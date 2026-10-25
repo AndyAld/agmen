@@ -1,0 +1,52 @@
+# agmen dev stack. Run deploy/dev/init.sh once first.
+# Image tags are pinned; see docs/adr/0001-dev-stack.md.
+name: agmen-dev
+
+services:
+  emqx:
+    image: emqx/emqx:6.3.2
+    ports:
+      - "1883:1883"    # MQTT
+      - "8083:8083"    # MQTT over WebSocket, path /mqtt
+      - "18083:18083"  # dashboard and REST API
+    volumes:
+      - ./emqx/emqx.conf:/opt/emqx/etc/emqx.conf:ro
+      - ./.secrets/api-keys.txt:/opt/emqx/etc/agmen/api-keys.txt:ro
+      - emqx-data:/opt/emqx/data
+    extra_hosts:
+      # JWKS comes from the hub (or a test harness) on the host, port 8090.
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "/opt/emqx/bin/emqx", "ctl", "status"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  postgres:
+    image: postgres:16.15
+    env_file: ./.secrets/dev.env
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agmen -d agmen"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.13.0
+    command: ["-host=0.0.0.0", "-config=/config/toxiproxy.json"]
+    ports:
+      - "8474:8474"    # API
+      - "21883:21883"  # proxied MQTT to emqx:1883
+    volumes:
+      - ./toxiproxy.json:/config/toxiproxy.json:ro
+    depends_on:
+      emqx:
+        condition: service_healthy
+
+volumes:
+  emqx-data:
+  pg-data:

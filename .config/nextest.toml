@@ -1,0 +1,12 @@
+# Integration tests are named it_* and need the dev stack (deploy/dev).
+# The filter is on test names, not binary names: nextest rejects a binary()
+# filter that matches no binary, which breaks the gate until the first
+# tests/it_*.rs file exists.
+
+[profile.default]
+default-filter = "not test(/(^|::)it_/)"
+
+[profile.it]
+default-filter = "test(/(^|::)it_/)"
+slow-timeout = { period = "30s", terminate-after = 4 }
+test-threads = 4

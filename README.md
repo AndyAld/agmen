@@ -274,7 +274,9 @@ These steps apply once M0 Task 1 lands.
 **Run the dev stack and tests**
 
 ```sh
-docker compose -f deploy/dev/compose.yaml up -d
+deploy/dev/init.sh                            # once: local secrets in deploy/dev/.secrets
+docker compose -f deploy/dev/compose.yaml up -d --wait
+set -a; . deploy/dev/.secrets/dev.env; set +a  # AGMEN_IT_* for integration tests
 cargo nextest run --workspace                 # unit tests
 cargo nextest run --workspace --profile it    # integration tests against the dev stack
 ```

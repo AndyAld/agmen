@@ -56,6 +56,7 @@ As [m0-m1 Task 1](m0-m1.md#task-1-workspace-scaffold-dev-stack-ci-gate), with th
 
 - Crates: `agmen-proto`, `agmen-client`, `agmen-cli`, `agmen-hub`.
 - `deploy/dev/compose.yaml`: `emqx` (1883 TCP, 8083 WS, 18083 dashboard and REST API), `postgres`, `toxiproxy`. Put EMQX config in `deploy/dev/emqx/emqx.conf`: `allow_anonymous`-style access off (authentication chain is JWT only), `authorization.no_match = deny`, `authorization.sources = []`, `mqtt.max_packet_size = 96KB`, and an API key bootstrap file for the hub (`api_key.bootstrap_file`).
+- nextest profiles filter on test names (`test(/(^|::)it_/)`) instead of binary names; see ADR-0001.
 - JWT authn in dev reads the hub's JWKS at `http://host.docker.internal:<port>/v1/jwks`. Until the hub exists (Task 7), tests sign tokens with a fixed dev ES256 key that compose mounts as a static public key.
 
 ### Task 2: Spike S1, EMQX identity and ACLs

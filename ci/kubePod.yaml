@@ -1,0 +1,38 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    build: agmen
+spec:
+  serviceAccountName: jenkins-ci
+  containers:
+    # Builds and tests. Reaches the dev stack in the docker container over the
+    # pod's shared localhost.
+    - name: rust
+      image: rust:1.99.1-bookworm
+      command: ["sleep"]
+      args: ["infinity"]
+      env:
+        - name: CARGO_TERM_COLOR
+          value: never
+      resources:
+        requests:
+          memory: "8000Mi"
+          cpu: "6000m"
+        limits:
+          memory: "8000Mi"
+          cpu: "6000m"
+    # Runs the EMQX, Postgres and Toxiproxy dev stack for integration tests.
+    - name: docker
+      image: docker:29.9.2-dind
+      command: ["dockerd"]
+      tty: true
+      securityContext:
+        privileged: true
+      resources:
+        requests:
+          memory: "3000Mi"
+          cpu: "2000m"
+        limits:
+          memory: "3000Mi"
+          cpu: "2000m"
