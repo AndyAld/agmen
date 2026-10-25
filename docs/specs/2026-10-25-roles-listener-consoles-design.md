@@ -32,7 +32,7 @@ Why now: the 2026-10-24 run (design section 1) had one agent, `andy-agent1`, doi
 9. Urgent alerts that need a human are highlighted like a Slack mention and play a chime like ntfy.
 10. A planning room for greenfield projects, ending in a kick-off that each person approves for their own machine.
 11. GitHub integration that reports PRs, checks and merges back into agmen.
-12. Zed themes, from the person's own Zed and from Zed's theme extensions.
+12. Appearance settings: Zed themes, icon themes from the person's Zed (system icons without Zed), and fonts and sizes.
 13. Every agent, person, branch, commit, file, item, lane and PR named in a message is highlighted and opens where it points.
 
 ### Non-goals
@@ -336,11 +336,30 @@ Everything an agent or a person names in a message is highlighted and opens wher
 - **Terminal UI:** references are colored by type. `f` shows a one-letter label next to every reference on screen, like Vimium; typing the label opens it. `gd` opens the reference under the cursor.
 - **Web console and mod:** the same highlighting; the web console opens what the hub knows (agents, items, lanes, PRs) and shows branches and files as text with a "open on your machine" hint.
 
-### 9.4 Themes
+### 9.4 Appearance: theme, icons and fonts
 
-- The app reads Zed theme JSON files: the person's own (`~/.config/zed/themes/`) and themes downloaded from Zed's theme extensions through a picker in Settings. The mockups use Andy's "Gruvbox Material Dark Hard".
-- Unverified: whether Zed's extension registry API may be used by other apps, and the license terms of theme extensions. If the API is off limits, the picker reads the public extensions repository instead.
-- Role and reference colors come from the theme's terminal palette, so they stay readable in light and dark themes.
+**Settings** (Andy: "a setting where we can change the theme, file icons (like zed) and where we can change the font, font sizes"). Settings → Appearance, opened from the gear in the status bar or the command palette:
+
+| Setting | Choices |
+|---|---|
+| Follow Zed | On by default when Zed is installed: agmen reads the theme, icon theme and fonts from Zed's settings, read-only, and never writes Zed's files. Off: choose below |
+| Theme | Any Zed theme: the person's own (`~/.config/zed/themes/`) or one from Zed's theme extensions; Light, Dark or System |
+| Icon theme | An icon theme installed in Zed, agmen's own, or the system's (below) |
+| UI font and size | Panels, chat text, menus |
+| Code font, size and ligatures | Files, diffs, handles, branches, code in chat |
+| Terminal font and size | Embedded terminals and take-over; "same as code font" by default |
+| Chat density | Comfortable or compact |
+
+Settings live in `~/.config/agmen/settings.toml`, which the terminal UI reads too: there `:set theme=...` and `:set icons=nerd|none` change it, and the font is the terminal's own.
+
+**Themes.** Zed theme JSON, as above. Unverified: whether Zed's extension registry API may be used by other apps, and the license terms of theme extensions. If the API is off limits, the picker reads the public extensions repository instead. Role and reference colors come from the theme's terminal palette, so they stay readable in light and dark themes.
+
+**Icons** (Andy: "use the zed icons for Project, Git, roles, search, terminal, etc and the file type icons from what's already installed on zed and if they don't have zed installed have the system defaults"). Findings from Zed's and the icon theme's repositories, 2026-10-25:
+
+- *UI icons* (Agents, Project, Git, Roles, search, terminal, chat, bell, settings, chevrons). Zed compiles its icons into the Zed binary (`/Applications/Zed.app` holds no SVG files), so agmen cannot read them from an install. In Zed's repo, `assets/icons/` has no license of its own: the repo is GPL-3.0-or-later, the only notice there is Lucide's ISC license, and `crates/icons/README.md` says "Most icons are created by sourcing them from Lucide. Then, they're modified...". agmen is not GPL, so it does not copy Zed's SVGs. It ships Lucide (ISC, with its notice), which gives the same look. The mockups draw with Zed's own icons to show the look; the product will not ship them, and the SVG files are not in this repo.
+- *File and folder icons.* Read at runtime from the icon theme the person installed in Zed (Andy has the Material Icon Theme extension: 1,252 SVGs and a mapping file, `icon_themes/material-icon-theme.json`), through that theme's own mapping of names, suffixes and folders. agmen bundles none of them. The extension is Apache-2.0 and its icons come from the MIT-licensed vscode-material-icon-theme. Zed's built-in file icons are compiled in and of mixed origin, so agmen does not use them.
+- *No Zed installed.* UI icons stay Lucide. File icons come from the operating system: Finder's icons through NSWorkspace on macOS, the shell's icons on Windows, the freedesktop icon theme on Linux. Unverified: whether GPUI can show them without `unsafe` code, which the workspace forbids; spike S8 checks.
+- *Terminal UI.* Nerd Font glyphs when the terminal font has them (Andy's CaskaydiaCove Nerd Font Mono does), otherwise no icons.
 
 ## 10. GitHub integration
 
@@ -403,6 +422,8 @@ A GitHub App on the hub with read-only permissions (pull requests, checks, issue
 | Hour and token caps (5.6) | Andy | My call; Andy has not said whether caps or display only |
 | GitHub App write access | Andy | Read-only here; Andy has not answered whether agmen should open PRs or comment |
 | Zed registry API and theme licenses | Builder | Unverified (9.4) |
+| System file icons in GPUI without `unsafe` | Builder | Spike S8 (9.4) |
+| Lucide notice in the shipped app | Builder | ISC requires the notice in all copies |
 | `agy` 1.1.7 on Andy's machine | Andy | Too old for JSON streaming; `agy update` |
 | Grok Build | Builder | Not installed here; the 5.2 row comes from xAI's docs |
 | OpenCode permissions and Gemini cost fields | Builder | Not verified; S3 |

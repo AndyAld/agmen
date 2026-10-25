@@ -5,6 +5,8 @@ Colors come from the user's Zed theme "Gruvbox Material Dark Hard"
 """
 
 import json
+import os
+import pathlib
 import re
 import sys
 
@@ -736,12 +738,92 @@ def zwindow(name, project="pr-3331"):
     return s, body
 
 
+
+# ---------------------------------------------------------------- icons
+# UI icons: Zed's assets/icons SVGs from a folder named by ZED_ICONS (not bundled here).
+# File icons: the Zed icon theme installed on this machine (MATERIAL_ICON_THEME, default the
+# Material Icon Theme extension), read through its own mapping file.
+
+OUT_PATH = pathlib.Path(sys.argv[1]).resolve()
+ICON_CACHE = OUT_PATH.parent / "icon-cache"
+ZED_ICONS = pathlib.Path(os.environ["ZED_ICONS"]) if os.environ.get("ZED_ICONS") else None
+MAT_ROOT = pathlib.Path(os.environ.get(
+    "MATERIAL_ICON_THEME",
+    str(pathlib.Path.home() / "Library/Application Support/Zed/extensions/installed/"
+                               "material-icon-theme")))
+try:
+    MAT = json.loads((MAT_ROOT / "icon_themes/material-icon-theme.json").read_text())["themes"][0]
+except (OSError, ValueError, KeyError, IndexError):
+    MAT = None
+
+
+def place(parent, path, size, native):
+    ref = cmd("file.import", {"path": str(path), "x": -2000, "y": -2000})
+    cmd("node.reparent", {"ids": [ref], "parent": parent})
+    if abs(native - size) > 0.01:
+        cmd("transform.scale", {"ids": [ref], "factor": round(size / native, 4)})
+    return ref
+
+
+def zicon(parent, name, color, size=14):
+    src = ZED_ICONS / f"{name}.svg" if ZED_ICONS else None
+    if not src or not src.exists():
+        return text(parent, "·", size, color)
+    svg = re.sub(r'(stroke|fill)="(?!none)[^"]*"', lambda m: f'{m.group(1)}="{color}"',
+                 src.read_text())
+    ICON_CACHE.mkdir(exist_ok=True)
+    out = ICON_CACHE / f"{name}-{color.lstrip('#')}.svg"
+    out.write_text(svg)
+    return place(parent, out, size, 16)
+
+
+def mat_icon_path(name, is_dir=False, expanded=False):
+    if not MAT:
+        return None
+    if is_dir:
+        d = MAT["named_directory_icons"].get(name) or MAT["directory_icons"]
+        rel = d["expanded" if expanded else "collapsed"]
+    else:
+        key = MAT["file_stems"].get(name)
+        parts = name.split(".")
+        for i in range(1, len(parts)):
+            if key:
+                break
+            key = MAT["file_suffixes"].get(".".join(parts[i:]))
+        entry = MAT["file_icons"].get(key) if key else None
+        rel = entry["path"] if entry else "./icons/file.svg"
+    path = MAT_ROOT / rel.removeprefix("./")
+    return path if path.exists() else None
+
+
+def ficon(parent, name, is_dir=False, expanded=False, size=16):
+    path = mat_icon_path(name, is_dir, expanded)
+    if not path:
+        return text(parent, "▪", 10, FAINT)
+    m = re.search(r'viewBox="[\d.-]+\s+[\d.-]+\s+([\d.]+)\s+[\d.]+"', path.read_text()[:600])
+    return place(parent, path, size, float(m.group(1)) if m else 32.0)
+
+
+def icon_spec(parent, spec, color, size=14):
+    if spec.startswith("z:"):
+        return zicon(parent, spec[2:], color, size)
+    if spec.startswith("f:"):
+        return ficon(parent, spec[2:], size=size)
+    return text(parent, spec, 12, color, font=BUF)
+
+
+TAB_ICONS = {"Agents": "user_group", "Project": "file_tree", "Git": "git_branch",
+             "Roles": "person"}
+
 REFS = {}
 
 
 def statusbar(s, item_right="listener codex · idle", dock_toggle=False, alert=False):
     sb = row(s, "status bar", gap=14, padding=[0, 10, 0, 10], sizingH="fill", **rule("Top"))
     fixed(sb, h=28)
+    icons = row(sb, "panel buttons", gap=10)
+    for name in ["file_tree", "git_branch", "magnifying_glass"]:
+        zicon(icons, name, FAINT, 14)
     if alert:
         nb = row(sb, "needs you", gap=5, padding=[1, 7, 1, 7], cornerRadius=4, fill=ERR)
         text(nb, "!", 12, BG, style="Bold")
@@ -760,6 +842,12 @@ def statusbar(s, item_right="listener codex · idle", dock_toggle=False, alert=F
         text(t, "◨", 11, ACCENT)
         text(t, "Listener", 12, TEXT)
         REFS["toggle"] = t
+    rb = row(sb, "right buttons", gap=10)
+    for name in ["terminal", "chat", "bell"]:
+        zicon(rb, name, FAINT, 14)
+    gear = row(rb, "settings", gap=0)
+    zicon(gear, "settings", FAINT, 14)
+    link(gear, "Desktop · settings")
     pal = text(sb, "⌘⇧P", 12, ACCENT, font=BUF)
     return pal
 
@@ -803,10 +891,12 @@ def project_tree(tree, tests_open):
             is_open = tests_open
         r = tree_row(tree, depth, name, on=name == "main.rs")
         if kind == "dir":
-            text(r, "▾" if is_open else "▸", 12, DIM, font=BUF, width=10)
+            zicon(r, "chevron_down" if is_open else "chevron_right", DIM, 12)
+            ficon(r, name, is_dir=True, expanded=is_open)
             text(r, name, 13, TEXT, font=BUF)
         else:
-            frame(r, "indent", 10, 4)
+            frame(r, "indent", 12, 4)
+            ficon(r, name)
             text(r, name, 13, (WARN if status == "M" else TEXT), font=BUF)
         if status:
             frame(r, "spacer", 4, 4, sizingH="fill")
@@ -815,7 +905,8 @@ def project_tree(tree, tests_open):
         if name == "tests" and tests_open:
             for d2, k2, n2, s2, _ in TESTS:
                 r2 = tree_row(tree, d2, n2)
-                frame(r2, "indent", 10, 4)
+                frame(r2, "indent", 12, 4)
+                ficon(r2, n2)
                 text(r2, n2, 13, TEXT, font=BUF)
     return refs
 
@@ -823,7 +914,7 @@ def project_tree(tree, tests_open):
 def git_section(tree, label, count, is_open):
     r = row(tree, label, gap=6, padding=[0, 10, 0, 10], sizingH="fill")
     fixed(r, h=26)
-    text(r, "▾" if is_open else "▸", 12, DIM, font=BUF, width=10)
+    zicon(r, "chevron_down" if is_open else "chevron_right", DIM, 12)
     text(r, label, 11, DIM, style="Semibold", textCase="upper", letterSpacing="6%")
     c = row(r, "count", padding=[0, 6, 0, 6], cornerRadius=4, fill=SURF)
     text(c, count, 11, FAINT, font=BUF)
@@ -837,6 +928,7 @@ def git_tree(tree, changes_open):
         for st, path, delta in [("M", "src/main.rs", "+2 −5"), ("M", "Cargo.lock", "+1 −1")]:
             r = tree_row(tree, 1, path, on=path == "src/main.rs")
             text(r, st, 12, WARN, font=BUF, style="Bold")
+            ficon(r, path.rsplit("/", 1)[-1])
             text(r, path, 13, TEXT, font=BUF)
             frame(r, "spacer", 4, 4, sizingH="fill")
             text(r, delta, 11, FAINT, font=BUF)
@@ -851,7 +943,7 @@ def git_tree(tree, changes_open):
         text(r, who, 11, FAINT, font=BUF)
     git_section(tree, "Worktrees", "5", True)
     r = tree_row(tree, 1, "andy")
-    text(r, "▾", 12, DIM, font=BUF, width=10)
+    zicon(r, "chevron_down", DIM, 12)
     text(r, "andy", 13, TEXT, style="Medium")
     for br, who, state, color in [("fix/c015-main-conflict", "fx1", "↑1 pushed", OK),
                                   ("test/b-415-replay-paging", "t7k", "↑1 local", WARN),
@@ -862,7 +954,7 @@ def git_tree(tree, changes_open):
         frame(r, "spacer", 4, 4, sizingH="fill")
         text(r, who, 11, FAINT, font=BUF)
     r = tree_row(tree, 1, "sean")
-    text(r, "▸", 12, DIM, font=BUF, width=10)
+    zicon(r, "chevron_right", DIM, 12)
     text(r, "sean", 13, TEXT, style="Medium")
     text(r, "2", 11, FAINT, font=BUF)
     git_section(tree, "Branches", "14", False)
@@ -872,14 +964,16 @@ def git_tree(tree, changes_open):
 def left_dock(body, tab="Agents", cursor=None, fx1="claude", variant=None):
     d = col(body, "left dock", gap=0, sizingV="fill", **rule("Right"))
     fixed(d, w=272)
-    tabs = row(d, "dock tabs", gap=14, padding=[0, 12, 0, 12], sizingH="fill", **rule("Bottom"))
+    tabs = row(d, "dock tabs", gap=10, padding=[0, 10, 0, 10], sizingH="fill", **rule("Bottom"))
     fixed(tabs, h=34)
     refs = {}
     for t in ["Agents", "Project", "Git", "Roles"]:
-        refs[t] = text(tabs, t, 12, TEXT if t == tab else FAINT,
-                       style="Semibold" if t == tab else "Regular")
+        tr = row(tabs, f"tab {t}", gap=5)
+        zicon(tr, TAB_ICONS[t], TEXT if t == tab else FAINT, 14)
+        text(tr, t, 12, TEXT if t == tab else FAINT, style="Semibold" if t == tab else "Regular")
+        refs[t] = tr
         if t != tab:
-            link(refs[t], DOCK_DEST[t], )
+            link(tr, DOCK_DEST[t])
     frame(tabs, "spacer", 4, 4, sizingH="fill")
     hide = text(tabs, "⟨", 13, DIM)
     refs["hide"] = hide
@@ -892,7 +986,7 @@ def left_dock(body, tab="Agents", cursor=None, fx1="claude", variant=None):
         for person, items in TREE:
             r = row(tree, person, gap=6, padding=[0, 10, 0, 10], sizingH="fill")
             fixed(r, h=26)
-            text(r, "▾", 11, DIM)
+            zicon(r, "chevron_down", DIM, 12)
             text(r, person, 13, TEXT, style="Medium")
             for indent, handle, role, harness, status in items:
                 on = cursor == handle and person.startswith("andy")
@@ -916,7 +1010,7 @@ def left_dock(body, tab="Agents", cursor=None, fx1="claude", variant=None):
         for g, items in groups:
             r = row(tree, g, gap=6, padding=[0, 10, 0, 10], sizingH="fill")
             fixed(r, h=26)
-            text(r, "▾", 11, DIM)
+            zicon(r, "chevron_down", DIM, 12)
             text(r, g, 13, TEXT, style="Medium", font=BUF if g.startswith((".", "~")) else UI)
             for k in items:
                 on = k == "reviewer"
@@ -925,7 +1019,7 @@ def left_dock(body, tab="Agents", cursor=None, fx1="claude", variant=None):
                 fixed(r, h=26)
                 color = ROLE[k][1] if k in ROLE else (ERR if k == "security-reviewer" else
                                                       ORG if k == "docs-writer" else DIM)
-                text(r, "</>", 11, color, font=BUF)
+                ficon(r, f"{k}.xml", size=16)
                 text(r, f"{k}.xml", 13, TEXT, font=BUF)
     return d, refs
 
@@ -934,13 +1028,15 @@ def tab_bar(center, active, extra=None, badge=None):
     tb = row(center, "tab bar", gap=0, sizingH="fill", **rule("Bottom"))
     fixed(tb, h=34)
     refs = {}
-    for label, icon, color in [("chat", "#", ACCENT), ("andy/fx1", "●", ORG),
-                               ("reviewer.xml", "</>", ERR)] + ([extra] if extra else []):
+    for label, icon, color in [("chat", "z:chat", ACCENT), ("andy/fx1", "z:sparkle", ORG),
+                               ("reviewer.xml", "f:reviewer.xml", ERR)] + (
+                                   [extra] if extra else []):
         on = label == active
         t = row(tb, f"tab {label}", gap=8, padding=[0, 14, 0, 14], sizingV="fill",
                 **({"fill": SURF} if on else {}), **rule("Right"))
-        text(t, icon, 12, color, font=BUF)
-        text(t, label, 13, TEXT if on else FAINT, font=BUF if label != "chat" else UI)
+        icon_spec(t, icon, color, 14)
+        text(t, label, 13, TEXT if on else FAINT, font=BUF if label not in ("chat", "settings")
+             else UI)
         if on:
             text(t, "×", 13, DIM)
         if label == badge:
@@ -1136,7 +1232,7 @@ def embedded_terminal(center, harness="claude"):
               strokeWeight=1, sizingH="fill", sizingV="fill", clip=True)
     th = row(blk, "terminal head", gap=10, padding=[0, 10, 0, 12], sizingH="fill", fill=SURF)
     fixed(th, h=32)
-    text(th, ">_", 11, ACCENT, font=BUF)
+    zicon(th, "terminal", ACCENT, 14)
     sw = row(th, "switch agent", gap=6, padding=[2, 8, 2, 8], cornerRadius=4, fill=SEL,
              stroke=BORDER, strokeWeight=1)
     text(sw, harness, 12, TEXT, font=BUF, style="Bold")
@@ -1462,6 +1558,8 @@ def build_d_chat(name, palette=False, terminal=None, menu=False, ask=False, pick
     fixed(pop, w=600)
     inp = row(pop, "input", gap=0, padding=[10, 14, 10, 14], sizingH="fill", **rule("Bottom",
                                                                                     BORDER))
+    zicon(inp, "magnifying_glass", FAINT, 14)
+    frame(inp, "gap", 8, 4)
     text(inp, "spawn", 14, TEXT)
     frame(inp, "caret", 2, 18, fill=ACCENT)
     items = [("agmen:", "spawn", "worker…", "⌘N", "Desktop · chat"),
@@ -1623,10 +1721,10 @@ def build_d_tree(name, tab, variant=None):
     _, refs = left_dock(body, tab=tab, cursor="fx1", variant=variant)
     center = col(body, "center", gap=0, sizingH="fill", sizingV="fill")
     if tab == "Project":
-        tabs = tab_bar(center, "main.rs", ("main.rs", "rs", ORG))
+        tabs = tab_bar(center, "main.rs", ("main.rs", "f:main.rs", ORG))
         btns = breadcrumb(center, ["andy/fx1", "src", "main.rs"], [("Diff", "plain")])
     else:
-        tabs = tab_bar(center, "main.rs (diff)", ("main.rs (diff)", "±", WARN))
+        tabs = tab_bar(center, "main.rs (diff)", ("main.rs (diff)", "z:diff", WARN))
         btns = breadcrumb(center, ["andy/fx1", "changes", "src/main.rs"],
                           [("Open file", "plain")])
     ed = frame(center, "editor", 100, 100, fill=BG, sizingH="fill", sizingV="fill", clip=True)
@@ -1716,10 +1814,12 @@ PLAN_RUN = [
 def plan_left(body, running):
     d = col(body, "left dock", gap=0, sizingV="fill", **rule("Right"))
     fixed(d, w=272)
-    tabs = row(d, "dock tabs", gap=14, padding=[0, 12, 0, 12], sizingH="fill", **rule("Bottom"))
+    tabs = row(d, "dock tabs", gap=10, padding=[0, 10, 0, 10], sizingH="fill", **rule("Bottom"))
     fixed(tabs, h=34)
     for t in ["Agents", "Project", "Git", "Roles"]:
-        text(tabs, t, 12, TEXT if t == "Agents" else FAINT,
+        tr = row(tabs, f"tab {t}", gap=5)
+        zicon(tr, TAB_ICONS[t], TEXT if t == "Agents" else FAINT, 14)
+        text(tr, t, 12, TEXT if t == "Agents" else FAINT,
              style="Semibold" if t == "Agents" else "Regular")
     tree = col(d, "tree", gap=0, padding=[6, 0, 6, 0], sizingH="fill")
     git_section(tree, "Planning room", "4", True)
@@ -1739,7 +1839,7 @@ def plan_left(body, running):
     if running:
         for person in ["andy", "sean"]:
             r = tree_row(tree, 1, person)
-            text(r, "▾", 12, DIM, font=BUF, width=10)
+            zicon(r, "chevron_down", DIM, 12)
             text(r, person, 13, TEXT, style="Medium")
             for key, rname, handle, harness, lane, owner, cost in TEAM:
                 if owner != person:
@@ -1756,11 +1856,12 @@ def plan_tabs(center, active):
     tb = row(center, "tab bar", gap=0, sizingH="fill", **rule("Bottom"))
     fixed(tb, h=34)
     refs = {}
-    for label, icon, color in [("plan", "#", ACCENT), ("ridgeline-design.md", "md", WARN)]:
+    for label, icon, color in [("plan", "z:chat", ACCENT),
+                               ("ridgeline-design.md", "f:ridgeline-design.md", WARN)]:
         on = label == active
         t = row(tb, f"tab {label}", gap=8, padding=[0, 14, 0, 14], sizingV="fill",
                 **({"fill": SURF} if on else {}), **rule("Right"))
-        text(t, icon, 12, color, font=BUF)
+        icon_spec(t, icon, color, 14)
         text(t, label, 13, TEXT if on else FAINT, font=BUF if label != "plan" else UI)
         refs[label] = t
     return refs
@@ -2022,6 +2123,107 @@ def add_agent_dialog(s):
     link(cancel, "Desktop · switch agent")
     link(again, "Desktop · switch agent")
 
+
+def seg(parent, options, picked):
+    sg = row(parent, "segmented", gap=0, cornerRadius=5, stroke=BORDER, strokeWeight=1, clip=True)
+    for o in options:
+        on = o == picked
+        c = row(sg, o, padding=[3, 10, 3, 10], **({"fill": ACCENT + "33"} if on else {}),
+                **rule("Right", BORDER))
+        text(c, o, 12, ACCENT if on else FAINT)
+
+
+def dropdown(parent, value, width=300, mono=False):
+    d = row(parent, "dropdown", gap=8, padding=[5, 10, 5, 10], cornerRadius=5, fill=BG,
+            stroke=BORDER, strokeWeight=1, mainAlign="spaceBetween")
+    fixed(d, w=width)
+    text(d, value, 13, TEXT, font=BUF if mono else UI)
+    zicon(d, "chevron_down", FAINT, 12)
+    return d
+
+
+def stepper(parent, value):
+    st = row(parent, "size", gap=0, cornerRadius=5, stroke=BORDER, strokeWeight=1, clip=True)
+    for lbl in ["−", value, "+"]:
+        c = row(st, lbl, padding=[3, 9, 3, 9], **({"fill": BG} if lbl == value else {}))
+        text(c, lbl, 12, TEXT if lbl == value else FAINT, font=BUF)
+
+
+def setting(parent, label, hint):
+    r = row(parent, label, gap=16, padding=[12, 0, 12, 0], sizingH="fill", crossAlign="min",
+            **rule("Bottom"))
+    lc = col(r, "label", gap=3)
+    fixed(lc, w=230)
+    text(lc, label, 13, BRIGHT, style="Medium")
+    wrap(lc, hint, 11, FAINT)
+    ctl = col(r, "control", gap=8, sizingH="fill")
+    return ctl
+
+
+def build_d_settings(name):
+    s, body = zwindow(name)
+    left_dock(body)
+    center = col(body, "center", gap=0, sizingH="fill", sizingV="fill")
+    tabs = tab_bar(center, "settings", ("settings", "z:settings", FAINT))
+    breadcrumb(center, ["settings", "appearance"], [("Open settings.toml", "plain")])
+    main = row(center, "settings body", gap=0, sizingH="fill", sizingV="fill", crossAlign="min")
+    cats = col(main, "categories", gap=2, padding=[12, 8, 12, 8], sizingV="fill",
+               **rule("Right"))
+    fixed(cats, w=190)
+    for c, icon in [("General", "settings"), ("Appearance", "sparkle"), ("Listener", "chat"),
+                    ("Agents", "user_group"), ("Roles", "person"), ("Notifications", "bell"),
+                    ("Terminal", "terminal"), ("Keys", "pencil")]:
+        on = c == "Appearance"
+        r = row(cats, c, gap=8, padding=[6, 10, 6, 10], cornerRadius=5, sizingH="fill",
+                **({"fill": SEL} if on else {}))
+        zicon(r, icon, TEXT if on else FAINT, 14)
+        text(r, c, 13, TEXT if on else FAINT, style="Medium" if on else "Regular")
+    form = col(main, "form", gap=0, padding=[8, 24, 8, 24], sizingH="fill")
+    text(form, "Appearance", 18, BRIGHT, style="Semibold")
+    ctl = setting(form, "Follow Zed", "Use the theme, icon theme and fonts from your Zed "
+                                      "settings. Turn off to choose them here.")
+    t = row(ctl, "toggle", gap=8)
+    sw = frame(t, "switch", 30, 18, fill=ACCENT, cornerRadius=9, layout="horizontal", padding=2,
+               crossAlign="center", mainAlign="max")
+    cmd("node.create", {"type": "ellipse", "parent": sw, "width": 14, "height": 14,
+                        "props": {"fill": "#ffffff"}})
+    text(t, "On · Zed found at /Applications/Zed.app", 12, TEXT)
+    ctl = setting(form, "Theme", "Any Zed theme: yours from ~/.config/zed/themes, or one from "
+                                 "Zed's theme extensions.")
+    r = row(ctl, "theme", gap=10)
+    dropdown(r, "Gruvbox Material Dark Hard")
+    seg(r, ["Light", "Dark", "System"], "System")
+    text(ctl, "Browse Zed themes…", 12, ACCENT)
+    ctl = setting(form, "Icon theme", "File and folder icons. Zed's installed icon themes, "
+                                      "agmen's own (Lucide), or your system's.")
+    dropdown(ctl, "Material Icon Theme (from Zed)")
+    pv = row(ctl, "preview", gap=10, padding=[6, 10, 6, 10], cornerRadius=5, fill=BG)
+    for n, is_dir in [("src", True), ("tests", True), ("main.rs", False), ("Cargo.toml", False),
+                      ("README.md", False), ("Cargo.lock", False), ("reviewer.xml", False),
+                      ("release.yml", False)]:
+        ficon(pv, n, is_dir=is_dir, size=18)
+    ctl = setting(form, "UI font", "Panels, chat text and menus.")
+    r = row(ctl, "ui font", gap=10)
+    dropdown(r, "SF Pro Text")
+    stepper(r, "15")
+    ctl = setting(form, "Code font", "Files, diffs, handles, branches and code in chat.")
+    r = row(ctl, "buffer font", gap=10)
+    dropdown(r, "CaskaydiaCove Nerd Font Mono", mono=True)
+    stepper(r, "13")
+    seg(r, ["Ligatures on", "off"], "Ligatures on")
+    ctl = setting(form, "Terminal font", "Embedded terminals and take-over.")
+    r = row(ctl, "terminal font", gap=10)
+    dropdown(r, "Same as code font")
+    stepper(r, "13")
+    ctl = setting(form, "Chat density", "Spacing between messages.")
+    seg(ctl, ["Comfortable", "Compact"], "Comfortable")
+    wrap(form, "Saved to ~/.config/agmen/settings.toml. The terminal UI reads the same file; "
+               "there, :set theme=… and :set icons=nerd|none change it, and the font is your "
+               "terminal's.", 11, FAINT, paragraphSpacing=0)
+    statusbar(s, "settings")
+    link(tabs["chat"], "Desktop · chat")
+    link(tabs["andy/fx1"], "Desktop · agent")
+
 # ---------------------------------------------------------------- build
 
 POS = {
@@ -2034,6 +2236,7 @@ POS = {
     "Desktop · needs you": (21840, 0), "Terminal · needs you": (6240, 1060),
     "Desktop · needs you (answered)": (23400, 0), "Desktop · settings from chat": (24960, 0),
     "Desktop · add agent": (26520, 0), "Desktop · settings applied": (28080, 0),
+    "Desktop · settings": (29640, 0),
     "Desktop · plan": (0, 2120), "Desktop · spec": (1560, 2120),
     "Desktop · plan ready": (3120, 2120), "Desktop · kick off": (4680, 2120),
     "Desktop · running": (6240, 2120), "Terminal · references": (7800, 1060),
@@ -2059,6 +2262,7 @@ build_d_chat("Desktop · needs you", alert=True)
 build_d_chat("Desktop · needs you (answered)", answered=True)
 build_d_chat("Desktop · settings from chat", settings="pending")
 build_d_chat("Desktop · settings applied", settings="applied")
+build_d_settings("Desktop · settings")
 build_t_chat("Terminal · needs you", alert=True)
 build_t_chat("Terminal · references", hints=True)
 build_d_plan("Desktop · plan", "draft")
