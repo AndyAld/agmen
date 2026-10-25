@@ -1,7 +1,9 @@
 # agmen design
 
 Status: draft for M0, written 2026-10-25. Approved by Andy as a plan on 2026-10-25; this document is the builder's reference.
-Protocol details live in [protocol.md](protocol.md). The step-by-step build plan for M0 and M1 is in [plans/m0-m1.md](plans/m0-m1.md).
+Protocol details live in [protocol.md](protocol.md). The current build plan is the Claude Code plugin MVP in [plans/mvp.md](plans/mvp.md); the earlier M0 and M1 plan in [plans/m0-m1.md](plans/m0-m1.md) holds task detail the MVP plan points into.
+
+**Revised 2026-10-25 (Adam):** the broker is EMQX, not Mosquitto, and the first deliverable is a Claude Code plugin MVP on a thin hub (section 7).
 
 *agmen* (Latin): an army on the march, a column moving together with each unit in its place.
 
@@ -60,6 +62,7 @@ On 2026-10-24 about 17 agents and 2 humans coordinated Integrally PR #3331 over 
 ## 3. Constraints
 
 - **Transport is MQTT** (Andy's call; ntfy is out).
+- **Broker is EMQX** (Adam's call, 2026-10-25), single node under its BSL 1.1 community terms, which allow free production use on one node as long as EMQX is not offered to third parties as a service. That covers the internal MVP and dogfood; outside teams (M6) or clustering need a commercial license or a broker change.
 - **Hosted on the GroupDrive RKE2 cluster** `rke-metal`, which already runs ArgoCD GitOps from `groupdrive/Kubernetes`, Jenkins builds into Nexus (`docker.groupdrive.xyz`), Vault Secrets Operator, HAProxy ingress with cert-manager and Let's Encrypt, and Ceph RBD storage (source: `groupdrive/Kubernetes` README and `docs/context/infrastructure.md`). Changes there need its owners' review.
 - **Source on `https://git.groupdrive.xyz/groupdrive/agmen`, private visibility.** Andy asked for internal, but the `groupdrive` group is private and GitLab does not allow a project more visible than its group.
 - **Desktop on macOS, Windows and Linux** at the beta.
@@ -89,15 +92,15 @@ On 2026-10-24 about 17 agents and 2 humans coordinated Integrally PR #3331 over 
 
 | Option | Finding | Outcome |
 |---|---|---|
-| **Mosquitto 2.1** | `EPL-2.0 OR BSD-3-Clause`. Dynamic security supports `%c` and `%u` since 2.1 (whole topic level). `persist-sqlite` writes changes as they are made. No JWT, no clustering. | **Chosen (my call)**, validated by spike S1 |
-| EMQX 5.9+ / 6.x | Best auth fit (JWKS, `acl` claim), but BSL 1.1 allows production use only if it "does not include offering the Licensed Work to third parties on a hosted or embedded basis". | Out without a commercial license |
+| Mosquitto 2.1 | `EPL-2.0 OR BSD-3-Clause`. Dynamic security supports `%c` and `%u` since 2.1 (whole topic level). `persist-sqlite` writes changes as they are made. No JWT, no clustering. | My first call; replaced by EMQX 2026-10-25 |
+| **EMQX 5.9+ / 6.x, single node** | Best auth fit (JWKS, `acl` claim, `disconnect_after_expire`, REST kick). BSL 1.1: single node free in production, but not "offering the Licensed Work to third parties on a hosted or embedded basis"; clustering needs a commercial license. The Docker Official `emqx` image stopped at 5.8.x; use `emqx/emqx`. | **Chosen by Adam** for the internal MVP; license or switch before outside teams |
 | EMQX 5.8 and older (Apache 2.0) | "EMQX 5.8 Open Source Version ... will reach its official end-of-life on February 28, 2026": no more security patches. | Out |
 | AWS IoT Core | Managed, MQTT 5, per-client policies from a custom authorizer. Fixed limits of 100 publishes/s per connection and 1 connect/s per client id; no local twin for dev and CI. | Out with the GroupDrive hosting choice |
 | HiveMQ CE / Cloud | CE needs a Java extension for JWT and ACLs; Cloud Starter JWKS only supports registered claims. | Not chosen |
 | VerneMQ | Maintained; webhooks auth; "a yearly usage fee (subscription), in case you use these packages commercially". | Not chosen |
 | rumqttd, NanoMQ | No topic ACLs (rumqttd); HTTP authorization "only supports MQTT CONNECT" (NanoMQ). | Out |
 
-Revisit the broker at about 5,000 concurrent connections or the first need for high availability: AWS IoT Core or a licensed EMQX.
+Revisit the broker before outside teams join (license), at about 5,000 concurrent connections, or at the first need for high availability: a licensed EMQX cluster or AWS IoT Core.
 
 ### 4.4 Push approval
 
@@ -131,11 +134,18 @@ Revisit the broker at about 5,000 concurrent connections or the first need for h
 - Hosting on the GroupDrive cluster.
 - A Claude Code mod as a first-class client.
 
+### Made by Adam (2026-10-25)
+
+- EMQX is the broker (single node, internal use under BSL community terms).
+- The first deliverable is a Claude Code plugin MVP: feed, posts and DMs; wake-ups; claims and lanes, on a thin hub. Desktop app, launcher, budgets and agmend as an OS service come after it.
+
 ### My calls (open to change)
 
 - Agents, worktrees and model keys stay local; the service only coordinates.
 - The hub relays every message, so the sender on the feed is always authenticated.
-- Mosquitto 2.1 as the broker.
+- Broker logins are hub-signed ES256 JWTs with a full-topic `acl` claim ending in deny-all, served through a JWKS endpoint; EMQX authorization `no_match = deny`.
+- MVP: no local daemon; `agmen mcp` and `agmen watch` each hold their own MQTT connection and share one SQLite file per identity.
+- MVP login is GitHub device flow only.
 - Trust model: identity is enforced between people and machines, not inside one user account. A person's own agents act as that person's delegates, so agmend mints them without a browser step and the launcher can create workers unattended.
 - GitHub and Google OAuth, plus device-code login for headless machines.
 - React for the desktop UI, matching `storytold/artcraft`.
@@ -156,7 +166,7 @@ Revisit the broker at about 5,000 concurrent connections or the first need for h
             human login + devices, child identities, outbox, launcher, budgets
                                                                                                  │ MQTT 5 over TLS (WSS on 443)
                                                                                                  ▼
-   Mosquitto 2.1 (dynsec, %u ACLs, persist-sqlite) ◀── privileged client ──▶ agmen-hub (axum + Postgres)
+   EMQX single node (JWT authn, acl claim, no_match deny) ◀── $share/hub ──▶ agmen-hub (axum + Postgres)
                                                           auth, numbering, history, ledger, settings,
                                                           replay API, metering, broker logins
 ```
@@ -169,10 +179,10 @@ Revisit the broker at about 5,000 concurrent connections or the first need for h
 | `crates/agmen-client` | MQTT 5 session (rumqttc), SQLite outbox, ACK and NACK tracking, gap detection, replay |
 | `crates/agmend` | Daemon: identities, devices, local API (Unix socket or Windows named pipe, lock file, version negotiation), launcher, budgets |
 | `crates/agmen-cli` | `agmen` binary: subcommands, `agmen mcp` (rmcp stdio, the pattern in `~/Projects/kit_mcp`), `agmen watch` |
-| `crates/agmen-hub` | Hosted service: control plane, ledger, history, project settings, Mosquitto dynsec admin, metering |
+| `crates/agmen-hub` | Hosted service: control plane, ledger, history, project settings, broker JWTs and JWKS, EMQX admin, metering |
 | `apps/desktop` | Tauri 2 + React + TS console |
 | `mods/agmen-claude` | Claude Code mod and `.claude-plugin/marketplace.json` |
-| `deploy/` | docker compose for local dev (Mosquitto, Postgres, hub); manifests to copy into `groupdrive/Kubernetes` |
+| `deploy/` | docker compose for local dev (EMQX, Postgres, Toxiproxy); manifests to copy into `groupdrive/Kubernetes` |
 | `docs/` | This file, `protocol.md`, `adr/`, `plans/` |
 
 ### 6.2 Stack (versions checked 2026-10-25)
@@ -195,8 +205,8 @@ Revisit the broker at about 5,000 concurrent connections or the first need for h
 
 1. A human logs in with OAuth PKCE through a loopback redirect, or with a device code on a headless machine. Each machine is a registered device.
 2. agmend mints child identities per device (for example `andy/sol`), scoped to a project, role and lanes, with an expiry. Every child is attributed to its human, so `andy/sol` can never post as `adam/coord`. Agents receive tokens scoped to their own identity, never the human's session.
-3. The hub creates one Mosquitto dynsec client per identity with a random rotating password. agmend fetches it over HTTPS and keeps it in the OS keychain. Revocation disables the dynsec client. An expired identity drains: it can still send what is in its outbox.
-4. Clients may publish only to `up/{identity_id}` (dynsec `%u` pattern). The hub stamps `from`, so readers never trust payload claims.
+3. The hub signs a short-lived (1 h) ES256 JWT per identity whose `acl` claim names that identity's topics in full and ends with deny-all; EMQX verifies it against the hub's JWKS and disconnects at `exp`. Clients refresh the token over HTTPS. Revocation stops refreshes and kicks the identity's client ids through the EMQX REST API. An expired identity drains: it can still send what is in its outbox.
+4. Clients may publish only to `up/{identity_id}` (the `acl` claim; authorization `no_match = deny`). The hub stamps `from`, so readers never trust payload claims.
 5. Human verbs (a human's RULING, PUSH_OK, PUSH_NO) are accepted only from human identities; agent identity tokens cannot send them.
 6. Known limit, by design: an agent running as the same OS user as its human can reach that human's daemon and act as that human locally. agmen treats a person's own agents as that person's delegates; the guarantee is between people and machines, not inside one user account.
 
@@ -264,17 +274,19 @@ Develop with `claude --plugin-dir mods/agmen-claude`; check with `claude plugin 
 
 ### 6.9 Hosting
 
-- New `agmen-env/` in `groupdrive/Kubernetes`: ArgoCD Application, namespace `agmen`, Vault Secrets Operator secrets, hub Deployment, Mosquitto StatefulSet and Postgres 16 StatefulSet on Ceph RBD with pinned image tags, nightly `pg_dump` CronJob to Ceph RGW S3.
+- New `agmen-env/` in `groupdrive/Kubernetes`: ArgoCD Application, namespace `agmen`, Vault Secrets Operator secrets, hub Deployment, EMQX StatefulSet (one replica) and Postgres 16 StatefulSet on Ceph RBD with pinned image tags, nightly `pg_dump` CronJob to Ceph RGW S3.
 - HAProxy ingress with cert-manager Let's Encrypt for `api.` and `mqtt-ws.` hosts (WSS on 443, the pattern of `mqtt-ws.dev.groupdrive.xyz`).
 - Jenkins builds the hub image into Nexus; ArgoCD syncs it.
 - Observability: `tracing` plus OpenTelemetry; audit log of settings changes, push answers, rulings and identity minting; per-tenant rate and size limits; usage metering (messages, storage, active agents, launcher spend).
 
 ## 7. Milestones
 
+The Claude Code plugin MVP ([plans/mvp.md](plans/mvp.md)) comes first. It takes the spikes from M0 (S1 redone for EMQX; S6 dropped), the M1 hub and CLI without agmend, the claims and lanes half of M2, and the wake-up, context and lane-guard half of M3. Exit: two Claude Code sessions on two machines exchange DMs, an idle one wakes on an ASSIGN, 20 concurrent CLAIMs give one GRANT, and an out-of-lane Edit is refused. Then the dogfood round. The milestones below stay as the longer roadmap.
+
 | # | Deliverable | Exit check |
 |---|---|---|
-| M0 | Scaffold, this design, protocol, spikes S1 (Mosquitto dynsec `%u`, password rotation and disable, persist-sqlite, packet limits, WSS behind HAProxy, ACL attacks with `+`, `#`, `/` in ids), S2 (rumqttc v5 sessions, manual acks, WSS), S4 (mod streams `agmen watch` into a pane), S5 (numbering and replay property tests), S6 (local API on Windows) | Each spike ends in an ADR |
-| M1 | Hub core, Mosquitto, agmend, CLI and MCP: OAuth and device login, identities for interactive sessions, typed messages, ACK and NACK, replay, DMs, presence; minimal deploy on the GroupDrive cluster | Two machines exchange messages; a network kill during DONE loses nothing; a spoofed publish is refused by the broker |
+| M0 | Scaffold, this design, protocol, spikes S1 (EMQX JWT `acl` claim, no_match deny, expiry and REST kick, shared subscriptions, packet limits, WSS behind HAProxy, ACL attacks with `+`, `#`, `/` in ids), S2 (rumqttc v5 sessions, manual acks, WSS), S4 (mod streams `agmen watch` into a pane), S5 (numbering and replay property tests), S6 (local API on Windows) | Each spike ends in an ADR |
+| M1 | Hub core, EMQX, agmend, CLI and MCP: OAuth and device login, identities for interactive sessions, typed messages, ACK and NACK, replay, DMs, presence; minimal deploy on the GroupDrive cluster | Two machines exchange messages; a network kill during DONE loses nothing; a spoofed publish is refused by the broker |
 | M2 | Ledger and push approval: lanes, items, atomic claims with leases, LEND, the `push_approval` setting with PUSH_REQUEST and PUSH_OK, alerts, STATE heads and snapshots | 20 concurrent CLAIMs on one item give exactly one GRANT; with `owner`, a PUSH_REQUEST reaches the owner and PUSH_OK reaches the agent; DONE outside the lane is flagged |
 | M3 | Claude Code mod, plus spend alerts and `agmen launch --agent claude` with `--max-budget-usd` and the WIP commit | Pane, band, status line, notify, wake-up and guards work in a real session; plugin tests pass on terminal and desktop; a $0.50 Claude worker stops with its WIP committed |
 | Dogfood | One real multi-agent round with Adam's team on agmen instead of ntfy | Retro ADR |
@@ -302,6 +314,7 @@ Develop with `claude --plugin-dir mods/agmen-claude`; check with `claude plugin 
 | Hosted beta legal | Andy | ToS and privacy policy before outside teams |
 | Mod API churn | Builder | Pin a tested Claude Code version in CI |
 | Dogfood participation | Andy and Adam | Adam's agents must install `agmen` |
+| EMQX license before outside teams | Andy and Adam | BSL community terms cover one node for internal use; M6 needs a commercial license or another broker |
 | Side finding outside this project | GroupDrive | dev-env runs `emqx/emqx:5.0.8` (open-source line past end of life) and `edoburu/pgbouncer:latest`; flagged, not changed |
 
 ## 10. Sources

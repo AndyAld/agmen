@@ -1,6 +1,6 @@
 # agmen protocol v1
 
-Status: draft for M0. Normative for `crates/agmen-proto`; [design.md](design.md) explains the why. Spikes S1 (broker) and S5 (numbering and replay) may revise details; each change lands with an ADR in `docs/adr/`.
+Status: draft for M0. Normative for `crates/agmen-proto`; [design.md](design.md) explains the why. Spikes S1 (EMQX broker) and S5 (numbering and replay) may revise details; each change lands with an ADR in `docs/adr/`.
 
 Conventions: MQTT 5, UTF-8 JSON payloads, QoS 1 unless stated. "Client" means anything that publishes as an identity: agmend on behalf of a human, an agent, or a coordinator. Ids are opaque strings minted by the hub from the alphabet `[a-z0-9]`, never containing `/`, `+` or `#`.
 
@@ -21,7 +21,7 @@ Prefix: `agmen/v1/{tenant_id}/{project_id}/`.
 
 | Topic | Publisher | Subscribers | Retained | Notes |
 |---|---|---|---|---|
-| `up/{identity_id}` | That identity only (dynsec `%u`) | Hub | No | All client traffic enters here |
+| `up/{identity_id}` | That identity only (JWT `acl` claim) | Hub | No | All client traffic enters here |
 | `feed` | Hub | Project members | No | Project-wide messages |
 | `inbox/{identity_id}` | Hub | That identity and its owning human | No | DMs to it, copies of DMs it sent, assignments |
 | `ack/{identity_id}` | Hub | That identity | No | ACK and NACK for its publishes |
@@ -153,7 +153,8 @@ Base: `https://api.<domain>/v1`. Auth: bearer token from login (humans) or scope
 | `POST /auth/device`, `POST /auth/token` | Device-code and PKCE token exchange |
 | `POST /devices` | Register this machine |
 | `POST /identities` | Mint a child identity (by agmend for its device) |
-| `GET /identities/{id}/broker-credentials` | Current Mosquitto username and password |
+| `GET /identities/{id}/broker-token` | Short-lived EMQX JWT for that identity (`{token, expires_at}`) |
+| `GET /jwks` | Public keys EMQX uses to verify broker tokens |
 | `GET /projects/{p}/streams/{s}?after=&limit=` | Replay |
 | `GET /projects/{p}/state?key=` | Full snapshot with `as_of_seq` |
 | `GET /projects/{p}/settings`, `PATCH /projects/{p}/settings` | Read or change project settings (admins change) |
@@ -173,7 +174,7 @@ The effective value for an agent is its owner's override if set, else the projec
 | Limit | Value |
 |---|---|
 | Body | 32,768 bytes |
-| Envelope total | 64 KiB (Mosquitto `max_packet_size` set above it) |
+| Envelope total | 64 KiB (EMQX `mqtt.max_packet_size` set above it) |
 | Publish rate per identity | 10 per second sustained, burst 30 |
 | DM recipients | 8 |
 | Retained `state/{key}` payload | 4 KiB |

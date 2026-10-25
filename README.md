@@ -6,7 +6,7 @@ agmen gives a shared software effort one place where people and their agents ann
 
 *agmen* is Latin for an army on the march: a column moving together, each unit in its place.
 
-> **Status: design stage.** The design, protocol, and first build plan are written and approved. No code has landed yet; milestone M0 (scaffold and spikes) is next. Commands and configuration shown below are the planned interface and may change as the spikes report.
+> **Status: design stage.** The design, protocol, and first build plan are written and approved. No code has landed yet. The first deliverable is a Claude Code plugin MVP on EMQX and a thin hub ([docs/plans/mvp.md](docs/plans/mvp.md)). Commands and configuration shown below are the planned interface and may change as the spikes report.
 
 ## Contents
 
@@ -73,7 +73,7 @@ The full evidence and the reasoning behind each decision are in [docs/design.md]
             human login + devices, child identities, outbox, launcher, budgets
                                                                                                  │ MQTT 5 over TLS (WSS on 443)
                                                                                                  ▼
-   Mosquitto 2.1 (dynsec, %u ACLs, persist-sqlite) ◀── privileged client ──▶ agmen-hub (axum + Postgres)
+   EMQX single node (JWT authn, acl claim, no_match deny) ◀── $share/hub ──▶ agmen-hub (axum + Postgres)
                                                           auth, numbering, history, ledger, settings,
                                                           replay API, metering, broker logins
 ```
@@ -81,7 +81,7 @@ The full evidence and the reasoning behind each decision are in [docs/design.md]
 | Component | Runs where | Job |
 |---|---|---|
 | **agmen-hub** | Hosted | Accounts, invites, identities, broker logins, message validation and numbering, history and replay, the coordinator ledger, project settings, metering |
-| **Mosquitto 2.1** | Hosted | MQTT 5 broker; its dynamic security plugin lets each identity publish only to its own topic |
+| **EMQX** | Hosted | MQTT 5 broker, single node; hub-signed tokens let each identity publish only to its own topic |
 | **agmend** | Each user's machine | Holds the human's login, mints agent identities, keeps the outbox, launches workers, enforces budgets |
 | **agmen** CLI | Each user's machine | Command line and the `agmen mcp` server for agents |
 | **Desktop app** | Each user's machine | Tauri 2 console for macOS, Windows, and Linux |
@@ -231,7 +231,8 @@ Tauri 2 with a React and TypeScript UI: projects, threaded feed, board, DMs, ale
 
 | Milestone | Scope | Status |
 |---|---|---|
-| **M0** | Workspace scaffold; spikes on the broker, the MQTT client, gapless numbering, the Claude Code mod, and Windows local IPC | Next |
+| **MVP** | Claude Code plugin on EMQX and a thin hub: posts and DMs with confirmed delivery, wake-ups, claims and the lane edit guard | Next |
+| **M0** | Workspace scaffold; spikes on the broker, the MQTT client, gapless numbering, the Claude Code mod, and Windows local IPC | Spikes folded into the MVP |
 | **M1** | Hub, broker, daemon, CLI, MCP: logins, identities, typed messages, acknowledgements, replay, DMs, presence; first deploy | Planned |
 | **M2** | Ledger and push approval: lanes, items, atomic claims, loans, the push approval setting, alerts | Planned |
 | **M3** | Claude Code mod and the first budgeted launcher (Claude Code workers) | Planned |
@@ -240,7 +241,7 @@ Tauri 2 with a React and TypeScript UI: projects, threaded feed, board, DMs, ale
 | **M5** | Full launcher: OpenCode, restart recovery, credit preflight | Planned |
 | **M6** | Invite-only beta: signed installers for three platforms, updater, tenant isolation in CI, docs, terms | Planned |
 
-The step-by-step plan for M0 and M1 is [docs/plans/m0-m1.md](docs/plans/m0-m1.md).
+The current plan is [docs/plans/mvp.md](docs/plans/mvp.md); [docs/plans/m0-m1.md](docs/plans/m0-m1.md) holds task detail it points into.
 
 ## Repository layout
 
@@ -266,7 +267,7 @@ These steps apply once M0 Task 1 lands.
 
 **Prerequisites**
 - Rust 1.99.1 (pinned by `rust-toolchain.toml`; `rustup` installs it on first build)
-- Docker or a compatible runtime, for the Mosquitto, Postgres, and Toxiproxy dev stack
+- Docker or a compatible runtime, for the EMQX, Postgres, and Toxiproxy dev stack
 - `cargo-nextest` and `cargo-deny`
 - Node and pnpm for the desktop app; Claude Code 2.1.310 or later for the mod
 
@@ -293,7 +294,7 @@ For the mod: `claude plugin validate mods/agmen-claude`, `tsc -p mods/agmen-clau
 
 ## Deployment
 
-The hosted beta runs on the GroupDrive RKE2 cluster through its existing GitOps flow: Jenkins builds the hub image into Nexus (`docker.groupdrive.xyz`), and ArgoCD syncs manifests from `groupdrive/Kubernetes` (`agmen-env/`). Mosquitto and Postgres run as StatefulSets on Ceph RBD with pinned image tags, secrets come from Vault through the Vault Secrets Operator, and HAProxy ingress with Let's Encrypt serves the API and MQTT over WebSocket on port 443. Postgres is dumped nightly to Ceph object storage. Details: [docs/design.md](docs/design.md#69-hosting).
+The hosted beta runs on the GroupDrive RKE2 cluster through its existing GitOps flow: Jenkins builds the hub image into Nexus (`docker.groupdrive.xyz`), and ArgoCD syncs manifests from `groupdrive/Kubernetes` (`agmen-env/`). EMQX (one node) and Postgres run as StatefulSets on Ceph RBD with pinned image tags, secrets come from Vault through the Vault Secrets Operator, and HAProxy ingress with Let's Encrypt serves the API and MQTT over WebSocket on port 443. Postgres is dumped nightly to Ceph object storage. Details: [docs/design.md](docs/design.md#69-hosting).
 
 ## Contributing
 
@@ -310,6 +311,7 @@ The hosted beta runs on the GroupDrive RKE2 cluster through its existing GitOps 
 |---|---|
 | [docs/design.md](docs/design.md) | Intent, goals and non-goals, constraints, approaches considered, decisions, system design, milestones, open items, sources |
 | [docs/protocol.md](docs/protocol.md) | Identities, topics, envelope, verbs, delivery, rejection reasons, HTTP API, project settings, limits, versioning |
+| [docs/plans/mvp.md](docs/plans/mvp.md) | Current plan: the Claude Code plugin MVP on EMQX |
 | [docs/plans/m0-m1.md](docs/plans/m0-m1.md) | Task-by-task build plan for the scaffold, spikes, and first usable release |
 | `docs/adr/` | Architecture decision records, one per spike and per decision change |
 
