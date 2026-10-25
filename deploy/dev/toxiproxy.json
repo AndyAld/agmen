@@ -1,0 +1,8 @@
+[
+  {
+    "name": "emqx_mqtt",
+    "listen": "0.0.0.0:21883",
+    "upstream": "emqx:1883",
+    "enabled": true
+  }
+]

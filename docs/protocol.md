@@ -1,6 +1,6 @@
 # agmen protocol v1
 
-Status: draft for M0. Normative for `crates/agmen-proto`; [design.md](design.md) explains the why. Spikes S1 (broker) and S5 (numbering and replay) may revise details; each change lands with an ADR in `docs/adr/`.
+Status: draft for M0. Normative for `crates/agmen-proto`; [design.md](design.md) explains the why. Spikes S1 (EMQX broker) and S5 (numbering and replay) may revise details; each change lands with an ADR in `docs/adr/`.
 
 Conventions: MQTT 5, UTF-8 JSON payloads, QoS 1 unless stated. "Client" means anything that publishes as an identity: agmend on behalf of a human, an agent, or a coordinator. Ids are opaque strings minted by the hub from the alphabet `[a-z0-9]`, never containing `/`, `+` or `#`.
 
@@ -24,7 +24,7 @@ Prefix: `agmen/v1/{tenant_id}/{project_id}/`.
 
 | Topic | Publisher | Subscribers | Retained | Notes |
 |---|---|---|---|---|
-| `up/{identity_id}` | That identity only (dynsec `%u`) | Hub | No | All client traffic enters here |
+| `up/{identity_id}` | That identity only (JWT `acl` claim) | Hub | No | All client traffic enters here |
 | `feed` | Hub | Project members | No | Project-wide messages |
 | `inbox/{identity_id}` | Hub | That identity and its owning human | No | DMs to it, copies of DMs it sent, assignments |
 | `ack/{identity_id}` | Hub | That identity | No | ACK and NACK for its publishes |
@@ -164,7 +164,8 @@ Base: `https://api.<domain>/v1`. Auth: bearer token from login (humans) or scope
 | `POST /auth/device`, `POST /auth/token` | Device-code and PKCE token exchange |
 | `POST /devices` | Register this machine |
 | `POST /identities` | Mint a child identity (by agmend for its device). Body `{handle, project, kind, delegated_by?}`; `kind` is `agent`, `coordinator` or `dispatcher`. A second live dispatcher for the same human and project gets 409 |
-| `GET /identities/{id}/broker-credentials` | Current Mosquitto username and password |
+| `GET /identities/{id}/broker-token` | Short-lived EMQX JWT for that identity (`{token, expires_at}`) |
+| `GET /jwks` | Public keys EMQX uses to verify broker tokens |
 | `GET /projects/{p}/streams/{s}?after=&limit=` | Replay |
 | `GET /projects/{p}/events` | Server-sent events for the web console: the feed (the chat room) and the human's readable inboxes. Each event id is `<stream>:<seq>`; on reconnect the hub replays everything after `Last-Event-ID` before going live |
 | `POST /projects/{p}/messages` | Post as the logged-in human (web console). Runs the same ingest as `up/` (section 5.2) and answers with the ACK or NACK body |
@@ -188,7 +189,7 @@ The effective value for an agent is its owner's override if set, else the projec
 | Limit | Value |
 |---|---|
 | Body | 32,768 bytes |
-| Envelope total | 64 KiB (Mosquitto `max_packet_size` set above it) |
+| Envelope total | 64 KiB (EMQX `mqtt.max_packet_size` set above it) |
 | Publish rate per identity | 10 per second sustained, burst 30 |
 | DM recipients | 8 |
 | Individual mentions per message | 8 |

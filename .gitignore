@@ -12,6 +12,7 @@ node_modules/
 .env
 .env.*
 !.env.example
+/deploy/dev/.secrets/
 
 # OS and editor files
 .DS_Store
