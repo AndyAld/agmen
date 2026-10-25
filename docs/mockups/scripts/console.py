@@ -1325,13 +1325,21 @@ def build_d_chat(name, palette=False, terminal=None, menu=False, ask=False, pick
         zmessage(stream, *ALERT_MSG[:5], "mention")
         zmessage(stream, *ANSWER_MSG)
     if settings:
+        pending = settings == "pending"
         for i, m in enumerate(SETTINGS_CHAT):
+            if i == 1 and pending:
+                m = m[:4] + ("Both changes widen what andy/fx1 may do, so they wait for your "
+                             "Apply.",) + m[5:]
             zmessage(stream, *m)
             if i == 1:
                 cardc = card_box(REFS["last_content"], "change card", 560)
+                if pending:
+                    cmd("node.set", {"id": cardc, "stroke": WARN + "88"})
                 hh = row(cardc, "head", gap=8, sizingH="fill")
-                text(hh, "Settings changed", 12, BRIGHT, style="Semibold")
-                text(hh, "requested by andy · applied by agmend", 11, FAINT)
+                text(hh, "Waiting for you" if pending else "Settings changed", 12,
+                     WARN if pending else BRIGHT, style="Semibold")
+                text(hh, "requested by andy · widens access and budget" if pending else
+                     "requested by andy · applied by agmend", 11, FAINT)
                 for who, what, before, after in [
                         ("andy/fx1", "lanes", "L-CORE", "L-CORE, L-INFRA deploy/** until 18:00"),
                         ("andy/fx1", "budget", "$5.00", "$8.00")]:
@@ -1342,10 +1350,13 @@ def build_d_chat(name, palette=False, terminal=None, menu=False, ask=False, pick
                     text(rr, "→", 12, DIM)
                     text(rr, after, 12, OK, font=BUF)
                 br = row(cardc, "buttons", gap=6)
-                for label in ["Undo", "Audit log"]:
-                    b = row(br, label, padding=[3, 9, 3, 9], cornerRadius=5, fill=SEL)
-                    text(b, label, 12, TEXT)
-                    link(b, "Desktop · chat")
+                for label in (["Apply", "Cancel"] if pending else ["Undo", "Audit log"]):
+                    primary = label == "Apply"
+                    b = row(br, label, padding=[3, 9, 3, 9], cornerRadius=5,
+                            fill=ACCENT if primary else SEL)
+                    text(b, label, 12, BG if primary else TEXT,
+                         style="Semibold" if primary else "Regular")
+                    link(b, "Desktop · settings applied" if primary else "Desktop · chat")
     if alert:
         zmessage(stream, *ALERT_MSG)
         for b in REFS["alert_actions"]:
@@ -1394,7 +1405,10 @@ def build_d_chat(name, palette=False, terminal=None, menu=False, ask=False, pick
                                ("Workers today", "$11.20 of $20.00 · 3 of 4 running", TEXT),
                                ("Listener today", "$0.42 of $2.00", TEXT),
                            ("Listener tokens", "96k in · 8k out · up 6 h 40 min", TEXT)])
-        section(rd, "Recent", ([("15:50", "changed andy/fx1 lanes and budget (Undo)", ACCENT)]
+        section(rd, "Recent", ([("15:50", "waiting for Apply: andy/fx1 lanes and budget"
+                                if settings == "pending" else
+                                "changed andy/fx1 lanes and budget (Undo)",
+                                WARN if settings == "pending" else ACCENT)]
                                if settings else []) +
                 [("15:31", "delegated andy/fx1 · Engineer · claude", TEXT),
                                ("14:06", "delegated andy/t7k · Tester · opencode", TEXT),
@@ -2019,7 +2033,7 @@ POS = {
     "Desktop · git": (18720, 0), "Desktop · git (collapsed)": (20280, 0),
     "Desktop · needs you": (21840, 0), "Terminal · needs you": (6240, 1060),
     "Desktop · needs you (answered)": (23400, 0), "Desktop · settings from chat": (24960, 0),
-    "Desktop · add agent": (26520, 0),
+    "Desktop · add agent": (26520, 0), "Desktop · settings applied": (28080, 0),
     "Desktop · plan": (0, 2120), "Desktop · spec": (1560, 2120),
     "Desktop · plan ready": (3120, 2120), "Desktop · kick off": (4680, 2120),
     "Desktop · running": (6240, 2120), "Terminal · references": (7800, 1060),
@@ -2043,7 +2057,8 @@ build_d_tree("Desktop · git", "Git")
 build_d_tree("Desktop · git (collapsed)", "Git", "collapsed")
 build_d_chat("Desktop · needs you", alert=True)
 build_d_chat("Desktop · needs you (answered)", answered=True)
-build_d_chat("Desktop · settings from chat", settings=True)
+build_d_chat("Desktop · settings from chat", settings="pending")
+build_d_chat("Desktop · settings applied", settings="applied")
 build_t_chat("Terminal · needs you", alert=True)
 build_t_chat("Terminal · references", hints=True)
 build_d_plan("Desktop · plan", "draft")

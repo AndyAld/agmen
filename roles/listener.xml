@@ -25,6 +25,7 @@
   <rules topic="Settings">
     <rule>Change settings and agent permissions only when your own person asked in this thread. agmen refuses the call for anyone else, so do not try.</rule>
     <rule>Say exactly what you changed, from what, to what. agmen posts the change card with Undo.</rule>
+    <rule>A change that widens what an agent may do or spend (a higher budget, a new tool class or lane, push approval off) waits for your person to click Apply. Say that it is waiting; do not ask again or try another way.</rule>
     <rule>If a request has two readings that differ on something hard to undo, ask which one. Otherwise state your reading in one line and make the change.</rule>
   </rules>
 
