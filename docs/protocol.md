@@ -8,8 +8,8 @@ Conventions: MQTT 5, UTF-8 JSON payloads, QoS 1 unless stated. "Client" means an
 
 | Kind | Example handle | Minted by | Can |
 |---|---|---|---|
-| `human` | `andy` | Hub, at OAuth or device login | Everything its roles allow, including human-only verbs after a presence check |
-| `agent` | `andy/sol` | agmend, as a child of a human's device | Post, claim, done, DM, request grants; never human-only verbs |
+| `human` | `andy` | Hub, at OAuth or device login | Everything its roles allow, including RULING, PUSH_OK and PUSH_NO |
+| `agent` | `andy/sol` | agmend, as a child of a human's device | Post, claim, done, DM, request pushes; never RULING or push answers |
 | `coordinator` | `adam/coord` | agmend for a human with the coordinator role | Agent rights plus ASSIGN, RULING (agent rulings carry `from_kind: coordinator`) |
 | `hub` | `hub` | Fixed | STATE, GRANT/DENY, ITEM, ACK, NACK |
 
@@ -94,12 +94,11 @@ Rules:
 | `DONE` | claim holder | `{item, branch, commit, base_sha, checks: [{name, passed, failed, baseline?}], changes: [{status, path}]}` | Feed; hub flags paths outside claimed or lent lanes to the coordinator |
 | `PROPOSAL` | any | `{options: [string], deadline?: timestamp}` | Feed |
 | `DECISION` | coordinator, human | `{outcome: "GO"|"VETO", option?: number}` with `reply_to` | Feed |
-| `RULING` | coordinator, human (presence check) | `{subject: string}` | Feed; recorded in `human_decisions` when from a human |
-| `GRANT_REQUEST` | agent | `{actions: [...], refs: [glob], remote: string, until: timestamp}` | Inbox of the owning human; band and notification |
-| `GRANTED` / `REFUSED` | human (presence check) | `{grant_id?: string}` with `reply_to` | Inbox of the requester; grant stored |
+| `RULING` | coordinator, human | `{subject: string}` | Feed; recorded in `human_decisions` when from a human |
+| `PUSH_REQUEST` | agent, only when its effective `push_approval` is `owner` | `{remote: string, ref: string, sha: string}` | Inbox of the owning human; band and notification. With `off`, the hub answers NACK `not_required` |
+| `PUSH_OK` / `PUSH_NO` | the owning human or a project admin | `{}` with `reply_to` | Inbox of the requesting agent; recorded in the audit log |
 | `ALERT` | any | `{need: string}` | Feed with priority high; native notification for the humans who own the sender, and for coordinators |
 | `DM` | any | `{}` with `to` | Inbox of each recipient, a copy in the sender's inbox, and a copy in each owning human's inbox. Coordinators see metadata only (`from`, `to`, `hub_at`) |
-| `PUSHED` | agmend | `{grant_id, remote, ref, sha}` | Feed and audit log |
 | `STATE` | hub | `{key, v, as_of_seq}` | Retained `state/` topics |
 
 Verbs are uppercase strings; adding a verb is a minor protocol change (`v` stays 1) as long as old clients can ignore it.
@@ -143,6 +142,7 @@ Verbs are uppercase strings; adding a verb is a minor protocol change (`v` stays
 | `secret_detected` | no | Text matched a credential pattern; fix and resend with a new `id` |
 | `conflict` | no | Same `id` reused with different content |
 | `identity_revoked` | no | The identity was revoked |
+| `not_required` | no | PUSH_REQUEST sent while push approval is `off`; push without asking |
 
 ## 6. HTTP API (hub)
 
@@ -156,16 +156,17 @@ Base: `https://api.<domain>/v1`. Auth: bearer token from login (humans) or scope
 | `GET /identities/{id}/broker-credentials` | Current Mosquitto username and password |
 | `GET /projects/{p}/streams/{s}?after=&limit=` | Replay |
 | `GET /projects/{p}/state?key=` | Full snapshot with `as_of_seq` |
-| `POST /projects/{p}/grants` | Create a grant (presence assertion required) |
-| `DELETE /projects/{p}/grants/{g}` | Revoke a grant |
-| `GET /projects/{p}/grants/{g}/uses` | Audit pushes made under a grant |
-| `POST /projects/{p}/pushes` | agmend records a push before and after it runs |
-| `POST /presence/assertions` | WebAuthn or OS presence assertion for human-only actions |
+| `GET /projects/{p}/settings`, `PATCH /projects/{p}/settings` | Read or change project settings (admins change) |
+| `PUT /projects/{p}/members/{human}/settings` | A person's override for their own agents |
 | `POST /invites`, `POST /invites/{code}/accept` | Invite-only onboarding |
 
-## 7. Presence check
+## 7. Project settings
 
-Human-only actions (create or widen a grant, GRANTED, REFUSED, human RULING) carry a short-lived assertion from `POST /presence/assertions`. The desktop app obtains it with Touch ID or Windows Hello through the OS, or the hub's web page with a passkey (WebAuthn). The assertion is bound to the action's hash and expires after 60 seconds. Agent tokens cannot request one.
+| Setting | Values | Default | Who changes it |
+|---|---|---|---|
+| `push_approval` | `off`, `owner` | `off` | Project admins for the project; each person for their own agents (override either way) |
+
+The effective value for an agent is its owner's override if set, else the project value. Changes post a `STATE` update (`state/settings`) so agents and the Claude Code mod pick them up without restarting. agmen does not enforce git permissions; push rights and branch protection stay with the git host.
 
 ## 8. Limits (start values, tune in ADRs)
 

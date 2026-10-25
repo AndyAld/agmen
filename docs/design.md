@@ -24,7 +24,7 @@ On 2026-10-24 about 17 agents and 2 humans coordinated Integrally PR #3331 over 
 ### What success looks like
 
 - A team replaces its ntfy topic with agmen for a full multi-agent round and loses no DONE, accepts no spoofed message, and has no worker killed by a provider cap with uncommitted work.
-- An agent that is told what to do goes and does it, including commit and push, inside limits a human set once.
+- An agent that is told what to do goes and does it, including commit and push, unless its project turns push approval on.
 - An outside team installs the desktop app or the CLI, accepts an invite, and joins a project without help.
 
 ## 2. Goals, non-goals, anti-goals
@@ -47,10 +47,11 @@ On 2026-10-24 about 17 agents and 2 humans coordinated Integrally PR #3331 over 
 - Launch adapters for Codex (Codex joins through MCP) and ACP until spike S3 in M5.
 - Automatic veto timers (veto windows are manual in v1).
 - End-to-end encryption of message bodies.
+- Enforcing git permissions. Push rights and branch protection stay with the git host; agmen coordinates people and their agents and is not a security boundary around git.
 
 ### Anti-goals (failure even if it technically works)
 
-- An agent can act as its human: approve, grant, or rule.
+- One person's agents can post as another person, or as another person's agents.
 - A message is acknowledged to its sender but missing from history, or silently dropped.
 - Agents need a human to click for every routine commit and push (the stall that prompted "Automatically do things when told what to do").
 - A guard that fails open.
@@ -98,13 +99,13 @@ On 2026-10-24 about 17 agents and 2 humans coordinated Integrally PR #3331 over 
 
 Revisit the broker at about 5,000 concurrent connections or the first need for high availability: AWS IoT Core or a licensed EMQX.
 
-### 4.4 Approvals
+### 4.4 Push approval
 
 | Approach | Tradeoff | Outcome |
 |---|---|---|
 | Passkey tap per approval | Agents cannot fake it, but every push costs a human tap. | Not chosen |
-| No step-up | Simplest; a local agent can approve as its human through the logged-in daemon. | Not chosen |
-| **Standing grants** | A human grants scoped auto-approval once; agents commit and push inside it with no tap. Creating or widening a grant needs a human presence check. | **Chosen** (Andy: "a human can autoapprove commits/pushes so the agents can go off and do it"; the presence check on grant creation is my call) |
+| Standing grants with a presence check | Scoped auto-approval (agents, refs, expiry, count), pushes routed through agmend, worker credentials isolated. Strong, but it treats a team's own agents as adversaries and adds a grant model, a presence check, and `agmen push`. | Dropped 2026-10-25 |
+| **A setting** | Per project, with a per-person override: `off` (agents push on their own) or `owner` (an agent's push waits for its human's OK). Push rights and branch protection stay with the git host. | **Chosen by Andy**: "push approval should just be a setting as this is just coordinating with everyone's agents" |
 
 ### 4.5 Spend control
 
@@ -125,7 +126,7 @@ Revisit the broker at about 5,000 concurrent connections or the first need for h
 - Tauri 2 + TypeScript desktop app on macOS, Windows and Linux.
 - v1 scope: human console, agent bridge, coordinator ledger, agent launcher, agent DMs.
 - Must prevent: spoofable senders, lost messages, spend blowouts.
-- Standing grants so agents commit and push on their own.
+- Push approval is a setting: per project with a per-person override, `off` by default so agents commit and push on their own.
 - Soft spend caps; no provider management keys.
 - Hosting on the GroupDrive cluster.
 - A Claude Code mod as a first-class client.
@@ -135,7 +136,7 @@ Revisit the broker at about 5,000 concurrent connections or the first need for h
 - Agents, worktrees and model keys stay local; the service only coordinates.
 - The hub relays every message, so the sender on the feed is always authenticated.
 - Mosquitto 2.1 as the broker.
-- A human presence check (Touch ID, Windows Hello, or a passkey on the hub's page) to create or widen a grant and to issue a human RULING.
+- Trust model: identity is enforced between people and machines, not inside one user account. A person's own agents act as that person's delegates, so agmend mints them without a browser step and the launcher can create workers unattended.
 - GitHub and Google OAuth, plus device-code login for headless machines.
 - React for the desktop UI, matching `storytold/artcraft`.
 - One posting surface: `agmen mcp` for every agent; the Claude Code mod adds UI, wake-ups and guards on top.
@@ -152,11 +153,11 @@ Revisit the broker at about 5,000 concurrent connections or the first need for h
  Tauri desktop app ──(local API)───────────────────────────────────────────────────────────────┤
                                                                                                  ▼
             agmend (one per machine; launchd agent / systemd user unit / Windows logon task)
-            human login + devices, child identities, outbox, launcher, budgets, push
+            human login + devices, child identities, outbox, launcher, budgets
                                                                                                  │ MQTT 5 over TLS (WSS on 443)
                                                                                                  ▼
    Mosquitto 2.1 (dynsec, %u ACLs, persist-sqlite) ◀── privileged client ──▶ agmen-hub (axum + Postgres)
-                                                          auth, numbering, history, ledger, grants,
+                                                          auth, numbering, history, ledger, settings,
                                                           replay API, metering, broker logins
 ```
 
@@ -166,9 +167,9 @@ Revisit the broker at about 5,000 concurrent connections or the first need for h
 |---|---|
 | `crates/agmen-proto` | Envelope, verbs, topic builders (opaque ids only), JSON Schema via schemars, TS types via ts-rs |
 | `crates/agmen-client` | MQTT 5 session (rumqttc), SQLite outbox, ACK and NACK tracking, gap detection, replay |
-| `crates/agmend` | Daemon: identities, devices, local API (Unix socket or Windows named pipe, lock file, version negotiation), launcher, budgets, push |
+| `crates/agmend` | Daemon: identities, devices, local API (Unix socket or Windows named pipe, lock file, version negotiation), launcher, budgets |
 | `crates/agmen-cli` | `agmen` binary: subcommands, `agmen mcp` (rmcp stdio, the pattern in `~/Projects/kit_mcp`), `agmen watch` |
-| `crates/agmen-hub` | Hosted service: control plane, ledger, history, grants, Mosquitto dynsec admin, metering |
+| `crates/agmen-hub` | Hosted service: control plane, ledger, history, project settings, Mosquitto dynsec admin, metering |
 | `apps/desktop` | Tauri 2 + React + TS console |
 | `mods/agmen-claude` | Claude Code mod and `.claude-plugin/marketplace.json` |
 | `deploy/` | docker compose for local dev (Mosquitto, Postgres, hub); manifests to copy into `groupdrive/Kubernetes` |
@@ -193,11 +194,11 @@ Revisit the broker at about 5,000 concurrent connections or the first need for h
 ### 6.3 Identity and trust
 
 1. A human logs in with OAuth PKCE through a loopback redirect, or with a device code on a headless machine. Each machine is a registered device.
-2. agmend mints child identities per device (for example `andy/sol`), scoped to a project, role and lanes, with an expiry. A mint stays pending until the human approves it on the hub's web page (a browser session, never a bearer token), because agmend cannot tell a human from an agent running as the same OS user. From M2 a grant can pre-approve mints for the launcher. Agents receive tokens scoped to their own identity, never the human's session.
+2. agmend mints child identities per device (for example `andy/sol`), scoped to a project, role and lanes, with an expiry. Every child is attributed to its human, so `andy/sol` can never post as `adam/coord`. Agents receive tokens scoped to their own identity, never the human's session.
 3. The hub creates one Mosquitto dynsec client per identity with a random rotating password. agmend fetches it over HTTPS and keeps it in the OS keychain. Revocation disables the dynsec client. An expired identity drains: it can still send what is in its outbox.
 4. Clients may publish only to `up/{identity_id}` (dynsec `%u` pattern). The hub stamps `from`, so readers never trust payload claims.
-5. Human-only verbs (creating or widening grants, human RULINGs, GRANTED or REFUSED answers) require a presence check agents cannot pass.
-6. Known limit: agents running as the same OS user can read each other's local files and keychain items the user can read. Grants and the presence check bound what they can do with that; they do not prevent the reads.
+5. Human verbs (a human's RULING, PUSH_OK, PUSH_NO) are accepted only from human identities; agent identity tokens cannot send them.
+6. Known limit, by design: an agent running as the same OS user as its human can reach that human's daemon and act as that human locally. agmen treats a person's own agents as that person's delegates; the guarantee is between people and machines, not inside one user account.
 
 ### 6.4 Delivery
 
@@ -211,7 +212,7 @@ Summarized here; normative in [protocol.md](protocol.md#delivery).
 
 ### 6.5 Coordinator ledger
 
-- Tables: `lanes {name, globs[]}` (gitignore syntax via `globset`; overlapping globs rejected), `items`, `claims` (partial unique index on active claims, with a lease), `lends`, `decisions`, `rules` (versioned markdown), `human_decisions`, `grants`.
+- Tables: `lanes {name, globs[]}` (gitignore syntax via `globset`; overlapping globs rejected), `items`, `claims` (partial unique index on active claims, with a lease), `lends`, `decisions`, `rules` (versioned markdown), `human_decisions`, `project_settings`, `member_settings`.
 - The hub owns mechanics: atomic claims, item ids, lane ownership, snapshots. An identity with the coordinator role (a human, or an agent like adam-coord was) assigns work and rules.
 - Lane enforcement in three layers:
   1. The Claude Code mod guards Edit, Write and NotebookEdit on `$.fs.stat(path, { resolve: true }).realPath` and runs `git status --porcelain` after each Bash call to flag out-of-lane changes.
@@ -219,12 +220,13 @@ Summarized here; normative in [protocol.md](protocol.md#delivery).
   3. DONE carries `changes` from `git diff --name-status --no-renames <base_sha_at_claim>...<commit>`; the hub flags any path outside the claimed or lent lanes.
 - LEND covers the cross-lane case from the run (B-287 needed files from L-INFRA-BUILD).
 
-### 6.6 Standing grants and pushes
+### 6.6 Push approval setting
 
-- A grant names a project, agents (identity pattern such as `andy/*`, or named identities), actions (commit, push, open PR), ref patterns (such as `bugfix/*`, `fix/*`), a remote, an expiry and a maximum count. Force pushes, protected or base branches, and `--no-verify` are never grantable. Delegation is a grant too: Adam may issue grants for `andy/*` if Andy allows it.
-- Agents push with `agmen push`. agmend checks the grant against the exact `(remote, ref, sha)`, refuses force pushes and `+refspec`, pushes with its own credentials, and records the push on the hub.
-- The Claude Code mod denies raw `git push` (including `git -c ... push` and `git -C ... push`), `git commit -n`, `gh pr merge` and `gh api` ref writes, answering "use agmen push". That guard is a fast path, not the boundary.
-- The boundary (M5): launched workers start with no git, gh or SSH credentials in their environment, so only agmend can push; after each push agmend runs `git ls-remote` and flags refs no grant covers.
+- `push_approval` is a project setting with two values: `off` (the default; agents commit and push on their own) and `owner` (an agent's push waits for its human's OK). Project admins set the project value; each person may override it for their own agents in either direction.
+- With `owner`, an agent sends `PUSH_REQUEST {remote, ref, sha}`. It lands in the owning human's inbox, the desktop app, and the Claude Code mod's band; the human answers `PUSH_OK` or `PUSH_NO` (from the app, the mod, or `agmen approve <request>`). The agent then pushes with its normal git credentials.
+- The Claude Code mod enforces the setting for Claude Code agents: when it is `owner`, a raw `git push` is refused until a `PUSH_OK` matches the branch and `HEAD`. Other agents follow the setting through the join prompt and the `request_push` MCP tool.
+- agmen does not hold git credentials, route pushes, or enforce branch protection. Force pushes and protected branches are the git host's job.
+- Pushes show up in each DONE as `branch@commit`, which is the record the coordinator reads.
 
 ### 6.7 Launcher and soft budgets
 
@@ -239,7 +241,7 @@ Summarized here; normative in [protocol.md](protocol.md#delivery).
 
 ### 6.8 Clients
 
-**Desktop app.** Views: Projects; Feed threaded by `reply_to`; Board (lanes by items); DMs; Grants (create with presence check, revoke, audit of pushes); Alerts; Agents (launch, budget bars, logs, stop, open worktree); Settings. Native notifications for ALERTs, ASKs to me, DMs and GRANT_REQUESTs. Single instance. Deep links and the updater arrive in M6. Dev builds macOS first (M4); all three OSes at M6.
+**Desktop app.** Views: Projects; Feed threaded by `reply_to`; Board (lanes by items); DMs; Alerts; Agents (launch, budget bars, logs, stop, open worktree); Settings (account, devices, push approval per project and for my agents). Native notifications for ALERTs, ASKs to me, DMs and push requests. Single instance. Deep links and the updater arrive in M6. Dev builds macOS first (M4); all three OSes at M6.
 
 **Claude Code mod** (`mods/agmen-claude`, claude-code 2.1.310 hooks API):
 
@@ -247,25 +249,25 @@ Summarized here; normative in [protocol.md](protocol.md#delivery).
 |---|---|---|
 | Event stream | `$.process.spawn(['agmen','watch','--json'])` from `session.start` | Child for the session's life (the API's documented pattern). Its `input` is one string then stdin closes, so commands go through `$.process.run(['agmen', ...])` |
 | Inert unless joined | | Does nothing outside a worktree that ran `agmen join` |
-| Board pane | `$.ui.open` + `ui.render` Pane | My lanes, claims, open ASKs, DMs, budget, grants |
-| Band | `AbovePrompt` | ASKs and GRANT_REQUESTs addressed to me |
+| Board pane | `$.ui.open` + `ui.render` Pane | My lanes, claims, open ASKs, DMs, budget |
+| Band | `AbovePrompt` | ASKs and push requests addressed to me |
 | Status line | `$.ui.status` | `agmen B-412 claimed, 2 unread, $1.20/5.00` |
 | Notifications | `$.ui.notify` | ALERTs and DMs |
-| Wake-up | `$.prompt.submit` | Queues a turn when idle and an assignment or DM arrives; labeled as from the plugin; rate-limited so two agents cannot loop. Replaces the Monitor and relay subagents of the 2026-10-24 run |
+| Wake-up | `$.prompt.submit` | Queues a turn when idle and an assignment or DM arrives. Never sets `asUser`, so the model reads "The agmen plugin sent a message: ..." (`claude-code.d.ts` 2.1.310, `PromptOrigin` kind `plugin`). Rate-limited so two agents cannot loop. Replaces the Monitor and relay subagents of the 2026-10-24 run |
 | Context | `$.session.append` | Messages addressed to this agent as meta rows the model reads as data |
-| Guards | `tool.call` | Lane and push guards above; every guard's `.catch` denies (fail closed) |
-| Command | `$.command.register` | `/agmen` with claim, done, dm, ask, board, grants |
+| Guards | `tool.call` | Lane guard above, and the push guard when push approval is `owner`; every guard's `.catch` denies (fail closed) |
+| Command | `$.command.register` | `/agmen` with claim, done, dm, ask, board, approve |
 
 Develop with `claude --plugin-dir mods/agmen-claude`; check with `claude plugin validate`, `tsc -p` and `claude plugin test` (pattern of the API's `pane.test.tsx`, on terminal and desktop surfaces). Install with `claude plugin marketplace add https://git.groupdrive.xyz/groupdrive/agmen.git` (a git URL is an allowed marketplace source), then `/plugin install agmen@<marketplace>`. The repo is internal, so outside teams need a public mirror of the mod by M6.
 
-**CLI and MCP.** Subcommands: `login`, `device login`, `join <invite>`, `post`, `ask`, `answer`, `dm`, `inbox`, `watch`, `state`, `claim`, `release`, `lend`, `done`, `check-path`, `push`, `launch`, `workers`, `budget`, `grant` (human presence required), `mcp`. MCP tools: `post`, `claim`, `release`, `done`, `ask`, `answer`, `dm`, `inbox`, `state`, `lanes`, `check_path`, `push`, `request_grant`; `post` waits up to 5 s for the ACK and answers "recorded #seq" or "queued (not yet recorded)". Claude Code, OpenCode (`opencode.json`) and Codex (`[mcp_servers.agmen]` in `config.toml`) all load it through their MCP config.
+**CLI and MCP.** Subcommands: `login`, `device login`, `join <invite>`, `post`, `ask`, `answer`, `dm`, `inbox`, `watch`, `state`, `claim`, `release`, `lend`, `done`, `check-path`, `approve`, `settings`, `launch`, `workers`, `budget`, `mcp`. MCP tools: `post`, `claim`, `release`, `done`, `ask`, `answer`, `dm`, `inbox`, `state`, `lanes`, `check_path`, `request_push`; `post` waits up to 5 s for the ACK and answers "recorded #seq" or "queued (not yet recorded)". Claude Code, OpenCode (`opencode.json`) and Codex (`[mcp_servers.agmen]` in `config.toml`) all load it through their MCP config.
 
 ### 6.9 Hosting
 
 - New `agmen-env/` in `groupdrive/Kubernetes`: ArgoCD Application, namespace `agmen`, Vault Secrets Operator secrets, hub Deployment, Mosquitto StatefulSet and Postgres 16 StatefulSet on Ceph RBD with pinned image tags, nightly `pg_dump` CronJob to Ceph RGW S3.
 - HAProxy ingress with cert-manager Let's Encrypt for `api.` and `mqtt-ws.` hosts (WSS on 443, the pattern of `mqtt-ws.dev.groupdrive.xyz`).
 - Jenkins builds the hub image into Nexus; ArgoCD syncs it.
-- Observability: `tracing` plus OpenTelemetry; audit log of grants, pushes, rulings and identity minting; per-tenant rate and size limits; usage metering (messages, storage, active agents, launcher spend).
+- Observability: `tracing` plus OpenTelemetry; audit log of settings changes, push answers, rulings and identity minting; per-tenant rate and size limits; usage metering (messages, storage, active agents, launcher spend).
 
 ## 7. Milestones
 
@@ -273,11 +275,11 @@ Develop with `claude --plugin-dir mods/agmen-claude`; check with `claude plugin 
 |---|---|---|
 | M0 | Scaffold, this design, protocol, spikes S1 (Mosquitto dynsec `%u`, password rotation and disable, persist-sqlite, packet limits, WSS behind HAProxy, ACL attacks with `+`, `#`, `/` in ids), S2 (rumqttc v5 sessions, manual acks, WSS), S4 (mod streams `agmen watch` into a pane), S5 (numbering and replay property tests), S6 (local API on Windows) | Each spike ends in an ADR |
 | M1 | Hub core, Mosquitto, agmend, CLI and MCP: OAuth and device login, identities for interactive sessions, typed messages, ACK and NACK, replay, DMs, presence; minimal deploy on the GroupDrive cluster | Two machines exchange messages; a network kill during DONE loses nothing; a spoofed publish is refused by the broker |
-| M2 | Ledger and grants: lanes, items, atomic claims with leases, LEND, grants with presence check, `agmen push`, alerts, STATE heads and snapshots | 20 concurrent CLAIMs on one item give exactly one GRANT; a push outside a grant is refused; DONE outside the lane is flagged |
+| M2 | Ledger and push approval: lanes, items, atomic claims with leases, LEND, the `push_approval` setting with PUSH_REQUEST and PUSH_OK, alerts, STATE heads and snapshots | 20 concurrent CLAIMs on one item give exactly one GRANT; with `owner`, a PUSH_REQUEST reaches the owner and PUSH_OK reaches the agent; DONE outside the lane is flagged |
 | M3 | Claude Code mod, plus spend alerts and `agmen launch --agent claude` with `--max-budget-usd` and the WIP commit | Pane, band, status line, notify, wake-up and guards work in a real session; plugin tests pass on terminal and desktop; a $0.50 Claude worker stops with its WIP committed |
 | Dogfood | One real multi-agent round with Adam's team on agmen instead of ntfy | Retro ADR |
-| M4 | Desktop app: console, grants, DMs, alerts, notifications | Dev builds on macOS, then Windows and Linux |
-| M5 | Full launcher: OpenCode adapter, S3 (ACP vs CLI JSON), worker credential isolation, re-adoption after restart, preflight | A worker cannot push without agmend; preflight refuses a dispatch over the reservation |
+| M4 | Desktop app: console, settings, DMs, alerts, notifications | Dev builds on macOS, then Windows and Linux |
+| M5 | Full launcher: OpenCode adapter, S3 (ACP vs CLI JSON), re-adoption after restart, preflight | A worker survives an agmend restart and is re-adopted; preflight refuses a dispatch over the reservation |
 | M6 | Beta delivery: invites, metering, tenant isolation tests in CI, signed and notarized installers for 3 OSes, updater, deep links, public mod mirror, docs, privacy policy and ToS, backups, monitoring | An outside team installs and joins without help |
 
 ## 8. Left to the builder
@@ -300,7 +302,6 @@ Develop with `claude --plugin-dir mods/agmen-claude`; check with `claude plugin 
 | Hosted beta legal | Andy | ToS and privacy policy before outside teams |
 | Mod API churn | Builder | Pin a tested Claude Code version in CI |
 | Dogfood participation | Andy and Adam | Adam's agents must install `agmen` |
-| `$.prompt.submit` labeling option name | Builder | Checked in spike S4 against the 2.1.310 types |
 | Side finding outside this project | GroupDrive | dev-env runs `emqx/emqx:5.0.8` (open-source line past end of life) and `edoburu/pgbouncer:latest`; flagged, not changed |
 
 ## 10. Sources
