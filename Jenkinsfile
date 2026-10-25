@@ -46,7 +46,11 @@ pipeline {
         container('docker') {
           sh '''
             set -eu
-            apk add --no-cache bash
+            apk add --no-cache bash openssl xxd
+            # Hand the static docker CLI and compose plugin to the rust container.
+            mkdir -p /var/run/ci-bin /var/run/ci-docker/cli-plugins
+            cp /usr/local/bin/docker /var/run/ci-bin/
+            cp /usr/local/libexec/docker/cli-plugins/docker-compose /var/run/ci-docker/cli-plugins/
             deploy/dev/init.sh
             ${COMPOSE} up -d --wait
           '''

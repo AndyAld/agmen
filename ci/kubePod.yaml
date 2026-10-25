@@ -15,6 +15,17 @@ spec:
       env:
         - name: CARGO_TERM_COLOR
           value: never
+        # Spike S1 restarts the broker with docker compose; the CLI comes from
+        # the docker container through the shared volume.
+        - name: DOCKER_HOST
+          value: unix:///var/run/docker.sock
+        - name: PATH
+          value: /var/run/ci-bin:/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+        - name: DOCKER_CONFIG
+          value: /var/run/ci-docker
+      volumeMounts:
+        - name: docker-run
+          mountPath: /var/run
       resources:
         requests:
           memory: "8000Mi"
@@ -29,6 +40,9 @@ spec:
       tty: true
       securityContext:
         privileged: true
+      volumeMounts:
+        - name: docker-run
+          mountPath: /var/run
       resources:
         requests:
           memory: "3000Mi"
@@ -36,3 +50,6 @@ spec:
         limits:
           memory: "3000Mi"
           cpu: "2000m"
+  volumes:
+    - name: docker-run
+      emptyDir: {}

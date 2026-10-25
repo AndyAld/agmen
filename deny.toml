@@ -4,6 +4,18 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
+# Temporary: all six come from rumqttc 0.25.1 (rustls-webpki 0.102.8 and
+# rustls-pemfile), a dev-dependency of spike S1 only. Spike S2 picks the MQTT
+# client and must remove these ignores before any shipped crate depends on
+# one. See ADR-0002.
+ignore = [
+    { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile unmaintained; via rumqttc 0.25.1 in spike S1 only" },
+    { id = "RUSTSEC-2026-0049", reason = "rustls-webpki 0.102.8; via rumqttc 0.25.1 in spike S1 only" },
+    { id = "RUSTSEC-2026-0098", reason = "rustls-webpki 0.102.8; via rumqttc 0.25.1 in spike S1 only" },
+    { id = "RUSTSEC-2026-0099", reason = "rustls-webpki 0.102.8; via rumqttc 0.25.1 in spike S1 only" },
+    { id = "RUSTSEC-2026-0104", reason = "rustls-webpki 0.102.8; via rumqttc 0.25.1 in spike S1 only" },
+    { id = "RUSTSEC-2026-0382", reason = "rustls-webpki 0.102.8; via rumqttc 0.25.1 in spike S1 only" },
+]
 
 [licenses]
 version = 2

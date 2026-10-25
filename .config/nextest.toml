@@ -10,3 +10,11 @@ default-filter = "not test(/(^|::)it_/)"
 default-filter = "test(/(^|::)it_/)"
 slow-timeout = { period = "30s", terminate-after = 4 }
 test-threads = 4
+
+# Spike S1 restarts the broker, so its tests run one at a time.
+[test-groups]
+serial-broker = { max-threads = 1 }
+
+[[profile.it.overrides]]
+filter = "package(s1-emqx)"
+test-group = "serial-broker"
