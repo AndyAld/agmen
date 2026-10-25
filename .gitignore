@@ -1,0 +1,20 @@
+# Rust
+/target/
+
+# Node and the desktop frontend
+node_modules/
+/apps/desktop/dist/
+
+# Claude Code mod: types the engine writes at load time
+/mods/*/.claude-plugin/types/
+
+# Local env and secrets
+.env
+.env.*
+!.env.example
+
+# OS and editor files
+.DS_Store
+*~
+*.swp
+*.log
