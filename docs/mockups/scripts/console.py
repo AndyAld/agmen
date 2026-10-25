@@ -1189,7 +1189,19 @@ def switch_menu(s, current):
             text(r, "current session", 11, ACCENT)
         elif note:
             text(r, note, 11, WARN if ver else DIM)
+            btn = row(r, "add", padding=[2, 8, 2, 8], cornerRadius=4,
+                      fill=ACCENT if not ver else SEL)
+            text(btn, "Update…" if ver else "Add…", 11, BG if not ver else TEXT,
+                 style="Semibold")
+            refs[f"{name}:btn"] = btn
         refs[name] = r
+    more = row(lst, "add other", gap=8, padding=[0, 10, 0, 10], cornerRadius=5, sizingH="fill")
+    fixed(more, h=30)
+    text(more, "+", 13, ACCENT, width=12)
+    text(more, "Add a terminal agent…", 13, ACCENT)
+    frame(more, "spacer", 4, 4, sizingH="fill")
+    text(more, "any ACP agent, or a command", 11, FAINT)
+    refs["add-other"] = more
     f = col(m, "foot", padding=[8, 12, 10, 12], sizingH="fill", **rule("Top", BORDER))
     wrap(f, "Switching starts a new session of that agent in the same worktree, as andy/fx1, "
             "with a handoff brief. The current session stays resumable. Found by checking PATH "
@@ -1269,7 +1281,8 @@ def card_box(parent, name, width):
 
 
 def build_d_chat(name, palette=False, terminal=None, menu=False, ask=False, picker=False,
-                 collapsed=False, alert=False, answered=False, settings=False):
+                 collapsed=False, alert=False, answered=False, settings=False,
+                 add_agent=False):
     s, body = zwindow(name)
     _, dock_refs = left_dock(body, cursor="fx1" if terminal else None,
                              fx1=terminal if terminal == "codex" else "claude")
@@ -1409,7 +1422,15 @@ def build_d_chat(name, palette=False, terminal=None, menu=False, ask=False, pick
         if menu:
             refs = switch_menu(s, terminal)
             for k, r in refs.items():
-                link(r, "Desktop · chat + codex" if k == "codex" else "Desktop · chat + terminal")
+                if k.endswith(":btn") or k == "add-other":
+                    link(r, "Desktop · add agent")
+                elif k in ("grok",):
+                    continue
+                else:
+                    link(r, "Desktop · chat + codex" if k == "codex" else
+                         "Desktop · chat + terminal")
+        if add_agent:
+            add_agent_dialog(s)
         return
     if alert:
         link(s, "Desktop · needs you (answered)", "delay:6000")
@@ -1933,6 +1954,60 @@ def build_d_spec(name):
     statusbar(s, "ridgeline · planning")
     link(tabs["plan"], "Desktop · plan ready")
 
+
+ADD_PROMPT = [
+    "Install xAI's Grok Build CLI (the `grok` command) on this machine",
+    "from xAI's official instructions at github.com/xai-org/grok-build.",
+    "Do not use the community npm package @vibe-kit/grok-cli; it also",
+    "installs a `grok` command. When it is installed, run `grok --version`",
+    "and `agmen agents scan`, and tell me both outputs.",
+]
+
+
+def add_agent_dialog(s):
+    dim = col(s, "dim", gap=0, absolute=True, x=0, y=0, fill="#000000a0")
+    fixed(dim, 1440, 900)
+    md = col(s, "add agent", gap=12, padding=20, cornerRadius=10, fill=SURF, stroke=BORDER,
+             strokeWeight=1, absolute=True, x=380, y=120,
+             effects=[{"type": "dropShadow", "color": "#000000aa", "offset": [0, 10],
+                       "radius": 30}])
+    fixed(md, w=680)
+    h = row(md, "title", gap=10, sizingH="fill")
+    text(h, "Add Grok Build", 17, BRIGHT, style="Semibold")
+    text(h, "xAI's terminal coding agent · `grok` not found on PATH", 12, FAINT)
+    text(md, "Install it yourself", 11, DIM, style="Semibold", textCase="upper",
+         letterSpacing="6%")
+    r = row(md, "docs", gap=8)
+    text(r, "Follow xAI's official instructions:", 13, TEXT)
+    lk = row(r, "link", padding=[0, 4, 0, 4], cornerRadius=3)
+    text(lk, "github.com/xai-org/grok-build ↗", 12, ACCENT, font=BUF, textDecoration="underline")
+    text(md, "Or give this prompt to an agent you already run", 11, DIM, style="Semibold",
+         textCase="upper", letterSpacing="6%")
+    box = col(md, "prompt", gap=2, padding=[10, 12, 10, 12], cornerRadius=6, fill=BG,
+              stroke=BORDER, strokeWeight=1, sizingH="fill")
+    for ln in ADD_PROMPT:
+        text(box, ln, 12, TEXT, font=BUF)
+    cp = row(md, "copy row", gap=8)
+    copy = row(cp, "copy", gap=6, padding=[4, 10, 4, 10], cornerRadius=5, fill=SEL)
+    text(copy, "⧉", 12, ACCENT)
+    text(copy, "Copy prompt", 12, TEXT)
+    text(cp, "paste it into Claude Code, Codex or any agent with a shell; your listener has none",
+         11, FAINT)
+    text(md, "Then", 11, DIM, style="Semibold", textCase="upper", letterSpacing="6%")
+    wrap(md, "agmen looks for `grok` on PATH, runs `grok --version`, and checks that "
+             "`grok agent stdio` starts over ACP. It appears in this list once both pass.",
+         12, TEXT)
+    wrap(md, "agmen runs no installers itself: install steps change, and the prompt names the "
+             "official source so an agent does not pick up a look-alike package.", 11, FAINT)
+    ft = row(md, "footer", gap=8, sizingH="fill", mainAlign="max")
+    cancel = row(ft, "cancel", padding=[6, 12, 6, 12], cornerRadius=6, fill=BG, stroke=BORDER,
+                 strokeWeight=1)
+    text(cancel, "Cancel", 13, TEXT)
+    again = row(ft, "check", padding=[6, 14, 6, 14], cornerRadius=6, fill=ACCENT)
+    text(again, "Check again", 13, BG, style="Semibold")
+    link(cancel, "Desktop · switch agent")
+    link(again, "Desktop · switch agent")
+
 # ---------------------------------------------------------------- build
 
 POS = {
@@ -1944,6 +2019,7 @@ POS = {
     "Desktop · git": (18720, 0), "Desktop · git (collapsed)": (20280, 0),
     "Desktop · needs you": (21840, 0), "Terminal · needs you": (6240, 1060),
     "Desktop · needs you (answered)": (23400, 0), "Desktop · settings from chat": (24960, 0),
+    "Desktop · add agent": (26520, 0),
     "Desktop · plan": (0, 2120), "Desktop · spec": (1560, 2120),
     "Desktop · plan ready": (3120, 2120), "Desktop · kick off": (4680, 2120),
     "Desktop · running": (6240, 2120), "Terminal · references": (7800, 1060),
@@ -1956,6 +2032,7 @@ build_d_chat("Desktop · chat")
 build_d_agent("Desktop · agent")
 build_d_chat("Desktop · chat + terminal", terminal="claude")
 build_d_chat("Desktop · switch agent", terminal="claude", menu=True)
+build_d_chat("Desktop · add agent", terminal="claude", menu=True, add_agent=True)
 build_d_chat("Desktop · chat + codex", terminal="codex")
 build_d_chat("Desktop · model picker", picker=True)
 build_d_chat("Desktop · ask", ask=True)

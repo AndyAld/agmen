@@ -224,7 +224,14 @@ The listener replaces the dispatcher (design 6.11). Everything there carries ove
 | Antigravity `agy` 1.1.7 | `-p`; `--input-format stream-json` needs 1.1.15+ (`agy changelog`) | tokens only | settings allow/deny rules, `--mode plan`, `--sandbox` | `--conversation <id>` | separate `agy_acp_server` with its own login (registry entry, not tested) |
 | Grok Build (not installed; xAI docs) | `-p`, `--output-format streaming-json` | `total_cost_usd` when the server reports it | `--tools`, `--disallowed-tools` | `-r <id>` | `grok agent stdio` |
 
-agmend finds installed agents by looking on `PATH` and running each one's `--version`, and flags versions too old for what agmen needs.
+agmend finds installed agents by looking on `PATH` and running each one's `--version`, and flags versions too old for what agmen needs. `agmen agents scan` reruns the check.
+
+**Adding an agent** (Andy: "have a button that says click here to add, or a copy and pastable prompt to give to an agent"). In the "Terminal agents on this machine" list, a missing agent has **Add…**, an outdated one **Update…**, and a last row **Add a terminal agent…** takes any ACP agent or a custom command. Each opens a dialog with:
+- the agent's official install source (agmend keeps a short list of known agents: binary name, official source, minimum version, ACP command);
+- a prompt to copy and paste into any agent you already run that has a shell (your listener has none), naming the official source, warning about look-alike packages (for Grok, the community npm package `@vibe-kit/grok-cli` also installs a `grok` command), and ending with `<agent> --version` and `agmen agents scan`;
+- **Check again**, which reruns the scan and confirms the agent starts over ACP.
+
+agmen runs no installers itself (my call): install steps change between releases, and running them would make agmen a software installer on every member's machine.
 
 ### 5.3 Spikes
 
@@ -241,7 +248,7 @@ agmend finds installed agents by looking on `PATH` and running each one's `--ver
 
 ### 5.5 Switching agents
 
-The terminal's header has an agent chip (`claude ▾`). It lists the agents installed on this machine with their versions, greys out missing ones, and warns about old ones. Choosing another starts a new session of that agent in the same worktree, as the same identity, holding the same claim and budget, with a handoff brief: item, lane, branch and its state, what is done, what is next, and the previous session's id, which stays resumable. Role enforcement follows the new agent's capabilities (section 3.4) and the agent view shows any loss of precision.
+The terminal's header has an agent chip (`claude ▾`). It lists the agents installed on this machine with their versions, greys out missing ones with an Add button, and marks old ones with Update (section 5.2). Choosing another starts a new session of that agent in the same worktree, as the same identity, holding the same claim and budget, with a handoff brief: item, lane, branch and its state, what is done, what is next, and the previous session's id, which stays resumable. Role enforcement follows the new agent's capabilities (section 3.4) and the agent view shows any loss of precision.
 
 ### 5.6 Budgets
 
