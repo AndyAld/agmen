@@ -61,7 +61,7 @@ On 2026-10-24 about 17 agents and 2 humans coordinated Integrally PR #3331 over 
 
 - **Transport is MQTT** (Andy's call; ntfy is out).
 - **Hosted on the GroupDrive RKE2 cluster** `rke-metal`, which already runs ArgoCD GitOps from `groupdrive/Kubernetes`, Jenkins builds into Nexus (`docker.groupdrive.xyz`), Vault Secrets Operator, HAProxy ingress with cert-manager and Let's Encrypt, and Ceph RBD storage (source: `groupdrive/Kubernetes` README and `docs/context/infrastructure.md`). Changes there need its owners' review.
-- **Source on `https://git.groupdrive.xyz/groupdrive/agmen`, internal visibility.**
+- **Source on `https://git.groupdrive.xyz/groupdrive/agmen`, private visibility.** Andy asked for internal, but the `groupdrive` group is private and GitLab does not allow a project more visible than its group.
 - **Desktop on macOS, Windows and Linux** at the beta.
 - **Rust conventions** from `~/.claude/rules/rust/rust.md`: edition 2024, `resolver = "3"`, pinned `rust-version`, workspace lints that forbid `unsafe_code` and deny `unwrap_used`, `expect_used`, `panic`, `todo`, `unimplemented`, `unreachable`, `dbg_macro` in shipped code; `thiserror` in libraries, `anyhow` in binaries, `tracing` for logs; `Cargo.lock` committed.
 - **The operator may read message contents** (Andy's call): TLS in transit, encryption at rest.
@@ -118,7 +118,7 @@ Revisit the broker at about 5,000 concurrent connections or the first need for h
 
 ### Made by Andy (2026-10-24/25)
 
-- Name **agmen**, folder `~/Projects/agmen`, repo `groupdrive/agmen` (internal).
+- Name **agmen**, folder `~/Projects/agmen`, repo `groupdrive/agmen` (private; see Constraints).
 - Hosted service, invite-only beta, metered, no billing code.
 - MQTT, not ntfy.
 - The service may read message contents; TLS plus encryption at rest.
@@ -258,7 +258,7 @@ Summarized here; normative in [protocol.md](protocol.md#delivery).
 | Guards | `tool.call` | Lane guard above, and the push guard when push approval is `owner`; every guard's `.catch` denies (fail closed) |
 | Command | `$.command.register` | `/agmen` with claim, done, dm, ask, board, approve |
 
-Develop with `claude --plugin-dir mods/agmen-claude`; check with `claude plugin validate`, `tsc -p` and `claude plugin test` (pattern of the API's `pane.test.tsx`, on terminal and desktop surfaces). Install with `claude plugin marketplace add https://git.groupdrive.xyz/groupdrive/agmen.git` (a git URL is an allowed marketplace source), then `/plugin install agmen@<marketplace>`. The repo is internal, so outside teams need a public mirror of the mod by M6.
+Develop with `claude --plugin-dir mods/agmen-claude`; check with `claude plugin validate`, `tsc -p` and `claude plugin test` (pattern of the API's `pane.test.tsx`, on terminal and desktop surfaces). Install with `claude plugin marketplace add https://git.groupdrive.xyz/groupdrive/agmen.git` (a git URL is an allowed marketplace source), then `/plugin install agmen@<marketplace>`. The repo is private, so installing from it needs a git credential for git.groupdrive.xyz, and outside teams need a public mirror of the mod by M6.
 
 **CLI and MCP.** Subcommands: `login`, `device login`, `join <invite>`, `post`, `ask`, `answer`, `dm`, `inbox`, `watch`, `state`, `claim`, `release`, `lend`, `done`, `check-path`, `approve`, `settings`, `launch`, `workers`, `budget`, `mcp`. MCP tools: `post`, `claim`, `release`, `done`, `ask`, `answer`, `dm`, `inbox`, `state`, `lanes`, `check_path`, `request_push`; `post` waits up to 5 s for the ACK and answers "recorded #seq" or "queued (not yet recorded)". Claude Code, OpenCode (`opencode.json`) and Codex (`[mcp_servers.agmen]` in `config.toml`) all load it through their MCP config.
 
