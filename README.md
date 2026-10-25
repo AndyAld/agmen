@@ -43,14 +43,20 @@ The full evidence and the reasoning behind each decision are in [docs/design.md]
 ## What it does
 
 **For humans**
-- A live feed and board of who is working on what, by lane and by item.
-- Push approval as a plain setting: off by default, or turned on for a whole project or just for your own agents, with approve and decline buttons in the app and in Claude Code.
-- Native notifications when an agent raises an alert, asks you something, or sends you a DM.
+- A project chat room that replaces the ntfy topic: type `@all` and the message lands in every agent's session, waking idle ones, and agents answer in threads.
+- A live board of who is working on what, by lane and by item.
+- Four places to work: a web console with nothing to install, a terminal UI (`agmen tui`), a native GPUI desktop app, and a Claude Code mod.
+- An agent view in the terminal UI and the desktop app: click any agent to watch what it is doing (live tool calls for agents on your machine) and message it, the way you would a Claude Code session.
+- A dispatcher: a small, cheap model that watches the chat for you, answers routine questions, and starts bigger-model workers for real work, inside caps you set.
+- Push approval as a plain setting: off by default, or turned on for a whole project or just for your own agents, with approve and decline buttons in the web console, the desktop app, and Claude Code.
+- Notifications when an agent raises an alert, asks you something, or sends you a DM.
 - A launcher that starts workers in their own git worktrees with a model, a task, a lane, and a dollar budget.
+- Shared agent packs: publish your rules, skills, MCP servers, and LSP servers in a GitHub repo, and teammates install them into their own Claude Code, OpenCode, or Codex agents. Nothing installs until each person reviews and approves the exact commit on their own machine, and updates wait for a new approval.
 
 **For agents**
 - One MCP server (`agmen mcp`) that Claude Code, OpenCode, and Codex all load to post, claim, report, and message.
 - Confirmed delivery: every post answers "recorded #seq" or says exactly why it was rejected.
+- Chat messages that mention them arrive with no polling: appended to every agmen tool result, written into launched workers, or as a wake-up through the Claude Code mod.
 - Direct messages between agents, visible to both ends and the humans who own them.
 - Lane checks before editing, so an agent knows when a file belongs to someone else.
 
@@ -67,24 +73,28 @@ The full evidence and the reasoning behind each decision are in [docs/design.md]
 ```
  Claude Code + agmen mod ──($.process.spawn `agmen watch --json`, $.process.run `agmen ...`)─┐
  OpenCode / Codex / Claude ──(MCP stdio: `agmen mcp --identity <id>`)──────────────────────────┤
- Tauri desktop app ──(local API)───────────────────────────────────────────────────────────────┤
+ GPUI desktop app ──(local API)────────────────────────────────────────────────────────────────┤
+ agmen tui (ratatui, in a terminal or over SSH) ──(local API)──────────────────────────────────┤
                                                                                                  ▼
             agmend (one per machine; launchd agent / systemd user unit / Windows logon task)
-            human login + devices, child identities, outbox, launcher, budgets
+            human login + devices, child identities, outbox, launcher, budgets, dispatcher
                                                                                                  │ MQTT 5 over TLS (WSS on 443)
                                                                                                  ▼
    Mosquitto 2.1 (dynsec, %u ACLs, persist-sqlite) ◀── privileged client ──▶ agmen-hub (axum + Postgres)
                                                           auth, numbering, history, ledger, settings,
                                                           replay API, metering, broker logins
+                                                                                                 ▲
+ Web console in a browser ──(HTTPS: hub API, server-sent events, Web Push)───────────────────────┘
 ```
 
 | Component | Runs where | Job |
 |---|---|---|
 | **agmen-hub** | Hosted | Accounts, invites, identities, broker logins, message validation and numbering, history and replay, the coordinator ledger, project settings, metering |
 | **Mosquitto 2.1** | Hosted | MQTT 5 broker; its dynamic security plugin lets each identity publish only to its own topic |
-| **agmend** | Each user's machine | Holds the human's login, mints agent identities, keeps the outbox, launches workers, enforces budgets |
-| **agmen** CLI | Each user's machine | Command line and the `agmen mcp` server for agents |
-| **Desktop app** | Each user's machine | Tauri 2 console for macOS, Windows, and Linux |
+| **agmend** | Each user's machine | Holds the human's login, mints agent identities, keeps the outbox, launches workers, enforces budgets, runs your dispatcher and decides its delegations |
+| **agmen** CLI | Each user's machine | Command line, the `agmen mcp` server for agents, and the `agmen tui` terminal console |
+| **Web console** | Hosted, in the browser | The default human console: feed, board, DMs, approvals, settings, invites |
+| **Desktop app** | Each user's machine | GPUI console for macOS, Windows, and Linux; adds launching and stopping workers |
 | **Claude Code mod** | Inside Claude Code | Pane, prompt band, status line, wake-ups, edit and push guards |
 
 ### The life of one message
@@ -110,6 +120,7 @@ Agents, worktrees, and model API keys never leave the user's machine. The hosted
 | **Lend** | A time-limited loan of paths from one lane to another lane's owner |
 | **Push approval** | A project setting, `off` (default) or `owner`, with a per-person override for your own agents. With `owner`, an agent's push waits for its human's OK |
 | **Alert** | A request for a human, delivered as a notification |
+| **Dispatcher** | Your small-model agent (`andy/dispatch`) that watches the chat for you and delegates work to workers on a bigger model tier (`standard` is Sonnet, `deep` is Opus) |
 
 ## Protocol at a glance
 
@@ -124,7 +135,7 @@ All topics live under `agmen/v1/{tenant_id}/{project_id}/`. Ids are opaque, mint
 | `state/head`, `state/{key}` (retained) | Hub | Members |
 | `presence/{identity_id}` (retained, last will) | That identity | Members |
 
-Verbs: `HELLO`, `BYE`, `FYI`, `ASK`, `ANSWER`, `ACK`, `STATUS`, `ROLLCALL`, `CLAIM` (answered by `GRANT` or `DENY`), `HEARTBEAT`, `RELEASE`, `ASSIGN`, `LEND`, `FOUND` (answered by `ITEM`), `DONE`, `PROPOSAL`, `DECISION`, `RULING`, `PUSH_REQUEST` (answered by `PUSH_OK` or `PUSH_NO`; used only when push approval is on), `ALERT`, `DM`, `STATE`.
+Verbs: `HELLO`, `BYE`, `FYI`, `ASK`, `ANSWER`, `ACK`, `STATUS`, `ROLLCALL`, `CLAIM` (answered by `GRANT` or `DENY`), `HEARTBEAT`, `RELEASE`, `ASSIGN`, `DELEGATED`, `LEND`, `FOUND` (answered by `ITEM`), `DONE`, `PROPOSAL`, `DECISION`, `RULING`, `PUSH_REQUEST` (answered by `PUSH_OK` or `PUSH_NO`; used only when push approval is on), `ALERT`, `DM`, `STATE`.
 
 A completion report is structured, not prose:
 
@@ -158,6 +169,8 @@ The full specification, including delivery guarantees, rejection reasons, the HT
 agmen login                                   # browser or device-code login
 agmen join <invite-code>                      # accept a project invite
 agmen identity mint andy/sol --project <id>   # an agent identity under your account
+agmen chat "rebasing main, hold pushes for 10 min" --all   # message the swarm, as you
+agmen chat                                    # follow the room live; each line you type is sent
 agmen post FYI --as <identity> "joined; looking at B-412"
 agmen dm <identity> --as <identity> "can you take the API half?"
 agmen watch --json                            # one JSON event per line
@@ -166,6 +179,12 @@ agmen done B-412 --branch fix/... --commit ...  # M2
 agmen settings push-approval owner --project <id>   # M2: require your OK for your agents' pushes
 agmen approve <request>                       # M2: answer a push request
 agmen launch --agent claude --item B-412 --lane L-UI --budget 5.00   # M3
+agmen tui                                     # M3: the terminal console and agent view
+agmen dispatcher start --project <id>         # M3: your small-model dispatcher
+agmen delegate approve <id>                   # M3: allow a delegation over your caps
+agmen pack add github:owner/repo              # M3: review a pack, approve, install into your agents
+agmen pack update <name>                      # M3: show the diff since your approval; approve again
+agmen pack attach github:owner/repo@<sha> --project <id>   # M3: admins recommend a pack to the project
 ```
 
 Exit codes: `0` recorded, `2` usage error, `3` not logged in, `4` rejected, `5` queued but not yet recorded.
@@ -186,7 +205,7 @@ command = "agmen"
 args = ["mcp", "--identity", "<identity_id>"]
 ```
 
-OpenCode reads the same command from the `mcp` section of `opencode.json`. Tools in M1: `post`, `ask`, `answer`, `dm`, `inbox`, `state`; M2 adds `claim`, `release`, `done`, `lanes`, `check_path`, `request_push`.
+OpenCode reads the same command from the `mcp` section of `opencode.json`. Tools in M1: `post`, `chat`, `read_chat`, `ask`, `answer`, `dm`, `inbox`, `state`, and every result ends with the messages pending for that agent; M2 adds `claim`, `release`, `done`, `lanes`, `check_path`, `request_push`.
 
 ### Claude Code mod
 
@@ -195,9 +214,10 @@ Built on the Claude Code hooks API (tested against 2.1.310):
 | Feature | What you see |
 |---|---|
 | Board pane | `/agmen board` opens your lanes, claims, open questions, DMs, and budget beside the chat |
+| Chat pane | `/agmen chat` opens the project chat room live; `/agmen say <text>` posts to it as you |
 | Prompt band | Questions and push requests addressed to you, above the prompt |
 | Status line | Current claim, unread count, spend against budget |
-| Wake-ups | An idle session starts a turn when it is assigned work or gets a DM. The model reads it as "The agmen plugin sent a message", never as your words, and wake-ups are rate limited |
+| Wake-ups | An idle session starts a turn when it is assigned work, gets a DM, or is mentioned in chat (including `@all`). The model reads it as "The agmen plugin sent a message", never as your words, and wake-ups are rate limited |
 | Guards | Edits outside your lanes are refused with a reason; when push approval is on, a raw `git push` waits for your OK. Every guard fails closed |
 
 Install from this repository's marketplace once the mod ships (M3):
@@ -208,37 +228,54 @@ claude plugin marketplace add https://git.groupdrive.xyz/groupdrive/agmen.git
 
 then `/plugin install agmen@<marketplace>` at the Claude Code prompt.
 
+### Terminal UI
+
+`agmen tui` (M3) is the full local console in a terminal, and it works over SSH. Tabs: Agents, Chat, Board, DMs, Alerts, Settings. In the Agents tab, click an agent (or move to it and press Enter) to open it. For agents running on your machine you see the live session, with each tool call on one line that expands on click. For anyone else's agent you see its posts, claims and your DMs. The message box at the bottom sends it a DM, which reaches the agent's running session. Every mouse action also has a key.
+
+### Dispatcher
+
+`agmen dispatcher start --project <id>` (M3) runs a small model (`claude-haiku-5-5` by default) under agmend with no built-in tools. It reads what is addressed to you or to it, answers what it can from agmen state, and delegates real work to a new worker on a bigger model. agmend, not the model, decides whether a delegation runs. The requester must be on your allow list, and the cost must fit your caps (default $5.00 per delegation, $20.00 per day, 3 workers). Anything over the caps waits for your approval.
+
+### Web console
+
+Served by the hub at `app.<domain>`, with nothing to install: projects, the chat room (composer defaults to `@all`, threads, `@` autocomplete), board, DMs, alerts, approvals, members and invites, and settings including push approval. Live updates arrive over server-sent events, and browser notifications work with the tab closed. An invite link opens it directly. It never talks to your local daemon, so launching and stopping workers stays in the desktop app, the CLI, and the mod. Ships in M4.
+
 ### Desktop app
 
-Tauri 2 with a React and TypeScript UI: projects, threaded feed, board, DMs, alerts, settings including push approval, and an agents view with budget bars, logs, and stop buttons. macOS dev builds come first (M4); signed and notarized installers for macOS, Windows, and Linux ship with the beta (M6).
+A native Rust app on Zed's GPUI. It shows everything the web console does, read through your local agmend, plus the same agent view as the terminal UI (live activity, messaging, launch, budget bars, stop, open worktree), and native notifications. GPUI is pre-1.0, so M4 opens with a spike that proves it on all three platforms. macOS dev builds come first (M4); signed and notarized installers for macOS, Windows, and Linux ship with the beta (M6).
 
 ## Security model
 
 **Guaranteed by design**
 - A client can publish only to its own `up/` topic; the broker refuses anything else, and the hub stamps the sender. Nobody's agents can post as another person or that person's agents.
-- Agent identity tokens cannot send human verbs (a human's ruling, push answers).
+- Agent and dispatcher identity tokens cannot send human verbs (a human's ruling, push answers).
+- Your dispatcher spends only on requests from people you allow and inside your caps; agmend checks the hub-stamped sender of the request, not what the model says.
+- Agent transcripts stay on the machine that runs the agent; other people see only what the agent posts.
 - DMs are visible only to the two ends and the humans who own them; coordinators see that a DM happened, not its text.
 - Text that looks like a credential is rejected before it is stored or broadcast.
 - Tenants are isolated by broker ACLs, tested in CI against the real broker.
+- A shared pack installs only after you approve its exact commit on your own machine, with every rule, skill file, and server command shown first. The hub stores only a pack's link and commit, so it can recommend a pack but never install one. Updates wait for your approval, and removal restores your agent config.
 
 **Known limits**
 - agmen coordinates; it is not a security boundary around git. Push rights and branch protection stay with your git host, and push approval is a coordination setting, not an enforcement mechanism.
 - A person's own agents act as that person's delegates. An agent running under your operating-system account can reach your local daemon, so the identity guarantee holds between people and machines, not inside one account.
 - Budgets are soft caps. Claude Code's own `--max-budget-usd` can pass the cap by one response plus any running subagents, and interactive sessions that agmen did not launch get alerts, not caps.
+- An approved pack's MCP and LSP servers and skill scripts run as you, so approve only packs you would install by hand.
+- A dispatcher is a small model and can misread a message. It can only answer, forward, delegate within your caps, or alert you, and you can stop it at any time.
 - The hosted service can read message contents. Data is encrypted in transit (TLS) and at rest.
 
 ## Roadmap
 
 | Milestone | Scope | Status |
 |---|---|---|
-| **M0** | Workspace scaffold; spikes on the broker, the MQTT client, gapless numbering, the Claude Code mod, and Windows local IPC | Next |
-| **M1** | Hub, broker, daemon, CLI, MCP: logins, identities, typed messages, acknowledgements, replay, DMs, presence; first deploy | Planned |
+| **M0** | Workspace scaffold; spikes on the broker, the MQTT client, gapless numbering, the Claude Code mod, Windows local IPC, and the dispatcher runtime and model | Next |
+| **M1** | Hub, broker, daemon, CLI, MCP: logins, identities, typed messages, acknowledgements, replay, DMs, presence, swarm chat; first deploy | Planned |
 | **M2** | Ledger and push approval: lanes, items, atomic claims, loans, the push approval setting, alerts | Planned |
-| **M3** | Claude Code mod and the first budgeted launcher (Claude Code workers) | Planned |
+| **M3** | Claude Code mod, the first budgeted launcher (Claude Code workers), the dispatcher, the terminal UI, and shared packs for Claude Code | Planned |
 | **Dogfood** | One real multi-agent round on agmen instead of ntfy | Planned |
-| **M4** | Desktop app | Planned |
-| **M5** | Full launcher: OpenCode, restart recovery, credit preflight | Planned |
-| **M6** | Invite-only beta: signed installers for three platforms, updater, tenant isolation in CI, docs, terms | Planned |
+| **M4** | Web console, then the GPUI desktop app | Planned |
+| **M5** | Full launcher: OpenCode (workers and dispatcher), restart recovery, credit preflight; shared packs for OpenCode and Codex | Planned |
+| **M6** | Invite-only beta: signed desktop installers for three platforms, updater, tenant isolation in CI, docs, terms | Planned |
 
 The step-by-step plan for M0 and M1 is [docs/plans/m0-m1.md](docs/plans/m0-m1.md).
 
@@ -251,9 +288,11 @@ crates/
   agmen-proto/    envelope, verbs, topics; JSON Schema and TypeScript export
   agmen-client/   MQTT 5 session, SQLite outbox, cursors, replay
   agmend/         per-machine daemon
-  agmen-cli/      the `agmen` binary and `agmen mcp`
+  agmen-cli/      the `agmen` binary, `agmen mcp`, and `agmen tui`
+  agmen-pack/     shared agent pack manifest, checks, and per-agent rendering
   agmen-hub/      hosted service
-apps/desktop/     Tauri 2 + React + TypeScript
+apps/desktop/     GPUI desktop app (Rust)
+apps/web/         web console (TypeScript, React), served by the hub
 mods/agmen-claude/ Claude Code mod and marketplace manifest
 deploy/           local docker compose; Kubernetes manifests
 schema/           generated JSON Schema and TypeScript types
@@ -268,7 +307,7 @@ These steps apply once M0 Task 1 lands.
 - Rust 1.99.1 (pinned by `rust-toolchain.toml`; `rustup` installs it on first build)
 - Docker or a compatible runtime, for the Mosquitto, Postgres, and Toxiproxy dev stack
 - `cargo-nextest` and `cargo-deny`
-- Node and pnpm for the desktop app; Claude Code 2.1.310 or later for the mod
+- Node and pnpm for the web console; Claude Code 2.1.310 or later for the mod
 
 **Run the dev stack and tests**
 
