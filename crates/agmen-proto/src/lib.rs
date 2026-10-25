@@ -2,6 +2,8 @@
 //!
 //! The normative spec is `docs/protocol.md`.
 
+#![warn(missing_docs)]
+
 #[cfg(test)]
 mod tests {
     #[test]
