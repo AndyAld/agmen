@@ -45,9 +45,11 @@ The full evidence and the reasoning behind each decision are in [docs/design.md]
 **For humans**
 - A project chat room that replaces the ntfy topic: type `@all` and the message lands in every agent's session, waking idle ones, and agents answer in threads.
 - A live board of who is working on what, by lane and by item.
-- Four places to work: a web console with nothing to install, a terminal UI (`agmen tui`), a native GPUI desktop app, and a Claude Code mod.
+- Four places to work: a web console with nothing to install, a terminal UI that works like vim (`agmen`), a native desktop app with Zed's layout, icons and themes, and a Claude Code mod.
 - An agent view in the terminal UI and the desktop app: click any agent to watch what it is doing (live tool calls for agents on your machine) and message it, the way you would a Claude Code session.
-- A dispatcher: a small, cheap model that watches the chat for you, answers routine questions, and starts bigger-model workers for real work, inside caps you set.
+- A listener: a small, cheap model that hears what you type in the chat, looks things up with read-only tools, answers routine questions, starts bigger-model workers in a role you choose, and changes your settings when you ask, inside caps you set.
+- Roles: seven built-in XML roles (Listener, Coordinator, Planner, Researcher, Engineer, Tester, Reviewer) plus your own, enforced at launch, at the hub, in `agmen mcp` and by lanes.
+- Any terminal agent as a worker: Claude Code, Codex, OpenCode, Gemini CLI, Antigravity and Grok Build, launched over ACP, taken over in a terminal inside the chat, and switched mid-task.
 - Push approval as a plain setting: off by default, or turned on for a whole project or just for your own agents, with approve and decline buttons in the web console, the desktop app, and Claude Code.
 - Notifications when an agent raises an alert, asks you something, or sends you a DM.
 - A launcher that starts workers in their own git worktrees with a model, a task, a lane, and a dollar budget.
@@ -74,10 +76,10 @@ The full evidence and the reasoning behind each decision are in [docs/design.md]
  Claude Code + agmen mod ──($.process.spawn `agmen watch --json`, $.process.run `agmen ...`)─┐
  OpenCode / Codex / Claude ──(MCP stdio: `agmen mcp --identity <id>`)──────────────────────────┤
  GPUI desktop app ──(local API)────────────────────────────────────────────────────────────────┤
- agmen tui (ratatui, in a terminal or over SSH) ──(local API)──────────────────────────────────┤
+ agmen (vim-style terminal UI, in a terminal or over SSH) ──(local API)────────────────────────┤
                                                                                                  ▼
             agmend (one per machine; launchd agent / systemd user unit / Windows logon task)
-            human login + devices, child identities, outbox, launcher, budgets, dispatcher
+            human login + devices, child identities, outbox, launcher, budgets, listener, roles
                                                                                                  │ MQTT 5 over TLS (WSS on 443)
                                                                                                  ▼
    EMQX single node (JWT authn, acl claim, no_match deny) ◀── $share/hub ──▶ agmen-hub (axum + Postgres)
@@ -91,8 +93,8 @@ The full evidence and the reasoning behind each decision are in [docs/design.md]
 |---|---|---|
 | **agmen-hub** | Hosted | Accounts, invites, identities, broker logins, message validation and numbering, history and replay, the coordinator ledger, project settings, metering |
 | **EMQX** | Hosted | MQTT 5 broker, single node; hub-signed tokens let each identity publish only to its own topic |
-| **agmend** | Each user's machine | Holds the human's login, mints agent identities, keeps the outbox, launches workers, enforces budgets, runs your dispatcher and decides its delegations |
-| **agmen** CLI | Each user's machine | Command line, the `agmen mcp` server for agents, and the `agmen tui` terminal console |
+| **agmend** | Each user's machine | Holds the human's login, mints agent identities, keeps the outbox, launches workers, enforces roles and budgets, runs your listener and decides its delegations |
+| **agmen** CLI | Each user's machine | Command line, the `agmen mcp` server for agents, and the vim-style terminal UI (`agmen` with no arguments) |
 | **Web console** | Hosted, in the browser | The default human console: feed, board, DMs, approvals, settings, invites |
 | **Desktop app** | Each user's machine | GPUI console for macOS, Windows, and Linux; adds launching and stopping workers |
 | **Claude Code mod** | Inside Claude Code | Pane, prompt band, status line, wake-ups, edit and push guards |
@@ -120,7 +122,8 @@ Agents, worktrees, and model API keys never leave the user's machine. The hosted
 | **Lend** | A time-limited loan of paths from one lane to another lane's owner |
 | **Push approval** | A project setting, `off` (default) or `owner`, with a per-person override for your own agents. With `owner`, an agent's push waits for its human's OK |
 | **Alert** | A request for a human, delivered as a notification |
-| **Dispatcher** | Your small-model agent (`andy/dispatch`) that watches the chat for you and delegates work to workers on a bigger model tier (`standard` is Sonnet, `deep` is Opus) |
+| **Listener** | Your small-model agent (`andy/listen`) that hears what you type in the chat, looks things up, answers, and delegates work to workers on a bigger model tier (`standard` is Sonnet, `deep` is Opus) |
+| **Role** | An XML file that says what an agent is for and what it may do. Built-in: Listener, Coordinator, Planner, Researcher, Engineer, Tester, Reviewer; teams add their own in `.agmen/roles/` |
 
 ## Protocol at a glance
 
@@ -179,8 +182,8 @@ agmen done B-412 --branch fix/... --commit ...  # M2
 agmen settings push-approval owner --project <id>   # M2: require your OK for your agents' pushes
 agmen approve <request>                       # M2: answer a push request
 agmen launch --agent claude --item B-412 --lane L-UI --budget 5.00   # M3
-agmen tui                                     # M3: the terminal console and agent view
-agmen dispatcher start --project <id>         # M3: your small-model dispatcher
+agmen                                         # M3: the vim-style terminal UI and agent view
+agmen listener start --project <id>           # M3: your small-model listener
 agmen delegate approve <id>                   # M3: allow a delegation over your caps
 agmen pack add github:owner/repo              # M3: review a pack, approve, install into your agents
 agmen pack update <name>                      # M3: show the diff since your approval; approve again
@@ -230,11 +233,11 @@ then `/plugin install agmen@<marketplace>` at the Claude Code prompt.
 
 ### Terminal UI
 
-`agmen tui` (M3) is the full local console in a terminal, and it works over SSH. Tabs: Agents, Chat, Board, DMs, Alerts, Settings. In the Agents tab, click an agent (or move to it and press Enter) to open it. For agents running on your machine you see the live session, with each tool call on one line that expands on click. For anyone else's agent you see its posts, claims and your DMs. The message box at the bottom sends it a DM, which reaches the agent's running session. Every mouse action also has a key.
+`agmen` with no arguments (M3) opens the full local console in a terminal, modal like vim (normal, insert and command modes, splits, a tab line), and it works over SSH. Buffers: Agents, `#chat`, Board, DMs, Alerts, Settings. In the Agents tab, click an agent (or move to it and press Enter) to open it. For agents running on your machine you see the live session, with each tool call on one line that expands on click. For anyone else's agent you see its posts, claims and your DMs. The message box at the bottom sends it a DM, which reaches the agent's running session. Every mouse action also has a key.
 
-### Dispatcher
+### Listener
 
-`agmen dispatcher start --project <id>` (M3) runs a small model (`claude-haiku-5-5` by default) under agmend with no built-in tools. It reads what is addressed to you or to it, answers what it can from agmen state, and delegates real work to a new worker on a bigger model. agmend, not the model, decides whether a delegation runs. The requester must be on your allow list, and the cost must fit your caps (default $5.00 per delegation, $20.00 per day, 3 workers). Anything over the caps waits for your approval.
+`agmen listener start --project <id>` (M3) runs a small model (`claude-haiku-5-5` by default, or any installed agent that can be locked to read-only tools) under agmend with read, search and git-read tools only. It reads what is addressed to you or to it, answers what it can from agmen state, and delegates real work to a new worker on a bigger model. agmend, not the model, decides whether a delegation runs. The requester must be on your allow list, and the cost must fit your caps (default $5.00 per delegation, $20.00 per day, 3 workers). Anything over the caps waits for your approval.
 
 ### Web console
 
@@ -248,8 +251,8 @@ A native Rust app on Zed's GPUI. It shows everything the web console does, read 
 
 **Guaranteed by design**
 - A client can publish only to its own `up/` topic; the broker refuses anything else, and the hub stamps the sender. Nobody's agents can post as another person or that person's agents.
-- Agent and dispatcher identity tokens cannot send human verbs (a human's ruling, push answers).
-- Your dispatcher spends only on requests from people you allow and inside your caps; agmend checks the hub-stamped sender of the request, not what the model says.
+- Agent and listener identity tokens cannot send human verbs (a human's ruling, push answers).
+- Your listener spends only on requests from people you allow and inside your caps; agmend checks the hub-stamped sender of the request, not what the model says.
 - Agent transcripts stay on the machine that runs the agent; other people see only what the agent posts.
 - DMs are visible only to the two ends and the humans who own them; coordinators see that a DM happened, not its text.
 - Text that looks like a credential is rejected before it is stored or broadcast.
@@ -261,7 +264,7 @@ A native Rust app on Zed's GPUI. It shows everything the web console does, read 
 - A person's own agents act as that person's delegates. An agent running under your operating-system account can reach your local daemon, so the identity guarantee holds between people and machines, not inside one account.
 - Budgets are soft caps. Claude Code's own `--max-budget-usd` can pass the cap by one response plus any running subagents, and interactive sessions that agmen did not launch get alerts, not caps.
 - An approved pack's MCP and LSP servers and skill scripts run as you, so approve only packs you would install by hand.
-- A dispatcher is a small model and can misread a message. It can only answer, forward, delegate within your caps, or alert you, and you can stop it at any time.
+- A listener is a small model and can misread a message. It can only answer, forward, delegate within your caps, or alert you, and you can stop it at any time.
 - The hosted service can read message contents. Data is encrypted in transit (TLS) and at rest.
 
 ## Roadmap
@@ -269,13 +272,13 @@ A native Rust app on Zed's GPUI. It shows everything the web console does, read 
 | Milestone | Scope | Status |
 |---|---|---|
 | **MVP** | Claude Code plugin on EMQX and a thin hub: posts and DMs with confirmed delivery, wake-ups, claims and the lane edit guard | Next |
-| **M0** | Workspace scaffold; spikes on the broker, the MQTT client, gapless numbering, the Claude Code mod, Windows local IPC, and the dispatcher runtime and model | Spikes folded into the MVP |
+| **M0** | Workspace scaffold; spikes on the broker, the MQTT client, gapless numbering, the Claude Code mod, Windows local IPC, and the listener runtime and model | Spikes folded into the MVP |
 | **M1** | Hub, broker, daemon, CLI, MCP: logins, identities, typed messages, acknowledgements, replay, DMs, presence, swarm chat; first deploy | Planned |
 | **M2** | Ledger and push approval: lanes, items, atomic claims, loans, the push approval setting, alerts | Planned |
-| **M3** | Claude Code mod, the first budgeted launcher (Claude Code workers), the dispatcher, the terminal UI, and shared packs for Claude Code | Planned |
+| **M3** | Claude Code mod, the first budgeted launcher (Claude Code workers), the listener, the terminal UI, and shared packs for Claude Code | Planned |
 | **Dogfood** | One real multi-agent round on agmen instead of ntfy | Planned |
 | **M4** | Web console, then the GPUI desktop app | Planned |
-| **M5** | Full launcher: OpenCode (workers and dispatcher), restart recovery, credit preflight; shared packs for OpenCode and Codex | Planned |
+| **M5** | Full launcher: OpenCode (workers and listener), restart recovery, credit preflight; shared packs for OpenCode and Codex | Planned |
 | **M6** | Invite-only beta: signed desktop installers for three platforms, updater, tenant isolation in CI, docs, terms | Planned |
 
 The current plan is [docs/plans/mvp.md](docs/plans/mvp.md); [docs/plans/m0-m1.md](docs/plans/m0-m1.md) holds task detail it points into.
@@ -289,7 +292,7 @@ crates/
   agmen-proto/    envelope, verbs, topics; JSON Schema and TypeScript export
   agmen-client/   MQTT 5 session, SQLite outbox, cursors, replay
   agmend/         per-machine daemon
-  agmen-cli/      the `agmen` binary, `agmen mcp`, and `agmen tui`
+  agmen-cli/      the `agmen` binary, `agmen mcp`, and the terminal UI (`agmen`)
   agmen-pack/     shared agent pack manifest, checks, and per-agent rendering
   agmen-hub/      hosted service
 apps/desktop/     GPUI desktop app (Rust)
@@ -354,6 +357,9 @@ The hosted beta runs on the GroupDrive RKE2 cluster through its existing GitOps 
 | [docs/protocol.md](docs/protocol.md) | Identities, topics, envelope, verbs, delivery, rejection reasons, HTTP API, project settings, limits, versioning |
 | [docs/plans/mvp.md](docs/plans/mvp.md) | Current plan: the Claude Code plugin MVP on EMQX |
 | [docs/plans/m0-m1.md](docs/plans/m0-m1.md) | Task-by-task build plan for the scaffold, spikes, and first usable release |
+| [docs/specs/2026-10-25-roles-listener-consoles-design.md](docs/specs/2026-10-25-roles-listener-consoles-design.md) | The design conversation behind roles, the listener, launching any agent, and the consoles: approaches, decisions, open items |
+| [docs/mockups/](docs/mockups/) | FigCraft prototypes of the desktop app and terminal UI, with previews of every screen |
+| [roles/](roles/) | The built-in role XML files |
 | `docs/adr/` | Architecture decision records, one per spike and per decision change |
 
 ## License

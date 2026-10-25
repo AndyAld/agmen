@@ -1,6 +1,6 @@
 # Agent roles, the listener, launching any agent, and the consoles
 
-Status: draft for Andy's review, written 2026-10-25 from a design conversation the same day. Once approved, its changes fold into [../design.md](../design.md) and [../protocol.md](../protocol.md) (section 12 lists them). Until then those two files are unchanged and this document is the reference for the parts below.
+Status: written 2026-10-25 from a design conversation the same day, approved by Andy, and folded into [../design.md](../design.md) and [../protocol.md](../protocol.md) the same day (section 12 lists what moved where). Those two files are the reference; this one keeps the conversation record, the approaches, the per-agent findings and the open items.
 
 Mockups: [`../mockups/`](../mockups/): `agmen-console.figcraft` (Zed-style desktop app, vim-style terminal UI, alerts, planning, references) and the earlier `agmen-roles.figcraft` (roles, launch, worktrees, first chat), with PNG exports and the scripts that build them.
 
