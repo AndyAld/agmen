@@ -340,6 +340,7 @@ A single hub process with the broker inside is acceptable at launch. A deploy or
    - **Releases and images** are published publicly, from the repository's release pipeline.
    - **agmen hosted's deployment** (`groupdrive/agmen-kubernetes`, the hosted hub's configuration, its secrets and its data) stays private.
    - **MIT allows anyone to host agmen commercially.** Andy chose that knowingly.
+   - **Publishing (Andy, 2026-10-26: "go with your recs, fresh squashed repo"):** a new public repository `github.com/agmen-dev/agmen` with one squashed first commit, authored with Andy's GitHub no-reply address. Before it: GroupDrive and other private text removed from the tree, Integrally reworded as "a 17-agent PR", repository URLs pointed at the public repo, and the mockups regenerated with Lucide icons in place of Zed's and Material's. The existing private `AndyAld/agmen` stays private. The local `mvp/t14` branch, which holds Claude Code's early-access type files in its history, is never published.
 2. **agmen's domain: decided 2026-10-26.** Andy: "go with getagmen.ai".
    - **Use:** `getagmen.ai` is the one canonical domain for the site, the hosted hub (for example `api.getagmen.ai`), the install script, invite links on agmen hosted, billing and email.
    - **Availability:** it was unregistered on 2026-10-26 (whois.nic.ai: "Domain not found").
