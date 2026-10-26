@@ -4,6 +4,7 @@ DROP TABLE device_authorizations;
 DROP TABLE tokens;
 DROP TABLE invites;
 DROP TABLE identities;
+DROP TABLE bootstrap_admins;
 DROP TABLE memberships;
 DROP TABLE humans;
 DROP TABLE projects;

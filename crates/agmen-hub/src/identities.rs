@@ -23,6 +23,11 @@ pub const BROKER_TOKEN_TTL: Duration = Duration::from_secs(3600);
 /// server, `agmen watch`, and one-shot CLI commands.
 pub const CLIENT_ID_SUFFIXES: [&str; 3] = ["mcp", "watch", "cli"];
 
+/// How long a revoked identity's username stays banned in EMQX past
+/// [`BROKER_TOKEN_TTL`] after revocation (ruling R36). It covers a token
+/// minted just as the revocation committed, and clock skew.
+const BAN_MARGIN: Duration = Duration::from_secs(300);
+
 /// A person's id, minted by the hub at first sign-in.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct HumanId(String);
@@ -291,31 +296,45 @@ pub(crate) async fn broker_token(
 }
 
 /// `DELETE /v1/identities/{id}` (the owner's human token): revokes the
-/// identity and kicks its client ids off the broker. Its broker tokens are
-/// refused from then on. Repeating the call kicks again, so a failed kick
-/// can be retried.
+/// identity, bans its username in EMQX until its last broker token has
+/// expired, and kicks its client ids off the broker. Its broker tokens are
+/// refused from then on. Repeating the call bans and kicks again, so a
+/// failed call can be retried.
 pub(crate) async fn revoke(
     State(hub): State<Hub>,
     Path(id): Path<String>,
     caller: Caller,
 ) -> Result<StatusCode, ApiError> {
     let human = caller.human()?;
-    // Commit the revocation before kicking, so a client that reconnects
-    // between the kicks cannot get a fresh broker token.
-    let revoked: Option<String> = sqlx::query_scalar(
+    // Commit the revocation before banning and kicking, so a client that
+    // reconnects in between cannot get a fresh broker token.
+    let revoked: Option<(String, i64)> = sqlx::query_as(
         "UPDATE identities SET revoked_at = coalesce(revoked_at, now())
          WHERE id = $1 AND owner_human_id = $2
-         RETURNING id",
+         RETURNING id, extract(epoch FROM revoked_at)::bigint",
     )
     .bind(&id)
     .bind(human.as_str())
     .fetch_optional(hub.pool())
     .await?;
-    let Some(id) = revoked else {
+    let Some((id, revoked_at)) = revoked else {
         return Err(ApiError::not_found("no such identity of yours"));
     };
     tracing::info!(identity = %id, owner = %human, "revoked identity");
+    let ban_until = Timestamp::from_second(revoked_at)
+        .and_then(|at| at.checked_add(BROKER_TOKEN_TTL + BAN_MARGIN))
+        .map_err(ApiError::stored)?;
     let mut failed = None;
+    // Ban before kicking: a kicked client that reconnects with its
+    // unexpired token is refused, since EMQX checks only signature and exp.
+    // Past ban_until every token minted before the revocation has expired,
+    // so a late retry needs no ban.
+    if ban_until > Timestamp::now()
+        && let Err(err) = hub.emqx().ban_username(&id, ban_until).await
+    {
+        tracing::warn!(identity = %id, error = %err, "ban failed");
+        failed = Some(err);
+    }
     for suffix in CLIENT_ID_SUFFIXES {
         let client_id = format!("{id}-{suffix}");
         if let Err(err) = hub.emqx().kick(&client_id).await {

@@ -209,3 +209,119 @@ async fn it_invite_once() {
     })
     .await;
 }
+
+/// Runs `agmen-hub bootstrap` against the test's database and returns the
+/// JSON it printed.
+async fn bootstrap(ctx: &Ctx, tenant: &str, project: &str, admin_github: &str) -> Value {
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_agmen-hub"));
+    command
+        .args(["bootstrap", "--tenant", tenant, "--project", project])
+        .args(["--admin-github", admin_github])
+        .env("AGMEN_DATABASE_URL", &ctx.db_url);
+    let out = tokio::task::spawn_blocking(move || command.output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "bootstrap failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    serde_json::from_slice(&out.stdout).unwrap()
+}
+
+fn is_hub_id(value: &Value) -> bool {
+    value.as_str().is_some_and(|id| {
+        (8..=32).contains(&id.len())
+            && id
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+    })
+}
+
+async fn role_in(ctx: &Ctx, handle: &str, project: &Value) -> Option<String> {
+    sqlx::query_scalar(
+        "SELECT m.role FROM memberships m JOIN humans h ON h.id = m.human_id
+         WHERE h.handle = $1 AND m.project_id = $2",
+    )
+    .bind(handle)
+    .bind(project.as_str().unwrap())
+    .fetch_optional(&ctx.pool)
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn it_bootstrap_creates_project_and_first_admin() {
+    run(|ctx| async move {
+        let made = bootstrap(&ctx, "Acme Co", "agmen", "Root-Admin").await;
+        assert!(is_hub_id(&made["tenant"]), "{made}");
+        assert!(is_hub_id(&made["project"]), "{made}");
+        assert_eq!(made["admin_github"], "root-admin");
+        let tenant = made["tenant"].as_str().unwrap();
+        assert_eq!(
+            count(
+                &ctx.pool,
+                "SELECT count(*) FROM projects WHERE tenant_id = $1 AND name = 'agmen'",
+                tenant
+            )
+            .await,
+            1
+        );
+
+        // Idempotent: the same names give the same ids and no new rows.
+        assert_eq!(bootstrap(&ctx, "Acme Co", "agmen", "root-admin").await, made);
+        for table in ["tenants", "projects", "bootstrap_admins"] {
+            let rows: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                "SELECT count(*) FROM {table}"
+            )))
+            .fetch_one(&ctx.pool)
+            .await
+            .unwrap();
+            assert_eq!(rows, 1, "{table}");
+        }
+
+        // The first sign-in with that login, in any case, makes the admin.
+        let other = login(&ctx, 31, "bob").await;
+        let admin = login(&ctx, 30, "ROOT-admin").await;
+        assert_eq!(
+            role_in(&ctx, "root-admin", &made["project"]).await.as_deref(),
+            Some("admin")
+        );
+        assert_eq!(role_in(&ctx, "bob", &made["project"]).await, None);
+        let invite = |token: &str| {
+            ctx.http
+                .post(ctx.hub.url("/v1/invites"))
+                .bearer_auth(token)
+                .json(&json!({ "project": made["project"], "role": "member" }))
+                .send()
+        };
+        assert_eq!(invite(&admin).await.unwrap().status(), StatusCode::CREATED);
+        assert_eq!(invite(&other).await.unwrap().status(), StatusCode::FORBIDDEN);
+
+        // A re-run after the claim changes nothing: the row stays claimed.
+        assert_eq!(bootstrap(&ctx, "Acme Co", "agmen", "root-admin").await, made);
+        assert_eq!(
+            count(
+                &ctx.pool,
+                "SELECT count(*) FROM bootstrap_admins WHERE claimed_by IS NULL AND project_id = $1",
+                made["project"].as_str().unwrap()
+            )
+            .await,
+            0
+        );
+
+        // A second project in the tenant, whose admin signed in before the
+        // bootstrap: the membership comes at their next sign-in.
+        let second = bootstrap(&ctx, "Acme Co", "docs", "bob").await;
+        assert_eq!(second["tenant"], made["tenant"]);
+        assert_ne!(second["project"], made["project"]);
+        assert_eq!(role_in(&ctx, "bob", &second["project"]).await, None);
+        login(&ctx, 31, "bob").await;
+        assert_eq!(
+            role_in(&ctx, "bob", &second["project"]).await.as_deref(),
+            Some("admin")
+        );
+    })
+    .await;
+}

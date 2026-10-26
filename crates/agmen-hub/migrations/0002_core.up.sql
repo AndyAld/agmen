@@ -3,9 +3,11 @@
 -- safe as an MQTT topic level (protocol section 1). Secrets the hub hands
 -- out (tokens, invite codes, device codes) are stored only as SHA-256 hashes.
 
+-- Names are unique (a tenant's among tenants, a project's within its
+-- tenant), so `agmen-hub bootstrap` finds the rows it made before.
 CREATE TABLE tenants (
     id text PRIMARY KEY CHECK (id ~ '^[a-z0-9]{8,32}$'),
-    name text NOT NULL,
+    name text NOT NULL UNIQUE,
     created_at timestamptz NOT NULL DEFAULT now()
 );
 
@@ -16,7 +18,8 @@ CREATE TABLE projects (
     created_at timestamptz NOT NULL DEFAULT now(),
     -- Lets other tables reference (project, tenant) together, so a row can
     -- never name a project under the wrong tenant.
-    UNIQUE (id, tenant_id)
+    UNIQUE (id, tenant_id),
+    UNIQUE (tenant_id, name)
 );
 
 -- A person, keyed by the login provider's stable account id. The handle is
@@ -39,6 +42,20 @@ CREATE TABLE memberships (
     role text NOT NULL CHECK (role IN ('admin', 'coordinator', 'member')),
     created_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (human_id, project_id)
+);
+
+-- A project's first admin, named by `agmen-hub bootstrap` before they have
+-- signed in. The first sign-in with that GitHub login (lowercased) claims
+-- the row and becomes an admin member. A claimed row stays, so running
+-- bootstrap again never hands the role to a later holder of the login.
+CREATE TABLE bootstrap_admins (
+    project_id text NOT NULL REFERENCES projects (id),
+    github_login text NOT NULL CHECK (github_login ~ '^[a-z0-9][a-z0-9-]{0,38}$'),
+    created_at timestamptz NOT NULL DEFAULT now(),
+    claimed_by text REFERENCES humans (id),
+    claimed_at timestamptz,
+    PRIMARY KEY (project_id, github_login),
+    CHECK ((claimed_by IS NULL) = (claimed_at IS NULL))
 );
 
 -- An agent or coordinator that a person owns. It is owned by a human and

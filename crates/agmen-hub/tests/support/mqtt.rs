@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use rumqttc::v5::mqttbytes::QoS;
 use rumqttc::v5::mqttbytes::v5::{
-    DisconnectReasonCode, Packet, PubAckReason, Publish, SubscribeReasonCode,
+    ConnectReturnCode, DisconnectReasonCode, Packet, PubAckReason, Publish, SubscribeReasonCode,
 };
 use rumqttc::v5::{AsyncClient, ConnectionError, Event, MqttOptions, StateError};
 use tokio::sync::mpsc;
@@ -94,6 +94,24 @@ pub async fn connect_ok(opts: MqttOptions) -> Client {
         events,
         pending: VecDeque::new(),
         poller,
+    }
+}
+
+/// Connects and returns the code of the CONNACK EMQX refused with,
+/// failing the test if the broker accepts.
+pub async fn connect_refused(opts: MqttOptions) -> ConnectReturnCode {
+    let id = opts.client_id();
+    let (_client, mut eventloop) = AsyncClient::new(opts, 64);
+    loop {
+        match timeout(ACK_WAIT, eventloop.poll())
+            .await
+            .expect("no CONNACK within 10 s")
+        {
+            Ok(Event::Incoming(Packet::ConnAck(_))) => panic!("{id} was accepted"),
+            Ok(_) => {}
+            Err(ConnectionError::ConnectionRefused(code)) => return code,
+            Err(e) => panic!("{id}: expected a refused CONNACK, got {e:?}"),
+        }
     }
 }
 

@@ -214,22 +214,23 @@ impl TestHub {
     }
 }
 
-/// A tenant and project, made directly in the database (no API makes them
-/// in the MVP).
+/// A tenant and project, made directly in the database (`agmen-hub
+/// bootstrap` makes them outside tests).
 #[derive(Debug, Clone)]
 pub struct Project {
     pub tenant: String,
     pub project: String,
 }
 
+/// Names carry the id, since tenant names are unique.
 pub async fn seed_project(pool: &PgPool) -> Project {
     let (tenant, project) = (new_id(), new_id());
-    sqlx::query("INSERT INTO tenants (id, name) VALUES ($1, 'test tenant')")
+    sqlx::query("INSERT INTO tenants (id, name) VALUES ($1, 'tenant ' || $1)")
         .bind(&tenant)
         .execute(pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO projects (id, tenant_id, name) VALUES ($1, $2, 'test project')")
+    sqlx::query("INSERT INTO projects (id, tenant_id, name) VALUES ($1, $2, 'project ' || $1)")
         .bind(&project)
         .bind(&tenant)
         .execute(pool)
@@ -436,6 +437,33 @@ pub async fn member_with_token(
     let human = seed_human(&ctx.pool, sub, handle).await;
     seed_member(&ctx.pool, &human, project, role).await;
     login(ctx, sub, handle).await
+}
+
+/// Lifts EMQX's ban on `username`, so a test leaves no ban behind. A ban
+/// that is already gone (404) is fine.
+pub async fn unban_username(http: &reqwest::Client, username: &str) {
+    let mut url = Url::parse(&env("AGMEN_IT_EMQX_API")).unwrap();
+    url.path_segments_mut()
+        .unwrap()
+        .pop_if_empty()
+        .extend(["banned", "username", username]);
+    let resp = http
+        .delete(url)
+        .basic_auth(
+            env("AGMEN_IT_EMQX_API_KEY"),
+            Some(env("AGMEN_IT_EMQX_API_SECRET")),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            resp.status(),
+            StatusCode::NO_CONTENT | StatusCode::NOT_FOUND
+        ),
+        "unban {username} answered {}",
+        resp.status()
+    );
 }
 
 /// Counts rows, for assertions on what the hub stored.

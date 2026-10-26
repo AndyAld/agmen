@@ -247,7 +247,8 @@ pub(super) async fn callback(
 }
 
 /// The human for a GitHub account, made at first sign-in with the login,
-/// lowercased, as handle. Returns the id and handle.
+/// lowercased, as handle. Also claims any first-admin rows that `agmen-hub
+/// bootstrap` left for the login. Returns the id and handle.
 async fn upsert_human(hub: &Hub, account: &GithubUser) -> Result<(String, String), ApiError> {
     let handle = account.login.to_ascii_lowercase();
     if !is_human_handle(&handle) {
@@ -270,20 +271,49 @@ async fn upsert_human(hub: &Hub, account: &GithubUser) -> Result<(String, String
     .bind(&handle)
     .fetch_one(hub.pool())
     .await;
-    match row {
-        Ok(row) => Ok(row),
+    let (id, stored_handle) = match row {
+        Ok(row) => row,
         // The account is new and another account already has the handle.
-        Err(err) if is_unique_violation(&err) => Err(ApiError::conflict(
-            "handle_taken",
-            format!("the handle {handle:?} belongs to another account"),
-        )),
-        Err(err) => Err(err.into()),
+        Err(err) if is_unique_violation(&err) => {
+            return Err(ApiError::conflict(
+                "handle_taken",
+                format!("the handle {handle:?} belongs to another account"),
+            ));
+        }
+        Err(err) => return Err(err.into()),
+    };
+    claim_bootstrap_admin(hub, &id, &handle).await?;
+    Ok((id, stored_handle))
+}
+
+/// Makes `human` an admin of every project whose unclaimed first admin is
+/// `login` (the GitHub login as it is now, lowercased), and marks those rows
+/// claimed. One statement, so a row is claimed only with its membership.
+async fn claim_bootstrap_admin(hub: &Hub, human: &str, login: &str) -> Result<(), ApiError> {
+    let claimed = sqlx::query(
+        "WITH claimed AS (
+             UPDATE bootstrap_admins SET claimed_by = $1, claimed_at = now()
+             WHERE github_login = $2 AND claimed_by IS NULL
+             RETURNING project_id
+         )
+         INSERT INTO memberships (human_id, project_id, role)
+         SELECT $1, project_id, 'admin' FROM claimed
+         ON CONFLICT (human_id, project_id) DO UPDATE SET role = 'admin'",
+    )
+    .bind(human)
+    .bind(login)
+    .execute(hub.pool())
+    .await?
+    .rows_affected();
+    if claimed > 0 {
+        tracing::info!(human, login, projects = claimed, "claimed first admin");
     }
+    Ok(())
 }
 
 /// `humans.handle`'s rule: a GitHub login, lowercased (`[a-z0-9-]`, at most
 /// 39 characters, not starting with `-`).
-fn is_human_handle(handle: &str) -> bool {
+pub(crate) fn is_human_handle(handle: &str) -> bool {
     (1..=39).contains(&handle.len())
         && !handle.starts_with('-')
         && handle

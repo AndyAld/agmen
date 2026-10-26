@@ -21,12 +21,14 @@ use jsonwebtoken::jwk::Jwk;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 use reqwest::StatusCode;
 use rumqttc::v5::mqttbytes::QoS;
-use rumqttc::v5::mqttbytes::v5::{DisconnectReasonCode, PubAckReason, SubscribeReasonCode};
+use rumqttc::v5::mqttbytes::v5::{
+    ConnectReturnCode, DisconnectReasonCode, PubAckReason, SubscribeReasonCode,
+};
 use serde_json::{Value, json};
-use support::mqtt::{self, Client, connect_ok};
+use support::mqtt::{self, Client, connect_ok, connect_refused};
 use support::{
     Ctx, DEV_KEY_1, DEV_KEY_2, Minted, Project, TestHub, broker_token, count, env, hub_jwks, login,
-    member_with_token, mint, mint_ok, new_id, run, seed_project,
+    member_with_token, mint, mint_ok, new_id, run, seed_project, unban_username,
 };
 
 const ANDY: u64 = 4242;
@@ -437,11 +439,22 @@ async fn it_revoke_kicks_and_refuses_refresh() {
             );
         }
 
+        // The old broker token has not expired, but EMQX now refuses the
+        // banned username on every client id (ruling R36).
+        for suffix in ["mcp", "watch", "cli"] {
+            let client_id = format!("{}-{suffix}", a.id);
+            assert_eq!(
+                connect_refused(mqtt::options(&client_id, &a.id, &broker)).await,
+                ConnectReturnCode::Banned,
+                "{client_id} reconnected with the old token"
+            );
+        }
+
         let (status, body) = broker_token(&ctx.http, &ctx.hub, &a.id, &a.token).await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
         assert_eq!(body["error"], "identity_revoked");
-        // Revoking again kicks again and still succeeds, so a failed kick can
-        // be retried.
+        // Revoking again bans and kicks again and still succeeds (the ban
+        // already exists), so a failed call can be retried.
         let again = ctx
             .http
             .delete(revoke_url)
@@ -450,9 +463,16 @@ async fn it_revoke_kicks_and_refuses_refresh() {
             .await
             .unwrap();
         assert_eq!(again.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            connect_refused(mqtt::options(&format!("{}-mcp", a.id), &a.id, &broker)).await,
+            ConnectReturnCode::Banned
+        );
 
-        // Andy's other identity is untouched.
-        broker_token_ok(&ctx, &ctx.hub, &b).await;
+        // Andy's other identity is untouched: the ban names A's username only.
+        let b_broker = broker_token_ok(&ctx, &ctx.hub, &b).await;
+        connect_ok(mqtt::options(&format!("{}-mcp", b.id), &b.id, &b_broker)).await;
+
+        unban_username(&ctx.http, &a.id).await;
     })
     .await;
 }

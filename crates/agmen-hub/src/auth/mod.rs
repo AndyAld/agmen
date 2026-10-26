@@ -11,7 +11,7 @@ mod device;
 mod oauth;
 
 pub use oauth::GithubError;
-pub(crate) use oauth::GithubOAuth;
+pub(crate) use oauth::{GithubOAuth, is_human_handle};
 
 use axum::extract::{Form, FromRequestParts, State};
 use axum::http::request::Parts;
