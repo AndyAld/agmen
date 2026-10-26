@@ -12,6 +12,7 @@
 )]
 
 pub mod fake_github;
+pub mod globs;
 pub mod mqtt;
 
 use std::collections::HashMap;

@@ -47,6 +47,8 @@ const MAX_GLOB_BYTES: usize = 256;
 const MAX_CHECK_PATHS: usize = 500;
 /// The size limit for each glob's DFA and its construction, in bytes.
 const DFA_LIMIT: usize = 1 << 20;
+/// [`DFA_LIMIT`] in MiB, as error messages name it.
+const DFA_LIMIT_MIB: usize = DFA_LIMIT >> 20;
 /// The most memory the DFAs of one lane set's overlap check may use
 /// together, in bytes (ruling R50). Typical globs take 1 to 3 KiB each, so
 /// [`MAX_GLOBS`] of them stay far below it.
@@ -183,9 +185,13 @@ type GlobDfa = dense::DFA<Vec<u32>>;
 /// Why the overlap check could not finish.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 enum OverlapError {
-    #[error("glob {0:?} is too complex to check for overlaps")]
+    #[error(
+        "glob {0:?} is too complex to check for overlaps: its DFA needs more than {DFA_LIMIT_MIB} MiB"
+    )]
     TooComplex(String),
-    #[error("the lane globs are too many or too complex to check for overlaps")]
+    #[error(
+        "the lane globs are too many or too complex to check for overlaps: the check needs more than {OVERLAP_BUDGET} steps"
+    )]
     OverBudget,
     #[error(
         "the lane globs are too complex to check for overlaps: their DFAs need more than {} MiB together",

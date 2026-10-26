@@ -279,24 +279,79 @@ fn lane_specs_are_checked() {
     assert!(check_lane_specs(&[spec("L-A", &["ui/**"]), spec("L-B", &["api/**"])]).is_ok());
 }
 
-/// A distinct anchored literal glob of nearly [`MAX_GLOB_BYTES`] bytes. Its
-/// many distinct bytes give it a DFA of about 260 KiB, under the per-glob
-/// limit.
+#[path = "../tests/support/globs.rs"]
+mod globs;
+
+/// [`globs::wide_glob`] at this crate's glob limit.
 fn wide_glob(seed: usize) -> String {
-    let chars: Vec<char> = ('0'..='9')
-        .chain('a'..='z')
-        .chain('A'..='Z')
-        .chain('\u{a1}'..='\u{ff}')
-        .collect();
-    let mut glob = String::from("/");
-    for i in seed.. {
-        let next = chars[i % chars.len()];
-        if glob.len() + next.len_utf8() > MAX_GLOB_BYTES {
-            break;
-        }
-        glob.push(next);
+    globs::wide_glob(seed, MAX_GLOB_BYTES)
+}
+
+/// The code of a refused request.
+fn code_of(err: &ApiError) -> &'static str {
+    match err {
+        ApiError::Client { code, .. } => code,
+        other => panic!("not a client error: {other:?}"),
     }
-    glob
+}
+
+fn owned_spec(name: &str, globs: Vec<String>) -> LaneSpec {
+    LaneSpec {
+        name: name.parse().unwrap(),
+        globs,
+        owner: None,
+    }
+}
+
+#[test]
+fn lane_count_is_capped() {
+    let lanes: Vec<LaneSpec> = (0..=MAX_LANES)
+        .map(|n| owned_spec(&format!("L-{n}"), vec![format!("d{n}/")]))
+        .collect();
+    assert!(check_lane_specs(&lanes[..MAX_LANES]).is_ok());
+    let err = check_lane_specs(&lanes).unwrap_err();
+    assert_eq!(code_of(&err), "too_many_lanes");
+    assert!(err.to_string().contains(&MAX_LANES.to_string()), "{err}");
+}
+
+#[test]
+fn glob_count_is_capped_across_lanes() {
+    let mut lanes: Vec<LaneSpec> = (0..MAX_GLOBS / MAX_GLOBS_PER_LANE)
+        .map(|n| {
+            let globs = (0..MAX_GLOBS_PER_LANE)
+                .map(|g| format!("d{n}/f{g}"))
+                .collect();
+            owned_spec(&format!("L-{n}"), globs)
+        })
+        .collect();
+    assert!(
+        check_lane_specs(&lanes).is_ok(),
+        "exactly {MAX_GLOBS} globs"
+    );
+    lanes.push(owned_spec("L-EXTRA", vec!["extra/".to_owned()]));
+    let err = check_lane_specs(&lanes).unwrap_err();
+    assert_eq!(code_of(&err), "too_many_globs");
+    assert!(err.to_string().contains(&MAX_GLOBS.to_string()), "{err}");
+}
+
+#[test]
+fn glob_dfas_have_a_size_limit() {
+    // A name whose 25th byte from the end is `a`: a DFA reading it must
+    // remember which of the last 25 bytes were `a`, about 2^25 states.
+    let glob = format!("**/*a{}", "?".repeat(24));
+    assert!(glob.len() <= MAX_GLOB_BYTES);
+    let err = glob_dfa(&glob, &compile(&glob).unwrap()).unwrap_err();
+    assert_eq!(err, OverlapError::TooComplex(glob.clone()));
+    assert!(err.to_string().contains("1 MiB"), "{err}");
+    let lanes = [spec("L-A", &[&glob]), spec("L-B", &["api/"])];
+    assert!(check_lane_specs(&lanes).is_ok());
+    assert_eq!(find_overlap(&lanes), Err(OverlapError::TooComplex(glob)));
+}
+
+#[test]
+fn overlap_budget_is_named() {
+    let text = OverlapError::OverBudget.to_string();
+    assert!(text.contains(&OVERLAP_BUDGET.to_string()), "{text}");
 }
 
 #[test]
@@ -308,12 +363,7 @@ fn overlap_check_has_a_combined_memory_budget() {
     assert!(size <= DFA_LIMIT && size * 2 * MAX_GLOBS_PER_LANE > DFA_MEMORY_BUDGET);
     let globs: Vec<String> = (0..2 * MAX_GLOBS_PER_LANE).map(wide_glob).collect();
     let (a, b) = globs.split_at(MAX_GLOBS_PER_LANE);
-    let lane = |name: &str, globs: &[String]| LaneSpec {
-        name: name.parse().unwrap(),
-        globs: globs.to_vec(),
-        owner: None,
-    };
-    let lanes = [lane("L-A", a), lane("L-B", b)];
+    let lanes = [owned_spec("L-A", a.to_vec()), owned_spec("L-B", b.to_vec())];
     assert!(check_lane_specs(&lanes).is_ok());
     let err = find_overlap(&lanes).unwrap_err();
     assert_eq!(err, OverlapError::OverMemory);

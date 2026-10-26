@@ -572,23 +572,11 @@ async fn it_overlapping_lanes_rejected() {
     .await;
 }
 
-/// A distinct anchored literal glob of nearly 256 bytes. Its many distinct
-/// bytes give it a DFA of about 260 KiB, under the 1 MiB per-glob limit.
+/// The hub's glob limit, in bytes.
+const MAX_GLOB_BYTES: usize = 256;
+
 fn wide_glob(seed: usize) -> String {
-    let chars: Vec<char> = ('0'..='9')
-        .chain('a'..='z')
-        .chain('A'..='Z')
-        .chain('\u{a1}'..='\u{ff}')
-        .collect();
-    let mut glob = String::from("/");
-    for i in seed.. {
-        let next = chars[i % chars.len()];
-        if glob.len() + next.len_utf8() > 256 {
-            break;
-        }
-        glob.push(next);
-    }
-    glob
+    support::globs::wide_glob(seed, MAX_GLOB_BYTES)
 }
 
 #[tokio::test]
@@ -702,6 +690,26 @@ async fn it_check_path() {
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+
+        // At most 500 paths in one call (ruling R50).
+        let paths: Vec<String> = (0..501).map(|n| format!("ui/f{n}.ts")).collect();
+        let (status, body) = check(
+            room.sol.token.clone(),
+            json!({ "identity": room.sol.id, "paths": &paths[..500] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (status, body) = check(
+            room.sol.token.clone(),
+            json!({ "identity": room.sol.id, "paths": paths }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert_eq!(body["error"], "too_many_paths", "{body}");
+        assert!(
+            body["error_description"].as_str().unwrap().contains("500"),
+            "{body}"
+        );
     })
     .await;
 }
