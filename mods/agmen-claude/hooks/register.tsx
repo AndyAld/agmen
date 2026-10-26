@@ -945,7 +945,7 @@ async function checkPaths($: EngineInterface, root: string, paths: readonly stri
   }
 }
 
-/** The deny reason for a path in another worktree of this repository or in its git dir. */
+/** The deny reason for a path in another worktree of this repository, listed or not. */
 const inSibling = (path: string): string =>
   `agmen: ${path} is in another worktree of this repository, so the edit is denied. Edit it from a session in that worktree.`
 
@@ -988,6 +988,13 @@ async function judgeEdit($: EngineInterface, root: string, repository: Repositor
   const place = await placed($, path)
   if (place === undefined) return `agmen: cannot tell where ${path} lands, so the edit is denied.`
   const real = joinPath(place.head, place.tail)
+  // The git dir and all below it (hooks, config, a submodule's git dir under
+  // modules/), wherever it lies: what is written there runs on a later git
+  // command. Settled before git is asked, since git names a submodule's git
+  // dir as a repository of its own. Compared folded: over-matching denies.
+  if (isWithin(folded(real), folded(repository.commonDir))) {
+    return `agmen: ${path} is in this repository's git dir, so the edit is denied. Change it with git instead.`
+  }
   const worktrees = await worktreesOf($, repository.root)
   if (!worktrees.isOk) return `agmen: git cannot list this repository's worktrees (${worktrees.why}), so the edit is denied.`
   switch (locate(repository.root, worktrees.paths, real)) {

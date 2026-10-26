@@ -1313,29 +1313,29 @@ for (const surface of SURFACES) {
     })
 
     test('guard_resolves_relative_common_dirs', async ($, on) => {
-      // This repository keeps its git dir apart (`git init --separate-git-dir /gitdirs/work`):
-      // git names it from /work, and as `.` in it. Another repository answers `../.git` from a subfolder.
+      // This repository keeps its git dir apart (`git init --separate-git-dir /gitdirs/work`).
+      // A worktree git does not list names it relative to its subfolder; another repository answers `../.git`.
       const w = world(on, {
         commonDir: cwd =>
-          cwd === ROOT || cwd.startsWith('/gitdirs/work/')
+          cwd === ROOT
             ? { stdout: '/gitdirs/work\n' }
-            : cwd === '/gitdirs/work'
-              ? { stdout: '.\n' }
+            : cwd === '/hidden/src'
+              ? { stdout: '../../gitdirs/work\n' }
               : cwd === '/other/src'
                 ? { stdout: '../.git\n' }
                 : undefined,
-        absent: path => path === '/gitdirs/work/description' || path === '/other/src/new.ts',
+        absent: path => path === '/hidden/src/new.ts' || path === '/other/src/new.ts',
         checkPath: path => allowedEntry(path, true, null),
       })
 
       await start($, w, surface)
-      const gitDir = await $.tool.call({ tool: 'Write', file_path: '/gitdirs/work/description', content: 'x' })
+      const hidden = await $.tool.call({ tool: 'Write', file_path: '/hidden/src/new.ts', content: 'x' })
       const other = await $.tool.call({ tool: 'Write', file_path: '/other/src/new.ts', content: 'x' })
 
-      expect(gitDir.deny).toContain('another worktree of this repository')
+      expect(hidden.deny).toContain('another worktree of this repository')
       expect(other.deny).toBeUndefined()
       expect(w.ran).toEqual(['Write'])
-      expect(w.gitCwds).toContainEqual(['rev-parse', '/gitdirs/work'])
+      expect(w.gitCwds).toContainEqual(['rev-parse', '/hidden/src'])
       expect(w.gitCwds).toContainEqual(['rev-parse', '/other/src'])
       expect(w.runs.filter(argv => argv[1] === 'check-path')).toEqual([])
     })
@@ -1386,21 +1386,64 @@ for (const surface of SURFACES) {
     })
 
     test('guard_ignores_a_git_ceiling_in_the_host_environment', async ($, on) => {
-      // A ceiling at the git dir stops git's search from its hooks folder: "not a git repository".
+      // A ceiling at /hidden stops git's search from /hidden/src, a worktree of this
+      // repository git does not list: "not a git repository".
       const w = world(on, {
-        hostEnv: { GIT_CEILING_DIRECTORIES: '/gitdirs/work' },
-        commonDir: cwd => (cwd === ROOT || isUnder(cwd, '/gitdirs/work') ? { stdout: '/gitdirs/work\n' } : undefined),
-        absent: path => path === '/gitdirs/work/hooks/pre-commit',
+        hostEnv: { GIT_CEILING_DIRECTORIES: '/hidden' },
+        commonDir: cwd => (cwd === ROOT || isUnder(cwd, '/hidden') ? { stdout: '/gitdirs/work\n' } : undefined),
+        absent: path => path === '/hidden/src/a.ts',
         checkPath: path => allowedEntry(path, true, null),
       })
 
       await start($, w, surface)
-      const hook = await $.tool.call({ tool: 'Write', file_path: '/gitdirs/work/hooks/pre-commit', content: 'x' })
+      const hidden = await $.tool.call({ tool: 'Write', file_path: '/hidden/src/a.ts', content: 'x' })
       const scratch = await $.tool.call({ tool: 'Write', file_path: '/tmp/notes.md', content: 'x' })
 
-      expect(hook.deny).toContain('another worktree of this repository')
+      expect(hidden.deny).toContain('another worktree of this repository')
       expect(scratch.deny).toBeUndefined()
       expect(w.ran).toEqual(['Write'])
+      expect(w.gitCwds).toContainEqual(['rev-parse', '/hidden/src'])
+    })
+
+    test('guard_denies_paths_in_the_git_dir_before_asking_git', async ($, on) => {
+      // A separate git dir (`git init --separate-git-dir /gitdirs/work`) with a submodule at mods/s:
+      // real git 2.52 names the submodule's git dir as its own common dir, with no superproject.
+      const modules = '/gitdirs/work/modules/mods/s'
+      const w = world(on, {
+        commonDir: cwd => (cwd === ROOT ? { stdout: '/gitdirs/work\n' } : isUnder(cwd, modules) ? { stdout: `${modules}\n` } : undefined),
+        absent: path => path.endsWith('/pre-commit'),
+        checkPath: path => allowedEntry(path, true, null),
+      })
+
+      await start($, w, surface)
+      const write = async (file_path: string) => (await $.tool.call({ tool: 'Write', file_path, content: 'x' })).deny
+      const submoduleHook = await write(`${modules}/hooks/pre-commit`)
+      const hook = await write('/gitdirs/work/hooks/pre-commit')
+      const aliased = await write('/GITDIRS/Work/hooks/pre-commit')
+      const scratch = await write('/tmp/notes.md')
+
+      for (const deny of [submoduleHook, hook, aliased]) expect(deny).toContain("is in this repository's git dir")
+      expect(scratch).toBeUndefined()
+      expect(w.ran).toEqual(['Write'])
+      // git was asked about none of the git dir's paths, and check-path never ran.
+      expect(w.gitCwds.filter(([, cwd]) => cwd.toLowerCase().startsWith('/gitdirs/'))).toEqual([])
+      expect(w.runs.filter(argv => argv[1] === 'check-path')).toEqual([])
+    })
+
+    test('guard_denies_paths_in_a_git_dir_inside_the_worktree', async ($, on) => {
+      // The default layout: the common dir is /work/.git, inside this worktree, so check-path would see `.git/...`.
+      const w = world(on, { checkPath: path => allowedEntry(path, true, null) })
+
+      await start($, w, surface)
+      const hook = await $.tool.call({ tool: 'Write', file_path: '/work/.git/hooks/pre-commit', content: 'x' })
+      const submoduleHook = await $.tool.call({ tool: 'Write', file_path: '/work/.git/modules/s/hooks/pre-commit', content: 'x' })
+      const inLane = await $.tool.call(edit('/work/src/ok.ts'))
+
+      expect(hook.deny).toContain("is in this repository's git dir")
+      expect(submoduleHook.deny).toContain("is in this repository's git dir")
+      expect(inLane.deny).toBeUndefined()
+      expect(w.ran).toEqual(['Edit'])
+      expect(w.runs.filter(argv => argv[1] === 'check-path')).toEqual([['agmen', 'check-path', '--json', '--', '/work/src/ok.ts']])
     })
 
     test('guard_runs_git_without_the_location_variables', async ($, on) => {
