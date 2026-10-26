@@ -5,8 +5,7 @@ use std::path::Path;
 
 use super::fallback::BUILTIN_THEME;
 use super::marked::MARKED_THEME;
-pub(crate) use super::marketplace::InstalledTheme;
-use super::marketplace::{ThemeExtension, read_installed};
+use super::marketplace::{InstalledTheme, ThemeExtension, read_installed};
 use super::theme::{Family, ThemeDirs, theme_files};
 use super::zed::read_jsonc;
 use super::{Skipped, SystemMode};

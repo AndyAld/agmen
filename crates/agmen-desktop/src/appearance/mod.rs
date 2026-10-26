@@ -3,7 +3,7 @@
 mod catalog;
 mod fallback;
 mod marked;
-pub(crate) mod marketplace;
+mod marketplace;
 mod settings;
 mod theme;
 mod zed;
@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 
 pub(crate) use catalog::{PickerEntry, ThemeEntry, ThemeOrigin, installed_themes, picker_entries};
 pub(crate) use fallback::BUILTIN_THEME;
+pub(crate) use marketplace::{API_BASE, EXTENSIONS_PAGE, MarketError, Marketplace, ThemeExtension};
 pub(crate) use settings::{AgmenSettings, Density, IconThemeChoice};
 pub(crate) use theme::{Theme, ThemeDirs, window_background};
 pub(crate) use zed::{Mode, read_jsonc};
