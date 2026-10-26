@@ -55,16 +55,19 @@ pub(super) fn installed_detail(theme: &ThemeEntry) -> String {
         .map(|a| format!("by {a} \u{b7} "))
         .unwrap_or_default();
     let credit = |t: &InstalledTheme| {
-        if t.manifest_error.is_some() {
-            return "extension.toml unreadable, so no author or repository".to_owned();
-        }
         let license = t.license.as_deref().unwrap_or("no license file");
         let repo = t
             .repository
             .as_ref()
             .map(|r| format!(" \u{b7} {r}"))
             .unwrap_or_default();
-        format!("{license}{repo}")
+        // C238, C239: an unreadable manifest adds its error to the credit.
+        let manifest = t
+            .manifest_error
+            .as_ref()
+            .map(|err| format!(" \u{b7} extension.toml unreadable ({err})"))
+            .unwrap_or_default();
+        format!("{license}{repo}{manifest}")
     };
     let from = match &theme.origin {
         ThemeOrigin::BuiltIn => "built into agmen".to_owned(),

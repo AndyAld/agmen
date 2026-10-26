@@ -49,7 +49,8 @@ impl RenderOnce for KvRow {
         // end, so a value that fits exactly stays on one line (C219).
         let space = cell_width(window, &cx.global::<Appearance>().fonts);
         let label = self.label.clone();
-        // Runs of spaces and edge spaces draw no empty words.
+        // Runs of spaces and edge spaces draw no empty words; tabs and
+        // newlines also split, since a value is one line of text (C240).
         let words = self.value.split_whitespace().enumerate().map(|(i, word)| {
             let selector = format!("kv-word:{label}:{}:{i}", self.row);
             div().debug_selector(|| selector).max_w_full().child(

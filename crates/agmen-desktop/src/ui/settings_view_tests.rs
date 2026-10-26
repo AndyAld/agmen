@@ -444,3 +444,20 @@ fn fully_shadowed_install_is_installed_not_failed() {
     assert_eq!(first, None);
     assert!(matches!(status, BrowseStatus::Installed(_)), "{status:?}");
 }
+
+#[test]
+fn unreadable_manifest_keeps_the_license_and_says_why() {
+    // Reviews C238 and C239: the note adds to the credit and shows the error.
+    let theme = entry(
+        "Broken",
+        ThemeOrigin::ZedExtension(InstalledTheme {
+            id: "broken".into(),
+            license: Some("MIT License".into()),
+            manifest_error: Some("expected `]`".into()),
+            ..InstalledTheme::default()
+        }),
+    );
+    let detail = rows::installed_detail(&theme);
+    assert!(detail.contains("MIT License"), "{detail}");
+    assert!(detail.contains("expected `]`"), "{detail}");
+}

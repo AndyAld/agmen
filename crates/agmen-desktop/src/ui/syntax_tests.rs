@@ -177,3 +177,22 @@ fn capitalized_path_names_are_types() {
     assert!(has(&found, "default", "function"), "{found:?}");
     assert!(has(&found, "main", "function"), "{found:?}");
 }
+
+#[test]
+fn all_caps_names_are_constants() {
+    // tree-sitter-rust 0.24.2's constant pattern ends in a stray quote and
+    // never matches; agmen's query restores it.
+    let found = names_of(
+        "const MAX_LEN: usize = 4;\nfn f() -> usize { MAX_LEN }\n",
+        Language::Rust,
+    );
+    let caps: Vec<_> = found
+        .iter()
+        .filter(|(text, _)| *text == "MAX_LEN")
+        .collect();
+    assert_eq!(caps.len(), 2, "{found:?}");
+    assert!(
+        caps.iter().all(|(_, name)| *name == "constant"),
+        "{found:?}"
+    );
+}
