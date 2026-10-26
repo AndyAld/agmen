@@ -853,6 +853,19 @@ fn encode(packet: Packet) -> BytesMut {
     out
 }
 
+/// Makes aws-lc-rs the process-level rustls provider (ADR-0003). The
+/// workspace builds rustls with both the `ring` and `aws-lc-rs` features, so
+/// `ClientConfig::builder()` panics until a provider is installed.
+fn install_crypto_provider() {
+    // Err means a provider is already installed. Only this function installs
+    // one in this test binary, so it is aws-lc-rs from an earlier call.
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "an earlier call already installed aws-lc-rs"
+    )]
+    let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
+}
+
 /// Sends CONNECT and one QoS 1 PUBLISH of `hello` to `topic` as MQTT over
 /// WebSocket over TLS to `AGMEN_IT_MQTT_WSS`, trusting only the dev CA in
 /// `AGMEN_IT_WSS_CA`. Returns the PUBACK reason.
@@ -863,6 +876,7 @@ async fn wss_publish(client_id: &str, username: &str, token: &str, topic: &str) 
         .and_then(|rest| rest.split('/').next())
         .unwrap_or_else(|| panic!("AGMEN_IT_MQTT_WSS must be wss://host:port/path, got {url}"));
     let (host, port) = authority.rsplit_once(':').unwrap();
+    install_crypto_provider();
     let mut roots = RootCertStore::empty();
     for cert in CertificateDer::pem_slice_iter(&std::fs::read(env("AGMEN_IT_WSS_CA")).unwrap()) {
         roots.add(cert.unwrap()).unwrap();

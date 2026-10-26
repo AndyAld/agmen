@@ -177,8 +177,22 @@ fn base_options(endpoint: Endpoint, client_id: &str) -> MqttOptions {
     }
 }
 
+/// Makes aws-lc-rs the process-level rustls provider (ADR-0003). The
+/// workspace builds rustls with both the `ring` and `aws-lc-rs` features, so
+/// `ClientConfig::builder()` panics until a provider is installed.
+fn install_crypto_provider() {
+    // Err means a provider is already installed. Only this function installs
+    // one in this test binary, so it is aws-lc-rs from an earlier call.
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "an earlier call already installed aws-lc-rs"
+    )]
+    let _ = rumqttc::tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
+}
+
 /// TLS that trusts only the dev CA in `AGMEN_IT_WSS_CA`.
 fn dev_tls() -> Arc<ClientConfig> {
+    install_crypto_provider();
     let mut roots = RootCertStore::empty();
     for cert in CertificateDer::pem_slice_iter(&std::fs::read(env("AGMEN_IT_WSS_CA")).unwrap()) {
         roots.add(cert.unwrap()).unwrap();

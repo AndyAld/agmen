@@ -27,6 +27,12 @@ rumqttc-next = { version = "0.34.0", default-features = false, features = ["webs
 
 `use-rustls` selects the aws-lc-rs provider, which the workspace already builds for `jsonwebtoken`. `rumqttc::tokio_rustls` re-exports the rustls it was built with, so the client builds its `ClientConfig` from that.
 
+### rustls crypto provider (R46)
+
+Cargo unifies features across the workspace, so rustls 0.23.46 is built with both `aws-lc-rs` (from `jsonwebtoken`, reqwest's `rustls` feature and `use-rustls`) and `ring` (from sqlx's `tls-rustls-ring-native-roots`). With both on, rustls has no automatic process-level provider, and `ClientConfig::builder()` panics with "Could not automatically determine the process-level CryptoProvider". Merging Task 7 turned this on and broke `it_wss_behind_haproxy` and `it_wss_transport`.
+
+aws-lc-rs is the process-level provider. Every binary that may use TLS (`agmen-hub`, `agmen`) calls `rustls::crypto::aws_lc_rs::default_provider().install_default()` first thing in `main` and exits with an error if a provider is already set. Every test file that opens TLS does the same once, before it builds a `ClientConfig`, and ignores the error a second call returns. Libraries never install a provider: a library that did would race the binary's choice. Both backends stay, since sqlx needs `ring` and the rest need aws-lc-rs.
+
 ### Connection settings for `<id>-mcp` and `<id>-watch`
 
 ```rust

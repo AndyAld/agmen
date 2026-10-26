@@ -5,6 +5,9 @@ version = 4
 [[package]]
 name = "agmen-cli"
 version = "0.1.0"
+dependencies = [
+ "rustls",
+]
 
 [[package]]
 name = "agmen-client"
@@ -23,6 +26,7 @@ dependencies = [
  "oauth2",
  "reqwest",
  "rumqttc",
+ "rustls",
  "serde",
  "serde_json",
  "sha2 0.11.1",

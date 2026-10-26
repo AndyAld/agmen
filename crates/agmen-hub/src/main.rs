@@ -35,6 +35,7 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    install_crypto_provider()?;
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
@@ -53,6 +54,15 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
     }
+}
+
+/// Makes aws-lc-rs the process-level rustls provider (ADR-0003). The
+/// workspace builds rustls with both the `ring` and `aws-lc-rs` features, so
+/// rustls cannot pick a default on its own and panics at the first TLS use.
+fn install_crypto_provider() -> anyhow::Result<()> {
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .map_err(|_| anyhow::anyhow!("a rustls crypto provider is already installed"))
 }
 
 fn parse_args(args: impl IntoIterator<Item = OsString>) -> anyhow::Result<Command> {
