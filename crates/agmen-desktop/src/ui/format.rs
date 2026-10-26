@@ -1,4 +1,9 @@
-//! Money, token counts, durations and other numbers as the views show them.
+//! Money, token counts, durations, clock times and other numbers as the
+//! views show them.
+
+use agmen_proto::Timestamp;
+
+use crate::local_time::UtcOffset;
 
 /// Dollars with cents: `$14.20`. Values that are not finite show `$0.00`.
 #[must_use]
@@ -98,6 +103,16 @@ pub(crate) fn counted(count: u32, one: &str, many: &str) -> String {
     format!("{count} {}", if count == 1 { one } else { many })
 }
 
+/// `at` as a 24 hour `15:27` at `offset` from UTC.
+#[must_use]
+pub(crate) fn clock(at: Timestamp, offset: UtcOffset) -> String {
+    let secs = at
+        .as_second()
+        .saturating_add(i64::from(offset.minutes()) * 60);
+    let day = secs.rem_euclid(86_400);
+    format!("{:02}:{:02}", day / 3600, day % 3600 / 60)
+}
+
 /// A lowercase name with its first letter capitalized: `engineer` to
 /// `Engineer`.
 #[must_use]
@@ -156,6 +171,16 @@ mod tests {
             wall_clock(72, 41),
             "1 h 12 min since launch · 41 min working"
         );
+    }
+
+    #[test]
+    fn clock_shows_the_time_at_the_offset() {
+        let at: Timestamp = "2026-10-26T21:27:40Z".parse().unwrap();
+        let mdt = UtcOffset::from_minutes(-6 * 60);
+        assert_eq!(clock(at, mdt), "15:27");
+        assert_eq!(clock(at, UtcOffset::default()), "21:27");
+        // 21:27 UTC plus 14 hours wraps to the next day.
+        assert_eq!(clock(at, UtcOffset::from_minutes(14 * 60)), "11:27");
     }
 
     #[test]

@@ -6,38 +6,28 @@
 
 use std::rc::Rc;
 
-use agmen_proto::{StampedEnvelope, Verb};
+use agmen_proto::StampedEnvelope;
 use futures::StreamExt as _;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    InteractiveElement as _, IntoElement, ListAlignment, ListState, ParentElement as _, Render,
-    SharedString, Styled as _, Task, Window, div, list,
+    InteractiveElement as _, IntoElement, ListAlignment, ListOffset, ListState, ParentElement as _,
+    Render, SharedString, Styled as _, Task, Window, div, list, px,
 };
 
+use super::chat_context::ChatContext;
 use super::components::{Color, Label, LabelSize};
 use super::composer::Composer;
-use super::message::MessageRow;
-use super::ref_chip::{ChatContext, RefEvent};
+use super::message::{MessageRow, is_presence};
+use super::ref_chip::RefEvent;
 use super::tokens::{LIST_OVERDRAW, SPACE_2, SPACE_6, SPACE_10, SPACE_12, SPACE_14};
 use crate::alerts::{AlertState, Me};
 use crate::backend::{Action, BackendError, BackendHandle, Draft, Snapshot, Update};
 use crate::local_time::UtcOffset;
 
-/// Presence bookkeeping, which the chat hides until "Show ledger". Lease
-/// and state lines (GRANT, DENY, RELEASE, STATE) stay, as the mockup draws
-/// the GRANT and the hub's STATE.
-#[must_use]
-pub(crate) fn is_presence(env: &StampedEnvelope) -> bool {
-    matches!(
-        env.client.payload.verb(),
-        Some(Verb::Hello | Verb::Bye | Verb::Rollcall | Verb::Heartbeat)
-    )
-}
-
 /// The indices of the messages the chat draws, oldest first.
 #[must_use]
-pub(crate) fn visible_rows(messages: &[StampedEnvelope], show_ledger: bool) -> Vec<usize> {
+fn visible_rows(messages: &[StampedEnvelope], show_ledger: bool) -> Vec<usize> {
     messages
         .iter()
         .enumerate()
@@ -61,7 +51,7 @@ pub(crate) struct ChatView {
     composer: Entity<Composer>,
     /// Why the last send or action failed, until the next one succeeds.
     error: Option<SharedString>,
-    utc_offset_minutes: i32,
+    offset: UtcOffset,
     _updates: Option<Task<()>>,
 }
 
@@ -81,7 +71,7 @@ impl ChatView {
     /// The chat over `snapshot`, sending and acting through the
     /// [`BackendHandle`] global when there is one.
     pub(crate) fn new(snapshot: Snapshot, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let utc_offset_minutes = cx.try_global::<UtcOffset>().map_or(0, |o| o.minutes());
+        let offset = cx.try_global::<UtcOffset>().copied().unwrap_or_default();
         let chat = cx.entity().downgrade();
         let composer = cx.new(|cx| {
             Composer::new(
@@ -116,9 +106,7 @@ impl ChatView {
         let mut alerts = AlertState::default();
         replay(&mut alerts, &snapshot);
         Self {
-            context: Rc::new(
-                ChatContext::new(snapshot.clone()).with_utc_offset(utc_offset_minutes),
-            ),
+            context: Rc::new(ChatContext::new(snapshot.clone()).with_utc_offset(offset)),
             snapshot,
             list: ListState::new(rows.len(), ListAlignment::Bottom, LIST_OVERDRAW),
             rows,
@@ -126,7 +114,7 @@ impl ChatView {
             alerts,
             composer,
             error: None,
-            utc_offset_minutes,
+            offset,
             _updates: updates,
         }
     }
@@ -136,19 +124,33 @@ impl ChatView {
         self.alerts.badge()
     }
 
-    #[cfg(test)]
+    /// Whether the presence lines show; the breadcrumb's "Show ledger".
     pub(crate) const fn show_ledger(&self) -> bool {
         self.show_ledger
     }
 
-    /// Shows or hides the presence lines.
+    /// Shows or hides the presence lines, keeping the message at the top of
+    /// the view where it was. A view that followed the newest message keeps
+    /// following it.
     pub(crate) fn set_show_ledger(&mut self, on: bool, cx: &mut Context<Self>) {
         if self.show_ledger == on {
             return;
         }
         self.show_ledger = on;
+        let top = self.list.logical_scroll_top();
+        let top_message = self.rows.get(top.item_ix).copied();
         self.rows = visible_rows(&self.snapshot.messages, on);
         self.list.reset(self.rows.len());
+        if let Some(message) = top_message {
+            // The first row at or after the old top: the same message, or the
+            // one after a presence line that just hid.
+            let item_ix = self.rows.partition_point(|&row| row < message);
+            let same = self.rows.get(item_ix) == Some(&message);
+            self.list.scroll_to(ListOffset {
+                item_ix,
+                offset_in_item: if same { top.offset_in_item } else { px(0.) },
+            });
+        }
         cx.notify();
     }
 
@@ -214,9 +216,8 @@ impl ChatView {
 
     fn set_snapshot(&mut self, snapshot: Snapshot) {
         self.snapshot = Rc::new(snapshot);
-        self.context = Rc::new(
-            ChatContext::new(self.snapshot.clone()).with_utc_offset(self.utc_offset_minutes),
-        );
+        self.context =
+            Rc::new(ChatContext::new(self.snapshot.clone()).with_utc_offset(self.offset));
         let old = std::mem::replace(
             &mut self.rows,
             visible_rows(&self.snapshot.messages, self.show_ledger),
@@ -232,15 +233,11 @@ impl ChatView {
     }
 
     fn render_row(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
-        let Some(env) = self
-            .rows
-            .get(ix)
-            .and_then(|&i| self.snapshot.messages.get(i))
-        else {
+        let Some(&index) = self.rows.get(ix) else {
             return div().into_any_element();
         };
         let (on_ref, on_action) = (cx.entity().downgrade(), cx.entity().downgrade());
-        let row = MessageRow::new(env.clone(), self.context.clone())
+        let row = MessageRow::new(index, self.context.clone())
             .on_ref(move |event, _, cx| {
                 // A chip outlives its chat only while the window closes.
                 on_ref
@@ -252,7 +249,10 @@ impl ChatView {
                     .update(cx, |chat, cx| chat.act(action, cx))
                     .unwrap_or_default();
             });
+        // The stream's side padding (node 137) sits on each row: a list lays
+        // its items out at its left edge whatever its padding.
         div()
+            .px(SPACE_12)
             .when(ix > 0, |this| this.pt(SPACE_2))
             .child(row)
             .into_any_element()
@@ -290,8 +290,7 @@ impl Render for ChatView {
                 .flex_1()
                 .min_h_0()
                 .pt(SPACE_10)
-                .pb(SPACE_6)
-                .px(SPACE_12),
+                .pb(SPACE_6),
             )
             .when_some(self.error.clone(), |this, error| {
                 this.child(

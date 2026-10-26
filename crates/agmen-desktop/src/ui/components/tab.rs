@@ -10,8 +10,8 @@ use gpui::{
 
 use super::{Badge, ClickHandler, Color, Icon, IconButton, IconSize, Label, LabelSize};
 use crate::appearance::Appearance;
-use crate::icons::UiIcon;
-use crate::ui::tokens::{BORDER_WIDTH, SPACE_5, SPACE_8, SPACE_14, TAB_CLOSE_SLOT};
+use crate::icons::{FileIcon, UiIcon};
+use crate::ui::tokens::{BORDER_WIDTH, ICON_MD, SPACE_5, SPACE_8, SPACE_14, TAB_CLOSE_SLOT};
 
 /// Where the tab sits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -27,6 +27,7 @@ enum TabStyle {
 pub(crate) struct Tab {
     id: ElementId,
     icon: UiIcon,
+    file_icon: Option<FileIcon>,
     icon_color: Option<Color>,
     label: SharedString,
     selected: bool,
@@ -56,6 +57,7 @@ impl Tab {
         Self {
             id: id.into(),
             icon,
+            file_icon: None,
             icon_color: None,
             label: label.into(),
             selected: false,
@@ -87,6 +89,14 @@ impl Tab {
     #[must_use]
     pub(crate) fn icon_color(mut self, color: Color) -> Self {
         self.icon_color = Some(color);
+        self
+    }
+
+    /// Draws a file's icon from the icon theme in place of the UI icon, as
+    /// a role file's tab.
+    #[must_use]
+    pub(crate) fn file_icon(mut self, icon: FileIcon) -> Self {
+        self.file_icon = Some(icon);
         self
     }
 
@@ -164,6 +174,11 @@ impl Tab {
         let slot_selector = format!("{selector}:close");
         let badge_selector = format!("{selector}:badge");
         let label = Label::new(self.label).color(color.clone());
+        let icon_color = self.icon_color.unwrap_or(color);
+        let icon = match self.file_icon {
+            Some(file) => file.render(icon_color.hsla(theme), ICON_MD),
+            None => Icon::new(self.icon).color(icon_color).into_any_element(),
+        };
         let close = self.on_close.map(|handler| {
             IconButton::new(format!("{selector}:close-button"), UiIcon::Close)
                 .size(IconSize::Glyph)
@@ -189,7 +204,7 @@ impl Tab {
             .when_some(self.on_click, |this, handler| {
                 this.cursor_pointer().on_click(handler)
             })
-            .child(Icon::new(self.icon).color(self.icon_color.unwrap_or(color)))
+            .child(icon)
             .child(if self.code { label.code() } else { label })
             // Zed shows an inactive tab's close button on hover, in the
             // same slot, so the slot is always there.
@@ -209,7 +224,7 @@ impl Tab {
                 this.child(
                     div()
                         .debug_selector(|| badge_selector)
-                        .child(Badge::new(count, Color::Error).solid()),
+                        .child(Badge::new(count, Color::Error).pill()),
                 )
             })
     }
@@ -258,6 +273,25 @@ mod tests {
         let inactive = rendered_size(&mut cx2, make(false));
         assert_eq!(active.width, inactive.width);
         assert!(active.width > TAB_CLOSE_SLOT + SPACE_14 * 2.);
+    }
+
+    #[gpui::test]
+    fn pane_tab_draws_a_file_icon_at_the_icon_size(cx: &mut TestAppContext) {
+        let make = |file: bool| {
+            move || {
+                let tab = Tab::new("role", UiIcon::File, "reviewer.xml").pane().code();
+                if file {
+                    tab.file_icon(FileIcon::Ui(UiIcon::File))
+                } else {
+                    tab
+                }
+                .into_any_element()
+            }
+        };
+        let plain = rendered_size(cx, make(false));
+        let mut cx2 = TestAppContext::single();
+        let file = rendered_size(&mut cx2, make(true));
+        assert_eq!(plain, file);
     }
 
     #[gpui::test]

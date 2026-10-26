@@ -9,12 +9,11 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _, Window, anchored, deferred, div,
 };
 
-use super::{ChangeHandler, Color, Icon, IconSize, Label};
+use super::{Card, ChangeHandler, Color, Icon, IconSize, Label};
 use crate::appearance::Appearance;
 use crate::icons::UiIcon;
 use crate::ui::tokens::{
-    BORDER_WIDTH, DROPDOWN_WIDTH, ICON_SM, RADIUS_LG, RADIUS_MD, SPACE_2, SPACE_3, SPACE_5,
-    SPACE_8, SPACE_10,
+    BORDER_WIDTH, DROPDOWN_WIDTH, ICON_SM, RADIUS_MD, SPACE_2, SPACE_3, SPACE_5, SPACE_8, SPACE_10,
 };
 
 /// The caller owns whether the menu is open: it passes `open` and flips it in
@@ -214,16 +213,16 @@ impl RenderOnce for Dropdown {
                     div()
                         .occlude()
                         .mt(SPACE_2)
-                        .w(DROPDOWN_WIDTH)
-                        .p(SPACE_2)
-                        .rounded(RADIUS_LG)
-                        .border(BORDER_WIDTH)
-                        .border_color(theme.border_variant)
-                        .bg(theme.elevated_surface)
                         .when_some(on_toggle.clone(), |this, handler| {
                             this.on_mouse_down_out(move |_, window, cx| handler(false, window, cx))
                         })
-                        .children(rows),
+                        .child(
+                            Card::new()
+                                .w(DROPDOWN_WIDTH)
+                                .p(SPACE_2)
+                                .gap_0()
+                                .children(rows),
+                        ),
                 ),
             )
         });

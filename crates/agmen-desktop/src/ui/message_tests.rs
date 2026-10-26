@@ -6,12 +6,13 @@ use gpui::{AnyElement, Context, Render, TestAppContext, VisualTestContext, Windo
 
 use super::*;
 use crate::backend::{Backend, FixtureBackend, Screen, Snapshot, chat_snapshot};
+use crate::local_time::UtcOffset;
 use crate::refs::RefTarget;
 use crate::ui::test_support::{click, init, redraw};
 use crate::ui::tokens::{MENTION_BAR_WIDTH, MOCKUP_REM, REPLY_INDENT};
 
 /// Mountain daylight time, as the mockup's clock shows.
-const MDT: i32 = -6 * 60;
+const MDT: UtcOffset = UtcOffset::from_minutes(-6 * 60);
 
 fn snapshot_of(screen: Screen) -> Snapshot {
     FixtureBackend::for_screen(screen).unwrap().snapshot()
@@ -144,17 +145,19 @@ fn times_show_at_the_offset() {
     let (messages, c) = chat();
     assert_eq!(c.clock(messages[0].hub_at), "15:27");
     assert_eq!(c.clock(messages[8].hub_at), "15:45");
-    let utc = ChatContext::new(Rc::new(chat_snapshot())).with_utc_offset(-22 * 60);
-    // 21:27 UTC minus 22 hours wraps to the day before.
-    assert_eq!(utc.clock(messages[0].hub_at), "23:27");
+    let east = ChatContext::new(Rc::new(chat_snapshot()))
+        .with_utc_offset(UtcOffset::from_minutes(14 * 60));
+    // 21:27 UTC plus 14 hours wraps to the next day.
+    assert_eq!(east.clock(messages[0].hub_at), "11:27");
 }
 
 type Heard<T> = Rc<RefCell<Vec<T>>>;
 
-/// Draws message rows in a column `width` wide and records what they report.
+/// Draws the context's messages at `rows` in a column `width` wide and
+/// records what they report.
 struct Host {
     width: gpui::Pixels,
-    rows: Vec<StampedEnvelope>,
+    rows: Vec<usize>,
     context: Rc<ChatContext>,
     refs: Heard<RefEvent>,
     actions: Heard<Action>,
@@ -163,9 +166,9 @@ struct Host {
 impl Render for Host {
     fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         window.set_rem_size(MOCKUP_REM);
-        let rows = self.rows.iter().map(|env| {
+        let rows = self.rows.iter().map(|&index| {
             let (refs, actions) = (self.refs.clone(), self.actions.clone());
-            MessageRow::new(env.clone(), self.context.clone())
+            MessageRow::new(index, self.context.clone())
                 .on_ref(move |event, _, _| refs.borrow_mut().push(event))
                 .on_action(move |action, _, _| actions.borrow_mut().push(action))
                 .into_any_element()
@@ -187,7 +190,7 @@ struct Opened<'a> {
 fn open(
     cx: &mut TestAppContext,
     width: gpui::Pixels,
-    rows: Vec<StampedEnvelope>,
+    rows: Vec<usize>,
     context: Rc<ChatContext>,
 ) -> Opened<'_> {
     init(cx);
@@ -212,7 +215,7 @@ fn avatar_x(cx: &mut VisualTestContext, env: &StampedEnvelope) -> gpui::Pixels {
 #[gpui::test]
 fn reply_indents_under_parent(cx: &mut TestAppContext) {
     let (messages, c) = chat();
-    let o = open(cx, px(800.), messages.clone(), c);
+    let o = open(cx, px(800.), (0..messages.len()).collect(), c);
     let parent = avatar_x(o.cx, &messages[2]);
     assert_eq!(avatar_x(o.cx, &messages[3]) - parent, REPLY_INDENT);
     assert_eq!(avatar_x(o.cx, &messages[4]) - parent, REPLY_INDENT);
@@ -224,7 +227,7 @@ fn reply_indents_under_parent(cx: &mut TestAppContext) {
 fn mention_of_me_gets_yellow_bar(cx: &mut TestAppContext) {
     let (messages, c) = chat();
     assert_eq!(row_kind(&messages[8], &c), RowKind::Mention);
-    let o = open(cx, px(800.), messages.clone(), c);
+    let o = open(cx, px(800.), (0..messages.len()).collect(), c);
     // The bar sits inside the row, so the avatar moves right by its width.
     let plain = avatar_x(o.cx, &messages[7]);
     assert_eq!(avatar_x(o.cx, &messages[8]) - plain, MENTION_BAR_WIDTH);
@@ -240,11 +243,10 @@ fn mention_of_me_gets_yellow_bar(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn message_wraps_long_token(cx: &mut TestAppContext) {
-    let (messages, c) = chat();
-    let short = messages[7].clone();
-    let mut long = messages[8].clone();
-    long.client.body = "x".repeat(500).try_into().unwrap();
-    let o = open(cx, px(600.), vec![short.clone(), long.clone()], c);
+    let mut snapshot = chat_snapshot();
+    snapshot.messages[8].client.body = "x".repeat(500).try_into().unwrap();
+    let (short, long) = (snapshot.messages[7].clone(), snapshot.messages[8].clone());
+    let o = open(cx, px(600.), vec![7, 8], context_of(snapshot));
     let one_line = o.cx.debug_bounds(sel(&short, "row")).unwrap().size;
     let bounds = o.cx.debug_bounds(sel(&long, "row")).unwrap();
     let row = bounds.size;
@@ -267,7 +269,7 @@ fn fixture_chat_renders_the_sheet_chips(cx: &mut TestAppContext) {
     // The sheet's section 4 table: chips per CHAT message, the GRANT ledger
     // line drawing none.
     let counts = [4, 3, 0, 4, 2, 0, 2, 0, 2];
-    let o = open(cx, px(800.), messages.clone(), c);
+    let o = open(cx, px(800.), (0..messages.len()).collect(), c);
     for (env, count) in messages.iter().zip(counts) {
         for i in 0..count {
             let s = sel(env, &format!("ref:{i}"));
@@ -283,7 +285,7 @@ fn fixture_chat_renders_the_sheet_chips(cx: &mut TestAppContext) {
 #[gpui::test]
 fn chip_in_a_row_reports_open_ref(cx: &mut TestAppContext) {
     let (messages, c) = chat();
-    let o = open(cx, px(800.), messages.clone(), c);
+    let o = open(cx, px(800.), (0..messages.len()).collect(), c);
     click(o.cx, sel(&messages[4], "ref:0"));
     assert_eq!(
         *o.refs.borrow(),
@@ -294,7 +296,7 @@ fn chip_in_a_row_reports_open_ref(cx: &mut TestAppContext) {
 #[gpui::test]
 fn open_in_terminal_on_a_local_agents_done(cx: &mut TestAppContext) {
     let (messages, c) = chat();
-    let o = open(cx, px(800.), messages.clone(), c.clone());
+    let o = open(cx, px(800.), (0..messages.len()).collect(), c.clone());
     let fx1_done = &messages[6];
     assert!(
         o.cx.debug_bounds(sel(fx1_done, "open-in-terminal"))
@@ -334,7 +336,11 @@ fn settings_message_hosts_its_change_card(cx: &mut TestAppContext) {
         .find(|m| &m.client.id == id)
         .unwrap()
         .clone();
-    let o = open(cx, px(800.), vec![m], context_of(snapshot));
+    let index = snapshot
+        .messages
+        .iter()
+        .position(|e| e.client.id == m.client.id);
+    let o = open(cx, px(800.), vec![index.unwrap()], context_of(snapshot));
     assert!(o.cx.debug_bounds("chg-fx1-lanes-budget:waiting").is_some());
     click(o.cx, "chg-fx1-lanes-budget:apply");
     assert_eq!(
@@ -343,4 +349,64 @@ fn settings_message_hosts_its_change_card(cx: &mut TestAppContext) {
             "chg-fx1-lanes-budget".into()
         ))]
     );
+}
+
+/// Asserts the element `part` of `env` ends inside its row.
+fn inside_row(cx: &mut VisualTestContext, env: &StampedEnvelope, part: &str) {
+    let row = cx.debug_bounds(sel(env, "row")).unwrap();
+    let part_bounds = cx
+        .debug_bounds(sel(env, part))
+        .unwrap_or_else(|| panic!("{part} not drawn"));
+    assert!(
+        part_bounds.right() <= row.right(),
+        "{part}: {part_bounds:?} past {row:?}"
+    );
+}
+
+#[gpui::test]
+fn narrow_row_wraps_the_head_instead_of_cutting_it(cx: &mut TestAppContext) {
+    // A two-pane split at 1280 px leaves the chat column about 256 px.
+    let (messages, c) = chat();
+    let o = open(cx, px(300.), vec![0, 6], c);
+    for env in [&messages[0], &messages[6]] {
+        inside_row(o.cx, env, "verb");
+        inside_row(o.cx, env, "open-in-terminal");
+        let head = o.cx.debug_bounds(sel(env, "head")).unwrap();
+        let verb = o.cx.debug_bounds(sel(env, "verb")).unwrap();
+        assert!(head.size.height > verb.size.height * 1.5, "{head:?}");
+    }
+}
+
+#[gpui::test]
+fn narrow_row_keeps_a_long_file_chip_inside(cx: &mut TestAppContext) {
+    let path = "crates/agmen-desktop/src/backend/fixture_data.rs";
+    let mut snapshot = chat_snapshot();
+    snapshot.git.files.insert(path.into());
+    snapshot.messages[8].client.body = format!("see {path}:239 now").try_into().unwrap();
+    snapshot.messages[8].refs.clear();
+    let env = snapshot.messages[8].clone();
+    let o = open(cx, px(300.), vec![8], context_of(snapshot));
+    inside_row(o.cx, &env, "ref:0");
+    inside_row(o.cx, &env, "body");
+    // The chip wraps inside the column rather than running past it.
+    let chip = o.cx.debug_bounds(sel(&env, "ref:0")).unwrap();
+    let verb = o.cx.debug_bounds(sel(&env, "verb")).unwrap();
+    assert!(chip.size.height > verb.size.height * 1.5, "{chip:?}");
+}
+
+#[gpui::test]
+fn narrow_row_keeps_the_change_card_inside(cx: &mut TestAppContext) {
+    let snapshot = snapshot_of(Screen::SettingsFromChat);
+    let (id, card) = snapshot.changes.iter().next().unwrap();
+    let index = snapshot
+        .messages
+        .iter()
+        .position(|m| &m.client.id == id)
+        .unwrap();
+    let env = snapshot.messages[index].clone();
+    let card_sel: &'static str = Box::leak(format!("{}:card", card.id).into_boxed_str());
+    let o = open(cx, px(300.), vec![index], context_of(snapshot.clone()));
+    let row = o.cx.debug_bounds(sel(&env, "row")).unwrap();
+    let card = o.cx.debug_bounds(card_sel).unwrap();
+    assert!(card.right() <= row.right(), "{card:?} past {row:?}");
 }

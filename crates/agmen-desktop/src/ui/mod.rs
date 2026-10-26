@@ -4,6 +4,7 @@ mod agent_panel;
 mod agents_panel;
 mod change_card;
 mod chat;
+mod chat_context;
 mod components;
 mod composer;
 mod dock;

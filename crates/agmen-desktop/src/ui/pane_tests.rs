@@ -1,6 +1,3 @@
-use std::cell::RefCell;
-use std::rc::Rc;
-
 use gpui::{TestAppContext, VisualTestContext};
 
 use super::*;
@@ -21,11 +18,28 @@ impl Render for Host {
 fn open_center(cx: &mut TestAppContext) -> (Entity<PaneGroup>, &mut VisualTestContext) {
     init(cx);
     let snapshot = chat_snapshot();
-    let group = cx.new(|cx| PaneGroup::new(&snapshot, None, cx));
+    let group = cx.new(|cx| PaneGroup::new(&snapshot, None, Vec::new(), cx));
     let host = group.clone();
     let (_, cx) = cx.add_window_view(|_, _| Host(host));
     redraw(cx);
     (group, cx)
+}
+
+/// The center over the chat fixture with its chat, and `tabs` behind it.
+fn open_center_with_chat(
+    cx: &mut TestAppContext,
+    tabs: Vec<TabItem>,
+) -> (Entity<PaneGroup>, Entity<ChatView>, &mut VisualTestContext) {
+    init(cx);
+    let (host, cx) = cx.add_window_view(|window, cx| {
+        let snapshot = chat_snapshot();
+        let chat = cx.new(|cx| ChatView::new(snapshot.clone(), window, cx));
+        Host(cx.new(|cx| PaneGroup::new(&snapshot, Some(chat), tabs, cx)))
+    });
+    let group = host.read_with(cx, |host, _| host.0.clone());
+    let chat = group.read_with(cx, |group, _| group.chat.clone().unwrap());
+    redraw(cx);
+    (group, chat, cx)
 }
 
 fn fx1() -> TabItem {
@@ -139,25 +153,78 @@ fn close_slot_is_reserved_on_every_tab(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn show_ledger_toggle_reports_each_change(cx: &mut TestAppContext) {
-    let (group, cx) = open_center(cx);
-    let reported = Rc::new(RefCell::new(Vec::new()));
-    let sink = reported.clone();
-    cx.update(|_, cx| {
-        cx.subscribe(&group, move |_, event: &PaneGroupEvent, _| {
-            let PaneGroupEvent::ShowLedger(on) = event;
-            sink.borrow_mut().push(*on);
-        })
-        .detach();
-    });
-    let pane = first_pane(&group, cx);
-    assert!(!pane.read_with(cx, |pane, _| pane.show_ledger()));
+fn show_ledger_toggles_the_chats_flag(cx: &mut TestAppContext) {
+    let (_group, chat, cx) = open_center_with_chat(cx, Vec::new());
+    assert!(!chat.read_with(cx, |chat, _| chat.show_ledger()));
+    click(cx, "pane-0:show-ledger");
+    assert!(chat.read_with(cx, |chat, _| chat.show_ledger()));
+    click(cx, "pane-0:show-ledger");
+    assert!(!chat.read_with(cx, |chat, _| chat.show_ledger()));
+}
 
-    click(cx, "pane-0:show-ledger");
-    assert!(pane.read_with(cx, |pane, _| pane.show_ledger()));
-    click(cx, "pane-0:show-ledger");
-    assert!(!pane.read_with(cx, |pane, _| pane.show_ledger()));
-    assert_eq!(*reported.borrow(), vec![true, false]);
+#[gpui::test]
+fn starting_tabs_open_behind_the_chat(cx: &mut TestAppContext) {
+    let reviewer = TabItem::RoleFile("reviewer".into());
+    let (group, _chat, cx) = open_center_with_chat(cx, vec![fx1(), reviewer.clone()]);
+    let pane = first_pane(&group, cx);
+    pane.read_with(cx, |pane, _| {
+        assert_eq!(pane.tabs(), &[TabItem::Chat, fx1(), reviewer]);
+        assert_eq!(pane.active_item(), Some(&TabItem::Chat));
+    });
+    assert!(cx.debug_bounds("pane-0:tab-2").is_some());
+}
+
+#[gpui::test]
+fn closed_chat_in_a_split_reopens_with_its_state(cx: &mut TestAppContext) {
+    let (group, chat, cx) = open_center_with_chat(cx, Vec::new());
+    let weak = chat.downgrade();
+    drop(chat);
+    group
+        .update(cx, |group, cx| {
+            group.split(SplitDirection::Right, fx1(), cx)
+        })
+        .expect("room to split");
+    click(cx, "pane-0:tab-0:close-button");
+    group.read_with(cx, |group, _| assert_eq!(group.panes().len(), 1));
+    assert!(cx.debug_bounds("chat").is_none());
+    assert!(weak.upgrade().is_some(), "the group keeps the chat");
+
+    group.update(cx, |group, cx| group.open(TabItem::Chat, cx));
+    redraw(cx);
+    let pane = first_pane(&group, cx);
+    pane.read_with(cx, |pane, _| {
+        assert_eq!(pane.active_item(), Some(&TabItem::Chat));
+        assert_eq!(pane.chat().map(Entity::downgrade), Some(weak.clone()));
+    });
+    assert!(cx.debug_bounds("chat").is_some());
+}
+
+#[gpui::test]
+fn closing_the_last_tab_falls_back_to_the_chat(cx: &mut TestAppContext) {
+    let (group, _chat, cx) = open_center_with_chat(cx, Vec::new());
+    click(cx, "pane-0:tab-0:close-button");
+    let pane = first_pane(&group, cx);
+    pane.read_with(cx, |pane, _| assert_eq!(pane.tabs(), &[TabItem::Chat]));
+    assert!(cx.debug_bounds("chat").is_some());
+}
+
+#[gpui::test]
+fn opening_the_chat_activates_its_one_tab(cx: &mut TestAppContext) {
+    let (group, _chat, cx) = open_center_with_chat(cx, Vec::new());
+    let second = group
+        .update(cx, |group, cx| {
+            group.split(SplitDirection::Right, fx1(), cx)
+        })
+        .expect("room to split");
+    group.update(cx, |group, cx| group.open(TabItem::Chat, cx));
+    second.read_with(cx, |pane, _| assert_eq!(pane.tabs(), &[fx1()]));
+    let again = group
+        .update(cx, |group, cx| {
+            group.split(SplitDirection::Right, TabItem::Chat, cx)
+        })
+        .expect("the chat's pane");
+    assert_eq!(again, first_pane(&group, cx));
+    group.read_with(cx, |group, _| assert_eq!(group.panes().len(), 2));
 }
 
 #[gpui::test]

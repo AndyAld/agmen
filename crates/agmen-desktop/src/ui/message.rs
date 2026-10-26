@@ -9,27 +9,26 @@ use std::rc::Rc;
 use agmen_proto::{IdentityKind, Payload, StampedEnvelope, Verb, Verdict};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
+    AnyElement, App, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
+    RenderOnce, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
 };
 
 use super::change_card::ChangeCard;
-use super::components::{Avatar, Badge, ChangeHandler, Color, Icon, IconSize, Label, LabelSize};
+use super::chat_context::ChatContext;
+use super::components::{Avatar, Badge, ChangeHandler, Chip, Color, Label, LabelSize};
 use super::format::title_case;
-use super::ref_chip::{ChatContext, RefEvent};
+use super::ref_chip::RefEvent;
 use super::rich_text::RichText;
 use super::tokens::{
-    BORDER_WIDTH, MENTION_BAR_WIDTH, MESSAGE_AVATAR_SIZE, RADIUS_SM, REPLY_INDENT, SPACE_1,
-    SPACE_2, SPACE_3, SPACE_5, SPACE_6, SPACE_7, SPACE_8, SPACE_10, TINT_BORDER, TINT_FILL,
-    TINT_MENTION, tint,
+    MENTION_BAR_WIDTH, MESSAGE_AVATAR_SIZE, REPLY_INDENT, SPACE_2, SPACE_3, SPACE_6, SPACE_8,
+    SPACE_10, TINT_MENTION, tint,
 };
 use crate::appearance::Appearance;
 use crate::backend::Action;
-use crate::icons::UiIcon;
 
 /// How a message row is drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum RowKind {
+enum RowKind {
     Message,
     /// Indented under the message it answers.
     Reply,
@@ -39,23 +38,26 @@ pub(crate) enum RowKind {
     Ledger,
 }
 
-/// Whether `env` is ledger bookkeeping rather than conversation: anything
-/// the hub sends, and the verbs that track presence, claims and state.
+/// Presence bookkeeping, which the chat hides until "Show ledger". Lease
+/// and state lines (GRANT, DENY, RELEASE, STATE) stay, as the mockup draws
+/// the GRANT and the hub's STATE.
 #[must_use]
-pub(crate) fn is_ledger(env: &StampedEnvelope) -> bool {
+pub(super) fn is_presence(env: &StampedEnvelope) -> bool {
+    matches!(
+        env.client.payload.verb(),
+        Some(Verb::Hello | Verb::Bye | Verb::Rollcall | Verb::Heartbeat)
+    )
+}
+
+/// Whether `env` is ledger bookkeeping rather than conversation: anything
+/// the hub sends, presence, and the verbs that track claims and state.
+#[must_use]
+pub(super) fn is_ledger(env: &StampedEnvelope) -> bool {
     env.from_kind == IdentityKind::Hub
+        || is_presence(env)
         || matches!(
             env.client.payload.verb(),
-            Some(
-                Verb::Hello
-                    | Verb::Bye
-                    | Verb::Rollcall
-                    | Verb::Grant
-                    | Verb::Deny
-                    | Verb::Heartbeat
-                    | Verb::Release
-                    | Verb::State
-            )
+            Some(Verb::Grant | Verb::Deny | Verb::Release | Verb::State)
         )
 }
 
@@ -65,7 +67,7 @@ pub(crate) fn is_ledger(env: &StampedEnvelope) -> bool {
 /// stays a reply: the hub mentions a reply's human parent author, so every
 /// answer to me would otherwise turn yellow.
 #[must_use]
-pub(crate) fn row_kind(env: &StampedEnvelope, context: &ChatContext) -> RowKind {
+fn row_kind(env: &StampedEnvelope, context: &ChatContext) -> RowKind {
     let me = &context.snapshot().me_id;
     let verdict = matches!(
         env.client.payload.verb(),
@@ -94,7 +96,7 @@ pub(crate) fn row_kind(env: &StampedEnvelope, context: &ChatContext) -> RowKind 
 /// the sender's own prefix dropped ("to listen" for andy to andy/listen); a
 /// REVIEW is green for pass and red for changes (mockup fix 42).
 #[must_use]
-pub(crate) fn verb_badge(env: &StampedEnvelope, context: &ChatContext) -> (String, Color) {
+fn verb_badge(env: &StampedEnvelope, context: &ChatContext) -> (String, Color) {
     if context.snapshot().changes.contains_key(&env.client.id) {
         return ("SETTINGS".to_owned(), Color::Accent);
     }
@@ -140,18 +142,18 @@ pub(crate) fn verb_badge(env: &StampedEnvelope, context: &ChatContext) -> (Strin
 
 /// Who sent a message, as the row's head shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Sender {
+struct Sender {
     /// "Engineer", "Listener", "human" or "human · coordinator".
-    pub(crate) label: String,
-    pub(crate) color: Color,
-    pub(crate) agent: bool,
+    label: String,
+    color: Color,
+    agent: bool,
 }
 
 /// An agent by its roster role (or its kind when the roster lacks it, and
 /// as an engineer when nothing says, as console.py does); a person as
 /// "human".
 #[must_use]
-pub(crate) fn sender(env: &StampedEnvelope, context: &ChatContext) -> Sender {
+fn sender(env: &StampedEnvelope, context: &ChatContext) -> Sender {
     if !env.from_handle.contains('/') {
         let label = if env.from_kind == IdentityKind::Coordinator {
             "human · coordinator"
@@ -186,16 +188,17 @@ pub(crate) fn sender(env: &StampedEnvelope, context: &ChatContext) -> Sender {
 /// Whether the row offers "Open in terminal": a DONE from an agent this
 /// person's agmend runs (plan Task 9; spec 5.4 allows take-over only there).
 #[must_use]
-pub(crate) fn offers_take_over(env: &StampedEnvelope, context: &ChatContext) -> bool {
+fn offers_take_over(env: &StampedEnvelope, context: &ChatContext) -> bool {
     matches!(env.client.payload, Payload::Done { .. }) && context.is_local_agent(&env.from_handle)
 }
 
-/// One message. Tests find its parts as `"{message id}:row"` (or
+/// One message, the one at an index in the context's snapshot, so a frame
+/// copies none of it. Tests find its parts as `"{message id}:row"` (or
 /// `":ledger"`), `":avatar"`, `":verb"`, `":mention-bar"`,
 /// `":open-in-terminal"` and `":ref:{n}"`.
 #[derive(IntoElement)]
 pub(crate) struct MessageRow {
-    env: StampedEnvelope,
+    index: usize,
     context: Rc<ChatContext>,
     on_ref: Option<ChangeHandler<RefEvent>>,
     on_action: Option<ChangeHandler<Action>>,
@@ -204,16 +207,18 @@ pub(crate) struct MessageRow {
 impl std::fmt::Debug for MessageRow {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MessageRow")
-            .field("id", &self.env.client.id)
+            .field("index", &self.index)
             .finish_non_exhaustive()
     }
 }
 
 impl MessageRow {
+    /// The message at `index` in `context`'s snapshot; past the last one,
+    /// the row draws nothing.
     #[must_use]
-    pub(crate) const fn new(env: StampedEnvelope, context: Rc<ChatContext>) -> Self {
+    pub(crate) const fn new(index: usize, context: Rc<ChatContext>) -> Self {
         Self {
-            env,
+            index,
             context,
             on_ref: None,
             on_action: None,
@@ -241,8 +246,7 @@ impl MessageRow {
         self
     }
 
-    fn ledger(self, id: &str) -> gpui::AnyElement {
-        let env = &self.env;
+    fn ledger(&self, env: &StampedEnvelope, id: &str) -> AnyElement {
         let selector = format!("{id}:ledger");
         let line = format!(
             "{} {} {}",
@@ -269,40 +273,30 @@ impl MessageRow {
             .into_any_element()
     }
 
-    fn take_over_chip(&self, id: &str, cx: &App) -> impl IntoElement {
-        let theme = &cx.global::<Appearance>().theme;
+    /// "Open in terminal ⌥O" (node 300): `>_`, the label and the key, on an
+    /// accent tint.
+    fn take_over_chip(&self, env: &StampedEnvelope, id: &str) -> impl IntoElement {
         let selector = format!("{id}:open-in-terminal");
         let element_id = SharedString::from(selector.clone());
-        let worker = self.env.from.clone();
+        let worker = env.from.clone();
         div()
             .id(element_id)
             .debug_selector(|| selector)
             .flex()
             .flex_none()
-            .items_center()
-            .gap(SPACE_5)
-            .py(SPACE_1)
-            .px(SPACE_7)
-            .rounded(RADIUS_SM)
-            .bg(tint(theme.text_accent, TINT_FILL))
-            .border(BORDER_WIDTH)
-            .border_color(tint(theme.text_accent, TINT_BORDER))
             .when_some(self.on_action.clone(), |this, handler| {
                 this.cursor_pointer().on_click(move |_, window, cx| {
                     handler(Action::TakeOver(worker.clone()), window, cx);
                 })
             })
             .child(
-                Icon::new(UiIcon::Terminal)
-                    .size(IconSize::Small)
-                    .color(Color::Accent),
+                Chip::new("Open in terminal")
+                    .inline()
+                    .tinted(Color::Accent)
+                    .outline(Color::Accent)
+                    .leading(Label::new(">_").code().color(Color::Accent))
+                    .trailing(Label::new("⌥O").size(LabelSize::Small).color(Color::Accent)),
             )
-            .child(
-                Label::new("Open in terminal")
-                    .size(LabelSize::Small)
-                    .color(Color::Accent),
-            )
-            .child(Label::new("⌥O").size(LabelSize::Small).color(Color::Accent))
     }
 }
 
@@ -321,14 +315,14 @@ fn verb_name(env: &StampedEnvelope) -> String {
 impl MessageRow {
     /// The avatar: an agent's role initial on a square in its role color, a
     /// person's initial on a round dim fill (node 139 and 207).
-    fn avatar(&self, who: &Sender, id: &str) -> impl IntoElement {
+    fn avatar(env: &StampedEnvelope, who: &Sender, id: &str) -> impl IntoElement {
         let avatar = if who.agent {
             Avatar::new(&who.label)
                 .color(who.color.clone())
                 .fill(who.color.clone())
                 .square()
         } else {
-            Avatar::new(&self.env.from_handle)
+            Avatar::new(&env.from_handle)
                 .color(Color::Default)
                 .fill(Color::Placeholder)
         };
@@ -340,14 +334,19 @@ impl MessageRow {
     }
 
     /// Handle, role, verb badge, time and the take-over chip (node 142).
-    fn head(&self, who: &Sender, id: &str, cx: &App) -> impl IntoElement {
-        let env = &self.env;
+    /// The row wraps, so a narrow pane moves the time and the chip down a
+    /// line rather than cutting them off.
+    fn head(&self, env: &StampedEnvelope, who: &Sender, id: &str) -> impl IntoElement {
         let (verb, verb_color) = verb_badge(env, &self.context);
         let verb_sel = format!("{id}:verb");
+        let head_sel = format!("{id}:head");
         div()
+            .debug_selector(|| head_sel)
             .flex()
+            .flex_wrap()
             .items_center()
-            .gap(SPACE_8)
+            .gap_x(SPACE_8)
+            .gap_y(SPACE_3)
             .child(
                 Label::new(env.from_handle.clone())
                     .code()
@@ -370,31 +369,28 @@ impl MessageRow {
                     .color(Color::Muted),
             )
             .when(offers_take_over(env, &self.context), |this| {
-                this.child(self.take_over_chip(id, cx))
+                this.child(self.take_over_chip(env, id))
             })
     }
 }
 
 impl RenderOnce for MessageRow {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let id = self.env.client.id.as_str().to_owned();
         let context = self.context.clone();
-        let kind = row_kind(&self.env, &context);
+        let Some(env) = context.snapshot().messages.get(self.index) else {
+            return div().into_any_element();
+        };
+        let id = env.client.id.as_str().to_owned();
+        let kind = row_kind(env, &context);
         if kind == RowKind::Ledger {
-            return self.ledger(&id);
+            return self.ledger(env, &id);
         }
-        let env = &self.env;
         let warning = cx.global::<Appearance>().theme.warning;
         let who = sender(env, &context);
-        let avatar = self.avatar(&who, &id);
-        let head = self.head(&who, &id, cx);
-        let body = RichText::new(
-            id.clone(),
-            env.client.body.as_str().to_owned(),
-            &env.refs,
-            context.clone(),
-        )
-        .when_some(self.on_ref.clone(), RichText::on_ref);
+        let avatar = Self::avatar(env, &who, &id);
+        let head = self.head(env, &who, &id);
+        let body = RichText::new(id.clone(), context.body_of(env), context.clone())
+            .when_some(self.on_ref.clone(), RichText::on_ref);
         let card = context.snapshot().changes.get(&env.client.id).map(|card| {
             ChangeCard::new(card.clone(), &context.snapshot().roster).when_some(
                 self.on_action.clone(),

@@ -8,7 +8,9 @@ use gpui::{App, Window};
 
 mod avatar;
 mod badge;
+mod breadcrumb;
 mod button;
+mod card;
 mod chip;
 mod color;
 #[cfg(test)]
@@ -45,7 +47,9 @@ mod toggle;
 
 pub(crate) use avatar::Avatar;
 pub(crate) use badge::Badge;
+pub(crate) use breadcrumb::Breadcrumb;
 pub(crate) use button::{Button, ButtonStyle};
+pub(crate) use card::Card;
 pub(crate) use chip::Chip;
 pub(crate) use color::Color;
 pub(crate) use icon::{Icon, IconSize};

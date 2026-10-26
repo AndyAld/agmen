@@ -10,9 +10,7 @@ use super::agents_panel::{AgentsPanel, AgentsPanelEvent};
 use super::chat::ChatView;
 use super::dock::{Dock, DockSide, LeftDockTabs};
 use super::listener_panel::ListenerPanel;
-use super::pane::PaneGroup;
-#[cfg(test)]
-use super::pane::{SplitDirection, TabItem};
+use super::pane::{PaneGroup, TabItem};
 use super::status_bar::StatusBar;
 use super::title_bar::TitleBar;
 use super::tokens::{BORDER_WIDTH, LEFT_DOCK_WIDTH, RIGHT_DOCK_WIDTH};
@@ -45,7 +43,8 @@ impl Workspace {
             AgentsPanelEvent::Selected(id) => this.select_agent(id, cx),
         });
         let chat = cx.new(|cx| ChatView::new(snapshot.clone(), window, cx));
-        let pane_group = cx.new(|cx| PaneGroup::new(&snapshot, Some(chat), cx));
+        let tabs = starting_tabs(&snapshot);
+        let pane_group = cx.new(|cx| PaneGroup::new(&snapshot, Some(chat), tabs, cx));
         Self {
             focus_handle: cx.focus_handle(),
             snapshot,
@@ -105,6 +104,25 @@ impl Workspace {
             .as_ref()
             .and_then(|id| self.snapshot.agents.get(id))
     }
+}
+
+/// The tabs the center opens behind the chat: the mockup's agent tab and
+/// role file tab (console.py `tab_bar`: andy/fx1 and reviewer.xml), when the
+/// roster has that agent and role.
+// shortcut: the mockup's tabs stand in for the tabs the person left open;
+// restore those instead once agmend keeps them.
+fn starting_tabs(snapshot: &Snapshot) -> Vec<TabItem> {
+    let agents = || snapshot.roster.iter().flat_map(|group| &group.agents);
+    let fx1 = format!("{}/fx1", snapshot.me);
+    let mut tabs: Vec<TabItem> = agents()
+        .find(|agent| agent.handle == fx1)
+        .map(|agent| TabItem::Agent(agent.id.clone()))
+        .into_iter()
+        .collect();
+    if agents().any(|agent| agent.role == "reviewer") {
+        tabs.push(TabItem::RoleFile("reviewer".into()));
+    }
+    tabs
 }
 
 impl Focusable for Workspace {

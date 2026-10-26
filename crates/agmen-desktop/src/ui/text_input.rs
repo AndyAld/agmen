@@ -425,6 +425,9 @@ impl TextInput {
     ) -> Option<Rc<TextLayout>> {
         let (font_size, line_height) = (shaping.font_size, shaping.line_height);
         let empty = self.buffer.text().is_empty();
+        // The placeholder stays on one line and is clipped at the edge, as
+        // Zed's; only typed text wraps.
+        let width = if empty { None } else { width };
         let marked = self.buffer.marked();
         if let Some(key) = self.cache.iter().find(|key| {
             key.text == self.buffer.text()

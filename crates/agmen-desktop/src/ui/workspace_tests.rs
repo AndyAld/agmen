@@ -1,5 +1,6 @@
 use super::*;
 use crate::backend::chat_snapshot;
+use crate::ui::pane::SplitDirection;
 use crate::ui::test_support::{click, init, redraw};
 use crate::ui::tokens::{STATUS_BAR_HEIGHT, TAB_BAR_HEIGHT, TITLE_BAR_HEIGHT};
 use gpui::TestAppContext;
@@ -196,17 +197,14 @@ fn cmd_click_ref_opens_split(cx: &mut TestAppContext) {
     let (panes, direction) = group.read_with(cx, |g, _| (g.panes(), g.direction()));
     assert_eq!(panes.len(), 2, "the center split in two");
     assert_eq!(direction, Some(SplitDirection::Right), "side by side");
-    let fx1 = chat_snapshot()
-        .roster
-        .iter()
-        .flat_map(|g| &g.agents)
-        .find(|a| a.handle == "andy/fx1")
-        .map(|a| a.id.clone())
-        .unwrap();
+    let fx1 = fx1_id();
     panes[1].read_with(cx, |pane, _| {
-        assert_eq!(pane.active_item(), Some(&TabItem::Agent(fx1)));
+        assert_eq!(pane.active_item(), Some(&TabItem::Agent(fx1.clone())));
     });
-    panes[0].read_with(cx, |pane, _| assert_eq!(pane.tabs(), &[TabItem::Chat]));
+    panes[0].read_with(cx, |pane, _| {
+        assert_eq!(pane.tabs(), starting_center(fx1));
+        assert_eq!(pane.active_item(), Some(&TabItem::Chat));
+    });
     assert!(cx.debug_bounds("pane-1").is_some());
 }
 
@@ -218,15 +216,46 @@ fn click_on_a_ref_opens_a_tab_in_the_pane(cx: &mut TestAppContext) {
     let group = workspace.read_with(cx, |w, _| w.pane_group.clone());
     let panes = group.read_with(cx, |g, _| g.panes());
     assert_eq!(panes.len(), 1);
+    let commit = TabItem::Ref(crate::refs::RefTarget::Commit("4d9fdc8".into()));
     panes[0].read_with(cx, |pane, _| {
-        assert_eq!(
-            pane.tabs(),
-            &[
-                TabItem::Chat,
-                TabItem::Ref(crate::refs::RefTarget::Commit("4d9fdc8".into()))
-            ]
-        );
+        let mut tabs = starting_center(fx1_id());
+        tabs.insert(1, commit.clone());
+        assert_eq!(pane.tabs(), tabs);
+        assert_eq!(pane.active_item(), Some(&commit));
     });
+}
+
+fn fx1_id() -> IdentityId {
+    chat_snapshot()
+        .roster
+        .iter()
+        .flat_map(|g| &g.agents)
+        .find(|a| a.handle == "andy/fx1")
+        .map(|a| a.id.clone())
+        .unwrap()
+}
+
+/// The mockup's tab bar: chat, andy/fx1, reviewer.xml (console.py `tab_bar`).
+fn starting_center(fx1: IdentityId) -> Vec<TabItem> {
+    vec![
+        TabItem::Chat,
+        TabItem::Agent(fx1),
+        TabItem::RoleFile("reviewer".into()),
+    ]
+}
+
+#[gpui::test]
+fn center_opens_the_mockups_tabs_behind_the_chat(cx: &mut TestAppContext) {
+    let (workspace, cx) = open(cx);
+    let group = workspace.read_with(cx, |w, _| w.pane_group.clone());
+    let pane = group.read_with(cx, |g, _| g.panes()[0].clone());
+    pane.read_with(cx, |pane, _| {
+        assert_eq!(pane.tabs(), starting_center(fx1_id()));
+        assert_eq!(pane.active_item(), Some(&TabItem::Chat));
+    });
+    for tab in ["pane-0:tab-0", "pane-0:tab-1", "pane-0:tab-2"] {
+        assert!(cx.debug_bounds(tab).is_some(), "{tab}");
+    }
 }
 
 #[gpui::test]

@@ -4,10 +4,6 @@ mod alerts;
 mod appearance;
 mod assets;
 mod backend;
-#[expect(
-    dead_code,
-    reason = "file icons get their first view in Task 11 (Project panel) of the desktop plan"
-)]
 mod icons;
 #[cfg(unix)]
 mod instance;

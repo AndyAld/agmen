@@ -7,29 +7,18 @@ use super::{Color, Label};
 #[derive(Debug, IntoElement)]
 pub(crate) struct KeyHint {
     keys: SharedString,
-    color: Color,
 }
 
 impl KeyHint {
     #[must_use]
     pub(crate) fn new(keys: impl Into<SharedString>) -> Self {
-        Self {
-            keys: keys.into(),
-            color: Color::Accent,
-        }
-    }
-
-    /// The hint's color; accent by default.
-    #[must_use]
-    pub(crate) fn color(mut self, color: Color) -> Self {
-        self.color = color;
-        self
+        Self { keys: keys.into() }
     }
 }
 
 impl RenderOnce for KeyHint {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        Label::new(self.keys).code().color(self.color)
+        Label::new(self.keys).code().color(Color::Accent)
     }
 }
 

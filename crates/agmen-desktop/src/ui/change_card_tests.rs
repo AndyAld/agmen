@@ -5,7 +5,7 @@ use gpui::{Context, Render, TestAppContext, VisualTestContext};
 
 use super::*;
 use crate::backend::{Backend, ChangeId, ChangeRow, ChangeState, FixtureBackend, Screen};
-use crate::ui::test_support::{click, init, redraw, rendered_size};
+use crate::ui::test_support::{click, init, redraw};
 use crate::ui::tokens::{CHANGE_CARD_WIDTH, MOCKUP_REM};
 
 const ID: &str = "chg-fx1-lanes-budget";
@@ -207,15 +207,40 @@ fn before_value_struck_through() {
     );
 }
 
-fn assert_fixture_card_renders(cx: &mut TestAppContext, screen: Screen) {
+/// The fixture card for `screen`, drawn in a column `width` wide.
+fn card_size(
+    cx: &mut TestAppContext,
+    screen: Screen,
+    width: gpui::Pixels,
+) -> gpui::Size<gpui::Pixels> {
+    init(cx);
     let snapshot = FixtureBackend::for_screen(screen).unwrap().snapshot();
     let card = snapshot.changes.values().next().unwrap().clone();
+    let selector: &'static str = Box::leak(format!("{}:card", card.id).into_boxed_str());
     let roster = snapshot.roster;
-    let size = rendered_size(cx, move || {
-        ChangeCard::new(card.clone(), &roster).into_any_element()
+    let (_, cx) = cx.add_window_view(move |_, _| {
+        let (card, roster) = (card.clone(), roster.clone());
+        Lone(Box::new(move || {
+            div()
+                .w(width)
+                .child(ChangeCard::new(card.clone(), &roster))
+                .into_any_element()
+        }))
     });
+    redraw(cx);
+    cx.debug_bounds(selector).unwrap().size
+}
+
+fn assert_fixture_card_renders(cx: &mut TestAppContext, screen: Screen) {
+    let size = card_size(cx, screen, gpui::px(800.));
     assert_eq!(size.width, CHANGE_CARD_WIDTH, "{screen:?}");
     assert!(size.height > gpui::px(60.), "{screen:?}");
+}
+
+#[gpui::test]
+fn card_fits_a_narrow_pane(cx: &mut TestAppContext) {
+    let size = card_size(cx, Screen::SettingsFromChat, gpui::px(300.));
+    assert_eq!(size.width, gpui::px(300.));
 }
 
 #[gpui::test]

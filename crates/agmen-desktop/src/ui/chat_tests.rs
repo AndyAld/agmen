@@ -8,7 +8,7 @@ use crate::backend::{Backend, ChangeState, FixtureBackend, Screen, chat_snapshot
 use crate::ui::message::is_ledger;
 use crate::ui::test_support::{click, init, redraw};
 use crate::ui::text_input::bind_keys;
-use crate::ui::tokens::MOCKUP_REM;
+use crate::ui::tokens::{MOCKUP_REM, SPACE_12};
 
 /// The window's root in these tests: the chat in an 800 by 900 box.
 struct Host(Entity<ChatView>);
@@ -233,4 +233,50 @@ fn badge_counts_alerts_that_need_me(cx: &mut TestAppContext) {
     }
     // The first context is unused past here; it only has to exist.
     init(cx);
+}
+
+#[gpui::test]
+fn rows_sit_inside_the_streams_side_padding(cx: &mut TestAppContext) {
+    // Node 350, the mention row, is inset 12 px from the center column on
+    // both sides (stream node 137 pads [10, 12, 6, 12]).
+    let snapshot = chat_snapshot();
+    let mention = snapshot.messages[8].clone();
+    let (_chat, cx) = open_with(cx, snapshot);
+    let chat = cx.debug_bounds("chat").unwrap();
+    let row = cx.debug_bounds(sel(&mention, "row")).unwrap();
+    assert_eq!(row.left() - chat.left(), SPACE_12);
+    assert_eq!(chat.right() - row.right(), SPACE_12);
+}
+
+#[gpui::test]
+fn show_ledger_keeps_the_reading_position(cx: &mut TestAppContext) {
+    // 120 more messages, every other one a HEARTBEAT, so the chat scrolls
+    // and the toggle changes which rows exist.
+    let mut snapshot = chat_snapshot();
+    let review = snapshot.messages[7].clone();
+    for i in 0..60 {
+        let mut env = review.clone();
+        env.client.id = format!("01JE{i:022}").parse().unwrap();
+        snapshot.messages.push(env);
+        let beat = heartbeat(&snapshot.messages);
+        snapshot.messages.push(beat);
+    }
+    let (chat, cx) = open_with(cx, snapshot);
+    chat.update(cx, |chat, _| {
+        chat.list.scroll_to(ListOffset {
+            item_ix: 20,
+            offset_in_item: px(0.),
+        });
+    });
+    redraw(cx);
+    let top_message = |chat: &ChatView| chat.rows[chat.list.logical_scroll_top().item_ix];
+    let before = chat.read_with(cx, |chat, _| top_message(chat));
+
+    chat.update(cx, |chat, cx| chat.set_show_ledger(true, cx));
+    redraw(cx);
+    assert_eq!(chat.read_with(cx, |chat, _| top_message(chat)), before);
+
+    chat.update(cx, |chat, cx| chat.set_show_ledger(false, cx));
+    redraw(cx);
+    assert_eq!(chat.read_with(cx, |chat, _| top_message(chat)), before);
 }

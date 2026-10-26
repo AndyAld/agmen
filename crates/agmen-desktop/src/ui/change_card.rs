@@ -10,10 +10,9 @@ use gpui::{
     SharedString, Styled as _, Window, div,
 };
 
-use super::components::{Button, ButtonStyle, ChangeHandler, Color, Label, LabelSize};
+use super::components::{Button, ButtonStyle, Card, ChangeHandler, Color, Label, LabelSize};
 use super::tokens::{
-    BORDER_WIDTH, CHANGE_CARD_WIDTH, CHANGE_SETTING_WIDTH, PENDING_BORDER_TINT, RADIUS_LG, SPACE_6,
-    SPACE_8, SPACE_10, SPACE_12,
+    CHANGE_CARD_WIDTH, CHANGE_SETTING_WIDTH, SPACE_6, SPACE_8, TINT_PENDING, tint,
 };
 use crate::appearance::Appearance;
 use crate::backend::{self, Action, ChangeRow, ChangeState, PersonGroup};
@@ -21,7 +20,7 @@ use crate::backend::{self, Action, ChangeRow, ChangeState, PersonGroup};
 /// A backend change card, drawn by its state: waiting for Apply or Cancel,
 /// applied with Undo, or cancelled with no buttons. Tests find the head row
 /// as `"{id}:waiting"`, `"{id}:applied"` or `"{id}:cancelled"`, and the
-/// buttons as `"{id}:apply"`, `"{id}:cancel"`, `"{id}:undo"` and
+/// card as `"{id}:card"`, the buttons as `"{id}:apply"`, `"{id}:cancel"`, `"{id}:undo"` and
 /// `"{id}:audit-log"`.
 #[derive(IntoElement)]
 pub(crate) struct ChangeCard {
@@ -181,7 +180,7 @@ impl RenderOnce for ChangeCard {
         let card = self.card;
         let state = card.state;
         let border = if state == ChangeState::Pending {
-            theme.warning.opacity(PENDING_BORDER_TINT)
+            tint(theme.warning, TINT_PENDING)
         } else {
             theme.border
         };
@@ -195,8 +194,9 @@ impl RenderOnce for ChangeCard {
         let head = div()
             .debug_selector(|| head_selector)
             .flex()
+            .flex_wrap()
             .items_center()
-            .gap(SPACE_8)
+            .gap_x(SPACE_8)
             .child(
                 Label::new(title(state))
                     .size(LabelSize::Small)
@@ -264,20 +264,19 @@ impl RenderOnce for ChangeCard {
             ChangeState::Cancelled | ChangeState::Undone => None,
         };
 
+        let card_selector = format!("{}:card", card.id);
+        // Full width up to the mockup's, so a narrow pane does not cut it off.
         div()
-            .w(CHANGE_CARD_WIDTH)
-            .flex()
-            .flex_col()
-            .gap(SPACE_6)
-            .py(SPACE_10)
-            .px(SPACE_12)
-            .rounded(RADIUS_LG)
-            .border(BORDER_WIDTH)
-            .border_color(border)
-            .bg(theme.elevated_surface)
-            .child(head)
-            .children(rows)
-            .children(buttons.map(|buttons| buttons.flex().items_center().gap(SPACE_6)))
+            .debug_selector(|| card_selector)
+            .w_full()
+            .max_w(CHANGE_CARD_WIDTH)
+            .child(
+                Card::new()
+                    .border_color(border)
+                    .child(head)
+                    .children(rows)
+                    .children(buttons.map(|buttons| buttons.flex().items_center().gap(SPACE_6))),
+            )
     }
 }
 

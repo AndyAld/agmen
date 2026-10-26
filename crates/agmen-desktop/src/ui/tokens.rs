@@ -104,6 +104,8 @@ pub(crate) const RADIUS_MD: Pixels = px(5.);
 pub(crate) const RADIUS_INPUT: Pixels = px(6.);
 /// Menus and cards: the switch menu (node 1802) and the model picker (node 3355).
 pub(crate) const RADIUS_LG: Pixels = px(8.);
+/// A count pill, as the chat tab's alert count (console.py `tab_bar`).
+pub(crate) const RADIUS_PILL: Pixels = px(7.);
 
 // Controls in "Desktop · settings" (node 7908).
 /// The Follow Zed toggle's track (node 8098).
@@ -164,6 +166,11 @@ pub(crate) const TINT_MENTION: f32 = 20. / 255.;
 /// The take-over chip's border and the composer's model chip outline
 /// (0x55, node 380).
 pub(crate) const TINT_BORDER: f32 = 85. / 255.;
+/// A selected button or segment: the breadcrumb's primary button fill
+/// (0x26, console.py `breadcrumb`).
+pub(crate) const TINT_SELECTED: f32 = 38. / 255.;
+/// A waiting change card's `warning` border (0x88, node 7101).
+pub(crate) const TINT_PENDING: f32 = 136. / 255.;
 
 /// `color` at `alpha` of its own opacity: the one way views derive a fill
 /// the theme has no token for.
@@ -172,11 +179,6 @@ pub(crate) fn tint(color: Hsla, alpha: f32) -> Hsla {
     color.opacity(alpha)
 }
 
-/// How strongly a tinted badge's fill shows its color.
-pub(crate) const BADGE_TINT: f32 = 0.18;
-/// How strongly a waiting change card's border shows `warning` (node 7101
-/// draws it at alpha 0x88).
-pub(crate) const PENDING_BORDER_TINT: f32 = 0.53;
 /// How far a button on a card fades on hover. Hover is not drawn (nodes 7118,
 /// 7120); a fill change would vanish on the card's `elevated_surface`, which
 /// is the theme's `element_hover`.

@@ -10,7 +10,7 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _, Subscription, Window, div,
 };
 
-use super::components::{Chip, Color, KeyHint, Label, LabelSize};
+use super::components::{Chip, Color, Label, LabelSize};
 use super::text_input::{TextInput, TextInputEvent};
 use super::tokens::{
     BORDER_WIDTH, RADIUS_INPUT, SPACE_8, SPACE_10, SPACE_12, SPACE_14, TEXT_DEFAULT,
@@ -20,7 +20,7 @@ use crate::backend::{BackendError, Draft, Snapshot};
 
 /// The input's placeholder (node 384). The ⏎ hint after the input already
 /// says how to send, so the placeholder does not repeat it.
-pub(crate) const PLACEHOLDER: &str = "Ask or tell your listener · @ to mention someone else";
+const PLACEHOLDER: &str = "Ask or tell your listener · @ to mention someone else";
 
 /// How many lines the input grows to before it scrolls.
 const MAX_INPUT_LINES: usize = 6;
@@ -45,7 +45,7 @@ pub(crate) type SendHandler = Rc<dyn Fn(Draft, &mut Window, &mut App) -> Result<
 
 /// The handle an `@mention` at the start of `text` names, without trailing
 /// punctuation: `@andy/fx1, go` names `andy/fx1`.
-pub(crate) fn mention_handle(text: &str) -> Option<&str> {
+fn mention_handle(text: &str) -> Option<&str> {
     let rest = text.trim_start().strip_prefix('@')?;
     let token = rest.split_whitespace().next()?;
     // A mention at the start of the text begins right after the @.
@@ -140,6 +140,13 @@ impl Composer {
     }
 
     fn send(&self, body: &str, window: &mut Window, cx: &mut Context<Self>) {
+        // Blank text is not a message; the input keeps it, as if Enter had
+        // not been pressed.
+        if body.trim().is_empty() {
+            self.input
+                .update(cx, |input, cx| input.set_text(body, window, cx));
+            return;
+        }
         let draft = Draft {
             to: vec![self.target_for(body).id.clone()],
             body: body.to_owned(),
@@ -217,7 +224,8 @@ impl Render for Composer {
                             .text_size(TEXT_DEFAULT)
                             .child(self.input.clone()),
                     )
-                    .child(KeyHint::new("⏎").color(Color::Muted)),
+                    // The UI font at body size, as node 385 draws it.
+                    .child(Label::new("⏎").color(Color::Muted)),
             )
     }
 }

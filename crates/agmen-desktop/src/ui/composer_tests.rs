@@ -133,6 +133,19 @@ fn mention_after_the_start_does_not_retarget(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn whitespace_only_enter_sends_nothing(cx: &mut TestAppContext) {
+    let (composer, sent, cx) = open_composer(cx);
+    cx.simulate_input("   ");
+    cx.simulate_keystrokes("enter");
+    cx.simulate_keystrokes("shift-enter");
+    cx.simulate_keystrokes("enter");
+    assert!(sent.borrow().is_empty(), "{:?}", sent.borrow());
+    composer.read_with(cx, |composer, cx| {
+        assert_eq!(composer.input.read(cx).text(), "   \n");
+    });
+}
+
+#[gpui::test]
 fn model_chip_asks_for_the_picker(cx: &mut TestAppContext) {
     let (composer, _, cx) = open_composer(cx);
     let events = Rc::new(RefCell::new(Vec::new()));

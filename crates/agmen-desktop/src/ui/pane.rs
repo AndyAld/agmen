@@ -2,30 +2,31 @@
 //! chat", nodes 115 and 130), and a group that splits them side by side.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::rc::Rc;
 
 use agmen_proto::IdentityId;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _,
-    IntoElement, MouseButton, ParentElement as _, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div,
+    App, AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement,
+    MouseButton, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Subscription, Window, div,
 };
 
 use super::chat::ChatView;
-use super::components::{Button, ButtonStyle, Color, Label, LabelSize, Tab};
+use super::components::{Breadcrumb, Button, ButtonStyle, Color, Label, Tab};
 use super::ref_chip::RefEvent;
-use super::tokens::{BORDER_WIDTH, BREADCRUMB_HEIGHT, SPACE_8, SPACE_14, TAB_BAR_HEIGHT};
+use super::tokens::{BORDER_WIDTH, TAB_BAR_HEIGHT};
 use crate::backend::Snapshot;
-use crate::icons::UiIcon;
+use crate::icons::{FileIcons, UiIcon};
 use crate::refs::RefTarget;
 
 /// The most tabs one pane holds; opening another closes the leftmost
 /// inactive tab.
-pub(crate) const MAX_TABS: usize = 32;
+const MAX_TABS: usize = 32;
 
 /// The most panes the center splits into.
-pub(crate) const MAX_PANES: usize = 4;
+const MAX_PANES: usize = 4;
 
 /// A Settings page. Task 17 builds Appearance; the other pages follow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -77,7 +78,7 @@ struct AgentName {
 
 /// What tabs and breadcrumbs name, from the snapshot.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct PaneNames {
+struct PaneNames {
     project: String,
     agents: BTreeMap<IdentityId, AgentName>,
 }
@@ -88,7 +89,7 @@ fn file_name(path: &str) -> &str {
 }
 
 impl PaneNames {
-    pub(crate) fn from_snapshot(snapshot: &Snapshot) -> Self {
+    fn from_snapshot(snapshot: &Snapshot) -> Self {
         let agents = snapshot
             .roster
             .iter()
@@ -118,7 +119,7 @@ impl PaneNames {
 
     /// The tab a reference chip opens: an agent in the roster as its agent
     /// tab, anything else as a placeholder until Task 12 routes it.
-    pub(crate) fn tab_for_ref(&self, target: &RefTarget) -> TabItem {
+    fn tab_for_ref(&self, target: &RefTarget) -> TabItem {
         if let RefTarget::Agent(handle) = target
             && let Some((id, _)) = self.agents.iter().find(|(_, a)| a.handle == *handle)
         {
@@ -128,7 +129,7 @@ impl PaneNames {
     }
 
     /// The tab's label, as the mockup's tab bar (console.py `tab_bar`).
-    pub(crate) fn tab_label(&self, item: &TabItem) -> String {
+    fn tab_label(&self, item: &TabItem) -> String {
         match item {
             TabItem::Chat => "chat".into(),
             TabItem::Agent(id) => self.handle(id),
@@ -143,7 +144,7 @@ impl PaneNames {
     }
 
     /// The breadcrumb's parts, outermost first.
-    pub(crate) fn breadcrumb(&self, item: &TabItem) -> Vec<String> {
+    fn breadcrumb(&self, item: &TabItem) -> Vec<String> {
         match item {
             TabItem::File { worktree, path } | TabItem::Diff { worktree, path } => {
                 vec![worktree.clone(), path.clone()]
@@ -171,7 +172,9 @@ impl PaneNames {
             // file icons here once the Project panel reads them.
             TabItem::File { .. } => (UiIcon::File, Color::Muted),
             TabItem::Diff { .. } => (UiIcon::Diff, Color::Warning),
-            TabItem::RoleFile(role) => (UiIcon::File, Color::Role(role.clone().into())),
+            // The icon theme's file icon (`Pane::render_tab`), or Lucide's
+            // in the muted icon color, as the Roles panel draws it.
+            TabItem::RoleFile(_) => (UiIcon::File, Color::Muted),
             TabItem::Spec(_) => (UiIcon::File, Color::Warning),
             TabItem::Settings(_) => (UiIcon::Settings, Color::Placeholder),
             TabItem::Ref(RefTarget::File { .. }) => (UiIcon::File, Color::Accent),
@@ -219,8 +222,6 @@ const fn label_is_code(item: &TabItem) -> bool {
 /// What a pane tells its group.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PaneEvent {
-    /// The breadcrumb's "Show ledger" was switched on or off.
-    ShowLedger(bool),
     /// The person clicked in the pane.
     Focused,
     /// The last tab closed.
@@ -237,8 +238,8 @@ pub(crate) struct Pane {
     names: Rc<PaneNames>,
     tabs: Vec<TabItem>,
     active: usize,
-    show_ledger: bool,
-    /// The chat this pane shows on its Chat tab, if it hosts it.
+    /// The center's chat, which this pane shows on a Chat tab. The group
+    /// owns it too, so it outlives any one pane.
     chat: Option<Entity<ChatView>>,
     /// Redraws the tab bar when the chat's badge changes.
     _chat_changes: Option<Subscription>,
@@ -247,19 +248,18 @@ pub(crate) struct Pane {
 impl EventEmitter<PaneEvent> for Pane {}
 
 impl Pane {
-    pub(crate) fn new(number: usize, names: Rc<PaneNames>) -> Self {
+    fn new(number: usize, names: Rc<PaneNames>) -> Self {
         Self {
             number,
             names,
             tabs: Vec::new(),
             active: 0,
-            show_ledger: false,
             chat: None,
             _chat_changes: None,
         }
     }
 
-    /// Shows `chat` on this pane's Chat tab.
+    /// Shows `chat` on a Chat tab in this pane.
     pub(crate) fn set_chat(&mut self, chat: Entity<ChatView>, cx: &mut Context<Self>) {
         self._chat_changes = Some(cx.observe(&chat, |_, _, cx| cx.notify()));
         self.chat = Some(chat);
@@ -281,11 +281,6 @@ impl Pane {
 
     pub(crate) fn active_item(&self) -> Option<&TabItem> {
         self.tabs.get(self.active)
-    }
-
-    #[cfg_attr(not(test), expect(dead_code, reason = "only tests read it so far"))]
-    pub(crate) const fn show_ledger(&self) -> bool {
-        self.show_ledger
     }
 
     /// Activates `item`'s tab, opening one after the active tab when there
@@ -338,15 +333,6 @@ impl Pane {
         }
     }
 
-    fn set_show_ledger(&mut self, on: bool, cx: &mut Context<Self>) {
-        self.show_ledger = on;
-        if let Some(chat) = &self.chat {
-            chat.update(cx, |chat, cx| chat.set_show_ledger(on, cx));
-        }
-        cx.emit(PaneEvent::ShowLedger(on));
-        cx.notify();
-    }
-
     fn render_tab(&self, index: usize, item: &TabItem, cx: &mut Context<Self>) -> Tab {
         let (icon, icon_color) = self.names.tab_icon(item);
         let tab = Tab::new(
@@ -361,49 +347,43 @@ impl Pane {
         .on_close(cx.listener(move |this, _, _, cx| this.close(index, cx)));
         let tab = match (item, &self.chat) {
             (TabItem::Chat, Some(chat)) => tab.badge(chat.read(cx).badge()),
+            (TabItem::RoleFile(_), _) => match cx.try_global::<FileIcons>() {
+                Some(icons) => {
+                    let name = self.names.tab_label(item);
+                    tab.file_icon(icons.icon(Path::new(&name), false, false))
+                }
+                None => tab,
+            },
             _ => tab,
         };
         if label_is_code(item) { tab.code() } else { tab }
     }
 
-    fn render_breadcrumb(&self, item: &TabItem, cx: &mut Context<Self>) -> AnyElement {
-        let parts = self.names.breadcrumb(item);
-        let last = parts.len().saturating_sub(1);
-        let mut bar = div()
-            .h(BREADCRUMB_HEIGHT)
-            .w_full()
-            .flex()
-            .flex_none()
-            .items_center()
-            .gap(SPACE_8)
-            .px(SPACE_14)
-            .border_b(BORDER_WIDTH)
-            .border_color(super::rule_color(cx));
-        for (i, part) in parts.into_iter().enumerate() {
-            if i > 0 {
-                bar = bar.child(Label::new("›").size(LabelSize::Small).color(Color::Muted));
-            }
-            let color = if i == last {
-                Color::Default
-            } else {
-                Color::Placeholder
-            };
-            bar = bar.child(Label::new(part).code().color(color));
-        }
-        let on = self.show_ledger;
-        bar.child(div().flex_1())
-            .when(*item == TabItem::Chat, |this| {
-                this.child(
+    fn render_breadcrumb(&self, item: &TabItem, cx: &mut Context<Self>) -> Breadcrumb {
+        let parts = self
+            .names
+            .breadcrumb(item)
+            .into_iter()
+            .map(SharedString::from);
+        let bar = Breadcrumb::new(parts);
+        match (item, &self.chat) {
+            (TabItem::Chat, Some(chat)) => {
+                let on = chat.read(cx).show_ledger();
+                let chat = chat.clone();
+                bar.end(
                     Button::new(
                         SharedString::from(format!("pane-{}:show-ledger", self.number)),
                         "Show ledger",
                     )
                     .style(ButtonStyle::Subtle)
                     .selected(on)
-                    .on_click(cx.listener(move |this, _, _, cx| this.set_show_ledger(!on, cx))),
+                    .on_click(move |_, _, cx| {
+                        chat.update(cx, |chat, cx| chat.set_show_ledger(!on, cx));
+                    }),
                 )
-            })
-            .into_any_element()
+            }
+            _ => bar,
+        }
     }
 }
 
@@ -451,8 +431,7 @@ impl Render for Pane {
                     // shortcut: every other item shows its name until its
                     // view is built (agent and role file in Task 10, file
                     // and diff in Tasks 11 and 12, settings in 17, plan and
-                    // spec in 19). A second Chat tab has no chat of its own
-                    // yet, so it shows its name too.
+                    // spec in 19).
                     _ => div()
                         .flex_1()
                         .flex()
@@ -482,13 +461,6 @@ pub(crate) enum SplitError {
     OtherDirection,
 }
 
-/// What the center tells its owner.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PaneGroupEvent {
-    /// A pane's "Show ledger" was switched on or off.
-    ShowLedger(bool),
-}
-
 /// A pane and the subscription to its events, dropped together.
 #[derive(Debug)]
 struct Member {
@@ -506,17 +478,21 @@ pub(crate) struct PaneGroup {
     active: usize,
     /// The next pane's number; numbers are not reused.
     next_number: usize,
+    /// The center's one chat. The group holds it, so closing its tab or
+    /// its pane keeps its composer text, alerts and backend updates, and
+    /// any pane can open it again.
+    chat: Option<Entity<ChatView>>,
     _chat_refs: Option<Subscription>,
 }
 
-impl EventEmitter<PaneGroupEvent> for PaneGroup {}
-
 impl PaneGroup {
-    /// One pane with the chat open, showing `chat` when given. A click on
-    /// one of its reference chips opens a tab, a ⌘-click a split.
+    /// One pane with the chat's tab active and `tabs` open after it,
+    /// showing `chat` when given. A click on one of the chat's reference
+    /// chips opens a tab, a ⌘-click a split.
     pub(crate) fn new(
         snapshot: &Snapshot,
         chat: Option<Entity<ChatView>>,
+        tabs: Vec<TabItem>,
         cx: &mut Context<Self>,
     ) -> Self {
         let chat_refs = chat
@@ -528,17 +504,38 @@ impl PaneGroup {
             direction: None,
             active: 0,
             next_number: 0,
+            chat,
             _chat_refs: chat_refs,
         };
-        group.add_pane(TabItem::Chat, chat, cx);
+        let pane = group.add_pane(TabItem::Chat, cx);
+        pane.update(cx, |pane, cx| {
+            for item in tabs {
+                pane.open(item, cx);
+            }
+            pane.activate(0, cx);
+        });
         group
     }
 
-    /// Opens `item` in the active pane.
+    /// The pane with a Chat tab, if one has it.
+    fn chat_pane(&self, cx: &App) -> Option<usize> {
+        self.members
+            .iter()
+            .position(|m| m.pane.read(cx).tabs.contains(&TabItem::Chat))
+    }
+
+    /// Opens `item` in the active pane. The chat has one tab in the
+    /// center: when a pane has it, that pane and tab become active.
     pub(crate) fn open(&mut self, item: TabItem, cx: &mut Context<Self>) {
+        if item == TabItem::Chat
+            && let Some(index) = self.chat_pane(cx)
+        {
+            self.active = index;
+        }
         if let Some(member) = self.members.get(self.active) {
             member.pane.update(cx, |pane, cx| pane.open(item, cx));
         }
+        cx.notify();
     }
 
     /// Opens a reference chip's target: in the active pane on a click, in
@@ -573,6 +570,8 @@ impl PaneGroup {
     }
 
     /// Opens `item` in a new pane after the active one, in `direction`.
+    /// The chat has one tab: when a pane has it, that pane becomes active
+    /// instead and is returned.
     ///
     /// # Errors
     ///
@@ -584,6 +583,14 @@ impl PaneGroup {
         item: TabItem,
         cx: &mut Context<Self>,
     ) -> Result<Entity<Pane>, SplitError> {
+        if item == TabItem::Chat
+            && let Some(index) = self.chat_pane(cx)
+            && let Some(member) = self.members.get(index)
+        {
+            let pane = member.pane.clone();
+            self.open(item, cx);
+            return Ok(pane);
+        }
         if self.members.len() >= MAX_PANES {
             return Err(SplitError::Full);
         }
@@ -593,21 +600,17 @@ impl PaneGroup {
         // shortcut: one direction per center, so the group is a flat list;
         // nested splits need a tree of groups if people ask for them.
         self.direction = Some(direction);
-        let pane = self.add_pane(item, None, cx);
+        let pane = self.add_pane(item, cx);
         cx.notify();
         Ok(pane)
     }
 
     /// Makes a pane holding `item` and puts it after the active pane.
-    fn add_pane(
-        &mut self,
-        item: TabItem,
-        chat: Option<Entity<ChatView>>,
-        cx: &mut Context<Self>,
-    ) -> Entity<Pane> {
+    fn add_pane(&mut self, item: TabItem, cx: &mut Context<Self>) -> Entity<Pane> {
         let number = self.next_number;
         self.next_number += 1;
         let names = self.names.clone();
+        let chat = self.chat.clone();
         let pane = cx.new(|cx| {
             let mut pane = Pane::new(number, names);
             if let Some(chat) = chat {
@@ -638,9 +641,7 @@ impl PaneGroup {
             return;
         };
         match *event {
-            PaneEvent::ShowLedger(on) => cx.emit(PaneGroupEvent::ShowLedger(on)),
             PaneEvent::Focused => self.active = index,
-            // The last pane stays, empty, so the center always has one.
             PaneEvent::Emptied if self.members.len() > 1 => {
                 self.members.remove(index);
                 if index < self.active || self.active >= self.members.len() {
@@ -651,7 +652,13 @@ impl PaneGroup {
                 }
                 cx.notify();
             }
-            PaneEvent::Emptied => {}
+            // The last pane stays and falls back to the chat, so the center
+            // is never blank with nothing to reopen it.
+            PaneEvent::Emptied => {
+                if self.chat.is_some() {
+                    pane.update(cx, |pane, cx| pane.open(TabItem::Chat, cx));
+                }
+            }
         }
     }
 }

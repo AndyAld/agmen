@@ -11,7 +11,9 @@ use gpui::{
 
 use super::{ChangeHandler, Color, Label, LabelSize};
 use crate::appearance::Appearance;
-use crate::ui::tokens::{BADGE_TINT, BORDER_WIDTH, RADIUS_MD, SPACE_3, SPACE_10, SPACE_12};
+use crate::ui::tokens::{
+    BORDER_WIDTH, RADIUS_MD, SPACE_3, SPACE_10, SPACE_12, TINT_SELECTED, tint,
+};
 
 #[derive(IntoElement)]
 pub(crate) struct Segmented {
@@ -101,7 +103,7 @@ impl RenderOnce for Segmented {
                 .focus_visible(move |style| style.bg(hover))
                 .map(|this| {
                     if selected {
-                        this.bg(theme.text_accent.opacity(BADGE_TINT))
+                        this.bg(tint(theme.text_accent, TINT_SELECTED))
                     } else {
                         this.hover(move |style| style.bg(hover)).when_some(
                             self.on_change.clone(),

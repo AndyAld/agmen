@@ -38,6 +38,15 @@ impl UtcOffset {
         let seconds = objc2_foundation::NSTimeZone::localTimeZone().secondsFromGMT();
         i32::try_from(seconds / 60).map_or(Self::default(), Self::from_minutes)
     }
+
+    /// UTC: the S8 spike reads the zone on macOS only.
+    // shortcut: Windows and Linux show UTC; read their zone when the app
+    // ships there (after S8).
+    #[cfg(not(target_os = "macos"))]
+    #[must_use]
+    pub(crate) fn system() -> Self {
+        Self::default()
+    }
 }
 
 #[cfg(test)]
@@ -52,9 +61,14 @@ mod tests {
         assert_eq!(UtcOffset::from_minutes(i32::MIN).minutes(), 0);
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn system_offset_is_a_real_zone() {
         assert!(UtcOffset::system().minutes().abs() <= MAX_OFFSET_MINUTES);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn system_offset_is_utc_off_macos() {
+        assert_eq!(UtcOffset::system(), UtcOffset::default());
     }
 }

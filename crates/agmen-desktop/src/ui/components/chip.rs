@@ -1,5 +1,6 @@
-//! A small rounded label on a surface fill: the title bar's listener chip and
-//! the composer's target and model chips.
+//! A small rounded label: the title bar's listener chip, the composer's
+//! target and model chips, a message's "Open in terminal" chip and the
+//! reference chips in message text.
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -10,9 +11,24 @@ use gpui::{
 use super::{Color, Label, LabelSize};
 use crate::appearance::Appearance;
 use crate::ui::tokens::{
-    BORDER_WIDTH, DOT_SIZE, RADIUS_MD, RADIUS_SM, SPACE_2, SPACE_3, SPACE_5, SPACE_6, SPACE_7,
-    SPACE_8, TINT_BORDER, tint,
+    BORDER_WIDTH, DOT_SIZE, RADIUS_MD, RADIUS_REF, RADIUS_SM, SPACE_1, SPACE_2, SPACE_3, SPACE_4,
+    SPACE_5, SPACE_6, SPACE_7, SPACE_8, TINT_BORDER, TINT_FILL, tint,
 };
+
+/// The chip's padding, radius and default fill.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum ChipShape {
+    /// The title bar's chip: surface fill, 3 by 8 padding.
+    #[default]
+    Default,
+    /// The composer's chips (nodes 376 and 380): selected fill, 2 by 7.
+    Compact,
+    /// A chip in a message's head row (node 300): no fill of its own, 1 by 7.
+    Inline,
+    /// A reference in message text (`rich_body`): no fill of its own, 4 px
+    /// at the sides only, a small radius.
+    Reference,
+}
 
 #[derive(IntoElement)]
 pub(crate) struct Chip {
@@ -20,10 +36,15 @@ pub(crate) struct Chip {
     color: Color,
     dot: Option<Color>,
     code: bool,
-    compact: bool,
+    shape: ChipShape,
+    tint: Option<Color>,
     outline: Option<Color>,
     leading: Option<AnyElement>,
     trailing: Option<AnyElement>,
+    flush_start: bool,
+    flush_end: bool,
+    underline: bool,
+    shrink: bool,
 }
 
 impl std::fmt::Debug for Chip {
@@ -31,6 +52,7 @@ impl std::fmt::Debug for Chip {
         f.debug_struct("Chip")
             .field("label", &self.label)
             .field("color", &self.color)
+            .field("shape", &self.shape)
             .finish_non_exhaustive()
     }
 }
@@ -43,10 +65,15 @@ impl Chip {
             color: Color::Placeholder,
             dot: None,
             code: false,
-            compact: false,
+            shape: ChipShape::Default,
+            tint: None,
             outline: None,
             leading: None,
             trailing: None,
+            flush_start: false,
+            flush_end: false,
+            underline: false,
+            shrink: false,
         }
     }
 
@@ -54,7 +81,32 @@ impl Chip {
     /// padding and a smaller radius.
     #[must_use]
     pub(crate) const fn compact(mut self) -> Self {
-        self.compact = true;
+        self.shape = ChipShape::Compact;
+        self
+    }
+
+    /// A chip in a line of text, such as a message's head row (node 300):
+    /// 1 by 7 padding and no fill unless tinted.
+    #[must_use]
+    pub(crate) const fn inline(mut self) -> Self {
+        self.shape = ChipShape::Inline;
+        self
+    }
+
+    /// A reference in message text (`rich_body` in console.py): 4 px at
+    /// the sides, a 3 px radius, and no fill unless tinted.
+    #[must_use]
+    pub(crate) const fn reference(mut self) -> Self {
+        self.shape = ChipShape::Reference;
+        self
+    }
+
+    /// Fills the chip with `color` at the mockup's tint and sets the label
+    /// in it, as a verb badge does.
+    #[must_use]
+    pub(crate) fn tinted(mut self, color: Color) -> Self {
+        self.color = color.clone();
+        self.tint = Some(color);
         self
     }
 
@@ -97,29 +149,83 @@ impl Chip {
         self.code = true;
         self
     }
+
+    /// No padding before the label, because punctuation touches it there
+    /// (mockup fix 54).
+    #[must_use]
+    pub(crate) const fn flush_start(mut self) -> Self {
+        self.flush_start = true;
+        self
+    }
+
+    /// No padding after the label, because punctuation follows it (mockup
+    /// fix 54).
+    #[must_use]
+    pub(crate) const fn flush_end(mut self) -> Self {
+        self.flush_end = true;
+        self
+    }
+
+    /// Underlines the label, as a reference chip with no fill.
+    #[must_use]
+    pub(crate) const fn underline(mut self) -> Self {
+        self.underline = true;
+        self
+    }
+
+    /// Lets the chip shrink to the space it has and wrap its label there,
+    /// so a long reference stays inside a narrow column.
+    #[must_use]
+    pub(crate) const fn shrink(mut self) -> Self {
+        self.shrink = true;
+        self
+    }
 }
 
 impl RenderOnce for Chip {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = &cx.global::<Appearance>().theme;
-        let label = Label::new(self.label)
-            .size(LabelSize::Small)
-            .color(self.color);
-        let base = div().flex().flex_none().items_center();
-        let styled = if self.compact {
-            base.gap(SPACE_5)
-                .py(SPACE_2)
-                .px(SPACE_7)
-                .rounded(RADIUS_SM)
-                .bg(theme.element_selected)
+        let label = Label::new(self.label).color(self.color);
+        let label = if self.code {
+            label.code()
         } else {
-            base.gap(SPACE_6)
-                .py(SPACE_3)
-                .px(SPACE_8)
-                .rounded(RADIUS_MD)
-                .bg(theme.elevated_surface)
+            label.size(LabelSize::Small)
         };
-        styled
+        let label = if self.underline {
+            label.underline()
+        } else {
+            label
+        };
+        let label = if self.shrink { label.wrap() } else { label };
+        // A reference sits in a line of text, so it pads only its sides.
+        let (py, px, radius, gap) = match self.shape {
+            ChipShape::Default => (Some(SPACE_3), SPACE_8, RADIUS_MD, SPACE_6),
+            ChipShape::Compact => (Some(SPACE_2), SPACE_7, RADIUS_SM, SPACE_5),
+            ChipShape::Inline => (Some(SPACE_1), SPACE_7, RADIUS_SM, SPACE_5),
+            ChipShape::Reference => (None, SPACE_4, RADIUS_REF, SPACE_4),
+        };
+        let fill = match (&self.tint, self.shape) {
+            (Some(color), _) => Some(tint(color.hsla(theme), TINT_FILL)),
+            (None, ChipShape::Default) => Some(theme.elevated_surface),
+            (None, ChipShape::Compact) => Some(theme.element_selected),
+            (None, ChipShape::Inline | ChipShape::Reference) => None,
+        };
+        div()
+            .flex()
+            .items_center()
+            .gap(gap)
+            .when_some(py, gpui::Styled::py)
+            .when(!self.flush_start, |this| this.pl(px))
+            .when(!self.flush_end, |this| this.pr(px))
+            .rounded(radius)
+            .map(|this| {
+                if self.shrink {
+                    this.min_w_0()
+                } else {
+                    this.flex_none()
+                }
+            })
+            .when_some(fill, gpui::Styled::bg)
             .when_some(self.outline, |this, outline| {
                 this.border(BORDER_WIDTH)
                     .border_color(tint(outline.hsla(theme), TINT_BORDER))
@@ -134,7 +240,7 @@ impl RenderOnce for Chip {
                 )
             })
             .children(self.leading)
-            .child(if self.code { label.code() } else { label })
+            .child(label)
             .children(self.trailing)
     }
 }
@@ -182,5 +288,68 @@ mod tests {
         // adds 1 px on each side.
         assert_eq!(compact.height, plain.height);
         assert!(compact.width > plain.width);
+    }
+
+    #[gpui::test]
+    fn inline_chip_pads_seven_by_one_inside_its_outline(cx: &mut TestAppContext) {
+        // Node 300: padding [1, 7, 1, 7] and a 1 px tinted stroke.
+        let chip = rendered_size(cx, || {
+            Chip::new("Open in terminal")
+                .inline()
+                .tinted(Color::Accent)
+                .outline(Color::Accent)
+                .into_any_element()
+        });
+        let mut cx2 = TestAppContext::single();
+        let text = rendered_size(&mut cx2, || {
+            Label::new("Open in terminal")
+                .size(LabelSize::Small)
+                .into_any_element()
+        });
+        assert_eq!(chip.width - text.width, px(16.));
+        assert_eq!(chip.height - text.height, px(4.));
+    }
+
+    #[gpui::test]
+    fn reference_chip_pads_its_sides_unless_flush(cx: &mut TestAppContext) {
+        let make = |flush: bool| {
+            move || {
+                let chip = Chip::new("4d9fdc8").reference().code().underline();
+                if flush { chip.flush_end() } else { chip }.into_any_element()
+            }
+        };
+        let padded = rendered_size(cx, make(false));
+        let mut cx2 = TestAppContext::single();
+        let flush = rendered_size(&mut cx2, make(true));
+        let mut cx3 = TestAppContext::single();
+        let text = rendered_size(&mut cx3, || Label::new("4d9fdc8").code().into_any_element());
+        assert_eq!(padded.width - flush.width, SPACE_4);
+        assert_eq!(padded.width - text.width, SPACE_4 * 2.);
+        assert_eq!(padded.height, text.height);
+    }
+
+    #[gpui::test]
+    fn shrinking_chip_wraps_in_a_narrow_column(cx: &mut TestAppContext) {
+        let make = |shrink: bool| {
+            move || {
+                let chip = Chip::new("crates/agmen-desktop/src/backend/fixture_data.rs:239")
+                    .reference()
+                    .code()
+                    .tinted(Color::Accent);
+                div()
+                    .w(px(100.))
+                    .flex()
+                    .child(if shrink { chip.shrink() } else { chip })
+                    .into_any_element()
+            }
+        };
+        let one_line = rendered_size(cx, make(false));
+        let mut cx2 = TestAppContext::single();
+        let wrapped = rendered_size(&mut cx2, make(true));
+        assert_eq!(wrapped.width, px(100.));
+        assert!(
+            wrapped.height > one_line.height,
+            "{wrapped:?} vs {one_line:?}"
+        );
     }
 }

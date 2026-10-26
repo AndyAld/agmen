@@ -8,13 +8,16 @@ use gpui::{
 
 use super::{Color, Label, LabelSize};
 use crate::appearance::Appearance;
-use crate::ui::tokens::{RADIUS_SM, SPACE_1, SPACE_5, SPACE_7, TINT_FILL, tint};
+use crate::ui::tokens::{
+    RADIUS_PILL, RADIUS_SM, SPACE_1, SPACE_5, SPACE_6, SPACE_7, TINT_FILL, tint,
+};
 
 #[derive(Debug, IntoElement)]
 pub(crate) struct Badge {
     label: SharedString,
     color: Color,
     solid: bool,
+    pill: bool,
     code: bool,
     leading: Option<SharedString>,
 }
@@ -27,6 +30,7 @@ impl Badge {
             label: label.into(),
             color,
             solid: false,
+            pill: false,
             code: false,
             leading: None,
         }
@@ -48,6 +52,16 @@ impl Badge {
         self
     }
 
+    /// A solid count pill: fully rounded, padded only at the sides, with a
+    /// bold extra small label, as the chat tab's alert count (console.py
+    /// `tab_bar`).
+    #[must_use]
+    pub(crate) const fn pill(mut self) -> Self {
+        self.solid = true;
+        self.pill = true;
+        self
+    }
+
     /// A bold glyph before the label, as the "!" of "! 1 needs you".
     #[must_use]
     pub(crate) fn leading(mut self, glyph: impl Into<SharedString>) -> Self {
@@ -65,23 +79,23 @@ impl RenderOnce for Badge {
         } else {
             (tint(fill, TINT_FILL), self.color.clone())
         };
-        let label = Label::new(self.label)
-            .size(LabelSize::Small)
-            .color(text.clone());
-        let label = if self.code {
+        let label = Label::new(self.label).color(text.clone());
+        let label = if self.pill {
+            label.size(LabelSize::XSmall).weight(FontWeight::BOLD)
+        } else if self.code {
             label.code()
         } else {
-            label.weight(FontWeight::SEMIBOLD)
+            label.size(LabelSize::Small).weight(FontWeight::SEMIBOLD)
         };
-        div()
-            .flex()
-            .flex_none()
-            .items_center()
-            .gap(SPACE_5)
-            .py(SPACE_1)
-            .px(if self.solid { SPACE_7 } else { SPACE_5 })
-            .rounded(RADIUS_SM)
-            .bg(bg)
+        let base = div().flex().flex_none().items_center().gap(SPACE_5).bg(bg);
+        let shaped = if self.pill {
+            base.px(SPACE_5).rounded(RADIUS_PILL)
+        } else {
+            base.py(SPACE_1)
+                .px(if self.solid { SPACE_7 } else { SPACE_6 })
+                .rounded(RADIUS_SM)
+        };
+        shaped
             .when_some(self.leading, |this, glyph| {
                 this.child(
                     Label::new(glyph)
@@ -113,6 +127,35 @@ mod tests {
             Badge::new("DONE", Color::Success).code().into_any_element()
         });
         assert!(size.width > px(10.));
+    }
+
+    #[gpui::test]
+    fn tinted_badge_pads_six_each_side(cx: &mut TestAppContext) {
+        // Node 145: the verb badge pads [1, 6, 1, 6].
+        let badge = rendered_size(cx, || {
+            Badge::new("DONE", Color::Success).code().into_any_element()
+        });
+        let mut cx2 = TestAppContext::single();
+        let text = rendered_size(&mut cx2, || Label::new("DONE").code().into_any_element());
+        assert_eq!(badge.width - text.width, px(12.));
+        assert_eq!(badge.height - text.height, px(2.));
+    }
+
+    #[gpui::test]
+    fn pill_pads_five_each_side_and_none_above(cx: &mut TestAppContext) {
+        // console.py `tab_bar`: the count pads [0, 5, 0, 5] around 10 px bold.
+        let pill = rendered_size(cx, || {
+            Badge::new("1", Color::Error).pill().into_any_element()
+        });
+        let mut cx2 = TestAppContext::single();
+        let text = rendered_size(&mut cx2, || {
+            Label::new("1")
+                .size(LabelSize::XSmall)
+                .weight(FontWeight::BOLD)
+                .into_any_element()
+        });
+        assert_eq!(pill.width - text.width, px(10.));
+        assert_eq!(pill.height, text.height);
     }
 
     #[gpui::test]

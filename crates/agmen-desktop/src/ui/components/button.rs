@@ -11,8 +11,8 @@ use gpui::{
 use super::{ClickHandler, Color, Label, LabelSize};
 use crate::appearance::Appearance;
 use crate::ui::tokens::{
-    BADGE_TINT, BORDER_WIDTH, BUTTON_HOVER_OPACITY, RADIUS_MD, RADIUS_SM, SPACE_1, SPACE_3,
-    SPACE_5, SPACE_7, SPACE_9, SPACE_10,
+    BORDER_WIDTH, BUTTON_HOVER_OPACITY, RADIUS_MD, RADIUS_SM, SPACE_1, SPACE_3, SPACE_5, SPACE_7,
+    SPACE_9, SPACE_10, TINT_SELECTED, tint,
 };
 
 /// How the button is drawn.
@@ -143,7 +143,7 @@ impl RenderOnce for Button {
                 .hover(move |style| style.bg(hover)),
         };
         let styled = if selected {
-            styled.bg(theme.text_accent.opacity(BADGE_TINT))
+            styled.bg(tint(theme.text_accent, TINT_SELECTED))
         } else {
             styled
         };

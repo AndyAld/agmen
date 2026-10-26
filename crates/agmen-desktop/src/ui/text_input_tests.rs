@@ -175,6 +175,22 @@ fn multiline_grows_to_max_lines(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn long_placeholder_stays_on_one_line(cx: &mut TestAppContext) {
+    // The composer's placeholder is clipped, not wrapped, so an empty
+    // composer keeps its one line height (Zed truncates placeholders).
+    let placeholder = "Ask or tell your listener · @ to mention someone else ".repeat(3);
+    let (input, cx) = setup_with(cx, move |i| i.placeholder(placeholder).multiline(6));
+    let lh = cx.update(|window, _| window.line_height());
+    input.read_with(cx, |input, _| {
+        let height = input.last_bounds.unwrap().size.height;
+        assert!(
+            (height - lh).abs() < gpui::px(0.5),
+            "height {height:?}, line {lh:?}"
+        );
+    });
+}
+
+#[gpui::test]
 fn up_and_down_move_between_lines(cx: &mut TestAppContext) {
     let (input, cx) = setup_with(cx, |i| i.multiline(6));
     input.update_in(cx, |input, window, cx| {
