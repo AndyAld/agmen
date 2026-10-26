@@ -106,3 +106,28 @@ fn diff_columns_use_the_code_font_cell(cx: &mut TestAppContext) {
     let text = cx.debug_bounds("diff-row:3:text").unwrap();
     assert!(close(text.left(), cell * 4.), "{text:?} {cell:?}");
 }
+
+#[test]
+fn diff_code_keeps_function_colors_past_conflict_markers() {
+    // V103: the base side's conflict markers made tree-sitter read the rest
+    // of the hunk as types, so `main`, `default` and `run` drew in the type
+    // color. Each side is highlighted on its own, as Zed does.
+    let rows = layout_rows(&main_rs_hunks(), Language::Rust);
+    let name_of = |needle: &str| {
+        rows.iter()
+            .find_map(|row| match row {
+                Row::Line { line, .. } => line.text.find(needle).map(|at| {
+                    line.highlights()
+                        .iter()
+                        .find(|(range, _)| range.contains(&at))
+                        .map(|(_, name)| *name)
+                }),
+                Row::Header(_) => None,
+            })
+            .flatten()
+    };
+    assert_eq!(name_of("main"), Some("function"));
+    assert_eq!(name_of("default"), Some("function"));
+    assert_eq!(name_of("run"), Some("function"));
+    assert_eq!(name_of("Result"), Some("type"));
+}
