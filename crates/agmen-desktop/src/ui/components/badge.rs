@@ -8,13 +8,14 @@ use gpui::{
 
 use super::{Color, Label, LabelSize};
 use crate::appearance::Appearance;
-use crate::ui::tokens::{BADGE_TINT, RADIUS_SM, SPACE_1, SPACE_5, SPACE_7};
+use crate::ui::tokens::{RADIUS_SM, SPACE_1, SPACE_5, SPACE_7, TINT_FILL, tint};
 
 #[derive(Debug, IntoElement)]
 pub(crate) struct Badge {
     label: SharedString,
     color: Color,
     solid: bool,
+    code: bool,
     leading: Option<SharedString>,
 }
 
@@ -26,8 +27,17 @@ impl Badge {
             label: label.into(),
             color,
             solid: false,
+            code: false,
             leading: None,
         }
+    }
+
+    /// Sets the label in the code font at regular weight, as a message's
+    /// verb (node 145).
+    #[must_use]
+    pub(crate) const fn code(mut self) -> Self {
+        self.code = true;
+        self
     }
 
     /// Fills the badge with its color and sets the text on it in the
@@ -53,12 +63,16 @@ impl RenderOnce for Badge {
         let (bg, text) = if self.solid {
             (fill, Color::Background)
         } else {
-            (fill.opacity(BADGE_TINT), self.color.clone())
+            (tint(fill, TINT_FILL), self.color.clone())
         };
         let label = Label::new(self.label)
             .size(LabelSize::Small)
-            .color(text.clone())
-            .weight(FontWeight::SEMIBOLD);
+            .color(text.clone());
+        let label = if self.code {
+            label.code()
+        } else {
+            label.weight(FontWeight::SEMIBOLD)
+        };
         div()
             .flex()
             .flex_none()
@@ -89,6 +103,15 @@ mod tests {
     #[gpui::test]
     fn badge_renders(cx: &mut TestAppContext) {
         let size = rendered_size(cx, || Badge::new("DONE", Color::Success).into_any_element());
+        assert!(size.width > px(10.));
+    }
+
+    #[gpui::test]
+    fn code_badge_renders(cx: &mut TestAppContext) {
+        assert!(Badge::new("DONE", Color::Success).code().code);
+        let size = rendered_size(cx, || {
+            Badge::new("DONE", Color::Success).code().into_any_element()
+        });
         assert!(size.width > px(10.));
     }
 

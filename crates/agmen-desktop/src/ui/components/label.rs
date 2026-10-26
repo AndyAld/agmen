@@ -37,6 +37,7 @@ pub(crate) struct Label {
     code: bool,
     wrap: bool,
     strikethrough: bool,
+    underline: bool,
 }
 
 impl Label {
@@ -50,6 +51,7 @@ impl Label {
             code: false,
             wrap: false,
             strikethrough: false,
+            underline: false,
         }
     }
 
@@ -96,6 +98,13 @@ impl Label {
         self.strikethrough = true;
         self
     }
+
+    /// Underlines the text, as a reference chip with no fill.
+    #[must_use]
+    pub(crate) const fn underline(mut self) -> Self {
+        self.underline = true;
+        self
+    }
 }
 
 impl RenderOnce for Label {
@@ -117,6 +126,7 @@ impl RenderOnce for Label {
         sized
             .when_some(self.weight, gpui::Styled::font_weight)
             .when(self.strikethrough, gpui::Styled::line_through)
+            .when(self.underline, gpui::Styled::underline)
             .map(|this| {
                 if self.wrap {
                     this.flex_1().min_w_0()
@@ -170,6 +180,11 @@ mod tests {
                 .into_any_element()
         });
         assert_eq!(struck, plain);
+    }
+
+    #[test]
+    fn underline_is_a_distinct_style() {
+        assert_ne!(Label::new("#9").underline(), Label::new("#9"));
     }
 
     #[gpui::test]

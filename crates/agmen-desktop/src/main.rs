@@ -31,9 +31,12 @@ mod notify;
     )
 )]
 mod plan;
-#[expect(
-    dead_code,
-    reason = "the chat's reference chips use it from Task 9 of the desktop plan"
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the chat's reference chips use it from Task 9 of the desktop plan"
+    )
 )]
 mod refs;
 mod spike;

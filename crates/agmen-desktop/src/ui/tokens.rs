@@ -5,7 +5,7 @@
 //! Text sizes are rems, so they scale with the person's `ui_font_size`: the
 //! window's rem size is that font size, as in Zed.
 
-use gpui::{Pixels, Rems, px};
+use gpui::{Hsla, Pixels, Rems, px};
 
 /// `px` pixels as rems at Zed's 16 px base (Zed's `rems_from_px`).
 #[must_use]
@@ -87,6 +87,9 @@ pub(crate) const MONO_CELL_HEIGHT: Pixels = px(18.);
 pub(crate) const SPACE_1: Pixels = px(1.);
 pub(crate) const SPACE_2: Pixels = px(2.);
 pub(crate) const SPACE_3: Pixels = px(3.);
+/// The gap between words in a message body, and a reference chip's side
+/// padding (`rich_body` in console.py).
+pub(crate) const SPACE_4: Pixels = px(4.);
 pub(crate) const SPACE_5: Pixels = px(5.);
 pub(crate) const SPACE_6: Pixels = px(6.);
 pub(crate) const SPACE_7: Pixels = px(7.);
@@ -100,6 +103,8 @@ pub(crate) const SPACE_16: Pixels = px(16.);
 
 // Radii.
 pub(crate) const RADIUS_XS: Pixels = px(2.);
+/// A reference chip in a message body (`rich_body`).
+pub(crate) const RADIUS_REF: Pixels = px(3.);
 pub(crate) const RADIUS_SM: Pixels = px(4.);
 pub(crate) const RADIUS_MD: Pixels = px(5.);
 /// Menus and cards: the switch menu (node 1802) and the model picker (node 3355).
@@ -141,9 +146,37 @@ pub(crate) const DOCK_BUTTON: gpui::Size<Pixels> = gpui::Size {
 pub(crate) const LEADING_SLOT: Pixels = px(10.);
 pub(crate) const ICON_MD: Pixels = px(14.);
 pub(crate) const AVATAR_SIZE: Pixels = px(22.);
+/// A chat message's avatar (node 139).
+pub(crate) const MESSAGE_AVATAR_SIZE: Pixels = px(24.);
+/// How far a reply sits right of its parent: the avatar and the gap after
+/// it, so the reply's avatar lines up with the parent's text (node 227).
+pub(crate) const REPLY_INDENT: Pixels = px(34.);
+/// The bar on the left of a message that mentions me (node 350).
+pub(crate) const MENTION_BAR_WIDTH: Pixels = px(2.);
+/// A reference's hover card.
+pub(crate) const REF_CARD_WIDTH: Pixels = px(300.);
 pub(crate) const DOT_SIZE: Pixels = px(7.);
 pub(crate) const BORDER_WIDTH: Pixels = px(1.);
 pub(crate) const PROGRESS_HEIGHT: Pixels = px(4.);
+
+// Alpha tints. The theme has no tokens for these fills, so they come from a
+// base token through `tint` (mockup fix 58). Values are the mockup's alpha
+// bytes over 255.
+/// Verb badges, filled reference chips and the take-over chip (0x22).
+pub(crate) const TINT_FILL: f32 = 34. / 255.;
+/// A chat message's avatar (0x33).
+pub(crate) const TINT_AVATAR: f32 = 51. / 255.;
+/// A message that mentions me (0x14).
+pub(crate) const TINT_MENTION: f32 = 20. / 255.;
+/// The take-over chip's border (0x55).
+pub(crate) const TINT_BORDER: f32 = 85. / 255.;
+
+/// `color` at `alpha` of its own opacity: the one way views derive a fill
+/// the theme has no token for.
+#[must_use]
+pub(crate) fn tint(color: Hsla, alpha: f32) -> Hsla {
+    color.opacity(alpha)
+}
 
 /// How strongly a tinted badge's fill shows its color.
 pub(crate) const BADGE_TINT: f32 = 0.18;
@@ -170,6 +203,15 @@ mod tests {
         assert!((at_15(TEXT_DEFAULT) - 13.125).abs() < 0.001);
         assert!((at_15(TEXT_SMALL) - 11.25).abs() < 0.001);
         assert!((at_15(TEXT_XSMALL) - 9.375).abs() < 0.001);
+    }
+
+    #[test]
+    fn tint_scales_alpha_only() {
+        let base = gpui::hsla(0.1, 0.5, 0.5, 1.);
+        let tinted = tint(base, TINT_FILL);
+        assert!((tinted.a - 34. / 255.).abs() < 0.0001);
+        assert_eq!((tinted.h, tinted.s, tinted.l), (base.h, base.s, base.l));
+        assert!((tint(base, TINT_AVATAR).a - 0.2).abs() < 0.0001);
     }
 
     #[test]

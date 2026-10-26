@@ -89,6 +89,11 @@ impl Known {
         known
     }
 
+    /// The handle of the identity `id`, when the roster or the chat names it.
+    pub(crate) fn handle(&self, id: &IdentityId) -> Option<&str> {
+        self.handles.get(id).map(String::as_str)
+    }
+
     /// The known file `token` names: the exact path, or the one path whose
     /// last parts it is (`release.yml` for `.github/workflows/release.yml`).
     fn file(&self, token: &str) -> Option<&String> {

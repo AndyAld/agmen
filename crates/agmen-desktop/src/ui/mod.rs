@@ -8,7 +8,13 @@ mod components;
 mod dock;
 mod format;
 mod listener_panel;
+#[cfg_attr(not(test), expect(dead_code, reason = "hosted by the Task 9 chat"))]
+mod message;
 mod palette_filter;
+#[cfg_attr(not(test), expect(dead_code, reason = "hosted by the Task 9 chat"))]
+mod ref_chip;
+#[cfg_attr(not(test), expect(dead_code, reason = "hosted by the Task 9 chat"))]
+mod rich_text;
 mod status_bar;
 #[cfg(test)]
 mod test_support;
