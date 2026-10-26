@@ -29,6 +29,8 @@ const CLOSE_WAIT: Duration = Duration::from_secs(5);
 const CHECK_EVERY: Duration = Duration::from_millis(100);
 const KEEP_ALIVE_SECS: u16 = 30;
 const CLIENT_CAPACITY: usize = 64;
+/// How much of an unexpected REST answer a snapshot quotes.
+const SNAPSHOT_BODY_CHARS: usize = 200;
 
 /// The streams a watch session subscribes to that the publisher writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -117,31 +119,91 @@ struct Conn {
 }
 
 impl Trial {
-    /// Runs every project at once and gathers what they saw.
-    pub(crate) async fn run(&self, signer: &Arc<Signer>) -> anyhow::Result<Outcome> {
+    /// Runs every project at once and gathers what they saw. A project that
+    /// fails is recorded in the outcome's errors; the others run on.
+    pub(crate) async fn run(&self, signer: &Arc<Signer>) -> Outcome {
         let mut projects = JoinSet::new();
         for _ in 0..self.projects {
             projects.spawn(run_project(self.clone(), signer.clone()));
         }
         let mut outcome = Outcome::default();
         while let Some(done) = projects.join_next().await {
-            let project = done.context("a project task panicked")??;
-            outcome.deliveries.extend(project.deliveries);
-            outcome.errors.extend(project.errors);
-            outcome.snapshots.extend(project.snapshots);
+            match done {
+                Ok(project) => {
+                    outcome.deliveries.extend(project.deliveries);
+                    outcome.errors.extend(project.errors);
+                    outcome.snapshots.extend(project.snapshots);
+                }
+                // A panic skips the project's closes, so its sessions may
+                // stay at the broker until they expire.
+                Err(err) => outcome.errors.push(format!(
+                    "a project task failed and may have left sessions at the broker: {err}"
+                )),
+            }
         }
-        Ok(outcome)
+        outcome
     }
 }
 
-/// One project: connect its watch sessions, publish `rounds` rounds to its
-/// feed and to each session's inbox and ack, wait for them, close.
-async fn run_project(trial: Trial, signer: Arc<Signer>) -> anyhow::Result<Outcome> {
+/// One project: connect its watch sessions and a publisher, measure, then
+/// close every connection that opened, whether or not the measuring failed.
+async fn run_project(trial: Trial, signer: Arc<Signer>) -> Outcome {
     let prefix = format!("agmen/v1/{}/{}", new_id(), new_id());
+    let mut outcome = Outcome::default();
+    // Sign every token before connecting anything, so a signing error
+    // leaves no session open.
+    let tokens = (0..trial.sessions)
+        .map(|_| {
+            let id = new_id();
+            let token = signer.identity(&prefix, &id)?;
+            Ok((id, token))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()
+        .and_then(|watches| Ok((watches, signer.hub()?)));
+    let (watch_tokens, hub_token) = match tokens {
+        Ok(tokens) => tokens,
+        Err(err) => {
+            outcome
+                .errors
+                .push(format!("project {prefix} failed: {err:#}"));
+            return outcome;
+        }
+    };
+    let watches = connect_watches(&trial, &prefix, watch_tokens, &mut outcome).await;
+    let hub_id = format!("agmen-hub-{}", new_id());
+    let hub = connect(options(&trial, &hub_id, HUB_USER, hub_token), Vec::new()).await;
+    let measured = match &hub {
+        Ok(hub) => measure(&trial, &prefix, hub, &watches, &mut outcome).await,
+        Err(err) => Err(anyhow::anyhow!("connecting the publisher: {err:#}")),
+    };
+    if let Err(err) = measured {
+        outcome
+            .errors
+            .push(format!("project {prefix} failed: {err:#}"));
+    }
+    for conn in watches.into_iter().chain(hub.ok()) {
+        let errors = std::mem::take(&mut *lock(&conn.log.errors));
+        outcome.errors.extend(
+            errors
+                .into_iter()
+                .map(|e| format!("{}: {e}", conn.client_id)),
+        );
+        close(conn).await;
+    }
+    outcome
+}
+
+/// Connects a watch-like persistent session per `(id, token)`, each with
+/// the watch's four subscriptions. A session that fails to connect is
+/// closed by `connect` and recorded in `outcome`.
+async fn connect_watches(
+    trial: &Trial,
+    prefix: &str,
+    tokens: Vec<(String, String)>,
+    outcome: &mut Outcome,
+) -> Vec<Conn> {
     let mut connecting = JoinSet::new();
-    for _ in 0..trial.sessions {
-        let id = new_id();
-        let token = signer.identity(&prefix, &id)?;
+    for (id, token) in tokens {
         let filters = [
             "feed".to_owned(),
             format!("inbox/{id}"),
@@ -149,43 +211,53 @@ async fn run_project(trial: Trial, signer: Arc<Signer>) -> anyhow::Result<Outcom
             "state/head".to_owned(),
         ]
         .map(|topic| format!("{prefix}/{topic}"));
-        let mut options = options(&trial, &format!("{id}-watch"), &id, token);
+        let mut options = options(trial, &format!("{id}-watch"), &id, token);
         options
             .set_clean_start(false)
             .set_session_expiry_interval(Some(trial.expiry));
         connecting.spawn(connect(options, filters.to_vec()));
     }
     let mut watches = Vec::with_capacity(trial.sessions);
-    let mut outcome = Outcome::default();
     while let Some(done) = connecting.join_next().await {
-        match done.context("a connect task panicked")? {
-            Ok(conn) => watches.push(conn),
-            Err(err) => outcome.errors.push(format!("{err:#}")),
+        match done {
+            Ok(Ok(conn)) => watches.push(conn),
+            Ok(Err(err)) => outcome.errors.push(format!("{err:#}")),
+            Err(err) => outcome.errors.push(format!(
+                "a connect task failed and may have left a session at the broker: {err}"
+            )),
         }
     }
-    let hub_id = format!("agmen-hub-{}", new_id());
-    let hub = connect(
-        options(&trial, &hub_id, HUB_USER, signer.hub()?),
-        Vec::new(),
-    )
-    .await?;
+    watches
+}
+
+/// Publishes `rounds` rounds to the project's feed and to each watch's
+/// inbox and ack, waits for them, and records each session's deliveries.
+async fn measure(
+    trial: &Trial,
+    prefix: &str,
+    hub: &Conn,
+    watches: &[Conn],
+    outcome: &mut Outcome,
+) -> anyhow::Result<()> {
     let start = Instant::now();
     let mut sent = Vec::new();
     for round in 0..trial.rounds {
         let at = start.elapsed();
-        publish_round(&hub, &prefix, &watches, round, at).await?;
+        publish_round(hub, prefix, watches, round, at).await?;
         sent.push(at);
         tokio::time::sleep(trial.interval).await;
     }
-    let expected = trial.rounds as usize * Kind::ALL.len();
+    // Complete means every expected message arrived; counting raw publishes
+    // instead would let a QoS 1 duplicate stand in for a missing message.
+    let complete = |watch: &Conn| missing(&deliveries(watch, prefix, &sent, start)).is_empty();
     let until = start + trial.deadline;
-    while Instant::now() < until && watches.iter().any(|w| received(w) < expected) {
+    while Instant::now() < until && !watches.iter().all(complete) {
         tokio::time::sleep(CHECK_EVERY).await;
     }
     // The sessions that miss messages at the deadline, with what they miss.
     let mut short = Vec::new();
-    for watch in &watches {
-        let deliveries = deliveries(watch, &prefix, &sent, start);
+    for watch in watches {
+        let deliveries = deliveries(watch, prefix, &sent, start);
         let missing = missing(&deliveries);
         if !missing.is_empty() {
             let seen = match &trial.api {
@@ -193,8 +265,9 @@ async fn run_project(trial: Trial, signer: Arc<Signer>) -> anyhow::Result<Outcom
                 None => watch.client_id.clone(),
             };
             outcome.snapshots.push(format!(
-                "missing at deadline: {seen} missing {} (project {prefix}, publisher {hub_id})",
-                missing.join(",")
+                "missing at deadline: {seen} missing {} (project {prefix}, publisher {})",
+                missing.join(","),
+                hub.client_id,
             ));
             short.push((watch, missing));
         }
@@ -203,14 +276,13 @@ async fn run_project(trial: Trial, signer: Arc<Signer>) -> anyhow::Result<Outcom
     if let Some(wait) = trial.nudge
         && !short.is_empty()
     {
-        publish_round(&hub, &prefix, &watches, trial.rounds, start.elapsed()).await?;
+        publish_round(hub, prefix, watches, trial.rounds, start.elapsed()).await?;
         let until = Instant::now() + wait;
-        let complete = |watch: &Conn| missing(&deliveries(watch, &prefix, &sent, start)).is_empty();
         while Instant::now() < until && short.iter().any(|(watch, _)| !complete(watch)) {
             tokio::time::sleep(CHECK_EVERY).await;
         }
         for (watch, before) in short {
-            let after = missing(&deliveries(watch, &prefix, &sent, start));
+            let after = missing(&deliveries(watch, prefix, &sent, start));
             let released: Vec<&str> = before
                 .iter()
                 .filter(|label| !after.contains(label))
@@ -226,16 +298,7 @@ async fn run_project(trial: Trial, signer: Arc<Signer>) -> anyhow::Result<Outcom
             ));
         }
     }
-    for conn in watches.into_iter().chain([hub]) {
-        let errors = std::mem::take(&mut *lock(&conn.log.errors));
-        outcome.errors.extend(
-            errors
-                .into_iter()
-                .map(|e| format!("{}: {e}", conn.client_id)),
-        );
-        close(conn).await;
-    }
-    Ok(outcome)
+    Ok(())
 }
 
 /// Publishes round `round` (sent `at` after the start) to the project's
@@ -376,8 +439,11 @@ async fn poll(
 
 fn signal(ready: &mut Option<oneshot::Sender<()>>) {
     if let Some(ready) = ready.take() {
-        // The connect may have timed out already; nobody waits then.
-        if ready.send(()).is_err() {}
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the connect may have timed out already, and then nobody waits"
+        )]
+        let _ = ready.send(());
     }
 }
 
@@ -410,10 +476,6 @@ async fn close(conn: Conn) {
             task.abort();
         }
     }
-}
-
-fn received(conn: &Conn) -> usize {
-    lock(&conn.log.received).len()
 }
 
 /// Each message `conn` should have got, with its latency if it came.
@@ -459,7 +521,9 @@ fn round_of(payload: &[u8]) -> Option<u32> {
 }
 
 /// EMQX's view of `client_id`: whether it is connected and durable, its
-/// subscriptions, streams and send counters.
+/// subscriptions, streams and send counters. A failed request says why,
+/// with the HTTP status and the start of the body, so it cannot pass for a
+/// session whose fields are null.
 async fn snapshot(api: &Api, client_id: &str) -> String {
     let url = format!("{}/clients/{client_id}", api.base);
     let response = reqwest::Client::new()
@@ -467,15 +531,28 @@ async fn snapshot(api: &Api, client_id: &str) -> String {
         .basic_auth(&api.key, Some(&api.secret))
         .send()
         .await;
-    let body = match response {
-        Ok(response) => response.text().await,
-        Err(err) => return format!("{client_id}: GET failed: {err}"),
+    let response = match response {
+        Ok(response) => response,
+        Err(err) => return format!("{client_id}: GET {url} failed: {err}"),
     };
-    let fields = body
-        .ok()
-        .and_then(|text| serde_json::from_str::<Value>(&text).ok());
-    let Some(fields) = fields else {
-        return format!("{client_id}: unreadable answer");
+    let status = response.status();
+    let text = match response.text().await {
+        Ok(text) => text,
+        Err(err) => return format!("{client_id}: HTTP {status}, reading the body failed: {err}"),
+    };
+    snapshot_fields(client_id, status, &text)
+}
+
+/// Formats the fields [`snapshot`] reports from an answer with `status`
+/// and body `text`.
+fn snapshot_fields(client_id: &str, status: reqwest::StatusCode, text: &str) -> String {
+    let start: String = text.chars().take(SNAPSHOT_BODY_CHARS).collect();
+    if !status.is_success() {
+        return format!("{client_id}: HTTP {status}: {start}");
+    }
+    let fields = match serde_json::from_str::<Value>(text) {
+        Ok(fields) => fields,
+        Err(err) => return format!("{client_id}: HTTP {status}, not JSON ({err}): {start}"),
     };
     let picked: Vec<String> = [
         "connected",
@@ -514,5 +591,39 @@ mod tests {
         assert_eq!(kind_of(prefix, "agmen/v1/t/q/feed"), None);
         assert_eq!(round_of(b"7:123"), Some(7));
         assert_eq!(round_of(b"x"), None);
+    }
+
+    #[test]
+    fn snapshot_reports_status_and_parse_errors() {
+        let id = "w";
+        assert_eq!(
+            snapshot_fields(
+                id,
+                reqwest::StatusCode::NOT_FOUND,
+                r#"{"code":"CLIENTID_NOT_FOUND"}"#
+            ),
+            r#"w: HTTP 404 Not Found: {"code":"CLIENTID_NOT_FOUND"}"#
+        );
+        let garbled = snapshot_fields(id, reqwest::StatusCode::OK, "<html>");
+        assert!(
+            garbled.starts_with("w: HTTP 200 OK, not JSON ("),
+            "{garbled}"
+        );
+        assert!(garbled.ends_with("): <html>"), "{garbled}");
+        assert_eq!(
+            snapshot_fields(
+                id,
+                reqwest::StatusCode::OK,
+                r#"{"connected":true,"n_streams":0}"#
+            ),
+            "w: connected=true durable=null subscriptions_cnt=null n_streams=0 send_msg=null \
+             inflight_cnt=null mqueue_len=null"
+        );
+        let long = "x".repeat(SNAPSHOT_BODY_CHARS + 50);
+        let cut = snapshot_fields(id, reqwest::StatusCode::BAD_GATEWAY, &long);
+        assert_eq!(
+            cut.len(),
+            "w: HTTP 502 Bad Gateway: ".len() + SNAPSHOT_BODY_CHARS
+        );
     }
 }

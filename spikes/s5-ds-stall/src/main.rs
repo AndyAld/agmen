@@ -14,8 +14,9 @@
 //! storage is still learning the topic structure, so start from a fresh
 //! broker data directory to reproduce them (Task 15s report).
 //!
-//! Every session it opens is closed with a session expiry of 0, so it
-//! leaves nothing at the broker.
+//! Every session it opens is closed with a session expiry of 0, on error
+//! paths too, so it leaves nothing at the broker. `--mqtt` is required so
+//! that a run never lands on the shared dev broker by accident.
 
 mod auth;
 mod probe;
@@ -30,10 +31,10 @@ use crate::probe::{Api, Delivery, Kind, Trial};
 /// A message slower than this counts as stalled.
 const DEFAULT_STALL_MS: u64 = 2000;
 
-const USAGE: &str = "usage: ds-stall [--mqtt host:port] [--api URL] [--projects N] \
+const USAGE: &str = "usage: ds-stall --mqtt host:port [--api URL] [--projects N] \
 [--sessions N] [--rounds N] [--interval-ms N] [--deadline-s N] [--stall-ms N] \
 [--trials N] [--expiry-s N] [--nudge-s N]
---mqtt defaults to AGMEN_IT_MQTT. --api snapshots a session that misses a message; \
+--mqtt is required, so a run never lands on the shared dev broker by default. --api snapshots a session that misses a message; \
 its key is DS_STALL_API_KEY and DS_STALL_API_SECRET, else AGMEN_IT_EMQX_API_KEY and \
 AGMEN_IT_EMQX_API_SECRET. --nudge-s: after the deadline, a project whose sessions \
 still miss messages publishes one more round and waits up to N s for them.";
@@ -55,7 +56,7 @@ async fn main() -> anyhow::Result<()> {
     );
     let mut all = Vec::new();
     for n in 1..=trials {
-        let outcome = trial.run(&signer).await?;
+        let outcome = trial.run(&signer).await;
         println!("trial {n}: {}", summary(&outcome.deliveries, stall));
         for error in &outcome.errors {
             println!("  error {error}");
@@ -178,13 +179,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> anyhow::Result<(Trial, u32, 
             _ => bail!("unknown flag {flag}\n{USAGE}"),
         }
     }
-    let broker = match broker {
-        Some(broker) => broker,
-        None => std::env::var("AGMEN_IT_MQTT")
-            .context("no --mqtt and AGMEN_IT_MQTT is unset")?
-            .trim_start_matches("mqtt://")
-            .to_owned(),
-    };
+    let broker = broker.with_context(|| format!("--mqtt is required\n{USAGE}"))?;
     let (host, port) = broker
         .rsplit_once(':')
         .with_context(|| format!("{broker} is not host:port"))?;
@@ -204,4 +199,86 @@ fn parse(mut args: impl Iterator<Item = String>) -> anyhow::Result<(Trial, u32, 
         })
         .transpose()?;
     Ok((trial, trials, stall))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ms(n: u64) -> Duration {
+        Duration::from_millis(n)
+    }
+
+    fn delivery(
+        client_id: &str,
+        project: &str,
+        kind: Kind,
+        round: u32,
+        latency: Option<u64>,
+    ) -> Delivery {
+        Delivery {
+            client_id: client_id.to_owned(),
+            project: project.to_owned(),
+            kind,
+            round,
+            latency: latency.map(ms),
+        }
+    }
+
+    #[test]
+    fn percentile_picks_the_nearest_rank() {
+        assert_eq!(percentile(&[], 50), "-");
+        for p in [50, 99, 100] {
+            assert_eq!(percentile(&[ms(7)], p), "7ms", "p{p} of one value");
+        }
+        let hundred: Vec<Duration> = (1..=100).map(ms).collect();
+        assert_eq!(percentile(&hundred, 50), "50ms");
+        assert_eq!(percentile(&hundred, 99), "99ms");
+        assert_eq!(percentile(&hundred, 100), "100ms");
+        let three = [ms(1), ms(2), ms(3)];
+        assert_eq!(percentile(&three, 50), "2ms");
+        assert_eq!(percentile(&three, 99), "3ms");
+    }
+
+    #[test]
+    fn summary_counts_stalled_sessions_and_projects() {
+        let stall = ms(2000);
+        let deliveries = [
+            // a1 is fine; a2 has one late message; b1 misses one.
+            delivery("a1", "pa", Kind::Feed, 0, Some(5)),
+            delivery("a1", "pa", Kind::Inbox, 1, Some(6)),
+            delivery("a2", "pa", Kind::Feed, 0, Some(10)),
+            delivery("a2", "pa", Kind::Ack, 1, Some(2500)),
+            delivery("b1", "pb", Kind::Feed, 0, None),
+            delivery("b1", "pb", Kind::Inbox, 1, Some(8)),
+            // c1 is exactly at the threshold, which is not a stall.
+            delivery("c1", "pc", Kind::Ack, 0, Some(2000)),
+        ];
+        assert_eq!(
+            summary(&deliveries, stall),
+            "messages 7 delivered 6 late(>2s) 1 missing 1 (round 0: 1; Feed=1 Inbox=0 Ack=1) \
+             sessions stalled 2/4 projects stalled 2/3 p50 8ms p99 2500ms max 2500ms"
+        );
+    }
+
+    #[test]
+    fn summary_of_nothing() {
+        assert_eq!(
+            summary(&[], ms(2000)),
+            "messages 0 delivered 0 late(>2s) 0 missing 0 (round 0: 0; Feed=0 Inbox=0 Ack=0) \
+             sessions stalled 0/0 projects stalled 0/0 p50 - p99 - max -"
+        );
+    }
+
+    #[test]
+    fn mqtt_is_required() {
+        let err = parse(["--projects".to_owned(), "4".to_owned()].into_iter())
+            .err()
+            .map(|e| format!("{e:#}"))
+            .unwrap_or_default();
+        assert!(err.starts_with("--mqtt is required"), "{err}");
+        let (trial, _, _) =
+            parse(["--mqtt".to_owned(), "localhost:2883".to_owned()].into_iter()).unwrap();
+        assert_eq!(trial.broker, ("localhost".to_owned(), 2883));
+    }
 }
