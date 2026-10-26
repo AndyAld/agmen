@@ -1446,6 +1446,45 @@ for (const surface of SURFACES) {
       expect(w.runs.filter(argv => argv[1] === 'check-path')).toEqual([['agmen', 'check-path', '--json', '--', '/work/src/ok.ts']])
     })
 
+    test('guard_denies_any_path_with_a_git_name', async ($, on) => {
+      // This worktree is a linked one: its common dir is elsewhere and /work/.git is a file a lane could cover.
+      const w = world(on, {
+        commonDir: cwd => (cwd === ROOT ? { stdout: '/gitdirs/work\n' } : undefined),
+        checkPath: path => allowedEntry(path, true, null),
+      })
+
+      await start($, w, surface)
+      const write = async (file_path: string) => (await $.tool.call({ tool: 'Write', file_path, content: 'x' })).deny
+      const denied = [
+        // A submodule whose git dir was never absorbed into the common dir.
+        await write('/work/mods/s/.git/hooks/pre-commit'),
+        // This linked worktree's .git file.
+        await write('/work/.git'),
+        // Folded, and with the trailing dot Windows drops.
+        await write('/work/mods/s/.GIT/config'),
+        await write('/work/mods/s/.git./config'),
+        // A repository outside every worktree, which git would call another repository.
+        await write('/tmp/clone/.git/hooks/post-checkout'),
+      ]
+      const allowed = [
+        await write('/work/.gitignore'),
+        await write('/work/.github/workflows/ci.yml'),
+        await write('/work/.gitmodules'),
+        await write('/work/mods/s/.git-blame-ignore-revs'),
+      ]
+
+      for (const deny of denied) expect(deny).toContain('has a .git name')
+      for (const deny of allowed) expect(deny).toBeUndefined()
+      expect(w.ran).toEqual(['Write', 'Write', 'Write', 'Write'])
+      // Only the allowed paths reached check-path.
+      expect(w.runs.filter(argv => argv[1] === 'check-path').map(argv => argv[4])).toEqual([
+        '/work/.gitignore',
+        '/work/.github/workflows/ci.yml',
+        '/work/.gitmodules',
+        '/work/mods/s/.git-blame-ignore-revs',
+      ])
+    })
+
     test('guard_runs_git_without_the_location_variables', async ($, on) => {
       const w = world(on, {
         hostEnv: { GIT_DIR: '/elsewhere/.git', GIT_WORK_TREE: '/elsewhere', GIT_COMMON_DIR: '' },

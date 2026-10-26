@@ -631,6 +631,13 @@ async function placed($: EngineInterface, path: string): Promise<Placed | undefi
  */
 const folded = (path: string): string => path.normalize('NFKC').toUpperCase().toLowerCase()
 
+/**
+ * Whether a name of `path` is `.git`, compared folded and with trailing dots
+ * and spaces dropped, as Windows opens `.git.` as `.git`: a git dir or a
+ * worktree's `.git` file. `.gitignore` and `.github` are not.
+ */
+const hasGitName = (path: string): boolean => path.split(/[\\/]/).some(name => folded(name).replace(/[. ]+$/, '') === '.git')
+
 /** Whether `path` is `folder` or below it. */
 const isWithin = (path: string, folder: string): boolean =>
   path === folder || ['/', '\\'].some(sep => path.startsWith(folder.endsWith(sep) ? folder : `${folder}${sep}`))
@@ -994,6 +1001,12 @@ async function judgeEdit($: EngineInterface, root: string, repository: Repositor
   // dir as a repository of its own. Compared folded: over-matching denies.
   if (isWithin(folded(real), folded(repository.commonDir))) {
     return `agmen: ${path} is in this repository's git dir, so the edit is denied. Change it with git instead.`
+  }
+  // Any other `.git` (a submodule's git dir that was never absorbed, a linked
+  // worktree's `.git` file, a repository cloned anywhere): what is written
+  // there can run on a later git command, so no lane may allow it.
+  if (hasGitName(path) || hasGitName(real)) {
+    return `agmen: ${path} has a .git name (a git dir or a worktree's .git file), so the edit is denied. Change it with git instead.`
   }
   const worktrees = await worktreesOf($, repository.root)
   if (!worktrees.isOk) return `agmen: git cannot list this repository's worktrees (${worktrees.why}), so the edit is denied.`
