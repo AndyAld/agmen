@@ -134,7 +134,11 @@ pub(crate) enum Action {
         path: String,
         sha: GitSha,
     },
-    #[expect(dead_code, reason = "no view sends the share approval yet")]
+    // Only the fixture's tests send ApproveShare; no view does yet.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "no view sends the share approval yet")
+    )]
     ApproveShare,
     KickOff,
     // Task 18: a worker on an installed agent, from the command palette.
@@ -200,6 +204,9 @@ pub(crate) struct TeamRow {
     pub(crate) lane: String,
     pub(crate) owner: String,
     pub(crate) usd_per_day: u32,
+    /// The agent's identity, which the hub makes at kick-off; `None` while
+    /// the plan is a plan.
+    pub(crate) id: Option<IdentityId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

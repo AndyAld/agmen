@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 use agmen_proto::{GitSha, Timestamp};
 
-use super::{Action, AgentStatus, BackendError, Snapshot, SpecComment, SpecReview};
+use super::{Action, AgentStatus, BackendError, PlanInfo, Snapshot, SpecComment, SpecReview};
 
 /// The design spec (console.py `MD`).
 const RIDGELINE_DESIGN: &str = "\
@@ -105,6 +105,22 @@ pub(super) fn presence() -> BTreeMap<String, AgentStatus> {
     ])
 }
 
+/// Gives each team member the identity the hub makes for it at kick-off,
+/// named `{owner}/{handle}` as the running roster names it.
+///
+/// # Errors
+///
+/// When a handle does not make a valid id.
+pub(super) fn identify_team(plan: &mut PlanInfo) -> Result<(), BackendError> {
+    for row in &mut plan.team {
+        row.id = Some(super::fixture_data::id(&format!(
+            "{}/{}",
+            row.owner, row.handle
+        ))?);
+    }
+    Ok(())
+}
+
 /// Does a planning room action on the fixture's plan, as the person:
 /// approve a spec at the commit they read, approve their own share, or
 /// kick off a plan whose checks all pass.
@@ -155,7 +171,7 @@ pub(super) fn act(snapshot: &mut Snapshot, action: Action) -> Result<(), Backend
                 ));
             }
             plan.running = true;
-            Ok(())
+            identify_team(plan)
         }
         _ => Err(BackendError::Unsupported(
             "that action in the planning room",

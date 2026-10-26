@@ -87,15 +87,14 @@ pub(crate) enum ButtonSize {
     /// Padding 4 by 10 and 6 between its parts, as the add agent dialog's
     /// Copy prompt (node 2435).
     Medium,
-    /// Radius 6 and body text, as a dialog's Cancel and Check again:
-    /// Primary pads 6 by 14 (node 2445), the other styles 6 by 12 inside
-    /// their border (node 2443).
+    /// Radius 6 and body text, as a dialog's Cancel and Check again or
+    /// Kick off (node 10320): Primary pads 6 by 14 (node 2445), the other
+    /// styles 6 by 12 inside their border (node 2443).
     Large,
     /// Task 19: body text and padding that makes a 32 px button with or
     /// without a border (nodes 9777 and 10953): Primary pads 8 by 14, the
     /// other styles 7 by 12 inside their border; the input's radius. The
-    /// plan panel's Kick off and Pause all, and the kick-off dialog's
-    /// buttons.
+    /// plan panel's Kick off and Pause all.
     Tall,
 }
 

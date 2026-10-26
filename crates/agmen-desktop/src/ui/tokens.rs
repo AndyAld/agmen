@@ -175,6 +175,8 @@ pub(crate) const TINT_BORDER: f32 = 85. / 255.;
 /// A selected button or segment: the breadcrumb's primary button fill
 /// (0x26, console.py `breadcrumb`).
 pub(crate) const TINT_SELECTED: f32 = 38. / 255.;
+/// The plan panel's state pill (0x26, node 8940).
+pub(crate) const TINT_STATE: f32 = 38. / 255.;
 /// A waiting change card's `warning` border (0x88, node 7101).
 pub(crate) const TINT_PENDING: f32 = 136. / 255.;
 

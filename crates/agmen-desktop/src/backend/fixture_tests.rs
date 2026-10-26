@@ -705,7 +705,29 @@ fn fixture_kick_off_runs_only_a_ready_plan() {
     let Some(Update::Snapshot(snapshot)) = futures::executor::block_on(updates.next()) else {
         panic!("no snapshot after kick off");
     };
-    assert!(snapshot.plan.unwrap().running);
+    let plan = snapshot.plan.unwrap();
+    assert!(plan.running);
+    // The hub makes the team's identities at kick-off.
+    let core = plan.team.iter().find(|row| row.handle == "core").unwrap();
+    assert_eq!(
+        core.id,
+        Some(super::super::fixture_data::id("andy/core").unwrap())
+    );
+}
+
+// Review minor 4: approving my own share records when, once.
+#[test]
+fn fixture_approve_share_records_the_first_time() {
+    let backend = FixtureBackend::for_screen(Screen::Plan).unwrap();
+    backend.state.borrow_mut().me = "sean".into();
+    assert_eq!(plan_of(&backend).shares_approved.get("sean"), Some(&false));
+    assert!(!plan_of(&backend).shares_approved_at.contains_key("sean"));
+    backend.act(Action::ApproveShare).unwrap();
+    let first = plan_of(&backend);
+    assert_eq!(first.shares_approved.get("sean"), Some(&true));
+    let at = *first.shares_approved_at.get("sean").unwrap();
+    backend.act(Action::ApproveShare).unwrap();
+    assert_eq!(plan_of(&backend).shares_approved_at.get("sean"), Some(&at));
 }
 
 #[test]

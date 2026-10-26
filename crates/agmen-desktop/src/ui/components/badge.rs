@@ -9,7 +9,7 @@ use gpui::{
 use super::{Color, Label, LabelSize};
 use crate::appearance::Appearance;
 use crate::ui::tokens::{
-    RADIUS_PILL, RADIUS_SM, SPACE_1, SPACE_5, SPACE_6, SPACE_7, TINT_FILL, tint,
+    RADIUS_PILL, RADIUS_SM, SPACE_1, SPACE_5, SPACE_6, SPACE_7, TINT_FILL, TINT_STATE, tint,
 };
 
 /// How a badge is filled and padded.
@@ -27,6 +27,9 @@ enum BadgeShape {
     /// Task 19: the elevated surface instead of a tint, padded at the sides
     /// only.
     Neutral,
+    /// A plan's state: a stronger tint, padded 1 by 7, with a regular label
+    /// (node 8940).
+    State,
 }
 
 #[derive(Debug, IntoElement)]
@@ -64,6 +67,13 @@ impl Badge {
     #[must_use]
     pub(crate) const fn neutral(mut self) -> Self {
         self.shape = BadgeShape::Neutral;
+        self
+    }
+
+    /// The plan panel's state pill, as "ready to kick off" (node 8940).
+    #[must_use]
+    pub(crate) const fn state(mut self) -> Self {
+        self.shape = BadgeShape::State;
         self
     }
 
@@ -106,6 +116,7 @@ impl RenderOnce for Badge {
         let fill = self.color.hsla(theme);
         let (bg, text) = match self.shape {
             BadgeShape::Tinted => (tint(fill, TINT_FILL), self.color.clone()),
+            BadgeShape::State => (tint(fill, TINT_STATE), self.color.clone()),
             BadgeShape::Neutral => (theme.elevated_surface, self.color.clone()),
             BadgeShape::Solid | BadgeShape::Pill | BadgeShape::Marker => (fill, Color::Background),
         };
@@ -114,6 +125,7 @@ impl RenderOnce for Badge {
             BadgeShape::Pill | BadgeShape::Marker => {
                 label.size(LabelSize::XSmall).weight(FontWeight::BOLD)
             }
+            BadgeShape::State => label.size(LabelSize::Small),
             BadgeShape::Tinted | BadgeShape::Solid | BadgeShape::Neutral if self.code => {
                 label.code()
             }
@@ -124,7 +136,9 @@ impl RenderOnce for Badge {
         let base = div().flex().flex_none().items_center().gap(SPACE_5).bg(bg);
         let shaped = match self.shape {
             BadgeShape::Pill => base.px(SPACE_5).rounded(RADIUS_PILL),
-            BadgeShape::Solid => base.py(SPACE_1).px(SPACE_7).rounded(RADIUS_SM),
+            BadgeShape::Solid | BadgeShape::State => {
+                base.py(SPACE_1).px(SPACE_7).rounded(RADIUS_SM)
+            }
             BadgeShape::Tinted | BadgeShape::Marker => {
                 base.py(SPACE_1).px(SPACE_6).rounded(RADIUS_SM)
             }
@@ -253,5 +267,24 @@ mod tests {
                 .into_any_element()
         });
         assert!(size.width > px(14.));
+    }
+
+    // Shot diff (node 8941): the plan panel's state pill pads [1, 7, 1, 7]
+    // around a regular small label.
+    #[gpui::test]
+    fn state_pill_pads_seven_each_side(cx: &mut TestAppContext) {
+        let pill = rendered_size(cx, || {
+            Badge::new("ready to kick off", Color::Success)
+                .state()
+                .into_any_element()
+        });
+        let mut cx2 = TestAppContext::single();
+        let text = rendered_size(&mut cx2, || {
+            Label::new("ready to kick off")
+                .size(LabelSize::Small)
+                .into_any_element()
+        });
+        assert_eq!(pill.width - text.width, px(14.));
+        assert_eq!(pill.height - text.height, px(2.));
     }
 }

@@ -94,23 +94,11 @@ mod tests {
     use gpui::{TestAppContext, px};
 
     use super::*;
-    use crate::backend::{Backend as _, FixtureBackend, Screen};
+    use crate::backend::Screen;
+    use crate::ui::plan_test_support::{mountain, plan};
     use crate::ui::test_support::rendered_size;
 
     const DESIGN: &str = "docs/specs/ridgeline-design.md";
-
-    fn plan(screen: Screen) -> PlanInfo {
-        FixtureBackend::for_screen(screen)
-            .unwrap()
-            .snapshot()
-            .plan
-            .unwrap()
-    }
-
-    /// Mountain standard time, as the fixture's clock reads.
-    fn mountain() -> TimeZone {
-        TimeZone::fixed(jiff::tz::offset(-6))
-    }
 
     #[test]
     fn approvals_say_who_and_when() {

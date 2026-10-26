@@ -1,7 +1,7 @@
 //! The planning room's state that the plan panel, the spec tab, the Review
 //! panel and the kick-off dialog share: the plan as the backend last sent
 //! it, whether the dialog is open and where it took focus from, and why
-//! the last action failed. It hears
+//! the last action from each view failed. It hears
 //! the backend's updates, so an approval or a kick-off shows everywhere.
 
 use agmen_proto::GitSha;
@@ -31,9 +31,9 @@ pub(crate) struct PlanModel {
     me: String,
     plan: Option<PlanInfo>,
     kickoff_open: bool,
-    /// Why the last action failed and where it came from, until an action
-    /// from there succeeds.
-    error: Option<(ErrorSource, SharedString)>,
+    /// Why the last action from each source failed, until an action from
+    /// there succeeds. At most one entry per source (two sources today).
+    errors: Vec<(ErrorSource, SharedString)>,
     dialog_focus: FocusHandle,
     restore_focus: Option<FocusHandle>,
     _updates: Option<Task<()>>,
@@ -44,7 +44,7 @@ impl std::fmt::Debug for PlanModel {
         f.debug_struct("PlanModel")
             .field("project", &self.project)
             .field("kickoff_open", &self.kickoff_open)
-            .field("error", &self.error)
+            .field("errors", &self.errors)
             .finish_non_exhaustive()
     }
 }
@@ -75,7 +75,7 @@ impl PlanModel {
             me: snapshot.me.clone(),
             plan: snapshot.plan.clone(),
             kickoff_open: false,
-            error: None,
+            errors: Vec::new(),
             dialog_focus: cx.focus_handle(),
             restore_focus: None,
             _updates: updates,
@@ -116,9 +116,9 @@ impl PlanModel {
 
     /// Why the last action from `source` failed, until one from it succeeds.
     pub(crate) fn error(&self, source: &ErrorSource) -> Option<&SharedString> {
-        self.error
-            .as_ref()
-            .filter(|(from, _)| from == source)
+        self.errors
+            .iter()
+            .find(|(from, _)| from == source)
             .map(|(_, reason)| reason)
     }
 
@@ -185,9 +185,7 @@ impl PlanModel {
     }
 
     fn clear_error(&mut self, source: &ErrorSource) {
-        if self.error.as_ref().is_some_and(|(from, _)| from == source) {
-            self.error = None;
-        }
+        self.errors.retain(|(from, _)| from != source);
     }
 
     fn act(&mut self, action: Action, source: ErrorSource, cx: &mut Context<Self>) {
@@ -197,7 +195,10 @@ impl PlanModel {
         };
         match result {
             Ok(()) => self.clear_error(&source),
-            Err(err) => self.error = Some((source, err.to_string().into())),
+            Err(err) => {
+                self.clear_error(&source);
+                self.errors.push((source, err.to_string().into()));
+            }
         }
         cx.notify();
     }

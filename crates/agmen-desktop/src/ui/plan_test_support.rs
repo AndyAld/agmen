@@ -6,11 +6,28 @@ use std::rc::Rc;
 
 use futures::channel::mpsc::UnboundedReceiver;
 use gpui::{Entity, TestAppContext};
+use jiff::tz::TimeZone;
 
 use super::plan_model::PlanModel;
 use crate::backend::{
-    Action, Backend, BackendError, BackendHandle, Draft, FixtureBackend, Screen, Snapshot, Update,
+    Action, Backend, BackendError, BackendHandle, Draft, FixtureBackend, PlanInfo, Screen,
+    Snapshot, Update,
 };
+
+/// The plan `screen`'s fixture shows.
+pub(crate) fn plan(screen: Screen) -> PlanInfo {
+    FixtureBackend::for_screen(screen)
+        .unwrap()
+        .snapshot()
+        .plan
+        .unwrap()
+}
+
+/// Mountain daylight time (UTC-6), as the fixture's clock reads: its day,
+/// 2026-10-25, is before the change to standard time on November 1.
+pub(crate) fn mountain() -> TimeZone {
+    TimeZone::fixed(jiff::tz::offset(-6))
+}
 
 /// The fixture for a screen, recording every action before passing it on.
 pub(crate) struct Recording {

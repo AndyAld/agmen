@@ -228,3 +228,69 @@ fn change_card_needs_the_listener_as_sender_at_its_position() {
     assert!(ctx.change_card(&real).is_some());
     assert!(ctx.change_card(&spoof).is_none());
 }
+
+/// The spans in the first message of the `screen` fixture whose body
+/// starts with `start`.
+fn plan_spans(screen: crate::backend::Screen, start: &str) -> (Rc<ChatContext>, Vec<RefTarget>) {
+    use crate::backend::Backend as _;
+    let snapshot = crate::backend::FixtureBackend::for_screen(screen)
+        .unwrap()
+        .snapshot();
+    let ctx = Rc::new(ChatContext::new(Rc::new(snapshot)));
+    let env = ctx
+        .snapshot()
+        .messages
+        .iter()
+        .find(|m| m.client.body.as_str().starts_with(start))
+        .cloned()
+        .unwrap();
+    let targets = ctx
+        .body_of(&env)
+        .spans
+        .iter()
+        .map(|s| s.target.clone())
+        .collect();
+    (ctx, targets)
+}
+
+// Shot diff (plan and running, nodes 8831, 8867, 10806): the plan's files
+// in a body are file chips.
+#[test]
+fn plan_files_are_chips() {
+    use crate::backend::Screen;
+    let (_, plan) = plan_spans(Screen::Plan, "Approved ridgeline-design.md");
+    assert!(
+        plan.contains(&file("docs/specs/ridgeline-design.md", None)),
+        "{plan:?}"
+    );
+    let (_, v2) = plan_spans(Screen::Plan, "Plan v2:");
+    assert!(
+        v2.contains(&file("docs/specs/tile-sources.md", None)),
+        "{v2:?}"
+    );
+    let (_, run) = plan_spans(Screen::Running, "Starting the tile licensing");
+    assert!(
+        run.contains(&file("docs/specs/tile-sources.md", None)),
+        "{run:?}"
+    );
+}
+
+// Shot diff (running, node 10697): every agent the ASSIGN names is a chip in
+// its plan role's color, including the ones that have not posted yet.
+#[test]
+fn assigned_team_agents_are_chips_in_their_role_color() {
+    use crate::backend::Screen;
+    let (ctx, targets) = plan_spans(Screen::Running, "R-1 to @andy/core");
+    for handle in ["andy/core", "andy/app", "sean/sync", "sean/qa"] {
+        let agent = RefTarget::Agent(handle.into());
+        assert!(targets.contains(&agent), "{handle}: {targets:?}");
+    }
+    assert_eq!(
+        ctx.chip_color(&RefTarget::Agent("andy/app".into())),
+        Color::Role("engineer".into())
+    );
+    assert_eq!(
+        ctx.chip_color(&RefTarget::Agent("sean/qa".into())),
+        Color::Role("tester".into())
+    );
+}

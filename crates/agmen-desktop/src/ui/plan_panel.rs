@@ -9,8 +9,9 @@
 //! `plan:kickoff` and `plan:pause`.
 
 use gpui::{
-    Action, AnyElement, App, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
-    RenderOnce, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
+    Action, AnyElement, App, Entity, FontWeight, InteractiveElement as _, IntoElement,
+    ParentElement as _, Pixels, RenderOnce, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Window, div,
 };
 
 use super::components::{
@@ -23,6 +24,7 @@ use super::tokens::{
     SPACE_8, SPACE_12, SPACE_14, TEAM_HANDLE_COLUMN, TEAM_HARNESS_COLUMN, TEAM_LANE_COLUMN,
     TEAM_OWNER_COLUMN, TEAM_ROLE_COLUMN,
 };
+use crate::appearance::Appearance;
 use crate::backend::{AgentStatus, Approval, PlanInfo, SpecState, TeamRow};
 use crate::plan::{self, Check};
 
@@ -133,8 +135,27 @@ impl PlanPanel {
     }
 }
 
-/// One team row's cells, as node 8947 lays them out.
-fn team_cells(ix: usize, row: &TeamRow, running: bool) -> Vec<AnyElement> {
+/// The harness column: the mockup's 100 px, or wider when the code font
+/// needs it for the longest harness ("claude · sonnet" takes about 114 px
+/// at 13 px). One width for every row keeps the columns lined up.
+fn harness_width(plan: &PlanInfo, cell: Pixels) -> Pixels {
+    let longest = plan
+        .team
+        .iter()
+        .map(|row| row.harness.chars().count())
+        .max()
+        .unwrap_or_default();
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a harness name is a few dozen characters"
+    )]
+    let needed = cell * longest as f32;
+    needed.max(TEAM_HARNESS_COLUMN)
+}
+
+/// One team row's cells, as node 8947 lays them out. The role column gives
+/// up the room a wider harness column takes, the same in every row.
+fn team_cells(ix: usize, row: &TeamRow, running: bool, harness: Pixels) -> Vec<AnyElement> {
     let role = Color::Role(row.role.clone().into());
     let mut cells = Vec::with_capacity(9);
     if running {
@@ -154,21 +175,33 @@ fn team_cells(ix: usize, row: &TeamRow, running: bool) -> Vec<AnyElement> {
             .child(label)
             .into_any_element()
     };
+    let harness_selector = format!("team:harness-{ix}");
+    let cost_selector = format!("team:cost-{ix}");
     cells.extend([
         Dot::new(role.clone()).into_any_element(),
-        column(
-            TEAM_ROLE_COLUMN,
-            Label::new(row.role_label.clone())
-                .size(LabelSize::Small)
-                .color(role),
-        ),
+        div()
+            // Shrinks (flex's default) where the others keep their width.
+            .w(TEAM_ROLE_COLUMN)
+            .min_w_0()
+            .overflow_hidden()
+            .child(
+                Label::new(row.role_label.clone())
+                    .size(LabelSize::Small)
+                    .color(role),
+            )
+            .into_any_element(),
         column(TEAM_HANDLE_COLUMN, Label::new(row.handle.clone()).code()),
-        column(
-            TEAM_HARNESS_COLUMN,
-            Label::new(row.harness.clone())
-                .code()
-                .color(Color::Placeholder),
-        ),
+        div()
+            .debug_selector(|| harness_selector)
+            .w(harness)
+            .flex_none()
+            .overflow_hidden()
+            .child(
+                Label::new(row.harness.clone())
+                    .code()
+                    .color(Color::Placeholder),
+            )
+            .into_any_element(),
         column(TEAM_LANE_COLUMN, Label::new(row.lane.clone()).code()),
         column(
             TEAM_OWNER_COLUMN,
@@ -177,9 +210,14 @@ fn team_cells(ix: usize, row: &TeamRow, running: bool) -> Vec<AnyElement> {
                 .color(Color::Placeholder),
         ),
         div().flex_1().into_any_element(),
-        Label::new(format!("${}/d", row.usd_per_day))
-            .code()
-            .color(Color::Placeholder)
+        div()
+            .debug_selector(|| cost_selector)
+            .flex_none()
+            .child(
+                Label::new(format!("${}/d", row.usd_per_day))
+                    .code()
+                    .color(Color::Placeholder),
+            )
             .into_any_element(),
     ]);
     cells
@@ -231,26 +269,30 @@ fn plan_button(plan: &PlanInfo, model: Entity<PlanModel>) -> Button {
             .size(ButtonSize::Tall)
             .on_click(move |_, _, cx| model.update(cx, |model, cx| model.open_kickoff(cx)))
     } else {
+        // Semibold as the enabled one (node 9047).
         Button::new("plan:kickoff", label)
             .size(ButtonSize::Tall)
+            .weight(FontWeight::SEMIBOLD)
             .disabled(true)
     }
 }
 
 impl RenderOnce for PlanPanel {
-    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let cell = super::code_view::cell_width(window, &cx.global::<Appearance>().fonts);
         let model = self.model.read(cx);
         let Some(plan) = model.plan().cloned() else {
             return div().debug_selector(|| "plan-panel".into());
         };
         let checks: Vec<Check> = plan::checklist(&plan, model.me());
         let (pill, pill_color) = state_pill(&plan);
+        let harness = harness_width(&plan, cell);
         let team = plan
             .team
             .iter()
             .enumerate()
             .fold(TableCard::new("team"), |table, (ix, row)| {
-                table.row(team_cells(ix, row, plan.running))
+                table.row(team_cells(ix, row, plan.running, harness))
             });
         let specs = plan.specs.iter().map(|spec| {
             let has_text = plan.reviews.iter().any(|review| review.path == spec.path);
@@ -299,7 +341,7 @@ impl RenderOnce for PlanPanel {
             .flex_col()
             .child(
                 RightDockHeader::new("Plan", format!("{} · v{}", plan.name, plan.version))
-                    .end(Badge::new(pill, pill_color)),
+                    .end(Badge::new(pill, pill_color).state()),
             )
             .child(content)
     }

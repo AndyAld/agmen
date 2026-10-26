@@ -4,17 +4,9 @@ use std::rc::Rc;
 use gpui::{Context, Entity, Render, TestAppContext, VisualTestContext, Window, div, px};
 
 use super::*;
-use crate::backend::{Backend as _, FixtureBackend, Screen};
-use crate::ui::plan_test_support::plan_globals;
+use crate::backend::Screen;
+use crate::ui::plan_test_support::{plan, plan_globals};
 use crate::ui::test_support::{click, redraw};
-
-fn plan(screen: Screen) -> PlanInfo {
-    FixtureBackend::for_screen(screen)
-        .unwrap()
-        .snapshot()
-        .plan
-        .unwrap()
-}
 
 #[test]
 fn pill_counts_what_the_plan_waits_on() {
@@ -90,7 +82,9 @@ struct Harness {
 }
 
 impl Render for Harness {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl gpui::IntoElement {
+    fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl gpui::IntoElement {
+        // The workspace sets the rem from the UI font size, 15 px in the shots.
+        window.set_rem_size(crate::ui::tokens::MOCKUP_REM);
         let opened = self.opened.clone();
         div()
             .track_focus(&self.focus)
@@ -158,4 +152,35 @@ fn a_spec_with_text_opens_its_tab(cx: &mut TestAppContext) {
     // A spec the backend has no text for is not a link.
     click(cx, "plan:spec:docs/plans/m0.md");
     assert_eq!(*opened.borrow(), ["docs/specs/ridgeline-design.md"]);
+}
+
+// Shot diff (nodes 8951, 8969, 10852): "claude · sonnet" is not clipped
+// at Andy's 13 px code font, the columns stay lined up, and the row still
+// fits the panel.
+#[gpui::test]
+fn the_harness_column_fits_claude_sonnet(cx: &mut TestAppContext) {
+    let (_, _, cx) = open(cx, Screen::Running);
+    cx.update(|_, cx| {
+        let mut appearance = cx.global::<crate::appearance::Appearance>().clone();
+        appearance.fonts.code_size = px(13.);
+        cx.set_global(appearance);
+        crate::assets::load_fonts(cx).unwrap();
+    });
+    redraw(cx);
+    let cell = cx.update(|window, cx| {
+        let fonts = &cx.global::<crate::appearance::Appearance>().fonts;
+        crate::ui::code_view::cell_width(window, fonts)
+    });
+    let mut bounds = |name: String| cx.debug_bounds(name.leak()).unwrap();
+    let coord = bounds("team:harness-0".into());
+    // "claude · sonnet" is 15 cells.
+    assert!(coord.size.width >= cell * 15., "{coord:?} for {cell:?}");
+    for ix in 0..7 {
+        let harness = bounds(format!("team:harness-{ix}"));
+        assert_eq!(harness.origin.x, coord.origin.x, "row {ix}");
+        assert_eq!(harness.size.width, coord.size.width, "row {ix}");
+        let row = bounds(format!("team:row-{ix}"));
+        let cost = bounds(format!("team:cost-{ix}"));
+        assert!(cost.right() <= row.right(), "row {ix}: {cost:?} in {row:?}");
+    }
 }

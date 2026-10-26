@@ -150,22 +150,20 @@ impl KickoffDialog {
 
 impl RenderOnce for KickoffDialog {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let focus = self.hold_focus(window, cx);
         let zone = cx
             .try_global::<LocalZone>()
             .map_or(TimeZone::UTC, |local| local.0.clone());
         let background = cx.global::<Appearance>().theme.background;
         let model = self.model.read(cx);
         let error = model.error(&ErrorSource::KickOff).cloned();
-        let (title, boxes, bullets, go) = match model.plan() {
-            Some(plan) => (
-                format!("Kick off {} (plan v{})", plan.name, plan.version),
-                owner_boxes(plan, model.me(), &zone),
-                what_happens(plan),
-                format!("Kick off {}", plan::agent_count(plan.team.len())),
-            ),
-            None => return div(),
+        // With no plan there is nothing to show or to give focus to.
+        let Some(plan) = model.plan() else {
+            return div();
         };
+        let title = format!("Kick off {} (plan v{})", plan.name, plan.version);
+        let (boxes, bullets) = (owner_boxes(plan, model.me(), &zone), what_happens(plan));
+        let go = format!("Kick off {}", plan::agent_count(plan.team.len()));
+        let focus = self.hold_focus(window, cx);
         let boxes = boxes.into_iter().map(|owner| {
             let selector = format!("kickoff:owner:{}", owner.owner);
             let (status, color) = owner.approval;
@@ -196,7 +194,13 @@ impl RenderOnce for KickoffDialog {
         });
         let (cancel, kick) = (self.model.clone(), self.model.clone());
         let (dismiss, escape) = (self.model.clone(), self.model.clone());
+        // Over the whole window: the workspace lays its overlays out as rows
+        // of its column, so the dim needs a box of its own to fill.
         div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
             .track_focus(&focus)
             .key_context(KICKOFF_CONTEXT)
             .on_action(move |_: &Cancel, window, cx| {
@@ -231,7 +235,7 @@ impl RenderOnce for KickoffDialog {
                             .child(
                                 Button::new("kickoff:cancel", "Cancel")
                                     .style(ButtonStyle::Inset)
-                                    .size(ButtonSize::Tall)
+                                    .size(ButtonSize::Large)
                                     .on_click(move |_, window, cx| {
                                         cancel.update(cx, |m, cx| m.close_kickoff(window, cx));
                                     }),
@@ -239,7 +243,7 @@ impl RenderOnce for KickoffDialog {
                             .child(
                                 Button::new("kickoff:go", go)
                                     .style(ButtonStyle::Primary)
-                                    .size(ButtonSize::Tall)
+                                    .size(ButtonSize::Large)
                                     .on_click(move |_, window, cx| {
                                         kick.update(cx, |m, cx| m.kick_off(window, cx));
                                     }),
@@ -254,21 +258,9 @@ mod tests {
     use gpui::{TestAppContext, VisualTestContext, px};
 
     use super::*;
-    use crate::backend::{Action, Backend as _, FixtureBackend, Screen};
-    use crate::ui::plan_test_support::{Recording, plan_globals};
+    use crate::backend::{Action, Screen};
+    use crate::ui::plan_test_support::{Recording, mountain, plan, plan_globals};
     use crate::ui::test_support::{click, draw, redraw};
-
-    fn plan(screen: Screen) -> PlanInfo {
-        FixtureBackend::for_screen(screen)
-            .unwrap()
-            .snapshot()
-            .plan
-            .unwrap()
-    }
-
-    fn mountain() -> TimeZone {
-        TimeZone::fixed(jiff::tz::offset(-6))
-    }
 
     #[test]
     fn owner_boxes_show_each_share_mine_first() {
@@ -349,6 +341,49 @@ mod tests {
         cx.simulate_keystrokes("escape");
         assert!(recording.acts.borrow().is_empty());
         model.read_with(cx, |model, _| assert!(!model.kickoff_open()));
+    }
+
+    // Review minor 2: with no plan the dialog draws nothing, so it must not
+    // take focus to a handle that is not in the tree.
+    #[gpui::test]
+    fn no_plan_takes_no_focus(cx: &mut TestAppContext) {
+        let (_, model) = plan_globals(cx, Screen::KickOff, None);
+        cx.update(|cx| {
+            model.update(cx, |model, cx| {
+                model.open_kickoff(cx);
+                model.apply(None, cx);
+            });
+        });
+        let dialog = model.clone();
+        let cx = draw(cx, move || {
+            KickoffDialog::new(dialog.clone()).into_any_element()
+        });
+        let focused = cx.update(|window, cx| model.read(cx).dialog_focus().is_focused(window));
+        assert!(!focused);
+    }
+
+    // Shot diff (node 10320): Cancel and Kick off are the add agent dialog's
+    // buttons (ButtonSize::Large), not the plan panel's taller ones.
+    #[gpui::test]
+    fn buttons_are_the_dialog_size(cx: &mut TestAppContext) {
+        use crate::ui::test_support::rendered_size;
+        let mut cancel_cx = TestAppContext::single();
+        let cancel = rendered_size(&mut cancel_cx, || {
+            Button::new("c", "Cancel")
+                .style(ButtonStyle::Inset)
+                .size(ButtonSize::Large)
+                .into_any_element()
+        });
+        let mut go_cx = TestAppContext::single();
+        let go = rendered_size(&mut go_cx, || {
+            Button::new("g", "Kick off 7 agents")
+                .style(ButtonStyle::Primary)
+                .size(ButtonSize::Large)
+                .into_any_element()
+        });
+        let (_, _, cx) = open(cx);
+        assert_eq!(cx.debug_bounds("kickoff:cancel").unwrap().size, cancel);
+        assert_eq!(cx.debug_bounds("kickoff:go").unwrap().size.width, go.width);
     }
 
     #[gpui::test]

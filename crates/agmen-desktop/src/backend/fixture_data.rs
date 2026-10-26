@@ -635,6 +635,7 @@ pub(super) fn plan(ready: bool, running: bool) -> Result<PlanInfo, BackendError>
                 lane: lane.into(),
                 owner: owner.into(),
                 usd_per_day: usd,
+                id: None,
             }
         };
     let both = |sean: Approval| {
@@ -649,7 +650,7 @@ pub(super) fn plan(ready: bool, running: bool) -> Result<PlanInfo, BackendError>
         name: name.into(),
         paths: vec![path.into()],
     };
-    Ok(PlanInfo {
+    let mut plan = PlanInfo {
         name: "ridgeline".into(),
         version: 3,
         goal: "Offline trail maps for iOS and Android on a shared Rust core. First milestone: a downloaded region renders with no network.".into(),
@@ -688,7 +689,11 @@ pub(super) fn plan(ready: bool, running: bool) -> Result<PlanInfo, BackendError>
         caps_usd: super::fixture_plan::caps_usd(),
         shares_approved_at: super::fixture_plan::shares_approved_at(ready || running)?,
         presence: super::fixture_plan::presence(),
-    })
+    };
+    if running {
+        super::fixture_plan::identify_team(&mut plan)?;
+    }
+    Ok(plan)
 }
 
 /// The planning room roster (desktop-plan's left dock).
