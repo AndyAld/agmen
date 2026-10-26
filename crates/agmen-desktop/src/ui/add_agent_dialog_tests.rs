@@ -1,7 +1,7 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
-use gpui::TestAppContext;
+use gpui::{TestAppContext, px};
 
 use super::*;
 use crate::backend::Backend as _;
@@ -79,6 +79,23 @@ fn copy_prompt_writes_clipboard(cx: &mut TestAppContext) {
     let item = cx.read_from_clipboard().unwrap();
     assert_eq!(item.text().as_deref(), Some(expected.as_str()));
     assert!(copied.get());
+}
+
+#[gpui::test]
+fn check_again_keeps_its_height_beside_the_bordered_cancel(cx: &mut TestAppContext) {
+    // Shot diff (nodes 2442 to 2445): Check again is 28 tall, centered on
+    // the 30 px bordered Cancel, not stretched to it.
+    let cx = draw(cx, || {
+        AddAgentDialog::new(AgentDialog::Add("grok".into()), Some(agent("grok"))).into_any_element()
+    });
+    let cancel = cx.debug_bounds("add-agent:cancel").unwrap();
+    let check = cx.debug_bounds("add-agent:check").unwrap();
+    assert_eq!(
+        cancel.size.height - check.size.height,
+        px(2.),
+        "{cancel:?} {check:?}"
+    );
+    assert_eq!(cancel.center().y, check.center().y);
 }
 
 #[gpui::test]

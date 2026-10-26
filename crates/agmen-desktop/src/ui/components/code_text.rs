@@ -1,17 +1,20 @@
-//! Wrapping UI text with command names in the code font, as the add agent
-//! dialog's "agmen looks for grok on PATH, runs grok --version, ..." (node
-//! 2440, mockup fix 48). The source marks each code span with backticks,
-//! which are not drawn. Punctuation after a span touches it (fix 54).
+//! Wrapping UI text with command names as monospace chips, as the add
+//! agent dialog's "agmen looks for grok on PATH, runs grok --version, ..."
+//! (node 2440, mockup fix 48). The source marks each code span with
+//! backticks, which are not drawn. Punctuation touching a span stays with
+//! its chip (fix 54).
 
 use std::ops::Range;
 
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, IntoElement, ParentElement as _, RenderOnce, SharedString, Styled as _, StyledText,
-    TextRun, Window, div, font, relative,
+    AnyElement, App, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce,
+    SharedString, Styled as _, Window, div, relative,
 };
 
-use super::{Color, LabelSize};
+use super::{Chip, Color, LabelSize};
 use crate::appearance::Appearance;
+use crate::ui::inline_flow::{FlowItem, InlineFlow};
 use crate::ui::tokens::LINE_HEIGHT;
 
 /// `source` without its backticks, and the byte ranges of the code spans in
@@ -32,6 +35,48 @@ pub(crate) fn split_code(source: &str) -> (String, Vec<Range<usize>>) {
     }
     text.push_str(rest);
     (text, spans)
+}
+
+/// A part of the drawn text: words, or a code span with the punctuation
+/// that touches it on either side.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Piece<'a> {
+    /// Words joined by single spaces.
+    Words(String),
+    Code {
+        lead: &'a str,
+        code: &'a str,
+        tail: &'a str,
+    },
+}
+
+/// `text` split at its code `spans` (from [`split_code`]) into words and
+/// code spans, each span with the punctuation that touches it (fix 54).
+fn pieces<'a>(text: &'a str, spans: &[Range<usize>]) -> Vec<Piece<'a>> {
+    let mut out = Vec::with_capacity(spans.len() * 2 + 1);
+    let push_words = |out: &mut Vec<Piece<'a>>, words: &str| {
+        let words = words.split_whitespace().collect::<Vec<_>>().join(" ");
+        if !words.is_empty() {
+            out.push(Piece::Words(words));
+        }
+    };
+    let mut at = 0;
+    for (ix, span) in spans.iter().enumerate() {
+        let before = text.get(at..span.start).unwrap_or_default();
+        let words = before.trim_end_matches(|c: char| !c.is_whitespace());
+        push_words(&mut out, words);
+        let next = spans.get(ix + 1).map_or(text.len(), |next| next.start);
+        let after = text.get(span.end..next).unwrap_or_default();
+        let tail_len = after.find(char::is_whitespace).unwrap_or(after.len());
+        out.push(Piece::Code {
+            lead: before.get(words.len()..).unwrap_or_default(),
+            code: text.get(span.clone()).unwrap_or_default(),
+            tail: after.get(..tail_len).unwrap_or_default(),
+        });
+        at = span.end + tail_len;
+    }
+    push_words(&mut out, text.get(at..).unwrap_or_default());
+    out
 }
 
 #[derive(Debug, IntoElement)]
@@ -67,37 +112,54 @@ impl CodeText {
 
 impl RenderOnce for CodeText {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let appearance = cx.global::<Appearance>();
-        let color = self.color.hsla(&appearance.theme);
+        let color = self.color.hsla(&cx.global::<Appearance>().theme);
         let (text, spans) = split_code(&self.source);
-        let run = |len: usize, family: &SharedString| TextRun {
-            len,
-            font: font(family.clone()),
-            color,
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        };
-        let (ui, code) = (&appearance.fonts.ui_family, &appearance.fonts.code_family);
-        let mut runs = Vec::with_capacity(spans.len() * 2 + 1);
-        let mut at = 0;
-        for span in spans {
-            if span.start > at {
-                runs.push(run(span.start - at, ui));
-            }
-            runs.push(run(span.len(), code));
-            at = span.end;
-        }
-        if text.len() > at {
-            runs.push(run(text.len() - at, ui));
-        }
-        // Code spans take the text's size, so a line keeps one height.
+        let items = pieces(&text, &spans)
+            .into_iter()
+            .map(|piece| match piece {
+                Piece::Words(words) => FlowItem::Run(words.into()),
+                Piece::Code { lead, code, tail } => FlowItem::Chip {
+                    element: chip(lead, code, tail, self.color.clone()),
+                    label: code.to_owned().into(),
+                },
+            })
+            .collect();
         div()
             .min_w_0()
             .text_size(self.size.rems())
+            .text_color(color)
             .line_height(relative(LINE_HEIGHT))
-            .child(StyledText::new(text).with_runs(runs))
+            .child(InlineFlow::new(items))
     }
+}
+
+/// A command as a monospace chip in `color`'s reference fill (fix 48),
+/// with the punctuation that touches it (fix 54). Tests find it as
+/// `"code-text:chip"`.
+fn chip(lead: &str, code: &str, tail: &str, color: Color) -> AnyElement {
+    let chip = Chip::new(code.to_owned()).reference().code().tinted(color);
+    let chip = if lead.is_empty() {
+        chip
+    } else {
+        chip.flush_start()
+    };
+    let chip = if tail.is_empty() {
+        chip
+    } else {
+        chip.flush_end()
+    };
+    // As a message's reference chip: the flow lays this out as a root,
+    // capped at the column's width.
+    div()
+        .debug_selector(|| "code-text:chip".into())
+        .flex()
+        .max_w_full()
+        .min_w_0()
+        .items_center()
+        .when(!lead.is_empty(), |this| this.child(lead.to_owned()))
+        .child(chip)
+        .when(!tail.is_empty(), |this| this.child(tail.to_owned()))
+        .into_any_element()
 }
 
 #[cfg(test)]
@@ -120,6 +182,54 @@ mod tests {
         assert_eq!(text, "a b c ` d");
         assert_eq!((spans.len(), spans.first()), (1, Some(&(2..3))));
         assert_eq!(split_code("plain").0, "plain");
+    }
+
+    #[test]
+    fn code_spans_become_chips_with_their_punctuation() {
+        // Fix 54: punctuation that touches a span stays with its chip.
+        let source = "runs `grok --version`, then (`agmen agents scan`) and `x` y";
+        let (text, spans) = split_code(source);
+        assert_eq!(
+            pieces(&text, &spans),
+            [
+                Piece::Words("runs".into()),
+                Piece::Code {
+                    lead: "",
+                    code: "grok --version",
+                    tail: ","
+                },
+                Piece::Words("then".into()),
+                Piece::Code {
+                    lead: "(",
+                    code: "agmen agents scan",
+                    tail: ")"
+                },
+                Piece::Words("and".into()),
+                Piece::Code {
+                    lead: "",
+                    code: "x",
+                    tail: ""
+                },
+                Piece::Words("y".into()),
+            ]
+        );
+        assert_eq!(
+            pieces("plain words", &[]),
+            [Piece::Words("plain words".into())]
+        );
+    }
+
+    #[gpui::test]
+    fn a_command_draws_as_a_chip(cx: &mut TestAppContext) {
+        // Fix 48: command names are monospace chips, padded and filled.
+        let cx = crate::ui::test_support::draw(cx, || {
+            div()
+                .w(px(600.))
+                .child(CodeText::new("runs `grok --version`, and checks it."))
+                .into_any_element()
+        });
+        let chip = cx.debug_bounds("code-text:chip").expect("a chip");
+        assert!(chip.size.width > px(0.));
     }
 
     #[gpui::test]

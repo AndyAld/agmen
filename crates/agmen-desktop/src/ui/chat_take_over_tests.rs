@@ -2,8 +2,8 @@ use std::rc::Rc;
 
 use agmen_proto::StampedEnvelope;
 use gpui::{
-    AppContext as _, Context, Entity, Focusable as _, IntoElement, ParentElement as _, Render,
-    Styled as _, TestAppContext, VisualTestContext, Window, div, px,
+    AppContext as _, Context, Entity, Focusable as _, IntoElement, ParentElement as _, Pixels,
+    Render, Size, Styled as _, TestAppContext, VisualTestContext, Window, div, px, size,
 };
 
 use crate::backend::{Backend, BackendHandle, FixtureBackend, Screen, Snapshot, fixture_id};
@@ -213,7 +213,7 @@ fn add_opens_the_dialog_and_escape_returns_to_the_menu(cx: &mut TestAppContext) 
 
 #[gpui::test]
 fn check_again_says_the_agent_is_still_missing(cx: &mut TestAppContext) {
-    let (_chat, _backend, cx) = open(cx, Screen::ChatTerminal);
+    let (chat, _backend, cx) = open(cx, Screen::ChatTerminal);
     click(cx, "terminal:agent");
     settle(cx);
     click(cx, "switch-menu:grok:add");
@@ -222,6 +222,10 @@ fn check_again_says_the_agent_is_still_missing(cx: &mut TestAppContext) {
     click(cx, "add-agent:check");
     settle(cx);
     assert!(cx.debug_bounds("add-agent:note").is_some());
+    assert_eq!(
+        note(chat, cx).as_deref(),
+        Some("grok is still not on PATH.")
+    );
     assert!(cx.debug_bounds("add-agent").is_some());
 }
 
@@ -253,23 +257,33 @@ impl Render for FullHost {
     }
 }
 
-#[gpui::test]
-fn the_menu_never_covers_the_chip_in_a_short_window(cx: &mut TestAppContext) {
-    // Fix 27 in a window with room for the menu on neither side: the menu
-    // is cut to its side's room instead of snapped over the chip.
+/// The chat over `screen`'s fixture, filling a `viewport` window.
+fn open_full(
+    cx: &mut TestAppContext,
+    screen: Screen,
+    viewport: Size<Pixels>,
+) -> &mut VisualTestContext {
     init(cx);
     // Every binding, so Escape reaches the menu and the dialog.
     cx.update(crate::keymap::bind_all);
-    let backend = Rc::new(FixtureBackend::for_screen(Screen::ChatTerminal).unwrap());
+    let backend = Rc::new(FixtureBackend::for_screen(screen).unwrap());
     let handle: Rc<dyn Backend> = backend.clone();
     cx.update(|cx| cx.set_global(BackendHandle(handle)));
     let snapshot = backend.snapshot();
     let (_host, cx) = cx.add_window_view(|window, cx| {
-        FullHost(cx.new(|cx| ChatView::new(std::rc::Rc::new(snapshot), window, cx)))
+        FullHost(cx.new(|cx| ChatView::new(Rc::new(snapshot), window, cx)))
     });
-    let viewport = gpui::size(px(1000.), px(300.));
     cx.simulate_resize(viewport);
     settle(cx);
+    cx
+}
+
+#[gpui::test]
+fn the_menu_never_covers_the_chip_in_a_short_window(cx: &mut TestAppContext) {
+    // Fix 27 in a window with room for the menu on neither side: the menu
+    // is cut to its side's room instead of snapped over the chip.
+    let viewport = size(px(1000.), px(300.));
+    let cx = open_full(cx, Screen::ChatTerminal, viewport);
     click(cx, "terminal:agent");
     settle(cx);
     redraw(cx);
@@ -283,9 +297,71 @@ fn the_menu_never_covers_the_chip_in_a_short_window(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn the_menu_follows_its_head_when_the_window_resizes(cx: &mut TestAppContext) {
+    // Shot diff (fix 27): opened before a resize, the menu kept the old
+    // head's place, 82 px below the new one, over the composer.
+    let cx = open_full(cx, Screen::ChatTerminal, size(px(1280.), px(700.)));
+    click(cx, "terminal:agent");
+    settle(cx);
+    // The test window draws the one frame a resize asks for; nothing
+    // draws it again.
+    cx.simulate_resize(size(px(1280.), px(901.)));
+    let head = cx.debug_bounds("terminal:head").unwrap();
+    let menu = cx.debug_bounds("switch-menu").expect("the menu stays open");
+    // Below the head, or above it when the agent's input box leaves too
+    // little room below.
+    let hangs = (menu.top() - head.bottom()).abs() <= px(1.)
+        || (menu.bottom() - head.top()).abs() <= px(1.);
+    assert!(hangs, "{menu:?} does not hang from {head:?}");
+}
+
+#[gpui::test]
+fn hand_back_stays_in_a_narrow_pane(cx: &mut TestAppContext) {
+    // Shot diff: at 1280 the center pane is 668 wide, and the head cut
+    // Hand back off. The live chip goes first; the controls stay.
+    let cx = open_full(cx, Screen::ChatTerminal, size(px(668.), px(900.)));
+    let head = cx.debug_bounds("terminal:head").unwrap();
+    for part in [
+        "terminal:agent",
+        "terminal:start",
+        "terminal:open-as-tab",
+        "terminal:hand-back",
+    ] {
+        let bounds = cx.debug_bounds(part).unwrap();
+        assert!(
+            bounds.left() >= head.left() && bounds.right() <= head.right(),
+            "{part}: {bounds:?} is not inside {head:?}"
+        );
+        assert!(
+            bounds.top() >= head.top() && bounds.bottom() <= head.bottom(),
+            "{part}: {bounds:?} is not on the head's line {head:?}"
+        );
+    }
+}
+
+#[gpui::test]
+fn a_short_window_keeps_the_composer_and_hand_back_in_it(cx: &mut TestAppContext) {
+    // Review: the 392 px terminal never shrank, so a short window pushed
+    // the composer out of it.
+    let viewport = size(px(1000.), px(360.));
+    let cx = open_full(cx, Screen::ChatTerminal, viewport);
+    let input = cx.debug_bounds("composer:input").unwrap();
+    assert!(
+        input.bottom() <= viewport.height,
+        "{input:?} leaves the window"
+    );
+    let hand_back = cx.debug_bounds("terminal:hand-back").unwrap();
+    assert!(
+        hand_back.bottom() <= input.top(),
+        "{hand_back:?} under the composer"
+    );
+    assert!(hand_back.top() >= px(0.), "{hand_back:?} above the window");
+}
+
+#[gpui::test]
 fn check_again_says_why_the_scan_failed(cx: &mut TestAppContext) {
     // Review: a failed ScanAgents ends the check with its error.
-    let (_chat, _backend, cx) = open(cx, Screen::ChatTerminal);
+    let (chat, _backend, cx) = open(cx, Screen::ChatTerminal);
     click(cx, "terminal:agent");
     settle(cx);
     click(cx, "switch-menu:grok:add");
@@ -294,4 +370,16 @@ fn check_again_says_why_the_scan_failed(cx: &mut TestAppContext) {
     click(cx, "add-agent:check");
     settle(cx);
     assert!(cx.debug_bounds("add-agent:note").is_some());
+    assert_eq!(
+        note(chat, cx).as_deref(),
+        Some("acting without a backend cannot be done from this console yet")
+    );
+}
+
+/// What the terminal's last Check again said.
+fn note(chat: Entity<ChatView>, cx: &mut VisualTestContext) -> Option<String> {
+    let view = chat
+        .read_with(cx, |chat, _| chat.terminal().cloned())
+        .unwrap();
+    view.read_with(cx, |v, _| v.note().map(str::to_owned))
 }

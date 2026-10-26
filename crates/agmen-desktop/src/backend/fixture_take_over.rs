@@ -32,10 +32,17 @@ const LINE: TermColor = TermColor::Ansi(8);
 const BLUE: TermColor = TermColor::Ansi(4);
 const TEXT: TermColor = TermColor::Default;
 
-/// Writes `text` on `row` of `g` so it ends at the last column.
+/// Writes `text` on `row` of `g` so it ends a cell before the last column,
+/// as console.py's `rput(row, cols - 1, ...)` does.
 fn put_right(g: &mut TerminalScreen, row: u16, text: &str, fg: TermColor) {
     let len = u16::try_from(text.chars().count()).unwrap_or(u16::MAX);
-    g.put(row, g.cols().saturating_sub(len), text, fg, false);
+    g.put(
+        row,
+        g.cols().saturating_sub(len.saturating_add(1)),
+        text,
+        fg,
+        false,
+    );
 }
 
 /// The input box at the bottom of an agent's screen, with `prompt` and the
@@ -180,55 +187,55 @@ pub(super) fn installed_agents() -> Vec<InstalledAgent> {
     ]
 }
 
-/// What the Agent panel shows for fx1 running `agent`: harness, model, the
-/// tools it enforces, and whether that list says less than the role file
-/// (spec 5.5).
-fn harness_details(agent: &str) -> (&'static str, &'static str, &'static str, bool) {
+/// The tools an agent enforces, as the Agent panel lists them (spec 5.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tools {
+    /// One tool per word.
+    List(&'static str),
+    /// One phrase that says less than the role file.
+    Lossy(&'static str),
+}
+
+/// What the Agent panel shows for fx1 running `agent`: harness, model and
+/// the tools it enforces.
+fn harness_details(agent: &str) -> (&'static str, &'static str, Tools) {
     match agent {
         "codex" => (
             "Codex 0.164.0 · ACP, since 15:52",
             "Codex default (standard tier)",
-            "sandbox workspace-write (Codex has no tool list)",
-            true,
+            Tools::Lossy("sandbox workspace-write (Codex has no tool list)"),
         ),
         "opencode" => (
             "OpenCode 2.1.4 · ACP, since 15:52",
             "OpenCode default (standard tier)",
-            "agent permissions (not verified)",
-            true,
+            Tools::Lossy("agent permissions (not verified)"),
         ),
         "gemini" => (
             "Gemini CLI 0.46.0 · ACP, since 15:52",
             "Gemini default (standard tier)",
-            "approval mode plan and policy (Gemini has no tool list)",
-            true,
+            Tools::Lossy("approval mode plan and policy (Gemini has no tool list)"),
         ),
         "agy" => (
             "Antigravity 1.1.7 · ACP, since 15:52",
             "Antigravity default (standard tier)",
-            "settings allow and deny rules (agy has no tool list)",
-            true,
+            Tools::Lossy("settings allow and deny rules (agy has no tool list)"),
         ),
         _ => (
             "Claude Code 2.1.310 · CLI adapter",
             "sonnet (standard tier)",
-            "Read Edit Write Bash Grep Glob",
-            false,
+            Tools::List("Read Edit Write Bash Grep Glob"),
         ),
     }
 }
 
 fn set_harness(info: &mut AgentInfo, agent: &str) {
-    let (harness, model, tools, lossy) = harness_details(agent);
+    let (harness, model, tools) = harness_details(agent);
     info.harness_label = harness.into();
     info.model = model.into();
-    // A lossy list is one phrase; a tool list is one tool per word.
-    info.tools = if lossy {
-        vec![tools.into()]
-    } else {
-        tools.split(' ').map(Into::into).collect()
+    (info.tools, info.tools_lossy) = match tools {
+        Tools::List(tools) => (tools.split(' ').map(Into::into).collect(), false),
+        Tools::Lossy(phrase) => (vec![phrase.into()], true),
     };
-    info.tools_lossy = lossy;
 }
 
 /// The roster row of agent `id`, when there is one.
@@ -241,20 +248,26 @@ fn roster_harness<'a>(snapshot: &'a mut Snapshot, id: &IdentityId) -> Option<&'a
         .map(|agent| &mut agent.harness)
 }
 
-/// Takes andy/fx1 over, as the take-over frames show it (V66); with
-/// `codex`, then switches it to codex, as "Desktop · chat + codex".
+/// Takes andy/fx1 over, as the take-over frames show it (V66), running
+/// `agent`: claude resumes its session, and another agent is switched to,
+/// as "Desktop · chat + codex".
 ///
 /// # Errors
 ///
-/// When the fixture has no andy/fx1 session to take over.
+/// When the fixture has no andy/fx1 session to take over, or `agent` is not
+/// installed.
 pub(super) fn fx1_taken_over(
     mut snapshot: Snapshot,
-    codex: bool,
+    agent: &str,
 ) -> Result<Snapshot, BackendError> {
     let worker = super::fixture_data::id("andy/fx1")?;
     act(&mut snapshot, Action::TakeOver(worker.clone()))?;
-    if codex {
-        let agent = "codex".into();
+    if snapshot
+        .take_overs
+        .get(&worker)
+        .is_some_and(|t| t.harness != agent)
+    {
+        let agent = agent.into();
         act(&mut snapshot, Action::SwitchAgent { worker, agent })?;
     }
     Ok(snapshot)
