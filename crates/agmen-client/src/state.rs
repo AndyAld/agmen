@@ -15,7 +15,7 @@ use rumqttc_next::{
 };
 use serde::Deserialize;
 use serde_json::Value;
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 use tokio::time::Instant;
 
 use crate::error::ClientError;
@@ -171,16 +171,25 @@ pub(crate) struct StateReads {
     routes: Routes,
     /// The read in flight, which the link task feeds.
     slot: StateSlot,
+    /// Whether the session's connection is up; the link task sets it, and
+    /// it closes when the link task ends.
+    connected: watch::Receiver<bool>,
     /// Held for the whole of a read: one at a time.
     turn: tokio::sync::Mutex<()>,
 }
 
 impl StateReads {
-    pub(crate) fn new(topics: Topics, routes: Routes, slot: StateSlot) -> Self {
+    pub(crate) fn new(
+        topics: Topics,
+        routes: Routes,
+        slot: StateSlot,
+        connected: watch::Receiver<bool>,
+    ) -> Self {
         Self {
             topics,
             routes,
             slot,
+            connected,
             turn: tokio::sync::Mutex::new(()),
         }
     }
@@ -196,7 +205,8 @@ impl StateReads {
         let topic = self.topics.state(key);
         let keep = self.routes.subscribes(&topic);
         let _turn = self.turn.lock().await;
-        read_through(client, &self.slot, key, topic, keep).await
+        let connected = self.connected.clone();
+        read_through(client, &self.slot, connected, key, topic, keep).await
     }
 }
 
@@ -205,9 +215,16 @@ impl StateReads {
 /// retained one, sent right after the SUBACK), and unsubscribes unless
 /// `keep` says the session subscribes to the topic anyway. The caller runs
 /// one read at a time per session.
+///
+/// A connection that drops after the SUBACK loses the retained message the
+/// broker was about to send, so the read fails then instead of answering
+/// that nothing is retained: [`ClientError::Timeout`] while the session
+/// reconnects, [`ClientError::Closed`] once it has stopped. `connected` is
+/// the session's watch of its connection.
 async fn read_through(
     client: &CurrentClient,
     slot: &StateSlot,
+    mut connected: watch::Receiver<bool>,
     key: &str,
     topic: String,
     keep: bool,
@@ -234,12 +251,28 @@ async fn read_through(
         Ok(Err(err)) => return Err(ClientError::StateRead(err)),
         Err(_) => return Err(ClientError::Timeout(CONNECT_WAIT)),
     }
-    let got = match tokio::time::timeout(STATE_WAIT, payload).await {
-        Ok(Ok(payload)) => payload,
-        // Nothing retained there: the broker sends nothing after the
-        // SUBACK. The sender is gone only if another read replaced this
-        // one's wait, which the caller rules out; read it as nothing too.
-        Ok(Err(_)) | Err(_) => Vec::new(),
+    // From the SUBACK on, any change of the connection means it dropped. A
+    // drop that has already reconnected by this check goes unseen, but the
+    // link waits at least 1 s before it reconnects.
+    if !*connected.borrow_and_update() {
+        return Err(ClientError::Timeout(STATE_WAIT));
+    }
+    let got = tokio::select! {
+        // A message that came just before a drop still counts.
+        biased;
+        got = tokio::time::timeout(STATE_WAIT, payload) => match got {
+            Ok(Ok(payload)) => payload,
+            // Nothing retained there: the broker sends nothing after the
+            // SUBACK. The sender is gone only if another read replaced this
+            // one's wait, which the caller rules out; read it as nothing too.
+            Ok(Err(_)) | Err(_) => Vec::new(),
+        },
+        changed = connected.changed() => {
+            return Err(match changed {
+                Ok(()) => ClientError::Timeout(STATE_WAIT),
+                Err(_) => ClientError::Closed,
+            });
+        }
     };
     drop(subscribed);
     parse_state(key, &got)

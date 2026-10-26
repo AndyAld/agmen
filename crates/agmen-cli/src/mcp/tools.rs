@@ -96,7 +96,27 @@ pub(crate) struct InboxParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub(crate) struct StateParams {
     /// head (stream heads and versions, the default) or roster (who is in the project).
-    key: Option<String>,
+    #[serde(default)]
+    key: StateKey,
+}
+
+/// The retained `state/<key>` topics the `state` tool reads.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+enum StateKey {
+    #[default]
+    Head,
+    Roster,
+}
+
+impl StateKey {
+    /// The topic level.
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Head => "head",
+            Self::Roster => "roster",
+        }
+    }
 }
 
 /// `claim`'s arguments.
@@ -244,14 +264,14 @@ impl Server {
     )]
     async fn state(&self, Parameters(params): Parameters<StateParams>) -> CallToolResult {
         self.respond(move |live: Arc<Live>| async move {
-            let key = params.key.unwrap_or_else(|| "head".to_owned());
+            let key = params.key.as_str();
             let value = live
                 .agent
-                .read_state(live.via(), &key)
+                .read_state(live.via(), key)
                 .await
                 .map_err(|err| client_error(err, "reading the project's state failed"))?;
             let shown = value.map_or_else(|| "nothing retained".to_owned(), |v| v.to_string());
-            Ok(format!("state/{}: {}", clean(&key), clean(&shown)))
+            Ok(format!("state/{key}: {}", clean(&shown)))
         })
         .await
     }
@@ -338,5 +358,58 @@ impl ServerHandler for Server {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("agmen", env!("CARGO_PKG_VERSION")))
             .with_instructions(INSTRUCTIONS)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rmcp::handler::server::tool::parse_json_object;
+    use serde_json::json;
+
+    use super::*;
+
+    /// Every string an `enum` or `const` in `schema` allows.
+    fn allowed(schema: &Value, out: &mut Vec<String>) {
+        match schema {
+            Value::Object(map) => {
+                if let Some(Value::String(value)) = map.get("const") {
+                    out.push(value.clone());
+                }
+                if let Some(Value::Array(values)) = map.get("enum") {
+                    out.extend(values.iter().filter_map(Value::as_str).map(str::to_owned));
+                }
+                map.values().for_each(|value| allowed(value, out));
+            }
+            Value::Array(values) => values.iter().for_each(|value| allowed(value, out)),
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn state_schema_lists_the_two_keys() {
+        let tool = Server::tool_router()
+            .list_all()
+            .into_iter()
+            .find(|tool| tool.name == "state")
+            .unwrap();
+        let mut keys = Vec::new();
+        allowed(&Value::Object((*tool.input_schema).clone()), &mut keys);
+        keys.sort();
+        assert_eq!(keys, ["head", "roster"], "{:?}", tool.input_schema);
+    }
+
+    #[test]
+    fn state_refuses_other_keys() {
+        let parse = |args: Value| {
+            let Value::Object(args) = args else {
+                panic!("tool arguments are a JSON object")
+            };
+            parse_json_object::<StateParams>(args)
+        };
+        assert!(parse(json!({})).is_ok());
+        assert!(parse(json!({ "key": "roster" })).is_ok());
+        for bad in ["a/b", "nothing", "Head", ""] {
+            assert!(parse(json!({ "key": bad })).is_err(), "{bad:?}");
+        }
     }
 }

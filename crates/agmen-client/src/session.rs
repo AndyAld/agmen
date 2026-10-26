@@ -449,6 +449,7 @@ impl Session {
             presence: presence.clone(),
             state_reads: state_slot.clone(),
         });
+        let state_reads = StateReads::new(topics.clone(), routes, state_slot, connected_rx.clone());
         let sender = Sender {
             client: client.clone(),
             outbox: outbox.clone(),
@@ -470,7 +471,7 @@ impl Session {
             wake,
             closing,
             presence: presence.is_some(),
-            state_reads: StateReads::new(topics, routes, state_slot),
+            state_reads,
             tasks,
         };
         match tokio::time::timeout(CONNECT_WAIT, ready_rx).await {
@@ -528,9 +529,10 @@ impl Session {
     /// [`ClientError::StateKey`] when `key` is not one topic level,
     /// [`ClientError::BadState`] when the payload is not JSON,
     /// [`ClientError::Subscribe`] when the broker refuses the subscription,
-    /// [`ClientError::Timeout`] when it does not answer it within 10 s,
-    /// [`ClientError::StateRead`] when the connection went before it did,
-    /// and [`ClientError::Closed`] when the session has stopped.
+    /// [`ClientError::Timeout`] when it does not answer it within 10 s or
+    /// the connection drops after it did, before any retained message came,
+    /// [`ClientError::StateRead`] when the connection went before it
+    /// answered, and [`ClientError::Closed`] when the session has stopped.
     pub async fn read_state(&self, key: &str) -> Result<Option<Value>, ClientError> {
         self.state_reads.read(&self.client, key).await
     }
