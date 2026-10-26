@@ -59,7 +59,13 @@ pub(super) fn installed_detail(theme: &ThemeEntry) -> String {
     // install has none only when neither the archive nor the repository
     // had one (Andy, 2026-10-26).
     let credit = |t: &InstalledTheme, missing: &str| {
-        let license = t.license.as_deref().unwrap_or(missing);
+        // A license file without a readable line is still kept (C303).
+        let unlabeled = if t.licenses.is_empty() {
+            missing
+        } else {
+            "license file kept"
+        };
+        let license = t.license.as_deref().unwrap_or(unlabeled);
         let repo = t
             .repository
             .as_ref()
@@ -93,7 +99,8 @@ pub(super) fn installed_detail(theme: &ThemeEntry) -> String {
     format!("{by}{from}")
 }
 
-/// The credit line of an offered theme; its license is checked on install.
+/// The credit line of an offered theme; its license is fetched on install,
+/// and a missing one never blocks it (Andy, 2026-10-26).
 pub(super) fn offered_detail(ext: &ThemeExtension) -> String {
     let by = if ext.authors.is_empty() {
         String::new()
@@ -101,7 +108,7 @@ pub(super) fn offered_detail(ext: &ThemeExtension) -> String {
         format!("by {} \u{b7} ", ext.authors.join(", "))
     };
     let repo = ext.repository.as_deref().unwrap_or("no repository");
-    format!("{by}{repo} \u{b7} license checked on install")
+    format!("{by}{repo} \u{b7} license fetched on install")
 }
 
 pub(super) fn density_row(density: Density, cx: &mut Context<SettingsView>) -> AnyElement {

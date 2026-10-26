@@ -7,12 +7,15 @@
 //! never into Zed's folders. Zed's archives carry no license file, so an
 //! install without one asks GitHub for the repository's license; when none
 //! is found it installs anyway, and the picker says "license not found"
-//! (Andy, 2026-10-26).
+//! (Andy, 2026-10-26). That request runs without the [`Marketplace`] lock
+//! (see [`install_shared`]), follows redirects only on its first origin and
+//! sends no Referer (C304, C305).
 
 use std::collections::HashMap;
 use std::fs;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
@@ -61,6 +64,13 @@ const REPO_LICENSE_FILE: &str = "LICENSE";
 /// GitHub's limits: owners up to 39 characters, repositories up to 100.
 const MAX_GITHUB_OWNER_LEN: usize = 39;
 const MAX_GITHUB_REPO_LEN: usize = 100;
+/// Redirects the license request follows at most (GitHub sends one 301 for
+/// a renamed repository).
+const MAX_LICENSE_REDIRECTS: usize = 5;
+/// The longest license label shown, in characters, ellipsis included.
+const MAX_LICENSE_LABEL_CHARS: usize = 80;
+/// The `extension.toml` key that keeps the license label GitHub detected.
+const LICENSE_KEY: &str = "license";
 
 /// The manifest file of an installed theme extension.
 const MANIFEST: &str = "extension.toml";
@@ -88,6 +98,8 @@ pub(crate) enum MarketError {
     Archive { id: String, message: String },
     #[error("cannot read {} back after installing: {message}", path.display())]
     ReadBack { path: PathBuf, message: String },
+    #[error("the theme list is unavailable after an earlier crash")]
+    Poisoned,
     #[error("cannot write {}: {source}", path.display())]
     Io {
         path: PathBuf,
@@ -138,6 +150,11 @@ struct Manifest {
     version: Option<String>,
     authors: Vec<String>,
     repository: Option<String>,
+    /// The license label agmen kept at install (C303). Any TOML value, so a
+    /// manifest whose `license` is not a string still parses; only a string
+    /// is shown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    license: Option<toml::Value>,
 }
 
 /// A theme extension installed by agmen or by Zed, as read back from its
@@ -152,7 +169,10 @@ pub(crate) struct InstalledTheme {
     pub(crate) repository: Option<String>,
     /// The license files kept with it.
     pub(crate) licenses: Vec<PathBuf>,
-    /// The first line of the first license, such as "MIT License".
+    /// The license label: GitHub's SPDX id or name as kept in the manifest,
+    /// else the first line of the first license file, without control or
+    /// bidi characters and at most [`MAX_LICENSE_LABEL_CHARS`] long. `None`
+    /// with `licenses` not empty means the file has no readable line.
     pub(crate) license: Option<String>,
     /// Why the manifest could not be read, when it could not; the install
     /// is still listed, without author or repository (C236).
@@ -166,9 +186,14 @@ pub(crate) struct Marketplace {
     base: String,
     github: String,
     client: reqwest::blocking::Client,
+    /// The client for GitHub: redirects only on the first origin, no
+    /// Referer (C304).
+    github_client: reqwest::blocking::Client,
     cache: HashMap<String, (Instant, Vec<ThemeExtension>)>,
     failures: u32,
     retry_at: Option<Instant>,
+    /// [`LICENSE_TIMEOUT`]; tests shorten it.
+    license_timeout: Duration,
 }
 
 impl Marketplace {
@@ -184,21 +209,41 @@ impl Marketplace {
         github: impl Into<String>,
     ) -> Result<Self, MarketError> {
         let base = base.into();
+        let github = github.into();
+        let unbuilt = |url: &str| {
+            let url = url.to_owned();
+            move |err: reqwest::Error| MarketError::Http {
+                url,
+                message: err.to_string(),
+            }
+        };
         let client = reqwest::blocking::Client::builder()
             .user_agent(USER_AGENT)
             .timeout(TIMEOUT)
             .build()
-            .map_err(|err| MarketError::Http {
-                url: base.clone(),
-                message: err.to_string(),
-            })?;
+            .map_err(unbuilt(&base))?;
+        let github_client = reqwest::blocking::Client::builder()
+            .user_agent(USER_AGENT)
+            .timeout(TIMEOUT)
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                if follows_license_redirect(attempt.url(), attempt.previous()) {
+                    attempt.follow()
+                } else {
+                    attempt.stop()
+                }
+            }))
+            .referer(false)
+            .build()
+            .map_err(unbuilt(&github))?;
         Ok(Self {
             base: base.trim_end_matches('/').to_owned(),
-            github: github.into().trim_end_matches('/').to_owned(),
+            github: github.trim_end_matches('/').to_owned(),
             client,
+            github_client,
             cache: HashMap::new(),
             failures: 0,
             retry_at: None,
+            license_timeout: LICENSE_TIMEOUT,
         })
     }
 
@@ -254,21 +299,20 @@ impl Marketplace {
         Ok(answer.data)
     }
 
-    /// Downloads `ext` and installs its themes, license and manifest into
-    /// `agmen_themes/<id>/`, replacing an older install of the same id. An
-    /// archive without a license file gets the repository's license from
-    /// GitHub, when there is one; without it the install has none.
+    /// Downloads `ext` and keeps its theme files that parse, its license
+    /// files and its manifest, ready for [`Download::write`]. An archive
+    /// without a license file gets a GitHub request to make, for its
+    /// repository when it names one there.
     ///
     /// # Errors
     ///
     /// While backing off; when the download fails; when the archive has no
-    /// theme file that parses; when writing fails.
-    pub(crate) fn install(
+    /// theme file that parses (before any GitHub request, C305).
+    pub(crate) fn download(
         &mut self,
         ext: &ThemeExtension,
-        agmen_themes: &Path,
         now: Instant,
-    ) -> Result<InstalledTheme, MarketError> {
+    ) -> Result<Download, MarketError> {
         check_id(&ext.id)?;
         let path_part = |s: &str| {
             s.chars()
@@ -290,61 +334,40 @@ impl Marketplace {
         // API, so only the download itself counts toward the backoff.
         self.record(&archive, now);
         let mut unpacked = unpack(&ext.id, &archive?)?;
-        if unpacked.licenses.is_empty() {
-            let repository = unpacked
+        keep_parsed_themes(&ext.id, &mut unpacked)?;
+        let license = if unpacked.licenses.is_empty() {
+            unpacked
                 .manifest
                 .as_deref()
                 .and_then(parse_manifest)
                 .and_then(|manifest| manifest.repository)
-                .or_else(|| ext.repository.clone());
-            if let Some(text) = repository
+                .or_else(|| ext.repository.clone())
                 .as_deref()
                 .and_then(github_repo)
-                .and_then(|repo| self.repo_license(&repo))
-            {
-                unpacked.licenses.push((REPO_LICENSE_FILE.to_owned(), text));
-            }
-        }
-        write_install(ext, &unpacked, agmen_themes)
+                .and_then(|repo| self.license_request(&repo))
+        } else {
+            None
+        };
+        Ok(Download {
+            ext: ext.clone(),
+            unpacked,
+            license,
+        })
     }
 
-    /// The license file of `repo` on GitHub, decoded; `None` when it has
-    /// none (404), when the request or its answer fails, or when the text
-    /// is over [`MAX_LICENSE_BYTES`]. One request, without a token, and it
-    /// never counts toward the backoff, which is about Zed's API.
-    fn repo_license(&self, repo: &GithubRepo) -> Option<Vec<u8>> {
+    /// The request for `repo`'s license on GitHub; `None` when its URL does
+    /// not parse.
+    fn license_request(&self, repo: &GithubRepo) -> Option<LicenseRequest> {
         let url = reqwest::Url::parse(&format!(
             "{}/repos/{}/{}/license",
             self.github, repo.owner, repo.repo
         ))
         .ok()?;
-        let request = self
-            .client
-            .get(url.clone())
-            .header(reqwest::header::ACCEPT, "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
-            .timeout(LICENSE_TIMEOUT);
-        // Each `.ok()?` here is deliberate: any failure (network, 404, 5xx,
-        // too large, not JSON, not base64) means "license not found" for
-        // this install, and the install goes on without one.
-        let body = self.read(request, &url, MAX_LICENSE_ANSWER_BYTES).ok()?;
-        let answer: LicenseAnswer = serde_json::from_slice(&body).ok()?;
-        if answer.encoding != "base64" {
-            return None;
-        }
-        let packed: Vec<u8> = answer
-            .content
-            .bytes()
-            .filter(|b| !b.is_ascii_whitespace())
-            .collect();
-        // Four base64 characters carry three bytes: refuse before decoding.
-        if packed.len() / 4 * 3 > MAX_LICENSE_BYTES + 3 {
-            return None;
-        }
-        let text = base64::engine::general_purpose::STANDARD
-            .decode(&packed)
-            .ok()?;
-        (!text.is_empty() && text.len() <= MAX_LICENSE_BYTES).then_some(text)
+        Some(LicenseRequest {
+            client: self.github_client.clone(),
+            url,
+            timeout: self.license_timeout,
+        })
     }
 
     /// GETs `url`, at most `limit` bytes, unless backing off at `now`. The
@@ -381,45 +404,167 @@ impl Marketplace {
     }
 
     fn fetch(&self, url: &reqwest::Url, limit: u64) -> Result<Vec<u8>, MarketError> {
-        self.read(self.client.get(url.clone()), url, limit)
+        read(self.client.get(url.clone()), url, limit)
+    }
+}
+
+/// Installs `ext` through the shared `market` into `agmen_themes/<id>/`,
+/// replacing an older install of the same id. The lock is held for the
+/// download from Zed and for the writes, but not for the GitHub request, so
+/// searches and other installs never wait on GitHub (C305).
+///
+/// # Errors
+///
+/// As [`Marketplace::download`] and [`Download::write`], and when the lock
+/// is poisoned.
+pub(crate) fn install_shared(
+    market: &Mutex<Marketplace>,
+    ext: &ThemeExtension,
+    agmen_themes: &Path,
+    now: Instant,
+) -> Result<InstalledTheme, MarketError> {
+    let mut download = market
+        .lock()
+        .map_err(|_| MarketError::Poisoned)?
+        .download(ext, now)?;
+    download.fetch_license();
+    // Writes stay under the lock, so two installs of one id never share a
+    // staging folder.
+    let _writing = market.lock().map_err(|_| MarketError::Poisoned)?;
+    download.write(agmen_themes)
+}
+
+/// A downloaded extension, not yet written.
+#[derive(Debug)]
+pub(crate) struct Download {
+    ext: ThemeExtension,
+    unpacked: Unpacked,
+    /// The GitHub request to make, when the archive has no license file.
+    license: Option<LicenseRequest>,
+}
+
+impl Download {
+    /// Asks GitHub for the repository license, when the archive had none,
+    /// and keeps it with its label. Any failure leaves the install without
+    /// one ("license not found"); it blocks for at most the license timeout.
+    pub(crate) fn fetch_license(&mut self) {
+        if let Some(found) = self.license.take().and_then(|request| request.fetch()) {
+            self.unpacked
+                .licenses
+                .push((REPO_LICENSE_FILE.to_owned(), found.text));
+            self.unpacked.license_label = found.label;
+        }
     }
 
-    /// Sends `request` for `url` and reads at most `limit` bytes of a
-    /// successful answer.
-    fn read(
-        &self,
-        request: reqwest::blocking::RequestBuilder,
-        url: &reqwest::Url,
-        limit: u64,
-    ) -> Result<Vec<u8>, MarketError> {
-        let http = |err: reqwest::Error| MarketError::Http {
+    /// Writes the install into `agmen_themes/<id>/`, replacing an older
+    /// install of the same id.
+    ///
+    /// # Errors
+    ///
+    /// When writing or reading the install back fails.
+    pub(crate) fn write(&self, agmen_themes: &Path) -> Result<InstalledTheme, MarketError> {
+        write_install(&self.ext, &self.unpacked, agmen_themes)
+    }
+}
+
+/// GitHub's `/repos/{owner}/{repo}/license`, ready to send.
+#[derive(Debug)]
+struct LicenseRequest {
+    client: reqwest::blocking::Client,
+    url: reqwest::Url,
+    timeout: Duration,
+}
+
+/// A repository license from GitHub.
+struct RepoLicense {
+    text: Vec<u8>,
+    /// GitHub's SPDX id, or its name when it has no SPDX id.
+    label: Option<String>,
+}
+
+impl LicenseRequest {
+    /// The license, decoded; `None` when the repository has none (404), when
+    /// the request or its answer fails, or when the text is over
+    /// [`MAX_LICENSE_BYTES`]. One request, without a token, and it never
+    /// counts toward the backoff, which is about Zed's API.
+    fn fetch(&self) -> Option<RepoLicense> {
+        let request = self
+            .client
+            .get(self.url.clone())
+            .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .timeout(self.timeout);
+        // Each `.ok()?` here is deliberate: any failure (network, 404, 5xx,
+        // too large, not JSON, not base64) means "license not found" for
+        // this install, and the install goes on without one.
+        let body = read(request, &self.url, MAX_LICENSE_ANSWER_BYTES).ok()?;
+        let answer: LicenseAnswer = serde_json::from_slice(&body).ok()?;
+        if answer.encoding != "base64" {
+            return None;
+        }
+        // GitHub wraps the base64 in lines of 60 characters.
+        let packed: Vec<u8> = answer
+            .content
+            .bytes()
+            .filter(|b| !b.is_ascii_whitespace())
+            .collect();
+        // Four base64 characters carry three bytes: refuse before decoding.
+        if packed.len() / 4 * 3 > MAX_LICENSE_BYTES + 3 {
+            return None;
+        }
+        let text = base64::engine::general_purpose::STANDARD
+            .decode(&packed)
+            .ok()?;
+        let label = answer.license.and_then(DetectedLicense::label);
+        (!text.is_empty() && text.len() <= MAX_LICENSE_BYTES).then_some(RepoLicense { text, label })
+    }
+}
+
+/// Whether the license request follows a redirect to `next`, after
+/// requesting `previous` (the first request first): only to the scheme,
+/// host and port of the first request, which is `https://api.github.com`
+/// in the app, and at most [`MAX_LICENSE_REDIRECTS`] times (C304).
+fn follows_license_redirect(next: &reqwest::Url, previous: &[reqwest::Url]) -> bool {
+    previous.len() <= MAX_LICENSE_REDIRECTS
+        && previous
+            .first()
+            .is_some_and(|first| first.origin() == next.origin())
+}
+
+/// Sends `request` for `url` and reads at most `limit` bytes of a
+/// successful answer.
+fn read(
+    request: reqwest::blocking::RequestBuilder,
+    url: &reqwest::Url,
+    limit: u64,
+) -> Result<Vec<u8>, MarketError> {
+    let http = |err: reqwest::Error| MarketError::Http {
+        url: url.to_string(),
+        message: err.to_string(),
+    };
+    let response = request.send().map_err(http)?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(MarketError::Status {
+            url: url.to_string(),
+            status: status.as_u16(),
+        });
+    }
+    let mut body = Vec::new();
+    response
+        .take(limit.saturating_add(1))
+        .read_to_end(&mut body)
+        .map_err(|err| MarketError::Http {
             url: url.to_string(),
             message: err.to_string(),
-        };
-        let response = request.send().map_err(http)?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(MarketError::Status {
-                url: url.to_string(),
-                status: status.as_u16(),
-            });
-        }
-        let mut body = Vec::new();
-        response
-            .take(limit.saturating_add(1))
-            .read_to_end(&mut body)
-            .map_err(|err| MarketError::Http {
-                url: url.to_string(),
-                message: err.to_string(),
-            })?;
-        if body.len() as u64 > limit {
-            return Err(MarketError::TooLarge {
-                url: url.to_string(),
-                limit,
-            });
-        }
-        Ok(body)
+        })?;
+    if body.len() as u64 > limit {
+        return Err(MarketError::TooLarge {
+            url: url.to_string(),
+            limit,
+        });
     }
+    Ok(body)
 }
 
 /// An extension id is a folder name: lowercase letters, digits, `-` and `_`.
@@ -444,13 +589,24 @@ struct GithubRepo {
     repo: String,
 }
 
-/// Parses `https://github.com/{owner}/{repo}` with an optional `.git`, and
-/// nothing else: no other host or scheme, no user, port, path, query or
-/// trailing slash. Only GitHub's own name characters pass, so the parts go
-/// into the API URL as they are.
+/// Parses `https://github.com/{owner}/{repo}` with an optional `.git`, one
+/// trailing slash, or a `/tree/{ref}/...` folder (C302), and nothing else:
+/// no other host or scheme, no user, port, other path, or query. Only
+/// GitHub's own name characters pass, so the parts go into the API URL as
+/// they are; the folder part is dropped, never sent.
 fn github_repo(url: &str) -> Option<GithubRepo> {
     let rest = url.strip_prefix("https://github.com/")?;
-    let (owner, repo) = rest.split_once('/')?;
+    let (owner, rest) = rest.split_once('/')?;
+    let repo = match rest.split_once('/') {
+        None | Some((_, "")) => rest.strip_suffix('/').unwrap_or(rest),
+        Some((repo, tail)) => {
+            let reference = tail.strip_prefix("tree/")?;
+            if reference.is_empty() || reference.starts_with('/') {
+                return None;
+            }
+            repo
+        }
+    };
     let repo = repo.strip_suffix(".git").unwrap_or(repo);
     let owner_ok = !owner.is_empty()
         && owner.len() <= MAX_GITHUB_OWNER_LEN
@@ -474,6 +630,56 @@ fn github_repo(url: &str) -> Option<GithubRepo> {
 struct LicenseAnswer {
     content: String,
     encoding: String,
+    #[serde(default)]
+    license: Option<DetectedLicense>,
+}
+
+/// The license GitHub detected in the file.
+#[derive(Deserialize)]
+struct DetectedLicense {
+    #[serde(default)]
+    spdx_id: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+impl DetectedLicense {
+    /// The SPDX id, or the name when GitHub has no SPDX id for it
+    /// (`NOASSERTION`), cleaned as [`license_label`] does (C303).
+    fn label(self) -> Option<String> {
+        self.spdx_id
+            .filter(|id| id != "NOASSERTION")
+            .and_then(|id| license_label(&id))
+            .or_else(|| self.name.as_deref().and_then(license_label))
+    }
+}
+
+/// `line` as a license label: without control or bidi characters, trimmed,
+/// and cut to [`MAX_LICENSE_LABEL_CHARS`] with an ellipsis; `None` when
+/// nothing is left. The text is untrusted: a bidi override could reorder
+/// the credit line, and one long line would make its row tall (C303).
+fn license_label(line: &str) -> Option<String> {
+    let bidi = |c: char| {
+        matches!(
+            c,
+            '\u{61c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+        )
+    };
+    let clean: String = line
+        .chars()
+        .filter(|&c| !c.is_control() && !bidi(c))
+        .collect();
+    let clean = clean.trim();
+    if clean.is_empty() {
+        return None;
+    }
+    if clean.chars().count() <= MAX_LICENSE_LABEL_CHARS {
+        return Some(clean.to_owned());
+    }
+    let mut cut: String = clean.chars().take(MAX_LICENSE_LABEL_CHARS - 1).collect();
+    cut.truncate(cut.trim_end().len());
+    cut.push('\u{2026}');
+    Some(cut)
 }
 
 /// An `extension.toml` that parses, or `None`.
@@ -500,6 +706,8 @@ struct Unpacked {
     themes: Vec<(String, Vec<u8>)>,
     /// File name and contents of each license file at the root.
     licenses: Vec<(String, Vec<u8>)>,
+    /// The label GitHub gave the repository license, kept in the manifest.
+    license_label: Option<String>,
 }
 
 /// Reads the `.tar.gz` in memory, keeping the manifest, `themes/*.json` and
@@ -569,28 +777,47 @@ enum Kept {
     Theme(String),
 }
 
-/// Checks `unpacked` and writes it to `agmen_themes/<id>/` through a staging
-/// folder and a rename. A failed install removes the staging folder and
-/// leaves any older install of the same id in place (C204).
+/// Keeps only the theme files of `unpacked` that parse as a Zed theme
+/// family.
+///
+/// # Errors
+///
+/// [`MarketError::NoThemes`] when none does.
+fn keep_parsed_themes(id: &str, unpacked: &mut Unpacked) -> Result<(), MarketError> {
+    unpacked.themes.retain(|(name, bytes)| {
+        std::str::from_utf8(bytes).is_ok_and(|text| {
+            parse_jsonc::<Family>(text, Path::new(name)).is_ok_and(|f| !f.themes.is_empty())
+        })
+    });
+    if unpacked.themes.is_empty() {
+        return Err(MarketError::NoThemes { id: id.to_owned() });
+    }
+    Ok(())
+}
+
+/// `manifest` with its `license` key set to `label`.
+fn with_license_key(manifest: &[u8], label: &str) -> Result<Vec<u8>, String> {
+    let text = std::str::from_utf8(manifest).map_err(|err| err.to_string())?;
+    let mut table: toml::Table = toml::from_str(text).map_err(|err| err.to_string())?;
+    table.insert(
+        LICENSE_KEY.to_owned(),
+        toml::Value::String(label.to_owned()),
+    );
+    toml::to_string(&table)
+        .map(String::into_bytes)
+        .map_err(|err| err.to_string())
+}
+
+/// Writes `unpacked`, whose themes all parse, to `agmen_themes/<id>/`
+/// through a staging folder and a rename. A failed install removes the
+/// staging folder and leaves any older install of the same id in place
+/// (C204).
 fn write_install(
     ext: &ThemeExtension,
     unpacked: &Unpacked,
     agmen_themes: &Path,
 ) -> Result<InstalledTheme, MarketError> {
     let id = ext.id.clone();
-    // Only theme files that parse as a Zed theme family are kept.
-    let themes: Vec<&(String, Vec<u8>)> = unpacked
-        .themes
-        .iter()
-        .filter(|(name, bytes)| {
-            std::str::from_utf8(bytes).is_ok_and(|text| {
-                parse_jsonc::<Family>(text, Path::new(name)).is_ok_and(|f| !f.themes.is_empty())
-            })
-        })
-        .collect();
-    if themes.is_empty() {
-        return Err(MarketError::NoThemes { id });
-    }
     let io = |path: &Path| {
         let path = path.to_owned();
         move |source| MarketError::Io { path, source }
@@ -604,12 +831,22 @@ fn write_install(
             version: Some(ext.version.clone()),
             authors: ext.authors.clone(),
             repository: ext.repository.clone(),
+            license: None,
         })
         .map_err(|err| MarketError::Archive {
             id: id.clone(),
             message: err.to_string(),
         })?
         .into_bytes(),
+    };
+    let manifest = match &unpacked.license_label {
+        Some(label) => {
+            with_license_key(&manifest, label).map_err(|message| MarketError::Archive {
+                id: id.clone(),
+                message,
+            })?
+        }
+        None => manifest,
     };
     fs::create_dir_all(agmen_themes).map_err(io(agmen_themes))?;
     let staging = agmen_themes.join(format!(".{id}.partial"));
@@ -620,21 +857,22 @@ fn write_install(
         }
     }
     let target = agmen_themes.join(&id);
-    let swapped = write_staging(&staging, &manifest, &unpacked.licenses, &themes).and_then(|()| {
-        let had_old = target.exists();
-        if had_old {
-            fs::rename(&target, &old).map_err(io(&target))?;
-        }
-        fs::rename(&staging, &target)
-            .map_err(io(&target))
-            .inspect_err(|_| {
-                if had_old {
-                    // Best effort: the rename error is what the person needs to
-                    // see; a failure here leaves the old install at `.{id}.old`.
-                    fs::rename(&old, &target).unwrap_or(());
-                }
-            })
-    });
+    let swapped = write_staging(&staging, &manifest, &unpacked.licenses, &unpacked.themes)
+        .and_then(|()| {
+            let had_old = target.exists();
+            if had_old {
+                fs::rename(&target, &old).map_err(io(&target))?;
+            }
+            fs::rename(&staging, &target)
+                .map_err(io(&target))
+                .inspect_err(|_| {
+                    if had_old {
+                        // Best effort: the rename error is what the person needs to
+                        // see; a failure here leaves the old install at `.{id}.old`.
+                        fs::rename(&old, &target).unwrap_or(());
+                    }
+                })
+        });
     if let Err(err) = swapped {
         if staging.exists() {
             // Best effort: the write error matters more, and the next
@@ -656,7 +894,7 @@ fn write_staging(
     staging: &Path,
     manifest: &[u8],
     licenses: &[(String, Vec<u8>)],
-    themes: &[&(String, Vec<u8>)],
+    themes: &[(String, Vec<u8>)],
 ) -> Result<(), MarketError> {
     let write = |path: PathBuf, bytes: &[u8]| {
         fs::write(&path, bytes).map_err(|source| MarketError::Io { path, source })
@@ -687,6 +925,7 @@ fn read_back(target: &Path) -> Result<InstalledTheme, MarketError> {
 /// Reads an install back from its folder; `None` when it is not one (no
 /// manifest). A folder without a license file reads with `license: None`;
 /// for agmen's own installs that means none was found (Andy, 2026-10-26).
+/// A license file that is not UTF-8 or is blank reads with no label.
 pub(crate) fn read_installed(root: &Path) -> Option<InstalledTheme> {
     let id = root.file_name()?.to_str()?.to_owned();
     if id.starts_with('.') {
@@ -715,14 +954,19 @@ pub(crate) fn read_installed(root: &Path) -> Option<InstalledTheme> {
         })
         .collect();
     licenses.sort();
-    let license = licenses.first().and_then(|path| {
-        fs::read_to_string(path).ok().and_then(|text| {
-            text.lines()
-                .map(str::trim)
-                .find(|line| !line.is_empty())
-                .map(str::to_owned)
-        })
-    });
+    // The label kept at install first, as GitHub named the license; else
+    // the file's first line that has any text.
+    let license = manifest
+        .license
+        .as_ref()
+        .and_then(toml::Value::as_str)
+        .and_then(license_label)
+        .or_else(|| {
+            licenses
+                .first()
+                .and_then(|path| fs::read_to_string(path).ok())
+                .and_then(|text| text.lines().find_map(license_label))
+        });
     Some(InstalledTheme {
         id,
         name: manifest.name,
