@@ -6,6 +6,7 @@ mod components;
 mod dock;
 mod format;
 mod listener_panel;
+mod palette_filter;
 mod status_bar;
 #[cfg(test)]
 mod test_support;
