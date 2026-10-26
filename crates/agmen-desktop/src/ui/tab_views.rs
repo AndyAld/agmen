@@ -148,6 +148,10 @@ impl TabViews {
                 view.into()
             }
             TabItem::SettingsFile(path) => {
+                // shortcut: the text is read when the tab is first drawn and
+                // kept while it stays open, so a change made in Settings
+                // after that shows once the tab is reopened; reload it on
+                // Settings' saves when the file tab gets edited in place.
                 let text = settings_file_text(path);
                 cx.new(|_| CodeView::new(&text, Language::Toml, Vec::new()))
                     .into()
@@ -179,5 +183,23 @@ fn settings_file_text(path: &Path) -> String {
             "# No settings.toml yet: Settings writes it on the first change.\n".to_owned()
         }
         Err(err) => format!("# Could not read {}: {err}\n", path.display()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::settings_file_text;
+
+    // Review (wirec7 minor 2): the two reasons a settings file has no text.
+    #[test]
+    fn settings_file_text_says_why_there_is_none() {
+        let home = tempfile::tempdir().unwrap();
+        let missing = settings_file_text(&home.path().join("settings.toml"));
+        assert!(missing.starts_with("# No settings.toml yet"), "{missing}");
+        let unreadable = settings_file_text(home.path());
+        assert!(unreadable.starts_with("# Could not read "), "{unreadable}");
+        let file = home.path().join("written.toml");
+        std::fs::write(&file, "mode = \"dark\"\n").unwrap();
+        assert_eq!(settings_file_text(&file), "mode = \"dark\"\n");
     }
 }
