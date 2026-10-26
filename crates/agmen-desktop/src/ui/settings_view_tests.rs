@@ -254,3 +254,17 @@ fn unbuilt_pages_say_they_come_with_agmend(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("settings-placeholder").is_some());
     assert!(cx.debug_bounds("follow-zed").is_none());
 }
+
+#[test]
+fn about_carries_every_linked_crates_license() {
+    // Review C198: the Zed crates (Apache-2.0) and zed-font-kit and zed-scap
+    // (MIT) need their license texts in the binary too.
+    let has = |name: &str, text: &str| {
+        NOTICES
+            .iter()
+            .any(|(title, body)| title.contains(name) && body.contains(text))
+    };
+    assert!(has("gpui", "Apache License"), "Zed's crates");
+    assert!(has("font-kit", "Permission is hereby granted"));
+    assert!(has("scap", "MIT License"));
+}

@@ -18,7 +18,7 @@ use super::scope_chip::{ScopeChip, ScopeChipEvent, ScopeOption, branch_label};
 use super::syntax::Language;
 use super::tokens::{ICON_LG, ICON_SM, PROJECT_ROW_HEIGHT, SPACE_6};
 use crate::appearance::Appearance;
-use crate::backend::{ChangeKind, FileChange, WorktreeHead, WorktreeInfo, normalize_path};
+use crate::backend::{ChangeKind, FileChange, WorktreeHead, WorktreeInfo};
 use crate::icons::{FileIcons, UiIcon};
 
 /// What the Project panel tells the workspace.
@@ -158,9 +158,7 @@ fn push_children(
 
 /// The marker a changed file shows at the row's end, and its color.
 fn change_marker(changes: &[FileChange], path: &str) -> Option<(&'static str, Color)> {
-    let change = changes
-        .iter()
-        .find(|change| normalize_path(&change.path) == path)?;
+    let change = changes.iter().find(|change| change.path == path)?;
     Some(match change.kind {
         ChangeKind::Modified => ("M", Color::Warning),
         ChangeKind::Added => ("A", Color::Success),

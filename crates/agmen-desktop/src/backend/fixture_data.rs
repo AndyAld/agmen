@@ -904,7 +904,7 @@ pub(super) fn worktrees() -> Result<Vec<WorktreeInfo>, BackendError> {
             WorktreeState::Pushed,
         )?
     };
-    Ok(vec![
+    let all = vec![
         fx1,
         worktree(
             "andy/t7k",
@@ -948,7 +948,8 @@ pub(super) fn worktrees() -> Result<Vec<WorktreeInfo>, BackendError> {
             )?],
             WorktreeState::Pushed,
         )?,
-    ])
+    ];
+    Ok(all.into_iter().map(WorktreeInfo::normalized).collect())
 }
 
 /// A commit at `utc`, a time on the mockup's day (2026-10-25) in UTC.

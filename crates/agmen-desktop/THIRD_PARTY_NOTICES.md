@@ -1,6 +1,6 @@
 # Third-party notices: agmen-desktop
 
-agmen is MIT licensed. The desktop app bundles or links the works below, each under its own license. The full license texts ship in the app and show in Settings → About.
+agmen is MIT licensed. The desktop app bundles or links the works below, each under its own license. Every license text below is compiled into the app and shown in Settings → About; the files are in `assets/`.
 
 ## Bundled assets
 
@@ -14,11 +14,11 @@ agmen is MIT licensed. The desktop app bundles or links the works below, each un
 
 | Crates | Source and revision | License |
 |---|---|---|
-| gpui, gpui_apple, gpui_macos, gpui_macros, gpui_shared_string, gpui_util, collections, derive_refineable, refineable, http_client, scheduler, sum_tree, ztracing, ztracing_macro | github.com/zed-industries/zed at 08cbb88 | Apache-2.0 |
-| zed-font-kit 0.14.1-zed | github.com/zed-industries/font-kit at 94b0f28 | MIT OR Apache-2.0 |
-| zed-scap 0.0.8-zed | github.com/zed-industries/scap at 4afea48 | MIT |
+| gpui, gpui_apple, gpui_macos, gpui_macros, gpui_shared_string, gpui_util, collections, derive_refineable, refineable, http_client, scheduler, sum_tree, ztracing, ztracing_macro | github.com/zed-industries/zed at 08cbb88 | Apache-2.0 (`assets/licenses/zed-LICENSE-APACHE.txt`) |
+| zed-font-kit 0.14.1-zed | github.com/zed-industries/font-kit at 94b0f28 | MIT OR Apache-2.0; agmen uses it under MIT (`assets/licenses/font-kit-LICENSE-MIT.txt`) |
+| zed-scap 0.0.8-zed | github.com/zed-industries/scap at 4afea48 | MIT (`assets/licenses/scap-LICENSE.txt`) |
 
-Licenses come from each crate's Cargo metadata (`cargo metadata --locked`, 2026-10-26). Crates from crates.io are checked by `cargo deny check` against `deny.toml`.
+Licenses come from each crate's Cargo metadata (`cargo metadata --locked`, 2026-10-26). Crates from crates.io are checked by `cargo deny check` against `deny.toml`; shipping their license texts with release builds is the release pipeline's job (not built yet).
 
 ## Not bundled
 

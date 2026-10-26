@@ -213,14 +213,25 @@ fn clicking_the_open_chip_closes_its_menu(cx: &mut TestAppContext) {
 }
 
 #[test]
-fn change_markers_match_paths_with_empty_segments() {
-    // Review C189: the tree drops empty segments, so the marker must too.
-    let change = FileChange {
+fn normalized_worktrees_keep_markers_and_texts() {
+    // Reviews C189 and C199: the backend normalizes paths once, so the
+    // tree, its markers and the file texts all use the same spelling.
+    let mut wt = fx1();
+    wt.changes = vec![FileChange {
         path: "src//main.rs".into(),
         kind: crate::backend::ChangeKind::Modified,
         added: 1,
         removed: 0,
         hunks: Vec::new(),
-    };
-    assert!(change_marker(std::slice::from_ref(&change), "src/main.rs").is_some());
+    }];
+    wt.texts = std::collections::BTreeMap::from([(
+        "./src/main.rs".to_owned(),
+        crate::backend::FileText {
+            text: "fn main() {}\n".into(),
+            marks: Vec::new(),
+        },
+    )]);
+    let wt = wt.normalized();
+    assert!(change_marker(&wt.changes, "src/main.rs").is_some());
+    assert_eq!(contents(&wt, "src/main.rs").0, "fn main() {}\n");
 }

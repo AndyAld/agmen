@@ -8,9 +8,7 @@ use agmen_proto::{GitSha, IdentityId, Timestamp};
 
 /// A worktree path with empty and `.` segments dropped, as the Project
 /// panel's tree builds it, so `src//main.rs` and `src/main.rs` match.
-// shortcut: called where paths are compared; the live backend normalizes
-// once when it reads `git status`.
-pub(crate) fn normalize_path(path: &str) -> String {
+fn normalize_path(path: &str) -> String {
     path.split('/')
         .filter(|part| !part.is_empty() && *part != ".")
         .collect::<Vec<_>>()
@@ -88,6 +86,26 @@ pub(crate) enum GutterMark {
     Modified(Range<u32>),
     /// Lines were deleted just after this line; 0 means above line 1.
     Deleted(u32),
+}
+
+impl WorktreeInfo {
+    /// The same worktree with every path normalized (files, changes and
+    /// text keys), so views compare paths as they are. Backends call it
+    /// once, where they build the worktree (C199).
+    #[must_use]
+    pub(crate) fn normalized(mut self) -> Self {
+        for file in &mut self.files {
+            *file = normalize_path(file);
+        }
+        for change in &mut self.changes {
+            change.path = normalize_path(&change.path);
+        }
+        self.texts = std::mem::take(&mut self.texts)
+            .into_iter()
+            .map(|(path, text)| (normalize_path(&path), text))
+            .collect();
+        self
+    }
 }
 
 /// One file's text and the marks its diff gives the gutter.
