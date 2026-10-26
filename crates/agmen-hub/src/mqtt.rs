@@ -21,6 +21,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
 use crate::broker_tokens::{HUB_USERNAME, TokenError};
+use crate::claims::LeaseSweepError;
 use crate::config::MqttConfig;
 use crate::http::Hub;
 use crate::ingest::{IngestError, ReplyRoute};
@@ -80,6 +81,9 @@ pub enum MessagingError {
     /// The sweeper failed too many times in a row.
     #[error("the sweeper stopped")]
     Sweeper(#[source] Box<dyn std::error::Error + Send + Sync>),
+    /// The lease sweeper failed too many times in a row.
+    #[error("the lease sweeper stopped")]
+    Leases(#[source] LeaseSweepError),
     /// A task ended because another one it depends on ended.
     #[error("the {0} task stopped")]
     Stopped(&'static str),
@@ -88,8 +92,8 @@ pub enum MessagingError {
     Panicked(#[source] tokio::task::JoinError),
 }
 
-/// The running broker connection, ingest worker and sweeper. Dropping it
-/// stops all three.
+/// The running broker connection, ingest worker, sweeper and lease
+/// sweeper. Dropping it stops all four.
 #[derive(Debug)]
 pub struct Messaging {
     tasks: JoinSet<Result<(), MessagingError>>,
@@ -109,9 +113,10 @@ impl Messaging {
 
 impl Hub {
     /// Connects to the broker as `agmen-hub-<instance>`, subscribes to
-    /// `$share/<group>/agmen/v1/+/+/up/+`, and starts ingest and the
-    /// sweeper. It returns once the subscription is granted, so nothing
-    /// published to `up/` afterwards is missed.
+    /// `$share/<group>/agmen/v1/+/+/up/+`, and starts ingest, the sweeper
+    /// and the lease sweeper ([`Hub::run_lease_sweeper`]). It returns once
+    /// the subscription is granted, so nothing published to `up/`
+    /// afterwards is missed.
     ///
     /// # Errors
     ///
@@ -163,6 +168,12 @@ impl Hub {
         ));
         tasks.spawn(run_ingest(self.clone(), client.clone(), rx));
         tasks.spawn(crate::sweeper::run(self.clone(), client));
+        let hub = self.clone();
+        tasks.spawn(async move {
+            hub.run_lease_sweeper()
+                .await
+                .map_err(MessagingError::Leases)
+        });
         Ok(Messaging { tasks })
     }
 }

@@ -18,7 +18,7 @@ use crate::broker_tokens::{BrokerTokens, SigningKey, TokenError};
 use crate::config::Config;
 use crate::emqx::{EmqxAdmin, EmqxError};
 use crate::ingest::IngestState;
-use crate::{db, identities, invites};
+use crate::{db, identities, invites, items, lanes};
 
 /// How long the hub waits for GitHub or EMQX to answer.
 const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(10);
@@ -58,6 +58,7 @@ struct Inner {
     github: GithubOAuth,
     public_url: Url,
     ingest: IngestState,
+    claim_lease: Duration,
 }
 
 impl Hub {
@@ -102,6 +103,7 @@ impl Hub {
                 github,
                 public_url: config.public_url.clone(),
                 ingest: IngestState::default(),
+                claim_lease: config.claim_lease,
             }),
         })
     }
@@ -119,6 +121,12 @@ impl Hub {
             )
             .route("/v1/invites", post(invites::create))
             .route("/v1/invites/{code}/accept", post(invites::accept))
+            .route(
+                "/v1/projects/{project}/lanes",
+                get(lanes::list).put(lanes::replace),
+            )
+            .route("/v1/projects/{project}/check-path", post(lanes::check_path))
+            .route("/v1/projects/{project}/items", get(items::list))
             .layer(axum::middleware::map_response(refuse_framing))
             .with_state(self.clone())
     }
@@ -141,6 +149,11 @@ impl Hub {
 
     pub(crate) fn ingest_state(&self) -> &IngestState {
         &self.inner.ingest
+    }
+
+    /// How long a granted claim lasts without a HEARTBEAT.
+    pub(crate) fn claim_lease(&self) -> Duration {
+        self.inner.claim_lease
     }
 
     /// `path` (such as `v1/auth/device`) under the public URL, keeping any

@@ -3,6 +3,7 @@
 use std::fmt;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use url::Url;
 
@@ -158,6 +159,12 @@ fn mqtt_addr(value: &str) -> Result<(String, u16), ConfigError> {
     }
 }
 
+/// How long a claim lasts without a HEARTBEAT (protocol section 8).
+pub const DEFAULT_CLAIM_LEASE: Duration = Duration::from_secs(30 * 60);
+
+/// The longest claim lease `AGMEN_CLAIM_LEASE_SECS` may set: one day.
+const MAX_CLAIM_LEASE_SECS: u64 = 24 * 3600;
+
 /// Everything the hub needs to start.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -182,6 +189,9 @@ pub struct Config {
     /// this holds the next key (published at least 60 s before the switch)
     /// or the previous one (kept until its last token has expired).
     pub jwt_extra_keys: Vec<PathBuf>,
+    /// `AGMEN_CLAIM_LEASE_SECS`, default 1800 (30 minutes), at most a day:
+    /// how long a granted claim lasts unless a HEARTBEAT renews it.
+    pub claim_lease: Duration,
 }
 
 /// Why the configuration could not be read.
@@ -241,6 +251,7 @@ impl Config {
     /// assert_eq!(config.jwt_extra_keys.len(), 1);
     /// assert_eq!(config.mqtt.client_id(), "agmen-hub-main");
     /// assert_eq!(config.mqtt.up_filter(), "$share/hub/agmen/v1/+/+/up/+");
+    /// assert_eq!(config.claim_lease, agmen_hub::DEFAULT_CLAIM_LEASE);
     /// # Ok(()) }
     /// ```
     pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Self, ConfigError> {
@@ -302,6 +313,18 @@ impl Config {
                         .collect()
                 })
                 .unwrap_or_default(),
+            claim_lease: match get("AGMEN_CLAIM_LEASE_SECS") {
+                Some(value) => value
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|secs| (1..=MAX_CLAIM_LEASE_SECS).contains(secs))
+                    .map(Duration::from_secs)
+                    .ok_or(ConfigError::Invalid {
+                        name: "AGMEN_CLAIM_LEASE_SECS",
+                        what: "number of seconds from 1 to 86400",
+                    })?,
+                None => DEFAULT_CLAIM_LEASE,
+            },
         })
     }
 }
@@ -360,6 +383,38 @@ mod tests {
         assert!(is_short_name("main") && is_short_name("a1") && is_short_name(&"x".repeat(32)));
         for bad in ["", "Main", "a-b", "a/b", "+", &"x".repeat(33)] {
             assert!(!is_short_name(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn claim_lease_is_bounded() {
+        let with_lease = |value: &'static str| {
+            Config::from_lookup(|name| match name {
+                "AGMEN_CLAIM_LEASE_SECS" => Some(value.to_owned()),
+                "AGMEN_DATABASE_URL" => Some("postgres://localhost/agmen".to_owned()),
+                "AGMEN_PUBLIC_URL" => Some("https://api.example.com".to_owned()),
+                "AGMEN_EMQX_API_URL" => Some("http://emqx:18083/api/v5".to_owned()),
+                "AGMEN_MQTT_URL" => Some("mqtt://emqx:1883".to_owned()),
+                "AGMEN_JWT_SIGNING_KEY" => Some("/keys/hub-1.pem".to_owned()),
+                "AGMEN_GITHUB_CLIENT_ID"
+                | "AGMEN_GITHUB_CLIENT_SECRET"
+                | "AGMEN_EMQX_API_KEY"
+                | "AGMEN_EMQX_API_SECRET" => Some("x".to_owned()),
+                _ => None,
+            })
+        };
+        assert_eq!(with_lease("2").unwrap().claim_lease, Duration::from_secs(2));
+        for bad in ["0", "-1", "1.5", "86401"] {
+            assert!(
+                matches!(
+                    with_lease(bad),
+                    Err(ConfigError::Invalid {
+                        name: "AGMEN_CLAIM_LEASE_SECS",
+                        ..
+                    })
+                ),
+                "{bad}"
+            );
         }
     }
 

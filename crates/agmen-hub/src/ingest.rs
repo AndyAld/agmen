@@ -14,14 +14,15 @@ use std::time::{Duration, Instant};
 
 use agmen_proto::{
     Body, ClientEnvelope, DeliveryReply, IdentityId, IdentityKind, ItemKey, LaneName, Mention,
-    MessageId, NackReason, Payload, Seq, StampedEnvelope, Stream, Timestamp, Topics, Verb,
-    validate,
+    MessageId, NackReason, Payload, Seq, Severity, StampedEnvelope, Stream, Timestamp, Topics,
+    Verb, validate,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use tokio::sync::Notify;
 
+use crate::claims::LedgerMessage;
 use crate::db::{Role, is_unique_violation};
 use crate::http::{Hub, error_chain};
 use crate::numbering::{NumberingError, next_seq};
@@ -261,6 +262,14 @@ impl Hub {
         let mentioned = mentioned(verb, &env, &sender, &roster, parent.as_ref())?;
         let streams = route(verb, &env, &sender, &roster, parent.as_ref())?;
         let id = env.id.clone();
+        let ledger = LedgerMessage::handles(verb).then(|| LedgerMessage {
+            env: env.clone(),
+            from: sender.id.clone(),
+            from_handle: sender.handle.clone(),
+            from_kind: sender.kind,
+            from_owner: sender.owner.clone(),
+            hub_at,
+        });
         let draft = Draft {
             topics,
             client: env,
@@ -276,6 +285,9 @@ impl Hub {
         match store(pool, draft).await {
             Ok(recorded) => {
                 self.ingest_state().outbox_ready().notify_one();
+                if let Some(ledger) = &ledger {
+                    self.apply_ledger(topics, ledger).await;
+                }
                 let (stream, seq) = recorded.ack;
                 Ok(Handled {
                     reply: DeliveryReply::Ack { id, stream, seq },
@@ -316,7 +328,12 @@ impl Hub {
                 None => Refused::retry(NackReason::HubBusy, Duration::from_millis(BUSY_RETRY_MS)),
             })?;
         let env = ClientEnvelope::from_json(raw).map_err(|err| NackReason::from(&err))?;
-        validate(&env, hub_at)?;
+        match validate(&env, hub_at) {
+            // A late CLAIM is recorded and answered with DENY expired
+            // (protocol 3).
+            Err(NackReason::Expired) if matches!(env.payload, Payload::Claim { .. }) => {}
+            checked => checked?,
+        }
         let verb = env.payload.verb().ok_or(NackReason::Schema)?;
         let sender = load_sender(self.pool(), topics, from)
             .await?
@@ -381,6 +398,27 @@ impl Hub {
     /// # Ok(()) }
     /// ```
     pub async fn post_as_hub(&self, topics: &Topics, post: HubPost) -> Result<Posted, PostError> {
+        self.post_hub(topics, post, None).await
+    }
+
+    /// [`Hub::post_as_hub`] for an ALERT meant for the coordinators: when
+    /// the project has none, it mentions `fallback`, the owning human of
+    /// the identity concerned, instead (ruling R35).
+    pub(crate) async fn post_alert(
+        &self,
+        topics: &Topics,
+        post: HubPost,
+        fallback: &IdentityId,
+    ) -> Result<Posted, PostError> {
+        self.post_hub(topics, post, Some(fallback)).await
+    }
+
+    async fn post_hub(
+        &self,
+        topics: &Topics,
+        post: HubPost,
+        fallback: Option<&IdentityId>,
+    ) -> Result<Posted, PostError> {
         let verb = match &post.payload {
             Payload::Unknown { verb, .. } => return Err(PostError::NotHubVerb(verb.clone())),
             payload => payload.verb(),
@@ -399,7 +437,11 @@ impl Hub {
             let roster = Roster::load(self.pool(), topics)
                 .await
                 .map_err(PostError::store)?;
-            mentioned.extend(roster.coordinators().cloned());
+            let mut coordinators = roster.coordinators().cloned().peekable();
+            if coordinators.peek().is_none() {
+                mentioned.extend(fallback.cloned());
+            }
+            mentioned.extend(coordinators);
         }
         let client = ClientEnvelope {
             v: 1,
@@ -879,6 +921,10 @@ async fn find_parent(
 ///   to, so a reply in a private thread stays private; the feed when that
 ///   message was in the feed or is unknown.
 /// - ASSIGN: the feed and the assignee's inbox.
+/// - HEARTBEAT: the sender's own inbox, so it is not in the feed (protocol
+///   4) and the ACK still names a copy.
+/// - FOUND with severity `security`: the inboxes of the sender and its
+///   owning human; the feed gets only the hub's ITEM.
 /// - Everything else: the feed.
 ///
 /// # Errors
@@ -913,6 +959,18 @@ fn route(
                 return Err(NackReason::Schema);
             }
             Ok(BTreeSet::from([Stream::Feed, Stream::Inbox(to.clone())]))
+        }
+        Verb::Heartbeat => Ok(BTreeSet::from([Stream::Inbox(sender.id.clone())])),
+        Verb::Found
+            if matches!(
+                env.payload,
+                Payload::Found {
+                    severity: Some(Severity::Security),
+                    ..
+                }
+            ) =>
+        {
+            fan_out(&[], sender, roster)
         }
         _ => Ok(feed()),
     }
