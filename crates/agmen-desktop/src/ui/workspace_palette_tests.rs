@@ -354,8 +354,8 @@ fn an_outdated_agents_spawn_row_says_why_and_is_refused(cx: &mut TestAppContext)
 #[gpui::test]
 fn a_spawn_of_an_agent_with_an_unread_version_is_refused(cx: &mut TestAppContext) {
     // C261: an agent whose --version agmen could not read keeps its row,
-    // and the backend refuses its spawn with not_ready's text above the
-    // chat's composer.
+    // which carries the switch menu's note (C274), and the backend refuses
+    // its spawn with not_ready's text above the chat's composer.
     let (workspace, backend, cx) = open_edited_screen(cx, Screen::Chat, |snapshot| {
         let gemini = snapshot
             .installed_agents
@@ -382,6 +382,18 @@ fn a_spawn_of_an_agent_with_an_unread_version_is_refused(cx: &mut TestAppContext
     assert_eq!(
         shown(&workspace, cx).unwrap(),
         ["agmen: spawn worker with gemini"]
+    );
+    let (note, _) = crate::ui::switch_menu::note(&gemini).unwrap();
+    assert_eq!(note, "could not read its version");
+    assert!(cx.debug_bounds("palette-row:0:note").is_some());
+    let entries = workspace.update_in(cx, |w, window, cx| w.palette_entries(window, cx));
+    let entry = entries
+        .iter()
+        .find(|e| e.label.as_ref() == "agmen: spawn worker with gemini")
+        .unwrap();
+    assert_eq!(
+        entry.note.as_ref().map(|(t, _)| t.as_ref()),
+        Some(note.as_str())
     );
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
