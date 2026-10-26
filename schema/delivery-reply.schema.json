@@ -1,0 +1,153 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DeliveryReply",
+  "description": "The hub's answer to one publish on `up/`. Serializes as\n`{\"verb\": \"ACK\", \"id\": ..., \"stream\": ..., \"seq\": ...}` or\n`{\"verb\": \"NACK\", \"id\": ..., \"retryable\": ..., \"retry_after_ms\": ..., \"reason\": ...}`.",
+  "oneOf": [
+    {
+      "description": "The message is recorded at `seq` in `stream`.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "The envelope's id.",
+          "$ref": "#/$defs/MessageId"
+        },
+        "seq": {
+          "description": "Its number in that stream.",
+          "$ref": "#/$defs/Seq"
+        },
+        "stream": {
+          "description": "Where the hub recorded it. A DM is recorded in the sender's inbox.",
+          "$ref": "#/$defs/Stream"
+        },
+        "verb": {
+          "type": "string",
+          "const": "ACK"
+        }
+      },
+      "required": [
+        "verb",
+        "id",
+        "stream",
+        "seq"
+      ]
+    },
+    {
+      "description": "The message was not recorded.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "The envelope's id.",
+          "$ref": "#/$defs/MessageId"
+        },
+        "reason": {
+          "description": "Why.",
+          "$ref": "#/$defs/NackReason"
+        },
+        "retry_after_ms": {
+          "description": "How long to wait before retrying, when the hub says.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "retryable": {
+          "description": "Whether the client should send it again with the same id.",
+          "type": "boolean"
+        },
+        "verb": {
+          "type": "string",
+          "const": "NACK"
+        }
+      },
+      "required": [
+        "verb",
+        "id",
+        "retryable",
+        "reason"
+      ]
+    }
+  ],
+  "$defs": {
+    "MessageId": {
+      "type": "string",
+      "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "NackReason": {
+      "description": "Why the hub refused a message (protocol section 5.4).",
+      "oneOf": [
+        {
+          "description": "Slow down; honor `retry_after_ms`.",
+          "type": "string",
+          "const": "rate_limited"
+        },
+        {
+          "description": "A transient server condition.",
+          "type": "string",
+          "const": "hub_busy"
+        },
+        {
+          "description": "The envelope or its `data` does not match v1.",
+          "type": "string",
+          "const": "schema"
+        },
+        {
+          "description": "The body is over 32,768 bytes.",
+          "type": "string",
+          "const": "body_too_large"
+        },
+        {
+          "description": "The message arrived after `valid_until`.",
+          "type": "string",
+          "const": "expired"
+        },
+        {
+          "description": "The sender's kind or role may not send this verb.",
+          "type": "string",
+          "const": "forbidden_verb"
+        },
+        {
+          "description": "A mention the sender may not use, more than 8 identities, or mentions\non a verb that does not take them.",
+          "type": "string",
+          "const": "forbidden_mention"
+        },
+        {
+          "description": "Text matched a credential pattern; fix it and resend with a new id.",
+          "type": "string",
+          "const": "secret_detected"
+        },
+        {
+          "description": "The same id was reused with different content.",
+          "type": "string",
+          "const": "conflict"
+        },
+        {
+          "description": "The sender was revoked.",
+          "type": "string",
+          "const": "identity_revoked"
+        },
+        {
+          "description": "A LEND from an identity that neither owns the lane nor coordinates.",
+          "type": "string",
+          "const": "not_lane_owner"
+        },
+        {
+          "description": "A PUSH_REQUEST while push approval is `off`.",
+          "type": "string",
+          "const": "not_required"
+        }
+      ]
+    },
+    "Seq": {
+      "description": "A stream's sequence number. The hub numbers each stream from 1 with no gaps.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "Stream": {
+      "description": "feed, or inbox:<identity id>.",
+      "type": "string"
+    }
+  }
+}
