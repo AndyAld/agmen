@@ -298,13 +298,17 @@ fn spec_screen_shows_the_spec_tab_and_its_review(cx: &mut TestAppContext) {
 fn a_plan_spec_click_opens_its_tab_and_escape_closes_the_dialog(cx: &mut TestAppContext) {
     let (workspace, cx) = open(cx, Screen::KickOff);
     cx.update(|_, cx| crate::ui::bind_workspace_keys(cx));
+    // main.rs focuses the workspace once the window opens; the dialog takes
+    // focus from it and gives it back when it closes.
     cx.update(|window, cx| {
         let focus = workspace.read(cx).focus_handle.clone();
         focus.focus(window, cx);
     });
+    redraw(cx);
     cx.simulate_keystrokes("escape");
     redraw(cx);
     assert!(cx.debug_bounds("kickoff-dialog").is_none());
+    cx.update(|window, cx| assert!(workspace.read(cx).focus_handle.is_focused(window)));
     crate::ui::test_support::click(cx, "plan:spec:docs/specs/ridgeline-design.md");
     workspace.read_with(cx, |w, cx| {
         let pane = w.pane_group.read(cx).panes()[0].clone();

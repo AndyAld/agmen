@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use agmen_proto::Timestamp;
+use agmen_proto::{GitSha, Timestamp};
 
 use super::{Action, AgentStatus, BackendError, Snapshot, SpecComment, SpecReview};
 
@@ -51,9 +51,9 @@ fn at(mountain: &str) -> Result<Timestamp, BackendError> {
         .map_err(|_| bad())
 }
 
-/// The design spec's review: andy approved at 15:47 (his FYI), sean at
+/// The design spec's review at `sha`: andy approved at 15:47 (his FYI), sean at
 /// 15:52 (his DECISION) once `sean_approved`.
-pub(super) fn reviews(sean_approved: bool) -> Result<Vec<SpecReview>, BackendError> {
+pub(super) fn reviews(sean_approved: bool, sha: GitSha) -> Result<Vec<SpecReview>, BackendError> {
     let mut approved_at = BTreeMap::from([("andy".to_owned(), at("15:47")?)]);
     if sean_approved {
         approved_at.insert("sean".into(), at("15:52")?);
@@ -64,6 +64,7 @@ pub(super) fn reviews(sean_approved: bool) -> Result<Vec<SpecReview>, BackendErr
     };
     Ok(vec![SpecReview {
         path: DESIGN_PATH.into(),
+        sha,
         text: RIDGELINE_DESIGN.into(),
         approved_at,
         comments: vec![

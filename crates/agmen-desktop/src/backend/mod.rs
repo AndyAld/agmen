@@ -235,6 +235,8 @@ pub(crate) struct SpecComment {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SpecReview {
     pub(crate) path: String,
+    /// The commit `text` is at, which an approval from the tab names.
+    pub(crate) sha: GitSha,
     pub(crate) text: SharedString,
     pub(crate) approved_at: BTreeMap<String, Timestamp>,
     pub(crate) comments: Vec<SpecComment>,

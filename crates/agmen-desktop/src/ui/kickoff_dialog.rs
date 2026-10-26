@@ -10,8 +10,8 @@
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, Entity, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce,
-    Styled as _, Window, div,
+    App, Entity, FocusHandle, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
+    RenderOnce, Styled as _, Window, div,
 };
 use jiff::tz::TimeZone;
 
@@ -23,9 +23,13 @@ gpui::actions!(
     ]
 );
 
+/// The key context the open dialog sets. Escape is bound here, not in the
+/// workspace, so an open menu elsewhere still takes Escape first.
+pub(crate) const KEY_CONTEXT: &str = "KickoffDialog";
+
 use super::components::{Button, ButtonStyle, Card, Color, Heading, Label, LabelSize, Modal};
 use super::format::clock;
-use super::plan_model::PlanModel;
+use super::plan_model::{ErrorSource, PlanModel};
 use super::tokens::{RADIUS_CARD, SPACE_3, SPACE_8};
 use crate::appearance::Appearance;
 use crate::backend::PlanInfo;
@@ -135,14 +139,29 @@ impl KickoffDialog {
     }
 }
 
+impl KickoffDialog {
+    /// The dialog holds focus while open, as a Zed modal does, and gives it
+    /// back when it closes (`PlanModel::close_kickoff`).
+    fn hold_focus(&self, window: &mut Window, cx: &mut App) -> FocusHandle {
+        let focus = self.model.read(cx).dialog_focus().clone();
+        if !focus.contains_focused(window, cx) && !focus.is_focused(window) {
+            let previous = window.focused(cx);
+            self.model.update(cx, |m, _| m.remember_focus(previous));
+            window.focus(&focus, cx);
+        }
+        focus
+    }
+}
+
 impl RenderOnce for KickoffDialog {
-    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let focus = self.hold_focus(window, cx);
         let zone = cx
             .try_global::<LocalZone>()
             .map_or(TimeZone::UTC, |local| local.0.clone());
         let background = cx.global::<Appearance>().theme.background;
         let model = self.model.read(cx);
-        let error = model.error().cloned();
+        let error = model.error(&ErrorSource::KickOff).cloned();
         let (title, boxes, bullets, go) = match model.plan() {
             Some(plan) => (
                 format!("Kick off {} (plan v{})", plan.name, plan.version),
@@ -181,44 +200,57 @@ impl RenderOnce for KickoffDialog {
                 .child(Label::new(text).size(LabelSize::Small).wrap())
         });
         let (cancel, kick) = (self.model.clone(), self.model.clone());
-        let dismiss = self.model.clone();
-        div().child(
-            Modal::new("kickoff-dialog")
-                .on_dismiss(move |_, _, cx| dismiss.update(cx, |m, cx| m.close_kickoff(cx)))
-                .child(
-                    Label::new(title)
-                        .size(LabelSize::Large)
-                        .weight(FontWeight::SEMIBOLD)
-                        .color(Color::TextMuted),
-                )
-                .children(boxes)
-                .child(Heading::new("What happens"))
-                .children(bullets)
-                .when_some(error, |this, error| {
-                    this.child(
-                        div()
-                            .debug_selector(|| "kickoff:error".into())
-                            .child(Label::new(error).size(LabelSize::Small).color(Color::Error)),
+        let (dismiss, escape) = (self.model.clone(), self.model.clone());
+        div()
+            .track_focus(&focus)
+            .key_context(KEY_CONTEXT)
+            .on_action(move |_: &CloseKickoffDialog, window, cx| {
+                escape.update(cx, |m, cx| m.close_kickoff(window, cx));
+            })
+            .child(
+                Modal::new("kickoff-dialog")
+                    .on_dismiss(move |_, window, cx| {
+                        dismiss.update(cx, |m, cx| m.close_kickoff(window, cx));
+                    })
+                    .child(
+                        Label::new(title)
+                            .size(LabelSize::Large)
+                            .weight(FontWeight::SEMIBOLD)
+                            .color(Color::TextMuted),
                     )
-                })
-                .child(
-                    div()
-                        .flex()
-                        .justify_end()
-                        .gap(SPACE_8)
-                        .child(Button::new("kickoff:cancel", "Cancel").large().on_click(
-                            move |_, _, cx| {
-                                cancel.update(cx, |m, cx| m.close_kickoff(cx));
-                            },
-                        ))
-                        .child(
-                            Button::new("kickoff:go", go)
-                                .style(ButtonStyle::Primary)
-                                .large()
-                                .on_click(move |_, _, cx| kick.update(cx, |m, cx| m.kick_off(cx))),
-                        ),
-                ),
-        )
+                    .children(boxes)
+                    .child(Heading::new("What happens"))
+                    .children(bullets)
+                    .when_some(error, |this, error| {
+                        this.child(
+                            div().debug_selector(|| "kickoff:error".into()).child(
+                                Label::new(error).size(LabelSize::Small).color(Color::Error),
+                            ),
+                        )
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .justify_end()
+                            .gap(SPACE_8)
+                            .child(
+                                Button::new("kickoff:cancel", "Cancel")
+                                    .style(ButtonStyle::Recessed)
+                                    .large()
+                                    .on_click(move |_, window, cx| {
+                                        cancel.update(cx, |m, cx| m.close_kickoff(window, cx));
+                                    }),
+                            )
+                            .child(
+                                Button::new("kickoff:go", go)
+                                    .style(ButtonStyle::Primary)
+                                    .large()
+                                    .on_click(move |_, window, cx| {
+                                        kick.update(cx, |m, cx| m.kick_off(window, cx));
+                                    }),
+                            ),
+                    ),
+            )
     }
 }
 
@@ -312,6 +344,16 @@ mod tests {
             assert!(!model.kickoff_open());
             assert!(model.plan().unwrap().running);
         });
+    }
+
+    #[gpui::test]
+    fn escape_closes_the_dialog(cx: &mut TestAppContext) {
+        let (recording, model, cx) = open(cx);
+        cx.update(|_, cx| crate::ui::bind_workspace_keys(cx));
+        redraw(cx);
+        cx.simulate_keystrokes("escape");
+        assert!(recording.acts.borrow().is_empty());
+        model.read_with(cx, |model, _| assert!(!model.kickoff_open()));
     }
 
     #[gpui::test]

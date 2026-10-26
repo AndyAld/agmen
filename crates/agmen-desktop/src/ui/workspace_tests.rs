@@ -292,3 +292,29 @@ fn chat_tab_badge_matches_needs_you(cx: &mut TestAppContext) {
         );
     }
 }
+
+#[gpui::test]
+fn escape_closes_an_open_settings_dropdown(cx: &mut TestAppContext) {
+    // Task 19 binds Escape to close the kick-off dialog; an open menu in the
+    // workspace still takes Escape first.
+    let (_, cx) = open(cx);
+    let home = tempfile::tempdir().unwrap();
+    let sources = crate::ui::SettingsSources {
+        config: home.path().join(".config"),
+        extensions: home.path().join("extensions"),
+        market: "http://127.0.0.1:9".into(),
+    };
+    cx.update(|_, cx| {
+        cx.set_global(sources);
+        crate::ui::bind_workspace_keys(cx);
+    });
+    cx.dispatch_action(crate::ui::keys::OpenSettings);
+    click(cx, "theme");
+    assert!(cx.debug_bounds("theme:0").is_some());
+    cx.simulate_keystrokes("escape");
+    redraw(cx);
+    assert!(
+        cx.debug_bounds("theme:0").is_none(),
+        "escape left the menu open"
+    );
+}

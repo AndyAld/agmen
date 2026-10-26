@@ -171,6 +171,9 @@ impl PlanRoom {
             if folded {
                 continue;
             }
+            // shortcut: team rows take no click; the plan's team has no
+            // identities and the backend no details to show for them. Emit
+            // `AgentsPanelEvent::Selected` once `TeamRow` carries an id.
             for row in plan.team.iter().filter(|row| row.owner == owner) {
                 // The team table's harness reads "claude · sonnet"; the
                 // dock shows the agent only, as the Agents dock does.

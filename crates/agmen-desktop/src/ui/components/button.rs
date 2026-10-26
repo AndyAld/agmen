@@ -34,6 +34,9 @@ pub(crate) enum ButtonStyle {
     Secondary,
     /// Surface fill, as the breadcrumb's "Show ledger" (node 135).
     Subtle,
+    /// Task 19: the window background with a border, so it reads on an
+    /// elevated card, as the kick-off dialog's Cancel (node 10318).
+    Recessed,
 }
 
 #[derive(IntoElement)]
@@ -90,7 +93,6 @@ impl Button {
         self
     }
 
-    /// Something drawn before the label, such as a glyph.
     /// Task 19: 13 px text and padding that makes a 32 px button with or
     /// without a border (nodes 9777 and 10953): Primary pads 8 by 14,
     /// Outlined 7 by 12 inside its border.
@@ -108,6 +110,7 @@ impl Button {
         self
     }
 
+    /// Something drawn before the label, such as a glyph.
     #[must_use]
     pub(crate) fn leading(mut self, leading: impl IntoElement) -> Self {
         self.leading = Some(leading.into_any_element());
@@ -145,8 +148,12 @@ impl RenderOnce for Button {
         let primary = self.style == ButtonStyle::Primary;
         let selected = self.selected && !primary;
         let styled = match self.style {
-            ButtonStyle::Outlined => base
-                .bg(theme.elevated_surface)
+            ButtonStyle::Outlined | ButtonStyle::Recessed => base
+                .bg(if self.style == ButtonStyle::Recessed {
+                    theme.background
+                } else {
+                    theme.elevated_surface
+                })
                 .border(BORDER_WIDTH)
                 .border_color(theme.border)
                 .rounded(RADIUS_MD)
@@ -220,6 +227,7 @@ impl RenderOnce for Button {
                 ButtonStyle::Tinted => label.color(Color::Accent),
                 _ if selected => label.color(Color::Accent),
                 ButtonStyle::Outlined
+                | ButtonStyle::Recessed
                 | ButtonStyle::Filled
                 | ButtonStyle::Plain
                 | ButtonStyle::Secondary

@@ -219,8 +219,10 @@ fn spec_row(spec: &SpecState, has_text: bool) -> impl IntoElement {
 fn plan_button(plan: &PlanInfo, model: Entity<PlanModel>) -> Button {
     if plan.running {
         // shortcut: the backend has no pause action yet (desktop plan,
-        // Task 19); Pause all draws as the frame does and does nothing.
-        return Button::new("plan:pause", "Pause all").large();
+        // Task 19), so Pause all draws disabled; enable it once agmend has one.
+        return Button::new("plan:pause", "Pause all")
+            .large()
+            .disabled(true);
     }
     let label = plan::kickoff_label(plan);
     if plan::kickoff_enabled(plan) {

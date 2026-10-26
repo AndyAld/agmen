@@ -1,10 +1,12 @@
 //! The planning room's state that the plan panel, the spec tab, the Review
 //! panel and the kick-off dialog share: the plan as the backend last sent
-//! it, whether the dialog is open, and why the last action failed. It hears
+//! it, whether the dialog is open and where it took focus from, and why
+//! the last action failed. It hears
 //! the backend's updates, so an approval or a kick-off shows everywhere.
 
+use agmen_proto::GitSha;
 use futures::StreamExt as _;
-use gpui::{AppContext as _, Context, Entity, Global, SharedString, Task};
+use gpui::{AppContext as _, Context, Entity, FocusHandle, Global, SharedString, Task, Window};
 
 use crate::backend::{Action, Approval, BackendError, BackendHandle, PlanInfo, Snapshot, Update};
 
@@ -15,13 +17,25 @@ pub(crate) struct PlanHandle(pub(crate) Entity<PlanModel>);
 
 impl Global for PlanHandle {}
 
+/// What a refusal came from, so each view shows only its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ErrorSource {
+    /// Approving the spec at this path.
+    Spec(String),
+    /// Kicking off the plan.
+    KickOff,
+}
+
 pub(crate) struct PlanModel {
     project: String,
     me: String,
     plan: Option<PlanInfo>,
     kickoff_open: bool,
-    /// Why the last action failed, until the next one succeeds.
-    error: Option<SharedString>,
+    /// Why the last action failed and where it came from, until an action
+    /// from there succeeds.
+    error: Option<(ErrorSource, SharedString)>,
+    dialog_focus: FocusHandle,
+    restore_focus: Option<FocusHandle>,
     _updates: Option<Task<()>>,
 }
 
@@ -49,10 +63,7 @@ impl PlanModel {
                     let Update::Snapshot(snapshot) = update else {
                         continue;
                     };
-                    let applied = model.update(cx, |model, cx| {
-                        model.plan = snapshot.plan;
-                        cx.notify();
-                    });
+                    let applied = model.update(cx, |model, cx| model.apply(snapshot.plan, cx));
                     if applied.is_err() {
                         break;
                     }
@@ -65,6 +76,8 @@ impl PlanModel {
             plan: snapshot.plan.clone(),
             kickoff_open: false,
             error: None,
+            dialog_focus: cx.focus_handle(),
+            restore_focus: None,
             _updates: updates,
         }
     }
@@ -95,8 +108,30 @@ impl PlanModel {
         self.kickoff_open
     }
 
-    pub(crate) fn error(&self) -> Option<&SharedString> {
-        self.error.as_ref()
+    /// Takes the plan the backend sent.
+    pub(crate) fn apply(&mut self, plan: Option<PlanInfo>, cx: &mut Context<Self>) {
+        self.plan = plan;
+        cx.notify();
+    }
+
+    /// Why the last action from `source` failed, until one from it succeeds.
+    pub(crate) fn error(&self, source: &ErrorSource) -> Option<&SharedString> {
+        self.error
+            .as_ref()
+            .filter(|(from, _)| from == source)
+            .map(|(_, reason)| reason)
+    }
+
+    /// Where the dialog holds focus while it is open, so Escape reaches its
+    /// key context.
+    pub(crate) const fn dialog_focus(&self) -> &FocusHandle {
+        &self.dialog_focus
+    }
+
+    /// Records what had focus before the dialog took it, to give it back on
+    /// close.
+    pub(crate) fn remember_focus(&mut self, previous: Option<FocusHandle>) {
+        self.restore_focus = previous.filter(|previous| *previous != self.dialog_focus);
     }
 
     /// My approval of the spec at `path`, or `None` when I am not asked to
@@ -112,68 +147,58 @@ impl PlanModel {
             .copied()
     }
 
-    /// Approves the spec at `path` at the commit the tab shows (spec 7:
-    /// an approval names the commit its approver read).
-    pub(crate) fn approve_spec(&mut self, path: &str, cx: &mut Context<Self>) {
-        let sha = self
-            .plan
-            .as_ref()
-            .and_then(|plan| plan.specs.iter().find(|spec| spec.path == path))
-            .map(|spec| spec.sha.clone());
-        match sha {
-            Some(sha) => self.act(
-                Action::ApproveSpec {
-                    path: path.to_owned(),
-                    sha,
-                },
-                cx,
-            ),
-            None => self.fail(
-                BackendError::Unsupported("approving a spec the plan does not list"),
-                cx,
-            ),
-        }
+    /// Approves the spec at `path` at `shown`, the commit whose text the
+    /// tab shows (spec 7: an approval names the commit its approver read).
+    pub(crate) fn approve_spec(&mut self, path: &str, shown: GitSha, cx: &mut Context<Self>) {
+        let action = Action::ApproveSpec {
+            path: path.to_owned(),
+            sha: shown,
+        };
+        self.act(action, ErrorSource::Spec(path.to_owned()), cx);
     }
 
     /// Opens the kick-off dialog, when the plan is ready to kick off.
     pub(crate) fn open_kickoff(&mut self, cx: &mut Context<Self>) {
         if self.plan.as_ref().is_some_and(crate::plan::kickoff_enabled) {
             self.kickoff_open = true;
-            self.error = None;
+            self.clear_error(&ErrorSource::KickOff);
             cx.notify();
         }
     }
 
-    pub(crate) fn close_kickoff(&mut self, cx: &mut Context<Self>) {
+    /// Closes the dialog and gives focus back to what had it before.
+    pub(crate) fn close_kickoff(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.kickoff_open = false;
+        if let Some(previous) = self.restore_focus.take() {
+            window.focus(&previous, cx);
+        }
         cx.notify();
     }
 
     /// Kicks off the plan; the dialog closes when the backend takes it and
     /// stays open with the reason when it refuses.
-    pub(crate) fn kick_off(&mut self, cx: &mut Context<Self>) {
-        self.act(Action::KickOff, cx);
-        if self.error.is_none() {
-            self.kickoff_open = false;
+    pub(crate) fn kick_off(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.act(Action::KickOff, ErrorSource::KickOff, cx);
+        if self.error(&ErrorSource::KickOff).is_none() {
+            self.close_kickoff(window, cx);
         }
     }
 
-    fn act(&mut self, action: Action, cx: &mut Context<Self>) {
+    fn clear_error(&mut self, source: &ErrorSource) {
+        if self.error.as_ref().is_some_and(|(from, _)| from == source) {
+            self.error = None;
+        }
+    }
+
+    fn act(&mut self, action: Action, source: ErrorSource, cx: &mut Context<Self>) {
         let result = match cx.try_global::<BackendHandle>() {
             Some(backend) => backend.0.act(action),
             None => Err(BackendError::Unsupported("acting without a backend")),
         };
         match result {
-            Ok(()) => {
-                self.error = None;
-                cx.notify();
-            }
-            Err(err) => self.fail(err, cx),
+            Ok(()) => self.clear_error(&source),
+            Err(err) => self.error = Some((source, err.to_string().into())),
         }
-    }
-
-    fn fail(&mut self, err: BackendError, cx: &mut Context<Self>) {
-        self.error = Some(err.to_string().into());
         cx.notify();
     }
 }

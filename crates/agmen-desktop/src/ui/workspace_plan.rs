@@ -13,7 +13,7 @@ use super::Workspace;
 use crate::backend::Snapshot;
 use crate::local_time::LocalZone;
 use crate::ui::agents_panel::AgentsPanelEvent;
-use crate::ui::kickoff_dialog::{CloseKickoffDialog, KickoffDialog};
+use crate::ui::kickoff_dialog::KickoffDialog;
 use crate::ui::pane::TabItem;
 use crate::ui::plan_model::PlanModel;
 use crate::ui::plan_panel::{self, OpenSpec, PlanPanel};
@@ -130,17 +130,12 @@ impl Workspace {
         }
     }
 
-    /// Registers the plan panel's and the dialog's actions.
+    /// Registers the plan panel's actions; the dialog handles its own.
     pub(super) fn plan_actions(root: Div, cx: &Context<Self>) -> Div {
         root.on_action(cx.listener(|this, action: &OpenSpec, _, cx| {
             let item = TabItem::Spec(action.0.clone());
             this.pane_group.update(cx, |group, cx| group.open(item, cx));
             cx.notify();
-        }))
-        .on_action(cx.listener(|this, _: &CloseKickoffDialog, _, cx| {
-            if let Some(model) = &this.plan.model {
-                model.update(cx, |model, cx| model.close_kickoff(cx));
-            }
         }))
     }
 }

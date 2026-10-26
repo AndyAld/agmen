@@ -46,8 +46,6 @@ impl Badge {
         self
     }
 
-    /// Fills the badge with its color and sets the text on it in the
-    /// background color.
     /// Task 19: a count chip on the elevated surface instead of a tint,
     /// with no padding above or below (a dock section's count, node 8688).
     #[must_use]
@@ -56,6 +54,8 @@ impl Badge {
         self
     }
 
+    /// Fills the badge with its color and sets the text on it in the
+    /// background color.
     #[must_use]
     pub(crate) const fn solid(mut self) -> Self {
         self.solid = true;
