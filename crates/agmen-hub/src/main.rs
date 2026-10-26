@@ -1,6 +1,9 @@
 //! The agmen hub: auth, identities, ingest, numbering, replay, and the ledger.
 //!
-//! `agmen-hub` (or `agmen-hub serve`) serves the HTTP API. Configuration
+//! `agmen-hub` (or `agmen-hub serve`) serves the HTTP API and, connected to
+//! the broker at `AGMEN_MQTT_URL`, ingests what clients publish and
+//! publishes the feed, inboxes and replies; it exits if that connection
+//! cannot be kept. Configuration
 //! comes from `AGMEN_*` environment variables (see `agmen_hub::Config`);
 //! `RUST_LOG` sets the log filter (default `info`). Logs go to stderr.
 //!
@@ -124,6 +127,10 @@ async fn serve() -> anyhow::Result<()> {
     let hub = agmen_hub::Hub::connect(&config)
         .await
         .context("starting the hub")?;
+    let mut messaging = hub
+        .start_messaging(&config.mqtt)
+        .await
+        .context("connecting to the broker")?;
     let listener = tokio::net::TcpListener::bind(config.listen)
         .await
         .with_context(|| format!("listening on {}", config.listen))?;
@@ -132,10 +139,11 @@ async fn serve() -> anyhow::Result<()> {
         version = env!("CARGO_PKG_VERSION"),
         "agmen-hub serving"
     );
-    axum::serve(listener, hub.router())
-        .with_graceful_shutdown(shutdown())
-        .await
-        .context("serving HTTP")
+    let server = axum::serve(listener, hub.router()).with_graceful_shutdown(shutdown());
+    tokio::select! {
+        served = server => served.context("serving HTTP"),
+        failed = messaging.failed() => Err(anyhow::Error::new(failed).context("messaging stopped")),
+    }
 }
 
 async fn bootstrap(tenant: String, project: String, admin: AdminGithub) -> anyhow::Result<()> {

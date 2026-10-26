@@ -17,6 +17,7 @@ use crate::auth::{self, GithubError, GithubOAuth};
 use crate::broker_tokens::{BrokerTokens, SigningKey, TokenError};
 use crate::config::Config;
 use crate::emqx::{EmqxAdmin, EmqxError};
+use crate::ingest::IngestState;
 use crate::{db, identities, invites};
 
 /// How long the hub waits for GitHub or EMQX to answer.
@@ -56,6 +57,7 @@ struct Inner {
     emqx: EmqxAdmin,
     github: GithubOAuth,
     public_url: Url,
+    ingest: IngestState,
 }
 
 impl Hub {
@@ -99,6 +101,7 @@ impl Hub {
                 emqx,
                 github,
                 public_url: config.public_url.clone(),
+                ingest: IngestState::default(),
             }),
         })
     }
@@ -134,6 +137,10 @@ impl Hub {
 
     pub(crate) fn github(&self) -> &GithubOAuth {
         &self.inner.github
+    }
+
+    pub(crate) fn ingest_state(&self) -> &IngestState {
+        &self.inner.ingest
     }
 
     /// `path` (such as `v1/auth/device`) under the public URL, keeping any
@@ -292,7 +299,7 @@ impl IntoResponse for ApiError {
 }
 
 /// `err` and up to 16 of its sources, joined with ": ".
-fn error_chain(err: &dyn std::error::Error) -> String {
+pub(crate) fn error_chain(err: &dyn std::error::Error) -> String {
     std::iter::successors(Some(err), |e| e.source())
         .take(17)
         .map(ToString::to_string)

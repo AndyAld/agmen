@@ -21,7 +21,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use agmen_hub::{Config, EmqxConfig, GithubConfig, Hub, Secret};
+use agmen_hub::{Config, EmqxConfig, GithubConfig, Hub, Messaging, MqttConfig, Secret};
 use reqwest::StatusCode;
 use reqwest::redirect::Policy;
 use serde_json::{Value, json};
@@ -168,6 +168,11 @@ fn jwt_key(name: &str) -> PathBuf {
 #[derive(Debug)]
 pub struct TestHub {
     pub base: Url,
+    /// The hub itself, for calls tests make without HTTP.
+    pub hub: Hub,
+    /// Its broker settings: an instance and share group of its own, so
+    /// parallel tests never take each other's `up/` messages.
+    pub mqtt: MqttConfig,
     server: JoinHandle<()>,
 }
 
@@ -184,6 +189,7 @@ impl TestHub {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr: SocketAddr = listener.local_addr().unwrap();
         let base = Url::parse(&format!("http://{addr}")).unwrap();
+        let (host, port) = mqtt::mqtt_addr();
         let config = Config {
             database_url: Secret::new(db_url),
             listen: addr,
@@ -199,14 +205,35 @@ impl TestHub {
                 api_key: env("AGMEN_IT_EMQX_API_KEY"),
                 api_secret: Secret::new(env("AGMEN_IT_EMQX_API_SECRET")),
             },
+            mqtt: MqttConfig {
+                host,
+                port,
+                instance: new_id(),
+                share_group: new_id(),
+            },
             jwt_signing_key: jwt_key(signing),
             jwt_extra_keys: extra.iter().map(|name| jwt_key(name)).collect(),
         };
         let hub = Hub::connect(&config).await.expect("start the hub");
+        let router = hub.router();
         let server = tokio::spawn(async move {
-            axum::serve(listener, hub.router()).await.unwrap();
+            axum::serve(listener, router).await.unwrap();
         });
-        Self { base, server }
+        Self {
+            base,
+            hub,
+            mqtt: config.mqtt,
+            server,
+        }
+    }
+
+    /// Connects this hub to the dev EMQX and starts ingest and the
+    /// sweeper. Dropping the result stops them.
+    pub async fn start_messaging(&self) -> Messaging {
+        self.hub
+            .start_messaging(&self.mqtt)
+            .await
+            .expect("start messaging")
     }
 
     pub fn url(&self, path: &str) -> Url {

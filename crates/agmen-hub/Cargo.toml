@@ -21,14 +21,18 @@ getrandom = "0.4.3"
 jiff = { version = "0.2.38", default-features = false, features = ["std", "serde"] }
 jsonwebtoken = { version = "11.1.0", features = ["aws_lc_rs"] }
 oauth2 = { version = "5.0.0", default-features = false }
+regex = "1.13.1"
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls", "form"] }
+# rumqttc-next names its library `rumqttc`, as the upstream rumqttc that the
+# tests use does, so this one is renamed (ADR-0003).
+rumqttc_next = { version = "0.34.0", package = "rumqttc-next", default-features = false }
 rustls = { version = "0.23.46", default-features = false, features = ["aws_lc_rs", "std"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha2 = "0.11.1"
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-native-roots", "postgres", "macros", "migrate"] }
 thiserror = "2.0.21"
-tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "net", "signal", "time"] }
+tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "net", "signal", "time", "sync"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 url = "2.5.8"

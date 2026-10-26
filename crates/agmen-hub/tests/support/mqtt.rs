@@ -16,8 +16,11 @@ use super::env;
 
 pub const ACK_WAIT: Duration = Duration::from_secs(10);
 
+/// Publishes a client keeps for later `recv_on` calls on their topics.
+const MAX_PENDING: usize = 1024;
+
 /// Host and port from `AGMEN_IT_MQTT` (`mqtt://host:port`).
-fn mqtt_addr() -> (String, u16) {
+pub fn mqtt_addr() -> (String, u16) {
     let url = env("AGMEN_IT_MQTT");
     let rest = url
         .strip_prefix("mqtt://")
@@ -153,7 +156,10 @@ impl Client {
         }
     }
 
-    /// The next publish on `topic` within `within`; other topics are dropped.
+    /// The next publish on `topic` within `within`. Publishes on other
+    /// topics that arrive meanwhile are kept, in order, for later calls (the
+    /// newest [`MAX_PENDING`]), since the hub sends a message's copies just
+    /// before its ACK.
     pub async fn recv_on(&mut self, topic: &str, within: Duration) -> Option<Publish> {
         if let Some(i) = self
             .pending
@@ -167,6 +173,12 @@ impl Client {
             match timeout_at(deadline, self.events.recv()).await {
                 Ok(Some(Ev::Packet(Packet::Publish(p)))) if p.topic == topic.as_bytes() => {
                     return Some(p);
+                }
+                Ok(Some(Ev::Packet(Packet::Publish(p)))) => {
+                    if self.pending.len() == MAX_PENDING {
+                        self.pending.pop_front();
+                    }
+                    self.pending.push_back(p);
                 }
                 Ok(Some(Ev::Packet(_))) => {}
                 Ok(Some(Ev::Closed(e))) => {
