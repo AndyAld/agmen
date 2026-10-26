@@ -14,6 +14,16 @@ default-filter = "test(/(^|::)it_/) and not test(/restart/)"
 slow-timeout = { period = "30s", terminate-after = 4 }
 test-threads = 4
 
+# Integration tests whose name contains "toxiproxy" cut or slow the shared
+# toxiproxy link (localhost:21883 to emqx:1883), so they run one at a time.
+# Tests that connect to EMQX directly are not affected and run alongside.
+[test-groups]
+toxiproxy = { max-threads = 1 }
+
+[[profile.it.overrides]]
+filter = "test(/toxiproxy/)"
+test-group = "toxiproxy"
+
 [profile.it-restart]
 default-filter = "test(/(^|::)it_/) and test(/restart/)"
 slow-timeout = { period = "60s", terminate-after = 3 }
