@@ -18,7 +18,7 @@ use super::scope_chip::{ScopeChip, ScopeChipEvent, ScopeOption, branch_label};
 use super::syntax::Language;
 use super::tokens::{ICON_LG, ICON_SM, PROJECT_ROW_HEIGHT, SPACE_6};
 use crate::appearance::Appearance;
-use crate::backend::{ChangeKind, FileChange, WorktreeInfo};
+use crate::backend::{ChangeKind, FileChange, WorktreeHead, WorktreeInfo};
 use crate::icons::{FileIcons, UiIcon};
 
 /// What the Project panel tells the workspace.
@@ -169,9 +169,12 @@ fn change_marker(changes: &[FileChange], path: &str) -> Option<(&'static str, Co
 /// The root folder's name: the worktree's folder, which agmen names after
 /// the branch with `/` turned into `-`.
 fn root_name(worktree: &WorktreeInfo) -> String {
-    // shortcut: derived from the branch until the backend gives each
+    // shortcut: derived from the head until the backend gives each
     // worktree's root path (the live backend, ADR-0011).
-    branch_label(worktree).replace('/', "-")
+    match &worktree.head {
+        WorktreeHead::Branch(_) => branch_label(worktree).replace('/', "-"),
+        WorktreeHead::Detached { item, .. } => item.clone(),
+    }
 }
 
 /// Tests find each row as `"tree:{path}"` (the root as `tree:`) and a

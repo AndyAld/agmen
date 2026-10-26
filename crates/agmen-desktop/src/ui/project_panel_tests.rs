@@ -21,7 +21,10 @@ fn rv2() -> WorktreeInfo {
     WorktreeInfo {
         owner: fixture_id("andy/rv2"),
         handle: "andy/rv2".into(),
-        branch: "C015".into(),
+        head: crate::backend::WorktreeHead::Detached {
+            at: "9e2a71c".parse().unwrap(),
+            item: "C015".into(),
+        },
         files: vec!["README.md".into()],
         changes: Vec::new(),
         commits: Vec::new(),

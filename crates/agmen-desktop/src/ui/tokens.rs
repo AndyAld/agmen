@@ -135,6 +135,9 @@ pub(crate) const DOT_SIZE: Pixels = px(7.);
 pub(crate) const BORDER_WIDTH: Pixels = px(1.);
 pub(crate) const PROGRESS_HEIGHT: Pixels = px(4.);
 
+/// How strongly a diff line's fill shows `created` or `deleted` (the
+/// mockup draws OK and ERR at alpha 0x22).
+pub(crate) const DIFF_TINT: f32 = 0.13;
 /// How strongly a tinted badge's fill shows its color.
 pub(crate) const BADGE_TINT: f32 = 0.18;
 /// An accent-tinted button's fill (console.py "primary", #72b9a926).
