@@ -214,6 +214,37 @@ fn settings_applied_screen_starts_applied() {
 }
 
 #[test]
+fn settings_screens_lead_recent_with_their_change() {
+    // V65: console.py 1504 to 1508 (frames 6674 and 7290).
+    let first = |screen| {
+        FixtureBackend::for_screen(screen)
+            .unwrap()
+            .snapshot()
+            .listener
+            .recent
+            .remove(0)
+    };
+    let pending = first(Screen::SettingsFromChat);
+    assert_eq!(
+        (pending.time.as_str(), pending.text.as_str(), pending.kind),
+        (
+            "15:50",
+            "waiting for Apply: andy/fx1 lanes and budget",
+            RecentKind::Waiting
+        )
+    );
+    let applied = first(Screen::SettingsApplied);
+    assert_eq!(
+        (applied.time.as_str(), applied.text.as_str(), applied.kind),
+        (
+            "15:50",
+            "changed andy/fx1 lanes and budget (Undo)",
+            RecentKind::Applied
+        )
+    );
+}
+
+#[test]
 fn plan_fixture_team_and_shares() {
     let plan = FixtureBackend::for_screen(Screen::Plan)
         .unwrap()
@@ -499,4 +530,16 @@ fn refused_is_what_the_kind_could_send_but_the_role_cannot() {
             "PUSH_REQUEST"
         ]
     );
+}
+
+#[test]
+fn git_facts_know_every_worktree_commit() {
+    // Review C191: refs confirm commits against git_facts, so every commit
+    // the Git panel lists must be there.
+    let s = chat();
+    for wt in &s.worktrees {
+        for c in &wt.commits {
+            assert!(s.git.commits.contains(&c.sha.to_string()), "{}", c.sha);
+        }
+    }
 }

@@ -80,6 +80,13 @@ pub(crate) const LUCIDE_LICENSE: &str = include_str!("../assets/icons/LICENSE-lu
 pub(crate) const IBM_PLEX_LICENSE: &str = include_str!("../assets/fonts/ibm-plex-sans/license.txt");
 /// Lilex's SIL Open Font License (shown in About).
 pub(crate) const LILEX_LICENSE: &str = include_str!("../assets/fonts/lilex/OFL.txt");
+/// Zed's Apache-2.0 license, for gpui and the other zed-industries/zed
+/// crates the app links (shown in About).
+pub(crate) const ZED_APACHE_LICENSE: &str =
+    include_str!("../assets/licenses/zed-LICENSE-APACHE.txt");
+/// zed-font-kit's MIT license, one of its two (shown in About).
+pub(crate) const FONT_KIT_MIT_LICENSE: &str =
+    include_str!("../assets/licenses/font-kit-LICENSE-MIT.txt");
 
 /// The built-in assets, for GPUI's `svg()` paths.
 #[derive(Debug, Clone, Copy, Default)]

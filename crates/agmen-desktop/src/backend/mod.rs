@@ -21,8 +21,8 @@ use crate::roles::{Edits, RoleKind, Tier};
 pub(crate) use fixture::FixtureBackend;
 pub(crate) use fixture_data::REVIEWER_XML;
 pub(crate) use worktree::{
-    ChangeKind, CommitInfo, DiffLine, DiffLineKind, FileChange, Hunk, WorktreeHead, WorktreeInfo,
-    WorktreeState,
+    ChangeKind, CommitInfo, DiffLine, DiffLineKind, FileChange, FileText, GutterMark, Hunk,
+    WorktreeHead, WorktreeInfo, WorktreeState,
 };
 
 /// The identity id the fixture gives a mockup handle, for tests.
@@ -273,6 +273,8 @@ pub(crate) enum RecentKind {
     Answered,
     /// A settings change waits for the person.
     Waiting,
+    /// It applied a settings change, which the person can undo.
+    Applied,
 }
 
 /// The right dock's Listener panel.

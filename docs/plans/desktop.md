@@ -132,7 +132,7 @@
 
 - [x] Done. `Theme.syntax` is a map by Zed's syntax names (what Task 10 looks up), not a bare ramp; Marked's ramp fills it the way Marked's syntax JSON does. The theme is chosen by name, "Wallpaper Adaptive (Balanced)". `theme_overrides` (per theme) and `experimental.theme_overrides` (global) are read when following Zed. Shot with a throwaway HOME choosing the Marked theme: translucent and blurred as intended.
 
-Andy's decision (2026-10-26): reuse what his own app Marked (`~/Projects/Marked`, MIT, Andy's project) does for color.
+Andy's decision (2026-10-26): reuse what Andy's Marked editor (MIT) does for color.
 
 **Files:** Modify `src/appearance/theme.rs`, `src/appearance/fallback.rs`, `src/appearance/mod.rs`, `src/appearance/zed.rs`; create `src/appearance/marked.rs`, `src/appearance/marked_tests.rs`.
 
@@ -243,7 +243,7 @@ Screens: `desktop-chat`.
 
 ### Task 10: Center tabs: agent view and role file
 
-- [x] Done. Syntax and the code view in 76699c6; the agent view, the Roles tab, the role file tab (Duplicate to .agmen/roles on built-ins only) and the Role panel after it. Checked alone with `--view agent` and `--view roles` until Task 9's tabs host them. Fix 55 is in (a role-colored dot ends each Roles row). Fix 50's deletion marks wait for the main.rs file view in Task 11, the file the +2 -5 edit touched. Open in terminal and Stop do nothing until Task 14. As built against node 11725 (ruling D12): the Role panel shows what the role file grants, not the mockup's sample values. Tools are the role's tool classes (`read search shell`); Verbs are the role's own plus base's; Refused is what the identity kind could send (the hub's kind cap, `may_send` in agmen-hub `ingest.rs`) minus the role's verbs; one line says these come from the role file. The code view has no active line or cursor (the mockup's line 11): it is read-only, and no task adds a cursor yet.
+- [x] Done. Syntax and the code view in 76699c6; the agent view, the Roles tab, the role file tab (Duplicate to .agmen/roles on built-ins only) and the Role panel after it. Checked alone with `--view agent` and `--view roles` until Task 9's tabs host them. Fix 55 is in (a role-colored dot ends each Roles row). Fix 50's deletion marks wait for the main.rs file view in Task 11, the file the +2 -5 edit touched. Open in terminal and Stop do nothing until Task 14. As built against node 11725 (ruling D12): the Role panel shows what the role file grants, not the mockup's sample values. Tools are the role's tool classes (`read search shell`); Verbs are the role's own plus base's; Refused is what the identity kind could send (the hub's kind cap, `may_send` in agmen-hub `ingest.rs`) minus the role's verbs; one line says these come from the role file. The code view has no active line or cursor (the mockup's line 11): it is read-only, and no task adds a cursor yet. The deleted mark is a 3 px bar on the edge between lines, as Zed draws it, not the mockup's "▾"; the added and modified bar stays Zed's 4 px, not the mockup's full mark cell. Visual pass (V65 to V89, merged at 5226ea8 and 597af9a): XML attribute names and "=" use the theme's `type` color, the only warning-colored syntax name both themes have; role file text starts at code cell 7, as the file view's mockup has (the role file mockup has 6); files over 999 lines widen the number column a cell per digit.
 
 Screens: `desktop-agent`, `desktop-role-file`.
 
@@ -345,7 +345,7 @@ Screens: `desktop-settings-from-chat`, `desktop-settings-applied`.
 
 ### Task 17: Settings → Appearance, and themes from Zed
 
-- [ ] Done. The controls (`Toggle`, `Segmented`, `Dropdown`, `Stepper` in `ui/components/`) are in, by agmen-c7 (merged at f658bc9); every planned stepper is 6 to 72, so `Stepper` has no range setter. The Settings view and the theme sources remain here.
+- [x] Done (the view and theme sources by a subagent, 7f249f3, merged at 6a7fd2a). The controls (`Toggle`, `Segmented`, `Dropdown`, `Stepper` in `ui/components/`) are in, by agmen-c7 (merged at f658bc9); every planned stepper is 6 to 72, so `Stepper` has no range setter. The Settings view and the theme sources remain here. As built: `SettingsView::new(SettingsSources, cx)`; the theme picker lists the built-in themes, Zed's installed themes and agmen's own, then the marketplace (`appearance::marketplace`, reqwest blocking on the background executor, a 1 hour cache, backoff to 60 minutes); Light, Dark and System filter the theme list; changing a control while following Zed copies the values and turns Follow Zed off; About shows the Lucide, IBM Plex and Lilex licenses. Open question for Andy: Zed's theme archives carry no LICENSE file (Zed's `extension_resources.rs` copies none), so the no-license rule refuses every marketplace install; fetching the license from the extension's repository would mean a host other than api.zed.dev. Differences kept: UI font is Zed Sans, not SF Pro Text (Global Constraints); an About page is added; the browse panel was not shot.
 
 Andy's decision (2026-10-26): the theme picker covers the themes Zed already has and Zed's theme marketplace. Research with sources: `.superpowers/sdd/mvp/zed-themes-research.md` in the main checkout.
 

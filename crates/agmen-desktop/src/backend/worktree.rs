@@ -1,7 +1,19 @@
 //! Local worktrees as the Project and Git panels show them (Tasks 11 and
 //! 12): files, changes, commits and state, from local git.
 
+use std::collections::BTreeMap;
+use std::ops::Range;
+
 use agmen_proto::{GitSha, IdentityId, Timestamp};
+
+/// A worktree path with empty and `.` segments dropped, as the Project
+/// panel's tree builds it, so `src//main.rs` and `src/main.rs` match.
+fn normalize_path(path: &str) -> String {
+    path.split('/')
+        .filter(|part| !part.is_empty() && *part != ".")
+        .collect::<Vec<_>>()
+        .join("/")
+}
 
 /// Whether a worktree's commits have left this machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -69,6 +81,49 @@ pub(crate) struct WorktreeInfo {
     pub(crate) changes: Vec<FileChange>,
     pub(crate) commits: Vec<CommitInfo>,
     pub(crate) state: WorktreeState,
+    /// File contents the backend has read, by path, with their change
+    /// marks; a file not here shows a placeholder.
+    pub(crate) texts: BTreeMap<String, FileText>,
+}
+
+/// A change mark beside a line. Line numbers start at 1; ranges are
+/// end-exclusive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum GutterMark {
+    Added(Range<u32>),
+    Modified(Range<u32>),
+    /// Lines were deleted just after this line; 0 means above line 1.
+    Deleted(u32),
+}
+
+impl WorktreeInfo {
+    /// The same worktree with every path normalized (files, changes and
+    /// text keys), so views compare paths as they are. Backends call it
+    /// once, where they build the worktree (C199).
+    #[must_use]
+    pub(crate) fn normalized(mut self) -> Self {
+        for file in &mut self.files {
+            *file = normalize_path(file);
+        }
+        for change in &mut self.changes {
+            change.path = normalize_path(&change.path);
+        }
+        // Two raw keys that name the same file (`a//b` and `a/b`) keep the
+        // first in path order; git never reports both (C215).
+        let mut texts = BTreeMap::new();
+        for (path, text) in std::mem::take(&mut self.texts) {
+            texts.entry(normalize_path(&path)).or_insert(text);
+        }
+        self.texts = texts;
+        self
+    }
+}
+
+/// One file's text and the marks its diff gives the gutter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FileText {
+    pub(crate) text: String,
+    pub(crate) marks: Vec<GutterMark>,
 }
 
 /// What a worktree has checked out.

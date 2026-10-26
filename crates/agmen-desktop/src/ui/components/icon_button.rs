@@ -2,14 +2,15 @@
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, ClickEvent, ElementId, InteractiveElement as _, IntoElement, ParentElement as _,
-    RenderOnce, StatefulInteractiveElement as _, Styled as _, Window, div,
+    App, ClickEvent, ElementId, Hsla, InteractiveElement as _, IntoElement, MouseButton,
+    ParentElement as _, RenderOnce, StatefulInteractiveElement as _, Styled as _, Window,
+    WindowControlArea, div,
 };
 
 use super::{Color, Icon, IconSize};
-use crate::appearance::Appearance;
+use crate::appearance::{Appearance, Theme};
 use crate::icons::UiIcon;
-use crate::ui::tokens::{DOCK_BUTTON, RADIUS_SM};
+use crate::ui::tokens::{DOCK_BUTTON, RADIUS_SM, WINDOW_BUTTON_WIDTH};
 
 /// What a click does.
 pub(crate) type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
@@ -22,6 +23,21 @@ pub(crate) enum IconButtonStyle {
     Ghost,
     /// On a surface fill, as the right dock's close button.
     Filled,
+    /// A Windows or Linux caption button: as tall as the title bar and 36 px
+    /// wide, square cornered, as Zed draws them.
+    Caption,
+    /// The caption's close button, which hovers in Windows' red.
+    CaptionClose,
+}
+
+/// The fill under the pointer.
+fn hover_fill(style: IconButtonStyle, theme: &Theme) -> Hsla {
+    match style {
+        IconButtonStyle::CaptionClose => Theme::WINDOWS_CLOSE_HOVER.into(),
+        IconButtonStyle::Ghost | IconButtonStyle::Filled | IconButtonStyle::Caption => {
+            theme.element_hover
+        }
+    }
 }
 
 #[derive(IntoElement)]
@@ -32,6 +48,7 @@ pub(crate) struct IconButton {
     size: IconSize,
     style: IconButtonStyle,
     selected: bool,
+    control_area: Option<WindowControlArea>,
     on_click: Option<ClickHandler>,
 }
 
@@ -54,6 +71,7 @@ impl IconButton {
             size: IconSize::Medium,
             style: IconButtonStyle::Ghost,
             selected: false,
+            control_area: None,
             on_click: None,
         }
     }
@@ -84,6 +102,14 @@ impl IconButton {
         self
     }
 
+    /// Marks the button as a window control that the OS hit-tests, as
+    /// Windows does for its caption buttons.
+    #[must_use]
+    pub(crate) const fn window_control_area(mut self, area: WindowControlArea) -> Self {
+        self.control_area = Some(area);
+        self
+    }
+
     #[must_use]
     pub(crate) fn on_click(
         mut self,
@@ -97,7 +123,7 @@ impl IconButton {
 impl RenderOnce for IconButton {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = &cx.global::<Appearance>().theme;
-        let hover = theme.element_hover;
+        let hover = hover_fill(self.style, theme);
         let selected_fill = theme.element_selected;
         let color = if self.selected {
             Color::Default
@@ -105,6 +131,10 @@ impl RenderOnce for IconButton {
             self.color
         };
         let selector = self.id.to_string();
+        let caption = matches!(
+            self.style,
+            IconButtonStyle::Caption | IconButtonStyle::CaptionClose
+        );
         div()
             .id(self.id)
             .debug_selector(|| selector)
@@ -112,16 +142,29 @@ impl RenderOnce for IconButton {
             .flex_none()
             .items_center()
             .justify_center()
-            .rounded(RADIUS_SM)
+            .when(!caption, |this| this.rounded(RADIUS_SM))
             .when(self.style == IconButtonStyle::Filled, |this| {
                 this.bg(theme.elevated_surface)
                     .w(DOCK_BUTTON.width)
                     .h(DOCK_BUTTON.height)
             })
             .when(self.selected, |this| this.bg(selected_fill))
+            .when(caption, |this| {
+                this.w(WINDOW_BUTTON_WIDTH)
+                    .h_full()
+                    .occlude()
+                    // Keep the title bar from starting a window move under
+                    // the button.
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            })
             .hover(move |style| style.bg(hover))
+            .when_some(self.control_area, |this, area| {
+                this.window_control_area(area)
+            })
             .when_some(self.on_click, |this, handler| {
-                this.cursor_pointer().on_click(handler)
+                // Caption buttons keep the arrow, as native ones do.
+                this.when(!caption, |this| this.cursor_pointer())
+                    .on_click(handler)
             })
             .child(Icon::new(self.icon).color(color).size(self.size))
     }
@@ -130,8 +173,42 @@ impl RenderOnce for IconButton {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::test_support::rendered_size;
+    use crate::ui::test_support::{draw, rendered_size};
     use gpui::{TestAppContext, px};
+
+    #[gpui::test]
+    fn caption_buttons_fill_the_bar_height(cx: &mut TestAppContext) {
+        // V89: Zed's caption buttons are 36 px wide and as tall as the bar.
+        let cx = draw(cx, || {
+            div()
+                .h(px(40.))
+                .flex()
+                .child(
+                    IconButton::new("caption", UiIcon::Minus)
+                        .style(IconButtonStyle::Caption)
+                        .window_control_area(WindowControlArea::Min),
+                )
+                .into_any_element()
+        });
+        let bounds = cx.debug_bounds("caption").unwrap();
+        assert_eq!(bounds.size, gpui::size(WINDOW_BUTTON_WIDTH, px(40.)));
+    }
+
+    #[test]
+    fn caption_close_hovers_in_windows_red() {
+        let theme = crate::appearance::Appearance::builtin().theme;
+        assert_eq!(
+            hover_fill(IconButtonStyle::CaptionClose, &theme),
+            Hsla::from(Theme::WINDOWS_CLOSE_HOVER)
+        );
+        for style in [
+            IconButtonStyle::Ghost,
+            IconButtonStyle::Filled,
+            IconButtonStyle::Caption,
+        ] {
+            assert_eq!(hover_fill(style, &theme), theme.element_hover, "{style:?}");
+        }
+    }
 
     #[gpui::test]
     fn icon_button_renders(cx: &mut TestAppContext) {

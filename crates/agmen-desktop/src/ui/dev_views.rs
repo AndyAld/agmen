@@ -197,7 +197,8 @@ pub(crate) struct GitDev {
     worktrees: Vec<WorktreeInfo>,
     panel: Entity<GitPanel>,
     /// The open diff's worktree handle and path.
-    open: (String, String),
+    /// The worktree handle and path whose diff is open, if any.
+    open: Option<(String, String)>,
     diff: Entity<DiffView>,
 }
 
@@ -211,17 +212,16 @@ impl GitDev {
         layout: GitDevLayout,
         cx: &mut Context<Self>,
     ) -> Self {
-        let first = worktrees
-            .first()
-            .and_then(|w| {
-                w.changes
-                    .first()
-                    .map(|c| (w.handle.clone(), c.path.clone()))
-            })
-            .unwrap_or_default();
+        let first = worktrees.first().and_then(|w| {
+            w.changes
+                .first()
+                .map(|c| (w.handle.clone(), c.path.clone()))
+        });
         let panel = cx.new(|cx| GitPanel::new(worktrees.clone(), branches, options, cx));
         panel.update(cx, |panel, cx| {
-            panel.set_selected(&first.1);
+            if let Some((_, path)) = &first {
+                panel.set_selected(path);
+            }
             if layout == GitDevLayout::ChangesFolded {
                 panel.toggle_section(GitSection::Changes, cx);
             }
@@ -235,10 +235,12 @@ impl GitDev {
         let mut this = Self {
             worktrees,
             panel,
-            open: first.clone(),
+            open: None,
             diff,
         };
-        this.open(&first.0, &first.1, cx);
+        if let Some((worktree, path)) = first {
+            this.open(&worktree, &path, cx);
+        }
         this
     }
 
@@ -252,7 +254,7 @@ impl GitDev {
             .unwrap_or_default();
         let language = Language::for_path(std::path::Path::new(path));
         self.diff = cx.new(|_| DiffView::new(hunks, language));
-        self.open = (worktree.to_owned(), path.to_owned());
+        self.open = Some((worktree.to_owned(), path.to_owned()));
         cx.notify();
     }
 }
@@ -261,7 +263,7 @@ impl Render for GitDev {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = &cx.global::<Appearance>().theme;
         let rule = super::rule_color(cx);
-        let (worktree, path) = self.open.clone();
+        let (worktree, path) = self.open.clone().unwrap_or_default();
         // shortcut: Open file does nothing until the workspace hosts the
         // Project panel's file tabs (Task 11 and agmen-c7's wiring).
         let crumb = Breadcrumb::new([worktree.into(), "changes".into(), path.into()])
@@ -340,6 +342,27 @@ mod tests {
     use crate::ui::test_support::{click, init, redraw};
 
     #[gpui::test]
+    fn a_worktree_without_changes_opens_no_diff(cx: &mut TestAppContext) {
+        // Review C196: no change means no selection, not the path "".
+        init(cx);
+        let snapshot = chat_snapshot();
+        let mut worktrees = snapshot.worktrees.clone();
+        worktrees.retain(|w| w.changes.is_empty());
+        let (view, cx) = cx.add_window_view(move |_, cx| {
+            GitDev::new(
+                worktrees.clone(),
+                snapshot.git.branches.clone(),
+                ScopeOption::for_worktrees(&worktrees, &snapshot.agents),
+                GitDevLayout::Open,
+                cx,
+            )
+        });
+        redraw(cx);
+        view.read_with(cx, |v, _| assert_eq!(v.open, None));
+        assert!(cx.debug_bounds("diff-empty").is_some());
+    }
+
+    #[gpui::test]
     fn selecting_a_change_opens_its_diff(cx: &mut TestAppContext) {
         init(cx);
         let snapshot = chat_snapshot();
@@ -354,9 +377,13 @@ mod tests {
         });
         redraw(cx);
         assert!(cx.debug_bounds("diff-hunk:0").is_some());
-        view.read_with(cx, |v, _| assert_eq!(v.open.1, "src/main.rs"));
+        view.read_with(cx, |v, _| {
+            assert_eq!(v.open.as_ref().map(|o| o.1.as_str()), Some("src/main.rs"));
+        });
         click(cx, "git-change:Cargo.lock");
-        view.read_with(cx, |v, _| assert_eq!(v.open.1, "Cargo.lock"));
+        view.read_with(cx, |v, _| {
+            assert_eq!(v.open.as_ref().map(|o| o.1.as_str()), Some("Cargo.lock"));
+        });
         assert!(cx.debug_bounds("diff-row:4:removed").is_some());
     }
 

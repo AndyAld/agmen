@@ -11,12 +11,12 @@ use gpui::{
 use super::breadcrumb::Breadcrumb;
 use super::code_view::CodeView;
 use super::components::{
-    Button, ButtonStyle, Color, Icon, IconSize, Indent, KvRow, KvSection, Label, LabelSize,
+    Button, ButtonStyle, Color, Dot, Icon, IconSize, Indent, KvRow, KvSection, Label, LabelSize,
     ListItem,
 };
 use super::dock::RightDockHeader;
 use super::syntax::Language;
-use super::tokens::{DOT_SIZE, ICON_MD, SPACE_6, SPACE_14, SPACE_16};
+use super::tokens::{ICON_MD, SPACE_6, SPACE_14, SPACE_16};
 use crate::appearance::Appearance;
 use crate::backend::{RoleFile, RoleInfo, RoleLayer};
 use crate::icons::{FileIcons, UiIcon};
@@ -28,8 +28,8 @@ pub(crate) enum RolesPanelEvent {
     Open(String),
 }
 
-/// Tests find each layer's header as `"role-layer:{slug}"` and each file as
-/// `"role:{name}"`.
+/// Tests find each layer's header as `"role-layer:{slug}"`, its title as
+/// `"role-layer:{slug}:title"`, and each file as `"role:{name}"`.
 pub(crate) struct RolesPanel {
     roles: Vec<RoleFile>,
     selected: Option<String>,
@@ -91,26 +91,25 @@ impl RolesPanel {
             .selected(self.selected.as_deref() == Some(role.name.as_str()))
             .leading(icon)
             .child(Label::new(file).code())
-            .end(role_dot(
-                &role.name,
-                role.palette_role
-                    .as_deref()
-                    .map_or(theme.icon_muted, |palette| theme.role_color(palette)),
-            ))
+            .end(role_dot(&role.name, role.palette_role.as_deref()))
             .on_click(cx.listener(move |this, _, _, cx| this.clicked(&name, cx)))
     }
 }
 
-/// A dot in the role's color (mockup fix 55). Tests find it as
-/// `"role-dot:{name}"`.
-fn role_dot(name: &str, color: gpui::Hsla) -> impl IntoElement {
+/// A role dot's color: the role's palette color (mockup fix 55), or
+/// icon.muted for a role with none.
+fn role_dot_color(palette_role: Option<&str>) -> Color {
+    palette_role.map_or(Color::Muted, |palette| {
+        Color::Role(palette.to_owned().into())
+    })
+}
+
+/// Tests find a role's dot as `"role-dot:{name}"`.
+fn role_dot(name: &str, palette_role: Option<&str>) -> impl IntoElement {
     let selector = format!("role-dot:{name}");
     div()
         .debug_selector(|| selector)
-        .size(DOT_SIZE)
-        .flex_none()
-        .rounded_full()
-        .bg(color)
+        .child(Dot::new(role_dot_color(palette_role)))
 }
 
 impl Render for RolesPanel {
@@ -124,7 +123,17 @@ impl Render for RolesPanel {
                             .size(IconSize::Small)
                             .color(Color::Muted),
                     )
-                    .child(Label::new(title).weight(FontWeight::MEDIUM)),
+                    .child({
+                        let selector = format!("role-layer:{slug}:title");
+                        let label = Label::new(title).weight(FontWeight::MEDIUM);
+                        // A folder path is code, as console.py draws it.
+                        let label = if layer == RoleLayer::BuiltIn {
+                            label
+                        } else {
+                            label.code()
+                        };
+                        div().debug_selector(|| selector).child(label)
+                    }),
             );
             for role in self.roles.iter().filter(|r| r.layer == layer) {
                 rows.push(self.role_row(role, cx));

@@ -18,9 +18,8 @@ use crate::appearance::Appearance;
 use crate::backend::{AgentInfo, WorktreeInfo};
 use crate::icons::UiIcon;
 
-/// The worktree's branch as the panels show it. The one place that reads
-/// `WorktreeInfo::head`, so a change to how a worktree names its head
-/// changes one line.
+/// The worktree's head as the scope chip and the Project panel's root row
+/// show it.
 pub(crate) fn branch_label(worktree: &WorktreeInfo) -> String {
     worktree.head.label()
 }
@@ -154,7 +153,11 @@ impl Render for ScopeChip {
             .debug_selector(|| "scope-chip".into())
             .w_full()
             .cursor_pointer()
-            .on_click(cx.listener(|this, _, _, cx| this.toggle(cx)))
+            // While open, the menu's mouse down out closes it; a click here
+            // too would reopen it on mouse up (C186, as the dropdown's C81).
+            .when(!self.open, |chip| {
+                chip.on_click(cx.listener(|this, _, _, cx| this.toggle(cx)))
+            })
             .child(
                 Chip::new(label)
                     .dot(Color::Role(role))
@@ -203,3 +206,7 @@ impl Render for ScopeChip {
             })
     }
 }
+
+#[cfg(test)]
+#[path = "scope_chip_tests.rs"]
+mod tests;

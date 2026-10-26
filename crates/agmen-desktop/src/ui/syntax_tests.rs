@@ -33,11 +33,10 @@ fn highlight_xml_tags() {
         "<role name=\"reviewer\" kind=\"agent\">\n  <rule>Scope</rule>\n</role>\n",
         Language::Xml,
     );
-    assert!(has(&found, "role", "tag"), "{found:?}");
-    assert!(
-        has(&found, "name", "attribute") || has(&found, "name", "property"),
-        "{found:?}"
-    );
+    // V82: the tag name and its "<" are one run.
+    assert!(has(&found, "<role", "tag"), "{found:?}");
+    // V82: an attribute's name and `=` are one warning colored run.
+    assert!(has(&found, "name=", "type"), "{found:?}");
 }
 
 #[test]
@@ -109,4 +108,39 @@ fn time_the_highlight_cap() {
         runs[2],
         runs[4]
     );
+}
+
+/// The syntax name over byte `at` of `text`, if any.
+fn name_at(text: &str, language: Language, at: usize) -> Option<&'static str> {
+    highlight(text, language)
+        .into_iter()
+        .find(|h| h.range.contains(&at))
+        .map(|h| h.name)
+}
+
+#[test]
+fn xml_highlights_follow_the_mockup() {
+    // V82: console.py's TOKEN draws `<tag` and `>` in accent, ` attr=` in
+    // warning and the whole quoted value, quotes too, in success.
+    let text = "<!-- c -->\n<role name=\"reviewer\">\n  <tools allow=\"Read\" />\n  <rule>x</rule>\n</role>\n";
+    let at = |needle: &str| text.find(needle).unwrap();
+    let name = |offset: usize| name_at(text, Language::Xml, offset);
+    assert_eq!(name(at("<!--")), Some("comment"));
+    let open = at("<role");
+    assert_eq!(name(open), Some("tag"), "<");
+    assert_eq!(name(open + 1), Some("tag"), "role");
+    assert_eq!(name(at("name=")), Some("type"), "attribute name");
+    assert_eq!(name(at("=\"reviewer")), Some("type"), "=");
+    let value = at("\"reviewer\"");
+    assert_eq!(name(value), Some("string"), "opening quote");
+    assert_eq!(name(value + 1), Some("string"));
+    assert_eq!(
+        name(value + "\"reviewer".len()),
+        Some("string"),
+        "closing quote"
+    );
+    assert_eq!(name(value + "\"reviewer\"".len()), Some("tag"), ">");
+    assert_eq!(name(at("/>")), Some("tag"), "/>");
+    assert_eq!(name(at("</rule")), Some("tag"), "</");
+    assert_eq!(name(at("x</rule")), None, "character data stays plain");
 }

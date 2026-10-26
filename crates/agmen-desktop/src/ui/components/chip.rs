@@ -279,6 +279,52 @@ mod tests {
         assert!(size.width > px(16.));
     }
 
+    use gpui::InteractiveElement as _;
+
+    /// A 300 px row holding the chip and a marker right after it.
+    struct Row(bool);
+
+    impl gpui::Render for Row {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let chip = Chip::new("fx1 · main").trailing(
+                crate::ui::components::Icon::new(crate::icons::UiIcon::ChevronDown)
+                    .size(crate::ui::components::IconSize::Small),
+            );
+            gpui::div()
+                .debug_selector(|| "row".into())
+                .w(px(300.))
+                .flex()
+                .child(if self.0 { chip.full_width() } else { chip })
+                .child(
+                    gpui::div()
+                        .debug_selector(|| "after".into())
+                        .w(px(1.))
+                        .h(px(1.)),
+                )
+        }
+    }
+
+    fn marker_offset(cx: &mut TestAppContext, full: bool) -> gpui::Pixels {
+        crate::ui::test_support::init(cx);
+        let (_, cx) = cx.add_window_view(|_, _| Row(full));
+        crate::ui::test_support::redraw(cx);
+        let row = cx.debug_bounds("row").unwrap();
+        cx.debug_bounds("after").unwrap().left() - row.left()
+    }
+
+    #[gpui::test]
+    fn full_width_chip_fills_its_row(cx: &mut TestAppContext) {
+        // Review C190.
+        let plain = marker_offset(cx, false);
+        let full = marker_offset(cx, true);
+        assert!(plain < px(150.), "{plain:?}");
+        assert!(full > px(250.), "{full:?}");
+    }
+
     #[gpui::test]
     fn code_chip_renders(cx: &mut TestAppContext) {
         let size = rendered_size(cx, || {

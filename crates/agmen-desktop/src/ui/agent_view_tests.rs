@@ -35,3 +35,12 @@ fn plain_output_is_dim() {
     assert_eq!(tone_color(Tone::Plain), Color::Placeholder);
     assert_eq!(tone_color(Tone::Success), Color::Success);
 }
+
+#[test]
+fn output_glyph_takes_the_line_color() {
+    // V79: "⎿ ok" is all success, "⎿ recorded" all accent, "⎿ 2 files" all
+    // text.placeholder.
+    for tone in [Tone::Plain, Tone::Success, Tone::Accent] {
+        assert_eq!(out_colors(tone), (tone_color(tone), tone_color(tone)));
+    }
+}

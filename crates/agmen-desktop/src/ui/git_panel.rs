@@ -132,7 +132,7 @@ fn branch_item(branch: &str) -> &str {
 
 impl GitPanel {
     /// Branches and other people's worktrees start folded, as in the mockup.
-    /// `options` are the scope chip's, one per worktree in the same order.
+    /// `options` are the scope chip's, one per worktree.
     pub(crate) fn new(
         worktrees: Vec<WorktreeInfo>,
         branches: impl IntoIterator<Item = String>,
@@ -411,9 +411,10 @@ impl Render for GitPanel {
             }
             match section {
                 GitSection::Changes => {
-                    let changes = self.scoped().map(|w| w.changes.clone()).unwrap_or_default();
-                    for change in &changes {
-                        rows.push(self.change_row(change, cx).into_any_element());
+                    if let Some(w) = self.scoped() {
+                        for change in &w.changes {
+                            rows.push(self.change_row(change, cx).into_any_element());
+                        }
                     }
                 }
                 GitSection::Commits => {

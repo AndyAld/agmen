@@ -28,6 +28,7 @@ fn rv2() -> WorktreeInfo {
         files: vec!["README.md".into()],
         changes: Vec::new(),
         commits: Vec::new(),
+        texts: std::collections::BTreeMap::new(),
         state: crate::backend::WorktreeState::Reading,
     }
 }
@@ -198,4 +199,39 @@ fn file_view_marks_deletions(cx: &mut TestAppContext) {
     view.read_with(cx, |file, _| {
         assert_eq!(file.parts(), ["andy/fx1", "src", "main.rs"]);
     });
+}
+
+#[gpui::test]
+fn clicking_the_open_chip_closes_its_menu(cx: &mut TestAppContext) {
+    // Review C186: the menu's mouse down out closes it, so the chip itself
+    // must not reopen it on the same click.
+    let (_, cx) = panel(cx, vec![fx1(), rv2()]);
+    click(cx, "scope-chip");
+    assert!(cx.debug_bounds("scope-chip:0").is_some());
+    click(cx, "scope-chip");
+    assert!(cx.debug_bounds("scope-chip:0").is_none());
+}
+
+#[test]
+fn normalized_worktrees_keep_markers_and_texts() {
+    // Reviews C189 and C199: the backend normalizes paths once, so the
+    // tree, its markers and the file texts all use the same spelling.
+    let mut wt = fx1();
+    wt.changes = vec![FileChange {
+        path: "src//main.rs".into(),
+        kind: crate::backend::ChangeKind::Modified,
+        added: 1,
+        removed: 0,
+        hunks: Vec::new(),
+    }];
+    wt.texts = std::collections::BTreeMap::from([(
+        "./src/main.rs".to_owned(),
+        crate::backend::FileText {
+            text: "fn main() {}\n".into(),
+            marks: Vec::new(),
+        },
+    )]);
+    let wt = wt.normalized();
+    assert!(change_marker(&wt.changes, "src/main.rs").is_some());
+    assert_eq!(contents(&wt, "src/main.rs").0, "fn main() {}\n");
 }
