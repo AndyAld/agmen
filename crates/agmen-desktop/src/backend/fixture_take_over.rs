@@ -32,10 +32,11 @@ const LINE: TermColor = TermColor::Ansi(8);
 const BLUE: TermColor = TermColor::Ansi(4);
 const TEXT: TermColor = TermColor::Default;
 
-/// Writes `text` on `row` of `g` so it ends at the last column.
+/// Writes `text` on `row` of `g` so it ends a cell before the last column,
+/// as console.py's `rput(row, cols - 1, ...)` does.
 fn put_right(g: &mut TerminalScreen, row: u16, text: &str, fg: TermColor) {
     let len = u16::try_from(text.chars().count()).unwrap_or(u16::MAX);
-    g.put(row, g.cols().saturating_sub(len), text, fg, false);
+    g.put(row, g.cols().saturating_sub(len.saturating_add(1)), text, fg, false);
 }
 
 /// The input box at the bottom of an agent's screen, with `prompt` and the

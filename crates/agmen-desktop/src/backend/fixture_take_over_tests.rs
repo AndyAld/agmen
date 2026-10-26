@@ -152,9 +152,34 @@ fn fixture_publishes_take_over_and_hand_back() {
         panic!("no snapshot");
     };
     assert!(s.take_overs.contains_key(&fx1));
+    // Review: hand back and a scan each publish what they changed.
     backend.act(Action::HandBack(fx1)).unwrap();
-    assert!(backend.snapshot().take_overs.is_empty());
+    let Some(Update::Snapshot(s)) = futures::executor::block_on(updates.next()) else {
+        panic!("no snapshot after hand back");
+    };
+    assert!(s.take_overs.is_empty());
+    let scans = s.agent_scans;
     backend.act(Action::ScanAgents).unwrap();
+    let Some(Update::Snapshot(s)) = futures::executor::block_on(updates.next()) else {
+        panic!("no snapshot after the scan");
+    };
+    assert_eq!(s.agent_scans, scans + 1);
+}
+
+#[test]
+fn the_input_box_footer_ends_a_cell_before_the_edge() {
+    // Shot diff (node 1161): console.py puts it at cols - 1, so it ends at
+    // column 102 of 104 and leaves a cell before the terminal's border.
+    for shown in [Screen::ChatTerminal, Screen::ChatCodex] {
+        let s = screen(shown);
+        let grid = &s.take_overs[&fixture_id("andy/fx1")].screen;
+        let footer = "messages here stay on this machine";
+        let row = (0..grid.rows())
+            .find(|&row| text(grid, row).contains(footer))
+            .unwrap();
+        let line = text(grid, row);
+        assert!(line.ends_with(&format!("{footer} ")), "{shown:?}: {line:?}");
+    }
 }
 
 #[test]
