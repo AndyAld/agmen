@@ -44,10 +44,11 @@ actions!(
         /// Splits the active pane, opening its active tab on the right
         /// (Zed's `pane::SplitRight`).
         SplitRight,
-        /// Shows or hides the take-over terminal (Zed's
+        /// Hides or shows the take-over terminal (Zed's
         /// `terminal_panel::Toggle`).
         ToggleTerminal,
-        /// Opens the agent in a terminal inside the chat (take-over).
+        /// Takes over the agent of the newest DONE that offers "Open in
+        /// terminal" (agmen's ⌥O); in an agent view, that view's agent.
         OpenInTerminal,
         /// Opens the palette on "spawn worker with ", to pick the agent.
         SpawnWorker,
@@ -94,6 +95,12 @@ actions!(
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Action)]
 #[action(namespace = workspace, no_json)]
 pub(crate) struct ActivatePane(pub(crate) usize);
+
+/// Takes over this agent's session in the chat: the agent view's Open in
+/// terminal (Task 14). It names its agent, so no key or palette row runs it.
+#[derive(Debug, Clone, PartialEq, Eq, Action)]
+#[action(namespace = workspace, no_json)]
+pub(crate) struct TakeOverAgent(pub(crate) agmen_proto::IdentityId);
 
 /// Asks the listener for a worker on `agent`, one palette row per
 /// installed agent.

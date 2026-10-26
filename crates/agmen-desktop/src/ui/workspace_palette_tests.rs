@@ -76,8 +76,13 @@ fn cmd_shift_p_lists_what_the_workspace_can_run(cx: &mut TestAppContext) {
     ] {
         assert!(rows.contains(&label.to_owned()), "{label}");
     }
-    // Take-over has no handler until its view lands, so it is not listed.
-    assert!(!rows.iter().any(|r| r.contains("terminal")), "{rows:?}");
+    // Task 14: the workspace handles take-over's actions, so both are listed.
+    for label in [
+        "agmen: open agent in terminal here",
+        "terminal panel: toggle",
+    ] {
+        assert!(rows.contains(&label.to_owned()), "{label} in {rows:?}");
+    }
     // Zed's palette lists its own toggle with its key.
     assert!(
         rows.contains(&"command palette: toggle".to_owned()),

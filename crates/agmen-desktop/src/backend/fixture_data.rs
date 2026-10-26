@@ -146,6 +146,7 @@ pub(super) fn fx1() -> Result<AgentInfo, BackendError> {
         delegated_by: Some("andy/listen at 15:31".into()),
         state: "working".into(),
         tools: words("Read Edit Write Bash Grep Glob"),
+        tools_lossy: false,
         edits: "lane L-CORE".into(),
         verbs: words("CLAIM DONE PUSH_REQUEST FOUND chat"),
         refused: words("ASSIGN RULING LEND REVIEW"),

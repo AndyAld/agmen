@@ -4,8 +4,8 @@
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, IntoElement, ParentElement as _, RenderOnce, SharedString, Styled as _,
-    Window, div,
+    AnyElement, App, FontWeight, IntoElement, ParentElement as _, RenderOnce, SharedString,
+    Styled as _, Window, div,
 };
 
 use super::{Color, Label, LabelSize};
@@ -30,6 +30,9 @@ enum ChipShape {
     /// A reference in message text (`rich_body`): no fill of its own, 4 px
     /// at the sides only, a small radius.
     Reference,
+    /// A chip that opens a menu, as the take-over terminal's agent chip
+    /// (node 1134): selected fill, a border, 2 by 8.
+    Picker,
 }
 
 #[derive(IntoElement)]
@@ -48,6 +51,7 @@ pub(crate) struct Chip {
     underline: bool,
     shrink: bool,
     full_width: bool,
+    weight: Option<FontWeight>,
 }
 
 impl std::fmt::Debug for Chip {
@@ -78,7 +82,16 @@ impl Chip {
             underline: false,
             shrink: false,
             full_width: false,
+            weight: None,
         }
+    }
+
+    /// The label's weight, as the take-over terminal's bold agent chip
+    /// (node 1134).
+    #[must_use]
+    pub(crate) const fn weight(mut self, weight: FontWeight) -> Self {
+        self.weight = Some(weight);
+        self
     }
 
     /// The composer's chips (nodes 376 and 380): a selected fill, tighter
@@ -94,6 +107,14 @@ impl Chip {
     #[must_use]
     pub(crate) const fn note(mut self) -> Self {
         self.shape = ChipShape::Note;
+        self
+    }
+
+    /// A chip that opens a menu, as the take-over terminal's agent chip
+    /// (node 1134): a selected fill inside a border, 2 by 8 padding.
+    #[must_use]
+    pub(crate) const fn picker(mut self) -> Self {
+        self.shape = ChipShape::Picker;
         self
     }
 
@@ -216,6 +237,10 @@ impl RenderOnce for Chip {
             label
         };
         let label = if self.shrink { label.wrap() } else { label };
+        let label = match self.weight {
+            Some(weight) => label.weight(weight),
+            None => label,
+        };
         // A reference sits in a line of text, so it pads only its sides.
         let (py, px, radius, gap) = match self.shape {
             ChipShape::Default => (Some(SPACE_3), SPACE_8, RADIUS_MD, SPACE_6),
@@ -223,11 +248,14 @@ impl RenderOnce for Chip {
             ChipShape::Inline => (Some(SPACE_1), SPACE_7, RADIUS_SM, SPACE_5),
             ChipShape::Note => (Some(SPACE_1), SPACE_7, RADIUS_SM, SPACE_4),
             ChipShape::Reference => (None, SPACE_4, RADIUS_REF, SPACE_4),
+            ChipShape::Picker => (Some(SPACE_2), SPACE_8, RADIUS_SM, SPACE_6),
         };
         let fill = match (&self.tint, self.shape) {
             (Some(color), _) => Some(tint(color.hsla(theme), TINT_FILL)),
             (None, ChipShape::Default) => Some(theme.elevated_surface),
-            (None, ChipShape::Compact | ChipShape::Note) => Some(theme.element_selected),
+            (None, ChipShape::Compact | ChipShape::Note | ChipShape::Picker) => {
+                Some(theme.element_selected)
+            }
             (None, ChipShape::Inline | ChipShape::Reference) => None,
         };
         div()
@@ -246,6 +274,9 @@ impl RenderOnce for Chip {
                 }
             })
             .when_some(fill, gpui::Styled::bg)
+            .when(self.shape == ChipShape::Picker, |this| {
+                this.border(BORDER_WIDTH).border_color(theme.border)
+            })
             .when_some(self.outline, |this, outline| {
                 this.border(BORDER_WIDTH)
                     .border_color(tint(outline.hsla(theme), TINT_BORDER))
@@ -422,6 +453,30 @@ mod tests {
         assert_eq!(padded.width - flush.width, SPACE_4);
         assert_eq!(padded.width - text.width, SPACE_4 * 2.);
         assert_eq!(padded.height, text.height);
+    }
+
+    // Task 14 review: the take-over terminal's agent chip (node 1134) pads
+    // 2 by 8 inside a 1 px border, with 6 between its parts.
+    #[gpui::test]
+    fn picker_chip_pads_two_by_eight_inside_a_border(cx: &mut TestAppContext) {
+        let chip = rendered_size(cx, || {
+            Chip::new("claude")
+                .picker()
+                .code()
+                .trailing(Label::new("▾").size(LabelSize::XSmall))
+                .into_any_element()
+        });
+        let mut cx2 = TestAppContext::single();
+        let parts = rendered_size(&mut cx2, || {
+            div()
+                .flex()
+                .items_center()
+                .child(Label::new("claude").code())
+                .child(Label::new("▾").size(LabelSize::XSmall))
+                .into_any_element()
+        });
+        assert_eq!(chip.width - parts.width, SPACE_8 * 2. + SPACE_6 + px(2.));
+        assert_eq!(chip.height - parts.height, SPACE_2 * 2. + px(2.));
     }
 
     #[gpui::test]

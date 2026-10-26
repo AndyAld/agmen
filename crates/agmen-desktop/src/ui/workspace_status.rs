@@ -19,10 +19,15 @@ use crate::ui::syntax::Language;
 
 impl Workspace {
     /// What the status bar shows in the listener's place for the active
-    /// tab, or `None` for the listener's state.
+    /// tab, else "andy/fx1 · taken over" while a session is taken over
+    /// (Task 14, node 1265), or `None` for the listener's state.
     pub(crate) fn status_context(&self, cx: &App) -> Option<SharedString> {
-        let (item, label) = self.pane_group.read(cx).active_tab(cx)?;
-        context_for(&item, &label, &self.snapshot).map(Into::into)
+        self.pane_group
+            .read(cx)
+            .active_tab(cx)
+            .and_then(|(item, label)| context_for(&item, &label, &self.snapshot))
+            .map(Into::into)
+            .or_else(|| self.chat.read(cx).take_over_status(cx))
     }
 
     /// Whether the status bar offers the Listener toggle.

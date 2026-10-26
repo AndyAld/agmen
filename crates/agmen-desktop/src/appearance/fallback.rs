@@ -47,6 +47,8 @@ pub(crate) fn gruvbox_material_dark_hard() -> Theme {
         modified: hex(warn),
         deleted: hex(err),
         ansi: ansi.map(hex),
+        terminal_foreground: hex(text),
+        terminal_background: hex(bg),
         players: [accent, mag, err, org, grn, warn, ok, text]
             .into_iter()
             .map(hex)

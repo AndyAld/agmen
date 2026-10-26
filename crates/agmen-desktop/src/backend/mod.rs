@@ -7,9 +7,6 @@
 
 mod fixture;
 mod fixture_data;
-// Task 18: installed agents, for the palette's spawn rows.
-mod installed;
-pub(crate) use installed::InstalledAgent;
 mod screen;
 mod worktree;
 
@@ -99,14 +96,27 @@ pub(crate) enum Action {
     Undo(ChangeId),
     TakeOver(IdentityId),
     HandBack(IdentityId),
-    SwitchAgent { worker: IdentityId, agent: String },
-    AnswerAlert { alert: MessageId, choice: String },
+    SwitchAgent {
+        worker: IdentityId,
+        agent: String,
+    },
+    AnswerAlert {
+        alert: MessageId,
+        choice: String,
+    },
+    /// Looks for terminal agents again (`agmen agents scan`, Task 14).
+    ScanAgents,
     SnoozeAlert(MessageId),
-    ApproveSpec { path: String, sha: GitSha },
+    ApproveSpec {
+        path: String,
+        sha: GitSha,
+    },
     ApproveShare,
     KickOff,
     // Task 18: a worker on an installed agent, from the command palette.
-    SpawnWorker { agent: String },
+    SpawnWorker {
+        agent: String,
+    },
 }
 
 /// What a subscriber hears.
@@ -320,6 +330,9 @@ pub(crate) struct AgentInfo {
     pub(crate) delegated_by: Option<String>,
     pub(crate) state: String,
     pub(crate) tools: Vec<String>,
+    /// Task 14: whether the harness cannot enforce the role's tool list, so
+    /// Tools says what it enforces instead (spec 5.5).
+    pub(crate) tools_lossy: bool,
     pub(crate) edits: String,
     pub(crate) verbs: Vec<String>,
     pub(crate) refused: Vec<String>,
@@ -344,6 +357,15 @@ pub(crate) struct StatusSummary {
     pub(crate) worktrees: u32,
     pub(crate) spend_today_usd: f64,
 }
+
+// Task 14: take-over in the chat and the terminal agents on this machine;
+// the fixture's side of it in its own module.
+mod fixture_take_over;
+mod take_over;
+pub(crate) use take_over::{
+    AgentFound, AgentSource, InstalledAgent, SessionStart, TakeOver, TermCell, TermColor,
+    TerminalScreen, can_take_over,
+};
 
 /// Everything the window shows at one moment.
 #[derive(Debug, Clone, PartialEq)]
@@ -372,8 +394,13 @@ pub(crate) struct Snapshot {
     pub(crate) roles: Vec<RoleFile>,
     /// The worktrees on this machine, the person's own first.
     pub(crate) worktrees: Vec<WorktreeInfo>,
-    /// Task 18: the terminal agents agmen knows, installed or not.
+    /// Task 14: sessions the person took over in the chat, by identity.
+    pub(crate) take_overs: BTreeMap<IdentityId, TakeOver>,
+    /// Task 14: the terminal agents agmend looked for on this machine.
     pub(crate) installed_agents: Vec<InstalledAgent>,
+    /// Task 14: how many agent scans agmend has finished, so Check again
+    /// knows its scan's result from any other update.
+    pub(crate) agent_scans: u64,
 }
 
 /// One row of an agent's session, as the agent view shows it.

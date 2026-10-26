@@ -176,6 +176,28 @@ pub(crate) const TINT_SELECTED: f32 = 38. / 255.;
 /// A waiting change card's `warning` border (0x88, node 7101).
 pub(crate) const TINT_PENDING: f32 = 136. / 255.;
 
+// Task 14: the take-over terminal (node 1129), the switch menu (node 1802)
+// and the add agent dialog (node 2418). The terminal's border is
+// `TINT_PENDING` (0x88) of the accent; its live tag is `TINT_FILL`.
+/// The terminal block between the chat and the composer, with its padding.
+pub(crate) const TERMINAL_BLOCK_HEIGHT: Pixels = px(392.);
+/// The terminal's head row (node 1131).
+pub(crate) const TERMINAL_HEAD_HEIGHT: Pixels = px(32.);
+pub(crate) const SWITCH_MENU_WIDTH: Pixels = px(440.);
+/// The switch menu's height until it is measured once.
+pub(crate) const SWITCH_MENU_HEIGHT: Pixels = px(308.);
+/// A menu row (node 1806).
+pub(crate) const MENU_ROW_HEIGHT: Pixels = px(30.);
+pub(crate) const DIALOG_WIDTH: Pixels = px(680.);
+/// How far below the window's top a dialog sits (node 2418 at y 120).
+pub(crate) const DIALOG_TOP: Pixels = px(120.);
+/// A dialog's padding (node 2418).
+pub(crate) const SPACE_20: Pixels = px(20.);
+pub(crate) const RADIUS_DIALOG: Pixels = px(10.);
+/// The dim over the window behind a dialog (0xa0, node 2417), of the
+/// background color.
+pub(crate) const TINT_DIM: f32 = 160. / 255.;
+
 /// `color` at `alpha` of its own opacity: the one way views derive a fill
 /// the theme has no token for.
 #[must_use]

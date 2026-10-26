@@ -2,7 +2,7 @@
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, FontWeight, IntoElement, ParentElement as _, RenderOnce, SharedString, Styled as _,
+    App, FontWeight, IntoElement, ParentElement as _, Rems, RenderOnce, SharedString, Styled as _,
     Window, div, relative,
 };
 
@@ -18,6 +18,19 @@ pub(crate) enum LabelSize {
     #[default]
     Default,
     Large,
+}
+
+impl LabelSize {
+    /// The size in rems, from `tokens`.
+    #[must_use]
+    pub(crate) const fn rems(self) -> Rems {
+        match self {
+            Self::XSmall => TEXT_XSMALL,
+            Self::Small => TEXT_SMALL,
+            Self::Default => TEXT_DEFAULT,
+            Self::Large => TEXT_LARGE,
+        }
+    }
 }
 
 /// One line of text, or a wrapping block with [`Label::wrap`].
@@ -115,12 +128,7 @@ impl RenderOnce for Label {
             base.font_family(appearance.fonts.code_family.clone())
                 .text_size(appearance.fonts.code_size)
         } else {
-            base.text_size(match self.size {
-                LabelSize::XSmall => TEXT_XSMALL,
-                LabelSize::Small => TEXT_SMALL,
-                LabelSize::Default => TEXT_DEFAULT,
-                LabelSize::Large => TEXT_LARGE,
-            })
+            base.text_size(self.size.rems())
         };
         sized
             .when_some(self.weight, gpui::Styled::font_weight)

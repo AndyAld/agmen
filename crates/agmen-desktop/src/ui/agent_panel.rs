@@ -14,23 +14,46 @@ use crate::backend::{AgentInfo, AgentStatus};
 #[derive(Debug, IntoElement)]
 pub(crate) struct AgentPanel {
     info: AgentInfo,
+    taken_over: bool,
 }
 
 impl AgentPanel {
     #[must_use]
     pub(crate) const fn new(info: AgentInfo) -> Self {
-        Self { info }
+        Self {
+            info,
+            taken_over: false,
+        }
+    }
+
+    /// Task 14: whether the person took the agent's session over in the
+    /// chat, which pauses its headless run (spec 5.4).
+    #[must_use]
+    pub(crate) const fn taken_over(mut self, taken_over: bool) -> Self {
+        self.taken_over = taken_over;
+        self
+    }
+}
+
+/// The State row's text and color: the take-over in the accent color while
+/// the agent's status stays working (frame 760, node 1198).
+fn state(info: &AgentInfo, taken_over: bool) -> (String, Color) {
+    if taken_over {
+        (
+            "taken over in chat; headless run paused".into(),
+            Color::Accent,
+        )
+    } else if info.status == AgentStatus::Working {
+        (info.state.clone(), Color::Success)
+    } else {
+        (info.state.clone(), Color::Accent)
     }
 }
 
 impl RenderOnce for AgentPanel {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let (state_text, state_color) = state(&self.info, self.taken_over);
         let i = self.info;
-        let state_color = if i.status == AgentStatus::Working {
-            Color::Success
-        } else {
-            Color::Accent
-        };
         let role = Color::Role(i.role.clone().into());
         let mut runs = KvSection::new("Runs")
             .row(KvRow::new("Role", i.role_label).color(role))
@@ -39,9 +62,17 @@ impl RenderOnce for AgentPanel {
         if let Some(by) = i.delegated_by {
             runs = runs.row(KvRow::new("Delegated by", by));
         }
-        let runs = runs.row(KvRow::new("State", i.state).color(state_color));
+        let runs = runs.row(KvRow::new("State", state_text).color(state_color));
+        // Spec 5.5: a harness that cannot enforce the role's tool list says
+        // what it does enforce, in the warning color.
+        let tools = KvRow::new("Tools", i.tools.join(" "));
+        let tools = if i.tools_lossy {
+            tools.color(Color::Warning)
+        } else {
+            tools
+        };
         let enforced = KvSection::new("Enforced")
-            .row(KvRow::new("Tools", i.tools.join(" ")))
+            .row(tools)
             .row(KvRow::new("Edits", i.edits))
             .row(KvRow::new("Verbs", i.verbs.join(" ")).color(Color::Success))
             .row(KvRow::new("Refused", i.refused.join(" ")).color(Color::Error));
@@ -96,6 +127,24 @@ mod tests {
     use crate::backend::chat_snapshot;
     use crate::ui::test_support::rendered_size;
     use gpui::{TestAppContext, px};
+
+    #[test]
+    fn taken_over_state_is_accent_while_the_status_stays_working() {
+        // V66: frame 760's State, node 1198, beside a green status dot.
+        let info = chat_snapshot()
+            .agents
+            .remove(&crate::backend::fixture_id("andy/fx1"))
+            .unwrap();
+        assert_eq!(info.status, AgentStatus::Working);
+        assert_eq!(state(&info, false), ("working".into(), Color::Success));
+        assert_eq!(
+            state(&info, true),
+            (
+                "taken over in chat; headless run paused".into(),
+                Color::Accent
+            )
+        );
+    }
 
     #[gpui::test]
     fn agent_panel_renders(cx: &mut TestAppContext) {

@@ -36,6 +36,9 @@ mod palette;
 #[path = "workspace_alerts.rs"]
 mod alert_wiring;
 pub(crate) use alert_wiring::OpenAlerts;
+// Task 14: take-over keys and the Agent panel following the chat.
+#[path = "workspace_take_over.rs"]
+mod take_over;
 
 // Task 18: the actions moved to src/keymap.rs with their bindings.
 pub(crate) use crate::keymap::{Quit, ToggleLeftDock, ToggleRightDock};
@@ -61,7 +64,8 @@ pub(crate) struct Workspace {
     /// Task 18: the command palette, while open.
     palette: palette::PaletteState,
     _agents_events: Subscription,
-    // Task 13: the status bar's counts and the toast come from the chat.
+    // Task 13: the status bar's counts and the toast come from the chat;
+    // Task 14: it also holds the take-over terminal.
     chat: Entity<ChatView>,
     _chat_changes: Subscription,
 }
@@ -78,7 +82,12 @@ impl Workspace {
             AgentsPanelEvent::Selected(id) => this.select_agent(id, cx),
         });
         let chat = cx.new(|cx| ChatView::new(Snapshot::clone(&snapshot), window, cx));
-        let chat_changes = cx.observe(&chat, |_, _, cx| cx.notify());
+        // Task 13: the status bar's counts and the toast redraw on any change;
+        // Task 14: the roster and the Agent panel follow the chat's snapshot.
+        let chat_changes = cx.observe(&chat, |this, _, cx| {
+            this.follow_chat(cx);
+            cx.notify();
+        });
         let tabs = starting_tabs(&snapshot);
         let pane_group = cx.new(|cx| PaneGroup::new(&snapshot, Some(chat.clone()), tabs, cx));
         let left = LeftDockState::new(&snapshot, cx);
@@ -256,33 +265,36 @@ impl Render for Workspace {
             );
         }
 
-        // Task 18: the palette's actions.
-        Self::alert_actions(Self::palette_actions(Self::dock_actions(div(), cx), cx), cx)
-            .track_focus(&self.focus_handle)
-            .key_context(crate::keymap::WORKSPACE_CONTEXT)
-            .on_action(cx.listener(|this, _: &ToggleLeftDock, _, cx| {
-                this.toggle_dock(DockSide::Left, cx);
-            }))
-            .on_action(cx.listener(|this, _: &ToggleRightDock, _, cx| {
-                this.toggle_dock(DockSide::Right, cx);
-            }))
-            .size_full()
-            .flex()
-            .flex_col()
-            .bg(theme.background)
-            .text_color(theme.text)
-            .font_family(fonts.ui_family.clone())
-            .child(TitleBar::new(&self.snapshot))
-            .child(body)
-            .child(
-                StatusBar::new(&self.snapshot, self.shows_listener_toggle(cx))
-                    .panels(self.panel_buttons(cx))
-                    .alert_counts(self.chat.read(cx).alert_counts())
-                    .when_some(self.status_context(cx), StatusBar::context)
-                    .palette_open(self.is_palette_open()),
-            )
-            .children(palette)
-            .children(self.alert_toast(cx))
+        // Tasks 18, 13 and 14: the palette's, alerts' and take-over's actions.
+        Self::take_over_actions(
+            Self::alert_actions(Self::palette_actions(Self::dock_actions(div(), cx), cx), cx),
+            cx,
+        )
+        .track_focus(&self.focus_handle)
+        .key_context(crate::keymap::WORKSPACE_CONTEXT)
+        .on_action(cx.listener(|this, _: &ToggleLeftDock, _, cx| {
+            this.toggle_dock(DockSide::Left, cx);
+        }))
+        .on_action(cx.listener(|this, _: &ToggleRightDock, _, cx| {
+            this.toggle_dock(DockSide::Right, cx);
+        }))
+        .size_full()
+        .flex()
+        .flex_col()
+        .bg(theme.background)
+        .text_color(theme.text)
+        .font_family(fonts.ui_family.clone())
+        .child(TitleBar::new(&self.snapshot))
+        .child(body)
+        .child(
+            StatusBar::new(&self.snapshot, self.shows_listener_toggle(cx))
+                .panels(self.panel_buttons(cx))
+                .alert_counts(self.chat.read(cx).alert_counts())
+                .when_some(self.status_context(cx), StatusBar::context)
+                .palette_open(self.is_palette_open()),
+        )
+        .children(palette)
+        .children(self.alert_toast(cx))
     }
 }
 

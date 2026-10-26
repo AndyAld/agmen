@@ -13,11 +13,14 @@ use super::composer::{Composer, Target};
 use super::tokens::{SPACE_6, SPACE_8, SPACE_10, SPACE_14, SPACE_18};
 use crate::appearance::Appearance;
 use crate::backend::{AgentSession, BackendError, BackendHandle, SessionRow, Snapshot, Tone};
+use crate::keymap::{OpenInTerminal, TakeOverAgent};
 
 /// Tests find row `ix` as `"session:{ix}:{kind}"`, where kind is `tool`,
 /// `out`, `say` or `cost`, and the buttons as `agent-open-terminal` and
 /// `agent-stop`.
 pub(crate) struct AgentView {
+    /// Task 14: the agent Open in terminal takes over.
+    id: IdentityId,
     handle: SharedString,
     session: AgentSession,
     composer: Entity<Composer>,
@@ -58,6 +61,7 @@ impl AgentView {
             )
         });
         Self {
+            id: id.clone(),
             handle: handle.into(),
             session,
             composer,
@@ -127,15 +131,27 @@ impl Render for AgentView {
             .flex()
             .items_center()
             .gap(SPACE_6)
-            // shortcut: the buttons do nothing until the hub backend can open
-            // a terminal and stop an agent (Task 14).
-            .child(
+            // Task 14: the terminal opens in the chat (spec 5.4).
+            .child({
+                let id = self.id.clone();
                 Button::new("agent-open-terminal", "Open in terminal  ⌥O")
-                    .style(ButtonStyle::Tinted),
-            )
+                    .style(ButtonStyle::Tinted)
+                    .on_click(move |_, window, cx| {
+                        window.dispatch_action(Box::new(TakeOverAgent(id.clone())), cx);
+                    })
+            })
+            // shortcut: Stop does nothing until the hub backend can stop an
+            // agent.
             .child(Button::new("agent-stop", "Stop").style(ButtonStyle::Plain));
+        let id = self.id.clone();
         div()
             .debug_selector(|| "agent-view".into())
+            // Task 14: ⌥O here is this view's button, so it takes over this
+            // view's agent, not the agent of the chat's newest DONE; the
+            // action stops here.
+            .on_action(move |_: &OpenInTerminal, window, cx| {
+                window.dispatch_action(Box::new(TakeOverAgent(id.clone())), cx);
+            })
             .size_full()
             .flex()
             .flex_col()
