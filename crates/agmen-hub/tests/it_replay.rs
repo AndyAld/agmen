@@ -32,7 +32,7 @@ use serde_json::{Value, json};
 use support::mqtt::{self, ACK_WAIT, Client, connect_ok};
 use support::{
     Ctx, DEV_KEY_1, Minted, Project, TestHub, env, envelope, login, mint_ok, run, seed_human,
-    seed_member, seed_project, ulid,
+    seed_member, seed_project, topics, ulid,
 };
 use url::Url;
 
@@ -52,13 +52,6 @@ const LATE_WAIT: Duration = Duration::from_secs(2);
 const ONLINE: &[u8] = br#"{"status":"online"}"#;
 const AWAY: &[u8] = br#"{"status":"away"}"#;
 const OFFLINE: &[u8] = br#"{"status":"offline"}"#;
-
-fn topics(project: &Project) -> Topics {
-    Topics::new(
-        project.tenant.parse().unwrap(),
-        project.project.parse().unwrap(),
-    )
-}
 
 /// Posts `raw` as `from` without the broker, as a human's post will.
 async fn ingest(ctx: &Ctx, project: &Project, from: &str, raw: &[u8]) -> DeliveryReply {

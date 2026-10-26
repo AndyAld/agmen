@@ -69,10 +69,12 @@ const HANDLE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,31}(?:\/[A-Za-z0-9][A-Za-z0-9._-]{0
 const MAX_BODY_BYTES = 32_768
 /**
  * check-path reasons a deny may show, beside `lane <lane> held by <handle>`
- * (docs/plans/mvp.md, `it_check_path`). A reason of any other shape is not
- * shown: it could carry text the model would read as instructions.
+ * (docs/plans/mvp.md, `it_check_path`). They are the hub's fixed phrases in
+ * crates/agmen-hub/src/lanes.rs (`UNOWNED`, `NOT_CLAIMED`, `NOT_A_REPO_PATH`);
+ * a phrase added there goes here in the same change. A reason of any other
+ * shape is not shown: it could carry text the model would read as instructions.
  */
-const CHECK_PATH_PHRASES = ['unowned'] as const
+const CHECK_PATH_PHRASES = ['unowned', 'not claimed', 'not a repository path'] as const
 const HELD_BY = /^lane (\S+) held by (\S+)$/
 
 /** The oldest `agmen` this plugin accepts: the workspace's first version. */

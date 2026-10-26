@@ -19,9 +19,12 @@ use std::future::Future;
 use std::hash::{BuildHasher, Hasher, RandomState};
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use agmen_hub::{Config, EmqxConfig, GithubConfig, Hub, Messaging, MqttConfig, Secret};
+use agmen_hub::{
+    Config, DEFAULT_CLAIM_LEASE, EmqxConfig, GithubConfig, Hub, Messaging, MqttConfig, Secret,
+};
+use agmen_proto::Topics;
 use jiff::Timestamp;
 use reqwest::StatusCode;
 use reqwest::redirect::Policy;
@@ -103,6 +106,14 @@ pub fn envelope(id: &str, verb: &str, data: Value, extra: Value) -> Vec<u8> {
     serde_json::to_vec(&env).unwrap()
 }
 
+/// The broker topics of `project`.
+pub fn topics(project: &Project) -> Topics {
+    Topics::new(
+        project.tenant.parse().unwrap(),
+        project.project.parse().unwrap(),
+    )
+}
+
 /// A database of its own on the `AGMEN_IT_PG` server.
 #[derive(Debug)]
 pub struct TestDb {
@@ -165,9 +176,18 @@ where
     F: FnOnce(Ctx) -> Fut,
     Fut: Future<Output = ()> + Send + 'static,
 {
+    run_with_lease(DEFAULT_CLAIM_LEASE, body).await;
+}
+
+/// [`run`] with a hub whose claims last `lease` without a HEARTBEAT.
+pub async fn run_with_lease<F, Fut>(lease: Duration, body: F)
+where
+    F: FnOnce(Ctx) -> Fut,
+    Fut: Future<Output = ()> + Send + 'static,
+{
     let db = TestDb::create().await;
     let github = FakeGithub::start().await;
-    let hub = TestHub::start(&db.url, &github, DEV_KEY_1, &[]).await;
+    let hub = TestHub::start_with_lease(&db.url, &github, DEV_KEY_1, &[], lease).await;
     let pool = PgPoolOptions::new()
         .max_connections(2)
         .connect(&db.url)
@@ -223,6 +243,17 @@ impl TestHub {
     /// Starts a hub on `db_url` that signs broker tokens with `signing` and
     /// also publishes `extra` in its JWKS.
     pub async fn start(db_url: &str, github: &FakeGithub, signing: &str, extra: &[&str]) -> Self {
+        Self::start_with_lease(db_url, github, signing, extra, DEFAULT_CLAIM_LEASE).await
+    }
+
+    /// [`TestHub::start`] with claims that last `lease`.
+    pub async fn start_with_lease(
+        db_url: &str,
+        github: &FakeGithub,
+        signing: &str,
+        extra: &[&str],
+        lease: Duration,
+    ) -> Self {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr: SocketAddr = listener.local_addr().unwrap();
         let base = Url::parse(&format!("http://{addr}")).unwrap();
@@ -250,6 +281,7 @@ impl TestHub {
             },
             jwt_signing_key: jwt_key(signing),
             jwt_extra_keys: extra.iter().map(|name| jwt_key(name)).collect(),
+            claim_lease: lease,
         };
         let hub = Hub::connect(&config).await.expect("start the hub");
         let router = hub.router();
@@ -469,10 +501,21 @@ pub struct Minted {
 }
 
 pub async fn mint_ok(ctx: &Ctx, human_token: &str, handle: &str, project: &Project) -> Minted {
+    mint_kind(ctx, human_token, handle, project, "agent").await
+}
+
+/// Mints an identity of `kind` in `project` with `human_token`.
+pub async fn mint_kind(
+    ctx: &Ctx,
+    human_token: &str,
+    handle: &str,
+    project: &Project,
+    kind: &str,
+) -> Minted {
     let (status, body) = mint(
         ctx,
         human_token,
-        &json!({ "handle": handle, "project": project.project, "kind": "agent" }),
+        &json!({ "handle": handle, "project": project.project, "kind": kind }),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "mint answered {body}");

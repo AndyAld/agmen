@@ -9,7 +9,10 @@
 //! sweeper that publishes what ingest stored; [`Hub::post_as_hub`] posts the
 //! hub's own messages. The hub also serves replay of every stream, keeps
 //! each project's retained `state/roster` from presence, and answers
-//! ROLLCALL. [`Bootstrap`] makes a tenant, a project and its first
+//! ROLLCALL. The ledger (lanes, items and claims, design 6.5) answers
+//! CLAIM, FOUND and DONE as they are ingested, serves lanes, items and path
+//! checks over HTTP, and [`Hub::run_lease_sweeper`] releases claims whose
+//! lease ran out. [`Bootstrap`] makes a tenant, a project and its first
 //! admin for the `agmen-hub bootstrap` command.
 
 #![warn(missing_docs)]
@@ -17,6 +20,7 @@
 mod auth;
 mod bootstrap;
 mod broker_tokens;
+mod claims;
 mod config;
 mod db;
 mod emqx;
@@ -24,6 +28,8 @@ mod http;
 mod identities;
 mod ingest;
 mod invites;
+mod items;
+mod lanes;
 mod mqtt;
 mod numbering;
 mod presence;
@@ -35,7 +41,10 @@ mod sweeper;
 pub use auth::{GithubError, GithubId};
 pub use bootstrap::{AdminGithub, Bootstrap, BootstrapError, Bootstrapped};
 pub use broker_tokens::{BrokerTokens, SigningKey, TokenError};
-pub use config::{Config, ConfigError, EmqxConfig, GithubConfig, MqttConfig, Secret};
+pub use claims::LeaseSweepError;
+pub use config::{
+    Config, ConfigError, DEFAULT_CLAIM_LEASE, EmqxConfig, GithubConfig, MqttConfig, Secret,
+};
 pub use emqx::{EmqxAdmin, EmqxError};
 pub use http::{Hub, HubError};
 pub use identities::{BROKER_TOKEN_TTL, CLIENT_ID_SUFFIXES, HumanId, Identity};
