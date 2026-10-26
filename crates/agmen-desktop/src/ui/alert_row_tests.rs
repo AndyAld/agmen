@@ -115,11 +115,17 @@ fn alert_that_needs_me_is_red_with_needs_you_and_four_buttons(cx: &mut TestAppCo
         cx.debug_bounds(sel(alert, "alert:action:2")).is_none(),
         "Snooze shows once"
     );
+    // Reply has no border, so it is 2 px shorter than the bordered actions
+    // (nodes 5996 and 5998: 20 and 22 px) and sits centered beside them,
+    // 1 px down (its y in the row is 1).
     for pair in buttons.windows(2) {
         assert!(pair[0].right() < pair[1].left());
-        assert_eq!(pair[0].size.height, pair[1].size.height);
-        assert_eq!(pair[0].top(), pair[1].top());
+        assert_eq!(pair[0].center().y, pair[1].center().y);
     }
+    for button in &buttons[1..] {
+        assert_eq!(button.size.height - buttons[0].size.height, px(2.));
+    }
+    assert_eq!(buttons[0].top() - buttons[1].top(), px(1.));
     let body = cx.debug_bounds(sel(alert, "body")).unwrap();
     assert!(
         buttons[0].top() > body.bottom() - px(1.),

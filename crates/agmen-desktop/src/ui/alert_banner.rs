@@ -195,7 +195,16 @@ mod tests {
         let banner = cx.debug_bounds("banner").unwrap();
         assert_eq!(banner.size.height, px(37.));
         assert_eq!(banner.size.width, px(828.));
-        assert!(cx.debug_bounds("banner:jump").is_some());
+        // Jump to it is a small line padded 3 with no border, 20 px in the
+        // mockup (node 5712).
+        let jump = cx.debug_bounds("banner:jump").unwrap();
+        let mut text = TestAppContext::single();
+        let text = crate::ui::test_support::rendered_size(&mut text, || {
+            Label::new("Jump to it")
+                .size(LabelSize::Small)
+                .into_any_element()
+        });
+        assert_eq!(jump.size.height - text.height, px(20. - 14.));
     }
 
     #[gpui::test]

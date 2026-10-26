@@ -35,8 +35,8 @@ pub(crate) enum ButtonStyle {
     Secondary,
     /// Surface fill, as the breadcrumb's "Show ledger" (node 135).
     Subtle,
-    /// Error fill with semibold text, as an alert's Reply and the banner's
-    /// Jump to it (nodes 5996 and 5712).
+    /// Error fill with semibold text and no border, as an alert's Reply and
+    /// the banner's Jump to it (nodes 5996 and 5712, both 20 px).
     Danger,
     /// Plain with a 1 px border, as an alert's own actions (nodes 5998 to
     /// 6002).
@@ -293,18 +293,11 @@ impl RenderOnce for Button {
                 .when(self.style == ButtonStyle::Bordered, |this| {
                     this.border(BORDER_WIDTH).border_color(theme.border)
                 }),
-            // An alert's Reply sits beside bordered actions, so its border
-            // in its own fill keeps the row one height; the error fill is the
-            // alert's tint, so hover fades it as Primary does.
-            ButtonStyle::Danger => base
-                .border(BORDER_WIDTH)
-                .border_color(theme.error)
-                .rounded(RADIUS_MD)
-                .py(SPACE_3)
-                .px(SPACE_9),
             // These sit on a card whose fill is the hover color, so hover
-            // fades the button instead of filling it.
-            ButtonStyle::Primary | ButtonStyle::Secondary => {
+            // fades the button instead of filling it. Danger draws no border
+            // and is 2 px shorter than the bordered actions beside it, as
+            // the mockup draws it (nodes 5996 and 5998: 20 and 22 px).
+            ButtonStyle::Primary | ButtonStyle::Secondary | ButtonStyle::Danger => {
                 base.rounded(RADIUS_MD).py(SPACE_3).px(SPACE_9)
             }
             ButtonStyle::Subtle => base.rounded(RADIUS_MD).py(SPACE_3).px(SPACE_9),
@@ -468,9 +461,12 @@ mod tests {
     }
 
     #[gpui::test]
-    fn alert_buttons_share_one_height(cx: &mut TestAppContext) {
-        // Nodes 5996 to 6002: Reply and the alert's actions sit in one 22 px
-        // row; the actions are Plain plus a 1 px border.
+    fn alert_buttons_match_the_mockup_heights(cx: &mut TestAppContext) {
+        // Frame "Desktop · needs you": Reply and Jump to it are 20 px, a
+        // 14 px line padded 3, with no border (nodes 5996, 5712); the
+        // alert's own actions add a 1 px border for 22 px (node 5998). The
+        // app's small line is 13.5 px at Andy's 15 px rem, so each button
+        // is half a pixel shorter than the mockup and keeps its padding.
         let make =
             |style: ButtonStyle| move || Button::new("b", "Reply").style(style).into_any_element();
         let danger = rendered_size(cx, make(ButtonStyle::Danger));
@@ -478,9 +474,16 @@ mod tests {
         let bordered = rendered_size(&mut cx2, make(ButtonStyle::Bordered));
         let mut cx3 = TestAppContext::single();
         let plain = rendered_size(&mut cx3, make(ButtonStyle::Plain));
-        assert_eq!(bordered.height - plain.height, px(2.));
+        let mut cx4 = TestAppContext::single();
+        let text = rendered_size(&mut cx4, || {
+            Label::new("Reply")
+                .size(LabelSize::Small)
+                .into_any_element()
+        });
+        assert_eq!(danger.height - text.height, px(20. - 14.));
+        assert_eq!(bordered.height - text.height, px(22. - 14.));
         assert_eq!(bordered.width - plain.width, px(2.));
-        assert_eq!(danger, bordered);
+        assert_eq!(danger, plain);
     }
 
     #[test]
