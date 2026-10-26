@@ -1,5 +1,6 @@
 use super::*;
 use crate::backend::chat_snapshot;
+use crate::ui::pane::SplitDirection;
 use crate::ui::test_support::{click, init, redraw};
 use crate::ui::tokens::{STATUS_BAR_HEIGHT, TAB_BAR_HEIGHT, TITLE_BAR_HEIGHT};
 use gpui::TestAppContext;
@@ -118,10 +119,13 @@ fn hide_button_closes_left_dock(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn needs_you_pill_only_above_zero(cx: &mut TestAppContext) {
+    // Task 13: the pill follows the chat's alerts, not a stored number.
+    use crate::backend::{Backend as _, FixtureBackend, Screen};
     init(cx);
     let (_, cx) = cx.add_window_view(|window, cx| {
-        let mut snapshot = chat_snapshot();
-        snapshot.status.needs_you = 1;
+        let snapshot = FixtureBackend::for_screen(Screen::NeedsYou)
+            .unwrap()
+            .snapshot();
         Workspace::new(snapshot, window, cx)
     });
     redraw(cx);
@@ -154,4 +158,182 @@ fn bars_include_their_rules(cx: &mut TestAppContext) {
         tabs.origin.y, TITLE_BAR_HEIGHT,
         "the body starts right under the title bar"
     );
+}
+
+/// The chat the first pane hosts.
+fn chat_of(workspace: &Entity<Workspace>, cx: &gpui::VisualTestContext) -> Entity<ChatView> {
+    workspace.read_with(cx, |w, cx| {
+        w.pane_group.read(cx).panes()[0]
+            .read(cx)
+            .chat()
+            .cloned()
+            .expect("the first pane hosts the chat")
+    })
+}
+
+/// The selector of part `part` of the chat fixture's message `ix`.
+fn message_sel(ix: usize, part: &str) -> &'static str {
+    let id = chat_snapshot().messages[ix].client.id.clone();
+    Box::leak(format!("{}:{part}", id.as_str()).into_boxed_str())
+}
+
+#[gpui::test]
+fn center_hosts_the_chat_with_its_composer(cx: &mut TestAppContext) {
+    let (_workspace, cx) = open(cx);
+    assert!(cx.debug_bounds("pane-0:tab-0").is_some());
+    assert!(cx.debug_bounds("chat").is_some());
+    assert!(cx.debug_bounds("composer:model").is_some());
+    assert!(cx.debug_bounds(message_sel(0, "row")).is_some());
+}
+
+#[gpui::test]
+fn cmd_click_ref_opens_split(cx: &mut TestAppContext) {
+    let (workspace, cx) = open(cx);
+    // Message 5 is andy/listen's DELEGATED; its first chip is andy/fx1.
+    let chip = message_sel(4, "ref:0");
+    redraw(cx);
+    let center = cx.debug_bounds(chip).unwrap().center();
+    let secondary = cx.update(|_, cx| gpui::Modifiers::secondary_key(cx));
+    cx.simulate_click(center, secondary);
+    redraw(cx);
+    let group = workspace.read_with(cx, |w, _| w.pane_group.clone());
+    let (panes, direction) = group.read_with(cx, |g, _| (g.panes(), g.direction()));
+    assert_eq!(panes.len(), 2, "the center split in two");
+    assert_eq!(direction, Some(SplitDirection::Right), "side by side");
+    let fx1 = fx1_id();
+    panes[1].read_with(cx, |pane, _| {
+        assert_eq!(pane.active_item(), Some(&TabItem::Agent(fx1.clone())));
+    });
+    panes[0].read_with(cx, |pane, _| {
+        assert_eq!(pane.tabs(), starting_center(fx1));
+        assert_eq!(pane.active_item(), Some(&TabItem::Chat));
+    });
+    assert!(cx.debug_bounds("pane-1").is_some());
+}
+
+#[gpui::test]
+fn click_on_a_ref_opens_a_tab_in_the_pane(cx: &mut TestAppContext) {
+    let (workspace, cx) = open(cx);
+    // Message 2 is andy/a1's ALERT; its first chip is the commit 4d9fdc8.
+    click(cx, message_sel(1, "ref:0"));
+    let group = workspace.read_with(cx, |w, _| w.pane_group.clone());
+    let panes = group.read_with(cx, |g, _| g.panes());
+    assert_eq!(panes.len(), 1);
+    let commit = TabItem::Ref(crate::refs::RefTarget::Commit("4d9fdc8".into()));
+    panes[0].read_with(cx, |pane, _| {
+        let mut tabs = starting_center(fx1_id());
+        tabs.insert(1, commit.clone());
+        assert_eq!(pane.tabs(), tabs);
+        assert_eq!(pane.active_item(), Some(&commit));
+    });
+}
+
+fn fx1_id() -> IdentityId {
+    chat_snapshot()
+        .roster
+        .iter()
+        .flat_map(|g| &g.agents)
+        .find(|a| a.handle == "andy/fx1")
+        .map(|a| a.id.clone())
+        .unwrap()
+}
+
+/// The mockup's tab bar: chat, andy/fx1, reviewer.xml (console.py `tab_bar`).
+fn starting_center(fx1: IdentityId) -> Vec<TabItem> {
+    vec![
+        TabItem::Chat,
+        TabItem::Agent(fx1),
+        TabItem::RoleFile("reviewer".into()),
+    ]
+}
+
+#[gpui::test]
+fn center_opens_the_mockups_tabs_behind_the_chat(cx: &mut TestAppContext) {
+    let (workspace, cx) = open(cx);
+    let group = workspace.read_with(cx, |w, _| w.pane_group.clone());
+    let pane = group.read_with(cx, |g, _| g.panes()[0].clone());
+    pane.read_with(cx, |pane, _| {
+        assert_eq!(pane.tabs(), starting_center(fx1_id()));
+        assert_eq!(pane.active_item(), Some(&TabItem::Chat));
+    });
+    for tab in ["pane-0:tab-0", "pane-0:tab-1", "pane-0:tab-2"] {
+        assert!(cx.debug_bounds(tab).is_some(), "{tab}");
+    }
+}
+
+#[gpui::test]
+fn show_ledger_button_reveals_presence_lines(cx: &mut TestAppContext) {
+    let (workspace, cx) = open(cx);
+    let chat = chat_of(&workspace, cx);
+    assert!(!chat.read_with(cx, |chat, _| chat.show_ledger()));
+    click(cx, "pane-0:show-ledger");
+    assert!(chat.read_with(cx, |chat, _| chat.show_ledger()));
+}
+
+#[gpui::test]
+fn chat_tab_badge_matches_needs_you(cx: &mut TestAppContext) {
+    use crate::backend::{Backend as _, FixtureBackend, Screen};
+    init(cx);
+    for (screen, needs_you) in [
+        (Screen::Chat, 0),
+        (Screen::NeedsYou, 1),
+        (Screen::NeedsYouAnswered, 0),
+    ] {
+        let mut app = TestAppContext::single();
+        init(&mut app);
+        let snapshot = FixtureBackend::for_screen(screen).unwrap().snapshot();
+        let (workspace, app) =
+            app.add_window_view(|window, cx| Workspace::new(snapshot, window, cx));
+        redraw(app);
+        let chat = chat_of(&workspace, app);
+        assert_eq!(
+            chat.read_with(app, |c, _| c.badge()),
+            needs_you,
+            "{screen:?}"
+        );
+        assert_eq!(
+            app.debug_bounds("pane-0:tab-0:badge").is_some(),
+            needs_you > 0,
+            "{screen:?}"
+        );
+    }
+}
+
+#[gpui::test]
+fn escape_closes_an_open_settings_dropdown(cx: &mut TestAppContext) {
+    // Task 19 binds Escape to close the kick-off dialog; an open menu in the
+    // workspace still takes Escape first.
+    let (_, cx) = open(cx);
+    let home = tempfile::tempdir().unwrap();
+    let sources = crate::ui::SettingsSources {
+        config: home.path().join(".config"),
+        extensions: home.path().join("extensions"),
+        market: "http://127.0.0.1:9".into(),
+    };
+    cx.update(|_, cx| {
+        cx.set_global(sources);
+        crate::keymap::bind_all(cx);
+    });
+    cx.dispatch_action(crate::keymap::OpenSettings);
+    click(cx, "theme");
+    assert!(cx.debug_bounds("theme:0").is_some());
+    cx.simulate_keystrokes("escape");
+    redraw(cx);
+    assert!(
+        cx.debug_bounds("theme:0").is_none(),
+        "escape left the menu open"
+    );
+}
+
+// agmen-c7 fix-hosting-review minor 1 and 4: the chat and the center's tab
+// views read the workspace's one snapshot, not copies of it.
+#[gpui::test]
+fn the_chat_and_the_center_share_the_workspaces_snapshot(cx: &mut TestAppContext) {
+    let (workspace, cx) = open(cx);
+    workspace.read_with(cx, |workspace, cx| {
+        let chat = workspace.chat.read(cx).snapshot();
+        assert!(std::ptr::eq(&*workspace.snapshot, chat), "chat");
+        let center = workspace.pane_group.read(cx).sources().snapshot();
+        assert!(std::rc::Rc::ptr_eq(&workspace.snapshot, center), "center");
+    });
 }

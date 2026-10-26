@@ -7,15 +7,15 @@ use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, AppContext as _, Context, Entity, FontWeight, InteractiveElement as _, IntoElement,
-    ParentElement as _, Pixels, Render, SharedString, Styled as _, Window, div, uniform_list,
+    App, AppContext as _, Context, Entity, EventEmitter, FontWeight, InteractiveElement as _,
+    IntoElement, ParentElement as _, Pixels, Render, SharedString, Styled as _, Window, div,
+    uniform_list,
 };
 
-use super::breadcrumb::Breadcrumb;
 use super::code_view::{Line, cell_width, layout_lines, styled_line};
-use super::components::{Button, ButtonStyle, Color, Label};
+use super::components::{Breadcrumb, Button, ButtonStyle, Color, Label};
 use super::syntax::Language;
-use super::tokens::{DIFF_TINT, MONO_CELL_HEIGHT, SPACE_8, SPACE_16};
+use super::tokens::{DIFF_TINT, DIFF_TINT_COLUMNS, MONO_CELL_HEIGHT, SPACE_8, SPACE_16};
 use crate::appearance::Appearance;
 use crate::backend::{DiffLineKind, Hunk, WorktreeInfo};
 
@@ -30,63 +30,67 @@ enum Row {
     },
 }
 
-/// Whether `text` is a merge conflict marker line: seven `<`, `=`, `|` or
-/// `>`, alone or before a space.
+/// Whether `text` is a merge conflict marker line (`<<<<<<< HEAD`,
+/// `|||||||`, `=======`, `>>>>>>> 4d9fdc8`), which is not code.
 fn is_conflict_marker(text: &str) -> bool {
-    let bytes = text.as_bytes();
-    let Some(&mark) = bytes.first() else {
+    let Some((mark, rest)) = text.split_at_checked(7) else {
         return false;
     };
-    let run = bytes.iter().take_while(|&&b| b == mark).count();
-    matches!(mark, b'<' | b'=' | b'|' | b'>')
-        && run == 7
-        && matches!(bytes.get(7), None | Some(b' '))
+    let labeled = rest.is_empty() || rest.starts_with(' ');
+    match mark {
+        "=======" => rest.is_empty(),
+        "<<<<<<<" | "|||||||" | ">>>>>>>" => labeled,
+        _ => false,
+    }
 }
 
 /// Every hunk's header and lines, highlighted as `language`. Each side of a
 /// hunk is highlighted as one text, as Zed highlights the old and the new
 /// buffer: context and added lines from the worktree side, removed lines
-/// from the base side. Mixing the two would make one side's conflict
-/// markers turn the rest of the hunk into types (V103). A conflict marker
-/// line is not code, so it draws in the text color (V111).
+/// from the base side, so a construct that spans lines keeps its colors and
+/// one side's code does not bend the other's (V103). Conflict markers are
+/// left out of both texts and drawn plain, so the parser does not miscolor
+/// the code next to them (node 5215, V111).
 fn layout_rows(hunks: &[Hunk], language: Language) -> Vec<Row> {
     let mut rows = Vec::new();
     for hunk in hunks {
         rows.push(Row::Header(hunk.header().into()));
-        // One newline after every line, so an empty last line keeps its row.
-        let side = |skip: DiffLineKind| -> String {
+        let code = || {
             hunk.lines
                 .iter()
+                .filter(|line| !is_conflict_marker(&line.text))
+        };
+        // One newline after every line, so an empty last line keeps its row.
+        let side = |skip: DiffLineKind| -> String {
+            code()
                 .filter(|line| line.kind != skip)
                 .flat_map(|line| [line.text.as_str(), "\n"])
                 .collect()
         };
         let mut new = layout_lines(&side(DiffLineKind::Removed), language).into_iter();
         let mut old = layout_lines(&side(DiffLineKind::Added), language).into_iter();
-        let before = rows.len();
-        rows.extend(hunk.lines.iter().filter_map(|diff| {
-            let line = match diff.kind {
-                DiffLineKind::Context => {
-                    old.next();
-                    new.next()
-                }
-                DiffLineKind::Added => new.next(),
-                DiffLineKind::Removed => old.next(),
-            }?;
-            let line = if is_conflict_marker(&line.text) {
-                Line::plain(line.text)
+        rows.extend(hunk.lines.iter().map(|diff| {
+            let line = if is_conflict_marker(&diff.text) {
+                None
             } else {
-                line
+                match diff.kind {
+                    DiffLineKind::Context => {
+                        old.next();
+                        new.next()
+                    }
+                    DiffLineKind::Added => new.next(),
+                    DiffLineKind::Removed => old.next(),
+                }
             };
-            Some(Row::Line {
+            Row::Line {
                 kind: diff.kind,
-                line,
-            })
+                line: line.unwrap_or_else(|| Line::plain(&diff.text)),
+            }
         }));
         debug_assert_eq!(
-            rows.len() - before,
-            hunk.lines.len(),
-            "one laid out line per diff line"
+            (old.next(), new.next()),
+            (None, None),
+            "one laid out line per code line on each side"
         );
     }
     rows
@@ -158,16 +162,14 @@ fn render_row(ix: usize, header_ix: usize, row: &Row, cell: Pixels, cx: &App) ->
                 DiffLineKind::Removed => ("-", theme.deleted, Some(theme.deleted)),
             };
             let slug = kind_slug(*kind);
-            base.debug_selector(move || format!("diff-row:{number}:{slug}"))
-                .when_some(tint, |this, color| {
-                    this.child(
-                        div()
-                            .debug_selector(move || format!("diff-row:{number}:tint"))
-                            .absolute()
-                            .inset_0()
-                            .bg(color.opacity(DIFF_TINT)),
-                    )
-                })
+            // The line is at least the grid's 150 columns wide and grows
+            // with its code (C285); its holder shrinks to the row, so the
+            // tint, which fills the holder, spans
+            // min(pane, max(grid, line)).
+            let code = div()
+                .flex()
+                .items_center()
+                .min_w(cell * DIFF_TINT_COLUMNS)
                 .child(
                     div()
                         .debug_selector(move || format!("diff-row:{number}:sign"))
@@ -187,6 +189,26 @@ fn render_row(ix: usize, header_ix: usize, row: &Row, cell: Pixels, cx: &App) ->
                         .min_w_0()
                         .overflow_hidden()
                         .child(styled_line(line, theme)),
+                );
+            base.debug_selector(move || format!("diff-row:{number}:{slug}"))
+                .child(
+                    div()
+                        .relative()
+                        .flex()
+                        .flex_col()
+                        .justify_center()
+                        .h_full()
+                        .min_w_0()
+                        .when_some(tint, |this, color| {
+                            this.child(
+                                div()
+                                    .debug_selector(move || format!("diff-row:{number}:tint"))
+                                    .absolute()
+                                    .inset_0()
+                                    .bg(color.opacity(DIFF_TINT)),
+                            )
+                        })
+                        .child(code),
                 )
                 .into_any_element()
         }
@@ -230,18 +252,29 @@ impl Render for DiffView {
     }
 }
 
-/// A change's diff in a center tab: the worktree, `changes` and the path in
-/// the breadcrumb with Open file at its end, then the diff
-/// (`desktop-git.webp`). Tests find it as `diff-tab` and the button as
-/// `diff-open-file`.
+/// What a diff tab asks its host to do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DiffTabEvent {
+    /// Open file: open `path` in worktree `worktree` (a handle) in its own
+    /// tab.
+    OpenFile { worktree: String, path: String },
+}
+
+/// A change's diff as a center tab shows it (frame "Desktop · git", node
+/// 5206): the breadcrumb "worktree › changes › path" ending in Open file,
+/// over the diff. The workspace and the Git dev window both use it, as
+/// FileView is the file tab's. Tests find the button as `diff-open-file`.
 pub(crate) struct DiffTab {
-    parts: Vec<SharedString>,
+    worktree: SharedString,
+    path: SharedString,
     diff: Entity<DiffView>,
 }
 
+impl EventEmitter<DiffTabEvent> for DiffTab {}
+
 impl DiffTab {
-    /// `path`'s change in `worktree`; a path without a change shows an
-    /// empty diff.
+    /// `path`'s diff in `worktree`; a path with no change shows the diff
+    /// view's empty state.
     pub(crate) fn new(worktree: &WorktreeInfo, path: &str, cx: &mut Context<Self>) -> Self {
         let hunks = worktree
             .changes
@@ -250,28 +283,32 @@ impl DiffTab {
             .map(|change| change.hunks.clone())
             .unwrap_or_default();
         let language = Language::for_path(std::path::Path::new(path));
-        let diff = cx.new(|_| DiffView::new(hunks, language));
-        let parts = vec![
-            SharedString::from(worktree.handle.clone()),
-            "changes".into(),
-            SharedString::from(path.to_owned()),
-        ];
-        Self { parts, diff }
+        Self {
+            worktree: worktree.handle.clone().into(),
+            path: path.to_owned().into(),
+            diff: cx.new(|_| DiffView::new(hunks, language)),
+        }
     }
 
-    #[cfg(test)]
-    pub(crate) fn parts(&self) -> Vec<&str> {
-        self.parts.iter().map(SharedString::as_ref).collect()
+    /// The breadcrumb's parts: the worktree, `changes` and the path.
+    fn parts(&self) -> [SharedString; 3] {
+        [self.worktree.clone(), "changes".into(), self.path.clone()]
     }
 }
 
 impl Render for DiffTab {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = &cx.global::<Appearance>().theme;
-        // shortcut: Open file does nothing until the workspace hosts the
-        // Project panel's file tabs (Task 11 and agmen-c7's wiring).
-        let crumb = Breadcrumb::new(self.parts.clone())
-            .end(Button::new("diff-open-file", "Open file").style(ButtonStyle::Plain));
+        // Node 5213 is a plain button (V92).
+        let open = Button::new("diff-open-file", "Open file")
+            .style(ButtonStyle::Plain)
+            .on_click(cx.listener(|this, _, _, cx| {
+                cx.emit(DiffTabEvent::OpenFile {
+                    worktree: this.worktree.to_string(),
+                    path: this.path.to_string(),
+                });
+            }));
+        let crumb = Breadcrumb::new(self.parts()).end(open);
         div()
             .debug_selector(|| "diff-tab".into())
             .size_full()

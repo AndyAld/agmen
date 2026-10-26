@@ -1,4 +1,8 @@
-//! Money, token counts, durations and other numbers as the views show them.
+//! Money, token counts, durations, clock times and other numbers as the
+//! views show them.
+
+use agmen_proto::Timestamp;
+use jiff::tz::TimeZone;
 
 /// Dollars with cents: `$14.20`. Values that are not finite show `$0.00`.
 #[must_use]
@@ -98,6 +102,31 @@ pub(crate) fn counted(count: u32, one: &str, many: &str) -> String {
     format!("{count} {}", if count == 1 { one } else { many })
 }
 
+// Task 13: alert counts cap at 99+.
+/// The largest count a badge or the status bar spells out; more reads `99+`.
+pub(crate) const MAX_SHOWN_COUNT: usize = 99;
+
+/// A count as a badge shows it: `7`, or `99+` past [`MAX_SHOWN_COUNT`].
+#[must_use]
+pub(crate) fn count_label(count: usize) -> String {
+    if count > MAX_SHOWN_COUNT {
+        format!("{MAX_SHOWN_COUNT}+")
+    } else {
+        count.to_string()
+    }
+}
+
+/// [`counted`] with the count capped as [`count_label`] caps it:
+/// `1 needs you`, `99+ need you`.
+#[must_use]
+pub(crate) fn counted_capped(count: usize, one: &str, many: &str) -> String {
+    format!(
+        "{} {}",
+        count_label(count),
+        if count == 1 { one } else { many }
+    )
+}
+
 /// A lowercase name with its first letter capitalized: `engineer` to
 /// `Engineer`.
 #[must_use]
@@ -108,11 +137,9 @@ pub(crate) fn title_case(name: &str) -> String {
     })
 }
 
-/// A time of day as `15:31`, in `tz`; views pass
-/// `jiff::tz::TimeZone::system()`, which is UTC when the system zone cannot
-/// be read.
+/// `at` as a 24 hour `15:31` in `tz`, at the offset `tz` has at that moment.
 #[must_use]
-pub(crate) fn clock(at: agmen_proto::Timestamp, tz: &jiff::tz::TimeZone) -> String {
+pub(crate) fn clock(at: Timestamp, tz: &TimeZone) -> String {
     at.to_zoned(tz.clone()).strftime("%H:%M").to_string()
 }
 
@@ -179,12 +206,26 @@ mod tests {
 
     #[test]
     fn clock_shows_hours_and_minutes_in_the_zone() {
-        let at: agmen_proto::Timestamp = "2026-10-25T21:31:00Z".parse().unwrap();
-        let denver = jiff::tz::TimeZone::get("America/Denver").unwrap();
+        let at: Timestamp = "2026-10-25T21:31:40Z".parse().unwrap();
+        let denver = TimeZone::get("America/Denver").unwrap();
         assert_eq!(clock(at, &denver), "15:31");
-        assert_eq!(clock(at, &jiff::tz::TimeZone::UTC), "21:31");
-        let morning: agmen_proto::Timestamp = "2026-10-25T07:05:00Z".parse().unwrap();
-        assert_eq!(clock(morning, &jiff::tz::TimeZone::UTC), "07:05");
+        assert_eq!(clock(at, &TimeZone::UTC), "21:31");
+        let morning: Timestamp = "2026-10-25T07:05:00Z".parse().unwrap();
+        assert_eq!(clock(morning, &TimeZone::UTC), "07:05");
+        // 21:31 UTC plus 14 hours wraps to the next day.
+        let east = TimeZone::fixed(jiff::tz::offset(14));
+        assert_eq!(clock(at, &east), "11:31");
+    }
+
+    #[test]
+    fn large_counts_cap_at_99() {
+        assert_eq!(count_label(0), "0");
+        assert_eq!(count_label(99), "99");
+        assert_eq!(count_label(100), "99+");
+        assert_eq!(count_label(usize::MAX), "99+");
+        assert_eq!(counted_capped(1, "needs you", "need you"), "1 needs you");
+        assert_eq!(counted_capped(2, "alert", "alerts"), "2 alerts");
+        assert_eq!(counted_capped(256, "needs you", "need you"), "99+ need you");
     }
 
     #[test]

@@ -6,7 +6,11 @@
     {
       "name": "Partial Dark",
       "appearance": "dark",
-      "style": { "background": "#101010", "terminal.ansi.green": "#00ff00", },
+      "style": {
+        "background": "#101010",
+        "terminal.ansi.green": "#00ff00",
+        "terminal.foreground": "#aabbcc",
+      },
     },
   ],
 }

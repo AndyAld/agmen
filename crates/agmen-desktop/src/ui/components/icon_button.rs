@@ -47,6 +47,7 @@ pub(crate) struct IconButton {
     color: Color,
     size: IconSize,
     style: IconButtonStyle,
+    selected: bool,
     control_area: Option<WindowControlArea>,
     on_click: Option<ClickHandler>,
 }
@@ -69,6 +70,7 @@ impl IconButton {
             color: Color::Placeholder,
             size: IconSize::Medium,
             style: IconButtonStyle::Ghost,
+            selected: false,
             control_area: None,
             on_click: None,
         }
@@ -89,6 +91,14 @@ impl IconButton {
     #[must_use]
     pub(crate) const fn style(mut self, style: IconButtonStyle) -> Self {
         self.style = style;
+        self
+    }
+
+    /// Draws the button's on state, as a status bar panel button while its
+    /// panel shows: a selected fill behind a bright icon.
+    #[must_use]
+    pub(crate) const fn selected(mut self, selected: bool) -> Self {
+        self.selected = selected;
         self
     }
 
@@ -114,6 +124,12 @@ impl RenderOnce for IconButton {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = &cx.global::<Appearance>().theme;
         let hover = hover_fill(self.style, theme);
+        let selected_fill = theme.element_selected;
+        let color = if self.selected {
+            Color::Default
+        } else {
+            self.color
+        };
         let selector = self.id.to_string();
         let caption = matches!(
             self.style,
@@ -132,6 +148,7 @@ impl RenderOnce for IconButton {
                     .w(DOCK_BUTTON.width)
                     .h(DOCK_BUTTON.height)
             })
+            .when(self.selected, |this| this.bg(selected_fill))
             .when(caption, |this| {
                 this.w(WINDOW_BUTTON_WIDTH)
                     .h_full()
@@ -149,7 +166,7 @@ impl RenderOnce for IconButton {
                 this.when(!caption, |this| this.cursor_pointer())
                     .on_click(handler)
             })
-            .child(Icon::new(self.icon).color(self.color).size(self.size))
+            .child(Icon::new(self.icon).color(color).size(self.size))
     }
 }
 

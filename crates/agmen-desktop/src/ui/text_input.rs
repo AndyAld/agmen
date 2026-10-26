@@ -14,11 +14,12 @@ use gpui::{
     App, AvailableSpace, Bounds, ClipboardItem, ContentMask, Context, CursorStyle, Element,
     ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle,
     Focusable, Font, GlobalElementId, Hsla, InspectorElementId, InteractiveElement, IntoElement,
-    KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad,
-    ParentElement, Pixels, Point, Render, SharedString, Size, Style, Styled, TextAlign, TextRun,
-    UTF16Selection, UnderlineStyle, Window, WrappedLine, actions, div, fill, point, px, relative,
-    size,
+    LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, ParentElement,
+    Pixels, Point, Render, SharedString, Size, Style, Styled, TextAlign, TextRun, UTF16Selection,
+    UnderlineStyle, Window, WrappedLine, actions, div, fill, point, px, relative, size,
 };
+
+use gpui::prelude::FluentBuilder as _;
 
 use super::text_edit::TextBuffer;
 use crate::appearance::Appearance;
@@ -45,8 +46,6 @@ actions!(
     ]
 );
 
-const CONTEXT: &str = "TextInput";
-
 /// Shaped layouts kept per input; a frame uses at most two widths.
 const MAX_CACHED_LAYOUTS: usize = 3;
 
@@ -54,29 +53,11 @@ const MAX_CACHED_LAYOUTS: usize = 3;
 /// takes bodies of at most 32 KiB, so the cap leaves room for that.
 const MAX_TEXT_BYTES: usize = 64 * 1024;
 
-/// Binds the input's keys; call once at startup.
+/// Binds the input's keys, which `src/keymap.rs` lists; the app binds
+/// them with the rest through `keymap::bind_all`.
+#[cfg(test)]
 pub(crate) fn bind_keys(cx: &mut App) {
-    let ctx = Some(CONTEXT);
-    cx.bind_keys([
-        KeyBinding::new("backspace", Backspace, ctx),
-        KeyBinding::new("delete", Delete, ctx),
-        KeyBinding::new("left", Left, ctx),
-        KeyBinding::new("right", Right, ctx),
-        KeyBinding::new("up", Up, ctx),
-        KeyBinding::new("down", Down, ctx),
-        KeyBinding::new("shift-left", SelectLeft, ctx),
-        KeyBinding::new("shift-right", SelectRight, ctx),
-        KeyBinding::new("cmd-a", SelectAll, ctx),
-        KeyBinding::new("home", Home, ctx),
-        KeyBinding::new("cmd-left", Home, ctx),
-        KeyBinding::new("end", End, ctx),
-        KeyBinding::new("cmd-right", End, ctx),
-        KeyBinding::new("enter", Submit, ctx),
-        KeyBinding::new("shift-enter", Newline, ctx),
-        KeyBinding::new("cmd-v", Paste, ctx),
-        KeyBinding::new("cmd-x", Cut, ctx),
-        KeyBinding::new("cmd-c", Copy, ctx),
-    ]);
+    cx.bind_keys(crate::keymap::text_input_bindings());
 }
 
 /// What the input tells its owner.
@@ -93,6 +74,9 @@ pub(crate) struct TextInput {
     placeholder: SharedString,
     /// 1 for a single line; more lets the text wrap and grow to that many.
     max_lines: usize,
+    /// The line the input measures, shapes and draws its caret with; `None`
+    /// takes the enclosing text style's.
+    line_height: Option<Pixels>,
     layout: Option<Rc<TextLayout>>,
     /// The last few shaped layouts and what each was shaped for: layout
     /// asks with the measured width and paint with the final one.
@@ -122,6 +106,7 @@ impl TextInput {
             buffer: TextBuffer::default(),
             placeholder: SharedString::default(),
             max_lines: 1,
+            line_height: None,
             layout: None,
             cache: Vec::new(),
             #[cfg(test)]
@@ -142,18 +127,25 @@ impl TextInput {
         self
     }
 
+    /// Task 19: what the empty input shows, for tests.
+    #[cfg(test)]
+    pub(crate) fn placeholder_text(&self) -> &str {
+        &self.placeholder
+    }
+
     /// Lets the text wrap and grow to `max_lines` before it scrolls, with
     /// Shift-Enter for a newline.
     #[must_use]
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the composer uses it in Task 9 of the desktop plan"
-        )
-    )]
     pub(crate) fn multiline(mut self, max_lines: usize) -> Self {
         self.max_lines = max_lines.max(1);
+        self
+    }
+
+    /// Sets the input's own line height, so its rows, its caret and its
+    /// height follow it whatever its ancestors set.
+    #[must_use]
+    pub(crate) const fn line_height(mut self, height: Pixels) -> Self {
+        self.line_height = Some(height);
         self
     }
 
@@ -161,25 +153,11 @@ impl TextInput {
         self.max_lines > 1
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the composer reads it in Task 9 of the desktop plan"
-        )
-    )]
     pub(crate) fn text(&self) -> &str {
         self.buffer.text()
     }
 
     /// Replaces all the text and puts the cursor at the end.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the composer and palette use it from Task 9 of the desktop plan"
-        )
-    )]
     pub(crate) fn set_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         let mut text = self.normalize(text);
         let mut end = text.len().min(MAX_TEXT_BYTES);
@@ -447,6 +425,9 @@ impl TextInput {
     ) -> Option<Rc<TextLayout>> {
         let (font_size, line_height) = (shaping.font_size, shaping.line_height);
         let empty = self.buffer.text().is_empty();
+        // The placeholder stays on one line and is clipped at the edge, as
+        // Zed's; only typed text wraps.
+        let width = if empty { None } else { width };
         let drawn = drawn_color(self, cx, shaping.color);
         let marked = self.buffer.marked();
         if let Some(key) = self.cache.iter().find(|key| {
@@ -502,6 +483,31 @@ struct TextLayout {
     tops: Vec<Pixels>,
     height: Pixels,
     line_height: Pixels,
+    /// How far the glyphs reach above the first line box and below the
+    /// last, where a font taller than the line overflows it (C264a).
+    bleed: Bleed,
+}
+
+/// How far painted glyphs reach past their line boxes.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+struct Bleed {
+    above: Pixels,
+    below: Pixels,
+}
+
+impl Bleed {
+    /// The overflow of a line shaped with `ascent` and `descent` in a
+    /// `line_height` box: ascent plus |descent| minus the line height,
+    /// split where gpui's paint puts the baseline (half the spare height
+    /// plus the ascent, as kv.rs's painted_baseline reads it). Zero on a
+    /// side the glyphs do not reach past.
+    fn of(ascent: Pixels, descent: Pixels, line_height: Pixels) -> Self {
+        let baseline = (line_height - ascent - descent) / 2. + ascent;
+        Self {
+            above: (ascent - baseline).max(px(0.)),
+            below: (baseline + descent.abs() - line_height).max(px(0.)),
+        }
+    }
 }
 
 impl TextLayout {
@@ -521,9 +527,13 @@ impl TextLayout {
         starts.extend(text.match_indices('\n').map(|(i, _)| i + 1));
         let mut tops = Vec::with_capacity(lines.len());
         let mut height = px(0.);
+        let mut bleed = Bleed::default();
         for line in &lines {
             tops.push(height);
             height += line.size(line_height).height.max(line_height);
+            let this = Bleed::of(line.ascent(), line.descent(), line_height);
+            bleed.above = bleed.above.max(this.above);
+            bleed.below = bleed.below.max(this.below);
         }
         Some(Self {
             lines: lines.into_vec(),
@@ -531,6 +541,7 @@ impl TextLayout {
             tops,
             height: height.max(line_height),
             line_height,
+            bleed,
         })
     }
 
@@ -548,6 +559,50 @@ impl TextLayout {
         } else {
             1
         }
+    }
+
+    /// The hard lines whose boxes meet `bounds` when the text's top left
+    /// sits at `origin`, and the mask they paint under (C273): `bounds`,
+    /// grown by the bleed on a side only where the outermost of those
+    /// lines starts or ends inside, so a line cut by the edge, or one
+    /// scrolled past it, shows nothing beyond the input.
+    fn in_view(
+        &self,
+        origin: Point<Pixels>,
+        bounds: Bounds<Pixels>,
+    ) -> (Range<usize>, Bounds<Pixels>) {
+        // Tops are row aligned with the scroll, up to rounding.
+        const EPSILON: Pixels = px(0.01);
+        let bottoms = self.tops.iter().skip(1).copied().chain([self.height]);
+        let boxes = self
+            .tops
+            .iter()
+            .zip(bottoms)
+            .map(|(&top, bottom)| (origin.y + top, origin.y + bottom));
+        let first = boxes
+            .clone()
+            .take_while(|&(_, bottom)| bottom <= bounds.top() + EPSILON)
+            .count();
+        let end = boxes
+            .clone()
+            .take_while(|&(top, _)| top < bounds.bottom() - EPSILON)
+            .count()
+            .max(first);
+        let grow_above = boxes
+            .clone()
+            .nth(first)
+            .is_some_and(|(top, _)| top >= bounds.top() - EPSILON);
+        let grow_below = end
+            .checked_sub(1)
+            .and_then(|last| boxes.clone().nth(last))
+            .is_some_and(|(_, bottom)| bottom <= bounds.bottom() + EPSILON);
+        let above = if grow_above { self.bleed.above } else { px(0.) };
+        let below = if grow_below { self.bleed.below } else { px(0.) };
+        let mask = Bounds::from_corners(
+            point(bounds.left(), bounds.top() - above),
+            point(bounds.right(), bounds.bottom() + below),
+        );
+        (first..end, mask)
     }
 
     /// The hard line holding `offset`.
@@ -751,7 +806,9 @@ impl Render for TextInput {
         div()
             .flex()
             .flex_1()
-            .key_context(CONTEXT)
+            // The text area reads its line from the style in effect.
+            .when_some(self.line_height, |this, height| this.line_height(height))
+            .key_context(crate::keymap::TEXT_INPUT_CONTEXT)
             .track_focus(&self.focus_handle)
             .cursor(CursorStyle::IBeam)
             .on_action(
@@ -985,14 +1042,23 @@ impl Element for TextArea {
         let Some(paint) = prepaint.take() else {
             return;
         };
-        let scroll = self.input.read(cx).scroll;
+        let origin = bounds.origin - self.input.read(cx).scroll;
         let mut failed = false;
+        // C273: the selection stays inside the input.
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
             for quad in paint.selection {
                 window.paint_quad(quad);
             }
-            for (line, top) in paint.layout.lines.iter().zip(&paint.layout.tops) {
-                let at = bounds.origin - scroll + point(px(0.), *top);
+        });
+        // C264a: a font taller than the line paints past the line box; the
+        // mask grows by that much so it never cuts descenders. C273: only
+        // the lines in view paint, and only past an edge they start or end
+        // at. The caret paints under the same mask.
+        let (in_view, mask) = paint.layout.in_view(origin, bounds);
+        let lines = paint.layout.lines.iter().zip(&paint.layout.tops);
+        window.with_content_mask(Some(ContentMask { bounds: mask }), |window| {
+            for (line, top) in lines.skip(in_view.start).take(in_view.len()) {
+                let at = origin + point(px(0.), *top);
                 failed |= line
                     .paint(
                         at,

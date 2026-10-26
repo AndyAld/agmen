@@ -5,7 +5,8 @@ use gpui::{
     SharedString, Styled as _, Window, div,
 };
 
-use super::components::{Color, IconButton, IconButtonStyle, IconSize, Label, Tab};
+use super::components::{Color, IconButton, IconButtonStyle, IconSize, Label};
+use super::left_dock::LeftDockTab;
 use super::tokens::{BORDER_WIDTH, SPACE_8, SPACE_10, SPACE_14, TAB_BAR_HEIGHT};
 use super::workspace::{ToggleLeftDock, ToggleRightDock};
 use crate::icons::UiIcon;
@@ -44,11 +45,16 @@ impl Dock {
     pub(crate) const fn open(&mut self) {
         self.open = true;
     }
+
+    pub(crate) const fn close(&mut self) {
+        self.open = false;
+    }
 }
 
-/// The left dock's tab strip and its hide button, with its rule inside.
+/// The left dock's tab strip, with the shown tab selected, and its hide
+/// button, with its rule inside.
 #[derive(Debug, IntoElement)]
-pub(crate) struct LeftDockTabs;
+pub(crate) struct LeftDockTabs(pub(crate) LeftDockTab);
 
 impl RenderOnce for LeftDockTabs {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
@@ -66,10 +72,7 @@ impl RenderOnce for LeftDockTabs {
             .gap(SPACE_8)
             .pl(SPACE_10)
             .pr(SPACE_8)
-            .child(Tab::new("tab-agents", UiIcon::Agents, "Agents").selected(true))
-            .child(Tab::new("tab-project", UiIcon::Project, "Project"))
-            .child(Tab::new("tab-git", UiIcon::Git, "Git"))
-            .child(Tab::new("tab-roles", UiIcon::Roles, "Roles"))
+            .children(LeftDockTab::ALL.map(|tab| tab.tab(self.0)))
             .child(div().flex_1())
             .child(
                 IconButton::new("hide-left-dock", UiIcon::ChevronLeft)
@@ -84,10 +87,21 @@ impl RenderOnce for LeftDockTabs {
 
 /// A right dock panel's title, subtitle and close button, with its rule
 /// inside.
-#[derive(Debug, IntoElement)]
+#[derive(IntoElement)]
 pub(crate) struct RightDockHeader {
     title: SharedString,
     subtitle: SharedString,
+    // Task 19: the plan panel's state pill before the close button.
+    end: Option<gpui::AnyElement>,
+}
+
+impl std::fmt::Debug for RightDockHeader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RightDockHeader")
+            .field("title", &self.title)
+            .field("subtitle", &self.subtitle)
+            .finish_non_exhaustive()
+    }
 }
 
 impl RightDockHeader {
@@ -96,7 +110,16 @@ impl RightDockHeader {
         Self {
             title: title.into(),
             subtitle: subtitle.into(),
+            end: None,
         }
+    }
+
+    /// Task 19: drawn at the right, before the close button, as the plan
+    /// panel's state pill (node 8940).
+    #[must_use]
+    pub(crate) fn end(mut self, end: impl IntoElement) -> Self {
+        self.end = Some(end.into_any_element());
+        self
     }
 }
 
@@ -116,6 +139,7 @@ impl RenderOnce for RightDockHeader {
             .child(Label::new(self.title).weight(FontWeight::SEMIBOLD))
             .child(Label::new(self.subtitle).code().color(Color::Placeholder))
             .child(div().flex_1())
+            .children(self.end)
             .child(
                 IconButton::new("close-right-dock", UiIcon::ChevronRight)
                     .size(IconSize::Glyph)

@@ -29,8 +29,16 @@ pub(crate) enum WorktreeState {
 /// How a file differs from the worktree's base.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum ChangeKind {
+    #[expect(
+        dead_code,
+        reason = "the fixture's changes are all modified; git reports added files once the live backend lands (ADR-0011)"
+    )]
     Added,
     Modified,
+    #[expect(
+        dead_code,
+        reason = "the fixture's changes are all modified; git reports deleted files once the live backend lands (ADR-0011)"
+    )]
     Deleted,
 }
 

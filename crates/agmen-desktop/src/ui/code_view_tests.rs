@@ -182,3 +182,63 @@ fn columns_follow_the_mockup_grid(cx: &mut TestAppContext) {
     let text = cx.debug_bounds("line:1:text").unwrap();
     assert!(close(text.left(), cell * 7.), "{text:?} {cell:?}");
 }
+
+/// The theme's color over all of `piece` on `line`, or `None` when no one
+/// highlight covers it.
+fn color_over(line: &Line, piece: &str, theme: &Theme) -> Option<Hsla> {
+    let from = line.text.find(piece)?;
+    let range = from..from + piece.len();
+    let (_, name) = line
+        .highlights
+        .iter()
+        .find(|(r, _)| r.start <= range.start && range.end <= r.end)?;
+    syntax_color(theme, name)
+}
+
+// Shot diff (spec, frame "Desktop · spec"): headings in accent (node 9193),
+// list markers in warning (9207) and the Status line in text.placeholder
+// (9195), the way the theme colors agmen's Markdown names.
+#[test]
+fn spec_markdown_takes_the_mockup_colors() {
+    let theme = Appearance::builtin().theme;
+    let text = "# Ridgeline design\nStatus: v3 · drafted by sean/plan\n\n## 2. Goals\n- One Rust core.\n\nPlain text.\n";
+    let lines = layout_lines(text, Language::Markdown);
+    let accent = Some(theme.text_accent);
+    assert_eq!(color_over(&lines[0], "# Ridgeline design", &theme), accent);
+    assert_eq!(color_over(&lines[3], "## 2. Goals", &theme), accent);
+    assert_eq!(color_over(&lines[4], "-", &theme), Some(theme.warning));
+    assert_eq!(color_over(&lines[4], "One Rust core.", &theme), None);
+    assert_eq!(
+        color_over(&lines[1], "Status: v3 · drafted by sean/plan", &theme),
+        Some(theme.text_placeholder)
+    );
+    assert_eq!(color_over(&lines[6], "Plain text.", &theme), None);
+}
+
+// Shot diff (spec, nodes 9228 to 9232): console.py draws a table row's "|"
+// in the line number color and its cells in text, whether or not the
+// table has a delimiter row (the spec's has none).
+#[test]
+fn spec_table_pipes_take_the_line_number_color() {
+    let theme = Appearance::builtin().theme;
+    let text = "## 4. Lanes\n| Lane    | Paths    |\n| L-CORE  | core/**  |\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\n```\n| code |\n```\n";
+    let lines = layout_lines(text, Language::Markdown);
+    for ix in [1, 2, 4, 5, 6] {
+        let line = &lines[ix];
+        let pipes: Vec<usize> = line.text.match_indices('|').map(|(at, _)| at).collect();
+        assert!(!pipes.is_empty(), "line {ix}");
+        for at in pipes {
+            let color = line
+                .highlights
+                .iter()
+                .find(|(r, _)| r.start <= at && at < r.end)
+                .and_then(|(_, name)| syntax_color(&theme, name));
+            assert_eq!(color, Some(theme.line_number), "line {ix} at {at}");
+        }
+    }
+    assert_eq!(color_over(&lines[1], "Lane", &theme), None);
+    assert_eq!(color_over(&lines[2], "core/**", &theme), None);
+    // A pipe inside a code block keeps the code block's color.
+    let names: Vec<&str> = lines[9].highlights.iter().map(|(_, name)| *name).collect();
+    assert_eq!(names, ["text.literal"]);
+}

@@ -219,19 +219,30 @@ fn git_metadata_is_mono_placeholder() {
 fn section_counts_are_mono_placeholder() {
     // V94: node 5113 draws the count in text.placeholder, mono 11; the
     // accepted difference covers only the pill's fill.
-    assert_eq!(count_badge("2"), Badge::new("2", Color::Placeholder).code());
+    assert_eq!(
+        count_badge("2"),
+        Badge::new("2", Color::Placeholder).count()
+    );
 }
 
 #[gpui::test]
-fn count_pills_are_drawn_with_a_placeholder_tint(cx: &mut TestAppContext) {
-    // V94, drawn per C254: the pill's fill is text.placeholder at the badge
-    // tint, as its text color.
+fn section_counts_draw_as_count_chips(cx: &mut TestAppContext) {
+    // V114: node 5113 is 13 px tall, mono 11 padded 0/6; at the 15 px rem
+    // the chip is Small's 11.25 px times 1.2, not a 16 px pill.
+    let (_, cx) = panel(cx);
+    cx.update(|window, _| window.set_rem_size(crate::ui::tokens::MOCKUP_REM));
+    redraw(cx);
+    let count = at(cx, "git-count:changes");
+    assert_eq!(count.size.height, gpui::px(13.5), "{count:?}");
+}
+
+#[gpui::test]
+fn count_chips_are_drawn_on_the_elevated_surface(cx: &mut TestAppContext) {
+    // V114, drawn per C254: node 5113's chip fills with the elevated
+    // surface (`Badge::count`).
     let (_, cx) = panel(cx);
     redraw(cx);
     let theme = cx.update(|_, cx| cx.global::<crate::appearance::Appearance>().theme.clone());
     let fills = crate::ui::test_support::fills_at(cx, "git-count:changes");
-    let want = theme
-        .text_placeholder
-        .opacity(crate::ui::tokens::BADGE_TINT);
-    assert_eq!(fills, [want]);
+    assert_eq!(fills, [theme.elevated_surface]);
 }

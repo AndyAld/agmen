@@ -1,0 +1,371 @@
+//! A message body with its references drawn as chips (`rich_body` in
+//! `docs/mockups/scripts/console.py`).
+//!
+//! Lines with no chips join into one text element. A line with chips is an
+//! [`InlineFlow`]: the words between two chips are one shaped run that
+//! fills the rest of a chip's line and wraps word by word, so a 32 KiB body
+//! shapes a run per stretch of words rather than an element per word.
+//! Short punctuation glued to a reference stays beside its chip with no gap
+//! (mockup fix 54). A word or chip wider than the column, such as a 500
+//! character token, takes the column and wraps inside itself; a chip is
+//! never split. Every slice is taken at a span edge or at whitespace, so a
+//! character is never split.
+
+use std::rc::Rc;
+
+use gpui::prelude::FluentBuilder as _;
+use gpui::{
+    AnyElement, App, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, RenderOnce,
+    SharedString, Styled as _, Window, div,
+};
+
+use super::chat_context::{BodyText, ChatContext};
+use super::components::ChangeHandler;
+use super::inline_flow::{FlowItem, InlineFlow};
+use super::ref_chip::{RefChip, RefEvent};
+use super::tokens::{LINE_HEIGHT, SPACE_3, TEXT_DEFAULT};
+use crate::appearance::Appearance;
+use crate::refs::Span;
+
+/// The most characters of punctuation that stay glued to a chip; a longer
+/// token beside a reference wraps as a word of its own.
+const MAX_GLUE_CHARS: usize = 8;
+
+/// How many spaces a tab in a line's indent draws as.
+const TAB_SPACES: usize = 4;
+
+/// One piece of a laid out body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Piece<'a> {
+    Word(&'a str),
+    /// The whitespace that starts a line, kept so indented logs and code
+    /// stay indented.
+    Indent(&'a str),
+    /// A reference with the punctuation glued to it on either side; `span`
+    /// is its index in the spans.
+    Ref {
+        lead: &'a str,
+        text: &'a str,
+        tail: &'a str,
+        span: usize,
+    },
+    LineBreak,
+}
+
+/// Whether `glue` is short enough to stay beside a chip.
+fn short(glue: &str) -> bool {
+    glue.chars().nth(MAX_GLUE_CHARS).is_none()
+}
+
+/// Splits `body` into words, line breaks and references. `spans` come from
+/// `find_refs` (sorted, not overlapping, on character boundaries); a span
+/// that breaks those rules is left as plain text rather than trusted.
+fn pieces<'a>(body: &'a str, spans: &[Span]) -> Vec<Piece<'a>> {
+    let mut out = Vec::new();
+    let mut pos = push_indent(body, &mut out);
+    for (i, span) in spans.iter().enumerate() {
+        let (start, end) = (span.range.start, span.range.end);
+        let (Some(gap), Some(text)) = (body.get(pos..start), body.get(start..end)) else {
+            continue;
+        };
+        if text.is_empty() {
+            continue;
+        }
+        let words = gap.trim_end_matches(|c: char| !c.is_whitespace());
+        let lead = gap.get(words.len()..).unwrap_or_default();
+        let (words, lead) = if short(lead) {
+            (words, lead)
+        } else {
+            (gap, "")
+        };
+        push_words(words, &mut out);
+        // The tail runs to the next whitespace, or to the next chip.
+        let rest = body.get(end..).unwrap_or_default();
+        let to_space = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let to_next = spans
+            .get(i + 1..)
+            .and_then(|later| later.iter().map(|s| s.range.start).find(|s| *s >= end))
+            .map_or(to_space, |next| next - end);
+        let tail = rest
+            .get(..to_space.min(to_next))
+            .or_else(|| rest.get(..to_space))
+            .unwrap_or_default();
+        let tail = if short(tail) { tail } else { "" };
+        out.push(Piece::Ref {
+            lead,
+            text,
+            tail,
+            span: i,
+        });
+        pos = end + tail.len();
+    }
+    push_words(body.get(pos..).unwrap_or_default(), &mut out);
+    out
+}
+
+/// Words and line breaks; each line after a break keeps its indent.
+fn push_words<'a>(text: &'a str, out: &mut Vec<Piece<'a>>) {
+    for (i, line) in text.split('\n').enumerate() {
+        let line = if i > 0 {
+            out.push(Piece::LineBreak);
+            line.get(push_indent(line, out)..).unwrap_or_default()
+        } else {
+            line
+        };
+        out.extend(line.split_whitespace().map(Piece::Word));
+    }
+}
+
+/// Pushes the whitespace that starts `line`, if any, and returns its length.
+fn push_indent<'a>(line: &'a str, out: &mut Vec<Piece<'a>>) -> usize {
+    let words = line.trim_start_matches(|c: char| c.is_whitespace() && c != '\n');
+    let indent = line.get(..line.len() - words.len()).unwrap_or_default();
+    if !indent.is_empty() {
+        out.push(Piece::Indent(indent));
+    }
+    indent.len()
+}
+
+/// One element of a drawn line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Item<'a> {
+    /// Words joined by single spaces, shaped as one run.
+    Run(String),
+    Ref {
+        lead: &'a str,
+        text: &'a str,
+        tail: &'a str,
+        span: usize,
+    },
+}
+
+/// The pieces as lines of items: runs of words, and chips.
+fn lines(pieces: Vec<Piece<'_>>) -> Vec<Vec<Item<'_>>> {
+    let mut lines = Vec::new();
+    let mut line = Vec::new();
+    for piece in pieces {
+        if piece == Piece::LineBreak {
+            lines.push(std::mem::take(&mut line));
+        } else {
+            line.push(piece);
+        }
+    }
+    lines.push(line);
+    lines.into_iter().map(items).collect()
+}
+
+fn items(line: Vec<Piece<'_>>) -> Vec<Item<'_>> {
+    let mut out = Vec::new();
+    let mut run = String::new();
+    for piece in line {
+        match piece {
+            Piece::Indent(indent) => {
+                for c in indent.chars() {
+                    if c == '\t' {
+                        run.extend(std::iter::repeat_n(' ', TAB_SPACES));
+                    } else {
+                        run.push(c);
+                    }
+                }
+            }
+            Piece::Word(word) => {
+                if !run.is_empty() && !run.ends_with(char::is_whitespace) {
+                    run.push(' ');
+                }
+                run.push_str(word);
+            }
+            Piece::Ref {
+                lead,
+                text,
+                tail,
+                span,
+            } => {
+                if !run.is_empty() {
+                    out.push(Item::Run(std::mem::take(&mut run)));
+                }
+                out.push(Item::Ref {
+                    lead,
+                    text,
+                    tail,
+                    span,
+                });
+            }
+            Piece::LineBreak => {}
+        }
+    }
+    if !run.is_empty() {
+        out.push(Item::Run(run));
+    }
+    out
+}
+
+/// A message body. Tests find it as `"{id}:body"` and its chips as
+/// `"{id}:ref:{n}"`, `n` counting the body's references from 0.
+#[derive(IntoElement)]
+pub(crate) struct RichText {
+    id: SharedString,
+    text: Rc<BodyText>,
+    context: Rc<ChatContext>,
+    on_ref: Option<ChangeHandler<RefEvent>>,
+}
+
+impl std::fmt::Debug for RichText {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RichText")
+            .field("id", &self.id)
+            .field("spans", &self.text.spans)
+            .finish_non_exhaustive()
+    }
+}
+
+impl RichText {
+    /// `text` from [`ChatContext::body_of`], so the references are found
+    /// once per snapshot rather than once per frame.
+    #[must_use]
+    pub(crate) fn new(
+        id: impl Into<SharedString>,
+        text: Rc<BodyText>,
+        context: Rc<ChatContext>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            text,
+            context,
+            on_ref: None,
+        }
+    }
+
+    /// Called when a chip is clicked or ⌘-clicked.
+    #[must_use]
+    pub(crate) fn on_ref(mut self, handler: ChangeHandler<RefEvent>) -> Self {
+        self.on_ref = Some(handler);
+        self
+    }
+
+    fn chip(&self, span: usize, lead: &str, text: &str, tail: &str) -> Option<AnyElement> {
+        let target = self.text.spans.get(span)?.target.clone();
+        let color = self.context.chip_color(&target);
+        let id = SharedString::from(format!("{}:ref:{span}", self.id));
+        let handler = self.on_ref.clone();
+        let chip = RefChip::new(id, text.to_owned(), target, color)
+            .card(self.context.clone())
+            .when(!lead.is_empty(), RefChip::flush_start)
+            .when(!tail.is_empty(), RefChip::flush_end)
+            .when_some(handler, |chip, handler| {
+                chip.on_ref(move |event, window, cx| handler(event, window, cx))
+            });
+        // The flow lays this out as a root, at the column's width when it
+        // is wider: max_w_full caps it there, and min_w_0 lets the chip
+        // shrink to that and wrap, while the glue is short and never needs
+        // to.
+        Some(
+            div()
+                .flex()
+                .max_w_full()
+                .min_w_0()
+                .items_center()
+                .when(!lead.is_empty(), |this| this.child(lead.to_owned()))
+                .child(chip)
+                .when(!tail.is_empty(), |this| this.child(tail.to_owned()))
+                .into_any_element(),
+        )
+    }
+}
+
+/// A block of plain lines. Each line takes `line` and the [`SPACE_3`] row
+/// gap under it, as a line of chips does in the flow (node 8745: 16 px
+/// rows 3 px apart). Half a gap above and below comes back as margin, so
+/// the block is as tall as its rows and the gaps between them, and its
+/// first row sits at its top.
+fn run(text: String, line: Pixels) -> AnyElement {
+    // min_w_0 lets a run wider than the column shrink to it and wrap.
+    div()
+        .min_w_0()
+        .line_height(line + SPACE_3)
+        .my(-SPACE_3 / 2.)
+        .child(SharedString::from(text))
+        .into_any_element()
+}
+
+/// A block of the drawn body: lines with no chips, joined as one text, or
+/// one line with chips as an inline flow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Block<'a> {
+    Text(String),
+    Row(Vec<Item<'a>>),
+}
+
+/// Joins each stretch of lines without chips into one text block, so a long
+/// plain body is one element however many lines it has.
+fn blocks(lines: Vec<Vec<Item<'_>>>) -> Vec<Block<'_>> {
+    let mut out: Vec<Block<'_>> = Vec::new();
+    for line in lines {
+        let plain = match line.as_slice() {
+            [] => Some(String::new()),
+            [Item::Run(run)] => Some(run.clone()),
+            _ => None,
+        };
+        match (plain, out.last_mut()) {
+            (Some(text), Some(Block::Text(block))) => {
+                block.push('\n');
+                block.push_str(&text);
+            }
+            (Some(text), _) => out.push(Block::Text(text)),
+            (None, _) => out.push(Block::Row(line)),
+        }
+    }
+    out
+}
+
+impl RenderOnce for RichText {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let theme = &cx.global::<Appearance>().theme;
+        // A row's line, snapped as gpui's Text snaps it: the flow reads it
+        // from this style, and plain text adds the row gap to it.
+        let line = window.pixel_snap(TEXT_DEFAULT.to_pixels(window.rem_size()) * LINE_HEIGHT);
+        let text = self.text.clone();
+        let selector = format!("{}:body", self.id);
+        let blocks = blocks(lines(pieces(&text.body, &text.spans)))
+            .into_iter()
+            .map(|block| match block {
+                // An empty line keeps its height, as a blank line in the text.
+                Block::Text(text) if text.is_empty() => run(" ".to_owned(), line),
+                Block::Text(text) => run(text, line),
+                Block::Row(items) => InlineFlow::new(
+                    items
+                        .into_iter()
+                        .filter_map(|item| match item {
+                            Item::Run(text) => Some(FlowItem::Run(text.into())),
+                            Item::Ref {
+                                lead,
+                                text,
+                                tail,
+                                span,
+                            } => self
+                                .chip(span, lead, text, tail)
+                                .map(|element| FlowItem::Chip {
+                                    element,
+                                    label: text.to_owned().into(),
+                                }),
+                        })
+                        .collect(),
+                )
+                .into_any_element(),
+            });
+        div()
+            .debug_selector(|| selector)
+            .w_full()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .gap_y(SPACE_3)
+            .text_size(TEXT_DEFAULT)
+            .text_color(theme.text)
+            .line_height(line)
+            .children(blocks)
+    }
+}
+
+#[cfg(test)]
+#[path = "rich_text_tests.rs"]
+mod tests;

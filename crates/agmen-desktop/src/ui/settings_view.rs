@@ -16,10 +16,9 @@ use gpui::{
 use self::rows::{
     browse_row, controls, density_row, font_label, icon_preview, row, setting, size_stepper, tilde,
 };
-use super::breadcrumb::Breadcrumb;
 use super::components::{
-    Button, ButtonStyle, Color, Dropdown, Icon, IconSize, Indent, InputFrame, Label, LabelSize,
-    Link, ListItem, Segmented, Toggle,
+    Breadcrumb, Button, ButtonStyle, Color, Dropdown, Icon, IconSize, Indent, InputFrame, Label,
+    LabelSize, Link, ListItem, Segmented, Toggle,
 };
 use super::text_input::{TextInput, TextInputEvent};
 use super::tokens::{
@@ -60,6 +59,10 @@ impl SettingsSources {
         agmen_settings_path(&self.config)
     }
 }
+
+/// The app sets the real folders at launch and tests a throwaway home; a
+/// Settings tab without it shows a placeholder.
+impl gpui::Global for SettingsSources {}
 
 /// What Settings asks of the workspace.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1026,6 +1029,18 @@ pub(crate) fn apply(sources: &SettingsSources, cx: &mut App) {
     cx.refresh_windows();
 }
 
+/// The icon theme preview's files and folders: the mockup's eight.
+pub(super) const ICON_PREVIEW_NAMES: [(&str, bool); 8] = [
+    ("src", true),
+    ("tests", true),
+    ("main.rs", false),
+    ("Cargo.toml", false),
+    ("README.md", false),
+    ("Cargo.lock", false),
+    ("reviewer.xml", false),
+    ("release.yml", false),
+];
+
 impl Render for SettingsView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (title, slug) = PAGES
@@ -1046,8 +1061,6 @@ impl Render for SettingsView {
             ],
         };
         let path = self.sources.settings_path();
-        // shortcut: there are no workspace tabs yet, so the event has no subscriber and the file's
-        // path shows in the footer; the workspace opens it in a code tab once tabs exist.
         let open_file = Button::new("open-settings-toml", "Open settings.toml")
             .style(ButtonStyle::Plain)
             .on_click(

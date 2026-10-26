@@ -7,6 +7,7 @@ use gpui::{Entity, Hsla, Rgba, TestAppContext, VisualTestContext};
 use super::*;
 use crate::appearance::{AgmenSettings, Appearance, AppearanceSource, Density, resolve_paths};
 use crate::ui::test_support::{click, init, redraw};
+use crate::ui::tokens::AUTO_LINE_11;
 
 fn hex(s: &str) -> Hsla {
     Rgba::try_from(s).unwrap().into()
@@ -522,6 +523,24 @@ fn dropdowns_are_28_px(cx: &mut TestAppContext) {
     let (_, cx) = open_at_mockup_rem(cx, &home);
     let tall = height(cx, "theme");
     assert!((tall - 28.).abs() < 0.01, "{tall}");
+}
+
+#[gpui::test]
+fn hint_lines_are_13_px_apart(cx: &mut TestAppContext) {
+    // Node 8095: the Follow Zed hint is 11 px text at its auto line, 13 px,
+    // 39 px for 3 lines. At 1.2 times Small the lines were 13.5 apart and
+    // every rule below drifted down a pixel per hint line.
+    let home = Home::new();
+    let (_, cx) = open_at_mockup_rem(cx, &home);
+    let long = height(cx, "setting-text:Follow Zed");
+    let short = height(cx, "setting-text:UI font");
+    let more = long - short;
+    let lines = more / AUTO_LINE_11.as_f32();
+    assert!(more > 0., "the Follow Zed hint wraps: {long} {short}");
+    assert!(
+        (lines - lines.round()).abs() < 0.01,
+        "{more} px is not whole 13 px lines"
+    );
 }
 
 #[gpui::test]

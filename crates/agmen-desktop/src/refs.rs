@@ -73,6 +73,14 @@ impl Known {
                 known.handles.insert(agent.id.clone(), agent.handle.clone());
             }
         }
+        // A running plan's team, whether or not its agents have posted.
+        let team = snapshot.plan.iter().flat_map(|plan| &plan.team);
+        for row in team {
+            if let Some(id) = &row.id {
+                let handle = format!("{}/{}", row.owner, row.handle);
+                known.handles.insert(id.clone(), handle);
+            }
+        }
         for m in &snapshot.messages {
             known.handles.insert(m.from.clone(), m.from_handle.clone());
             // Branches and commits a DONE names count as known, as the spec says.
@@ -89,6 +97,11 @@ impl Known {
             }
         }
         known
+    }
+
+    /// The handle of the identity `id`, when the roster or the chat names it.
+    pub(crate) fn handle(&self, id: &IdentityId) -> Option<&str> {
+        self.handles.get(id).map(String::as_str)
     }
 
     /// The known file `token` names: the exact path, or the one path whose

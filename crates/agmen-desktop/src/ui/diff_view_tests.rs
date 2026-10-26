@@ -2,7 +2,7 @@ use gpui::TestAppContext;
 
 use super::*;
 use crate::backend::{DiffLine, chat_snapshot};
-use crate::ui::test_support::{PlainButtonHost, init, redraw};
+use crate::ui::test_support::{PlainButtonHost, fx1_worktree, init, redraw};
 
 fn main_rs_hunks() -> Vec<Hunk> {
     chat_snapshot()
@@ -108,6 +108,30 @@ fn diff_columns_use_the_code_font_cell(cx: &mut TestAppContext) {
 }
 
 #[test]
+fn conflict_markers_do_not_bend_the_code_around_them() {
+    // Frame 5057 node 5215: "mod cylinder;" after "<<<<<<< HEAD" keeps its
+    // keyword color, and ">>>>>>> 4d9fdc8" is plain text.
+    let rows = layout_rows(&main_rs_hunks(), Language::Rust);
+    let line = |text: &str| {
+        rows.iter()
+            .find_map(|row| match row {
+                Row::Line { line, .. } if line.text.as_ref() == text => Some(line.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no row {text}"))
+    };
+    let alone = |text: &str, language| layout_lines(&format!("{text}\n"), language).remove(0);
+    assert_eq!(
+        line("mod cylinder;"),
+        alone("mod cylinder;", Language::Rust)
+    );
+    assert_eq!(line("mod minimap;"), alone("mod minimap;", Language::Rust));
+    for marker in ["<<<<<<< HEAD", "=======", ">>>>>>> 4d9fdc8"] {
+        assert_eq!(line(marker), alone(marker, Language::Plain), "{marker}");
+    }
+}
+
+#[test]
 fn diff_code_keeps_function_colors_past_conflict_markers() {
     // V103: the base side's conflict markers made tree-sitter read the rest
     // of the hunk as types, so `main`, `default` and `run` drew in the type
@@ -175,20 +199,18 @@ fn conflict_markers_are_seven_marks_alone_or_before_a_space() {
         "a <<<<<<< b",
         "=======x",
         "<<= 2",
+        // C246: a banner line is code, not the base and worktree divider.
+        "======= Results =======",
     ] {
         assert!(!is_conflict_marker(code), "{code}");
     }
-}
-
-fn fx1() -> crate::backend::WorktreeInfo {
-    chat_snapshot().worktrees.into_iter().next().unwrap()
 }
 
 #[gpui::test]
 fn diff_tab_holds_its_breadcrumb_open_file_and_diff(cx: &mut TestAppContext) {
     // V95: one view the workspace can host, as FileView is for a file.
     init(cx);
-    let wt = fx1();
+    let wt = fx1_worktree();
     let (tab, cx) = cx.add_window_view(|_, cx| DiffTab::new(&wt, "src/main.rs", cx));
     redraw(cx);
     tab.read_with(cx, |tab, _| {
@@ -205,7 +227,7 @@ fn diff_tab_holds_its_breadcrumb_open_file_and_diff(cx: &mut TestAppContext) {
 #[gpui::test]
 fn diff_tab_without_the_change_says_so(cx: &mut TestAppContext) {
     init(cx);
-    let wt = fx1();
+    let wt = fx1_worktree();
     let (_, cx) = cx.add_window_view(|_, cx| DiffTab::new(&wt, "README.md", cx));
     redraw(cx);
     assert!(cx.debug_bounds("diff-empty").is_some());
@@ -216,7 +238,7 @@ fn diff_tab_open_file_button_is_plain(cx: &mut TestAppContext) {
     // V92: console.py 1729 draws Open file "plain": elevated surface,
     // padding 3/9, radius 5, 20 px tall.
     init(cx);
-    let wt = fx1();
+    let wt = fx1_worktree();
     let (_, cx) = cx.add_window_view(|_, cx| {
         let tab = cx.new(|cx| DiffTab::new(&wt, "src/main.rs", cx));
         PlainButtonHost::new(tab, "Open file")
@@ -225,4 +247,71 @@ fn diff_tab_open_file_button_is_plain(cx: &mut TestAppContext) {
     let want = cx.debug_bounds("want-plain").unwrap();
     let open = cx.debug_bounds("diff-open-file").unwrap();
     assert_eq!(open.size, want.size, "{open:?} {want:?}");
+}
+
+#[gpui::test]
+fn change_tints_span_the_mockups_grid_clipped_to_the_pane(cx: &mut TestAppContext) {
+    // Node 5220: console.py tints a changed row across its 150 column grid
+    // (`g.bg(r, 0, 150, ...)`), 1143 px of the 1168 px editor, and the
+    // editor clips it. A pane narrower than the grid clips the tint.
+    init(cx);
+    let (_, cx) = cx.add_window_view(|_, _| DiffView::new(main_rs_hunks(), Language::Rust));
+    let cell = cx.update(|window, cx| {
+        cell_width(window, &cx.global::<crate::appearance::Appearance>().fonts)
+    });
+    let close = |a: gpui::Pixels, b: gpui::Pixels| (a - b).abs() < gpui::px(0.5);
+    for (width, grid_fits) in [(cell * 150. + gpui::px(200.), true), (cell * 100., false)] {
+        cx.simulate_resize(gpui::size(width, gpui::px(600.)));
+        redraw(cx);
+        let row = cx.debug_bounds("diff-row:3:removed").unwrap();
+        let tint = cx.debug_bounds("diff-row:3:tint").unwrap();
+        assert!(close(tint.left(), row.left()), "{tint:?} {row:?}");
+        let expected = if grid_fits {
+            cell * 150.
+        } else {
+            row.size.width
+        };
+        assert!(
+            close(tint.size.width, expected),
+            "{width:?}: {tint:?} against {expected:?}"
+        );
+    }
+}
+
+#[gpui::test]
+fn a_changed_line_past_the_grid_is_tinted_to_its_end(cx: &mut TestAppContext) {
+    // C285: a changed line longer than the 150 column grid keeps its tint
+    // to its last character (code from column 4), still clipped to the pane.
+    init(cx);
+    let hunk = Hunk {
+        old_start: 1,
+        new_start: 1,
+        lines: vec![DiffLine {
+            kind: DiffLineKind::Added,
+            text: "x".repeat(200),
+        }],
+    };
+    let (_, cx) = cx.add_window_view(|_, _| DiffView::new(vec![hunk], Language::Plain));
+    let cell = cx.update(|window, cx| {
+        cell_width(window, &cx.global::<crate::appearance::Appearance>().fonts)
+    });
+    let close = |a: gpui::Pixels, b: gpui::Pixels| (a - b).abs() < gpui::px(0.5);
+    for (width, line_fits) in [(cell * 250., true), (cell * 180., false)] {
+        cx.simulate_resize(gpui::size(width, gpui::px(600.)));
+        redraw(cx);
+        let row = cx.debug_bounds("diff-row:2:added").unwrap();
+        let tint = cx.debug_bounds("diff-row:2:tint").unwrap();
+        assert!(close(tint.left(), row.left()), "{tint:?} {row:?}");
+        assert!(close(tint.top(), row.top()), "{tint:?} {row:?}");
+        assert!(close(tint.size.height, row.size.height), "{tint:?} {row:?}");
+        let expected = if line_fits {
+            cell * 204.
+        } else {
+            row.size.width
+        };
+        assert!(
+            close(tint.size.width, expected),
+            "{width:?}: {tint:?} against {expected:?}"
+        );
+    }
 }

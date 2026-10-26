@@ -5,8 +5,8 @@ use gpui::{Context, Render, TestAppContext, VisualTestContext};
 
 use super::*;
 use crate::backend::{Backend, ChangeId, ChangeRow, ChangeState, FixtureBackend, Screen};
-use crate::ui::test_support::{click, init, redraw, rendered_size};
-use crate::ui::tokens::{CHANGE_CARD_WIDTH, MOCKUP_REM};
+use crate::ui::test_support::{click, init, redraw};
+use crate::ui::tokens::{CHANGE_CARD_WIDTH, CHANGE_VALUE_MIN_WIDTH, MOCKUP_REM};
 
 const ID: &str = "chg-fx1-lanes-budget";
 
@@ -207,15 +207,127 @@ fn before_value_struck_through() {
     );
 }
 
-fn assert_fixture_card_renders(cx: &mut TestAppContext, screen: Screen) {
+/// The fixture card for `screen`, drawn in a column `width` wide.
+fn card_window(
+    cx: &mut TestAppContext,
+    screen: Screen,
+    width: gpui::Pixels,
+) -> (crate::backend::ChangeCard, &mut VisualTestContext) {
+    init(cx);
     let snapshot = FixtureBackend::for_screen(screen).unwrap().snapshot();
     let card = snapshot.changes.values().next().unwrap().clone();
     let roster = snapshot.roster;
-    let size = rendered_size(cx, move || {
-        ChangeCard::new(card.clone(), &roster).into_any_element()
+    let drawn = card.clone();
+    let (_, cx) = cx.add_window_view(move |_, _| {
+        let (card, roster) = (drawn.clone(), roster.clone());
+        Lone(Box::new(move || {
+            div()
+                .w(width)
+                .child(ChangeCard::new(card.clone(), &roster))
+                .into_any_element()
+        }))
     });
+    redraw(cx);
+    (card, cx)
+}
+
+fn bounds(cx: &mut VisualTestContext, selector: &str) -> gpui::Bounds<gpui::Pixels> {
+    let selector: &'static str = Box::leak(selector.to_owned().into_boxed_str());
+    cx.debug_bounds(selector)
+        .unwrap_or_else(|| panic!("{selector} not drawn"))
+}
+
+/// Asserts `screen`'s card fills a column `width` wide, every part of it
+/// ends inside the card, and each old value keeps the width it has in a wide
+/// card (the row wraps instead of squeezing it).
+fn assert_card_fits(cx: &mut TestAppContext, screen: Screen, width: gpui::Pixels) {
+    let mut wide_cx = TestAppContext::single();
+    let (card, wide) = card_window(&mut wide_cx, screen, gpui::px(800.));
+    let full: Vec<gpui::Pixels> = (0..card.rows.len())
+        .map(|i| bounds(wide, &format!("{}:before:{i}", card.id)).size.width)
+        .collect();
+    let one_line = bounds(wide, &format!("{}:subline", card.id)).size.height;
+    let (card, cx) = card_window(cx, screen, width);
+    let outer = bounds(cx, &format!("{}:card", card.id));
+    // The subline's box shrinks with the row whether or not its text wraps,
+    // so its right edge alone cannot show an overflow: text wider than the box
+    // must wrap onto more lines.
+    let text = subline(&card);
+    let mut natural_cx = TestAppContext::single();
+    init(&mut natural_cx);
+    let (_, natural_cx) = natural_cx.add_window_view(move |_, _| {
+        let text = text.clone();
+        Lone(Box::new(move || {
+            div()
+                .flex()
+                .items_start()
+                .child(
+                    div()
+                        .debug_selector(|| "natural".into())
+                        .child(Label::new(text.clone()).size(LabelSize::Small)),
+                )
+                .into_any_element()
+        }))
+    });
+    redraw(natural_cx);
+    let natural = bounds(natural_cx, "natural").size.width;
+    let subline_box = bounds(cx, &format!("{}:subline", card.id));
+    if natural > subline_box.size.width {
+        assert!(
+            subline_box.size.height > one_line,
+            "{screen:?} at {width:?}: subline {subline_box:?} is {natural:?} of text on one line"
+        );
+    }
+    assert_eq!(outer.size.width, width, "{screen:?}");
+    for part in part_selectors(&card) {
+        let inner = bounds(cx, &part);
+        assert!(
+            inner.right() <= outer.right(),
+            "{screen:?} at {width:?}: {part} {inner:?} past {outer:?}"
+        );
+    }
+    for (i, full) in full.into_iter().enumerate() {
+        let before = bounds(cx, &format!("{}:before:{i}", card.id));
+        assert_eq!(
+            before.size.width, full,
+            "{screen:?} at {width:?}: before:{i} squeezed"
+        );
+        let after = bounds(cx, &format!("{}:after:{i}", card.id));
+        assert!(
+            after.size.width >= CHANGE_VALUE_MIN_WIDTH,
+            "{screen:?} at {width:?}: after:{i} is {after:?}"
+        );
+    }
+}
+
+fn assert_fixture_card_renders(cx: &mut TestAppContext, screen: Screen) {
+    let (card, cx) = card_window(cx, screen, gpui::px(800.));
+    let size = bounds(cx, &format!("{}:card", card.id)).size;
     assert_eq!(size.width, CHANGE_CARD_WIDTH, "{screen:?}");
     assert!(size.height > gpui::px(60.), "{screen:?}");
+    // At full width each row stays on one line, and so does the head.
+    for i in 0..card.rows.len() {
+        let target = bounds(cx, &format!("{}:target:{i}", card.id));
+        let after = bounds(cx, &format!("{}:after:{i}", card.id));
+        assert!(after.top() < target.bottom(), "{screen:?} row {i} wrapped");
+    }
+    let title = bounds(cx, &format!("{}:title", card.id));
+    let subline = bounds(cx, &format!("{}:subline", card.id));
+    assert!(subline.top() < title.bottom(), "{screen:?} head wrapped");
+}
+
+#[gpui::test]
+fn card_fits_a_narrow_pane(cx: &mut TestAppContext) {
+    // 300 px: a two-pane split; 276 px: three panes in a 1440 px window
+    // with both docks open.
+    let mut screens = [Screen::SettingsFromChat, Screen::SettingsApplied]
+        .into_iter()
+        .flat_map(|screen| [(screen, gpui::px(300.)), (screen, gpui::px(276.))]);
+    let (screen, width) = screens.next().unwrap();
+    assert_card_fits(cx, screen, width);
+    for (screen, width) in screens {
+        assert_card_fits(&mut TestAppContext::single(), screen, width);
+    }
 }
 
 #[gpui::test]

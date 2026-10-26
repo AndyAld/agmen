@@ -170,6 +170,18 @@ fn partial_theme_fills_from_fallback() {
 }
 
 #[test]
+fn terminal_colors_fall_back_to_text_and_background() {
+    // Task 14: `terminal.foreground` when the theme has it, else the theme's
+    // own text; `terminal.background` likewise falls back to `background`.
+    let t = load_theme(&zed_dir(), &ext_dir(), "Partial Dark").unwrap();
+    assert!(close(t.terminal_foreground, hex("#aabbcc")));
+    assert!(close(t.terminal_background, hex("#101010")));
+    let fallback = gruvbox_material_dark_hard();
+    assert!(close(fallback.terminal_foreground, hex("#d8bf94")));
+    assert!(close(fallback.terminal_background, hex("#1d2021")));
+}
+
+#[test]
 fn unknown_theme_is_an_error() {
     let err = load_theme(&zed_dir(), &ext_dir(), "No Such Theme").unwrap_err();
     assert!(err.to_string().contains("No Such Theme"));

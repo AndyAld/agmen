@@ -5,20 +5,42 @@ use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Window, div,
+    App, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, RenderOnce,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
 };
 
 use super::{ChangeHandler, Color, Label, LabelSize};
 use crate::appearance::Appearance;
-use crate::ui::tokens::{BADGE_TINT, BORDER_WIDTH, RADIUS_MD, SPACE_3, SPACE_10, SPACE_12};
+use crate::ui::tokens::{BORDER_WIDTH, RADIUS_MD, SPACE_3, SPACE_10, SPACE_12, TINT_SEGMENT, tint};
+
+/// How a control's options are set: each caller's padding and font from the
+/// mockup. Both looks fill the selected option alike.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum Look {
+    /// Settings' controls (frame 7908, nodes 8111, 8182 and 8209): the UI
+    /// font with 10 px sides.
+    #[default]
+    Ui,
+    /// The model picker's effort row (frame 2971, node 3392): the code font
+    /// with 12 px sides.
+    Code,
+}
+
+impl Look {
+    const fn side_padding(self) -> Pixels {
+        match self {
+            Self::Ui => SPACE_10,
+            Self::Code => SPACE_12,
+        }
+    }
+}
 
 #[derive(IntoElement)]
 pub(crate) struct Segmented {
     id: SharedString,
     options: Vec<SharedString>,
     selected: usize,
-    code: bool,
+    look: Look,
     on_change: Option<ChangeHandler<usize>>,
 }
 
@@ -33,8 +55,8 @@ impl std::fmt::Debug for Segmented {
 }
 
 impl Segmented {
-    /// `id` names the control; tests find option `i` as `"{id}:{i}"`, and its
-    /// label as `"{id}:{i}:label"`, with `debug_bounds`.
+    /// `id` names the control; tests find it as `"{id}"`, option `i` as
+    /// `"{id}:{i}"` and its label as `"{id}:{i}:label"`, with `debug_bounds`.
     #[must_use]
     pub(crate) fn new(
         id: impl Into<SharedString>,
@@ -45,19 +67,15 @@ impl Segmented {
             id: id.into(),
             options: options.into_iter().map(Into::into).collect(),
             selected,
-            code: false,
+            look: Look::Ui,
             on_change: None,
         }
     }
 
     /// Sets the options in the code font with wider padding, as the effort row.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the model picker's effort row uses it in Task 15")
-    )]
     #[must_use]
     pub(crate) const fn code(mut self) -> Self {
-        self.code = true;
+        self.look = Look::Code;
         self
     }
 
@@ -76,7 +94,11 @@ impl RenderOnce for Segmented {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = &cx.global::<Appearance>().theme;
         let hover = theme.element_hover;
+        // The selected option's fill: `text_accent` at 0x33 in both looks
+        // (nodes 8116, 8183, 8210 and 3397, and console.py `seg`).
+        let fill = tint(theme.text_accent, TINT_SEGMENT);
         let last = self.options.len().saturating_sub(1);
+        let root_selector = self.id.to_string();
         let segments = self.options.into_iter().enumerate().map(|(index, option)| {
             let selected = index == self.selected;
             let selector = format!("{}:{index}", self.id);
@@ -87,10 +109,9 @@ impl RenderOnce for Segmented {
                 Color::Placeholder
             });
             // A code label keeps the code font's own size.
-            let label = if self.code {
-                label.code()
-            } else {
-                label.size(LabelSize::Small)
+            let label = match self.look {
+                Look::Ui => label.size(LabelSize::Small),
+                Look::Code => label.code(),
             };
             div()
                 .id(SharedString::from(selector.clone()))
@@ -100,7 +121,7 @@ impl RenderOnce for Segmented {
                 .flex_none()
                 .items_center()
                 .py(SPACE_3)
-                .px(if self.code { SPACE_12 } else { SPACE_10 })
+                .px(self.look.side_padding())
                 .when(index < last, |this| {
                     this.border_r(BORDER_WIDTH).border_color(theme.border)
                 })
@@ -109,7 +130,7 @@ impl RenderOnce for Segmented {
                 .focus_visible(move |style| style.bg(hover))
                 .map(|this| {
                     if selected {
-                        this.bg(theme.text_accent.opacity(BADGE_TINT))
+                        this.bg(fill)
                     } else {
                         this.hover(move |style| style.bg(hover)).when_some(
                             self.on_change.clone(),
@@ -123,6 +144,7 @@ impl RenderOnce for Segmented {
                 .child(div().debug_selector(|| label_selector).child(label))
         });
         div()
+            .debug_selector(|| root_selector)
             .flex()
             .flex_none()
             .rounded(RADIUS_MD)
@@ -160,6 +182,53 @@ mod tests {
     #[gpui::test]
     fn code_options_pad_12(cx: &mut TestAppContext) {
         assert_eq!(side_padding(cx, true), SPACE_12);
+    }
+
+    /// The drawn height of the last option's label.
+    fn label_height(cx: &mut TestAppContext, code: bool) -> (Pixels, Pixels) {
+        let cx = open(cx, move || {
+            let effort = Segmented::new("effort", ["low", "high"], 0);
+            if code { effort.code() } else { effort }.into_any_element()
+        });
+        let code_size = cx.update(|_, cx| cx.global::<Appearance>().fonts.code_size);
+        let label = cx
+            .debug_bounds("effort:1:label")
+            .expect("label")
+            .size
+            .height;
+        (label, code_size)
+    }
+
+    #[gpui::test]
+    fn code_options_keep_the_code_size(cx: &mut TestAppContext) {
+        // C242: Task 15's effort row (node 3397) draws mono 13, the code
+        // font's own size, not the UI scale's Small step.
+        let (label, code_size) = label_height(cx, true);
+        assert_eq!(label, code_size * crate::ui::tokens::LINE_HEIGHT);
+    }
+
+    #[gpui::test]
+    fn ui_options_take_the_small_step(cx: &mut TestAppContext) {
+        // Small is 11.25 px at the mockup's 15 px rem; 1.2 times that.
+        let (label, _) = label_height(cx, false);
+        assert_eq!(label, gpui::px(13.5));
+    }
+
+    #[test]
+    fn selected_option_fills_the_accent_at_0x33() {
+        // Both looks draw #72b9a9 (`text_accent`) at 0x33: nodes 8116, 8183
+        // and 8210 in frame 7908 and node 3397 in frame 2971.
+        let theme = Appearance::builtin().theme;
+        let fill = tint(theme.text_accent, TINT_SEGMENT);
+        assert_eq!(
+            (fill.h, fill.s, fill.l),
+            (
+                theme.text_accent.h,
+                theme.text_accent.s,
+                theme.text_accent.l
+            )
+        );
+        assert!((fill.a - 0.2).abs() < 0.0001);
     }
 
     #[gpui::test]

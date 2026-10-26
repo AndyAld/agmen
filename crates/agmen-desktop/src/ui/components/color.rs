@@ -30,6 +30,10 @@ pub(crate) enum Color {
     Background,
     /// A role's color, by lowercase role name (`Theme::role_color`).
     Role(SharedString),
+    /// A slot of the theme's player palette, for the mockup colors no named
+    /// token holds: slot 1 is its magenta (items, ASSIGN), slot 3 its orange
+    /// (CLAIM). A theme without that slot gives `text.muted`.
+    Player(u8),
 }
 
 impl Color {
@@ -45,6 +49,11 @@ impl Color {
             Self::Error => theme.error,
             Self::Background => theme.background,
             Self::Role(role) => theme.role_color(role),
+            Self::Player(slot) => theme
+                .players
+                .get(usize::from(*slot))
+                .copied()
+                .unwrap_or(theme.text_muted),
         }
     }
 }
@@ -63,6 +72,14 @@ mod tests {
             Color::Role("engineer".into()).hsla(&theme),
             theme.role_color("engineer")
         );
+    }
+
+    #[test]
+    fn player_slots_map_to_the_palette() {
+        let theme = crate::appearance::Appearance::builtin().theme;
+        assert_eq!(Color::Player(1).hsla(&theme), theme.players[1]);
+        assert_eq!(Color::Player(3).hsla(&theme), theme.players[3]);
+        assert_eq!(Color::Player(200).hsla(&theme), theme.text_muted);
     }
 
     #[test]

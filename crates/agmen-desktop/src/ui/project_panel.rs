@@ -11,9 +11,10 @@ use gpui::{
     Window, div,
 };
 
-use super::breadcrumb::Breadcrumb;
 use super::code_view::{CodeView, GutterMark};
-use super::components::{Button, ButtonStyle, Color, Icon, IconSize, Indent, Label, ListItem};
+use super::components::{
+    Breadcrumb, Button, ButtonStyle, Color, Icon, IconSize, Indent, Label, ListItem,
+};
 use super::scope_chip::{ScopeChip, ScopeChipEvent, ScopeOption, branch_label};
 use super::syntax::Language;
 use super::tokens::{ICON_LG, ICON_SM, PROJECT_ROW_HEIGHT, SPACE_6};

@@ -5,7 +5,7 @@ use gpui::TestAppContext;
 
 use super::*;
 use crate::backend::chat_snapshot;
-use crate::ui::test_support::{click, init, redraw};
+use crate::ui::test_support::{assert_breadcrumb_glyphs, click, init, redraw};
 
 #[gpui::test]
 fn roles_panel_lists_layers_and_opens_a_role(cx: &mut TestAppContext) {
@@ -170,4 +170,34 @@ fn role_dots_take_the_palette_role_color() {
         Color::Role("reviewer".into())
     );
     assert_eq!(role_dot_color(None), Color::Muted);
+}
+
+#[gpui::test]
+fn role_file_breadcrumb_splits_its_parts_with_a_glyph(cx: &mut TestAppContext) {
+    init(cx);
+    let role = chat_snapshot()
+        .roles
+        .into_iter()
+        .find(|r| r.name == "reviewer")
+        .unwrap();
+    let (_, cx) = cx.add_window_view(|_, cx| RoleFileView::new(&role, cx));
+    redraw(cx);
+    // roles › built-in › reviewer.xml
+    assert_breadcrumb_glyphs(cx, 3);
+}
+
+#[gpui::test]
+fn role_rows_draw_a_16px_file_icon_at_26(cx: &mut TestAppContext) {
+    // C216, node 11564: the icon at x 26 is 16 px, so the name is at 49.
+    init(cx);
+    let roles = chat_snapshot().roles;
+    let (_, cx) = cx.add_window_view(|window, _| {
+        window.set_rem_size(crate::ui::tokens::MOCKUP_REM);
+        RolesPanel::new(roles)
+    });
+    redraw(cx);
+    let row = cx.debug_bounds("role:reviewer").unwrap();
+    let icon = cx.debug_bounds("role:reviewer:leading").unwrap();
+    assert_eq!(icon.size.width, crate::ui::tokens::ICON_LG);
+    assert_eq!(icon.origin.x - row.origin.x, gpui::px(26.));
 }

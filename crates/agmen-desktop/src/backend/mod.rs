@@ -7,12 +7,18 @@
 
 mod fixture;
 mod fixture_data;
+// Task 19: the planning room's spec texts, comments, caps and presence.
+mod fixture_plan;
 mod screen;
 mod worktree;
+// Task 15: the models each agent offers and the model a message ran on.
+mod fixture_models;
+mod models;
+pub(crate) use models::{ChoiceScope, Effort, ModelChoice, ModelGroup};
 
 use std::collections::BTreeMap;
 
-use agmen_proto::{GitSha, IdentityId, MessageId, StampedEnvelope};
+use agmen_proto::{GitSha, IdentityId, MessageId, Seq, StampedEnvelope, Stream, Timestamp};
 use futures::channel::mpsc::UnboundedReceiver;
 use gpui::SharedString;
 
@@ -43,6 +49,10 @@ pub(crate) enum BackendError {
     NoSuchChange(String),
     #[error("{0} cannot be done from this console yet")]
     Unsupported(&'static str),
+    /// The agent is missing, outdated or of unknown version;
+    /// `why` is [`InstalledAgent::not_ready`]'s text.
+    #[error("{agent} cannot run a worker: {why}")]
+    AgentNotReady { agent: String, why: String },
     #[error("the built-in fixture is broken: {0}")]
     BadFixture(String),
 }
@@ -52,7 +62,9 @@ pub(crate) enum BackendError {
 pub(crate) trait Backend: 'static {
     /// Everything the window shows now.
     fn snapshot(&self) -> Snapshot;
-    /// Sends a message as the person.
+    /// Sends a message as the person. A draft with a model comes back in an
+    /// [`Update::Snapshot`] whose `message_models` carries its tag; one
+    /// without comes back as an [`Update::Message`].
     ///
     /// # Errors
     ///
@@ -74,13 +86,32 @@ pub(crate) struct BackendHandle(pub(crate) std::rc::Rc<dyn Backend>);
 
 impl gpui::Global for BackendHandle {}
 
+impl BackendHandle {
+    /// Sends `draft` through the app's backend: the one way a view sends.
+    ///
+    /// # Errors
+    ///
+    /// When the backend refuses the draft, or the app has no backend.
+    pub(crate) fn send(draft: Draft, cx: &gpui::App) -> Result<(), BackendError> {
+        match cx.try_global::<Self>() {
+            Some(backend) => backend.0.send(draft),
+            None => Err(BackendError::Unsupported("sending without a backend")),
+        }
+    }
+}
+
 /// A chat message the person writes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Draft {
     /// Who it is addressed to; the listener unless the person picks.
     pub(crate) to: Vec<IdentityId>,
     pub(crate) body: String,
+    /// The message it answers. A reply to an ASK or an ALERT goes out as
+    /// an ANSWER, any other message as an FYI.
     pub(crate) reply_to: Option<MessageId>,
+    /// The model the listener runs this message on (Task 15); `None` runs
+    /// it on the listener's own settings.
+    pub(crate) model: Option<ModelChoice>,
 }
 
 /// Something the person does that is not a chat message.
@@ -92,12 +123,32 @@ pub(crate) enum Action {
     Undo(ChangeId),
     TakeOver(IdentityId),
     HandBack(IdentityId),
-    SwitchAgent { worker: IdentityId, agent: String },
-    AnswerAlert { alert: MessageId, choice: String },
+    SwitchAgent {
+        worker: IdentityId,
+        agent: String,
+    },
+    AnswerAlert {
+        alert: MessageId,
+        choice: String,
+    },
+    /// Looks for terminal agents again (`agmen agents scan`, Task 14).
+    ScanAgents,
     SnoozeAlert(MessageId),
-    ApproveSpec { path: String, sha: GitSha },
+    ApproveSpec {
+        path: String,
+        sha: GitSha,
+    },
+    // Only the fixture's tests send ApproveShare; no view does yet.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "no view sends the share approval yet")
+    )]
     ApproveShare,
     KickOff,
+    // Task 18: a worker on an installed agent, from the command palette.
+    SpawnWorker {
+        agent: String,
+    },
 }
 
 /// What a subscriber hears.
@@ -157,6 +208,9 @@ pub(crate) struct TeamRow {
     pub(crate) lane: String,
     pub(crate) owner: String,
     pub(crate) usd_per_day: u32,
+    /// The agent's identity, which the hub makes at kick-off; `None` while
+    /// the plan is a plan.
+    pub(crate) id: Option<IdentityId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -203,6 +257,37 @@ pub(crate) struct PlanInfo {
     /// Per owner: whether they approved their own agents and spend.
     pub(crate) shares_approved: BTreeMap<String, bool>,
     pub(crate) running: bool,
+    // Task 19: what the spec tab, the Review panel, the kick-off dialog and
+    // the planning room show beyond the checklist's inputs.
+    /// Each spec's text, approval times and comments, by path.
+    pub(crate) reviews: Vec<SpecReview>,
+    /// Per owner: their daily spend cap, when they set one.
+    pub(crate) caps_usd: BTreeMap<String, u32>,
+    /// Per owner: when they approved their own agents and spend.
+    pub(crate) shares_approved_at: BTreeMap<String, Timestamp>,
+    /// Per person in the planning room: whether they are at work.
+    pub(crate) presence: BTreeMap<String, AgentStatus>,
+}
+
+// Task 19: a spec's review, as the spec tab and the Review panel show it.
+/// One comment on a spec under review.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SpecComment {
+    /// A person or agent handle, such as `sean/plan`.
+    pub(crate) author: String,
+    pub(crate) body: String,
+}
+
+/// A spec file's text at its approved commit, who approved it when, and
+/// the comments on it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SpecReview {
+    pub(crate) path: String,
+    /// The commit `text` is at, which an approval from the tab names.
+    pub(crate) sha: GitSha,
+    pub(crate) text: SharedString,
+    pub(crate) approved_at: BTreeMap<String, Timestamp>,
+    pub(crate) comments: Vec<SpecComment>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -311,6 +396,9 @@ pub(crate) struct AgentInfo {
     pub(crate) delegated_by: Option<String>,
     pub(crate) state: String,
     pub(crate) tools: Vec<String>,
+    /// Task 14: whether the harness cannot enforce the role's tool list, so
+    /// Tools says what it enforces instead (spec 5.5).
+    pub(crate) tools_lossy: bool,
     pub(crate) edits: String,
     pub(crate) verbs: Vec<String>,
     pub(crate) refused: Vec<String>,
@@ -327,15 +415,23 @@ pub(crate) struct AgentInfo {
     pub(crate) cache_read: u64,
 }
 
-/// The status bar's counts.
+/// The status bar's counts. Task 13: the needs-you and alert counts are
+/// not stored; the chat derives them from its messages (mockup fix 34).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct StatusSummary {
-    pub(crate) needs_you: u32,
     pub(crate) online: u32,
-    pub(crate) alerts: u32,
     pub(crate) worktrees: u32,
     pub(crate) spend_today_usd: f64,
 }
+
+// Task 14: take-over in the chat and the terminal agents on this machine;
+// the fixture's side of it in its own module.
+mod fixture_take_over;
+mod take_over;
+pub(crate) use take_over::{
+    AgentFound, AgentSource, InstalledAgent, SessionStart, TakeOver, TermCell, TermColor,
+    TerminalScreen, can_take_over,
+};
 
 /// Everything the window shows at one moment.
 #[derive(Debug, Clone, PartialEq)]
@@ -364,6 +460,23 @@ pub(crate) struct Snapshot {
     pub(crate) roles: Vec<RoleFile>,
     /// The worktrees on this machine, the person's own first.
     pub(crate) worktrees: Vec<WorktreeInfo>,
+    /// Task 14: sessions the person took over in the chat, by identity.
+    pub(crate) take_overs: BTreeMap<IdentityId, TakeOver>,
+    /// Task 14: the terminal agents agmend looked for on this machine.
+    pub(crate) installed_agents: Vec<InstalledAgent>,
+    /// Task 14: how many agent scans agmend has finished, so Check again
+    /// knows its scan's result from any other update.
+    pub(crate) agent_scans: u64,
+    // Task 15: the model picker's models, and message tags.
+    /// The models each installed agent offers, in the picker's order.
+    pub(crate) models: Vec<ModelGroup>,
+    /// The model a message was sent with or answered on, by hub position.
+    /// The wire carries no model (agmen-proto's FYI and ANSWER have no
+    /// field), so agmend reports it beside the message.
+    pub(crate) message_models: BTreeMap<(Stream, Seq), ModelChoice>,
+    /// The person's "until I change it" model, which the composer's chip
+    /// opens on; `None` opens it on the listener's own model.
+    pub(crate) standing_model: Option<ModelChoice>,
 }
 
 /// One row of an agent's session, as the agent view shows it.

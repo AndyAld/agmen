@@ -8,11 +8,10 @@ use gpui::{
     IntoElement, ParentElement as _, Render, RenderOnce, SharedString, Styled as _, Window, div,
 };
 
-use super::breadcrumb::Breadcrumb;
 use super::code_view::CodeView;
 use super::components::{
-    Button, ButtonStyle, Color, Dot, Icon, IconSize, Indent, KvRow, KvSection, Label, LabelSize,
-    ListItem,
+    Breadcrumb, Button, ButtonStyle, Color, Dot, Icon, IconSize, Indent, KvRow, KvSection, Label,
+    LabelSize, ListItem,
 };
 use super::dock::RightDockHeader;
 use super::syntax::Language;
@@ -45,6 +44,12 @@ const LAYERS: [(RoleLayer, &str, &str); 3] = [
     (RoleLayer::Personal, "~/.config/agmen/roles", "personal"),
 ];
 
+/// A role's file name, as the Roles panel, its tab and the status bar
+/// show it.
+pub(crate) fn role_file_name(role: &str) -> String {
+    format!("{role}.xml")
+}
+
 impl RolesPanel {
     pub(crate) const fn new(roles: Vec<RoleFile>) -> Self {
         Self {
@@ -70,10 +75,10 @@ impl RolesPanel {
     }
 
     fn role_row(&self, role: &RoleFile, cx: &mut Context<Self>) -> ListItem {
-        let file = format!("{}.xml", role.name);
+        let file = role_file_name(&role.name);
         let theme = &cx.global::<Appearance>().theme;
         let icon_color = theme.icon_muted;
-        // console.py draws role file icons at 16 px (V83, C216).
+        // Node 11564: a 16 px icon, so the name starts at x 49 (C216).
         let icon = cx.try_global::<FileIcons>().map_or_else(
             || UiIcon::File.render(icon_color, ICON_LG).into_any_element(),
             |icons| {
@@ -232,7 +237,7 @@ pub(crate) struct RoleFileView {
 
 impl RoleFileView {
     pub(crate) fn new(role: &RoleFile, cx: &mut Context<Self>) -> Self {
-        let file = format!("{}.xml", role.name);
+        let file = role_file_name(&role.name);
         let slug = LAYERS
             .iter()
             .find(|(layer, ..)| *layer == role.layer)

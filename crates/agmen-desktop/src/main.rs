@@ -1,36 +1,19 @@
 //! The agmen desktop app: a GPUI console with Zed's layout.
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the needs-you views use it from Task 13 of the desktop plan"
-    )
-)]
 mod alerts;
 mod appearance;
 mod assets;
-#[expect(
-    dead_code,
-    reason = "views send and act through Backend from Task 9 (chat composer) of the desktop plan"
-)]
 mod backend;
+// Task 13: the urgent-alert chime.
+mod chime;
 mod icons;
 #[cfg(unix)]
 mod instance;
+// Task 18: every key binding and the palette's entries.
+mod keymap;
+mod local_time;
 mod notify;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the plan panel uses it from Task 19 of the desktop plan"
-    )
-)]
 mod plan;
-#[expect(
-    dead_code,
-    reason = "the chat's reference chips use it from Task 9 of the desktop plan"
-)]
 mod refs;
 mod roles;
 mod spike;
@@ -40,13 +23,13 @@ use std::rc::Rc;
 
 use anyhow::{Context as _, Result};
 use gpui::{
-    App, AppContext as _, Application, Bounds, Focusable as _, KeyBinding, TitlebarOptions,
-    WindowAppearance, WindowBounds, WindowOptions, point, px, size,
+    App, AppContext as _, Application, Bounds, Focusable as _, TitlebarOptions, WindowAppearance,
+    WindowBounds, WindowOptions, point, px, size,
 };
 
 use appearance::{Appearance, SystemMode};
 
-use ui::{Quit, ToggleLeftDock, ToggleRightDock, Workspace};
+use ui::{Quit, Workspace};
 
 const USAGE: &str = "usage: agmen-desktop [--screen <name> | --list-screens | --view <name> | --spike list [--autoscroll] | --spike notify]";
 
@@ -266,12 +249,8 @@ fn open_dev_view(
                 .sessions
                 .pop_first()
                 .context("the fixture has no agent session")?;
-            let handle = snapshot
-                .agents
-                .remove(&id)
-                .map_or_else(|| id.to_string(), |agent| agent.handle);
-            cx.open_window(options, |_, cx| {
-                let agent = cx.new(|cx| ui::AgentView::new(handle, session, cx));
+            cx.open_window(options, |window, cx| {
+                let agent = cx.new(|cx| ui::AgentView::new(&snapshot, &id, session, window, cx));
                 cx.new(|_| ui::DevFrame::new(title, agent))
             })
         }
@@ -324,11 +303,7 @@ fn open_dev_view(
 }
 
 fn open_main_window(launch: &Launch, cx: &mut App) -> Result<()> {
-    cx.bind_keys([
-        KeyBinding::new("cmd-b", ToggleLeftDock, None),
-        KeyBinding::new("cmd-r", ToggleRightDock, None),
-        KeyBinding::new("cmd-q", Quit, None),
-    ]);
+    keymap::bind_all(cx);
     cx.on_action(|_: &Quit, cx| cx.quit());
     assets::load_fonts(cx).context("loading the bundled fonts")?;
     let mut appearance = load_appearance(cx.window_appearance());
@@ -342,7 +317,11 @@ fn open_main_window(launch: &Launch, cx: &mut App) -> Result<()> {
     }
     cx.set_global(appearance);
     cx.set_global(file_icons);
-    ui::bind_keys(cx);
+    cx.set_global(local_time::LocalZone::system());
+    // Without a home folder the Settings tab shows a placeholder.
+    if let Some(home) = std::env::home_dir() {
+        cx.set_global(ui::SettingsSources::for_home(&home));
+    }
 
     let options = window_options(cx);
     let window = match launch {
@@ -357,13 +336,12 @@ fn open_main_window(launch: &Launch, cx: &mut App) -> Result<()> {
             );
             let snapshot = backend.snapshot();
             cx.set_global(backend::BackendHandle(backend));
+            // Task 13: live alerts chime and post notifications.
+            cx.set_global(ui::AlarmHandle::system());
             cx.open_window(options, |window, cx| {
                 let workspace = cx.new(|cx| {
                     let mut workspace = Workspace::new(snapshot, window, cx);
-                    // The one render whose layout state is not in the data.
-                    if screen == backend::Screen::ListenerCollapsed {
-                        workspace.toggle_dock(ui::DockSide::Right, cx);
-                    }
+                    workspace.show_screen(screen, cx);
                     workspace
                 });
                 window.focus(&workspace.focus_handle(cx), cx);

@@ -108,23 +108,86 @@ fn fixture_roster_groups() {
 
 #[test]
 fn status_counts_follow_one_rule() {
-    // Mockup fixes 29, 34 and 36.
+    // Mockup fixes 29, 34 and 36. The alert and needs-you counts are not
+    // stored: the status bar derives them from the messages (Task 13).
+    use crate::alerts::{AlertState, Me, alert_count};
     let chat = chat();
     assert_eq!(chat.status.worktrees, 5);
-    assert_eq!(chat.status.alerts, 1);
     let total = chat.listener.workers_today_usd + chat.listener.listener_today_usd;
     assert!(
         (total - chat.status.spend_today_usd).abs() < 0.005,
         "{total}"
     );
-    let needs = FixtureBackend::for_screen(Screen::NeedsYou)
-        .unwrap()
-        .snapshot();
-    assert_eq!((needs.status.alerts, needs.status.needs_you), (2, 1));
-    let answered = FixtureBackend::for_screen(Screen::NeedsYouAnswered)
-        .unwrap()
-        .snapshot();
-    assert_eq!((answered.status.alerts, answered.status.needs_you), (1, 0));
+    for (screen, alerts, needs_you) in [
+        (Screen::Chat, 1, 0),
+        (Screen::NeedsYou, 2, 1),
+        (Screen::NeedsYouAnswered, 1, 0),
+    ] {
+        let s = FixtureBackend::for_screen(screen).unwrap().snapshot();
+        let me = Me::from(&s);
+        let mut state = AlertState::default();
+        for m in &s.messages {
+            state.on_message(m, &me);
+        }
+        assert_eq!(
+            (alert_count(&s.messages, &me), state.badge()),
+            (alerts, needs_you),
+            "{screen:?}"
+        );
+    }
+}
+
+// Task 13: answering an alert.
+
+#[test]
+fn answering_an_alert_posts_my_answer() {
+    let backend = FixtureBackend::for_screen(Screen::NeedsYou).unwrap();
+    let alert = backend.snapshot().messages.last().unwrap().clone();
+    let mut updates = backend.subscribe();
+    backend
+        .act(Action::AnswerAlert {
+            alert: alert.client.id.clone(),
+            choice: "Revert #10".into(),
+        })
+        .unwrap();
+    let Some(Update::Message(m)) = futures::executor::block_on(updates.next()) else {
+        panic!("no update");
+    };
+    assert!(matches!(m.client.payload, Payload::Answer {}));
+    assert_eq!(m.client.reply_to.as_ref(), Some(&alert.client.id));
+    assert_eq!(m.client.body.as_str(), "Revert #10");
+    assert_eq!(m.client.to, vec![alert.from.clone()]);
+    assert_eq!(m.from_handle, "andy");
+    assert_eq!(backend.snapshot().messages.last(), Some(&*m));
+}
+
+#[test]
+fn answering_an_unknown_alert_is_refused() {
+    let backend = FixtureBackend::for_screen(Screen::Chat).unwrap();
+    let before = backend.snapshot().messages.len();
+    let missing = backend.act(Action::AnswerAlert {
+        alert: "01JZ0000000000000000000000".parse().unwrap(),
+        choice: "Revert #10".into(),
+    });
+    assert!(missing.is_err());
+    assert_eq!(backend.snapshot().messages.len(), before);
+}
+
+#[test]
+fn a_reply_is_an_answer() {
+    let backend = FixtureBackend::for_screen(Screen::NeedsYou).unwrap();
+    let alert = backend.snapshot().messages.last().unwrap().clone();
+    backend
+        .send(Draft {
+            to: vec![alert.from.clone()],
+            body: "Reverting".into(),
+            reply_to: Some(alert.client.id.clone()),
+            model: None,
+        })
+        .unwrap();
+    let sent = backend.snapshot().messages.last().unwrap().clone();
+    assert!(matches!(sent.client.payload, Payload::Answer {}));
+    assert_eq!(sent.client.reply_to, Some(alert.client.id));
 }
 
 #[test]
@@ -156,6 +219,7 @@ fn fixture_send_appends_and_notifies() {
             to: vec![backend.snapshot().listener_id.clone()],
             body: "hi".into(),
             reply_to: None,
+            model: None,
         })
         .unwrap();
     let Some(Update::Message(m)) = futures::executor::block_on(updates.next()) else {
@@ -174,6 +238,7 @@ fn fixture_send_refuses_an_oversized_body() {
             to: Vec::new(),
             body: "x".repeat(agmen_proto::MAX_BODY_BYTES + 1),
             reply_to: None,
+            model: None,
         })
         .unwrap_err();
     assert!(err.to_string().contains("32768"), "{err}");
@@ -542,4 +607,181 @@ fn git_facts_know_every_worktree_commit() {
             assert!(s.git.commits.contains(&c.sha.to_string()), "{}", c.sha);
         }
     }
+}
+
+// Task 18: the palette's "spawn worker with <agent>" plays the 15:31 exchange.
+#[test]
+fn spawn_worker_plays_the_delegated_exchange() {
+    let backend = FixtureBackend::for_screen(Screen::Chat).unwrap();
+    let mut updates = backend.subscribe();
+    let before = backend.snapshot().messages.len();
+    backend
+        .act(Action::SpawnWorker {
+            agent: "codex".into(),
+        })
+        .unwrap();
+    let s = backend.snapshot();
+    let new = &s.messages[before..];
+    let verbs: Vec<_> = new
+        .iter()
+        .map(|m| m.client.payload.verb().map(agmen_proto::Verb::as_str))
+        .collect();
+    assert_eq!(verbs, [Some("FYI"), Some("ANSWER"), Some("DELEGATED")]);
+    assert_eq!(new[0].from_handle.as_str(), "andy");
+    assert_eq!(new[0].client.body.as_str(), "Spawn a worker with codex");
+    assert_eq!(new[0].client.to, std::slice::from_ref(&s.listener_id));
+    for reply in &new[1..] {
+        assert_eq!(reply.from_handle.as_str(), "andy/listen");
+        assert_eq!(reply.client.reply_to, Some(new[0].client.id.clone()));
+    }
+    let Payload::Delegated { worker, agent, .. } = &new[2].client.payload else {
+        panic!("not a DELEGATED: {:?}", new[2].client.payload);
+    };
+    assert_eq!(agent, "codex");
+    // andy/fx1 is the fixture's first worker, so this one is andy/fx2.
+    assert_eq!(worker.as_str(), "andyfx20");
+    assert!(
+        new[2]
+            .client
+            .body
+            .as_str()
+            .starts_with("andy/fx2 · Engineer · codex")
+    );
+    // Each message reaches the views as it is added.
+    for expected in new {
+        let Some(Update::Message(env)) = futures::executor::block_on(updates.next()) else {
+            panic!("no message update");
+        };
+        assert_eq!(&*env, expected);
+    }
+    // A second spawn gets the next worker.
+    backend
+        .act(Action::SpawnWorker {
+            agent: "claude".into(),
+        })
+        .unwrap();
+    let last = backend.snapshot().messages.pop().unwrap();
+    assert!(
+        last.client
+            .body
+            .as_str()
+            .starts_with("andy/fx3 · Engineer · claude")
+    );
+}
+
+#[test]
+fn spawn_worker_refuses_an_agent_that_cannot_run_one() {
+    // C261: the palette lists outdated agy; the backend that knows the
+    // version rule refuses its spawn with the switch menu's note.
+    let backend = FixtureBackend::for_screen(Screen::Chat).unwrap();
+    let before = backend.snapshot().messages.len();
+    for (agent, why) in [
+        ("agy", "update to 1.1.15+ for JSON"),
+        ("grok", "not installed"),
+        ("nope", "not installed"),
+    ] {
+        let refused = backend
+            .act(Action::SpawnWorker {
+                agent: agent.into(),
+            })
+            .unwrap_err()
+            .to_string();
+        assert_eq!(refused, format!("{agent} cannot run a worker: {why}"));
+    }
+    assert_eq!(backend.snapshot().messages.len(), before);
+}
+
+#[test]
+fn spawn_worker_skips_workers_the_screen_already_has() {
+    // The plan screens have andy/fx1 in the sessions and the roster but no
+    // DELEGATED for it, so counting DELEGATED messages would mint fx1 again.
+    let backend = FixtureBackend::for_screen(Screen::Plan).unwrap();
+    backend
+        .act(Action::SpawnWorker {
+            agent: "codex".into(),
+        })
+        .unwrap();
+    let last = backend.snapshot().messages.pop().unwrap();
+    let Payload::Delegated { worker, .. } = &last.client.payload else {
+        panic!("not a DELEGATED: {:?}", last.client.payload);
+    };
+    assert_eq!(worker.as_str(), "andyfx20");
+    assert!(last.client.body.as_str().starts_with("andy/fx2 · "));
+}
+
+// Task 19: the planning room's actions change the fixture's plan.
+fn plan_of(backend: &FixtureBackend) -> crate::backend::PlanInfo {
+    backend.snapshot().plan.unwrap()
+}
+
+#[test]
+fn fixture_kick_off_runs_only_a_ready_plan() {
+    let draft = FixtureBackend::for_screen(Screen::Plan).unwrap();
+    assert!(draft.act(Action::KickOff).is_err());
+    assert!(!plan_of(&draft).running);
+
+    let ready = FixtureBackend::for_screen(Screen::PlanReady).unwrap();
+    let mut updates = ready.subscribe();
+    ready.act(Action::KickOff).unwrap();
+    assert!(plan_of(&ready).running);
+    let Some(Update::Snapshot(snapshot)) = futures::executor::block_on(updates.next()) else {
+        panic!("no snapshot after kick off");
+    };
+    let plan = snapshot.plan.unwrap();
+    assert!(plan.running);
+    // The hub makes the team's identities at kick-off.
+    let core = plan.team.iter().find(|row| row.handle == "core").unwrap();
+    assert_eq!(
+        core.id,
+        Some(super::super::fixture_data::id("andy/core").unwrap())
+    );
+}
+
+// Review minor 4: approving my own share records when, once.
+#[test]
+fn fixture_approve_share_records_the_first_time() {
+    let backend = FixtureBackend::for_screen(Screen::Plan).unwrap();
+    backend.state.borrow_mut().me = "sean".into();
+    assert_eq!(plan_of(&backend).shares_approved.get("sean"), Some(&false));
+    assert!(!plan_of(&backend).shares_approved_at.contains_key("sean"));
+    backend.act(Action::ApproveShare).unwrap();
+    let first = plan_of(&backend);
+    assert_eq!(first.shares_approved.get("sean"), Some(&true));
+    let at = *first.shares_approved_at.get("sean").unwrap();
+    backend.act(Action::ApproveShare).unwrap();
+    assert_eq!(plan_of(&backend).shares_approved_at.get("sean"), Some(&at));
+}
+
+#[test]
+fn fixture_approve_spec_checks_the_sha() {
+    let backend = FixtureBackend::for_screen(Screen::Plan).unwrap();
+    let design = plan_of(&backend).specs[0].clone();
+    let stale: agmen_proto::GitSha = "0000000".parse().unwrap();
+    assert!(
+        backend
+            .act(Action::ApproveSpec {
+                path: design.path.clone(),
+                sha: stale,
+            })
+            .is_err()
+    );
+    let draft = plan_of(&backend).specs[1].clone();
+    assert!(draft.draft_note.is_some());
+    assert!(
+        backend
+            .act(Action::ApproveSpec {
+                path: draft.path,
+                sha: draft.sha,
+            })
+            .is_err()
+    );
+    // andy approved the design at 15:47 already, so approving again keeps it.
+    let before = plan_of(&backend).reviews[0].approved_at.clone();
+    backend
+        .act(Action::ApproveSpec {
+            path: design.path,
+            sha: design.sha,
+        })
+        .unwrap();
+    assert_eq!(plan_of(&backend).reviews[0].approved_at, before);
 }

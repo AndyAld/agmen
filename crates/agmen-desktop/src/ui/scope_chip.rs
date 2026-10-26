@@ -10,9 +10,8 @@ use gpui::{
     SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
 };
 
-use super::components::{Chip, Color, Dot, Label, menu};
-use super::tokens::{RADIUS_MD, SPACE_2, SPACE_3, SPACE_6, SPACE_8, SPACE_10};
-use crate::appearance::Appearance;
+use super::components::{Chip, Color, Dot, Icon, IconSize, Label, Menu, MenuRow};
+use super::tokens::{SPACE_2, SPACE_8, SPACE_10};
 use crate::backend::{AgentInfo, WorktreeInfo};
 use crate::icons::UiIcon;
 
@@ -109,32 +108,15 @@ impl ScopeChip {
         cx.notify();
     }
 
-    fn menu_row(
-        &self,
-        index: usize,
-        option: &ScopeOption,
-        cx: &mut Context<Self>,
-    ) -> gpui::Stateful<gpui::Div> {
-        let theme = &cx.global::<Appearance>().theme;
-        let hover = theme.element_hover;
-        let selector = format!("scope-chip:{index}");
-        div()
-            .id(SharedString::from(selector.clone()))
-            .debug_selector(|| selector)
-            .flex()
-            .items_center()
-            .gap(SPACE_6)
-            .py(SPACE_3)
-            .px(SPACE_8)
-            .rounded(RADIUS_MD)
-            .cursor_pointer()
-            .when(index == self.selected, |this| {
-                this.bg(theme.element_selected)
-            })
-            .hover(move |style| style.bg(hover))
-            .on_click(cx.listener(move |this, _, _, cx| this.pick(index, cx)))
-            .child(Dot::new(Color::Role(option.role.clone())))
+    /// Menu row `index`: the owner's role dot, then the option; the
+    /// selected row on the selected fill.
+    fn menu_row(&self, index: usize, option: &ScopeOption, cx: &mut Context<Self>) -> MenuRow {
+        MenuRow::new(format!("scope-chip:{index}"))
+            .picker()
+            .checked(index == self.selected)
+            .leading(Dot::new(Color::Role(option.role.clone())))
             .child(Label::new(option.label.clone()).code())
+            .on_click(cx.listener(move |this, _, _, cx| this.pick(index, cx)))
     }
 }
 
@@ -146,7 +128,11 @@ fn chip(label: SharedString, role: SharedString) -> Chip {
         .dot(Color::Role(role))
         .code()
         .full_width()
-        .trailing(UiIcon::ChevronDown)
+        .trailing(
+            Icon::new(UiIcon::ChevronDown)
+                .size(IconSize::Small)
+                .color(Color::Placeholder),
+        )
 }
 
 impl Render for ScopeChip {
@@ -160,11 +146,24 @@ impl Render for ScopeChip {
             .id("scope-chip")
             .debug_selector(|| "scope-chip".into())
             .w_full()
+            // Focused by the click that opens the menu, so Escape reaches it.
+            .tab_index(0)
             .cursor_pointer()
             // While open, the menu's mouse down out closes it; a click here
             // too would reopen it on mouse up (C186, as the dropdown's C81).
-            .when(!self.open, |chip| {
-                chip.on_click(cx.listener(|this, _, _, cx| this.toggle(cx)))
+            .map(|chip| {
+                if self.open {
+                    chip.on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                        if event.keystroke.key == "escape" {
+                            // As Dropdown's: the open menu takes Escape
+                            // before the panel that holds it.
+                            cx.stop_propagation();
+                            this.close(cx);
+                        }
+                    }))
+                } else {
+                    chip.on_click(cx.listener(|this, _, _, cx| this.toggle(cx)))
+                }
             })
             .child(chip(label, role));
         let menu = self.open.then(|| {
@@ -172,21 +171,17 @@ impl Render for ScopeChip {
                 .options
                 .iter()
                 .enumerate()
-                .map(|(index, option)| self.menu_row(index, option, cx).into_any_element())
+                .map(|(index, option)| self.menu_row(index, option, cx))
                 .collect();
             let this = cx.entity().downgrade();
-            menu(
-                "scope-chip:menu".into(),
-                None,
-                rows,
-                move |_, cx| {
+            Menu::new("scope-chip:menu")
+                .children(rows)
+                .on_close(move |_, cx| {
                     // Gone only while the window closes; nothing to close.
                     if let Some(this) = this.upgrade() {
                         this.update(cx, |this, cx| this.close(cx));
                     }
-                },
-                cx,
-            )
+                })
         });
         div()
             .relative()

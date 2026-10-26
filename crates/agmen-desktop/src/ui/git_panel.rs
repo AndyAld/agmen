@@ -16,6 +16,7 @@ use super::components::{
 };
 use super::format::clock;
 use super::scope_chip::{ScopeChip, ScopeChipEvent, ScopeOption};
+use super::tagged;
 use super::tokens::{ICON_LG, PROJECT_ROW_HEIGHT, SPACE_6};
 use crate::appearance::Appearance;
 use crate::backend::{
@@ -134,10 +135,10 @@ fn branch_item(branch: &str) -> &str {
     branch.get(..end).unwrap_or(branch)
 }
 
-/// A section's count: console.py's mono 11 in text.placeholder on a pill
-/// (V94).
+/// A section's count: mono 11 in text.placeholder on a count chip (V94,
+/// V114, node 5113).
 fn count_badge(text: impl Into<SharedString>) -> Badge {
-    Badge::new(text, Color::Placeholder).code()
+    Badge::new(text, Color::Placeholder).count()
 }
 
 /// A row's trailing detail, such as `+2 −5` or an author: console.py's mono
@@ -160,11 +161,6 @@ fn status_letter(kind: ChangeKind) -> Label {
         .code()
         .weight(FontWeight::BOLD)
         .color(color)
-}
-
-/// `child` in a box tests find as `selector`.
-fn tagged(selector: String, child: impl IntoElement) -> gpui::Div {
-    div().flex_none().debug_selector(|| selector).child(child)
 }
 
 impl GitPanel {
@@ -229,8 +225,16 @@ impl GitPanel {
 
     /// Folds or unfolds `section`.
     pub(crate) fn toggle_section(&mut self, section: GitSection, cx: &mut Context<Self>) {
-        if !self.folded.remove(&section) {
+        let folded = !self.folded.contains(&section);
+        self.set_folded(section, folded, cx);
+    }
+
+    /// Folds `section` when `folded`, else unfolds it.
+    pub(crate) fn set_folded(&mut self, section: GitSection, folded: bool, cx: &mut Context<Self>) {
+        if folded {
             self.folded.insert(section);
+        } else {
+            self.folded.remove(&section);
         }
         cx.notify();
     }
@@ -306,12 +310,9 @@ impl GitPanel {
         ListItem::new(id.clone(), Indent::Tree(1))
             .height(PROJECT_ROW_HEIGHT)
             .selected(self.selected.as_deref() == Some(change.path.as_str()))
-            .child(tagged(format!("{id}:status"), status_letter(change.kind)))
-            .child(tagged(format!("{id}:icon"), icon))
-            .child(tagged(
-                format!("{id}:path"),
-                Label::new(change.path.clone()).code(),
-            ))
+            .child(tagged(format!("{id}:status"), status_letter(change.kind)).flex_none())
+            .child(tagged(format!("{id}:icon"), icon).flex_none())
+            .child(tagged(format!("{id}:path"), Label::new(change.path.clone()).code()).flex_none())
             .end(meta(format!(
                 "+{} \u{2212}{}",
                 change.added, change.removed
@@ -324,12 +325,15 @@ impl GitPanel {
         let id = format!("git-commit:{}", commit.sha);
         let row = ListItem::new(id.clone(), Indent::Tree(1))
             .height(PROJECT_ROW_HEIGHT)
-            .child(tagged(
-                format!("{id}:sha"),
-                Label::new(commit.sha.to_string())
-                    .code()
-                    .color(Color::Accent),
-            ))
+            .child(
+                tagged(
+                    format!("{id}:sha"),
+                    Label::new(commit.sha.to_string())
+                        .code()
+                        .color(Color::Accent),
+                )
+                .flex_none(),
+            )
             .child(Label::new(commit.subject.clone()).size(LabelSize::Small))
             .end(meta(commit_author(&commit.author, owner).to_owned()));
         div()
@@ -355,10 +359,13 @@ impl GitPanel {
         let mut row = ListItem::new(id.clone(), Indent::Tree(1))
             .height(PROJECT_ROW_HEIGHT)
             .leading(Icon::new(chevron).size(IconSize::Small).color(Color::Muted))
-            .child(tagged(
-                format!("{id}:name"),
-                Label::new(name.to_owned()).weight(FontWeight::MEDIUM),
-            ));
+            .child(
+                tagged(
+                    format!("{id}:name"),
+                    Label::new(name.to_owned()).weight(FontWeight::MEDIUM),
+                )
+                .flex_none(),
+            );
         if folded {
             row = row.child(meta(count.to_string()));
         }
@@ -374,7 +381,7 @@ impl GitPanel {
         let id = format!("git-worktree:{}", worktree.handle);
         let mut row = ListItem::new(id.clone(), Indent::Tree(2))
             .height(PROJECT_ROW_HEIGHT)
-            .child(tagged(format!("{id}:dot"), Dot::new(color)))
+            .child(tagged(format!("{id}:dot"), Dot::new(color)).flex_none())
             // A long head clips here so the agent's name stays in view.
             .child(
                 div()

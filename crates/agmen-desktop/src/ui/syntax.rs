@@ -62,6 +62,10 @@ const NAMES: &[&str] = &[
 /// draw role files (see the file's header).
 const XML_HIGHLIGHTS: &str = include_str!("queries/xml.scm");
 
+/// agmen's Markdown highlights, which color headings, list markers and a
+/// spec's status line as the mockup draws a spec (see the file's header).
+const MARKDOWN_HIGHLIGHTS: &str = include_str!("queries/markdown.scm");
+
 /// agmen's Rust patterns, appended to the stock query (see the file's header).
 const RUST_AGMEN: &str = include_str!("queries/rust-agmen.scm");
 
@@ -76,6 +80,17 @@ pub(crate) enum Language {
 }
 
 impl Language {
+    /// The name Zed's status bar gives the language.
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Rust => "Rust",
+            Self::Toml => "TOML",
+            Self::Xml => "XML",
+            Self::Markdown => "Markdown",
+            Self::Plain => "Plain Text",
+        }
+    }
+
     pub(crate) fn for_path(path: &Path) -> Self {
         match path.extension().and_then(|e| e.to_str()) {
             Some("rs") => Self::Rust,
@@ -106,7 +121,7 @@ impl Language {
             Self::Markdown => (
                 tree_sitter_md::LANGUAGE.into(),
                 "markdown",
-                tree_sitter_md::HIGHLIGHT_QUERY_BLOCK,
+                MARKDOWN_HIGHLIGHTS,
             ),
             Self::Plain => return None,
         };
@@ -123,6 +138,11 @@ impl Language {
         Some(config)
     }
 }
+
+/// agmen's own highlight name for text in the line number color, which no
+/// Zed syntax name gives: a Markdown table's "|" (console.py `build_d_spec`
+/// draws them in the gutter's color, nodes 9228 to 9232).
+pub(crate) const LINE_NUMBER: &str = "line_number";
 
 /// One highlighted byte range and its Zed syntax name.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -158,7 +178,7 @@ pub(crate) fn highlight(text: &str, language: Language) -> Vec<Highlight> {
         else {
             return Vec::new();
         };
-        HIGHLIGHTER.with_borrow_mut(|highlighter| {
+        let highlights = HIGHLIGHTER.with_borrow_mut(|highlighter| {
             run(highlighter, config, text).unwrap_or_else(|err| {
                 // Once per language: a grammar that fails tends to fail again.
                 LOGGED.with_borrow_mut(|logged| {
@@ -169,8 +189,52 @@ pub(crate) fn highlight(text: &str, language: Language) -> Vec<Highlight> {
                 });
                 Vec::new()
             })
-        })
+        });
+        if language == Language::Markdown {
+            with_table_pipes(text, highlights)
+        } else {
+            highlights
+        }
     })
+}
+
+/// Adds a [`LINE_NUMBER`] highlight for each "|" on a line that starts with
+/// one, where no other highlight (a code block) covers it and no backslash
+/// escapes it (GFM reads "\\|" as a literal pipe, "\\\\|" as a separator). The
+/// block grammar parses a table only when it has a delimiter row, and a
+/// spec's table may have none (console.py's `MD` does not), so the pipes
+/// are found by line, as console.py finds them.
+fn with_table_pipes(text: &str, mut highlights: Vec<Highlight>) -> Vec<Highlight> {
+    let covered = |at: usize, highlights: &[Highlight]| {
+        let ix = highlights.partition_point(|h| h.range.end <= at);
+        highlights.get(ix).is_some_and(|h| h.range.start <= at)
+    };
+    // An odd run of backslashes before a pipe escapes it.
+    let escaped = |line: &str, at: usize| {
+        line[..at].bytes().rev().take_while(|b| *b == b'\\').count() % 2 == 1
+    };
+    let mut pipes = Vec::new();
+    let mut start = 0;
+    for line in text.split_inclusive('\n') {
+        if line.trim_start_matches(' ').starts_with('|') {
+            pipes.extend(
+                line.match_indices('|')
+                    .filter(|(at, _)| !escaped(line, *at))
+                    .map(|(at, _)| start + at)
+                    .filter(|at| !covered(*at, &highlights))
+                    .map(|at| Highlight {
+                        range: at..at + 1,
+                        name: LINE_NUMBER,
+                    }),
+            );
+        }
+        start += line.len();
+    }
+    if !pipes.is_empty() {
+        highlights.extend(pipes);
+        highlights.sort_by_key(|h| h.range.start);
+    }
+    highlights
 }
 
 /// Highlights `text`, or the error that stopped it before any event.

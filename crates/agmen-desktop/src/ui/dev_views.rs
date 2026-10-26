@@ -196,9 +196,8 @@ pub(crate) struct GitDev {
     panel: Entity<GitPanel>,
     /// The worktree handle and path whose diff is open, if any.
     open: Option<(String, String)>,
-    tab: Option<Entity<DiffTab>>,
-    /// Shown while no diff is open.
-    empty: Entity<DiffView>,
+    /// The open change's diff tab, or an empty diff while none is open.
+    diff: AnyView,
 }
 
 impl GitDev {
@@ -221,22 +220,25 @@ impl GitDev {
             if let Some((_, path)) = &first {
                 panel.set_selected(path);
             }
-            if layout == GitDevLayout::ChangesFolded {
-                panel.toggle_section(GitSection::Changes, cx);
-            }
+            panel.set_folded(
+                GitSection::Changes,
+                layout == GitDevLayout::ChangesFolded,
+                cx,
+            );
         });
         cx.subscribe(&panel, |this, _, event: &GitPanelEvent, cx| {
             let GitPanelEvent::OpenDiff { worktree, path } = event;
             this.open(worktree, path, cx);
         })
         .detach();
-        let empty = cx.new(|_| DiffView::new(Vec::new(), Language::Plain));
+        let diff = cx
+            .new(|_| DiffView::new(Vec::new(), Language::Plain))
+            .into();
         let mut this = Self {
             worktrees,
             panel,
             open: None,
-            tab: None,
-            empty,
+            diff,
         };
         if let Some((worktree, path)) = first {
             this.open(&worktree, &path, cx);
@@ -245,11 +247,12 @@ impl GitDev {
     }
 
     fn open(&mut self, worktree: &str, path: &str, cx: &mut Context<Self>) {
-        self.tab = self
-            .worktrees
-            .iter()
-            .find(|w| w.handle == worktree)
-            .map(|w| cx.new(|cx| DiffTab::new(w, path, cx)));
+        let Some(wt) = self.worktrees.iter().find(|w| w.handle == worktree) else {
+            return;
+        };
+        // shortcut: Open file does nothing here; the dev window hosts no
+        // file tabs. The workspace opens the file (tab_views.rs).
+        self.diff = cx.new(|cx| DiffTab::new(wt, path, cx)).into();
         self.open = Some((worktree.to_owned(), path.to_owned()));
         cx.notify();
     }
@@ -259,10 +262,6 @@ impl Render for GitDev {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = &cx.global::<Appearance>().theme;
         let rule = super::rule_color(cx);
-        let center: AnyView = self
-            .tab
-            .clone()
-            .map_or_else(|| self.empty.clone().into(), Into::into);
         div()
             .size_full()
             .flex()
@@ -276,7 +275,13 @@ impl Render for GitDev {
                     .border_color(rule)
                     .child(self.panel.clone()),
             )
-            .child(div().flex_1().min_w_0().child(center))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .bg(theme.editor_background)
+                    .child(self.diff.clone()),
+            )
             .child(
                 div()
                     .w(RIGHT_DOCK_WIDTH)
@@ -366,6 +371,9 @@ mod tests {
         });
         redraw(cx);
         assert!(cx.debug_bounds("diff-hunk:0").is_some());
+        // V95: the same diff tab as the workspace's, crumb and button.
+        assert!(cx.debug_bounds("diff-tab").is_some());
+        assert!(cx.debug_bounds("diff-open-file").is_some());
         view.read_with(cx, |v, _| {
             assert_eq!(v.open.as_ref().map(|o| o.1.as_str()), Some("src/main.rs"));
         });

@@ -6,15 +6,7 @@ use gpui::{Entity, TestAppContext, VisualTestContext};
 use super::*;
 use crate::backend::{WorktreeInfo, chat_snapshot, fixture_id};
 use crate::ui::scope_chip::ScopeOption;
-use crate::ui::test_support::{PlainButtonHost, click, init, redraw};
-
-fn fx1() -> WorktreeInfo {
-    chat_snapshot()
-        .worktrees
-        .into_iter()
-        .find(|wt| wt.handle == "andy/fx1")
-        .unwrap()
-}
+use crate::ui::test_support::{PlainButtonHost, click, fx1_worktree, init, redraw};
 
 /// A second worktree, as Task 12's fixture will hold.
 fn rv2() -> WorktreeInfo {
@@ -89,7 +81,7 @@ const PROJECT: [(u8, &str); 15] = [
 
 #[gpui::test]
 fn tree_matches_fixture_order(cx: &mut TestAppContext) {
-    let (view, cx) = panel(cx, vec![fx1()]);
+    let (view, cx) = panel(cx, vec![fx1_worktree()]);
     assert_eq!(rows(&view, cx), owned(&PROJECT));
     assert!(cx.debug_bounds("tree:src/main.rs").is_some());
     assert!(cx.debug_bounds("tree:tests/it_main.rs").is_none());
@@ -100,7 +92,7 @@ fn tree_matches_fixture_order(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn opening_tests_shows_two_files(cx: &mut TestAppContext) {
-    let (view, cx) = panel(cx, vec![fx1()]);
+    let (view, cx) = panel(cx, vec![fx1_worktree()]);
     click(cx, "tree:tests");
     let after = rows(&view, cx);
     let tests = after.iter().position(|(_, n)| n == "tests").unwrap();
@@ -116,12 +108,12 @@ fn opening_tests_shows_two_files(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn change_marker_on_modified_files(cx: &mut TestAppContext) {
-    let (_, cx) = panel(cx, vec![fx1()]);
+    let (_, cx) = panel(cx, vec![fx1_worktree()]);
     assert!(cx.debug_bounds("tree-marker:src/main.rs").is_some());
     assert!(cx.debug_bounds("tree-marker:Cargo.lock").is_some());
     assert!(cx.debug_bounds("tree-marker:Cargo.toml").is_none());
     assert!(cx.debug_bounds("tree-marker:src").is_none());
-    let changes = fx1().changes;
+    let changes = fx1_worktree().changes;
     assert_eq!(
         change_marker(&changes, "src/main.rs"),
         Some(("M", Color::Warning))
@@ -131,7 +123,7 @@ fn change_marker_on_modified_files(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn clicking_a_file_opens_it(cx: &mut TestAppContext) {
-    let (view, cx) = panel(cx, vec![fx1()]);
+    let (view, cx) = panel(cx, vec![fx1_worktree()]);
     let seen = Rc::new(RefCell::new(Vec::new()));
     let sink = seen.clone();
     cx.update(|_, cx| {
@@ -157,7 +149,7 @@ fn clicking_a_file_opens_it(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn scope_chip_switches_worktree(cx: &mut TestAppContext) {
-    let (view, cx) = panel(cx, vec![fx1(), rv2()]);
+    let (view, cx) = panel(cx, vec![fx1_worktree(), rv2()]);
     assert!(cx.debug_bounds("scope-chip:1").is_none());
     click(cx, "scope-chip");
     assert!(cx.debug_bounds("scope-chip:1").is_some());
@@ -187,7 +179,7 @@ fn tree_puts_folders_first_and_bounds_depth() {
 #[gpui::test]
 fn file_view_marks_deletions(cx: &mut TestAppContext) {
     init(cx);
-    let wt = fx1();
+    let wt = fx1_worktree();
     let (view, cx) = cx.add_window_view(|_, cx| FileView::new(&wt, "src/main.rs", cx));
     redraw(cx);
     for selector in ["gutter:1:deleted", "gutter:3:deleted", "gutter:4:deleted"] {
@@ -205,7 +197,7 @@ fn file_view_marks_deletions(cx: &mut TestAppContext) {
 fn clicking_the_open_chip_closes_its_menu(cx: &mut TestAppContext) {
     // Review C186: the menu's mouse down out closes it, so the chip itself
     // must not reopen it on the same click.
-    let (_, cx) = panel(cx, vec![fx1(), rv2()]);
+    let (_, cx) = panel(cx, vec![fx1_worktree(), rv2()]);
     click(cx, "scope-chip");
     assert!(cx.debug_bounds("scope-chip:0").is_some());
     click(cx, "scope-chip");
@@ -216,7 +208,7 @@ fn clicking_the_open_chip_closes_its_menu(cx: &mut TestAppContext) {
 fn normalized_worktrees_keep_markers_and_texts() {
     // Reviews C189 and C199: the backend normalizes paths once, so the
     // tree, its markers and the file texts all use the same spelling.
-    let mut wt = fx1();
+    let mut wt = fx1_worktree();
     wt.changes = vec![FileChange {
         path: "src//main.rs".into(),
         kind: crate::backend::ChangeKind::Modified,
@@ -241,7 +233,7 @@ fn file_view_diff_button_is_plain(cx: &mut TestAppContext) {
     // V92: node 4663 and console.py 1725 draw Diff "plain": elevated
     // surface, padding 3/9, radius 5, 20 px tall.
     init(cx);
-    let wt = fx1();
+    let wt = fx1_worktree();
     let (_, cx) = cx.add_window_view(|_, cx| {
         let file = cx.new(|cx| FileView::new(&wt, "src/main.rs", cx));
         PlainButtonHost::new(file, "Diff")

@@ -9,7 +9,7 @@ use gpui::{
     ParentElement as _, SharedString, Styled as _, div,
 };
 
-use super::SettingsView;
+use super::{ICON_PREVIEW_NAMES, SettingsView};
 use crate::appearance::{
     AgmenSettings, Appearance, Density, InstalledTheme, PickerEntry, ThemeEntry, ThemeExtension,
     ThemeOrigin,
@@ -17,8 +17,8 @@ use crate::appearance::{
 use crate::icons::FileIcons;
 use crate::ui::components::{Button, Color, DetailRow, Label, LabelSize, Segmented, Stepper};
 use crate::ui::tokens::{
-    BORDER_WIDTH, ICON_PREVIEW, RADIUS_MD, SETTING_LABEL_WIDTH, SPACE_3, SPACE_6, SPACE_8,
-    SPACE_10, SPACE_12, SPACE_16,
+    AUTO_LINE_11, BORDER_WIDTH, ICON_PREVIEW, RADIUS_MD, SETTING_LABEL_WIDTH, SPACE_3, SPACE_6,
+    SPACE_8, SPACE_10, SPACE_12, SPACE_16,
 };
 
 /// A font family as the list shows it: Zed's dotted names by their fonts.
@@ -162,6 +162,7 @@ pub(super) fn setting(label: &'static str, hint: &'static str, cx: &App) -> Div 
         .border_color(super::super::rule_color(cx))
         .child(
             div()
+                .debug_selector(|| format!("setting-text:{label}"))
                 .w(SETTING_LABEL_WIDTH)
                 .flex_none()
                 .flex()
@@ -173,8 +174,10 @@ pub(super) fn setting(label: &'static str, hint: &'static str, cx: &App) -> Div 
                         .color(Color::TextMuted),
                 )
                 .child(
+                    // The mockup's 11 px hint advances 13 px a line (node 8095).
                     Label::new(hint)
                         .size(LabelSize::Small)
+                        .line_height(AUTO_LINE_11)
                         .color(Color::Placeholder)
                         .wrap(),
                 ),
@@ -221,22 +224,12 @@ pub(super) fn size_stepper(
     }))
 }
 
-/// The icon theme preview: the mockup's eight files and folders.
+/// The icon theme preview: [`ICON_PREVIEW_NAMES`].
 pub(super) fn icon_preview(cx: &mut App) -> impl IntoElement + use<> {
-    const NAMES: [(&str, bool); 8] = [
-        ("src", true),
-        ("tests", true),
-        ("main.rs", false),
-        ("Cargo.toml", false),
-        ("README.md", false),
-        ("Cargo.lock", false),
-        ("reviewer.xml", false),
-        ("release.yml", false),
-    ];
     let theme = &cx.global::<Appearance>().theme;
     let (bg, tint) = (theme.background, theme.icon_muted);
     let icons: Vec<AnyElement> = cx.try_global::<FileIcons>().map_or_else(Vec::new, |icons| {
-        NAMES
+        ICON_PREVIEW_NAMES
             .iter()
             .map(|(name, is_dir)| {
                 icons

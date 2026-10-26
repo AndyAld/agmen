@@ -309,11 +309,12 @@ fn chat_tab_badge_counts() {
         &me,
     );
     assert_eq!(state.badge(), 0);
-    // The badge agrees with the status bar's needs-you count on every screen.
+    // Only the needs-you screen has an alert that needs me. The status
+    // bar's pill reads this badge (Task 13), so they cannot disagree.
     for s in Screen::ALL {
         let snapshot = screen(s);
         let (state, _) = replay(&snapshot, AlertPrefs::default());
-        assert_eq!(state.badge(), snapshot.status.needs_you as usize, "{s:?}");
+        assert_eq!(state.badge(), usize::from(s == Screen::NeedsYou), "{s:?}");
     }
 }
 
@@ -391,12 +392,18 @@ fn alert_count_answered_is_one() {
 }
 
 #[test]
-fn alert_count_matches_status_summary() {
-    for s in Screen::ALL {
+fn alert_count_on_other_screens() {
+    // Task 13 dropped the stored count `alert_count_matches_status_summary`
+    // compared with; the status bar shows this count instead.
+    for (s, open) in [
+        (Screen::Plan, 0),
+        (Screen::Running, 0),
+        (Screen::SettingsFromChat, 1),
+    ] {
         let snapshot = screen(s);
         assert_eq!(
             alert_count(&snapshot.messages, &Me::from(&snapshot)),
-            snapshot.status.alerts,
+            open,
             "{s:?}"
         );
     }
@@ -509,4 +516,148 @@ fn cap_keeps_my_agents_owner_alerts() {
     let oldest_theirs: MessageId = format!("01JE{:022}", 0).parse().unwrap();
     assert!(state.needing_me().contains(&mine));
     assert!(!state.needing_me().contains(&oldest_theirs));
+}
+
+// Task 13 UI: Snooze 15 min dims the alert, and it needs me again when the
+// snooze ends unless someone cleared it meanwhile.
+
+#[test]
+fn snoozed_alert_wakes_needing_me_again() {
+    let me = andy();
+    let mut state = AlertState::default();
+    let budget = alert(ALERT_1, "andyfx10", "andy/fx1", "agent", &urgent("owner"));
+    state.on_message(&budget, &me);
+    let id: MessageId = ALERT_1.parse().unwrap();
+    assert!(state.snooze(&id));
+    assert_eq!(state.badge(), 0);
+    assert!(state.is_snoozed(&id));
+    assert!(state.wake(&id));
+    assert_eq!(state.needing_me(), std::slice::from_ref(&id));
+    assert!(!state.is_snoozed(&id));
+    assert!(!state.wake(&id), "only a snoozed alert wakes");
+    // It is still an owner alert from my agent: a coordinator's answer
+    // leaves it, mine clears it.
+    state.on_message(
+        &answer(ANSWER_1, ALERT_1, "adamcoor", "adam/coord", "coordinator"),
+        &me,
+    );
+    assert_eq!(state.badge(), 1);
+    state.on_message(
+        &answer(ANSWER_2, ALERT_1, me.id.as_str(), "andy", "human"),
+        &me,
+    );
+    assert_eq!(state.badge(), 0);
+}
+
+#[test]
+fn an_answer_ends_a_snooze() {
+    let me = andy();
+    let mut state = AlertState::default();
+    let ci = mentioning(
+        alert(
+            ALERT_1,
+            "adamcoor",
+            "adam/coord",
+            "agent",
+            &urgent("anyone"),
+        ),
+        &me.id,
+    );
+    state.on_message(&ci, &me);
+    let id: MessageId = ALERT_1.parse().unwrap();
+    assert!(state.snooze(&id));
+    state.on_message(&answer(ANSWER_1, ALERT_1, "adam0000", "adam", "human"), &me);
+    assert!(!state.is_snoozed(&id));
+    assert!(!state.wake(&id), "an answered alert does not come back");
+    assert_eq!(state.badge(), 0);
+}
+
+#[test]
+fn clear_ends_a_snooze() {
+    let me = andy();
+    let mut state = AlertState::default();
+    state.on_message(
+        &alert(ALERT_1, "andyfx10", "andy/fx1", "agent", &urgent("anyone")),
+        &me,
+    );
+    let id: MessageId = ALERT_1.parse().unwrap();
+    assert!(state.snooze(&id));
+    assert!(state.clear(&id), "clearing a snoozed alert ends it");
+    assert!(!state.wake(&id));
+}
+
+#[test]
+fn snoozed_alerts_are_bounded() {
+    let me = andy();
+    let mut state = AlertState::default();
+    let ids: Vec<MessageId> = (0..=MAX_NEEDING_ME)
+        .map(|i| format!("01JD{i:022}").parse().unwrap())
+        .collect();
+    for id in &ids {
+        let env = alert(
+            id.as_str(),
+            "andyt7k0",
+            "andy/t7k",
+            "agent",
+            &urgent("anyone"),
+        );
+        state.on_message(&env, &me);
+        state.snooze(id);
+    }
+    assert!(!state.is_snoozed(&ids[0]), "the oldest snooze drops first");
+    assert!(state.is_snoozed(&ids[MAX_NEEDING_ME]));
+}
+
+#[test]
+fn a_woken_alert_keeps_its_place_by_arrival() {
+    // Review: A (older) is snoozed, B arrives, A wakes; the banner still
+    // names A, the alert that has needed me longest.
+    let me = andy();
+    let mut state = AlertState::default();
+    for id in [ALERT_1, ALERT_2] {
+        state.on_message(
+            &alert(id, "andyfx10", "andy/fx1", "agent", &urgent("anyone")),
+            &me,
+        );
+        if id == ALERT_1 {
+            assert!(state.snooze(&ALERT_1.parse().unwrap()));
+        }
+    }
+    let (a, b): (MessageId, MessageId) = (ALERT_1.parse().unwrap(), ALERT_2.parse().unwrap());
+    assert!(state.wake(&a));
+    assert_eq!(state.needing_me(), [a.clone(), b.clone()]);
+    // A newer alert woken behind an older one goes after it.
+    assert!(state.snooze(&b));
+    state.on_message(
+        &alert(ALERT_3, "andyfx10", "andy/fx1", "agent", &urgent("anyone")),
+        &me,
+    );
+    assert!(state.wake(&b));
+    let c: MessageId = ALERT_3.parse().unwrap();
+    assert_eq!(state.needing_me(), [a, b, c]);
+}
+
+#[test]
+fn oldest_open_alert_is_the_first_one_still_open() {
+    // The status bar's alert count opens the chat at this alert (node 456).
+    let chat = screen(Screen::Chat);
+    let a1 = chat
+        .messages
+        .iter()
+        .find(|m| m.from_handle == "andy/a1" && matches!(m.client.payload, Payload::Alert { .. }));
+    assert_eq!(
+        oldest_open_alert(&chat.messages, &Me::from(&chat)),
+        a1.map(|m| &m.client.id)
+    );
+    // An answered alert is skipped: the answered screen's open one is a1's.
+    let answered = screen(Screen::NeedsYouAnswered);
+    let a1 = answered
+        .messages
+        .iter()
+        .find(|m| m.from_handle == "andy/a1" && matches!(m.client.payload, Payload::Alert { .. }));
+    assert_eq!(
+        oldest_open_alert(&answered.messages, &Me::from(&answered)),
+        a1.map(|m| &m.client.id)
+    );
+    assert_eq!(oldest_open_alert(&[], &andy()), None);
 }

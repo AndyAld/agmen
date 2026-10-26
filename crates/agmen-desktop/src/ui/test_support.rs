@@ -21,6 +21,26 @@ pub(crate) fn init(cx: &mut TestAppContext) {
     });
 }
 
+/// A test app that shapes and measures with CoreText, as the app does on
+/// macOS, where gpui's test text system gives every font one set of metrics.
+#[cfg(target_os = "macos")]
+pub(crate) fn core_text_app() -> TestAppContext {
+    TestAppContext::build_with_text_system(
+        gpui::TestDispatcher::new(0),
+        None,
+        std::sync::Arc::new(gpui_apple::AppleTextSystem::new()),
+    )
+}
+
+/// The chat fixture's andy/fx1 worktree.
+pub(crate) fn fx1_worktree() -> crate::backend::WorktreeInfo {
+    crate::backend::chat_snapshot()
+        .worktrees
+        .into_iter()
+        .find(|wt| wt.handle == "andy/fx1")
+        .expect("the chat fixture has andy/fx1")
+}
+
 /// A view that renders one component, wrapped in a box sized to it.
 struct Harness(Box<dyn Fn() -> AnyElement>);
 
@@ -65,6 +85,29 @@ pub(crate) fn redraw(cx: &mut VisualTestContext) {
         // The arena is cleared on the next frame.
         drop(window.draw(cx));
     });
+}
+
+/// Asserts the drawn breadcrumb splits its `parts` parts with the "›"
+/// glyph (V80: console.py's 12 px "›" in icon.muted, nodes 609 and 11630):
+/// one separator before each part after the first, each narrower than a
+/// 12 px icon, so not a chevron icon.
+pub(crate) fn assert_breadcrumb_glyphs(cx: &mut VisualTestContext, parts: usize) {
+    let selector =
+        |ix: usize| -> &'static str { Box::leak(format!("breadcrumb:sep:{ix}").into_boxed_str()) };
+    for ix in 1..parts {
+        let sel = selector(ix);
+        let sep = cx
+            .debug_bounds(sel)
+            .unwrap_or_else(|| panic!("no separator drawn as {sel}"));
+        assert!(
+            sep.size.width < crate::ui::tokens::ICON_SM,
+            "{sel} is {sep:?}, wider than a glyph"
+        );
+    }
+    assert!(
+        cx.debug_bounds(selector(parts)).is_none(),
+        "a separator too many"
+    );
 }
 
 /// Clicks the middle of the element with debug selector `selector`.
@@ -130,6 +173,125 @@ pub(crate) fn painted_at(cx: &mut VisualTestContext, selector: &'static str) -> 
     })
 }
 
+/// How far right anything inside the element `selector` can show: the
+/// right edge of the content mask on the quads the last frame painted
+/// starting inside its bounds. `debug_bounds` reports a shrunken box, not
+/// a child drawn past it; gpui clips that child's fill and its glyphs to
+/// this mask. The element must paint a quad (a fill or a border); `None`
+/// when it painted none.
+pub(crate) fn clip_right(
+    cx: &mut VisualTestContext,
+    selector: &'static str,
+) -> Option<gpui::Pixels> {
+    let bounds = cx
+        .debug_bounds(selector)
+        .unwrap_or_else(|| panic!("nothing is drawn with selector {selector}"));
+    cx.update(|window, _| {
+        let scale = window.scale_factor();
+        window
+            .painted_quads()
+            .into_iter()
+            .filter(|quad| {
+                let x = gpui::px(quad.bounds.origin.x.0 / scale);
+                let y = gpui::px(quad.bounds.origin.y.0 / scale);
+                x >= bounds.left() && x < bounds.right() && y >= bounds.top() && y < bounds.bottom()
+            })
+            .map(|quad| gpui::px(quad.content_mask.bounds.right().0 / scale))
+            .reduce(gpui::Pixels::max)
+    })
+}
+
+/// Asserts the open menu drawn as `frame` is the shared menu frame (node
+/// 1802): the theme's `border` around `elevated_surface`, and its first
+/// row `row` 4 px inside the 1 px border.
+pub(crate) fn assert_menu_frame(
+    cx: &mut VisualTestContext,
+    frame: &'static str,
+    row: &'static str,
+) {
+    let theme = cx.update(|_, cx| cx.global::<Appearance>().theme.clone());
+    let quads = painted_at(cx, frame);
+    // gpui paints the fill and the border as separate quads.
+    assert!(
+        quads
+            .iter()
+            .any(|quad| quad.border_color == theme.border && quad.border_widths.left.0 > 0.),
+        "{frame} has no border in the theme's border: {quads:?}"
+    );
+    assert!(
+        fills_at(cx, frame).contains(&theme.elevated_surface),
+        "{frame} is not filled with elevated_surface"
+    );
+    let (frame_at, row_at) = (
+        cx.debug_bounds(frame).expect("the frame"),
+        cx.debug_bounds(row).expect("the first row"),
+    );
+    let inset = super::tokens::BORDER_WIDTH + super::tokens::SPACE_4;
+    assert_eq!(row_at.left() - frame_at.left(), inset, "{row} in {frame}");
+}
+
+/// The least contrast a menu row's hover fill keeps against the menu's
+/// `elevated_surface`. The mockup's checked row, `element_selected` on the
+/// menu (#3c3836 on #282828), is 1.27:1; the old half-strength hover was
+/// 1.12:1 and hard to see.
+pub(crate) const MIN_MENU_HOVER_CONTRAST: f32 = 1.25;
+
+/// The WCAG contrast ratio between `fill` painted over `under` and `under`
+/// itself, blending `fill`'s alpha as the menu draws it.
+pub(crate) fn contrast_over(fill: gpui::Hsla, under: gpui::Hsla) -> f32 {
+    let (top, base) = (fill.to_rgb(), under.to_rgb());
+    let blend = |a: f32, b: f32| a * top.a + b * (1. - top.a);
+    let luminance = |r: f32, g: f32, b: f32| {
+        let linear = |c: f32| {
+            if c <= 0.040_45 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
+    };
+    let shown = luminance(
+        blend(top.r, base.r),
+        blend(top.g, base.g),
+        blend(top.b, base.b),
+    );
+    let menu = luminance(base.r, base.g, base.b);
+    (shown.max(menu) + 0.05) / (shown.min(menu) + 0.05)
+}
+
+/// Asserts a menu's rows draw `MenuRow`'s picker look under the pointer
+/// (V119): the `checked` row keeps the selected fill, and the `other` row
+/// takes a fill that shows on the menu's `elevated_surface` by at least
+/// [`MIN_MENU_HOVER_CONTRAST`].
+pub(crate) fn assert_menu_row_hover(
+    cx: &mut VisualTestContext,
+    checked: &'static str,
+    other: &'static str,
+) {
+    let theme = cx.update(|_, cx| cx.global::<Appearance>().theme.clone());
+    for row in [checked, other] {
+        let center = cx.debug_bounds(row).expect("the row").center();
+        cx.simulate_mouse_move(center, None, Modifiers::none());
+        redraw(cx);
+        let fills = fills_at(cx, row);
+        let [fill] = fills.as_slice() else {
+            panic!("{row} under the pointer paints {fills:?}");
+        };
+        if row == checked {
+            assert_eq!(
+                *fill, theme.element_selected,
+                "{row} keeps the selected fill"
+            );
+        }
+        let contrast = contrast_over(*fill, theme.elevated_surface);
+        assert!(
+            contrast >= MIN_MENU_HOVER_CONTRAST,
+            "{row} under the pointer is {contrast:.2}:1 on the menu"
+        );
+    }
+}
+
 /// The solid fills among [`painted_at`]'s quads.
 pub(crate) fn fills_at(cx: &mut VisualTestContext, selector: &'static str) -> Vec<gpui::Hsla> {
     painted_at(cx, selector)
@@ -137,4 +299,13 @@ pub(crate) fn fills_at(cx: &mut VisualTestContext, selector: &'static str) -> Ve
         .filter_map(|quad| quad.background.as_solid())
         .filter(|fill| fill.a > 0.)
         .collect()
+}
+
+/// Asserts `height` is `padding` plus whole lines of `line`.
+pub(crate) fn assert_lines(height: Pixels, padding: Pixels, line: Pixels) {
+    let lines = (height - padding) / line;
+    assert!(
+        lines >= 1. && (lines - lines.round()).abs() < 0.01,
+        "{height:?} is {padding:?} and {lines} lines of {line:?}"
+    );
 }
