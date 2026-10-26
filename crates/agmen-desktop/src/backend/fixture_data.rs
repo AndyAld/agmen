@@ -832,11 +832,14 @@ pub(super) fn role_files(roster: &[PersonGroup]) -> Vec<RoleFile> {
 /// in console.py; Task 11 adds its changes and Task 12 the commits and the
 /// other worktrees.
 pub(super) fn worktrees() -> Result<Vec<WorktreeInfo>, BackendError> {
+    use super::{ChangeKind, FileChange};
     let files = [
         ".github/workflows/release.yml",
         "Cargo.lock",
         "Cargo.toml",
         "README.md",
+        // Mockup fix 50: main.rs declares `mod app;`.
+        "src/app.rs",
         "src/cylinder.rs",
         "src/document.rs",
         "src/main.rs",
@@ -851,7 +854,21 @@ pub(super) fn worktrees() -> Result<Vec<WorktreeInfo>, BackendError> {
         handle: "andy/fx1".into(),
         branch: "fix/c015-main-conflict".into(),
         files: files.iter().map(|f| (*f).to_owned()).collect(),
-        changes: Vec::new(),
+        // Mockup fix 41: the fix's edit to main.rs is +2 -5.
+        changes: vec![
+            FileChange {
+                path: "src/main.rs".into(),
+                kind: ChangeKind::Modified,
+                added: 2,
+                removed: 5,
+            },
+            FileChange {
+                path: "Cargo.lock".into(),
+                kind: ChangeKind::Modified,
+                added: 1,
+                removed: 1,
+            },
+        ],
         commits: Vec::new(),
         state: WorktreeState::Pushed,
     }])

@@ -27,6 +27,7 @@ use crate::roles::{Edits, RoleKind, Tier};
 
 pub(crate) use fixture::FixtureBackend;
 pub(crate) use fixture_data::REVIEWER_XML;
+pub(crate) use worktree::{ChangeKind, FileChange};
 pub(crate) use worktree::{WorktreeInfo, WorktreeState};
 
 /// The identity id the fixture gives a mockup handle, for tests.
