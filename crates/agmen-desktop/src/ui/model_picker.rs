@@ -46,7 +46,9 @@ pub(crate) struct ModelMenu {
 }
 
 impl ModelMenu {
-    /// Starts on the listener's own agent and configured model (fix 31).
+    /// Starts on the person's standing model when the picker offers it,
+    /// and otherwise on the listener's own agent and configured model
+    /// (fix 31).
     #[must_use]
     pub(crate) fn new(snapshot: &Snapshot) -> Self {
         let listener = ModelChoice::configured(snapshot.listener.agent.clone());
@@ -60,7 +62,22 @@ impl ModelMenu {
             open: false,
         };
         menu.refresh(snapshot);
+        if let Some(standing) = snapshot.standing_model.as_ref().filter(|s| menu.offers(s)) {
+            menu.standing = ModelChoice {
+                scope: ChoiceScope::UntilChanged,
+                ..standing.clone()
+            };
+            menu.current = menu.standing.clone();
+        }
         menu
+    }
+
+    /// The listener's own settings, lasting for `scope`.
+    fn listener_with(&self, scope: ChoiceScope) -> ModelChoice {
+        ModelChoice {
+            scope,
+            ..self.listener.clone()
+        }
     }
 
     /// Takes a new snapshot's agents, models and listener. A choice the
@@ -104,16 +121,10 @@ impl ModelMenu {
         let stays =
             |menu: &Self, choice: &ModelChoice| !choice.same_model(&old) && menu.offers(choice);
         if !stays(self, &self.current) {
-            self.current = ModelChoice {
-                scope: self.current.scope,
-                ..self.listener.clone()
-            };
+            self.current = self.listener_with(self.current.scope);
         }
         if !stays(self, &self.standing) {
-            self.standing = ModelChoice {
-                scope: self.standing.scope,
-                ..self.listener.clone()
-            };
+            self.standing = self.listener_with(self.standing.scope);
         }
     }
 
@@ -170,10 +181,7 @@ impl ModelMenu {
     fn pick(&mut self, agent: &str, model: Option<&str>) {
         // The listener's configured model is its own settings, effort too.
         if model.is_none() && agent == self.listener.agent {
-            self.current = ModelChoice {
-                scope: self.current.scope,
-                ..self.listener.clone()
-            };
+            self.current = self.listener_with(self.current.scope);
             self.keep_if_sticky();
             return;
         }

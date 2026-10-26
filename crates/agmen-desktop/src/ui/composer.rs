@@ -8,16 +8,15 @@ use agmen_proto::{IdentityId, MessageId};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     Anchor, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, SharedString,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
     StatefulInteractiveElement as _, Styled as _, Subscription, Window, anchored, deferred, div,
-    point,
 };
 
 use super::components::{Chip, Color, IconButton, IconSize, Label, LabelSize};
 use super::model_picker::{ModelMenu, PickerEvent};
 use super::text_input::{TextInput, TextInputEvent};
 use super::tokens::{
-    BORDER_WIDTH, MODEL_PICKER_GAP, RADIUS_INPUT, SPACE_8, SPACE_10, SPACE_12, SPACE_14,
+    BORDER_WIDTH, MODEL_PICKER_OFFSET, RADIUS_INPUT, SPACE_8, SPACE_10, SPACE_12, SPACE_14,
     TEXT_DEFAULT,
 };
 use crate::appearance::Appearance;
@@ -363,7 +362,8 @@ impl Composer {
     }
 
     /// The model chip (node 380) and, while open, the picker above it. The
-    /// picker's bottom left corner sits a gap above the chip's top left.
+    /// picker's bottom left corner sits [`MODEL_PICKER_OFFSET`] from the
+    /// chip's top left.
     fn model_chip(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
         let models = self.models.as_ref()?;
         let open = models.is_open();
@@ -380,7 +380,7 @@ impl Composer {
             deferred(
                 anchored()
                     .anchor(Anchor::BottomLeft)
-                    .offset(point(Pixels::ZERO, -MODEL_PICKER_GAP))
+                    .offset(MODEL_PICKER_OFFSET)
                     .snap_to_window()
                     .child(
                         div()

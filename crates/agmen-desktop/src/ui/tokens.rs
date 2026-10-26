@@ -5,7 +5,7 @@
 //! Text sizes are rems, so they scale with the person's `ui_font_size`: the
 //! window's rem size is that font size, as in Zed.
 
-use gpui::{BoxShadow, Hsla, Pixels, Rems, px};
+use gpui::{BoxShadow, Hsla, Pixels, Point, Rems, px};
 
 use crate::appearance::Theme;
 
@@ -227,8 +227,13 @@ pub(crate) fn tint(color: Hsla, alpha: f32) -> Hsla {
 // Task 15: the model picker (node 3355), its rows and the message model tag.
 /// The picker's width.
 pub(crate) const MODEL_PICKER_WIDTH: Pixels = px(470.);
-/// The gap between the model chip's top and the picker above it.
-pub(crate) const MODEL_PICKER_GAP: Pixels = px(8.);
+/// Where the picker's bottom left corner sits from the model chip's top
+/// left (nodes 3355 and 3349): 43 px left and 31 px up, which leaves 22 px
+/// above the composer box's top border.
+pub(crate) const MODEL_PICKER_OFFSET: Point<Pixels> = Point {
+    x: px(-43.),
+    y: px(-31.),
+};
 /// A model row (node 3361): `MenuRow::picker`.
 pub(crate) const PICKER_ROW_HEIGHT: Pixels = px(26.);
 /// The model picker's and the toast's drop shadow (nodes 3355 and 6004):
