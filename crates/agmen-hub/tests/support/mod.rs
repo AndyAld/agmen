@@ -1,0 +1,466 @@
+//! Shared harness for the hub's integration tests.
+//!
+//! Each test runs inside [`run`], which creates a fresh database on the
+//! `AGMEN_IT_PG` server (ruling R26), starts a fake GitHub and an in-process
+//! hub on ephemeral ports, and drops the database afterwards, even when the
+//! test panics. Ids, tenants and projects are random per test, so tests run
+//! in parallel and kick only the client ids they created.
+
+#![allow(
+    dead_code,
+    reason = "each test binary uses a different subset of the helpers"
+)]
+
+pub mod fake_github;
+pub mod mqtt;
+
+use std::collections::HashMap;
+use std::future::Future;
+use std::hash::{BuildHasher, Hasher, RandomState};
+use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use agmen_hub::{Config, EmqxConfig, GithubConfig, Hub, Secret};
+use reqwest::StatusCode;
+use reqwest::redirect::Policy;
+use serde_json::{Value, json};
+use sqlx::postgres::PgPoolOptions;
+use sqlx::{AssertSqlSafe, PgPool};
+use tokio::task::JoinHandle;
+use url::Url;
+
+use fake_github::FakeGithub;
+
+pub const DEV_KEY_1: &str = "agmen-dev-1";
+pub const DEV_KEY_2: &str = "agmen-dev-2";
+
+pub fn env(name: &str) -> String {
+    std::env::var(name).unwrap_or_else(|_| {
+        panic!(
+            "{name} is unset: run deploy/dev/init.sh, start the dev stack, then \
+             `set -a; . deploy/dev/.secrets/dev.env; set +a`"
+        )
+    })
+}
+
+/// A fresh id in the hub's format: 16 of `[a-z0-9]`.
+pub fn new_id() -> String {
+    const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
+    let mut id = String::with_capacity(16);
+    // RandomState is seeded randomly per instance; two draws give 16 chars.
+    for _ in 0..2 {
+        let mut hasher = RandomState::new().build_hasher();
+        hasher.write_u128(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        );
+        let mut bits = hasher.finish();
+        for _ in 0..8 {
+            id.push(char::from(ALPHABET[usize::try_from(bits % 36).unwrap()]));
+            bits /= 36;
+        }
+    }
+    id
+}
+
+/// A database of its own on the `AGMEN_IT_PG` server.
+#[derive(Debug)]
+pub struct TestDb {
+    pub name: String,
+    pub url: String,
+    admin: PgPool,
+}
+
+impl TestDb {
+    async fn create() -> Self {
+        let base = env("AGMEN_IT_PG");
+        let admin = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&base)
+            .await
+            .expect("connect to AGMEN_IT_PG");
+        let name = format!("agmen_it_{}", new_id());
+        // The name is a fixed prefix plus [a-z0-9], so it is safe to splice
+        // into DDL, which takes no bind parameters.
+        sqlx::query(AssertSqlSafe(format!("CREATE DATABASE \"{name}\"")))
+            .execute(&admin)
+            .await
+            .expect("create test database");
+        let mut url = Url::parse(&base).expect("parse AGMEN_IT_PG");
+        url.set_path(&name);
+        Self {
+            name,
+            url: url.into(),
+            admin,
+        }
+    }
+
+    async fn drop_db(self) {
+        sqlx::query(AssertSqlSafe(format!(
+            "DROP DATABASE \"{}\" WITH (FORCE)",
+            self.name
+        )))
+        .execute(&self.admin)
+        .await
+        .expect("drop test database");
+        self.admin.close().await;
+    }
+}
+
+/// Everything a test gets from [`run`].
+#[derive(Debug)]
+pub struct Ctx {
+    pub db_url: String,
+    pub pool: PgPool,
+    pub github: FakeGithub,
+    pub hub: TestHub,
+    pub http: reqwest::Client,
+}
+
+/// Runs `body` against a fresh database, a fake GitHub and a hub signing
+/// with dev key 1, then drops the database. A panic in `body` fails the
+/// test after the cleanup.
+pub async fn run<F, Fut>(body: F)
+where
+    F: FnOnce(Ctx) -> Fut,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    let db = TestDb::create().await;
+    let github = FakeGithub::start().await;
+    let hub = TestHub::start(&db.url, &github, DEV_KEY_1, &[]).await;
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&db.url)
+        .await
+        .expect("connect to the test database");
+    let ctx = Ctx {
+        db_url: db.url.clone(),
+        pool: pool.clone(),
+        github,
+        hub,
+        http: http_client(),
+    };
+    let outcome = tokio::spawn(body(ctx)).await;
+    pool.close().await;
+    db.drop_db().await;
+    if let Err(err) = outcome {
+        std::panic::resume_unwind(err.into_panic());
+    }
+}
+
+/// A client that does not follow redirects, so tests can step through the
+/// OAuth hops themselves.
+pub fn http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .redirect(Policy::none())
+        .build()
+        .unwrap()
+}
+
+fn jwt_key(name: &str) -> PathBuf {
+    PathBuf::from(env("AGMEN_IT_JWT_DIR")).join(format!("{name}.pem"))
+}
+
+/// An in-process hub on an ephemeral port.
+#[derive(Debug)]
+pub struct TestHub {
+    pub base: Url,
+    server: JoinHandle<()>,
+}
+
+impl Drop for TestHub {
+    fn drop(&mut self) {
+        self.server.abort();
+    }
+}
+
+impl TestHub {
+    /// Starts a hub on `db_url` that signs broker tokens with `signing` and
+    /// also publishes `extra` in its JWKS.
+    pub async fn start(db_url: &str, github: &FakeGithub, signing: &str, extra: &[&str]) -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr: SocketAddr = listener.local_addr().unwrap();
+        let base = Url::parse(&format!("http://{addr}")).unwrap();
+        let config = Config {
+            database_url: Secret::new(db_url),
+            listen: addr,
+            public_url: base.clone(),
+            github: GithubConfig {
+                client_id: fake_github::CLIENT_ID.to_owned(),
+                client_secret: Secret::new(fake_github::client_secret()),
+                url: github.base.clone(),
+                api_url: github.base.clone(),
+            },
+            emqx: EmqxConfig {
+                api_url: Url::parse(&env("AGMEN_IT_EMQX_API")).unwrap(),
+                api_key: env("AGMEN_IT_EMQX_API_KEY"),
+                api_secret: Secret::new(env("AGMEN_IT_EMQX_API_SECRET")),
+            },
+            jwt_signing_key: jwt_key(signing),
+            jwt_extra_keys: extra.iter().map(|name| jwt_key(name)).collect(),
+        };
+        let hub = Hub::connect(&config).await.expect("start the hub");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, hub.router()).await.unwrap();
+        });
+        Self { base, server }
+    }
+
+    pub fn url(&self, path: &str) -> Url {
+        self.base.join(path).unwrap()
+    }
+}
+
+/// A tenant and project, made directly in the database (no API makes them
+/// in the MVP).
+#[derive(Debug, Clone)]
+pub struct Project {
+    pub tenant: String,
+    pub project: String,
+}
+
+pub async fn seed_project(pool: &PgPool) -> Project {
+    let (tenant, project) = (new_id(), new_id());
+    sqlx::query("INSERT INTO tenants (id, name) VALUES ($1, 'test tenant')")
+        .bind(&tenant)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO projects (id, tenant_id, name) VALUES ($1, $2, 'test project')")
+        .bind(&project)
+        .bind(&tenant)
+        .execute(pool)
+        .await
+        .unwrap();
+    Project { tenant, project }
+}
+
+/// A person who has signed in with GitHub account `sub` before.
+pub async fn seed_human(pool: &PgPool, sub: u64, handle: &str) -> String {
+    let id = new_id();
+    sqlx::query(
+        "INSERT INTO humans (id, provider, provider_sub, handle) VALUES ($1, 'github', $2, $3)",
+    )
+    .bind(&id)
+    .bind(sub.to_string())
+    .bind(handle)
+    .execute(pool)
+    .await
+    .unwrap();
+    id
+}
+
+pub async fn seed_member(pool: &PgPool, human: &str, project: &Project, role: &str) {
+    sqlx::query("INSERT INTO memberships (human_id, project_id, role) VALUES ($1, $2, $3)")
+        .bind(human)
+        .bind(&project.project)
+        .bind(role)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+/// What `POST /v1/auth/device` answered.
+#[derive(Debug)]
+pub struct DeviceStart {
+    pub device_code: String,
+    pub user_code: String,
+    pub verification_uri: String,
+    pub verification_uri_complete: String,
+    pub body: Value,
+}
+
+pub async fn start_device_login(ctx: &Ctx) -> DeviceStart {
+    let resp = ctx
+        .http
+        .post(ctx.hub.url("/v1/auth/device"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = resp.json().await.unwrap();
+    let field = |name: &str| body[name].as_str().unwrap().to_owned();
+    DeviceStart {
+        device_code: field("device_code"),
+        user_code: field("user_code"),
+        verification_uri: field("verification_uri"),
+        verification_uri_complete: field("verification_uri_complete"),
+        body: body.clone(),
+    }
+}
+
+/// Polls the token endpoint once with the device code.
+pub async fn poll_device_token(ctx: &Ctx, device_code: &str) -> (StatusCode, Value) {
+    let resp = ctx
+        .http
+        .post(ctx.hub.url("/v1/auth/token"))
+        .form(&[
+            ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+            ("device_code", device_code),
+        ])
+        .send()
+        .await
+        .unwrap();
+    (resp.status(), resp.json().await.unwrap())
+}
+
+fn location(resp: &reqwest::Response) -> Url {
+    let location = resp
+        .headers()
+        .get(reqwest::header::LOCATION)
+        .unwrap_or_else(|| panic!("{} has no Location header", resp.url()))
+        .to_str()
+        .unwrap();
+    resp.url().join(location).unwrap()
+}
+
+/// The browser half of the device flow: open the verification link, sign
+/// in at the fake GitHub as its current user, and approve on the confirm
+/// page. Returns the confirm page's HTML.
+pub async fn approve_in_browser(ctx: &Ctx, start: &DeviceStart) -> String {
+    let to_github = ctx
+        .http
+        .get(&start.verification_uri_complete)
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        to_github.status().is_redirection(),
+        "start answered {}",
+        to_github.status()
+    );
+    let back_to_hub = ctx.http.get(location(&to_github)).send().await.unwrap();
+    assert!(back_to_hub.status().is_redirection());
+    let confirm = ctx.http.get(location(&back_to_hub)).send().await.unwrap();
+    assert_eq!(confirm.status(), StatusCode::OK);
+    let page = confirm.text().await.unwrap();
+    let approve = hidden_input(&page, "approve");
+    let approved = ctx
+        .http
+        .post(ctx.hub.url("/v1/auth/device/approve"))
+        .form(&[("approve", approve.as_str())])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(approved.status(), StatusCode::OK);
+    page
+}
+
+/// The value of `<input type="hidden" name="{name}" value="...">`.
+pub fn hidden_input(page: &str, name: &str) -> String {
+    let marker = format!("name=\"{name}\" value=\"");
+    let start = page
+        .find(&marker)
+        .unwrap_or_else(|| panic!("no {name} input in {page}"))
+        + marker.len();
+    let len = page[start..].find('"').unwrap();
+    page[start..start + len].to_owned()
+}
+
+/// Signs in through the device flow as GitHub account `(sub, login)` and
+/// returns the human's access token.
+pub async fn login(ctx: &Ctx, sub: u64, login: &str) -> String {
+    ctx.github.sign_in_as(sub, login);
+    let start = start_device_login(ctx).await;
+    approve_in_browser(ctx, &start).await;
+    let (status, body) = poll_device_token(ctx, &start.device_code).await;
+    assert_eq!(status, StatusCode::OK, "token poll answered {body}");
+    body["access_token"].as_str().unwrap().to_owned()
+}
+
+/// `POST /v1/identities` with `token`.
+pub async fn mint(ctx: &Ctx, token: &str, body: &Value) -> (StatusCode, Value) {
+    let resp = ctx
+        .http
+        .post(ctx.hub.url("/v1/identities"))
+        .bearer_auth(token)
+        .json(body)
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status();
+    (status, resp.json().await.unwrap_or(Value::Null))
+}
+
+/// A minted identity: its id and its own hub token.
+#[derive(Debug, Clone)]
+pub struct Minted {
+    pub id: String,
+    pub token: String,
+    pub body: Value,
+}
+
+pub async fn mint_ok(ctx: &Ctx, human_token: &str, handle: &str, project: &Project) -> Minted {
+    let (status, body) = mint(
+        ctx,
+        human_token,
+        &json!({ "handle": handle, "project": project.project, "kind": "agent" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "mint answered {body}");
+    Minted {
+        id: body["id"].as_str().unwrap().to_owned(),
+        token: body["token"].as_str().unwrap().to_owned(),
+        body,
+    }
+}
+
+/// `GET /v1/identities/{id}/broker-token` on `hub` with `token`.
+pub async fn broker_token(
+    http: &reqwest::Client,
+    hub: &TestHub,
+    id: &str,
+    token: &str,
+) -> (StatusCode, Value) {
+    let resp = http
+        .get(hub.url(&format!("/v1/identities/{id}/broker-token")))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status();
+    (status, resp.json().await.unwrap_or(Value::Null))
+}
+
+/// A human with a project membership and a signed-in token.
+pub async fn member_with_token(
+    ctx: &Ctx,
+    project: &Project,
+    sub: u64,
+    handle: &str,
+    role: &str,
+) -> String {
+    let human = seed_human(&ctx.pool, sub, handle).await;
+    seed_member(&ctx.pool, &human, project, role).await;
+    login(ctx, sub, handle).await
+}
+
+/// Counts rows, for assertions on what the hub stored.
+pub async fn count(pool: &PgPool, sql: &'static str, bind: &str) -> i64 {
+    sqlx::query_scalar(sql)
+        .bind(bind)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// The JWKS the hub serves, by kid.
+pub async fn hub_jwks(http: &reqwest::Client, hub: &TestHub) -> HashMap<String, Value> {
+    let jwks: Value = http
+        .get(hub.url("/v1/jwks"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    jwks["keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|key| (key["kid"].as_str().unwrap().to_owned(), key.clone()))
+        .collect()
+}

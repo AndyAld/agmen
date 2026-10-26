@@ -18,6 +18,14 @@ allow = [
     "MPL-2.0",
 ]
 
+# webpki-root-certs is Mozilla's CA certificate list, which reqwest's rustls
+# feature pulls in through rustls-platform-verifier; the hub needs it to call
+# GitHub over HTTPS. Its data license is CDLA-Permissive-2.0, which places no
+# conditions on using the data, so it is allowed for this crate only.
+[[licenses.exceptions]]
+crate = "webpki-root-certs"
+allow = ["CDLA-Permissive-2.0"]
+
 # Our own crates are publish = false and UNLICENSED until a license is picked.
 [licenses.private]
 ignore = true
