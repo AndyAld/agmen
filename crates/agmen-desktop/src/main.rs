@@ -49,6 +49,10 @@ enum DevView {
     Project,
     /// The same with the tests folder open.
     ProjectTestsOpen,
+    /// The Git tab with src/main.rs's diff open.
+    Git,
+    /// The same with the Changes section folded.
+    GitCollapsed,
 }
 
 /// What the command line asked for.
@@ -92,7 +96,11 @@ impl Launch {
                 "roles" => Ok(Self::View(DevView::Roles)),
                 "project" => Ok(Self::View(DevView::Project)),
                 "project-tests-open" => Ok(Self::View(DevView::ProjectTestsOpen)),
-                _ => anyhow::bail!("views: code, agent, roles, project, project-tests-open"),
+                "git" => Ok(Self::View(DevView::Git)),
+                "git-collapsed" => Ok(Self::View(DevView::GitCollapsed)),
+                _ => anyhow::bail!(
+                    "views: code, agent, roles, project, project-tests-open, git, git-collapsed"
+                ),
             },
             [flag, name] if flag == "--screen" => name
                 .parse()
@@ -273,6 +281,19 @@ fn open_dev_view(
                 cx.new(|_| ui::DevFrame::new(title, view))
             })
         }
+        DevView::Git | DevView::GitCollapsed => {
+            let layout = if view == DevView::Git {
+                ui::GitDevLayout::Open
+            } else {
+                ui::GitDevLayout::ChangesFolded
+            };
+            let scopes = ui::ScopeOption::for_worktrees(&snapshot.worktrees, &snapshot.agents);
+            let (worktrees, branches) = (snapshot.worktrees, snapshot.git.branches);
+            cx.open_window(options, |_, cx| {
+                let view = cx.new(|cx| ui::GitDev::new(worktrees, branches, scopes, layout, cx));
+                cx.new(|_| ui::DevFrame::new(title, view))
+            })
+        }
     };
     Ok(window.context("opening the view window")?.into())
 }
@@ -376,6 +397,8 @@ mod tests {
             ("roles", DevView::Roles),
             ("project", DevView::Project),
             ("project-tests-open", DevView::ProjectTestsOpen),
+            ("git", DevView::Git),
+            ("git-collapsed", DevView::GitCollapsed),
         ] {
             assert_eq!(
                 Launch::parse(&args(&["--view", name])).unwrap(),

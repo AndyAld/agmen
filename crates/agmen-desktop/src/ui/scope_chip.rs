@@ -19,10 +19,10 @@ use crate::backend::{AgentInfo, WorktreeInfo};
 use crate::icons::UiIcon;
 
 /// The worktree's branch as the panels show it. The one place that reads
-/// `WorktreeInfo::branch`, so a change to how a worktree names its head
+/// `WorktreeInfo::head`, so a change to how a worktree names its head
 /// changes one line.
 pub(crate) fn branch_label(worktree: &WorktreeInfo) -> String {
-    worktree.branch.clone()
+    worktree.head.label()
 }
 
 /// The chip's text: the owner's agent name and the branch, such as

@@ -169,6 +169,9 @@ pub(crate) fn tint(color: Hsla, alpha: f32) -> Hsla {
     color.opacity(alpha)
 }
 
+/// How strongly a diff line's fill shows `created` or `deleted` (the
+/// mockup draws OK and ERR at alpha 0x22).
+pub(crate) const DIFF_TINT: f32 = 0.13;
 /// How strongly a tinted badge's fill shows its color.
 pub(crate) const BADGE_TINT: f32 = 0.18;
 /// An accent-tinted button's fill (console.py "primary", #72b9a926).
