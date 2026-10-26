@@ -35,6 +35,18 @@ enum ChipShape {
     Picker,
 }
 
+/// What a chip does in a space narrower than itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Narrow {
+    /// Keeps its width; what holds it cuts or overflows it.
+    Keep,
+    /// Shrinks and wraps its label.
+    Wrap,
+    /// Shrinks and cuts its label with an ellipsis, keeping its leading and
+    /// trailing elements whole.
+    Truncate,
+}
+
 #[derive(IntoElement)]
 pub(crate) struct Chip {
     label: SharedString,
@@ -49,7 +61,7 @@ pub(crate) struct Chip {
     flush_start: bool,
     flush_end: bool,
     underline: bool,
-    shrink: bool,
+    narrow: Narrow,
     full_width: bool,
     weight: Option<FontWeight>,
     line_height: Option<Pixels>,
@@ -81,7 +93,7 @@ impl Chip {
             flush_start: false,
             flush_end: false,
             underline: false,
-            shrink: false,
+            narrow: Narrow::Keep,
             full_width: false,
             weight: None,
             line_height: None,
@@ -212,7 +224,16 @@ impl Chip {
     /// so a long reference stays inside a narrow column.
     #[must_use]
     pub(crate) const fn shrink(mut self) -> Self {
-        self.shrink = true;
+        self.narrow = Narrow::Wrap;
+        self
+    }
+
+    /// Lets the chip shrink to the space it has and cut its label there
+    /// with an ellipsis, so a trailing button such as a close mark stays
+    /// whole (C260).
+    #[must_use]
+    pub(crate) const fn truncate(mut self) -> Self {
+        self.narrow = Narrow::Truncate;
         self
     }
 
@@ -246,7 +267,11 @@ impl RenderOnce for Chip {
         } else {
             label
         };
-        let label = if self.shrink { label.wrap() } else { label };
+        let label = match self.narrow {
+            Narrow::Keep => label,
+            Narrow::Wrap => label.wrap(),
+            Narrow::Truncate => label.truncate(),
+        };
         let label = match self.weight {
             Some(weight) => label.weight(weight),
             None => label,
@@ -281,10 +306,10 @@ impl RenderOnce for Chip {
             .when(!self.flush_end, |this| this.pr(px))
             .rounded(radius)
             .map(|this| {
-                if self.shrink {
-                    this.min_w_0()
-                } else {
+                if self.narrow == Narrow::Keep {
                     this.flex_none()
+                } else {
+                    this.min_w_0()
                 }
             })
             .when_some(fill, gpui::Styled::bg)

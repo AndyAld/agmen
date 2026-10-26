@@ -252,6 +252,10 @@ pub(crate) fn tint(color: Hsla, alpha: f32) -> Hsla {
     color.opacity(alpha)
 }
 
+/// The composer's input at its narrowest (C260): room for a few words and
+/// the caret, so in a narrow window the chips beside it give way first.
+pub(crate) const COMPOSER_INPUT_MIN_WIDTH: Pixels = px(80.);
+
 // Task 15: the model picker (node 3355), its rows and the message model tag.
 /// The picker's width.
 pub(crate) const MODEL_PICKER_WIDTH: Pixels = px(470.);

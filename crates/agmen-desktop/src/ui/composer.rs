@@ -16,8 +16,8 @@ use super::components::{Chip, Color, IconButton, IconSize, Label, LabelSize};
 use super::model_picker::{ModelMenu, PickerEvent};
 use super::text_input::{TextInput, TextInputEvent};
 use super::tokens::{
-    AUTO_LINE_13, BORDER_WIDTH, MODEL_PICKER_OFFSET, RADIUS_INPUT, SPACE_8, SPACE_10, SPACE_12,
-    SPACE_14, TEXT_DEFAULT,
+    AUTO_LINE_13, BORDER_WIDTH, COMPOSER_INPUT_MIN_WIDTH, MODEL_PICKER_OFFSET, RADIUS_INPUT,
+    SPACE_8, SPACE_10, SPACE_12, SPACE_14, TEXT_DEFAULT,
 };
 use crate::appearance::Appearance;
 use crate::backend::{BackendError, Draft, Snapshot};
@@ -446,9 +446,12 @@ impl Render for Composer {
                 .min_w_0()
                 .overflow_hidden()
                 .child(
+                    // C260: a narrow box cuts the handle, not the close
+                    // mark or the caret after it.
                     Chip::new(self.target(cx).handle.clone())
                         .compact()
                         .code()
+                        .truncate()
                         .color(Color::Accent)
                         .leading(
                             Label::new(if replying { "reply to" } else { "to" })
@@ -512,7 +515,9 @@ impl Render for Composer {
                         div()
                             .debug_selector(|| "composer:input".into())
                             .flex_1()
-                            .min_w_0()
+                            // C260: the chips give way first, so the
+                            // input keeps room for its text and caret.
+                            .min_w(COMPOSER_INPUT_MIN_WIDTH)
                             .flex()
                             .text_size(TEXT_DEFAULT)
                             .child(self.input.clone()),
