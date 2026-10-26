@@ -79,8 +79,8 @@ fn chip_text_takes_the_text_color() {
 
 #[gpui::test]
 fn the_open_menu_stops_at_its_height_cap(cx: &mut TestAppContext) {
-    // C256: with many worktrees the menu scrolls instead of growing past
-    // the shared menu's cap.
+    // C256: with many worktrees the menu stops at the shared menu's
+    // 320 px cap and scrolls.
     init(cx);
     let s = chat_snapshot();
     let one = ScopeOption::for_worktrees(&s.worktrees, &s.agents);
@@ -90,10 +90,21 @@ fn the_open_menu_stops_at_its_height_cap(cx: &mut TestAppContext) {
     redraw(cx);
     click(cx, "scope-chip");
     let menu = cx.debug_bounds("scope-chip:menu").unwrap();
-    assert!(
-        menu.size.height <= crate::ui::tokens::DROPDOWN_MENU_MAX_HEIGHT,
+    assert_eq!(
+        menu.size.height,
+        crate::ui::tokens::DROPDOWN_MENU_MAX_HEIGHT,
         "{menu:?}"
     );
+    // The rows past the cap are reached by scrolling the list.
+    let first = cx.debug_bounds("scope-chip:0").unwrap().top();
+    cx.simulate_event(gpui::ScrollEvent {
+        position: menu.center(),
+        delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.), gpui::px(-100.))),
+        ..Default::default()
+    });
+    redraw(cx);
+    let scrolled = cx.debug_bounds("scope-chip:0").unwrap().top();
+    assert_eq!(first - scrolled, gpui::px(100.));
 }
 
 #[gpui::test]
