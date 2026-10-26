@@ -1,7 +1,7 @@
 //! The built-in theme: the Zed theme "Gruvbox Material Dark Hard" that the
 //! mockups use (`docs/mockups/scripts/console.py`).
 
-use gpui::{Hsla, rgb};
+use gpui::{Hsla, rgb, rgba};
 
 use super::theme::Theme;
 
@@ -46,5 +46,35 @@ pub(crate) fn gruvbox_material_dark_hard() -> Theme {
             .into_iter()
             .map(hex)
             .collect(),
+        element: hex(surf),
+        selection: rgba(0x72b9_a930).into(),
+        accents: [accent, mag, err, org, grn, warn, ok]
+            .into_iter()
+            .map(hex)
+            .collect(),
+        // The syntax colors of Andy's "Gruvbox Material Dark Hard".
+        syntax: [
+            ("attribute", accent),
+            ("boolean", mag),
+            ("comment", dim),
+            ("comment.doc", faint),
+            ("constant", mag),
+            ("constructor", grn),
+            ("function", grn),
+            ("keyword", err),
+            ("number", org),
+            ("operator", org),
+            ("property", accent),
+            ("punctuation", text),
+            ("string", ok),
+            ("string.escape", org),
+            ("tag", accent),
+            ("title", err),
+            ("type", warn),
+            ("variable", text),
+        ]
+        .into_iter()
+        .map(|(key, color)| (key.to_owned(), hex(color)))
+        .collect(),
     }
 }

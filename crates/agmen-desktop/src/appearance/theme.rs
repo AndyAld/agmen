@@ -1,5 +1,6 @@
 //! Zed theme JSON (schema v0.2.0) to the colors agmen paints with.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -43,6 +44,14 @@ pub(crate) struct Theme {
     pub(crate) ansi: [Hsla; 16],
     /// The `players` cursor colors.
     pub(crate) players: Vec<Hsla>,
+    /// Fills for controls at rest (`element.background`).
+    pub(crate) element: Hsla,
+    /// Text selection (`players[0].selection`).
+    pub(crate) selection: Hsla,
+    /// Accent colors for things that need telling apart (`accents`).
+    pub(crate) accents: Vec<Hsla>,
+    /// Highlight colors by Zed's syntax names (`keyword`, `string`, ...).
+    pub(crate) syntax: BTreeMap<String, Hsla>,
 }
 
 impl Theme {
@@ -98,7 +107,32 @@ impl Theme {
             }
             _ => base.players.clone(),
         };
+        let mut syntax = base.syntax.clone();
+        if let Some(map) = style.get("syntax").and_then(Value::as_object) {
+            for (key, entry) in map {
+                if let Some(color) = entry.get("color").and_then(parse_color) {
+                    syntax.insert(key.clone(), color);
+                }
+            }
+        }
+        let accents = style
+            .get("accents")
+            .and_then(Value::as_array)
+            .map(|list| list.iter().filter_map(parse_color).collect::<Vec<_>>())
+            .filter(|list| !list.is_empty())
+            .unwrap_or_else(|| base.accents.clone());
+        let selection = style
+            .get("players")
+            .and_then(Value::as_array)
+            .and_then(|list| list.first())
+            .and_then(|p| p.get("selection"))
+            .and_then(parse_color)
+            .unwrap_or(base.selection);
         Self {
+            element: pick(&["element.background"], base.element),
+            selection,
+            accents,
+            syntax,
             background: pick(&["background"], base.background),
             surface: pick(&["surface.background"], base.surface),
             elevated_surface: pick(&["elevated_surface.background"], base.elevated_surface),
@@ -165,11 +199,30 @@ struct FamilyTheme {
 /// # Errors
 ///
 /// When no readable theme file defines `name`.
+#[cfg(test)]
 pub(crate) fn load_theme(
     zed_dir: &Path,
     extensions_dir: &Path,
     name: &str,
 ) -> Result<Theme, AppearanceError> {
+    load_theme_with(zed_dir, extensions_dir, name, &Map::new())
+}
+
+/// Loads the theme named `name`, as `load_theme` does, with Zed's `theme_overrides` merged over the theme's own
+/// style keys first. Marked's built-in palette answers to its own name.
+///
+/// # Errors
+///
+/// When no readable theme file defines `name`.
+pub(crate) fn load_theme_with(
+    zed_dir: &Path,
+    extensions_dir: &Path,
+    name: &str,
+    overrides: &Map<String, Value>,
+) -> Result<Theme, AppearanceError> {
+    if name == super::marked::MARKED_THEME {
+        return Ok(super::marked::with_wallpaper());
+    }
     let (files, mut unreadable) = theme_files(zed_dir, extensions_dir);
     for path in files {
         // A file that does not parse is skipped, and named if nothing matches.
@@ -181,10 +234,9 @@ pub(crate) fn load_theme(
             }
         };
         if let Some(theme) = family.themes.into_iter().find(|t| t.name == name) {
-            return Ok(Theme::from_style(
-                &theme.style,
-                gruvbox_material_dark_hard(),
-            ));
+            let mut style = theme.style;
+            style.extend(overrides.clone());
+            return Ok(Theme::from_style(&style, gruvbox_material_dark_hard()));
         }
     }
     if unreadable.is_empty() {
@@ -241,4 +293,15 @@ fn theme_files(zed_dir: &Path, extensions_dir: &Path) -> (Vec<PathBuf>, Vec<Skip
         }
     }
     (files, skipped)
+}
+
+/// How the window paints behind the theme: blurred when the theme's
+/// background lets the desktop show through (Marked's palette), as GPUI's own
+/// window appearance does it, so no platform code of ours is needed.
+pub(crate) fn window_background(theme: &Theme) -> gpui::WindowBackgroundAppearance {
+    if theme.background.a < 1.0 {
+        gpui::WindowBackgroundAppearance::Blurred
+    } else {
+        gpui::WindowBackgroundAppearance::Opaque
+    }
 }

@@ -164,7 +164,9 @@ fn watch_instance(listener: instance::Listener, cx: &mut App) {
 
 fn window_options(cx: &App) -> WindowOptions {
     let bounds = Bounds::centered(None, size(px(1440.), px(900.)), cx);
+    let background = appearance::window_background(&cx.global::<Appearance>().theme);
     WindowOptions {
+        window_background: background,
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         titlebar: Some(TitlebarOptions {
             title: Some("agmen".into()),

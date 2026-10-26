@@ -52,6 +52,25 @@ pub(crate) struct ZedSettings {
     pub(crate) theme: Option<ThemeChoice>,
     pub(crate) icon_theme: Option<ThemeChoice>,
     pub(crate) fonts: FontPrefs,
+    /// `experimental.theme_overrides`: style keys over whatever theme is on.
+    pub(crate) global_overrides: serde_json::Map<String, serde_json::Value>,
+    /// `theme_overrides`: style keys per theme name.
+    pub(crate) theme_overrides: serde_json::Map<String, serde_json::Value>,
+}
+
+impl ZedSettings {
+    /// The overrides for `theme`: the global ones, then that theme's own.
+    pub(crate) fn overrides_for(&self, theme: &str) -> serde_json::Map<String, serde_json::Value> {
+        let mut out = self.global_overrides.clone();
+        if let Some(own) = self
+            .theme_overrides
+            .get(theme)
+            .and_then(serde_json::Value::as_object)
+        {
+            out.extend(own.clone());
+        }
+        out
+    }
 }
 
 #[derive(Deserialize)]
@@ -63,6 +82,10 @@ struct Raw {
     buffer_font_family: Option<String>,
     buffer_font_size: Option<f32>,
     terminal: Option<RawTerminal>,
+    #[serde(rename = "experimental.theme_overrides", default)]
+    global_overrides: serde_json::Map<String, serde_json::Value>,
+    #[serde(default)]
+    theme_overrides: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -83,6 +106,8 @@ pub(crate) fn read_zed_settings(dir: &Path) -> Result<ZedSettings, AppearanceErr
     Ok(ZedSettings {
         theme: raw.theme,
         icon_theme: raw.icon_theme,
+        global_overrides: raw.global_overrides,
+        theme_overrides: raw.theme_overrides,
         fonts: FontPrefs {
             ui_family: raw.ui_font_family,
             ui_size: raw.ui_font_size,

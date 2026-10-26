@@ -30,15 +30,35 @@
         "deleted": "#ed675f",
         "terminal.ansi.red": "#ed675f",
         "players": [
-          { "cursor": "#72b9a9", "background": "#72b9a920", "selection": "#72b9a930" },
-          { "cursor": "#da7f98", "background": "#da7f9820", "selection": "#da7f9830" }
-        ]
+          {
+            "cursor": "#72b9a9",
+            "background": "#72b9a920",
+            "selection": "#72b9a930"
+          },
+          {
+            "cursor": "#da7f98",
+            "background": "#da7f9820",
+            "selection": "#da7f9830"
+          }
+        ],
+        "syntax": {
+          "keyword": {
+            "color": "#ed675f",
+            "font_style": "italic"
+          },
+          "string": {
+            "color": "#afbf5c"
+          }
+        }
       }
     },
     {
       "name": "Gruvbox Material Light Hard",
       "appearance": "light",
-      "style": { "background": "#f9f5d7ff", "text": "#654735" }
+      "style": {
+        "background": "#f9f5d7ff",
+        "text": "#654735"
+      }
     }
   ]
 }

@@ -445,3 +445,54 @@ fn owned_keys_match_the_struct() {
         "a new AgmenSettings field must be added to OWNED_KEYS"
     );
 }
+
+#[test]
+fn theme_overrides_replace_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let zed = dir.path().join("zed");
+    fs::create_dir_all(zed.join("themes")).unwrap();
+    fs::copy(
+        zed_dir().join("themes/gruvbox-sample.json"),
+        zed.join("themes/g.json"),
+    )
+    .unwrap();
+    fs::write(
+        zed.join("settings.json"),
+        r##"{
+            "theme": "Gruvbox Material Dark Hard",
+            "experimental.theme_overrides": { "border": "#111111" },
+            "theme_overrides": {
+                "Gruvbox Material Dark Hard": { "background": "#222222" },
+                "Some Other Theme": { "background": "#333333" }
+            }
+        }"##,
+    )
+    .unwrap();
+    let a = resolve_paths(dir.path(), &ext_dir(), SystemMode::Dark);
+    assert!(
+        close(a.theme.background, hex("#222222")),
+        "the per-theme override wins"
+    );
+    assert!(
+        close(a.theme.border, hex("#111111")),
+        "the global override applies"
+    );
+    assert!(
+        close(a.theme.text, hex("#d8bf94")),
+        "other keys stay the theme's"
+    );
+}
+
+#[test]
+fn zed_syntax_map_is_read() {
+    let t = load_theme(&zed_dir(), &ext_dir(), "Gruvbox Material Dark Hard").unwrap();
+    assert!(close(t.syntax["keyword"], hex("#ed675f")));
+    let fallback = gruvbox_material_dark_hard();
+    assert!(close(fallback.syntax["string"], hex("#afbf5c")));
+}
+
+#[test]
+fn marked_theme_is_built_in() {
+    let t = load_theme(&zed_dir(), &ext_dir(), super::marked::MARKED_THEME).unwrap();
+    assert!(close(t.text_accent, hex("#68acd4")));
+}

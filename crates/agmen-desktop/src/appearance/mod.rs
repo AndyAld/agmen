@@ -1,6 +1,7 @@
 //! Theme, fonts and icon theme: read from Zed, or from agmen settings.
 
 mod fallback;
+mod marked;
 mod settings;
 mod theme;
 mod zed;
@@ -11,7 +12,7 @@ use gpui::{Global, Pixels, SharedString, px};
 use serde::{Deserialize, Serialize};
 
 pub(crate) use settings::{AgmenSettings, Density, IconThemeChoice};
-pub(crate) use theme::Theme;
+pub(crate) use theme::{Theme, window_background};
 pub(crate) use zed::read_jsonc;
 
 /// What can go wrong reading appearance files.
@@ -240,7 +241,14 @@ pub(crate) fn resolve_paths(config: &Path, extensions: &Path, system: SystemMode
     };
 
     let (theme, source) = match theme_name {
-        Some(name) => match theme::load_theme(&zed_dir, extensions, &name) {
+        Some(name) => match theme::load_theme_with(
+            &zed_dir,
+            extensions,
+            &name,
+            &zed.as_ref()
+                .map(|z| z.overrides_for(&name))
+                .unwrap_or_default(),
+        ) {
             Ok(theme) => (theme, wanted),
             Err(err) => {
                 warnings.push(format!("{err}; using the built-in Gruvbox theme"));
