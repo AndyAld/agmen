@@ -87,11 +87,12 @@ pub(crate) fn route(snapshot: &Snapshot, target: &RefTarget, from: &IdentityId) 
         RefTarget::File { path, lines } => {
             let has = |wt: &&WorktreeInfo| wt.files.contains(path);
             let mut holding = snapshot.worktrees.iter().filter(has);
-            // shortcut: a sender with no worktree here (a person, another
-            // machine's agent) opens the reader's own copy, which may be at
-            // another version; spec 9.3 opens the file at the commit the
-            // message names, which needs the live backend (ADR-0011) to read
-            // a file at a commit.
+            // shortcut: a sender with no worktree here that holds the path
+            // (a person, another machine's agent, or a local agent whose
+            // worktree lacks it) opens the reader's own copy, which may be at
+            // another version, and the chip's card names that copy (C315);
+            // spec 9.3 opens the file at the commit the message names, which
+            // needs the live backend (ADR-0011) to read a file at a commit.
             holding
                 .clone()
                 .find(|wt| wt.owner == *from)
@@ -185,10 +186,20 @@ impl Workspace {
                 });
                 // The right dock shows what the tab is about, as frames 479
                 // (an agent) and 11514 (a role) do.
+                // The left dock shows its row selected, on the tab that
+                // lists it (C319).
                 match &item {
-                    TabItem::Agent(id) => self.select_agent(id, cx),
+                    TabItem::Agent(id) => {
+                        self.show_left_tab(LeftDockTab::Agents, cx);
+                        self.select_agent(id, cx);
+                    }
                     // route found the role, so it has a panel to show.
                     TabItem::RoleFile(name) => {
+                        self.show_left_tab(LeftDockTab::Roles, cx);
+                        self.left.roles.update(cx, |panel, cx| {
+                            panel.set_selected(name);
+                            cx.notify();
+                        });
                         self.show_role(name, cx);
                     }
                     _ => {}

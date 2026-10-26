@@ -284,14 +284,18 @@ impl GitPanel {
             .is_some_and(|w| w.commits.iter().any(|c| c.sha == *sha));
         self.selected_commit = held.then(|| sha.clone());
         if held {
+            // One selected row at a time, as frame 5057 (C320).
+            self.selected = None;
             self.set_folded(GitSection::Commits, false, cx);
         }
         cx.notify();
     }
 
-    /// Highlights `path`'s change row without telling the workspace.
+    /// Highlights `path`'s change row without telling the workspace, and
+    /// clears a selected commit: one selected row at a time (C320).
     pub(crate) fn set_selected(&mut self, path: &str) {
         self.selected = Some(path.to_owned());
+        self.selected_commit = None;
     }
 
     fn change_clicked(&mut self, path: &str, cx: &mut Context<Self>) {

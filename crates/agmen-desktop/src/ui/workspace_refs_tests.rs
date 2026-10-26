@@ -145,6 +145,13 @@ fn cases() -> Vec<(RefTarget, IdentityId, RefRoute)> {
             a1.clone(),
             file_tab("andy/fx1", "src/main.rs", None),
         ),
+        // C313: a reversed range (src/main.rs:8-2) highlights its first
+        // line rather than nothing.
+        (
+            file("src/main.rs", Some((8, 2))),
+            t7k.clone(),
+            file_tab("andy/t7k", "src/main.rs", Some(8..=8)),
+        ),
         (file("src/nowhere.rs", None), t7k, RefRoute::HoverOnly),
         (
             RefTarget::Item("C015".into()),
@@ -180,6 +187,13 @@ fn git_cases(a1: &IdentityId, rv2: &IdentityId) -> Vec<(RefTarget, IdentityId, R
         (
             branch("fix/c015-main-conflict", Some("9e2a71c")),
             a1.clone(),
+            git("andy/fx1", Some("9e2a71c")),
+        ),
+        // C313: fx1 is on the branch and rv2 sent it; both hold 9e2a71c,
+        // and the branch outranks the sender.
+        (
+            branch("fix/c015-main-conflict", Some("9e2a71c")),
+            rv2.clone(),
             git("andy/fx1", Some("9e2a71c")),
         ),
         // A branch no local worktree has checked out.
@@ -347,15 +361,21 @@ fn open_ref_shows_each_route(cx: &mut TestAppContext) {
         match expected {
             RefRoute::Tab { item, .. } => {
                 assert_eq!(center(cx).0, Some(item.clone()), "{target:?}");
-                workspace.read_with(cx, |w, _| match &item {
+                workspace.read_with(cx, |w, cx| match &item {
                     // C291: the right dock shows the agent, as frame 479.
+                    // C319: on the Agents tab, so its row's highlight shows.
                     TabItem::Agent(id) => {
                         assert_eq!(w.shown_agent().map(|a| &a.id), Some(id), "{target:?}");
+                        assert_eq!(w.shown_left_tab(), Some(LeftDockTab::Agents));
                     }
-                    // C290: and the role's panel, as frame 11514.
+                    // C290: and the role's panel, as frame 11514, with the
+                    // Roles tab showing its row selected (C319).
                     TabItem::RoleFile(name) => {
                         let shown = w.left.shown_role.as_ref().map(|r| r.name.as_str());
                         assert_eq!(shown, Some(name.as_str()), "{target:?}");
+                        assert_eq!(w.shown_left_tab(), Some(LeftDockTab::Roles));
+                        let row = w.left.roles.read(cx).selected().map(str::to_owned);
+                        assert_eq!(row.as_deref(), Some(name.as_str()), "{target:?}");
                     }
                     _ => {}
                 });

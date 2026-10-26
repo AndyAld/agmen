@@ -179,6 +179,8 @@ impl RenderOnce for RefChip {
         let selector = self.id.to_string();
         let target = self.target;
         let hover_target = target.clone();
+        // A chip that names its sender builds the card for it (C315).
+        let sender = self.on_ref.as_ref().map(|(from, _)| from.clone());
         // min_w_0 lets a reference wider than the column shrink to it.
         div()
             .id(self.id)
@@ -198,7 +200,10 @@ impl RenderOnce for RefChip {
             })
             .when_some(self.context, |this, context| {
                 this.hoverable_tooltip(move |_window, cx| {
-                    let card = context.card(&hover_target);
+                    let card = sender.as_ref().map_or_else(
+                        || context.card(&hover_target),
+                        |from| context.card_from(&hover_target, from),
+                    );
                     cx.new(|_| RefCardView { card }).into()
                 })
             })

@@ -294,3 +294,21 @@ fn assigned_team_agents_are_chips_in_their_role_color() {
         Color::Role("tester".into())
     );
 }
+
+#[test]
+fn fallback_file_card_says_where_it_opens() {
+    // C315 (ruling): a file ref from a sender without the path opens the
+    // reader's own copy, and its card says so; the sender's own copy needs
+    // no note.
+    let c = ctx();
+    let target = file("src/main.rs", Some((2, 8)));
+    let from_sean = c.card_from(&target, &crate::backend::fixture_id("sean"));
+    assert_eq!(row(&from_sean, "Opens in"), Some("andy/fx1"));
+    let from_t7k = c.card_from(&target, &crate::backend::fixture_id("andy/t7k"));
+    assert_eq!(row(&from_t7k, "Opens in"), None);
+    assert_eq!(from_t7k, c.card(&target));
+    // Only a file falls back.
+    let commit = RefTarget::Commit("9e2a71c".parse().unwrap());
+    let card = c.card_from(&commit, &crate::backend::fixture_id("sean"));
+    assert_eq!(row(&card, "Opens in"), None);
+}
