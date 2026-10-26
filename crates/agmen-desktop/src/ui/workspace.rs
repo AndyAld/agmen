@@ -25,9 +25,10 @@ mod dock_wiring;
 use dock_wiring::LeftDockState;
 #[path = "workspace_screen.rs"]
 mod screen_state;
-// Task 13: the toast over the window.
+// Task 13: the toast over the window and the alert count's action.
 #[path = "workspace_alerts.rs"]
 mod alert_wiring;
+pub(crate) use alert_wiring::OpenAlerts;
 
 actions!(workspace, [ToggleLeftDock, ToggleRightDock, Quit]);
 
@@ -248,7 +249,7 @@ impl Render for Workspace {
             );
         }
 
-        Self::dock_actions(div(), cx)
+        Self::alert_actions(Self::dock_actions(div(), cx), cx)
             .track_focus(&self.focus_handle)
             .key_context("Workspace")
             .on_action(cx.listener(|this, _: &ToggleLeftDock, _, cx| {

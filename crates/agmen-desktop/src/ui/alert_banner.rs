@@ -2,7 +2,8 @@
 //! alert that needs me and "Jump to it" (frame "Desktop · needs you", node
 //! 5704), or "Answered" once the last one is answered (frame "Desktop ·
 //! needs you (answered)", node 6257). Each draws its rule inside, so it is
-//! 37 or 35 px tall as drawn (V61).
+//! 37 or 35 px tall as drawn (V61). A click on the Answered banner
+//! dismisses it; the mockup draws no close mark there.
 
 use std::rc::Rc;
 
@@ -10,7 +11,7 @@ use agmen_proto::MessageId;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce,
-    Styled as _, Window, div,
+    StatefulInteractiveElement as _, Styled as _, Window, div,
 };
 
 use super::components::{
@@ -30,7 +31,10 @@ use crate::icons::UiIcon;
 pub(crate) struct AlertBanner {
     banner: Banner,
     on_jump: Option<ChangeHandler<MessageId>>,
+    on_dismiss: Option<Rc<DismissHandler>>,
 }
+
+type DismissHandler = dyn Fn(&mut Window, &mut App);
 
 impl std::fmt::Debug for AlertBanner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -46,7 +50,15 @@ impl AlertBanner {
         Self {
             banner,
             on_jump: None,
+            on_dismiss: None,
         }
+    }
+
+    /// Called when the Answered banner is clicked.
+    #[must_use]
+    pub(crate) fn on_dismiss(mut self, handler: impl Fn(&mut Window, &mut App) + 'static) -> Self {
+        self.on_dismiss = Some(Rc::new(handler));
+        self
     }
 
     /// Called with the alert when "Jump to it" is clicked.
@@ -105,7 +117,7 @@ impl RenderOnce for AlertBanner {
                             div()
                                 .debug_selector(|| "banner:chime".into())
                                 .flex_none()
-                                .child(Chip::new("chime played").compact().leading(
+                                .child(Chip::new("chime played").note().leading(
                                     Label::new("♪").size(LabelSize::Small).color(Color::Accent),
                                 )),
                         )
@@ -119,12 +131,19 @@ impl RenderOnce for AlertBanner {
                                 })
                             }),
                     )
+                    .into_any_element()
             }
             Banner::Answered { message } => base
+                .id("banner")
                 .h(ANSWERED_BANNER_HEIGHT)
+                .when_some(self.on_dismiss, |this, handler| {
+                    this.cursor_pointer()
+                        .on_click(move |_, window, cx| handler(window, cx))
+                })
                 .child(GlyphDisc::icon(UiIcon::Check, Color::Success))
                 .child(title("Answered"))
-                .child(Label::new(message).truncate()),
+                .child(Label::new(message).truncate())
+                .into_any_element(),
         }
     }
 }
@@ -192,6 +211,14 @@ mod tests {
         let chimed = draw(cx, banner_in_column(needs_you(true)));
         let chip = chimed.debug_bounds("banner:chime").unwrap();
         let jump = chimed.debug_bounds("banner:jump").unwrap();
+        // Node 5709: 1 px above and below the small label, so 15 px tall.
+        let mut text = TestAppContext::single();
+        let text = crate::ui::test_support::rendered_size(&mut text, || {
+            Label::new("chime played")
+                .size(LabelSize::Small)
+                .into_any_element()
+        });
+        assert_eq!(chip.size.height, text.height + px(2.));
         assert!(
             chip.right() <= jump.left(),
             "the chip sits before the button"
@@ -199,6 +226,23 @@ mod tests {
         let mut quiet = TestAppContext::single();
         let quiet = draw(&mut quiet, banner_in_column(needs_you(false)));
         assert!(quiet.debug_bounds("banner:chime").is_none());
+    }
+
+    #[gpui::test]
+    fn clicking_the_answered_banner_reports_a_dismiss(cx: &mut TestAppContext) {
+        let heard = Rc::new(std::cell::Cell::new(0));
+        let sink = heard.clone();
+        let cx = draw(cx, move || {
+            let sink = sink.clone();
+            div()
+                .w(px(828.))
+                .child(
+                    AlertBanner::new(answered()).on_dismiss(move |_, _| sink.set(sink.get() + 1)),
+                )
+                .into_any_element()
+        });
+        click(cx, "banner");
+        assert_eq!(heard.get(), 1);
     }
 
     #[gpui::test]

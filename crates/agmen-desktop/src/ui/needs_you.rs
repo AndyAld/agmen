@@ -3,10 +3,13 @@
 //! notification, and the text each one says.
 //!
 //! History loaded at launch only updates the state: it never chimes,
-//! notifies or toasts. A message that arrives while the chat is open signals
-//! as `alerts.rs` decides: an urgent alert that needs me chimes, notifies
-//! and toasts; one hushed by quiet hours only highlights; a normal alert
-//! only notifies.
+//! notifies, toasts or shows the Answered banner. A message that arrives
+//! while the chat is open signals as `alerts.rs` decides: an urgent alert
+//! that needs me chimes, notifies and toasts; one hushed by quiet hours only
+//! highlights; a normal alert only notifies. "chime played" shows only once
+//! the alarm says the chime sounds. A live answer to the last alert that
+//! needed me shows the Answered banner for [`ANSWERED_FOR`] or until it is
+//! clicked.
 //!
 //! The banner, toast and notification text is the alert's body with its
 //! leading mentions dropped, as plain text; the mockup's copy is an edited
@@ -16,17 +19,20 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 use std::time::Duration;
 
-use agmen_proto::{IdentityKind, MessageId, Needs, Payload, StampedEnvelope};
+use agmen_proto::{IdentityKind, MessageId, Needs, Payload, StampedEnvelope, Urgency};
 use gpui::{App, Global};
 use jiff::Timestamp;
 
 use crate::alerts::{AlertEffect, AlertState, MAX_NEEDING_ME, Me};
-use crate::chime::Chime;
+use crate::chime::{Chime, Played};
 
 /// How long Snooze 15 min keeps an alert quiet.
 pub(crate) const SNOOZE_FOR: Duration = Duration::from_secs(15 * 60);
 /// How long the toast stays unless it is clicked or its alert clears.
 pub(crate) const TOAST_FOR: Duration = Duration::from_secs(10);
+/// How long the Answered banner stays unless it is clicked or another
+/// alert takes the banner.
+pub(crate) const ANSWERED_FOR: Duration = Duration::from_secs(30);
 /// The app's own snooze button, which an alert's actions may repeat.
 pub(crate) const SNOOZE_LABEL: &str = "Snooze 15 min";
 /// The most sender actions an alert row draws.
@@ -62,10 +68,13 @@ pub(crate) struct Notice {
 /// What one message asks of the window.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Signals {
-    pub(crate) chime: bool,
+    /// The alert whose chime to play.
+    pub(crate) chime: Option<MessageId>,
     pub(crate) notice: Option<Notice>,
     /// A new toast replaced the last one.
     pub(crate) toast: bool,
+    /// A new Answered banner replaced the last one.
+    pub(crate) answered: bool,
 }
 
 /// The in-app toast (node 6004).
@@ -75,6 +84,8 @@ pub(crate) struct Toast {
     /// "adam/coord needs you".
     pub(crate) title: String,
     pub(crate) body: String,
+    /// Whether its chime played, for the "♪ urgent chime" line.
+    pub(crate) chimed: bool,
 }
 
 /// The banner under the chat's breadcrumb.
@@ -87,7 +98,7 @@ pub(crate) enum Banner {
         /// Whether its chime played, for the "chime played" chip.
         chimed: bool,
     },
-    /// The last alert that needed me was answered (node 6257).
+    /// The last alert that needed me was just answered (node 6257).
     Answered { message: String },
 }
 
@@ -106,7 +117,9 @@ struct Answered {
 /// The chime and the native notification, as a global so tests and
 /// screenshots stay silent: without it nothing sounds or posts.
 pub(crate) trait Alarm {
-    fn chime(&self);
+    /// Plays the chime; returns whether it sounds (started now or still
+    /// sounding from an alert just before).
+    fn chime(&self) -> bool;
     fn notify(&self, notice: &Notice, cx: &App);
 }
 
@@ -130,8 +143,8 @@ struct SystemAlarm {
 }
 
 impl Alarm for SystemAlarm {
-    fn chime(&self) {
-        self.chime.play();
+    fn chime(&self) -> bool {
+        matches!(self.chime.play(), Played::Started | Played::StillPlaying)
     }
 
     fn notify(&self, notice: &Notice, cx: &App) {
@@ -166,10 +179,19 @@ impl NeedsYou {
             _ => None,
         };
         let effect = alerts.on_message(env, me);
+        let mut answered = false;
         if let Some(alert) = open_before
             && !is_open(alerts, &alert)
         {
-            self.answered = find_alert(messages, &alert).map(|alert| Answered::new(alert, env, me));
+            // Only a live answer to the last alert that needed me: history
+            // may be days old, and another alert still needing me keeps
+            // the banner.
+            self.answered = if arrival == Arrival::Live && alerts.needing_me().is_empty() {
+                find_alert(messages, &alert).map(|alert| Answered::new(alert, env, me))
+            } else {
+                None
+            };
+            answered = self.answered.is_some();
         }
         if matches!(
             effect,
@@ -181,7 +203,7 @@ impl NeedsYou {
         if arrival == Arrival::History {
             return Signals::default();
         }
-        match effect {
+        let signals = match effect {
             AlertEffect::None | AlertEffect::Highlight => Signals::default(),
             AlertEffect::Notify => Signals {
                 notice: Some(Notice {
@@ -192,7 +214,7 @@ impl NeedsYou {
                 ..Signals::default()
             },
             AlertEffect::HighlightChimeNotify => {
-                self.mark_chimed(&env.client.id);
+                // "chime played" waits for the alarm to say it did.
                 let toast = toast_for(env);
                 let notice = Notice {
                     tag: tag(env),
@@ -201,11 +223,16 @@ impl NeedsYou {
                 };
                 self.toast = Some(toast);
                 Signals {
-                    chime: true,
+                    chime: Some(env.client.id.clone()),
                     notice: Some(notice),
                     toast: true,
+                    answered: false,
                 }
             }
+        };
+        Signals {
+            answered,
+            ..signals
         }
     }
 
@@ -245,6 +272,54 @@ impl NeedsYou {
         })
     }
 
+    /// Records that `alert`'s chime played, for the banner's chip and the
+    /// toast's chime line.
+    pub(crate) fn chime_played(&mut self, alert: &MessageId) {
+        self.mark_chimed(alert);
+        if let Some(toast) = self.toast.as_mut().filter(|toast| &toast.alert == alert) {
+            toast.chimed = true;
+        }
+    }
+
+    /// Hides the Answered banner.
+    pub(crate) fn dismiss_answered(&mut self) {
+        self.answered = None;
+    }
+
+    /// Shows the Answered banner for the last urgent alert in `messages`
+    /// that an ANSWER closed, as if that answer had just arrived. For the
+    /// `needs-you-answered` screenshot, whose frame shows it; nothing shows
+    /// while an alert needs me.
+    pub(crate) fn show_answered(
+        &mut self,
+        alerts: &AlertState,
+        messages: &[StampedEnvelope],
+        me: &Me,
+    ) {
+        if !alerts.needing_me().is_empty() {
+            return;
+        }
+        let last = messages.iter().rev().find_map(|answer| {
+            let (Payload::Answer {}, Some(id)) = (&answer.client.payload, &answer.client.reply_to)
+            else {
+                return None;
+            };
+            let alert = find_alert(messages, id).filter(|alert| {
+                matches!(
+                    alert.client.payload,
+                    Payload::Alert {
+                        urgency: Urgency::Urgent,
+                        ..
+                    }
+                )
+            })?;
+            (!is_open(alerts, id)).then(|| Answered::new(alert, answer, me))
+        });
+        if last.is_some() {
+            self.answered = last;
+        }
+    }
+
     /// The toast showing, if any.
     #[must_use]
     pub(crate) const fn toast(&self) -> Option<&Toast> {
@@ -280,8 +355,8 @@ impl NeedsYou {
         else {
             return;
         };
-        self.mark_chimed(&alert.client.id);
         self.toast = Some(toast_for(alert));
+        self.chime_played(&alert.client.id);
     }
 }
 
@@ -326,7 +401,7 @@ impl Answered {
 }
 
 /// Whether `alert` needs me or is snoozed.
-fn is_open(alerts: &AlertState, alert: &MessageId) -> bool {
+pub(crate) fn is_open(alerts: &AlertState, alert: &MessageId) -> bool {
     alerts.needing_me().contains(alert) || alerts.is_snoozed(alert)
 }
 
@@ -342,6 +417,7 @@ fn toast_for(alert: &StampedEnvelope) -> Toast {
         alert: alert.client.id.clone(),
         title: format!("{} needs you", alert.from_handle),
         body: notice_body(alert),
+        chimed: false,
     }
 }
 

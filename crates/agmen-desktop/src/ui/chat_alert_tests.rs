@@ -9,7 +9,9 @@ use gpui::{TestAppContext, VisualTestContext, div, px};
 
 use super::*;
 use crate::backend::{Backend, FixtureBackend, Screen};
-use crate::ui::needs_you::{Alarm, AlarmHandle, Banner, Notice, SNOOZE_FOR, TOAST_FOR};
+use crate::ui::needs_you::{
+    ANSWERED_FOR, Alarm, AlarmHandle, Banner, Notice, SNOOZE_FOR, TOAST_FOR,
+};
 use crate::ui::test_support::{click, init, redraw};
 use crate::ui::text_input::bind_keys;
 use crate::ui::tokens::MOCKUP_REM;
@@ -34,12 +36,15 @@ impl Render for Host {
 #[derive(Default)]
 struct Recorder {
     chimes: Cell<usize>,
+    /// The player fails to start, as without afplay.
+    mute: Cell<bool>,
     notices: RefCell<Vec<Notice>>,
 }
 
 impl Alarm for Recorder {
-    fn chime(&self) {
+    fn chime(&self) -> bool {
         self.chimes.set(self.chimes.get() + 1);
+        !self.mute.get()
     }
 
     fn notify(&self, notice: &Notice, _cx: &gpui::App) {
@@ -148,6 +153,12 @@ fn needs_you_screen_draws_the_alert_and_the_banner_from_history(cx: &mut TestApp
 #[gpui::test]
 fn answered_screen_draws_the_answered_banner(cx: &mut TestAppContext) {
     let o = open(cx, Screen::NeedsYouAnswered);
+    assert!(
+        o.cx.debug_bounds("banner").is_none(),
+        "history alone shows no answered banner"
+    );
+    o.chat.update(o.cx, |chat, cx| chat.show_answered(cx));
+    redraw(o.cx);
     assert!(o.cx.debug_bounds("banner").is_some());
     assert!(o.cx.debug_bounds("banner:jump").is_none());
     assert!(matches!(
@@ -190,6 +201,23 @@ fn a_live_urgent_alert_chimes_notifies_and_toasts_once(cx: &mut TestAppContext) 
     });
     assert_eq!(o.alarm.chimes.get(), 1);
     assert_eq!(o.alarm.notices.borrow().len(), 1);
+}
+
+#[gpui::test]
+fn a_chime_that_did_not_play_is_not_shown_as_played(cx: &mut TestAppContext) {
+    // Review: no afplay (Linux, Windows) or a player that fails to spawn.
+    let alert = urgent_alert(&FixtureBackend::for_screen(Screen::NeedsYou).unwrap());
+    let o = open(cx, Screen::Chat);
+    o.alarm.mute.set(true);
+    o.chat.update(o.cx, |chat, cx| {
+        chat.apply(Update::Message(Box::new(alert)), cx);
+    });
+    redraw(o.cx);
+    assert_eq!(o.alarm.chimes.get(), 1, "the chime was tried");
+    assert!(o.cx.debug_bounds("banner").is_some());
+    assert!(o.cx.debug_bounds("banner:chime").is_none());
+    let toast = o.chat.read_with(o.cx, |chat, _| chat.toast().cloned());
+    assert!(toast.is_some_and(|toast| !toast.chimed));
 }
 
 #[gpui::test]
@@ -254,6 +282,28 @@ fn revert_answers_the_alert_for_everyone(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn the_answered_banner_goes_after_its_time(cx: &mut TestAppContext) {
+    let o = open(cx, Screen::NeedsYou);
+    let alert = urgent_alert(&o.backend);
+    click(o.cx, sel(&alert, "alert:action:1"));
+    settle(o.cx);
+    assert!(o.cx.debug_bounds("banner").is_some());
+    o.cx.executor().advance_clock(ANSWERED_FOR);
+    settle(o.cx);
+    assert!(o.cx.debug_bounds("banner").is_none());
+}
+
+#[gpui::test]
+fn clicking_the_answered_banner_dismisses_it(cx: &mut TestAppContext) {
+    let o = open(cx, Screen::NeedsYouAnswered);
+    o.chat.update(o.cx, |chat, cx| chat.show_answered(cx));
+    redraw(o.cx);
+    click(o.cx, "banner");
+    redraw(o.cx);
+    assert!(o.cx.debug_bounds("banner").is_none());
+}
+
+#[gpui::test]
 fn reply_answers_the_alert_from_the_composer(cx: &mut TestAppContext) {
     let o = open(cx, Screen::NeedsYou);
     let alert = urgent_alert(&o.backend);
@@ -270,6 +320,33 @@ fn reply_answers_the_alert_from_the_composer(cx: &mut TestAppContext) {
         banner_text(&o.chat, o.cx),
         Some(Banner::Answered { .. })
     ));
+}
+
+#[gpui::test]
+fn a_reply_ends_when_someone_else_answers_the_alert(cx: &mut TestAppContext) {
+    // Review: adam answers while my reply is pending; what I type next is a
+    // plain message, not a second ANSWER to a cleared alert.
+    let o = open(cx, Screen::NeedsYou);
+    let alert = urgent_alert(&o.backend);
+    click(o.cx, sel(&alert, "alert:reply"));
+    let adams = FixtureBackend::for_screen(Screen::NeedsYouAnswered)
+        .unwrap()
+        .snapshot()
+        .messages
+        .pop()
+        .unwrap();
+    assert_eq!(adams.client.reply_to.as_ref(), Some(&alert.client.id));
+    o.chat.update(o.cx, |chat, cx| {
+        chat.apply(Update::Message(Box::new(adams)), cx);
+    });
+    redraw(o.cx);
+    o.cx.simulate_input("hi");
+    o.cx.simulate_keystrokes("enter");
+    settle(o.cx);
+    let sent = o.backend.snapshot().messages.last().unwrap().clone();
+    assert_eq!(sent.client.body.as_str(), "hi");
+    assert_eq!(sent.client.reply_to, None);
+    assert!(!matches!(sent.client.payload, Payload::Answer {}));
 }
 
 #[gpui::test]

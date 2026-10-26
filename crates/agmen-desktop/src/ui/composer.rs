@@ -5,19 +5,21 @@
 use std::rc::Rc;
 
 use agmen_proto::{IdentityId, MessageId};
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
+    InteractiveElement as _, IntoElement, KeyDownEvent, ParentElement as _, Render, SharedString,
     StatefulInteractiveElement as _, Styled as _, Subscription, Window, div,
 };
 
-use super::components::{Chip, Color, Label, LabelSize};
+use super::components::{Chip, Color, IconButton, IconSize, Label, LabelSize};
 use super::text_input::{TextInput, TextInputEvent};
 use super::tokens::{
     BORDER_WIDTH, RADIUS_INPUT, SPACE_8, SPACE_10, SPACE_12, SPACE_14, TEXT_DEFAULT,
 };
 use crate::appearance::Appearance;
 use crate::backend::{BackendError, Draft, Snapshot};
+use crate::icons::UiIcon;
 
 /// The input's placeholder (node 384). The ⏎ hint after the input already
 /// says how to send, so the placeholder does not repeat it.
@@ -227,6 +229,30 @@ impl Composer {
         self.input.focus_handle(cx).focus(window, cx);
         cx.notify();
     }
+
+    /// Ends the reply: the next message goes to the recipient again. Escape
+    /// and the "reply to" chip's close mark call it.
+    pub(crate) fn cancel_reply(&mut self, cx: &mut Context<Self>) {
+        if self.reply.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Ends the reply unless `open` says its message still waits for an
+    /// answer, so a reply to an alert someone else answered is not sent.
+    pub(crate) fn drop_reply_unless(
+        &mut self,
+        open: impl Fn(&MessageId) -> bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .reply
+            .as_ref()
+            .is_some_and(|(message, _)| !open(message))
+        {
+            self.cancel_reply(cx);
+        }
+    }
 }
 
 impl Focusable for Composer {
@@ -238,6 +264,8 @@ impl Focusable for Composer {
 impl Render for Composer {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = &cx.global::<Appearance>().theme;
+        // Task 13: a pending reply says so and offers a way out.
+        let replying = self.reply.is_some();
         let to = div()
             .debug_selector(|| "composer:to".into())
             .flex_none()
@@ -247,11 +275,22 @@ impl Render for Composer {
                     .code()
                     .color(Color::Accent)
                     .leading(
-                        Label::new("to")
+                        Label::new(if replying { "reply to" } else { "to" })
                             .size(LabelSize::Small)
                             .color(Color::Placeholder),
                     )
-                    .trailing(caret()),
+                    .map(|chip| {
+                        if replying {
+                            chip.trailing(
+                                IconButton::new("composer:cancel-reply", UiIcon::Close)
+                                    .size(IconSize::Small)
+                                    .color(Color::Placeholder)
+                                    .on_click(cx.listener(|this, _, _, cx| this.cancel_reply(cx))),
+                            )
+                        } else {
+                            chip.trailing(caret())
+                        }
+                    }),
             );
         let model = self.model.clone().map(|model| {
             div()
@@ -273,6 +312,12 @@ impl Render for Composer {
         div()
             .w_full()
             .flex_none()
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                if event.keystroke.key == "escape" && this.reply.is_some() {
+                    cx.stop_propagation();
+                    this.cancel_reply(cx);
+                }
+            }))
             .pt(SPACE_8)
             .px(SPACE_14)
             .pb(SPACE_12)

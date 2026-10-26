@@ -109,13 +109,15 @@ impl RenderOnce for AlertToast {
                     .line_clamp(BODY_LINES)
                     .child(Label::new(self.toast.body).size(LabelSize::Small).wrap()),
             )
-            .child(
-                part("toast:footer").child(
-                    Label::new("♪ urgent chime")
-                        .size(LabelSize::Small)
-                        .color(Color::Placeholder),
-                ),
-            );
+            .when(self.toast.chimed, |card| {
+                card.child(
+                    part("toast:footer").child(
+                        Label::new("♪ urgent chime")
+                            .size(LabelSize::Small)
+                            .color(Color::Placeholder),
+                    ),
+                )
+            });
         let alert = self.toast.alert;
         div()
             .id("toast")
@@ -146,7 +148,21 @@ mod tests {
                    blocked. Revert #10, or hotfix on a branch? And then some more text so the \
                    body runs past two lines."
                 .into(),
+            chimed: true,
         }
+    }
+
+    #[gpui::test]
+    fn the_chime_line_shows_only_when_the_chime_played(cx: &mut TestAppContext) {
+        let quiet = Toast {
+            chimed: false,
+            ..toast()
+        };
+        let cx = draw(cx, move || {
+            AlertToast::new(quiet.clone()).into_any_element()
+        });
+        assert!(cx.debug_bounds("toast").is_some());
+        assert!(cx.debug_bounds("toast:footer").is_none());
     }
 
     #[gpui::test]

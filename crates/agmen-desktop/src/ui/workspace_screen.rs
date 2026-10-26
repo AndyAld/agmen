@@ -73,9 +73,20 @@ pub(super) struct WorkspaceState {
     left: Option<LeftDock>,
     center: CenterTab,
     right: Option<RightDock>,
-    /// Task 13: the oldest alert that needs me shows as just arrived, with
-    /// its toast and "chime played" (the needs-you frame), silently.
-    alert_arrives: bool,
+    /// Task 13: the alert moment the frame shows.
+    alert: AlertMoment,
+}
+
+/// Task 13: what a screen shows of an alert beyond its history, silently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AlertMoment {
+    None,
+    /// The oldest alert that needs me as just arrived: its toast and
+    /// "chime played" (the needs-you frame).
+    Arrives,
+    /// The last answered alert as just answered: the Answered banner (the
+    /// needs-you-answered frame).
+    Answered,
 }
 
 impl WorkspaceState {
@@ -119,7 +130,11 @@ impl WorkspaceState {
             left: Some(left),
             center,
             right,
-            alert_arrives: matches!(screen, Screen::NeedsYou),
+            alert: match screen {
+                Screen::NeedsYou => AlertMoment::Arrives,
+                Screen::NeedsYouAnswered => AlertMoment::Answered,
+                _ => AlertMoment::None,
+            },
         }
     }
 }
@@ -135,8 +150,10 @@ impl Workspace {
             self.pane_group
                 .update(cx, |group, cx| group.open_last(item, cx));
         }
-        if state.alert_arrives {
-            self.chat.update(cx, |chat, cx| chat.show_arrival(cx));
+        match state.alert {
+            AlertMoment::None => {}
+            AlertMoment::Arrives => self.chat.update(cx, |chat, cx| chat.show_arrival(cx)),
+            AlertMoment::Answered => self.chat.update(cx, |chat, cx| chat.show_answered(cx)),
         }
         cx.notify();
     }

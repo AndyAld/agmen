@@ -121,6 +121,11 @@ pub(crate) struct AlertState {
     /// Alerts I snoozed, oldest first, with whose answer clears them; at
     /// most [`MAX_NEEDING_ME`], since each came out of `needing_me`.
     snoozed: VecDeque<(MessageId, ClearedBy)>,
+    /// When each alert in `needing_me` or `snoozed` arrived, counted up, so
+    /// a woken alert goes back to its place; at most twice
+    /// [`MAX_NEEDING_ME`].
+    arrived: BTreeMap<MessageId, u64>,
+    next_arrival: u64,
 }
 
 impl AlertState {
@@ -187,6 +192,8 @@ impl AlertState {
         if self.needing_me.contains(id) || self.is_snoozed(id) {
             return AlertEffect::None;
         }
+        self.arrived.insert(id.clone(), self.next_arrival);
+        self.next_arrival = self.next_arrival.saturating_add(1);
         self.push_needing(id.clone(), ClearedBy::of(needs, env, me));
         if hushed {
             AlertEffect::Highlight
@@ -195,8 +202,8 @@ impl AlertState {
         }
     }
 
-    /// Adds `id` to the alerts that need me, dropping the oldest past
-    /// [`MAX_NEEDING_ME`].
+    /// Adds `id` to the alerts that need me at its place by arrival,
+    /// dropping the oldest past [`MAX_NEEDING_ME`].
     fn push_needing(&mut self, id: MessageId, by: ClearedBy) {
         if self.needing_me.len() >= MAX_NEEDING_ME {
             // Others' alerts go first, so a flood from many senders cannot
@@ -208,11 +215,17 @@ impl AlertState {
                 .unwrap_or(0);
             let evicted = self.needing_me.remove(at);
             self.only_me.remove(&evicted);
+            self.arrived.remove(&evicted);
         }
         if by == ClearedBy::OnlyMe {
             self.only_me.insert(id.clone());
         }
-        self.needing_me.push(id);
+        let arrived = |id: &MessageId| self.arrived.get(id).copied().unwrap_or(u64::MAX);
+        let mine = arrived(&id);
+        let at = self
+            .needing_me
+            .partition_point(|other| arrived(other) <= mine);
+        self.needing_me.insert(at, id);
     }
 
     /// The urgent alerts that need me, oldest first.
@@ -235,6 +248,7 @@ impl AlertState {
         self.needing_me.retain(|id| id != alert);
         self.snoozed.retain(|(id, _)| id != alert);
         self.only_me.remove(alert);
+        self.arrived.remove(alert);
         self.needing_me.len() + self.snoozed.len() != before
     }
 
@@ -252,9 +266,13 @@ impl AlertState {
         } else {
             ClearedBy::Anyone
         };
-        self.clear(alert);
-        if self.snoozed.len() >= MAX_NEEDING_ME {
-            self.snoozed.pop_front();
+        // Not `clear`: the alert keeps its arrival for when it wakes.
+        self.needing_me.retain(|id| id != alert);
+        self.only_me.remove(alert);
+        if self.snoozed.len() >= MAX_NEEDING_ME
+            && let Some((dropped, _)) = self.snoozed.pop_front()
+        {
+            self.arrived.remove(&dropped);
         }
         self.snoozed.push_back((alert.clone(), by));
         true
@@ -266,8 +284,9 @@ impl AlertState {
         self.snoozed.iter().any(|(id, _)| id == alert)
     }
 
-    /// Ends `alert`'s snooze: it needs me again, cleared by the same answers
-    /// as before. Returns whether it was snoozed.
+    /// Ends `alert`'s snooze: it needs me again, at its place by arrival
+    /// and cleared by the same answers as before. Returns whether it was
+    /// snoozed.
     pub(crate) fn wake(&mut self, alert: &MessageId) -> bool {
         let Some(at) = self.snoozed.iter().position(|(id, _)| id == alert) else {
             return false;
@@ -289,6 +308,26 @@ impl AlertState {
 /// are still open for me, by the same clearing rule as [`AlertState`].
 #[must_use]
 pub(crate) fn alert_count(messages: &[StampedEnvelope], me: &Me) -> u32 {
+    u32::try_from(open_alerts(messages, me).len()).unwrap_or(u32::MAX)
+}
+
+/// The first ALERT in `messages` (oldest first) that [`alert_count`]
+/// counts: where the status bar's count opens the chat.
+#[must_use]
+pub(crate) fn oldest_open_alert<'a>(
+    messages: &'a [StampedEnvelope],
+    me: &Me,
+) -> Option<&'a MessageId> {
+    let open = open_alerts(messages, me);
+    messages
+        .iter()
+        .filter(|env| matches!(env.client.payload, Payload::Alert { .. }))
+        .map(|env| &env.client.id)
+        .find(|id| open.contains_key(id))
+}
+
+/// The ALERTs in `messages` still open for me, by id.
+fn open_alerts<'a>(messages: &'a [StampedEnvelope], me: &Me) -> BTreeMap<&'a MessageId, ClearedBy> {
     let mut open: BTreeMap<&MessageId, ClearedBy> = BTreeMap::new();
     // Alerts already answered, so a later copy does not reopen them; bounded
     // by the number of messages.
@@ -313,7 +352,7 @@ pub(crate) fn alert_count(messages: &[StampedEnvelope], me: &Me) -> u32 {
             _ => {}
         }
     }
-    u32::try_from(open.len()).unwrap_or(u32::MAX)
+    open
 }
 
 #[cfg(test)]

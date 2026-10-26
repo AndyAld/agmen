@@ -607,3 +607,57 @@ fn snoozed_alerts_are_bounded() {
     assert!(!state.is_snoozed(&ids[0]), "the oldest snooze drops first");
     assert!(state.is_snoozed(&ids[MAX_NEEDING_ME]));
 }
+
+#[test]
+fn a_woken_alert_keeps_its_place_by_arrival() {
+    // Review: A (older) is snoozed, B arrives, A wakes; the banner still
+    // names A, the alert that has needed me longest.
+    let me = andy();
+    let mut state = AlertState::default();
+    for id in [ALERT_1, ALERT_2] {
+        state.on_message(
+            &alert(id, "andyfx10", "andy/fx1", "agent", &urgent("anyone")),
+            &me,
+        );
+        if id == ALERT_1 {
+            assert!(state.snooze(&ALERT_1.parse().unwrap()));
+        }
+    }
+    let (a, b): (MessageId, MessageId) = (ALERT_1.parse().unwrap(), ALERT_2.parse().unwrap());
+    assert!(state.wake(&a));
+    assert_eq!(state.needing_me(), [a.clone(), b.clone()]);
+    // A newer alert woken behind an older one goes after it.
+    assert!(state.snooze(&b));
+    state.on_message(
+        &alert(ALERT_3, "andyfx10", "andy/fx1", "agent", &urgent("anyone")),
+        &me,
+    );
+    assert!(state.wake(&b));
+    let c: MessageId = ALERT_3.parse().unwrap();
+    assert_eq!(state.needing_me(), [a, b, c]);
+}
+
+#[test]
+fn oldest_open_alert_is_the_first_one_still_open() {
+    // The status bar's alert count opens the chat at this alert (node 456).
+    let chat = screen(Screen::Chat);
+    let a1 = chat
+        .messages
+        .iter()
+        .find(|m| m.from_handle == "andy/a1" && matches!(m.client.payload, Payload::Alert { .. }));
+    assert_eq!(
+        oldest_open_alert(&chat.messages, &Me::from(&chat)),
+        a1.map(|m| &m.client.id)
+    );
+    // An answered alert is skipped: the answered screen's open one is a1's.
+    let answered = screen(Screen::NeedsYouAnswered);
+    let a1 = answered
+        .messages
+        .iter()
+        .find(|m| m.from_handle == "andy/a1" && matches!(m.client.payload, Payload::Alert { .. }));
+    assert_eq!(
+        oldest_open_alert(&answered.messages, &Me::from(&answered)),
+        a1.map(|m| &m.client.id)
+    );
+    assert_eq!(oldest_open_alert(&[], &andy()), None);
+}

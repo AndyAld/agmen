@@ -10,13 +10,13 @@ use agmen_proto::{MessageId, StampedEnvelope};
 use gpui::{App, Context, Task, Window};
 
 use super::{ChatView, Snapshot};
-use crate::alerts::{AlertState, MAX_NEEDING_ME, Me, alert_count};
+use crate::alerts::{AlertState, MAX_NEEDING_ME, Me, alert_count, oldest_open_alert};
 use crate::ui::alert_banner::AlertBanner;
 use crate::ui::composer::Target;
 use crate::ui::format::clock;
 use crate::ui::needs_you::{
-    AlarmHandle, Arrival, Banner, NeedsYou, SNOOZE_FOR, Signals, TOAST_FOR, Toast, alert_looks,
-    find_alert,
+    ANSWERED_FOR, AlarmHandle, Arrival, Banner, NeedsYou, SNOOZE_FOR, Signals, TOAST_FOR, Toast,
+    alert_looks, find_alert, is_open,
 };
 
 /// The needs-you and alert counts the status bar shows.
@@ -36,6 +36,8 @@ pub(super) struct ChatAlerts {
     open_alerts: usize,
     /// Dismisses the toast; replaced (and so cancelled) by the next toast.
     toast_timer: Option<Task<()>>,
+    /// Dismisses the Answered banner; replaced by the next one.
+    answered_timer: Option<Task<()>>,
     /// Wakes each snoozed alert; at most [`MAX_NEEDING_ME`].
     snooze_timers: Vec<(MessageId, Task<()>)>,
 }
@@ -67,6 +69,14 @@ impl ChatView {
             needs_you: self.alerts.badge(),
             alerts: self.alert_ui.open_alerts,
         }
+    }
+
+    /// Where the status bar's alert count opens the chat: the oldest alert
+    /// that needs me, else the oldest alert still open.
+    pub(crate) fn oldest_alert(&self) -> Option<MessageId> {
+        self.alerts.needing_me().first().cloned().or_else(|| {
+            oldest_open_alert(&self.snapshot.messages, &Me::from(&*self.snapshot)).cloned()
+        })
     }
 
     /// The banner above the rows, if any.
@@ -116,6 +126,32 @@ impl ChatView {
         cx.notify();
     }
 
+    /// Draws the Answered banner for the last answered alert, as the
+    /// `needs-you-answered` screen's frame shows it.
+    pub(crate) fn show_answered(&mut self, cx: &mut Context<Self>) {
+        let me = Me::from(&*self.snapshot);
+        self.alert_ui
+            .needs_you
+            .show_answered(&self.alerts, &self.snapshot.messages, &me);
+        self.start_answered_timer(cx);
+        cx.notify();
+    }
+
+    pub(crate) fn dismiss_answered(&mut self, cx: &mut Context<Self>) {
+        self.alert_ui.needs_you.dismiss_answered();
+        self.alert_ui.answered_timer = None;
+        cx.notify();
+    }
+
+    fn start_answered_timer(&mut self, cx: &mut Context<Self>) {
+        self.alert_ui.answered_timer = Some(cx.spawn(async move |chat, cx| {
+            cx.background_executor().timer(ANSWERED_FOR).await;
+            // A chat that closed has no banner left to dismiss.
+            chat.update(cx, |chat, cx| chat.dismiss_answered(cx))
+                .unwrap_or_default();
+        }));
+    }
+
     /// Feeds one message that arrives now.
     pub(super) fn hear(&mut self, env: &StampedEnvelope, earlier: &[StampedEnvelope]) -> Signals {
         let me = Me::from(&*self.snapshot);
@@ -128,8 +164,10 @@ impl ChatView {
     pub(super) fn signal(&mut self, signals: &Signals, cx: &mut Context<Self>) {
         let alarm = cx.try_global::<AlarmHandle>().map(|alarm| alarm.0.clone());
         if let Some(alarm) = alarm {
-            if signals.chime {
-                alarm.chime();
+            if let Some(alert) = &signals.chime
+                && alarm.chime()
+            {
+                self.alert_ui.needs_you.chime_played(alert);
             }
             if let Some(notice) = &signals.notice {
                 alarm.notify(notice, cx);
@@ -137,6 +175,9 @@ impl ChatView {
         }
         if signals.toast {
             self.start_toast_timer(cx);
+        }
+        if signals.answered {
+            self.start_answered_timer(cx);
         }
     }
 
@@ -202,6 +243,11 @@ impl ChatView {
     pub(super) fn refresh_alerts(&mut self, cx: &mut Context<Self>) {
         let me = Me::from(&*self.snapshot);
         self.alert_ui.needs_you.forget_closed(&self.alerts);
+        // A pending Reply to an alert that closed would answer it again.
+        let alerts = &self.alerts;
+        self.composer.update(cx, |composer, cx| {
+            composer.drop_reply_unless(|alert| is_open(alerts, alert), cx);
+        });
         self.alert_ui.open_alerts = count(&self.snapshot, &me);
         let looks = Rc::new(alert_looks(&self.alerts, &self.snapshot.messages));
         self.stream.update(cx, |stream, cx| {
@@ -218,12 +264,19 @@ impl ChatView {
     pub(super) fn banner_element(&self, cx: &Context<Self>) -> Option<AlertBanner> {
         let banner = self.banner()?;
         let chat = cx.entity().downgrade();
+        let dismiss = chat.clone();
         Some(
-            AlertBanner::new(banner).on_jump(move |alert, _: &mut Window, cx: &mut App| {
-                // A banner outlives its chat only while the window closes.
-                chat.update(cx, |chat, cx| chat.jump_to_alert(&alert, cx))
-                    .unwrap_or_default();
-            }),
+            AlertBanner::new(banner)
+                .on_jump(move |alert, _: &mut Window, cx: &mut App| {
+                    // A banner outlives its chat only while the window closes.
+                    chat.update(cx, |chat, cx| chat.jump_to_alert(&alert, cx))
+                        .unwrap_or_default();
+                })
+                .on_dismiss(move |_: &mut Window, cx: &mut App| {
+                    dismiss
+                        .update(cx, |chat, cx| chat.dismiss_answered(cx))
+                        .unwrap_or_default();
+                }),
         )
     }
 }

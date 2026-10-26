@@ -81,13 +81,14 @@ fn a_live_urgent_alert_chimes_notifies_and_toasts() {
     assert_eq!(
         signals,
         Signals {
-            chime: true,
+            chime: Some(alert.client.id.clone()),
             notice: Some(Notice {
                 tag: format!("alert-{}", alert.client.id),
                 title: title.clone(),
                 body: CI_TEXT.to_owned(),
             }),
             toast: true,
+            answered: false,
         }
     );
     assert_eq!(
@@ -96,8 +97,16 @@ fn a_live_urgent_alert_chimes_notifies_and_toasts() {
             alert: alert.client.id.clone(),
             title,
             body: CI_TEXT.to_owned(),
+            chimed: false,
         })
     );
+    // Neither says the chime played until the alarm says it did.
+    assert!(matches!(
+        needs.banner(&alerts, &snapshot.messages, mdt),
+        Some(Banner::NeedsYou { chimed: false, .. })
+    ));
+    needs.chime_played(&alert.client.id);
+    assert!(needs.toast().is_some_and(|toast| toast.chimed));
     assert!(matches!(
         needs.banner(&alerts, &snapshot.messages, mdt),
         Some(Banner::NeedsYou { chimed: true, .. })
@@ -112,7 +121,7 @@ fn a_live_normal_alert_only_notifies() {
     let (mut alerts, mut needs) = (AlertState::default(), NeedsYou::default());
     let me = Me::from(&snapshot);
     let signals = needs.on_message(&mut alerts, &alert, &me, &snapshot.messages, Arrival::Live);
-    assert!(!signals.chime && !signals.toast);
+    assert!(signals.chime.is_none() && !signals.toast);
     let notice = signals.notice.unwrap();
     assert_eq!(notice.title, "Alert from andy/a1");
     assert!(notice.body.starts_with("main does not compile: 4d9fdc8"));
@@ -143,12 +152,31 @@ fn quiet_hours_highlight_without_chime_or_toast() {
     ));
 }
 
+/// Feeds the answered screen's history up to its last message, the
+/// ANSWER, then that ANSWER live.
+fn answer_live(snapshot: &Snapshot, alerts: &mut AlertState, needs: &mut NeedsYou) {
+    let mut before = snapshot.clone();
+    let answer = before.messages.pop().unwrap();
+    feed(&before, alerts, needs, Arrival::History);
+    let me = Me::from(snapshot);
+    needs.on_message(alerts, &answer, &me, &snapshot.messages, Arrival::Live);
+}
+
+#[test]
+fn history_never_shows_the_answered_banner() {
+    // Review: an answer loaded at launch may be days old.
+    let snapshot = screen(Screen::NeedsYouAnswered);
+    let (mut alerts, mut needs) = (AlertState::default(), NeedsYou::default());
+    feed(&snapshot, &mut alerts, &mut needs, Arrival::History);
+    assert_eq!(needs.banner(&alerts, &snapshot.messages, mdt), None);
+}
+
 #[test]
 fn an_answer_from_someone_else_shows_the_answered_banner() {
     // Frame 6122 (node 6261).
     let snapshot = screen(Screen::NeedsYouAnswered);
     let (mut alerts, mut needs) = (AlertState::default(), NeedsYou::default());
-    feed(&snapshot, &mut alerts, &mut needs, Arrival::History);
+    answer_live(&snapshot, &mut alerts, &mut needs);
     assert_eq!(
         needs.banner(&alerts, &snapshot.messages, mdt),
         Some(Banner::Answered {
@@ -168,7 +196,7 @@ fn my_answer_reads_you() {
     answer.from_handle = me.handle.clone();
     answer.from_kind = IdentityKind::Human;
     let (mut alerts, mut needs) = (AlertState::default(), NeedsYou::default());
-    feed(&snapshot, &mut alerts, &mut needs, Arrival::History);
+    answer_live(&snapshot, &mut alerts, &mut needs);
     assert_eq!(
         needs.banner(&alerts, &snapshot.messages, mdt),
         Some(Banner::Answered {
@@ -195,6 +223,75 @@ fn a_new_alert_replaces_the_answered_banner() {
     alerts.snooze(&again.client.id);
     needs.forget_closed(&alerts);
     assert_eq!(needs.banner(&alerts, &snapshot.messages, mdt), None);
+}
+
+#[test]
+fn an_answer_while_another_alert_needs_me_leaves_no_answered_banner() {
+    // Review: A and B need me; A is answered; snoozing B shows nothing,
+    // not "... answered A's alert".
+    let mut snapshot = screen(Screen::NeedsYouAnswered);
+    let answer = snapshot.messages.pop().unwrap();
+    let mut other = snapshot.messages.last().unwrap().clone();
+    other.client.id = "01JE0000000000000000000NEW".parse().unwrap();
+    snapshot.messages.push(other.clone());
+    let (mut alerts, mut needs) = (AlertState::default(), NeedsYou::default());
+    feed(&snapshot, &mut alerts, &mut needs, Arrival::History);
+    snapshot.messages.push(answer.clone());
+    let me = Me::from(&snapshot);
+    needs.on_message(&mut alerts, &answer, &me, &snapshot.messages, Arrival::Live);
+    assert!(matches!(
+        needs.banner(&alerts, &snapshot.messages, mdt),
+        Some(Banner::NeedsYou { alert, .. }) if alert == other.client.id
+    ));
+    alerts.snooze(&other.client.id);
+    needs.forget_closed(&alerts);
+    assert_eq!(needs.banner(&alerts, &snapshot.messages, mdt), None);
+}
+
+#[test]
+fn the_answered_banner_can_be_dismissed() {
+    let snapshot = screen(Screen::NeedsYouAnswered);
+    let (mut alerts, mut needs) = (AlertState::default(), NeedsYou::default());
+    answer_live(&snapshot, &mut alerts, &mut needs);
+    assert!(needs.banner(&alerts, &snapshot.messages, mdt).is_some());
+    needs.dismiss_answered();
+    assert_eq!(needs.banner(&alerts, &snapshot.messages, mdt), None);
+}
+
+#[test]
+fn a_live_answer_asks_for_the_answered_timer() {
+    let mut snapshot = screen(Screen::NeedsYouAnswered);
+    let answer = snapshot.messages.pop().unwrap();
+    let (mut alerts, mut needs) = (AlertState::default(), NeedsYou::default());
+    feed(&snapshot, &mut alerts, &mut needs, Arrival::History);
+    snapshot.messages.push(answer.clone());
+    let me = Me::from(&snapshot);
+    let signals = needs.on_message(&mut alerts, &answer, &me, &snapshot.messages, Arrival::Live);
+    assert!(signals.answered);
+}
+
+#[test]
+fn show_answered_draws_the_screens_answered_banner() {
+    // The needs-you-answered screen opens on its frame's banner, which
+    // history alone never shows.
+    let snapshot = screen(Screen::NeedsYouAnswered);
+    let (mut alerts, mut needs) = (AlertState::default(), NeedsYou::default());
+    feed(&snapshot, &mut alerts, &mut needs, Arrival::History);
+    needs.show_answered(&alerts, &snapshot.messages, &Me::from(&snapshot));
+    assert_eq!(
+        needs.banner(&alerts, &snapshot.messages, mdt),
+        Some(Banner::Answered {
+            message:
+                "adam (coordinator) answered adam/coord's alert at 15:59. Cleared for everyone."
+                    .to_owned()
+        })
+    );
+    // The chat screen answers nothing: no banner.
+    let chat = screen(Screen::Chat);
+    let (mut alerts, mut needs) = (AlertState::default(), NeedsYou::default());
+    feed(&chat, &mut alerts, &mut needs, Arrival::History);
+    needs.show_answered(&alerts, &chat.messages, &Me::from(&chat));
+    assert_eq!(needs.banner(&alerts, &chat.messages, mdt), None);
 }
 
 #[test]

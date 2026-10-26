@@ -126,6 +126,27 @@ fn clicking_the_toast_opens_the_chat_at_the_alert(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn clicking_the_alert_count_opens_the_chat_at_the_alert(cx: &mut TestAppContext) {
+    // Node 456 links the status bar's "2 alerts" to the needs-you frame.
+    let (workspace, cx) = open(cx, Screen::NeedsYou);
+    workspace.update(cx, |w, cx| {
+        w.pane_group.update(cx, |group, cx| {
+            group.open(TabItem::Settings(Default::default()), cx)
+        });
+    });
+    redraw(cx);
+    assert!(cx.debug_bounds(sel(&urgent_alert(), "row")).is_none());
+    click(cx, "status-alerts");
+    redraw(cx);
+    let active = workspace.read_with(cx, |w, cx| w.pane_group.read(cx).active_item(cx));
+    assert_eq!(active, Some(TabItem::Chat));
+    assert!(
+        cx.debug_bounds(sel(&urgent_alert(), "row")).is_some(),
+        "the alert that needs me comes first"
+    );
+}
+
+#[gpui::test]
 fn large_counts_read_99_plus(cx: &mut TestAppContext) {
     let bar = |needs_you: usize| {
         move || {

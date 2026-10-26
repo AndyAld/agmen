@@ -4,7 +4,7 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce, SharedString,
-    Styled as _, Window, div,
+    StatefulInteractiveElement as _, Styled as _, Window, div,
 };
 
 use super::chat::AlertCounts;
@@ -13,7 +13,7 @@ use super::format::{counted, counted_capped, listener_label, spend_today};
 use super::keys::OpenSettings;
 use super::left_dock::PanelButtons;
 use super::tokens::{BORDER_WIDTH, SPACE_5, SPACE_10, SPACE_14, STATUS_BAR_HEIGHT};
-use super::workspace::ToggleRightDock;
+use super::workspace::{OpenAlerts, ToggleRightDock};
 use crate::backend::{Snapshot, StatusSummary};
 use crate::icons::UiIcon;
 
@@ -126,11 +126,22 @@ impl RenderOnce for StatusBar {
                 Color::Success,
                 counted(s.online, "online", "online"),
             ))
-            .child(div().debug_selector(|| "status-alerts".into()).child(item(
-                "⚠",
-                Color::Warning,
-                counted_capped(self.alerts.alerts, "alert", "alerts"),
-            )))
+            // Task 13: the count opens the chat at the alert (node 456).
+            .child(
+                div()
+                    .id("status-alerts")
+                    .debug_selector(|| "status-alerts".into())
+                    .when(self.alerts.alerts > 0, |this| {
+                        this.cursor_pointer().on_click(|_, window, cx| {
+                            window.dispatch_action(Box::new(OpenAlerts), cx);
+                        })
+                    })
+                    .child(item(
+                        "⚠",
+                        Color::Warning,
+                        counted_capped(self.alerts.alerts, "alert", "alerts"),
+                    )),
+            )
             .child(item(
                 "⎇",
                 Color::Placeholder,
