@@ -80,6 +80,9 @@ impl PanelButtons {
 }
 
 impl RenderOnce for PanelButtons {
+    /// Draws each button active while its panel or tab shows, as Zed's
+    /// status bar does. The mockup draws them all inactive; Andy kept the
+    /// active state on purpose (2026-10-26).
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
         let project = matches!(self.shown, Some(LeftDockTab::Project));
         let git = matches!(self.shown, Some(LeftDockTab::Git));
