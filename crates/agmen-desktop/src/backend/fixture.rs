@@ -154,7 +154,12 @@ impl FixtureBackend {
             // Task 14 (V66): fx1 taken over; on chat-codex, switched to codex.
             Screen::ChatTerminal | Screen::SwitchAgent | Screen::AddAgent | Screen::ChatCodex => {
                 let s = with_messages("pr-3331", chat_messages())?;
-                super::fixture_take_over::fx1_taken_over(s, screen == Screen::ChatCodex)?
+                let agent = if screen == Screen::ChatCodex {
+                    "codex"
+                } else {
+                    "claude"
+                };
+                super::fixture_take_over::fx1_taken_over(s, agent)?
             }
             Screen::Chat
             | Screen::Agent
