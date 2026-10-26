@@ -161,9 +161,16 @@ fn change_saves_settings_toml(cx: &mut TestAppContext) {
     assert!(text.contains("keys = \"vi\""), "other tables stay: {text}");
     let saved = home.saved();
     assert_eq!(saved.density, Density::Compact);
-    // Changing a value while following Zed turns Follow Zed off.
-    assert!(!saved.follow_zed);
+    // Ruling D14: density is agmen's own setting, so Follow Zed stays on.
+    assert!(saved.follow_zed);
+    assert_eq!(saved.theme, None, "nothing copied from Zed");
     assert_eq!(appearance(cx).density, Density::Compact);
+
+    // The light, dark or system mode is agmen's own setting too.
+    click(cx, "theme-mode:0");
+    let saved = home.saved();
+    assert_eq!(saved.mode, crate::appearance::Mode::Light);
+    assert!(saved.follow_zed);
 }
 
 #[gpui::test]
