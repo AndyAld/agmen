@@ -22,17 +22,18 @@ pub(crate) const MOCKUP_REM: Pixels = px(15.);
 // Zed's UI text scale (`TextSize` in Zed's ui crate), the only sizes UI text
 // uses. At a 15 px rem: Large 15, Default 13.125, Small 11.25, XSmall 9.375.
 // The mockup's 13 px text is Default, its 11 and 12 px text is Small, and
-// its 10 px glyphs are XSmall. Code text at Default uses the code font's own
-// size; code text at another step takes that step (V93).
+// its 10 px glyphs are XSmall. Code text with no size set uses the code
+// font's own size; code text given a step takes that step (V93, C252).
+pub(crate) const TEXT_LARGE: Rems = rems_from_px(16.);
+pub(crate) const TEXT_DEFAULT: Rems = rems_from_px(14.);
+pub(crate) const TEXT_SMALL: Rems = rems_from_px(12.);
+pub(crate) const TEXT_XSMALL: Rems = rems_from_px(10.);
+
 /// A page title, such as Settings' "Appearance" (node 8091): 18 px at a
 /// 15 px rem. Zed's `TextSize` stops at Large; its `HeadlineSize` steps
 /// (rems 1.125 and 1.27) give 16.875 and 19.05 px there, so this is a step
 /// of agmen's own, written as Zed writes `TextSize`.
 pub(crate) const TEXT_TITLE: Rems = rems_from_px(19.2);
-pub(crate) const TEXT_LARGE: Rems = rems_from_px(16.);
-pub(crate) const TEXT_DEFAULT: Rems = rems_from_px(14.);
-pub(crate) const TEXT_SMALL: Rems = rems_from_px(12.);
-pub(crate) const TEXT_XSMALL: Rems = rems_from_px(10.);
 
 /// Line height for chrome text, as a multiple of its size (the mockup's
 /// wrapped values advance 14 px at 12 px).
@@ -250,6 +251,10 @@ pub(crate) const MODAL_TOP: Pixels = px(150.);
 pub(crate) fn tint(color: Hsla, alpha: f32) -> Hsla {
     color.opacity(alpha)
 }
+
+/// The composer's input at its narrowest (C260): room for a few words and
+/// the caret, so in a narrow window the chips beside it give way first.
+pub(crate) const COMPOSER_INPUT_MIN_WIDTH: Pixels = px(80.);
 
 // Task 15: the model picker (node 3355), its rows and the message model tag.
 /// The picker's width.

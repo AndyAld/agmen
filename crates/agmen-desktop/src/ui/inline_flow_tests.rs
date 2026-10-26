@@ -479,22 +479,13 @@ fn cut_pieces_draw_their_own_glyphs_in_visual_order() {
     }
 }
 
-/// A test app that shapes with CoreText, which draws right to left text
-/// last letter first, where gpui's test text system keeps byte order.
-#[cfg(target_os = "macos")]
-fn core_text_app() -> TestAppContext {
-    TestAppContext::build_with_text_system(
-        gpui::TestDispatcher::new(0),
-        None,
-        std::sync::Arc::new(gpui_apple::AppleTextSystem::new()),
-    )
-}
-
+// CoreText draws right to left text last letter first, where gpui's test
+// text system keeps byte order.
 #[cfg(target_os = "macos")]
 #[test]
 fn right_to_left_text_cuts_whole_with_the_real_shaper() {
     let text = "abc مرحبا بالعالم def";
-    let mut app = core_text_app();
+    let mut app = crate::ui::test_support::core_text_app();
     init(&mut app);
     let mut cuts = 0;
     for width in [60., 90., 120., 160., 220., 400.] {
