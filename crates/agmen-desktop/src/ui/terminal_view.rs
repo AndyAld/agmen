@@ -30,6 +30,7 @@ use crate::backend::{
     Action, AgentFound, InstalledAgent, SessionStart, TakeOver, TermCell, TermColor, TerminalScreen,
 };
 use crate::icons::UiIcon;
+use crate::keymap::{AGENT_DIALOG_CONTEXT, Cancel, SWITCH_MENU_CONTEXT};
 
 /// What the terminal asks its chat to do through the backend.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -534,11 +535,10 @@ impl TerminalView {
                             .occlude()
                             .relative()
                             .track_focus(&self.menu_focus)
-                            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
-                                if event.keystroke.key == "escape" {
-                                    cx.stop_propagation();
-                                    this.set_menu_open(false, cx);
-                                }
+                            // Escape closes it; src/keymap.rs binds it.
+                            .key_context(SWITCH_MENU_CONTEXT)
+                            .on_action(cx.listener(|this, _: &Cancel, _, cx| {
+                                this.set_menu_open(false, cx);
                             }))
                             // The dialog over the menu takes the clicks.
                             .when(!dialog_open, |this| this.on_mouse_down_out(close))
@@ -595,14 +595,11 @@ impl TerminalView {
                             div()
                                 .track_focus(&self.dialog_focus)
                                 .on_mouse_down_out(cancel)
-                                .on_key_down(cx.listener(
-                                    |this, event: &gpui::KeyDownEvent, _, cx| {
-                                        if event.keystroke.key == "escape" {
-                                            cx.stop_propagation();
-                                            this.close_dialog(cx);
-                                        }
-                                    },
-                                ))
+                                // Escape closes it; src/keymap.rs binds it.
+                                .key_context(AGENT_DIALOG_CONTEXT)
+                                .on_action(cx.listener(|this, _: &Cancel, _, cx| {
+                                    this.close_dialog(cx);
+                                }))
                                 .child(content),
                         ),
                 ),

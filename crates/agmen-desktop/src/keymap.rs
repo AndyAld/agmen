@@ -118,6 +118,10 @@ pub(crate) const TEXT_INPUT_CONTEXT: &str = "TextInput";
 pub(crate) const PALETTE_CONTEXT: &str = "CommandPalette";
 /// The key context the open kick-off dialog sets (Task 19).
 pub(crate) const KICKOFF_CONTEXT: &str = "KickoffDialog";
+/// The key context take-over's switch agent menu sets (Task 14).
+pub(crate) const SWITCH_MENU_CONTEXT: &str = "SwitchMenu";
+/// The key context take-over's add agent dialog sets (Task 14).
+pub(crate) const AGENT_DIALOG_CONTEXT: &str = "AgentDialog";
 /// The key context the chat's composer sets.
 pub(crate) const COMPOSER_CONTEXT: &str = "Composer";
 /// The workspace outside any text input, for keys that type a character on
@@ -269,7 +273,10 @@ pub(crate) fn table() -> Vec<Binding> {
         // Tasks 13 and 15: the composer's model picker and reply; its
         // input binds no escape.
         bind("escape", Dismiss, Some(COMPOSER_CONTEXT)),
-        // Task 19: the kick-off dialog closes as Zed's modals do.
+        // Tasks 14 and 19: take-over's menu and dialog and the kick-off
+        // dialog close as Zed's modals do.
+        bind("escape", Cancel, Some(SWITCH_MENU_CONTEXT)),
+        bind("escape", Cancel, Some(AGENT_DIALOG_CONTEXT)),
         bind("escape", Cancel, Some(KICKOFF_CONTEXT)),
     ]);
     table

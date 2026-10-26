@@ -9,7 +9,6 @@ use gpui::{
 use crate::backend::{Backend, BackendHandle, FixtureBackend, Screen, Snapshot, fixture_id};
 use crate::ui::chat::ChatView;
 use crate::ui::test_support::{click, init, redraw};
-use crate::ui::text_input::bind_keys;
 use crate::ui::tokens::MOCKUP_REM;
 
 /// The chat in a 1000 by 900 box, as the center of the 1440 window.
@@ -33,7 +32,8 @@ fn open(
     screen: Screen,
 ) -> (Entity<ChatView>, Rc<FixtureBackend>, &mut VisualTestContext) {
     init(cx);
-    cx.update(bind_keys);
+    // Every binding, so Escape reaches the menu and the dialog.
+    cx.update(crate::keymap::bind_all);
     let backend = Rc::new(FixtureBackend::for_screen(screen).unwrap());
     let handle: Rc<dyn Backend> = backend.clone();
     cx.update(|cx| cx.set_global(BackendHandle(handle)));
@@ -254,7 +254,8 @@ fn the_menu_never_covers_the_chip_in_a_short_window(cx: &mut TestAppContext) {
     // Fix 27 in a window with room for the menu on neither side: the menu
     // is cut to its side's room instead of snapped over the chip.
     init(cx);
-    cx.update(bind_keys);
+    // Every binding, so Escape reaches the menu and the dialog.
+    cx.update(crate::keymap::bind_all);
     let backend = Rc::new(FixtureBackend::for_screen(Screen::ChatTerminal).unwrap());
     let handle: Rc<dyn Backend> = backend.clone();
     cx.update(|cx| cx.set_global(BackendHandle(handle)));

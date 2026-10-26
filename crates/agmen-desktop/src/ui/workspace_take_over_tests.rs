@@ -18,6 +18,8 @@ fn open(
     &mut VisualTestContext,
 ) {
     init(cx);
+    // Escape closes the menu through src/keymap.rs.
+    cx.update(crate::keymap::bind_all);
     let backend = Rc::new(FixtureBackend::for_screen(screen).unwrap());
     let handle: Rc<dyn Backend> = backend.clone();
     cx.update(|cx| cx.set_global(BackendHandle(handle)));

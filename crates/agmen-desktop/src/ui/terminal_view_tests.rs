@@ -69,6 +69,8 @@ mod check_again {
     /// open over the menu.
     fn open(cx: &mut TestAppContext) -> (Entity<TerminalView>, Snapshot, &mut VisualTestContext) {
         init(cx);
+        // Escape closes the menu and the dialog through src/keymap.rs.
+        cx.update(crate::keymap::bind_all);
         let snapshot = FixtureBackend::for_screen(Screen::ChatTerminal)
             .unwrap()
             .snapshot();
