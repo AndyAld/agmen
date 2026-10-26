@@ -1,0 +1,1523 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "StampedEnvelope",
+  "description": "A message as the hub delivers it on `feed` or `inbox/`: the client's\nenvelope plus the fields the hub stamps.\n\nUnlike `ClientEnvelope`, parsing ignores fields it does not know, so a\nreader keeps working when a later minor version adds one (protocol\nsection 9).",
+  "type": "object",
+  "properties": {
+    "body": {
+      "description": "Markdown text.",
+      "$ref": "#/$defs/Body"
+    },
+    "from": {
+      "description": "The sender, taken from the `up/` topic it published on.",
+      "$ref": "#/$defs/IdentityId"
+    },
+    "from_handle": {
+      "description": "The sender's handle, for display.",
+      "type": "string"
+    },
+    "from_kind": {
+      "description": "The sender's kind.",
+      "$ref": "#/$defs/IdentityKind"
+    },
+    "hub_at": {
+      "description": "The hub's clock when it recorded the message.",
+      "type": "string",
+      "format": "date-time"
+    },
+    "id": {
+      "description": "A ULID the client generates; the dedupe key with `from`.",
+      "$ref": "#/$defs/MessageId"
+    },
+    "items": {
+      "description": "Items the message is about.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ItemKey"
+      }
+    },
+    "lane": {
+      "description": "The lane the message is about.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/LaneName"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "mentioned": {
+      "description": "The identities this message interrupts: expanded mentions, plus reply\nauthors where the protocol says so, never the sender.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/IdentityId"
+      }
+    },
+    "mentions": {
+      "description": "Mentions; only FYI, ASK, ANSWER and ALERT take them.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Mention"
+      }
+    },
+    "refs": {
+      "description": "Links for what the body names.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Ref"
+      }
+    },
+    "reply_to": {
+      "description": "The id of an earlier message this one answers or threads under.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/MessageId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "sent_at": {
+      "description": "The client's clock when it sent the message; display only.",
+      "type": "string",
+      "format": "date-time"
+    },
+    "seq": {
+      "description": "Its number in that stream.",
+      "$ref": "#/$defs/Seq"
+    },
+    "stream": {
+      "description": "The stream this copy belongs to.",
+      "$ref": "#/$defs/Stream"
+    },
+    "to": {
+      "description": "DM recipients, 1 to 8; empty for every other verb. Parses from a list,\n`null`, or a missing field.",
+      "type": [
+        "array",
+        "null"
+      ],
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/IdentityId"
+      }
+    },
+    "v": {
+      "description": "Protocol version; 1.",
+      "type": "integer",
+      "format": "uint8",
+      "maximum": 255,
+      "minimum": 0
+    },
+    "valid_until": {
+      "description": "When the message stops being valid; required on CLAIM.",
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    }
+  },
+  "oneOf": [
+    {
+      "description": "Joins the room; the hub updates the roster.",
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "object",
+          "properties": {
+            "agent": {
+              "description": "Coding agent and version, such as `claude-code/2.1.310`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "client": {
+              "description": "Client name and version, such as `agmen-cli/0.1.0`.",
+              "type": "string"
+            },
+            "looking_at": {
+              "description": "What the sender is looking at, shown in the roster.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "model": {
+              "description": "Model the agent runs.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "client"
+          ]
+        },
+        "verb": {
+          "type": "string",
+          "const": "HELLO"
+        }
+      },
+      "required": [
+        "verb",
+        "data"
+      ]
+    },
+    {
+      "description": "Leaves the room; the hub sets presence offline.",
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "object"
+        },
+        "verb": {
+          "type": "string",
+          "const": "BYE"
+        }
+      },
+      "required": [
+        "verb",
+        "data"
+      ]
+    },
+    {
+      "description": "A chat message: the text is in `body`.",
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "object"
+        },
+        "verb": {
+          "type": "string",
+          "const": "FYI"
+        }
+      },
+      "required": [
+        "verb",
+        "data"
+      ]
+    },
+    {
+      "description": "A question; goes to the feed.",
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "object",
+          "properties": {
+            "of": {
+              "description": "Who should answer, when one identity should.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/IdentityId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        },
+        "verb": {
+          "type": "string",
+          "const": "ASK"
+        }
+      },
+      "required": [
+        "verb",
+        "data"
+      ]
+    },
+    {
+      "description": "An answer; `reply_to` names the ASK.",
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "object"
+        },
+        "verb": {
+          "type": "string",
+          "const": "ANSWER"
+        }
+      },
+      "required": [
+        "verb",
+        "data"
+      ]
+    },
+    {
+      "description": "A social acknowledgement (not the delivery ACK); `reply_to` is required.",
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "object"
+        },
+        "verb": {
+          "type": "string",
+          "const": "ACK"
+        }
+      },
+      "required": [
+        "verb",
+        "data"
+      ]
+    },
+    {
+      "description": "A progress report.",
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "object",
+          "properties": {
+            "hours": {
+              "description": "Hours worked so far.",
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "items": {
+              "description": "Items the report covers.",
+              "type": "array",
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/ItemKey"
+              }
+            },
+            "spend_usd": {
+              "description": "Dollars spent so far.",
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "summary": {
+              "description": "One line on where the work stands.",
+              "type": "string"
+            },
+            "tokens": {
+              "description": "Tokens used so far.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Tokens"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "summary"
+          ]
+        },
+        "verb": {
+          "type": "string",
+          "const": "STATUS"
+        }
+      },
+      "required": [
+        "verb",
+        "data"
+      ]
+    },
+    {
+      "description": "Asks who is here; the hub answers from presence.",
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "object"
+        },
+        "verb": {
+          "type": "string",
+          "const": "ROLLCALL"
+        }
+      },
+      "required": [
+        "verb",
+        "data"
+      ]
+    },
+    {
+      "description": "Asks for an item; `valid_until` is required.",
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "object",
+          "properties": {
+            "item": {
+              "description": "The item to claim.",
+              "$ref": "#/$defs/ItemKey"
+            }
+          },
+          "required": [
+            "item"
+          ]
+        },
+        "verb": {
+          "type": "string",
+          "const": "CLAIM"
+        }
+      },
+      "required": [
+        "verb",
+        "data"
+      ]
+    },
+    {
+      "description": "The hub's yes to a CLAIM.",
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "object",
+          "properties": {
+            "item": {
+              "description": "The claimed item.",
+              "$ref": "#/$defs/ItemKey"
+            },
+            "lease_until": {
+              "description": "When the lease ends unless a HEARTBEAT renews it.",
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          "required": [
+            "item",
+            "lease_until"
+          ]
+        },
+        "verb": {
+          "type": "string",
+          "const": "GRANT"
+        }
+      },
+      "required": [
+        "verb",
+        "data"
+      ]
+    },
+    {
+      "description": "The hub's no to a CLAIM.",
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "object",
+          "properties": {
+            "item": {
+              "description": "The item that was asked for.",
+              "$ref": "#/$defs/ItemKey"
+            },
+            "reason": {
+              "description": "Why the claim was refused.",
+              "$ref": "#/$defs/DenyReason"
+            }
+          },
+          "required": [
+            "item",
+            "reason"
+          ]
+        },
+        "verb": {
+          "type": "string",
+          "const": "DENY"
+        }
+      },
+      "required": [
+        "verb",
+        "data"
+      ]
+    },
+    {
+      "description": "Renews the leases on held items; not posted to the feed.",
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "object",
+          "properties": {
+            "items": {
+              "description": "The held items.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ItemKey"
+              }
+            }
+          },
+          "required": [
+            "items"
+          ]
+        },
+        "verb": {
+          "type": "string",
+          "const": "HEARTBEAT"
+        }
+      },
+      "required": [
+        "verb",
+        "data"
+      ]
+    },
+    {
+      "description": "Gives up a claim.",
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "object",
+          "properties": {
+            "item": {
+              "description": "The released item.",
+              "$ref": "#/$defs/ItemKey"
+            },
+            "reason": {
+              "description": "Why, such as `lease_expired` when the hub releases it.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "item"
+          ]
+        },
+        "verb": {
+          "type": "string",
+          "const": "RELEASE"
+        }
+      },
+      "required": [
+        "verb",
+        "data"
+      ]
+    },
+    {
+      "description": "A coordinator hands an item to an identity.",
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "object",
+          "properties": {
+            "item": {
+              "description": "The item.",
+              "$ref": "#/$defs/ItemKey"
+            },
+            "to": {
+              "description": "The assignee.",
+              "$ref": "#/$defs/IdentityId"
+            }
+          },
+          "required": [
+            "item",
+            "to"
+          ]
+        },
+        "verb": {
+          "type": "string",
+          "const": "ASSIGN"
+        }
+      },
+      "required": [
+        "verb",
+        "data"
+      ]
+    },
+    {
+      "description": "A listener started a worker; `reply_to` is required.",
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "object",
+          "properties": {
+            "agent": {
+              "description": "The coding agent the worker runs.",
+              "type": "string"
+            },
+            "budget_usd": {
+              "description": "The worker's budget in dollars.",
+              "type": "number",
+              "format": "double"
+            },
+            "item": {
+              "description": "The item the worker is on.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ItemKey"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "model": {
+              "description": "The model the worker runs.",
+              "type": "string"
+            },
+            "role": {
+              "description": "The worker's role.",
+              "$ref": "#/$defs/RoleName"
+            },
+            "tier": {
+              "description": "The tier the model came from, such as `standard`.",
+              "type": "string"
+            },
+            "worker": {
+              "description": "The worker's identity.",
+              "$ref": "#/$defs/IdentityId"
+            }
+          },
+          "required": [
+            "worker",
+            "agent",
+            "role",
+            "model",
+            "tier",
+            "budget_usd"
+          ]
+        },
+        "verb": {
+          "type": "string",
+          "const": "DELEGATED"
+        }
+      },
+      "required": [
+        "verb",
+        "data"
+      ]
+    },
+    {
+      "description": "A lane owner lends paths to an identity until a time.",
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "object",
+          "properties": {
+            "lane": {
+              "description": "The lane.",
+              "$ref": "#/$defs/LaneName"
+            },
+            "paths": {
+              "description": "Globs within the lane.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "to": {
+              "description": "Who may edit them.",
+              "$ref": "#/$defs/IdentityId"
+            },
+            "until": {
+              "description": "When the lend ends.",
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          "required": [
+            "lane",
+            "paths",
+            "to",
+            "until"
+          ]
+        },
+        "verb": {
+          "type": "string",
+          "const": "LEND"
+        }
+      },
+      "required": [
+        "verb",
+        "data"
+      ]
+    },
+    {
+      "description": "Reports a new problem; the hub answers with ITEM.",
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "object",
+          "properties": {
+            "lane": {
+              "description": "The lane it belongs to.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/LaneName"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "severity": {
+              "description": "How bad it is.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Severity"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "title": {
+              "description": "A short title.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "title"
+          ]
+        },
+        "verb": {
+          "type": "string",
+          "const": "FOUND"
+        }
+      },
+      "required": [
+        "verb",
+        "data"
+      ]
+    },
+    {
+      "description": "The hub minted an item key for a FOUND.",
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "object",
+          "properties": {
+            "key": {
+              "description": "The new key.",
+              "$ref": "#/$defs/ItemKey"
+            }
+          },
+          "required": [
+            "key"
+          ]
+        },
+        "verb": {
+          "type": "string",
+          "const": "ITEM"
+        }
+      },
+      "required": [
+        "verb",
+        "data"
+      ]
+    },
+    {
+      "description": "Finished work on a claimed item.",
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "object",
+          "properties": {
+            "base_sha": {
+              "description": "The commit the work started from.",
+              "$ref": "#/$defs/GitSha"
+            },
+            "branch": {
+              "description": "The branch holding the work.",
+              "type": "string"
+            },
+            "changes": {
+              "description": "Changed paths.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Change"
+              }
+            },
+            "checks": {
+              "description": "Check results.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Check"
+              }
+            },
+            "commit": {
+              "description": "The commit with the work.",
+              "$ref": "#/$defs/GitSha"
+            },
+            "item": {
+              "description": "The item.",
+              "$ref": "#/$defs/ItemKey"
+            }
+          },
+          "required": [
+            "item",
+            "branch",
+            "commit",
+            "base_sha",
+            "checks",
+            "changes"
+          ]
+        },
+        "verb": {
+          "type": "string",
+          "const": "DONE"
+        }
+      },
+      "required": [
+        "verb",
+        "data"
+      ]
+    },
+    {
+      "description": "A reviewer's verdict on a DONE; `reply_to` names the DONE.",
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "object",
+          "properties": {
+            "findings": {
+              "description": "What the reviewer found.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Finding"
+              }
+            },
+            "traced": {
+              "description": "The paths the reviewer traced.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "verdict": {
+              "description": "Pass or changes.",
+              "$ref": "#/$defs/Verdict"
+            }
+          },
+          "required": [
+            "verdict",
+            "findings"
+          ]
+        },
+        "verb": {
+          "type": "string",
+          "const": "REVIEW"
+        }
+      },
+      "required": [
+        "verb",
+        "data"
+      ]
+    },
+    {
+      "description": "Options for a decision.",
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "object",
+          "properties": {
+            "deadline": {
+              "description": "When the decision is due.",
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            },
+            "options": {
+              "description": "The options.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "options"
+          ]
+        },
+        "verb": {
+          "type": "string",
+          "const": "PROPOSAL"
+        }
+      },
+      "required": [
+        "verb",
+        "data"
+      ]
+    },
+    {
+      "description": "A planner's plan revision.",
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "description": "The plan file's path.",
+              "type": "string"
+            },
+            "sha": {
+              "description": "The commit holding that revision.",
+              "$ref": "#/$defs/GitSha"
+            },
+            "version": {
+              "description": "The revision number.",
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "version",
+            "path",
+            "sha"
+          ]
+        },
+        "verb": {
+          "type": "string",
+          "const": "PLAN"
+        }
+      },
+      "required": [
+        "verb",
+        "data"
+      ]
+    },
+    {
+      "description": "GO or VETO on a proposal, spec or plan; `reply_to` is required.",
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "object",
+          "properties": {
+            "option": {
+              "description": "The chosen option's index in the PROPOSAL.",
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0
+            },
+            "outcome": {
+              "description": "GO or VETO.",
+              "$ref": "#/$defs/Outcome"
+            },
+            "subject": {
+              "description": "The spec file and commit a person approves.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "outcome"
+          ]
+        },
+        "verb": {
+          "type": "string",
+          "const": "DECISION"
+        }
+      },
+      "required": [
+        "verb",
+        "data"
+      ]
+    },
+    {
+      "description": "A ruling from a coordinator or human.",
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "object",
+          "properties": {
+            "subject": {
+              "description": "What was ruled.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "subject"
+          ]
+        },
+        "verb": {
+          "type": "string",
+          "const": "RULING"
+        }
+      },
+      "required": [
+        "verb",
+        "data"
+      ]
+    },
+    {
+      "description": "An agent asks its owner to approve a push.",
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "object",
+          "properties": {
+            "ref": {
+              "description": "The ref to push.",
+              "type": "string"
+            },
+            "remote": {
+              "description": "The git remote.",
+              "type": "string"
+            },
+            "sha": {
+              "description": "The commit to push.",
+              "$ref": "#/$defs/GitSha"
+            }
+          },
+          "required": [
+            "remote",
+            "ref",
+            "sha"
+          ]
+        },
+        "verb": {
+          "type": "string",
+          "const": "PUSH_REQUEST"
+        }
+      },
+      "required": [
+        "verb",
+        "data"
+      ]
+    },
+    {
+      "description": "The owner approves a PUSH_REQUEST; `reply_to` is required.",
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "object"
+        },
+        "verb": {
+          "type": "string",
+          "const": "PUSH_OK"
+        }
+      },
+      "required": [
+        "verb",
+        "data"
+      ]
+    },
+    {
+      "description": "The owner refuses a PUSH_REQUEST; `reply_to` is required.",
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "object"
+        },
+        "verb": {
+          "type": "string",
+          "const": "PUSH_NO"
+        }
+      },
+      "required": [
+        "verb",
+        "data"
+      ]
+    },
+    {
+      "description": "Asks people for attention, at high priority.",
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "object",
+          "properties": {
+            "actions": {
+              "description": "Actions the sender offers, such as `Revert #10`.",
+              "type": "array",
+              "default": [],
+              "items": {
+                "type": "string"
+              }
+            },
+            "need": {
+              "description": "What the sender needs.",
+              "type": "string"
+            },
+            "needs": {
+              "description": "Who can clear it.",
+              "$ref": "#/$defs/Needs",
+              "default": "anyone"
+            },
+            "urgency": {
+              "description": "Normal or urgent.",
+              "$ref": "#/$defs/Urgency",
+              "default": "normal"
+            }
+          },
+          "required": [
+            "need"
+          ]
+        },
+        "verb": {
+          "type": "string",
+          "const": "ALERT"
+        }
+      },
+      "required": [
+        "verb",
+        "data"
+      ]
+    },
+    {
+      "description": "A direct message to the identities in `to`.",
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "object"
+        },
+        "verb": {
+          "type": "string",
+          "const": "DM"
+        }
+      },
+      "required": [
+        "verb",
+        "data"
+      ]
+    },
+    {
+      "description": "The hub's notice that a retained `state/` head changed.",
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "object",
+          "properties": {
+            "as_of_seq": {
+              "description": "The feed seq the state reflects.",
+              "$ref": "#/$defs/Seq"
+            },
+            "key": {
+              "description": "The state key, such as `roster`.",
+              "type": "string"
+            },
+            "v": {
+              "description": "The key's version.",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "key",
+            "v",
+            "as_of_seq"
+          ]
+        },
+        "verb": {
+          "type": "string",
+          "const": "STATE"
+        }
+      },
+      "required": [
+        "verb",
+        "data"
+      ]
+    }
+  ],
+  "required": [
+    "v",
+    "id",
+    "body",
+    "sent_at",
+    "stream",
+    "seq",
+    "from",
+    "from_handle",
+    "from_kind",
+    "hub_at"
+  ],
+  "$defs": {
+    "Body": {
+      "description": "Markdown, at most 32768 bytes after UTF-8 encoding.",
+      "type": "string"
+    },
+    "Change": {
+      "description": "One changed path in a DONE.",
+      "type": "object",
+      "properties": {
+        "path": {
+          "description": "The path, relative to the repository root.",
+          "type": "string"
+        },
+        "status": {
+          "description": "The `git diff --name-status` letter, such as `M` or `A`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "path"
+      ]
+    },
+    "Check": {
+      "description": "One check result in a DONE.",
+      "type": "object",
+      "properties": {
+        "baseline": {
+          "description": "Tests that failed on `base_sha`, when known.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "failed": {
+          "description": "Tests that failed.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "name": {
+          "description": "The check's name, such as `nextest`.",
+          "type": "string"
+        },
+        "passed": {
+          "description": "Tests that passed.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "name",
+        "passed",
+        "failed"
+      ]
+    },
+    "DenyReason": {
+      "description": "Why the hub refused a CLAIM.",
+      "oneOf": [
+        {
+          "description": "Another identity holds the item.",
+          "type": "string",
+          "const": "held_by"
+        },
+        {
+          "description": "The CLAIM arrived after its `valid_until`.",
+          "type": "string",
+          "const": "expired"
+        },
+        {
+          "description": "The item is outside the claimant's lane.",
+          "type": "string",
+          "const": "not_in_lane"
+        },
+        {
+          "description": "The item is closed.",
+          "type": "string",
+          "const": "closed"
+        }
+      ]
+    },
+    "Finding": {
+      "description": "One finding in a REVIEW.",
+      "type": "object",
+      "properties": {
+        "line": {
+          "description": "The line, when one applies.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "path": {
+          "description": "The file.",
+          "type": "string"
+        },
+        "severity": {
+          "description": "How bad it is.",
+          "$ref": "#/$defs/FindingSeverity"
+        },
+        "trigger": {
+          "description": "The input or state that shows it.",
+          "type": "string"
+        },
+        "what": {
+          "description": "What is wrong.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "severity",
+        "path",
+        "what",
+        "trigger"
+      ]
+    },
+    "FindingSeverity": {
+      "description": "How bad a REVIEW finding is.",
+      "oneOf": [
+        {
+          "description": "Low.",
+          "type": "string",
+          "const": "low"
+        },
+        {
+          "description": "Medium.",
+          "type": "string",
+          "const": "med"
+        },
+        {
+          "description": "High.",
+          "type": "string",
+          "const": "high"
+        }
+      ]
+    },
+    "GitSha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{7,64}$"
+    },
+    "IdentityId": {
+      "type": "string",
+      "pattern": "^[a-z0-9]{8,32}$"
+    },
+    "IdentityKind": {
+      "description": "What kind of identity sent a message (protocol section 1).",
+      "oneOf": [
+        {
+          "description": "A person.",
+          "type": "string",
+          "const": "human"
+        },
+        {
+          "description": "A coding agent working for a person.",
+          "type": "string",
+          "const": "agent"
+        },
+        {
+          "description": "An agent or person with the coordinator role.",
+          "type": "string",
+          "const": "coordinator"
+        },
+        {
+          "description": "A person's listener: reads the chat and delegates work.",
+          "type": "string",
+          "const": "listener"
+        },
+        {
+          "description": "The hub itself.",
+          "type": "string",
+          "const": "hub"
+        }
+      ]
+    },
+    "ItemKey": {
+      "type": "string",
+      "pattern": "^[A-Z]{1,4}-[0-9]{1,6}$"
+    },
+    "LaneName": {
+      "type": "string",
+      "pattern": "^L-[A-Z0-9-]{1,40}$"
+    },
+    "Mention": {
+      "description": "all, agents, humans, a lane name (L-UI), role:<name>, or an identity id.",
+      "type": "string"
+    },
+    "MessageId": {
+      "type": "string",
+      "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "Needs": {
+      "description": "Who can clear an ALERT.",
+      "oneOf": [
+        {
+          "description": "The first answer from the owner or a coordinator clears it.",
+          "type": "string",
+          "const": "anyone"
+        },
+        {
+          "description": "It stays open for the owner after a coordinator answers.",
+          "type": "string",
+          "const": "owner"
+        }
+      ]
+    },
+    "Outcome": {
+      "description": "A DECISION's outcome.",
+      "oneOf": [
+        {
+          "description": "Go ahead.",
+          "type": "string",
+          "const": "GO"
+        },
+        {
+          "description": "Stop.",
+          "type": "string",
+          "const": "VETO"
+        }
+      ]
+    },
+    "Ref": {
+      "description": "Something the body names that the hub knows, stamped as a link.",
+      "type": "object",
+      "properties": {
+        "end": {
+          "description": "Byte offset in `body` just past the text.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "kind": {
+          "description": "What the text names.",
+          "$ref": "#/$defs/RefKind"
+        },
+        "start": {
+          "description": "Byte offset in `body` where the text starts.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "target": {
+          "description": "The id, name, key or number it names.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "start",
+        "end",
+        "target"
+      ]
+    },
+    "RefKind": {
+      "description": "What a `Ref` names.",
+      "oneOf": [
+        {
+          "description": "An identity's handle.",
+          "type": "string",
+          "const": "identity"
+        },
+        {
+          "description": "A lane.",
+          "type": "string",
+          "const": "lane"
+        },
+        {
+          "description": "An item.",
+          "type": "string",
+          "const": "item"
+        },
+        {
+          "description": "A role.",
+          "type": "string",
+          "const": "role"
+        },
+        {
+          "description": "A pull request number.",
+          "type": "string",
+          "const": "pr"
+        }
+      ]
+    },
+    "RoleName": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{1,31}$"
+    },
+    "Seq": {
+      "description": "A stream's sequence number. The hub numbers each stream from 1 with no gaps.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "Severity": {
+      "description": "How bad a FOUND problem is.",
+      "oneOf": [
+        {
+          "description": "Low.",
+          "type": "string",
+          "const": "low"
+        },
+        {
+          "description": "Medium.",
+          "type": "string",
+          "const": "med"
+        },
+        {
+          "description": "High.",
+          "type": "string",
+          "const": "high"
+        },
+        {
+          "description": "A security problem: the feed shows only its key and lane.",
+          "type": "string",
+          "const": "security"
+        }
+      ]
+    },
+    "Stream": {
+      "description": "feed, or inbox:<identity id>.",
+      "type": "string"
+    },
+    "Tokens": {
+      "description": "Token counts in a STATUS.",
+      "type": "object",
+      "properties": {
+        "cache_read": {
+          "description": "Tokens read from the prompt cache.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "input": {
+          "description": "Input tokens.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "output": {
+          "description": "Output tokens.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "input",
+        "output",
+        "cache_read"
+      ]
+    },
+    "Urgency": {
+      "description": "An ALERT's urgency.",
+      "oneOf": [
+        {
+          "description": "A notification.",
+          "type": "string",
+          "const": "normal"
+        },
+        {
+          "description": "Adds the chime and the needs-you highlight.",
+          "type": "string",
+          "const": "urgent"
+        }
+      ]
+    },
+    "Verdict": {
+      "description": "A REVIEW's verdict.",
+      "oneOf": [
+        {
+          "description": "The work passes.",
+          "type": "string",
+          "const": "pass"
+        },
+        {
+          "description": "The work needs changes.",
+          "type": "string",
+          "const": "changes"
+        }
+      ]
+    }
+  }
+}
