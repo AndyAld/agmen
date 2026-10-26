@@ -10,6 +10,7 @@
         "background": "#1d2021",
         "surface.background": "#1d2021",
         "elevated_surface.background": "#282828",
+        "element.background": "#1d2021",
         "element.selected": "#3c3836",
         "element.hover": "#282828",
         "border": "#3c3836",
