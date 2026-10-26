@@ -253,8 +253,9 @@ pub(crate) const MODEL_PICKER_OFFSET: Point<Pixels> = Point {
 };
 /// A model row (node 3361): `MenuRow::picker`.
 pub(crate) const PICKER_ROW_HEIGHT: Pixels = px(26.);
-/// The model picker's and the toast's drop shadow (nodes 3355 and 6004):
-/// 8 px down, a 24 px blur, through [`drop_shadow`].
+/// The model picker's, the toast's and the switch menu's drop shadow
+/// (nodes 3355, 6004 and 1802): 8 px down, a 24 px blur, through
+/// [`drop_shadow`].
 pub(crate) const POPOVER_SHADOW_OFFSET: Pixels = px(8.);
 pub(crate) const POPOVER_SHADOW_BLUR: Pixels = px(24.);
 /// A selected segment in both looks (0x33): the effort row's "high" (node
