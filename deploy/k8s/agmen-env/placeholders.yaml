@@ -16,7 +16,8 @@ data:
   cluster-issuer: placeholder-cluster-issuer
   # The API host; the hub's AGMEN_PUBLIC_URL is https://<api-host>.
   api-host: api.agmen.example
-  # The MQTT over WebSocket host.
+  # The MQTT over WebSocket host; the hub's AGMEN_PUBLIC_MQTT_URL is
+  # wss://<mqtt-ws-host>/mqtt.
   mqtt-ws-host: mqtt-ws.agmen.example
   # The hub image: agmen's registry and a build-<N> tag from the Jenkins
   # Image stage (AGMEN_REGISTRY). build-0 is a tag no build produces.

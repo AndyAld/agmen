@@ -1,6 +1,7 @@
 # The agmen hub. Its env vars are read in crates/agmen-hub/src/config.rs.
-# The image and the host in AGMEN_PUBLIC_URL come from placeholders.yaml
-# (hub-image, api-host); the values here are overwritten. Jenkins pushes
+# The image and the hosts in AGMEN_PUBLIC_URL and AGMEN_PUBLIC_MQTT_URL
+# come from placeholders.yaml (hub-image, api-host, mqtt-ws-host); the
+# values here are overwritten. Jenkins pushes
 # <AGMEN_REGISTRY>/agmen-hub:build-<N> from main, and build-0 is a tag no
 # build produces, so the pod waits in ImagePullBackOff until hub-image
 # names a real build (README.md).
@@ -81,6 +82,11 @@ spec:
               value: http://agmen-emqx:18083/api/v5
             - name: AGMEN_MQTT_URL
               value: mqtt://agmen-emqx:1883
+            # The broker URL GET /v1/me gives clients. agmen-emqx:1883 only
+            # resolves inside the cluster, so clients get the mqtt-ws
+            # Ingress (EMQX 8083, path /mqtt) instead.
+            - name: AGMEN_PUBLIC_MQTT_URL
+              value: wss://mqtt-ws.agmen.example/mqtt
             - name: AGMEN_HUB_INSTANCE
               value: main
             # The key id is the file name without .pem. To rotate, add the

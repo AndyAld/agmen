@@ -77,6 +77,15 @@ replacements:
         fieldPaths:
           - spec.rules.0.host
           - spec.tls.0.hosts.0
+      # The host part of wss://<host>/mqtt.
+      - select:
+          kind: Deployment
+          name: agmen-hub
+        fieldPaths:
+          - spec.template.spec.containers.[name=hub].env.[name=AGMEN_PUBLIC_MQTT_URL].value
+        options:
+          delimiter: /
+          index: 2
   - source:
       kind: ConfigMap
       name: agmen-placeholders
