@@ -240,6 +240,12 @@ impl FixtureBackend {
         }
         Ok(())
     }
+
+    /// Changes the fixture's state, for a case no screen shows.
+    #[cfg(test)]
+    pub(crate) fn edit(&self, change: impl FnOnce(&mut Snapshot)) {
+        change(&mut self.state.borrow_mut());
+    }
 }
 
 impl Backend for FixtureBackend {

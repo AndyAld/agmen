@@ -18,8 +18,22 @@ fn open_screen(
     Rc<FixtureBackend>,
     &mut VisualTestContext,
 ) {
+    open_edited_screen(cx, screen, |_| {})
+}
+
+/// [`open_screen`] over the fixture after `edit` changes it.
+fn open_edited_screen(
+    cx: &mut TestAppContext,
+    screen: Screen,
+    edit: impl FnOnce(&mut crate::backend::Snapshot),
+) -> (
+    Entity<Workspace>,
+    Rc<FixtureBackend>,
+    &mut VisualTestContext,
+) {
     init(cx);
     let backend = Rc::new(FixtureBackend::for_screen(screen).unwrap());
+    backend.edit(edit);
     let snapshot = backend.snapshot();
     let handle: Rc<dyn crate::backend::Backend> = backend.clone();
     cx.update(|cx| {
@@ -335,4 +349,58 @@ fn an_outdated_agents_spawn_row_says_why_and_is_refused(cx: &mut TestAppContext)
         Some("agy cannot run a worker: update to 1.1.15+ for JSON")
     );
     assert!(cx.debug_bounds("chat:error").is_some());
+}
+
+#[gpui::test]
+fn a_spawn_of_an_agent_with_an_unread_version_is_refused(cx: &mut TestAppContext) {
+    // C261: an agent whose --version agmen could not read keeps its row,
+    // and the backend refuses its spawn with not_ready's text above the
+    // chat's composer.
+    let (workspace, backend, cx) = open_edited_screen(cx, Screen::Chat, |snapshot| {
+        let gemini = snapshot
+            .installed_agents
+            .iter_mut()
+            .find(|a| a.name == "gemini")
+            .unwrap();
+        gemini.found = crate::backend::AgentFound::VersionUnknown;
+    });
+    click(cx, "pane-0:tab-1");
+    let before = backend.snapshot().messages.len();
+    let gemini = backend
+        .snapshot()
+        .installed_agents
+        .into_iter()
+        .find(|a| a.name == "gemini")
+        .unwrap();
+    assert_eq!(
+        gemini.not_ready().as_deref(),
+        Some("could not read its version")
+    );
+    cx.simulate_keystrokes("cmd-n");
+    cx.simulate_input("gemini");
+    redraw(cx);
+    assert_eq!(
+        shown(&workspace, cx).unwrap(),
+        ["agmen: spawn worker with gemini"]
+    );
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    redraw(cx);
+    assert_eq!(backend.snapshot().messages.len(), before);
+    let error = workspace.read_with(cx, |w, cx| {
+        w.pane_group
+            .read(cx)
+            .chat()
+            .and_then(|chat| chat.read(cx).error().map(str::to_owned))
+    });
+    assert_eq!(
+        error.as_deref(),
+        Some("gemini cannot run a worker: could not read its version")
+    );
+    let shown_error = cx.debug_bounds("chat:error").unwrap();
+    let composer = cx.debug_bounds("composer:box").unwrap();
+    assert!(
+        shown_error.bottom() <= composer.top(),
+        "{shown_error:?} is not above {composer:?}"
+    );
 }
