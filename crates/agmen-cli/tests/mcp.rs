@@ -166,6 +166,35 @@ async fn case_variant_identity_dir_leaves_mcp_inert() {
     assert_eq!(recorder.hits(), (0, 0));
 }
 
+/// A trusted identity file that does not parse is a tool error that says
+/// so, not the not-joined text: the worktree is joined, and the model
+/// should report the broken file rather than suggest joining.
+#[tokio::test(flavor = "multi_thread")]
+async fn malformed_identity_file_is_a_tool_error() {
+    let recorder = Recorder::start().await;
+    let home = Home::new();
+    store_token(&home, &recorder);
+    let wt = Worktree::new(&home);
+    join_like_agmen(&wt, &recorder);
+    std::fs::write(wt.path().join(".agmen/identity.json"), "{ not json").unwrap();
+    let mcp = Mcp::start(options(&home, &wt.path())).await;
+    for (tool, args) in every_tool_call() {
+        let result = mcp.call(tool, args).await;
+        let text = text_of(&result);
+        assert_eq!(result.is_error, Some(true), "{tool}: {text}");
+        assert!(
+            text.starts_with("agmen: loading .agmen/identity.json failed: "),
+            "{tool}: {text}"
+        );
+        assert!(
+            text.contains("is not a valid identity file"),
+            "{tool}: {text}"
+        );
+    }
+    mcp.stop().await;
+    assert_eq!(recorder.hits(), (0, 0));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn identity_override_must_match_the_worktree() {
     let recorder = Recorder::start().await;

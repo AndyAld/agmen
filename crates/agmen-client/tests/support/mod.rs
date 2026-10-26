@@ -286,6 +286,24 @@ pub async fn disconnected(client_id: &str) {
     }
 }
 
+/// Has EMQX drop `client_id`'s connection, as the hub's kick does.
+pub async fn kick(client_id: &str) {
+    let resp = reqwest::Client::new()
+        .delete(emqx_api(&["clients", client_id]))
+        .basic_auth(
+            env("AGMEN_IT_EMQX_API_KEY"),
+            Some(env("AGMEN_IT_EMQX_API_SECRET")),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::NO_CONTENT,
+        "kicking {client_id}"
+    );
+}
+
 /// The topics EMQX lists `client_id` as subscribed to, each with its QoS,
 /// sorted.
 pub async fn subscriptions(client_id: &str) -> Vec<(String, u64)> {

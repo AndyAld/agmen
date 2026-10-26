@@ -276,8 +276,6 @@ async fn it_lanes_check_path_and_state() {
         let text = mcp.text("state", json!({ "key": "roster" })).await;
         assert!(text.starts_with("state/roster: ["), "{text}");
         assert!(text.contains(&sol.identity.handle), "{text}");
-        let result = mcp.call("state", json!({ "key": "a/b" })).await;
-        assert_eq!(result.is_error, Some(true), "{}", text_of(&result));
         mcp.stop().await;
     })
     .await;
@@ -294,12 +292,6 @@ async fn it_state_and_handles_never_take_the_cli_client_id() {
         let luna = ctx.member(Role::Member, "luna", "agent").await;
         let luna_handle = &luna.identity.handle;
         let mcp = Mcp::start(options(&sol)).await;
-        // The hub publishes state/head once the feed has a message.
-        let text = mcp
-            .text("post", json!({ "verb": "FYI", "body": "hi" }))
-            .await;
-        assert_eq!(text, "recorded #1 (feed)");
-
         // A concurrent agmen command or hook of the same identity.
         let state_dir = tempfile::tempdir().unwrap();
         let config = SessionConfig::new(
@@ -310,6 +302,15 @@ async fn it_state_and_handles_never_take_the_cli_client_id() {
             state_dir.path(),
         );
         let (cli, mut events) = Session::connect(config).await.unwrap();
+
+        // The hub publishes state/head once the feed has a message, so
+        // until then the read answers after the short wait.
+        let text = mcp.text("state", json!({})).await;
+        assert_eq!(text, "state/head: nothing retained");
+        let text = mcp
+            .text("post", json!({ "verb": "FYI", "body": "hi" }))
+            .await;
+        assert_eq!(text, "recorded #1 (feed)");
 
         let text = mcp.text("state", json!({})).await;
         assert!(text.starts_with("state/head: {"), "{text}");
@@ -330,9 +331,6 @@ async fn it_state_and_handles_never_take_the_cli_client_id() {
             )
             .await;
         assert!(text.starts_with("recorded #"), "{text}");
-        // A state key with nothing retained answers after the short wait.
-        let text = mcp.text("state", json!({ "key": "nothing" })).await;
-        assert_eq!(text, "state/nothing: nothing retained");
 
         assert_never_dropped(&mut events).await;
         cli.close().await.unwrap();

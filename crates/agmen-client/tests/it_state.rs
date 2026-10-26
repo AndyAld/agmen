@@ -15,8 +15,8 @@ use agmen_client::{ClientError, ClientEvent, ClientKind, Session, read_state, re
 use agmen_proto::{ClientEnvelope, IdentityId, Timestamp};
 use serde_json::{Value, json};
 use support::{
-    Ctx, PresenceLog, ShortTokens, TestIdentity, close, delivered, disconnected, new_message_id,
-    run, subscribed_to,
+    Ctx, PresenceLog, ShortTokens, TestIdentity, close, delivered, disconnected, kick,
+    new_message_id, run, subscribed_to, subscriptions,
 };
 
 /// How many times a test reads the roster before giving up on the hub
@@ -292,6 +292,51 @@ async fn it_session_reads_state_on_its_own_connection() {
                 "the mcp session dropped"
             );
         }
+        close(mcp).await;
+    })
+    .await;
+}
+
+/// A session's state read whose connection drops after the broker granted
+/// the subscription, and before any retained message came, fails: it does
+/// not say that nothing is retained, which `resolve` would turn into "no
+/// identity has that handle".
+#[tokio::test(flavor = "multi_thread")]
+async fn it_session_state_read_fails_when_the_connection_drops() {
+    run(|ctx| async move {
+        let who = ctx.identity().await;
+        let client_id = format!("{}-mcp", who.identity.id);
+        let (mcp, events) = Session::connect(ctx.config(ClientKind::Mcp, &who, &ctx.broker))
+            .await
+            .unwrap();
+        drop(events);
+        // Nothing is retained on state/roster in a fresh project, so the
+        // read waits its 3 s after the SUBACK.
+        let topic = ctx.topics.state("roster");
+        let (read, ()) = tokio::join!(mcp.read_state("roster"), async {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+            while !subscriptions(&client_id)
+                .await
+                .iter()
+                .any(|(subscribed, _)| *subscribed == topic)
+            {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "the read never subscribed"
+                );
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            // The SUBACK has reached the client well before this.
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            kick(&client_id).await;
+        });
+        // The session reconnects, so this is not Closed, and the broker
+        // answered the subscription, so the timeout is the 3 s state wait,
+        // not the 10 s subscribe wait.
+        assert!(
+            matches!(read, Err(ClientError::Timeout(wait)) if wait == Duration::from_secs(3)),
+            "{read:?}"
+        );
         close(mcp).await;
     })
     .await;

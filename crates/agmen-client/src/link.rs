@@ -590,6 +590,13 @@ impl AckGate {
 /// `ack/{id}` again: a request makes the poll return, the link then sees
 /// the token is due between polls, and subscribing again to a topic the
 /// session holds changes nothing. Ends when the link task does.
+///
+/// Unlike the link's subscribe in `on_connected`, this one is not tracked:
+/// its only job is to wake the poll. The broker granted `ack/{id}` on this
+/// connection already, so its answer says nothing new, and when the link
+/// then swaps the token, the new connection's subscribe is tracked and
+/// judged as on any connect. Waiting here for this SUBACK could also hold
+/// the timer on a client the rotation has just dropped.
 pub(crate) async fn token_timer(
     client: CurrentClient,
     ack: String,

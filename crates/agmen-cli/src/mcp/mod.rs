@@ -15,8 +15,11 @@
 //! server before the plugin's own trust check runs, so the test here is
 //! the one that counts.
 //!
-//! While connected, the server sends one HEARTBEAT every 5 minutes for the
-//! claims `claims.db` holds, so their leases stay alive.
+//! While it runs, the server sends one HEARTBEAT every 5 minutes for the
+//! claims `claims.db` holds, so their leases stay alive while the agent
+//! edits without calling a tool. It connects at startup and, whenever no
+//! session is connected (connecting failed, or the session stopped on its
+//! own), again on the next beat, through the same path a tool call takes.
 //!
 //! Tool results are text: `recorded #<seq> (<stream>)`, `queued id=<id>
 //! (not yet recorded)` or `rejected: <reason>` for what a tool sent, plus
@@ -26,8 +29,8 @@
 mod tools;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use agmen_client::{
@@ -44,7 +47,7 @@ use rmcp::transport::IntoTransport;
 use rmcp::{RoleServer, ServiceExt as _};
 use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
-use tokio::time::MissedTickBehavior;
+use tokio::time::Instant;
 
 use crate::client::blocking;
 use crate::cmd::claim::heartbeat_envelope;
@@ -56,6 +59,9 @@ use crate::paths;
 const HEARTBEAT_EVERY: Duration = Duration::from_secs(5 * 60);
 /// The shortest heartbeat period [`McpOptions::with_heartbeat`] takes.
 const HEARTBEAT_MIN: Duration = Duration::from_secs(1);
+/// The first wait before the heartbeat task tries to connect again after a
+/// failure; it doubles up to the heartbeat period.
+const RECONNECT_FIRST: Duration = Duration::from_secs(1);
 /// How long a tool waits for the hub to record what it sent.
 const ANSWER_WAIT: Duration = Duration::from_secs(5);
 
@@ -199,21 +205,14 @@ where
     E: std::error::Error + Send + Sync + 'static,
 {
     let server = Server::new(options);
-    // Connect now, so held claims get their HEARTBEAT without a tool call.
-    let warm_up = tokio::spawn({
-        let server = server.clone();
-        async move { server.warm_up().await }
-    });
+    // Connects now and keeps a session for the HEARTBEAT, so held claims
+    // get it without a tool call.
+    let heartbeat = Task::spawn(heartbeat(server.clone()));
     let served = match server.clone().serve(transport).await {
         Ok(running) => running.waiting().await.map(drop).map_err(McpError::Stopped),
         Err(err) => Err(McpError::Handshake(Box::new(err))),
     };
-    warm_up.abort();
-    if let Err(err) = warm_up.await
-        && err.is_panic()
-    {
-        tracing::error!(error = %err, "connecting at startup panicked");
-    }
+    heartbeat.stop().await;
     server.shut_down().await;
     served
 }
@@ -255,16 +254,15 @@ impl Live {
     }
 }
 
-/// A connected identity and the tasks that serve it.
+/// A connected identity and the task that reads its session's events.
 #[derive(Debug)]
 struct Connected {
     live: Arc<Live>,
     pump: Task,
-    heartbeat: Task,
 }
 
 impl Connected {
-    /// Stops the tasks, then sends DISCONNECT, so the broker keeps the
+    /// Stops the pump, then sends DISCONNECT, so the broker keeps the
     /// session for the next start.
     ///
     /// # Errors
@@ -272,7 +270,6 @@ impl Connected {
     /// The error that stopped the session earlier, if one did.
     async fn close(self) -> Result<(), ClientError> {
         self.pump.stop().await;
-        self.heartbeat.stop().await;
         match Arc::try_unwrap(self.live) {
             Ok(live) => live.session.close().await,
             Err(_) => {
@@ -403,7 +400,7 @@ impl Server {
     }
 
     /// Loads the token of `joined`'s identity, connects its `<id>-mcp`
-    /// session and starts the tasks that serve it.
+    /// session and starts the task that reads its events.
     async fn connect(&self, joined: Joined) -> anyhow::Result<Connected> {
         let options = &self.shared.options;
         let agent = Agent::load(joined, options.tokens.clone(), &options.state_base).await?;
@@ -430,25 +427,7 @@ impl Server {
             stopped,
             wait: options.answer_wait,
         });
-        let heartbeat = Task::spawn(heartbeat(Arc::downgrade(&live), options.heartbeat));
-        Ok(Connected {
-            live,
-            pump,
-            heartbeat,
-        })
-    }
-
-    /// Connects at startup when the worktree is joined. Not joined is no
-    /// news here; a failure is logged, and the next tool call tries again.
-    async fn warm_up(&self) {
-        if let Err(answer) = self.live().await
-            && answer.is_error == Some(true)
-        {
-            tracing::warn!(
-                "agmen mcp could not connect at startup: {}",
-                result_text(&answer)
-            );
-        }
+        Ok(Connected { live, pump })
     }
 
     /// Closes the connected identity's session, if one is connected.
@@ -474,29 +453,60 @@ async fn pump(mut events: Events, answered: Arc<Notify>, stopped: Arc<AtomicBool
     answered.notify_waiters();
 }
 
-/// Every `every`, queues one HEARTBEAT naming the claims `claims.db` holds,
-/// while the session lives. The outbox sends it; nothing waits for the
-/// hub's answer.
-async fn heartbeat(live: Weak<Live>, every: Duration) {
-    let mut ticks = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
-    ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
+/// Connects at once, then every heartbeat period queues one HEARTBEAT
+/// naming the claims `claims.db` holds, until the server stops. Each round
+/// takes the session through [`Server::live`], as a tool call does, so a
+/// session that failed to connect or stopped on its own is connected
+/// again. After a failure it tries again sooner, waiting 1 s and doubling
+/// up to the period. The first beat is due one period after startup and
+/// each next one a period after the last; a round that connects after a
+/// beat fell due sends it at once, so an outage delays a beat only until
+/// the reconnect. Not joined waits a whole period. The outbox sends what
+/// is queued; nothing waits for the hub's answer.
+async fn heartbeat(server: Server) {
+    let every = server.shared.options.heartbeat;
+    let mut retry = RECONNECT_FIRST.min(every);
+    let mut due = Instant::now() + every;
     loop {
-        ticks.tick().await;
-        let Some(live) = live.upgrade() else {
-            return;
+        let wait = match server.live().await {
+            Ok(live) => {
+                if Instant::now() >= due {
+                    send_heartbeat(&live).await;
+                    due = Instant::now() + every;
+                }
+                retry = RECONNECT_FIRST.min(every);
+                due.saturating_duration_since(Instant::now())
+            }
+            Err(answer) if answer.is_error == Some(true) => {
+                tracing::warn!(
+                    "agmen mcp has no broker session; trying again in {retry:?}: {}",
+                    result_text(&answer)
+                );
+                let wait = retry;
+                retry = retry.saturating_mul(2).min(every);
+                wait
+            }
+            // Not joined: no news, and nothing to beat for.
+            Err(_) => every,
         };
-        let sent = match heartbeat_envelope(&live.agent).await {
-            Ok(Some(env)) => live
-                .session
-                .publish(env)
-                .await
-                .context("queueing the HEARTBEAT failed"),
-            Ok(None) => Ok(()),
-            Err(err) => Err(err),
-        };
-        if let Err(err) = sent {
-            tracing::warn!("{}", clean(&format!("{err:#}")));
-        }
+        tokio::time::sleep(wait).await;
+    }
+}
+
+/// Queues one HEARTBEAT naming the claims `claims.db` holds, if it holds
+/// any. A failure is logged; the next beat tries again.
+async fn send_heartbeat(live: &Live) {
+    let sent = match heartbeat_envelope(&live.agent).await {
+        Ok(Some(env)) => live
+            .session
+            .publish(env)
+            .await
+            .context("queueing the HEARTBEAT failed"),
+        Ok(None) => Ok(()),
+        Err(err) => Err(err),
+    };
+    if let Err(err) = sent {
+        tracing::warn!("{}", clean(&format!("{err:#}")));
     }
 }
 
