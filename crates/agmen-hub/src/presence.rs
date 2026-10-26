@@ -14,14 +14,14 @@
 //! roster, a BYE sets its sender offline, and a ROLLCALL gets the hub's
 //! answer (`crate::rollcall`).
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Mutex, PoisonError};
 
 use agmen_proto::{IdentityId, IdentityKind, MessageId, ProjectId, Topics, Verb};
-use rumqttc_next::{AsyncClient, Publish, PublishOptions};
+use rumqttc_next::{AsyncClient, Publish, PublishOptions, QoS};
 use serde::de::IntoDeserializer as _;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::Notify;
 
 use crate::http::{Hub, error_chain};
 use crate::ingest::project_exists;
@@ -44,9 +44,10 @@ const MAX_STATE_BYTES: usize = 4 * 1024;
 /// will says.
 const OFFLINE_PAYLOAD: &[u8] = br#"{"status":"offline"}"#;
 
-/// The most presence messages the presence task applies before it
-/// publishes the rosters they changed.
-const DRAIN: usize = 256;
+/// The most presence topics [`Inbox`] holds at once. With presence at QoS 1
+/// only (the identity ACL), the broker's inflight window (32 in dev) keeps
+/// it far below this.
+const MAX_INBOX: usize = 4096;
 
 /// Whether an identity is there (protocol section 2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -125,6 +126,25 @@ struct Pending {
     offline: BTreeSet<(Topics, IdentityId)>,
 }
 
+/// A presence topic: its project and identity.
+type PresenceKey = (Topics, IdentityId);
+
+/// Presence messages the connection task handed over that the presence task
+/// has not applied yet. The connection task is the only one that polls the
+/// broker connection, which drains the request queue the presence task
+/// publishes and acks through, so it must never wait on the presence task:
+/// the hand-over is this map instead of a bounded channel. Presence is
+/// retained, so only each topic's latest message matters.
+#[derive(Debug, Default)]
+struct Inbox {
+    /// Each topic's latest message.
+    latest: BTreeMap<PresenceKey, Publish>,
+    /// Superseded or dropped QoS 1 messages, which still need their ack.
+    /// The broker's inflight window bounds them, since it sends no more
+    /// unacked QoS 1 messages than that.
+    acks: Vec<Publish>,
+}
+
 /// What the hub has read from presence since it last connected.
 #[derive(Debug, Default)]
 struct View {
@@ -145,7 +165,8 @@ struct View {
 pub(crate) struct PresenceState {
     view: Mutex<View>,
     pending: Mutex<Pending>,
-    /// Wakes the presence task when `pending` gained something.
+    inbox: Mutex<Inbox>,
+    /// Wakes the presence task when `pending` or `inbox` gained something.
     ready: Notify,
 }
 
@@ -211,8 +232,49 @@ impl PresenceState {
     /// connect: the broker then sends every retained presence again, and
     /// one cleared while the hub was away (or lost with a broker restart)
     /// must not stay online.
+    /// It also drops the messages not yet applied: they came on the old
+    /// connection, so their acks would name another session's packet ids.
     pub(crate) fn clear(&self) {
         *self.view.lock().unwrap_or_else(PoisonError::into_inner) = View::default();
+        *self.inbox.lock().unwrap_or_else(PoisonError::into_inner) = Inbox::default();
+    }
+
+    /// Hands a presence message on `key`'s topic to the presence task
+    /// without waiting: it replaces the topic's message not yet applied,
+    /// which then only needs its ack.
+    pub(crate) fn deliver(&self, key: PresenceKey, publish: Publish) {
+        let dropped = {
+            let mut inbox = self.inbox.lock().unwrap_or_else(PoisonError::into_inner);
+            let (unapplied, full) =
+                if inbox.latest.len() >= MAX_INBOX && !inbox.latest.contains_key(&key) {
+                    (Some(publish), true)
+                } else {
+                    (inbox.latest.insert(key, publish), false)
+                };
+            if let Some(old) = unapplied.filter(|old| old.qos != QoS::AtMostOnce) {
+                inbox.acks.push(old);
+            }
+            full
+        };
+        if dropped {
+            tracing::warn!(
+                limit = MAX_INBOX,
+                "the presence inbox is full; dropped a presence message"
+            );
+        }
+        self.ready.notify_one();
+    }
+
+    fn take_inbox(&self) -> Inbox {
+        std::mem::take(&mut *self.inbox.lock().unwrap_or_else(PoisonError::into_inner))
+    }
+
+    /// How many topics have a message waiting, and how many messages wait
+    /// only for their ack.
+    #[cfg(test)]
+    pub(crate) fn inbox_len(&self) -> (usize, usize) {
+        let inbox = self.inbox.lock().unwrap_or_else(PoisonError::into_inner);
+        (inbox.latest.len(), inbox.acks.len())
     }
 
     /// Queues a roster publish for `topics`' project: its presence changed,
@@ -317,13 +379,8 @@ impl Hub {
     }
 }
 
-/// Whether `topic` is a `presence/{id}` topic.
-pub(crate) fn is_presence_topic(topic: &str) -> bool {
-    parse_presence(topic).is_some()
-}
-
 /// The project topics and identity of `agmen/v1/{t}/{p}/presence/{id}`.
-fn parse_presence(topic: &str) -> Option<(Topics, IdentityId)> {
+pub(crate) fn parse_presence(topic: &str) -> Option<PresenceKey> {
     let mut levels = topic.split('/');
     let (Some("agmen"), Some("v1"), Some(tenant), Some(project), Some("presence"), Some(id), None) = (
         levels.next(),
@@ -342,44 +399,44 @@ fn parse_presence(topic: &str) -> Option<(Topics, IdentityId)> {
     ))
 }
 
-/// The presence task: applies each presence message, then publishes the
-/// retained presence BYEs asked for and the rosters that changed.
-pub(crate) async fn run(
-    hub: Hub,
-    client: AsyncClient,
-    mut rx: mpsc::Receiver<Publish>,
-) -> Result<(), MessagingError> {
+/// The presence task: acks and applies each presence message the
+/// connection task delivered, then publishes the retained presence BYEs
+/// asked for and the rosters that changed.
+pub(crate) async fn run(hub: Hub, client: AsyncClient) -> Result<(), MessagingError> {
+    let presence = hub.presence();
     loop {
-        tokio::select! {
-            publish = rx.recv() => {
-                let Some(publish) = publish else {
-                    return Err(MessagingError::Stopped("connection"));
-                };
-                handle(&hub, &client, &publish).await?;
-                for _ in 1..DRAIN {
-                    let Ok(publish) = rx.try_recv() else { break };
-                    handle(&hub, &client, &publish).await?;
-                }
-            }
-            () = hub.presence().ready.notified() => {}
+        let Inbox { latest, acks } = presence.take_inbox();
+        for publish in &acks {
+            ack(&client, publish).await?;
+        }
+        for (key, publish) in latest {
+            handle(&hub, &client, key, &publish).await?;
         }
         flush(&hub, &client).await;
+        // A notify_one with no waiter leaves a permit, so a delivery made
+        // since take_inbox still wakes this.
+        presence.ready.notified().await;
     }
+}
+
+async fn ack(client: &AsyncClient, publish: &Publish) -> Result<(), MessagingError> {
+    client
+        .ack(publish)
+        .await
+        .map_err(|_| MessagingError::Stopped("connection"))
 }
 
 /// Acks `publish` to the broker, then applies it. Acking first is safe:
 /// presence is retained, so a hub that dies before applying it reads it
 /// again after it reconnects, and the ack never waits on the database.
-async fn handle(hub: &Hub, client: &AsyncClient, publish: &Publish) -> Result<(), MessagingError> {
-    client
-        .ack(publish)
-        .await
-        .map_err(|_| MessagingError::Stopped("connection"))?;
+async fn handle(
+    hub: &Hub,
+    client: &AsyncClient,
+    (topics, id): PresenceKey,
+    publish: &Publish,
+) -> Result<(), MessagingError> {
+    ack(client, publish).await?;
     let topic = String::from_utf8_lossy(&publish.topic);
-    let Some((topics, id)) = parse_presence(&topic) else {
-        tracing::debug!(%topic, "dropped a publish that is not presence");
-        return Ok(());
-    };
     let status = if publish.payload.is_empty() {
         // A cleared retained presence.
         Status::Offline
@@ -488,7 +545,7 @@ mod tests {
             "agmen/v1/tenant01/project1/presence/ABC",
             "agmen/v1/t/project1/presence/abcdefgh",
         ] {
-            assert!(!is_presence_topic(bad), "{bad}");
+            assert!(parse_presence(bad).is_none(), "{bad}");
         }
     }
 
