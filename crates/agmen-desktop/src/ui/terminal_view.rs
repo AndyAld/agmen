@@ -18,12 +18,14 @@ use gpui::{
 };
 
 use super::add_agent_dialog::{AddAgentDialog, AgentDialog};
-use super::components::{Button, ButtonSize, ButtonStyle, Chip, Color, Icon, Label, LabelSize};
+use super::components::{
+    Button, ButtonSize, ButtonStyle, Chip, Color, Icon, Label, LabelSize, Modal,
+};
 use super::switch_menu::{SwitchMenu, place_menu};
 use super::tokens::{
-    BORDER_WIDTH, DIALOG_TOP, MONO_CELL_HEIGHT, RADIUS_LG, SPACE_6, SPACE_8, SPACE_10, SPACE_12,
-    STATUS_BAR_HEIGHT, SWITCH_MENU_HEIGHT, SWITCH_MENU_WIDTH, TERMINAL_BLOCK_HEIGHT,
-    TERMINAL_HEAD_HEIGHT, TINT_DIM, TINT_PENDING, tint,
+    BORDER_WIDTH, DIALOG_TOP, DIALOG_WIDTH, MONO_CELL_HEIGHT, RADIUS_LG, SPACE_6, SPACE_8,
+    SPACE_10, SPACE_12, STATUS_BAR_HEIGHT, SWITCH_MENU_HEIGHT, SWITCH_MENU_WIDTH,
+    TERMINAL_BLOCK_HEIGHT, TERMINAL_HEAD_HEIGHT, TINT_PENDING, tint,
 };
 use crate::appearance::{Appearance, Theme};
 use crate::backend::{
@@ -555,17 +557,16 @@ impl TerminalView {
         )
     }
 
-    /// The add agent dialog over a dim window (node 2417).
+    /// The add agent dialog in a `Modal` over the window (nodes 2417 and
+    /// 2418): a click on the dim or Escape closes it.
     fn dialog(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let dialog = self.dialog.clone()?;
         let agent = dialog
             .agent()
             .and_then(|name| self.agents.iter().find(|a| a.name == name))
             .cloned();
-        let theme = &cx.global::<Appearance>().theme;
-        let dim = tint(theme.background, TINT_DIM);
-        let cancel = cx.listener(|this, _: &gpui::MouseDownEvent, _, cx| this.close_dialog(cx));
         let view = cx.entity().downgrade();
+        let dismiss_view = view.clone();
         let (copied_view, cancel_view, check_view) = (view.clone(), view.clone(), view);
         let content = AddAgentDialog::new(dialog, agent)
             .copied(self.copied)
@@ -583,23 +584,20 @@ impl TerminalView {
             deferred(
                 anchored().position(point(px(0.), px(0.))).child(
                     div()
-                        .occlude()
+                        .relative()
                         .w(viewport.width)
                         .h(viewport.height)
-                        .bg(dim)
-                        .flex()
-                        .justify_center()
-                        .items_start()
-                        .pt(DIALOG_TOP)
+                        .track_focus(&self.dialog_focus)
+                        // Escape closes it; src/keymap.rs binds it.
+                        .key_context(AGENT_DIALOG_CONTEXT)
+                        .on_action(cx.listener(|this, _: &Cancel, _, cx| {
+                            this.close_dialog(cx);
+                        }))
                         .child(
-                            div()
-                                .track_focus(&self.dialog_focus)
-                                .on_mouse_down_out(cancel)
-                                // Escape closes it; src/keymap.rs binds it.
-                                .key_context(AGENT_DIALOG_CONTEXT)
-                                .on_action(cx.listener(|this, _: &Cancel, _, cx| {
-                                    this.close_dialog(cx);
-                                }))
+                            Modal::new("add-agent-dialog", DIALOG_WIDTH, DIALOG_TOP)
+                                .on_dismiss(move |_, _, cx| {
+                                    with_view(&dismiss_view, cx, Self::close_dialog);
+                                })
                                 .child(content),
                         ),
                 ),

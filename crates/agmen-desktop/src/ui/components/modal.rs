@@ -1,22 +1,23 @@
 //! A dialog over the window: a dim over everything and a card near the top
-//! (frame "Desktop · kick off": dim node 10289, card node 10290). A click on
-//! the dim dismisses it, as a click outside a Zed modal does.
+//! (frame "Desktop · kick off": dim node 10289, card node 10290; frame
+//! "Desktop · add agent": dim node 2417, card node 2418). A click on the dim
+//! dismisses it, as a click outside a Zed modal does.
 
 use gpui::{
     AnyElement, App, ClickEvent, InteractiveElement as _, IntoElement, MouseButton, ParentElement,
-    RenderOnce, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
+    Pixels, RenderOnce, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
 };
 
 use super::ClickHandler;
 use crate::appearance::Appearance;
-use crate::ui::tokens::{
-    BORDER_WIDTH, MODAL_DIM, MODAL_TOP, MODAL_WIDTH, RADIUS_MODAL, SPACE_12, SPACE_20, tint,
-};
+use crate::ui::tokens::{BORDER_WIDTH, RADIUS_XL, SPACE_12, SPACE_20, TINT_DIM, tint};
 
 /// Tests find the dim as `id` and the card as `"{id}:card"`.
 #[derive(IntoElement)]
 pub(crate) struct Modal {
     id: SharedString,
+    width: Pixels,
+    top: Pixels,
     children: Vec<AnyElement>,
     on_dismiss: Option<ClickHandler>,
 }
@@ -30,10 +31,13 @@ impl std::fmt::Debug for Modal {
 }
 
 impl Modal {
+    /// A card `width` wide whose top sits `top` below the window's.
     #[must_use]
-    pub(crate) fn new(id: impl Into<SharedString>) -> Self {
+    pub(crate) fn new(id: impl Into<SharedString>, width: Pixels, top: Pixels) -> Self {
         Self {
             id: id.into(),
+            width,
+            top,
             children: Vec::new(),
             on_dismiss: None,
         }
@@ -68,7 +72,7 @@ impl RenderOnce for Modal {
             // A click on the card stays on it.
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(|_, _, cx| cx.stop_propagation())
-            .w(MODAL_WIDTH)
+            .w(self.width)
             .flex()
             .flex_col()
             .gap(SPACE_12)
@@ -76,7 +80,7 @@ impl RenderOnce for Modal {
             .bg(theme.elevated_surface)
             .border(BORDER_WIDTH)
             .border_color(theme.border)
-            .rounded(RADIUS_MODAL)
+            .rounded(RADIUS_XL)
             .shadow_lg()
             .children(self.children);
         let dim = div()
@@ -90,8 +94,8 @@ impl RenderOnce for Modal {
             .flex()
             .flex_col()
             .items_center()
-            .pt(MODAL_TOP)
-            .bg(tint(theme.background, MODAL_DIM))
+            .pt(self.top)
+            .bg(tint(theme.background, TINT_DIM))
             .child(card);
         match self.on_dismiss {
             Some(handler) => dim.on_click(handler),
@@ -108,6 +112,7 @@ mod tests {
     use super::*;
     use crate::ui::components::Label;
     use crate::ui::test_support::{click, draw};
+    use crate::ui::tokens::{MODAL_TOP, MODAL_WIDTH};
     use gpui::{TestAppContext, px};
 
     #[gpui::test]
@@ -121,7 +126,7 @@ mod tests {
                 .w(px(1000.))
                 .h(px(700.))
                 .child(
-                    Modal::new("dialog")
+                    Modal::new("dialog", MODAL_WIDTH, MODAL_TOP)
                         .on_dismiss(move |_, _, _| count.set(count.get() + 1))
                         .child(Label::new("Kick off")),
                 )

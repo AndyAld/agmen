@@ -197,6 +197,9 @@ fn add_opens_the_dialog_and_escape_returns_to_the_menu(cx: &mut TestAppContext) 
     click(cx, "switch-menu:grok:add");
     settle(cx);
     assert!(cx.debug_bounds("add-agent").is_some());
+    // The dialog's card is node 2418's width.
+    let card = cx.debug_bounds("add-agent-dialog:card").unwrap();
+    assert_eq!(card.size.width, crate::ui::tokens::DIALOG_WIDTH);
     assert!(
         cx.debug_bounds("switch-menu").is_some(),
         "the menu stays under it"

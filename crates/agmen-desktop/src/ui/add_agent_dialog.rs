@@ -13,13 +13,10 @@ use gpui::{
 };
 
 use super::components::{
-    Button, ButtonSize, ButtonStyle, Card, CodeText, Color, Icon, IconSize, Label, LabelSize,
+    Button, ButtonSize, ButtonStyle, CodeText, Color, Icon, IconSize, Label, LabelSize,
     SectionHeading,
 };
-use super::tokens::{
-    BORDER_WIDTH, DIALOG_WIDTH, RADIUS_CARD, RADIUS_DIALOG, RADIUS_REF, SPACE_4, SPACE_8, SPACE_10,
-    SPACE_12, SPACE_20,
-};
+use super::tokens::{BORDER_WIDTH, RADIUS_CARD, RADIUS_REF, SPACE_4, SPACE_8, SPACE_10, SPACE_12};
 use crate::appearance::Appearance;
 use crate::backend::{AgentFound, InstalledAgent};
 
@@ -355,12 +352,12 @@ impl RenderOnce for AddAgentDialog {
                 }
             }
         };
-        let card = Card::new()
-            .w(DIALOG_WIDTH)
-            .p(SPACE_20)
+        // The terminal hosts this in a `Modal` DIALOG_WIDTH wide.
+        let content = div()
+            .debug_selector(|| "add-agent".into())
+            .flex()
+            .flex_col()
             .gap(SPACE_12)
-            .rounded(RADIUS_DIALOG)
-            .shadow_lg()
             .child(
                 div()
                     .flex()
@@ -423,7 +420,7 @@ impl RenderOnce for AddAgentDialog {
                             .on_click(handler(self.on_check.clone())),
                     ),
             );
-        div().debug_selector(|| "add-agent".into()).child(card)
+        content
     }
 }
 

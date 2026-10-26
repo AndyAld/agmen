@@ -1,40 +1,13 @@
-//! Section headings: the plan panel's uppercase titles ("GOAL", node 8943)
-//! and a dock tree's foldable section row with its count ("PLANNING ROOM 4",
-//! node 8684; console.py `git_section`).
+//! A dock tree's foldable section row with its count ("PLANNING ROOM 4",
+//! node 8684; console.py `git_section`), titled with a [`SectionHeading`].
 
 use gpui::{
-    App, ClickEvent, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
-    RenderOnce, SharedString, Window,
+    App, ClickEvent, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce,
+    SharedString, Window,
 };
 
-use super::{Badge, ClickHandler, Color, Icon, IconSize, Indent, Label, LabelSize, ListItem};
+use super::{Badge, ClickHandler, Color, Icon, IconSize, Indent, ListItem, SectionHeading};
 use crate::icons::UiIcon;
-
-/// An uppercase heading in the muted icon color (gpui has no letter
-/// spacing, so the mockup's 6% tracking is not drawn).
-#[derive(Debug, IntoElement)]
-pub(crate) struct Heading {
-    title: SharedString,
-}
-
-impl Heading {
-    /// `title` is shown uppercased.
-    #[must_use]
-    pub(crate) fn new(title: &str) -> Self {
-        Self {
-            title: title.to_uppercase().into(),
-        }
-    }
-}
-
-impl RenderOnce for Heading {
-    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        Label::new(self.title)
-            .size(LabelSize::Small)
-            .color(Color::Muted)
-            .weight(FontWeight::SEMIBOLD)
-    }
-}
 
 /// A foldable section in a dock tree: chevron, heading and a count chip.
 /// Tests find it by its id and its count as `"{id}:count"`.
@@ -102,7 +75,7 @@ impl RenderOnce for SectionHeader {
         let count_selector = format!("{}:count", self.id);
         let mut row = ListItem::new(self.id, Indent::Group)
             .leading(Icon::new(chevron).size(IconSize::Small).color(Color::Muted))
-            .child(Heading::new(&self.title));
+            .child(SectionHeading::new(&self.title));
         if let Some(count) = self.count {
             row = row.child(
                 gpui::div()
@@ -122,7 +95,7 @@ mod tests {
     use gpui::{Styled as _, TestAppContext, px};
 
     use super::*;
-    use crate::ui::test_support::{draw, rendered_size};
+    use crate::ui::test_support::draw;
     use crate::ui::tokens::AGENT_ROW_HEIGHT;
 
     #[gpui::test]
@@ -138,19 +111,5 @@ mod tests {
         // The chevron sits at the group indent, as the Agents dock's people.
         assert_eq!(cx.debug_bounds("room:leading").unwrap().origin.x, px(10.));
         assert!(cx.debug_bounds("room:count").is_some());
-    }
-
-    #[gpui::test]
-    fn heading_renders(cx: &mut TestAppContext) {
-        let size = rendered_size(cx, || Heading::new("Goal").into_any_element());
-        assert!(size.width > px(10.));
-    }
-
-    #[test]
-    fn heading_is_uppercase() {
-        assert_eq!(
-            Heading::new("Before kick-off").title.as_ref(),
-            "BEFORE KICK-OFF"
-        );
     }
 }

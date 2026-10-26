@@ -5,7 +5,9 @@
 //! Text sizes are rems, so they scale with the person's `ui_font_size`: the
 //! window's rem size is that font size, as in Zed.
 
-use gpui::{Hsla, Pixels, Rems, px};
+use gpui::{BoxShadow, Hsla, Pixels, Rems, px};
+
+use crate::appearance::Theme;
 
 /// `px` pixels as rems at Zed's 16 px base (Zed's `rems_from_px`).
 #[must_use]
@@ -188,14 +190,16 @@ pub(crate) const SWITCH_MENU_WIDTH: Pixels = px(440.);
 pub(crate) const SWITCH_MENU_HEIGHT: Pixels = px(308.);
 /// A menu row (node 1806).
 pub(crate) const MENU_ROW_HEIGHT: Pixels = px(30.);
+/// The add agent dialog's card (node 2418).
 pub(crate) const DIALOG_WIDTH: Pixels = px(680.);
-/// How far below the window's top a dialog sits (node 2418 at y 120).
+/// How far below the window's top the add agent dialog sits (node 2418 at
+/// y 120).
 pub(crate) const DIALOG_TOP: Pixels = px(120.);
 /// A dialog's padding (node 2418).
 pub(crate) const SPACE_20: Pixels = px(20.);
-pub(crate) const RADIUS_DIALOG: Pixels = px(10.);
-/// The dim over the window behind a dialog (0xa0, node 2417), of the
-/// background color.
+/// The dim over the window behind a dialog (0xa0, nodes 2417 and 10289),
+/// of the background color; the mockup draws black, and the theme has no
+/// overlay token.
 pub(crate) const TINT_DIM: f32 = 160. / 255.;
 
 // Task 19: the plan panel, its team table and the kick-off dialog
@@ -209,13 +213,10 @@ pub(crate) const TEAM_HANDLE_COLUMN: Pixels = px(40.);
 pub(crate) const TEAM_HARNESS_COLUMN: Pixels = px(100.);
 pub(crate) const TEAM_LANE_COLUMN: Pixels = px(56.);
 pub(crate) const TEAM_OWNER_COLUMN: Pixels = px(32.);
-/// The kick-off dialog's card, and how far it sits below the window's top.
+/// The kick-off dialog's card, and how far it sits below the window's top
+/// (node 10290).
 pub(crate) const MODAL_WIDTH: Pixels = px(620.);
 pub(crate) const MODAL_TOP: Pixels = px(150.);
-pub(crate) const RADIUS_MODAL: Pixels = px(10.);
-/// The dim behind a dialog: the window background at 0xa0 (node 10289
-/// draws black; this theme has no overlay token).
-pub(crate) const MODAL_DIM: f32 = 160. / 255.;
 
 /// `color` at `alpha` of its own opacity: the one way views derive a fill
 /// the theme has no token for.
@@ -231,11 +232,10 @@ pub(crate) const MODEL_PICKER_WIDTH: Pixels = px(470.);
 pub(crate) const MODEL_PICKER_GAP: Pixels = px(8.);
 /// A model row (node 3361): `MenuRow::picker`.
 pub(crate) const PICKER_ROW_HEIGHT: Pixels = px(26.);
-/// The picker's drop shadow: black at 0xaa, 8 px down, 24 px blur. The
-/// theme has no shadow token.
-pub(crate) const MENU_SHADOW_ALPHA: f32 = 170. / 255.;
-pub(crate) const MENU_SHADOW_OFFSET: Pixels = px(8.);
-pub(crate) const MENU_SHADOW_BLUR: Pixels = px(24.);
+/// The model picker's and the toast's drop shadow (nodes 3355 and 6004):
+/// 8 px down, a 24 px blur, through [`drop_shadow`].
+pub(crate) const POPOVER_SHADOW_OFFSET: Pixels = px(8.);
+pub(crate) const POPOVER_SHADOW_BLUR: Pixels = px(24.);
 /// A selected segment, as the effort row's "high" (0x33, node 3397, and
 /// console.py `seg` for Settings).
 pub(crate) const TINT_SEGMENT: f32 = 51. / 255.;
@@ -264,11 +264,18 @@ pub(crate) const PALETTE_INPUT_HEIGHT: Pixels = px(39.);
 pub(crate) const PALETTE_ROW_HEIGHT: Pixels = px(30.);
 /// The list scrolls past this: Zed's modal limit of 24 rem at 15 px.
 pub(crate) const PALETTE_MAX_HEIGHT: Pixels = px(360.);
-/// A drop shadow's black, as the palette's (#000000aa): the one
-/// untokened color, through [`tint`] (mockup fix 58).
+/// How strongly every drop shadow's black shows (#000000aa, mockup fix 58).
 pub(crate) const SHADOW_ALPHA: f32 = 170. / 255.;
+/// The palette's drop shadow (node 11473): 10 px down, a 30 px blur.
 pub(crate) const SHADOW_OFFSET_Y: Pixels = px(10.);
 pub(crate) const SHADOW_BLUR: Pixels = px(30.);
+
+/// A floating surface's drop shadow: [`Theme::SHADOW`] at [`SHADOW_ALPHA`],
+/// `offset_y` down and blurred `blur`.
+#[must_use]
+pub(crate) fn drop_shadow(offset_y: Pixels, blur: Pixels) -> BoxShadow {
+    BoxShadow::new(px(0.), offset_y, tint(Theme::SHADOW.into(), SHADOW_ALPHA)).blur_radius(blur)
+}
 
 // Task 13: needs you (the alert row, the banner and the toast).
 /// An urgent alert that needs me: its row's fill (error 0x1c, node 5951).
@@ -297,12 +304,8 @@ pub(crate) const GLYPH_DISC: Pixels = px(18.);
 pub(crate) const TOAST_WIDTH: Pixels = px(360.);
 /// The toast's top edge in the window (node 6004 at y 150).
 pub(crate) const TOAST_TOP: Pixels = px(150.);
-/// The toast's corners (node 6004).
+/// The toast's and a dialog's corners (nodes 6004, 2418 and 10290).
 pub(crate) const RADIUS_XL: Pixels = px(10.);
-/// The toast's shadow: 8 px down, a 24 px blur, black at 0xaa.
-pub(crate) const TOAST_SHADOW_OFFSET: Pixels = px(8.);
-pub(crate) const TOAST_SHADOW_BLUR: Pixels = px(24.);
-pub(crate) const TOAST_SHADOW_ALPHA: f32 = 170. / 255.;
 
 #[cfg(test)]
 mod tests {

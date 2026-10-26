@@ -21,11 +21,11 @@ use jiff::tz::TimeZone;
 use crate::keymap::{Cancel, KICKOFF_CONTEXT};
 
 use super::components::{
-    Button, ButtonSize, ButtonStyle, Card, Color, Heading, Label, LabelSize, Modal,
+    Button, ButtonSize, ButtonStyle, Card, Color, Label, LabelSize, Modal, SectionHeading,
 };
 use super::format::clock;
 use super::plan_model::{ErrorSource, PlanModel};
-use super::tokens::{RADIUS_CARD, SPACE_3, SPACE_8};
+use super::tokens::{MODAL_TOP, MODAL_WIDTH, RADIUS_CARD, SPACE_3, SPACE_8};
 use crate::appearance::Appearance;
 use crate::backend::PlanInfo;
 use crate::local_time::LocalZone;
@@ -203,7 +203,7 @@ impl RenderOnce for KickoffDialog {
                 escape.update(cx, |m, cx| m.close_kickoff(window, cx));
             })
             .child(
-                Modal::new("kickoff-dialog")
+                Modal::new("kickoff-dialog", MODAL_WIDTH, MODAL_TOP)
                     .on_dismiss(move |_, window, cx| {
                         dismiss.update(cx, |m, cx| m.close_kickoff(window, cx));
                     })
@@ -214,7 +214,7 @@ impl RenderOnce for KickoffDialog {
                             .color(Color::TextMuted),
                     )
                     .children(boxes)
-                    .child(Heading::new("What happens"))
+                    .child(SectionHeading::new("What happens"))
                     .children(bullets)
                     .when_some(error, |this, error| {
                         this.child(

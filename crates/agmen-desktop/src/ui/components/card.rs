@@ -4,13 +4,11 @@
 use gpui::prelude::Refineable as _;
 use gpui::{
     AnyElement, App, IntoElement, ParentElement, RenderOnce, StyleRefinement, Styled, Window, div,
-    px,
 };
 
 use crate::appearance::Appearance;
 use crate::ui::tokens::{
-    BORDER_WIDTH, RADIUS_LG, SHADOW_ALPHA, SHADOW_BLUR, SHADOW_OFFSET_Y, SPACE_6, SPACE_10,
-    SPACE_12, tint,
+    BORDER_WIDTH, RADIUS_LG, SHADOW_BLUR, SHADOW_OFFSET_Y, SPACE_6, SPACE_10, SPACE_12, drop_shadow,
 };
 
 /// A column on the elevated surface with the theme's `border`, rounded, padded
@@ -42,14 +40,10 @@ impl Card {
 
 impl Card {
     /// Lifts the card above the window with the mockup's drop shadow, as
-    /// the command palette (node 11473): black at [`SHADOW_ALPHA`], 10 px
-    /// down, blurred 30 px.
+    /// the command palette (node 11473): 10 px down, blurred 30 px.
     #[must_use]
     pub(crate) fn elevated(mut self) -> Self {
-        self.style.box_shadow = Some(vec![
-            gpui::BoxShadow::new(px(0.), SHADOW_OFFSET_Y, tint(gpui::black(), SHADOW_ALPHA))
-                .blur_radius(SHADOW_BLUR),
-        ]);
+        self.style.box_shadow = Some(vec![drop_shadow(SHADOW_OFFSET_Y, SHADOW_BLUR)]);
         self
     }
 }

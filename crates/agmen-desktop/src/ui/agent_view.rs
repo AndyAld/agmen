@@ -134,7 +134,12 @@ impl Render for AgentView {
             // Task 14: the terminal opens in the chat (spec 5.4).
             .child({
                 let id = self.id.clone();
-                Button::new("agent-open-terminal", "Open in terminal  ⌥O")
+                // The key's glyphs come from src/keymap.rs, its one home.
+                let label = format!(
+                    "Open in terminal  {}",
+                    crate::keymap::open_in_terminal_hint()
+                );
+                Button::new("agent-open-terminal", label)
                     .style(ButtonStyle::Tinted)
                     .on_click(move |_, window, cx| {
                         window.dispatch_action(Box::new(TakeOverAgent(id.clone())), cx);

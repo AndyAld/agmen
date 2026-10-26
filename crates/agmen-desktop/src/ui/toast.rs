@@ -11,17 +11,17 @@ use std::rc::Rc;
 use agmen_proto::MessageId;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, BoxShadow, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
-    RenderOnce, StatefulInteractiveElement as _, Styled as _, Window, div, point,
+    App, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce,
+    StatefulInteractiveElement as _, Styled as _, Window, div,
 };
 
 use super::components::{Card, ChangeHandler, Color, GlyphDisc, Label, LabelSize};
 use super::needs_you::Toast;
 use super::tokens::{
-    BORDER_WIDTH, GLYPH_DISC, RADIUS_XL, SPACE_4, SPACE_8, SPACE_10, SPACE_12, TINT_ALERT_EDGE,
-    TOAST_SHADOW_ALPHA, TOAST_SHADOW_BLUR, TOAST_SHADOW_OFFSET, TOAST_WIDTH, tint,
+    BORDER_WIDTH, GLYPH_DISC, POPOVER_SHADOW_BLUR, POPOVER_SHADOW_OFFSET, RADIUS_XL, SPACE_4,
+    SPACE_8, SPACE_10, SPACE_12, TINT_ALERT_EDGE, TOAST_WIDTH, drop_shadow, tint,
 };
-use crate::appearance::{Appearance, Theme};
+use crate::appearance::Appearance;
 
 /// How many lines of the alert's text the toast shows.
 const BODY_LINES: usize = 2;
@@ -64,13 +64,7 @@ impl AlertToast {
 impl RenderOnce for AlertToast {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = &cx.global::<Appearance>().theme;
-        let shadow = BoxShadow {
-            color: tint(Theme::SHADOW.into(), TOAST_SHADOW_ALPHA),
-            offset: point(Pixels::ZERO, TOAST_SHADOW_OFFSET),
-            blur_radius: TOAST_SHADOW_BLUR,
-            spread_radius: Pixels::ZERO,
-            inset: false,
-        };
+        let shadow = drop_shadow(POPOVER_SHADOW_OFFSET, POPOVER_SHADOW_BLUR);
         let part = |name: &'static str| div().debug_selector(move || name.into());
         let card = Card::new()
             .w(TOAST_WIDTH)

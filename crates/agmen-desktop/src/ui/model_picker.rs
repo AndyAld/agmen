@@ -11,16 +11,15 @@
 use std::rc::Rc;
 
 use gpui::{
-    App, BoxShadow, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
-    RenderOnce, SharedString, StatefulInteractiveElement as _, Styled as _, Window, black, div,
-    point,
+    App, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
 };
 
 use super::components::{ChangeHandler, Color, Label, LabelSize, MenuRow, Radio, Segmented};
 use super::tokens::{
-    BORDER_WIDTH, DROPDOWN_MENU_MAX_HEIGHT, MENU_SHADOW_ALPHA, MENU_SHADOW_BLUR,
-    MENU_SHADOW_OFFSET, MODEL_PICKER_WIDTH, RADIUS_LG, SPACE_2, SPACE_4, SPACE_6, SPACE_8,
-    SPACE_10, SPACE_12, SPACE_14,
+    BORDER_WIDTH, DROPDOWN_MENU_MAX_HEIGHT, MODEL_PICKER_WIDTH, POPOVER_SHADOW_BLUR,
+    POPOVER_SHADOW_OFFSET, RADIUS_LG, SPACE_2, SPACE_4, SPACE_6, SPACE_8, SPACE_10, SPACE_12,
+    SPACE_14, drop_shadow,
 };
 use crate::appearance::Appearance;
 use crate::backend::{ChoiceScope, Effort, ModelChoice, ModelGroup, Snapshot};
@@ -504,13 +503,10 @@ impl RenderOnce for ModelPicker {
             .border(BORDER_WIDTH)
             .border_color(rule)
             .bg(theme.elevated_surface)
-            .shadow(vec![BoxShadow {
-                color: black().opacity(MENU_SHADOW_ALPHA),
-                offset: point(gpui::Pixels::ZERO, MENU_SHADOW_OFFSET),
-                blur_radius: MENU_SHADOW_BLUR,
-                spread_radius: gpui::Pixels::ZERO,
-                inset: false,
-            }])
+            .shadow(vec![drop_shadow(
+                POPOVER_SHADOW_OFFSET,
+                POPOVER_SHADOW_BLUR,
+            )])
             .overflow_hidden()
             .child(
                 div()

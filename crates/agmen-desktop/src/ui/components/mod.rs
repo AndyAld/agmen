@@ -63,8 +63,7 @@ pub(crate) use tab::Tab;
 pub(crate) use tool_card::ToolCard;
 // Task 19.
 pub(crate) use {
-    check_row::CheckRow, modal::Modal, section_header::Heading, section_header::SectionHeader,
-    table_card::TableCard,
+    check_row::CheckRow, modal::Modal, section_header::SectionHeader, table_card::TableCard,
 };
 pub(crate) use {dropdown::Dropdown, segmented::Segmented, stepper::Stepper, toggle::Toggle};
 

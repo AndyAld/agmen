@@ -96,8 +96,6 @@ fn dialog_draws_source_prompt_and_buttons(cx: &mut TestAppContext) {
     ] {
         assert!(cx.debug_bounds(part).is_some(), "{part}");
     }
-    let dialog = cx.debug_bounds("add-agent").unwrap();
-    assert_eq!(dialog.size.width, DIALOG_WIDTH);
 }
 
 #[gpui::test]

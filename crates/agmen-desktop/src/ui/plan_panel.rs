@@ -14,7 +14,7 @@ use gpui::{
 };
 
 use super::components::{
-    Badge, Button, ButtonSize, ButtonStyle, CheckRow, Color, Dot, Heading, Label, LabelSize,
+    Badge, Button, ButtonSize, ButtonStyle, CheckRow, Color, Dot, Label, LabelSize, SectionHeading,
     StatusDot, TableCard,
 };
 use super::dock::RightDockHeader;
@@ -272,9 +272,9 @@ impl RenderOnce for PlanPanel {
             .gap(SPACE_14)
             .py(SPACE_12)
             .px(SPACE_14)
-            .child(Heading::new("Goal"))
+            .child(SectionHeading::new("Goal"))
             .child(Label::new(plan.goal.clone()).size(LabelSize::Small).wrap())
-            .child(Heading::new(&format!(
+            .child(SectionHeading::new(&format!(
                 "Team · {}",
                 plan::agent_count(plan.team.len())
             )))
@@ -285,11 +285,11 @@ impl RenderOnce for PlanPanel {
                     .color(Color::Placeholder)
                     .wrap(),
             )
-            .child(Heading::new("Specs"))
+            .child(SectionHeading::new("Specs"))
             .children(specs)
-            .child(Heading::new("Lanes"))
+            .child(SectionHeading::new("Lanes"))
             .child(Label::new(lanes_line(&plan)).code().wrap())
-            .child(Heading::new("Before kick-off"))
+            .child(SectionHeading::new("Before kick-off"))
             .children(checks)
             .child(div().flex().child(plan_button(&plan, self.model.clone())));
         div()

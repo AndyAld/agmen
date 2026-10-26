@@ -1,6 +1,7 @@
 //! An uppercase section heading, as the switch menu's "Terminal agents on
-//! this machine" (node 1803) and the add agent dialog's "Install it
-//! yourself" (node 2422).
+//! this machine" (node 1803), the add agent dialog's "Install it yourself"
+//! (node 2422), the plan panel's "GOAL" (node 8943) and a dock section's
+//! title.
 
 use gpui::{App, FontWeight, IntoElement, RenderOnce, SharedString, Window};
 
@@ -41,6 +42,15 @@ impl RenderOnce for SectionHeading {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn heading_renders(cx: &mut gpui::TestAppContext) {
+        use gpui::IntoElement as _;
+        let size = crate::ui::test_support::rendered_size(cx, || {
+            SectionHeading::new("Goal").into_any_element()
+        });
+        assert!(size.width > gpui::px(10.));
+    }
 
     #[test]
     fn heading_is_uppercase() {
