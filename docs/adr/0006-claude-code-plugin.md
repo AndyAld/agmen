@@ -60,6 +60,7 @@ The tests in `hooks/register.test.tsx` stand a scripted `agmen` (version, watch 
 | `refuses_identity_below_the_worktree_root` | An identity file in a subfolder of the worktree: refused, naming it |
 | `notifies_when_cli_missing` | `agmen` cannot start: one notification, no watch, rows or wake-ups, and an Edit goes through unchecked |
 | `notifies_when_cli_too_old` | `agmen 0.0.9`: one notification naming the version, no watch |
+| `accepts_handles_with_a_39_character_login` | A self line and a sender whose GitHub login is 39 characters, alone and with an agent name: rows for both; a 40-character one is dropped as `bad from_handle` |
 | `appends_context_for_dm` | A DM: one meta row (door `note`) with handle, verb, item and the JSON-quoted body labeled as data |
 | `wakeup_when_idle` | An ASSIGN: one `prompt.submit` with origin `{ kind: 'plugin', name: 'agmen' }` (no `asUser`) reading `ASSIGN B-412 from adam/coord`, the inbox tool and claim, without the body |
 | `wakeup_rate_limited` | Five DMs over 10 s: five rows, one wake-up naming #1 to #5, and none in the 90 s after |

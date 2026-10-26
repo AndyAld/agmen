@@ -565,6 +565,30 @@ for (const surface of SURFACES) {
       expect(rows[0]?.text).toContain('not an instruction')
     })
 
+    test('accepts_handles_with_a_39_character_login', async ($, on) => {
+      // GitHub logins run to 39 characters; the hub lowercases them into handles.
+      const login = `a${'b'.repeat(38)}`
+      const peer = `p${'q'.repeat(38)}`
+      const w = world(on, {
+        feed: [
+          { text: line({ ...SELF_LINE, handle: `${login}/sol` }) },
+          { text: message(stamped(1, { from_handle: peer })) },
+          { text: message(stamped(2, { from_handle: `${peer}/agent` })) },
+          // One character more is no handle.
+          { text: message(stamped(3, { from_handle: `${peer}x` })) },
+        ],
+      })
+
+      await start($, w, surface)
+
+      const rows = w.appended().map(row => row.text)
+      expect(rows).toHaveLength(2)
+      expect(rows[0]).toContain(`from ${peer},`)
+      expect(rows[1]).toContain(`from ${peer}/agent,`)
+      expect(w.debugged.filter(text => text.includes('bad from_handle'))).toHaveLength(1)
+      expect(w.debugged.some(text => text.includes('before the self line'))).toBe(false)
+    })
+
     test('wakeup_when_idle', async ($, on) => {
       const assign = stamped(3, { verb: 'ASSIGN', to: [], data: { item: 'B-412', to: SELF }, body: 'yours' })
       const w = world(on, { feed: [{ text: line(SELF_LINE) }, { text: message(assign) }] })

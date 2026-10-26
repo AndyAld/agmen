@@ -65,7 +65,10 @@ const ITEM_KEY = /^[A-Z]{1,4}-[0-9]{1,6}$/
 const LANE_NAME = /^L-[A-Z0-9-]{1,40}$/
 // Handles are display text the hub stamps (`andy`, `andy/sol`, `hub`); the
 // proto has no rule for them, so this one keeps spaces and punctuation out.
-const HANDLE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,31}(?:\/[A-Za-z0-9][A-Za-z0-9._-]{0,31})?$/
+// The person's part is a lowercased GitHub login, up to 39 characters
+// (is_human_handle in crates/agmen-hub/src/auth/oauth.rs); an agent's name
+// after the slash is at most 32.
+const HANDLE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,38}(?:\/[A-Za-z0-9][A-Za-z0-9._-]{0,31})?$/
 const MAX_BODY_BYTES = 32_768
 /**
  * check-path reasons a deny may show, beside `lane <lane> held by <handle>`
