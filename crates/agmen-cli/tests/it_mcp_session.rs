@@ -116,15 +116,25 @@ async fn it_stopped_session_is_one_error_then_reconnects() {
         let lock = stop_mcp_session(&sol).await;
         drop(lock);
 
-        let result = mcp
-            .call("post", json!({ "verb": "FYI", "body": "lost" }))
-            .await;
-        let text = text_of(&result);
-        assert_eq!(result.is_error, Some(true), "{text}");
-        assert!(
-            text.starts_with("agmen: the broker session stopped: "),
-            "{text}"
-        );
+        // EMQX can list the client gone a moment before the server has
+        // seen its session stop. Until then a state read, which changes
+        // nothing, fails on the dead session; once the server has seen
+        // the stop, the call answers that, once.
+        let deadline = Instant::now() + WAIT;
+        loop {
+            let result = mcp.call("state", json!({})).await;
+            let text = text_of(&result);
+            assert_eq!(result.is_error, Some(true), "{text}");
+            if text.starts_with("agmen: the broker session stopped: ") {
+                break;
+            }
+            assert_eq!(
+                text, "agmen: reading the project's state failed: the session has stopped",
+                "the server has not seen the stop yet"
+            );
+            assert!(Instant::now() < deadline, "the server never saw the stop");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
         let text = mcp
             .text("post", json!({ "verb": "FYI", "body": "after" }))
             .await;
@@ -161,6 +171,56 @@ async fn it_heartbeat_reconnects_a_stopped_session() {
             assert!(
                 Instant::now() < deadline,
                 "no HEARTBEAT in {WAIT:?} after the session stopped ({before} before)"
+            );
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
+        mcp.stop().await;
+    })
+    .await;
+}
+
+/// A startup that cannot connect does not push the first HEARTBEAT back by
+/// a period: the round that connects after the beat fell due sends it.
+#[tokio::test(flavor = "multi_thread")]
+async fn it_heartbeat_is_not_late_after_a_failed_startup() {
+    run(Ingest::On, |ctx| async move {
+        let sol = ctx.member(Role::Member, "sol", "agent").await;
+        let mcp = Mcp::start(options(&sol)).await;
+        mcp.text("found", json!({ "title": "the build is slow" }))
+            .await;
+        let text = mcp.text("claim", json!({ "item": "B-1" })).await;
+        assert!(text.contains("\ngranted B-1 until "), "{text}");
+        mcp.stop().await;
+        let before = heartbeats(&ctx.base, &sol, "B-1").await;
+
+        // A broken identity file makes every round fail until it is put
+        // back: rounds at about 0, 1, 3, 7 and 15 s with this period.
+        let every = Duration::from_secs(10);
+        let file = sol.wt.path().join(".agmen/identity.json");
+        let good = std::fs::read(&file).unwrap();
+        std::fs::write(&file, "{ not json").unwrap();
+        let started = Instant::now();
+        let mcp = Mcp::start(options(&sol).with_heartbeat(every)).await;
+        tokio::time::sleep(Duration::from_secs(8)).await;
+        std::fs::write(&file, good).unwrap();
+
+        let client_id = format!("{}-mcp", sol.identity.identity_id.as_str());
+        wait_for_client(&client_id, "never connected", |client| {
+            client.is_some_and(|client| client["connected"] == true)
+        })
+        .await;
+        // The beat is due a period after startup, or at the connect if that
+        // came later. Before the fix it came a whole period after the
+        // connect.
+        let deadline = (started + every).max(Instant::now()) + Duration::from_secs(3);
+        loop {
+            let beats = heartbeats(&ctx.base, &sol, "B-1").await;
+            if beats > before {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "no HEARTBEAT within 3 s of it falling due ({before} before)"
             );
             tokio::time::sleep(Duration::from_millis(300)).await;
         }

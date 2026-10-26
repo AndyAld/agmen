@@ -330,8 +330,13 @@ async fn it_session_state_read_fails_when_the_connection_drops() {
             tokio::time::sleep(Duration::from_millis(300)).await;
             kick(&client_id).await;
         });
-        // The session reconnects, so this is not Closed.
-        assert!(matches!(read, Err(ClientError::Timeout(_))), "{read:?}");
+        // The session reconnects, so this is not Closed, and the broker
+        // answered the subscription, so the timeout is the 3 s state wait,
+        // not the 10 s subscribe wait.
+        assert!(
+            matches!(read, Err(ClientError::Timeout(wait)) if wait == Duration::from_secs(3)),
+            "{read:?}"
+        );
         close(mcp).await;
     })
     .await;

@@ -96,8 +96,8 @@ pub(crate) struct InboxParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub(crate) struct StateParams {
     /// head (stream heads and versions, the default) or roster (who is in the project).
-    #[serde(default)]
-    key: StateKey,
+    // Option, not serde(default): some MCP clients send null for an omitted argument.
+    key: Option<StateKey>,
 }
 
 /// The retained `state/<key>` topics the `state` tool reads.
@@ -264,7 +264,7 @@ impl Server {
     )]
     async fn state(&self, Parameters(params): Parameters<StateParams>) -> CallToolResult {
         self.respond(move |live: Arc<Live>| async move {
-            let key = params.key.as_str();
+            let key = params.key.unwrap_or_default().as_str();
             let value = live
                 .agent
                 .read_state(live.via(), key)
@@ -407,6 +407,7 @@ mod tests {
             parse_json_object::<StateParams>(args)
         };
         assert!(parse(json!({})).is_ok());
+        assert!(parse(json!({ "key": null })).is_ok());
         assert!(parse(json!({ "key": "roster" })).is_ok());
         for bad in ["a/b", "nothing", "Head", ""] {
             assert!(parse(json!({ "key": bad })).is_err(), "{bad:?}");

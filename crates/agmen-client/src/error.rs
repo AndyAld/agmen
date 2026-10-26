@@ -68,7 +68,9 @@ pub enum ClientError {
     /// The broker refused a subscription.
     #[error("the broker refused the subscription: {0}")]
     Subscribe(String),
-    /// The broker did not answer the first connect in time.
+    /// The broker did not answer the first connect or a state read's
+    /// subscription in time (10 s), or a state read's connection was down
+    /// or dropped before the retained message came (3 s, the state wait).
     #[error("the broker did not answer within {0:?}")]
     Timeout(std::time::Duration),
     /// The connection failed too many times in a row.

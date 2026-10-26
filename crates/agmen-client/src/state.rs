@@ -216,11 +216,12 @@ impl StateReads {
 /// `keep` says the session subscribes to the topic anyway. The caller runs
 /// one read at a time per session.
 ///
-/// A connection that drops after the SUBACK loses the retained message the
-/// broker was about to send, so the read fails then instead of answering
-/// that nothing is retained: [`ClientError::Timeout`] while the session
-/// reconnects, [`ClientError::Closed`] once it has stopped. `connected` is
-/// the session's watch of its connection.
+/// A connection that drops between the subscribe and the retained message
+/// may lose that message, so the read fails then instead of answering that
+/// nothing is retained: [`ClientError::Timeout`] carrying [`STATE_WAIT`]
+/// while the session reconnects, [`ClientError::Closed`] once it has
+/// stopped. A read that starts while the connection is down fails too.
+/// `connected` is the session's watch of its connection.
 async fn read_through(
     client: &CurrentClient,
     slot: &StateSlot,
@@ -230,6 +231,10 @@ async fn read_through(
     keep: bool,
 ) -> Result<Option<Value>, ClientError> {
     let payload = slot.wait_for(&topic);
+    // Mark the connection's state seen before subscribing, so any drop from
+    // here to the SUBACK check below shows as a change, also one that has
+    // already reconnected.
+    connected.borrow_and_update();
     let subscribed = Subscribed {
         client,
         slot,
@@ -251,11 +256,12 @@ async fn read_through(
         Ok(Err(err)) => return Err(ClientError::StateRead(err)),
         Err(_) => return Err(ClientError::Timeout(CONNECT_WAIT)),
     }
-    // From the SUBACK on, any change of the connection means it dropped. A
-    // drop that has already reconnected by this check goes unseen, but the
-    // link waits at least 1 s before it reconnects.
-    if !*connected.borrow_and_update() {
-        return Err(ClientError::Timeout(STATE_WAIT));
+    // Any change of the connection since the subscribe means it dropped, and
+    // the retained message may have gone with it.
+    match connected.has_changed() {
+        Ok(false) if *connected.borrow() => {}
+        Ok(_) => return Err(ClientError::Timeout(STATE_WAIT)),
+        Err(_) => return Err(ClientError::Closed),
     }
     let got = tokio::select! {
         // A message that came just before a drop still counts.

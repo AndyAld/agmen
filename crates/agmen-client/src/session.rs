@@ -529,10 +529,13 @@ impl Session {
     /// [`ClientError::StateKey`] when `key` is not one topic level,
     /// [`ClientError::BadState`] when the payload is not JSON,
     /// [`ClientError::Subscribe`] when the broker refuses the subscription,
-    /// [`ClientError::Timeout`] when it does not answer it within 10 s or
-    /// the connection drops after it did, before any retained message came,
-    /// [`ClientError::StateRead`] when the connection went before it
-    /// answered, and [`ClientError::Closed`] when the session has stopped.
+    /// [`ClientError::Timeout`] carrying 10 s when the broker does not
+    /// answer the subscription within that time, or carrying 3 s (the wait
+    /// for the retained message) when the connection is down or drops
+    /// before the retained message came while the session reconnects,
+    /// [`ClientError::StateRead`] when the connection went before the
+    /// broker answered, and [`ClientError::Closed`] when the session has
+    /// stopped.
     pub async fn read_state(&self, key: &str) -> Result<Option<Value>, ClientError> {
         self.state_reads.read(&self.client, key).await
     }

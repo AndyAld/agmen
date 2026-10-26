@@ -47,6 +47,7 @@ use rmcp::transport::IntoTransport;
 use rmcp::{RoleServer, ServiceExt as _};
 use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
+use tokio::time::Instant;
 
 use crate::client::blocking;
 use crate::cmd::claim::heartbeat_envelope;
@@ -457,23 +458,24 @@ async fn pump(mut events: Events, answered: Arc<Notify>, stopped: Arc<AtomicBool
 /// takes the session through [`Server::live`], as a tool call does, so a
 /// session that failed to connect or stopped on its own is connected
 /// again. After a failure it tries again sooner, waiting 1 s and doubling
-/// up to the period; the beat a failure held back goes out once
-/// connected. Not joined waits a whole period. The outbox sends what is
-/// queued; nothing waits for the hub's answer.
+/// up to the period. The first beat is due one period after startup and
+/// each next one a period after the last; a round that connects after a
+/// beat fell due sends it at once, so an outage delays a beat only until
+/// the reconnect. Not joined waits a whole period. The outbox sends what
+/// is queued; nothing waits for the hub's answer.
 async fn heartbeat(server: Server) {
     let every = server.shared.options.heartbeat;
     let mut retry = RECONNECT_FIRST.min(every);
-    // The first round only connects.
-    let mut beat = false;
+    let mut due = Instant::now() + every;
     loop {
         let wait = match server.live().await {
             Ok(live) => {
-                if beat {
+                if Instant::now() >= due {
                     send_heartbeat(&live).await;
+                    due = Instant::now() + every;
                 }
-                beat = true;
                 retry = RECONNECT_FIRST.min(every);
-                every
+                due.saturating_duration_since(Instant::now())
             }
             Err(answer) if answer.is_error == Some(true) => {
                 tracing::warn!(
