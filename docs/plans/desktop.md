@@ -345,7 +345,7 @@ Screens: `desktop-settings-from-chat`, `desktop-settings-applied`.
 
 ### Task 17: Settings → Appearance, and themes from Zed
 
-- [ ] Done. The controls (`Toggle`, `Segmented`, `Dropdown`, `Stepper` in `ui/components/`) are in, by agmen-c7 (merged at f658bc9); every planned stepper is 6 to 72, so `Stepper` has no range setter. The Settings view and the theme sources remain here.
+- [x] Done (the view and theme sources by a subagent, 7f249f3, merged at 6a7fd2a). The controls (`Toggle`, `Segmented`, `Dropdown`, `Stepper` in `ui/components/`) are in, by agmen-c7 (merged at f658bc9); every planned stepper is 6 to 72, so `Stepper` has no range setter. The Settings view and the theme sources remain here. As built: `SettingsView::new(SettingsSources, cx)`; the theme picker lists the built-in themes, Zed's installed themes and agmen's own, then the marketplace (`appearance::marketplace`, reqwest blocking on the background executor, a 1 hour cache, backoff to 60 minutes); Light, Dark and System filter the theme list; changing a control while following Zed copies the values and turns Follow Zed off; About shows the Lucide, IBM Plex and Lilex licenses. Open question for Andy: Zed's theme archives carry no LICENSE file (Zed's `extension_resources.rs` copies none), so the no-license rule refuses every marketplace install; fetching the license from the extension's repository would mean a host other than api.zed.dev. Differences kept: UI font is Zed Sans, not SF Pro Text (Global Constraints); an About page is added; the browse panel was not shot.
 
 Andy's decision (2026-10-26): the theme picker covers the themes Zed already has and Zed's theme marketplace. Research with sources: `.superpowers/sdd/mvp/zed-themes-research.md` in the main checkout.
 
