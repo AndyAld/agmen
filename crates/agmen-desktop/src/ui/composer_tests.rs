@@ -162,11 +162,17 @@ fn model_chip_asks_for_the_picker(cx: &mut TestAppContext) {
     assert_eq!(*events.borrow(), vec![ComposerEvent::PickModel]);
 }
 
-#[test]
-fn enter_hint_shows_once() {
-    // The ⏎ hint follows the input, so the placeholder does not repeat it
-    // (reference sheet mismatch 6).
-    assert!(!PLACEHOLDER.contains('⏎'));
+#[gpui::test]
+fn placeholder_is_the_mockups(cx: &mut TestAppContext) {
+    // Node 384 keeps "· ⏎ send" in the placeholder, beside the ⏎ hint
+    // (node 385).
+    let (composer, _, cx) = open_composer(cx);
+    composer.read_with(cx, |composer, cx| {
+        assert_eq!(
+            composer.input.read(cx).placeholder_text(),
+            "Ask or tell your listener · @ to mention someone else · ⏎ send"
+        );
+    });
 }
 
 #[test]
@@ -212,15 +218,29 @@ fn direct_composer_sends_to_its_agent(cx: &mut TestAppContext) {
     });
     cx.simulate_input("rebase first");
     cx.simulate_keystrokes("enter");
+    // Node 650 draws no "to" chip, so the DM keeps its agent: a leading
+    // @mention stays text in the DM.
+    cx.simulate_input("@adam/coord ok?");
+    cx.simulate_keystrokes("enter");
     assert_eq!(
         *sent.borrow(),
-        vec![Draft {
-            to: vec![agent_id("andy/fx1")],
-            body: "rebase first".into(),
-            reply_to: None,
-            model: None,
-        }]
+        vec![
+            Draft {
+                to: vec![agent_id("andy/fx1")],
+                body: "rebase first".into(),
+                reply_to: None,
+                model: None,
+            },
+            Draft {
+                to: vec![agent_id("andy/fx1")],
+                body: "@adam/coord ok?".into(),
+                reply_to: None,
+                model: None,
+            },
+        ]
     );
+    assert!(cx.debug_bounds("composer:to").is_none());
+    assert!(cx.debug_bounds("composer:input").is_some());
 }
 
 #[gpui::test]
