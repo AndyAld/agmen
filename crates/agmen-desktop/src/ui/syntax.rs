@@ -139,6 +139,11 @@ impl Language {
     }
 }
 
+/// agmen's own highlight name for text in the line number color, which no
+/// Zed syntax name gives: a Markdown table's "|" (console.py `build_d_spec`
+/// draws them in the gutter's color, nodes 9228 to 9232).
+pub(crate) const LINE_NUMBER: &str = "line_number";
+
 /// One highlighted byte range and its Zed syntax name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Highlight {
@@ -173,7 +178,7 @@ pub(crate) fn highlight(text: &str, language: Language) -> Vec<Highlight> {
         else {
             return Vec::new();
         };
-        HIGHLIGHTER.with_borrow_mut(|highlighter| {
+        let highlights = HIGHLIGHTER.with_borrow_mut(|highlighter| {
             run(highlighter, config, text).unwrap_or_else(|err| {
                 // Once per language: a grammar that fails tends to fail again.
                 LOGGED.with_borrow_mut(|logged| {
@@ -184,8 +189,46 @@ pub(crate) fn highlight(text: &str, language: Language) -> Vec<Highlight> {
                 });
                 Vec::new()
             })
-        })
+        });
+        if language == Language::Markdown {
+            with_table_pipes(text, highlights)
+        } else {
+            highlights
+        }
     })
+}
+
+/// Adds a [`LINE_NUMBER`] highlight for each "|" on a line that starts with
+/// one, where no other highlight (a code block, an escape) covers it. The
+/// block grammar parses a table only when it has a delimiter row, and a
+/// spec's table may have none (console.py's `MD` does not), so the pipes
+/// are found by line, as console.py finds them.
+fn with_table_pipes(text: &str, mut highlights: Vec<Highlight>) -> Vec<Highlight> {
+    let covered = |at: usize, highlights: &[Highlight]| {
+        let ix = highlights.partition_point(|h| h.range.end <= at);
+        highlights.get(ix).is_some_and(|h| h.range.start <= at)
+    };
+    let mut pipes = Vec::new();
+    let mut start = 0;
+    for line in text.split_inclusive('\n') {
+        if line.trim_start_matches(' ').starts_with('|') {
+            pipes.extend(
+                line.match_indices('|')
+                    .map(|(at, _)| start + at)
+                    .filter(|at| !covered(*at, &highlights))
+                    .map(|at| Highlight {
+                        range: at..at + 1,
+                        name: LINE_NUMBER,
+                    }),
+            );
+        }
+        start += line.len();
+    }
+    if !pipes.is_empty() {
+        highlights.extend(pipes);
+        highlights.sort_by_key(|h| h.range.start);
+    }
+    highlights
 }
 
 /// Highlights `text`, or the error that stopped it before any event.

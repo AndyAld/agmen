@@ -7,7 +7,9 @@
 ;; and `comment.doc` its placeholder gray, as the XML query uses `type` for
 ;; attributes. Upstream's query (queries/highlights.scm) is not copied: it
 ;; names headings `text.title` and markers `punctuation.special`, which the
-;; theme leaves uncolored or colors as text.
+;; theme leaves uncolored or colors as text. A table's "|" takes the line
+;; number color, which no syntax name gives, so syntax.rs marks those
+;; (`with_table_pipes`) instead of this query.
 
 [
   (atx_heading)

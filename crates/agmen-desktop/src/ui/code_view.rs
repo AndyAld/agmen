@@ -85,8 +85,12 @@ pub(super) fn layout_lines(text: &str, language: Language) -> Vec<Line> {
 }
 
 /// The theme's color for a Zed syntax name, or the nearest parent name's
-/// (`keyword.function` falls back to `keyword`).
+/// (`keyword.function` falls back to `keyword`); the line number color for
+/// agmen's [`syntax::LINE_NUMBER`].
 fn syntax_color(theme: &Theme, name: &str) -> Option<Hsla> {
+    if name == syntax::LINE_NUMBER {
+        return Some(theme.line_number);
+    }
     let mut name = name;
     loop {
         if let Some(color) = theme.syntax.get(name) {
