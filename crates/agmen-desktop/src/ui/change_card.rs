@@ -82,6 +82,8 @@ fn title(state: ChangeState) -> &'static str {
         ChangeState::Pending => "Waiting for you",
         ChangeState::Applied => "Settings changed",
         ChangeState::Cancelled => "Change cancelled",
+        // shortcut: minimal Undone arms so the merge builds; agmen-c7 renders Undone fully (V68).
+        ChangeState::Undone => "Change undone",
     }
 }
 
@@ -89,7 +91,7 @@ const fn title_color(state: ChangeState) -> Color {
     match state {
         ChangeState::Pending => Color::Warning,
         ChangeState::Applied => Color::TextMuted,
-        ChangeState::Cancelled => Color::Placeholder,
+        ChangeState::Cancelled | ChangeState::Undone => Color::Placeholder,
     }
 }
 
@@ -104,6 +106,7 @@ fn subline(card: &backend::ChangeCard) -> String {
         }
         ChangeState::Applied => "applied by agmend".to_owned(),
         ChangeState::Cancelled => "nothing changed".to_owned(),
+        ChangeState::Undone => format!("undone by {}", card.requested_by),
     };
     format!("requested by {} · {what}", card.requested_by)
 }
@@ -182,6 +185,7 @@ impl RenderOnce for ChangeCard {
             ChangeState::Pending => "waiting",
             ChangeState::Applied => "applied",
             ChangeState::Cancelled => "cancelled",
+            ChangeState::Undone => "undone",
         };
         let head_selector = format!("{}:{state_name}", card.id);
         let head = div()
@@ -253,7 +257,7 @@ impl RenderOnce for ChangeCard {
                         ),
                 )
             }
-            ChangeState::Cancelled => None,
+            ChangeState::Cancelled | ChangeState::Undone => None,
         };
 
         div()

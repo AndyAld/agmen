@@ -185,7 +185,7 @@ From here every task follows the same shape: write the view's tests (GPUI `TestA
     }
     ```
     Implementations are held as `Rc<dyn Backend>` in a GPUI global; a later `AgmendBackend` and the CLI and MCP surfaces map onto the same `Draft` and `Action` types.
-  - `pub(crate) struct Snapshot { me: Person, project: ProjectName, roster: Vec<PersonGroup>, messages: Vec<StampedEnvelope>, listener: ListenerInfo, agents: BTreeMap<IdentityId, AgentInfo>, worktrees: Vec<WorktreeInfo>, plan: Option<PlanInfo>, installed_agents: Vec<InstalledAgent>, models: Vec<ModelGroup>, alerts: AlertState, spend_today_usd: f64, online: u32 }`. Messages are `agmen_proto::StampedEnvelope`; everything else is a desktop view type in `backend/mod.rs`, each with only the fields some screen shows.
+  - `pub(crate) struct Snapshot { me: Person, project: ProjectName, roster: Vec<PersonGroup>, messages: Vec<StampedEnvelope>, listener: ListenerInfo, agents: BTreeMap<IdentityId, AgentInfo>, worktrees: Vec<WorktreeInfo>, plan: Option<PlanInfo>, installed_agents: Vec<InstalledAgent>, models: Vec<ModelGroup>, alerts: AlertState, spend_today_usd: f64, online: u32 }`. `spend_today_usd` is the person's total today across all projects, so the Ridgeline screens show the same $14.20 (V69). Messages are `agmen_proto::StampedEnvelope`; everything else is a desktop view type in `backend/mod.rs`, each with only the fields some screen shows.
   - `pub(crate) struct Draft { to: Vec<Mention>, body: String, reply_to: Option<MessageId>, model: Option<ModelChoice> }`.
   - `pub(crate) enum Action { Apply(ChangeId), Cancel(ChangeId), Undo(ChangeId), TakeOver(IdentityId), HandBack(IdentityId), SwitchAgent { worker: IdentityId, agent: String }, AnswerAlert { alert: MessageId, choice: String }, SnoozeAlert(MessageId), ApproveSpec { path: String, sha: GitSha }, ApproveShare, KickOff }`.
   - `pub(crate) enum Update { Message(StampedEnvelope), Snapshot(Snapshot) }`.
@@ -287,6 +287,8 @@ Screens: `desktop-git`, `desktop-git-collapsed`.
 
 - [ ] Done
 
+Notes from the alerts review (V70): the MVP has no rate-limit display (C102); the needs-me rule as built in `src/alerts.rs` is: an urgent ALERT needs me when I own its sender or the hub put me in `mentioned`; coordinators only keep the quiet-hours sound; remembered alert ids are capped at 1024, so a redelivery never reopens one (C106). The `ApproveSpec` sha dispatch test (C88) lands with Task 19's spec view.
+
 Screens: `desktop-needs-you`, `desktop-needs-you-answered`.
 
 **Files:** Create `src/alerts.rs` (state: which alerts need me, needs `anyone` versus `owner`, rate limit display), `src/alerts_tests.rs`, `src/chime.rs`, `assets/sounds/chime.wav` (generated in code at build time or synthesized at startup: no third-party sound file), `src/ui/alert_banner.rs`, `src/ui/toast.rs`.
@@ -316,6 +318,8 @@ Screens: `desktop-chat-terminal`, `desktop-chat-codex`, `desktop-switch-agent`, 
 
 - [ ] Done
 
+The effort row uses `Segmented::code()` (mono text, 12 px padding, model picker node 2971; V71).
+
 Screens: `desktop-model-picker`, `desktop-ask`.
 
 **Files:** Create `src/ui/model_picker.rs`, `src/ui/ask_card.rs`, tests alongside.
@@ -327,7 +331,8 @@ Screens: `desktop-model-picker`, `desktop-ask`.
 
 ### Task 16: Change cards for settings from chat
 
-- [ ] Done
+- [x] Done by agmen-c7 (merged at f658bc9, cleared by agmen-db). Undo (Andy's answer to C93, V72): a narrowing card goes to `ChangeState::Undone` with no buttons; a widening card returns to Pending with Apply and Cancel (mockup fix 44). The backend side is in the commit after f658bc9.
+- [ ] Undone card rendering (V68): agmen-c7, on top of f658bc9; the merge has minimal Undone arms marked `shortcut:` until then.
 
 Screens: `desktop-settings-from-chat`, `desktop-settings-applied`.
 
@@ -340,7 +345,7 @@ Screens: `desktop-settings-from-chat`, `desktop-settings-applied`.
 
 ### Task 17: Settings → Appearance, and themes from Zed
 
-- [ ] Done
+- [ ] Done. The controls (`Toggle`, `Segmented`, `Dropdown`, `Stepper` in `ui/components/`) are in, by agmen-c7 (merged at f658bc9); every planned stepper is 6 to 72, so `Stepper` has no range setter. The Settings view and the theme sources remain here.
 
 Andy's decision (2026-10-26): the theme picker covers the themes Zed already has and Zed's theme marketplace. Research with sources: `.superpowers/sdd/mvp/zed-themes-research.md` in the main checkout.
 
@@ -361,7 +366,7 @@ Screens: `desktop-settings`.
 
 ### Task 18: Command palette and key bindings
 
-- [ ] Done
+- [ ] Done. The fuzzy filter `ui/palette_filter.rs` is in, by agmen-c7 (merged at f658bc9); the palette view and keymap remain here.
 
 Screens: `desktop-palette`.
 

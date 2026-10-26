@@ -188,7 +188,11 @@ impl FixtureBackend {
             .retain(|tx| tx.unbounded_send(update.clone()).is_ok());
     }
 
-    fn set_change(&self, id: &super::ChangeId, state: ChangeState) -> Result<(), BackendError> {
+    fn set_change(
+        &self,
+        id: &super::ChangeId,
+        next: impl FnOnce(&super::ChangeCard) -> ChangeState,
+    ) -> Result<(), BackendError> {
         {
             let mut snapshot = self.state.borrow_mut();
             let card = snapshot
@@ -196,7 +200,7 @@ impl FixtureBackend {
                 .values_mut()
                 .find(|card| &card.id == id)
                 .ok_or_else(|| BackendError::NoSuchChange(id.to_string()))?;
-            card.state = state;
+            card.state = next(card);
         }
         let snapshot = self.snapshot();
         self.publish(&Update::Snapshot(Box::new(snapshot)));
@@ -247,10 +251,18 @@ impl Backend for FixtureBackend {
 
     fn act(&self, action: Action) -> Result<(), BackendError> {
         match action {
-            Action::Apply(id) => self.set_change(&id, ChangeState::Applied),
-            Action::Cancel(id) => self.set_change(&id, ChangeState::Cancelled),
-            // Andy's answer to review C93: Undo shows the card as undone.
-            Action::Undo(id) => self.set_change(&id, ChangeState::Undone),
+            Action::Apply(id) => self.set_change(&id, |_| ChangeState::Applied),
+            Action::Cancel(id) => self.set_change(&id, |_| ChangeState::Cancelled),
+            // Andy's answer to review C93 (V72): undoing a narrowing change
+            // leaves it undone; undoing a widening one waits for Apply again
+            // (mockup fix 44).
+            Action::Undo(id) => self.set_change(&id, |card| {
+                if card.widens {
+                    ChangeState::Pending
+                } else {
+                    ChangeState::Undone
+                }
+            }),
             // shortcut: the fixture records nothing for these; the views that send
             // them (Tasks 13 to 19) add fixture behavior as they need it.
             Action::TakeOver(_)

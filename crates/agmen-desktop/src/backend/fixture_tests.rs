@@ -192,8 +192,8 @@ fn fixture_apply_changes_card_state() {
     let undone = backend.snapshot().changes.values().next().unwrap().clone();
     assert_eq!(
         undone.state,
-        ChangeState::Undone,
-        "Andy's answer to C93: Undo shows an undone card"
+        ChangeState::Pending,
+        "V72: undoing a widening change waits for Apply again (fix 44)"
     );
     assert!(
         backend
@@ -351,4 +351,20 @@ fn settings_screens_use_their_own_listener_text() {
         body(Screen::SettingsApplied),
         "Done. andy/fx1 can edit L-INFRA deploy/** until 18:00, and its budget is $8.00."
     );
+}
+
+#[test]
+fn undoing_a_narrowing_change_ends_undone() {
+    // Andy's answer to C93 (V72): narrowing changes apply at once, so Undo
+    // leaves a finished, undone card with no buttons.
+    let backend = FixtureBackend::for_screen(Screen::SettingsApplied).unwrap();
+    let id = {
+        let mut state = backend.state.borrow_mut();
+        let card = state.changes.values_mut().next().unwrap();
+        card.widens = false;
+        card.id.clone()
+    };
+    backend.act(Action::Undo(id)).unwrap();
+    let card = backend.snapshot().changes.values().next().unwrap().clone();
+    assert_eq!(card.state, ChangeState::Undone);
 }
