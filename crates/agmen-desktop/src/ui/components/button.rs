@@ -87,8 +87,9 @@ pub(crate) enum ButtonSize {
     /// Padding 4 by 10 and 6 between its parts, as the add agent dialog's
     /// Copy prompt (node 2435).
     Medium,
-    /// Padding 6 by 12, radius 6 and body text, as a dialog's Cancel and
-    /// Check again (nodes 2443, 2445).
+    /// Radius 6 and body text, as a dialog's Cancel and Check again:
+    /// Primary pads 6 by 14 (node 2445), the other styles 6 by 12 inside
+    /// their border (node 2443).
     Large,
     /// Task 19: body text and padding that makes a 32 px button with or
     /// without a border (nodes 9777 and 10953): Primary pads 8 by 14, the
@@ -134,10 +135,17 @@ fn sized(
             styled.py(SPACE_4).px(SPACE_10).gap(SPACE_6),
             LabelSize::Small,
         ),
-        ButtonSize::Large => (
-            styled.py(SPACE_6).px(SPACE_12).rounded(RADIUS_CARD),
-            LabelSize::Default,
-        ),
+        ButtonSize::Large => {
+            let px = if style == ButtonStyle::Primary {
+                SPACE_14
+            } else {
+                SPACE_12
+            };
+            (
+                styled.py(SPACE_6).px(px).rounded(RADIUS_CARD),
+                LabelSize::Default,
+            )
+        }
         ButtonSize::Tall => {
             let (py, px) = if style == ButtonStyle::Primary {
                 (SPACE_8, SPACE_14)
@@ -438,7 +446,8 @@ mod tests {
                 .weight(FontWeight::SEMIBOLD)
                 .into_any_element()
         });
-        assert_eq!(button.width - text.width, px(24.));
+        // Node 2445: Primary pads 6 by 14.
+        assert_eq!(button.width - text.width, px(28.));
         assert_eq!(button.height - text.height, px(12.));
     }
 

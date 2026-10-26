@@ -406,6 +406,8 @@ impl RenderOnce for AddAgentDialog {
                     .w_full()
                     .flex()
                     .justify_end()
+                    // Check again keeps its height beside the bordered Cancel.
+                    .items_center()
                     .gap(SPACE_8)
                     .child(
                         Button::new("add-agent:cancel", "Cancel")
