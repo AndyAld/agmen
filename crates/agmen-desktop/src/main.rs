@@ -340,6 +340,9 @@ fn open_main_window(launch: &Launch, cx: &mut App) -> Result<()> {
                 backend::FixtureBackend::for_screen(screen).context("building the fixture data")?,
             );
             let snapshot = backend.snapshot();
+            // agmen-c7 fix-hosting: the first frame draws the snapshot's file
+            // icons, even in a window macOS will not draw again (icons/preload.rs).
+            icons::preload_snapshot(&snapshot, cx);
             cx.set_global(backend::BackendHandle(backend));
             cx.open_window(options, |window, cx| {
                 let workspace = cx.new(|cx| {

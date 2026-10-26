@@ -47,6 +47,8 @@ pub(crate) use syntax::Language;
 pub(crate) use text_input::{TextInput, bind_keys};
 pub(crate) use title_bar::TitleBar;
 pub(crate) use workspace::{Quit, Workspace};
+// agmen-c7 fix-hosting: the icon preload reads Settings' preview names.
+pub(crate) use settings_view::ICON_PREVIEW_NAMES;
 
 use gpui::App;
 

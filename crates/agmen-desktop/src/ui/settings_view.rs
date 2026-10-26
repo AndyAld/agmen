@@ -1177,22 +1177,24 @@ fn size_stepper(
     }))
 }
 
-/// The icon theme preview: the mockup's eight files and folders.
+/// The icon theme preview's files and folders: the mockup's eight.
+pub(crate) const ICON_PREVIEW_NAMES: [(&str, bool); 8] = [
+    ("src", true),
+    ("tests", true),
+    ("main.rs", false),
+    ("Cargo.toml", false),
+    ("README.md", false),
+    ("Cargo.lock", false),
+    ("reviewer.xml", false),
+    ("release.yml", false),
+];
+
+/// The icon theme preview: [`ICON_PREVIEW_NAMES`].
 fn icon_preview(cx: &mut App) -> impl IntoElement + use<> {
-    const NAMES: [(&str, bool); 8] = [
-        ("src", true),
-        ("tests", true),
-        ("main.rs", false),
-        ("Cargo.toml", false),
-        ("README.md", false),
-        ("Cargo.lock", false),
-        ("reviewer.xml", false),
-        ("release.yml", false),
-    ];
     let theme = &cx.global::<Appearance>().theme;
     let (bg, tint) = (theme.background, theme.icon_muted);
     let icons: Vec<AnyElement> = cx.try_global::<FileIcons>().map_or_else(Vec::new, |icons| {
-        NAMES
+        ICON_PREVIEW_NAMES
             .iter()
             .map(|(name, is_dir)| {
                 icons
