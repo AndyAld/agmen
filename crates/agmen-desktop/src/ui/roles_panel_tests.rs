@@ -102,3 +102,57 @@ fn role_rows_show_a_role_dot(cx: &mut TestAppContext) {
         assert!(cx.debug_bounds(sel).is_some(), "{sel}");
     }
 }
+
+/// The Roles panel beside each layer title drawn as a reference label.
+struct LayerHost(gpui::Entity<RolesPanel>);
+
+impl gpui::Render for LayerHost {
+    fn render(
+        &mut self,
+        _: &mut gpui::Window,
+        _: &mut gpui::Context<Self>,
+    ) -> impl gpui::IntoElement {
+        let reference = |sel: &'static str, text: &'static str, code: bool| {
+            let label = Label::new(text).weight(FontWeight::MEDIUM);
+            div()
+                .flex()
+                .debug_selector(move || sel.into())
+                .child(if code { label.code() } else { label })
+        };
+        div()
+            .flex()
+            .flex_col()
+            .items_start()
+            .child(self.0.clone())
+            .child(reference("want:built-in", "Built-in", false))
+            .child(reference("want:project", ".agmen/roles", true))
+            .child(reference("want:personal", "~/.config/agmen/roles", true))
+    }
+}
+
+#[gpui::test]
+fn path_layer_headers_use_the_code_font(cx: &mut TestAppContext) {
+    // V83: ".agmen/roles" and "~/.config/agmen/roles" are mono 13 Medium
+    // (nodes 11599, 11607); "Built-in" stays in the UI font.
+    init(cx);
+    let roles = chat_snapshot().roles;
+    let (_, cx) = cx.add_window_view(|_, cx| LayerHost(cx.new(|_| RolesPanel::new(roles))));
+    redraw(cx);
+    for slug in ["built-in", "project", "personal"] {
+        let sel: &'static str = Box::leak(format!("role-layer:{slug}:title").into_boxed_str());
+        let want: &'static str = Box::leak(format!("want:{slug}").into_boxed_str());
+        let title = cx.debug_bounds(sel).unwrap_or_else(|| panic!("{sel}"));
+        let want = cx.debug_bounds(want).unwrap();
+        assert_eq!(title.size.width, want.size.width, "{sel}");
+    }
+}
+
+#[test]
+fn role_dots_take_the_palette_role_color() {
+    // V85: the dot is a Dot in the role's palette color, icon.muted without one.
+    assert_eq!(
+        role_dot_color(Some("reviewer")),
+        Color::Role("reviewer".into())
+    );
+    assert_eq!(role_dot_color(None), Color::Muted);
+}

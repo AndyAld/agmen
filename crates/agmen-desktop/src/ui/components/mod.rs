@@ -13,6 +13,7 @@ mod chip;
 mod color;
 #[cfg(test)]
 mod control_harness;
+mod dot;
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "used by the Task 17 settings view")
@@ -49,6 +50,7 @@ pub(crate) use badge::Badge;
 pub(crate) use button::{Button, ButtonStyle};
 pub(crate) use chip::Chip;
 pub(crate) use color::Color;
+pub(crate) use dot::Dot;
 pub(crate) use icon::{Icon, IconSize};
 pub(crate) use icon_button::{ClickHandler, IconButton, IconButtonStyle};
 pub(crate) use key_hint::KeyHint;
