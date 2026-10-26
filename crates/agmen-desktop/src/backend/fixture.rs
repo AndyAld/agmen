@@ -13,6 +13,7 @@ use super::fixture_data::{
     plan, plan_messages, plan_roster, role_files, roster, settings_card, settings_messages, stamp,
     urgent_alert, worktrees,
 };
+use super::fixture_models::{ask_model, installed_agents, model_groups, tag_from};
 use super::{
     Action, Backend, BackendError, ChangeState, Draft, RecentAction, RecentKind, Screen, Snapshot,
     StatusSummary, Update,
@@ -73,6 +74,10 @@ fn base(project: &str) -> Result<Snapshot, BackendError> {
         sessions: BTreeMap::from([(id("andy/fx1")?, fx1_session())]),
         roles,
         worktrees: worktrees()?,
+        // Task 15: the model picker's agents and models.
+        installed_agents: installed_agents(),
+        models: model_groups(),
+        message_models: BTreeMap::new(),
     })
 }
 
@@ -89,6 +94,10 @@ impl FixtureBackend {
     ///
     /// When the built-in fixture data is not valid protocol data, which
     /// `fixture_messages_survive_the_wire_format` guards against.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one arm per mockup screen; Task 15's model tags tipped it over"
+    )]
     pub(crate) fn for_screen(screen: Screen) -> Result<Self, BackendError> {
         let snapshot = match screen {
             Screen::NeedsYou | Screen::NeedsYouAnswered => {
@@ -137,8 +146,8 @@ impl FixtureBackend {
             }
             Screen::Ask | Screen::ModelPicker => {
                 let mut msgs = chat_messages();
+                let first = msgs.len();
                 if screen == Screen::Ask {
-                    let first = msgs.len();
                     msgs.extend(ask_messages(first));
                 }
                 let mut s = with_messages("pr-3331", msgs)?;
@@ -155,6 +164,8 @@ impl FixtureBackend {
                     );
                     s.status.spend_today_usd =
                         s.listener.workers_today_usd + s.listener.listener_today_usd;
+                    // Task 15 (V67): the question and its answer ran on opus.
+                    tag_from(&mut s, first, &ask_model());
                 }
                 s
             }
@@ -237,6 +248,13 @@ impl Backend for FixtureBackend {
         let message = {
             let mut snapshot = self.state.borrow_mut();
             let seq = snapshot.messages.len() + 1;
+            // Task 15: answering an ASK or an ALERT is an ANSWER (protocol
+            // section 4); anything else the person writes is an FYI.
+            let verb = if answers_a_question(&snapshot, draft.reply_to.as_ref()) {
+                "ANSWER"
+            } else {
+                "FYI"
+            };
             let value = json!({
                 "v": 1,
                 "id": super::fixture_data::message_id(seq),
@@ -244,7 +262,7 @@ impl Backend for FixtureBackend {
                 "to": draft.to,
                 "body": draft.body,
                 "sent_at": "2026-10-25T22:00:00Z",
-                "verb": "FYI",
+                "verb": verb,
                 "data": {},
                 "stream": "feed",
                 "seq": seq,
@@ -259,7 +277,19 @@ impl Backend for FixtureBackend {
             snapshot.messages.push(message.clone());
             message
         };
-        self.publish(&Update::Message(Box::new(message)));
+        // Task 15: the model rides beside the message, so a tagged message
+        // arrives with the snapshot that carries its tag.
+        if let Some(model) = draft.model {
+            let position = (message.stream.clone(), message.seq);
+            self.state
+                .borrow_mut()
+                .message_models
+                .insert(position, model);
+            let snapshot = self.snapshot();
+            self.publish(&Update::Snapshot(Box::new(snapshot)));
+        } else {
+            self.publish(&Update::Message(Box::new(message)));
+        }
         Ok(())
     }
 
@@ -295,6 +325,19 @@ impl Backend for FixtureBackend {
         self.subscribers.borrow_mut().push(tx);
         rx
     }
+}
+
+/// Whether `reply_to` names an ASK or an ALERT in the chat (Task 15).
+fn answers_a_question(snapshot: &Snapshot, reply_to: Option<&agmen_proto::MessageId>) -> bool {
+    reply_to.is_some_and(|parent| {
+        snapshot.messages.iter().any(|m| {
+            &m.client.id == parent
+                && matches!(
+                    m.client.payload.verb(),
+                    Some(agmen_proto::Verb::Ask | agmen_proto::Verb::Alert)
+                )
+        })
+    })
 }
 
 #[cfg(test)]

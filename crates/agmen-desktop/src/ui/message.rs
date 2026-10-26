@@ -13,9 +13,10 @@ use gpui::{
     RenderOnce, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
 };
 
+use super::ask_card::AskCard;
 use super::change_card::ChangeCard;
 use super::chat_context::ChatContext;
-use super::components::{Avatar, Badge, ChangeHandler, Chip, Color, Label, LabelSize};
+use super::components::{Avatar, Badge, ChangeHandler, Chip, Color, Label, LabelSize, ModelTag};
 use super::format::title_case;
 use super::ref_chip::RefEvent;
 use super::rich_text::RichText;
@@ -24,7 +25,7 @@ use super::tokens::{
     SPACE_10, TINT_MENTION, tint,
 };
 use crate::appearance::Appearance;
-use crate::backend::Action;
+use crate::backend::{Action, Draft};
 
 /// How a message row is drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -195,13 +196,16 @@ fn offers_take_over(env: &StampedEnvelope, context: &ChatContext) -> bool {
 /// One message, the one at an index in the context's snapshot, so a frame
 /// copies none of it. Tests find its parts as `"{message id}:row"` (or
 /// `":ledger"`), `":avatar"`, `":head"`, `":handle"`, `":role"`, `":verb"`,
-/// `":time"`, `":mention-bar"`, `":open-in-terminal"` and `":ref:{n}"`.
+/// `":time"`, `":model"`, `":mention-bar"`, `":open-in-terminal"` and
+/// `":ref:{n}"`.
 #[derive(IntoElement)]
 pub(crate) struct MessageRow {
     index: usize,
     context: Rc<ChatContext>,
     on_ref: Option<ChangeHandler<RefEvent>>,
     on_action: Option<ChangeHandler<Action>>,
+    /// Task 15: where an ASK card's answer goes.
+    on_answer: Option<ChangeHandler<Draft>>,
 }
 
 impl std::fmt::Debug for MessageRow {
@@ -222,7 +226,19 @@ impl MessageRow {
             context,
             on_ref: None,
             on_action: None,
+            on_answer: None,
         }
+    }
+
+    /// Called with the ANSWER an ASK card's button sends (Task 15); the
+    /// caller passes it to `Backend::send`.
+    #[must_use]
+    pub(crate) fn on_answer(
+        mut self,
+        handler: impl Fn(Draft, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_answer = Some(Rc::new(handler));
+        self
     }
 
     /// Called when a reference chip in the body is clicked or ⌘-clicked.
@@ -364,6 +380,10 @@ impl MessageRow {
                 ),
             )
             .child(part("verb").child(Badge::new(verb, verb_color).code()))
+            // Task 15: the model the message was sent with or answered on.
+            .when_some(self.context.model_of(env), |this, model| {
+                this.child(part("model").child(ModelTag::new(model.label())))
+            })
             .child(
                 part("time").child(
                     Label::new(self.context.clock(env.hub_at))
@@ -411,6 +431,8 @@ impl RenderOnce for MessageRow {
                 },
             )
         });
+        let ask = AskCard::for_message(env, context.snapshot())
+            .map(|ask| ask.when_some(self.on_answer.clone(), AskCard::on_answer));
         let indent = if kind == RowKind::Reply {
             SPACE_10 + REPLY_INDENT
         } else {
@@ -436,7 +458,8 @@ impl RenderOnce for MessageRow {
                     .gap(SPACE_3)
                     .child(head)
                     .child(body)
-                    .children(card),
+                    .children(card)
+                    .children(ask),
             );
         div()
             .debug_selector(|| row_sel)

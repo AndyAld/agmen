@@ -13,7 +13,7 @@ use jiff::tz::TimeZone;
 
 use super::components::Color;
 use super::format::{clock, money_of, title_case};
-use crate::backend::{AgentInfo, AgentStatus, ChangeCard, Snapshot};
+use crate::backend::{AgentInfo, AgentStatus, ChangeCard, ModelChoice, Snapshot};
 use crate::refs::{Known, RefTarget, Span, find_refs};
 
 /// How many entries a hover card row lists before it says "and N more".
@@ -152,6 +152,14 @@ impl ChatContext {
         } else {
             None
         }
+    }
+
+    /// Task 15: the model `env` was sent with or answered on, by its hub
+    /// position.
+    pub(crate) fn model_of(&self, env: &StampedEnvelope) -> Option<&ModelChoice> {
+        self.snapshot
+            .message_models
+            .get(&(env.stream.clone(), env.seq))
     }
 
     /// The lowercase role of the roster agent `handle`.

@@ -144,10 +144,7 @@ impl PaneGroup {
         }
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the palette (Task 18) moves between panes")
-    )]
+    // Task 15: the model picker screen finds the chat through it.
     pub(crate) fn panes(&self) -> Vec<Entity<Pane>> {
         self.members.iter().map(|m| m.pane.clone()).collect()
     }

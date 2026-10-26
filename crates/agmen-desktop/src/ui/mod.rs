@@ -36,6 +36,9 @@ mod text_input;
 mod title_bar;
 mod tokens;
 mod workspace;
+// Task 15: the model picker and ASK cards.
+mod ask_card;
+mod model_picker;
 
 pub(crate) use agent_view::AgentView;
 pub(crate) use code_view::{CodeView, GutterMark};

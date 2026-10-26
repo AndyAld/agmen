@@ -183,6 +183,22 @@ pub(crate) fn tint(color: Hsla, alpha: f32) -> Hsla {
     color.opacity(alpha)
 }
 
+// Task 15: the model picker (node 3355), its rows and the message model tag.
+/// The picker's width.
+pub(crate) const MODEL_PICKER_WIDTH: Pixels = px(470.);
+/// The gap between the model chip's top and the picker above it.
+pub(crate) const MODEL_PICKER_GAP: Pixels = px(8.);
+/// A model row (node 3361).
+pub(crate) const MENU_ROW_HEIGHT: Pixels = px(26.);
+/// The picker's drop shadow: black at 0xaa, 8 px down, 24 px blur. The
+/// theme has no shadow token.
+pub(crate) const MENU_SHADOW_ALPHA: f32 = 170. / 255.;
+pub(crate) const MENU_SHADOW_OFFSET: Pixels = px(8.);
+pub(crate) const MENU_SHADOW_BLUR: Pixels = px(24.);
+/// A selected segment, as the effort row's "high" (0x33, node 3397, and
+/// console.py `seg` for Settings).
+pub(crate) const TINT_SEGMENT: f32 = 51. / 255.;
+
 /// How strongly a diff line's fill shows `created` or `deleted` (the
 /// mockup draws OK and ERR at alpha 0x22).
 pub(crate) const DIFF_TINT: f32 = 0.13;

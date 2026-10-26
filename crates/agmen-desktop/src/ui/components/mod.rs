@@ -30,6 +30,11 @@ mod stepper;
 mod tab;
 mod toggle;
 mod tool_card;
+// Task 15: the model picker's rows and scope options, and the message tag.
+mod menu_row;
+mod model_tag;
+mod radio;
+pub(crate) use {menu_row::MenuRow, model_tag::ModelTag, radio::Radio};
 
 pub(crate) use avatar::Avatar;
 pub(crate) use badge::Badge;

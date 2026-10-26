@@ -9,10 +9,14 @@ mod fixture;
 mod fixture_data;
 mod screen;
 mod worktree;
+// Task 15: installed agents, models and the model a message ran on.
+mod fixture_models;
+mod models;
+pub(crate) use models::{ChoiceScope, Effort, InstalledAgent, ModelChoice, ModelGroup};
 
 use std::collections::BTreeMap;
 
-use agmen_proto::{GitSha, IdentityId, MessageId, StampedEnvelope};
+use agmen_proto::{GitSha, IdentityId, MessageId, Seq, StampedEnvelope, Stream};
 use futures::channel::mpsc::UnboundedReceiver;
 use gpui::SharedString;
 
@@ -80,7 +84,12 @@ pub(crate) struct Draft {
     /// Who it is addressed to; the listener unless the person picks.
     pub(crate) to: Vec<IdentityId>,
     pub(crate) body: String,
+    /// The message it answers. A reply to an ASK or an ALERT goes out as
+    /// an ANSWER, any other message as an FYI.
     pub(crate) reply_to: Option<MessageId>,
+    /// The model the listener runs this message on (Task 15); `None` runs
+    /// it on the listener's own settings.
+    pub(crate) model: Option<ModelChoice>,
 }
 
 /// Something the person does that is not a chat message.
@@ -368,6 +377,15 @@ pub(crate) struct Snapshot {
     pub(crate) roles: Vec<RoleFile>,
     /// The worktrees on this machine, the person's own first.
     pub(crate) worktrees: Vec<WorktreeInfo>,
+    // Task 15: the model picker's agents and models, and message tags.
+    /// Coding agents on this machine, and the ones agmen can add.
+    pub(crate) installed_agents: Vec<InstalledAgent>,
+    /// The models each installed agent offers, in the picker's order.
+    pub(crate) models: Vec<ModelGroup>,
+    /// The model a message was sent with or answered on, by hub position.
+    /// The wire carries no model (agmen-proto's FYI and ANSWER have no
+    /// field), so agmend reports it beside the message.
+    pub(crate) message_models: BTreeMap<(Stream, Seq), ModelChoice>,
 }
 
 /// One row of an agent's session, as the agent view shows it.

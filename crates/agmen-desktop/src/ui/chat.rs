@@ -100,7 +100,8 @@ impl ChatStream {
         let Some(&index) = self.rows.get(ix) else {
             return div().into_any_element();
         };
-        let (on_ref, on_action) = (self.chat.clone(), self.chat.clone());
+        let (on_ref, on_action, on_answer) =
+            (self.chat.clone(), self.chat.clone(), self.chat.clone());
         let row = MessageRow::new(index, self.context.clone())
             .on_ref(move |event, _, cx| {
                 // A chip outlives its chat only while the window closes.
@@ -111,6 +112,15 @@ impl ChatStream {
             .on_action(move |action, _, cx| {
                 on_action
                     .update(cx, |chat, cx| chat.act(action, cx))
+                    .unwrap_or_default();
+            })
+            // Task 15: an ASK card's answer.
+            .on_answer(move |draft, _, cx| {
+                on_answer
+                    .update(cx, |chat, cx| {
+                        // A refusal shows above the composer; `send` puts it there.
+                        let _shown = chat.send(draft, cx);
+                    })
                     .unwrap_or_default();
             });
         // The stream's side padding (node 137) sits on each row: a list lays
@@ -220,6 +230,12 @@ impl ChatView {
             zone,
             _updates: updates,
         }
+    }
+
+    /// Opens or closes the composer's model picker (Task 15).
+    pub(crate) fn set_model_picker_open(&mut self, open: bool, cx: &mut Context<Self>) {
+        self.composer
+            .update(cx, |composer, cx| composer.set_model_picker_open(open, cx));
     }
 
     /// The chat tab's red count: urgent alerts that need me (Task 13).

@@ -87,8 +87,9 @@ impl WorkspaceState {
             | Screen::SettingsApplied => {
                 (LeftDock::Agents, CenterTab::Chat, Some(RightDock::Listener))
             }
-            // shortcut: the needs-you notification, the model picker and the
-            // palette are not built (Tasks 15 and 18); they draw over this.
+            // shortcut: the needs-you notification and the palette are not
+            // built (Tasks 13 and 18); they draw over this. The model
+            // picker opens in `show_screen` (Task 15).
             Screen::NeedsYou | Screen::ModelPicker | Screen::Palette => {
                 (LeftDock::Agents, CenterTab::Chat, Some(RightDock::Listener))
             }
@@ -129,6 +130,14 @@ impl Workspace {
         if let Some(item) = self.center_item(state.center) {
             self.pane_group
                 .update(cx, |group, cx| group.open_last(item, cx));
+        }
+        // Task 15: the frame shows the composer's model picker open.
+        if screen == Screen::ModelPicker {
+            let chats = self.pane_group.read(cx).panes();
+            let chat = chats.iter().find_map(|pane| pane.read(cx).chat().cloned());
+            if let Some(chat) = chat {
+                chat.update(cx, |chat, cx| chat.set_model_picker_open(true, cx));
+            }
         }
         cx.notify();
     }

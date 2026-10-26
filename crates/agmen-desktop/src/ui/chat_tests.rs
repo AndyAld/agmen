@@ -180,6 +180,7 @@ fn refused_send_shows_why_until_the_next_send(cx: &mut TestAppContext) {
         to: to.clone(),
         body,
         reply_to: None,
+        model: None,
     };
     let big = draft("x".repeat(MAX_BODY_BYTES + 1));
     let refused = chat.update(cx, |chat, cx| chat.send(big, cx));
@@ -204,6 +205,7 @@ fn send_without_a_backend_shows_why(cx: &mut TestAppContext) {
                 to,
                 body: "hi".into(),
                 reply_to: None,
+                model: None,
             },
             cx,
         )

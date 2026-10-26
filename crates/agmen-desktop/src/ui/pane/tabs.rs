@@ -72,7 +72,7 @@ impl Pane {
         cx.notify();
     }
 
-    #[cfg(test)]
+    // Task 15: the model picker screen reaches the composer through it.
     pub(crate) const fn chat(&self) -> Option<&Entity<ChatView>> {
         self.chat.as_ref()
     }

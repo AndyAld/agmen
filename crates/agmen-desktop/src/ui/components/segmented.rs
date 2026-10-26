@@ -11,9 +11,7 @@ use gpui::{
 
 use super::{ChangeHandler, Color, Label, LabelSize};
 use crate::appearance::Appearance;
-use crate::ui::tokens::{
-    BORDER_WIDTH, RADIUS_MD, SPACE_3, SPACE_10, SPACE_12, TINT_SELECTED, tint,
-};
+use crate::ui::tokens::{BORDER_WIDTH, RADIUS_MD, SPACE_3, SPACE_10, SPACE_12, TINT_SEGMENT, tint};
 
 #[derive(IntoElement)]
 pub(crate) struct Segmented {
@@ -53,10 +51,6 @@ impl Segmented {
     }
 
     /// Sets the options in the code font with wider padding, as the effort row.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the model picker's effort row uses it in Task 15")
-    )]
     #[must_use]
     pub(crate) const fn code(mut self) -> Self {
         self.code = true;
@@ -107,7 +101,7 @@ impl RenderOnce for Segmented {
                 .focus_visible(move |style| style.bg(hover))
                 .map(|this| {
                     if selected {
-                        this.bg(tint(theme.text_accent, TINT_SELECTED))
+                        this.bg(tint(theme.text_accent, TINT_SEGMENT))
                     } else {
                         this.hover(move |style| style.bg(hover)).when_some(
                             self.on_change.clone(),

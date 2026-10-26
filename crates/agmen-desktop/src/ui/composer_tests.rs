@@ -62,6 +62,7 @@ fn composer_sends_to_listener_by_default(cx: &mut TestAppContext) {
             to: vec![agent_id("andy/listen")],
             body: "hi".into(),
             reply_to: None,
+            model: None,
         }]
     );
 }
@@ -105,6 +106,7 @@ fn composer_at_mention_overrides_target(cx: &mut TestAppContext) {
             to: vec![agent_id("andy/fx1")],
             body: "@andy/fx1, rebase on main".into(),
             reply_to: None,
+            model: None,
         }]
     );
     // The input is empty again, so the chip is back on the listener.
@@ -216,6 +218,7 @@ fn direct_composer_sends_to_its_agent(cx: &mut TestAppContext) {
             to: vec![agent_id("andy/fx1")],
             body: "rebase first".into(),
             reply_to: None,
+            model: None,
         }]
     );
 }
