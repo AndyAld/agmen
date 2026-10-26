@@ -116,7 +116,7 @@ fn my_share_sums_my_agents() {
 }
 
 #[test]
-fn spec_approve_dispatches_decision() {
+fn approve_spec_flips_approved_by_all() {
     // Dispatching needs a view, and Action::ApproveSpec needs the spec's sha,
     // which SpecState does not carry yet; this tests the state change.
     let mut p = plan(Screen::Plan);
@@ -148,4 +148,53 @@ fn names_join_in_plain_english() {
     assert_eq!(join_names(&["andy"]), "andy");
     assert_eq!(join_names(&["andy", "sean"]), "andy and sean");
     assert_eq!(join_names(&["adam", "andy", "sean"]), "adam, andy and sean");
+}
+
+#[test]
+fn kickoff_needs_an_agent_and_an_approved_spec() {
+    let mut empty = plan(Screen::PlanReady);
+    empty.team.clear();
+    empty.shares_approved.clear();
+    assert!(!kickoff_enabled(&empty));
+    assert_eq!(kickoff_label(&empty), "Kick off · no agents");
+
+    let mut no_specs = plan(Screen::PlanReady);
+    no_specs.specs.retain(|s| s.draft_note.is_some());
+    assert!(!kickoff_enabled(&no_specs));
+    let specs = &checklist(&no_specs, "andy")[2];
+    assert_eq!(
+        (specs.label.as_str(), specs.ok),
+        ("At least one spec approved", false)
+    );
+    assert_eq!(kickoff_label(&no_specs), "Kick off · no approved spec");
+}
+
+#[test]
+fn lane_paths_with_dot_dot_are_rejected() {
+    assert!(paths_overlap("core/../cli/**", "cli/**"));
+    let mut p = plan(Screen::PlanReady);
+    p.lanes.push(LaneInfo {
+        name: "L-CLI".into(),
+        paths: vec!["core/../cli/**".into()],
+    });
+    let lanes = &checklist(&p, "andy")[1];
+    assert_eq!(
+        (lanes.label.as_str(), lanes.ok),
+        ("Lane L-CLI path core/../cli/** uses ..", false)
+    );
+    assert!(!kickoff_enabled(&p));
+    assert_eq!(kickoff_label(&p), "Kick off · a lane path uses ..");
+}
+
+#[test]
+fn running_plan_label_says_running() {
+    let mut p = plan(Screen::Plan);
+    p.running = true;
+    assert_eq!(kickoff_label(&p), "Kick off · running");
+    assert_eq!(kickoff_label(&plan(Screen::Running)), "Kick off · running");
+}
+
+#[test]
+fn owners_are_distinct_in_team_order() {
+    assert_eq!(owners(&plan(Screen::Plan)), ["andy", "sean"]);
 }

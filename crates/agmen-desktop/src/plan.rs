@@ -48,8 +48,12 @@ pub(crate) fn checklist(plan: &PlanInfo, me: &str) -> Vec<Check> {
             label: format!("Repo {} exists on the git host", plan.name),
             ok: plan.repo_exists,
         },
-        match overlapping_lanes(plan) {
-            Some((a, b)) => Check {
+        match lane_problem(plan) {
+            Some(LaneProblem::DotDot { lane, path }) => Check {
+                label: format!("Lane {lane} path {path} uses .."),
+                ok: false,
+            },
+            Some(LaneProblem::Overlap(a, b)) => Check {
                 label: format!("Lanes {a} and {b} overlap"),
                 ok: false,
             },
@@ -64,19 +68,14 @@ pub(crate) fn checklist(plan: &PlanInfo, me: &str) -> Vec<Check> {
         .collect();
     let approvers: Vec<&str> = approvers.into_iter().collect();
     checks.push(Check {
-        label: if approvers.is_empty() {
-            "Specs approved".into()
-        } else {
+        label: if has_spec(plan) {
             format!("Specs approved by {}", join_names(&approvers))
+        } else {
+            "At least one spec approved".into()
         },
-        ok: up_for_approval(plan).all(SpecState::approved_by_all),
+        ok: has_spec(plan) && up_for_approval(plan).all(SpecState::approved_by_all),
     });
-    let mut owners: Vec<&str> = Vec::new();
-    for row in &plan.team {
-        if !owners.contains(&row.owner.as_str()) {
-            owners.push(&row.owner);
-        }
-    }
+    let mut owners = owners(plan);
     owners.sort_by_key(|owner| *owner != me);
     for owner in owners {
         let Share {
@@ -94,17 +93,23 @@ pub(crate) fn checklist(plan: &PlanInfo, me: &str) -> Vec<Check> {
     checks
 }
 
-/// Whether Kick off is enabled: every check is ok, the plan branch is
+/// Whether Kick off is enabled: the team has at least one agent, every
+/// check is ok (which needs at least one approved spec), the plan branch is
 /// merged, and the plan is not already running.
 #[must_use]
 pub(crate) fn kickoff_enabled(plan: &PlanInfo) -> bool {
-    !plan.running && plan.branch_merged && checklist(plan, "").iter().all(|c| c.ok)
+    !plan.running
+        && plan.branch_merged
+        && !plan.team.is_empty()
+        && checklist(plan, "").iter().all(|c| c.ok)
 }
 
 /// The Kick off button's text, which says what it waits for while disabled.
 #[must_use]
 pub(crate) fn kickoff_label(plan: &PlanInfo) -> String {
-    let reason = if kickoff_enabled(plan) {
+    let reason = if plan.running {
+        "running".into()
+    } else if kickoff_enabled(plan) {
         agent_count(plan.team.len())
     } else if let waiting = waiting_on(plan)
         && !waiting.is_empty()
@@ -112,12 +117,18 @@ pub(crate) fn kickoff_label(plan: &PlanInfo) -> String {
         format!("waiting on {}", join_names(&waiting))
     } else if !plan.repo_exists {
         "no repo".into()
-    } else if overlapping_lanes(plan).is_some() {
-        "lanes overlap".into()
-    } else if !plan.branch_merged {
-        "waiting on the plan branch merge".into()
+    } else if plan.team.is_empty() {
+        "no agents".into()
+    } else if !has_spec(plan) {
+        "no approved spec".into()
+    } else if let Some(problem) = lane_problem(plan) {
+        match problem {
+            LaneProblem::DotDot { .. } => "a lane path uses ..".into(),
+            LaneProblem::Overlap(..) => "lanes overlap".into(),
+        }
     } else {
-        "running".into()
+        // Every check passed and nobody waits, so only the merge is left.
+        "waiting on the plan branch merge".into()
     };
     format!("Kick off · {reason}")
 }
@@ -144,6 +155,21 @@ fn up_for_approval(plan: &PlanInfo) -> impl Iterator<Item = &SpecState> {
     plan.specs.iter().filter(|spec| spec.draft_note.is_none())
 }
 
+fn has_spec(plan: &PlanInfo) -> bool {
+    up_for_approval(plan).next().is_some()
+}
+
+/// The plan's owners, each once, in team order.
+fn owners(plan: &PlanInfo) -> Vec<&str> {
+    let mut owners: Vec<&str> = Vec::new();
+    for row in &plan.team {
+        if !owners.contains(&row.owner.as_str()) {
+            owners.push(&row.owner);
+        }
+    }
+    owners
+}
+
 fn share_approved(plan: &PlanInfo, owner: &str) -> bool {
     plan.shares_approved.get(owner).copied().unwrap_or(false)
 }
@@ -156,10 +182,8 @@ fn waiting_on(plan: &PlanInfo) -> Vec<&str> {
             .filter(|(_, approval)| **approval == Approval::Waiting)
             .map(|(person, _)| person.as_str())
     });
-    let shares = plan
-        .team
-        .iter()
-        .map(|row| row.owner.as_str())
+    let shares = owners(plan)
+        .into_iter()
         .filter(|owner| !share_approved(plan, owner));
     let names: BTreeSet<&str> = specs.chain(shares).collect();
     names.into_iter().collect()
@@ -183,6 +207,30 @@ fn join_names<S: AsRef<str>>(names: &[S]) -> String {
             format!("{} and {}", rest.join(", "), last.as_ref())
         }
     }
+}
+
+/// What is wrong with a plan's lanes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LaneProblem<'a> {
+    /// A path that climbs out with `..`, which no lane may use.
+    DotDot { lane: &'a str, path: &'a str },
+    /// Two lanes, in plan order, with paths that overlap.
+    Overlap(&'a str, &'a str),
+}
+
+/// The first problem with the plan's lanes: a `..` path first, then the
+/// first two lanes that overlap.
+fn lane_problem(plan: &PlanInfo) -> Option<LaneProblem<'_>> {
+    let dot_dot = plan.lanes.iter().find_map(|lane| {
+        lane.paths
+            .iter()
+            .find(|path| path.split('/').any(|s| s == ".."))
+            .map(|path| LaneProblem::DotDot {
+                lane: &lane.name,
+                path,
+            })
+    });
+    dot_dot.or_else(|| overlapping_lanes(plan).map(|(a, b)| LaneProblem::Overlap(a, b)))
 }
 
 /// The first two lanes, in plan order, with paths that overlap.
@@ -221,6 +269,12 @@ impl<'a> LanePath<'a> {
         // `a/**` only reports more overlaps.
         if let Some(at) = segments.iter().position(|s| *s == "**") {
             segments.truncate(at);
+            open = true;
+        }
+        // Lanes reject `..` (lane_problem); here it matches everything, the
+        // safe direction for a kick-off gate.
+        if segments.contains(&"..") {
+            segments.clear();
             open = true;
         }
         Self { segments, open }
