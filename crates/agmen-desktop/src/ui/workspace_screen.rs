@@ -93,6 +93,8 @@ pub(super) struct WorkspaceState {
     alert: AlertMoment,
     /// Task 14: the take-over terminal's menu or dialog the frame opens.
     popup: Option<Popup>,
+    /// Task 15: whether the frame shows the composer's model picker open.
+    model_picker: bool,
 }
 
 /// Task 13: what a screen shows of an alert beyond its history, silently.
@@ -120,8 +122,7 @@ impl WorkspaceState {
             | Screen::SettingsApplied => {
                 (LeftDock::Agents, CenterTab::Chat, Some(RightDock::Listener))
             }
-            // shortcut: the model picker is not built (Task 15); it draws
-            // over this.
+            // Task 15: the composer's model picker opens over the chat.
             Screen::ModelPicker => (LeftDock::Agents, CenterTab::Chat, Some(RightDock::Listener)),
             // Task 18: the palette opens over the chat with "spawn" typed.
             Screen::Palette => {
@@ -132,6 +133,7 @@ impl WorkspaceState {
                     palette: Some("spawn"),
                     alert: AlertMoment::None,
                     popup: None,
+                    model_picker: false,
                 };
             }
             // Task 14: the fixture takes fx1 over; the popups open below.
@@ -168,6 +170,7 @@ impl WorkspaceState {
                 _ => AlertMoment::None,
             },
             popup,
+            model_picker: matches!(screen, Screen::ModelPicker),
         }
     }
 }
@@ -198,6 +201,11 @@ impl Workspace {
                 self.show_terminal_popup(TerminalPopup::Dialog(dialog), cx);
             }
             None => {}
+        }
+        // Task 15: the frame shows the composer's model picker open.
+        if state.model_picker {
+            self.chat
+                .update(cx, |chat, cx| chat.set_model_picker_open(true, cx));
         }
         cx.notify();
     }

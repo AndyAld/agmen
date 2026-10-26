@@ -184,6 +184,15 @@ impl InstalledAgent {
     pub(crate) fn is_installed(&self) -> bool {
         self.found != AgentFound::Missing
     }
+
+    /// What `--version` printed; `None` when it is not on PATH.
+    #[must_use]
+    pub(crate) fn version(&self) -> Option<&str> {
+        match &self.found {
+            AgentFound::Ready { version } | AgentFound::Outdated { version, .. } => Some(version),
+            AgentFound::Missing => None,
+        }
+    }
 }
 
 /// Whether the person can take `id`'s session over now: an agent with a

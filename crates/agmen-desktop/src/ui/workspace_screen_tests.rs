@@ -250,3 +250,31 @@ fn plan_screens_keep_the_chat_and_the_listener_for_now(_cx: &mut TestAppContext)
         );
     }
 }
+
+// Task 15: the model picker screen opens the composer's picker on codex.
+#[gpui::test]
+fn model_picker_screen_opens_the_picker(cx: &mut TestAppContext) {
+    let (_, cx) = open(cx, Screen::ModelPicker);
+    assert!(cx.debug_bounds("model-picker").is_some());
+    assert!(
+        cx.debug_bounds("model-picker:codex:default:check")
+            .is_some()
+    );
+}
+
+#[gpui::test]
+fn ask_screen_keeps_the_picker_closed(cx: &mut TestAppContext) {
+    let (_, cx) = open(cx, Screen::Ask);
+    assert!(cx.debug_bounds("model-picker").is_none());
+}
+
+#[gpui::test]
+fn toggling_the_right_dock_keeps_the_picker_open(cx: &mut TestAppContext) {
+    // Fix 45 and V86: cmd-r and cmd-alt-b leave the picker as it is.
+    let (workspace, cx) = open(cx, Screen::ModelPicker);
+    for _ in 0..2 {
+        workspace.update(cx, |w, cx| w.toggle_dock(DockSide::Right, cx));
+        redraw(cx);
+        assert!(cx.debug_bounds("model-picker").is_some());
+    }
+}

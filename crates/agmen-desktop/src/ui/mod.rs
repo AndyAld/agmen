@@ -38,6 +38,9 @@ mod text_input;
 mod title_bar;
 mod tokens;
 mod workspace;
+// Task 15: the model picker and ASK cards.
+mod ask_card;
+mod model_picker;
 
 // Task 13: needs you (the alert row's state, the banner and the toast).
 mod alert_banner;

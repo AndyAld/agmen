@@ -66,13 +66,13 @@ actions!(
     ]
 );
 
-// Task 13: Escape ends a reply in the composer.
+// Tasks 13 and 15: Escape in the composer.
 actions!(
     composer,
     [
-        /// Ends the composer's reply, so the next message goes to the
-        /// recipient again.
-        CancelReply,
+        /// Closes the composer's model picker when it is open, else ends
+        /// its reply, so the next message goes to the recipient again.
+        Dismiss,
     ]
 );
 
@@ -264,8 +264,9 @@ pub(crate) fn table() -> Vec<Binding> {
         bind("down", SelectNext, input),
         bind("enter", Confirm, input),
         bind("escape", Cancel, Some(PALETTE_CONTEXT)),
-        // Task 13: the composer's reply; its input binds no escape.
-        bind("escape", CancelReply, Some(COMPOSER_CONTEXT)),
+        // Tasks 13 and 15: the composer's model picker and reply; its
+        // input binds no escape.
+        bind("escape", Dismiss, Some(COMPOSER_CONTEXT)),
     ]);
     table
 }
@@ -295,7 +296,7 @@ pub(crate) fn commands() -> Vec<Command> {
         window("pane: deploy search", Box::new(OpenSearch)),
         window("pane: split right", Box::new(SplitRight)),
         window("pane: close active item", Box::new(CloseActiveTab)),
-        window("composer: cancel reply", Box::new(CancelReply)),
+        window("composer: dismiss", Box::new(Dismiss)),
     ];
     let panes = [
         "workspace: activate pane 1",

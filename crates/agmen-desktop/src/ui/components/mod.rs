@@ -33,6 +33,10 @@ mod tool_card;
 // Task 18: the command palette's row label.
 mod highlighted_label;
 pub(crate) use highlighted_label::HighlightedLabel;
+// Task 15: the model picker's scope options, and the message tag.
+mod model_tag;
+mod radio;
+pub(crate) use {model_tag::ModelTag, radio::Radio};
 
 pub(crate) use avatar::Avatar;
 pub(crate) use badge::Badge;

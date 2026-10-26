@@ -180,6 +180,7 @@ fn refused_send_shows_why_until_the_next_send(cx: &mut TestAppContext) {
         to: to.clone(),
         body,
         reply_to: None,
+        model: None,
     };
     let big = draft("x".repeat(MAX_BODY_BYTES + 1));
     let refused = chat.update(cx, |chat, cx| chat.send(big, cx));
@@ -204,6 +205,7 @@ fn send_without_a_backend_shows_why(cx: &mut TestAppContext) {
                 to,
                 body: "hi".into(),
                 reply_to: None,
+                model: None,
             },
             cx,
         )
@@ -359,4 +361,22 @@ fn snoozed_alert_stays_snoozed_across_snapshots(cx: &mut TestAppContext) {
         chat.read_with(cx, |chat, _| chat.alerts.needing_me().to_vec()),
         [fresh.client.id]
     );
+}
+
+#[gpui::test]
+fn a_snapshot_reaches_the_composers_model_chip(cx: &mut TestAppContext) {
+    // Task 15: a new listener agent shows on the chip.
+    let (chat, cx) = open_with(cx, chat_snapshot());
+    let mut later = chat_snapshot();
+    later.listener.agent = "claude".into();
+    chat.update(cx, |chat, cx| {
+        chat.apply(Update::Snapshot(Box::new(later)), cx);
+    });
+    let chip = chat.read_with(cx, |chat, cx| {
+        chat.composer
+            .read(cx)
+            .model_choice()
+            .map(crate::backend::ModelChoice::label)
+    });
+    assert_eq!(chip.as_deref(), Some("claude · default"));
 }

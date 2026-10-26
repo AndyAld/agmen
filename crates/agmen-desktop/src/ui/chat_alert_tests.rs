@@ -244,6 +244,7 @@ fn jump_to_it_scrolls_to_the_alert(cx: &mut TestAppContext) {
                 to: Vec::new(),
                 body: format!("filler {i}"),
                 reply_to: None,
+                model: None,
             })
             .unwrap();
     }

@@ -13,6 +13,7 @@ use super::fixture_data::{
     plan, plan_messages, plan_roster, role_files, roster, settings_card, settings_messages,
     spawn_exchange, stamp, urgent_alert, worktrees,
 };
+use super::fixture_models::{ask_model, model_groups, tag_from};
 use super::{
     Action, Backend, BackendError, ChangeState, Draft, RecentAction, RecentKind, Screen, Snapshot,
     StatusSummary, Update,
@@ -73,6 +74,9 @@ fn base(project: &str) -> Result<Snapshot, BackendError> {
         take_overs: BTreeMap::new(),
         installed_agents: super::fixture_take_over::installed_agents(),
         agent_scans: 0,
+        // Task 15: the model picker's models and message tags.
+        models: model_groups(),
+        message_models: BTreeMap::new(),
     })
 }
 
@@ -132,29 +136,7 @@ impl FixtureBackend {
                 s.listener.recent.insert(0, row);
                 s
             }
-            Screen::Ask | Screen::ModelPicker => {
-                let mut msgs = chat_messages();
-                if screen == Screen::Ask {
-                    let first = msgs.len();
-                    msgs.extend(ask_messages(first));
-                }
-                let mut s = with_messages("pr-3331", msgs)?;
-                if screen == Screen::Ask {
-                    // Mockup fix 36: the answer's $0.31 shows in the listener's spend.
-                    s.listener.listener_today_usd = 0.73;
-                    s.listener.recent.insert(
-                        0,
-                        recent(
-                            "15:52",
-                            "answered: musl in C014 (git_show, opus)",
-                            RecentKind::Answered,
-                        ),
-                    );
-                    s.status.spend_today_usd =
-                        s.listener.workers_today_usd + s.listener.listener_today_usd;
-                }
-                s
-            }
+            Screen::Ask | Screen::ModelPicker => ask_snapshot(screen)?,
             Screen::Plan | Screen::Spec | Screen::PlanReady | Screen::KickOff | Screen::Running => {
                 let ready = matches!(screen, Screen::PlanReady | Screen::KickOff);
                 let running = screen == Screen::Running;
@@ -258,6 +240,13 @@ impl Backend for FixtureBackend {
         let message = {
             let mut snapshot = self.state.borrow_mut();
             let seq = snapshot.messages.len() + 1;
+            // Task 15: answering an ASK or an ALERT is an ANSWER (protocol
+            // section 4); anything else the person writes is an FYI.
+            let verb = if answers_a_question(&snapshot, draft.reply_to.as_ref()) {
+                "ANSWER"
+            } else {
+                "FYI"
+            };
             let value = json!({
                 "v": 1,
                 "id": super::fixture_data::message_id(seq),
@@ -265,8 +254,9 @@ impl Backend for FixtureBackend {
                 "to": draft.to,
                 "body": draft.body,
                 "sent_at": "2026-10-25T22:00:00Z",
-                // Task 13: a reply (an alert's Reply) answers what it replies to.
-                "verb": if draft.reply_to.is_some() { "ANSWER" } else { "FYI" },
+                // Tasks 13 and 15: a reply to an ASK or an ALERT (an
+                // alert's Reply) answers it.
+                "verb": verb,
                 "data": {},
                 "stream": "feed",
                 "seq": seq,
@@ -281,7 +271,19 @@ impl Backend for FixtureBackend {
             snapshot.messages.push(message.clone());
             message
         };
-        self.publish(&Update::Message(Box::new(message)));
+        // Task 15: the model rides beside the message, so a tagged message
+        // arrives with the snapshot that carries its tag.
+        if let Some(model) = draft.model {
+            let position = (message.stream.clone(), message.seq);
+            self.state
+                .borrow_mut()
+                .message_models
+                .insert(position, model);
+            let snapshot = self.snapshot();
+            self.publish(&Update::Snapshot(Box::new(snapshot)));
+        } else {
+            self.publish(&Update::Message(Box::new(message)));
+        }
         Ok(())
     }
 
@@ -315,6 +317,7 @@ impl Backend for FixtureBackend {
                     to: vec![sender],
                     body: choice,
                     reply_to: Some(alert),
+                    model: None,
                 })
             }
             // Task 14: take-over, hand back, switching and the agent scan.
@@ -343,6 +346,47 @@ impl Backend for FixtureBackend {
         self.subscribers.borrow_mut().push(tx);
         rx
     }
+}
+
+// Task 15: the ask and model picker screens, and answers to questions.
+/// The ask screen's chat with its ASK and the opus answer, or the model
+/// picker's chat before it.
+fn ask_snapshot(screen: Screen) -> Result<Snapshot, BackendError> {
+    let mut msgs = chat_messages();
+    let first = msgs.len();
+    if screen == Screen::Ask {
+        msgs.extend(ask_messages(first));
+    }
+    let mut s = with_messages("pr-3331", msgs)?;
+    if screen == Screen::Ask {
+        // Mockup fix 36: the answer's $0.31 shows in the listener's spend.
+        s.listener.listener_today_usd = 0.73;
+        s.listener.recent.insert(
+            0,
+            recent(
+                "15:52",
+                "answered: musl in C014 (git_show, opus)",
+                RecentKind::Answered,
+            ),
+        );
+        s.status.spend_today_usd = s.listener.workers_today_usd + s.listener.listener_today_usd;
+        // V67: the question and its answer ran on opus.
+        tag_from(&mut s, first, &ask_model());
+    }
+    Ok(s)
+}
+
+/// Whether `reply_to` names an ASK or an ALERT in the chat (Task 15).
+fn answers_a_question(snapshot: &Snapshot, reply_to: Option<&agmen_proto::MessageId>) -> bool {
+    reply_to.is_some_and(|parent| {
+        snapshot.messages.iter().any(|m| {
+            &m.client.id == parent
+                && matches!(
+                    m.client.payload.verb(),
+                    Some(agmen_proto::Verb::Ask | agmen_proto::Verb::Alert)
+                )
+        })
+    })
 }
 
 #[cfg(test)]

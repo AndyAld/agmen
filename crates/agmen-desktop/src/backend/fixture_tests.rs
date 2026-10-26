@@ -182,6 +182,7 @@ fn a_reply_is_an_answer() {
             to: vec![alert.from.clone()],
             body: "Reverting".into(),
             reply_to: Some(alert.client.id.clone()),
+            model: None,
         })
         .unwrap();
     let sent = backend.snapshot().messages.last().unwrap().clone();
@@ -218,6 +219,7 @@ fn fixture_send_appends_and_notifies() {
             to: vec![backend.snapshot().listener_id.clone()],
             body: "hi".into(),
             reply_to: None,
+            model: None,
         })
         .unwrap();
     let Some(Update::Message(m)) = futures::executor::block_on(updates.next()) else {
@@ -236,6 +238,7 @@ fn fixture_send_refuses_an_oversized_body() {
             to: Vec::new(),
             body: "x".repeat(agmen_proto::MAX_BODY_BYTES + 1),
             reply_to: None,
+            model: None,
         })
         .unwrap_err();
     assert!(err.to_string().contains("32768"), "{err}");

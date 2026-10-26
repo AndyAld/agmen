@@ -7,20 +7,23 @@ use std::rc::Rc;
 use agmen_proto::{IdentityId, MessageId};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div,
+    Anchor, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
+    InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Window, anchored, deferred, div,
+    point,
 };
 
 use super::components::{Chip, Color, IconButton, IconSize, Label, LabelSize};
+use super::model_picker::{ModelMenu, PickerEvent};
 use super::text_input::{TextInput, TextInputEvent};
 use super::tokens::{
-    BORDER_WIDTH, RADIUS_INPUT, SPACE_8, SPACE_10, SPACE_12, SPACE_14, TEXT_DEFAULT,
+    BORDER_WIDTH, MODEL_PICKER_GAP, RADIUS_INPUT, SPACE_8, SPACE_10, SPACE_12, SPACE_14,
+    TEXT_DEFAULT,
 };
 use crate::appearance::Appearance;
 use crate::backend::{BackendError, Draft, Snapshot};
 use crate::icons::UiIcon;
-use crate::keymap::CancelReply;
+use crate::keymap::Dismiss;
 
 /// The input's placeholder (node 384). The ⏎ hint after the input already
 /// says how to send, so the placeholder does not repeat it.
@@ -32,7 +35,7 @@ const MAX_INPUT_LINES: usize = 6;
 /// What the composer tells its owner, besides sending.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ComposerEvent {
-    /// The model chip was clicked; Task 15 opens the picker.
+    /// The model chip opened the model picker.
     PickModel,
 }
 
@@ -67,8 +70,8 @@ pub(crate) struct Composer {
     recipient: Target,
     /// Every agent in the roster, which an `@mention` can address.
     agents: Vec<Target>,
-    /// The model chip's label; `None` draws no chip.
-    model: Option<SharedString>,
+    /// The model chip and its picker (Task 15); `None` draws no chip.
+    models: Option<ModelMenu>,
     /// The message the next send replies to, and its sender (Task 13).
     reply: Option<(MessageId, Target)>,
     on_send: SendHandler,
@@ -79,7 +82,7 @@ impl std::fmt::Debug for Composer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Composer")
             .field("recipient", &self.recipient)
-            .field("model", &self.model)
+            .field("models", &self.models)
             .finish_non_exhaustive()
     }
 }
@@ -104,14 +107,11 @@ impl Composer {
                 id: snapshot.listener_id.clone(),
                 handle: snapshot.listener.handle.clone(),
             });
-        // shortcut: the listener's harness with its configured model;
-        // Task 15 adds models to the snapshot and the picker.
-        let model = format!("{} · default", snapshot.listener.agent).into();
         Self::build(
             agents,
             listener,
             PLACEHOLDER.into(),
-            Some(model),
+            Some(ModelMenu::new(snapshot)),
             Rc::new(on_send),
             window,
             cx,
@@ -147,7 +147,7 @@ impl Composer {
         agents: Vec<Target>,
         recipient: Target,
         placeholder: SharedString,
-        model: Option<SharedString>,
+        models: Option<ModelMenu>,
         on_send: SendHandler,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -167,7 +167,7 @@ impl Composer {
             input,
             recipient,
             agents,
-            model,
+            models,
             reply: None,
             on_send,
             _subscriptions: [submits, edits],
@@ -197,10 +197,19 @@ impl Composer {
                 .update(cx, |input, cx| input.set_text(body, window, cx));
             return;
         }
+        let target = self.target_for(body);
+        // Task 15: the model choice is for the recipient; an @mention of
+        // another agent runs on that agent's own model.
+        let to_recipient = target.id == self.recipient.id;
         let draft = Draft {
-            to: vec![self.target_for(body).id.clone()],
+            to: vec![target.id.clone()],
             body: body.to_owned(),
             reply_to: self.reply.as_ref().map(|(message, _)| message.clone()),
+            model: self
+                .models
+                .as_ref()
+                .filter(|_| to_recipient)
+                .and_then(ModelMenu::outgoing),
         };
         // The input cleared itself on Enter; a refused draft is not lost.
         // The caller shows why it was refused.
@@ -209,13 +218,15 @@ impl Composer {
                 .update(cx, |input, cx| input.set_text(body, window, cx));
         } else {
             self.reply = None;
+            if let Some(models) = self.models.as_mut().filter(|_| to_recipient) {
+                // Task 15: a "this message" choice ends with the message.
+                models.sent();
+            }
             cx.notify();
         }
     }
-}
 
-// Task 13: an alert's Reply.
-impl Composer {
+    // Task 13: an alert's Reply.
     /// Starts a reply to `message`, addressed to `to`, and focuses the
     /// input. The next message sent replies to it; an `@mention` still
     /// picks another agent.
@@ -254,6 +265,114 @@ impl Composer {
             self.cancel_reply(cx);
         }
     }
+
+    // Task 15: the model chip's choice and its picker.
+    /// The model the next message runs on, as the chip shows it; `None` on
+    /// a DM composer, which has no model chip.
+    #[cfg(test)]
+    pub(crate) fn model_choice(&self) -> Option<&crate::backend::ModelChoice> {
+        self.models.as_ref().map(ModelMenu::current)
+    }
+
+    /// Takes a new snapshot's installed agents, models and listener.
+    pub(crate) fn set_snapshot(&mut self, snapshot: &Snapshot, cx: &mut Context<Self>) {
+        if let Some(models) = &mut self.models {
+            models.refresh(snapshot);
+            cx.notify();
+        }
+    }
+
+    /// Opens or closes the model picker.
+    pub(crate) fn set_model_picker_open(&mut self, open: bool, cx: &mut Context<Self>) {
+        if let Some(models) = &mut self.models
+            && models.is_open() != open
+        {
+            models.set_open(open);
+            if open {
+                cx.emit(ComposerEvent::PickModel);
+            }
+            cx.notify();
+        }
+    }
+
+    fn on_pick(&mut self, event: &PickerEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(models) = &mut self.models {
+            models.apply(event);
+            if event.closes() {
+                models.set_open(false);
+                // A click on an effort level focuses it; typing goes back
+                // to the input.
+                self.input.focus_handle(cx).focus(window, cx);
+            }
+            cx.notify();
+        }
+    }
+
+    /// The text typed so far.
+    #[cfg(test)]
+    pub(crate) fn text<'a>(&self, cx: &'a App) -> &'a str {
+        self.input.read(cx).text()
+    }
+
+    /// The model chip (node 380) and, while open, the picker above it. The
+    /// picker's bottom left corner sits a gap above the chip's top left.
+    fn model_chip(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        let models = self.models.as_ref()?;
+        let open = models.is_open();
+        let entity = cx.entity().downgrade();
+        let picker = open.then(|| {
+            let on_event = entity.clone();
+            let on_close = entity.clone();
+            let picker = models.picker(move |event, window, cx| {
+                // The picker lives inside the composer's frame.
+                on_event
+                    .update(cx, |this, cx| this.on_pick(&event, window, cx))
+                    .unwrap_or_default();
+            });
+            deferred(
+                anchored()
+                    .anchor(Anchor::BottomLeft)
+                    .offset(point(Pixels::ZERO, -MODEL_PICKER_GAP))
+                    .snap_to_window()
+                    .child(
+                        div()
+                            .on_mouse_down_out(move |_, _, cx| {
+                                on_close
+                                    .update(cx, |this, cx| this.set_model_picker_open(false, cx))
+                                    .unwrap_or_default();
+                            })
+                            .child(picker),
+                    ),
+            )
+        });
+        Some(
+            div()
+                .id("composer-model")
+                .debug_selector(|| "composer:model".into())
+                .relative()
+                .flex_none()
+                .cursor_pointer()
+                // C81: while open, mouse down outside the picker closes it;
+                // a click here too would reopen it on mouse up.
+                .when(!open, |this| {
+                    this.on_click(cx.listener(|this, _, _, cx| {
+                        this.set_model_picker_open(true, cx);
+                    }))
+                })
+                .child(
+                    Chip::new(models.current().label())
+                        .compact()
+                        .code()
+                        .color(Color::Default)
+                        .outline(Color::Accent)
+                        .leading(Label::new("◆").size(LabelSize::XSmall).color(Color::Accent))
+                        .trailing(caret()),
+                )
+                .when_some(picker, |this, picker| {
+                    this.child(div().absolute().top_0().left_0().child(picker))
+                }),
+        )
+    }
 }
 
 impl Focusable for Composer {
@@ -264,6 +383,7 @@ impl Focusable for Composer {
 
 impl Render for Composer {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let model = self.model_chip(cx);
         let theme = &cx.global::<Appearance>().theme;
         // Task 13: a pending reply says so and offers a way out.
         let replying = self.reply.is_some();
@@ -293,30 +413,17 @@ impl Render for Composer {
                         }
                     }),
             );
-        let model = self.model.clone().map(|model| {
-            div()
-                .id("composer-model")
-                .debug_selector(|| "composer:model".into())
-                .flex_none()
-                .cursor_pointer()
-                .on_click(cx.listener(|_, _, _, cx| cx.emit(ComposerEvent::PickModel)))
-                .child(
-                    Chip::new(model)
-                        .compact()
-                        .code()
-                        .color(Color::Default)
-                        .outline(Color::Accent)
-                        .leading(Label::new("◆").size(LabelSize::XSmall).color(Color::Accent))
-                        .trailing(caret()),
-                )
-        });
         div()
             .w_full()
             .flex_none()
-            // Task 13: Escape ends a reply; src/keymap.rs binds it.
+            // Task 13 and Task 15: Escape closes the open model picker and
+            // goes no further (C87, C113), else ends a reply; src/keymap.rs
+            // binds it.
             .key_context(crate::keymap::COMPOSER_CONTEXT)
-            .on_action(cx.listener(|this, _: &CancelReply, _, cx| {
-                if this.reply.is_some() {
+            .on_action(cx.listener(|this, _: &Dismiss, _, cx| {
+                if this.models.as_ref().is_some_and(ModelMenu::is_open) {
+                    this.set_model_picker_open(false, cx);
+                } else if this.reply.is_some() {
                     this.cancel_reply(cx);
                 } else {
                     cx.propagate();

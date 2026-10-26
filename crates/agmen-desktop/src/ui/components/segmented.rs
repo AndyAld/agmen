@@ -11,9 +11,7 @@ use gpui::{
 
 use super::{ChangeHandler, Color, Label, LabelSize};
 use crate::appearance::Appearance;
-use crate::ui::tokens::{
-    BORDER_WIDTH, RADIUS_MD, SPACE_3, SPACE_10, SPACE_12, TINT_SELECTED, tint,
-};
+use crate::ui::tokens::{BORDER_WIDTH, RADIUS_MD, SPACE_3, SPACE_10, SPACE_12, TINT_SEGMENT, tint};
 
 #[derive(IntoElement)]
 pub(crate) struct Segmented {
@@ -35,8 +33,8 @@ impl std::fmt::Debug for Segmented {
 }
 
 impl Segmented {
-    /// `id` names the control; tests find option `i` as `"{id}:{i}"`, and its
-    /// label as `"{id}:{i}:label"`, with `debug_bounds`.
+    /// `id` names the control; tests find it as `"{id}"`, option `i` as
+    /// `"{id}:{i}"` and its label as `"{id}:{i}:label"`, with `debug_bounds`.
     #[must_use]
     pub(crate) fn new(
         id: impl Into<SharedString>,
@@ -53,10 +51,6 @@ impl Segmented {
     }
 
     /// Sets the options in the code font with wider padding, as the effort row.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the model picker's effort row uses it in Task 15")
-    )]
     #[must_use]
     pub(crate) const fn code(mut self) -> Self {
         self.code = true;
@@ -79,6 +73,7 @@ impl RenderOnce for Segmented {
         let theme = &cx.global::<Appearance>().theme;
         let hover = theme.element_hover;
         let last = self.options.len().saturating_sub(1);
+        let root_selector = self.id.to_string();
         let segments = self.options.into_iter().enumerate().map(|(index, option)| {
             let selected = index == self.selected;
             let selector = format!("{}:{index}", self.id);
@@ -107,7 +102,7 @@ impl RenderOnce for Segmented {
                 .focus_visible(move |style| style.bg(hover))
                 .map(|this| {
                     if selected {
-                        this.bg(tint(theme.text_accent, TINT_SELECTED))
+                        this.bg(tint(theme.text_accent, TINT_SEGMENT))
                     } else {
                         this.hover(move |style| style.bg(hover)).when_some(
                             self.on_change.clone(),
@@ -125,6 +120,7 @@ impl RenderOnce for Segmented {
                 }))
         });
         div()
+            .debug_selector(|| root_selector)
             .flex()
             .flex_none()
             .rounded(RADIUS_MD)
