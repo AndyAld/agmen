@@ -16,14 +16,18 @@ test-threads = 4
 
 # Integration tests whose name contains "toxiproxy", and agmen-client's
 # it_gap_filled_by_replay, cut or slow the shared toxiproxy link
-# (localhost:21883 to emqx:1883), so they run one at a time.
+# (localhost:21883 to emqx:1883), so they run one at a time. So do
+# agmen-e2e's tests: one of them cuts the link too, and when several of them
+# open durable sessions on fresh projects at once, EMQX 6.3.2 sometimes
+# delivers nothing to one of those sessions for 8 to 60 s or more (its
+# REST API then shows the session connected and subscribed, n_streams 0).
 # Tests that connect to EMQX directly are not affected and run alongside.
 [test-groups]
-toxiproxy = { max-threads = 1 }
+serial = { max-threads = 1 }
 
 [[profile.it.overrides]]
-filter = "test(/toxiproxy/) | test(=it_gap_filled_by_replay)"
-test-group = "toxiproxy"
+filter = "test(/toxiproxy/) | test(=it_gap_filled_by_replay) | package(agmen-e2e)"
+test-group = "serial"
 
 [profile.it-restart]
 default-filter = "test(/(^|::)it_/) and test(/restart/)"

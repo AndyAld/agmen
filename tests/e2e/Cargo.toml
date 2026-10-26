@@ -1,0 +1,38 @@
+[package]
+name = "agmen-e2e"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+# The agmen command line again, under its own name: cargo tells a
+# package's tests only where that package's own binaries are, and a second
+# binary named agmen would collide with agmen-cli's in target/.
+[[bin]]
+name = "agmen-e2e"
+path = "src/main.rs"
+test = false
+doc = false
+
+[lints]
+workspace = true
+
+[dependencies]
+agmen-cli = { version = "0.1.0", path = "../../crates/agmen-cli" }
+
+[dev-dependencies]
+agmen-client = { version = "0.1.0", path = "../../crates/agmen-client" }
+agmen-hub = { version = "0.1.0", path = "../../crates/agmen-hub", features = ["test-hooks"] }
+agmen-proto = { version = "0.1.0", path = "../../crates/agmen-proto" }
+axum = { version = "0.8.9", default-features = false, features = ["tokio", "http1", "json", "query"] }
+jiff = "0.2.38"
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls"] }
+rmcp = { version = "3.7.0", features = ["client", "transport-io"] }
+rumqttc = { version = "0.25.1", default-features = false }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "postgres"] }
+tempfile = "3.27.0"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "process", "io-util"] }
+url = "2.5.8"

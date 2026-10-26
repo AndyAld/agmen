@@ -4,6 +4,8 @@ import type { FsEntry, FsStat, On, ProcessRunResult, PromptSubmitInput } from 'c
 
 import type { StampedEnvelope } from '../../../schema/ts/StampedEnvelope'
 
+import { CLI_OUTPUT } from './cli-output.fixture'
+
 // Nothing sits beneath the plugin: each hook registered here stands for the
 // engine or for a scripted fake `agmen` on PATH. A call on `$` is answered
 // `{ value }`; an event by its own result.
@@ -690,6 +692,35 @@ for (const surface of SURFACES) {
 
       expect(w.appended()).toEqual([])
       expect(w.submitted).toEqual([])
+    })
+
+    test('parses_real_cli_output', async ($, on) => {
+      // What the real `agmen watch --json` and `agmen check-path --json`
+      // printed for andy/sol, captured by tests/e2e (it_plugin_contract_matches_the_cli).
+      const w = world(on, {
+        feed: [{ text: CLI_OUTPUT.watch.map(text => `${text}\n`).join('') }],
+        checkPath: (_, paths) => {
+          const run = CLI_OUTPUT.check_path.find(entry => entry.paths.join('\n') === paths.join('\n'))
+
+          return run === undefined ? { exitCode: 1, stdout: '' } : { exitCode: 0, stdout: run.stdout }
+        },
+      })
+
+      await start($, w, surface)
+      const denied = await $.tool.call(edit('/work/ui/a.ts'))
+      const allowed = await $.tool.call(edit('/work/src/ok.ts'))
+
+      // Every line fits the plugin's formats: none was dropped.
+      expect(w.debugged.filter(text => text.startsWith('dropped'))).toEqual([])
+      // For andy/sol: the GRANT on its inbox, adam/coord's DM and the FYI that mentions it.
+      const rows = w.appended().map(row => row.text)
+      expect(rows).toHaveLength(3)
+      expect(rows.some(text => text.startsWith('agmen GRANT') && text.includes('from hub about B-2'))).toBe(true)
+      expect(rows.some(text => text.startsWith('agmen DM') && text.includes('from adam/coord'))).toBe(true)
+      expect(rows.some(text => text.startsWith('agmen FYI') && text.includes('"heads up on the build"'))).toBe(true)
+      expect(denied.deny).toContain('check-path says: "lane L-UI held by adam/coord"')
+      expect(allowed.deny).toBeUndefined()
+      expect(w.ran).toEqual(['Edit'])
     })
 
     test('wakeup_waits_for_turn_end', async ($, on) => {

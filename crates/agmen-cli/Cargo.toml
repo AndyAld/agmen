@@ -35,7 +35,6 @@ url = "2.5.8"
 
 [dev-dependencies]
 agmen-hub = { version = "0.1.0", path = "../agmen-hub", features = ["test-hooks"] }
-assert_cmd = "2.2.2"
 axum = { version = "0.8.9", default-features = false, features = ["tokio", "http1", "json", "query"] }
 rmcp = { version = "3.7.0", features = ["client"] }
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "postgres"] }

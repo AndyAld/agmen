@@ -346,7 +346,13 @@ impl Home {
     /// `agmen <args>` in `cwd` with this home, and nothing of the user's
     /// own config, keychain or git settings.
     pub fn agmen(&self, cwd: &Path, args: &[&str]) -> Command {
-        let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("agmen"));
+        // Cargo tells a package's tests only where that package's own
+        // binaries are: agmen-cli's tests run its `agmen`, agmen-e2e's the
+        // same command line built there as `agmen-e2e`.
+        let bin = option_env!("CARGO_BIN_EXE_agmen")
+            .or(option_env!("CARGO_BIN_EXE_agmen-e2e"))
+            .expect("cargo builds this test with an agmen binary");
+        let mut cmd = Command::new(bin);
         cmd.args(args).current_dir(cwd);
         self.apply_env(&mut cmd);
         cmd
