@@ -113,7 +113,8 @@ impl Hub {
         })
     }
 
-    /// The `/v1` routes.
+    /// The hub's HTTP routes: the `/v1` API plus the cluster probes
+    /// `GET /livez` and `GET /healthz`, which sit outside `/v1`.
     pub fn router(&self) -> Router {
         Router::new()
             .merge(health::routes())
