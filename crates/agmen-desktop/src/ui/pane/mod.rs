@@ -9,7 +9,8 @@ mod tabs;
 pub(crate) use group::PaneGroup;
 #[cfg(test)]
 pub(crate) use group::SplitDirection;
-pub(crate) use item::TabItem;
+pub(crate) use item::{SettingsPage, TabItem};
+pub(crate) use tabs::Pane;
 
 #[cfg(test)]
 mod tests;

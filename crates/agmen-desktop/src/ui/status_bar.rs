@@ -9,6 +9,7 @@ use gpui::{
 
 use super::components::{Badge, Button, ButtonStyle, Color, IconButton, KeyHint, Label, LabelSize};
 use super::format::{counted, listener_label, spend_today};
+use super::keys::OpenSettings;
 use super::left_dock::PanelButtons;
 use super::tokens::{BORDER_WIDTH, SPACE_5, SPACE_10, SPACE_14, STATUS_BAR_HEIGHT};
 use super::workspace::ToggleRightDock;
@@ -18,7 +19,8 @@ use crate::icons::UiIcon;
 #[derive(Debug, IntoElement)]
 pub(crate) struct StatusBar {
     status: StatusSummary,
-    listener: SharedString,
+    /// The listener's state, or what the active tab is about.
+    context: SharedString,
     right_dock_open: bool,
     panels: PanelButtons,
 }
@@ -28,7 +30,7 @@ impl StatusBar {
     pub(crate) fn new(snapshot: &Snapshot, right_dock_open: bool) -> Self {
         Self {
             status: snapshot.status.clone(),
-            listener: listener_label(&snapshot.listener.agent, &snapshot.listener.state).into(),
+            context: listener_label(&snapshot.listener.agent, &snapshot.listener.state).into(),
             right_dock_open,
             panels: PanelButtons::default(),
         }
@@ -38,6 +40,14 @@ impl StatusBar {
     #[must_use]
     pub(crate) const fn panels(mut self, panels: PanelButtons) -> Self {
         self.panels = panels;
+        self
+    }
+
+    /// Shows `context` in the listener's place, as "settings" while
+    /// Settings is the active tab (frame "Desktop · settings", node 8240).
+    #[must_use]
+    pub(crate) fn context(mut self, context: impl Into<SharedString>) -> Self {
+        self.context = context.into();
         self
     }
 }
@@ -57,6 +67,7 @@ fn item(glyph: &'static str, color: Color, label: String) -> impl IntoElement {
         )
 }
 
+/// The right-side buttons; the gear opens Settings.
 fn buttons(icons: &[(&'static str, UiIcon)]) -> impl IntoElement {
     div()
         .flex()
@@ -64,6 +75,11 @@ fn buttons(icons: &[(&'static str, UiIcon)]) -> impl IntoElement {
         .items_center()
         .gap(SPACE_10)
         .children(icons.iter().map(|(id, icon)| IconButton::new(*id, *icon)))
+        .child(
+            IconButton::new("status-settings", UiIcon::Settings).on_click(|_, window, cx| {
+                window.dispatch_action(Box::new(OpenSettings), cx);
+            }),
+        )
 }
 
 impl RenderOnce for StatusBar {
@@ -107,9 +123,11 @@ impl RenderOnce for StatusBar {
             ))
             .child(div().flex_1())
             .child(
-                Label::new(self.listener)
-                    .size(LabelSize::Small)
-                    .color(Color::Placeholder),
+                div().debug_selector(|| "status-context".into()).child(
+                    Label::new(self.context)
+                        .size(LabelSize::Small)
+                        .color(Color::Placeholder),
+                ),
             )
             .child(
                 Label::new(spend_today(s.spend_today_usd))
@@ -130,7 +148,6 @@ impl RenderOnce for StatusBar {
                 ("status-terminal", UiIcon::Terminal),
                 ("status-chat", UiIcon::Chat),
                 ("status-bell", UiIcon::Bell),
-                ("status-settings", UiIcon::Settings),
             ]))
             .child(KeyHint::new("⌘⇧P"))
     }

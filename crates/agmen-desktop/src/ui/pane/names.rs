@@ -80,6 +80,10 @@ impl PaneNames {
             TabItem::Plan => "plan".into(),
             TabItem::Spec(path) => file_name(path).into(),
             TabItem::Settings(_) => "settings".into(),
+            TabItem::SettingsFile(path) => path.file_name().map_or_else(
+                || path.display().to_string(),
+                |name| name.to_string_lossy().into_owned(),
+            ),
             TabItem::Search => "Search".into(),
             TabItem::Ref(target) => ref_label(target),
         }
@@ -93,6 +97,7 @@ impl PaneNames {
             }
             TabItem::RoleFile(_) => vec!["roles".into(), self.tab_label(item)],
             TabItem::Settings(page) => vec!["settings".into(), page.label().into()],
+            TabItem::SettingsFile(_) => vec!["settings".into(), self.tab_label(item)],
             TabItem::Spec(path) => vec![self.project.clone(), path.clone()],
             TabItem::Chat
             | TabItem::Agent(_)
@@ -123,6 +128,7 @@ impl PaneNames {
             TabItem::RoleFile(_) => (UiIcon::File, Color::Muted),
             TabItem::Spec(_) => (UiIcon::File, Color::Warning),
             TabItem::Settings(_) => (UiIcon::Settings, Color::Placeholder),
+            TabItem::SettingsFile(_) => (UiIcon::File, Color::Muted),
             TabItem::Search => (UiIcon::Search, Color::Placeholder),
             TabItem::Ref(RefTarget::File { .. }) => (UiIcon::File, Color::Accent),
             TabItem::Ref(RefTarget::Commit(_) | RefTarget::Branch { .. }) => {

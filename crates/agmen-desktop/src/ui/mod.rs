@@ -40,7 +40,6 @@ mod workspace;
 pub(crate) use agent_view::AgentView;
 pub(crate) use code_view::{CodeView, GutterMark};
 pub(crate) use dev_views::{DevFrame, GitDev, GitDevLayout, ProjectDev, ProjectTests, RolesDev};
-pub(crate) use dock::DockSide;
 pub(crate) use keys::bind_workspace_keys;
 pub(crate) use scope_chip::ScopeOption;
 pub(crate) use settings_view::{SettingsSources, SettingsView};

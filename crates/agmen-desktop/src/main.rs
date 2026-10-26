@@ -326,6 +326,10 @@ fn open_main_window(launch: &Launch, cx: &mut App) -> Result<()> {
     cx.set_global(appearance);
     cx.set_global(file_icons);
     cx.set_global(local_time::UtcOffset::system());
+    // Without a home folder the Settings tab shows a placeholder.
+    if let Some(home) = std::env::home_dir() {
+        cx.set_global(ui::SettingsSources::for_home(&home));
+    }
     ui::bind_keys(cx);
 
     let options = window_options(cx);
@@ -344,10 +348,7 @@ fn open_main_window(launch: &Launch, cx: &mut App) -> Result<()> {
             cx.open_window(options, |window, cx| {
                 let workspace = cx.new(|cx| {
                     let mut workspace = Workspace::new(snapshot, window, cx);
-                    // The one render whose layout state is not in the data.
-                    if screen == backend::Screen::ListenerCollapsed {
-                        workspace.toggle_dock(ui::DockSide::Right, cx);
-                    }
+                    workspace.show_screen(screen, cx);
                     workspace
                 });
                 window.focus(&workspace.focus_handle(cx), cx);

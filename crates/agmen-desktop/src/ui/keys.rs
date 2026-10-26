@@ -3,9 +3,9 @@
 //! Bindings are Zed's wherever agmen has the same action (finding V86, from
 //! Zed's `assets/keymaps/default-macos.json` at 08cbb88). Task 18's
 //! `keymap.rs` absorbs this list when it lists every binding for the
-//! palette. The palette (cmd-shift-p), settings (cmd-comma), search
-//! (cmd-shift-f) and the terminal (ctrl-backtick) belong to Tasks 17, 18
-//! and 14 and are not bound here.
+//! palette. The palette (cmd-shift-p), search (cmd-shift-f) and the
+//! terminal (ctrl-backtick) belong to Tasks 18 and 14 and are not bound
+//! here.
 
 use gpui::{Action, App, KeyBinding, actions};
 
@@ -23,6 +23,9 @@ actions!(
         ToggleGitPanel,
         /// Opens the Search tab in the active pane.
         OpenSearch,
+        /// Opens the Settings tab in the active pane (Zed's
+        /// `zed::OpenSettings`).
+        OpenSettings,
         /// Closes the active pane's active tab (Zed's `pane::CloseActiveItem`).
         CloseActiveTab,
         /// Splits the active pane, opening its active tab on the right
@@ -54,6 +57,7 @@ pub(crate) fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-alt-b", ToggleRightDock, ctx),
         KeyBinding::new("cmd-shift-e", ToggleProjectPanel, ctx),
         KeyBinding::new("ctrl-shift-g", ToggleGitPanel, ctx),
+        KeyBinding::new("cmd-,", OpenSettings, ctx),
         KeyBinding::new("cmd-1", ActivatePane(0), ctx),
         KeyBinding::new("cmd-2", ActivatePane(1), ctx),
         KeyBinding::new("cmd-3", ActivatePane(2), ctx),
@@ -91,7 +95,7 @@ mod tests {
     #[test]
     fn other_tasks_keys_stay_unbound() {
         let bindings = bindings();
-        for key in ["cmd-shift-p", "cmd-,", "cmd-shift-f", "ctrl-`", "cmd-q"] {
+        for key in ["cmd-shift-p", "cmd-shift-f", "ctrl-`", "cmd-q"] {
             let typed = [Keystroke::parse(key).unwrap()];
             assert!(
                 bindings
@@ -100,5 +104,17 @@ mod tests {
                 "{key} is bound here"
             );
         }
+    }
+
+    #[test]
+    fn cmd_comma_opens_settings() {
+        // V86: Zed binds cmd-comma to zed::OpenSettings.
+        let typed = [Keystroke::parse("cmd-,").unwrap()];
+        let bound: Vec<_> = bindings()
+            .into_iter()
+            .filter(|b| b.match_keystrokes(&typed) == Some(false))
+            .collect();
+        assert_eq!(bound.len(), 1);
+        assert!(bound[0].action().partial_eq(&OpenSettings));
     }
 }

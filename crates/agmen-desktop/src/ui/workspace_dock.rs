@@ -12,12 +12,12 @@ use crate::backend::{RoleFile, Snapshot};
 use crate::ui::agent_panel::AgentPanel;
 use crate::ui::git_panel::{GitPanel, GitPanelEvent};
 use crate::ui::keys::{
-    ActivatePane, CloseActiveTab, OpenSearch, ShowLeftDockTab, SplitRight, ToggleGitPanel,
-    ToggleProjectPanel,
+    ActivatePane, CloseActiveTab, OpenSearch, OpenSettings, ShowLeftDockTab, SplitRight,
+    ToggleGitPanel, ToggleProjectPanel,
 };
 use crate::ui::left_dock::{LeftDockTab, PanelButtons};
 use crate::ui::listener_panel::ListenerPanel;
-use crate::ui::pane::TabItem;
+use crate::ui::pane::{SettingsPage, TabItem};
 use crate::ui::project_panel::{ProjectPanel, ProjectPanelEvent};
 use crate::ui::roles_panel::{RolePanel, RolesPanel, RolesPanelEvent};
 use crate::ui::scope_chip::ScopeOption;
@@ -97,6 +97,12 @@ impl Workspace {
         }
     }
 
+    /// Opens Settings in a center tab: the status bar's gear and cmd-comma.
+    pub(crate) fn open_settings(&mut self, cx: &mut Context<Self>) {
+        let item = TabItem::Settings(SettingsPage::default());
+        self.pane_group.update(cx, |group, cx| group.open(item, cx));
+    }
+
     /// Opens a Project panel file in a center tab.
     fn open_file(&mut self, owner: &agmen_proto::IdentityId, path: &str, cx: &mut Context<Self>) {
         let Some(wt) = self.snapshot.worktrees.iter().find(|wt| wt.owner == *owner) else {
@@ -168,6 +174,9 @@ impl Workspace {
         .on_action(cx.listener(|this, _: &OpenSearch, _, cx| {
             this.pane_group
                 .update(cx, |group, cx| group.open(TabItem::Search, cx));
+        }))
+        .on_action(cx.listener(|this, _: &OpenSettings, _, cx| {
+            this.open_settings(cx);
         }))
         .on_action(cx.listener(|this, action: &ActivatePane, _, cx| {
             this.pane_group

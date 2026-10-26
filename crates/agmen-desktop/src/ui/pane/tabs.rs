@@ -166,13 +166,15 @@ impl Pane {
         };
         let tab = match (item, &self.chat) {
             (TabItem::Chat, Some(chat)) => tab.badge(chat.read(cx).badge()),
-            (TabItem::RoleFile(_), _) => match cx.try_global::<FileIcons>() {
-                Some(icons) => {
-                    let name = self.names.tab_label(item);
-                    tab.file_icon(icons.icon(Path::new(&name), false, false))
+            (TabItem::RoleFile(_) | TabItem::SettingsFile(_), _) => {
+                match cx.try_global::<FileIcons>() {
+                    Some(icons) => {
+                        let name = self.names.tab_label(item);
+                        tab.file_icon(icons.icon(Path::new(&name), false, false))
+                    }
+                    None => tab,
                 }
-                None => tab,
-            },
+            }
             _ => tab,
         };
         if label_is_code(item) { tab.code() } else { tab }

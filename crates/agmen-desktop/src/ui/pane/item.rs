@@ -1,5 +1,7 @@
 //! What a center tab shows.
 
+use std::path::PathBuf;
+
 use agmen_proto::IdentityId;
 
 use crate::refs::RefTarget;
@@ -39,6 +41,8 @@ pub(crate) enum TabItem {
     /// A spec file, by path.
     Spec(String),
     Settings(SettingsPage),
+    /// The settings file Settings writes, shown read only.
+    SettingsFile(PathBuf),
     // shortcut: a placeholder tab the status bar's search button opens;
     // Task 18 builds search (cmd-shift-f) and its view.
     Search,

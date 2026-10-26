@@ -1,8 +1,10 @@
 //! The window's root view: title bar, docks, center and status bar.
 
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, Styled as _, Subscription, Window, actions, div,
+    App, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _,
+    IntoElement, ParentElement as _, Render, SharedString, Styled as _, Subscription, Window,
+    actions, div,
 };
 
 use super::agents_panel::{AgentsPanel, AgentsPanelEvent};
@@ -15,7 +17,7 @@ use super::tokens::{BORDER_WIDTH, LEFT_DOCK_WIDTH, RIGHT_DOCK_WIDTH};
 use crate::appearance::Appearance;
 use agmen_proto::IdentityId;
 
-use crate::backend::{AgentInfo, Snapshot};
+use crate::backend::{AgentInfo, Screen, Snapshot};
 use crate::icons::FileIcons;
 
 #[path = "workspace_dock.rs"]
@@ -100,6 +102,27 @@ impl Workspace {
         self.set_selection(shown, cx);
         self.right_dock.open();
         cx.notify();
+    }
+
+    /// Sets up what a mockup screen shows beyond its fixture data: the
+    /// Listener dock closed, or the Settings tab active.
+    pub(crate) fn show_screen(&mut self, screen: Screen, cx: &mut Context<Self>) {
+        match screen {
+            Screen::ListenerCollapsed => self.toggle_dock(DockSide::Right, cx),
+            Screen::Settings => self.open_settings(cx),
+            _ => {}
+        }
+    }
+
+    /// What the status bar shows in the listener's place: "settings" while
+    /// Settings is the active tab (frame "Desktop · settings", node 8240),
+    /// `None` for the listener.
+    pub(crate) fn status_context(&self, cx: &App) -> Option<SharedString> {
+        matches!(
+            self.pane_group.read(cx).active_item(cx),
+            Some(TabItem::Settings(_))
+        )
+        .then(|| "settings".into())
     }
 
     /// The agent the right dock shows, or `None` for the Listener panel.
@@ -218,7 +241,8 @@ impl Render for Workspace {
             .child(body)
             .child(
                 StatusBar::new(&self.snapshot, self.is_dock_open(DockSide::Right))
-                    .panels(self.panel_buttons(cx)),
+                    .panels(self.panel_buttons(cx))
+                    .when_some(self.status_context(cx), StatusBar::context),
             )
     }
 }

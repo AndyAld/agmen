@@ -1,8 +1,8 @@
-use gpui::{TestAppContext, VisualTestContext};
+use gpui::{SharedString, TestAppContext, VisualTestContext};
 
 use super::*;
 use crate::backend::chat_snapshot;
-use crate::ui::DockSide;
+use crate::ui::dock::DockSide;
 use crate::ui::keys::bind_workspace_keys;
 use crate::ui::test_support::{click, init, redraw};
 
@@ -220,4 +220,77 @@ fn cmd_backslash_splits_right(cx: &mut TestAppContext) {
     panes[1].read_with(cx, |pane, _| {
         assert_eq!(pane.active_item(), Some(&TabItem::Search), "the active tab");
     });
+}
+
+/// Points Settings at a throwaway home whose `settings.toml` holds one
+/// comment line, never the real one.
+fn settings_home(cx: &mut VisualTestContext) -> (tempfile::TempDir, std::path::PathBuf) {
+    let home = tempfile::tempdir().unwrap();
+    let config = home.path().join(".config");
+    let file = config.join("agmen/settings.toml");
+    std::fs::create_dir_all(config.join("agmen")).unwrap();
+    std::fs::write(&file, "# agmen settings\n").unwrap();
+    let sources = crate::ui::SettingsSources {
+        config,
+        extensions: home.path().join("extensions"),
+        market: "http://127.0.0.1:9".into(),
+    };
+    cx.update(|_, cx| cx.set_global(sources));
+    (home, file)
+}
+
+const SETTINGS: TabItem = TabItem::Settings(crate::ui::pane::SettingsPage::Appearance);
+
+fn status_context(workspace: &Entity<Workspace>, cx: &VisualTestContext) -> Option<SharedString> {
+    workspace.read_with(cx, |w, cx| w.status_context(cx))
+}
+
+#[gpui::test]
+fn settings_button_opens_the_settings_tab(cx: &mut TestAppContext) {
+    let (workspace, cx) = open(cx);
+    let _home = settings_home(cx);
+    assert_eq!(
+        status_context(&workspace, cx),
+        None,
+        "the chat shows the listener"
+    );
+    click(cx, "status-settings");
+    assert_eq!(active_item(&workspace, cx), Some(SETTINGS));
+    assert!(cx.debug_bounds("settings-page:appearance").is_some());
+    // Frame "Desktop · settings", node 8240.
+    assert_eq!(status_context(&workspace, cx), Some("settings".into()));
+    assert!(cx.debug_bounds("status-context").is_some());
+}
+
+#[gpui::test]
+fn cmd_comma_opens_the_settings_tab(cx: &mut TestAppContext) {
+    let (workspace, cx) = open(cx);
+    let _home = settings_home(cx);
+    cx.simulate_keystrokes("cmd-,");
+    assert_eq!(active_item(&workspace, cx), Some(SETTINGS));
+}
+
+#[gpui::test]
+fn open_settings_toml_shows_the_file_in_a_code_tab(cx: &mut TestAppContext) {
+    let (workspace, cx) = open(cx);
+    let (_home, file) = settings_home(cx);
+    click(cx, "status-settings");
+    click(cx, "open-settings-toml");
+    assert_eq!(
+        active_item(&workspace, cx),
+        Some(TabItem::SettingsFile(file))
+    );
+    assert!(cx.debug_bounds("line:1:text").is_some());
+    assert!(cx.debug_bounds("line:2:text").is_none());
+    assert_eq!(status_context(&workspace, cx), None);
+}
+
+#[gpui::test]
+fn settings_screen_opens_with_the_settings_tab_active(cx: &mut TestAppContext) {
+    let (workspace, cx) = open(cx);
+    let _home = settings_home(cx);
+    workspace.update(cx, |w, cx| {
+        w.show_screen(crate::backend::Screen::Settings, cx);
+    });
+    assert_eq!(active_item(&workspace, cx), Some(SETTINGS));
 }

@@ -59,6 +59,10 @@ impl SettingsSources {
     }
 }
 
+/// The app sets the real folders at launch and tests a throwaway home; a
+/// Settings tab without it shows a placeholder.
+impl gpui::Global for SettingsSources {}
+
 /// What Settings asks of the workspace.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SettingsEvent {
@@ -1230,8 +1234,6 @@ impl Render for SettingsView {
             ],
         };
         let path = self.sources.settings_path();
-        // shortcut: there are no workspace tabs yet, so the event has no subscriber and the file's
-        // path shows in the footer; the workspace opens it in a code tab once tabs exist.
         let open_file = Button::new("open-settings-toml", "Open settings.toml").on_click(
             cx.listener(move |_, _, _, cx| cx.emit(SettingsEvent::OpenFile(path.clone()))),
         );
