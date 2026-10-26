@@ -194,13 +194,30 @@ mod tests {
         assert_eq!(Indent::Tree(3).padding(), px(10. + 14. * 3.));
     }
 
-    #[test]
-    fn selected_rows_keep_their_fill_on_hover() {
-        // V117 (C245): hovering a selected row must not swap the selected
-        // fill for the hover one, as Zed's lists keep it.
+    #[gpui::test]
+    fn selected_rows_keep_their_fill_on_hover(cx: &mut TestAppContext) {
+        // V117 (C245, drawn per C253): hovering a selected row keeps the
+        // selected fill, as Zed's lists do; an unselected row takes hover.
         let theme = crate::appearance::Appearance::builtin().theme;
-        assert_eq!(hover_fill(false, &theme), Some(theme.element_hover));
-        assert_eq!(hover_fill(true, &theme), None);
+        assert_ne!(theme.element_selected, theme.element_hover);
+        let cx = crate::ui::test_support::draw(cx, || {
+            gpui::div()
+                .w(gpui::px(200.))
+                .child(
+                    ListItem::new("on", Indent::Group)
+                        .selected(true)
+                        .child(Label::new("on")),
+                )
+                .child(ListItem::new("off", Indent::Group).child(Label::new("off")))
+                .into_any_element()
+        });
+        for (row, want) in [("on", theme.element_selected), ("off", theme.element_hover)] {
+            let center = cx.debug_bounds(row).unwrap().center();
+            cx.simulate_mouse_move(center, None, gpui::Modifiers::none());
+            crate::ui::test_support::redraw(cx);
+            let fills = crate::ui::test_support::fills_at(cx, row);
+            assert_eq!(fills, [want], "{row}");
+        }
     }
 
     #[gpui::test]

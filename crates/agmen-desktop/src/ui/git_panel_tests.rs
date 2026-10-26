@@ -221,3 +221,17 @@ fn section_counts_are_mono_placeholder() {
     // accepted difference covers only the pill's fill.
     assert_eq!(count_badge("2"), Badge::new("2", Color::Placeholder).code());
 }
+
+#[gpui::test]
+fn count_pills_are_drawn_with_a_placeholder_tint(cx: &mut TestAppContext) {
+    // V94, drawn per C254: the pill's fill is text.placeholder at the badge
+    // tint, as its text color.
+    let (_, cx) = panel(cx);
+    redraw(cx);
+    let theme = cx.update(|_, cx| cx.global::<crate::appearance::Appearance>().theme.clone());
+    let fills = crate::ui::test_support::fills_at(cx, "git-count:changes");
+    let want = theme
+        .text_placeholder
+        .opacity(crate::ui::tokens::BADGE_TINT);
+    assert_eq!(fills, [want]);
+}

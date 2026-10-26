@@ -102,8 +102,8 @@ mod tests {
                 .on_click(move |_, _, _| seen.set(seen.get() + 1))
                 .into_any_element()
         });
-        // A click focuses a tab stop, as Tab will once Task 18 binds it;
-        // Enter on the focused link then clicks it again.
+        // A click focuses a tab stop (agmen binds no Tab key yet), and Enter
+        // on the focused link then clicks it again.
         let bounds = cx.debug_bounds("link").unwrap();
         cx.simulate_click(bounds.center(), Modifiers::none());
         redraw(cx);
@@ -129,6 +129,32 @@ mod tests {
         });
         redraw(cx);
         assert_eq!(clicks.get(), 2);
+    }
+
+    #[gpui::test]
+    fn a_link_without_a_handler_takes_no_focus_or_underline(cx: &mut TestAppContext) {
+        // C256: plain accent text, not a control.
+        let cx = open(cx, || Link::new("link", "Browse").into_any_element());
+        let bounds = cx.debug_bounds("link").unwrap();
+        cx.simulate_mouse_move(bounds.center(), None, Modifiers::none());
+        redraw(cx);
+        assert!(cx.update(|window, _| window.painted_underlines().is_empty()));
+        cx.simulate_click(bounds.center(), Modifiers::none());
+        redraw(cx);
+        assert!(cx.update(|window, cx| window.focused(cx).is_none()));
+    }
+
+    #[gpui::test]
+    fn a_link_with_a_handler_underlines_on_hover(cx: &mut TestAppContext) {
+        let cx = open(cx, || {
+            Link::new("link", "Browse")
+                .on_click(|_, _, _| {})
+                .into_any_element()
+        });
+        let bounds = cx.debug_bounds("link").unwrap();
+        cx.simulate_mouse_move(bounds.center(), None, Modifiers::none());
+        redraw(cx);
+        assert!(!cx.update(|window, _| window.painted_underlines().is_empty()));
     }
 
     #[gpui::test]

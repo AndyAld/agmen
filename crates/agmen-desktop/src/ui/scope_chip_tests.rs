@@ -80,3 +80,22 @@ fn chip_text_takes_the_text_color() {
     let theme = crate::appearance::Appearance::builtin().theme;
     assert_eq!(Color::Default.hsla(&theme), gpui::rgb(0xd8bf94).into());
 }
+
+#[gpui::test]
+fn the_open_menu_stops_at_its_height_cap(cx: &mut TestAppContext) {
+    // C256: with many worktrees the menu scrolls instead of growing past
+    // the shared menu's cap.
+    init(cx);
+    let s = chat_snapshot();
+    let one = ScopeOption::for_worktrees(&s.worktrees, &s.agents);
+    let options: Vec<ScopeOption> = std::iter::repeat_n(one, 10).flatten().collect();
+    assert!(options.len() >= 40);
+    let (_, cx) = cx.add_window_view(|_, _| ScopeChip::new(options));
+    redraw(cx);
+    click(cx, "scope-chip");
+    let menu = cx.debug_bounds("scope-chip:menu").unwrap();
+    assert!(
+        menu.size.height <= crate::ui::tokens::DROPDOWN_MENU_MAX_HEIGHT,
+        "{menu:?}"
+    );
+}

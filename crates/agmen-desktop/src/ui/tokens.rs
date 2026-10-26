@@ -66,9 +66,9 @@ pub(crate) const MONO_CELL_HEIGHT: Pixels = px(18.);
 /// The agent view's rows between tool cards, at console.py's heights
 /// whatever the font size (V108, V113): an output row, a Say row and the
 /// turn's cost line.
-pub(crate) const SESSION_OUT_LINE: Pixels = px(14.);
-pub(crate) const SESSION_SAY_LINE: Pixels = px(16.);
-pub(crate) const SESSION_COST_LINE: Pixels = px(13.);
+pub(crate) const AGENT_OUT_LINE: Pixels = px(14.);
+pub(crate) const AGENT_SAY_LINE: Pixels = px(16.);
+pub(crate) const AGENT_COST_LINE: Pixels = px(13.);
 /// The code view's change bar beside a line number, as Zed's git gutter.
 pub(crate) const GUTTER_MARK_WIDTH: Pixels = px(4.);
 /// A deletion mark: a short bar on the edge between two lines.

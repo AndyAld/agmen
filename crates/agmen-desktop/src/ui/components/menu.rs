@@ -21,11 +21,13 @@ pub(crate) fn menu(
     cx: &App,
 ) -> Deferred {
     let theme = &cx.global::<Appearance>().theme;
+    let selector = id.to_string();
     // Deferred so the menu paints over the rows below its trigger.
     deferred(
         anchored().snap_to_window().child(
             div()
                 .id(id)
+                .debug_selector(|| selector)
                 .occlude()
                 .mt(SPACE_2)
                 .when_some(width, |this, width| this.w(width))

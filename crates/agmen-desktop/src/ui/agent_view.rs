@@ -11,8 +11,8 @@ use super::breadcrumb::Breadcrumb;
 use super::components::{Button, ButtonStyle, Color, Icon, IconSize, Label, LabelSize, ToolCard};
 use super::text_input::TextInput;
 use super::tokens::{
-    BORDER_WIDTH, RADIUS_CARD, SESSION_COST_LINE, SESSION_OUT_LINE, SESSION_SAY_LINE, SPACE_8,
-    SPACE_10, SPACE_12, SPACE_14, SPACE_18,
+    AGENT_COST_LINE, AGENT_OUT_LINE, AGENT_SAY_LINE, BORDER_WIDTH, RADIUS_CARD, SPACE_8, SPACE_10,
+    SPACE_12, SPACE_14, SPACE_18,
 };
 use crate::appearance::Appearance;
 use crate::backend::{AgentSession, SessionRow, Tone};
@@ -82,30 +82,26 @@ fn session_row(row: &SessionRow) -> gpui::AnyElement {
                     Label::new("⎿")
                         .code()
                         .color(glyph)
-                        .line_height(SESSION_OUT_LINE),
+                        .line_height(AGENT_OUT_LINE),
                 )
                 .child(
                     Label::new(text.clone())
                         .code()
                         .color(text_color)
-                        .line_height(SESSION_OUT_LINE)
+                        .line_height(AGENT_OUT_LINE)
                         .wrap(),
                 )
                 .into_any_element()
         }
         SessionRow::Say(text) => div()
-            .child(
-                Label::new(text.clone())
-                    .line_height(SESSION_SAY_LINE)
-                    .wrap(),
-            )
+            .child(Label::new(text.clone()).line_height(AGENT_SAY_LINE).wrap())
             .into_any_element(),
         SessionRow::Cost(text) => div()
             .child(
                 Label::new(text.clone())
                     .size(LabelSize::Small)
                     .color(Color::Muted)
-                    .line_height(SESSION_COST_LINE),
+                    .line_height(AGENT_COST_LINE),
             )
             .into_any_element(),
     }

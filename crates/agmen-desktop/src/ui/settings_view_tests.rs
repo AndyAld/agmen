@@ -559,3 +559,18 @@ fn zed_installed_theme_without_license_says_zed_keeps_it() {
     let detail = rows::installed_detail(&ours);
     assert!(detail.contains("no license file"), "{detail}");
 }
+
+#[gpui::test]
+fn page_list_rule_is_drawn_in_the_chrome_rule_color(cx: &mut TestAppContext) {
+    // V99, drawn per C254: node 8049 is border.variant, like the other rules.
+    let home = Home::new();
+    let (_, cx) = open(cx, &home);
+    let theme = cx.update(|_, cx| cx.global::<Appearance>().theme.clone());
+    assert_ne!(theme.border, theme.border_variant);
+    let quads = crate::ui::test_support::painted_at(cx, "settings-pages");
+    let rule = quads
+        .iter()
+        .find(|q| q.border_widths.right.0 > 0.)
+        .expect("the page list draws a right rule");
+    assert_eq!(rule.border_color, theme.border_variant);
+}

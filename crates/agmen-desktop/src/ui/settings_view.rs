@@ -559,6 +559,7 @@ impl SettingsView {
                 )
         });
         div()
+            .debug_selector(|| "settings-pages".into())
             .w(SETTINGS_PAGES_WIDTH)
             .flex_none()
             .h_full()

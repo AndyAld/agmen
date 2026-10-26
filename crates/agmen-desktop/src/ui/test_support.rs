@@ -104,3 +104,37 @@ impl Render for PlainButtonHost {
             .child(div().w_full().flex_1().child(self.view.clone()))
     }
 }
+
+/// The quads the last frame painted exactly over the element `selector`:
+/// its own fill and border, read with `background.as_solid()` and
+/// `border_color`, as Zed's tests do (gpui's `Window::painted_quads`).
+pub(crate) fn painted_at(cx: &mut VisualTestContext, selector: &'static str) -> Vec<gpui::Quad> {
+    let bounds = cx
+        .debug_bounds(selector)
+        .unwrap_or_else(|| panic!("nothing is drawn with selector {selector}"));
+    cx.update(|window, _| {
+        let scale = window.scale_factor();
+        let near = |scaled: gpui::ScaledPixels, logical: gpui::Pixels| {
+            (scaled.0 / scale - f32::from(logical)).abs() < 0.5
+        };
+        window
+            .painted_quads()
+            .into_iter()
+            .filter(|quad| {
+                near(quad.bounds.origin.x, bounds.origin.x)
+                    && near(quad.bounds.origin.y, bounds.origin.y)
+                    && near(quad.bounds.size.width, bounds.size.width)
+                    && near(quad.bounds.size.height, bounds.size.height)
+            })
+            .collect()
+    })
+}
+
+/// The solid fills among [`painted_at`]'s quads.
+pub(crate) fn fills_at(cx: &mut VisualTestContext, selector: &'static str) -> Vec<gpui::Hsla> {
+    painted_at(cx, selector)
+        .iter()
+        .filter_map(|quad| quad.background.as_solid())
+        .filter(|fill| fill.a > 0.)
+        .collect()
+}
