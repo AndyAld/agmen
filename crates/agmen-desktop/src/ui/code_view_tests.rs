@@ -126,3 +126,15 @@ fn crlf_lines_drop_the_carriage_return() {
     let texts: Vec<&str> = lines.iter().map(|l| l.text.as_ref()).collect();
     assert_eq!(texts, ["a", "b"]);
 }
+
+#[gpui::test]
+fn line_one_shows_deletions_above_and_below(cx: &mut TestAppContext) {
+    // Review C161: Deleted(0) and Deleted(1) both mark line 1.
+    init(cx);
+    let marks = vec![GutterMark::Deleted(0), GutterMark::Deleted(1)];
+    let (_, cx) = cx.add_window_view(|_, _| CodeView::new(MAIN_RS, Language::Rust, marks));
+    redraw(cx);
+    let above = cx.debug_bounds("gutter:0:deleted").unwrap();
+    let below = cx.debug_bounds("gutter:1:deleted").unwrap();
+    assert!(above.top() < below.top(), "{above:?} {below:?}");
+}

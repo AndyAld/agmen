@@ -32,6 +32,7 @@ mod plan;
     reason = "the chat's reference chips use it from Task 9 of the desktop plan"
 )]
 mod refs;
+mod roles;
 mod spike;
 mod ui;
 
@@ -59,9 +60,6 @@ enum DevView {
     /// The Roles tab with reviewer.xml open.
     Roles,
 }
-
-/// The role file the code view shows: a built-in role, from the repo.
-const REVIEWER_XML: &str = include_str!("../../../roles/reviewer.xml");
 
 /// What the command line asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -239,7 +237,7 @@ fn open_dev_view(
         DevView::Code => cx.open_window(options, |_, cx| {
             let code = cx.new(|_| {
                 ui::CodeView::new(
-                    REVIEWER_XML,
+                    backend::REVIEWER_XML,
                     ui::Language::for_path(std::path::Path::new("roles/reviewer.xml")),
                     vec![ui::GutterMark::Modified(11..12)],
                 )

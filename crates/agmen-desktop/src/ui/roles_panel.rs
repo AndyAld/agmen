@@ -149,25 +149,25 @@ impl RenderOnce for RolePanel {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
         let i = self.info;
         let mut enforced = KvSection::new("Enforced by agmen")
-            .row(KvRow::new("Kind", i.kind))
+            .row(KvRow::new("Kind", i.kind.to_string()))
             .row(KvRow::new("Tools", i.tools.join(" ")));
         if let Some(note) = i.bash_note {
             enforced = enforced.row(KvRow::new("Bash", note).color(Color::Warning));
         }
         let enforced = enforced
-            .row(KvRow::new("Edits", i.edits))
+            .row(KvRow::new("Edits", i.edits.to_string()))
             .row(KvRow::new("Verbs", i.verbs.join(" ")).color(Color::Success))
             .row(KvRow::new("Refused", i.refused.join(" ")).color(Color::Error))
-            .row(KvRow::new("Tier", i.tier));
-        let used_by = i
-            .used_by
-            .into_iter()
-            .fold(KvSection::new("Used by"), |section, (who, what)| {
-                section.row(KvRow::new(who, what))
-            });
-        let mention = i
-            .mention
-            .map(|(handle, what)| KvSection::new("Mention").row(KvRow::new(handle, what)));
+            .row(KvRow::new("Tier", i.tier.to_string()));
+        let used_by = (!i.used_by.is_empty()).then(|| {
+            i.used_by
+                .into_iter()
+                .fold(KvSection::new("Used by"), |section, (who, what)| {
+                    section.row(KvRow::new(who, what))
+                })
+        });
+        let (handle, what) = i.mention;
+        let mention = KvSection::new("Mention").row(KvRow::new(handle, what));
         div()
             .debug_selector(|| "role-panel".into())
             .size_full()
@@ -182,8 +182,8 @@ impl RenderOnce for RolePanel {
                     .gap(SPACE_16)
                     .p(SPACE_14)
                     .child(enforced)
-                    .child(used_by)
-                    .children(mention),
+                    .children(used_by)
+                    .child(mention),
             )
     }
 }
@@ -213,6 +213,14 @@ impl RoleFileView {
             built_in: role.layer == RoleLayer::BuiltIn,
             code,
         }
+    }
+}
+
+impl RoleFileView {
+    /// The file name the breadcrumb ends with, such as `reviewer.xml`.
+    #[cfg(test)]
+    pub(crate) fn file_name(&self) -> &str {
+        &self.parts[2]
     }
 }
 

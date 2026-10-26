@@ -45,6 +45,8 @@ fn recent(time: &str, text: &str, kind: RecentKind) -> RecentAction {
 
 fn base(project: &str) -> Result<Snapshot, BackendError> {
     let fx1 = fx1()?;
+    let roster = roster()?;
+    let roles = role_files(&roster);
     let listener = listener();
     let spend = listener.workers_today_usd + listener.listener_today_usd;
     Ok(Snapshot {
@@ -52,7 +54,7 @@ fn base(project: &str) -> Result<Snapshot, BackendError> {
         me: "andy".into(),
         me_id: id("andy")?,
         listener_id: id("andy/listen")?,
-        roster: roster()?,
+        roster,
         listener,
         agents: BTreeMap::from([(fx1.id.clone(), fx1)]),
         status: StatusSummary {
@@ -69,7 +71,7 @@ fn base(project: &str) -> Result<Snapshot, BackendError> {
         plan: None,
         git: git_facts(),
         sessions: BTreeMap::from([(id("andy/fx1")?, fx1_session())]),
-        roles: role_files(),
+        roles,
     })
 }
 

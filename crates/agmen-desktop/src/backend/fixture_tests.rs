@@ -406,12 +406,43 @@ fn role_files_cover_three_layers() {
     let reviewer = s.roles.iter().find(|r| r.name == "reviewer").unwrap();
     assert!(reviewer.text.contains("<role name=\"reviewer\""));
     let info = reviewer.info.as_ref().unwrap();
-    assert_eq!(info.tier, "deep");
-    // Mockup fix 51: no adam/sec, and rv2 is on C015.
+    assert_eq!(info.tier, crate::roles::Tier::Deep);
+    // Mockup fix 51: no adam/sec. Used by comes from the roster, and the
+    // roles that extend this one.
     assert!(info.used_by.iter().all(|(who, _)| who != "adam/sec"));
-    assert!(
-        info.used_by
-            .iter()
-            .any(|(who, what)| who == "andy/rv2" && what.contains("C015"))
+    assert_eq!(
+        info.used_by,
+        [
+            ("andy/rv2".to_owned(), "opencode · reading".to_owned()),
+            ("security-reviewer".to_owned(), "extends it".to_owned()),
+        ]
     );
+}
+
+#[test]
+fn role_panels_come_from_the_role_files() {
+    // Reviews C163 and C164: every role but base has kind and tier, and the
+    // reviewer's verbs and tools are what reviewer.xml says.
+    let s = chat();
+    for role in &s.roles {
+        assert_eq!(role.info.is_some(), role.name != "base", "{}", role.name);
+    }
+    let info = s
+        .roles
+        .iter()
+        .find(|r| r.name == "reviewer")
+        .and_then(|r| r.info.clone())
+        .unwrap();
+    assert_eq!(info.tools, ["read", "search", "shell"]);
+    assert_eq!(info.verbs[0], "REVIEW");
+    assert!(info.verbs.iter().any(|v| v == "HELLO"));
+    assert!(info.refused.iter().any(|v| v == "CLAIM"));
+    assert!(info.refused.iter().all(|v| !info.verbs.contains(v)));
+    assert!(
+        info.bash_note.is_some(),
+        "shell with no edits is read-only by rule"
+    );
+    assert_eq!(info.mention.0, "@reviewers");
+    let engineer = s.roles.iter().find(|r| r.name == "engineer").unwrap();
+    assert!(engineer.info.as_ref().unwrap().bash_note.is_none());
 }

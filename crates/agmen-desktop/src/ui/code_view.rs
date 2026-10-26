@@ -108,19 +108,27 @@ impl CodeView {
     }
 }
 
+/// What fills a line's gutter bar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Fill {
+    Added,
+    Modified,
+}
+
 /// The Added or Modified mark that fills line `line`'s gutter.
-fn fill_mark(marks: &[GutterMark], line: u32) -> Option<&GutterMark> {
-    marks.iter().find(|m| match m {
-        GutterMark::Added(r) | GutterMark::Modified(r) => r.contains(&line),
-        GutterMark::Deleted(_) => false,
+fn fill_mark(marks: &[GutterMark], line: u32) -> Option<Fill> {
+    marks.iter().find_map(|m| match m {
+        GutterMark::Added(r) if r.contains(&line) => Some(Fill::Added),
+        GutterMark::Modified(r) if r.contains(&line) => Some(Fill::Modified),
+        GutterMark::Added(_) | GutterMark::Modified(_) | GutterMark::Deleted(_) => None,
     })
 }
 
-/// Where a deletion mark sits on line `line`'s row: at its bottom edge for
-/// lines removed after it, or at line 1's top edge for lines removed above
-/// the first line (`Deleted(0)`). Returns the mark's own line number.
-fn deleted_mark(marks: &[GutterMark], line: u32) -> Option<(u32, bool)> {
-    marks.iter().find_map(|m| match m {
+/// The deletion marks on line `line`'s row, as (mark line, at the top):
+/// lines removed after it sit at its bottom edge, and lines removed above
+/// the first line (`Deleted(0)`) at line 1's top edge. Line 1 can have both.
+fn deleted_marks(marks: &[GutterMark], line: u32) -> impl Iterator<Item = (u32, bool)> + '_ {
+    marks.iter().filter_map(move |m| match m {
         GutterMark::Deleted(at) if *at == line => Some((*at, false)),
         GutterMark::Deleted(0) if line == 1 => Some((0, true)),
         GutterMark::Added(_) | GutterMark::Modified(_) | GutterMark::Deleted(_) => None,
@@ -152,10 +160,10 @@ fn render_line(
             })
         })
         .collect();
-    let fill = fill_mark(marks, number).map(|mark| {
-        let (kind, color) = match mark {
-            GutterMark::Added(_) => ("added", theme.created),
-            GutterMark::Modified(_) | GutterMark::Deleted(_) => ("modified", theme.modified),
+    let fill = fill_mark(marks, number).map(|fill| {
+        let (kind, color) = match fill {
+            Fill::Added => ("added", theme.created),
+            Fill::Modified => ("modified", theme.modified),
         };
         div()
             .debug_selector(move || format!("gutter:{number}:{kind}"))
@@ -163,7 +171,7 @@ fn render_line(
             .inset_0()
             .bg(color)
     });
-    let deleted = deleted_mark(marks, number).map(|(at, top)| {
+    let deleted = deleted_marks(marks, number).map(|(at, top)| {
         let edge = div()
             .debug_selector(move || format!("gutter:{at}:deleted"))
             .absolute()

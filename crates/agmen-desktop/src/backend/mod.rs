@@ -13,8 +13,12 @@ use std::collections::BTreeMap;
 
 use agmen_proto::{GitSha, IdentityId, MessageId, StampedEnvelope};
 use futures::channel::mpsc::UnboundedReceiver;
+use gpui::SharedString;
+
+use crate::roles::{Edits, RoleKind, Tier};
 
 pub(crate) use fixture::FixtureBackend;
+pub(crate) use fixture_data::REVIEWER_XML;
 
 /// The identity id the fixture gives a mockup handle, for tests.
 #[cfg(test)]
@@ -384,26 +388,31 @@ pub(crate) enum RoleLayer {
 pub(crate) struct RoleFile {
     pub(crate) name: String,
     pub(crate) layer: RoleLayer,
-    pub(crate) text: String,
-    /// What agmen enforces for it, when the console has resolved it.
+    /// The XML; built-in roles borrow the text compiled into the binary.
+    pub(crate) text: SharedString,
+    /// What agmen enforces for it; `None` for base, which has no kind, and
+    /// for a file that does not parse.
     pub(crate) info: Option<RoleInfo>,
 }
 
 /// A resolved role, as the Role panel shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RoleInfo {
-    pub(crate) kind: String,
+    pub(crate) kind: RoleKind,
+    pub(crate) tier: Tier,
+    /// Tool classes, the same for every agent (spec 3.2).
     pub(crate) tools: Vec<String>,
     /// A limit agmen states but cannot enforce, such as Bash read-only.
     pub(crate) bash_note: Option<String>,
-    pub(crate) edits: String,
+    pub(crate) edits: Edits,
+    /// The role's own verbs, then base's.
     pub(crate) verbs: Vec<String>,
+    /// Verbs other roles have that the hub refuses for this one.
     pub(crate) refused: Vec<String>,
-    pub(crate) tier: String,
     /// Who holds it, and a short note on each.
     pub(crate) used_by: Vec<(String, String)>,
     /// The role mention and what it expands to.
-    pub(crate) mention: Option<(String, String)>,
+    pub(crate) mention: (String, String),
 }
 
 /// Branches, commits and files in the person's local worktrees.

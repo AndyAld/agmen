@@ -11,6 +11,10 @@ use std::collections::BTreeMap;
 use agmen_proto::{GitSha, IdentityId, StampedEnvelope};
 use serde_json::{Value, json};
 
+use gpui::SharedString;
+
+use crate::roles;
+
 use super::{
     AgentInfo, AgentRow, AgentSession, AgentStatus, Approval, BackendError, ChangeCard, ChangeId,
     ChangeRow, ChangeState, GitFacts, LaneInfo, ListenerInfo, PersonGroup, PlanInfo, RecentAction,
@@ -697,66 +701,124 @@ pub(super) fn fx1_session() -> AgentSession {
     }
 }
 
+/// The built-in reviewer role, which the code view's dev window also shows.
+pub(crate) const REVIEWER_XML: &str = include_str!("../../../../roles/reviewer.xml");
+
 /// The built-in roles ship in the binary from the repo's `roles/` folder
 /// (spec 3.2); the project and personal ones are the mockup's examples.
-pub(super) fn role_files() -> Vec<RoleFile> {
-    let built_in = |name: &str, text: &str| RoleFile {
-        name: name.into(),
-        layer: RoleLayer::BuiltIn,
-        text: text.into(),
-        info: None,
-    };
-    let words = |list: &str| {
-        list.split_whitespace()
-            .map(str::to_owned)
-            .collect::<Vec<_>>()
-    };
-    let mut reviewer = built_in("reviewer", include_str!("../../../../roles/reviewer.xml"));
-    reviewer.info = Some(RoleInfo {
-        kind: "agent".into(),
-        tools: words("Read Grep Glob Bash"),
-        bash_note: Some("read-only by rule only; not enforceable".into()),
-        edits: "none".into(),
-        verbs: words("REVIEW ASK ANSWER FYI DM"),
-        refused: words("CLAIM DONE PUSH_REQUEST ASSIGN RULING"),
-        tier: "deep".into(),
-        // Mockup fix 51: rv2 reviews C015, and adam/sec is not in the roster.
-        used_by: vec![("andy/rv2".into(), "opencode · reading C015".into())],
-        mention: Some((
-            "@reviewers".into(),
-            "role:reviewer on the wire · humans and coordinators".into(),
-        )),
-    });
-    let example = |name: &str, layer, text: &str| RoleFile {
-        name: name.into(),
-        layer,
-        text: text.into(),
-        info: None,
-    };
-    vec![
-        built_in("base", include_str!("../../../../roles/base.xml")),
-        built_in("listener", include_str!("../../../../roles/listener.xml")),
-        built_in(
+/// Each role's panel is resolved from the files, the way agmend will.
+pub(super) fn role_files(roster: &[PersonGroup]) -> Vec<RoleFile> {
+    let files: [(&str, RoleLayer, &'static str); 10] = [
+        (
+            "base",
+            RoleLayer::BuiltIn,
+            include_str!("../../../../roles/base.xml"),
+        ),
+        (
+            "listener",
+            RoleLayer::BuiltIn,
+            include_str!("../../../../roles/listener.xml"),
+        ),
+        (
             "coordinator",
+            RoleLayer::BuiltIn,
             include_str!("../../../../roles/coordinator.xml"),
         ),
-        built_in("planner", include_str!("../../../../roles/planner.xml")),
-        built_in(
+        (
+            "planner",
+            RoleLayer::BuiltIn,
+            include_str!("../../../../roles/planner.xml"),
+        ),
+        (
             "researcher",
+            RoleLayer::BuiltIn,
             include_str!("../../../../roles/researcher.xml"),
         ),
-        built_in("engineer", include_str!("../../../../roles/engineer.xml")),
-        built_in("tester", include_str!("../../../../roles/tester.xml")),
-        reviewer,
-        example(
+        (
+            "engineer",
+            RoleLayer::BuiltIn,
+            include_str!("../../../../roles/engineer.xml"),
+        ),
+        (
+            "tester",
+            RoleLayer::BuiltIn,
+            include_str!("../../../../roles/tester.xml"),
+        ),
+        ("reviewer", RoleLayer::BuiltIn, REVIEWER_XML),
+        (
             "security-reviewer",
             RoleLayer::Project,
             "<role name=\"security-reviewer\" extends=\"reviewer\" kind=\"agent\" tier=\"deep\" version=\"1\">\n  <summary>Reviews a DONE for security only.</summary>\n</role>\n",
         ),
-        example(
+        (
             "docs-writer",
             RoleLayer::Personal,
             "<role name=\"docs-writer\" extends=\"engineer\" kind=\"agent\" tier=\"standard\" version=\"1\">\n  <summary>Writes docs in docs/**.</summary>\n  <edits scope=\"paths\" globs=\"docs/**\" />\n</role>\n",
         ),
-    ]
+    ];
+    let specs: Vec<roles::RoleSpec> = files
+        .iter()
+        .filter_map(|(_, _, text)| roles::parse(text).ok())
+        .collect();
+    // Every verb some role names, in file order, for the Refused row.
+    let mut known: Vec<&str> = Vec::new();
+    for verb in specs.iter().flat_map(|s| s.verbs.iter().flatten()) {
+        if !known.contains(&verb.as_str()) {
+            known.push(verb);
+        }
+    }
+    let info = |name: &str| -> Option<RoleInfo> {
+        // A role that does not resolve shows its file with no panel.
+        let resolved = roles::resolve(name, &specs).ok()?;
+        let refused = known
+            .iter()
+            .filter(|v| !resolved.verbs.iter().any(|own| own == *v))
+            .map(|v| (*v).to_owned())
+            .collect();
+        let mut used_by: Vec<(String, String)> = roster
+            .iter()
+            .flat_map(|group| &group.agents)
+            .filter(|agent| agent.role == name)
+            .map(|agent| {
+                let status = format!("{:?}", agent.status).to_lowercase();
+                (
+                    agent.handle.clone(),
+                    format!("{} · {status}", agent.harness),
+                )
+            })
+            .collect();
+        used_by.extend(
+            specs
+                .iter()
+                .filter(|s| s.extends.as_deref() == Some(name))
+                .map(|s| (s.name.clone(), "extends it".to_owned())),
+        );
+        // Spec 3.4: no agent can limit which commands a shell runs.
+        let read_only_shell =
+            resolved.tools.iter().any(|t| t == "shell") && resolved.edits == roles::Edits::None;
+        Some(RoleInfo {
+            kind: resolved.kind,
+            tier: resolved.tier,
+            tools: resolved.tools,
+            bash_note: read_only_shell
+                .then(|| "read-only by rule only; not enforceable".to_owned()),
+            edits: resolved.edits,
+            verbs: resolved.verbs,
+            refused,
+            used_by,
+            mention: (
+                format!("@{name}s"),
+                format!("role:{name} on the wire · humans and coordinators"),
+            ),
+        })
+    };
+    files
+        .iter()
+        .map(|(name, layer, text)| RoleFile {
+            name: (*name).to_owned(),
+            layer: *layer,
+            text: SharedString::new_static(text),
+            info: info(name),
+        })
+        .collect()
 }

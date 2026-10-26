@@ -12,7 +12,11 @@ fn agent_view_lists_tool_calls(cx: &mut TestAppContext) {
     let session = snapshot.sessions.get(&id).unwrap().clone();
     let (_, cx) = cx.add_window_view(|_, cx| AgentView::new("andy/fx1", session, cx));
     redraw(cx);
-    for (ix, kind) in [(0, "tool"), (2, "out"), (3, "say"), (9, "cost")] {
+    // Review C166: every row, in console.py's order.
+    let kinds = [
+        "tool", "tool", "out", "say", "tool", "tool", "out", "tool", "out", "cost", "tool", "out",
+    ];
+    for (ix, kind) in kinds.into_iter().enumerate() {
         let sel: &'static str = Box::leak(format!("session:{ix}:{kind}").into_boxed_str());
         assert!(cx.debug_bounds(sel).is_some(), "{sel}");
     }
