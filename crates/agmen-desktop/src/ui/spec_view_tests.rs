@@ -149,3 +149,27 @@ fn breadcrumb_splits_the_path_after_the_project() {
         ["ridgeline", "docs", "specs", "ridgeline-design.md"]
     );
 }
+
+#[gpui::test]
+fn spec_text_starts_at_code_column_6(cx: &mut TestAppContext) {
+    // Shot diff (spec, node 9193): a spec has no change marks, so the
+    // mockup starts its text at cell 6 (x 317.7, 45.7 px into the pane)
+    // with line numbers still ending at cell 4 (node 9192).
+    let (_, _, cx) = open(cx, Screen::Spec, None, DESIGN);
+    let cell = cx.update(|window, cx| {
+        crate::ui::code_view::cell_width(window, &cx.global::<Appearance>().fonts)
+    });
+    let pane = cx.debug_bounds("spec:code").unwrap();
+    let close = |a: gpui::Pixels, b: gpui::Pixels| (a - b).abs() < gpui::px(0.5);
+    let number = cx.debug_bounds("line:1:number").unwrap();
+    assert!(
+        close(number.right() - pane.left(), cell * 4.),
+        "{number:?} {cell:?}"
+    );
+    let text = cx.debug_bounds("line:1:text").unwrap();
+    assert!(
+        close(text.left() - pane.left(), cell * 6.),
+        "{text:?} {cell:?}"
+    );
+    assert!(cx.debug_bounds("line:1:mark").is_none());
+}
