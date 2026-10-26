@@ -162,6 +162,34 @@ pub(crate) fn painted_at(cx: &mut VisualTestContext, selector: &'static str) -> 
     })
 }
 
+/// How far right anything inside the element `selector` can show: the
+/// right edge of the content mask on the quads the last frame painted
+/// starting inside its bounds. `debug_bounds` reports a shrunken box, not
+/// a child drawn past it; gpui clips that child's fill and its glyphs to
+/// this mask. The element must paint a quad (a fill or a border); `None`
+/// when it painted none.
+pub(crate) fn clip_right(
+    cx: &mut VisualTestContext,
+    selector: &'static str,
+) -> Option<gpui::Pixels> {
+    let bounds = cx
+        .debug_bounds(selector)
+        .unwrap_or_else(|| panic!("nothing is drawn with selector {selector}"));
+    cx.update(|window, _| {
+        let scale = window.scale_factor();
+        window
+            .painted_quads()
+            .into_iter()
+            .filter(|quad| {
+                let x = gpui::px(quad.bounds.origin.x.0 / scale);
+                let y = gpui::px(quad.bounds.origin.y.0 / scale);
+                x >= bounds.left() && x < bounds.right() && y >= bounds.top() && y < bounds.bottom()
+            })
+            .map(|quad| gpui::px(quad.content_mask.bounds.right().0 / scale))
+            .reduce(gpui::Pixels::max)
+    })
+}
+
 /// Asserts the open menu drawn as `frame` is the shared menu frame (node
 /// 1802): the theme's `border` around `elevated_surface`, and its first
 /// row `row` 4 px inside the 1 px border.

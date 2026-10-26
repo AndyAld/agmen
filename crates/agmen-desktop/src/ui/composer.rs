@@ -494,8 +494,9 @@ impl Render for Composer {
                 div()
                     .debug_selector(|| "composer:box".into())
                     .w_full()
-                    // Node 375 clips: a box too narrow for its chips cuts
-                    // them at its edge.
+                    // Node 375 clips. The chips clip in their own
+                    // wrappers; this cuts the ⏎ in a pane too narrow for
+                    // the padding, the gaps and the ⏎.
                     .overflow_hidden()
                     .flex()
                     .items_center()
