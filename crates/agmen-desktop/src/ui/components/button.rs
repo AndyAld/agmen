@@ -76,6 +76,9 @@ impl Button {
 
     /// Draws a toggle button's on state: an accent tint and accent text.
     /// The mockup draws only the off state (reference sheet mismatch 12).
+    /// It takes a `bool`, as `Tab`, `ListItem` and `IconButton` do (Zed's
+    /// `Toggleable::toggle_state`), so callers pass a comparison such as
+    /// `index == active`.
     #[must_use]
     pub(crate) const fn selected(mut self, selected: bool) -> Self {
         self.selected = selected;
