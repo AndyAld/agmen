@@ -151,3 +151,21 @@ fn refused_dm_shows_why_until_the_next_send(cx: &mut TestAppContext) {
         assert_eq!(view.composer.read(cx).text(cx), "")
     });
 }
+
+#[gpui::test]
+fn output_rows_indent_three_code_cells(cx: &mut TestAppContext) {
+    // Nodes 627, 637 and 648 draw "   ⎿ text": three code cells, then ⎿.
+    init(cx);
+    let (_, cx) = open_fx1(cx);
+    redraw(cx);
+    let cell = cx.update(|window, cx| {
+        crate::ui::code_view::cell_width(window, &cx.global::<Appearance>().fonts)
+    });
+    let row = cx.debug_bounds("session:2:out").unwrap();
+    let glyph = cx.debug_bounds("session:2:glyph").unwrap();
+    let indent = glyph.origin.x - row.origin.x;
+    assert!(
+        (indent - cell * 3.).abs() < gpui::px(0.5),
+        "indent {indent:?}, cell {cell:?}"
+    );
+}
