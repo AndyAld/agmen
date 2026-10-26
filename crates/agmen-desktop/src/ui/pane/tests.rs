@@ -1,7 +1,15 @@
-use gpui::{TestAppContext, VisualTestContext};
+use gpui::{
+    AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, Styled as _,
+    TestAppContext, VisualTestContext, Window, div,
+};
 
+use super::group::{MAX_PANES, SplitError};
+use super::item::SettingsPage;
+use super::names::PaneNames;
+use super::tabs::{MAX_TABS, Pane};
 use super::*;
 use crate::backend::chat_snapshot;
+use crate::ui::chat::ChatView;
 use crate::ui::test_support::{click, init, redraw};
 use crate::ui::tokens::{MOCKUP_REM, TAB_CLOSE_SLOT};
 
@@ -37,7 +45,9 @@ fn open_center_with_chat(
         Host(cx.new(|cx| PaneGroup::new(&snapshot, Some(chat), tabs, cx)))
     });
     let group = host.read_with(cx, |host, _| host.0.clone());
-    let chat = group.read_with(cx, |group, _| group.chat.clone().unwrap());
+    let chat = group.read_with(cx, |group, cx| {
+        group.panes()[0].read(cx).chat().cloned().unwrap()
+    });
     redraw(cx);
     (group, chat, cx)
 }
@@ -197,7 +207,8 @@ fn chat_stays_reachable_through_any_closes(cx: &mut TestAppContext) {
             }
             5 => {
                 // The close button a person sees on the active tab, if any.
-                let (number, len) = pane.read_with(cx, |pane, _| (pane.number, pane.tabs().len()));
+                let (number, len) =
+                    pane.read_with(cx, |pane, _| (pane.number(), pane.tabs().len()));
                 let index = next(len.max(1));
                 pane.update(cx, |pane, cx| pane.activate(index, cx));
                 let selector: &'static str =
