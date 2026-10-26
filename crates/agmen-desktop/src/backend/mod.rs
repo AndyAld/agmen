@@ -15,6 +15,12 @@ use agmen_proto::{GitSha, IdentityId, MessageId, StampedEnvelope};
 use futures::channel::mpsc::UnboundedReceiver;
 
 pub(crate) use fixture::FixtureBackend;
+
+/// The identity id the fixture gives a mockup handle, for tests.
+#[cfg(test)]
+pub(crate) fn fixture_id(handle: &str) -> IdentityId {
+    fixture_data::id(handle).unwrap_or_else(|err| panic!("{err}"))
+}
 #[cfg(test)]
 pub(crate) use fixture::chat_snapshot;
 pub(crate) use screen::Screen;
@@ -217,6 +223,7 @@ pub(crate) struct AgentRow {
 /// One person and their agents.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PersonGroup {
+    pub(crate) id: IdentityId,
     pub(crate) person: String,
     /// The person running this app, shown as "andy (you)".
     pub(crate) you: bool,

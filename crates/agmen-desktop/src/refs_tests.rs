@@ -74,6 +74,15 @@ fn refs_find_every_kind_in_chat_fixture() {
     );
     assert_eq!(all[1][2].1, RefTarget::Agent("sean/a1".into()));
     assert_eq!(all[8][0].1, RefTarget::Person("andy".into()));
+    // Message 5 (C133).
+    assert_eq!(all[4][0].1, RefTarget::Agent("andy/fx1".into()));
+    assert_eq!(
+        all[4][1].1,
+        RefTarget::Branch {
+            name: "fix/c015-main-conflict".into(),
+            at: None
+        }
+    );
 }
 
 #[test]
@@ -85,7 +94,70 @@ fn refs_ignore_non_commit_hex() {
 #[test]
 fn refs_ignore_version_numbers() {
     let known = Known::from_snapshot(&chat_snapshot());
-    assert!(spans_of("bump to v1.2.3 or 1.2.3, see 2026-10-25", &[], &known).is_empty());
+    // The known commit is the positive control: the scan runs on this body.
+    let spans = spans_of(
+        "Codex 0.164.0 or v1.2.3, see 2026-10-25 at 4d9fdc8",
+        &[],
+        &known,
+    );
+    assert_eq!(text(&spans), ["4d9fdc8"]);
+}
+
+#[test]
+fn branch_before_punctuation_is_found() {
+    // Review C129.
+    let known = Known::from_snapshot(&chat_snapshot());
+    for body in [
+        "merged fix/c015-main-conflict.",
+        "fix/c015-main-conflict, then",
+    ] {
+        assert_eq!(
+            text(&spans_of(body, &[], &known)),
+            ["fix/c015-main-conflict"],
+            "{body}"
+        );
+    }
+}
+
+#[test]
+fn unknown_sha_after_a_branch_is_left_out() {
+    // Review C136: only a sha git knows joins the branch chip.
+    let known = Known::from_snapshot(&chat_snapshot());
+    let spans = spans_of("fix/c015-main-conflict@0123abc", &[], &known);
+    assert_eq!(text(&spans), ["fix/c015-main-conflict"]);
+    assert_eq!(
+        spans[0].1,
+        RefTarget::Branch {
+            name: "fix/c015-main-conflict".into(),
+            at: None
+        }
+    );
+}
+
+#[test]
+fn reversed_line_ranges_are_ordered() {
+    let known = Known::from_snapshot(&chat_snapshot());
+    let spans = spans_of("see src/main.rs:8-2", &[], &known);
+    assert_eq!(
+        spans[0].1,
+        RefTarget::File {
+            path: "src/main.rs".into(),
+            lines: Some((2, 8))
+        }
+    );
+}
+
+#[test]
+fn people_who_have_not_posted_are_known() {
+    // Review C131: adam has agents in the roster but no message in the chat.
+    let snapshot = chat_snapshot();
+    let known = Known::from_snapshot(&snapshot);
+    let adam = crate::backend::fixture_id("adam");
+    let refs = [hub(RefKind::Identity, 0, 5, adam.as_str())];
+    assert_eq!(
+        spans_of("@adam ok", &refs, &known)[0].1,
+        RefTarget::Person("adam".into())
+    );
 }
 
 #[test]
@@ -122,13 +194,16 @@ fn refs_reject_offsets_off_char_boundary() {
 
 #[test]
 fn refs_prefer_hub_ref_over_regex_overlap() {
-    let known = Known::from_snapshot(&chat_snapshot());
-    // The hub stamps the whole name; the regex would match the commit inside.
-    let body = "lane L-CORE 4d9fdc8";
-    let refs = [hub(RefKind::Lane, 5, 19, "L-CORE")];
+    // Review C135: a branch named like an identity, which both sources match.
+    let mut known = Known::from_snapshot(&chat_snapshot());
+    known.branches.insert("sean/sync".into());
+    let sean_sync = crate::backend::fixture_id("sean/sync");
+    known.handles.insert(sean_sync.clone(), "sean/sync".into());
+    let body = "ask sean/sync";
+    let refs = [hub(RefKind::Identity, 4, 13, sean_sync.as_str())];
     let spans = spans_of(body, &refs, &known);
     assert_eq!(spans.len(), 1);
-    assert_eq!(spans[0].1, RefTarget::Lane("L-CORE".into()));
+    assert_eq!(spans[0].1, RefTarget::Agent("sean/sync".into()));
 }
 
 #[test]

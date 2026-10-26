@@ -45,6 +45,7 @@ pub(super) fn roster() -> Result<Vec<PersonGroup>, BackendError> {
     use AgentStatus::{Idle, Reading, Working};
     Ok(vec![
         PersonGroup {
+            id: id("andy")?,
             person: "andy".into(),
             you: true,
             agents: vec![
@@ -57,6 +58,7 @@ pub(super) fn roster() -> Result<Vec<PersonGroup>, BackendError> {
             ],
         },
         PersonGroup {
+            id: id("sean")?,
             person: "sean".into(),
             you: false,
             agents: vec![
@@ -65,6 +67,7 @@ pub(super) fn roster() -> Result<Vec<PersonGroup>, BackendError> {
             ],
         },
         PersonGroup {
+            id: id("adam")?,
             person: "adam".into(),
             you: false,
             agents: vec![
@@ -236,6 +239,7 @@ const ROSTER: &[&str] = &[
 /// What the hub stamps as `refs` for a body: identities it has in its
 /// roster, items, lanes and PRs (protocol section 3). Git names are left to
 /// the client.
+// shortcut: a stand-in for the hub's own stamp_refs; once the fixture is replaced by agmend, the hub's refs arrive on the wire and this goes.
 fn hub_refs(body: &str) -> Vec<Value> {
     static WORDS: std::sync::LazyLock<Option<regex::Regex>> = std::sync::LazyLock::new(|| {
         regex::Regex::new(
@@ -645,11 +649,13 @@ pub(super) fn plan_roster() -> Result<Vec<PersonGroup>, BackendError> {
     Ok(vec![
         // Mockup fix 52: sean/plan keeps its pr-3331 harness, gemini.
         PersonGroup {
+            id: id("andy")?,
             person: "andy".into(),
             you: true,
             agents: vec![row("andy/listen", "listener", "codex", Idle)?],
         },
         PersonGroup {
+            id: id("sean")?,
             person: "sean".into(),
             you: false,
             agents: vec![row("sean/plan", "planner", "gemini", Working)?],
