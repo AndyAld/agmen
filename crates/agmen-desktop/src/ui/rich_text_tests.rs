@@ -111,6 +111,20 @@ fn long_glue_becomes_a_word_of_its_own() {
 }
 
 #[test]
+fn chip_free_lines_keep_their_indent() {
+    // C228: indented logs and code keep each line's leading whitespace; a
+    // tab draws as four spaces.
+    let body = "  panicked:\n    at main.rs:3\n\tat lib.rs:9\n4d9fdc8 is the cause";
+    let start = body.find("4d9fdc8").unwrap();
+    let drawn = blocks(lines(pieces(body, &[span(start..start + 7, commit())])));
+    assert_eq!(
+        drawn[0],
+        Block::Text("  panicked:\n    at main.rs:3\n    at lib.rs:9".into())
+    );
+    assert!(matches!(&drawn[1], Block::Row(items) if items.len() == 2));
+}
+
+#[test]
 fn words_between_chips_draw_as_one_run() {
     let body = "see the 4d9fdc8 commit now";
     let flowed = lines(pieces(body, &[span(8..15, commit())]));

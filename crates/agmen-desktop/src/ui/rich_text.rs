@@ -29,10 +29,16 @@ use crate::refs::Span;
 /// token beside a reference wraps as a word of its own.
 const MAX_GLUE_CHARS: usize = 8;
 
+/// How many spaces a tab in a line's indent draws as.
+const TAB_SPACES: usize = 4;
+
 /// One piece of a laid out body.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Piece<'a> {
     Word(&'a str),
+    /// The whitespace that starts a line, kept so indented logs and code
+    /// stay indented.
+    Indent(&'a str),
     /// A reference with the punctuation glued to it on either side; `span`
     /// is its index in the spans.
     Ref {
@@ -54,7 +60,7 @@ fn short(glue: &str) -> bool {
 /// that breaks those rules is left as plain text rather than trusted.
 fn pieces<'a>(body: &'a str, spans: &[Span]) -> Vec<Piece<'a>> {
     let mut out = Vec::new();
-    let mut pos = 0;
+    let mut pos = push_indent(body, &mut out);
     for (i, span) in spans.iter().enumerate() {
         let (start, end) = (span.range.start, span.range.end);
         let (Some(gap), Some(text)) = (body.get(pos..start), body.get(start..end)) else {
@@ -95,13 +101,27 @@ fn pieces<'a>(body: &'a str, spans: &[Span]) -> Vec<Piece<'a>> {
     out
 }
 
+/// Words and line breaks; each line after a break keeps its indent.
 fn push_words<'a>(text: &'a str, out: &mut Vec<Piece<'a>>) {
     for (i, line) in text.split('\n').enumerate() {
-        if i > 0 {
+        let line = if i > 0 {
             out.push(Piece::LineBreak);
-        }
+            line.get(push_indent(line, out)..).unwrap_or_default()
+        } else {
+            line
+        };
         out.extend(line.split_whitespace().map(Piece::Word));
     }
+}
+
+/// Pushes the whitespace that starts `line`, if any, and returns its length.
+fn push_indent<'a>(line: &'a str, out: &mut Vec<Piece<'a>>) -> usize {
+    let words = line.trim_start_matches(|c: char| c.is_whitespace() && c != '\n');
+    let indent = line.get(..line.len() - words.len()).unwrap_or_default();
+    if !indent.is_empty() {
+        out.push(Piece::Indent(indent));
+    }
+    indent.len()
 }
 
 /// One element of a drawn line.
@@ -141,8 +161,17 @@ fn items(line: Vec<Piece<'_>>) -> Vec<Item<'_>> {
     let mut run = String::new();
     for piece in line {
         match piece {
+            Piece::Indent(indent) => {
+                for c in indent.chars() {
+                    if c == '\t' {
+                        run.extend(std::iter::repeat_n(' ', TAB_SPACES));
+                    } else {
+                        run.push(c);
+                    }
+                }
+            }
             Piece::Word(word) => {
-                if !run.is_empty() {
+                if !run.is_empty() && !run.ends_with(char::is_whitespace) {
                     run.push(' ');
                 }
                 run.push_str(word);
