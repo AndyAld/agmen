@@ -1,18 +1,17 @@
 //! Spike S5: per-stream numbering stays gapless and in commit order when many
 //! transactions number the same streams at once.
 //!
-//! Needs the dev stack's Postgres in `AGMEN_IT_PG`. The concurrency test writes
-//! to its own scratch table and uses stream names unique to the run, then
-//! deletes the rows it wrote, so reruns start clean and other tests' rows stay
-//! untouched. The migration test works in a scratch schema that it drops.
+//! Needs the dev stack's Postgres in `AGMEN_IT_PG`. The concurrency test runs
+//! in a database of its own on that server (ruling R26), with this tree's
+//! migrations applied, so a migration another branch applied to the shared
+//! database cannot fail it. The migration test works in a scratch schema that
+//! it drops.
 
-// clippy.toml's allow-*-in-tests covers only #[test] functions, not the
-// helpers below them; a failed step in a helper should fail the test.
-#![expect(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    reason = "test helpers fail the test on error"
-)]
+// Integration tests are test code throughout, helpers included: this lets
+// clippy's allow-*-in-tests settings cover the helpers too.
+#![cfg(test)]
+
+mod support;
 
 use std::collections::BTreeMap;
 use std::hash::{BuildHasher, RandomState};
@@ -21,6 +20,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{AssertSqlSafe, PgPool};
+use support::run;
 use tokio::task::JoinSet;
 
 const TASKS: u32 = 50;
@@ -48,13 +48,13 @@ fn run_id() -> String {
     format!("{}_{nanos}", std::process::id())
 }
 
-async fn pool() -> PgPool {
+async fn pool(db_url: &str) -> PgPool {
     // One connection per task, so all 50 transactions can be open at once.
     PgPoolOptions::new()
         .max_connections(TASKS)
-        .connect(&pg_url())
+        .connect(db_url)
         .await
-        .expect("connect to AGMEN_IT_PG")
+        .expect("connect to the test database")
 }
 
 async fn create_scratch_table(pool: &PgPool) {
@@ -109,97 +109,87 @@ async fn run_task(pool: PgPool, run: String, streams: Vec<String>, task: u32) {
     }
 }
 
+/// [`run`] gives the test a fresh database with the hub's migrations applied
+/// (the hub it starts runs them) and drops it afterwards, even on a panic.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn it_numbering_is_gapless_under_concurrency() {
-    let pool = pool().await;
-    agmen_hub::MIGRATOR
-        .run(&pool)
-        .await
-        .expect("run hub migrations");
-    create_scratch_table(&pool).await;
+    run(|ctx| async move {
+        let pool = pool(&ctx.db_url).await;
+        create_scratch_table(&pool).await;
 
-    let run = run_id();
-    let streams: Vec<String> = (0..STREAMS)
-        .map(|i| format!("it-numbering/{run}/{i}"))
-        .collect();
+        let run = run_id();
+        let streams: Vec<String> = (0..STREAMS)
+            .map(|i| format!("it-numbering/{run}/{i}"))
+            .collect();
 
-    let started = Instant::now();
-    let mut tasks = JoinSet::new();
-    for task in 0..TASKS {
-        tasks.spawn(run_task(pool.clone(), run.clone(), streams.clone(), task));
-    }
-    while let Some(joined) = tasks.join_next().await {
-        joined.expect("task finished without panicking");
-    }
-    let elapsed = started.elapsed();
+        let started = Instant::now();
+        let mut tasks = JoinSet::new();
+        for task in 0..TASKS {
+            tasks.spawn(run_task(pool.clone(), run.clone(), streams.clone(), task));
+        }
+        while let Some(joined) = tasks.join_next().await {
+            joined.expect("task finished without panicking");
+        }
+        let elapsed = started.elapsed();
 
-    // Microseconds since the epoch: Postgres timestamps have microsecond
-    // resolution, so this loses nothing and needs no time crate.
-    let rows: Vec<(String, i64, i64)> = sqlx::query_as(
-        "SELECT stream, seq, (extract(epoch FROM committed_at) * 1000000)::bigint
-         FROM it_numbering_rows
-         WHERE run = $1
-         ORDER BY stream, committed_at, seq",
-    )
-    .bind(&run)
-    .fetch_all(&pool)
-    .await
-    .expect("read scratch rows");
-
-    // Clean up before asserting, so a failed run leaves nothing behind.
-    sqlx::query("DELETE FROM it_numbering_rows WHERE run = $1")
+        // Microseconds since the epoch: Postgres timestamps have microsecond
+        // resolution, so this loses nothing and needs no time crate.
+        let rows: Vec<(String, i64, i64)> = sqlx::query_as(
+            "SELECT stream, seq, (extract(epoch FROM committed_at) * 1000000)::bigint
+             FROM it_numbering_rows
+             WHERE run = $1
+             ORDER BY stream, committed_at, seq",
+        )
         .bind(&run)
-        .execute(&pool)
+        .fetch_all(&pool)
         .await
-        .expect("delete scratch rows");
-    sqlx::query("DELETE FROM stream_heads WHERE stream = ANY($1)")
-        .bind(&streams)
-        .execute(&pool)
-        .await
-        .expect("delete this run's stream heads");
+        .expect("read scratch rows");
+        pool.close().await;
 
-    let total = TASKS * TXS_PER_TASK;
-    assert_eq!(
-        rows.len(),
-        usize::try_from(total).unwrap(),
-        "one row per committed transaction"
-    );
-
-    // Seqs per stream, in commit-time order, plus each stream's commit span.
-    let mut by_stream: BTreeMap<&str, (Vec<i64>, i64, i64)> = BTreeMap::new();
-    for (stream, seq, committed_us) in &rows {
-        let entry = by_stream
-            .entry(stream.as_str())
-            .or_insert_with(|| (Vec::new(), *committed_us, *committed_us));
-        entry.0.push(*seq);
-        entry.2 = *committed_us;
-    }
-
-    println!(
-        "numbering: {total} transactions on {STREAMS} streams by {TASKS} tasks in {:.2} s ({:.0} tx/s overall)",
-        elapsed.as_secs_f64(),
-        f64::from(total) / elapsed.as_secs_f64(),
-    );
-    for (stream, (seqs, first_us, last_us)) in &by_stream {
-        let count = i64::try_from(seqs.len()).unwrap();
-        assert!(
-            seqs.is_sorted(),
-            "{stream}: seq decreases in commit order: {seqs:?}"
-        );
-        let mut sorted = seqs.clone();
-        sorted.sort_unstable();
-        let expected: Vec<i64> = (1..=count).collect();
+        let total = TASKS * TXS_PER_TASK;
         assert_eq!(
-            sorted, expected,
-            "{stream}: seqs are not exactly 1..={count}"
+            rows.len(),
+            usize::try_from(total).unwrap(),
+            "one row per committed transaction"
         );
 
-        let span_s = (last_us - first_us) as f64 / 1_000_000.0;
-        let rate = (count - 1) as f64 / span_s;
+        // Seqs per stream, in commit-time order, plus each stream's commit span.
+        let mut by_stream: BTreeMap<&str, (Vec<i64>, i64, i64)> = BTreeMap::new();
+        for (stream, seq, committed_us) in &rows {
+            let entry = by_stream
+                .entry(stream.as_str())
+                .or_insert_with(|| (Vec::new(), *committed_us, *committed_us));
+            entry.0.push(*seq);
+            entry.2 = *committed_us;
+        }
+
         println!(
-            "numbering: {stream}: {count} transactions committed over {span_s:.2} s ({rate:.0} tx/s on one stream)"
+            "numbering: {total} transactions on {STREAMS} streams by {TASKS} tasks in {:.2} s ({:.0} tx/s overall)",
+            elapsed.as_secs_f64(),
+            f64::from(total) / elapsed.as_secs_f64(),
         );
-    }
+        for (stream, (seqs, first_us, last_us)) in &by_stream {
+            let count = i64::try_from(seqs.len()).unwrap();
+            assert!(
+                seqs.is_sorted(),
+                "{stream}: seq decreases in commit order: {seqs:?}"
+            );
+            let mut sorted = seqs.clone();
+            sorted.sort_unstable();
+            let expected: Vec<i64> = (1..=count).collect();
+            assert_eq!(
+                sorted, expected,
+                "{stream}: seqs are not exactly 1..={count}"
+            );
+
+            let span_s = (last_us - first_us) as f64 / 1_000_000.0;
+            let rate = (count - 1) as f64 / span_s;
+            println!(
+                "numbering: {stream}: {count} transactions committed over {span_s:.2} s ({rate:.0} tx/s on one stream)"
+            );
+        }
+    })
+    .await;
 }
 
 /// Whether `name` (schema qualified) names a table or other relation.
