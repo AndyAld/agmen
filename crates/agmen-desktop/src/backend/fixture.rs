@@ -94,10 +94,6 @@ impl FixtureBackend {
     ///
     /// When the built-in fixture data is not valid protocol data, which
     /// `fixture_messages_survive_the_wire_format` guards against.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one arm per mockup screen; Task 15's model tags tipped it over"
-    )]
     pub(crate) fn for_screen(screen: Screen) -> Result<Self, BackendError> {
         let snapshot = match screen {
             Screen::NeedsYou | Screen::NeedsYouAnswered => {
@@ -144,31 +140,7 @@ impl FixtureBackend {
                 s.listener.recent.insert(0, row);
                 s
             }
-            Screen::Ask | Screen::ModelPicker => {
-                let mut msgs = chat_messages();
-                let first = msgs.len();
-                if screen == Screen::Ask {
-                    msgs.extend(ask_messages(first));
-                }
-                let mut s = with_messages("pr-3331", msgs)?;
-                if screen == Screen::Ask {
-                    // Mockup fix 36: the answer's $0.31 shows in the listener's spend.
-                    s.listener.listener_today_usd = 0.73;
-                    s.listener.recent.insert(
-                        0,
-                        recent(
-                            "15:52",
-                            "answered: musl in C014 (git_show, opus)",
-                            RecentKind::Answered,
-                        ),
-                    );
-                    s.status.spend_today_usd =
-                        s.listener.workers_today_usd + s.listener.listener_today_usd;
-                    // Task 15 (V67): the question and its answer ran on opus.
-                    tag_from(&mut s, first, &ask_model());
-                }
-                s
-            }
+            Screen::Ask | Screen::ModelPicker => ask_snapshot(screen)?,
             Screen::Plan | Screen::Spec | Screen::PlanReady | Screen::KickOff | Screen::Running => {
                 let ready = matches!(screen, Screen::PlanReady | Screen::KickOff);
                 let running = screen == Screen::Running;
@@ -325,6 +297,34 @@ impl Backend for FixtureBackend {
         self.subscribers.borrow_mut().push(tx);
         rx
     }
+}
+
+// Task 15: the ask and model picker screens, and answers to questions.
+/// The ask screen's chat with its ASK and the opus answer, or the model
+/// picker's chat before it.
+fn ask_snapshot(screen: Screen) -> Result<Snapshot, BackendError> {
+    let mut msgs = chat_messages();
+    let first = msgs.len();
+    if screen == Screen::Ask {
+        msgs.extend(ask_messages(first));
+    }
+    let mut s = with_messages("pr-3331", msgs)?;
+    if screen == Screen::Ask {
+        // Mockup fix 36: the answer's $0.31 shows in the listener's spend.
+        s.listener.listener_today_usd = 0.73;
+        s.listener.recent.insert(
+            0,
+            recent(
+                "15:52",
+                "answered: musl in C014 (git_show, opus)",
+                RecentKind::Answered,
+            ),
+        );
+        s.status.spend_today_usd = s.listener.workers_today_usd + s.listener.listener_today_usd;
+        // V67: the question and its answer ran on opus.
+        tag_from(&mut s, first, &ask_model());
+    }
+    Ok(s)
 }
 
 /// Whether `reply_to` names an ASK or an ALERT in the chat (Task 15).

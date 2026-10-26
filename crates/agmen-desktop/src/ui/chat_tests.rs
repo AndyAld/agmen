@@ -359,3 +359,21 @@ fn snoozed_alert_stays_snoozed_across_snapshots(cx: &mut TestAppContext) {
         [fresh.client.id]
     );
 }
+
+#[gpui::test]
+fn a_snapshot_reaches_the_composers_model_chip(cx: &mut TestAppContext) {
+    // Task 15: a new listener agent shows on the chip.
+    let (chat, cx) = open_with(cx, chat_snapshot());
+    let mut later = chat_snapshot();
+    later.listener.agent = "claude".into();
+    chat.update(cx, |chat, cx| {
+        chat.apply(Update::Snapshot(Box::new(later)), cx);
+    });
+    let chip = chat.read_with(cx, |chat, cx| {
+        chat.composer
+            .read(cx)
+            .model_choice()
+            .map(crate::backend::ModelChoice::label)
+    });
+    assert_eq!(chip.as_deref(), Some("claude · default"));
+}

@@ -4,15 +4,21 @@
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, ClickEvent, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce,
+    App, ClickEvent, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce,
     SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
 };
 
 use super::{ClickHandler, Color, Icon, IconSize, Label};
-use crate::appearance::Appearance;
+use crate::appearance::{Appearance, Theme};
 use crate::icons::UiIcon;
-use crate::ui::tokens::{ICON_SM, MENU_ROW_HEIGHT, RADIUS_MD, SPACE_8, SPACE_10};
+use crate::ui::tokens::{
+    ICON_SM, MENU_ROW_HEIGHT, RADIUS_MD, SPACE_8, SPACE_10, TINT_MENU_HOVER, tint,
+};
 
+// shortcut: Dropdown::menu_row (dropdown.rs) keeps its own row: it hugs its
+// label with 3/8 padding, may use the UI font, and draws no selected fill,
+// as the Settings frames show. Fold it into MenuRow with a compact variant
+// when a third menu needs a row or the Settings frames are compared again.
 #[derive(IntoElement)]
 pub(crate) struct MenuRow {
     id: SharedString,
@@ -70,10 +76,18 @@ impl MenuRow {
     }
 }
 
+/// The fill a row takes under the pointer: none on the checked row, which
+/// keeps its selected fill, and otherwise the selected fill at half
+/// strength. Zed's `element_hover` would vanish here: Andy's Gruvbox and the
+/// built-in theme give it the menu's own `elevated_surface`.
+fn hover_fill(theme: &Theme, checked: bool) -> Option<Hsla> {
+    (!checked).then(|| tint(theme.element_selected, TINT_MENU_HOVER))
+}
+
 impl RenderOnce for MenuRow {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = &cx.global::<Appearance>().theme;
-        let hover = theme.element_hover;
+        let hover = hover_fill(theme, self.checked);
         let selector = self.id.to_string();
         let check_selector = format!("{selector}:check");
         div()
@@ -88,8 +102,9 @@ impl RenderOnce for MenuRow {
             .px(SPACE_10)
             .rounded(RADIUS_MD)
             .when(self.checked, |this| this.bg(theme.element_selected))
-            // Zed's menus hover with the theme's element hover color.
-            .hover(move |style| style.bg(hover))
+            .when_some(hover, |this, hover| {
+                this.hover(move |style| style.bg(hover))
+            })
             .when_some(self.on_click, |this, handler| {
                 this.cursor_pointer().on_click(handler)
             })
@@ -121,6 +136,18 @@ mod tests {
     fn menu_row_is_26_tall(cx: &mut TestAppContext) {
         let size = rendered_size(cx, || MenuRow::new("row", "opus").into_any_element());
         assert_eq!(size.height, MENU_ROW_HEIGHT);
+    }
+
+    #[gpui::test]
+    fn hover_shows_on_the_menu_and_keeps_the_checked_fill(cx: &mut TestAppContext) {
+        // The built-in theme, like Andy's Gruvbox, has element_hover equal
+        // to the menu's elevated_surface.
+        crate::ui::test_support::init(cx);
+        let theme = cx.update(|cx| cx.global::<Appearance>().theme.clone());
+        assert_eq!(hover_fill(&theme, true), None);
+        let hover = hover_fill(&theme, false).expect("a hover fill");
+        assert_ne!(hover, theme.elevated_surface);
+        assert_ne!(hover, theme.element_selected);
     }
 
     #[gpui::test]

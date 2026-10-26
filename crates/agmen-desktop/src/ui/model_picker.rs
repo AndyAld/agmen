@@ -50,6 +50,24 @@ impl ModelMenu {
     /// Starts on the listener's own agent and configured model (fix 31).
     #[must_use]
     pub(crate) fn new(snapshot: &Snapshot) -> Self {
+        let listener = ModelChoice::configured(snapshot.listener.agent.clone());
+        let mut menu = Self {
+            groups: Rc::from([]),
+            headings: Rc::from([]),
+            standing: listener.clone(),
+            current: listener.clone(),
+            listener,
+            listener_handle: SharedString::default(),
+            open: false,
+        };
+        menu.refresh(snapshot);
+        menu
+    }
+
+    /// Takes a new snapshot's agents, models and listener. A choice the
+    /// picker still offers stays; the listener's old settings, or a model
+    /// no longer offered, become the new listener's settings.
+    pub(crate) fn refresh(&mut self, snapshot: &Snapshot) {
         let groups: Rc<[ModelGroup]> = snapshot
             .models
             .iter()
@@ -77,15 +95,26 @@ impl ModelMenu {
                 }
             })
             .collect();
-        let listener = ModelChoice::configured(snapshot.listener.agent.clone());
-        Self {
-            groups,
-            headings,
-            standing: listener.clone(),
-            current: listener.clone(),
-            listener,
-            listener_handle: snapshot.listener.handle.clone().into(),
-            open: false,
+        self.groups = groups;
+        self.headings = headings;
+        self.listener_handle = snapshot.listener.handle.clone().into();
+        let old = std::mem::replace(
+            &mut self.listener,
+            ModelChoice::configured(snapshot.listener.agent.clone()),
+        );
+        let stays =
+            |menu: &Self, choice: &ModelChoice| !choice.same_model(&old) && menu.offers(choice);
+        if !stays(self, &self.current) {
+            self.current = ModelChoice {
+                scope: self.current.scope,
+                ..self.listener.clone()
+            };
+        }
+        if !stays(self, &self.standing) {
+            self.standing = ModelChoice {
+                scope: self.standing.scope,
+                ..self.listener.clone()
+            };
         }
     }
 
@@ -106,6 +135,24 @@ impl ModelMenu {
         self.groups.iter().find(|group| group.agent == agent)
     }
 
+    /// Whether `group` lists a "configured model" row: an agent that lists
+    /// no models, and the listener's own agent, so its settings can be
+    /// picked again.
+    fn offers_configured(&self, group: &ModelGroup) -> bool {
+        group.models.is_empty() || group.agent == self.listener.agent
+    }
+
+    /// Whether the picker offers `choice`'s model and effort.
+    fn offers(&self, choice: &ModelChoice) -> bool {
+        self.group(&choice.agent).is_some_and(|group| {
+            let model = match &choice.model {
+                None => self.offers_configured(group),
+                Some(model) => group.models.contains(model),
+            };
+            model && choice.effort.is_none_or(|e| group.efforts.contains(&e))
+        })
+    }
+
     /// Does what a click in the picker asks.
     pub(crate) fn apply(&mut self, event: &PickerEvent) {
         match event {
@@ -122,6 +169,15 @@ impl ModelMenu {
     /// effort carries over within an agent and starts at the agent's
     /// default otherwise; an agent without levels gets none.
     fn pick(&mut self, agent: &str, model: Option<&str>) {
+        // The listener's configured model is its own settings, effort too.
+        if model.is_none() && agent == self.listener.agent {
+            self.current = ModelChoice {
+                scope: self.current.scope,
+                ..self.listener.clone()
+            };
+            self.keep_if_sticky();
+            return;
+        }
         let effort = self.group(agent).and_then(|group| {
             let kept = self
                 .current
@@ -290,7 +346,7 @@ impl ModelPicker {
                 .pb(SPACE_2)
                 .child(Label::new(heading.clone()).code().color(Color::Placeholder))
                 .into_any_element();
-            let configured = group.models.is_empty().then_some(None);
+            let configured = self.menu.offers_configured(group).then_some(None);
             let names = group.models.iter().map(|m| Some(m.as_str()));
             let rows = configured.into_iter().chain(names).map(|model| {
                 let id = format!(
@@ -367,14 +423,17 @@ impl ModelPicker {
         section
             .debug_selector(|| "model-picker:effort".into())
             .child(Self::title("Effort"))
+            // Node 3392 hugs its options; the column alone would stretch it.
             .child(
-                Segmented::new("model-picker:effort-level", options, selected)
-                    .code()
-                    .on_change(move |index, window, cx| {
-                        if let Some(level) = levels.get(index) {
-                            handler(PickerEvent::Effort(*level), window, cx);
-                        }
-                    }),
+                div().flex().child(
+                    Segmented::new("model-picker:effort-level", options, selected)
+                        .code()
+                        .on_change(move |index, window, cx| {
+                            if let Some(level) = levels.get(index) {
+                                handler(PickerEvent::Effort(*level), window, cx);
+                            }
+                        }),
+                ),
             )
             .child(
                 Label::new(effort_hint(&self.menu.groups))

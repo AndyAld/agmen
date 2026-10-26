@@ -67,12 +67,14 @@ impl ModelChoice {
     }
 
     /// The chip's and the message tag's text: "codex · default" for an
-    /// agent's configured model, "opus · high" for a model with an effort,
-    /// and the model alone for one without.
+    /// agent's configured model, "agy · high" for one with an effort,
+    /// "opus · high" for a model with an effort, and the model alone for
+    /// one without.
     #[must_use]
     pub(crate) fn label(&self) -> String {
         match (&self.model, self.effort) {
-            (None, _) => format!("{} · default", self.agent),
+            (None, None) => format!("{} · default", self.agent),
+            (None, Some(effort)) => format!("{} · {effort}", self.agent),
             (Some(model), Some(effort)) => format!("{model} · {effort}"),
             (Some(model), None) => model.clone(),
         }
@@ -128,6 +130,12 @@ mod tests {
     #[test]
     fn labels_name_the_model_and_effort() {
         assert_eq!(ModelChoice::configured("codex").label(), "codex · default");
+        // A configured model with a level names the level, as "agy · high".
+        let agy = ModelChoice {
+            effort: Some(Effort::High),
+            ..ModelChoice::configured("agy")
+        };
+        assert_eq!(agy.label(), "agy · high");
         let opus = ModelChoice {
             agent: "claude".into(),
             model: Some("opus".into()),

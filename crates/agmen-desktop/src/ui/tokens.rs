@@ -198,6 +198,9 @@ pub(crate) const MENU_SHADOW_BLUR: Pixels = px(24.);
 /// A selected segment, as the effort row's "high" (0x33, node 3397, and
 /// console.py `seg` for Settings).
 pub(crate) const TINT_SEGMENT: f32 = 51. / 255.;
+/// A picker row under the pointer: `element_selected` at half strength. The
+/// mockup draws no hover.
+pub(crate) const TINT_MENU_HOVER: f32 = 0.5;
 
 /// How strongly a diff line's fill shows `created` or `deleted` (the
 /// mockup draws OK and ERR at alpha 0x22).

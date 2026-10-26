@@ -191,19 +191,27 @@ impl Composer {
                 .update(cx, |input, cx| input.set_text(body, window, cx));
             return;
         }
+        let target = self.target_for(body);
+        // Task 15: the model choice is for the recipient; an @mention of
+        // another agent runs on that agent's own model.
+        let to_recipient = target.id == self.recipient.id;
         let draft = Draft {
-            to: vec![self.target_for(body).id.clone()],
+            to: vec![target.id.clone()],
             body: body.to_owned(),
             // shortcut: no reply target yet; Task 13's Reply button sets one.
             reply_to: None,
-            model: self.models.as_ref().and_then(ModelMenu::outgoing),
+            model: self
+                .models
+                .as_ref()
+                .filter(|_| to_recipient)
+                .and_then(ModelMenu::outgoing),
         };
         // The input cleared itself on Enter; a refused draft is not lost.
         // The caller shows why it was refused.
         if (self.on_send)(draft, window, cx).is_err() {
             self.input
                 .update(cx, |input, cx| input.set_text(body, window, cx));
-        } else if let Some(models) = &mut self.models {
+        } else if let Some(models) = self.models.as_mut().filter(|_| to_recipient) {
             // Task 15: a "this message" choice ends with the message.
             models.sent();
             cx.notify();
@@ -216,6 +224,14 @@ impl Composer {
     #[cfg(test)]
     pub(crate) fn model_choice(&self) -> Option<&crate::backend::ModelChoice> {
         self.models.as_ref().map(ModelMenu::current)
+    }
+
+    /// Takes a new snapshot's installed agents, models and listener.
+    pub(crate) fn set_snapshot(&mut self, snapshot: &Snapshot, cx: &mut Context<Self>) {
+        if let Some(models) = &mut self.models {
+            models.refresh(snapshot);
+            cx.notify();
+        }
     }
 
     /// Opens or closes the model picker.

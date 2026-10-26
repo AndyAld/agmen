@@ -325,6 +325,9 @@ impl ChatView {
                         let _effect = self.alerts.on_message(env, &me);
                     }
                 }
+                // Task 15: the model chip follows the new agents and listener.
+                self.composer
+                    .update(cx, |composer, cx| composer.set_snapshot(&snapshot, cx));
                 *snapshot
             }
         };

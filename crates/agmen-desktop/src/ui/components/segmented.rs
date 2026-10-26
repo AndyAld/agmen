@@ -33,8 +33,8 @@ impl std::fmt::Debug for Segmented {
 }
 
 impl Segmented {
-    /// `id` names the control; tests find option `i` as `"{id}:{i}"`, and its
-    /// label as `"{id}:{i}:label"`, with `debug_bounds`.
+    /// `id` names the control; tests find it as `"{id}"`, option `i` as
+    /// `"{id}:{i}"` and its label as `"{id}:{i}:label"`, with `debug_bounds`.
     #[must_use]
     pub(crate) fn new(
         id: impl Into<SharedString>,
@@ -73,6 +73,7 @@ impl RenderOnce for Segmented {
         let theme = &cx.global::<Appearance>().theme;
         let hover = theme.element_hover;
         let last = self.options.len().saturating_sub(1);
+        let root_selector = self.id.to_string();
         let segments = self.options.into_iter().enumerate().map(|(index, option)| {
             let selected = index == self.selected;
             let selector = format!("{}:{index}", self.id);
@@ -119,6 +120,7 @@ impl RenderOnce for Segmented {
                 }))
         });
         div()
+            .debug_selector(|| root_selector)
             .flex()
             .flex_none()
             .rounded(RADIUS_MD)

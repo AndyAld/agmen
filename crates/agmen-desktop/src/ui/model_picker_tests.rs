@@ -4,7 +4,7 @@ use std::rc::Rc;
 use gpui::{AppContext as _, Entity, Focusable as _, TestAppContext, VisualTestContext};
 
 use super::*;
-use crate::backend::{Draft, chat_snapshot};
+use crate::backend::{Draft, Snapshot, chat_snapshot};
 use crate::ui::composer::Composer;
 use crate::ui::test_support::{click, init, redraw};
 use crate::ui::text_input::bind_keys;
@@ -15,11 +15,18 @@ type Sent = Rc<RefCell<Vec<Draft>>>;
 /// A focused composer over the chat fixture (listener on codex) whose
 /// sends land in `Sent`, in a window tall enough for the picker above it.
 fn open_composer(cx: &mut TestAppContext) -> (Entity<Composer>, Sent, &mut VisualTestContext) {
+    open_composer_with(cx, chat_snapshot())
+}
+
+/// As `open_composer`, over `snapshot`.
+fn open_composer_with(
+    cx: &mut TestAppContext,
+    snapshot: Snapshot,
+) -> (Entity<Composer>, Sent, &mut VisualTestContext) {
     init(cx);
     cx.update(bind_keys);
     let sent = Sent::default();
     let sink = sent.clone();
-    let snapshot = chat_snapshot();
     let (host, cx) = cx.add_window_view(|window, cx| {
         window.set_rem_size(MOCKUP_REM);
         let composer = cx.new(|cx| {
@@ -97,6 +104,9 @@ fn effort_row_hidden_for_codex(cx: &mut TestAppContext) {
     );
     assert!(cx.debug_bounds("model-picker:effort").is_none());
     assert!(cx.debug_bounds("model-picker:scope:this").is_some());
+    // An agent with listed models offers only those unless it is the
+    // listener's.
+    assert!(cx.debug_bounds("model-picker:claude:default").is_none());
 
     click(cx, "model-picker:claude:opus");
     assert_eq!(chip(&composer, cx), "opus · high");
@@ -193,6 +203,97 @@ fn picker_opens_above_the_chip(cx: &mut TestAppContext) {
     let chip = cx.debug_bounds("composer:model").expect("the chip");
     assert!(picker.bottom() <= chip.top(), "{picker:?} over {chip:?}");
     assert_eq!(picker.left(), chip.left());
+}
+
+#[gpui::test]
+fn effort_levels_hug_their_options(cx: &mut TestAppContext) {
+    // Node 3392: the levels box ends at "max", not at the section's edge.
+    let (_, _, cx) = open_composer(cx);
+    click(cx, "composer:model");
+    click(cx, "model-picker:claude:opus");
+    click(cx, "composer:model");
+    let levels = cx
+        .debug_bounds("model-picker:effort-level")
+        .expect("levels");
+    let max = cx.debug_bounds("model-picker:effort-level:4").expect("max");
+    // The box's 1 px border sits outside the last option.
+    assert_eq!(levels.right(), max.right() + BORDER_WIDTH);
+}
+
+#[gpui::test]
+fn a_mention_carries_no_model_and_keeps_the_choice(cx: &mut TestAppContext) {
+    // The choice is for the listener; a message @mentioning another agent
+    // runs on that agent's own model and does not use the choice up.
+    let (composer, sent, cx) = open_composer(cx);
+    click(cx, "composer:model");
+    click(cx, "model-picker:claude:opus");
+    send(cx, "@andy/fx1 rebase");
+    assert_eq!(chip(&composer, cx), "opus · high");
+    send(cx, "why?");
+    let models: Vec<_> = sent.borrow().iter().map(|d| d.model.clone()).collect();
+    assert_eq!(models, [None, Some(opus(ChoiceScope::ThisMessage))]);
+}
+
+/// The chat fixture with the listener on claude.
+fn claude_listener() -> Snapshot {
+    let mut snapshot = chat_snapshot();
+    snapshot.listener.agent = "claude".into();
+    snapshot
+}
+
+#[gpui::test]
+fn picker_checks_the_listeners_own_model(cx: &mut TestAppContext) {
+    // An agent with listed models still offers the listener's configured
+    // model, checked when the chip shows it.
+    let (composer, sent, cx) = open_composer_with(cx, claude_listener());
+    assert_eq!(chip(&composer, cx), "claude · default");
+    click(cx, "composer:model");
+    assert!(
+        cx.debug_bounds("model-picker:claude:default:check")
+            .is_some()
+    );
+    click(cx, "model-picker:claude:sonnet");
+    click(cx, "composer:model");
+    click(cx, "model-picker:scope:sticky");
+    // Back to the listener's own model, which a message then runs on.
+    click(cx, "model-picker:claude:default");
+    assert_eq!(chip(&composer, cx), "claude · default");
+    send(cx, "and now?");
+    let models: Vec<_> = sent.borrow().iter().map(|d| d.model.clone()).collect();
+    assert_eq!(models, [None]);
+}
+
+#[test]
+fn a_new_snapshot_moves_the_menu_to_its_listener() {
+    let mut menu = ModelMenu::new(&chat_snapshot());
+    // The person's choice survives a snapshot that still offers it.
+    menu.apply(&PickerEvent::Model {
+        agent: "claude".into(),
+        model: Some("opus".into()),
+    });
+    menu.apply(&PickerEvent::Scope(ChoiceScope::UntilChanged));
+    menu.refresh(&chat_snapshot());
+    assert_eq!(menu.current().label(), "opus · high");
+
+    // A new listener agent brings its own model; the sticky opus stays.
+    menu.refresh(&claude_listener());
+    assert_eq!(menu.current().label(), "opus · high");
+    menu.apply(&PickerEvent::Scope(ChoiceScope::ThisMessage));
+    menu.sent();
+    assert_eq!(menu.current().label(), "claude · default");
+    assert_eq!(menu.outgoing(), None);
+
+    // A choice the snapshot no longer offers goes back to the listener's.
+    menu.apply(&PickerEvent::Model {
+        agent: "claude".into(),
+        model: Some("haiku".into()),
+    });
+    let mut fewer = claude_listener();
+    for group in &mut fewer.models {
+        group.models.retain(|m| m != "haiku");
+    }
+    menu.refresh(&fewer);
+    assert_eq!(menu.current().label(), "claude · default");
 }
 
 #[test]
