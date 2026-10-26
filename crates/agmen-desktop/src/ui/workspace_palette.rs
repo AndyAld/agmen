@@ -10,7 +10,6 @@ use gpui::{
 };
 
 use super::Workspace;
-use crate::backend::AgentFound;
 use crate::keymap::{
     self, Scope, SpawnWorker, SpawnWorkerWith, ToggleAgentsPanel, ToggleCommandPalette,
     ToggleRolesPanel, ToggleVimMode,
@@ -19,6 +18,7 @@ use crate::ui::left_dock::LeftDockTab;
 use crate::ui::palette::{CommandPalette, PaletteEntry, PaletteEvent};
 use crate::ui::pane::TabItem;
 use crate::ui::settings_view::SettingsSources;
+use crate::ui::switch_menu;
 use crate::ui::tokens::PALETTE_TOP;
 
 /// The query ⌘N and "spawn worker…" open the palette on.
@@ -58,7 +58,7 @@ impl Workspace {
 
     /// The rows the focused view can run: every command whose action a
     /// view on the focus path handles or the app handles, with a spawn row
-    /// per ready agent after "spawn worker…". Zed lists only available
+    /// per installed agent after "spawn worker…". Zed lists only available
     /// actions too, so take-over's keys show once its view handles them.
     fn palette_entries(&self, window: &Window, cx: &Context<Self>) -> Vec<PaletteEntry> {
         let table = keymap::table();
@@ -79,19 +79,21 @@ impl Workspace {
         entries
     }
 
-    /// `agmen: spawn worker with <agent>` for each agent that can run a
-    /// worker: not a missing one, nor an outdated one (agy 1.1.7 needs
-    /// 1.1.15 for JSON). The listener's agent comes first, as the mockup's
-    /// codex row (node 11489), then the others in the order the backend
-    /// lists them.
+    /// `agmen: spawn worker with <agent>` for each installed agent
+    /// (desktop.md:380); a missing one has no row (fix 28). An agent that
+    /// cannot run a worker yet, such as agy 1.1.7 (1.1.15 is needed for
+    /// JSON), keeps its row with the switch menu's note as its hint, and
+    /// the backend refuses its spawn with that text (C261). The listener's
+    /// agent comes first, as the mockup's codex row (node 11489), then the
+    /// others in the order the backend lists them.
     fn spawn_entries(&self) -> impl Iterator<Item = PaletteEntry> + '_ {
         let listener = self.snapshot.listener.agent.as_str();
-        let ready = self
+        let installed = self
             .snapshot
             .installed_agents
             .iter()
-            .filter(|agent| matches!(agent.found, AgentFound::Ready { .. }));
-        let (first, rest) = (ready.clone(), ready);
+            .filter(|agent| agent.is_installed());
+        let (first, rest) = (installed.clone(), installed);
         first
             .filter(move |agent| agent.name == listener)
             .chain(rest.filter(move |agent| agent.name != listener))
@@ -102,6 +104,7 @@ impl Workspace {
                         agent: agent.name.clone().into(),
                     }),
                 )
+                .note(switch_menu::note(agent))
             })
     }
 

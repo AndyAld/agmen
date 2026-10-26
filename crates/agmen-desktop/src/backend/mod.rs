@@ -49,6 +49,10 @@ pub(crate) enum BackendError {
     NoSuchChange(String),
     #[error("{0} cannot be done from this console yet")]
     Unsupported(&'static str),
+    /// The agent is missing, outdated or of unknown version;
+    /// `why` is [`InstalledAgent::not_ready`]'s text.
+    #[error("{agent} cannot run a worker: {why}")]
+    AgentNotReady { agent: String, why: String },
     #[error("the built-in fixture is broken: {0}")]
     BadFixture(String),
 }

@@ -53,6 +53,44 @@ fn switch_menu_marks_outdated_and_missing(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn switch_menu_offers_an_agent_whose_version_is_unknown(cx: &mut TestAppContext) {
+    // C261: `--version` timed out or printed nothing parseable. The agent is
+    // on PATH, so a session can switch to it, but the row says why it cannot
+    // run a worker and has no version to show.
+    let with_unknown_agy = || {
+        let mut agents = agents();
+        for agent in &mut agents {
+            if agent.name == "agy" {
+                agent.found = crate::backend::AgentFound::VersionUnknown;
+            }
+        }
+        agents
+    };
+    let agy = with_unknown_agy()
+        .into_iter()
+        .find(|a| a.name == "agy")
+        .unwrap();
+    assert_eq!(
+        note(&agy),
+        Some(("could not read its version".into(), Color::Warning))
+    );
+    assert_eq!(row_button(&agy), None);
+    let switched: std::rc::Rc<std::cell::RefCell<Vec<String>>> = std::rc::Rc::default();
+    let sink = switched.clone();
+    let cx = draw(cx, move || {
+        let sink = sink.clone();
+        SwitchMenu::new(with_unknown_agy(), "claude", "andy/fx1")
+            .on_switch(move |agent, _, _| sink.borrow_mut().push(agent))
+            .into_any_element()
+    });
+    assert!(cx.debug_bounds("switch-menu:agy:note").is_some());
+    assert!(cx.debug_bounds("switch-menu:agy:version").is_none());
+    assert!(cx.debug_bounds("switch-menu:agy:update").is_none());
+    crate::ui::test_support::click(cx, "switch-menu:agy");
+    assert_eq!(*switched.borrow(), ["agy"]);
+}
+
+#[gpui::test]
 fn switch_menu_uses_the_menu_frame(cx: &mut TestAppContext) {
     // V118: the switch menu draws the frame Dropdown and the scope chip do.
     let cx = draw(cx, || {

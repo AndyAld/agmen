@@ -59,17 +59,18 @@ fn cmd_shift_p_lists_what_the_workspace_can_run(cx: &mut TestAppContext) {
     redraw(cx);
     assert!(cx.debug_bounds("command-palette").is_some());
     let rows = shown(&workspace, cx).unwrap();
-    // One spawn row per ready agent: the listener's codex first, as the
-    // mockup's first row (node 11489), then the others in installed order.
-    // grok is not installed (fix 28) and agy 1.1.7 is older than the 1.1.15
-    // agmen needs for JSON, so neither can run a worker.
+    // One spawn row per installed agent (desktop.md:380, C261): the
+    // listener's codex first, as the mockup's first row (node 11489), then
+    // the others in installed order, outdated agy included. grok is not
+    // installed (fix 28).
     assert_eq!(rows[0], "agmen: spawn worker\u{2026}");
-    let spawn: Vec<&str> = rows[1..5].iter().map(String::as_str).collect();
+    let spawn: Vec<&str> = rows[1..6].iter().map(String::as_str).collect();
     assert_eq!(
         spawn,
-        ["codex", "claude", "opencode", "gemini"].map(|a| format!("agmen: spawn worker with {a}"))
+        ["codex", "claude", "opencode", "gemini", "agy"]
+            .map(|a| format!("agmen: spawn worker with {a}"))
     );
-    assert!(!rows.iter().any(|r| r.contains("grok") || r.contains("agy")));
+    assert!(!rows.iter().any(|r| r.contains("grok")));
     for label in [
         "workspace: toggle left dock",
         "agents panel: toggle focus",
@@ -169,7 +170,7 @@ fn spawn_row_opens_the_delegated_flow_in_the_chat(cx: &mut TestAppContext) {
             .all(|r| r.starts_with("agmen: spawn worker with ")),
         "{rows:?}"
     );
-    assert_eq!(rows.len(), 4, "{rows:?}");
+    assert_eq!(rows.len(), 5, "{rows:?}");
     // The first row is the listener's codex (node 11489).
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
@@ -270,12 +271,68 @@ fn palette_screen_opens_with_spawn_typed(cx: &mut TestAppContext) {
     assert_eq!(row.size, gpui::size(gpui::px(590.), gpui::px(30.)));
     assert_eq!(row.origin.x - bounds.origin.x, gpui::px(5.));
     assert_eq!(row.origin.y - bounds.origin.y, gpui::px(1. + 39. + 4.));
-    // "spawn worker…" and four agents: fix 28 drops grok, the outdated agy
-    // has no row, and fix 30 drops the rows that do not match.
-    let last = cx.debug_bounds("palette-row:4").unwrap();
-    assert!(cx.debug_bounds("palette-row:5").is_none());
+    // "spawn worker…" and five agents: fix 28 drops grok, the outdated agy
+    // keeps its row (C261), and fix 30 drops the rows that do not match.
+    let last = cx.debug_bounds("palette-row:5").unwrap();
+    assert!(cx.debug_bounds("palette-row:6").is_none());
     assert_eq!(
         bounds.size.height,
         last.origin.y + last.size.height + gpui::px(4. + 1.) - bounds.origin.y
     );
+}
+
+#[gpui::test]
+fn an_outdated_agents_spawn_row_says_why_and_is_refused(cx: &mut TestAppContext) {
+    // C261: typing "agy" finds its row, which carries the switch menu's
+    // note, and the backend refuses the spawn with the same text above the
+    // chat's composer.
+    let (workspace, backend, cx) = open_screen(cx, Screen::Chat);
+    click(cx, "pane-0:tab-1");
+    let before = backend.snapshot().messages.len();
+    cx.simulate_keystrokes("cmd-n");
+    cx.simulate_input("agy");
+    redraw(cx);
+    let rows = shown(&workspace, cx).unwrap();
+    assert_eq!(rows, ["agmen: spawn worker with agy"]);
+    let agy = backend
+        .snapshot()
+        .installed_agents
+        .into_iter()
+        .find(|a| a.name == "agy")
+        .unwrap();
+    let (note, _) = crate::ui::switch_menu::note(&agy).unwrap();
+    assert_eq!(note, "update to 1.1.15+ for JSON");
+    assert!(cx.debug_bounds("palette-row:0:note").is_some());
+    let entries = workspace.update_in(cx, |w, window, cx| w.palette_entries(window, cx));
+    let entry = entries
+        .iter()
+        .find(|e| e.label.as_ref() == "agmen: spawn worker with agy")
+        .unwrap();
+    assert_eq!(
+        entry.note.as_ref().map(|(t, _)| t.as_ref()),
+        Some(note.as_str())
+    );
+    // The ready agents' rows carry no note.
+    assert!(
+        entries
+            .iter()
+            .filter(|e| e.label.starts_with("agmen: spawn worker with "))
+            .filter(|e| e.note.is_some())
+            .all(|e| e.label.ends_with(" agy"))
+    );
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    redraw(cx);
+    assert_eq!(backend.snapshot().messages.len(), before);
+    let error = workspace.read_with(cx, |w, cx| {
+        w.pane_group
+            .read(cx)
+            .chat()
+            .and_then(|chat| chat.read(cx).error().map(str::to_owned))
+    });
+    assert_eq!(
+        error.as_deref(),
+        Some("agy cannot run a worker: update to 1.1.15+ for JSON")
+    );
+    assert!(cx.debug_bounds("chat:error").is_some());
 }

@@ -11,7 +11,9 @@ use gpui::{
     uniform_list,
 };
 
-use super::components::{Card, Color, HighlightedLabel, Icon, Indent, KeyHint, Label, ListItem};
+use super::components::{
+    Card, Color, HighlightedLabel, Icon, Indent, KeyHint, Label, LabelSize, ListItem,
+};
 use super::palette_filter::{Match, filter};
 use super::text_input::TextInput;
 use super::tokens::{
@@ -32,6 +34,9 @@ pub(crate) struct PaletteEntry {
     pub(crate) action: Box<dyn Action>,
     /// The key hint, as `⌘⇧P`.
     pub(crate) keys: Option<SharedString>,
+    /// Why the row's action will be refused, drawn where a key hint goes:
+    /// an outdated agent's spawn row says what to update (C261).
+    pub(crate) note: Option<(SharedString, Color)>,
 }
 
 impl PaletteEntry {
@@ -41,12 +46,19 @@ impl PaletteEntry {
             label: label.into(),
             action,
             keys: None,
+            note: None,
         }
     }
 
     #[must_use]
     pub(crate) fn keys(mut self, keys: Option<SharedString>) -> Self {
         self.keys = keys;
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn note(mut self, note: Option<(impl Into<SharedString>, Color)>) -> Self {
+        self.note = note.map(|(text, color)| (text.into(), color));
         self
     }
 }
@@ -57,6 +69,7 @@ impl std::fmt::Debug for PaletteEntry {
             .field("label", &self.label)
             .field("action", &self.action.name())
             .field("keys", &self.keys)
+            .field("note", &self.note)
             .finish()
     }
 }
@@ -239,6 +252,13 @@ impl CommandPalette {
         .child(HighlightedLabel::new(entry.label.clone(), m.ranges.clone()))
         .when_some(entry.keys.clone(), |row, keys| {
             row.end(KeyHint::new(keys).color(Color::Placeholder))
+        })
+        .when_some(entry.note.clone(), |row, (note, color)| {
+            row.end(
+                div()
+                    .debug_selector(move || format!("palette-row:{ix}:note"))
+                    .child(Label::new(note).size(LabelSize::Small).color(color)),
+            )
         })
         .into_any_element()
     }

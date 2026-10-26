@@ -369,6 +369,9 @@ impl TerminalView {
             }) => {
                 Some(format!("{name} is still {version}; agmen needs {minimum} or later.").into())
             }
+            Some(AgentFound::VersionUnknown) => {
+                Some(format!("{name}'s version still could not be read.").into())
+            }
             Some(AgentFound::Missing) | None => {
                 Some(format!("{name} is still not on PATH.").into())
             }

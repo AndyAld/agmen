@@ -84,9 +84,16 @@ impl ModelMenu {
     /// picker still offers stays; the listener's old settings, or a model
     /// no longer offered, become the new listener's settings.
     pub(crate) fn refresh(&mut self, snapshot: &Snapshot) {
+        let installed = |agent: &str| {
+            snapshot
+                .installed_agents
+                .iter()
+                .any(|a| a.name == agent && a.is_installed())
+        };
         let groups: Rc<[ModelGroup]> = snapshot
             .models
             .iter()
+            .filter(|group| installed(&group.agent))
             .map(|group| ModelGroup {
                 models: group
                     .models

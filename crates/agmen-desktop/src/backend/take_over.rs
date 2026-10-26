@@ -149,6 +149,16 @@ pub(crate) enum AgentFound {
         minimum: String,
         why: String,
     },
+    /// On PATH, but `--version` timed out or printed nothing agmen could
+    /// read, so agmen cannot tell whether it is new enough.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "FixtureBackend has no such agent; agmend's version probe makes it"
+        )
+    )]
+    VersionUnknown,
     Missing,
 }
 
@@ -179,10 +189,28 @@ pub(crate) struct InstalledAgent {
 }
 
 impl InstalledAgent {
-    /// Whether the agent is on this machine at all, new enough or not.
+    /// Whether the agent is on this machine at all, new enough or not: the
+    /// one rule for listing it. The palette shows its spawn row, the switch
+    /// menu lets a session switch to it and the model picker shows its
+    /// models; a missing agent is in none of them.
     #[must_use]
     pub(crate) fn is_installed(&self) -> bool {
         self.found != AgentFound::Missing
+    }
+
+    /// Why agmen cannot run it as a worker, as the switch menu and the
+    /// palette show it and the backend refuses its spawn; `None` when it
+    /// is ready.
+    #[must_use]
+    pub(crate) fn not_ready(&self) -> Option<String> {
+        match &self.found {
+            AgentFound::Ready { .. } => None,
+            AgentFound::Outdated { minimum, why, .. } => {
+                Some(format!("update to {minimum}+ for {why}"))
+            }
+            AgentFound::VersionUnknown => Some("could not read its version".into()),
+            AgentFound::Missing => Some("not installed".into()),
+        }
     }
 
     /// What `--version` printed; `None` when it is not on PATH.
@@ -190,7 +218,7 @@ impl InstalledAgent {
     pub(crate) fn version(&self) -> Option<&str> {
         match &self.found {
             AgentFound::Ready { version } | AgentFound::Outdated { version, .. } => Some(version),
-            AgentFound::Missing => None,
+            AgentFound::VersionUnknown | AgentFound::Missing => None,
         }
     }
 }

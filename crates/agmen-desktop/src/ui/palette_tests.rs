@@ -202,3 +202,30 @@ fn the_query_is_14_px_one_step_above_the_rows(cx: &mut TestAppContext) {
         "{drawn:?} against {query:?}"
     );
 }
+
+#[gpui::test]
+fn a_row_with_a_note_draws_it_at_the_end(cx: &mut TestAppContext) {
+    // C261: an outdated agent's spawn row says what to update.
+    init(cx);
+    let (_, cx) = cx.add_window_view(|window, cx| {
+        let entries = vec![
+            PaletteEntry::new("agmen: quit", Box::new(Quit)),
+            PaletteEntry::new(
+                "agmen: spawn worker with agy",
+                Box::new(SpawnWorkerWith {
+                    agent: "agy".into(),
+                }),
+            )
+            .note(Some(("update to 1.1.15+ for JSON", Color::Warning))),
+        ];
+        CommandPalette::new(entries, window, cx)
+    });
+    redraw(cx);
+    assert!(cx.debug_bounds("palette-row:0:note").is_none());
+    let row = cx.debug_bounds("palette-row:1").unwrap();
+    let note = cx
+        .debug_bounds("palette-row:1:note")
+        .expect("the agy row's note");
+    assert!(row.contains(&note.center()), "{note:?} in {row:?}");
+    assert!(note.center().x > row.center().x, "at the row's end");
+}
