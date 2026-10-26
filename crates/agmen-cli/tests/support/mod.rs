@@ -23,7 +23,7 @@ use std::process::{Command, Output};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use agmen_client::{IdentityFile, TokenKey, TokenStore};
-use agmen_hub::{Config, Hub, Messaging, Role, SeededHuman};
+use agmen_hub::{Config, Hub, Messaging, MqttConfig, Role, SeededHuman};
 use agmen_proto::{IdentityId, Timestamp, Topics};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{AssertSqlSafe, PgPool};
@@ -127,8 +127,28 @@ pub struct Ctx {
     /// The hub's base URL.
     pub base: Url,
     pub topics: Topics,
-    _messaging: Option<Messaging>,
+    messaging: Option<Messaging>,
+    mqtt: MqttConfig,
     server: JoinHandle<()>,
+}
+
+impl Ctx {
+    /// Starts or stops the hub's messaging. Stopped, it reads nothing from
+    /// the broker, so a client's publish stays in its outbox.
+    pub async fn set_ingest(&mut self, ingest: Ingest) {
+        // Stopped first: two connections with one client id take over
+        // each other's session.
+        self.messaging = None;
+        self.messaging = match ingest {
+            Ingest::On => Some(
+                self.hub
+                    .start_messaging(&self.mqtt)
+                    .await
+                    .expect("start messaging"),
+            ),
+            Ingest::Off => None,
+        };
+    }
 }
 
 impl Drop for Ctx {
@@ -180,22 +200,16 @@ where
     let hub = Hub::connect(&config).await.expect("start the hub");
     let router = hub.router();
     let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-    let messaging = match ingest {
-        Ingest::On => Some(
-            hub.start_messaging(&config.mqtt)
-                .await
-                .expect("start messaging"),
-        ),
-        Ingest::Off => None,
-    };
     let topics = hub.seed_project().await.expect("seed a project");
-    let ctx = Ctx {
+    let mut ctx = Ctx {
         hub,
         base,
         topics: topics.clone(),
-        _messaging: messaging,
+        messaging: None,
+        mqtt: config.mqtt.clone(),
         server,
     };
+    ctx.set_ingest(ingest).await;
     // The body owns the hub's messaging, so the hub publishes nothing once
     // it has ended.
     let outcome = tokio::spawn(body(ctx)).await;

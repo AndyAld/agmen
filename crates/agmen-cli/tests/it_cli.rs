@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use agmen_client::{ClientEvent, HubClient, TokenKey, find_identity};
 use agmen_hub::Role;
-use agmen_proto::{Payload, StampedEnvelope, Stream};
+use agmen_proto::{ItemKey, Payload, StampedEnvelope, Stream};
 use support::{Home, Ingest, Member, WAIT, Worktree, assert_exit, run, stderr, stdout};
 use tokio::io::{AsyncBufReadExt as _, BufReader};
 use tokio::process::{Child, ChildStdout};
@@ -46,6 +46,11 @@ impl Lines {
 
 /// The feed as `who` reads it through the hub's replay API.
 async fn feed(ctx_base: &url::Url, who: &Member) -> Vec<StampedEnvelope> {
+    stream(ctx_base, who, &Stream::Feed).await
+}
+
+/// `who`'s first page of `stream`.
+async fn stream(ctx_base: &url::Url, who: &Member, stream: &Stream) -> Vec<StampedEnvelope> {
     let token = who
         .home
         .tokens()
@@ -59,7 +64,7 @@ async fn feed(ctx_base: &url::Url, who: &Member) -> Vec<StampedEnvelope> {
         token,
     )
     .unwrap();
-    hub.page(&Stream::Feed, 0).await.unwrap().messages
+    hub.page(stream, 0).await.unwrap().messages
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -239,6 +244,47 @@ async fn it_post_queued_exit_5() {
     .await;
 }
 
+/// A CLAIM the hub records only after the command gave up waiting is still
+/// in `claims.db`: HEARTBEAT renews it and DONE diffs from it.
+#[tokio::test(flavor = "multi_thread")]
+async fn it_claim_granted_after_the_wait() {
+    run(Ingest::On, |mut ctx| async move {
+        let sol = ctx.member(Role::Member, "sol", "agent").await;
+        assert_exit(&sol.run(&["found", "the build is slow"]).await, 0);
+
+        ctx.set_ingest(Ingest::Off).await;
+        let out = sol.run(&["claim", "B-1", "--wait", "1"]).await;
+        assert_exit(&out, 5);
+        assert!(stdout(&out).starts_with("queued id="), "{}", stdout(&out));
+
+        // The next command sends the queued CLAIM again before its own
+        // message, so the hub grants it first.
+        ctx.set_ingest(Ingest::On).await;
+        let out = sol.run(&["heartbeat"]).await;
+        assert_exit(&out, 0);
+        let inbox = stream(&ctx.base, &sol, &Stream::Inbox(sol.identity.identity_id.clone())).await;
+        let renewed: Vec<&[ItemKey]> = inbox
+            .iter()
+            .filter_map(|message| match &message.client.payload {
+                Payload::Heartbeat { items } => Some(items.as_slice()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(renewed, [["B-1".parse::<ItemKey>().unwrap()]], "{inbox:?}");
+        assert!(
+            inbox
+                .iter()
+                .any(|message| matches!(&message.client.payload, Payload::Grant { item, .. } if item.as_str() == "B-1")),
+            "the queued CLAIM was granted: {inbox:?}"
+        );
+
+        let out = sol.run(&["done", "B-1", "--commit", "HEAD"]).await;
+        assert_exit(&out, 0);
+        assert!(stdout(&out).contains("done B-1"), "{}", stdout(&out));
+    })
+    .await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn it_watch_json_lines() {
     run(Ingest::On, |ctx| async move {
@@ -402,6 +448,10 @@ async fn it_claim_and_done_fill_changes() {
             "{}",
             stderr(&out)
         );
+        // ...and leaves nothing in claims.db for HEARTBEAT to renew.
+        let out = sol.run(&["heartbeat"]).await;
+        assert_exit(&out, 0);
+        assert_eq!(stdout(&out).trim(), "no claims to renew");
     })
     .await;
 }

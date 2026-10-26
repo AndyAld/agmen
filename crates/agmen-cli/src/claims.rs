@@ -54,10 +54,12 @@ impl Claims {
         Ok(Self { conn, path })
     }
 
-    /// Records that `item` was granted with `base` checked out. A claim
-    /// already recorded (a renewed grant) keeps its first base.
-    pub(crate) fn record(&self, item: &ItemKey, base: &GitSha) -> Result<()> {
-        self.conn
+    /// Records that `item` is claimed with `base` checked out, and returns
+    /// whether it added the row. A claim already recorded (a renewed grant)
+    /// keeps its first base.
+    pub(crate) fn record(&self, item: &ItemKey, base: &GitSha) -> Result<bool> {
+        let added = self
+            .conn
             .execute(
                 "INSERT INTO claims (item, base_sha, claimed_at_ms) VALUES (?1, ?2, ?3)
                  ON CONFLICT (item) DO NOTHING",
@@ -68,7 +70,7 @@ impl Claims {
                 ],
             )
             .with_context(|| format!("recording the claim of {item} in {}", self.path.display()))?;
-        Ok(())
+        Ok(added == 1)
     }
 
     /// The commit `item`'s claim started from, if it is recorded.
@@ -140,9 +142,9 @@ mod tests {
         let (b1, b2): (ItemKey, ItemKey) = ("B-1".parse().unwrap(), "B-2".parse().unwrap());
         let (first, second): (GitSha, GitSha) =
             ("aaaaaaa".parse().unwrap(), "bbbbbbb".parse().unwrap());
-        claims.record(&b1, &first).unwrap();
-        claims.record(&b1, &second).unwrap();
-        claims.record(&b2, &second).unwrap();
+        assert!(claims.record(&b1, &first).unwrap(), "added");
+        assert!(!claims.record(&b1, &second).unwrap(), "kept the first");
+        assert!(claims.record(&b2, &second).unwrap());
         assert_eq!(claims.base(&b1).unwrap(), Some(first));
         assert_eq!(claims.items().unwrap(), [b1.clone(), b2.clone()]);
         claims.remove(&b1).unwrap();

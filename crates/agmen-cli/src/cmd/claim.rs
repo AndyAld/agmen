@@ -1,6 +1,7 @@
 //! `agmen claim`, `release`, `heartbeat` and `done`: the claims this
-//! worktree's identity holds. A GRANT records the commit checked out at
-//! that moment in `claims.db`; DONE diffs from it.
+//! worktree's identity holds. A CLAIM records the commit checked out at
+//! that moment in `claims.db` (and a DENY removes it again); DONE diffs
+//! from it.
 
 use agmen_proto::{ClientEnvelope, ItemKey, Payload, Timestamp};
 use anyhow::{Context as _, Result, bail};
@@ -68,9 +69,11 @@ impl ClaimAnswer {
     }
 }
 
-/// Claims `item` through `via` and reads the hub's answer. A GRANT, or no
-/// answer found, records the commit checked out now in `claims.db`, so
-/// DONE can diff from it.
+/// Claims `item` through `via` and reads the hub's answer. The commit
+/// checked out now is recorded in `claims.db` before the CLAIM goes out, so
+/// DONE can diff from it and HEARTBEAT renews it even when the GRANT comes
+/// after the wait. A row this call added is removed again on DENY or a
+/// final rejection.
 ///
 /// # Errors
 ///
@@ -90,6 +93,35 @@ pub(crate) async fn claim_item(
             .checked_add(CLAIM_VALID)
             .context("the clock is out of range")?,
     );
+    let key = item.clone();
+    let added = with_claims(agent, move |claims| claims.record(&key, &base)).await?;
+    let err = match claim_answer(agent, via, env).await {
+        Ok((recorded, answer)) => {
+            if matches!(answer, ClaimAnswer::Denied { .. }) {
+                forget_added(agent, added, item).await?;
+            }
+            return Ok((recorded, answer));
+        }
+        Err(err) => err,
+    };
+    // Queued, or failed in a way that may still deliver it: the GRANT may
+    // come later, so the row stays. A HEARTBEAT for an item the identity
+    // does not hold changes nothing at the hub.
+    let rejected = err
+        .downcast_ref::<Fail>()
+        .is_some_and(|fail| fail.code == Code::Rejected);
+    if rejected {
+        forget_added(agent, added, item).await?;
+    }
+    Err(err)
+}
+
+/// Sends the CLAIM `env` through `via` and reads the hub's answer.
+async fn claim_answer(
+    agent: &Agent,
+    via: Via<'_>,
+    env: ClientEnvelope,
+) -> Result<(Recorded, ClaimAnswer)> {
     let recorded = agent.send(via, env).await?;
     let answer = match agent.hub_answer(&recorded).await?.map(|m| m.client) {
         Some(answer) => match answer.payload {
@@ -108,10 +140,16 @@ pub(crate) async fn claim_item(
         // inbox.
         None => ClaimAnswer::NotFound,
     };
-    if !matches!(answer, ClaimAnswer::Denied { .. }) {
-        with_claims(agent, move |claims| claims.record(&item, &base)).await?;
-    }
     Ok((recorded, answer))
+}
+
+/// Removes `item` from `claims.db` when this claim added it: a row from an
+/// earlier GRANT stays.
+async fn forget_added(agent: &Agent, added: bool, item: ItemKey) -> Result<()> {
+    if added {
+        with_claims(agent, move |claims| claims.remove(&item)).await?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Args)]
