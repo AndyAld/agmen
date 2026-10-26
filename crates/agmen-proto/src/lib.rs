@@ -43,7 +43,8 @@ mod topics;
 mod verbs;
 
 pub use envelope::{
-    ClientEnvelope, IdentityKind, MAX_ENVELOPE_BYTES, Ref, RefKind, StampedEnvelope, validate,
+    ClientEnvelope, IdentityKind, MAX_ENVELOPE_BYTES, MAX_HELLO_FIELD_BYTES, Ref, RefKind,
+    StampedEnvelope, validate,
 };
 pub use error::ProtoError;
 pub use ids::{

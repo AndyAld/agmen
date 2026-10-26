@@ -333,6 +333,30 @@ fn client_envelope_rejects_unknown_verb() {
 }
 
 #[test]
+fn validate_bounds_hello_fields() {
+    let hello = |client: &str, agent: Option<&str>, model: Option<&str>, looking: Option<&str>| {
+        envelope(Payload::Hello {
+            client: client.to_owned(),
+            agent: agent.map(str::to_owned),
+            model: model.map(str::to_owned),
+            looking_at: looking.map(str::to_owned),
+        })
+    };
+    let at_limit = "m".repeat(MAX_HELLO_FIELD_BYTES);
+    let over = "m".repeat(MAX_HELLO_FIELD_BYTES + 1);
+    let fine = hello(&at_limit, Some(&at_limit), Some(&at_limit), Some(&at_limit));
+    assert_eq!(validate(&fine, now()), Ok(()));
+    for env in [
+        hello(&over, None, None, None),
+        hello("x", Some(&over), None, None),
+        hello("x", None, Some(&"m".repeat(50_000)), None),
+        hello("x", None, None, Some(&over)),
+    ] {
+        assert_eq!(validate(&env, now()), Err(NackReason::Schema));
+    }
+}
+
+#[test]
 fn validate_rejects_unknown_payload() {
     let env = envelope(Payload::Unknown {
         verb: "WAVE".to_owned(),

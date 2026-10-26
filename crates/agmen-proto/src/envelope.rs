@@ -19,6 +19,11 @@ use crate::verbs::{Payload, Verb};
 /// The largest raw envelope the hub parses, in bytes (protocol section 8).
 pub const MAX_ENVELOPE_BYTES: usize = 64 * 1024;
 
+/// The longest HELLO `client`, `agent`, `model` or `looking_at`, in bytes.
+/// The hub copies these into the retained roster, which must stay under
+/// the broker's packet limit.
+pub const MAX_HELLO_FIELD_BYTES: usize = 128;
+
 /// The most DM or ASK recipients, and the most identity mentions, in one message.
 const MAX_ADDRESSEES: usize = 8;
 
@@ -300,8 +305,9 @@ impl WireClient {
 /// It checks the verb (`Payload::Unknown` is `schema`), the version, `to`
 /// (1 to 8 recipients on DM, 0 to 8 on ASK, none elsewhere),
 /// `reply_to` on the verbs that answer something, `valid_until` on CLAIM
-/// with a 120 s skew allowance, and `mentions` (only on FYI, ASK, ANSWER and
-/// ALERT, at most 8 identities). The body limit holds by construction of
+/// with a 120 s skew allowance, `mentions` (only on FYI, ASK, ANSWER and
+/// ALERT, at most 8 identities), and HELLO's `client`, `agent`, `model` and
+/// `looking_at` (each at most [`MAX_HELLO_FIELD_BYTES`]). The body limit holds by construction of
 /// [`Body`]. Which kinds may use group, lane and role mentions, and who may
 /// send which verb, depend on the sender and are the hub's checks.
 ///
@@ -357,6 +363,24 @@ pub fn validate(env: &ClientEnvelope, hub_now: Timestamp) -> Result<(), NackReas
         return Err(NackReason::Schema);
     }
     if verb == Verb::Claim && env.valid_until.is_none() {
+        return Err(NackReason::Schema);
+    }
+    if let Payload::Hello {
+        client,
+        agent,
+        model,
+        looking_at,
+    } = &env.payload
+        && [
+            Some(client),
+            agent.as_ref(),
+            model.as_ref(),
+            looking_at.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|field| field.len() > MAX_HELLO_FIELD_BYTES)
+    {
         return Err(NackReason::Schema);
     }
     let takes_mentions = matches!(verb, Verb::Fyi | Verb::Ask | Verb::Answer | Verb::Alert);

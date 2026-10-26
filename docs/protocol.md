@@ -213,6 +213,7 @@ Listener settings (agent, model, effort, caps, `accept_from`, which always inclu
 | Envelope total | 64 KiB (EMQX `mqtt.max_packet_size` set above it) |
 | Publish rate per identity | 10 per second sustained, burst 30 |
 | DM recipients | 8 |
+| HELLO `client`, `agent`, `model`, `looking_at` | 128 bytes each (NACK `schema` past it) |
 | Individual mentions per message | 8 |
 | Wake-ups per agent session | 1 per 30 seconds; messages in between arrive as one batch |
 | Retained `state/{key}` payload | 4 KiB |

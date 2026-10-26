@@ -17,7 +17,9 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Mutex, PoisonError};
 
-use agmen_proto::{IdentityId, IdentityKind, MessageId, ProjectId, Topics, Verb};
+use agmen_proto::{
+    IdentityId, IdentityKind, MAX_HELLO_FIELD_BYTES, MessageId, ProjectId, Topics, Verb,
+};
 use rumqttc_next::{AsyncClient, Publish, PublishOptions, QoS};
 use serde::de::IntoDeserializer as _;
 use serde::{Deserialize, Serialize};
@@ -357,7 +359,11 @@ impl Hub {
         .fetch_all(self.pool())
         .await?
         .into_iter()
-        .map(|(from, agent, model)| (from, (agent, model)))
+        .map(
+            |(from, agent, model): (String, Option<String>, Option<String>)| {
+                (from, (agent.map(hello_field), model.map(hello_field)))
+            },
+        )
         .collect();
         members
             .into_iter()
@@ -377,6 +383,15 @@ impl Hub {
             })
             .collect()
     }
+}
+
+/// `field` cut to [`MAX_HELLO_FIELD_BYTES`] at a character boundary. Ingest
+/// refuses a longer HELLO field, so this only trims one recorded before that
+/// limit, which could otherwise push the retained roster past the broker's
+/// packet limit.
+fn hello_field(mut field: String) -> String {
+    field.truncate(field.floor_char_boundary(MAX_HELLO_FIELD_BYTES));
+    field
 }
 
 /// The project topics and identity of `agmen/v1/{t}/{p}/presence/{id}`.
@@ -576,6 +591,17 @@ mod tests {
         state.clear();
         assert_eq!(state.status(&project, &id), Status::Offline);
         assert!(!state.seen(&topics), "a connect starts over");
+    }
+
+    #[test]
+    fn hello_fields_are_cut_at_a_character_boundary() {
+        assert_eq!(hello_field("opus".to_owned()), "opus");
+        let long = "é".repeat(MAX_HELLO_FIELD_BYTES);
+        let cut = hello_field(long);
+        assert_eq!(cut.len(), MAX_HELLO_FIELD_BYTES);
+        assert_eq!(cut, "é".repeat(MAX_HELLO_FIELD_BYTES / 2));
+        let odd = format!("a{}", "é".repeat(MAX_HELLO_FIELD_BYTES));
+        assert_eq!(hello_field(odd).len(), MAX_HELLO_FIELD_BYTES - 1);
     }
 
     #[test]
