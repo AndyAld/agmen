@@ -111,9 +111,13 @@ pub(crate) struct Draft {
 /// Something the person does that is not a chat message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-#[expect(
-    dead_code,
-    reason = "Tasks 13 to 19 send hand back, switch, alert, spec and kick-off actions"
+// Only the fixture's tests send ApproveShare; no view does yet.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "Tasks 13 to 19 send hand back, switch, alert, spec and kick-off actions"
+    )
 )]
 pub(crate) enum Action {
     Apply(ChangeId),
