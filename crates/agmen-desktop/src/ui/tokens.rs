@@ -85,11 +85,14 @@ pub(crate) const MONO_CELL_HEIGHT: Pixels = px(18.);
 
 // Spacing: the mockup's gaps and padding, named by their pixels.
 pub(crate) const SPACE_1: Pixels = px(1.);
+pub(crate) const SPACE_2: Pixels = px(2.);
 pub(crate) const SPACE_3: Pixels = px(3.);
 pub(crate) const SPACE_5: Pixels = px(5.);
 pub(crate) const SPACE_6: Pixels = px(6.);
 pub(crate) const SPACE_7: Pixels = px(7.);
 pub(crate) const SPACE_8: Pixels = px(8.);
+/// The settings stepper's button and value padding (node 8159).
+pub(crate) const SPACE_9: Pixels = px(9.);
 pub(crate) const SPACE_10: Pixels = px(10.);
 pub(crate) const SPACE_12: Pixels = px(12.);
 pub(crate) const SPACE_14: Pixels = px(14.);
@@ -99,6 +102,17 @@ pub(crate) const SPACE_16: Pixels = px(16.);
 pub(crate) const RADIUS_XS: Pixels = px(2.);
 pub(crate) const RADIUS_SM: Pixels = px(4.);
 pub(crate) const RADIUS_MD: Pixels = px(5.);
+/// Menus and cards: the switch menu (node 1802) and the model picker (node 3355).
+pub(crate) const RADIUS_LG: Pixels = px(8.);
+
+// Controls in "Desktop · settings" (node 7908).
+/// The Follow Zed toggle's track (node 8098).
+pub(crate) const TOGGLE_WIDTH: Pixels = px(30.);
+pub(crate) const TOGGLE_HEIGHT: Pixels = px(18.);
+/// The toggle's knob (node 8099).
+pub(crate) const TOGGLE_KNOB: Pixels = px(14.);
+/// The theme dropdown (node 8107), console.py's `dropdown` default.
+pub(crate) const DROPDOWN_WIDTH: Pixels = px(300.);
 
 // Icons and marks.
 pub(crate) const ICON_SM: Pixels = px(12.);
