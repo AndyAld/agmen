@@ -115,8 +115,9 @@ fn whitespace_inside_query_is_ignored() {
 
 #[test]
 fn camel_case_hump_is_a_word_start() {
+    // Both match "f" at offset 3 or later; only the hump bonus orders them.
     let entries = ["profile", "openFile"];
-    let got = filter("of", &entries);
+    let got = filter("f", &entries);
     assert_eq!(labels(&got), [1, 0]);
-    assert_eq!(highlighted(entries[1], &got[0]), ["o", "F"]);
+    assert_eq!(highlighted(entries[1], &got[0]), ["F"]);
 }

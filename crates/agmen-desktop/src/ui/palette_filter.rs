@@ -3,7 +3,7 @@
 //! A label matches when the query's characters appear in it in order, ignoring
 //! case and the query's whitespace. A small dynamic program picks the best
 //! alignment: matches at word starts and in consecutive runs score higher, and
-//! a match that starts earlier beats one that starts later.
+//! among matches in the first few characters, an earlier start ranks higher.
 #![cfg_attr(
     not(test),
     expect(dead_code, reason = "used by the Task 18 palette view")
