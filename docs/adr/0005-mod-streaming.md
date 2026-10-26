@@ -24,7 +24,7 @@ The API facts the design rests on, from the 2.1.310 `claude-code.d.ts`:
 - **Wake-up.** The mod tracks whether a main-loop turn is running (`turn.start` sets busy, `turn.complete` clears it; subagent turns are ignored). When the session is idle, a line addressed to it calls `$.prompt.submit({ text })` at once, never `asUser`. When a turn is running, the line waits, and at that turn's end one wake-up names every waiting line (up to 20). The engine queues it behind the turn, so the turn is never cut into, and a DM that arrives after the turn's last model request is not lost. The wake-up text names what arrived (`agmen: DM #3, DM #4 arrived for this session...`) and never the bodies, which reach the model only inside the data rows.
 - **Guard.** A `tool.call` hook on Edit, Write and NotebookEdit resolves where the path lands with `$.fs.stat(path, { resolve: true })` (for a file not there yet, its folder plus the name). It denies the call when the path lands under `<realpath of the session cwd>/forbidden/` or cannot be placed. Its `.catch` denies on any thrown error. The real path catches a link that points into `forbidden/`.
 
-Rate limiting and coalescing across turns (protocol 8, ruling R13), Windows paths and the lane check (`agmen check-path`) are Task 14's.
+Rate limiting and coalescing across turns (protocol 8, ruling R13), Windows paths and the lane check (`agmen check-path`) are Task 14's. Task 14 records them in [ADR-0006](0006-claude-code-plugin.md).
 
 ## Results
 
@@ -49,7 +49,7 @@ The tests in `hooks/register.test.tsx`, each run against the engine's test kit w
 
 Mutation check: removing the busy flag fails `wakeup_waits_for_turn_end`, removing the `to_me` check fails `no_wakeup_for_own_message`, and removing `.catch` fails `guard_denies_on_error`.
 
-**Interactive check: pending** (ruling R24: it needs a person at a live session and spends model budget). Steps, from the repository root:
+**Interactive check: pending** (ruling R24: it needs a person at a live session and spends model budget). Since Task 14 the mod runs `agmen watch`, not `fake-watch`, so [ADR-0006](0006-claude-code-plugin.md)'s check takes the place of this one; these steps still run against the spike's module from commit `d6a173a`. Steps, from the repository root:
 
 1. `cargo build -p s4-fake-watch`, then make a scratch project with a link into the protected folder:
    `mkdir -p /tmp/s4/forbidden /tmp/s4/src && ln -s forbidden /tmp/s4/alias && cd /tmp/s4 && git init -q`

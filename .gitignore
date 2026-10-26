@@ -5,8 +5,11 @@
 node_modules/
 /apps/desktop/dist/
 
-# Claude Code mod: types the engine writes at load time
+# Claude Code mod: types the engine writes at load time, or
+# mods/agmen-claude/scripts/claude-types.sh lays at check time (R41).
+# Never commit them, nor a vendored copy.
 /mods/*/.claude-plugin/types/
+/mods/*/vendor/
 
 # Local env and secrets
 .env

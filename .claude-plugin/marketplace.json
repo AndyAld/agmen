@@ -1,0 +1,14 @@
+{
+  "name": "agmen",
+  "owner": {
+    "name": "Andy Aldrich"
+  },
+  "description": "The agmen Claude Code plugin: agmen messages in the session, wake-ups, and the lane guard.",
+  "plugins": [
+    {
+      "name": "agmen",
+      "source": "./mods/agmen-claude",
+      "description": "Brings agmen messages into the session, wakes it when one is addressed to it, and keeps edits inside its lanes."
+    }
+  ]
+}
