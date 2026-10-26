@@ -42,6 +42,11 @@ impl Breadcrumb {
     }
 }
 
+/// The separator between parts: console.py's small "›" in icon.muted (V80).
+fn separator() -> Label {
+    Label::new("›").size(LabelSize::Small).color(Color::Muted)
+}
+
 impl RenderOnce for Breadcrumb {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let last = self.parts.len().saturating_sub(1);
@@ -49,11 +54,7 @@ impl RenderOnce for Breadcrumb {
         for (ix, part) in self.parts.into_iter().enumerate() {
             if ix > 0 {
                 let selector = format!("breadcrumb:sep:{ix}");
-                row = row.child(
-                    div()
-                        .debug_selector(|| selector)
-                        .child(Label::new("›").size(LabelSize::Small).color(Color::Muted)),
-                );
+                row = row.child(div().debug_selector(|| selector).child(separator()));
             }
             let color = if ix == last {
                 Color::Default
@@ -107,5 +108,14 @@ mod tests {
             assert!(sep.size.width < ICON_SM, "{sel}: {sep:?}");
         }
         assert!(cx.debug_bounds("breadcrumb:sep:3").is_none());
+        // C220: the glyph, its size and its color, as literals.
+        assert_eq!(
+            separator(),
+            Label::new("\u{203a}")
+                .size(LabelSize::Small)
+                .color(Color::Muted)
+        );
+        let theme = crate::appearance::Appearance::builtin().theme;
+        assert_eq!(Color::Muted.hsla(&theme), gpui::rgb(0x7c6f64).into());
     }
 }

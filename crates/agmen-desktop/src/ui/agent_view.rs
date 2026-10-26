@@ -10,9 +10,7 @@ use gpui::{
 use super::breadcrumb::Breadcrumb;
 use super::components::{Button, ButtonStyle, Color, Icon, IconSize, Label, LabelSize, ToolCard};
 use super::text_input::TextInput;
-use super::tokens::{
-    BORDER_WIDTH, RADIUS_CARD, SPACE_6, SPACE_8, SPACE_10, SPACE_12, SPACE_14, SPACE_18,
-};
+use super::tokens::{BORDER_WIDTH, RADIUS_CARD, SPACE_8, SPACE_10, SPACE_12, SPACE_14, SPACE_18};
 use crate::appearance::Appearance;
 use crate::backend::{AgentSession, SessionRow, Tone};
 use crate::icons::UiIcon;
@@ -104,7 +102,7 @@ impl Render for AgentView {
         let buttons = div()
             .flex()
             .items_center()
-            .gap(SPACE_6)
+            .gap(SPACE_8)
             // shortcut: the buttons do nothing until the hub backend can open
             // a terminal and stop an agent (Task 14).
             .child(
