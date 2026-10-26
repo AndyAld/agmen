@@ -18,6 +18,7 @@ mod broker_tokens;
 mod config;
 mod db;
 mod emqx;
+mod health;
 mod http;
 mod identities;
 mod ingest;

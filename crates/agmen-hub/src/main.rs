@@ -127,10 +127,6 @@ async fn serve() -> anyhow::Result<()> {
     let hub = agmen_hub::Hub::connect(&config)
         .await
         .context("starting the hub")?;
-    let mut messaging = hub
-        .start_messaging(&config.mqtt)
-        .await
-        .context("connecting to the broker")?;
     let listener = tokio::net::TcpListener::bind(config.listen)
         .await
         .with_context(|| format!("listening on {}", config.listen))?;
@@ -139,10 +135,21 @@ async fn serve() -> anyhow::Result<()> {
         version = env!("CARGO_PKG_VERSION"),
         "agmen-hub serving"
     );
+    // HTTP serves before the broker connect: in the cluster EMQX verifies
+    // the hub's own broker token against this hub's /v1/jwks, so on a cold
+    // start it cannot accept the hub until that route answers.
     let server = axum::serve(listener, hub.router()).with_graceful_shutdown(shutdown());
+    let messaging = async {
+        let mut messaging = hub
+            .start_messaging(&config.mqtt)
+            .await
+            .context("connecting to the broker")?;
+        let failed = messaging.failed().await;
+        Err::<(), _>(anyhow::Error::new(failed).context("messaging stopped"))
+    };
     tokio::select! {
         served = server => served.context("serving HTTP"),
-        failed = messaging.failed() => Err(anyhow::Error::new(failed).context("messaging stopped")),
+        failed = messaging => failed,
     }
 }
 

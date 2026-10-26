@@ -1,0 +1,57 @@
+# HAProxy ingress with cert-manager certificates. The hosts are
+# placeholders until Andy picks agmen's domain (README.md). The EMQX
+# dashboard and REST API (18083) and plain MQTT (1883) get no ingress.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: agmen-api
+  namespace: agmen
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    haproxy.org/ssl-redirect: "true"
+spec:
+  ingressClassName: haproxy
+  rules:
+    - host: api.agmen.example
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: agmen-hub
+                port:
+                  number: 8080
+  tls:
+    - hosts:
+        - api.agmen.example
+      secretName: agmen-api-tls
+---
+# MQTT over WebSocket to EMQX 8083, path /mqtt. Clients keep the link open
+# with a 30 s keep-alive (ADR-0003), well inside the 1 h tunnel timeout.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: agmen-mqtt-ws
+  namespace: agmen
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    haproxy.org/ssl-redirect: "true"
+    haproxy.org/timeout-tunnel: "1h"
+spec:
+  ingressClassName: haproxy
+  rules:
+    - host: mqtt-ws.agmen.example
+      http:
+        paths:
+          - path: /mqtt
+            pathType: Prefix
+            backend:
+              service:
+                name: agmen-emqx
+                port:
+                  number: 8083
+  tls:
+    - hosts:
+        - mqtt-ws.agmen.example
+      secretName: agmen-mqtt-ws-tls

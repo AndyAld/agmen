@@ -1,0 +1,41 @@
+# ArgoCD in agmen's own cluster syncs this directory into namespace agmen.
+# Apply this file by hand once (kubectl apply -f argocd-application.yaml);
+# ArgoCD skips it and README.md when it syncs. repoURL is a placeholder
+# until agmen's git home is settled (README.md).
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: agmen
+  namespace: argocd
+spec:
+  description: agmen hub, broker and database
+  sourceRepos:
+    - https://git.agmen.example/agmen/agmen.git
+  destinations:
+    - namespace: agmen
+      server: https://kubernetes.default.svc
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: agmen
+  namespace: argocd
+spec:
+  project: agmen
+  source:
+    repoURL: https://git.agmen.example/agmen/agmen.git
+    targetRevision: main
+    path: deploy/k8s/agmen-env
+    directory:
+      exclude: argocd-application.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: agmen
+  syncPolicy:
+    automated:
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

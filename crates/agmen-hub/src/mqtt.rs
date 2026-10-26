@@ -32,8 +32,12 @@ const HUB_TOKEN_TTL: Duration = Duration::from_secs(3600);
 const KEEP_ALIVE_SECS: u16 = 30;
 /// The broker's packet cap (ADR-0002), above the 64 KiB envelope limit.
 const MAX_PACKET: u32 = 96 * 1024;
-/// How long the first connect may take, CONNACK and SUBACK together.
+/// How long one step of the first connect (the CONNACK, or the SUBACK) may
+/// take.
 const CONNECT_WAIT: Duration = Duration::from_secs(10);
+/// Failed first connect attempts before the hub gives up: about two
+/// minutes with [`retry_delay`].
+const FIRST_CONNECT_FAILURES: u32 = 10;
 /// Failed connection attempts in a row before the hub gives up and exits.
 const MAX_FAILURES: u32 = 60;
 /// The first reconnect delay; it doubles up to [`MAX_RETRY_DELAY`].
@@ -54,10 +58,10 @@ pub enum MessagingError {
     /// The MQTT client settings are invalid.
     #[error("the MQTT client settings are invalid")]
     Client(#[source] rumqttc_next::ClientBuildError),
-    /// The broker refused or dropped the connection.
+    /// The broker refused or dropped every first connect attempt.
     #[error("connecting to the broker failed")]
     Connect(#[source] ConnectionError),
-    /// The first CONNACK or SUBACK did not come in time.
+    /// The broker did not answer a step of the first connect in time.
     #[error("the broker did not answer within {CONNECT_WAIT:?}")]
     Timeout,
     /// The broker refused the `up/` subscription.
@@ -111,7 +115,10 @@ impl Hub {
     /// Connects to the broker as `agmen-hub-<instance>`, subscribes to
     /// `$share/<group>/agmen/v1/+/+/up/+`, and starts ingest and the
     /// sweeper. It returns once the subscription is granted, so nothing
-    /// published to `up/` afterwards is missed.
+    /// published to `up/` afterwards is missed. A failed or refused connect
+    /// is retried with backoff, about two minutes in all: in the cluster
+    /// EMQX reads this hub's own `/v1/jwks`, so after a cold start it
+    /// refuses the hub until it has fetched the keys.
     ///
     /// # Errors
     ///
@@ -145,12 +152,7 @@ impl Hub {
             .try_build()
             .map_err(MessagingError::Client)?;
         let filter = config.up_filter();
-        tokio::time::timeout(
-            CONNECT_WAIT,
-            first_connect(&client, &mut eventloop, &filter),
-        )
-        .await
-        .map_err(|_| MessagingError::Timeout)??;
+        first_connect(&client, &mut eventloop, &filter).await?;
         tracing::info!(client_id = %config.client_id(), %filter, "subscribed to up/");
         let (tx, rx) = mpsc::channel(QUEUE);
         let mut tasks = JoinSet::new();
@@ -167,21 +169,39 @@ impl Hub {
     }
 }
 
-/// Polls until CONNACK, subscribes, and polls until the SUBACK.
+/// Polls until CONNACK, subscribes, and polls until the SUBACK, retrying a
+/// failed connection up to [`FIRST_CONNECT_FAILURES`] times.
 async fn first_connect(
     client: &AsyncClient,
     eventloop: &mut EventLoop,
     filter: &str,
 ) -> Result<(), MessagingError> {
     let mut subscribed = false;
+    let mut failures = 0_u32;
     loop {
-        match eventloop.poll().await.map_err(MessagingError::Connect)? {
-            Event::Incoming(Packet::ConnAck(_)) if !subscribed => {
+        let polled = tokio::time::timeout(CONNECT_WAIT, eventloop.poll())
+            .await
+            .map_err(|_| MessagingError::Timeout)?;
+        match polled {
+            Ok(Event::Incoming(Packet::ConnAck(_))) if !subscribed => {
                 subscribe(client, filter)?;
                 subscribed = true;
             }
-            Event::Incoming(Packet::SubAck(ack)) => return check_suback(filter, &ack.return_codes),
-            _ => {}
+            Ok(Event::Incoming(Packet::SubAck(ack))) => {
+                return check_suback(filter, &ack.return_codes);
+            }
+            Ok(_) => {}
+            Err(err) => {
+                failures += 1;
+                if failures >= FIRST_CONNECT_FAILURES {
+                    return Err(MessagingError::Connect(err));
+                }
+                tracing::warn!(error = %err, failures, "connecting to the broker failed; retrying");
+                // The session is clean, so a subscription made before the
+                // failure is gone.
+                subscribed = false;
+                tokio::time::sleep(retry_delay(failures)).await;
+            }
         }
     }
 }

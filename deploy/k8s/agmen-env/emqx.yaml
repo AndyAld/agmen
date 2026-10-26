@@ -1,0 +1,225 @@
+# EMQX, one node (docs/adr/0001-dev-stack.md, 0002-broker-emqx.md). One
+# replica and no clustering keeps the single-node community terms of the
+# BSL license. The config is read-only emqx.conf from the ConfigMap below,
+# never runtime config: EMQX lets anonymous clients in when it has no
+# authenticator, and the dashboard can delete runtime authenticators.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agmen-emqx-conf
+  namespace: agmen
+  labels:
+    app.kubernetes.io/name: emqx
+    app.kubernetes.io/part-of: agmen
+data:
+  emqx.conf: |
+    ## agmen broker. Mounted read-only over /opt/emqx/etc/emqx.conf, so the
+    ## REST API cannot change these keys. The node cookie and dashboard
+    ## password come from the agmen-emqx secret as EMQX_* variables.
+
+    node {
+      name = "emqx@127.0.0.1"
+      data_dir = "data"
+    }
+
+    cluster {
+      name = agmen
+      discovery_strategy = manual
+    }
+
+    mqtt {
+      ## Envelope max is 64 KiB (protocol 8); leave room for MQTT headers.
+      max_packet_size = 96KB
+    }
+
+    ## Two authenticators, in order. Neither may ever be removed: with no
+    ## authenticator EMQX lets anonymous clients in.
+    ##
+    ## 1. cinfo binds the client id to the username before any token is
+    ##    read. An identity may connect only as <id>-mcp, <id>-watch or
+    ##    <id>-cli, and the hub only as agmen-hub-<instance>. A match passes
+    ##    the client on (ignore, never allow); anything else is denied.
+    ## 2. JWT checks the token against the hub's JWKS, fetched in the
+    ##    cluster through the agmen-hub Service, and binds the username to
+    ##    its sub. on_missing_jwt = deny keeps a client without a token out.
+    authentication = [
+      {
+        mechanism = cinfo
+        checks = [
+          { is_match = "str_eq(clientid, concat([username, '-mcp']))", result = ignore },
+          { is_match = "str_eq(clientid, concat([username, '-watch']))", result = ignore },
+          { is_match = "str_eq(clientid, concat([username, '-cli']))", result = ignore },
+          {
+            is_match = ["str_eq(username, 'agmen-hub')", "regex_match(clientid, '^agmen-hub-[a-z0-9]{1,32}$')"]
+            result = ignore
+          },
+          { is_match = "true", result = deny }
+        ]
+      },
+      {
+        mechanism = jwt
+        use_jwks = true
+        endpoint = "http://agmen-hub.agmen.svc.cluster.local:8080/v1/jwks"
+        refresh_interval = 60
+        from = password
+        on_missing_jwt = deny
+        disconnect_after_expire = true
+        acl_claim_name = acl
+        verify_claims { sub = "${username}" }
+      }
+    ]
+
+    ## The token's acl claim is the only source of permissions. Anything it
+    ## does not match is denied.
+    authorization {
+      no_match = deny
+      deny_action = ignore
+      sources = []
+    }
+
+    ## Persistent sessions and their queued QoS 1 messages survive a broker
+    ## restart. Retention matches the clients' 1 day session expiry.
+    durable_sessions {
+      enable = true
+      message_retention_period = 1d
+    }
+
+    api_key {
+      bootstrap_file = "/opt/emqx/etc/agmen/api-keys.txt"
+    }
+---
+# 1883 and 18083 are for the hub inside the cluster only; no ingress
+# reaches them. Clients come in on 8083 (WebSocket) through the mqtt-ws
+# ingress.
+apiVersion: v1
+kind: Service
+metadata:
+  name: agmen-emqx
+  namespace: agmen
+  labels:
+    app.kubernetes.io/name: emqx
+    app.kubernetes.io/part-of: agmen
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: emqx
+    app.kubernetes.io/part-of: agmen
+  ports:
+    - name: mqtt
+      port: 1883
+      targetPort: mqtt
+    - name: ws
+      port: 8083
+      targetPort: ws
+    - name: api
+      port: 18083
+      targetPort: api
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: agmen-emqx
+  namespace: agmen
+  labels:
+    app.kubernetes.io/name: emqx
+    app.kubernetes.io/part-of: agmen
+spec:
+  serviceName: agmen-emqx
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: emqx
+      app.kubernetes.io/part-of: agmen
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: emqx
+        app.kubernetes.io/part-of: agmen
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        # The image's emqx user.
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: emqx
+          image: emqx/emqx:6.3.2
+          ports:
+            - name: mqtt
+              containerPort: 1883
+            - name: ws
+              containerPort: 8083
+            - name: api
+              containerPort: 18083
+          env:
+            - name: EMQX_NODE__COOKIE
+              valueFrom:
+                secretKeyRef:
+                  name: agmen-emqx
+                  key: EMQX_NODE__COOKIE
+            - name: EMQX_DASHBOARD__DEFAULT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: agmen-emqx
+                  key: EMQX_DASHBOARD__DEFAULT_PASSWORD
+          readinessProbe:
+            exec:
+              command: ["/opt/emqx/bin/emqx", "ctl", "status"]
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["/opt/emqx/bin/emqx", "ctl", "status"]
+            initialDelaySeconds: 60
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: data
+              mountPath: /opt/emqx/data
+            - name: conf
+              mountPath: /opt/emqx/etc/emqx.conf
+              subPath: emqx.conf
+              readOnly: true
+            - name: api-keys
+              mountPath: /opt/emqx/etc/agmen
+              readOnly: true
+      volumes:
+        - name: conf
+          configMap:
+            name: agmen-emqx-conf
+        - name: api-keys
+          secret:
+            secretName: agmen-emqx
+            items:
+              - key: api-keys.txt
+                path: api-keys.txt
+            defaultMode: 0440
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        # Set storageClassName to agmen's Ceph RBD class once the cluster
+        # exists; unset, the claim takes the cluster's default class.
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 5Gi

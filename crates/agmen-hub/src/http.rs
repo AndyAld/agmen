@@ -18,7 +18,7 @@ use crate::broker_tokens::{BrokerTokens, SigningKey, TokenError};
 use crate::config::Config;
 use crate::emqx::{EmqxAdmin, EmqxError};
 use crate::ingest::IngestState;
-use crate::{db, identities, invites};
+use crate::{db, health, identities, invites};
 
 /// How long the hub waits for GitHub or EMQX to answer.
 const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(10);
@@ -109,6 +109,7 @@ impl Hub {
     /// The `/v1` routes.
     pub fn router(&self) -> Router {
         Router::new()
+            .merge(health::routes())
             .route("/v1/jwks", get(jwks))
             .merge(auth::routes())
             .route("/v1/identities", post(identities::mint))
