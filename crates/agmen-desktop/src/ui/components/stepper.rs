@@ -161,21 +161,32 @@ impl RenderOnce for Stepper {
 mod tests {
     use super::*;
     use crate::ui::components::control_harness::{Reported, open};
-    use crate::ui::test_support::{click, rendered_size};
-    use gpui::{TestAppContext, px};
+    use crate::ui::test_support::click;
+    use gpui::TestAppContext;
 
-    /// Renders a stepper at `value`, clicks `button`, and returns what it reported.
-    fn click_at(cx: &mut TestAppContext, value: u32, button: &'static str) -> Option<u32> {
+    /// Renders `make()` with a reporting handler, clicks `button`, and
+    /// returns what it reported.
+    fn click_with(
+        cx: &mut TestAppContext,
+        make: impl Fn() -> Stepper + 'static,
+        button: &'static str,
+    ) -> Option<u32> {
         let reported = Reported::default();
         let sink = reported.clone();
         let cx = open(cx, move || {
             let sink = sink.clone();
-            Stepper::new("size", value)
+            make()
                 .on_change(move |value, _, _| sink.set(Some(value)))
                 .into_any_element()
         });
         click(cx, button);
         reported.get()
+    }
+
+    /// Renders a stepper at `value` with the default range, clicks `button`,
+    /// and returns what it reported.
+    fn click_at(cx: &mut TestAppContext, value: u32, button: &'static str) -> Option<u32> {
+        click_with(cx, move || Stepper::new("size", value), button)
     }
 
     #[test]
@@ -203,15 +214,24 @@ mod tests {
     }
 
     #[gpui::test]
-    fn stepper_reports_one_step(cx: &mut TestAppContext) {
+    fn stepper_increments_one_step(cx: &mut TestAppContext) {
         assert_eq!(click_at(cx, 15, "size:increment"), Some(16));
-        let mut cx2 = TestAppContext::single();
-        assert_eq!(click_at(&mut cx2, 15, "size:decrement"), Some(14));
     }
 
     #[gpui::test]
-    fn stepper_renders(cx: &mut TestAppContext) {
-        let size = rendered_size(cx, || Stepper::new("size", 15).into_any_element());
-        assert!(size.width > px(40.));
+    fn stepper_decrements_one_step(cx: &mut TestAppContext) {
+        assert_eq!(click_at(cx, 15, "size:decrement"), Some(14));
+    }
+
+    #[gpui::test]
+    fn custom_range_disables_increment_at_its_max(cx: &mut TestAppContext) {
+        let make = || Stepper::new("size", 12).range(10, 12);
+        assert_eq!(click_with(cx, make, "size:increment"), None);
+    }
+
+    #[gpui::test]
+    fn custom_range_steps_below_the_default_min(cx: &mut TestAppContext) {
+        let make = || Stepper::new("size", 3).range(2, 4);
+        assert_eq!(click_with(cx, make, "size:decrement"), Some(2));
     }
 }

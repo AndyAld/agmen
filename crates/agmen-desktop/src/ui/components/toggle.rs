@@ -8,12 +8,9 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _, Window, div,
 };
 
+use super::ChangeHandler;
 use crate::appearance::Appearance;
 use crate::ui::tokens::{BORDER_WIDTH, SPACE_1, TOGGLE_HEIGHT, TOGGLE_KNOB, TOGGLE_WIDTH};
-
-/// What a control reports when its value changes: the new value. An `Rc`, not
-/// a `Box`, because segments, menu rows and stepper buttons share one handler.
-pub(crate) type ChangeHandler<T> = Rc<dyn Fn(T, &mut Window, &mut App)>;
 
 #[derive(IntoElement)]
 pub(crate) struct Toggle {
@@ -32,6 +29,8 @@ impl std::fmt::Debug for Toggle {
 }
 
 impl Toggle {
+    /// Tests find the toggle as `id` and its knob as `"{id}:knob"` with
+    /// `debug_bounds`.
     #[must_use]
     pub(crate) fn new(id: impl Into<ElementId>, on: bool) -> Self {
         Self {
@@ -58,6 +57,7 @@ impl RenderOnce for Toggle {
         let (hover, focus) = (theme.element_hover, theme.text_accent);
         let on = self.on;
         let selector = self.id.to_string();
+        let knob_selector = format!("{selector}:knob");
         // Off is drawn as Zed's off switch: an empty track with a border. On
         // keeps the border in the track color, so both states inset the knob
         // by the same 2 px the mockup's padding gives.
@@ -91,6 +91,7 @@ impl RenderOnce for Toggle {
             // text, so it reads the same and follows a light theme.
             .child(
                 div()
+                    .debug_selector(|| knob_selector)
                     .size(TOGGLE_KNOB)
                     .flex_none()
                     .rounded_full()
@@ -102,7 +103,7 @@ impl RenderOnce for Toggle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::components::control_harness::{Reported, open};
+    use crate::ui::components::control_harness::{Reported, open, open_with_caller};
     use crate::ui::test_support::{click, rendered_size};
     use crate::ui::tokens::{TOGGLE_HEIGHT, TOGGLE_WIDTH};
     use gpui::TestAppContext;
@@ -114,7 +115,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn toggle_flips_and_reports_the_new_value(cx: &mut TestAppContext) {
+    fn toggle_reports_on_to_off(cx: &mut TestAppContext) {
         let reported = Reported::default();
         let sink = reported.clone();
         let cx = open(cx, move || {
@@ -125,5 +126,24 @@ mod tests {
         });
         click(cx, "follow-zed");
         assert_eq!(reported.get(), Some(false));
+    }
+
+    #[gpui::test]
+    fn toggle_flips_off_to_on_and_moves_the_knob(cx: &mut TestAppContext) {
+        let (caller, cx) = open_with_caller(cx, false, |on, set| {
+            Toggle::new("follow-zed", on)
+                .on_change(move |on, window, cx| set(on, window, cx))
+                .into_any_element()
+        });
+        // The border and padding inset the knob 2 px from the track's edge.
+        let inset = BORDER_WIDTH + SPACE_1;
+        let track = cx.debug_bounds("follow-zed").expect("track");
+        let knob = cx.debug_bounds("follow-zed:knob").expect("knob");
+        assert_eq!(knob.left(), track.left() + inset);
+
+        click(cx, "follow-zed");
+        assert!(caller.read_with(cx, |caller, _| caller.flag));
+        let knob = cx.debug_bounds("follow-zed:knob").expect("knob");
+        assert_eq!(knob.right(), track.right() - inset);
     }
 }

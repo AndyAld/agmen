@@ -2,6 +2,10 @@
 //! builder methods. They take sizes from `ui::tokens` and colors only from
 //! the theme; views compose them and add layout.
 
+use std::rc::Rc;
+
+use gpui::{App, Window};
+
 mod avatar;
 mod badge;
 mod button;
@@ -53,6 +57,9 @@ pub(crate) use list_item::{Indent, ListItem};
 pub(crate) use progress::ProgressBar;
 pub(crate) use status_dot::StatusDot;
 pub(crate) use tab::Tab;
-pub(crate) use toggle::ChangeHandler;
 #[expect(unused_imports, reason = "used by the Task 17 settings view")]
 pub(crate) use {dropdown::Dropdown, segmented::Segmented, stepper::Stepper, toggle::Toggle};
+
+/// What a control reports when its value changes: the new value. An `Rc`, not
+/// a `Box`, because segments, menu rows and stepper buttons share one handler.
+pub(crate) type ChangeHandler<T> = Rc<dyn Fn(T, &mut Window, &mut App)>;

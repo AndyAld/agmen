@@ -33,8 +33,8 @@ impl std::fmt::Debug for Segmented {
 }
 
 impl Segmented {
-    /// `id` names the control; tests find option `i` as `"{id}:{i}"` with
-    /// `debug_bounds`.
+    /// `id` names the control; tests find option `i` as `"{id}:{i}"`, and its
+    /// label as `"{id}:{i}:label"`, with `debug_bounds`.
     #[must_use]
     pub(crate) fn new(
         id: impl Into<SharedString>,
@@ -76,6 +76,7 @@ impl RenderOnce for Segmented {
         let segments = self.options.into_iter().enumerate().map(|(index, option)| {
             let selected = index == self.selected;
             let selector = format!("{}:{index}", self.id);
+            let label_selector = format!("{selector}:label");
             let label = Label::new(option)
                 .size(LabelSize::Small)
                 .color(if selected {
@@ -111,7 +112,11 @@ impl RenderOnce for Segmented {
                         )
                     }
                 })
-                .child(if self.code { label.code() } else { label })
+                .child(div().debug_selector(|| label_selector).child(if self.code {
+                    label.code()
+                } else {
+                    label
+                }))
         });
         div()
             .flex()
@@ -128,18 +133,29 @@ impl RenderOnce for Segmented {
 mod tests {
     use super::*;
     use crate::ui::components::control_harness::{Reported, open};
-    use crate::ui::test_support::{click, rendered_size};
+    use crate::ui::test_support::click;
     use crate::ui::tokens::BORDER_WIDTH;
-    use gpui::{TestAppContext, px};
+    use gpui::{Pixels, TestAppContext};
+
+    /// The side padding of the last option, which draws no divider.
+    fn side_padding(cx: &mut TestAppContext, code: bool) -> Pixels {
+        let cx = open(cx, move || {
+            let effort = Segmented::new("effort", ["low", "high"], 0);
+            if code { effort.code() } else { effort }.into_any_element()
+        });
+        let option = cx.debug_bounds("effort:1").expect("option").size.width;
+        let label = cx.debug_bounds("effort:1:label").expect("label").size.width;
+        (option - label) / 2.
+    }
 
     #[gpui::test]
-    fn segmented_renders(cx: &mut TestAppContext) {
-        let size = rendered_size(cx, || {
-            Segmented::new("effort", ["low", "medium", "high"], 2)
-                .code()
-                .into_any_element()
-        });
-        assert!(size.width > px(60.));
+    fn ui_options_pad_10(cx: &mut TestAppContext) {
+        assert_eq!(side_padding(cx, false), SPACE_10);
+    }
+
+    #[gpui::test]
+    fn code_options_pad_12(cx: &mut TestAppContext) {
+        assert_eq!(side_padding(cx, true), SPACE_12);
     }
 
     #[gpui::test]

@@ -5,7 +5,7 @@ use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce, SharedString,
+    App, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce, SharedString,
     StatefulInteractiveElement as _, Styled as _, Window, anchored, deferred, div,
 };
 
@@ -76,7 +76,8 @@ impl Dropdown {
     }
 
     /// Called with the menu's new open state: `true` on a click on the closed
-    /// box, `false` on a click on the open box, a row, or outside the menu.
+    /// box, `false` on a click on the open box, a row, or outside the menu,
+    /// or on Escape while the box has focus.
     #[must_use]
     pub(crate) fn on_toggle(
         mut self,
@@ -100,6 +101,51 @@ impl Dropdown {
     /// is out of range.
     fn value(&self) -> SharedString {
         self.options.get(self.selected).cloned().unwrap_or_default()
+    }
+
+    /// Menu row `index`: a check on the selected row, then the option.
+    fn menu_row(
+        &self,
+        index: usize,
+        option: &SharedString,
+        on_toggle: Option<ChangeHandler<bool>>,
+        on_change: Option<ChangeHandler<usize>>,
+        hover: Hsla,
+    ) -> impl IntoElement + use<> {
+        let selector = format!("{}:{index}", self.id);
+        div()
+            .id(SharedString::from(selector.clone()))
+            .debug_selector(|| selector)
+            .flex()
+            .items_center()
+            .gap(SPACE_8)
+            .py(SPACE_3)
+            .px(SPACE_8)
+            .rounded(RADIUS_MD)
+            .cursor_pointer()
+            .hover(move |style| style.bg(hover))
+            .on_click(move |_, window, cx| {
+                if let Some(handler) = &on_change {
+                    handler(index, window, cx);
+                }
+                if let Some(handler) = &on_toggle {
+                    handler(false, window, cx);
+                }
+            })
+            // An empty slot on other rows keeps every label in line.
+            .child(
+                div()
+                    .size(ICON_SM)
+                    .flex_none()
+                    .when(index == self.selected, |this| {
+                        this.child(
+                            Icon::new(UiIcon::Check)
+                                .size(IconSize::Small)
+                                .color(Color::Accent),
+                        )
+                    }),
+            )
+            .child(self.label(option.clone(), Color::Default))
     }
 
     fn label(&self, text: SharedString, color: Color) -> Label {
@@ -134,8 +180,20 @@ impl RenderOnce for Dropdown {
             .hover(move |style| style.bg(hover))
             .focus_visible(move |style| style.border_color(focus))
             .when_some(on_toggle.clone(), |this, handler| {
-                this.cursor_pointer()
-                    .on_click(move |_, window, cx| handler(!open, window, cx))
+                // While open, the menu's mouse down out closes it. A click
+                // handler here too would reopen it on mouse up, after the
+                // caller has re-rendered closed.
+                this.cursor_pointer().map(|this| {
+                    if open {
+                        this.on_key_down(move |event, window, cx| {
+                            if event.keystroke.key == "escape" {
+                                handler(false, window, cx);
+                            }
+                        })
+                    } else {
+                        this.on_click(move |_, window, cx| handler(true, window, cx))
+                    }
+                })
             })
             .child(self.label(self.value(), Color::Default))
             .child(
@@ -144,42 +202,9 @@ impl RenderOnce for Dropdown {
                     .color(Color::Placeholder),
             );
         let menu = open.then(|| {
-            let rows =
-                self.options.iter().enumerate().map(|(index, option)| {
-                    let selector = format!("{}:{index}", self.id);
-                    let (on_toggle, on_change) = (on_toggle.clone(), on_change.clone());
-                    div()
-                        .id(SharedString::from(selector.clone()))
-                        .debug_selector(|| selector)
-                        .flex()
-                        .items_center()
-                        .gap(SPACE_8)
-                        .py(SPACE_3)
-                        .px(SPACE_8)
-                        .rounded(RADIUS_MD)
-                        .cursor_pointer()
-                        .hover(move |style| style.bg(hover))
-                        .on_click(move |_, window, cx| {
-                            if let Some(handler) = &on_change {
-                                handler(index, window, cx);
-                            }
-                            if let Some(handler) = &on_toggle {
-                                handler(false, window, cx);
-                            }
-                        })
-                        // An empty slot on other rows keeps every label in line.
-                        .child(div().size(ICON_SM).flex_none().when(
-                            index == self.selected,
-                            |this| {
-                                this.child(
-                                    Icon::new(UiIcon::Check)
-                                        .size(IconSize::Small)
-                                        .color(Color::Accent),
-                                )
-                            },
-                        ))
-                        .child(self.label(option.clone(), Color::Default))
-                });
+            let rows = self.options.iter().enumerate().map(|(index, option)| {
+                self.menu_row(index, option, on_toggle.clone(), on_change.clone(), hover)
+            });
             // Deferred so the menu paints over the rows below the dropdown.
             deferred(
                 anchored().snap_to_window().child(
@@ -212,10 +237,10 @@ impl RenderOnce for Dropdown {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::components::control_harness::{Reported, open};
+    use crate::ui::components::control_harness::{Caller, Reported, open, open_with_caller};
     use crate::ui::test_support::{click, rendered_size};
     use crate::ui::tokens::DROPDOWN_WIDTH;
-    use gpui::TestAppContext;
+    use gpui::{Entity, TestAppContext, VisualTestContext};
 
     const THEMES: [&str; 3] = ["Gruvbox Material Dark Hard", "One Dark", "Ayu Light"];
 
@@ -275,5 +300,37 @@ mod tests {
         click(cx, "theme:2");
         assert_eq!(chosen.get(), Some(2));
         assert_eq!(toggled.get(), Some(false));
+    }
+
+    /// Opens a dropdown whose caller owns `open`, starting closed.
+    fn with_caller(cx: &mut TestAppContext) -> (Entity<Caller>, &mut VisualTestContext) {
+        open_with_caller(cx, false, |open, set| {
+            Dropdown::new("theme", THEMES, 0)
+                .open(open)
+                .on_toggle(move |open, window, cx| set(open, window, cx))
+                .into_any_element()
+        })
+    }
+
+    #[gpui::test]
+    fn clicking_the_open_box_closes_it(cx: &mut TestAppContext) {
+        let (caller, cx) = with_caller(cx);
+        click(cx, "theme");
+        assert!(caller.read_with(cx, |caller, _| caller.flag));
+        assert!(cx.debug_bounds("theme:1").is_some());
+
+        click(cx, "theme");
+        assert!(!caller.read_with(cx, |caller, _| caller.flag));
+        assert!(cx.debug_bounds("theme:1").is_none());
+    }
+
+    #[gpui::test]
+    fn escape_closes_the_open_menu(cx: &mut TestAppContext) {
+        let (caller, cx) = with_caller(cx);
+        click(cx, "theme");
+        assert!(caller.read_with(cx, |caller, _| caller.flag));
+
+        cx.simulate_keystrokes("escape");
+        assert!(!caller.read_with(cx, |caller, _| caller.flag));
     }
 }
