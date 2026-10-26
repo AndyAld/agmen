@@ -324,3 +324,36 @@ fn typing_in_the_composer_does_not_rebuild_the_rows(cx: &mut TestAppContext) {
         "the ledger toggle kept stale rows"
     );
 }
+
+#[gpui::test]
+fn snoozed_alert_stays_snoozed_across_snapshots(cx: &mut TestAppContext) {
+    // C229: a snapshot updates the alert state from its new messages only,
+    // so it does not bring back an alert the person snoozed.
+    let (chat, backend, cx) = open_screen(cx, Screen::NeedsYou);
+    let alert = chat.read_with(cx, |chat, _| chat.alerts.needing_me()[0].clone());
+    chat.update(cx, |chat, _| assert!(chat.alerts.snooze(&alert)));
+    let snapshot = backend.snapshot();
+    chat.update(cx, |chat, cx| {
+        chat.apply(Update::Snapshot(Box::new(snapshot.clone())), cx);
+    });
+    assert_eq!(chat.read_with(cx, |chat, _| chat.badge()), 0);
+
+    // A new urgent alert in a later snapshot still needs me.
+    let mut later = snapshot;
+    let mut fresh = later
+        .messages
+        .iter()
+        .find(|m| m.client.id == alert)
+        .unwrap()
+        .clone();
+    fresh.client.id = "01JE0000000000000000000NEW".parse().unwrap();
+    fresh.seq = agmen_proto::Seq(fresh.seq.0 + 1000);
+    later.messages.push(fresh.clone());
+    chat.update(cx, |chat, cx| {
+        chat.apply(Update::Snapshot(Box::new(later)), cx);
+    });
+    assert_eq!(
+        chat.read_with(cx, |chat, _| chat.alerts.needing_me().to_vec()),
+        [fresh.client.id]
+    );
+}

@@ -4,9 +4,10 @@
 //! under the listener message they belong to, and ledger presence lines
 //! (HELLO, BYE, ROLLCALL, HEARTBEAT) hide until "Show ledger".
 
+use std::collections::BTreeSet;
 use std::rc::Rc;
 
-use agmen_proto::StampedEnvelope;
+use agmen_proto::{MessageId, Seq, StampedEnvelope, Stream};
 use futures::StreamExt as _;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -294,10 +295,17 @@ impl ChatView {
                 snapshot
             }
             Update::Snapshot(snapshot) => {
-                let mut alerts = AlertState::default();
-                alerts.prefs = self.alerts.prefs.clone();
-                replay(&mut alerts, &snapshot);
-                self.alerts = alerts;
+                // Only messages the chat has not seen update the alerts, so
+                // an alert the person snoozed or cleared stays that way.
+                let seen: BTreeSet<(&Stream, Seq, &MessageId)> =
+                    self.snapshot.messages.iter().map(position).collect();
+                for env in &snapshot.messages {
+                    if !seen.contains(&position(env)) {
+                        // Task 13 plays the chime and posts the notification
+                        // from this effect, as for a single message.
+                        let _effect = self.alerts.on_message(env, &me);
+                    }
+                }
                 *snapshot
             }
         };
@@ -308,6 +316,12 @@ impl ChatView {
             .update(cx, |stream, cx| stream.set_rows(context, rows, cx));
         cx.notify();
     }
+}
+
+/// Where the hub put `env`, with its client id: a client id alone is
+/// unique per sender only.
+fn position(env: &StampedEnvelope) -> (&Stream, Seq, &MessageId) {
+    (&env.stream, env.seq, &env.client.id)
 }
 
 /// Feeds every message in `snapshot` to `alerts`, oldest first.
