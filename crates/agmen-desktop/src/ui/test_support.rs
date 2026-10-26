@@ -219,23 +219,65 @@ pub(crate) fn assert_menu_frame(
     assert_eq!(row_at.left() - frame_at.left(), inset, "{row} in {frame}");
 }
 
+/// The least contrast a menu row's hover fill keeps against the menu's
+/// `elevated_surface`. The mockup's checked row, `element_selected` on the
+/// menu (#3c3836 on #282828), is 1.27:1; the old half-strength hover was
+/// 1.12:1 and hard to see.
+pub(crate) const MIN_MENU_HOVER_CONTRAST: f32 = 1.25;
+
+/// The WCAG contrast ratio between `fill` painted over `under` and `under`
+/// itself, blending `fill`'s alpha as the menu draws it.
+pub(crate) fn contrast_over(fill: gpui::Hsla, under: gpui::Hsla) -> f32 {
+    let (top, base) = (fill.to_rgb(), under.to_rgb());
+    let blend = |a: f32, b: f32| a * top.a + b * (1. - top.a);
+    let luminance = |r: f32, g: f32, b: f32| {
+        let linear = |c: f32| {
+            if c <= 0.040_45 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
+    };
+    let shown = luminance(
+        blend(top.r, base.r),
+        blend(top.g, base.g),
+        blend(top.b, base.b),
+    );
+    let menu = luminance(base.r, base.g, base.b);
+    (shown.max(menu) + 0.05) / (shown.min(menu) + 0.05)
+}
+
 /// Asserts a menu's rows draw `MenuRow`'s picker look under the pointer
 /// (V119): the `checked` row keeps the selected fill, and the `other` row
-/// takes the selected fill at half strength, which shows on the menu's
-/// `elevated_surface` where `element_hover` would not.
+/// takes a fill that shows on the menu's `elevated_surface` by at least
+/// [`MIN_MENU_HOVER_CONTRAST`].
 pub(crate) fn assert_menu_row_hover(
     cx: &mut VisualTestContext,
     checked: &'static str,
     other: &'static str,
 ) {
     let theme = cx.update(|_, cx| cx.global::<Appearance>().theme.clone());
-    let hover = super::tokens::tint(theme.element_selected, super::tokens::TINT_MENU_HOVER);
-    assert_ne!(hover, theme.elevated_surface);
-    for (row, want) in [(checked, theme.element_selected), (other, hover)] {
+    for row in [checked, other] {
         let center = cx.debug_bounds(row).expect("the row").center();
         cx.simulate_mouse_move(center, None, Modifiers::none());
         redraw(cx);
-        assert_eq!(fills_at(cx, row), [want], "{row} under the pointer");
+        let fills = fills_at(cx, row);
+        let [fill] = fills.as_slice() else {
+            panic!("{row} under the pointer paints {fills:?}");
+        };
+        if row == checked {
+            assert_eq!(
+                *fill, theme.element_selected,
+                "{row} keeps the selected fill"
+            );
+        }
+        let contrast = contrast_over(*fill, theme.elevated_surface);
+        assert!(
+            contrast >= MIN_MENU_HOVER_CONTRAST,
+            "{row} under the pointer is {contrast:.2}:1 on the menu"
+        );
     }
 }
 

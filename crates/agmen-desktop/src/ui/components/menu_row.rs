@@ -14,8 +14,7 @@ use super::{ClickHandler, Color, Icon, IconSize};
 use crate::appearance::{Appearance, Theme};
 use crate::icons::UiIcon;
 use crate::ui::tokens::{
-    ICON_SM, MENU_ROW_HEIGHT, PICKER_ROW_HEIGHT, RADIUS_MD, SPACE_8, SPACE_10, TINT_MENU_HOVER,
-    tint,
+    ICON_SM, MENU_ROW_HEIGHT, PICKER_ROW_HEIGHT, RADIUS_MD, SPACE_8, SPACE_10,
 };
 
 /// Which menu's row it is.
@@ -66,7 +65,7 @@ impl MenuRow {
     }
 
     /// Draws the row as the model picker's (node 3361): 26 px tall, the
-    /// checked row on the selected fill, a half-strength hover.
+    /// checked row on the selected fill.
     #[must_use]
     pub(crate) const fn picker(mut self) -> Self {
         self.look = Look::Picker;
@@ -111,16 +110,16 @@ impl ParentElement for MenuRow {
     }
 }
 
-/// The fill a row takes under the pointer. The switch menu's hovered row
-/// (node 1812) fills with the selected color. A picker row: none on the
-/// checked row, which keeps its selected fill, and otherwise the selected
-/// fill at half strength; Zed's `element_hover` would vanish there, as
-/// Andy's Gruvbox and the built-in theme give it the menu's own
-/// `elevated_surface`.
+/// The fill a row takes under the pointer: the selected color, as Zed's
+/// pickers select the hovered row and fill it with `ghost_element.selected`
+/// (the switch menu's hovered row, node 1812, has it too). A checked picker
+/// row has none, as it keeps its selected fill. Zed's `element_hover`
+/// would vanish here: Andy's Gruvbox and the built-in theme give it the
+/// menu's own `elevated_surface`.
 fn hover_fill(theme: &Theme, look: Look, checked: bool) -> Option<Hsla> {
     match look {
         Look::Menu => Some(theme.element_selected),
-        Look::Picker => (!checked).then(|| tint(theme.element_selected, TINT_MENU_HOVER)),
+        Look::Picker => (!checked).then_some(theme.element_selected),
     }
 }
 
@@ -178,7 +177,7 @@ impl RenderOnce for MenuRow {
 mod tests {
     use super::*;
     use crate::ui::components::Label;
-    use crate::ui::test_support::{draw, rendered_size};
+    use crate::ui::test_support::{MIN_MENU_HOVER_CONTRAST, contrast_over, draw, rendered_size};
     use gpui::{TestAppContext, px};
 
     #[gpui::test]
@@ -210,9 +209,14 @@ mod tests {
         crate::ui::test_support::init(cx);
         let theme = cx.update(|cx| cx.global::<Appearance>().theme.clone());
         assert_eq!(hover_fill(&theme, Look::Picker, true), None);
-        let hover = hover_fill(&theme, Look::Picker, false).expect("a hover fill");
-        assert_ne!(hover, theme.elevated_surface);
-        assert_ne!(hover, theme.element_selected);
+        for look in [Look::Menu, Look::Picker] {
+            let hover = hover_fill(&theme, look, false).expect("a hover fill");
+            let contrast = contrast_over(hover, theme.elevated_surface);
+            assert!(
+                contrast >= MIN_MENU_HOVER_CONTRAST,
+                "{look:?} hover is {contrast:.2}:1 on the menu"
+            );
+        }
     }
 
     #[gpui::test]
