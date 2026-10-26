@@ -59,14 +59,15 @@ fn cmd_shift_p_lists_what_the_workspace_can_run(cx: &mut TestAppContext) {
     redraw(cx);
     assert!(cx.debug_bounds("command-palette").is_some());
     let rows = shown(&workspace, cx).unwrap();
-    // One spawn row per ready agent, in installed order: grok is not
-    // installed (fix 28) and agy 1.1.7 is older than the 1.1.15 agmen needs
-    // for JSON, so neither can run a worker.
+    // One spawn row per ready agent: the listener's codex first, as the
+    // mockup's first row (node 11489), then the others in installed order.
+    // grok is not installed (fix 28) and agy 1.1.7 is older than the 1.1.15
+    // agmen needs for JSON, so neither can run a worker.
     assert_eq!(rows[0], "agmen: spawn worker\u{2026}");
     let spawn: Vec<&str> = rows[1..5].iter().map(String::as_str).collect();
     assert_eq!(
         spawn,
-        ["claude", "codex", "opencode", "gemini"].map(|a| format!("agmen: spawn worker with {a}"))
+        ["codex", "claude", "opencode", "gemini"].map(|a| format!("agmen: spawn worker with {a}"))
     );
     assert!(!rows.iter().any(|r| r.contains("grok") || r.contains("agy")));
     for label in [
@@ -169,7 +170,8 @@ fn spawn_row_opens_the_delegated_flow_in_the_chat(cx: &mut TestAppContext) {
         "{rows:?}"
     );
     assert_eq!(rows.len(), 4, "{rows:?}");
-    cx.simulate_keystrokes("down enter");
+    // The first row is the listener's codex (node 11489).
+    cx.simulate_keystrokes("enter");
     cx.run_until_parked();
     // The plan: here the row opens the fixture's DELEGATED flow, andy's
     // ask, the listener's ANSWER and its DELEGATED with the chosen agent.

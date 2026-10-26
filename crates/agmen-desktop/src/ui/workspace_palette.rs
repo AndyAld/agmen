@@ -80,13 +80,21 @@ impl Workspace {
     }
 
     /// `agmen: spawn worker with <agent>` for each agent that can run a
-    /// worker, in the order the backend lists them: not a missing one, nor
-    /// an outdated one (agy 1.1.7 needs 1.1.15 for JSON).
+    /// worker: not a missing one, nor an outdated one (agy 1.1.7 needs
+    /// 1.1.15 for JSON). The listener's agent comes first, as the mockup's
+    /// codex row (node 11489), then the others in the order the backend
+    /// lists them.
     fn spawn_entries(&self) -> impl Iterator<Item = PaletteEntry> + '_ {
-        self.snapshot
+        let listener = self.snapshot.listener.agent.as_str();
+        let ready = self
+            .snapshot
             .installed_agents
             .iter()
-            .filter(|agent| matches!(agent.found, AgentFound::Ready { .. }))
+            .filter(|agent| matches!(agent.found, AgentFound::Ready { .. }));
+        let (first, rest) = (ready.clone(), ready);
+        first
+            .filter(move |agent| agent.name == listener)
+            .chain(rest.filter(move |agent| agent.name != listener))
             .map(|agent| {
                 PaletteEntry::new(
                     format!("agmen: spawn worker with {}", agent.name),
