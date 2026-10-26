@@ -1,9 +1,10 @@
 //! Spike S5: per-stream numbering stays gapless and in commit order when many
 //! transactions number the same streams at once.
 //!
-//! Needs the dev stack's Postgres in `AGMEN_IT_PG`. The test writes to its own
-//! scratch table and uses stream names unique to the run, then deletes the
-//! rows it wrote, so reruns start clean and other tests' rows stay untouched.
+//! Needs the dev stack's Postgres in `AGMEN_IT_PG`. The concurrency test writes
+//! to its own scratch table and uses stream names unique to the run, then
+//! deletes the rows it wrote, so reruns start clean and other tests' rows stay
+//! untouched. The migration test works in a scratch schema that it drops.
 
 // clippy.toml's allow-*-in-tests covers only #[test] functions, not the
 // helpers below them; a failed step in a helper should fail the test.
@@ -15,10 +16,11 @@
 
 use std::collections::BTreeMap;
 use std::hash::{BuildHasher, RandomState};
+use std::str::FromStr;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use sqlx::PgPool;
-use sqlx::postgres::PgPoolOptions;
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+use sqlx::{AssertSqlSafe, PgPool};
 use tokio::task::JoinSet;
 
 const TASKS: u32 = 50;
@@ -32,13 +34,25 @@ fn random_up_to(max: u64) -> u64 {
     RandomState::new().hash_one(0_u8) % (max + 1)
 }
 
+fn pg_url() -> String {
+    std::env::var("AGMEN_IT_PG")
+        .expect("AGMEN_IT_PG is unset: source deploy/dev/.secrets/dev.env and start the dev stack")
+}
+
+/// A name unique to this process and moment, for streams and schemas.
+fn run_id() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    format!("{}_{nanos}", std::process::id())
+}
+
 async fn pool() -> PgPool {
-    let url = std::env::var("AGMEN_IT_PG")
-        .expect("AGMEN_IT_PG is unset: source deploy/dev/.secrets/dev.env and start the dev stack");
     // One connection per task, so all 50 transactions can be open at once.
     PgPoolOptions::new()
         .max_connections(TASKS)
-        .connect(&url)
+        .connect(&pg_url())
         .await
         .expect("connect to AGMEN_IT_PG")
 }
@@ -104,11 +118,7 @@ async fn it_numbering_is_gapless_under_concurrency() {
         .expect("run hub migrations");
     create_scratch_table(&pool).await;
 
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let run = format!("{}-{nanos}", std::process::id());
+    let run = run_id();
     let streams: Vec<String> = (0..STREAMS)
         .map(|i| format!("it-numbering/{run}/{i}"))
         .collect();
@@ -190,4 +200,74 @@ async fn it_numbering_is_gapless_under_concurrency() {
             "numbering: {stream}: {count} transactions committed over {span_s:.2} s ({rate:.0} tx/s on one stream)"
         );
     }
+}
+
+/// Whether `name` (schema qualified) names a table or other relation.
+async fn relation_exists(pool: &PgPool, name: &str) -> bool {
+    sqlx::query_scalar::<_, Option<String>>("SELECT to_regclass($1)::text")
+        .bind(name)
+        .fetch_one(pool)
+        .await
+        .expect("look up relation")
+        .is_some()
+}
+
+/// The hub's migrations apply and revert cleanly. Runs in a schema of its own,
+/// so the shared database's `stream_heads` and migration history stay as they
+/// are, then drops that schema.
+#[tokio::test]
+async fn it_numbering_migration_reverts() {
+    let schema = format!("it_numbering_mig_{}", run_id());
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&pg_url())
+        .await
+        .expect("connect to AGMEN_IT_PG");
+    // The schema name is a fixed prefix plus digits from run_id, so it is safe
+    // to splice into DDL, which takes no bind parameters.
+    sqlx::query(AssertSqlSafe(format!("CREATE SCHEMA \"{schema}\"")))
+        .execute(&admin)
+        .await
+        .expect("create scratch schema");
+
+    // Unqualified names, including sqlx's _sqlx_migrations, resolve to the
+    // scratch schema on every connection in this pool.
+    let options = PgConnectOptions::from_str(&pg_url())
+        .expect("parse AGMEN_IT_PG")
+        .options([("search_path", schema.as_str())]);
+    let scoped = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .expect("connect with the scratch search_path");
+    let heads = format!("\"{schema}\".stream_heads");
+
+    agmen_hub::MIGRATOR
+        .run(&scoped)
+        .await
+        .expect("apply hub migrations");
+    let after_up = relation_exists(&admin, &heads).await;
+    agmen_hub::MIGRATOR
+        .undo(&scoped, 0)
+        .await
+        .expect("revert hub migrations");
+    let after_down = relation_exists(&admin, &heads).await;
+    let applied: i64 = sqlx::query_scalar("SELECT count(*) FROM _sqlx_migrations")
+        .fetch_one(&scoped)
+        .await
+        .expect("count applied migrations");
+
+    // Clean up before asserting, so a failed run leaves nothing behind.
+    scoped.close().await;
+    sqlx::query(AssertSqlSafe(format!("DROP SCHEMA \"{schema}\" CASCADE")))
+        .execute(&admin)
+        .await
+        .expect("drop scratch schema");
+
+    assert!(after_up, "stream_heads missing after the up migrations");
+    assert!(
+        !after_down,
+        "stream_heads still exists after the down migrations"
+    );
+    assert_eq!(applied, 0, "migration history not empty after undo to 0");
 }

@@ -9,7 +9,7 @@ Readers detect lost messages by seq: a gap (`seq > last + 1`) triggers a replay 
 
 ## Decision
 
-The hub numbers messages with one row per stream in `stream_heads (stream text primary key, seq bigint not null)`, created by `crates/agmen-hub/migrations/0001_streams.sql`. `agmen_hub::next_seq(tx, stream)` runs, inside the ingest transaction:
+The hub numbers messages with one row per stream in `stream_heads (stream text primary key, seq bigint not null)`, created by `crates/agmen-hub/migrations/0001_streams.up.sql`. `agmen_hub::next_seq(tx, stream)` runs, inside the ingest transaction:
 
 ```sql
 INSERT INTO stream_heads (stream, seq) VALUES ($1, 1)
@@ -19,7 +19,7 @@ RETURNING seq
 
 The upsert creates a new stream's row with seq 1, so no step registers streams in advance. It takes the row lock that protocol 5.2's `UPDATE ... RETURNING` takes, and holds it until commit or rollback. A second transaction on the same stream waits for the first to finish, so seqs commit in order, and a rollback returns its seq to the next writer. Writers on different streams do not block each other.
 
-The hub embeds its migrations with `sqlx::migrate!` as `agmen_hub::MIGRATOR` and runs it before other queries. `crates/agmen-hub/build.rs` makes Cargo rebuild when a file is added to `migrations/`, which the macro cannot track on stable Rust. Queries are runtime-checked `sqlx::query` calls with binds (ruling R23).
+The hub embeds its migrations with `sqlx::migrate!` as `agmen_hub::MIGRATOR` and runs it before other queries. Hub migrations are reversible: each is a `NNNN_name.up.sql` and `NNNN_name.down.sql` pair, and `0001_streams.down.sql` drops `stream_heads`. sqlx reads that suffix as a reversible migration and runs the down file on `Migrator::undo`. Later hub migrations follow the same form. `crates/agmen-hub/build.rs` makes Cargo rebuild when a file is added to `migrations/`, which the macro cannot track on stable Rust. Queries are runtime-checked `sqlx::query` calls with binds (ruling R23).
 
 ## Results
 
@@ -27,6 +27,7 @@ The hub embeds its migrations with `sqlx::migrate!` as `agmen_hub::MIGRATOR` and
 
 - Run 20 times with `--retries 0`: 20 passes.
 - Mutation check: changing the increment to `+ 2` fails the test with "seqs are not exactly 1..=680".
+- `it_numbering_migration_reverts` applies the migrations and undoes them to version 0 in a scratch schema, and checks that `stream_heads` exists after the up step and is gone after the down step. A no-op down file fails it with "stream_heads still exists after the down migrations".
 - Throughput on one stream, from the test output (`committed / commit span` per stream, 60 samples): median 186 tx/s, range 97 to 202. 17 of 20 runs measured 160 to 202 tx/s per stream; runs 7, 8 and 10 measured 97 to 107 on all three streams at once. The cause is unknown: other worktrees share this machine and this Postgres, so a load spike there is likely but unverified. Across all 3 streams: median 557 tx/s, range 298 to 591.
 
 The per-stream rate measures how long each transaction holds the row lock, not the cost of the upsert. Here that hold is four round trips plus the test's sleep: about 5.4 ms per transaction at 186 tx/s.
