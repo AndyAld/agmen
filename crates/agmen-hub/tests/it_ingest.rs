@@ -13,8 +13,7 @@
 mod support;
 
 use std::collections::BTreeSet;
-use std::hash::{BuildHasher, Hasher, RandomState};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use agmen_hub::{HUB_IDENTITY, HubPost};
 use agmen_proto::{
@@ -28,50 +27,14 @@ use rumqttc::v5::mqttbytes::v5::{PubAckReason, SubscribeReasonCode};
 use serde_json::{Value, json};
 use support::mqtt::{self, ACK_WAIT, Client, connect_ok};
 use support::{
-    Ctx, DEV_KEY_1, Minted, Project, TestHub, broker_token, count, login, mint, mint_ok, run,
-    seed_human, seed_member, seed_project,
+    Ctx, DEV_KEY_1, Minted, Project, TestHub, broker_token, count, envelope, login, mint, mint_ok,
+    run, seed_human, seed_member, seed_project, ulid,
 };
 
 const ANDY: u64 = 4242;
 const CAROL: u64 = 77;
 /// How long a test waits to be sure nothing arrives.
 const QUIET: Duration = Duration::from_secs(2);
-
-/// A fresh ULID-shaped message id: 26 Crockford digits, the first 0 to 7.
-fn ulid() -> String {
-    const CROCKFORD: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
-    let mut id = String::from("0");
-    while id.len() < 26 {
-        let mut hasher = RandomState::new().build_hasher();
-        hasher.write_u128(
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos(),
-        );
-        let mut bits = hasher.finish();
-        for _ in 0..12 {
-            if id.len() == 26 {
-                break;
-            }
-            id.push(char::from(CROCKFORD[usize::try_from(bits % 32).unwrap()]));
-            bits /= 32;
-        }
-    }
-    id
-}
-
-/// A client envelope: `verb` with `data`, plus any `extra` top-level fields.
-fn envelope(id: &str, verb: &str, data: Value, extra: Value) -> Vec<u8> {
-    let mut env = json!({
-        "v": 1, "id": id, "verb": verb, "data": data,
-        "body": "hello", "sent_at": Timestamp::now().to_string(),
-    });
-    for (key, value) in extra.as_object().unwrap() {
-        env[key] = value.clone();
-    }
-    serde_json::to_vec(&env).unwrap()
-}
 
 fn fyi(id: &str) -> Vec<u8> {
     envelope(id, "FYI", json!({}), json!({}))

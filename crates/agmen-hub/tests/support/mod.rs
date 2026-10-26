@@ -22,6 +22,7 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agmen_hub::{Config, EmqxConfig, GithubConfig, Hub, Messaging, MqttConfig, Secret};
+use jiff::Timestamp;
 use reqwest::StatusCode;
 use reqwest::redirect::Policy;
 use serde_json::{Value, json};
@@ -64,6 +65,42 @@ pub fn new_id() -> String {
         }
     }
     id
+}
+
+/// A fresh ULID-shaped message id: 26 Crockford digits, the first 0 to 7.
+pub fn ulid() -> String {
+    const CROCKFORD: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+    let mut id = String::from("0");
+    while id.len() < 26 {
+        let mut hasher = RandomState::new().build_hasher();
+        hasher.write_u128(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        );
+        let mut bits = hasher.finish();
+        for _ in 0..12 {
+            if id.len() == 26 {
+                break;
+            }
+            id.push(char::from(CROCKFORD[usize::try_from(bits % 32).unwrap()]));
+            bits /= 32;
+        }
+    }
+    id
+}
+
+/// A client envelope: `verb` with `data`, plus any `extra` top-level fields.
+pub fn envelope(id: &str, verb: &str, data: Value, extra: Value) -> Vec<u8> {
+    let mut env = json!({
+        "v": 1, "id": id, "verb": verb, "data": data,
+        "body": "hello", "sent_at": Timestamp::now().to_string(),
+    });
+    for (key, value) in extra.as_object().unwrap() {
+        env[key] = value.clone();
+    }
+    serde_json::to_vec(&env).unwrap()
 }
 
 /// A database of its own on the `AGMEN_IT_PG` server.
