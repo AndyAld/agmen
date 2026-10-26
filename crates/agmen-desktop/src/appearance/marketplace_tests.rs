@@ -195,7 +195,7 @@ repository = "https://github.com/catppuccin/zed"
 #[test]
 fn marketplace_list_parses_and_caches_an_hour() {
     let server = Fixture::serve(3, vec![("/extensions", 200, LIST.into())]);
-    let mut market = Marketplace::new(&server.base).unwrap();
+    let mut market = Marketplace::new(&server.base, &server.base).unwrap();
     let t0 = Instant::now();
 
     let list = market.search("cat", t0).unwrap();
@@ -244,7 +244,7 @@ fn marketplace_list_parses_and_caches_an_hour() {
 #[test]
 fn marketplace_backs_off_after_errors() {
     let server = Fixture::serve(15, vec![("/extensions", 503, Vec::new())]);
-    let mut market = Marketplace::new(&server.base).unwrap();
+    let mut market = Marketplace::new(&server.base, &server.base).unwrap();
     let t0 = Instant::now();
     let min = |m: u64| Duration::from_secs(m * 60);
 
@@ -287,7 +287,7 @@ fn marketplace_backs_off_after_errors() {
 fn unparsable_list_backs_off() {
     // Review C208: an HTML error page sent with status 200.
     let server = Fixture::serve(1, vec![("/extensions", 200, b"<html>busy</html>".to_vec())]);
-    let mut market = Marketplace::new(&server.base).unwrap();
+    let mut market = Marketplace::new(&server.base, &server.base).unwrap();
     let t0 = Instant::now();
 
     assert!(matches!(
@@ -301,30 +301,260 @@ fn unparsable_list_backs_off() {
     assert_eq!(server.requests().len(), 1);
 }
 
-#[test]
-fn install_refuses_theme_without_license() {
-    let bytes = archive(&[
-        ("extension.toml", MANIFEST_TOML),
+/// An archive with a manifest and a theme but no license file, as Zed's
+/// archives are.
+fn license_less_archive(manifest: &str) -> Vec<u8> {
+    archive(&[
+        ("extension.toml", manifest),
         ("themes/catppuccin-mocha.json", THEME_JSON),
-    ]);
+    ])
+}
+
+/// GitHub's answer to `/repos/{owner}/{repo}/license` for `text`, with the
+/// content wrapped at 60 characters as GitHub sends it.
+fn license_json(text: &[u8]) -> Vec<u8> {
+    use base64::Engine as _;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(text);
+    let wrapped = encoded
+        .as_bytes()
+        .chunks(60)
+        .map(|chunk| std::str::from_utf8(chunk).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+    serde_json::json!({
+        "name": "LICENSE",
+        "path": "LICENSE",
+        "encoding": "base64",
+        "content": wrapped,
+        "license": {"key": "mit", "name": "MIT License", "spdx_id": "MIT"},
+    })
+    .to_string()
+    .into_bytes()
+}
+
+const MIT: &str = "MIT License\n\nCopyright (c) Catppuccin\n";
+
+#[test]
+fn install_saves_the_repository_license_when_the_archive_has_none() {
+    // Andy, 2026-10-26: replaces install_refuses_theme_without_license.
     let server = Fixture::serve(
-        1,
-        vec![("/extensions/catppuccin/0.2.27/download", 200, bytes)],
+        2,
+        vec![
+            (
+                "/extensions/catppuccin/0.2.27/download",
+                200,
+                license_less_archive(MANIFEST_TOML),
+            ),
+            (
+                "/repos/catppuccin/zed/license",
+                200,
+                license_json(MIT.as_bytes()),
+            ),
+        ],
     );
-    let mut market = Marketplace::new(&server.base).unwrap();
+    let mut market = Marketplace::new(&server.base, &server.base).unwrap();
     let home = tempfile::tempdir().unwrap();
     let themes = home.path().join("agmen/themes");
 
-    let err = market
+    let installed = market
         .install(&catppuccin(), &themes, Instant::now())
-        .unwrap_err();
-    assert!(matches!(err, MarketError::NoLicense { ref id } if id == "catppuccin"));
-    assert!(err.to_string().contains("no license"), "{err}");
-    assert!(!themes.join("catppuccin").exists(), "nothing installed");
+        .unwrap();
+    let root = themes.join("catppuccin");
+    assert_eq!(installed.licenses, [root.join("LICENSE")]);
+    assert_eq!(installed.license.as_deref(), Some("MIT License"));
+    assert_eq!(fs::read_to_string(root.join("LICENSE")).unwrap(), MIT);
+    assert!(root.join("themes/catppuccin-mocha.json").is_file());
+    let seen = server.requests();
     assert_eq!(
-        server.requests()[0].line,
+        seen[0].line,
         "GET /extensions/catppuccin/0.2.27/download HTTP/1.1"
     );
+    assert_eq!(seen[1].line, "GET /repos/catppuccin/zed/license HTTP/1.1");
+}
+
+#[test]
+fn license_request_carries_agmen_user_agent() {
+    let server = Fixture::serve(
+        2,
+        vec![
+            (
+                "/extensions/catppuccin/",
+                200,
+                license_less_archive(MANIFEST_TOML),
+            ),
+            ("/repos/", 200, license_json(MIT.as_bytes())),
+        ],
+    );
+    let mut market = Marketplace::new(&server.base, &server.base).unwrap();
+    let home = tempfile::tempdir().unwrap();
+
+    market
+        .install(&catppuccin(), home.path(), Instant::now())
+        .unwrap();
+    let seen = server.requests();
+    assert_eq!(seen.len(), 2);
+    assert!(seen[1].line.starts_with("GET /repos/"), "{:?}", seen[1]);
+    assert_eq!(seen[1].user_agent.as_deref(), Some(USER_AGENT));
+}
+
+#[test]
+fn install_without_any_license_marks_it_not_found() {
+    // The fixture answers the license request with 404.
+    let server = Fixture::serve(
+        2,
+        vec![(
+            "/extensions/catppuccin/",
+            200,
+            license_less_archive(MANIFEST_TOML),
+        )],
+    );
+    let mut market = Marketplace::new(&server.base, &server.base).unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let dirs = theme_dirs(&home.path().join(".config"), &home.path().join("no-zed"));
+
+    let installed = market
+        .install(&catppuccin(), &dirs.agmen, Instant::now())
+        .unwrap();
+    assert!(installed.licenses.is_empty(), "{installed:?}");
+    assert_eq!(installed.license, None);
+    assert_eq!(installed.authors, ["Catppuccin Org <hi@example.org>"]);
+    assert_eq!(
+        installed.repository.as_deref(),
+        Some("https://github.com/catppuccin/zed")
+    );
+    assert_eq!(
+        server.requests()[1].line,
+        "GET /repos/catppuccin/zed/license HTTP/1.1"
+    );
+    // A 404 is about this repository, not an outage of Zed's API.
+    assert_eq!(market.retry_at, None);
+
+    let (themes, _) = installed_themes(&dirs);
+    let entry = themes
+        .iter()
+        .find(|t| t.name == "Catppuccin Mocha")
+        .unwrap();
+    assert!(matches!(&entry.origin, ThemeOrigin::Agmen(t) if t == &installed));
+}
+
+#[test]
+fn github_outage_does_not_back_off() {
+    let server = Fixture::serve(
+        2,
+        vec![
+            (
+                "/extensions/catppuccin/",
+                200,
+                license_less_archive(MANIFEST_TOML),
+            ),
+            ("/repos/", 503, Vec::new()),
+        ],
+    );
+    let mut market = Marketplace::new(&server.base, &server.base).unwrap();
+    let home = tempfile::tempdir().unwrap();
+
+    let installed = market
+        .install(&catppuccin(), home.path(), Instant::now())
+        .unwrap();
+    assert!(installed.licenses.is_empty(), "{installed:?}");
+    assert_eq!(market.retry_at, None);
+    assert_eq!(market.failures, 0);
+}
+
+#[test]
+fn non_github_repository_installs_without_a_request() {
+    let manifest = MANIFEST_TOML.replace(
+        "https://github.com/catppuccin/zed",
+        "https://gitlab.com/catppuccin/zed",
+    );
+    let server = Fixture::serve(
+        1,
+        vec![(
+            "/extensions/catppuccin/",
+            200,
+            license_less_archive(&manifest),
+        )],
+    );
+    // A listener nobody accepts on: a request would sit in its backlog.
+    let github = TcpListener::bind("127.0.0.1:0").unwrap();
+    github.set_nonblocking(true).unwrap();
+    let github_base = format!("http://{}", github.local_addr().unwrap());
+    let mut market = Marketplace::new(&server.base, github_base).unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let ext = ThemeExtension {
+        repository: Some("https://gitlab.com/catppuccin/zed".into()),
+        ..catppuccin()
+    };
+
+    let installed = market.install(&ext, home.path(), Instant::now()).unwrap();
+    assert!(installed.licenses.is_empty(), "{installed:?}");
+    assert_eq!(
+        installed.repository.as_deref(),
+        Some("https://gitlab.com/catppuccin/zed")
+    );
+    assert!(matches!(
+        github.accept(),
+        Err(ref err) if err.kind() == std::io::ErrorKind::WouldBlock
+    ));
+}
+
+#[test]
+fn oversized_repo_license_is_not_saved() {
+    let big = vec![b'x'; MAX_LICENSE_BYTES + 1];
+    let server = Fixture::serve(
+        2,
+        vec![
+            (
+                "/extensions/catppuccin/",
+                200,
+                license_less_archive(MANIFEST_TOML),
+            ),
+            ("/repos/", 200, license_json(&big)),
+        ],
+    );
+    let mut market = Marketplace::new(&server.base, &server.base).unwrap();
+    let home = tempfile::tempdir().unwrap();
+
+    let installed = market
+        .install(&catppuccin(), home.path(), Instant::now())
+        .unwrap();
+    assert!(installed.licenses.is_empty(), "{installed:?}");
+    assert!(!home.path().join("catppuccin/LICENSE").exists());
+}
+
+#[test]
+fn github_repo_accepts_only_plain_github_urls() {
+    let parsed = |url: &str| github_repo(url).map(|r| (r.owner, r.repo));
+    let pair = |o: &str, r: &str| Some((o.to_owned(), r.to_owned()));
+    assert_eq!(
+        parsed("https://github.com/catppuccin/zed"),
+        pair("catppuccin", "zed")
+    );
+    assert_eq!(
+        parsed("https://github.com/a-b/c.d_e.git"),
+        pair("a-b", "c.d_e")
+    );
+    for bad in [
+        "http://github.com/catppuccin/zed",
+        "https://gitlab.com/catppuccin/zed",
+        "https://github.com.evil.example/catppuccin/zed",
+        "https://GitHub.com/catppuccin/zed",
+        "https://github.com/catppuccin",
+        "https://github.com/catppuccin/",
+        "https://github.com/catppuccin/zed/",
+        "https://github.com/catppuccin/zed/tree/main",
+        "https://github.com/catppuccin/zed?x=1",
+        "https://github.com/catppuccin/zed#readme",
+        "https://github.com/../zed",
+        "https://github.com/catppuccin/..",
+        "https://github.com/catppuccin/.git",
+        "https://github.com/-x/zed",
+        "https://user@github.com/catppuccin/zed",
+        "https://github.com/cat%2fppuccin/zed",
+        "",
+    ] {
+        assert_eq!(parsed(bad), None, "{bad}");
+    }
 }
 
 #[test]
@@ -339,7 +569,7 @@ fn installed_theme_keeps_license_and_author() {
         ("grammars/x.wasm", "not kept"),
     ]);
     let server = Fixture::serve(1, vec![("/extensions/catppuccin/", 200, bytes)]);
-    let mut market = Marketplace::new(&server.base).unwrap();
+    let mut market = Marketplace::new(&server.base, &server.base).unwrap();
     let home = tempfile::tempdir().unwrap();
     let config = home.path().join(".config");
     let dirs = theme_dirs(&config, &home.path().join("no-zed"));
@@ -403,7 +633,7 @@ fn failed_install_leaves_no_staging_folder() {
     }
     let bytes = tar.into_inner().unwrap().finish().unwrap();
     let server = Fixture::serve(1, vec![("/extensions/catppuccin/", 200, bytes)]);
-    let mut market = Marketplace::new(&server.base).unwrap();
+    let mut market = Marketplace::new(&server.base, &server.base).unwrap();
     let home = tempfile::tempdir().unwrap();
     let dirs = theme_dirs(&home.path().join(".config"), &home.path().join("no-zed"));
 
@@ -433,7 +663,7 @@ fn dot_folders_in_agmen_themes_are_not_listed() {
 
 #[test]
 fn install_refuses_ids_that_leave_the_folder() {
-    let mut market = Marketplace::new("http://127.0.0.1:9").unwrap();
+    let mut market = Marketplace::new("http://127.0.0.1:9", "http://127.0.0.1:9").unwrap();
     let home = tempfile::tempdir().unwrap();
     for id in ["../evil", "a/b", "", ".hidden", "UPPER"] {
         let ext = ThemeExtension {
@@ -529,7 +759,6 @@ fn failed_read_back_names_the_manifest() {
     fs::create_dir_all(&target).unwrap();
 
     let err = read_back(&target).unwrap_err();
-    assert!(!matches!(err, MarketError::NoLicense { .. }), "{err}");
     let text = err.to_string();
     assert!(
         text.contains(&target.join(MANIFEST).display().to_string()),
@@ -548,7 +777,7 @@ fn unparsable_manifest_is_replaced_from_the_api() {
         ("themes/catppuccin-mocha.json", THEME_JSON),
     ]);
     let server = Fixture::serve(1, vec![("/extensions/catppuccin/", 200, bytes)]);
-    let mut market = Marketplace::new(&server.base).unwrap();
+    let mut market = Marketplace::new(&server.base, &server.base).unwrap();
     let home = tempfile::tempdir().unwrap();
     let themes = home.path().join("agmen/themes");
 

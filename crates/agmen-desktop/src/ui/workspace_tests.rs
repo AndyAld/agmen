@@ -313,6 +313,7 @@ fn escape_closes_an_open_settings_dropdown(cx: &mut TestAppContext) {
         config: home.path().join(".config"),
         extensions: home.path().join("extensions"),
         market: "http://127.0.0.1:9".into(),
+        github: "http://127.0.0.1:9".into(),
     };
     cx.update(|_, cx| {
         cx.set_global(sources);

@@ -92,6 +92,7 @@ version = "0.1.0"
 dependencies = [
  "agmen-proto",
  "anyhow",
+ "base64 0.23.1",
  "flate2",
  "futures",
  "gpui",

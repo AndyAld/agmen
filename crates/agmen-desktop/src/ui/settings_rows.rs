@@ -55,7 +55,9 @@ pub(super) fn installed_detail(theme: &ThemeEntry) -> String {
         .map(|a| format!("by {a} \u{b7} "))
         .unwrap_or_default();
     // Zed never copies a LICENSE into the folders it installs, so a Zed
-    // install without one is no fault of the theme (V107).
+    // install without one is no fault of the theme (V107). agmen's own
+    // install has none only when neither the archive nor the repository
+    // had one (Andy, 2026-10-26).
     let credit = |t: &InstalledTheme, missing: &str| {
         let license = t.license.as_deref().unwrap_or(missing);
         let repo = t
@@ -82,7 +84,10 @@ pub(super) fn installed_detail(theme: &ThemeEntry) -> String {
             )
         }
         ThemeOrigin::Agmen(t) => {
-            format!("installed by agmen \u{b7} {}", credit(t, "no license file"))
+            format!(
+                "installed by agmen \u{b7} {}",
+                credit(t, "license not found")
+            )
         }
     };
     format!("{by}{from}")

@@ -67,6 +67,7 @@ impl Home {
             extensions: self.extensions(),
             // A closed port: these tests never browse, and never reach the API.
             market: "http://127.0.0.1:9".into(),
+            github: "http://127.0.0.1:9".into(),
         }
     }
 }
@@ -576,7 +577,43 @@ fn zed_installed_theme_without_license_says_zed_keeps_it() {
         }),
     );
     let detail = rows::installed_detail(&ours);
-    assert!(detail.contains("no license file"), "{detail}");
+    assert!(detail.contains("license not found"), "{detail}");
+}
+
+#[test]
+fn agmen_install_without_license_says_license_not_found() {
+    // Andy, 2026-10-26: an install with no license in its archive or its
+    // repository keeps its authors and repository and says so.
+    let home = Home::new();
+    let dirs = theme_dirs(&home.config(), &home.extensions());
+    let root = dirs.agmen.join("catppuccin");
+    fs::create_dir_all(root.join("themes")).unwrap();
+    fs::write(
+        root.join("extension.toml"),
+        "id = \"catppuccin\"\nname = \"Catppuccin\"\nversion = \"0.2.27\"\n\
+         authors = [\"Catppuccin Org <hi@example.org>\"]\n\
+         repository = \"https://github.com/catppuccin/zed\"\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("themes/mocha.json"),
+        r#"{"themes": [{"name": "Catppuccin Mocha", "appearance": "dark", "style": {}}]}"#,
+    )
+    .unwrap();
+    let (themes, _) = installed_themes(&dirs);
+    let entry = themes
+        .iter()
+        .find(|t| t.name == "Catppuccin Mocha")
+        .unwrap();
+
+    let detail = rows::installed_detail(entry);
+    assert!(detail.contains("installed by agmen"), "{detail}");
+    assert!(detail.contains("license not found"), "{detail}");
+    assert!(detail.contains("by Catppuccin Org"), "{detail}");
+    assert!(
+        detail.contains("https://github.com/catppuccin/zed"),
+        "{detail}"
+    );
 }
 
 #[gpui::test]
