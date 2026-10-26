@@ -17,12 +17,14 @@ use super::tokens::{BORDER_WIDTH, LEFT_DOCK_WIDTH, RIGHT_DOCK_WIDTH};
 use crate::appearance::Appearance;
 use agmen_proto::IdentityId;
 
-use crate::backend::{AgentInfo, Screen, Snapshot};
+use crate::backend::{AgentInfo, Snapshot};
 use crate::icons::FileIcons;
 
 #[path = "workspace_dock.rs"]
 mod dock_wiring;
 use dock_wiring::LeftDockState;
+#[path = "workspace_screen.rs"]
+mod screen_state;
 
 actions!(workspace, [ToggleLeftDock, ToggleRightDock, Quit]);
 
@@ -104,16 +106,6 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Sets up what a mockup screen shows beyond its fixture data: the
-    /// Listener dock closed, or the Settings tab active.
-    pub(crate) fn show_screen(&mut self, screen: Screen, cx: &mut Context<Self>) {
-        match screen {
-            Screen::ListenerCollapsed => self.toggle_dock(DockSide::Right, cx),
-            Screen::Settings => self.open_settings(cx),
-            _ => {}
-        }
-    }
-
     /// What the status bar shows in the listener's place: "settings" while
     /// Settings is the active tab (frame "Desktop · settings", node 8240),
     /// `None` for the listener.
@@ -141,17 +133,34 @@ impl Workspace {
 // shortcut: the mockup's tabs stand in for the tabs the person left open;
 // restore those instead once agmend keeps them.
 fn starting_tabs(snapshot: &Snapshot) -> Vec<TabItem> {
-    let agents = || snapshot.roster.iter().flat_map(|group| &group.agents);
-    let fx1 = format!("{}/fx1", snapshot.me);
-    let mut tabs: Vec<TabItem> = agents()
-        .find(|agent| agent.handle == fx1)
-        .map(|agent| TabItem::Agent(agent.id.clone()))
+    let mut tabs: Vec<TabItem> = mockup_agent(snapshot)
+        .map(TabItem::Agent)
         .into_iter()
         .collect();
-    if agents().any(|agent| agent.role == "reviewer") {
-        tabs.push(TabItem::RoleFile("reviewer".into()));
+    let mut agents = snapshot.roster.iter().flat_map(|group| &group.agents);
+    if agents.any(|agent| agent.role == MOCKUP_ROLE) {
+        tabs.push(TabItem::RoleFile(MOCKUP_ROLE.into()));
     }
     tabs
+}
+
+/// The role whose file the mockup opens: reviewer.xml.
+const MOCKUP_ROLE: &str = "reviewer";
+
+/// The handle of the agent the mockup opens: your fx1, such as `andy/fx1`.
+fn mockup_handle(snapshot: &Snapshot) -> String {
+    format!("{}/fx1", snapshot.me)
+}
+
+/// The mockup's agent, when the roster has it.
+fn mockup_agent(snapshot: &Snapshot) -> Option<IdentityId> {
+    let fx1 = mockup_handle(snapshot);
+    snapshot
+        .roster
+        .iter()
+        .flat_map(|group| &group.agents)
+        .find(|agent| agent.handle == fx1)
+        .map(|agent| agent.id.clone())
 }
 
 impl Focusable for Workspace {

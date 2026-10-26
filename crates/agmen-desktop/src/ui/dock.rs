@@ -45,6 +45,10 @@ impl Dock {
     pub(crate) const fn open(&mut self) {
         self.open = true;
     }
+
+    pub(crate) const fn close(&mut self) {
+        self.open = false;
+    }
 }
 
 /// The left dock's tab strip, with the shown tab selected, and its hide
