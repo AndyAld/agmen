@@ -20,13 +20,6 @@ use crate::appearance::{Appearance, Theme};
 /// A change mark beside a line. Line numbers start at 1; ranges are
 /// end-exclusive.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the Project panel's file view marks added and deleted lines in Task 11"
-    )
-)]
 pub(crate) enum GutterMark {
     Added(Range<u32>),
     Modified(Range<u32>),

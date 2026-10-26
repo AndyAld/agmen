@@ -6,11 +6,14 @@ use gpui::{
     Styled as _, Window, div,
 };
 
+use super::project_panel::{FileView, ProjectPanel, ProjectPanelEvent};
 use super::roles_panel::{RoleFileView, RolePanel, RolesPanel, RolesPanelEvent};
+use super::scope_chip::ScopeOption;
 use super::title_bar::TitleBar;
 use super::tokens::{BORDER_WIDTH, LEFT_DOCK_WIDTH, RIGHT_DOCK_WIDTH};
 use crate::appearance::Appearance;
-use crate::backend::{RoleFile, RoleInfo};
+use crate::backend::{RoleFile, RoleInfo, Snapshot, WorktreeInfo};
+use crate::icons::FileIcons;
 
 /// The Roles tab, reviewer.xml open, and its Role panel
 /// (`desktop-role-file.webp`).
@@ -83,6 +86,94 @@ impl Render for RolesDev {
                             .clone()
                             .map(|info| RolePanel::new(self.name.clone(), info)),
                     ),
+            )
+    }
+}
+
+/// Which folders the Project dev view opens beyond the mockup's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProjectTests {
+    /// `desktop-project.webp`: tests folded.
+    Folded,
+    /// `desktop-project-tests-open.webp`.
+    Open,
+}
+
+/// The Project tab with fx1's main.rs open and an empty right dock
+/// (`desktop-project.webp`).
+pub(crate) struct ProjectDev {
+    worktrees: Vec<WorktreeInfo>,
+    panel: Entity<ProjectPanel>,
+    file: Option<Entity<FileView>>,
+}
+
+impl ProjectDev {
+    /// The first worktree with main.rs open and selected, `src/ui` open as
+    /// in the mockup, and `tests` as `tests` says.
+    pub(crate) fn new(snapshot: Snapshot, tests: ProjectTests, cx: &mut Context<Self>) -> Self {
+        const MAIN: &str = "src/main.rs";
+        let worktrees = snapshot.worktrees;
+        let options = ScopeOption::for_worktrees(&worktrees, &snapshot.agents);
+        let panel = cx.new(|cx| {
+            let mut panel = ProjectPanel::new(worktrees.clone(), options, cx);
+            panel.reveal(MAIN);
+            panel.open_folder("src/ui");
+            if tests == ProjectTests::Open {
+                panel.open_folder("tests");
+            }
+            panel
+        });
+        cx.subscribe(&panel, |this, _, event: &ProjectPanelEvent, cx| {
+            let ProjectPanelEvent::OpenFile { worktree, path } = event;
+            this.open(worktree, path, cx);
+        })
+        .detach();
+        let file = worktrees
+            .first()
+            .map(|wt| cx.new(|cx| FileView::new(wt, MAIN, cx)));
+        Self {
+            worktrees,
+            panel,
+            file,
+        }
+    }
+
+    fn open(&mut self, owner: &agmen_proto::IdentityId, path: &str, cx: &mut Context<Self>) {
+        let Some(wt) = self.worktrees.iter().find(|wt| &wt.owner == owner) else {
+            return;
+        };
+        self.file = Some(cx.new(|cx| FileView::new(wt, path, cx)));
+        cx.notify();
+    }
+}
+
+impl Render for ProjectDev {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Fetch the OS file icons the last frame asked for, as the
+        // workspace does.
+        cx.defer(FileIcons::fetch_wanted);
+        let theme = &cx.global::<Appearance>().theme;
+        let rule = super::rule_color(cx);
+        div()
+            .size_full()
+            .flex()
+            .bg(theme.background)
+            .text_color(theme.text)
+            .child(
+                div()
+                    .w(LEFT_DOCK_WIDTH)
+                    .flex_none()
+                    .border_r(BORDER_WIDTH)
+                    .border_color(rule)
+                    .child(self.panel.clone()),
+            )
+            .child(div().flex_1().min_w_0().children(self.file.clone()))
+            .child(
+                div()
+                    .w(RIGHT_DOCK_WIDTH)
+                    .flex_none()
+                    .border_l(BORDER_WIDTH)
+                    .border_color(rule),
             )
     }
 }

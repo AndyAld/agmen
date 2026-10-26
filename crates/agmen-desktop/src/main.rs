@@ -59,6 +59,10 @@ enum DevView {
     Agent,
     /// The Roles tab with reviewer.xml open.
     Roles,
+    /// The Project tab with fx1's main.rs open.
+    Project,
+    /// The same with the tests folder open.
+    ProjectTestsOpen,
 }
 
 /// What the command line asked for.
@@ -100,7 +104,9 @@ impl Launch {
                 "code" => Ok(Self::View(DevView::Code)),
                 "agent" => Ok(Self::View(DevView::Agent)),
                 "roles" => Ok(Self::View(DevView::Roles)),
-                _ => anyhow::bail!("views: code, agent, roles"),
+                "project" => Ok(Self::View(DevView::Project)),
+                "project-tests-open" => Ok(Self::View(DevView::ProjectTestsOpen)),
+                _ => anyhow::bail!("views: code, agent, roles, project, project-tests-open"),
             },
             [flag, name] if flag == "--screen" => name
                 .parse()
@@ -270,6 +276,17 @@ fn open_dev_view(
                 cx.new(|_| ui::DevFrame::new(title, view))
             })
         }
+        DevView::Project | DevView::ProjectTestsOpen => {
+            let tests = if view == DevView::Project {
+                ui::ProjectTests::Folded
+            } else {
+                ui::ProjectTests::Open
+            };
+            cx.open_window(options, |_, cx| {
+                let view = cx.new(|cx| ui::ProjectDev::new(snapshot, tests, cx));
+                cx.new(|_| ui::DevFrame::new(title, view))
+            })
+        }
     };
     Ok(window.context("opening the view window")?.into())
 }
@@ -373,6 +390,8 @@ mod tests {
             ("code", DevView::Code),
             ("agent", DevView::Agent),
             ("roles", DevView::Roles),
+            ("project", DevView::Project),
+            ("project-tests-open", DevView::ProjectTestsOpen),
         ] {
             assert_eq!(
                 Launch::parse(&args(&["--view", name])).unwrap(),

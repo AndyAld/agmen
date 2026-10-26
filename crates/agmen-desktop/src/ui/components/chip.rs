@@ -1,13 +1,14 @@
-//! A small rounded label on a surface fill: the title bar's listener chip and
-//! the composer's target chip.
+//! A small rounded label on a surface fill: the title bar's listener chip,
+//! the composer's target chip and the panels' worktree chip.
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, IntoElement, ParentElement as _, RenderOnce, SharedString, Styled as _, Window, div,
 };
 
-use super::{Color, Label, LabelSize};
+use super::{Color, Icon, IconSize, Label, LabelSize};
 use crate::appearance::Appearance;
+use crate::icons::UiIcon;
 use crate::ui::tokens::{DOT_SIZE, RADIUS_MD, SPACE_3, SPACE_6, SPACE_8};
 
 #[derive(Debug, IntoElement)]
@@ -16,6 +17,8 @@ pub(crate) struct Chip {
     color: Color,
     dot: Option<Color>,
     code: bool,
+    trailing: Option<UiIcon>,
+    full_width: bool,
 }
 
 impl Chip {
@@ -26,6 +29,8 @@ impl Chip {
             color: Color::Placeholder,
             dot: None,
             code: false,
+            trailing: None,
+            full_width: false,
         }
     }
 
@@ -46,13 +51,23 @@ impl Chip {
         self
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the composer's target chip uses it in Task 9")
-    )]
     #[must_use]
     pub(crate) const fn code(mut self) -> Self {
         self.code = true;
+        self
+    }
+
+    /// A small icon at the right edge, as the worktree chip's chevron.
+    #[must_use]
+    pub(crate) const fn trailing(mut self, icon: UiIcon) -> Self {
+        self.trailing = Some(icon);
+        self
+    }
+
+    /// Fills its row, with the trailing icon at the far end.
+    #[must_use]
+    pub(crate) const fn full_width(mut self) -> Self {
+        self.full_width = true;
         self
     }
 }
@@ -81,7 +96,24 @@ impl RenderOnce for Chip {
                         .bg(dot.hsla(theme)),
                 )
             })
-            .child(if self.code { label.code() } else { label })
+            .map(|this| {
+                let label = if self.code { label.code() } else { label };
+                if self.full_width {
+                    // The label takes the room left and clips, so the
+                    // trailing icon stays at the far end.
+                    this.w_full()
+                        .child(div().flex_1().min_w_0().overflow_hidden().child(label))
+                } else {
+                    this.child(label)
+                }
+            })
+            .when_some(self.trailing, |this, icon| {
+                this.child(
+                    Icon::new(icon)
+                        .size(IconSize::Small)
+                        .color(Color::Placeholder),
+                )
+            })
     }
 }
 

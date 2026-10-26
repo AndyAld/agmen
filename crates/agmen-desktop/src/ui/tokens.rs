@@ -52,13 +52,6 @@ pub(crate) const WINDOWS_CLOSE_HOVER: gpui::Rgba = gpui::Rgba {
 
 // Rows.
 pub(crate) const AGENT_ROW_HEIGHT: Pixels = px(26.);
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the Project panel uses it in Task 11 of the desktop plan"
-    )
-)]
 pub(crate) const PROJECT_ROW_HEIGHT: Pixels = px(24.);
 /// A tree row's left padding at depth 0, past the group row's chevron.
 pub(crate) const TREE_INDENT_BASE: Pixels = px(26.);
@@ -135,6 +128,8 @@ pub(crate) const DOCK_BUTTON: gpui::Size<Pixels> = gpui::Size {
 /// The leading slot of an Agents row: the status glyph's box (V62).
 pub(crate) const LEADING_SLOT: Pixels = px(10.);
 pub(crate) const ICON_MD: Pixels = px(14.);
+/// A file or folder icon in the Project panel (console.py `ficon`).
+pub(crate) const ICON_LG: Pixels = px(16.);
 pub(crate) const AVATAR_SIZE: Pixels = px(22.);
 pub(crate) const DOT_SIZE: Pixels = px(7.);
 pub(crate) const BORDER_WIDTH: Pixels = px(1.);

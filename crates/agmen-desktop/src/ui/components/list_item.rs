@@ -19,15 +19,19 @@ pub(crate) enum Indent {
     Group,
     /// An item at this depth under its group.
     Depth(u8),
+    /// A file tree row at this depth, which draws its own chevron.
+    Tree(u8),
 }
 
 impl Indent {
-    /// The row's left padding: 10 for a group, 26 + 14 * depth for an item.
+    /// The row's left padding: 10 for a group, 26 + 14 * depth for an item,
+    /// 10 + 14 * depth for a file tree row.
     #[must_use]
     pub(crate) fn padding(self) -> Pixels {
         match self {
             Self::Group => SPACE_10,
             Self::Depth(depth) => TREE_INDENT_BASE + TREE_INDENT_STEP * f32::from(depth),
+            Self::Tree(depth) => SPACE_10 + TREE_INDENT_STEP * f32::from(depth),
         }
     }
 }
@@ -71,10 +75,6 @@ impl ListItem {
         }
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the Project panel's 24 px rows use it in Task 11")
-    )]
     #[must_use]
     pub(crate) const fn height(mut self, height: Pixels) -> Self {
         self.height = height;
@@ -131,7 +131,7 @@ impl RenderOnce for ListItem {
             .flex_none()
             .items_center()
             .gap(match self.indent {
-                Indent::Group => SPACE_6,
+                Indent::Group | Indent::Tree(_) => SPACE_6,
                 Indent::Depth(_) => SPACE_7,
             })
             .pl(self.indent.padding())
@@ -171,6 +171,8 @@ mod tests {
         assert_eq!(Indent::Depth(0).padding(), px(26.));
         assert_eq!(Indent::Depth(1).padding(), px(40.));
         assert_eq!(Indent::Depth(2).padding(), px(26. + 14. * 2.));
+        assert_eq!(Indent::Tree(0).padding(), px(10.));
+        assert_eq!(Indent::Tree(3).padding(), px(10. + 14. * 3.));
     }
 
     #[gpui::test]
