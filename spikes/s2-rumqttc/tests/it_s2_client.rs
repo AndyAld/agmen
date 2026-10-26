@@ -523,6 +523,8 @@ async fn it_resume_session_flag() {
     // session and can still publish.
     let (mut second, connack) = connect(opts()).await;
     assert!(connack.session_present, "EMQX did not resume the session");
+    // Without a subscriber EMQX acks with NoMatchingSubscribers.
+    let _hub = hub_subscriber().await;
     assert_eq!(
         second.publish(&topic("up", &a), b"after resume").await,
         PubAckReason::Success
