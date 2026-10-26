@@ -257,8 +257,8 @@ fn unbuilt_pages_say_they_come_with_agmend(cx: &mut TestAppContext) {
 
 #[test]
 fn about_carries_every_linked_crates_license() {
-    // Review C198: the Zed crates (Apache-2.0) and zed-font-kit and zed-scap
-    // (MIT) need their license texts in the binary too.
+    // Review C198: the Zed crates (Apache-2.0) and zed-font-kit (MIT) need
+    // their license texts in the binary too.
     let has = |name: &str, text: &str| {
         NOTICES
             .iter()
@@ -266,5 +266,7 @@ fn about_carries_every_linked_crates_license() {
     };
     assert!(has("gpui", "Apache License"), "Zed's crates");
     assert!(has("font-kit", "Permission is hereby granted"));
-    assert!(has("scap", "MIT License"));
+    // Review C214: zed-scap's LICENSE is not MIT (it limits use by Valorant
+    // rank), and agmen does not build it, so About must not list it.
+    assert!(NOTICES.iter().all(|(title, _)| !title.contains("scap")));
 }

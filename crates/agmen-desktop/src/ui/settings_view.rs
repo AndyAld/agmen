@@ -106,7 +106,7 @@ const PAGES: [(Page, &str, &str, UiIcon); 9] = [
 
 /// The notices About shows: what agmen bundles or links, with its license
 /// text (THIRD_PARTY_NOTICES.md lists the same).
-pub(crate) const NOTICES: [(&str, &str); 6] = [
+pub(crate) const NOTICES: [(&str, &str); 5] = [
     ("Lucide icons (ISC License)", crate::assets::LUCIDE_LICENSE),
     (
         "IBM Plex Sans (SIL Open Font License 1.1)",
@@ -124,7 +124,6 @@ pub(crate) const NOTICES: [(&str, &str); 6] = [
         "zed-font-kit (MIT License)",
         crate::assets::FONT_KIT_MIT_LICENSE,
     ),
-    ("zed-scap (MIT License)", crate::assets::SCAP_LICENSE),
 ];
 
 /// The dropdown that is open, if any.

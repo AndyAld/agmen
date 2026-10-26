@@ -100,10 +100,13 @@ impl WorktreeInfo {
         for change in &mut self.changes {
             change.path = normalize_path(&change.path);
         }
-        self.texts = std::mem::take(&mut self.texts)
-            .into_iter()
-            .map(|(path, text)| (normalize_path(&path), text))
-            .collect();
+        // Two raw keys that name the same file (`a//b` and `a/b`) keep the
+        // first in path order; git never reports both (C215).
+        let mut texts = BTreeMap::new();
+        for (path, text) in std::mem::take(&mut self.texts) {
+            texts.entry(normalize_path(&path)).or_insert(text);
+        }
+        self.texts = texts;
         self
     }
 }

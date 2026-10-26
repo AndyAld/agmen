@@ -87,8 +87,6 @@ pub(crate) const ZED_APACHE_LICENSE: &str =
 /// zed-font-kit's MIT license, one of its two (shown in About).
 pub(crate) const FONT_KIT_MIT_LICENSE: &str =
     include_str!("../assets/licenses/font-kit-LICENSE-MIT.txt");
-/// zed-scap's MIT license (shown in About).
-pub(crate) const SCAP_LICENSE: &str = include_str!("../assets/licenses/scap-LICENSE.txt");
 
 /// The built-in assets, for GPUI's `svg()` paths.
 #[derive(Debug, Clone, Copy, Default)]
