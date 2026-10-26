@@ -194,8 +194,8 @@ fn offers_take_over(env: &StampedEnvelope, context: &ChatContext) -> bool {
 
 /// One message, the one at an index in the context's snapshot, so a frame
 /// copies none of it. Tests find its parts as `"{message id}:row"` (or
-/// `":ledger"`), `":avatar"`, `":verb"`, `":mention-bar"`,
-/// `":open-in-terminal"` and `":ref:{n}"`.
+/// `":ledger"`), `":avatar"`, `":head"`, `":handle"`, `":role"`, `":verb"`,
+/// `":time"`, `":mention-bar"`, `":open-in-terminal"` and `":ref:{n}"`.
 #[derive(IntoElement)]
 pub(crate) struct MessageRow {
     index: usize,
@@ -338,35 +338,38 @@ impl MessageRow {
     /// line rather than cutting them off.
     fn head(&self, env: &StampedEnvelope, who: &Sender, id: &str) -> impl IntoElement {
         let (verb, verb_color) = verb_badge(env, &self.context);
-        let verb_sel = format!("{id}:verb");
-        let head_sel = format!("{id}:head");
-        div()
-            .debug_selector(|| head_sel)
+        let part = |name: &str| {
+            let selector = format!("{id}:{name}");
+            div().debug_selector(|| selector)
+        };
+        part("head")
             .flex()
             .flex_wrap()
             .items_center()
             .gap_x(SPACE_8)
             .gap_y(SPACE_3)
             .child(
-                Label::new(env.from_handle.clone())
-                    .code()
-                    .weight(FontWeight::BOLD)
-                    .color(Color::TextMuted),
+                part("handle").child(
+                    Label::new(env.from_handle.clone())
+                        .code()
+                        .weight(FontWeight::BOLD)
+                        .color(Color::TextMuted),
+                ),
             )
             .child(
-                Label::new(who.label.clone())
-                    .size(LabelSize::Small)
-                    .color(who.color.clone()),
+                part("role").child(
+                    Label::new(who.label.clone())
+                        .size(LabelSize::Small)
+                        .color(who.color.clone()),
+                ),
             )
+            .child(part("verb").child(Badge::new(verb, verb_color).code()))
             .child(
-                div()
-                    .debug_selector(|| verb_sel)
-                    .child(Badge::new(verb, verb_color).code()),
-            )
-            .child(
-                Label::new(self.context.clock(env.hub_at))
-                    .size(LabelSize::Small)
-                    .color(Color::Muted),
+                part("time").child(
+                    Label::new(self.context.clock(env.hub_at))
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                ),
             )
             .when(offers_take_over(env, &self.context), |this| {
                 this.child(self.take_over_chip(env, id))

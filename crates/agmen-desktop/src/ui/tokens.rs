@@ -121,6 +121,9 @@ pub(crate) const DROPDOWN_WIDTH: Pixels = px(300.);
 pub(crate) const CHANGE_CARD_WIDTH: Pixels = px(560.);
 /// A change row's setting name column (node 7107).
 pub(crate) const CHANGE_SETTING_WIDTH: Pixels = px(52.);
+/// The narrowest a change row's new value gets before it moves to a line of
+/// its own: about six code font characters, so `$8.00` fits on one line.
+pub(crate) const CHANGE_VALUE_MIN_WIDTH: Pixels = px(48.);
 
 // Icons and marks.
 pub(crate) const ICON_SM: Pixels = px(12.);

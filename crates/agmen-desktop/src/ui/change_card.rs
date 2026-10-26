@@ -12,7 +12,8 @@ use gpui::{
 
 use super::components::{Button, ButtonStyle, Card, ChangeHandler, Color, Label, LabelSize};
 use super::tokens::{
-    CHANGE_CARD_WIDTH, CHANGE_SETTING_WIDTH, SPACE_6, SPACE_8, TINT_PENDING, tint,
+    CHANGE_CARD_WIDTH, CHANGE_SETTING_WIDTH, CHANGE_VALUE_MIN_WIDTH, SPACE_6, SPACE_8,
+    TINT_PENDING, tint,
 };
 use crate::appearance::Appearance;
 use crate::backend::{self, Action, ChangeRow, ChangeState, PersonGroup};
@@ -20,8 +21,7 @@ use crate::backend::{self, Action, ChangeRow, ChangeState, PersonGroup};
 /// A backend change card, drawn by its state: waiting for Apply or Cancel,
 /// applied with Undo, or cancelled with no buttons. Tests find the head row
 /// as `"{id}:waiting"`, `"{id}:applied"` or `"{id}:cancelled"`, and the
-/// card as `"{id}:card"`, the buttons as `"{id}:apply"`, `"{id}:cancel"`, `"{id}:undo"` and
-/// `"{id}:audit-log"`.
+/// card as `"{id}:card"`; `part_selectors` lists the rest.
 #[derive(IntoElement)]
 pub(crate) struct ChangeCard {
     card: backend::ChangeCard,
@@ -144,34 +144,123 @@ fn before_label(row: &ChangeRow, state: ChangeState) -> Label {
         .strikethrough()
 }
 
-fn row(row: &ChangeRow, target: Color, state: ChangeState, before: String) -> impl IntoElement {
+/// The debug selector of part `name` of the card `id`.
+fn part(id: &backend::ChangeId, name: &str) -> String {
+    format!("{id}:{name}")
+}
+
+/// Every part of `card` a test checks for overflow: the head's title and
+/// subline, each row's target, setting, old value, arrow and new value, and
+/// the buttons its state draws.
+#[cfg(test)]
+pub(super) fn part_selectors(card: &backend::ChangeCard) -> Vec<String> {
+    let mut parts = vec![part(&card.id, "title"), part(&card.id, "subline")];
+    for i in 0..card.rows.len() {
+        for name in ["target", "setting", "before", "arrow", "after"] {
+            parts.push(part(&card.id, &format!("{name}:{i}")));
+        }
+    }
+    let buttons: &[&str] = match card.state {
+        ChangeState::Pending => &["apply", "cancel"],
+        ChangeState::Applied => &["undo", "audit-log"],
+        ChangeState::Cancelled | ChangeState::Undone => &[],
+    };
+    parts.extend(buttons.iter().map(|name| part(&card.id, name)));
+    parts
+}
+
+/// `child` in a box tests find as `selector`.
+fn tagged(selector: String, child: impl IntoElement) -> gpui::Div {
+    div().debug_selector(|| selector).child(child)
+}
+
+fn row(card: &backend::ChangeCard, i: usize, row: &ChangeRow, target: Color) -> impl IntoElement {
+    let state = card.state;
     let (target, after) = if is_void(state) {
         (Color::Placeholder, Color::Placeholder)
     } else {
         (target, Color::Success)
     };
+    let name = |name: &str| part(&card.id, &format!("{name}:{i}"));
+    // In a narrow card the row wraps rather than squeezing the old value:
+    // the new value fills what is left of the line, and moves to a line of
+    // its own when less than CHANGE_VALUE_MIN_WIDTH is left.
     div()
         .flex()
+        .flex_wrap()
         .items_center()
         .gap(SPACE_8)
-        .child(Label::new(row.target.clone()).code().color(target))
+        .child(tagged(
+            name("target"),
+            Label::new(row.target.clone()).code().color(target),
+        ))
         .child(
-            div().w(CHANGE_SETTING_WIDTH).flex_none().child(
+            tagged(
+                name("setting"),
                 Label::new(row.setting.clone())
                     .size(LabelSize::Small)
                     .color(Color::Placeholder),
-            ),
+            )
+            .w(CHANGE_SETTING_WIDTH)
+            .flex_none(),
         )
         .child(
-            div()
-                .debug_selector(|| before)
+            tagged(name("before"), before_label(row, state).wrap())
                 .flex()
                 .flex_initial()
-                .min_w_0()
-                .child(before_label(row, state).wrap()),
+                .min_w_0(),
         )
-        .child(Label::new("→").size(LabelSize::Small).color(Color::Muted))
-        .child(Label::new(row.after.clone()).code().color(after).wrap())
+        .child(tagged(
+            name("arrow"),
+            Label::new("→").size(LabelSize::Small).color(Color::Muted),
+        ))
+        .child(
+            tagged(
+                name("after"),
+                Label::new(row.after.clone()).code().color(after).wrap(),
+            )
+            .flex()
+            .flex_1()
+            .min_w(CHANGE_VALUE_MIN_WIDTH),
+        )
+}
+
+/// The head row: the title, and the subline after it.
+fn head(card: &backend::ChangeCard) -> gpui::Div {
+    let state = card.state;
+    let state_name = match state {
+        ChangeState::Pending => "waiting",
+        ChangeState::Applied => "applied",
+        ChangeState::Cancelled => "cancelled",
+        ChangeState::Undone => "undone",
+    };
+    let head_selector = part(&card.id, state_name);
+    div()
+        .debug_selector(|| head_selector)
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap_x(SPACE_8)
+        .child(tagged(
+            part(&card.id, "title"),
+            Label::new(title(state))
+                .size(LabelSize::Small)
+                .weight(FontWeight::SEMIBOLD)
+                .color(title_color(state)),
+        ))
+        // The subline wraps, below the title when they do not fit on
+        // one line, rather than running past a narrow card.
+        .child(
+            tagged(
+                part(&card.id, "subline"),
+                Label::new(subline(card))
+                    .size(LabelSize::Small)
+                    .color(Color::Placeholder)
+                    .wrap(),
+            )
+            .flex_auto()
+            .min_w_0(),
+        )
 }
 
 impl RenderOnce for ChangeCard {
@@ -184,42 +273,17 @@ impl RenderOnce for ChangeCard {
         } else {
             theme.border
         };
-        let state_name = match state {
-            ChangeState::Pending => "waiting",
-            ChangeState::Applied => "applied",
-            ChangeState::Cancelled => "cancelled",
-            ChangeState::Undone => "undone",
-        };
-        let head_selector = format!("{}:{state_name}", card.id);
-        let head = div()
-            .debug_selector(|| head_selector)
-            .flex()
-            .flex_wrap()
-            .items_center()
-            .gap_x(SPACE_8)
-            .child(
-                Label::new(title(state))
-                    .size(LabelSize::Small)
-                    .weight(FontWeight::SEMIBOLD)
-                    .color(title_color(state)),
-            )
-            .child(
-                Label::new(subline(&card))
-                    .size(LabelSize::Small)
-                    .color(Color::Placeholder),
-            );
-        let rows =
-            card.rows
-                .iter()
-                .zip(self.target_colors)
-                .enumerate()
-                .map(|(i, (change, target))| {
-                    row(change, target, state, format!("{}:before:{i}", card.id))
-                });
+        let head = head(&card);
+        let rows = card
+            .rows
+            .iter()
+            .zip(self.target_colors)
+            .enumerate()
+            .map(|(i, (change, target))| row(&card, i, change, target));
 
         let button = |name: &str, label: &'static str, style: ButtonStyle, action: Action| {
             let handler = self.on_action.clone();
-            Button::new(SharedString::from(format!("{}:{name}", card.id)), label)
+            Button::new(SharedString::from(part(&card.id, name)), label)
                 .style(style)
                 .when_some(handler, |button, handler| {
                     button.on_click(move |_, window, cx| handler(action.clone(), window, cx))
@@ -243,7 +307,7 @@ impl RenderOnce for ChangeCard {
             ),
             // Mockup fix 44: Audit log is plain text, not a link.
             ChangeState::Applied => {
-                let audit_selector = format!("{}:audit-log", card.id);
+                let audit_selector = part(&card.id, "audit-log");
                 Some(
                     div()
                         .child(button(
@@ -264,7 +328,7 @@ impl RenderOnce for ChangeCard {
             ChangeState::Cancelled | ChangeState::Undone => None,
         };
 
-        let card_selector = format!("{}:card", card.id);
+        let card_selector = part(&card.id, "card");
         // Full width up to the mockup's, so a narrow pane does not cut it off.
         div()
             .debug_selector(|| card_selector)

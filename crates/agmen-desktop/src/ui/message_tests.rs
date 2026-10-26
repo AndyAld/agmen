@@ -394,8 +394,10 @@ fn narrow_row_keeps_a_long_file_chip_inside(cx: &mut TestAppContext) {
     assert!(chip.size.height > verb.size.height * 1.5, "{chip:?}");
 }
 
-#[gpui::test]
-fn narrow_row_keeps_the_change_card_inside(cx: &mut TestAppContext) {
+/// Draws the settings card's message and andy/fx1's DONE in a column
+/// `width` wide and asserts every part of both rows, the card's included,
+/// ends inside its row.
+fn assert_rows_fit(cx: &mut TestAppContext, width: gpui::Pixels) {
     let snapshot = snapshot_of(Screen::SettingsFromChat);
     let (id, card) = snapshot.changes.iter().next().unwrap();
     let index = snapshot
@@ -403,10 +405,44 @@ fn narrow_row_keeps_the_change_card_inside(cx: &mut TestAppContext) {
         .iter()
         .position(|m| &m.client.id == id)
         .unwrap();
-    let env = snapshot.messages[index].clone();
-    let card_sel: &'static str = Box::leak(format!("{}:card", card.id).into_boxed_str());
-    let o = open(cx, px(300.), vec![index], context_of(snapshot.clone()));
-    let row = o.cx.debug_bounds(sel(&env, "row")).unwrap();
-    let card = o.cx.debug_bounds(card_sel).unwrap();
-    assert!(card.right() <= row.right(), "{card:?} past {row:?}");
+    let done = 6;
+    assert!(offers_take_over(
+        &snapshot.messages[done],
+        &context_of(snapshot.clone())
+    ));
+    let (settings, done_env) = (
+        snapshot.messages[index].clone(),
+        snapshot.messages[done].clone(),
+    );
+    let card_parts = crate::ui::change_card::part_selectors(card);
+    let card_sel = format!("{}:card", card.id);
+    let o = open(cx, width, vec![done, index], context_of(snapshot.clone()));
+    let mut parts: Vec<(&StampedEnvelope, String)> = Vec::new();
+    for env in [&settings, &done_env] {
+        for name in ["avatar", "head", "handle", "role", "verb", "time", "body"] {
+            parts.push((env, format!("{}:{name}", env.client.id.as_str())));
+        }
+    }
+    parts.push((&done_env, sel(&done_env, "open-in-terminal").to_owned()));
+    parts.push((&settings, card_sel));
+    parts.extend(card_parts.into_iter().map(|part| (&settings, part)));
+    for (env, part) in parts {
+        let row = o.cx.debug_bounds(sel(env, "row")).unwrap();
+        let selector: &'static str = Box::leak(part.into_boxed_str());
+        let bounds =
+            o.cx.debug_bounds(selector)
+                .unwrap_or_else(|| panic!("{selector} not drawn"));
+        assert!(
+            bounds.right() <= row.right(),
+            "at {width:?}: {selector} {bounds:?} past {row:?}"
+        );
+    }
+}
+
+#[gpui::test]
+fn narrow_row_keeps_the_change_card_inside(cx: &mut TestAppContext) {
+    // 300 px: a two-pane split; 276 px: three panes in a 1440 px window
+    // with both docks open.
+    assert_rows_fit(cx, px(300.));
+    assert_rows_fit(&mut TestAppContext::single(), px(276.));
 }
