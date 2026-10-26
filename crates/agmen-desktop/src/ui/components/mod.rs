@@ -28,6 +28,7 @@ mod stepper;
 mod tab;
 mod toggle;
 mod tool_card;
+mod tooltip;
 
 pub(crate) use avatar::Avatar;
 pub(crate) use badge::Badge;
@@ -45,6 +46,7 @@ pub(crate) use progress::ProgressBar;
 pub(crate) use status_dot::StatusDot;
 pub(crate) use tab::Tab;
 pub(crate) use tool_card::ToolCard;
+pub(crate) use tooltip::Tooltip;
 pub(crate) use {dropdown::Dropdown, segmented::Segmented, stepper::Stepper, toggle::Toggle};
 
 /// What a control reports when its value changes: the new value. An `Rc`, not

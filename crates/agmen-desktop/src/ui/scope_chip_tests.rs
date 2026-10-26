@@ -63,3 +63,20 @@ fn picking_the_selected_option_emits_nothing(cx: &mut TestAppContext) {
     click(cx, "scope-chip:1");
     assert_eq!(seen.borrow().len(), 1);
 }
+
+#[test]
+fn chip_text_takes_the_text_color() {
+    // V90: node 4553 (console.py 881) draws the label in text #d8bf94, not
+    // Chip's default text.placeholder.
+    assert_eq!(
+        chip("fx1 · main".into(), "engineer".into()),
+        Chip::new("fx1 · main")
+            .color(Color::Default)
+            .dot(Color::Role("engineer".into()))
+            .code()
+            .full_width()
+            .trailing(UiIcon::ChevronDown)
+    );
+    let theme = crate::appearance::Appearance::builtin().theme;
+    assert_eq!(Color::Default.hsla(&theme), gpui::rgb(0xd8bf94).into());
+}

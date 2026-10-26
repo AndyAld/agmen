@@ -150,3 +150,74 @@ fn commits_header_cuts_branch_to_its_item() {
     assert_eq!(branch_item("main"), "main");
     assert_eq!(branch_item("fix/-12"), "fix/-12");
 }
+
+fn at(cx: &mut VisualTestContext, selector: &str) -> gpui::Bounds<gpui::Pixels> {
+    cx.debug_bounds(Box::leak(selector.to_owned().into_boxed_str()))
+        .unwrap_or_else(|| panic!("nothing is drawn as {selector}"))
+}
+
+#[gpui::test]
+fn change_rows_put_the_letter_at_24_and_a_16_px_icon_after_it(cx: &mut TestAppContext) {
+    // V91: node 5115 is console.py's tree_row at depth 1 (padding 24, gap
+    // 6): M at x 24, the 16 px icon at 38 and the path at 60.
+    let (_, cx) = panel(cx);
+    redraw(cx);
+    let status = at(cx, "git-change:src/main.rs:status");
+    let icon = at(cx, "git-change:src/main.rs:icon");
+    let path = at(cx, "git-change:src/main.rs:path");
+    assert_eq!(status.left(), gpui::px(24.), "{status:?}");
+    assert_eq!(icon.size.width, gpui::px(16.), "{icon:?}");
+    assert_eq!(icon.left(), status.right() + gpui::px(6.), "{icon:?}");
+    assert_eq!(path.left(), icon.right() + gpui::px(6.), "{path:?}");
+}
+
+#[gpui::test]
+fn git_rows_sit_on_the_tree_indent(cx: &mut TestAppContext) {
+    // V91 and V101: commit row 5135 has its sha at x 24; person row 5156
+    // its chevron at 24 and name at 42; worktree row 5160 its dot at 38
+    // and branch 6 px after it.
+    let (_, cx) = panel(cx);
+    redraw(cx);
+    let sha = at(cx, "git-commit:9e2a71c:sha");
+    assert_eq!(sha.left(), gpui::px(24.), "{sha:?}");
+    let chevron = at(cx, "git-person:andy:leading");
+    let name = at(cx, "git-person:andy:name");
+    assert_eq!(chevron.left(), gpui::px(24.), "{chevron:?}");
+    assert_eq!(name.left(), gpui::px(42.), "{name:?}");
+    let dot = at(cx, "git-worktree:andy/fx1:dot");
+    let head = at(cx, "git-worktree:andy/fx1:head");
+    assert_eq!(dot.left(), gpui::px(38.), "{dot:?}");
+    assert_eq!(dot.size.width, crate::ui::tokens::DOT_SIZE, "{dot:?}");
+    assert_eq!(head.left(), dot.right() + gpui::px(6.), "{head:?}");
+}
+
+#[test]
+fn git_metadata_is_mono_placeholder() {
+    // V93: the M letter is mono 12 Bold (node 5116); +2 -5, authors, the
+    // folded person's count and worktree agents are mono 11 in
+    // text.placeholder (nodes 5121, 5139, 5164, 5179).
+    assert_eq!(
+        meta("fx1"),
+        Label::new("fx1")
+            .code()
+            .size(LabelSize::Small)
+            .color(Color::Placeholder)
+    );
+    assert_eq!(
+        status_letter(ChangeKind::Modified),
+        Label::new("M")
+            .code()
+            .weight(FontWeight::BOLD)
+            .color(Color::Warning)
+    );
+    let theme = crate::appearance::Appearance::builtin().theme;
+    assert_eq!(Color::Placeholder.hsla(&theme), gpui::rgb(0x928374).into());
+    assert_eq!(Color::Warning.hsla(&theme), gpui::rgb(0xdda752).into());
+}
+
+#[test]
+fn section_counts_are_mono_placeholder() {
+    // V94: node 5113 draws the count in text.placeholder, mono 11; the
+    // accepted difference covers only the pill's fill.
+    assert_eq!(count_badge("2"), Badge::new("2", Color::Placeholder).code());
+}

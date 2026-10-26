@@ -64,8 +64,10 @@ impl Label {
         self
     }
 
-    /// Sets the text in the code font at the code font's size, for handles,
-    /// branches and other values people type.
+    /// Sets the text in the code font, for handles, branches and other
+    /// values people type. At the default size it takes the code font's own
+    /// size; another [`LabelSize`] takes that step of the UI scale, as Zed's
+    /// `buffer_font` labels do (the Git panel's mono 11 metadata, V93).
     #[must_use]
     pub(crate) const fn code(mut self) -> Self {
         self.code = true;
@@ -96,16 +98,20 @@ impl RenderOnce for Label {
         let appearance = cx.global::<Appearance>();
         let color = self.color.hsla(&appearance.theme);
         let base = div().text_color(color).line_height(relative(LINE_HEIGHT));
-        let sized = if self.code {
-            base.font_family(appearance.fonts.code_family.clone())
-                .text_size(appearance.fonts.code_size)
-        } else {
-            base.text_size(match self.size {
-                LabelSize::XSmall => TEXT_XSMALL,
-                LabelSize::Small => TEXT_SMALL,
-                LabelSize::Default => TEXT_DEFAULT,
-                LabelSize::Large => TEXT_LARGE,
-            })
+        let scale = match self.size {
+            LabelSize::XSmall => TEXT_XSMALL,
+            LabelSize::Small => TEXT_SMALL,
+            LabelSize::Default => TEXT_DEFAULT,
+            LabelSize::Large => TEXT_LARGE,
+        };
+        let sized = match (self.code, self.size) {
+            (true, LabelSize::Default) => base
+                .font_family(appearance.fonts.code_family.clone())
+                .text_size(appearance.fonts.code_size),
+            (true, _) => base
+                .font_family(appearance.fonts.code_family.clone())
+                .text_size(scale),
+            (false, _) => base.text_size(scale),
         };
         sized
             .when_some(self.weight, gpui::Styled::font_weight)
@@ -163,6 +169,29 @@ mod tests {
                 .into_any_element()
         });
         assert_eq!(struck, plain);
+    }
+
+    #[gpui::test]
+    fn code_label_takes_a_size_from_the_ui_scale(cx: &mut TestAppContext) {
+        // V93: the Git panel's mono 11 metadata is the code font at Small;
+        // a code label at the default size keeps the code font's own size.
+        const TEXT: &str = "+2 \u{2212}5";
+        let code = rendered_size(cx, || Label::new(TEXT).code().into_any_element());
+        let mut cx2 = TestAppContext::single();
+        let small = rendered_size(&mut cx2, || {
+            Label::new(TEXT)
+                .code()
+                .size(LabelSize::Small)
+                .into_any_element()
+        });
+        let mut cx3 = TestAppContext::single();
+        let ui = rendered_size(&mut cx3, || {
+            Label::new(TEXT).size(LabelSize::Small).into_any_element()
+        });
+        assert!(small.height < code.height, "{small:?} {code:?}");
+        // The test text system measures every font alike, so only the
+        // size is checked here.
+        assert_eq!(small.height, ui.height, "the same text size");
     }
 
     #[gpui::test]

@@ -19,7 +19,9 @@ pub(crate) enum Indent {
     Group,
     /// An item at this depth under its group.
     Depth(u8),
-    /// A file tree row at this depth, which draws its own chevron.
+    /// A tree row at this depth (console.py's `tree_row`), which draws its
+    /// own chevron or marks: the Project panel's files and the Git panel's
+    /// rows.
     Tree(u8),
 }
 

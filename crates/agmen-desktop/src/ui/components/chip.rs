@@ -11,7 +11,7 @@ use crate::appearance::Appearance;
 use crate::icons::UiIcon;
 use crate::ui::tokens::{DOT_SIZE, RADIUS_MD, SPACE_3, SPACE_6, SPACE_8};
 
-#[derive(Debug, IntoElement)]
+#[derive(Debug, PartialEq, IntoElement)]
 pub(crate) struct Chip {
     label: SharedString,
     color: Color,
@@ -34,10 +34,6 @@ impl Chip {
         }
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the composer's target chip uses it in Task 9")
-    )]
     #[must_use]
     pub(crate) fn color(mut self, color: Color) -> Self {
         self.color = color;
@@ -75,9 +71,13 @@ impl Chip {
 impl RenderOnce for Chip {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = &cx.global::<Appearance>().theme;
-        let label = Label::new(self.label)
-            .size(LabelSize::Small)
-            .color(self.color);
+        // A code chip keeps the code font's own size.
+        let label = Label::new(self.label).color(self.color);
+        let label = if self.code {
+            label.code()
+        } else {
+            label.size(LabelSize::Small)
+        };
         div()
             .flex()
             .flex_none()
@@ -97,7 +97,6 @@ impl RenderOnce for Chip {
                 )
             })
             .map(|this| {
-                let label = if self.code { label.code() } else { label };
                 if self.full_width {
                     // The label takes the room left and clips, so the
                     // trailing icon stays at the far end.
