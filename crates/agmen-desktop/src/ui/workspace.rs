@@ -34,6 +34,12 @@ pub(crate) struct Workspace {
     right_dock: Dock,
     agents_panel: Entity<AgentsPanel>,
     /// The center: the chat, and the tabs and splits its chips open.
+    ///
+    /// The plan's `Workspace::split(direction)` lives here as
+    /// `PaneGroup::split(direction, item, cx)`. The palette (Task 18) reaches
+    /// it by dispatching the `SplitRight` action (`keys.rs`), which
+    /// `workspace_dock.rs` routes to `PaneGroup::split_active_right`; a split
+    /// down gets its own action the same way.
     pane_group: Entity<PaneGroup>,
     /// The agent the right dock shows; `None` shows the Listener panel.
     selected_agent: Option<IdentityId>,
