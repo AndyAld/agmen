@@ -71,10 +71,6 @@ impl ListItem {
         }
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the Project panel's 24 px rows use it in Task 11")
-    )]
     #[must_use]
     pub(crate) const fn height(mut self, height: Pixels) -> Self {
         self.height = height;

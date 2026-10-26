@@ -52,13 +52,6 @@ pub(crate) const WINDOWS_CLOSE_HOVER: gpui::Rgba = gpui::Rgba {
 
 // Rows.
 pub(crate) const AGENT_ROW_HEIGHT: Pixels = px(26.);
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the Project panel uses it in Task 11 of the desktop plan"
-    )
-)]
 pub(crate) const PROJECT_ROW_HEIGHT: Pixels = px(24.);
 /// A tree row's left padding at depth 0, past the group row's chevron.
 pub(crate) const TREE_INDENT_BASE: Pixels = px(26.);
@@ -137,6 +130,9 @@ pub(crate) const DOT_SIZE: Pixels = px(7.);
 pub(crate) const BORDER_WIDTH: Pixels = px(1.);
 pub(crate) const PROGRESS_HEIGHT: Pixels = px(4.);
 
+/// How strongly a diff line's fill shows `created` or `deleted` (the
+/// mockup draws OK and ERR at alpha 0x22).
+pub(crate) const DIFF_TINT: f32 = 0.13;
 /// How strongly a tinted badge's fill shows its color.
 pub(crate) const BADGE_TINT: f32 = 0.18;
 /// How strongly a waiting change card's border shows `warning` (node 7101

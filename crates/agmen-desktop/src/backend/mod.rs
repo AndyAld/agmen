@@ -8,13 +8,6 @@
 mod fixture;
 mod fixture_data;
 mod screen;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the Project and Git panels read it in Tasks 11 and 12"
-    )
-)]
 mod worktree;
 
 use std::collections::BTreeMap;
@@ -27,7 +20,10 @@ use crate::roles::{Edits, RoleKind, Tier};
 
 pub(crate) use fixture::FixtureBackend;
 pub(crate) use fixture_data::REVIEWER_XML;
-pub(crate) use worktree::{WorktreeInfo, WorktreeState};
+pub(crate) use worktree::{
+    ChangeKind, CommitInfo, DiffLine, DiffLineKind, FileChange, Hunk, WorktreeHead, WorktreeInfo,
+    WorktreeState,
+};
 
 /// The identity id the fixture gives a mockup handle, for tests.
 #[cfg(test)]

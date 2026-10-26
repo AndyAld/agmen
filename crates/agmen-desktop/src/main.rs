@@ -59,6 +59,10 @@ enum DevView {
     Agent,
     /// The Roles tab with reviewer.xml open.
     Roles,
+    /// The Git tab with src/main.rs's diff open.
+    Git,
+    /// The same with the Changes section folded.
+    GitCollapsed,
 }
 
 /// What the command line asked for.
@@ -100,7 +104,9 @@ impl Launch {
                 "code" => Ok(Self::View(DevView::Code)),
                 "agent" => Ok(Self::View(DevView::Agent)),
                 "roles" => Ok(Self::View(DevView::Roles)),
-                _ => anyhow::bail!("views: code, agent, roles"),
+                "git" => Ok(Self::View(DevView::Git)),
+                "git-collapsed" => Ok(Self::View(DevView::GitCollapsed)),
+                _ => anyhow::bail!("views: code, agent, roles, git, git-collapsed"),
             },
             [flag, name] if flag == "--screen" => name
                 .parse()
@@ -270,6 +276,18 @@ fn open_dev_view(
                 cx.new(|_| ui::DevFrame::new(title, view))
             })
         }
+        DevView::Git | DevView::GitCollapsed => {
+            let layout = if view == DevView::Git {
+                ui::GitDevLayout::Open
+            } else {
+                ui::GitDevLayout::ChangesFolded
+            };
+            let (worktrees, branches) = (snapshot.worktrees, snapshot.git.branches);
+            cx.open_window(options, |_, cx| {
+                let view = cx.new(|cx| ui::GitDev::new(worktrees, branches, layout, cx));
+                cx.new(|_| ui::DevFrame::new(title, view))
+            })
+        }
     };
     Ok(window.context("opening the view window")?.into())
 }
@@ -373,6 +391,8 @@ mod tests {
             ("code", DevView::Code),
             ("agent", DevView::Agent),
             ("roles", DevView::Roles),
+            ("git", DevView::Git),
+            ("git-collapsed", DevView::GitCollapsed),
         ] {
             assert_eq!(
                 Launch::parse(&args(&["--view", name])).unwrap(),

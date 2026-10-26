@@ -1,6 +1,7 @@
 //! Read-only code with line numbers and change marks in the gutter: files
 //! in the Project panel (Task 11), role files (Task 10) and the lines of a
-//! diff (Task 12). Highlights are computed once, when the view is made.
+//! diff (Task 12, through [`layout_lines`] and [`styled_line`]). Highlights
+//! are computed once, when the view is made.
 
 use std::ops::Range;
 use std::rc::Rc;
@@ -36,15 +37,15 @@ pub(crate) enum GutterMark {
 
 /// One line of text and its highlights, as byte ranges within the line.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Line {
-    text: SharedString,
+pub(super) struct Line {
+    pub(super) text: SharedString,
     highlights: Vec<(Range<usize>, &'static str)>,
 }
 
 /// Splits `text` into lines and clips each highlight to the lines it covers.
 /// A final newline does not make an extra empty line, and a CRLF ending
 /// counts as one line break.
-fn layout_lines(text: &str, language: Language) -> Vec<Line> {
+pub(super) fn layout_lines(text: &str, language: Language) -> Vec<Line> {
     let highlights = syntax::highlight(text, language);
     let mut lines = Vec::new();
     let mut next = 0;
@@ -91,6 +92,26 @@ fn syntax_color(theme: &Theme, name: &str) -> Option<Hsla> {
         }
         name = name.rsplit_once('.')?.0;
     }
+}
+
+/// `line`'s text in the theme's syntax colors.
+pub(super) fn styled_line(line: &Line, theme: &Theme) -> StyledText {
+    let highlights: Vec<(Range<usize>, HighlightStyle)> = line
+        .highlights
+        .iter()
+        .filter_map(|(range, name)| {
+            syntax_color(theme, name).map(|color| {
+                (
+                    range.clone(),
+                    HighlightStyle {
+                        color: Some(color),
+                        ..HighlightStyle::default()
+                    },
+                )
+            })
+        })
+        .collect();
+    StyledText::new(line.text.clone()).with_highlights(highlights)
 }
 
 /// A read-only file view.
@@ -145,21 +166,6 @@ fn render_line(
     let appearance = cx.global::<Appearance>();
     let theme = &appearance.theme;
     let number = u32::try_from(ix + 1).unwrap_or(u32::MAX);
-    let highlights: Vec<(Range<usize>, HighlightStyle)> = line
-        .highlights
-        .iter()
-        .filter_map(|(range, name)| {
-            syntax_color(theme, name).map(|color| {
-                (
-                    range.clone(),
-                    HighlightStyle {
-                        color: Some(color),
-                        ..HighlightStyle::default()
-                    },
-                )
-            })
-        })
-        .collect();
     let fill = fill_mark(marks, number).map(|fill| {
         let (kind, color) = match fill {
             Fill::Added => ("added", theme.created),
@@ -220,7 +226,7 @@ fn render_line(
                 .min_w_0()
                 .overflow_hidden()
                 .whitespace_nowrap()
-                .child(StyledText::new(line.text.clone()).with_highlights(highlights)),
+                .child(styled_line(line, theme)),
         )
         .into_any_element()
 }

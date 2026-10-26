@@ -17,8 +17,9 @@ use crate::roles;
 
 use super::{
     AgentInfo, AgentRow, AgentSession, AgentStatus, Approval, BackendError, ChangeCard, ChangeId,
-    ChangeRow, ChangeState, GitFacts, LaneInfo, ListenerInfo, PersonGroup, PlanInfo, RecentAction,
-    RecentKind, RoleFile, RoleInfo, RoleLayer, SessionRow, SpecState, TeamRow, Tone, WorktreeInfo,
+    ChangeKind, ChangeRow, ChangeState, CommitInfo, DiffLine, DiffLineKind, FileChange, GitFacts,
+    Hunk, LaneInfo, ListenerInfo, PersonGroup, PlanInfo, RecentAction, RecentKind, RoleFile,
+    RoleInfo, RoleLayer, SessionRow, SpecState, TeamRow, Tone, WorktreeHead, WorktreeInfo,
     WorktreeState,
 };
 
@@ -196,12 +197,7 @@ fn kind(handle: &str) -> &'static str {
 pub(super) fn git_facts() -> GitFacts {
     let set = |items: &[&str]| items.iter().map(|s| (*s).to_owned()).collect();
     GitFacts {
-        branches: set(&[
-            "feat/c014-release-matrix",
-            "fix/c015-main-conflict",
-            "test/b-415-replay-paging",
-            "main",
-        ]),
+        branches: set(&BRANCHES),
         commits: set(&["7c8835e", "4d9fdc8", "016f235", "9e2a71c"]),
         files: set(&[
             ".github/workflows/release.yml",
@@ -828,11 +824,12 @@ pub(super) fn role_files(roster: &[PersonGroup]) -> Vec<RoleFile> {
         .collect()
 }
 
-/// The worktrees on Andy's machine. fx1's files are `PROJECT` and `TESTS`
-/// in console.py; Task 11 adds its changes and Task 12 the commits and the
-/// other worktrees.
+/// The worktrees on Andy's machine, by person, Andy's first: fx1's files
+/// are `PROJECT` and `TESTS` in console.py, and its commits and the other
+/// worktrees are the Git panel's (mockup fix 51: rv2 reads C015 detached at
+/// fx1's commit). Every worktree is of the same repo, so they share files.
 pub(super) fn worktrees() -> Result<Vec<WorktreeInfo>, BackendError> {
-    let files = [
+    let files: Vec<String> = [
         ".github/workflows/release.yml",
         "Cargo.lock",
         "Cargo.toml",
@@ -845,14 +842,183 @@ pub(super) fn worktrees() -> Result<Vec<WorktreeInfo>, BackendError> {
         "src/ui/tabs.rs",
         "tests/it_main.rs",
         "tests/it_tabs.rs",
-    ];
-    Ok(vec![WorktreeInfo {
-        owner: id("andy/fx1")?,
-        handle: "andy/fx1".into(),
-        branch: "fix/c015-main-conflict".into(),
-        files: files.iter().map(|f| (*f).to_owned()).collect(),
-        changes: Vec::new(),
-        commits: Vec::new(),
-        state: WorktreeState::Pushed,
-    }])
+    ]
+    .iter()
+    .map(|f| (*f).to_owned())
+    .collect();
+    let worktree = |handle: &str, head, commits, state| -> Result<_, BackendError> {
+        Ok(WorktreeInfo {
+            owner: id(handle)?,
+            handle: handle.into(),
+            head,
+            files: files.clone(),
+            changes: Vec::new(),
+            commits,
+            state,
+        })
+    };
+    let branch = |name: &str| WorktreeHead::Branch(name.into());
+    let resolve = commit("9e2a71c", "Resolve mod list", "andy/fx1", "21:31")?;
+    let fx1 = WorktreeInfo {
+        changes: fx1_changes(),
+        ..worktree(
+            "andy/fx1",
+            branch("fix/c015-main-conflict"),
+            vec![
+                resolve.clone(),
+                commit("4d9fdc8", "Merge sean/tabs", "sean/a1", "20:58")?,
+                commit("016f235", "Move tabs to src/ui", "sean/a1", "20:40")?,
+            ],
+            WorktreeState::Pushed,
+        )?
+    };
+    Ok(vec![
+        fx1,
+        worktree(
+            "andy/t7k",
+            branch("test/b-415-replay-paging"),
+            vec![commit(
+                "7c8835e",
+                "Page replay by seq",
+                "andy/t7k",
+                "21:12",
+            )?],
+            WorktreeState::LocalOnly,
+        )?,
+        worktree(
+            "andy/rv2",
+            WorktreeHead::Detached {
+                at: resolve.sha.clone(),
+                item: "C015".into(),
+            },
+            vec![resolve],
+            WorktreeState::Reading,
+        )?,
+        worktree(
+            "sean/a1",
+            branch("fix/c016-it-tabs"),
+            vec![commit(
+                "a41c0d2",
+                "Keep it_tabs in tab order",
+                "sean/a1",
+                "21:48",
+            )?],
+            WorktreeState::LocalOnly,
+        )?,
+        worktree(
+            "sean/plan",
+            branch("plan/ridgeline"),
+            vec![commit(
+                "5be3f19",
+                "Draft the ridgeline plan",
+                "sean/plan",
+                "21:44",
+            )?],
+            WorktreeState::Pushed,
+        )?,
+    ])
 }
+
+/// A commit at `utc`, a time on the mockup's day (2026-10-25) in UTC.
+fn commit(sha: &str, subject: &str, author: &str, utc: &str) -> Result<CommitInfo, BackendError> {
+    let bad = |what: &str| BackendError::BadFixture(format!("commit {sha}: {what}"));
+    Ok(CommitInfo {
+        sha: sha.parse().map_err(|_| bad("sha"))?,
+        subject: subject.into(),
+        author: author.into(),
+        at: format!("2026-10-25T{utc}:00Z")
+            .parse()
+            .map_err(|_| bad("time"))?,
+    })
+}
+
+/// fx1's changes against main, as the Git panel lists them.
+fn fx1_changes() -> Vec<FileChange> {
+    let main_rs = hunk(
+        1,
+        1,
+        &[
+            " mod app;",
+            "-<<<<<<< HEAD",
+            " mod cylinder;",
+            " mod document;",
+            "-=======",
+            " mod minimap;",
+            "-mod tabs;",
+            "->>>>>>> 4d9fdc8",
+            "+mod ui;",
+            " ",
+            "-use tabs::Tabs;",
+            "+use ui::tabs::Tabs;",
+            " ",
+            " fn main() -> anyhow::Result<()> {",
+            "     let tabs = Tabs::default();",
+            "     app::run(tabs)",
+            " }",
+        ],
+    );
+    let cargo_lock = hunk(
+        41,
+        41,
+        &[
+            " [[package]]",
+            " name = \"tabs\"",
+            "-version = \"0.3.1\"",
+            "+version = \"0.4.0\"",
+        ],
+    );
+    let change = |path: &str, added, removed, hunks| FileChange {
+        path: path.into(),
+        kind: ChangeKind::Modified,
+        added,
+        removed,
+        hunks,
+    };
+    vec![
+        change("src/main.rs", 2, 5, vec![main_rs]),
+        change("Cargo.lock", 1, 1, vec![cargo_lock]),
+    ]
+}
+
+/// A hunk from unified diff lines: a `+`, `-` or space, then the text.
+fn hunk(old_start: u32, new_start: u32, lines: &[&str]) -> Hunk {
+    let lines = lines
+        .iter()
+        .map(|line| {
+            let (kind, text) = match line.split_at_checked(1) {
+                Some(("+", text)) => (DiffLineKind::Added, text),
+                Some(("-", text)) => (DiffLineKind::Removed, text),
+                Some((_, text)) => (DiffLineKind::Context, text),
+                None => (DiffLineKind::Context, ""),
+            };
+            DiffLine {
+                kind,
+                text: text.to_owned(),
+            }
+        })
+        .collect();
+    Hunk {
+        old_start,
+        new_start,
+        lines,
+    }
+}
+
+/// Every local branch, 14 in all, as the Git panel's Branches section
+/// counts them.
+pub(super) const BRANCHES: [&str; 14] = [
+    "docs/c011-readme",
+    "feat/c009-ui-module",
+    "feat/c012-minimap",
+    "feat/c013-cylinder-view",
+    "feat/c014-release-matrix",
+    "fix/b-409-lock-drift",
+    "fix/c010-document-save",
+    "fix/c015-main-conflict",
+    "fix/c016-it-tabs",
+    "main",
+    "plan/ridgeline",
+    "sean/tabs",
+    "test/b-412-tabs-order",
+    "test/b-415-replay-paging",
+];

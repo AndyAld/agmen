@@ -6,11 +6,16 @@ use gpui::{
     Styled as _, Window, div,
 };
 
+use super::breadcrumb::Breadcrumb;
+use super::components::{Button, ButtonStyle};
+use super::diff_view::DiffView;
+use super::git_panel::{GitPanel, GitPanelEvent, GitSection};
 use super::roles_panel::{RoleFileView, RolePanel, RolesPanel, RolesPanelEvent};
+use super::syntax::Language;
 use super::title_bar::TitleBar;
 use super::tokens::{BORDER_WIDTH, LEFT_DOCK_WIDTH, RIGHT_DOCK_WIDTH};
 use crate::appearance::Appearance;
-use crate::backend::{RoleFile, RoleInfo};
+use crate::backend::{RoleFile, RoleInfo, WorktreeInfo};
 
 /// The Roles tab, reviewer.xml open, and its Role panel
 /// (`desktop-role-file.webp`).
@@ -87,6 +92,121 @@ impl Render for RolesDev {
     }
 }
 
+/// How the Git dev view opens (`desktop-git.webp` and
+/// `desktop-git-collapsed.webp`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GitDevLayout {
+    Open,
+    /// The Changes section folded.
+    ChangesFolded,
+}
+
+/// The Git tab, src/main.rs's diff open, and an empty right dock.
+pub(crate) struct GitDev {
+    worktrees: Vec<WorktreeInfo>,
+    panel: Entity<GitPanel>,
+    /// The open diff's worktree handle and path.
+    open: (String, String),
+    diff: Entity<DiffView>,
+}
+
+impl GitDev {
+    /// Shows `worktrees` with the first one's first change open; selecting
+    /// another change opens its diff.
+    pub(crate) fn new(
+        worktrees: Vec<WorktreeInfo>,
+        branches: impl IntoIterator<Item = String>,
+        layout: GitDevLayout,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let first = worktrees
+            .first()
+            .and_then(|w| {
+                w.changes
+                    .first()
+                    .map(|c| (w.handle.clone(), c.path.clone()))
+            })
+            .unwrap_or_default();
+        let panel = cx.new(|_| GitPanel::new(worktrees.clone(), branches));
+        panel.update(cx, |panel, cx| {
+            panel.set_selected(&first.1);
+            if layout == GitDevLayout::ChangesFolded {
+                panel.toggle_section(GitSection::Changes, cx);
+            }
+        });
+        cx.subscribe(&panel, |this, _, event: &GitPanelEvent, cx| {
+            let GitPanelEvent::OpenDiff { worktree, path } = event;
+            this.open(worktree, path, cx);
+        })
+        .detach();
+        let diff = cx.new(|_| DiffView::new(Vec::new(), Language::Plain));
+        let mut this = Self {
+            worktrees,
+            panel,
+            open: first.clone(),
+            diff,
+        };
+        this.open(&first.0, &first.1, cx);
+        this
+    }
+
+    fn open(&mut self, worktree: &str, path: &str, cx: &mut Context<Self>) {
+        let hunks = self
+            .worktrees
+            .iter()
+            .find(|w| w.handle == worktree)
+            .and_then(|w| w.changes.iter().find(|c| c.path == path))
+            .map(|c| c.hunks.clone())
+            .unwrap_or_default();
+        let language = Language::for_path(std::path::Path::new(path));
+        self.diff = cx.new(|_| DiffView::new(hunks, language));
+        self.open = (worktree.to_owned(), path.to_owned());
+        cx.notify();
+    }
+}
+
+impl Render for GitDev {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = &cx.global::<Appearance>().theme;
+        let rule = super::rule_color(cx);
+        let (worktree, path) = self.open.clone();
+        // shortcut: Open file does nothing until the workspace hosts the
+        // Project panel's file tabs (Task 11 and agmen-c7's wiring).
+        let crumb = Breadcrumb::new([worktree.into(), "changes".into(), path.into()])
+            .end(Button::new("diff-open-file", "Open file").style(ButtonStyle::Filled));
+        div()
+            .size_full()
+            .flex()
+            .bg(theme.background)
+            .text_color(theme.text)
+            .child(
+                div()
+                    .w(LEFT_DOCK_WIDTH)
+                    .flex_none()
+                    .border_r(BORDER_WIDTH)
+                    .border_color(rule)
+                    .child(self.panel.clone()),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .bg(theme.editor_background)
+                    .child(crumb)
+                    .child(div().flex_1().min_h_0().child(self.diff.clone())),
+            )
+            .child(
+                div()
+                    .w(RIGHT_DOCK_WIDTH)
+                    .flex_none()
+                    .border_l(BORDER_WIDTH)
+                    .border_color(rule),
+            )
+    }
+}
+
 /// A dev view under the app's title bar, so the window chrome (macOS
 /// traffic lights, or the Windows and Linux buttons) sits where it will in
 /// the workspace.
@@ -126,6 +246,46 @@ mod tests {
     use super::*;
     use crate::backend::chat_snapshot;
     use crate::ui::test_support::{click, init, redraw};
+
+    #[gpui::test]
+    fn selecting_a_change_opens_its_diff(cx: &mut TestAppContext) {
+        init(cx);
+        let snapshot = chat_snapshot();
+        let (view, cx) = cx.add_window_view(move |_, cx| {
+            GitDev::new(
+                snapshot.worktrees.clone(),
+                snapshot.git.branches.clone(),
+                GitDevLayout::Open,
+                cx,
+            )
+        });
+        redraw(cx);
+        assert!(cx.debug_bounds("diff-hunk:0").is_some());
+        view.read_with(cx, |v, _| assert_eq!(v.open.1, "src/main.rs"));
+        click(cx, "git-change:Cargo.lock");
+        view.read_with(cx, |v, _| assert_eq!(v.open.1, "Cargo.lock"));
+        assert!(cx.debug_bounds("diff-row:4:removed").is_some());
+    }
+
+    #[gpui::test]
+    fn collapsed_layout_folds_changes(cx: &mut TestAppContext) {
+        init(cx);
+        let snapshot = chat_snapshot();
+        let (_, cx) = cx.add_window_view(move |_, cx| {
+            GitDev::new(
+                snapshot.worktrees.clone(),
+                snapshot.git.branches.clone(),
+                GitDevLayout::ChangesFolded,
+                cx,
+            )
+        });
+        redraw(cx);
+        assert!(cx.debug_bounds("git-change:src/main.rs").is_none());
+        assert!(
+            cx.debug_bounds("diff-hunk:0").is_some(),
+            "the diff stays open"
+        );
+    }
 
     #[gpui::test]
     fn clicking_a_role_opens_its_file_and_panel(cx: &mut TestAppContext) {

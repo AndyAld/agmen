@@ -95,6 +95,7 @@ dependencies = [
  "futures",
  "gpui",
  "gpui_macos",
+ "jiff",
  "jsonc-parser",
  "notify-rust",
  "objc2 0.6.5",
