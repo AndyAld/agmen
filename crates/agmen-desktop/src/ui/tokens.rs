@@ -236,8 +236,9 @@ pub(crate) const PICKER_ROW_HEIGHT: Pixels = px(26.);
 /// 8 px down, a 24 px blur, through [`drop_shadow`].
 pub(crate) const POPOVER_SHADOW_OFFSET: Pixels = px(8.);
 pub(crate) const POPOVER_SHADOW_BLUR: Pixels = px(24.);
-/// A selected segment, as the effort row's "high" (0x33, node 3397, and
-/// console.py `seg` for Settings).
+/// A selected segment in both looks (0x33): the effort row's "high" (node
+/// 3397) and Settings' "System", "Ligatures on" and "Comfortable" (nodes
+/// 8116, 8183 and 8210).
 pub(crate) const TINT_SEGMENT: f32 = 51. / 255.;
 /// A picker row under the pointer: `element_selected` at half strength. The
 /// mockup draws no hover.

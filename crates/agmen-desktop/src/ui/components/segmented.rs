@@ -5,20 +5,49 @@ use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Window, div,
+    App, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, RenderOnce,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
 };
 
 use super::{ChangeHandler, Color, Label, LabelSize};
-use crate::appearance::Appearance;
+use crate::appearance::{Appearance, Theme};
 use crate::ui::tokens::{BORDER_WIDTH, RADIUS_MD, SPACE_3, SPACE_10, SPACE_12, TINT_SEGMENT, tint};
+
+/// How a control draws: each caller's look from the mockup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum Look {
+    /// Settings' controls (frame 7908, nodes 8111, 8182 and 8209): the UI
+    /// font with 10 px sides.
+    #[default]
+    Ui,
+    /// The model picker's effort row (frame 2971, node 3392): the code font
+    /// with 12 px sides.
+    Code,
+}
+
+impl Look {
+    const fn side_padding(self) -> Pixels {
+        match self {
+            Self::Ui => SPACE_10,
+            Self::Code => SPACE_12,
+        }
+    }
+
+    /// The selected option's fill. Both looks draw `text_accent` at 0x33
+    /// (nodes 8116, 8183, 8210 and 3397, and console.py `seg`).
+    fn selected_fill(self, theme: &Theme) -> Hsla {
+        match self {
+            Self::Ui | Self::Code => tint(theme.text_accent, TINT_SEGMENT),
+        }
+    }
+}
 
 #[derive(IntoElement)]
 pub(crate) struct Segmented {
     id: SharedString,
     options: Vec<SharedString>,
     selected: usize,
-    code: bool,
+    look: Look,
     on_change: Option<ChangeHandler<usize>>,
 }
 
@@ -45,7 +74,7 @@ impl Segmented {
             id: id.into(),
             options: options.into_iter().map(Into::into).collect(),
             selected,
-            code: false,
+            look: Look::Ui,
             on_change: None,
         }
     }
@@ -53,7 +82,7 @@ impl Segmented {
     /// Sets the options in the code font with wider padding, as the effort row.
     #[must_use]
     pub(crate) const fn code(mut self) -> Self {
-        self.code = true;
+        self.look = Look::Code;
         self
     }
 
@@ -72,6 +101,7 @@ impl RenderOnce for Segmented {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = &cx.global::<Appearance>().theme;
         let hover = theme.element_hover;
+        let fill = self.look.selected_fill(theme);
         let last = self.options.len().saturating_sub(1);
         let root_selector = self.id.to_string();
         let segments = self.options.into_iter().enumerate().map(|(index, option)| {
@@ -93,7 +123,7 @@ impl RenderOnce for Segmented {
                 .flex_none()
                 .items_center()
                 .py(SPACE_3)
-                .px(if self.code { SPACE_12 } else { SPACE_10 })
+                .px(self.look.side_padding())
                 .when(index < last, |this| {
                     this.border_r(BORDER_WIDTH).border_color(theme.border)
                 })
@@ -102,7 +132,7 @@ impl RenderOnce for Segmented {
                 .focus_visible(move |style| style.bg(hover))
                 .map(|this| {
                     if selected {
-                        this.bg(tint(theme.text_accent, TINT_SEGMENT))
+                        this.bg(fill)
                     } else {
                         this.hover(move |style| style.bg(hover)).when_some(
                             self.on_change.clone(),
@@ -113,11 +143,14 @@ impl RenderOnce for Segmented {
                         )
                     }
                 })
-                .child(div().debug_selector(|| label_selector).child(if self.code {
-                    label.code()
-                } else {
-                    label
-                }))
+                .child(
+                    div()
+                        .debug_selector(|| label_selector)
+                        .child(match self.look {
+                            Look::Ui => label,
+                            Look::Code => label.code(),
+                        }),
+                )
         });
         div()
             .debug_selector(|| root_selector)
@@ -158,6 +191,35 @@ mod tests {
     #[gpui::test]
     fn code_options_pad_12(cx: &mut TestAppContext) {
         assert_eq!(side_padding(cx, true), SPACE_12);
+    }
+
+    /// The selected fill `look` draws in the app's theme.
+    fn selected_fill_of(cx: &mut TestAppContext, look: Look) -> gpui::Hsla {
+        crate::ui::test_support::init(cx);
+        let theme = cx.update(|cx| cx.global::<Appearance>().theme.clone());
+        let fill = look.selected_fill(&theme);
+        // Both mockup looks draw #72b9a9 (`text_accent`) at 0x33.
+        assert_eq!(
+            (fill.h, fill.s, fill.l),
+            (
+                theme.text_accent.h,
+                theme.text_accent.s,
+                theme.text_accent.l
+            )
+        );
+        fill
+    }
+
+    #[gpui::test]
+    fn settings_look_fills_the_selected_option_at_0x33(cx: &mut TestAppContext) {
+        // Nodes 8116, 8183 and 8210 in frame 7908.
+        assert!((selected_fill_of(cx, Look::Ui).a - 0.2).abs() < 0.0001);
+    }
+
+    #[gpui::test]
+    fn effort_look_fills_the_selected_option_at_0x33(cx: &mut TestAppContext) {
+        // Node 3397 in frame 2971.
+        assert!((selected_fill_of(cx, Look::Code).a - 0.2).abs() < 0.0001);
     }
 
     #[gpui::test]
