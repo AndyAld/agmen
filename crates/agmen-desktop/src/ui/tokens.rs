@@ -284,6 +284,10 @@ pub(crate) const TINT_SEGMENT: f32 = 51. / 255.;
 /// How strongly a diff line's fill shows `created` or `deleted` (the
 /// mockup draws OK and ERR at alpha 0x22).
 pub(crate) const DIFF_TINT: f32 = 0.13;
+/// How many code font cells a changed line's tint spans: console.py's diff
+/// grid is 150 columns (`Grid(150, 40)`), so node 5220's tint is 1143 px
+/// of the 1168 px editor. A narrower pane clips it.
+pub(crate) const DIFF_TINT_COLUMNS: f32 = 150.;
 /// An accent-tinted button's fill (console.py "primary", #72b9a926).
 pub(crate) const BUTTON_TINT: f32 = 0.15;
 /// How far a button on a card fades on hover. Hover is not drawn (nodes 7118,

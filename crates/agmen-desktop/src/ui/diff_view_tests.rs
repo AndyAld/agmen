@@ -248,3 +248,32 @@ fn diff_tab_open_file_button_is_plain(cx: &mut TestAppContext) {
     let open = cx.debug_bounds("diff-open-file").unwrap();
     assert_eq!(open.size, want.size, "{open:?} {want:?}");
 }
+
+#[gpui::test]
+fn change_tints_span_the_mockups_grid_clipped_to_the_pane(cx: &mut TestAppContext) {
+    // Node 5220: console.py tints a changed row across its 150 column grid
+    // (`g.bg(r, 0, 150, ...)`), 1143 px of the 1168 px editor, and the
+    // editor clips it. A pane narrower than the grid clips the tint.
+    init(cx);
+    let (_, cx) = cx.add_window_view(|_, _| DiffView::new(main_rs_hunks(), Language::Rust));
+    let cell = cx.update(|window, cx| {
+        cell_width(window, &cx.global::<crate::appearance::Appearance>().fonts)
+    });
+    let close = |a: gpui::Pixels, b: gpui::Pixels| (a - b).abs() < gpui::px(0.5);
+    for (width, grid_fits) in [(cell * 150. + gpui::px(200.), true), (cell * 100., false)] {
+        cx.simulate_resize(gpui::size(width, gpui::px(600.)));
+        redraw(cx);
+        let row = cx.debug_bounds("diff-row:3:removed").unwrap();
+        let tint = cx.debug_bounds("diff-row:3:tint").unwrap();
+        assert!(close(tint.left(), row.left()), "{tint:?} {row:?}");
+        let expected = if grid_fits {
+            cell * 150.
+        } else {
+            row.size.width
+        };
+        assert!(
+            close(tint.size.width, expected),
+            "{width:?}: {tint:?} against {expected:?}"
+        );
+    }
+}

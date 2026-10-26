@@ -15,7 +15,7 @@ use gpui::{
 use super::code_view::{Line, cell_width, layout_lines, styled_line};
 use super::components::{Breadcrumb, Button, ButtonStyle, Color, Label};
 use super::syntax::Language;
-use super::tokens::{DIFF_TINT, MONO_CELL_HEIGHT, SPACE_8, SPACE_16};
+use super::tokens::{DIFF_TINT, DIFF_TINT_COLUMNS, MONO_CELL_HEIGHT, SPACE_8, SPACE_16};
 use crate::appearance::Appearance;
 use crate::backend::{DiffLineKind, Hunk, WorktreeInfo};
 
@@ -168,7 +168,11 @@ fn render_row(ix: usize, header_ix: usize, row: &Row, cell: Pixels, cx: &App) ->
                         div()
                             .debug_selector(move || format!("diff-row:{number}:tint"))
                             .absolute()
-                            .inset_0()
+                            .top_0()
+                            .bottom_0()
+                            .left_0()
+                            .w(cell * DIFF_TINT_COLUMNS)
+                            .max_w_full()
                             .bg(color.opacity(DIFF_TINT)),
                     )
                 })
