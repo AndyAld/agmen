@@ -4,8 +4,6 @@ use std::path::PathBuf;
 
 use agmen_proto::IdentityId;
 
-use crate::refs::RefTarget;
-
 /// A Settings page. Task 17 builds Appearance; the other pages follow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub(crate) enum SettingsPage {
@@ -46,10 +44,6 @@ pub(crate) enum TabItem {
     // shortcut: a placeholder tab the status bar's search button opens;
     // Task 18 builds search (cmd-shift-f) and its view.
     Search,
-    /// A reference chip's target whose view does not exist yet.
-    // shortcut: a placeholder tab; Task 12 routes each kind to its home
-    // (spec 9.3) and removes this variant.
-    Ref(RefTarget),
 }
 
 impl SettingsPage {

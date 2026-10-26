@@ -49,6 +49,19 @@ impl AgentsPanel {
         cx.notify();
     }
 
+    /// Shows only `person`'s agents: every other person folds, and a click
+    /// on their row unfolds them again (a person reference, spec 9.3).
+    pub(crate) fn show_only(&mut self, person: &str, cx: &mut Context<Self>) {
+        self.folded = self
+            .roster
+            .iter()
+            .map(|group| &group.person)
+            .filter(|name| *name != person)
+            .cloned()
+            .collect();
+        cx.notify();
+    }
+
     /// Tells the workspace a row was clicked; the workspace decides what is
     /// selected and calls [`AgentsPanel::set_selected`].
     fn clicked(&mut self, id: &IdentityId, cx: &mut Context<Self>) {

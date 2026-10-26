@@ -87,6 +87,20 @@ impl ScopeChip {
         }
     }
 
+    /// The owner of the option the chip shows.
+    #[cfg(test)]
+    pub(crate) fn selected_owner(&self) -> Option<&IdentityId> {
+        self.options.get(self.selected).map(|o| &o.owner)
+    }
+
+    /// Shows `owner`'s option without telling the panel, which asked.
+    pub(crate) fn select(&mut self, owner: &IdentityId, cx: &mut Context<Self>) {
+        if let Some(index) = self.options.iter().position(|o| o.owner == *owner) {
+            self.selected = index;
+            cx.notify();
+        }
+    }
+
     fn toggle(&mut self, cx: &mut Context<Self>) {
         self.open = !self.open;
         cx.notify();
