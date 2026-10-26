@@ -32,7 +32,7 @@ use crate::claims::{LaneHolder, LedgerError, LedgerMessage, lane_holders};
 use crate::http::{ApiError, Hub};
 use crate::identities::Identity;
 use crate::ingest::{HubPost, post_alert};
-use crate::items::mark_done;
+use crate::items::close_claimed;
 
 /// The most lanes one project may have.
 const MAX_LANES: usize = 64;
@@ -683,8 +683,8 @@ struct Stray {
     lane: Option<LaneName>,
 }
 
-/// Checks a DONE ingest has just written in `tx`: closes the item when the
-/// sender holds it, and when a changed path lies in a lane the sender holds
+/// Checks a DONE ingest has just written in `tx`: closes the item and ends
+/// the sender's claim on it when the sender holds it, and when a changed path lies in a lane the sender holds
 /// no claim in (or is no repository path), posts an ALERT naming those
 /// paths to the coordinators, or to the sender's owner when the project has
 /// none (ruling R35).
@@ -696,9 +696,10 @@ pub(crate) async fn check_done(
     changes: &[Change],
 ) -> Result<(), LedgerError> {
     let project = topics.project().as_str();
-    mark_done(tx, project, item, &msg.from).await?;
-    let lanes = Lanes::load(&mut **tx, project).await?;
+    // The lanes held before this DONE ends its claim, which counts.
     let holders = lane_holders(&mut **tx, project).await?;
+    close_claimed(tx, project, item, &msg.from).await?;
+    let lanes = Lanes::load(&mut **tx, project).await?;
     let held: BTreeSet<&LaneName> = holders
         .iter()
         .filter(|holder| holder.identity == msg.from)

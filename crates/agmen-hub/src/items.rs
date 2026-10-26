@@ -115,26 +115,35 @@ pub(crate) async fn assign(
     Ok(())
 }
 
-/// Moves `item` to done when `holder` holds its active claim, which closes
-/// it to new claims.
-pub(crate) async fn mark_done(
+/// Ends `holder`'s live claim on `item` and moves the item to done, which
+/// closes it to new claims. A claim is live by the test
+/// [`crate::claims::lane_holders`] uses: not released and its lease not
+/// over. Without one, nothing changes.
+pub(crate) async fn close_claimed(
     conn: &mut PgConnection,
     project: &str,
     item: &ItemKey,
     holder: &IdentityId,
 ) -> Result<(), LedgerError> {
-    sqlx::query(
-        "UPDATE items SET state = 'done'
-         WHERE project_id = $1 AND key = $2 AND EXISTS (
-             SELECT 1 FROM claims
-             WHERE project_id = $1 AND item_key = $2 AND identity_id = $3
-               AND released_at IS NULL)",
+    let released = sqlx::query(
+        "UPDATE claims SET released_at = now()
+         WHERE project_id = $1 AND item_key = $2 AND identity_id = $3
+           AND released_at IS NULL AND lease_until > now()",
     )
     .bind(project)
     .bind(item.as_str())
     .bind(holder.as_str())
-    .execute(conn)
+    .execute(&mut *conn)
     .await?;
+    if released.rows_affected() == 0 {
+        tracing::debug!(%item, %holder, "DONE from an identity without a live claim");
+        return Ok(());
+    }
+    sqlx::query("UPDATE items SET state = 'done' WHERE project_id = $1 AND key = $2")
+        .bind(project)
+        .bind(item.as_str())
+        .execute(conn)
+        .await?;
     Ok(())
 }
 

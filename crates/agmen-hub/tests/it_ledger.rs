@@ -283,6 +283,16 @@ async fn holders(ctx: &Ctx, item: &str) -> Vec<String> {
         .unwrap()
 }
 
+/// `item`'s entry in a `GET items` answer.
+fn item_view<'a>(items: &'a Value, item: &str) -> &'a Value {
+    items["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|view| view["key"] == item)
+        .unwrap_or_else(|| panic!("{item} is not listed: {items}"))
+}
+
 /// Waits for the hub's RELEASE of `item`, failing after [`SWEEP_WAIT`].
 async fn wait_for_release(ctx: &Ctx, item: &str) -> StampedEnvelope {
     let deadline = Instant::now() + SWEEP_WAIT;
@@ -396,6 +406,45 @@ async fn it_lease_expiry_releases() {
             holders(&ctx, &item).await,
             std::slice::from_ref(&room.coord.id)
         );
+        sweeper.abort();
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn it_lease_expiry_is_quiet_for_done_items() {
+    run_with_lease(SHORT_LEASE, |ctx| async move {
+        let room = room(&ctx).await;
+        let done_item = found_key(&ctx, &room.project, &room.sol.id, None).await;
+        let open_item = found_key(&ctx, &room.project, &room.sol.id, None).await;
+        for item in [&done_item, &open_item] {
+            assert_granted(
+                &claim_answer(&ctx, &room.project, &room.sol.id, item).await,
+                item,
+            );
+        }
+        // A claim left standing on a done item, as before DONE ended its
+        // own claim.
+        sqlx::query("UPDATE items SET state = 'done' WHERE project_id = $1 AND key = $2")
+            .bind(&room.project.project)
+            .bind(&done_item)
+            .execute(&ctx.pool)
+            .await
+            .unwrap();
+        let sweeper = lease_sweeper(&ctx);
+
+        wait_for_release(&ctx, &open_item).await;
+        let deadline = Instant::now() + SWEEP_WAIT;
+        while !holders(&ctx, &done_item).await.is_empty() {
+            assert!(Instant::now() < deadline, "{done_item} was never released");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let releases: Vec<Value> = feed_verb(&ctx, "RELEASE")
+            .await
+            .iter()
+            .map(|env| verb_data(env).1["item"].clone())
+            .collect();
+        assert_eq!(releases, [json!(open_item)], "no RELEASE for a done item");
         sweeper.abort();
     })
     .await;
@@ -693,19 +742,32 @@ async fn it_done_out_of_lane_alerts() {
             "coordinators(project): the coordinator identity and the coordinator human"
         );
 
+        // DONE closes the item and ends the claim: nobody holds it, and
+        // the lane is no longer the sender's.
+        let (_, items) = get(&ctx, &room.project, &room.sol.token, "items").await;
+        let closed = item_view(&items, &item);
+        assert_eq!(closed["state"], "done", "{items}");
+        assert_eq!(closed["holder"], Value::Null, "{items}");
+        assert!(holders(&ctx, &item).await.is_empty(), "holders({item})");
+
         // A DONE inside the claimed lanes raises nothing, and closes the item.
+        let second = found_key(&ctx, &room.project, &room.sol.id, Some("L-UI")).await;
+        assert_granted(
+            &claim_answer(&ctx, &room.project, &room.sol.id, &second).await,
+            &second,
+        );
         let quiet = ulid();
         post_ok(
             &ctx,
             &room.project,
             &room.sol.id,
-            &done(&quiet, &item, &["ui/y.ts"]),
+            &done(&quiet, &second, &["ui/y.ts"]),
         )
         .await;
         assert!(replies(&ctx, &quiet).await.is_empty());
         assert_eq!(feed_verb(&ctx, "ALERT").await.len(), 1);
         let (_, items) = get(&ctx, &room.project, &room.sol.token, "items").await;
-        assert_eq!(items["items"][0]["state"], "done", "{items}");
+        assert_eq!(item_view(&items, &second)["state"], "done", "{items}");
     })
     .await;
 }

@@ -157,13 +157,15 @@ impl Hub {
     }
 
     /// One sweep: releases up to [`SWEEP_BATCH`] expired claims and posts a
-    /// RELEASE for each. Returns how many it released.
+    /// RELEASE for each whose item is still open. Returns how many it
+    /// released. DONE ends its own claim, so a claim on a done item reaches
+    /// here only if it predates that; it is released without a RELEASE.
     ///
     /// shortcut: the release commits before its RELEASE is posted, so a
     /// crash in between loses that RELEASE (the claim is still released);
     /// post in the release's transaction if that matters.
     async fn expire_leases(&self) -> Result<usize, LedgerError> {
-        let rows: Vec<(String, String, String, Option<String>, String, String)> = sqlx::query_as(
+        let rows: Vec<ExpiredClaim> = sqlx::query_as(
             "UPDATE claims c SET released_at = now()
              FROM items i, identities h, projects p
              WHERE c.id IN (
@@ -173,12 +175,16 @@ impl Hub {
                      FOR UPDATE SKIP LOCKED)
                AND i.project_id = c.project_id AND i.key = c.item_key
                AND h.id = c.identity_id AND p.id = c.project_id
-             RETURNING p.tenant_id, c.project_id, c.item_key, i.lane, c.identity_id, h.handle",
+             RETURNING p.tenant_id, c.project_id, c.item_key, i.lane, c.identity_id, h.handle,
+                       i.state = 'open'",
         )
         .bind(SWEEP_BATCH)
         .fetch_all(self.pool())
         .await?;
-        for (tenant, project, item, lane, holder, handle) in &rows {
+        for (tenant, project, item, lane, holder, handle, open) in &rows {
+            if !open {
+                continue;
+            }
             let topics = Topics::new(
                 tenant.parse().map_err(stored)?,
                 project.parse().map_err(stored)?,
@@ -199,6 +205,10 @@ impl Hub {
         Ok(rows.len())
     }
 }
+
+/// A claim the lease sweep released: tenant, project, item, lane, holder,
+/// the holder's handle, and whether the item is still open.
+type ExpiredClaim = (String, String, String, Option<String>, String, String, bool);
 
 /// The RELEASE `lease_expired` for `item`, mentioning the holder.
 fn lease_expired(
