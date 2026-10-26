@@ -6,7 +6,7 @@ use gpui::{Entity, TestAppContext, VisualTestContext};
 
 use super::*;
 use crate::backend::{Backend as _, FixtureBackend, Screen};
-use crate::ui::plan_test_support::plan_globals;
+use crate::ui::plan_test_support::{plan, plan_globals};
 use crate::ui::test_support::{click, redraw};
 
 type Selected = Rc<RefCell<Vec<IdentityId>>>;
@@ -77,13 +77,6 @@ fn people_are_tagged_you_or_human() {
 
 #[test]
 fn team_count_is_planned_until_it_runs() {
-    let plan = |screen| {
-        FixtureBackend::for_screen(screen)
-            .unwrap()
-            .snapshot()
-            .plan
-            .unwrap()
-    };
     assert_eq!(team_count(&plan(Screen::Plan)), "planned");
     assert_eq!(team_count(&plan(Screen::Running)), "7");
 }

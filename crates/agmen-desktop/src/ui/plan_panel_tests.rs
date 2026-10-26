@@ -4,17 +4,9 @@ use std::rc::Rc;
 use gpui::{Context, Entity, Render, TestAppContext, VisualTestContext, Window, div, px};
 
 use super::*;
-use crate::backend::{Backend as _, FixtureBackend, Screen};
-use crate::ui::plan_test_support::plan_globals;
+use crate::backend::Screen;
+use crate::ui::plan_test_support::{plan, plan_globals};
 use crate::ui::test_support::{click, redraw};
-
-fn plan(screen: Screen) -> PlanInfo {
-    FixtureBackend::for_screen(screen)
-        .unwrap()
-        .snapshot()
-        .plan
-        .unwrap()
-}
 
 #[test]
 fn pill_counts_what_the_plan_waits_on() {

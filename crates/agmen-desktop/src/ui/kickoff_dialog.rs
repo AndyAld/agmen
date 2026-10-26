@@ -258,21 +258,9 @@ mod tests {
     use gpui::{TestAppContext, VisualTestContext, px};
 
     use super::*;
-    use crate::backend::{Action, Backend as _, FixtureBackend, Screen};
-    use crate::ui::plan_test_support::{Recording, plan_globals};
+    use crate::backend::{Action, Screen};
+    use crate::ui::plan_test_support::{Recording, mountain, plan, plan_globals};
     use crate::ui::test_support::{click, draw, redraw};
-
-    fn plan(screen: Screen) -> PlanInfo {
-        FixtureBackend::for_screen(screen)
-            .unwrap()
-            .snapshot()
-            .plan
-            .unwrap()
-    }
-
-    fn mountain() -> TimeZone {
-        TimeZone::fixed(jiff::tz::offset(-6))
-    }
 
     #[test]
     fn owner_boxes_show_each_share_mine_first() {
