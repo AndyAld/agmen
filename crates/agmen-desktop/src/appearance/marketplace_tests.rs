@@ -22,11 +22,13 @@ type Routes = Vec<(&'static str, u16, Vec<u8>)>;
 /// body and records every request. It never reaches the real API. It
 /// answers exactly `requests` requests, then stops listening, so an extra
 /// request fails at once; it gives up after [`FIXTURE_TIMEOUT`]. Errors in
-/// its thread come back over a channel and fail the test when it drops.
+/// its thread come back over a channel, and they and any request that never
+/// came fail the test when it drops (C235).
 struct Fixture {
     base: String,
     seen: Arc<Mutex<Vec<Seen>>>,
     errors: Receiver<String>,
+    expected: usize,
 }
 
 impl Fixture {
@@ -62,7 +64,12 @@ impl Fixture {
                 }
             }
         });
-        Self { base, seen, errors }
+        Self {
+            base,
+            seen,
+            errors,
+            expected: requests,
+        }
     }
 
     fn requests(&self) -> Vec<Seen> {
@@ -72,7 +79,13 @@ impl Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        let errors: Vec<String> = self.errors.try_iter().collect();
+        let mut errors: Vec<String> = self.errors.try_iter().collect();
+        // Each request is recorded before its answer is written, and the
+        // client waits for that answer, so the count is final here.
+        let came = self.seen.lock().map_or(0, |seen| seen.len());
+        if came < self.expected {
+            errors.push(format!("only {came} of {} requests came", self.expected));
+        }
         if !std::thread::panicking() {
             assert!(errors.is_empty(), "fixture server: {errors:?}");
         }
@@ -548,4 +561,25 @@ fn unparsable_manifest_is_replaced_from_the_api() {
         Some("https://github.com/catppuccin/zed")
     );
     assert_eq!(installed.version.as_deref(), Some("0.2.27"));
+}
+
+#[test]
+#[should_panic(expected = "fixture server")]
+fn fixture_reports_missing_requests() {
+    // Review C235: a test that makes fewer requests than it promised fails.
+    let fixture = Fixture::serve(1, Vec::new());
+    drop(fixture);
+}
+
+#[test]
+fn unreadable_manifest_is_reported() {
+    // Review C236: a manifest that does not parse keeps the install listed
+    // and says why its author and repository are missing.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("broken");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("extension.toml"), "name = [unclosed").unwrap();
+    let read = read_installed(&root).unwrap();
+    assert!(read.authors.is_empty());
+    assert!(read.manifest_error.is_some(), "{read:?}");
 }

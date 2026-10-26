@@ -49,7 +49,7 @@ fn output_glyph_takes_the_line_color() {
 }
 
 #[gpui::test]
-fn breadcrumb_buttons_are_8_px_apart(cx: &mut TestAppContext) {
+fn agent_header_buttons_are_8_px_apart(cx: &mut TestAppContext) {
     // V105: node 607 spaces "Open in terminal" and "Stop" 8 px apart.
     init(cx);
     let snapshot = chat_snapshot();

@@ -381,8 +381,9 @@ fn shadowed_install_warns(cx: &mut TestAppContext) {
         view.installed(&installed, &["Fixture Dark".to_owned()], cx);
     });
 
+    // C236: the install itself worked, so this is a note, not a failure.
     match status(&view, cx) {
-        BrowseStatus::Failed(text) => {
+        BrowseStatus::Installed(text) => {
             assert!(text.contains("Fixture Dark"), "{text}");
             assert!(text.contains("your Zed themes folder"), "{text}");
         }
@@ -400,4 +401,46 @@ fn zed_credit_links_to_the_extensions_page(cx: &mut TestAppContext) {
     click(cx, "browse-themes");
     assert!(cx.debug_bounds("zed-extensions-link").is_some());
     assert_eq!(EXTENSIONS_PAGE, "https://zed.dev/extensions");
+}
+
+fn entry(name: &str, origin: ThemeOrigin) -> ThemeEntry {
+    ThemeEntry {
+        name: name.into(),
+        appearance: None,
+        author: None,
+        origin,
+    }
+}
+
+#[test]
+fn partly_shadowed_install_names_the_taken_themes() {
+    // Review C236: the install works, but one of its names was taken.
+    let ours = InstalledTheme {
+        id: "nord".into(),
+        name: Some("Nord".into()),
+        ..InstalledTheme::default()
+    };
+    let themes = vec![
+        entry("Nord Dark", ThemeOrigin::ZedUser),
+        entry("Nord Light", ThemeOrigin::Agmen(ours.clone())),
+    ];
+    let names = ["Nord Dark".to_owned(), "Nord Light".to_owned()];
+    let (first, status) = SettingsView::install_outcome(&ours, &names, &themes);
+    assert_eq!(first.as_deref(), Some("Nord Light"));
+    match status {
+        BrowseStatus::Installed(note) => assert!(note.contains("Nord Dark"), "{note}"),
+        other => panic!("expected a note, got {other:?}"),
+    }
+}
+
+#[test]
+fn fully_shadowed_install_is_installed_not_failed() {
+    let ours = InstalledTheme {
+        id: "nord".into(),
+        ..InstalledTheme::default()
+    };
+    let themes = vec![entry("Nord Dark", ThemeOrigin::ZedUser)];
+    let (first, status) = SettingsView::install_outcome(&ours, &["Nord Dark".to_owned()], &themes);
+    assert_eq!(first, None);
+    assert!(matches!(status, BrowseStatus::Installed(_)), "{status:?}");
 }

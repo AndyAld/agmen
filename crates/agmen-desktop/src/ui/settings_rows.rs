@@ -55,6 +55,9 @@ pub(super) fn installed_detail(theme: &ThemeEntry) -> String {
         .map(|a| format!("by {a} \u{b7} "))
         .unwrap_or_default();
     let credit = |t: &InstalledTheme| {
+        if t.manifest_error.is_some() {
+            return "extension.toml unreadable, so no author or repository".to_owned();
+        }
         let license = t.license.as_deref().unwrap_or("no license file");
         let repo = t
             .repository

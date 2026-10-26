@@ -150,6 +150,8 @@ enum BrowseStatus {
     Loading,
     Ready,
     Installing(String),
+    /// Installed, with a note: some or all of its theme names were taken.
+    Installed(String),
     Failed(String),
 }
 
@@ -473,31 +475,49 @@ impl SettingsView {
     }
 
     /// Lists a fresh install, whose theme files name `names`, and switches
-    /// to its first theme. When another theme already has each of those
-    /// names, the install is not listed, so the status says which (C210).
+    /// to its first listed theme.
     fn installed(&mut self, installed: &InstalledTheme, names: &[String], cx: &mut Context<Self>) {
         self.rescan();
-        let first = self.themes.iter().find_map(|t| match &t.origin {
-            ThemeOrigin::Agmen(theme) if theme.id == installed.id => Some(t.name.clone()),
-            _ => None,
-        });
-        let Some(name) = first else {
-            let title = installed.name.as_deref().unwrap_or(&installed.id);
-            let shadow = names
-                .iter()
-                .find_map(|name| self.themes.iter().find(|t| &t.name == name));
-            let warning = match shadow {
-                Some(theme) => format!(
-                    "Installed {title}, but \u{201c}{}\u{201d} already names a theme ({}), which agmen keeps using",
-                    theme.name,
-                    rows::installed_detail(theme)
-                ),
-                None => format!("Installed {title}, but none of its themes could be read"),
-            };
-            return self.set_status(BrowseStatus::Failed(warning), cx);
+        let (first, status) = Self::install_outcome(installed, names, &self.themes);
+        self.set_status(status, cx);
+        if let Some(name) = first {
+            self.change(cx, |s| s.theme = Some(name));
+        }
+    }
+
+    /// What an install shows once `themes` is rescanned: its first listed
+    /// theme, if any, and the status. A name another theme already has is
+    /// not listed for the install, so the note names those (C210, C236).
+    fn install_outcome(
+        installed: &InstalledTheme,
+        names: &[String],
+        themes: &[ThemeEntry],
+    ) -> (Option<String>, BrowseStatus) {
+        let ours = |t: &ThemeEntry| matches!(&t.origin, ThemeOrigin::Agmen(theme) if theme.id == installed.id);
+        let first = themes.iter().find(|t| ours(t)).map(|t| t.name.clone());
+        let taken: Vec<&ThemeEntry> = names
+            .iter()
+            .filter_map(|name| themes.iter().find(|t| &t.name == name && !ours(t)))
+            .collect();
+        let title = installed.name.as_deref().unwrap_or(&installed.id);
+        let listed = taken
+            .iter()
+            .map(|t| format!("\u{201c}{}\u{201d} ({})", t.name, rows::installed_detail(t)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let status = match (&first, taken.is_empty()) {
+            (Some(_), true) => BrowseStatus::Ready,
+            (Some(_), false) => BrowseStatus::Installed(format!(
+                "Installed {title}; agmen keeps using the themes already named {listed}"
+            )),
+            (None, false) => BrowseStatus::Installed(format!(
+                "Installed {title}, but every theme in it already names a theme agmen keeps using: {listed}"
+            )),
+            (None, true) => BrowseStatus::Failed(format!(
+                "Installed {title}, but none of its themes could be read"
+            )),
         };
-        self.set_status(BrowseStatus::Ready, cx);
-        self.change(cx, |s| s.theme = Some(name));
+        (first, status)
     }
 
     /// A handler for a component's `on_change` that calls `f` on this view.
@@ -901,7 +921,9 @@ impl SettingsView {
             BrowseStatus::Installing(name) => {
                 Some(Label::new(format!("Installing {name}\u{2026}")).color(Color::Placeholder))
             }
-            BrowseStatus::Failed(err) => Some(Label::new(err.clone()).color(Color::Warning).wrap()),
+            BrowseStatus::Installed(note) | BrowseStatus::Failed(note) => {
+                Some(Label::new(note.clone()).color(Color::Warning).wrap())
+            }
             BrowseStatus::Ready => None,
         };
         let entries = picker_entries(&self.themes, &browse.results);

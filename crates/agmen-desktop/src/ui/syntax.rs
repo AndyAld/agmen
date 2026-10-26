@@ -62,6 +62,9 @@ const NAMES: &[&str] = &[
 /// draw role files (see the file's header).
 const XML_HIGHLIGHTS: &str = include_str!("queries/xml.scm");
 
+/// agmen's Rust patterns, appended to the stock query (see the file's header).
+const RUST_AGMEN: &str = include_str!("queries/rust-agmen.scm");
+
 /// A file type with a grammar, or none.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Language {
@@ -84,12 +87,16 @@ impl Language {
     }
 
     fn configuration(self) -> Option<HighlightConfiguration> {
+        let rust_query;
         let (language, name, query): (tree_sitter::Language, &str, &str) = match self {
-            Self::Rust => (
-                tree_sitter_rust::LANGUAGE.into(),
-                "rust",
-                tree_sitter_rust::HIGHLIGHTS_QUERY,
-            ),
+            Self::Rust => {
+                rust_query = format!("{}\n{RUST_AGMEN}", tree_sitter_rust::HIGHLIGHTS_QUERY);
+                (
+                    tree_sitter_rust::LANGUAGE.into(),
+                    "rust",
+                    rust_query.as_str(),
+                )
+            }
             Self::Toml => (
                 tree_sitter_toml_ng::LANGUAGE.into(),
                 "toml",

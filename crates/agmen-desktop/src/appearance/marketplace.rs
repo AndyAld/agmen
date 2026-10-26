@@ -139,6 +139,9 @@ pub(crate) struct InstalledTheme {
     pub(crate) licenses: Vec<PathBuf>,
     /// The first line of the first license, such as "MIT License".
     pub(crate) license: Option<String>,
+    /// Why the manifest could not be read, when it could not; the install
+    /// is still listed, without author or repository (C236).
+    pub(crate) manifest_error: Option<String>,
 }
 
 /// The API client, with its list cache and backoff. Calls block, so the
@@ -562,10 +565,14 @@ pub(crate) fn read_installed(root: &Path) -> Option<InstalledTheme> {
     }
     let text = fs::read_to_string(root.join(MANIFEST)).ok()?;
     // A manifest that does not parse still marks the folder as an install:
-    // its themes stay listed, only without author and repository. agmen's
-    // own installs always parse (write_install replaces one that does not),
-    // so this only reaches a Zed extension's hand-edited manifest (C206).
-    let manifest: Manifest = toml::from_str(&text).unwrap_or_default();
+    // its themes stay listed, without author and repository, and the error
+    // is kept to say why. agmen's own installs always parse (write_install
+    // replaces one that does not), so this only reaches a Zed extension's
+    // hand-edited manifest (C206, C236).
+    let (manifest, manifest_error) = match toml::from_str::<Manifest>(&text) {
+        Ok(manifest) => (manifest, None),
+        Err(err) => (Manifest::default(), Some(err.message().to_owned())),
+    };
     let mut licenses: Vec<PathBuf> = fs::read_dir(root)
         .ok()?
         .filter_map(Result::ok)
@@ -595,6 +602,7 @@ pub(crate) fn read_installed(root: &Path) -> Option<InstalledTheme> {
         repository: manifest.repository,
         licenses,
         license,
+        manifest_error,
     })
 }
 

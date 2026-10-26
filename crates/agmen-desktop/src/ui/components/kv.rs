@@ -49,7 +49,8 @@ impl RenderOnce for KvRow {
         // end, so a value that fits exactly stays on one line (C219).
         let space = cell_width(window, &cx.global::<Appearance>().fonts);
         let label = self.label.clone();
-        let words = self.value.split(' ').enumerate().map(|(i, word)| {
+        // Runs of spaces and edge spaces draw no empty words.
+        let words = self.value.split_whitespace().enumerate().map(|(i, word)| {
             let selector = format!("kv-word:{label}:{}:{i}", self.row);
             div().debug_selector(|| selector).max_w_full().child(
                 Label::new(word.to_owned())
@@ -211,6 +212,19 @@ mod tests {
         let first = cx.debug_bounds("kv-word:10:42:0:0").unwrap();
         let second = cx.debug_bounds("kv-word:10:42:1:0").unwrap();
         assert!(second.origin.y > first.origin.y, "{first:?} {second:?}");
+    }
+
+    #[gpui::test]
+    fn kv_edge_spaces_draw_no_empty_words(cx: &mut TestAppContext) {
+        // agmen-db: a leading or trailing space made an empty word and a gap.
+        let cx = draw(cx, || {
+            KvSection::new("Runs")
+                .row(KvRow::new("State", " working "))
+                .into_any_element()
+        });
+        let first = cx.debug_bounds("kv-word:State:0:0").unwrap();
+        assert!(first.size.width > px(0.), "{first:?}");
+        assert!(cx.debug_bounds("kv-word:State:0:1").is_none());
     }
 
     #[gpui::test]

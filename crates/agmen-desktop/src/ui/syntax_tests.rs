@@ -162,3 +162,18 @@ fn rust_function_names_are_functions_not_types() {
     assert_eq!(name(at("run")), Some("function"));
     assert_eq!(name(at("Tabs")), Some("type"));
 }
+
+#[test]
+fn capitalized_path_names_are_types() {
+    // V96: the stock query calls `Tabs` a constructor; the mockups draw a
+    // capitalized name in a path or `use` in the type color.
+    let found = names_of(
+        "use ui::tabs::Tabs;\nfn main() {\n    let t = Tabs::default();\n}\n",
+        Language::Rust,
+    );
+    let tabs: Vec<_> = found.iter().filter(|(text, _)| *text == "Tabs").collect();
+    assert_eq!(tabs.len(), 2, "{found:?}");
+    assert!(tabs.iter().all(|(_, name)| *name == "type"), "{found:?}");
+    assert!(has(&found, "default", "function"), "{found:?}");
+    assert!(has(&found, "main", "function"), "{found:?}");
+}
