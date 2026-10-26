@@ -15,7 +15,7 @@ use crate::appearance::{
     ThemeOrigin,
 };
 use crate::icons::FileIcons;
-use crate::ui::components::{Button, Color, Label, LabelSize, Segmented, Stepper};
+use crate::ui::components::{Button, Color, DetailRow, Label, LabelSize, Segmented, Stepper};
 use crate::ui::tokens::{
     BORDER_WIDTH, ICON_PREVIEW, RADIUS_MD, SETTING_LABEL_WIDTH, SPACE_3, SPACE_6, SPACE_8,
     SPACE_10, SPACE_12, SPACE_16,
@@ -121,10 +121,8 @@ pub(super) fn density_row(density: Density, cx: &mut Context<SettingsView>) -> A
 pub(super) fn browse_row(
     ix: usize,
     entry: PickerEntry,
-    hover: gpui::Hsla,
     cx: &mut Context<SettingsView>,
 ) -> impl IntoElement + use<> {
-    let selector = format!("browse:{ix}");
     let (name, detail, action): (String, String, AnyElement) = match entry {
         PickerEntry::Installed(t) => {
             let detail = installed_detail(&t);
@@ -148,31 +146,7 @@ pub(super) fn browse_row(
             (name, detail, install.into_any_element())
         }
     };
-    div()
-        .id(SharedString::from(selector.clone()))
-        .debug_selector(|| selector)
-        .flex()
-        .items_center()
-        .gap(SPACE_10)
-        .py(SPACE_3)
-        .px(SPACE_8)
-        .rounded(RADIUS_MD)
-        .hover(move |style| style.bg(hover))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .child(Label::new(name))
-                .child(
-                    Label::new(detail)
-                        .size(LabelSize::Small)
-                        .color(Color::Placeholder)
-                        .wrap(),
-                ),
-        )
-        .child(action)
+    DetailRow::new(format!("browse:{ix}"), name, detail).end(action)
 }
 
 /// One setting: its label and hint on the left; the caller adds controls.

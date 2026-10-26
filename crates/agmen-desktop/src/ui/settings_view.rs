@@ -18,8 +18,8 @@ use self::rows::{
 };
 use super::breadcrumb::Breadcrumb;
 use super::components::{
-    Button, ButtonStyle, Color, Dropdown, Icon, IconSize, Indent, Label, LabelSize, ListItem,
-    Segmented, Toggle,
+    Button, ButtonStyle, Color, Dropdown, Icon, IconSize, Indent, InputFrame, Label, LabelSize,
+    Link, ListItem, Segmented, Toggle,
 };
 use super::text_input::{TextInput, TextInputEvent};
 use super::tokens::{
@@ -677,20 +677,15 @@ impl SettingsView {
                         ),
                 )
                 .child(
-                    div()
-                        .id("browse-themes")
-                        .debug_selector(|| "browse-themes".into())
-                        .cursor_pointer()
-                        .on_click(cx.listener(|this, _, window, cx| this.toggle_browse(window, cx)))
-                        .child(
-                            Label::new(if self.browse.is_some() {
-                                "Close Zed themes"
-                            } else {
-                                "Browse Zed themes\u{2026}"
-                            })
-                            .size(LabelSize::Small)
-                            .color(Color::Accent),
-                        ),
+                    Link::new(
+                        "browse-themes",
+                        if self.browse.is_some() {
+                            "Close Zed themes"
+                        } else {
+                            "Browse Zed themes\u{2026}"
+                        },
+                    )
+                    .on_click(cx.listener(|this, _, window, cx| this.toggle_browse(window, cx))),
                 )
                 .children(self.browse_panel(cx)),
         )
@@ -901,7 +896,7 @@ impl SettingsView {
     fn browse_panel(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
         let browse = self.browse.as_ref()?;
         let theme = &cx.global::<Appearance>().theme;
-        let (border, hover) = (theme.border, theme.element_hover);
+        let border = theme.border;
         let status = match &browse.status {
             BrowseStatus::Loading => {
                 Some(Label::new("Asking Zed's extension list\u{2026}").color(Color::Placeholder))
@@ -920,7 +915,7 @@ impl SettingsView {
             .into_iter()
             .take(MAX_BROWSE_ROWS)
             .enumerate()
-            .map(|(ix, entry)| browse_row(ix, entry, hover, cx));
+            .map(|(ix, entry)| browse_row(ix, entry, cx));
         Some(
             div()
                 .debug_selector(|| "browse-panel".into())
@@ -944,16 +939,8 @@ impl SettingsView {
                                 .color(Color::Placeholder),
                         )
                         .child(
-                            div()
-                                .id("zed-extensions-link")
-                                .debug_selector(|| "zed-extensions-link".into())
-                                .cursor_pointer()
-                                .on_click(|_, _, cx| cx.open_url(EXTENSIONS_PAGE))
-                                .child(
-                                    Label::new(EXTENSIONS_PAGE)
-                                        .size(LabelSize::Small)
-                                        .color(Color::Accent),
-                                ),
+                            Link::new("zed-extensions-link", EXTENSIONS_PAGE)
+                                .on_click(|_, _, cx| cx.open_url(EXTENSIONS_PAGE)),
                         ),
                 )
                 .child(
@@ -964,15 +951,7 @@ impl SettingsView {
                     .color(Color::Placeholder)
                     .wrap(),
                 )
-                .child(
-                    div()
-                        .py(SPACE_3)
-                        .px(SPACE_8)
-                        .rounded(RADIUS_MD)
-                        .border(BORDER_WIDTH)
-                        .border_color(border)
-                        .child(browse.search.clone()),
-                )
+                .child(InputFrame::new().child(browse.search.clone()))
                 .when(!browse.query.is_empty(), |this| {
                     this.child(
                         Label::new(format!("Matching \u{201c}{}\u{201d}", browse.query))
