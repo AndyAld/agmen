@@ -9,8 +9,9 @@
 //! `plan:kickoff` and `plan:pause`.
 
 use gpui::{
-    Action, AnyElement, App, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
-    Pixels, RenderOnce, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
+    Action, AnyElement, App, Entity, FontWeight, InteractiveElement as _, IntoElement,
+    ParentElement as _, Pixels, RenderOnce, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Window, div,
 };
 
 use super::components::{
@@ -268,8 +269,10 @@ fn plan_button(plan: &PlanInfo, model: Entity<PlanModel>) -> Button {
             .size(ButtonSize::Tall)
             .on_click(move |_, _, cx| model.update(cx, |model, cx| model.open_kickoff(cx)))
     } else {
+        // Semibold as the enabled one (node 9047).
         Button::new("plan:kickoff", label)
             .size(ButtonSize::Tall)
+            .weight(FontWeight::SEMIBOLD)
             .disabled(true)
     }
 }
@@ -338,7 +341,7 @@ impl RenderOnce for PlanPanel {
             .flex_col()
             .child(
                 RightDockHeader::new("Plan", format!("{} · v{}", plan.name, plan.version))
-                    .end(Badge::new(pill, pill_color)),
+                    .end(Badge::new(pill, pill_color).state()),
             )
             .child(content)
     }
