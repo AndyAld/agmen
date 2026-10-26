@@ -15,8 +15,9 @@ use crate::ui::tokens::SPACE_3;
 /// One flex item per word, so a line breaks only at a space, while a word
 /// wider than the line still wraps inside itself. The gap is one space of
 /// the words' own font, which comes from the Appearance fonts rather than
-/// the caller's text style, for the words as for the gap, and flex leaves it out at a line's end, so text
-/// that fits exactly stays on one line (C219). Tests find word `i` as
+/// the caller's text style, for the words as for the gap, and flex leaves
+/// it out at a line's end, so text that fits exactly stays on one line
+/// (C219). Tests find word `i` as
 /// `"{selector}:{i}"`. Callers lay the box out through [`Styled`].
 #[derive(Debug, IntoElement)]
 pub(crate) struct WordWrap {

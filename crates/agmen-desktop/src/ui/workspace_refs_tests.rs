@@ -338,6 +338,23 @@ fn person_ref_during_a_plan_shows_its_card_only() {
     );
 }
 
+#[test]
+fn agent_ref_during_a_plan_shows_its_card_only() {
+    // Ruling C326: like a person chip under (b), the Agents tab shows the
+    // planning room, so an agent tab would open away from the plan.
+    let mut plan = FixtureBackend::for_screen(Screen::Plan).unwrap().snapshot();
+    assert!(plan.plan.is_some());
+    let agent = plan.roster[0].agents[0].clone();
+    // Give it a live session so only the plan can make it hover-only.
+    let session = chat_snapshot().sessions.into_values().next().unwrap();
+    plan.sessions.insert(agent.id.clone(), session);
+    let from = fixture_id("andy/a1");
+    assert_eq!(
+        route(&plan, &RefTarget::Agent(agent.handle.clone()), &from),
+        RefRoute::HoverOnly
+    );
+}
+
 #[gpui::test]
 fn open_ref_shows_each_route(cx: &mut TestAppContext) {
     let (workspace, cx) = open_with(chat_snapshot(), cx);

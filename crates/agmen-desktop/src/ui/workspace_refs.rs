@@ -52,11 +52,17 @@ pub(crate) fn route(snapshot: &Snapshot, target: &RefTarget, from: &IdentityId) 
     let found = match target {
         // An agent with no session here has no view to open (ruling d):
         // spec 9.3's remote agent view is not built.
+        // While there is a plan the Agents tab shows the planning room, so an
+        // agent chip shows its card only, as a person chip does (C326).
         RefTarget::Agent(handle) => snapshot
             .roster
             .iter()
             .flat_map(|group| &group.agents)
-            .find(|agent| agent.handle == *handle && snapshot.sessions.contains_key(&agent.id))
+            .find(|agent| {
+                snapshot.plan.is_none()
+                    && agent.handle == *handle
+                    && snapshot.sessions.contains_key(&agent.id)
+            })
             .map(|agent| tab(TabItem::Agent(agent.id.clone()))),
         // While there is a plan the Agents tab shows the planning room, so
         // folding the Agents panel would show nothing (ruling b).
