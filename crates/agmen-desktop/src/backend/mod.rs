@@ -96,10 +96,21 @@ pub(crate) enum Action {
     Undo(ChangeId),
     TakeOver(IdentityId),
     HandBack(IdentityId),
-    SwitchAgent { worker: IdentityId, agent: String },
-    AnswerAlert { alert: MessageId, choice: String },
+    SwitchAgent {
+        worker: IdentityId,
+        agent: String,
+    },
+    AnswerAlert {
+        alert: MessageId,
+        choice: String,
+    },
+    /// Looks for terminal agents again (`agmen agents scan`, Task 14).
+    ScanAgents,
     SnoozeAlert(MessageId),
-    ApproveSpec { path: String, sha: GitSha },
+    ApproveSpec {
+        path: String,
+        sha: GitSha,
+    },
     ApproveShare,
     KickOff,
 }
@@ -315,6 +326,9 @@ pub(crate) struct AgentInfo {
     pub(crate) delegated_by: Option<String>,
     pub(crate) state: String,
     pub(crate) tools: Vec<String>,
+    /// Task 14: whether the harness cannot enforce the role's tool list, so
+    /// Tools says what it enforces instead (spec 5.5).
+    pub(crate) tools_lossy: bool,
     pub(crate) edits: String,
     pub(crate) verbs: Vec<String>,
     pub(crate) refused: Vec<String>,
@@ -340,6 +354,13 @@ pub(crate) struct StatusSummary {
     pub(crate) worktrees: u32,
     pub(crate) spend_today_usd: f64,
 }
+
+// Task 14: take-over in the chat and the terminal agents on this machine.
+mod take_over;
+pub(crate) use take_over::{
+    AgentFound, InstalledAgent, SessionStart, TakeOver, TermCell, TermColor, TerminalScreen,
+    can_take_over,
+};
 
 /// Everything the window shows at one moment.
 #[derive(Debug, Clone, PartialEq)]
@@ -368,6 +389,10 @@ pub(crate) struct Snapshot {
     pub(crate) roles: Vec<RoleFile>,
     /// The worktrees on this machine, the person's own first.
     pub(crate) worktrees: Vec<WorktreeInfo>,
+    /// Task 14: sessions the person took over in the chat, by identity.
+    pub(crate) take_overs: BTreeMap<IdentityId, TakeOver>,
+    /// Task 14: the terminal agents agmend looked for on this machine.
+    pub(crate) installed_agents: Vec<InstalledAgent>,
 }
 
 /// One row of an agent's session, as the agent view shows it.

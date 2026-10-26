@@ -73,6 +73,8 @@ fn base(project: &str) -> Result<Snapshot, BackendError> {
         sessions: BTreeMap::from([(id("andy/fx1")?, fx1_session())]),
         roles,
         worktrees: worktrees()?,
+        take_overs: BTreeMap::new(),
+        installed_agents: super::take_over::installed_agents(),
     })
 }
 
@@ -174,11 +176,12 @@ impl FixtureBackend {
                 };
                 s
             }
+            // Task 14 (V66): fx1 taken over; on chat-codex, switched to codex.
+            Screen::ChatTerminal | Screen::SwitchAgent | Screen::AddAgent | Screen::ChatCodex => {
+                let s = with_messages("pr-3331", chat_messages())?;
+                super::take_over::fx1_taken_over(s, screen == Screen::ChatCodex)?
+            }
             Screen::Chat
-            | Screen::ChatCodex
-            | Screen::ChatTerminal
-            | Screen::SwitchAgent
-            | Screen::AddAgent
             | Screen::Agent
             | Screen::ListenerCollapsed
             | Screen::Palette
@@ -277,12 +280,18 @@ impl Backend for FixtureBackend {
                     ChangeState::Undone
                 }
             }),
-            // shortcut: the fixture records nothing for these; the views that send
-            // them (Tasks 13 to 19) add fixture behavior as they need it.
+            // Task 14: take-over, hand back, switching and the agent scan.
             Action::TakeOver(_)
             | Action::HandBack(_)
             | Action::SwitchAgent { .. }
-            | Action::AnswerAlert { .. }
+            | Action::ScanAgents => {
+                super::take_over::act(&mut self.state.borrow_mut(), action)?;
+                self.publish(&Update::Snapshot(Box::new(self.snapshot())));
+                Ok(())
+            }
+            // shortcut: the fixture records nothing for these; the views that send
+            // them (Tasks 13 to 19) add fixture behavior as they need it.
+            Action::AnswerAlert { .. }
             | Action::SnoozeAlert(_)
             | Action::ApproveSpec { .. }
             | Action::ApproveShare
