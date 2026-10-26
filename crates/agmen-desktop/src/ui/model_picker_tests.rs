@@ -45,7 +45,7 @@ fn open_composer_with(
                 cx,
             )
         });
-        Bottom(composer)
+        Bottom(composer, cx.focus_handle())
     });
     let composer = host.read_with(cx, |host, _| host.0.clone());
     composer.update_in(cx, |composer, window, cx| {
@@ -55,8 +55,9 @@ fn open_composer_with(
     (composer, sent, cx)
 }
 
-/// Puts the composer at the window's bottom, as the chat does.
-struct Bottom(Entity<Composer>);
+/// Puts the composer at the window's bottom, as the chat does, with a
+/// focusable element at the top right corner that is not the composer's.
+struct Bottom(Entity<Composer>, gpui::FocusHandle);
 
 impl gpui::Render for Bottom {
     fn render(
@@ -64,12 +65,23 @@ impl gpui::Render for Bottom {
         _window: &mut gpui::Window,
         _cx: &mut gpui::Context<Self>,
     ) -> impl gpui::IntoElement {
-        use gpui::{ParentElement as _, Styled as _};
+        use gpui::{InteractiveElement as _, ParentElement as _, Styled as _};
         gpui::div()
             .size_full()
+            .relative()
             .flex()
             .flex_col()
             .justify_end()
+            .child(
+                // Absolute, so it leaves the composer's layout alone.
+                gpui::div()
+                    .debug_selector(|| "other".into())
+                    .absolute()
+                    .top_0()
+                    .right_0()
+                    .size(px(20.))
+                    .track_focus(&self.1),
+            )
             .child(self.0.clone())
     }
 }
@@ -536,4 +548,37 @@ fn hiding_the_chip_under_a_pressed_effort_level_gives_focus_back(cx: &mut TestAp
     redraw(cx);
     assert!(cx.debug_bounds("composer:model").is_none());
     assert_escape_and_typing_reach_the_composer(&sent, cx);
+}
+
+#[gpui::test]
+fn closing_the_picker_leaves_focus_outside_it_alone(cx: &mut TestAppContext) {
+    // C286: only focus inside the picker goes back to the input (C283); a
+    // mouse down outside it that closes it must not take focus from
+    // another element.
+    let (composer, _, cx) = open_composer(cx);
+    click(cx, "composer:model");
+    let other = cx.update(|window, cx| {
+        let host = window.root::<Bottom>().flatten().unwrap();
+        let other = host.read(cx).1.clone();
+        other.focus(window, cx);
+        other
+    });
+    redraw(cx);
+    let picker = cx.debug_bounds("model-picker").unwrap();
+    let other_bounds = cx.debug_bounds("other").unwrap();
+    let outside = gpui::point(px(1.), px(1.));
+    assert!(!picker.contains(&outside), "{picker:?}");
+    assert!(!other_bounds.contains(&outside), "{other_bounds:?}");
+    cx.simulate_mouse_down(outside, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_up(outside, MouseButton::Left, Modifiers::none());
+    redraw(cx);
+    assert!(cx.debug_bounds("model-picker").is_none(), "it closed");
+    let (other_focused, input_focused) = composer.update_in(cx, |composer, window, cx| {
+        (
+            other.is_focused(window),
+            composer.focus_handle(cx).is_focused(window),
+        )
+    });
+    assert!(other_focused, "the other element keeps focus");
+    assert!(!input_focused, "the input did not take it");
 }
