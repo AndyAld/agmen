@@ -114,7 +114,8 @@ impl Label {
         self
     }
 
-    /// Lets the text wrap and shrink to the space left in its row.
+    /// Lets the text wrap and shrink to the space left in its row. In a
+    /// column it is as tall as its lines.
     #[must_use]
     pub(crate) const fn wrap(mut self) -> Self {
         self.wrap = true;
@@ -167,7 +168,9 @@ impl RenderOnce for Label {
             .when(self.underline, gpui::Styled::underline)
             .map(|this| {
                 if self.wrap {
-                    this.flex_1().min_w_0()
+                    // Full width, shrinking to what its row leaves: flex_1
+                    // would also grow it down a column with free height.
+                    this.w_full().min_w_0()
                 } else if self.truncate {
                     this.flex_1().min_w_0().truncate()
                 } else {
@@ -246,6 +249,62 @@ mod tests {
         let after = cx2.debug_bounds("after").unwrap();
         assert!(after.right() <= row.right(), "{after:?} past {row:?}");
         assert_eq!(row.size.height, one_line.height);
+    }
+
+    #[gpui::test]
+    fn wrapped_label_in_a_column_is_as_tall_as_its_text(cx: &mut TestAppContext) {
+        // The plan panel's goal, note and lanes (nodes 8944, 9010, 9029) hug
+        // their lines. flex_1 grew them into a definite column's free height.
+        use gpui::InteractiveElement as _;
+        let one_line = rendered_size(cx, || Label::new("agmen").into_any_element());
+        let mut cx2 = TestAppContext::single();
+        let cx2 = crate::ui::test_support::draw(&mut cx2, || {
+            div()
+                .debug_selector(|| "column".into())
+                .w(gpui::px(200.))
+                .h(gpui::px(300.))
+                .flex()
+                .flex_col()
+                .child(Label::new("agmen").wrap())
+                .child(
+                    div()
+                        .debug_selector(|| "after".into())
+                        .w(gpui::px(1.))
+                        .h(gpui::px(1.)),
+                )
+                .into_any_element()
+        });
+        let column = cx2.debug_bounds("column").unwrap();
+        let after = cx2.debug_bounds("after").unwrap();
+        assert_eq!(after.top() - column.top(), one_line.height);
+    }
+
+    #[gpui::test]
+    fn wrapped_label_in_a_row_takes_the_rest_of_it_and_wraps(cx: &mut TestAppContext) {
+        use gpui::InteractiveElement as _;
+        let long = "adam/coord: CI on main is red after #10 merged; the release tag is blocked.";
+        let one_line = rendered_size(cx, || Label::new("adam").into_any_element());
+        let mut cx2 = TestAppContext::single();
+        let cx2 = crate::ui::test_support::draw(&mut cx2, move || {
+            div()
+                .debug_selector(|| "row".into())
+                .w(gpui::px(100.))
+                .flex()
+                .child(div().w(gpui::px(20.)).h(gpui::px(1.)).flex_none())
+                .child(Label::new(long).wrap())
+                .child(
+                    div()
+                        .debug_selector(|| "after".into())
+                        .w(gpui::px(1.))
+                        .h(gpui::px(1.))
+                        .flex_none(),
+                )
+                .into_any_element()
+        });
+        let row = cx2.debug_bounds("row").unwrap();
+        let after = cx2.debug_bounds("after").unwrap();
+        assert_eq!(after.right(), row.right(), "the label fills the row");
+        assert!(row.size.height > one_line.height * 2., "{row:?} wraps");
     }
 
     #[test]

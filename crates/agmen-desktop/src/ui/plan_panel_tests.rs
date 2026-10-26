@@ -79,6 +79,7 @@ struct Harness {
     model: Entity<PlanModel>,
     opened: Rc<RefCell<Vec<String>>>,
     focus: gpui::FocusHandle,
+    height: gpui::Pixels,
 }
 
 impl Render for Harness {
@@ -90,7 +91,7 @@ impl Render for Harness {
             .track_focus(&self.focus)
             .on_action(move |action: &OpenSpec, _, _| opened.borrow_mut().push(action.0.clone()))
             .w(crate::ui::tokens::PLAN_PANEL_WIDTH)
-            .h(px(900.))
+            .h(self.height)
             .child(PlanPanel::new(self.model.clone()))
     }
 }
@@ -98,6 +99,19 @@ impl Render for Harness {
 fn open(
     cx: &mut TestAppContext,
     screen: Screen,
+) -> (
+    Entity<PlanModel>,
+    Rc<RefCell<Vec<String>>>,
+    &mut VisualTestContext,
+) {
+    open_at(cx, screen, px(900.))
+}
+
+/// [`open`] in a panel `height` tall.
+fn open_at(
+    cx: &mut TestAppContext,
+    screen: Screen,
+    height: gpui::Pixels,
 ) -> (
     Entity<PlanModel>,
     Rc<RefCell<Vec<String>>>,
@@ -112,6 +126,7 @@ fn open(
             model: model.clone(),
             opened: opened.clone(),
             focus,
+            height,
         }
     });
     redraw(cx);
@@ -183,4 +198,19 @@ fn the_harness_column_fits_claude_sonnet(cx: &mut TestAppContext) {
         let cost = bounds(format!("team:cost-{ix}"));
         assert!(cost.right() <= row.right(), "row {ix}: {cost:?} in {row:?}");
     }
+}
+
+#[gpui::test]
+fn wrapped_text_hugs_its_lines_so_kick_off_stays_put(cx: &mut TestAppContext) {
+    // Node 8942 stacks its items 14 px apart; the goal, the share note and
+    // the lanes (nodes 8944, 9010, 9029) hug their lines. They grew into
+    // the panel's free height, which pushed Kick off down. Both panels are
+    // taller than the content, so Kick off sits at the same place in each.
+    let kickoff_top = |cx: &mut TestAppContext, height: f32| {
+        let (_, _, cx) = open_at(cx, Screen::Plan, px(height));
+        cx.debug_bounds("plan:kickoff").unwrap().top()
+    };
+    let short = kickoff_top(cx, 3000.);
+    let tall = kickoff_top(&mut TestAppContext::single(), 4000.);
+    assert_eq!(short, tall);
 }
