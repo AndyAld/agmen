@@ -7,13 +7,11 @@ use agmen_proto::IdentityId;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     Context, EventEmitter, InteractiveElement as _, IntoElement, ParentElement as _, Render,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Window, anchored, deferred, div,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
 };
 
-use super::components::{Chip, Color, Dot, Label};
-use super::tokens::{
-    BORDER_WIDTH, RADIUS_LG, RADIUS_MD, SPACE_2, SPACE_3, SPACE_6, SPACE_8, SPACE_10,
-};
+use super::components::{Chip, Color, Dot, Label, menu};
+use super::tokens::{RADIUS_MD, SPACE_2, SPACE_3, SPACE_6, SPACE_8, SPACE_10};
 use crate::appearance::Appearance;
 use crate::backend::{AgentInfo, WorktreeInfo};
 use crate::icons::UiIcon;
@@ -174,23 +172,20 @@ impl Render for ScopeChip {
                 .options
                 .iter()
                 .enumerate()
-                .map(|(index, option)| self.menu_row(index, option, cx))
+                .map(|(index, option)| self.menu_row(index, option, cx).into_any_element())
                 .collect();
-            let theme = &cx.global::<Appearance>().theme;
-            // Deferred so the menu paints over the tree below the chip.
-            deferred(
-                anchored().snap_to_window().child(
-                    div()
-                        .occlude()
-                        .mt(SPACE_2)
-                        .p(SPACE_2)
-                        .rounded(RADIUS_LG)
-                        .border(BORDER_WIDTH)
-                        .border_color(theme.border_variant)
-                        .bg(theme.elevated_surface)
-                        .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close(cx)))
-                        .children(rows),
-                ),
+            let this = cx.entity().downgrade();
+            menu(
+                "scope-chip:menu".into(),
+                None,
+                rows,
+                move |_, cx| {
+                    // Gone only while the window closes; nothing to close.
+                    if let Some(this) = this.upgrade() {
+                        this.update(cx, |this, cx| this.close(cx));
+                    }
+                },
+                cx,
             )
         });
         div()
