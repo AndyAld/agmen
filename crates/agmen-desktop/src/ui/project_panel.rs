@@ -409,6 +409,12 @@ impl FileView {
         Self { parts, code }
     }
 
+    /// Scrolls so `line` (1-based) is the top line.
+    pub(crate) fn scroll_to_line(&mut self, line: u32, cx: &mut Context<Self>) {
+        self.code
+            .update(cx, |code, cx| code.scroll_to_line(line, cx));
+    }
+
     #[cfg(test)]
     pub(crate) fn parts(&self) -> Vec<&str> {
         self.parts.iter().map(SharedString::as_ref).collect()

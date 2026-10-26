@@ -200,11 +200,13 @@ impl GitPanel {
         self.worktrees.get(self.scoped)
     }
 
-    /// Shows `owner`'s worktree in Changes and Commits, nothing selected.
+    /// Shows `owner`'s worktree in Changes and Commits, nothing selected,
+    /// and names it on the scope chip.
     pub(crate) fn switch(&mut self, owner: &agmen_proto::IdentityId, cx: &mut Context<Self>) {
         if let Some(index) = self.worktrees.iter().position(|w| &w.owner == owner) {
             self.scoped = index;
             self.selected = None;
+            self.scope.update(cx, |chip, cx| chip.select(owner, cx));
             cx.notify();
         }
     }
@@ -244,6 +246,18 @@ impl GitPanel {
             self.folded_people.insert(name.to_owned());
         }
         cx.notify();
+    }
+
+    /// The owner of the worktree Changes and Commits show.
+    #[cfg(test)]
+    pub(crate) fn scoped_owner(&self) -> Option<&agmen_proto::IdentityId> {
+        self.scoped().map(|w| &w.owner)
+    }
+
+    /// The owner the scope chip shows.
+    #[cfg(test)]
+    pub(crate) fn chip_owner(&self, cx: &gpui::App) -> Option<agmen_proto::IdentityId> {
+        self.scope.read(cx).selected_owner().cloned()
     }
 
     #[cfg(test)]

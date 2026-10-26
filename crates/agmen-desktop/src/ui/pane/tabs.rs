@@ -124,6 +124,16 @@ impl Pane {
         cx.notify();
     }
 
+    /// Scrolls the active tab so `line` (1-based) is its top line, when it
+    /// is a file; its view may not exist yet, so the views keep the line
+    /// until they draw it.
+    pub(crate) fn scroll_active_to_line(&mut self, line: u32, cx: &mut Context<Self>) {
+        if let Some(item) = self.tabs.get(self.active) {
+            self.views.scroll_to_line(item.clone(), line);
+            cx.notify();
+        }
+    }
+
     /// Activates the tab at `index`; an index past the last tab does nothing.
     pub(crate) fn activate(&mut self, index: usize, cx: &mut Context<Self>) {
         if index < self.tabs.len() && index != self.active {

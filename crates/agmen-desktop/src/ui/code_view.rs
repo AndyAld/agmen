@@ -9,7 +9,8 @@ use std::rc::Rc;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, Context, HighlightStyle, Hsla, InteractiveElement as _, IntoElement, ParentElement as _,
-    Pixels, Render, SharedString, Styled as _, StyledText, Window, div, uniform_list,
+    Pixels, Render, ScrollStrategy, SharedString, Styled as _, StyledText, UniformListScrollHandle,
+    Window, div, uniform_list,
 };
 
 use super::syntax::{self, Language};
@@ -137,6 +138,7 @@ pub(crate) struct CodeView {
     lines: Rc<Vec<Line>>,
     marks: Rc<Vec<GutterMark>>,
     gutter: Gutter,
+    scroll: UniformListScrollHandle,
 }
 
 impl CodeView {
@@ -145,7 +147,17 @@ impl CodeView {
             lines: Rc::new(layout_lines(text, language)),
             marks: Rc::new(marks),
             gutter: Gutter::Marks,
+            scroll: UniformListScrollHandle::new(),
         }
+    }
+
+    /// Scrolls so `line` (1-based) is the top line; a line past the end
+    /// scrolls to the last.
+    pub(crate) fn scroll_to_line(&mut self, line: u32, cx: &mut Context<Self>) {
+        let last = self.lines.len().saturating_sub(1);
+        let ix = usize::try_from(line.saturating_sub(1)).map_or(last, |ix| ix.min(last));
+        self.scroll.scroll_to_item(ix, ScrollStrategy::Top);
+        cx.notify();
     }
 
     /// Drops the change mark column, for text that never has marks (a
@@ -314,6 +326,7 @@ impl Render for CodeView {
                         })
                         .collect::<Vec<_>>()
                 })
+                .track_scroll(&self.scroll)
                 .flex_1(),
             )
     }

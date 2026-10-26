@@ -50,6 +50,8 @@ struct TabView {
 pub(crate) struct TabViews {
     sources: Rc<TabSources>,
     views: HashMap<TabItem, TabView>,
+    /// File tabs to scroll to a line (1-based) the next time they draw.
+    lines: HashMap<TabItem, u32>,
 }
 
 impl std::fmt::Debug for TabViews {
@@ -65,6 +67,15 @@ impl TabViews {
         Self {
             sources,
             views: HashMap::new(),
+            lines: HashMap::new(),
+        }
+    }
+
+    /// Scrolls `item`'s file view so `line` (1-based) is on top, when it
+    /// next draws; other items ignore it.
+    pub(crate) fn scroll_to_line(&mut self, item: TabItem, line: u32) {
+        if matches!(item, TabItem::File { .. }) {
+            self.lines.insert(item, line);
         }
     }
 
@@ -93,6 +104,23 @@ impl TabViews {
         cx: &mut Context<Pane>,
     ) -> Option<AnyView> {
         self.views.retain(|key, _| open.contains(key));
+        self.lines.retain(|key, _| open.contains(key));
+        let view = self.built(item, window, cx)?;
+        if let Some(line) = self.lines.remove(item)
+            && let Ok(file) = view.clone().downcast::<FileView>()
+        {
+            file.update(cx, |file, cx| file.scroll_to_line(line, cx));
+        }
+        Some(view)
+    }
+
+    /// `item`'s cached view, or a new one.
+    fn built(
+        &mut self,
+        item: &TabItem,
+        window: &mut Window,
+        cx: &mut Context<Pane>,
+    ) -> Option<AnyView> {
         if let Some(tab) = self.views.get(item) {
             return Some(tab.view.clone());
         }

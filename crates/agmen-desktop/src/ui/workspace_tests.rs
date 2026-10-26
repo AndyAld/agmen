@@ -219,7 +219,11 @@ fn click_on_a_ref_opens_a_tab_in_the_pane(cx: &mut TestAppContext) {
     let group = workspace.read_with(cx, |w, _| w.pane_group.clone());
     let panes = group.read_with(cx, |g, _| g.panes());
     assert_eq!(panes.len(), 1);
-    let commit = TabItem::Ref(crate::refs::RefTarget::Commit("4d9fdc8".into()));
+    // Task 12 Step 1b: fx1's commit opens fx1's first change's diff.
+    let commit = TabItem::Diff {
+        worktree: "andy/fx1".into(),
+        path: "src/main.rs".into(),
+    };
     panes[0].read_with(cx, |pane, _| {
         let mut tabs = starting_center(fx1_id());
         tabs.insert(1, commit.clone());

@@ -42,6 +42,9 @@ mod take_over;
 // Task 19: the planning room, plan panel and kick-off dialog.
 #[path = "workspace_plan.rs"]
 mod plan_wiring;
+// Task 12 Step 1b: where a reference chip opens.
+#[path = "workspace_refs.rs"]
+mod ref_routes;
 
 // Task 18: the actions moved to src/keymap.rs with their bindings.
 pub(crate) use crate::keymap::{Quit, ToggleLeftDock, ToggleRightDock};
@@ -71,6 +74,9 @@ pub(crate) struct Workspace {
     _agents_events: Subscription,
     /// Closes the Role panel with its role file's tab.
     _pane_events: Subscription,
+    /// Task 12 Step 1b: the chat's reference chips, which open a tab or a
+    /// panel (`workspace_refs.rs`).
+    _chat_refs: Subscription,
     // Task 13: the status bar's counts and the toast come from the chat;
     // Task 14: it also holds the take-over terminal.
     chat: Entity<ChatView>,
@@ -100,6 +106,7 @@ impl Workspace {
         let pane_events = cx.subscribe(&pane_group, |this, _, event, cx| match event {
             PaneGroupEvent::TabClosed(item) => this.tab_closed(item, cx),
         });
+        let chat_refs = cx.subscribe(&chat, |this, _, event, cx| this.open_ref(event, cx));
         let left = LeftDockState::new(&snapshot, cx);
         let plan = plan_wiring::PlanWiring::new(&snapshot, cx);
         Self {
@@ -115,6 +122,7 @@ impl Workspace {
             plan,
             _agents_events: agents_events,
             _pane_events: pane_events,
+            _chat_refs: chat_refs,
             chat,
             _chat_changes: chat_changes,
         }

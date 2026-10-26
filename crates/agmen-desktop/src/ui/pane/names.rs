@@ -7,7 +7,6 @@ use agmen_proto::IdentityId;
 use super::item::TabItem;
 use crate::backend::Snapshot;
 use crate::icons::UiIcon;
-use crate::refs::RefTarget;
 use crate::ui::components::Color;
 use crate::ui::roles_panel::role_file_name;
 
@@ -63,17 +62,6 @@ impl PaneNames {
             .map_or_else(|| id.to_string(), |agent| agent.handle.clone())
     }
 
-    /// The tab a reference chip opens: an agent in the roster as its agent
-    /// tab, anything else as a placeholder until Task 12 routes it.
-    pub(super) fn tab_for_ref(&self, target: &RefTarget) -> TabItem {
-        if let RefTarget::Agent(handle) = target
-            && let Some((id, _)) = self.agents.iter().find(|(_, a)| a.handle == *handle)
-        {
-            return TabItem::Agent(id.clone());
-        }
-        TabItem::Ref(target.clone())
-    }
-
     /// The tab's label, as the mockup's tab bar (console.py `tab_bar`).
     pub(super) fn tab_label(&self, item: &TabItem) -> String {
         match item {
@@ -91,7 +79,6 @@ impl PaneNames {
                 |name| name.to_string_lossy().into_owned(),
             ),
             TabItem::Search => "Search".into(),
-            TabItem::Ref(target) => ref_label(target),
         }
     }
 
@@ -105,11 +92,7 @@ impl PaneNames {
             TabItem::Settings(page) => vec!["settings".into(), page.label().into()],
             TabItem::SettingsFile(_) => vec!["settings".into(), self.tab_label(item)],
             TabItem::Spec(path) => vec![self.project.clone(), path.clone()],
-            TabItem::Chat
-            | TabItem::Agent(_)
-            | TabItem::Plan
-            | TabItem::Search
-            | TabItem::Ref(_) => {
+            TabItem::Chat | TabItem::Agent(_) | TabItem::Plan | TabItem::Search => {
                 vec![self.project.clone(), self.tab_label(item)]
             }
         }
@@ -133,32 +116,7 @@ impl PaneNames {
             TabItem::Settings(_) => (UiIcon::Settings, Color::Placeholder),
             TabItem::SettingsFile(_) => (UiIcon::File, Color::Muted),
             TabItem::Search => (UiIcon::Search, Color::Placeholder),
-            TabItem::Ref(RefTarget::File { .. }) => (UiIcon::File, Color::Accent),
-            TabItem::Ref(RefTarget::Commit(_) | RefTarget::Branch { .. }) => {
-                (UiIcon::Git, Color::Success)
-            }
-            TabItem::Ref(_) => (UiIcon::File, Color::Placeholder),
         }
-    }
-}
-
-/// A reference as its chip reads: `src/main.rs:2-8`, `#9`.
-fn ref_label(target: &RefTarget) -> String {
-    match target {
-        RefTarget::Agent(name)
-        | RefTarget::Person(name)
-        | RefTarget::Role(name)
-        | RefTarget::Commit(name)
-        | RefTarget::Item(name)
-        | RefTarget::Lane(name) => name.clone(),
-        RefTarget::Branch { name, at: None } => name.clone(),
-        RefTarget::Branch { name, at: Some(at) } => format!("{name}@{at}"),
-        RefTarget::File { path, lines: None } => file_name(path).into(),
-        RefTarget::File {
-            path,
-            lines: Some((from, to)),
-        } => format!("{}:{from}-{to}", file_name(path)),
-        RefTarget::Pr(number) => format!("#{number}"),
     }
 }
 

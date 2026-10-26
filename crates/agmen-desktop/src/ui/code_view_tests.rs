@@ -242,3 +242,29 @@ fn spec_table_pipes_take_the_line_number_color() {
     let names: Vec<&str> = lines[9].highlights.iter().map(|(_, name)| *name).collect();
     assert_eq!(names, ["text.literal"]);
 }
+
+#[gpui::test]
+fn code_view_scrolls_to_line(cx: &mut TestAppContext) {
+    init(cx);
+    let text: String = (1..=300).map(|n| format!("// line {n}\n")).collect();
+    let (view, cx) = cx.add_window_view(|_, _| CodeView::new(&text, Language::Rust, Vec::new()));
+    redraw(cx);
+    assert!(cx.debug_bounds("line:1").is_some());
+    assert!(cx.debug_bounds("line:150").is_none(), "off screen at first");
+    view.update(cx, |code, cx| code.scroll_to_line(150, cx));
+    redraw(cx);
+    redraw(cx);
+    assert!(cx.debug_bounds("line:150").is_some(), "line 150 is drawn");
+    assert!(
+        cx.debug_bounds("line:149").is_none(),
+        "line 150 is the top line"
+    );
+    // A line past the end scrolls to the last line.
+    view.update(cx, |code, cx| code.scroll_to_line(9_999, cx));
+    redraw(cx);
+    redraw(cx);
+    assert!(
+        cx.debug_bounds("line:300").is_some(),
+        "the last line is drawn"
+    );
+}

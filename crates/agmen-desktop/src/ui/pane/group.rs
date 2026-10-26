@@ -13,7 +13,6 @@ use super::names::PaneNames;
 use super::tabs::{Pane, PaneEvent};
 use crate::backend::Snapshot;
 use crate::ui::chat::ChatView;
-use crate::ui::ref_chip::RefEvent;
 use crate::ui::tab_views::{TabSources, TabViews};
 use crate::ui::tokens::BORDER_WIDTH;
 
@@ -64,7 +63,6 @@ pub(crate) struct PaneGroup {
     /// its pane keeps its composer text, alerts and backend updates, and
     /// any pane can open it again.
     chat: Option<Entity<ChatView>>,
-    _chat_refs: Option<Subscription>,
     /// What the tabs' views read.
     sources: Rc<TabSources>,
 }
@@ -79,17 +77,14 @@ impl PaneGroup {
     }
 
     /// One pane with the chat's tab active and `tabs` open after it,
-    /// showing `chat` when given. A click on one of the chat's reference
-    /// chips opens a tab, a ⌘-click a split.
+    /// showing `chat` when given. The workspace routes the chat's reference
+    /// chips (`workspace_refs.rs`).
     pub(crate) fn new(
         snapshot: &Rc<Snapshot>,
         chat: Option<Entity<ChatView>>,
         tabs: Vec<TabItem>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let chat_refs = chat
-            .as_ref()
-            .map(|chat| cx.subscribe(chat, |this, _, event, cx| this.open_ref(event, cx)));
         let mut group = Self {
             names: Rc::new(PaneNames::from_snapshot(snapshot)),
             members: Vec::new(),
@@ -97,7 +92,6 @@ impl PaneGroup {
             active: 0,
             next_number: 0,
             chat,
-            _chat_refs: chat_refs,
             sources: Rc::new(TabSources::from_snapshot(snapshot)),
         };
         let pane = group.add_pane(TabItem::Chat, cx);
@@ -163,18 +157,22 @@ impl PaneGroup {
         cx.notify();
     }
 
-    /// Opens a reference chip's target: in the active pane on a click, in
-    /// a split to the right on a ⌘-click (Zed's split). A center that
-    /// cannot split further opens it in the active pane.
-    pub(crate) fn open_ref(&mut self, event: &RefEvent, cx: &mut Context<Self>) {
-        match event {
-            RefEvent::OpenRef(target) => self.open(self.names.tab_for_ref(target), cx),
-            RefEvent::OpenRefInSplit(target) => {
-                let item = self.names.tab_for_ref(target);
-                if self.split(SplitDirection::Right, item.clone(), cx).is_err() {
-                    self.open(item, cx);
-                }
-            }
+    /// Opens `item` in a split to the right (a reference chip's ⌘-click,
+    /// Zed's split). A center that cannot split further opens it in the
+    /// active pane.
+    pub(crate) fn open_in_split(&mut self, item: TabItem, cx: &mut Context<Self>) {
+        if self.split(SplitDirection::Right, item.clone(), cx).is_err() {
+            self.open(item, cx);
+        }
+    }
+
+    /// Scrolls the active pane's active tab so `line` (1-based) is its top
+    /// line, when that tab is a file.
+    pub(crate) fn scroll_active_to_line(&mut self, line: u32, cx: &mut Context<Self>) {
+        if let Some(member) = self.members.get(self.active) {
+            member
+                .pane
+                .update(cx, |pane, cx| pane.scroll_active_to_line(line, cx));
         }
     }
 
