@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use super::theme::{Family, safe_relative};
+use super::theme::Family;
 use super::zed::parse_jsonc;
 
 /// Zed's extension API.
@@ -71,6 +71,8 @@ pub(crate) enum MarketError {
     NoThemes { id: String },
     #[error("cannot unpack {id}: {message}")]
     Archive { id: String, message: String },
+    #[error("cannot read {} back after installing: {message}", path.display())]
+    ReadBack { path: PathBuf, message: String },
     #[error("cannot write {}: {source}", path.display())]
     Io {
         path: PathBuf,
@@ -80,10 +82,12 @@ pub(crate) enum MarketError {
 
 impl MarketError {
     /// Whether the failure says the API is unreachable or broken, as opposed
-    /// to an answer about one extension (a 404, a missing license).
+    /// to an answer about one extension (a 404, a missing license). A list
+    /// answer that does not parse counts: an error page sent with status 200
+    /// or a changed schema would fail the same way on every retry (C208).
     const fn counts_as_outage(&self) -> bool {
         match self {
-            Self::Http { .. } | Self::TooLarge { .. } => true,
+            Self::Http { .. } | Self::TooLarge { .. } | Self::Parse { .. } => true,
             Self::Status { status, .. } => *status >= 500 || *status == 429,
             _ => false,
         }
@@ -121,8 +125,9 @@ struct Manifest {
     repository: Option<String>,
 }
 
-/// A theme extension agmen installed, as read back from its folder.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A theme extension installed by agmen or by Zed, as read back from its
+/// folder.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct InstalledTheme {
     /// The extension id, which is also the folder name.
     pub(crate) id: String,
@@ -203,12 +208,15 @@ impl Marketplace {
             url: self.base.clone(),
             message: err.to_string(),
         })?;
-        let body = self.get(url, MAX_LIST_BYTES, now)?;
-        let answer: ListAnswer =
-            serde_json::from_slice(&body).map_err(|err| MarketError::Parse {
-                url: format!("{}/extensions", self.base),
+        let list_url = format!("{}/extensions", self.base);
+        let answer = self.get(url, MAX_LIST_BYTES, now).and_then(|body| {
+            serde_json::from_slice::<ListAnswer>(&body).map_err(|err| MarketError::Parse {
+                url: list_url,
                 message: err.to_string(),
-            })?;
+            })
+        });
+        self.record(&answer, now);
+        let answer = answer?;
         if self.cache.len() >= MAX_CACHED_QUERIES
             && let Some(oldest) = self
                 .cache
@@ -251,13 +259,17 @@ impl Marketplace {
             url: self.base.clone(),
             message: err.to_string(),
         })?;
-        let archive = self.get(url, MAX_ARCHIVE_BYTES, now)?;
-        let unpacked = unpack(&ext.id, &archive)?;
+        let archive = self.get(url, MAX_ARCHIVE_BYTES, now);
+        // An archive that does not unpack is about this extension, not the
+        // API, so only the download itself counts toward the backoff.
+        self.record(&archive, now);
+        let unpacked = unpack(&ext.id, &archive?)?;
         write_install(ext, &unpacked, agmen_themes)
     }
 
-    /// GETs `url`, at most `limit` bytes, honoring and updating the backoff.
-    fn get(&mut self, url: reqwest::Url, limit: u64, now: Instant) -> Result<Vec<u8>, MarketError> {
+    /// GETs `url`, at most `limit` bytes, unless backing off at `now`. The
+    /// caller passes the outcome to [`Self::record`].
+    fn get(&self, url: reqwest::Url, limit: u64, now: Instant) -> Result<Vec<u8>, MarketError> {
         if let Some(at) = self.retry_at
             && now < at
         {
@@ -266,8 +278,12 @@ impl Marketplace {
                 minutes: wait.div_ceil(60).max(1),
             });
         }
-        let result = self.fetch(&url, limit);
-        match &result {
+        self.fetch(&url, limit)
+    }
+
+    /// Updates the backoff from the outcome of a request made at `now`.
+    fn record<T>(&mut self, result: &Result<T, MarketError>, now: Instant) {
+        match result {
             Ok(_) => {
                 self.failures = 0;
                 self.retry_at = None;
@@ -278,9 +294,10 @@ impl Marketplace {
                 self.retry_at = Some(now + doubled.min(MAX_BACKOFF));
                 self.failures = self.failures.saturating_add(1);
             }
+            // A 404, or a request not made while backing off, says nothing
+            // about an outage.
             Err(_) => {}
         }
-        result
     }
 
     fn fetch(&self, url: &reqwest::Url, limit: u64) -> Result<Vec<u8>, MarketError> {
@@ -372,21 +389,25 @@ fn unpack(id: &str, archive: &[u8]) -> Result<Unpacked, MarketError> {
             .path()
             .map_err(|err| bad(err.to_string()))?
             .into_owned();
-        let parts: Vec<String> = path
-            .components()
-            .filter_map(|c| match c {
-                std::path::Component::Normal(part) => part.to_str().map(str::to_owned),
-                _ => None,
-            })
-            .collect();
+        // `./` is how Zed's archives start; any other component (`..`, a
+        // root, a name that is not UTF-8) skips the entry (C205).
+        let mut parts = Vec::new();
+        let mut plain = true;
+        for component in path.components() {
+            match component {
+                std::path::Component::CurDir => {}
+                std::path::Component::Normal(part) => match part.to_str() {
+                    Some(part) => parts.push(part.to_owned()),
+                    None => plain = false,
+                },
+                _ => plain = false,
+            }
+        }
         let keep = match parts.as_slice() {
+            _ if !plain => None,
             [name] if name == MANIFEST => Some(Kept::Manifest),
             [name] if is_license(name) => Some(Kept::License(name.clone())),
-            [dir, name]
-                if dir == THEMES_DIR
-                    && name.ends_with(".json")
-                    && safe_relative(Path::new(name)) =>
-            {
+            [dir, name] if dir == THEMES_DIR && name.ends_with(".json") => {
                 Some(Kept::Theme(name.clone()))
             }
             _ => None,
@@ -412,7 +433,8 @@ enum Kept {
 }
 
 /// Checks `unpacked` and writes it to `agmen_themes/<id>/` through a staging
-/// folder and a rename, so a failed install leaves the old one in place.
+/// folder and a rename. A failed install removes the staging folder and
+/// leaves any older install of the same id in place (C204).
 fn write_install(
     ext: &ThemeExtension,
     unpacked: &Unpacked,
@@ -439,10 +461,14 @@ fn write_install(
         let path = path.to_owned();
         move |source| MarketError::Io { path, source }
     };
+    let parses = |bytes: &Vec<u8>| {
+        std::str::from_utf8(bytes).is_ok_and(|text| toml::from_str::<Manifest>(text).is_ok())
+    };
     let manifest = match &unpacked.manifest {
-        Some(bytes) => bytes.clone(),
-        // An archive without a manifest still records who made it.
-        None => toml::to_string(&Manifest {
+        Some(bytes) if parses(bytes) => bytes.clone(),
+        // An archive without a manifest that parses still records who made
+        // it, from the API's answer (C206).
+        _ => toml::to_string(&Manifest {
             name: Some(ext.name.clone()),
             version: Some(ext.version.clone()),
             authors: ext.authors.clone(),
@@ -456,25 +482,75 @@ fn write_install(
     };
     fs::create_dir_all(agmen_themes).map_err(io(agmen_themes))?;
     let staging = agmen_themes.join(format!(".{id}.partial"));
-    if staging.exists() {
-        fs::remove_dir_all(&staging).map_err(io(&staging))?;
+    let old = agmen_themes.join(format!(".{id}.old"));
+    for leftover in [&staging, &old] {
+        if leftover.exists() {
+            fs::remove_dir_all(leftover).map_err(io(leftover))?;
+        }
     }
+    let target = agmen_themes.join(&id);
+    let swapped = write_staging(&staging, &manifest, &unpacked.licenses, &themes).and_then(|()| {
+        let had_old = target.exists();
+        if had_old {
+            fs::rename(&target, &old).map_err(io(&target))?;
+        }
+        fs::rename(&staging, &target)
+            .map_err(io(&target))
+            .inspect_err(|_| {
+                if had_old {
+                    // Best effort: the rename error is what the person needs to
+                    // see; a failure here leaves the old install at `.{id}.old`.
+                    fs::rename(&old, &target).unwrap_or(());
+                }
+            })
+    });
+    if let Err(err) = swapped {
+        if staging.exists() {
+            // Best effort: the write error matters more, and the next
+            // install of this id removes a leftover first.
+            fs::remove_dir_all(&staging).unwrap_or(());
+        }
+        return Err(err);
+    }
+    if old.exists() {
+        // The new install is in place; a leftover `.{id}.old` is hidden
+        // from the theme list and removed by the next install of this id.
+        fs::remove_dir_all(&old).unwrap_or(());
+    }
+    read_back(&target)
+}
+
+/// Writes the manifest, licenses and theme files into `staging`.
+fn write_staging(
+    staging: &Path,
+    manifest: &[u8],
+    licenses: &[(String, Vec<u8>)],
+    themes: &[&(String, Vec<u8>)],
+) -> Result<(), MarketError> {
+    let write = |path: PathBuf, bytes: &[u8]| {
+        fs::write(&path, bytes).map_err(|source| MarketError::Io { path, source })
+    };
     let theme_dir = staging.join(THEMES_DIR);
-    fs::create_dir_all(&theme_dir).map_err(io(&theme_dir))?;
-    let write = |path: PathBuf, bytes: &[u8]| fs::write(&path, bytes).map_err(io(&path));
-    write(staging.join(MANIFEST), &manifest)?;
-    for (name, bytes) in &unpacked.licenses {
+    fs::create_dir_all(&theme_dir).map_err(|source| MarketError::Io {
+        path: theme_dir.clone(),
+        source,
+    })?;
+    write(staging.join(MANIFEST), manifest)?;
+    for (name, bytes) in licenses {
         write(staging.join(name), bytes)?;
     }
     for (name, bytes) in themes {
         write(theme_dir.join(name), bytes)?;
     }
-    let target = agmen_themes.join(&id);
-    if target.exists() {
-        fs::remove_dir_all(&target).map_err(io(&target))?;
-    }
-    fs::rename(&staging, &target).map_err(io(&target))?;
-    read_installed(&target).ok_or(MarketError::NoLicense { id })
+    Ok(())
+}
+
+/// Reads a fresh install back from `target`.
+fn read_back(target: &Path) -> Result<InstalledTheme, MarketError> {
+    read_installed(target).ok_or_else(|| MarketError::ReadBack {
+        path: target.join(MANIFEST),
+        message: "the manifest is missing or unreadable".to_owned(),
+    })
 }
 
 /// Reads an install back from its folder; `None` when it is not one (no
@@ -485,6 +561,10 @@ pub(crate) fn read_installed(root: &Path) -> Option<InstalledTheme> {
         return None;
     }
     let text = fs::read_to_string(root.join(MANIFEST)).ok()?;
+    // A manifest that does not parse still marks the folder as an install:
+    // its themes stay listed, only without author and repository. agmen's
+    // own installs always parse (write_install replaces one that does not),
+    // so this only reaches a Zed extension's hand-edited manifest (C206).
     let manifest: Manifest = toml::from_str(&text).unwrap_or_default();
     let mut licenses: Vec<PathBuf> = fs::read_dir(root)
         .ok()?

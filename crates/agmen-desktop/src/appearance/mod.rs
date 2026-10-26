@@ -3,7 +3,7 @@
 mod catalog;
 mod fallback;
 mod marked;
-pub(crate) mod marketplace;
+mod marketplace;
 mod settings;
 mod theme;
 mod zed;
@@ -13,8 +13,13 @@ use std::path::{Path, PathBuf};
 use gpui::{Global, Pixels, SharedString, px};
 use serde::{Deserialize, Serialize};
 
-pub(crate) use catalog::{PickerEntry, ThemeEntry, ThemeOrigin, installed_themes, picker_entries};
+pub(crate) use catalog::{
+    PickerEntry, ThemeEntry, ThemeOrigin, installed_themes, picker_entries, theme_names,
+};
 pub(crate) use fallback::BUILTIN_THEME;
+pub(crate) use marketplace::{
+    API_BASE, EXTENSIONS_PAGE, InstalledTheme, MarketError, Marketplace, ThemeExtension,
+};
 pub(crate) use settings::{AgmenSettings, Density, IconThemeChoice};
 pub(crate) use theme::{Theme, ThemeDirs, window_background};
 pub(crate) use zed::{Mode, read_jsonc};

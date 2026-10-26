@@ -1,5 +1,6 @@
 use std::io::{BufRead as _, BufReader, Write as _};
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 
 use super::*;
@@ -12,63 +13,117 @@ struct Seen {
     user_agent: Option<String>,
 }
 
+/// How long the fixture waits for its requests, and for each read or write.
+const FIXTURE_TIMEOUT: Duration = Duration::from_secs(10);
+
+type Routes = Vec<(&'static str, u16, Vec<u8>)>;
+
 /// A local HTTP server that answers each path prefix with a fixed status and
-/// body and records every request. It never reaches the real API.
+/// body and records every request. It never reaches the real API. It
+/// answers exactly `requests` requests, then stops listening, so an extra
+/// request fails at once; it gives up after [`FIXTURE_TIMEOUT`]. Errors in
+/// its thread come back over a channel and fail the test when it drops.
 struct Fixture {
     base: String,
     seen: Arc<Mutex<Vec<Seen>>>,
+    errors: Receiver<String>,
 }
 
 impl Fixture {
-    fn serve(routes: Vec<(&'static str, u16, Vec<u8>)>) -> Self {
+    fn serve(requests: usize, routes: Routes) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
+        listener.set_nonblocking(true).unwrap();
         let seen = Arc::new(Mutex::new(Vec::new()));
+        let (report, errors) = channel();
         let log = seen.clone();
         std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                let Ok(mut stream) = stream else { continue };
-                let mut reader = BufReader::new(stream.try_clone().unwrap());
-                let mut line = String::new();
-                reader.read_line(&mut line).unwrap();
-                let mut user_agent = None;
-                loop {
-                    let mut header = String::new();
-                    reader.read_line(&mut header).unwrap();
-                    if header.trim().is_empty() {
-                        break;
-                    }
-                    if let Some((name, value)) = header.split_once(':')
-                        && name.eq_ignore_ascii_case("user-agent")
-                    {
-                        user_agent = Some(value.trim().to_owned());
-                    }
+            let deadline = Instant::now() + FIXTURE_TIMEOUT;
+            let mut served = 0;
+            while served < requests {
+                if Instant::now() >= deadline {
+                    report_err(
+                        &report,
+                        format!("only {served} of {requests} requests came"),
+                    );
+                    return;
                 }
-                let path = line.split_whitespace().nth(1).unwrap_or("").to_owned();
-                log.lock().unwrap().push(Seen {
-                    line: line.trim().to_owned(),
-                    user_agent,
-                });
-                let (status, body) = routes
-                    .iter()
-                    .find(|(prefix, _, _)| path.starts_with(prefix))
-                    .map_or((404, Vec::new()), |(_, status, body)| {
-                        (*status, body.clone())
-                    });
-                let head = format!(
-                    "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    body.len()
-                );
-                stream.write_all(head.as_bytes()).unwrap();
-                stream.write_all(&body).unwrap();
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        served += 1;
+                        if let Err(err) = answer(stream, &routes, &log) {
+                            report_err(&report, err.to_string());
+                        }
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(err) => report_err(&report, err.to_string()),
+                }
             }
         });
-        Self { base, seen }
+        Self { base, seen, errors }
     }
 
     fn requests(&self) -> Vec<Seen> {
         self.seen.lock().unwrap().clone()
     }
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let errors: Vec<String> = self.errors.try_iter().collect();
+        if !std::thread::panicking() {
+            assert!(errors.is_empty(), "fixture server: {errors:?}");
+        }
+    }
+}
+
+fn report_err(report: &Sender<String>, err: String) {
+    // The test may have finished and dropped the receiver; nothing to tell.
+    report.send(err).unwrap_or(());
+}
+
+/// Reads one request from `stream`, records it and writes the route's answer.
+fn answer(stream: TcpStream, routes: &Routes, log: &Mutex<Vec<Seen>>) -> std::io::Result<()> {
+    stream.set_nonblocking(false)?;
+    stream.set_read_timeout(Some(FIXTURE_TIMEOUT))?;
+    stream.set_write_timeout(Some(FIXTURE_TIMEOUT))?;
+    let mut reader = BufReader::new(stream.try_clone()?);
+    let mut line = String::new();
+    reader.read_line(&mut line)?;
+    let mut user_agent = None;
+    // A request has a few headers; 100 is far more than reqwest sends.
+    for _ in 0..100 {
+        let mut header = String::new();
+        reader.read_line(&mut header)?;
+        if header.trim().is_empty() {
+            break;
+        }
+        if let Some((name, value)) = header.split_once(':')
+            && name.eq_ignore_ascii_case("user-agent")
+        {
+            user_agent = Some(value.trim().to_owned());
+        }
+    }
+    let path = line.split_whitespace().nth(1).unwrap_or("").to_owned();
+    log.lock().unwrap().push(Seen {
+        line: line.trim().to_owned(),
+        user_agent,
+    });
+    let (status, body) = routes
+        .iter()
+        .find(|(prefix, _, _)| path.starts_with(prefix))
+        .map_or((404, Vec::new()), |(_, status, body)| {
+            (*status, body.clone())
+        });
+    let head = format!(
+        "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    let mut stream = stream;
+    stream.write_all(head.as_bytes())?;
+    stream.write_all(&body)
 }
 
 const LIST: &str = r#"{"data": [
@@ -126,7 +181,7 @@ repository = "https://github.com/catppuccin/zed"
 
 #[test]
 fn marketplace_list_parses_and_caches_an_hour() {
-    let server = Fixture::serve(vec![("/extensions", 200, LIST.into())]);
+    let server = Fixture::serve(3, vec![("/extensions", 200, LIST.into())]);
     let mut market = Marketplace::new(&server.base).unwrap();
     let t0 = Instant::now();
 
@@ -175,7 +230,7 @@ fn marketplace_list_parses_and_caches_an_hour() {
 
 #[test]
 fn marketplace_backs_off_after_errors() {
-    let server = Fixture::serve(vec![("/extensions", 503, Vec::new())]);
+    let server = Fixture::serve(15, vec![("/extensions", 503, Vec::new())]);
     let mut market = Marketplace::new(&server.base).unwrap();
     let t0 = Instant::now();
     let min = |m: u64| Duration::from_secs(m * 60);
@@ -216,12 +271,33 @@ fn marketplace_backs_off_after_errors() {
 }
 
 #[test]
+fn unparsable_list_backs_off() {
+    // Review C208: an HTML error page sent with status 200.
+    let server = Fixture::serve(1, vec![("/extensions", 200, b"<html>busy</html>".to_vec())]);
+    let mut market = Marketplace::new(&server.base).unwrap();
+    let t0 = Instant::now();
+
+    assert!(matches!(
+        market.search("", t0),
+        Err(MarketError::Parse { .. })
+    ));
+    assert!(matches!(
+        market.search("", t0 + Duration::from_secs(30)),
+        Err(MarketError::BackingOff { minutes: 1 })
+    ));
+    assert_eq!(server.requests().len(), 1);
+}
+
+#[test]
 fn install_refuses_theme_without_license() {
     let bytes = archive(&[
         ("extension.toml", MANIFEST_TOML),
         ("themes/catppuccin-mocha.json", THEME_JSON),
     ]);
-    let server = Fixture::serve(vec![("/extensions/catppuccin/0.2.27/download", 200, bytes)]);
+    let server = Fixture::serve(
+        1,
+        vec![("/extensions/catppuccin/0.2.27/download", 200, bytes)],
+    );
     let mut market = Marketplace::new(&server.base).unwrap();
     let home = tempfile::tempdir().unwrap();
     let themes = home.path().join("agmen/themes");
@@ -244,10 +320,12 @@ fn installed_theme_keeps_license_and_author() {
         ("extension.toml", MANIFEST_TOML),
         ("LICENSE", "MIT License\n\nCopyright (c) Catppuccin\n"),
         ("themes/catppuccin-mocha.json", THEME_JSON),
+        // Review C205: entries with `..` are skipped, not flattened.
         ("themes/../../escape.json", THEME_JSON),
+        ("../LICENSE-ESCAPE", "Not this one\n"),
         ("grammars/x.wasm", "not kept"),
     ]);
-    let server = Fixture::serve(vec![("/extensions/catppuccin/", 200, bytes)]);
+    let server = Fixture::serve(1, vec![("/extensions/catppuccin/", 200, bytes)]);
     let mut market = Marketplace::new(&server.base).unwrap();
     let home = tempfile::tempdir().unwrap();
     let config = home.path().join(".config");
@@ -267,7 +345,8 @@ fn installed_theme_keeps_license_and_author() {
     );
     assert!(root.join("themes/catppuccin-mocha.json").is_file());
     assert!(!root.join("grammars").exists());
-    assert!(!home.path().join(".config/escape.json").exists());
+    assert!(!root.join("themes/escape.json").exists());
+    assert!(!root.join("LICENSE-ESCAPE").exists());
     assert!(!dirs.agmen.join(".catppuccin.partial").exists());
 
     // The picker shows it with its author and license, and it loads.
@@ -290,6 +369,53 @@ fn installed_theme_keeps_license_and_author() {
         theme.background,
         gpui::Rgba::try_from("#1e1e2e").unwrap().into()
     );
+}
+
+#[test]
+fn failed_install_leaves_no_staging_folder() {
+    // Review C204: a theme file name longer than the file system allows
+    // makes a write fail after the staging folder exists.
+    let gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    let mut tar = tar::Builder::new(gz);
+    let long = format!("themes/{}.json", "a".repeat(300));
+    for (path, text) in [
+        ("extension.toml", MANIFEST_TOML),
+        ("LICENSE", "MIT License\n"),
+        (long.as_str(), THEME_JSON),
+    ] {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(text.len() as u64);
+        header.set_mode(0o644);
+        tar.append_data(&mut header, path, text.as_bytes()).unwrap();
+    }
+    let bytes = tar.into_inner().unwrap().finish().unwrap();
+    let server = Fixture::serve(1, vec![("/extensions/catppuccin/", 200, bytes)]);
+    let mut market = Marketplace::new(&server.base).unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let dirs = theme_dirs(&home.path().join(".config"), &home.path().join("no-zed"));
+
+    let err = market
+        .install(&catppuccin(), &dirs.agmen, Instant::now())
+        .unwrap_err();
+    assert!(matches!(err, MarketError::Io { .. }), "{err}");
+    assert!(!dirs.agmen.join(".catppuccin.partial").exists());
+    assert!(!dirs.agmen.join("catppuccin").exists());
+    let (themes, _) = installed_themes(&dirs);
+    assert!(!themes.iter().any(|t| t.name == "Catppuccin Mocha"));
+}
+
+#[test]
+fn dot_folders_in_agmen_themes_are_not_listed() {
+    // Review C204: a staging folder left by an older agmen is not a theme.
+    let home = tempfile::tempdir().unwrap();
+    let dirs = theme_dirs(&home.path().join(".config"), &home.path().join("no-zed"));
+    let staging = dirs.agmen.join(".catppuccin.partial/themes");
+    fs::create_dir_all(&staging).unwrap();
+    fs::write(staging.join("catppuccin-mocha.json"), THEME_JSON).unwrap();
+
+    let (themes, skipped) = installed_themes(&dirs);
+    assert!(!themes.iter().any(|t| t.name == "Catppuccin Mocha"));
+    assert!(skipped.is_empty(), "{skipped:?}");
 }
 
 #[test]
@@ -375,5 +501,51 @@ fn index_json_adds_themes_outside_the_themes_folder() {
         .iter()
         .find(|t| t.name == "Catppuccin Mocha")
         .unwrap();
-    assert_eq!(entry.origin, ThemeOrigin::ZedExtension("odd".into()));
+    assert!(
+        matches!(&entry.origin, ThemeOrigin::ZedExtension(t) if t.id == "odd"),
+        "{:?}",
+        entry.origin
+    );
+}
+
+#[test]
+fn failed_read_back_names_the_manifest() {
+    // Review C207: a read-back failure is not a missing license.
+    let home = tempfile::tempdir().unwrap();
+    let target = home.path().join("catppuccin");
+    fs::create_dir_all(&target).unwrap();
+
+    let err = read_back(&target).unwrap_err();
+    assert!(!matches!(err, MarketError::NoLicense { .. }), "{err}");
+    let text = err.to_string();
+    assert!(
+        text.contains(&target.join(MANIFEST).display().to_string()),
+        "{text}"
+    );
+    assert!(!text.contains("license"), "{text}");
+}
+
+#[test]
+fn unparsable_manifest_is_replaced_from_the_api() {
+    // Review C206: a manifest that does not parse would read back with no
+    // author or repository; agmen writes one from the API's answer instead.
+    let bytes = archive(&[
+        ("extension.toml", "authors = [not toml"),
+        ("LICENSE", "MIT License\n"),
+        ("themes/catppuccin-mocha.json", THEME_JSON),
+    ]);
+    let server = Fixture::serve(1, vec![("/extensions/catppuccin/", 200, bytes)]);
+    let mut market = Marketplace::new(&server.base).unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let themes = home.path().join("agmen/themes");
+
+    let installed = market
+        .install(&catppuccin(), &themes, Instant::now())
+        .unwrap();
+    assert_eq!(installed.authors, ["Catppuccin Org <hi@example.org>"]);
+    assert_eq!(
+        installed.repository.as_deref(),
+        Some("https://github.com/catppuccin/zed")
+    );
+    assert_eq!(installed.version.as_deref(), Some("0.2.27"));
 }
