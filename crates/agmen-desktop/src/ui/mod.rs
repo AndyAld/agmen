@@ -2,10 +2,13 @@
 
 mod agent_panel;
 mod agents_panel;
+#[cfg_attr(not(test), expect(dead_code, reason = "hosted by the Task 9 chat"))]
+mod change_card;
 mod components;
 mod dock;
 mod format;
 mod listener_panel;
+mod palette_filter;
 mod status_bar;
 #[cfg(test)]
 mod test_support;
