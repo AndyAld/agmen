@@ -4,12 +4,17 @@
 //!
 //! Every test mints its own identity ids, client ids and shared
 //! subscription group, so tests can run in parallel without seeing each
-//! other's sessions. `it_persistent_session_survives_restart` restarts
+//! other's sessions. `it_offline_session_replays_after_restart` restarts
 //! EMQX and runs only under `--profile it-restart` (`.config/nextest.toml`).
+//! It runs agmen-client against an in-process hub through agmen-client's
+//! own test harness, shared as it is.
 
 // Integration tests are test code throughout, helpers included: this lets
 // clippy's allow-*-in-tests settings cover the helpers too.
 #![cfg(test)]
+
+#[path = "../../../crates/agmen-client/tests/support/mod.rs"]
+mod support;
 
 use std::collections::{HashSet, VecDeque};
 use std::hash::{BuildHasher, Hasher, RandomState};
@@ -17,6 +22,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use agmen_client::{ClientEvent, ClientKind, Events, OutboxState, Session, SessionConfig};
+use agmen_proto::{Seq, Stream as ProtoStream};
 use async_tungstenite::tungstenite::client::IntoClientRequest;
 use async_tungstenite::tungstenite::http::HeaderValue;
 use async_tungstenite::tungstenite::{Error as WsError, Message};
@@ -40,6 +47,10 @@ use tokio_rustls::TlsConnector;
 use tokio_rustls::rustls::pki_types::pem::PemObject;
 use tokio_rustls::rustls::pki_types::{CertificateDer, ServerName};
 use tokio_rustls::rustls::{ClientConfig, RootCertStore};
+
+use support::{
+    close, delivered, dm, fyi, messages_until, next_event, next_feed_seq, recorded_on_feed,
+};
 
 const TENANT: &str = "t1";
 const PROJECT: &str = "p1";
@@ -739,53 +750,93 @@ async fn it_hub_token_scope() {
     );
 }
 
+/// R71: EMQX keeps sessions in memory only (`durable_sessions` off), so a
+/// restart drops a persistent session and the messages queued for it.
+/// agmen-client recovers them: a watcher that was offline across the
+/// restart reconnects and gets every message posted meanwhile by replay
+/// from the hub, in order and once each.
+///
 /// Runs only under `--profile it-restart`: it restarts the dev EMQX.
-#[tokio::test]
-async fn it_persistent_session_survives_restart() {
-    let a = new_id();
-    let base = format!("agmen/v1/{TENANT}/{PROJECT}");
-    let inbox = format!("{base}/inbox/{a}");
-    let token = identity_token(&a);
-    let persistent = || {
-        let mut opts = tcp_options(&format!("{a}-watch"), &a, &token);
-        opts.set_clean_start(false)
-            .set_session_expiry_interval(Some(86_400));
-        opts
-    };
-    let mut watch = connect_ok(persistent()).await;
-    assert_eq!(
-        watch.subscribe(&inbox).await,
-        SubscribeReasonCode::Success(QoS::AtLeastOnce)
-    );
-    watch.client.disconnect().await.unwrap();
-    assert!(watch.closed_within(Duration::from_secs(5)).await.is_ok());
-    drop(watch);
+#[tokio::test(flavor = "multi_thread")]
+async fn it_offline_session_replays_after_restart() {
+    support::run(|ctx| async move {
+        let (poster, watcher) = (ctx.identity().await, ctx.identity().await);
+        let (post, mut posted) =
+            Session::connect(ctx.config(ClientKind::Cli, &poster, &ctx.broker))
+                .await
+                .unwrap();
+        // Longer than the restart takes, so only the restart can drop the
+        // session before the watcher comes back.
+        let watch_config = || {
+            ctx.config(ClientKind::Watch, &watcher, &ctx.broker)
+                .with_session_expiry(Duration::from_secs(300))
+        };
+        let (watch, mut watched) = Session::connect(watch_config()).await.unwrap();
+        let first = fyi("before going offline");
+        post.publish(first.clone()).await.unwrap();
+        assert_eq!(recorded_on_feed(&mut posted, &first.id).await, 1);
+        assert_eq!(next_feed_seq(&mut watched).await, 1);
+        // A clean DISCONNECT: the broker keeps the session and queues for it.
+        close(watch).await;
 
-    let mut hub = hub_subscriber(&share_group()).await;
-    for n in 0..3 {
-        assert_eq!(
-            hub.publish(&inbox, format!("queued {n}").into_bytes(), false)
-                .await,
-            PubAckReason::Success
+        let mut sent = Vec::new();
+        for seq in 2..=4 {
+            let message = fyi(&format!("while offline {seq}"));
+            post.publish(message.clone()).await.unwrap();
+            assert_eq!(recorded_on_feed(&mut posted, &message.id).await, seq);
+            sent.push(message.id);
+        }
+        let note = dm(&watcher.identity.id, "psst");
+        post.publish(note.clone()).await.unwrap();
+        assert!(matches!(
+            delivered(&mut posted, &note.id).await,
+            OutboxState::Recorded { .. }
+        ));
+        close(post).await;
+
+        restart_emqx().await;
+        let client_id = format!("{}-watch", watcher.identity.id);
+        assert!(
+            !emqx_lists(&client_id).await,
+            "{client_id}'s session survived the restart, so this test would not reach replay"
         );
-    }
-    drop(hub);
 
-    restart_emqx().await;
-
-    let (mut watch, connack) = reconnect_after_restart(persistent).await;
-    assert!(
-        connack.session_present,
-        "EMQX lost the session in the restart"
-    );
-    for n in 0..3 {
-        let got = watch.recv_on(&inbox, Duration::from_secs(10)).await;
-        assert_eq!(
-            got.map(|p| p.payload),
-            Some(format!("queued {n}").into()),
-            "message {n}"
-        );
-    }
+        let (watch, mut watched) = reconnect_after_restart(watch_config).await;
+        let inbox = ProtoStream::Inbox(watcher.identity.id.clone());
+        let caught_up = messages_until(&mut watched, |seen| {
+            seen.iter()
+                .filter(|m| m.stream == ProtoStream::Feed)
+                .count()
+                == sent.len()
+                && seen.iter().any(|m| m.stream == inbox)
+        })
+        .await;
+        let feed: Vec<_> = caught_up
+            .iter()
+            .filter(|m| m.stream == ProtoStream::Feed)
+            .map(|m| (m.seq, m.client.id.clone()))
+            .collect();
+        let want: Vec<_> = (2..=4).map(Seq).zip(sent).collect();
+        assert_eq!(feed, want);
+        let dms: Vec<_> = caught_up
+            .iter()
+            .filter(|m| m.stream == inbox)
+            .map(|m| (m.seq, m.client.id.clone()))
+            .collect();
+        assert_eq!(dms, [(Seq(1), note.id)]);
+        // Nothing comes twice.
+        let late = timeout(Duration::from_secs(2), async {
+            next_event(&mut watched, |event| match event {
+                ClientEvent::Message { message } => Some(message.clone()),
+                _ => None,
+            })
+            .await
+        })
+        .await;
+        assert!(late.is_err(), "a message was delivered twice: {late:?}");
+        close(watch).await;
+    })
+    .await;
 }
 
 // ---------------------------------------------------------------- helpers
@@ -970,12 +1021,40 @@ async fn restart_emqx() {
     assert!(status.success(), "docker compose restart emqx: {status}");
 }
 
-/// Retries the CONNECT once a second for up to 90 s while EMQX starts and
-/// loads the JWKS. A refused attempt leaves the stored session alone.
-async fn reconnect_after_restart(opts: impl Fn() -> MqttOptions) -> (Client, ConnAck) {
+/// Whether EMQX lists `client_id`, connected or holding its session.
+/// Retries once a second for up to 90 s while the REST API is not yet
+/// answering after a restart.
+async fn emqx_lists(client_id: &str) -> bool {
+    let url = format!("{}/clients/{client_id}", env("AGMEN_IT_EMQX_API"));
+    let (key, secret) = (
+        env("AGMEN_IT_EMQX_API_KEY"),
+        env("AGMEN_IT_EMQX_API_SECRET"),
+    );
+    let http = reqwest::Client::new();
     let deadline = Instant::now() + Duration::from_secs(90);
     loop {
-        match connect(opts()).await {
+        let status = http
+            .get(&url)
+            .basic_auth(&key, Some(&secret))
+            .send()
+            .await
+            .map(|resp| resp.status());
+        match status {
+            Ok(reqwest::StatusCode::OK) => return true,
+            Ok(reqwest::StatusCode::NOT_FOUND) => return false,
+            _ if Instant::now() < deadline => sleep(Duration::from_secs(1)).await,
+            other => panic!("EMQX REST API not answering 90 s after restart: {other:?}"),
+        }
+    }
+}
+
+/// Retries `Session::connect` once a second for up to 90 s while EMQX
+/// starts and loads the JWKS. Each try gives up after the session's own
+/// 10 s connect wait.
+async fn reconnect_after_restart(config: impl Fn() -> SessionConfig) -> (Session, Events) {
+    let deadline = Instant::now() + Duration::from_secs(90);
+    loop {
+        match Session::connect(config()).await {
             Ok(connected) => return connected,
             Err(_) if Instant::now() < deadline => sleep(Duration::from_secs(1)).await,
             Err(e) => panic!("EMQX not accepting connections 90 s after restart: {e:?}"),

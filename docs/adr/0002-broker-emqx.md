@@ -2,6 +2,7 @@
 
 Status: accepted
 Date: 2026-10-25
+Amended: 2026-10-26 (ruling R71: durable sessions off)
 
 ## Context
 
@@ -115,10 +116,17 @@ authentication = [
 
 authorization { no_match = deny, deny_action = ignore, sources = [] }
 
-durable_sessions { enable = true, message_retention_period = 1d }
+durable_sessions { enable = false }
 ```
 
-`durable_sessions` is new in this spike. Without it EMQX 6.3.2 keeps sessions in memory, and a restart loses a persistent session and its queued messages (the RED run below). With it, `clean_start = false` sessions with an expiry and their queued QoS 1 messages survive a restart.
+### Durable sessions off (ruling R71)
+
+Spike S1 first turned `durable_sessions` on, so that `clean_start = false` sessions with an expiry and their queued QoS 1 messages survive a broker restart. Ruling R71 turns it off again, because EMQX 6.3.2's durable session storage stalls deliveries (Task 15s):
+
+- **Measured.** With the same harness on fresh EMQX 6.3.2 brokers that differ only in `durable_sessions.enable`, 358 of 640 sessions (56%) stalled at 32 projects x 2 sessions with it on (5,018 of 9,600 messages never delivered within 30 s), and 0 of 1,136 sessions stalled with it off, from 4 x 2 through 64 x 2 (17,040 messages, worst latency 47 ms). A stall is all or nothing for one subscription: its messages never arrive until something forces EMQX to rescan its streams.
+- **Root cause.** A bug in EMQX's filter-against-filter trie search, `emqx_trie_search:matches_filter/3` (`apps/emqx/src/emqx_trie_search.erl`, the same in 6.3.2 and master on 2026-10-26). While the storage layer is still learning a topic structure it creates a new stream per new tenant or project and notifies the sessions whose filters match it. The search ends early when another connected session's filter sorts before the match and diverges later, so the matching session never learns of the stream that holds its messages. It happens only while EMQX learns a topic shape (a new broker, a wiped data volume, new tenants and projects, a new topic shape), and only next to other connected sessions.
+
+With durable sessions off, EMQX keeps persistent sessions in memory: `clean_start = false` and the clients' session expiry still apply, and a reconnect within the expiry resumes the session and its queue (at most `max_mqueue_len` 1000 messages, `max_inflight` 32). **A broker restart now drops every session and the messages queued for it.** agmen-client recovers them: on every reconnect it replays each watched stream from the hub, from its own cursors, and its outbox resends every post the hub has not acknowledged. `it_offline_session_replays_after_restart` checks this across a real restart.
 
 ### JWKS
 
@@ -168,7 +176,7 @@ That test uses a small raw client (tokio-rustls, async-tungstenite 0.29 and rumq
 
 `cargo nextest run -p s1-emqx --profile it` (13 tests) and `--profile it-restart` (1 test), on `emqx/emqx:6.3.2`.
 
-RED, before this spike changed `emqx.conf` (JWKS already served): `it_client_ids_bound_to_identity` failed (`<B>-mcp` connected with A's token), and `it_persistent_session_survives_restart` failed (`session_present` false after the restart). The first runs also showed that EMQX closes an oversized packet without DISCONNECT and that rumqttc reports DISCONNECT as an error; those tests were corrected to assert what EMQX does.
+RED, before this spike changed `emqx.conf` (JWKS already served): `it_client_ids_bound_to_identity` failed (`<B>-mcp` connected with A's token), and `it_persistent_session_survives_restart` (since replaced, see below) failed (`session_present` false after the restart). The first runs also showed that EMQX closes an oversized packet without DISCONNECT and that rumqttc reports DISCONNECT as an error; those tests were corrected to assert what EMQX does.
 
 | Test | Checks | Result |
 |---|---|---|
@@ -180,7 +188,7 @@ RED, before this spike changed `emqx.conf` (JWKS already served): `it_client_ids
 | `it_expiry_disconnects` | `exp` = now + 5 s: dropped after `exp` and within 10 s, with DISCONNECT 0x87 | Pass |
 | `it_rest_kick_disconnects` | `DELETE /api/v5/clients/<A>-mcp`: 204, DISCONNECT 0x98 within 2 s, then GET is 404 and a second DELETE is 404 | Pass |
 | `it_hub_shared_subscription` | Two hub clients in one group, 100 QoS 1 publishes: all 100 arrive once, both clients get some | Pass |
-| `it_persistent_session_survives_restart` | `<A>-watch` with `clean_start = false`, expiry 86400, subscribed to `inbox/A`, goes offline; the hub queues 3 QoS 1 messages; `docker compose restart emqx`; reconnect gets `session_present` and all 3 messages in order | Pass with `durable_sessions` on (fails without it) |
+| `it_offline_session_replays_after_restart` | Replaces `it_persistent_session_survives_restart`, which asserted the broker-side persistence R71 removes. Through agmen-client and an in-process hub: a watch session (`clean_start = false`, expiry 300 s) gets feed seq 1 live and closes; feed seq 2 to 4 and a DM are recorded while it is offline; `docker compose restart emqx`; EMQX no longer lists the session; the watch reconnects and gets feed seq 2 to 4 in order and the DM by replay, and nothing twice within 2 s | Not yet run against a restart (R71 run pending). With the restart replaced by a clean-start connect that discards the session: pass; with no session loss at all, the test fails as meant (the broker still lists the session) |
 | `it_packet_over_limit_refused` | 60 KiB publish: PUBACK success and the hub receives it; 100 KiB: rumqttc fails locally, a raw client gets the socket closed and the hub receives nothing | Pass |
 | `it_websocket_listener` | `it_publish_to_own_up_allowed` with A over `ws://localhost:8083/mqtt` | Pass |
 | `it_wss_behind_haproxy` | A raw MQTT client over `wss://localhost:8443/mqtt` through HAProxy: CONNACK success, PUBACK success, the hub receives it | Pass |
@@ -189,14 +197,14 @@ RED, before this spike changed `emqx.conf` (JWKS already served): `it_client_ids
 
 ### Test isolation
 
-Every test mints its own identity ids (`id` plus 8 random `[a-z0-9]`), client ids and share group, so the `it` profile runs them 4 at a time; five consecutive runs passed. `it_persistent_session_survives_restart` restarts EMQX, which would cut every other test's connection, so `.config/nextest.toml` keeps any `it_` test with `restart` in its name out of the `it` profile and runs it under `--profile it-restart` with one thread. It calls `docker compose -f deploy/dev/compose.yaml restart emqx`, so it needs the Docker CLI where the tests run.
+Every test mints its own identity ids (`id` plus 8 random `[a-z0-9]`), client ids and share group, so the `it` profile runs them 4 at a time; five consecutive runs passed. `it_offline_session_replays_after_restart` restarts EMQX, which would cut every other test's connection, so `.config/nextest.toml` keeps any `it_` test with `restart` in its name out of the `it` profile and runs it under `--profile it-restart` with one thread. It calls `docker compose -f deploy/dev/compose.yaml restart emqx`, so it needs the Docker CLI where the tests run.
 
 ## Consequences
 
 - Task 7 mints the two token shapes above, serves `/v1/jwks` with the rotation rule above, and on revocation bans the identity's username, then kicks three client ids, not two (see "REST ban"). Task 8 connects as `agmen-hub-<instance>` with the hub claims.
 - The authentication chain has two authenticators, and both must stay in read-only config. Removing cinfo lets any client id use a valid token; removing both lets anonymous clients in (ADR-0001).
-- Durable sessions keep sessions and messages on disk under `/opt/emqx/data/ds` (`sessions/`, `messages/`); the cluster StatefulSet must keep `/opt/emqx/data` on its persistent volume, as dev does with `emqx-data`.
+- Durable sessions are off (R71): a broker restart drops every session and its queued messages, and each client pays one replay pass from the hub when it reconnects. Turn them on again only on an EMQX release that fixes `matches_filter`, after the Task 15s stall harness (`spikes/s5-ds-stall`, commit `68e20c3` on branch `mvp/t15s`) shows no stalls with them on.
 - rumqttc's TLS features fail `cargo deny` today (see WSS above); Task 3 decides how agmen-client gets WSS.
 - CI runs `--profile it-restart` in the Jenkins Integration stage, after the `it` run and before the stack is torn down. `dockerd` in the `docker` container also listens on a socket in an `emptyDir` shared with the `rust` container (`ci/kubePod.yaml`), and the `rust` container installs the Docker CLI and the compose plugin as static binaries, each checked against a sha256 pinned per architecture in the `Jenkinsfile`, then runs the profile with `DOCKER_HOST` set to that socket.
-- Not tested here: durable shared subscriptions for the hub (`durable_shared_subs`), whether a kick also discards a persistent session's queue, and token behavior with no `exp` (from source only).
+- Not tested here: whether a kick also discards a persistent session's queue, and token behavior with no `exp` (from source only).
 - Revisit if EMQX's license terms change, at a second node, or if a later EMQX version changes `verify_claims` or cinfo semantics.
