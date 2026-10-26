@@ -7,6 +7,7 @@ use gpui::{
 
 use super::dock::{Dock, DockSide};
 use crate::appearance::{Appearance, Theme};
+use crate::icons::{FileIcons, UiIcon};
 
 actions!(workspace, [ToggleLeftDock, ToggleRightDock, Quit]);
 
@@ -58,6 +59,58 @@ fn region(theme: &Theme, label: &'static str) -> impl IntoElement {
     div().text_color(theme.text_placeholder).child(label)
 }
 
+// shortcut: S8 placeholders; Task 7 of the desktop plan builds the real dock and status bar.
+fn dock_tabs(theme: &Theme) -> impl IntoElement {
+    let tab = |icon: UiIcon, label: &'static str| {
+        div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .child(icon.render(theme.text_placeholder, px(13.)))
+            .child(label)
+    };
+    div()
+        .flex()
+        .gap_3()
+        .text_size(px(12.))
+        .text_color(theme.text_placeholder)
+        .child(tab(UiIcon::Agents, "Agents"))
+        .child(tab(UiIcon::Project, "Project"))
+        .child(tab(UiIcon::Git, "Git"))
+        .child(tab(UiIcon::Roles, "Roles"))
+}
+
+fn file_icon_samples(theme: &Theme, icons: &FileIcons) -> impl IntoElement {
+    let row = |name: &'static str, is_dir: bool| {
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(
+                icons
+                    .icon(std::path::Path::new(name), is_dir, false)
+                    .render(theme.text, px(16.)),
+            )
+            .child(name)
+    };
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .pt_3()
+        .child(row("src", true))
+        .child(row("main.rs", false))
+        .child(row("Cargo.toml", false))
+        .child(row("README.md", false))
+}
+
+fn status_icons(theme: &Theme, list: &[UiIcon]) -> impl IntoElement {
+    div().flex().gap_3().children(
+        list.iter()
+            .map(|icon| icon.render(theme.text_placeholder, px(14.))),
+    )
+}
+
 impl Render for Workspace {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let appearance = cx.global::<Appearance>();
@@ -74,7 +127,8 @@ impl Render for Workspace {
                     .border_r_1()
                     .border_color(border)
                     .p_2()
-                    .child(region(theme, "Left dock")),
+                    .child(dock_tabs(theme))
+                    .child(file_icon_samples(theme, cx.global::<FileIcons>())),
             );
         }
         body = body.child(div().flex_1().h_full().p_2().child(region(theme, "Center")));
@@ -128,7 +182,20 @@ impl Render for Workspace {
                     .px_2()
                     .flex()
                     .items_center()
-                    .child(region(theme, "Status bar")),
+                    .justify_between()
+                    .child(status_icons(
+                        theme,
+                        &[UiIcon::Project, UiIcon::Git, UiIcon::Search],
+                    ))
+                    .child(status_icons(
+                        theme,
+                        &[
+                            UiIcon::Terminal,
+                            UiIcon::Chat,
+                            UiIcon::Bell,
+                            UiIcon::Settings,
+                        ],
+                    )),
             )
     }
 }
@@ -140,7 +207,14 @@ mod tests {
 
     #[gpui::test]
     fn workspace_toggles_docks(cx: &mut TestAppContext) {
-        cx.update(|cx| cx.set_global(Appearance::builtin()));
+        cx.update(|cx| {
+            cx.set_global(Appearance::builtin());
+            let (icons, _) = FileIcons::new(
+                &crate::appearance::IconThemeChoice::Lucide,
+                std::path::Path::new(""),
+            );
+            cx.set_global(icons);
+        });
         let (workspace, cx) = cx.add_window_view(Workspace::new);
         workspace.read_with(cx, |w, _| {
             assert!(w.is_dock_open(DockSide::Left));

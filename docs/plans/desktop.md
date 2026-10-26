@@ -124,7 +124,7 @@
 
 ### Task 5: Icons: Lucide, the Zed icon theme, and macOS file icons
 
-- [ ] Done
+- [x] Done. `FileIcons` global resolves Zed theme, then Finder, then Lucide; file icons draw with `img()` (own colors), UI icons with `svg()` (tinted). Lucide's license shows in About (Task 17).
 
 **Files:**
 - Create: `crates/agmen-desktop/assets/icons/lucide/*.svg` (only the icons used: `users`, `folder-tree`, `git-branch`, `user`, `search`, `square-terminal`, `messages-square`, `bell`, `settings`, `chevron-down`, `chevron-right`, `chevron-left`, `sparkle`, `diff`, `pencil`, `x`, `check`, `plus`, `minus`, `corner-down-left`, `circle-alert`, `panel-right`, `file`, `folder`, `folder-open`), `assets/icons/LICENSE-lucide.txt`, `src/assets.rs` (GPUI `AssetSource`), `src/icons/mod.rs`, `src/icons/zed_theme.rs`, `src/icons/system.rs`, `src/icons/zed_theme_tests.rs`, `tests/fixtures/zed/icon_theme/icon_themes/fixture.json` plus three small SVGs

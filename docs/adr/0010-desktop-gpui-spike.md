@@ -1,6 +1,6 @@
 # 0010: Spike S8, the GPUI desktop app on macOS
 
-Status: proposed (results are filled in as Tasks 1 to 5 of [the desktop plan](../plans/desktop.md) land)
+Status: accepted for macOS; Windows and Linux unverified
 Date: 2026-10-25
 
 ## Context
@@ -28,7 +28,13 @@ The desktop app is a GPUI app with Zed's layout (design 4.2 and 6.8, spec sectio
 | Native notification | `notify::notify`: inside an `.app` bundle, GPUI's `App::show_system_notification` (`UNUserNotificationCenter`, which macOS delivers only for a bundle id); a bare binary posts through `notify-rust` 4.18.2 (MIT OR Apache-2.0, default features off and macOS only, so its Linux `zbus` stack and advisories stay out). `agmen-desktop --spike notify` | The bare-binary path works: Andy saw the banner on 2026-10-25. The bundled path is untested, because a throwaway bundle id would leave a notification permission entry; it gets tested with packaging. `user-notify` was ruled out (LGPL-3.0) |
 | Single instance | `instance::acquire`, std only: `File::try_lock` on `~/Library/Application Support/agmen/desktop.lock`, and a Unix socket `desktop.sock` (mode 0600) where a second launch writes one JSON line of at most 64 KiB; 4 tests (forward, stale socket after a crash, oversize and bad lines dropped) | Works live: a second `agmen-desktop` exited 0 in 0.02 s and the first stayed the only process. macOS refuses `SO_RCVTIMEO` (EINVAL) once the peer has closed, so the reader ignores that error |
 | Zed theme and fonts | `appearance::resolve` reads `~/.config/zed/settings.json` (JSONC with comments and trailing commas, through `jsonc-parser` 0.34, MIT, nesting capped at 512), finds the theme in `~/.config/zed/themes/` or an installed extension, fills missing keys from a built-in copy of the mockup's Gruvbox colors, and reads `~/.config/agmen/settings.toml`; 14 tests | Works: Andy's "Gruvbox Material Dark Hard" and fonts load; no Zed, a missing theme or a bad file falls back with a warning. Role colors come from the theme's `players` palette, which matches every mockup role color |
-| System file icons without `unsafe` | Task 5 | pending |
+| UI and file icons, system icons without `unsafe` | Lucide v1.61.0 (2026-10-21, `lucide-icons-1.61.0.zip` SHA-256 `d4cfe5949e0cf202ec558c3fe2cc6c8373371c1cb8643fac2f7c68ce4153ff4b`): the 25 SVGs the views use, embedded, with Lucide's ISC license (which also carries Feather's MIT notice) in `assets/icons/LICENSE-lucide.txt`. File icons from the installed Zed icon theme through its own mapping (exact name, then longest suffix, then `default`; named folders open and closed); paths that leave the extension are refused. Without a Zed theme, Finder's icon through `NSWorkspace::sharedWorkspace().iconForFile()` at 32 px as TIFF, which GPUI decodes; 8 tests | Works: Andy's Material Icon Theme draws `src`, `main.rs`, `Cargo.toml` and `README.md` as in the mockup, and Finder returns TIFF icons for files and folders. All objc2-app-kit 0.3.2 and objc2-foundation 0.3.2 calls used are safe fns, so `unsafe_code = "forbid"` holds. Windows (shell icons) and Linux (freedesktop) unverified |
+
+## Packaging and signing (notes, untested)
+
+- The app needs a bundle (`agmen.app` with an `Info.plist` and a bundle id) for GPUI's own notifications, a Dock icon and deep links. `cargo-bundle` or a hand-written `Info.plist` both work for that; neither is installed or tried here.
+- Signing: a Developer ID Application certificate, `codesign --options runtime`, then `xcrun notarytool submit --wait` and `xcrun stapler staple`, which need Andy's Apple account (design 4.3).
+- Windows MSI and Linux deb and AppImage: not started.
 
 ## Consequences
 

@@ -107,7 +107,7 @@ pub(crate) fn read_zed_settings(dir: &Path) -> Result<ZedSettings, AppearanceErr
 
 /// Reads a JSONC file (comments and trailing commas allowed) of at most
 /// [`MAX_SETTINGS_BYTES`]. jsonc-parser caps nesting at 512 levels.
-pub(super) fn read_jsonc<T: serde::de::DeserializeOwned>(
+pub(crate) fn read_jsonc<T: serde::de::DeserializeOwned>(
     path: &Path,
 ) -> Result<T, AppearanceError> {
     let io = |source| AppearanceError::Io {

@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 pub(crate) use settings::{AgmenSettings, Density, IconThemeChoice};
 pub(crate) use theme::Theme;
+pub(crate) use zed::read_jsonc;
 
 /// What can go wrong reading appearance files.
 #[derive(Debug, thiserror::Error)]
@@ -127,10 +128,6 @@ pub(crate) enum AppearanceSource {
 pub(crate) struct Appearance {
     pub(crate) theme: Theme,
     pub(crate) fonts: Fonts,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "file icons read it in Task 5 of the desktop plan")
-    )]
     pub(crate) icon_theme: IconThemeChoice,
     #[expect(
         dead_code,
@@ -163,14 +160,15 @@ impl Appearance {
     }
 }
 
+/// Where Zed keeps installed extensions under a home folder.
+pub(crate) fn zed_extensions_dir(home: &Path) -> PathBuf {
+    home.join("Library/Application Support/Zed/extensions/installed")
+}
+
 /// Resolves the appearance for a person whose home folder is `home`.
 #[must_use]
 pub(crate) fn resolve(home: &Path, system: SystemMode) -> Appearance {
-    resolve_paths(
-        &home.join(".config"),
-        &home.join("Library/Application Support/Zed/extensions/installed"),
-        system,
-    )
+    resolve_paths(&home.join(".config"), &zed_extensions_dir(home), system)
 }
 
 /// [`resolve`] with explicit folders: `config` holds `zed/` and `agmen/`.

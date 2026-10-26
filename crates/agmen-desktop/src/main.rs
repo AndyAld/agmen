@@ -1,6 +1,8 @@
 //! The agmen desktop app: a GPUI console with Zed's layout.
 
 mod appearance;
+mod assets;
+mod icons;
 mod instance;
 mod notify;
 mod spike;
@@ -70,28 +72,30 @@ fn main() -> Result<()> {
         None
     };
     let platform = Rc::new(gpui_macos::MacPlatform::new(false));
-    Application::with_platform(platform).run(move |cx: &mut App| {
-        if launch == Launch::NotifySpike {
-            notify::notify("spike", "agmen", "adam/coord needs you", cx);
-            // Leave time for the background post before quitting.
-            cx.spawn(async |cx| {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_secs(3))
-                    .await;
-                cx.update(|cx| cx.quit());
-            })
-            .detach();
-            return;
-        }
-        if let Some(listener) = listener {
-            watch_instance(listener, cx);
-        }
-        if let Err(err) = open_main_window(&launch, cx) {
-            // The run loop owns the process from here, so report and quit.
-            eprintln!("agmen-desktop: {err:#}");
-            cx.quit();
-        }
-    });
+    Application::with_platform(platform)
+        .with_assets(assets::Assets)
+        .run(move |cx: &mut App| {
+            if launch == Launch::NotifySpike {
+                notify::notify("spike", "agmen", "adam/coord needs you", cx);
+                // Leave time for the background post before quitting.
+                cx.spawn(async |cx| {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_secs(3))
+                        .await;
+                    cx.update(|cx| cx.quit());
+                })
+                .detach();
+                return;
+            }
+            if let Some(listener) = listener {
+                watch_instance(listener, cx);
+            }
+            if let Err(err) = open_main_window(&launch, cx) {
+                // The run loop owns the process from here, so report and quit.
+                eprintln!("agmen-desktop: {err:#}");
+                cx.quit();
+            }
+        });
     Ok(())
 }
 
@@ -152,7 +156,16 @@ fn open_main_window(launch: &Launch, cx: &mut App) -> Result<()> {
         KeyBinding::new("cmd-q", Quit, None),
     ]);
     cx.on_action(|_: &Quit, cx| cx.quit());
-    cx.set_global(load_appearance(cx.window_appearance()));
+    let appearance = load_appearance(cx.window_appearance());
+    let extensions = std::env::home_dir()
+        .map(|home| appearance::zed_extensions_dir(&home))
+        .unwrap_or_default();
+    let (file_icons, warning) = icons::FileIcons::new(&appearance.icon_theme, &extensions);
+    if let Some(warning) = warning {
+        eprintln!("agmen-desktop: {warning}");
+    }
+    cx.set_global(appearance);
+    cx.set_global(file_icons);
     ui::bind_keys(cx);
 
     let options = window_options(cx);
