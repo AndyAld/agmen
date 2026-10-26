@@ -31,6 +31,8 @@ mod replay;
 mod rollcall;
 mod secrets_scan;
 mod sweeper;
+#[cfg(feature = "test-hooks")]
+mod test_hooks;
 
 pub use auth::{GithubError, GithubId};
 pub use bootstrap::{AdminGithub, Bootstrap, BootstrapError, Bootstrapped};
@@ -42,6 +44,8 @@ pub use identities::{BROKER_TOKEN_TTL, CLIENT_ID_SUFFIXES, HumanId, Identity};
 pub use ingest::{HUB_IDENTITY, HubPost, IngestError, PostError, Posted};
 pub use mqtt::{Messaging, MessagingError};
 pub use numbering::{NumberingError, next_seq};
+#[cfg(feature = "test-hooks")]
+pub use test_hooks::HookError;
 
 /// The hub's Postgres migrations from `migrations/`, embedded at compile time.
 ///

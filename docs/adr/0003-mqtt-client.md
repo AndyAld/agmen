@@ -98,3 +98,14 @@ Each test mints its own identity ids, client ids and share group, and its own se
 - The client owns the reconnect loop: bounded backoff, a fresh token before each attempt, and every connection error surfaced to the caller.
 - The rumqttc-next fork has a short history (first release 2026-02-16). Revisit if it stops releasing or if upstream rumqttc ships a release that passes `cargo deny` with TLS on; mqtt5 is the untested fallback.
 - Not tested here: a file-backed store across a real process restart, the `SessionStateMismatch` fallback, EMQX's `max_inflight = 32` with acks held back, `try_websocket_with_default_tls` (native root certificates), and EMQX's `max_mqueue_len = 1000` on a durable session.
+
+## agmen-client (MVP Task 11)
+
+agmen-client implements the file-backed `SessionStore` (`crates/agmen-client/src/mqtt_store.rs`, one record per client id beside the identity's SQLite file, scoped to the broker URL) and the `SessionStateMismatch` fallback. A missing or corrupt record loads as none; the link then connects once with a clean start and the hub replay delivers what the broker had queued. `it_lost_session_record_falls_back_to_replay` covers both cases against EMQX 6.3.2.
+
+Two rumqttc-next 0.34.0 behaviors found while building it bind later changes:
+
+- **`EventLoop::poll` is not safe to cancel.** The crate's docs say direct `poll` calls work in `tokio::select!`, but a `select!` that dropped `poll` while it was sending a graceful DISCONNECT (`send_pending_disconnect` had taken the pending request but not yet set `disconnect_complete`) left the DISCONNECT unsent and the loop running; `Session::close` then waited out its 5 s limit. The link task now never cancels `poll`: it handles and acks each publish between polls, and a timer task wakes the poll for the token swap by subscribing to `ack/{id}` again.
+- **An ack queued after DISCONNECT is still sent**, and EMQX then aborts the connection (`MqttState(ConnectionAborted)`). `Session::close` sets a flag before it queues DISCONNECT; from then on the link acks nothing and stops at the next error instead of reconnecting.
+
+Acks go out only between polls and only for publishes that arrived on the current connection (`AckGate` in `link.rs`), so an ack cannot reach a packet id that a reconnect gave to another publish. rumqttc drops acks still queued when a connection fails (`EventLoop::clean`).

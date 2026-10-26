@@ -13,6 +13,11 @@ path = "src/main.rs"
 [lints]
 workspace = true
 
+[features]
+# Hub::seed_project and Hub::seed_identity, for other crates' integration
+# tests (agmen-client). Never enabled in the hub binary.
+test-hooks = []
+
 [dependencies]
 agmen-proto = { version = "0.1.0", path = "../agmen-proto" }
 anyhow = "1.0.104"
