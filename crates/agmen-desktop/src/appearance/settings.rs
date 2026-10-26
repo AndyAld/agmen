@@ -61,6 +61,15 @@ impl Default for AgmenSettings {
 
 /// The table that holds these settings.
 const TABLE: &str = "appearance";
+/// The `[appearance]` keys this version writes.
+pub(super) const OWNED_KEYS: &[&str] = &[
+    "follow_zed",
+    "theme",
+    "mode",
+    "icon_theme",
+    "fonts",
+    "density",
+];
 /// A settings file is small; anything larger is refused.
 const MAX_SETTINGS_BYTES: u64 = 4 * 1024 * 1024;
 
@@ -111,7 +120,19 @@ impl AgmenSettings {
             path: path.to_owned(),
             message: err.to_string(),
         })?;
-        table.insert(TABLE.to_owned(), value);
+        // Merge into the table already there: keys this version does not
+        // know stay; keys it owns are replaced, or dropped when now unset.
+        let mut merged = match table.remove(TABLE) {
+            Some(toml::Value::Table(existing)) => existing,
+            _ => toml::Table::new(),
+        };
+        for key in OWNED_KEYS {
+            merged.remove(*key);
+        }
+        if let toml::Value::Table(ours) = value {
+            merged.extend(ours);
+        }
+        table.insert(TABLE.to_owned(), toml::Value::Table(merged));
         let text = toml::to_string_pretty(&table).map_err(|err| AppearanceError::Serialize {
             path: path.to_owned(),
             message: err.to_string(),

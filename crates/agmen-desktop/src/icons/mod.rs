@@ -3,7 +3,7 @@
 mod system;
 mod zed_theme;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -55,6 +55,8 @@ pub(crate) struct FileIcons {
     system: bool,
     cache: RefCell<HashMap<IconKind, Slot>>,
     wanted: RefCell<Vec<IconKind>>,
+    /// Whether a lookup task is running.
+    fetching: Cell<bool>,
 }
 
 impl Global for FileIcons {}
@@ -84,6 +86,7 @@ impl FileIcons {
             system,
             cache: RefCell::new(HashMap::new()),
             wanted: RefCell::new(Vec::new()),
+            fetching: Cell::new(false),
         };
         (icons, warning)
     }
@@ -135,25 +138,42 @@ impl FileIcons {
     /// Looks up, off the UI thread, every OS icon that frames asked for, and
     /// repaints when each one arrives.
     pub(crate) fn fetch_wanted(cx: &mut App) {
-        let wanted = std::mem::take(&mut *cx.global::<Self>().wanted.borrow_mut());
-        for kind in wanted {
-            cx.spawn(async move |cx| {
-                let lookup = kind.clone();
-                let tiff = cx
-                    .background_executor()
-                    .spawn(async move { system::icon_tiff(&lookup) })
-                    .await;
-                let image = tiff.map(|bytes| Arc::new(Image::from_bytes(ImageFormat::Tiff, bytes)));
-                cx.update(|cx| {
-                    cx.global::<Self>()
-                        .cache
-                        .borrow_mut()
-                        .insert(kind, Slot::Ready(image));
-                    cx.refresh_windows();
-                });
-            })
-            .detach();
+        let icons = cx.global::<Self>();
+        // One lookup task at a time: Apple documents NSImage as usable from
+        // any thread but only from one thread at a time, and says nothing
+        // about NSWorkspace (ADR-0010), so lookups never overlap.
+        if icons.fetching.get() || icons.wanted.borrow().is_empty() {
+            return;
         }
+        icons.fetching.set(true);
+        let wanted = std::mem::take(&mut *icons.wanted.borrow_mut());
+        cx.spawn(async move |cx| {
+            let found = cx
+                .background_executor()
+                .spawn(async move {
+                    wanted
+                        .into_iter()
+                        .map(|kind| {
+                            let tiff = system::icon_tiff(&kind);
+                            (kind, tiff)
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            cx.update(|cx| {
+                let icons = cx.global::<Self>();
+                let mut cache = icons.cache.borrow_mut();
+                for (kind, tiff) in found {
+                    let image =
+                        tiff.map(|bytes| Arc::new(Image::from_bytes(ImageFormat::Tiff, bytes)));
+                    cache.insert(kind, Slot::Ready(image));
+                }
+                drop(cache);
+                icons.fetching.set(false);
+                cx.refresh_windows();
+            });
+        })
+        .detach();
     }
 }
 

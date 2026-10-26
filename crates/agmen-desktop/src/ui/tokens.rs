@@ -85,7 +85,6 @@ pub(crate) const MONO_CELL_HEIGHT: Pixels = px(18.);
 
 // Spacing: the mockup's gaps and padding, named by their pixels.
 pub(crate) const SPACE_1: Pixels = px(1.);
-pub(crate) const SPACE_2: Pixels = px(2.);
 pub(crate) const SPACE_3: Pixels = px(3.);
 pub(crate) const SPACE_5: Pixels = px(5.);
 pub(crate) const SPACE_6: Pixels = px(6.);
@@ -103,6 +102,15 @@ pub(crate) const RADIUS_MD: Pixels = px(5.);
 
 // Icons and marks.
 pub(crate) const ICON_SM: Pixels = px(12.);
+/// The dock collapse glyph (mockup node 391, V63).
+pub(crate) const ICON_GLYPH: Pixels = px(13.);
+/// The filled dock button around it: 17 by 20.
+pub(crate) const DOCK_BUTTON: gpui::Size<Pixels> = gpui::Size {
+    width: px(17.),
+    height: px(20.),
+};
+/// The leading slot of an Agents row: the status glyph's box (V62).
+pub(crate) const LEADING_SLOT: Pixels = px(10.);
 pub(crate) const ICON_MD: Pixels = px(14.);
 pub(crate) const AVATAR_SIZE: Pixels = px(22.);
 pub(crate) const DOT_SIZE: Pixels = px(7.);

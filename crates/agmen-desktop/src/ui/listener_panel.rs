@@ -9,7 +9,7 @@ use super::components::{Button, Color, KvRow, KvSection};
 use super::dock::RightDockHeader;
 use super::format::{listener_tokens, money, money_of, workers_today};
 use super::tokens::{SPACE_14, SPACE_16};
-use crate::backend::ListenerInfo;
+use crate::backend::{ListenerInfo, RecentKind};
 
 #[derive(Debug, IntoElement)]
 pub(crate) struct ListenerPanel {
@@ -56,10 +56,9 @@ impl RenderOnce for ListenerPanel {
             .into_iter()
             .fold(KvSection::new("Recent"), |section, action| {
                 // Work the listener started reads bright; its answers read dim.
-                let color = if action.text.starts_with("delegated") {
-                    Color::Default
-                } else {
-                    Color::Placeholder
+                let color = match action.kind {
+                    RecentKind::Delegated | RecentKind::Waiting => Color::Default,
+                    RecentKind::Answered => Color::Placeholder,
                 };
                 section.row(KvRow::new(action.time, action.text).color(color))
             });

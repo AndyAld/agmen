@@ -33,9 +33,31 @@ pub(crate) enum AppearanceError {
     #[error(
         "no installed Zed theme is named \"{name}\" ({} theme files could not be read: {})",
         skipped.len(),
-        skipped.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
+        skipped.iter().map(ToString::to_string).collect::<Vec<_>>().join("; ")
     )]
-    ThemeNotFoundSkipped { name: String, skipped: Vec<PathBuf> },
+    ThemeNotFoundSkipped { name: String, skipped: Vec<Skipped> },
+}
+
+/// A theme file or folder passed over while searching, and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Skipped {
+    pub(crate) path: PathBuf,
+    pub(crate) reason: String,
+}
+
+impl std::fmt::Display for Skipped {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} ({})", self.path.display(), self.reason)
+    }
+}
+
+impl Skipped {
+    pub(crate) fn new(path: &Path, reason: impl std::fmt::Display) -> Self {
+        Self {
+            path: path.to_owned(),
+            reason: reason.to_string(),
+        }
+    }
 }
 
 /// Whether the OS is in light or dark mode right now.

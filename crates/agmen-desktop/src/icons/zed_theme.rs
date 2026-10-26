@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::appearance::{AppearanceError, read_jsonc};
+use crate::appearance::{AppearanceError, Skipped, read_jsonc};
 
 #[derive(Debug, Clone, Default, Deserialize)]
 struct FolderIcons {
@@ -69,9 +69,14 @@ impl IconTheme {
         roots.sort();
         for root in roots {
             let themes_dir = root.join("icon_themes");
-            let Ok(dir) = fs::read_dir(&themes_dir) else {
+            let dir = match fs::read_dir(&themes_dir) {
+                Ok(dir) => dir,
                 // Most extensions ship no icon themes; that is not an error.
-                continue;
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(err) => {
+                    unreadable.push(Skipped::new(&themes_dir, err));
+                    continue;
+                }
             };
             let mut files = entries(dir, &themes_dir, &mut unreadable);
             files.sort();
@@ -79,9 +84,12 @@ impl IconTheme {
                 .iter()
                 .filter(|p| p.extension().is_some_and(|e| e == "json"))
             {
-                let Ok(family) = read_jsonc::<Family>(file) else {
-                    unreadable.push(file.clone());
-                    continue;
+                let family = match read_jsonc::<Family>(file) {
+                    Ok(family) => family,
+                    Err(err) => {
+                        unreadable.push(Skipped::new(file, err));
+                        continue;
+                    }
                 };
                 if let Some(theme) = family.themes.into_iter().find(|t| t.name == name) {
                     let root = root.canonicalize().map_err(|source| AppearanceError::Io {
@@ -163,12 +171,12 @@ impl IconTheme {
 }
 
 /// The paths in `dir`, recording entries that cannot be read under `at`.
-fn entries(dir: fs::ReadDir, at: &Path, unreadable: &mut Vec<PathBuf>) -> Vec<PathBuf> {
+fn entries(dir: fs::ReadDir, at: &Path, unreadable: &mut Vec<Skipped>) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for entry in dir {
         match entry {
             Ok(entry) => out.push(entry.path()),
-            Err(_) => unreadable.push(at.to_owned()),
+            Err(err) => unreadable.push(Skipped::new(at, err)),
         }
     }
     out

@@ -3,12 +3,13 @@
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, IntoElement, ParentElement as _, RenderOnce, SharedString, Styled as _, Window, div,
+    App, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce, SharedString,
+    Styled as _, Window, div,
 };
 
 use super::components::{Badge, Button, ButtonStyle, Color, IconButton, KeyHint, Label, LabelSize};
 use super::format::{counted, listener_label, spend_today};
-use super::tokens::{SPACE_5, SPACE_10, SPACE_14, STATUS_BAR_HEIGHT};
+use super::tokens::{BORDER_WIDTH, SPACE_5, SPACE_10, SPACE_14, STATUS_BAR_HEIGHT};
 use super::workspace::ToggleRightDock;
 use crate::backend::{Snapshot, StatusSummary};
 use crate::icons::UiIcon;
@@ -56,10 +57,13 @@ fn buttons(icons: &[(&'static str, UiIcon)]) -> impl IntoElement {
 }
 
 impl RenderOnce for StatusBar {
-    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let s = &self.status;
         div()
+            .debug_selector(|| "status-bar".into())
             .h(STATUS_BAR_HEIGHT)
+            .border_t(BORDER_WIDTH)
+            .border_color(super::rule_color(cx))
             .w_full()
             .flex()
             .flex_none()
@@ -73,9 +77,11 @@ impl RenderOnce for StatusBar {
             ]))
             .when(s.needs_you > 0, |this| {
                 this.child(
-                    Badge::new(counted(s.needs_you, "needs you", "need you"), Color::Error)
-                        .solid()
-                        .leading("!"),
+                    div().debug_selector(|| "needs-you-pill".into()).child(
+                        Badge::new(counted(s.needs_you, "needs you", "need you"), Color::Error)
+                            .solid()
+                            .leading("!"),
+                    ),
                 )
             })
             .child(item(

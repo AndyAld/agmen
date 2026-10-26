@@ -7,7 +7,7 @@ use gpui::{
 
 use super::components::{Avatar, Chip, Color, Label};
 use super::format::listener_label;
-use super::tokens::{SPACE_10, SPACE_12, TITLE_BAR_HEIGHT, TRAFFIC_LIGHTS_INSET};
+use super::tokens::{BORDER_WIDTH, SPACE_10, SPACE_12, TITLE_BAR_HEIGHT, TRAFFIC_LIGHTS_INSET};
 use crate::backend::Snapshot;
 
 #[derive(Debug, IntoElement)]
@@ -29,9 +29,13 @@ impl TitleBar {
 }
 
 impl RenderOnce for TitleBar {
-    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         div()
+            .debug_selector(|| "title-bar".into())
             .h(TITLE_BAR_HEIGHT)
+            // The rule is inside the bar, as the mockup draws it (V61).
+            .border_b(BORDER_WIDTH)
+            .border_color(super::rule_color(cx))
             .w_full()
             .flex()
             .flex_none()

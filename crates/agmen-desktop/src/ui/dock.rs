@@ -1,12 +1,12 @@
 //! A collapsible side dock, and the strips at the top of each dock.
 
 use gpui::{
-    App, FontWeight, IntoElement, ParentElement as _, Pixels, RenderOnce, SharedString,
-    Styled as _, Window, div,
+    App, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, RenderOnce,
+    SharedString, Styled as _, Window, div,
 };
 
-use super::components::{Color, Divider, IconButton, IconButtonStyle, IconSize, Label, Tab};
-use super::tokens::{SPACE_8, SPACE_10, SPACE_14, TAB_BAR_HEIGHT};
+use super::components::{Color, IconButton, IconButtonStyle, IconSize, Label, Tab};
+use super::tokens::{BORDER_WIDTH, SPACE_8, SPACE_10, SPACE_14, TAB_BAR_HEIGHT};
 use super::workspace::{ToggleLeftDock, ToggleRightDock};
 use crate::icons::UiIcon;
 
@@ -46,16 +46,19 @@ impl Dock {
     }
 }
 
-/// The left dock's tab strip and its hide button, with the rule under it.
+/// The left dock's tab strip and its hide button, with its rule inside.
 #[derive(Debug, IntoElement)]
 pub(crate) struct LeftDockTabs;
 
 impl RenderOnce for LeftDockTabs {
-    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         // The mockup's gaps overflow the 272 px dock; 8 px gaps fit all four
         // tabs and the hide button.
-        let strip = div()
+        div()
+            .debug_selector(|| "dock-tabs".into())
             .h(TAB_BAR_HEIGHT)
+            .border_b(BORDER_WIDTH)
+            .border_color(super::rule_color(cx))
             .w_full()
             .flex()
             .flex_none()
@@ -70,23 +73,17 @@ impl RenderOnce for LeftDockTabs {
             .child(div().flex_1())
             .child(
                 IconButton::new("hide-left-dock", UiIcon::ChevronLeft)
-                    .size(IconSize::Small)
+                    .size(IconSize::Glyph)
                     .color(Color::Muted)
                     .on_click(|_, window, cx| {
                         window.dispatch_action(Box::new(ToggleLeftDock), cx);
                     }),
-            );
-        div()
-            .w_full()
-            .flex()
-            .flex_col()
-            .child(strip)
-            .child(Divider::horizontal())
+            )
     }
 }
 
-/// A right dock panel's title, subtitle and close button, with the rule
-/// under it.
+/// A right dock panel's title, subtitle and close button, with its rule
+/// inside.
 #[derive(Debug, IntoElement)]
 pub(crate) struct RightDockHeader {
     title: SharedString,
@@ -104,9 +101,12 @@ impl RightDockHeader {
 }
 
 impl RenderOnce for RightDockHeader {
-    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        let head = div()
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        div()
+            .debug_selector(|| "right-dock-head".into())
             .h(TAB_BAR_HEIGHT)
+            .border_b(BORDER_WIDTH)
+            .border_color(super::rule_color(cx))
             .w_full()
             .flex()
             .flex_none()
@@ -118,17 +118,11 @@ impl RenderOnce for RightDockHeader {
             .child(div().flex_1())
             .child(
                 IconButton::new("close-right-dock", UiIcon::ChevronRight)
-                    .size(IconSize::Small)
+                    .size(IconSize::Glyph)
                     .style(IconButtonStyle::Filled)
                     .on_click(|_, window, cx| {
                         window.dispatch_action(Box::new(ToggleRightDock), cx);
                     }),
-            );
-        div()
-            .w_full()
-            .flex()
-            .flex_col()
-            .child(head)
-            .child(Divider::horizontal())
+            )
     }
 }

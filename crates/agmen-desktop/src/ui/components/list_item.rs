@@ -9,7 +9,7 @@ use gpui::{
 use super::ClickHandler;
 use crate::appearance::Appearance;
 use crate::ui::tokens::{
-    AGENT_ROW_HEIGHT, SPACE_6, SPACE_7, SPACE_10, TREE_INDENT_BASE, TREE_INDENT_STEP,
+    AGENT_ROW_HEIGHT, LEADING_SLOT, SPACE_6, SPACE_7, SPACE_10, TREE_INDENT_BASE, TREE_INDENT_STEP,
 };
 
 /// Where a row's content starts.
@@ -146,6 +146,8 @@ impl RenderOnce for ListItem {
                     div()
                         .flex()
                         .flex_none()
+                        .w(LEADING_SLOT)
+                        .justify_center()
                         .debug_selector(|| leading_selector)
                         .child(leading),
                 )

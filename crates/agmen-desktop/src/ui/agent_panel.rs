@@ -9,7 +9,7 @@ use super::components::{Color, KvRow, KvSection, ProgressBar};
 use super::dock::RightDockHeader;
 use super::format::{agent_tokens, money_of, wall_clock};
 use super::tokens::{SPACE_7, SPACE_14, SPACE_16};
-use crate::backend::AgentInfo;
+use crate::backend::{AgentInfo, AgentStatus};
 
 #[derive(Debug, IntoElement)]
 pub(crate) struct AgentPanel {
@@ -23,24 +23,15 @@ impl AgentPanel {
     }
 }
 
-/// The role key in a label such as "Engineer (built-in)".
-fn role_key(role_label: &str) -> String {
-    role_label
-        .split_whitespace()
-        .next()
-        .unwrap_or_default()
-        .to_lowercase()
-}
-
 impl RenderOnce for AgentPanel {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
         let i = self.info;
-        let state_color = if i.state == "working" {
+        let state_color = if i.status == AgentStatus::Working {
             Color::Success
         } else {
             Color::Accent
         };
-        let role = Color::Role(role_key(&i.role_label).into());
+        let role = Color::Role(i.role.clone().into());
         let mut runs = KvSection::new("Runs")
             .row(KvRow::new("Role", i.role_label).color(role))
             .row(KvRow::new("Harness", i.harness_label))
@@ -105,12 +96,6 @@ mod tests {
     use crate::backend::chat_snapshot;
     use crate::ui::test_support::rendered_size;
     use gpui::{TestAppContext, px};
-
-    #[test]
-    fn role_key_from_label() {
-        assert_eq!(role_key("Engineer (built-in)"), "engineer");
-        assert_eq!(role_key(""), "");
-    }
 
     #[gpui::test]
     fn agent_panel_renders(cx: &mut TestAppContext) {

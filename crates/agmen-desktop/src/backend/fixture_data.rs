@@ -8,12 +8,13 @@
 
 use std::collections::BTreeMap;
 
-use agmen_proto::{IdentityId, StampedEnvelope};
+use agmen_proto::{GitSha, IdentityId, StampedEnvelope};
 use serde_json::{Value, json};
 
 use super::{
-    AgentInfo, AgentRow, AgentStatus, Approval, ChangeCard, ChangeId, ChangeRow, ChangeState,
-    LaneInfo, ListenerInfo, PersonGroup, PlanInfo, RecentAction, SpecState, TeamRow,
+    AgentInfo, AgentRow, AgentStatus, Approval, BackendError, ChangeCard, ChangeId, ChangeRow,
+    ChangeState, LaneInfo, ListenerInfo, PersonGroup, PlanInfo, RecentAction, RecentKind,
+    SpecState, TeamRow,
 };
 
 fn words(list: &str) -> Vec<String> {
@@ -27,57 +28,58 @@ fn agent(
     role: &str,
     harness: &str,
     status: AgentStatus,
-) -> AgentRow {
+) -> Result<AgentRow, BackendError> {
     let handle = format!("{person}/{name}");
-    AgentRow {
-        id: id(&handle),
+    Ok(AgentRow {
+        id: id(&handle)?,
         handle,
         name: name.to_owned(),
         role: role.to_owned(),
         harness: harness.to_owned(),
         status,
         depth,
-    }
+    })
 }
 
-pub(super) fn roster() -> Vec<PersonGroup> {
+pub(super) fn roster() -> Result<Vec<PersonGroup>, BackendError> {
     use AgentStatus::{Idle, Reading, Working};
-    vec![
+    Ok(vec![
         PersonGroup {
             person: "andy".into(),
             you: true,
             agents: vec![
-                agent("andy", 0, "listen", "listener", "codex", Idle),
-                agent("andy", 1, "fx1", "engineer", "claude", Working),
-                agent("andy", 1, "t7k", "tester", "opencode", Working),
+                agent("andy", 0, "listen", "listener", "codex", Idle)?,
+                agent("andy", 1, "fx1", "engineer", "claude", Working)?,
+                agent("andy", 1, "t7k", "tester", "opencode", Working)?,
                 // Mockup fix 28: rv2 runs on a harness installed on this machine.
-                agent("andy", 2, "rv2", "reviewer", "opencode", Reading),
-                agent("andy", 0, "a1", "engineer", "claude", Idle),
+                agent("andy", 2, "rv2", "reviewer", "opencode", Reading)?,
+                agent("andy", 0, "a1", "engineer", "claude", Idle)?,
             ],
         },
         PersonGroup {
             person: "sean".into(),
             you: false,
             agents: vec![
-                agent("sean", 0, "a1", "engineer", "codex", Working),
-                agent("sean", 0, "plan", "planner", "gemini", Idle),
+                agent("sean", 0, "a1", "engineer", "codex", Working)?,
+                agent("sean", 0, "plan", "planner", "gemini", Idle)?,
             ],
         },
         PersonGroup {
             person: "adam".into(),
             you: false,
             agents: vec![
-                agent("adam", 0, "coord", "coordinator", "claude", Working),
-                agent("adam", 0, "res", "researcher", "agy", Working),
+                agent("adam", 0, "coord", "coordinator", "claude", Working)?,
+                agent("adam", 0, "res", "researcher", "agy", Working)?,
             ],
         },
-    ]
+    ])
 }
 
 pub(super) fn listener() -> ListenerInfo {
-    let recent = |time: &str, text: &str| RecentAction {
+    let recent = |time: &str, text: &str, kind| RecentAction {
         time: time.into(),
         text: text.into(),
+        kind,
     };
     ListenerInfo {
         handle: "andy/listen".into(),
@@ -100,16 +102,30 @@ pub(super) fn listener() -> ListenerInfo {
         tokens_out: 8_000,
         uptime_minutes: 400,
         recent: vec![
-            recent("15:31", "delegated andy/fx1 · Engineer · claude"),
-            recent("14:06", "delegated andy/t7k · Tester · opencode"),
-            recent("13:52", "answered: is C012 merged? (git_log)"),
+            recent(
+                "15:31",
+                "delegated andy/fx1 · Engineer · claude",
+                RecentKind::Delegated,
+            ),
+            recent(
+                "14:06",
+                "delegated andy/t7k · Tester · opencode",
+                RecentKind::Delegated,
+            ),
+            recent(
+                "13:52",
+                "answered: is C012 merged? (git_log)",
+                RecentKind::Answered,
+            ),
         ],
     }
 }
 
-pub(super) fn fx1() -> AgentInfo {
-    AgentInfo {
-        id: id("andy/fx1"),
+pub(super) fn fx1() -> Result<AgentInfo, BackendError> {
+    Ok(AgentInfo {
+        id: id("andy/fx1")?,
+        role: "engineer".into(),
+        status: AgentStatus::Working,
         handle: "andy/fx1".into(),
         role_label: "Engineer (built-in)".into(),
         harness_label: "Claude Code 2.1.310 · CLI adapter".into(),
@@ -132,20 +148,27 @@ pub(super) fn fx1() -> AgentInfo {
         tokens_in: 418_000,
         tokens_out: 36_000,
         cache_read: 1_900_000,
-    }
+    })
 }
 
 /// A stable identity id for a mockup handle: the handle without `/`,
 /// padded to the protocol's 8 characters.
-#[expect(
-    clippy::expect_used,
-    reason = "fixture handles are lowercase ASCII; fixture_handles_make_ids checks every one"
-)]
-pub(super) fn id(handle: &str) -> IdentityId {
-    let flat: String = handle.chars().filter(char::is_ascii_alphanumeric).collect();
+///
+/// # Errors
+///
+/// When the handle does not make a valid id (it must be lowercase ASCII).
+pub(super) fn id(handle: &str) -> Result<IdentityId, BackendError> {
+    let flat: String = handle.chars().filter(|c| *c != '/').collect();
     format!("{flat:0<8}")
         .parse()
-        .expect("a fixture handle makes a valid identity id")
+        .map_err(|_| BackendError::BadFixture(handle.to_owned()))
+}
+
+/// The id as wire text, for JSON; an invalid handle makes JSON the protocol
+/// refuses, which `stamp` reports.
+fn id_text(handle: &str) -> String {
+    let flat: String = handle.chars().filter(|c| *c != '/').collect();
+    format!("{flat:0<8}")
 }
 
 fn kind(handle: &str) -> &'static str {
@@ -222,14 +245,20 @@ fn utc(time: &str) -> String {
 }
 
 /// Stamps `msgs` as the hub would, numbering from `first_seq`.
-pub(super) fn stamp(msgs: Vec<Msg>, first_seq: usize) -> Vec<StampedEnvelope> {
+///
+/// # Errors
+///
+/// When a message is not one the protocol accepts.
+pub(super) fn stamp(
+    msgs: Vec<Msg>,
+    first_seq: usize,
+) -> Result<Vec<StampedEnvelope>, BackendError> {
     msgs.into_iter()
         .enumerate()
-        .filter_map(|(i, m)| {
+        .map(|(i, m)| {
             let seq = first_seq + i;
-            let ids = |handles: &[&str]| -> Vec<String> {
-                handles.iter().map(|h| id(h).to_string()).collect()
-            };
+            let ids =
+                |handles: &[&str]| -> Vec<String> { handles.iter().map(|h| id_text(h)).collect() };
             let value = json!({
                 "v": 1,
                 "id": message_id(seq),
@@ -242,15 +271,14 @@ pub(super) fn stamp(msgs: Vec<Msg>, first_seq: usize) -> Vec<StampedEnvelope> {
                 "data": m.data,
                 "stream": "feed",
                 "seq": seq,
-                "from": id(m.handle).to_string(),
+                "from": id_text(m.handle),
                 "from_handle": m.handle,
                 "from_kind": kind(m.handle),
                 "mentioned": ids(&m.mentioned),
                 "hub_at": utc(m.time),
             });
-            let stamped = serde_json::from_value(value);
-            debug_assert!(stamped.is_ok(), "fixture message {seq}: {stamped:?}");
-            stamped.ok()
+            serde_json::from_value(value)
+                .map_err(|err| BackendError::BadFixture(format!("message {seq}: {err}")))
         })
         .collect()
 }
@@ -281,7 +309,7 @@ pub(super) fn chat_messages() -> Vec<Msg> {
             .reply_to(2).mentions(&["andy"]),
         msg("15:31", "andy/listen", "DELEGATED",
             "andy/fx1 · Engineer · claude · sonnet · $5.00 · fix/c015-main-conflict")
-            .data(json!({"worker": id("andy/fx1").to_string(), "agent": "claude", "role": "engineer",
+            .data(json!({"worker": id_text("andy/fx1"), "agent": "claude", "role": "engineer",
                          "model": "sonnet", "tier": "standard", "budget_usd": 5.0, "item": "C-015"}))
             .reply_to(2).items(&["C-015"]),
         msg("15:33", "hub", "GRANT", "C015 to andy/fx1, lease 30 min")
@@ -326,13 +354,17 @@ pub(super) fn alert_answer(alert: usize) -> Msg {
 /// `SETTINGS_CHAT`: the listener changes settings from chat. Returns the
 /// messages and the index of the listener's settings message, which carries
 /// the change card.
-pub(super) fn settings_messages(first: usize) -> (Vec<Msg>, usize) {
+pub(super) fn settings_messages(first: usize, applied: bool) -> (Vec<Msg>, usize) {
+    let listener_says = if applied {
+        "Done. andy/fx1 can edit L-INFRA deploy/** until 18:00, and its budget is $8.00."
+    } else {
+        "Both changes widen what andy/fx1 may do, so they wait for your Apply."
+    };
     let msgs = vec![
         msg("15:50", "andy", "FYI",
             "Give andy/fx1 edit access to L-INFRA until 18:00 and raise its budget to $8.")
             .to("andy/listen").mentions(&["andy/listen"]),
-        msg("15:50", "andy/listen", "ANSWER",
-            "Both changes widen what andy/fx1 may do, so they wait for your Apply.")
+        msg("15:50", "andy/listen", "ANSWER", listener_says)
             .reply_to(first).mentions(&["andy"]),
         msg("15:51", "sean", "FYI", "@andy/listen turn off push approval for andy's agents")
             .mentions(&["andy/listen"]),
@@ -413,7 +445,7 @@ pub(super) fn plan_messages(ready: bool, running: bool) -> Vec<Msg> {
                 .data(json!({"key": "plan.ridgeline", "v": 3, "as_of_seq": first})),
             msg("15:55", "andy/coord", "ASSIGN",
                 "R-1 to @andy/core, R-2 to @andy/app, R-3 to @sean/sync, R-4 to @sean/qa")
-                .data(json!({"item": "R-1", "to": id("andy/core").to_string()}))
+                .data(json!({"item": "R-1", "to": id_text("andy/core")}))
                 .items(&["R-1", "R-2", "R-3", "R-4"])
                 .mentions(&["andy/core", "andy/app", "sean/sync", "sean/qa"]),
             msg("15:56", "andy/core", "DM",
@@ -429,7 +461,11 @@ pub(super) fn plan_messages(ready: bool, running: bool) -> Vec<Msg> {
 }
 
 /// `TEAM` and the plan panel (desktop-plan, -plan-ready, -running).
-pub(super) fn plan(ready: bool, running: bool) -> PlanInfo {
+pub(super) fn plan(ready: bool, running: bool) -> Result<PlanInfo, BackendError> {
+    let sha = |s: &str| -> Result<GitSha, BackendError> {
+        s.parse()
+            .map_err(|_| BackendError::BadFixture(format!("sha {s}")))
+    };
     let team =
         |role: &str, label: &str, handle: &str, harness: &str, lane: &str, owner: &str, usd| {
             TeamRow {
@@ -454,7 +490,7 @@ pub(super) fn plan(ready: bool, running: bool) -> PlanInfo {
         name: name.into(),
         paths: vec![path.into()],
     };
-    PlanInfo {
+    Ok(PlanInfo {
         name: "ridgeline".into(),
         version: 3,
         goal: "Offline trail maps for iOS and Android on a shared Rust core. First milestone: a downloaded region renders with no network.".into(),
@@ -468,14 +504,15 @@ pub(super) fn plan(ready: bool, running: bool) -> PlanInfo {
             team("researcher", "Tile Researcher", "tiles", "agy", "none", "sean", 10),
         ],
         specs: vec![
-            SpecState { path: "docs/specs/ridgeline-design.md".into(), draft_note: None, approvals: both(sean) },
+            SpecState { path: "docs/specs/ridgeline-design.md".into(), sha: sha("3f1c0d2")?, draft_note: None, approvals: both(sean) },
             SpecState {
                 path: "docs/specs/tile-sources.md".into(),
+                sha: sha("3f1c0d2")?,
                 draft_note: Some("draft, researcher fills in".into()),
                 approvals: BTreeMap::new(),
             },
-            SpecState { path: "docs/plans/m0.md".into(), draft_note: None, approvals: both(Approval::Approved) },
-            SpecState { path: ".agmen/roles/tile-researcher.xml".into(), draft_note: None, approvals: both(Approval::Approved) },
+            SpecState { path: "docs/plans/m0.md".into(), sha: sha("3f1c0d2")?, draft_note: None, approvals: both(Approval::Approved) },
+            SpecState { path: ".agmen/roles/tile-researcher.xml".into(), sha: sha("3f1c0d2")?, draft_note: None, approvals: both(Approval::Approved) },
         ],
         lanes: vec![
             lane("L-CORE", "core/**"),
@@ -487,32 +524,34 @@ pub(super) fn plan(ready: bool, running: bool) -> PlanInfo {
         branch_merged: ready || running,
         shares_approved: BTreeMap::from([("andy".into(), true), ("sean".into(), ready || running)]),
         running,
-    }
+    })
 }
 
 /// The planning room roster (desktop-plan's left dock).
-pub(super) fn plan_roster() -> Vec<PersonGroup> {
+pub(super) fn plan_roster() -> Result<Vec<PersonGroup>, BackendError> {
     use AgentStatus::{Idle, Working};
-    let row = |handle: &str, role: &str, harness: &str, status| AgentRow {
-        id: id(handle),
-        handle: handle.into(),
-        name: handle.rsplit('/').next().unwrap_or(handle).into(),
-        role: role.into(),
-        harness: harness.into(),
-        status,
-        depth: 0,
+    let row = |handle: &str, role: &str, harness: &str, status| -> Result<AgentRow, BackendError> {
+        Ok(AgentRow {
+            id: id(handle)?,
+            handle: handle.into(),
+            name: handle.rsplit('/').next().unwrap_or(handle).into(),
+            role: role.into(),
+            harness: harness.into(),
+            status,
+            depth: 0,
+        })
     };
-    vec![
+    Ok(vec![
         // Mockup fix 52: sean/plan keeps its pr-3331 harness, gemini.
         PersonGroup {
             person: "andy".into(),
             you: true,
-            agents: vec![row("andy/listen", "listener", "codex", Idle)],
+            agents: vec![row("andy/listen", "listener", "codex", Idle)?],
         },
         PersonGroup {
             person: "sean".into(),
             you: false,
-            agents: vec![row("sean/plan", "planner", "gemini", Working)],
+            agents: vec![row("sean/plan", "planner", "gemini", Working)?],
         },
-    ]
+    ])
 }

@@ -7,12 +7,12 @@ use gpui::{
 
 use super::agent_panel::AgentPanel;
 use super::agents_panel::{AgentsPanel, AgentsPanelEvent};
-use super::components::{Color, Divider, Label};
+use super::components::{Color, Label};
 use super::dock::{Dock, DockSide, LeftDockTabs};
 use super::listener_panel::ListenerPanel;
 use super::status_bar::StatusBar;
 use super::title_bar::TitleBar;
-use super::tokens::{LEFT_DOCK_WIDTH, RIGHT_DOCK_WIDTH};
+use super::tokens::{BORDER_WIDTH, LEFT_DOCK_WIDTH, RIGHT_DOCK_WIDTH};
 use crate::appearance::Appearance;
 use agmen_proto::IdentityId;
 
@@ -119,10 +119,13 @@ impl Render for Workspace {
         if self.is_dock_open(DockSide::Left) {
             body = body.child(
                 div()
+                    .debug_selector(|| "left-dock".into())
                     .w(self.left_dock.width())
                     .flex_none()
                     .h_full()
                     .flex()
+                    .border_r(BORDER_WIDTH)
+                    .border_color(theme.border_variant)
                     .child(
                         div()
                             .flex_1()
@@ -132,8 +135,7 @@ impl Render for Workspace {
                             .flex_col()
                             .child(LeftDockTabs)
                             .child(self.agents_panel.clone()),
-                    )
-                    .child(Divider::vertical()),
+                    ),
             );
         }
         body = body.child(
@@ -156,7 +158,8 @@ impl Render for Workspace {
                     .flex_none()
                     .h_full()
                     .flex()
-                    .child(Divider::vertical())
+                    .border_l(BORDER_WIDTH)
+                    .border_color(theme.border_variant)
                     .child(
                         div()
                             .flex_1()
@@ -184,9 +187,7 @@ impl Render for Workspace {
             .text_color(theme.text)
             .font_family(fonts.ui_family.clone())
             .child(TitleBar::new(&self.snapshot))
-            .child(Divider::horizontal())
             .child(body)
-            .child(Divider::horizontal())
             .child(StatusBar::new(
                 &self.snapshot,
                 self.is_dock_open(DockSide::Right),

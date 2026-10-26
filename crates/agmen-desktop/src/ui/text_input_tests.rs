@@ -184,3 +184,52 @@ fn up_and_down_move_between_lines(cx: &mut TestAppContext) {
     cx.simulate_input("Y");
     input.read_with(cx, |input, _| assert_eq!(input.text(), "abcX\ndefY"));
 }
+
+#[gpui::test]
+fn at_the_cap_a_too_long_insert_keeps_the_selection(cx: &mut TestAppContext) {
+    let (input, cx) = setup(cx);
+    let full = "a".repeat(MAX_TEXT_BYTES);
+    input.update_in(cx, |input, window, cx| {
+        input.set_text(&full, window, cx);
+        // Select nothing and paste: no room, so nothing changes.
+        input.insert("bb", window, cx);
+        assert_eq!(input.text().len(), MAX_TEXT_BYTES);
+        // Select 1 byte and paste 2: still no room, and the selection stays.
+        input.buffer.set_selection(0..1, false);
+        input.insert("bb", window, cx);
+        assert_eq!(input.text(), full, "the selected byte was not deleted");
+    });
+}
+
+#[gpui::test]
+fn ime_room_comes_from_the_replaced_range(cx: &mut TestAppContext) {
+    let (input, cx) = setup(cx);
+    let full = "a".repeat(MAX_TEXT_BYTES);
+    input.update_in(cx, |input, window, cx| {
+        input.set_text(&full, window, cx);
+        // The IME replaces 3 bytes with 3: that fits at the cap.
+        input.replace_text_in_range(Some(0..3), "xyz", window, cx);
+        assert!(input.text().starts_with("xyz"));
+        assert_eq!(input.text().len(), MAX_TEXT_BYTES);
+        // Marked text goes through the cap too.
+        input.replace_and_mark_text_in_range(None, "toolong", None, window, cx);
+        assert_eq!(input.text().len(), MAX_TEXT_BYTES);
+    });
+}
+
+#[gpui::test]
+fn layout_is_shaped_once_per_change(cx: &mut TestAppContext) {
+    let (input, cx) = setup_with(cx, |i| i.multiline(6));
+    input.update_in(cx, |input, window, cx| {
+        input.set_text("hello world", window, cx)
+    });
+    cx.run_until_parked();
+    let after_change = input.read_with(cx, |input, _| input.shapes);
+    assert!(after_change >= 1);
+    // Frames with no change reuse the layout.
+    for _ in 0..3 {
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+    }
+    input.read_with(cx, |input, _| assert_eq!(input.shapes, after_change));
+}

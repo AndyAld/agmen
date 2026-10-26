@@ -64,3 +64,19 @@ fn selecting_a_row_emits_its_handle(cx: &mut TestAppContext) {
         vec![AgentsPanelEvent::Selected("seanplan".parse().unwrap())]
     );
 }
+
+#[gpui::test]
+fn status_glyphs_sit_in_a_fixed_slot(cx: &mut TestAppContext) {
+    // Mockup check V62: handles line up at the mockup's x whatever the glyph.
+    init(cx);
+    let (_, cx) = cx.add_window_view(|_, _| AgentsPanel::new(chat_snapshot().roster));
+    redraw(cx);
+    for row in [
+        "agent:andy/fx1:leading",
+        "agent:andy/rv2:leading",
+        "agent:sean/plan:leading",
+    ] {
+        let lead = cx.debug_bounds(row).unwrap();
+        assert_eq!(lead.size.width, crate::ui::tokens::LEADING_SLOT, "{row}");
+    }
+}

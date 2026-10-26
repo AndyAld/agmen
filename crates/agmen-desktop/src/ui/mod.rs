@@ -15,5 +15,15 @@ mod title_bar;
 mod tokens;
 mod workspace;
 
+pub(crate) use dock::DockSide;
 pub(crate) use text_input::{TextInput, bind_keys};
 pub(crate) use workspace::{Quit, ToggleLeftDock, ToggleRightDock, Workspace};
+
+use gpui::App;
+
+/// The color of the rules between chrome regions (mockup BORDER2).
+fn rule_color(cx: &App) -> gpui::Hsla {
+    cx.global::<crate::appearance::Appearance>()
+        .theme
+        .border_variant
+}

@@ -27,7 +27,6 @@ use gpui::{
 };
 
 use appearance::{Appearance, SystemMode};
-use backend::Backend as _;
 
 use ui::{Quit, ToggleLeftDock, ToggleRightDock, Workspace};
 
@@ -205,9 +204,20 @@ fn open_main_window(launch: &Launch, cx: &mut App) -> Result<()> {
                 _ => backend::Screen::Chat,
             };
             // shortcut: the fixture stands in for agmend until its local API exists (ADR-0011).
-            let snapshot = backend::FixtureBackend::for_screen(screen).snapshot();
+            let backend: Rc<dyn backend::Backend> = Rc::new(
+                backend::FixtureBackend::for_screen(screen).context("building the fixture data")?,
+            );
+            let snapshot = backend.snapshot();
+            cx.set_global(backend::BackendHandle(backend));
             cx.open_window(options, |window, cx| {
-                let workspace = cx.new(|cx| Workspace::new(snapshot, window, cx));
+                let workspace = cx.new(|cx| {
+                    let mut workspace = Workspace::new(snapshot, window, cx);
+                    // The one render whose layout state is not in the data.
+                    if screen == backend::Screen::ListenerCollapsed {
+                        workspace.toggle_dock(ui::DockSide::Right, cx);
+                    }
+                    workspace
+                });
                 window.focus(&workspace.focus_handle(cx), cx);
                 workspace
             })

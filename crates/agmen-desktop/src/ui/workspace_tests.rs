@@ -1,6 +1,7 @@
 use super::*;
 use crate::backend::chat_snapshot;
 use crate::ui::test_support::{click, init, redraw};
+use crate::ui::tokens::{STATUS_BAR_HEIGHT, TAB_BAR_HEIGHT, TITLE_BAR_HEIGHT};
 use gpui::TestAppContext;
 
 fn open(cx: &mut TestAppContext) -> (Entity<Workspace>, &mut gpui::VisualTestContext) {
@@ -117,16 +118,40 @@ fn hide_button_closes_left_dock(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn needs_you_pill_only_above_zero(cx: &mut TestAppContext) {
-    use crate::ui::test_support::rendered_size;
-    use gpui::IntoElement as _;
-    let quiet = rendered_size(cx, || {
-        StatusBar::new(&chat_snapshot(), true).into_any_element()
-    });
-    let mut cx2 = TestAppContext::single();
-    let loud = rendered_size(&mut cx2, || {
+    init(cx);
+    let (_, cx) = cx.add_window_view(|window, cx| {
         let mut snapshot = chat_snapshot();
         snapshot.status.needs_you = 1;
-        StatusBar::new(&snapshot, true).into_any_element()
+        Workspace::new(snapshot, window, cx)
     });
-    assert!(loud.width > quiet.width);
+    redraw(cx);
+    assert!(cx.debug_bounds("needs-you-pill").is_some());
+
+    let mut quiet = TestAppContext::single();
+    let (_, quiet) = open(&mut quiet);
+    assert!(quiet.debug_bounds("needs-you-pill").is_none());
+}
+
+#[gpui::test]
+fn bars_include_their_rules(cx: &mut TestAppContext) {
+    // Mockup check V61: each rule is drawn inside its bar, so the bars keep
+    // the mockup's sizes.
+    let (_workspace, cx) = open(cx);
+    let height = |cx: &mut gpui::VisualTestContext, sel: &'static str| {
+        cx.debug_bounds(sel)
+            .unwrap_or_else(|| panic!("no {sel}"))
+            .size
+            .height
+    };
+    assert_eq!(height(cx, "title-bar"), TITLE_BAR_HEIGHT);
+    assert_eq!(height(cx, "status-bar"), STATUS_BAR_HEIGHT);
+    assert_eq!(height(cx, "dock-tabs"), TAB_BAR_HEIGHT);
+    assert_eq!(height(cx, "right-dock-head"), TAB_BAR_HEIGHT);
+    let left = cx.debug_bounds("left-dock").unwrap();
+    assert_eq!(left.size.width, LEFT_DOCK_WIDTH);
+    let tabs = cx.debug_bounds("dock-tabs").unwrap();
+    assert_eq!(
+        tabs.origin.y, TITLE_BAR_HEIGHT,
+        "the body starts right under the title bar"
+    );
 }

@@ -5,13 +5,15 @@ use gpui::{App, IntoElement, RenderOnce, Window};
 use super::Color;
 use crate::appearance::Appearance;
 use crate::icons::UiIcon;
-use crate::ui::tokens::{ICON_MD, ICON_SM};
+use crate::ui::tokens::{ICON_GLYPH, ICON_MD, ICON_SM};
 
 /// Icon sizes from the mockup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum IconSize {
     /// 12 px: tree chevrons.
     Small,
+    /// 13 px: the dock collapse glyphs.
+    Glyph,
     /// 14 px: tabs and bar buttons.
     #[default]
     Medium,
@@ -52,6 +54,7 @@ impl RenderOnce for Icon {
         let color = self.color.hsla(&cx.global::<Appearance>().theme);
         let size = match self.size {
             IconSize::Small => ICON_SM,
+            IconSize::Glyph => ICON_GLYPH,
             IconSize::Medium => ICON_MD,
         };
         self.icon.render(color, size)

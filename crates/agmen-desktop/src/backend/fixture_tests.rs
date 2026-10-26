@@ -7,7 +7,7 @@ use super::*;
 use crate::backend::{Action, Backend, ChangeState, Draft, Screen, Update};
 
 fn chat() -> Snapshot {
-    FixtureBackend::for_screen(Screen::Chat).snapshot()
+    FixtureBackend::for_screen(Screen::Chat).unwrap().snapshot()
 }
 
 fn handles(s: &Snapshot) -> Vec<&str> {
@@ -72,7 +72,11 @@ fn fixture_chat_matches_mockup() {
 #[test]
 fn fixture_messages_survive_the_wire_format() {
     for screen in Screen::ALL {
-        for m in FixtureBackend::for_screen(screen).snapshot().messages {
+        for m in FixtureBackend::for_screen(screen)
+            .unwrap()
+            .snapshot()
+            .messages
+        {
             let json = serde_json::to_string(&m).unwrap();
             let back: agmen_proto::StampedEnvelope = serde_json::from_str(&json).unwrap();
             assert_eq!(back, m, "{screen:?}");
@@ -113,15 +117,21 @@ fn status_counts_follow_one_rule() {
         (total - chat.status.spend_today_usd).abs() < 0.005,
         "{total}"
     );
-    let needs = FixtureBackend::for_screen(Screen::NeedsYou).snapshot();
+    let needs = FixtureBackend::for_screen(Screen::NeedsYou)
+        .unwrap()
+        .snapshot();
     assert_eq!((needs.status.alerts, needs.status.needs_you), (2, 1));
-    let answered = FixtureBackend::for_screen(Screen::NeedsYouAnswered).snapshot();
+    let answered = FixtureBackend::for_screen(Screen::NeedsYouAnswered)
+        .unwrap()
+        .snapshot();
     assert_eq!((answered.status.alerts, answered.status.needs_you), (1, 0));
 }
 
 #[test]
 fn needs_you_has_an_urgent_alert_for_me() {
-    let s = FixtureBackend::for_screen(Screen::NeedsYou).snapshot();
+    let s = FixtureBackend::for_screen(Screen::NeedsYou)
+        .unwrap()
+        .snapshot();
     let alert = s.messages.last().unwrap();
     let Payload::Alert {
         urgency, actions, ..
@@ -139,7 +149,7 @@ fn needs_you_has_an_urgent_alert_for_me() {
 
 #[test]
 fn fixture_send_appends_and_notifies() {
-    let backend = FixtureBackend::for_screen(Screen::Chat);
+    let backend = FixtureBackend::for_screen(Screen::Chat).unwrap();
     let mut updates = backend.subscribe();
     backend
         .send(Draft {
@@ -158,7 +168,7 @@ fn fixture_send_appends_and_notifies() {
 
 #[test]
 fn fixture_send_refuses_an_oversized_body() {
-    let backend = FixtureBackend::for_screen(Screen::Chat);
+    let backend = FixtureBackend::for_screen(Screen::Chat).unwrap();
     let err = backend
         .send(Draft {
             to: Vec::new(),
@@ -171,7 +181,7 @@ fn fixture_send_refuses_an_oversized_body() {
 
 #[test]
 fn fixture_apply_changes_card_state() {
-    let backend = FixtureBackend::for_screen(Screen::SettingsFromChat);
+    let backend = FixtureBackend::for_screen(Screen::SettingsFromChat).unwrap();
     let card = backend.snapshot().changes.values().next().unwrap().clone();
     assert!(card.widens);
     assert_eq!(card.state, ChangeState::Pending);
@@ -194,7 +204,9 @@ fn fixture_apply_changes_card_state() {
 
 #[test]
 fn settings_applied_screen_starts_applied() {
-    let s = FixtureBackend::for_screen(Screen::SettingsApplied).snapshot();
+    let s = FixtureBackend::for_screen(Screen::SettingsApplied)
+        .unwrap()
+        .snapshot();
     assert_eq!(
         s.changes.values().next().unwrap().state,
         ChangeState::Applied
@@ -204,6 +216,7 @@ fn settings_applied_screen_starts_applied() {
 #[test]
 fn plan_fixture_team_and_shares() {
     let plan = FixtureBackend::for_screen(Screen::Plan)
+        .unwrap()
         .snapshot()
         .plan
         .unwrap();
@@ -218,6 +231,7 @@ fn plan_fixture_team_and_shares() {
     assert_eq!((share("andy"), share("sean")), (65, 40));
     assert_eq!(plan.lanes.len(), 4);
     let ready = FixtureBackend::for_screen(Screen::PlanReady)
+        .unwrap()
         .snapshot()
         .plan
         .unwrap();
@@ -254,15 +268,87 @@ fn screen_names_cover_every_render() {
 #[test]
 fn fixture_handles_make_ids() {
     for screen in Screen::ALL {
-        let s = FixtureBackend::for_screen(screen).snapshot();
+        let s = FixtureBackend::for_screen(screen).unwrap().snapshot();
         for group in &s.roster {
             for agent in &group.agents {
-                let _ = super::super::fixture_data::id(&agent.handle);
+                super::super::fixture_data::id(&agent.handle).unwrap();
             }
         }
     }
     assert_eq!(
-        super::super::fixture_data::id("andy/fx1").as_str(),
+        super::super::fixture_data::id("andy/fx1").unwrap().as_str(),
         "andyfx10"
+    );
+    assert!(
+        super::super::fixture_data::id("Andy/FX1").is_err(),
+        "uppercase is refused"
+    );
+}
+
+#[test]
+fn every_chat_body_matches_console_py() {
+    // CHAT in docs/mockups/scripts/console.py, in order.
+    let want = [
+        "C014 feat/c014-release-matrix@7c8835e · PR #9 · release.yml matrix: windows, macos-26, linux",
+        "main does not compile: 4d9fdc8 committed conflict markers at src/main.rs:2-8. @sean/a1 please hold pushes to main until the fix lands.",
+        "Spawn another worker to fix main and keep Sean's changes",
+        "git_show: Sean's 016f235 and 4d9fdc8 are on main; 4d9fdc8 left markers at src/main.rs:2-8. Delegating.",
+        "andy/fx1 · Engineer · claude · sonnet · $5.00 · fix/c015-main-conflict",
+        "C015 to andy/fx1, lease 30 min",
+        "C015 fix/c015-main-conflict@9e2a71c · cargo test 71 passed, 0 failed · keeps cylinder, document, minimap and tabs from both sides",
+        "pass · 0 findings · traced the mod list and both callers",
+        "@andy merging #10 after CI. Sorry about the markers.",
+    ];
+    let bodies: Vec<String> = chat()
+        .messages
+        .iter()
+        .map(|m| m.client.body.as_str().to_owned())
+        .collect();
+    assert_eq!(bodies, want);
+}
+
+#[test]
+fn every_roster_row_matches_console_py() {
+    use crate::backend::AgentStatus::{Idle, Reading, Working};
+    // TREE in console.py, with mockup fix 28 (rv2 on opencode).
+    let want = [
+        ("andy/listen", "listener", "codex", Idle, 0),
+        ("andy/fx1", "engineer", "claude", Working, 1),
+        ("andy/t7k", "tester", "opencode", Working, 1),
+        ("andy/rv2", "reviewer", "opencode", Reading, 2),
+        ("andy/a1", "engineer", "claude", Idle, 0),
+        ("sean/a1", "engineer", "codex", Working, 0),
+        ("sean/plan", "planner", "gemini", Idle, 0),
+        ("adam/coord", "coordinator", "claude", Working, 0),
+        ("adam/res", "researcher", "agy", Working, 0),
+    ];
+    let rows: Vec<_> = chat()
+        .roster
+        .into_iter()
+        .flat_map(|g| g.agents)
+        .map(|a| (a.handle, a.role, a.harness, a.status, a.depth))
+        .collect();
+    let want: Vec<_> = want
+        .iter()
+        .map(|(h, r, x, s, d)| ((*h).to_owned(), (*r).to_owned(), (*x).to_owned(), *s, *d))
+        .collect();
+    assert_eq!(rows, want);
+}
+
+#[test]
+fn settings_screens_use_their_own_listener_text() {
+    let body = |screen| {
+        let s = FixtureBackend::for_screen(screen).unwrap().snapshot();
+        let (id, _) = s.changes.iter().next().unwrap();
+        let m = s.messages.iter().find(|m| &m.client.id == id).unwrap();
+        m.client.body.as_str().to_owned()
+    };
+    assert_eq!(
+        body(Screen::SettingsFromChat),
+        "Both changes widen what andy/fx1 may do, so they wait for your Apply."
+    );
+    assert_eq!(
+        body(Screen::SettingsApplied),
+        "Done. andy/fx1 can edit L-INFRA deploy/** until 18:00, and its budget is $8.00."
     );
 }

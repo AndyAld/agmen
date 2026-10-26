@@ -7,9 +7,9 @@ use gpui::{Hsla, Rgba};
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
-use super::AppearanceError;
 use super::fallback::gruvbox_material_dark_hard;
 use super::zed::read_jsonc;
+use super::{AppearanceError, Skipped};
 
 /// How many theme files a search reads at most.
 const MAX_THEME_FILES: usize = 2_000;
@@ -170,12 +170,15 @@ pub(crate) fn load_theme(
     extensions_dir: &Path,
     name: &str,
 ) -> Result<Theme, AppearanceError> {
-    let mut unreadable = Vec::new();
-    for path in theme_files(zed_dir, extensions_dir) {
+    let (files, mut unreadable) = theme_files(zed_dir, extensions_dir);
+    for path in files {
         // A file that does not parse is skipped, and named if nothing matches.
-        let Ok(family) = read_jsonc::<Family>(&path) else {
-            unreadable.push(path);
-            continue;
+        let family = match read_jsonc::<Family>(&path) {
+            Ok(family) => family,
+            Err(err) => {
+                unreadable.push(Skipped::new(&path, err));
+                continue;
+            }
         };
         if let Some(theme) = family.themes.into_iter().find(|t| t.name == name) {
             return Ok(Theme::from_style(
@@ -194,29 +197,48 @@ pub(crate) fn load_theme(
     }
 }
 
-fn theme_files(zed_dir: &Path, extensions_dir: &Path) -> Vec<PathBuf> {
+/// Theme files to search, and the folders that could not be read. A
+/// missing folder is normal (most people have no `themes/` folder) and not
+/// reported.
+fn theme_files(zed_dir: &Path, extensions_dir: &Path) -> (Vec<PathBuf>, Vec<Skipped>) {
+    let mut skipped = Vec::new();
+    let list = |dir: &Path, skipped: &mut Vec<Skipped>| -> Vec<PathBuf> {
+        match fs::read_dir(dir) {
+            Ok(entries) => {
+                let mut out = Vec::new();
+                for entry in entries {
+                    match entry {
+                        Ok(entry) => out.push(entry.path()),
+                        Err(err) => skipped.push(Skipped::new(dir, err)),
+                    }
+                }
+                out.sort();
+                out
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(err) => {
+                skipped.push(Skipped::new(dir, err));
+                Vec::new()
+            }
+        }
+    };
     let mut dirs = vec![zed_dir.join("themes")];
-    if let Ok(entries) = fs::read_dir(extensions_dir) {
-        let mut exts: Vec<PathBuf> = entries.flatten().map(|e| e.path().join("themes")).collect();
-        exts.sort();
-        dirs.extend(exts);
-    }
+    dirs.extend(
+        list(extensions_dir, &mut skipped)
+            .into_iter()
+            .map(|ext| ext.join("themes")),
+    );
     let mut files = Vec::new();
     for dir in dirs {
-        let Ok(entries) = fs::read_dir(&dir) else {
-            continue;
-        };
-        let mut found: Vec<PathBuf> = entries
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|ext| ext == "json"))
-            .collect();
-        found.sort();
-        files.extend(found);
+        files.extend(
+            list(&dir, &mut skipped)
+                .into_iter()
+                .filter(|p| p.extension().is_some_and(|ext| ext == "json")),
+        );
         if files.len() >= MAX_THEME_FILES {
             files.truncate(MAX_THEME_FILES);
             break;
         }
     }
-    files
+    (files, skipped)
 }

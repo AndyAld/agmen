@@ -94,4 +94,8 @@ fn icon_theme_parse_failures_are_named() {
     std::fs::write(root.join("t.json"), "{ nope").unwrap();
     let err = IconTheme::load(dir.path(), "Anything").unwrap_err();
     assert!(err.to_string().contains("t.json"), "{err}");
+    assert!(
+        err.to_string().contains("line 1"),
+        "the parse message is kept: {err}"
+    );
 }

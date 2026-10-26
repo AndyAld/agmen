@@ -9,7 +9,7 @@ use gpui::{
 use super::{Color, Icon, IconSize};
 use crate::appearance::Appearance;
 use crate::icons::UiIcon;
-use crate::ui::tokens::{RADIUS_SM, SPACE_2, SPACE_6};
+use crate::ui::tokens::{DOCK_BUTTON, RADIUS_SM};
 
 /// What a click does.
 pub(crate) type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
@@ -98,7 +98,9 @@ impl RenderOnce for IconButton {
             .justify_center()
             .rounded(RADIUS_SM)
             .when(self.style == IconButtonStyle::Filled, |this| {
-                this.bg(theme.elevated_surface).py(SPACE_2).px(SPACE_6)
+                this.bg(theme.elevated_surface)
+                    .w(DOCK_BUTTON.width)
+                    .h(DOCK_BUTTON.height)
             })
             .hover(move |style| style.bg(hover))
             .when_some(self.on_click, |this, handler| {
@@ -122,6 +124,7 @@ mod tests {
                 .on_click(|_, _, _| {})
                 .into_any_element()
         });
-        assert_eq!(size.width, px(14. + 12.));
+        // Mockup check V63: the dock's collapse button is 17 by 20.
+        assert_eq!(size, gpui::size(px(17.), px(20.)));
     }
 }

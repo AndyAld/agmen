@@ -34,20 +34,35 @@ fi
 
 (cd "$root" && cargo build -p agmen-desktop --locked --quiet)
 mkdir -p "$out"
+work="$(mktemp -d)"
+pid=""
+cleanup() {
+	if [[ -n $pid ]]; then
+		kill "$pid" 2>/dev/null || true
+	fi
+	rm -rf "$work"
+}
+trap cleanup EXIT
+# Compile the window finder once instead of interpreting it on every poll.
+swiftc -O -o "$work/window-id" "$here/window-id.swift"
 
 for screen in "${screens[@]}"; do
 	"$app" --screen "$screen" >"$out/$screen.log" 2>&1 &
 	pid=$!
 	id=""
 	for ((i = 0; i < tries; i++)); do
-		if id="$(swift "$here/window-id.swift" agmen-desktop 2>/dev/null)"; then
+		if ! kill -0 "$pid" 2>/dev/null; then
+			echo "$screen: the app exited; see $out/$screen.log" >&2
+			pid=""
+			exit 1
+		fi
+		if id="$("$work/window-id" "$pid")"; then
 			break
 		fi
 		sleep 0.25
 	done
 	if [[ -z $id ]]; then
 		echo "$screen: no window appeared; see $out/$screen.log" >&2
-		kill "$pid" 2>/dev/null || true
 		exit 1
 	fi
 	if command -v aerospace >/dev/null; then
@@ -57,5 +72,6 @@ for screen in "${screens[@]}"; do
 	screencapture -x -o -l"$id" "$out/$screen.png"
 	kill "$pid" 2>/dev/null || true
 	wait "$pid" 2>/dev/null || true
+	pid=""
 	echo "$out/$screen.png"
 done

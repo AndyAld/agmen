@@ -14,7 +14,6 @@ pub(crate) struct KvRow {
     label: SharedString,
     value: SharedString,
     color: Color,
-    code: bool,
 }
 
 impl KvRow {
@@ -24,7 +23,6 @@ impl KvRow {
             label: label.into(),
             value: value.into(),
             color: Color::Default,
-            code: true,
         }
     }
 
@@ -50,7 +48,7 @@ impl RenderOnce for KvRow {
                         .color(Color::Placeholder),
                 ),
             )
-            .child(if self.code { value.code() } else { value })
+            .child(value.code())
     }
 }
 

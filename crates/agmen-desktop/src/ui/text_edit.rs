@@ -84,6 +84,12 @@ impl TextBuffer {
         self.reversed = false;
     }
 
+    /// How many bytes a replace of `range` (or the marked text, or the
+    /// selection) would remove.
+    pub(crate) fn target_len(&self, range: Option<Range<usize>>) -> usize {
+        self.target(range).len()
+    }
+
     fn target(&self, range: Option<Range<usize>>) -> Range<usize> {
         let range = range
             .or_else(|| self.marked.clone())

@@ -11,7 +11,7 @@ mod screen;
 
 use std::collections::BTreeMap;
 
-use agmen_proto::{IdentityId, MessageId, StampedEnvelope};
+use agmen_proto::{GitSha, IdentityId, MessageId, StampedEnvelope};
 use futures::channel::mpsc::UnboundedReceiver;
 
 pub(crate) use fixture::FixtureBackend;
@@ -28,6 +28,8 @@ pub(crate) enum BackendError {
     NoSuchChange(String),
     #[error("{0} cannot be done from this console yet")]
     Unsupported(&'static str),
+    #[error("the built-in fixture is broken: {0}")]
+    BadFixture(String),
 }
 
 /// The console's view of agmen: one snapshot, a way to send and act, and a
@@ -51,6 +53,12 @@ pub(crate) trait Backend: 'static {
     fn subscribe(&self) -> UnboundedReceiver<Update>;
 }
 
+/// The app's backend as a GPUI global, so any view can read and act
+/// through it.
+pub(crate) struct BackendHandle(pub(crate) std::rc::Rc<dyn Backend>);
+
+impl gpui::Global for BackendHandle {}
+
 /// A chat message the person writes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Draft {
@@ -72,7 +80,7 @@ pub(crate) enum Action {
     SwitchAgent { worker: IdentityId, agent: String },
     AnswerAlert { alert: MessageId, choice: String },
     SnoozeAlert(MessageId),
-    ApproveSpec { path: String, sha: String },
+    ApproveSpec { path: String, sha: GitSha },
     ApproveShare,
     KickOff,
 }
@@ -144,6 +152,8 @@ pub(crate) enum Approval {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SpecState {
     pub(crate) path: String,
+    /// The commit approvals refer to (spec 7: approvers read the exact commit).
+    pub(crate) sha: GitSha,
     /// Shown instead of approvals while the file is still a draft.
     pub(crate) draft_note: Option<String>,
     pub(crate) approvals: BTreeMap<String, Approval>,
@@ -216,6 +226,18 @@ pub(crate) struct PersonGroup {
 pub(crate) struct RecentAction {
     pub(crate) time: String,
     pub(crate) text: String,
+    pub(crate) kind: RecentKind,
+}
+
+/// What a listener's recent action was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum RecentKind {
+    /// It started a worker.
+    Delegated,
+    /// It answered from what it looked up.
+    Answered,
+    /// A settings change waits for the person.
+    Waiting,
 }
 
 /// The right dock's Listener panel.
@@ -246,6 +268,9 @@ pub(crate) struct ListenerInfo {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct AgentInfo {
     pub(crate) id: IdentityId,
+    /// The role's name, such as `engineer`.
+    pub(crate) role: String,
+    pub(crate) status: AgentStatus,
     pub(crate) handle: String,
     pub(crate) role_label: String,
     pub(crate) harness_label: String,

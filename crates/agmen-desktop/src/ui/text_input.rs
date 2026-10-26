@@ -8,6 +8,7 @@
 //! grow up to `max_lines`, then scroll down.
 
 use std::ops::Range;
+use std::rc::Rc;
 
 use gpui::{
     App, AvailableSpace, Bounds, ClipboardItem, ContentMask, Context, CursorStyle, Element,
@@ -45,6 +46,9 @@ actions!(
 );
 
 const CONTEXT: &str = "TextInput";
+
+/// Shaped layouts kept per input; a frame uses at most two widths.
+const MAX_CACHED_LAYOUTS: usize = 3;
 
 /// Text past this length is not inserted, so shaping stays bounded. The hub
 /// takes bodies of at most 32 KiB, so the cap leaves room for that.
@@ -89,7 +93,13 @@ pub(crate) struct TextInput {
     placeholder: SharedString,
     /// 1 for a single line; more lets the text wrap and grow to that many.
     max_lines: usize,
-    layout: Option<TextLayout>,
+    layout: Option<Rc<TextLayout>>,
+    /// The last few shaped layouts and what each was shaped for: layout
+    /// asks with the measured width and paint with the final one.
+    cache: Vec<LayoutKey>,
+    /// How many times the text was shaped, for tests.
+    #[cfg(test)]
+    pub(super) shapes: usize,
     pub(super) last_bounds: Option<Bounds<Pixels>>,
     /// Where the cursor was painted, for IME placement and tests.
     pub(super) last_cursor: Option<Bounds<Pixels>>,
@@ -113,6 +123,9 @@ impl TextInput {
             placeholder: SharedString::default(),
             max_lines: 1,
             layout: None,
+            cache: Vec::new(),
+            #[cfg(test)]
+            shapes: 0,
             last_bounds: None,
             last_cursor: None,
             visual_lines: 1,
@@ -168,29 +181,36 @@ impl TextInput {
         )
     )]
     pub(crate) fn set_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let text = self.fit(text);
+        let mut text = self.normalize(text);
+        let mut end = text.len().min(MAX_TEXT_BYTES);
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
         self.buffer = TextBuffer::default();
         self.buffer.replace(None, &text);
         self.preferred_x = None;
         self.changed(window, cx);
     }
 
-    /// `text` as this input takes it: one line has no newlines, and nothing
-    /// goes past [`MAX_TEXT_BYTES`].
-    fn fit(&self, text: &str) -> String {
-        let text = if self.is_multiline() {
+    /// `text` as this input takes it: one line has no newlines.
+    fn normalize(&self, text: &str) -> String {
+        if self.is_multiline() {
             text.replace("\r\n", "\n")
         } else {
             text.replace(['\r', '\n'], " ")
-        };
+        }
+    }
+
+    /// `text` ready to replace `range` (or the marked text, or the
+    /// selection), or `None` when it would take the text past
+    /// [`MAX_TEXT_BYTES`]; then nothing changes and the bell rings.
+    fn fit(&self, text: &str, range: Option<Range<usize>>) -> Option<String> {
+        let text = self.normalize(text);
         let room = MAX_TEXT_BYTES
             .saturating_sub(self.buffer.text().len())
-            .saturating_add(self.buffer.selected_text().len());
-        let mut end = text.len().min(room);
-        while !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        text[..end].to_owned()
+            .saturating_add(self.buffer.target_len(range));
+        (text.len() <= room).then_some(text)
     }
 
     fn changed(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -225,7 +245,10 @@ impl TextInput {
     }
 
     fn insert(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let text = self.fit(text);
+        let Some(text) = self.fit(text, None) else {
+            window.play_system_bell();
+            return;
+        };
         self.buffer.replace(None, &text);
         self.preferred_x = None;
         self.changed(window, cx);
@@ -372,6 +395,71 @@ impl TextInput {
             .collect(),
             _ => vec![run],
         }
+    }
+}
+
+/// What a cached layout was shaped for. The text is compared with the
+/// buffer, so it is copied only when it changes.
+struct LayoutKey {
+    text: String,
+    empty: bool,
+    width: Option<Pixels>,
+    font_size: Pixels,
+    line_height: Pixels,
+    marked: Option<Range<usize>>,
+    layout: Rc<TextLayout>,
+}
+
+impl TextInput {
+    /// The layout for `width` (`None` for one line), shaped only when the
+    /// text, width, font or composition changed since the last call.
+    fn layout_for(
+        &mut self,
+        width: Option<Pixels>,
+        window: &Window,
+        cx: &App,
+    ) -> Option<Rc<TextLayout>> {
+        let font_size = window.text_style().font_size.to_pixels(window.rem_size());
+        let line_height = window.line_height();
+        let empty = self.buffer.text().is_empty();
+        let marked = self.buffer.marked();
+        if let Some(key) = self.cache.iter().find(|key| {
+            key.text == self.buffer.text()
+                && key.empty == empty
+                && key.width == width
+                && key.font_size == font_size
+                && key.line_height == line_height
+                && key.marked == marked
+        }) {
+            return Some(key.layout.clone());
+        }
+        let (text, color) = display(self, cx, window);
+        let runs = self.runs(text.len(), color, window);
+        let layout = Rc::new(TextLayout::shape(
+            &text,
+            &runs,
+            font_size,
+            width,
+            line_height,
+            window,
+        )?);
+        #[cfg(test)]
+        {
+            self.shapes += 1;
+        }
+        if self.cache.len() >= MAX_CACHED_LAYOUTS {
+            self.cache.remove(0);
+        }
+        self.cache.push(LayoutKey {
+            text: self.buffer.text().to_owned(),
+            empty,
+            width,
+            font_size,
+            line_height,
+            marked,
+            layout: layout.clone(),
+        });
+        Some(layout)
     }
 }
 
@@ -552,7 +640,10 @@ impl EntityInputHandler for TextInput {
         cx: &mut Context<Self>,
     ) {
         let range = range_utf16.map(|r| self.buffer.range_from_utf16(&r));
-        let text = self.fit(text);
+        let Some(text) = self.fit(text, range.clone()) else {
+            window.play_system_bell();
+            return;
+        };
         self.buffer.replace(range, &text);
         self.preferred_x = None;
         self.changed(window, cx);
@@ -567,10 +658,14 @@ impl EntityInputHandler for TextInput {
         cx: &mut Context<Self>,
     ) {
         let range = range_utf16.map(|r| self.buffer.range_from_utf16(&r));
+        let Some(text) = self.fit(text, range.clone()) else {
+            window.play_system_bell();
+            return;
+        };
         // The selection arrives in UTF-16 units of `text`; convert within it.
-        let selected =
-            selected_utf16.map(|s| utf16_to_utf8_in(text, s.start)..utf16_to_utf8_in(text, s.end));
-        self.buffer.replace_and_mark(range, text, selected);
+        let selected = selected_utf16
+            .map(|s| utf16_to_utf8_in(&text, s.start)..utf16_to_utf8_in(&text, s.end));
+        self.buffer.replace_and_mark(range, &text, selected);
         self.changed(window, cx);
     }
 
@@ -675,7 +770,7 @@ struct TextArea {
 }
 
 struct AreaPaint {
-    layout: TextLayout,
+    layout: Rc<TextLayout>,
     cursor: Option<PaintQuad>,
     selection: Vec<PaintQuad>,
 }
@@ -729,19 +824,18 @@ impl Element for TextArea {
             return (window.request_layout(style, [], cx), ());
         }
         // Several lines: as tall as the wrapped text, from 1 to max_lines rows.
-        let (text, color) = display(input, cx, window);
-        let runs = input.runs(text.len(), color, window);
-        let font_size = window.text_style().font_size.to_pixels(window.rem_size());
         let max_lines = input.max_lines;
+        let entity = self.input.clone();
         let measure = move |known: Size<Option<Pixels>>,
                             available: Size<AvailableSpace>,
                             window: &mut Window,
-                            _: &mut App| {
+                            cx: &mut App| {
             let width = known.width.or(match available.width {
                 AvailableSpace::Definite(w) => Some(w),
                 AvailableSpace::MinContent | AvailableSpace::MaxContent => None,
             });
-            let rows = TextLayout::shape(&text, &runs, font_size, width, line_height, window)
+            let rows = entity
+                .update(cx, |input, cx| input.layout_for(width, window, cx))
                 .map_or(1, |layout| layout.visual_lines())
                 .clamp(1, max_lines);
             // rows is at most max_lines, a small number.
@@ -761,14 +855,13 @@ impl Element for TextArea {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
-        let input = self.input.read(cx);
         let line_height = window.line_height();
-        let (text, color) = display(input, cx, window);
-        let runs = input.runs(text.len(), color, window);
-        let font_size = window.text_style().font_size.to_pixels(window.rem_size());
-        let multiline = input.is_multiline();
+        let multiline = self.input.read(cx).is_multiline();
         let wrap = multiline.then_some(bounds.size.width);
-        let layout = TextLayout::shape(&text, &runs, font_size, wrap, line_height, window)?;
+        let layout = self
+            .input
+            .update(cx, |input, cx| input.layout_for(wrap, window, cx))?;
+        let input = self.input.read(cx);
 
         let empty = input.buffer.text().is_empty();
         let selection = input.buffer.selection();

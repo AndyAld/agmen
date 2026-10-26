@@ -13,7 +13,7 @@ use super::fixture_data::{
     plan_roster, roster, settings_card, settings_messages, stamp, urgent_alert,
 };
 use super::{
-    Action, Backend, BackendError, ChangeState, Draft, RecentAction, Screen, Snapshot,
+    Action, Backend, BackendError, ChangeState, Draft, RecentAction, RecentKind, Screen, Snapshot,
     StatusSummary, Update,
 };
 
@@ -29,26 +29,29 @@ pub(crate) struct FixtureBackend {
 #[cfg(test)]
 #[must_use]
 pub(crate) fn chat_snapshot() -> Snapshot {
-    FixtureBackend::for_screen(Screen::Chat).snapshot()
+    FixtureBackend::for_screen(Screen::Chat)
+        .map(|backend| backend.snapshot())
+        .unwrap_or_else(|err| panic!("{err}"))
 }
 
-fn recent(time: &str, text: &str) -> RecentAction {
+fn recent(time: &str, text: &str, kind: RecentKind) -> RecentAction {
     RecentAction {
         time: time.into(),
         text: text.into(),
+        kind,
     }
 }
 
-fn base(project: &str) -> Snapshot {
-    let fx1 = fx1();
+fn base(project: &str) -> Result<Snapshot, BackendError> {
+    let fx1 = fx1()?;
     let listener = listener();
     let spend = listener.workers_today_usd + listener.listener_today_usd;
-    Snapshot {
+    Ok(Snapshot {
         project: project.into(),
         me: "andy".into(),
-        me_id: id("andy"),
-        listener_id: id("andy/listen"),
-        roster: roster(),
+        me_id: id("andy")?,
+        listener_id: id("andy/listen")?,
+        roster: roster()?,
         listener,
         agents: BTreeMap::from([(fx1.id.clone(), fx1)]),
         status: StatusSummary {
@@ -63,18 +66,23 @@ fn base(project: &str) -> Snapshot {
         messages: Vec::new(),
         changes: BTreeMap::new(),
         plan: None,
-    }
+    })
 }
 
-fn with_messages(mut s: Snapshot, msgs: Vec<Msg>) -> Snapshot {
-    s.messages = stamp(msgs, 1);
-    s
+fn with_messages(project: &str, msgs: Vec<Msg>) -> Result<Snapshot, BackendError> {
+    let mut s = base(project)?;
+    s.messages = stamp(msgs, 1)?;
+    Ok(s)
 }
 
 impl FixtureBackend {
     /// The state `screen`'s render shows.
-    #[must_use]
-    pub(crate) fn for_screen(screen: Screen) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// When the built-in fixture data is not valid protocol data, which
+    /// `fixture_messages_survive_the_wire_format` guards against.
+    pub(crate) fn for_screen(screen: Screen) -> Result<Self, BackendError> {
         let snapshot = match screen {
             Screen::NeedsYou | Screen::NeedsYouAnswered => {
                 let mut msgs = chat_messages();
@@ -84,16 +92,17 @@ impl FixtureBackend {
                 if answered {
                     msgs.push(alert_answer(alert));
                 }
-                let mut s = with_messages(base("pr-3331"), msgs);
+                let mut s = with_messages("pr-3331", msgs)?;
                 s.status.alerts = if answered { 1 } else { 2 };
                 s.status.needs_you = u32::from(!answered);
                 s
             }
             Screen::SettingsFromChat | Screen::SettingsApplied => {
                 let mut msgs = chat_messages();
-                let (more, card_ix) = settings_messages(msgs.len());
+                let (more, card_ix) =
+                    settings_messages(msgs.len(), screen == Screen::SettingsApplied);
                 msgs.extend(more);
-                let mut s = with_messages(base("pr-3331"), msgs);
+                let mut s = with_messages("pr-3331", msgs)?;
                 let state = if screen == Screen::SettingsApplied {
                     ChangeState::Applied
                 } else {
@@ -104,7 +113,11 @@ impl FixtureBackend {
                 }
                 s.listener.recent.insert(
                     0,
-                    recent("15:50", "waiting for Apply: andy/fx1 lanes and budget"),
+                    recent(
+                        "15:50",
+                        "waiting for Apply: andy/fx1 lanes and budget",
+                        RecentKind::Waiting,
+                    ),
                 );
                 s
             }
@@ -114,13 +127,17 @@ impl FixtureBackend {
                     let first = msgs.len();
                     msgs.extend(ask_messages(first));
                 }
-                let mut s = with_messages(base("pr-3331"), msgs);
+                let mut s = with_messages("pr-3331", msgs)?;
                 if screen == Screen::Ask {
                     // Mockup fix 36: the answer's $0.31 shows in the listener's spend.
                     s.listener.listener_today_usd = 0.73;
                     s.listener.recent.insert(
                         0,
-                        recent("15:52", "answered: musl in C014 (git_show, opus)"),
+                        recent(
+                            "15:52",
+                            "answered: musl in C014 (git_show, opus)",
+                            RecentKind::Answered,
+                        ),
                     );
                     s.status.spend_today_usd =
                         s.listener.workers_today_usd + s.listener.listener_today_usd;
@@ -130,9 +147,9 @@ impl FixtureBackend {
             Screen::Plan | Screen::Spec | Screen::PlanReady | Screen::KickOff | Screen::Running => {
                 let ready = matches!(screen, Screen::PlanReady | Screen::KickOff);
                 let running = screen == Screen::Running;
-                let mut s = with_messages(base("ridgeline"), plan_messages(ready, running));
-                s.roster = plan_roster();
-                s.plan = Some(plan(ready, running));
+                let mut s = with_messages("ridgeline", plan_messages(ready, running))?;
+                s.roster = plan_roster()?;
+                s.plan = Some(plan(ready, running)?);
                 // Mockup fix 35: the status bar counts this project, not pr-3331.
                 s.status = StatusSummary {
                     needs_you: 0,
@@ -156,12 +173,12 @@ impl FixtureBackend {
             | Screen::ProjectTestsOpen
             | Screen::Git
             | Screen::GitCollapsed
-            | Screen::Settings => with_messages(base("pr-3331"), chat_messages()),
+            | Screen::Settings => with_messages("pr-3331", chat_messages())?,
         };
-        Self {
+        Ok(Self {
             state: RefCell::new(snapshot),
             subscribers: RefCell::new(Vec::new()),
-        }
+        })
     }
 
     fn publish(&self, update: &Update) {

@@ -293,6 +293,10 @@ fn unparsable_theme_files_are_named() {
     fs::write(themes.join("broken.json"), "{ not json").unwrap();
     let err = load_theme(dir.path(), &ext_dir(), "Anything").unwrap_err();
     assert!(err.to_string().contains("broken.json"), "{err}");
+    assert!(
+        err.to_string().contains("line 1"),
+        "the parse message is kept: {err}"
+    );
 }
 
 #[test]
@@ -356,6 +360,11 @@ fn settings_keep_other_keys() {
         "{text}"
     );
     assert_eq!(
+        table["appearance"]["added_later"].as_integer(),
+        Some(1),
+        "{text}"
+    );
+    assert_eq!(
         AgmenSettings::load(&path).unwrap().density,
         Density::Compact
     );
@@ -400,4 +409,39 @@ fn zed_fonts_follow_settings() {
     assert_eq!(a.fonts.ui_size, gpui::px(15.0));
     assert_eq!(a.fonts.code_size, gpui::px(13.0));
     assert_eq!(a.fonts.terminal_size, gpui::px(13.0));
+}
+
+#[test]
+fn clearing_a_setting_removes_its_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.toml");
+    fs::write(
+        &path,
+        "[appearance]\ntheme = \"One Dark\"\nfollow_zed = false\n",
+    )
+    .unwrap();
+    let mut s = AgmenSettings::load(&path).unwrap();
+    s.theme = None;
+    s.save(&path).unwrap();
+    assert_eq!(AgmenSettings::load(&path).unwrap().theme, None);
+}
+
+#[test]
+fn owned_keys_match_the_struct() {
+    let value = toml::Value::try_from(AgmenSettings {
+        theme: Some("x".into()),
+        ..AgmenSettings::default()
+    })
+    .unwrap();
+    let mut keys: Vec<String> = value.as_table().unwrap().keys().cloned().collect();
+    keys.sort();
+    let mut owned: Vec<String> = super::settings::OWNED_KEYS
+        .iter()
+        .map(|k| (*k).to_owned())
+        .collect();
+    owned.sort();
+    assert_eq!(
+        keys, owned,
+        "a new AgmenSettings field must be added to OWNED_KEYS"
+    );
 }
