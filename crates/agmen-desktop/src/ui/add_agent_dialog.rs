@@ -12,11 +12,14 @@ use gpui::{
     RenderOnce, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
 };
 
+use super::code_view::cell_width;
 use super::components::{
     Button, ButtonSize, ButtonStyle, CodeText, Color, Icon, IconSize, Label, LabelSize,
     SectionHeading,
 };
-use super::tokens::{BORDER_WIDTH, RADIUS_CARD, RADIUS_REF, SPACE_4, SPACE_8, SPACE_10, SPACE_12};
+use super::tokens::{
+    BORDER_WIDTH, PROMPT_COLUMNS, RADIUS_CARD, RADIUS_REF, SPACE_4, SPACE_8, SPACE_10, SPACE_12,
+};
 use crate::appearance::Appearance;
 use crate::backend::{AgentFound, InstalledAgent};
 
@@ -319,8 +322,11 @@ impl AddAgentDialog {
 struct PromptBox(String);
 
 impl RenderOnce for PromptBox {
-    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let theme = &cx.global::<Appearance>().theme;
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let appearance = cx.global::<Appearance>();
+        let theme = &appearance.theme;
+        // The mockup sets the prompt in lines narrower than the box.
+        let measure = cell_width(window, &appearance.fonts) * PROMPT_COLUMNS;
         div()
             .debug_selector(|| "add-agent:prompt".into())
             .w_full()
@@ -331,7 +337,13 @@ impl RenderOnce for PromptBox {
             .border(BORDER_WIDTH)
             .border_color(theme.border)
             .bg(theme.background)
-            .child(Label::new(self.0).code().wrap())
+            .child(
+                div()
+                    .debug_selector(|| "add-agent:prompt-text".into())
+                    .max_w(measure)
+                    .min_w_0()
+                    .child(Label::new(self.0).code().wrap()),
+            )
     }
 }
 
