@@ -898,6 +898,66 @@ fn the_chips_are_the_mockups_12_px_mono_lines(cx: &mut TestAppContext) {
     assert_eq!(frame.size.height, gpui::px(38.));
 }
 
+/// The composer over the chat fixture, 800 px wide, at a `code` px code
+/// font under CoreText.
+#[cfg(target_os = "macos")]
+fn core_text_composer(app: &mut TestAppContext, code: f32) -> &mut VisualTestContext {
+    init(app);
+    app.update(|cx| {
+        crate::assets::load_fonts(cx).unwrap();
+        bind_keys(cx);
+        let mut appearance = cx.global::<Appearance>().clone();
+        appearance.fonts.code_size = gpui::px(code);
+        cx.set_global(appearance);
+    });
+    let snapshot = chat_snapshot();
+    let (_, cx) = app.add_window_view(|window, cx| {
+        window.set_rem_size(MOCKUP_REM);
+        Composer::new(&snapshot, |_, _, _| Ok(()), window, cx)
+    });
+    resize(cx, 800.);
+    cx
+}
+
+/// The box's inside: it clips at the inside of its border.
+#[cfg(target_os = "macos")]
+fn box_inside(cx: &mut VisualTestContext) -> gpui::Bounds<gpui::Pixels> {
+    cx.debug_bounds("composer:box")
+        .unwrap()
+        .dilate(-crate::ui::tokens::BORDER_WIDTH)
+}
+
+/// The content mask on `chip`'s fill, and where its label paints: the
+/// label is centered in the chip on its 14 px line.
+#[cfg(target_os = "macos")]
+fn chip_fill_and_ink(
+    cx: &mut VisualTestContext,
+    chip: &'static str,
+    at: &str,
+) -> (gpui::Bounds<gpui::Pixels>, crate::ui::test_support::Ink) {
+    use crate::ui::test_support::{Ink, TALL_AND_DEEP, painted_at, unscaled};
+    let bounds = cx.debug_bounds(chip).unwrap();
+    let fill = painted_at(cx, chip);
+    let [fill, ..] = fill.as_slice() else {
+        panic!("{at} paints no fill");
+    };
+    cx.update(|window, cx| {
+        let fonts = cx.global::<Appearance>().fonts.clone();
+        let ink = Ink::of(
+            window,
+            TALL_AND_DEEP,
+            &gpui::font(fonts.code_family),
+            fonts.code_size,
+            bounds.center().y - AUTO_LINE_12 / 2.,
+            AUTO_LINE_12,
+        );
+        (
+            unscaled(fill.content_mask.bounds, window.scale_factor()),
+            ink,
+        )
+    })
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn the_composer_chips_show_tall_and_deep_glyphs_inside_the_box() {
@@ -905,58 +965,21 @@ fn the_composer_chips_show_tall_and_deep_glyphs_inside_the_box() {
     // wrapper clipped to the chip, 2 px above and below that line (3 px
     // with the model chip's outline), so at a 16 and 20 px code font it
     // cut what the label itself no longer cuts.
-    use crate::ui::test_support::{Ink, TALL_AND_DEEP, core_text_app, painted_at, unscaled};
     for size in [13., 16., 20.] {
-        let mut app = core_text_app();
-        init(&mut app);
-        app.update(|cx| {
-            crate::assets::load_fonts(cx).unwrap();
-            bind_keys(cx);
-            let mut appearance = cx.global::<Appearance>().clone();
-            appearance.fonts.code_size = gpui::px(size);
-            cx.set_global(appearance);
-        });
-        let snapshot = chat_snapshot();
-        let (_, cx) = app.add_window_view(|window, cx| {
-            window.set_rem_size(MOCKUP_REM);
-            Composer::new(&snapshot, |_, _, _| Ok(()), window, cx)
-        });
-        resize(cx, 800.);
-        // The box clips at the inside of its border.
-        let frame = cx
-            .debug_bounds("composer:box")
-            .unwrap()
-            .dilate(-crate::ui::tokens::BORDER_WIDTH);
+        let mut app = crate::ui::test_support::core_text_app();
+        let cx = core_text_composer(&mut app, size);
+        let frame = box_inside(cx);
         for chip in ["composer:to", "composer:model"] {
             let at = format!("{chip} at a {size} px code font");
-            let bounds = cx.debug_bounds(chip).unwrap();
-            let fill = painted_at(cx, chip);
-            let [fill, ..] = fill.as_slice() else {
-                panic!("{at} paints no fill");
-            };
-            let (mask, ink) = cx.update(|window, cx| {
-                let fonts = cx.global::<Appearance>().fonts.clone();
-                // The label is centered in the chip.
-                let top = bounds.center().y - AUTO_LINE_12 / 2.;
-                let ink = Ink::of(
-                    window,
-                    TALL_AND_DEEP,
-                    &gpui::font(fonts.code_family),
-                    fonts.code_size,
-                    top,
-                    AUTO_LINE_12,
-                );
-                (
-                    unscaled(fill.content_mask.bounds, window.scale_factor()),
-                    ink,
-                )
-            });
+            let (mask, ink) = chip_fill_and_ink(cx, chip, &at);
+            // C299: the font's whole ascent and descent, not just this
+            // text's glyphs.
             let near = gpui::px(0.01);
             assert!(
-                mask.top() <= ink.glyphs.0 + near && mask.bottom() >= ink.glyphs.1 - near,
-                "{at}: the mask {mask:?} cuts the glyphs from {:?} to {:?}",
-                ink.glyphs.0,
-                ink.glyphs.1
+                mask.top() <= ink.font.0 + near && mask.bottom() >= ink.font.1 - near,
+                "{at}: the mask {mask:?} cuts the font from {:?} to {:?}",
+                ink.font.0,
+                ink.font.1
             );
             // The label's glyphs stay inside the box's border.
             assert!(
@@ -964,6 +987,37 @@ fn the_composer_chips_show_tall_and_deep_glyphs_inside_the_box() {
                 "{at}: the font from {:?} to {:?} reaches past {frame:?}",
                 ink.font.0,
                 ink.font.1
+            );
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn the_box_clips_chips_whose_font_outgrows_it() {
+    // C298: the chips' wrappers clip at their sides only, so the box's
+    // own clip is all that stops a chip above and below. From about a
+    // 28 px code font the chips' font is taller than the box's 36 px
+    // inside; fonts go to 72 px.
+    for size in [32., 72.] {
+        let mut app = crate::ui::test_support::core_text_app();
+        let cx = core_text_composer(&mut app, size);
+        let frame = box_inside(cx);
+        let device_px = cx.update(|window, _| gpui::px(1. / window.scale_factor()));
+        for chip in ["composer:to", "composer:model"] {
+            let at = format!("{chip} at a {size} px code font");
+            let (mask, ink) = chip_fill_and_ink(cx, chip, &at);
+            assert!(
+                ink.font.0 < frame.top() && ink.font.1 > frame.bottom(),
+                "{at}: the font from {:?} to {:?} fits {frame:?}, so nothing to clip",
+                ink.font.0,
+                ink.font.1
+            );
+            // A content mask snaps out to device pixels.
+            assert!(
+                mask.top() >= frame.top() - device_px
+                    && mask.bottom() <= frame.bottom() + device_px,
+                "{at}: the mask {mask:?} reaches past the box's inside {frame:?}"
             );
         }
     }
