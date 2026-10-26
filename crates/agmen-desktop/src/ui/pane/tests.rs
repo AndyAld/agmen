@@ -10,7 +10,7 @@ use super::item::SettingsPage;
 use super::names::PaneNames;
 use super::tabs::{MAX_TABS, Pane};
 use super::*;
-use crate::backend::{Snapshot, chat_snapshot};
+use crate::backend::chat_snapshot;
 use crate::icons::FileIcon;
 use crate::icons::test_theme::material_icons;
 use crate::ui::chat::ChatView;
@@ -45,7 +45,7 @@ fn open_center_with_chat(
     init(cx);
     let (host, cx) = cx.add_window_view(|window, cx| {
         let snapshot = Rc::new(chat_snapshot());
-        let chat = cx.new(|cx| ChatView::new(Snapshot::clone(&snapshot), window, cx));
+        let chat = cx.new(|cx| ChatView::new(Rc::clone(&snapshot), window, cx));
         Host(cx.new(|cx| PaneGroup::new(&snapshot, Some(chat), tabs, cx)))
     });
     let group = host.read_with(cx, |host, _| host.0.clone());
@@ -525,8 +525,10 @@ fn file_tabs_draw_the_icon_themes_file_icon(cx: &mut TestAppContext) {
 fn the_center_shares_the_snapshot_it_was_built_from(cx: &mut TestAppContext) {
     init(cx);
     let snapshot = Rc::new(chat_snapshot());
-    let _group = cx.new(|cx| PaneGroup::new(&snapshot, None, Vec::new(), cx));
-    assert!(Rc::strong_count(&snapshot) > 1);
+    let group = cx.new(|cx| PaneGroup::new(&snapshot, None, Vec::new(), cx));
+    group.read_with(cx, |group, _| {
+        assert!(Rc::ptr_eq(&snapshot, group.sources().snapshot()));
+    });
 }
 
 // agmen-c7 fix-hosting-review: the status bar names the active tab by its label.

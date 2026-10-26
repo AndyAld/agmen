@@ -32,6 +32,11 @@ impl TabSources {
             snapshot: Rc::clone(snapshot),
         }
     }
+
+    #[cfg(test)]
+    pub(crate) const fn snapshot(&self) -> &Rc<Snapshot> {
+        &self.snapshot
+    }
 }
 
 /// A tab's view and the subscription to its events, dropped together.

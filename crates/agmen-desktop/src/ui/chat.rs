@@ -200,7 +200,7 @@ impl EventEmitter<RefEvent> for ChatView {}
 impl ChatView {
     /// The chat over `snapshot`, sending and acting through the
     /// [`BackendHandle`] global when there is one.
-    pub(crate) fn new(snapshot: Snapshot, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(snapshot: Rc<Snapshot>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let zone = cx
             .try_global::<LocalZone>()
             .map_or(TimeZone::UTC, |local| local.0.clone());
@@ -233,7 +233,6 @@ impl ChatView {
                 }
             })
         });
-        let snapshot = Rc::new(snapshot);
         let rows = visible_rows(&snapshot.messages, false);
         let (alerts, alert_ui) = alert_wiring::replay(&snapshot);
         let looks = Rc::new(super::needs_you::alert_looks(&alerts, &snapshot.messages));

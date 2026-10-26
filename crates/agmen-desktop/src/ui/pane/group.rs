@@ -63,6 +63,12 @@ pub(crate) struct PaneGroup {
 }
 
 impl PaneGroup {
+    /// What the tabs' views read.
+    #[cfg(test)]
+    pub(crate) fn sources(&self) -> &TabSources {
+        &self.sources
+    }
+
     /// One pane with the chat's tab active and `tabs` open after it,
     /// showing `chat` when given. A click on one of the chat's reference
     /// chips opens a tab, a ⌘-click a split.

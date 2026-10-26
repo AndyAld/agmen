@@ -33,7 +33,7 @@ fn open_with(
     init(cx);
     cx.update(bind_keys);
     let (host, cx) = cx.add_window_view(|window, cx| {
-        let chat = cx.new(|cx| ChatView::new(snapshot, window, cx));
+        let chat = cx.new(|cx| ChatView::new(std::rc::Rc::new(snapshot), window, cx));
         Host(chat)
     });
     let chat = host.read_with(cx, |host, _| host.0.clone());

@@ -324,3 +324,16 @@ fn escape_closes_an_open_settings_dropdown(cx: &mut TestAppContext) {
         "escape left the menu open"
     );
 }
+
+// agmen-c7 fix-hosting-review minor 1 and 4: the chat and the center's tab
+// views read the workspace's one snapshot, not copies of it.
+#[gpui::test]
+fn the_chat_and_the_center_share_the_workspaces_snapshot(cx: &mut TestAppContext) {
+    let (workspace, cx) = open(cx);
+    workspace.read_with(cx, |workspace, cx| {
+        let chat = workspace.chat.read(cx).snapshot();
+        assert!(std::ptr::eq(&*workspace.snapshot, chat), "chat");
+        let center = workspace.pane_group.read(cx).sources().snapshot();
+        assert!(std::rc::Rc::ptr_eq(&workspace.snapshot, center), "center");
+    });
+}

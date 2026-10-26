@@ -104,8 +104,9 @@ fn open_chat(
     let recorder = Rc::new(Recorder::default());
     let handle: Rc<dyn Backend> = recorder.clone();
     cx.update(|cx| cx.set_global(BackendHandle(handle)));
-    let (_, cx) =
-        cx.add_window_view(|window, cx| Host(cx.new(|cx| ChatView::new(snapshot, window, cx))));
+    let (_, cx) = cx.add_window_view(|window, cx| {
+        Host(cx.new(|cx| ChatView::new(std::rc::Rc::new(snapshot), window, cx)))
+    });
     redraw(cx);
     (recorder, cx)
 }
