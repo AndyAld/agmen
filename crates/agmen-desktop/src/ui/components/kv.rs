@@ -1,14 +1,14 @@
 //! Label and value rows under an uppercase heading, as in the right dock.
 
 use gpui::{
-    App, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce, SharedString,
-    Styled as _, Window, div,
+    App, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, RenderOnce,
+    SharedString, Styled as _, Window, div, px,
 };
 
 use super::{Color, Label, LabelSize, SectionHeading};
-use crate::appearance::Appearance;
+use crate::appearance::{Appearance, Fonts};
 use crate::ui::code_view::cell_width;
-use crate::ui::tokens::{KV_LABEL_WIDTH, SPACE_7, SPACE_10};
+use crate::ui::tokens::{AUTO_LINE_12, KV_LABEL_WIDTH, SPACE_7, SPACE_10, TEXT_SMALL};
 
 /// A label in a fixed column and a wrapping value in the code font. Tests
 /// find word `i` of the value as `"kv-word:{label}:{row}:{i}"`, where `row`
@@ -47,8 +47,14 @@ impl RenderOnce for KvRow {
         // break only at spaces; a word wider than the column still wraps.
         // The space is a one cell gap, which flex leaves out at a line's
         // end, so a value that fits exactly stays on one line (C219).
-        let space = cell_width(window, &cx.global::<Appearance>().fonts);
+        let fonts = &cx.global::<Appearance>().fonts;
+        let space = cell_width(window, fonts);
+        // Both columns draw 14 px lines, as the mockup's 12 px text boxes
+        // (nodes 397 and 398), and the higher baseline moves down to the
+        // other, so label and value share one at any font.
+        let shift = baseline_shift(window, fonts);
         let label = self.label.clone();
+        let label_selector = format!("kv-label:{label}:{}", self.row);
         // Runs of spaces and edge spaces draw no empty words; tabs and
         // newlines also split, since a value is one line of text (C240).
         let words = self.value.split_whitespace().enumerate().map(|(i, word)| {
@@ -57,10 +63,12 @@ impl RenderOnce for KvRow {
                 Label::new(word.to_owned())
                     .color(self.color.clone())
                     .code()
+                    .line_height(AUTO_LINE_12)
                     .wrap(),
             )
         });
         let value = div()
+            .mt((-shift).max(px(0.)))
             .flex_1()
             .min_w_0()
             .flex()
@@ -73,14 +81,32 @@ impl RenderOnce for KvRow {
             .items_start()
             .gap(SPACE_10)
             .child(
-                div().w(KV_LABEL_WIDTH).flex_none().child(
-                    Label::new(self.label)
-                        .size(LabelSize::Small)
-                        .color(Color::Placeholder),
-                ),
+                div()
+                    .debug_selector(|| label_selector)
+                    .mt(shift.max(px(0.)))
+                    .w(KV_LABEL_WIDTH)
+                    .flex_none()
+                    .child(
+                        Label::new(self.label)
+                            .size(LabelSize::Small)
+                            .line_height(AUTO_LINE_12)
+                            .color(Color::Placeholder),
+                    ),
             )
             .child(value)
     }
+}
+
+/// How far the value's first baseline sits below the label's, both in
+/// [`AUTO_LINE_12`] lines: the label is the UI font at Small and the value
+/// the code font at its own size. Negative when the label's is lower.
+fn baseline_shift(window: &Window, fonts: &Fonts) -> Pixels {
+    let text = window.text_system();
+    let ui = text.resolve_font(&window.text_style().font());
+    let code = text.resolve_font(&gpui::font(fonts.code_family.clone()));
+    let small = TEXT_SMALL.to_pixels(window.rem_size());
+    text.baseline_offset(code, fonts.code_size, AUTO_LINE_12)
+        - text.baseline_offset(ui, small, AUTO_LINE_12)
 }
 
 /// A heading and its rows.
@@ -221,6 +247,79 @@ mod tests {
         let first = cx.debug_bounds("kv-word:State:0:0").unwrap();
         assert!(first.size.width > px(0.), "{first:?}");
         assert!(cx.debug_bounds("kv-word:State:0:1").is_none());
+    }
+
+    /// Where the text inside `bounds` puts its first baseline, for a line
+    /// of `font` at `size` as tall as `line`.
+    fn baseline(
+        cx: &mut gpui::VisualTestContext,
+        bounds: gpui::Bounds<gpui::Pixels>,
+        font: &gpui::Font,
+        size: gpui::Pixels,
+        line: gpui::Pixels,
+    ) -> gpui::Pixels {
+        let text = cx.update(|window, _| window.text_system().clone());
+        bounds.top() + text.baseline_offset(text.resolve_font(font), size, line)
+    }
+
+    /// The label's and the first value word's baselines, and the word
+    /// bounds, for `value` in the right dock's column.
+    fn kv_baselines(
+        cx: &mut TestAppContext,
+        value: &'static str,
+    ) -> (gpui::Pixels, gpui::Pixels, Vec<gpui::Bounds<gpui::Pixels>>) {
+        let cx = draw(cx, move || {
+            div()
+                .w(RIGHT_DOCK_WIDTH - SPACE_14 * 2.)
+                .child(KvRow::new("Harness", value))
+                .into_any_element()
+        });
+        let label = cx.debug_bounds("kv-label:Harness:0").unwrap();
+        let words: Vec<_> = (0..)
+            .map_while(|i| {
+                cx.debug_bounds(Box::leak(format!("kv-word:Harness:0:{i}").into_boxed_str()))
+            })
+            .collect();
+        let (ui, rem) = cx.update(|window, _| (window.text_style().font(), window.rem_size()));
+        let fonts = cx.update(|_, cx| cx.global::<crate::appearance::Appearance>().fonts.clone());
+        let code = gpui::font(fonts.code_family.clone());
+        let label_line = label.size.height;
+        let first = words[0];
+        let label_at = baseline(cx, label, &ui, TEXT_SMALL.to_pixels(rem), label_line);
+        let value_at = baseline(cx, first, &code, fonts.code_size, first.size.height);
+        (label_at, value_at, words)
+    }
+
+    #[gpui::test]
+    fn kv_label_and_value_share_a_baseline(cx: &mut TestAppContext) {
+        // Nodes 397 and 398: "Harness" (UI 12) and its value (mono 12) end
+        // on one baseline. The label is Small and the value the code font's
+        // 13 px, so with each at 1.2 times its size the label sat 2 px high.
+        let (label, value, words) = kv_baselines(cx, "Codex 0.164.0 over ACP");
+        // gpui rounds layout edges to device pixels.
+        assert!((label - value).abs() < px(0.1), "{label:?} {value:?}");
+        assert_eq!(
+            words[0].size.height, AUTO_LINE_12,
+            "the mockup's 14 px line"
+        );
+    }
+
+    #[gpui::test]
+    fn a_wrapped_kv_value_keeps_the_baseline_on_its_first_line(cx: &mut TestAppContext) {
+        let (label, value, words) = kv_baselines(
+            cx,
+            "waiting for Apply: andy/fx1 lanes and budget, then the review and the merge",
+        );
+        // gpui rounds layout edges to device pixels.
+        assert!((label - value).abs() < px(0.1), "{label:?} {value:?}");
+        let last = words.last().unwrap();
+        assert!(last.top() > words[0].top(), "the value wraps");
+        // Wrapped lines advance by the mockup's 14 px.
+        let pitch = last.top() - words[0].top();
+        assert!(
+            (pitch / AUTO_LINE_12).fract().abs() < 0.001,
+            "{pitch:?} is not whole 14 px lines"
+        );
     }
 
     #[gpui::test]
