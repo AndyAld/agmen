@@ -4,7 +4,9 @@ use super::*;
 use crate::backend::Backend as _;
 use crate::backend::{FixtureBackend, Screen};
 use crate::ui::test_support::draw;
-use crate::ui::tokens::SWITCH_MENU_HEIGHT;
+use crate::ui::tokens::{
+    POPOVER_SHADOW_BLUR, POPOVER_SHADOW_OFFSET, SHADOW_ALPHA, SWITCH_MENU_HEIGHT,
+};
 
 fn agents() -> Vec<InstalledAgent> {
     FixtureBackend::for_screen(Screen::SwitchAgent)
@@ -117,4 +119,17 @@ fn menu_stays_inside_the_window_sideways() {
     let chip = Bounds::new(point(px(1300.), px(435.)), size(px(72.), px(20.)));
     let p = place_menu(chip, head(), menu(), area(872.));
     assert_eq!(p.position.x, px(1440.) - SWITCH_MENU_WIDTH);
+}
+
+#[test]
+fn menu_casts_the_popover_shadow() {
+    // Node 1802: one drop shadow, #000000aa, 8 px down, a 24 px blur, as
+    // the model picker and the toast cast.
+    let mut card = menu_card();
+    let shadows = card.style().box_shadow.clone().unwrap();
+    assert_eq!(shadows.len(), 1, "{shadows:?}");
+    assert_eq!(shadows[0].offset, point(px(0.), POPOVER_SHADOW_OFFSET));
+    assert_eq!(shadows[0].blur_radius, POPOVER_SHADOW_BLUR);
+    assert_eq!(shadows[0].spread_radius, px(0.));
+    assert!((shadows[0].color.a - SHADOW_ALPHA).abs() < 0.001);
 }

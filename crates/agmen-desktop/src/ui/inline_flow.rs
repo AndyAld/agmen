@@ -28,7 +28,7 @@ use gpui::{
     relative, size,
 };
 
-use super::tokens::LINE_HEIGHT;
+use super::tokens::{LINE_HEIGHT, SPACE_3};
 use crate::appearance::Appearance;
 
 #[path = "inline_flow_breaker.rs"]
@@ -54,12 +54,24 @@ pub(super) enum FlowItem {
 /// A line of words and chips that flows as inline text.
 pub(super) struct InlineFlow {
     items: Vec<FlowItem>,
+    line_gap: Pixels,
 }
 
 impl InlineFlow {
+    /// Lines `SPACE_3` apart, as a message body's (`rich_body`).
     #[must_use]
     pub(super) const fn new(items: Vec<FlowItem>) -> Self {
-        Self { items }
+        Self {
+            items,
+            line_gap: SPACE_3,
+        }
+    }
+
+    /// The space between lines, as none in a dialog's prose (node 2440).
+    #[must_use]
+    pub(super) const fn line_gap(mut self, gap: Pixels) -> Self {
+        self.line_gap = gap;
+        self
     }
 }
 
@@ -136,6 +148,7 @@ struct FlowState {
     segs: Vec<Seg>,
     parts: Vec<Part>,
     line_height: Pixels,
+    line_gap: Pixels,
     label: LabelFont,
     cached: Vec<(Option<Pixels>, Rc<Flow>)>,
 }
@@ -147,14 +160,18 @@ impl FlowState {
             return laid.clone();
         }
         let (segs, parts, label) = (&self.segs, &self.parts, &self.label);
-        let laid = Rc::new(flow(segs, width, self.line_height, |seg, width| {
-            match (segs.get(seg), parts.get(seg)) {
+        let laid = Rc::new(flow(
+            segs,
+            width,
+            self.line_height,
+            self.line_gap,
+            |seg, width| match (segs.get(seg), parts.get(seg)) {
                 (Some(Seg::Atom(natural)), Some(Part::Atom { label: text, .. })) => {
                     label.wrapped_height(text, *natural, width, window)
                 }
                 _ => px(0.),
-            }
-        }));
+            },
+        ));
         if self.cached.len() >= CACHED_WIDTHS {
             self.cached.remove(0);
         }
@@ -258,6 +275,7 @@ impl Element for InlineFlow {
             segs,
             parts,
             line_height,
+            line_gap: self.line_gap,
             label,
             cached: Vec::new(),
         }));

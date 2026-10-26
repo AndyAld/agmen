@@ -19,7 +19,10 @@ use super::components::{
     Button, ButtonSize, ButtonStyle, Card, ChangeHandler, Color, Label, LabelSize, MenuRow,
     SectionHeading,
 };
-use super::tokens::{BORDER_WIDTH, SPACE_4, SPACE_8, SPACE_10, SPACE_12, SWITCH_MENU_WIDTH};
+use super::tokens::{
+    BORDER_WIDTH, POPOVER_SHADOW_BLUR, POPOVER_SHADOW_OFFSET, SPACE_4, SPACE_8, SPACE_10, SPACE_12,
+    SWITCH_MENU_WIDTH, drop_shadow,
+};
 use crate::appearance::Appearance;
 use crate::backend::{AgentFound, InstalledAgent};
 
@@ -268,6 +271,20 @@ fn version_of(agent: &InstalledAgent) -> Option<&str> {
     }
 }
 
+/// The menu's card (node 1802): its rows run edge to edge, and it casts
+/// the popover's drop shadow.
+fn menu_card() -> Card {
+    Card::new()
+        .w(SWITCH_MENU_WIDTH)
+        .p_0()
+        .gap_0()
+        .overflow_hidden()
+        .shadow(vec![drop_shadow(
+            POPOVER_SHADOW_OFFSET,
+            POPOVER_SHADOW_BLUR,
+        )])
+}
+
 impl RenderOnce for SwitchMenu {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let border = cx.global::<Appearance>().theme.border;
@@ -289,12 +306,7 @@ impl RenderOnce for SwitchMenu {
              each tool's --version.",
             self.handle
         );
-        let card = Card::new()
-            .w(SWITCH_MENU_WIDTH)
-            .p_0()
-            .gap_0()
-            .overflow_hidden()
-            .shadow_lg()
+        let card = menu_card()
             .when_some(self.max_height, gpui::Styled::max_h)
             .child(
                 div()

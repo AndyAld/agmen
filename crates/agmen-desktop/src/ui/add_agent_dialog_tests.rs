@@ -123,3 +123,70 @@ fn the_generic_dialog_has_no_prompt(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("add-agent:prompt").is_none());
     assert!(cx.debug_bounds("add-agent:check").is_some());
 }
+
+#[gpui::test]
+fn prompt_wraps_at_the_mockups_measure(cx: &mut TestAppContext) {
+    // Node 2428: the prompt's set lines are at most 69 characters (node
+    // 2432), well inside the 680 px dialog, so the box wraps it in five
+    // lines there rather than at its own edge.
+    let cx = draw(cx, || {
+        div()
+            .w(crate::ui::tokens::DIALOG_WIDTH)
+            .child(AddAgentDialog::new(
+                AgentDialog::Add("grok".into()),
+                Some(agent("grok")),
+            ))
+            .into_any_element()
+    });
+    let (cell, line) = cx.update(|window, cx| {
+        let fonts = &cx.global::<Appearance>().fonts;
+        (
+            crate::ui::code_view::cell_width(window, fonts),
+            fonts.code_size * crate::ui::tokens::LINE_HEIGHT,
+        )
+    });
+    let text = cx.debug_bounds("add-agent:prompt-text").unwrap();
+    let columns = text.size.width / cell;
+    assert!((69.5..=70.5).contains(&columns), "{columns} cells");
+    let lines = text.size.height / line;
+    assert!((lines - 5.).abs() < 0.2, "{lines} lines");
+    // Three of the mockup's five breaks. No measure gives all five: the
+    // one that fits node 2432's 69 characters also fits "Do" at the end of
+    // node 2430's 66.
+    let asked = prompt(&AgentDialog::Add("grok".into()), Some(&agent("grok"))).unwrap();
+    let rows = cx.update(|window, cx| {
+        let fonts = &cx.global::<Appearance>().fonts;
+        let mut style = window.text_style();
+        style.font_family = fonts.code_family.clone();
+        let run = style.to_run(asked.len());
+        let shaped = window
+            .text_system()
+            .shape_text(
+                asked.clone().into(),
+                fonts.code_size,
+                &[run],
+                Some(text.size.width),
+                None,
+            )
+            .unwrap();
+        let mut rows = Vec::new();
+        let mut start = 0;
+        for line in shaped.iter() {
+            for boundary in &line.wrap_boundaries {
+                let run = &line.unwrapped_layout.runs[boundary.run_ix];
+                let end = run.glyphs[boundary.glyph_ix].index;
+                rows.push(asked[start..end].trim().to_owned());
+                start = end;
+            }
+        }
+        rows.push(asked[start..].trim().to_owned());
+        rows
+    });
+    assert_eq!(rows.len(), 5, "{rows:#?}");
+    assert!(rows[0].ends_with("on this machine"), "{rows:#?}");
+    assert!(rows[3].ends_with("run `grok --version`"), "{rows:#?}");
+    assert_eq!(
+        rows[4],
+        "and `agmen agents scan`, and tell me both outputs."
+    );
+}

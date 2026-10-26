@@ -216,6 +216,10 @@ pub(crate) const SWITCH_MENU_HEIGHT: Pixels = px(308.);
 pub(crate) const MENU_ROW_HEIGHT: Pixels = px(30.);
 /// The add agent dialog's card (node 2418).
 pub(crate) const DIALOG_WIDTH: Pixels = px(680.);
+/// The add agent prompt's measure, in code cells: its widest set line
+/// (node 2432, 69 characters) and the space after it, which gpui's line
+/// wrapper counts, so it wraps near the mockup's breaks.
+pub(crate) const PROMPT_COLUMNS: f32 = 70.;
 /// How far below the window's top the add agent dialog sits (node 2418 at
 /// y 120).
 pub(crate) const DIALOG_TOP: Pixels = px(120.);
@@ -260,8 +264,9 @@ pub(crate) const MODEL_PICKER_OFFSET: Point<Pixels> = Point {
 };
 /// A model row (node 3361): `MenuRow::picker`.
 pub(crate) const PICKER_ROW_HEIGHT: Pixels = px(26.);
-/// The model picker's and the toast's drop shadow (nodes 3355 and 6004):
-/// 8 px down, a 24 px blur, through [`drop_shadow`].
+/// The model picker's, the toast's and the switch menu's drop shadow
+/// (nodes 3355, 6004 and 1802): 8 px down, a 24 px blur, through
+/// [`drop_shadow`].
 pub(crate) const POPOVER_SHADOW_OFFSET: Pixels = px(8.);
 pub(crate) const POPOVER_SHADOW_BLUR: Pixels = px(24.);
 /// A selected segment in both looks (0x33): the effort row's "high" (node
