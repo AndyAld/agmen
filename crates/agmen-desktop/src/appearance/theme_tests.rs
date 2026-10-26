@@ -626,3 +626,22 @@ fn overrides_apply_to_the_marked_theme() {
     .unwrap();
     assert!(close(t.border, hex("#333333")));
 }
+
+#[test]
+fn bad_override_values_keep_the_themes_own() {
+    // Review C142: Zed keeps the theme's value for an unparsable override
+    // and treats "accents": [] as no change.
+    let mut style: serde_json::Map<String, serde_json::Value> = serde_json::from_str(
+        r##"{"border": "#123456", "text": "#654321", "accents": ["#abcdef"]}"##,
+    )
+    .unwrap();
+    let overrides = serde_json::from_str(
+        r##"{"border": "not a color", "text": null, "accents": [], "background": "#010101"}"##,
+    )
+    .unwrap();
+    super::theme::merge_style(&mut style, &overrides);
+    assert_eq!(style["border"], "#123456");
+    assert_eq!(style["text"], "#654321");
+    assert_eq!(style["accents"][0], "#abcdef");
+    assert_eq!(style["background"], "#010101", "good values still apply");
+}

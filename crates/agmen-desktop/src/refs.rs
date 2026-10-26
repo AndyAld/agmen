@@ -49,9 +49,9 @@ pub(crate) struct Span {
 /// What the console knows, to resolve hub refs and confirm git references.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Known {
-    pub(super) handles: BTreeMap<IdentityId, String>,
+    handles: BTreeMap<IdentityId, String>,
     commits: BTreeSet<String>,
-    pub(super) branches: BTreeSet<String>,
+    branches: BTreeSet<String>,
     files: BTreeSet<String>,
 }
 

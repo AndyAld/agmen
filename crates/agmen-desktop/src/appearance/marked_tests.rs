@@ -87,9 +87,13 @@ fn translucent_theme_requests_blur() {
 
 #[test]
 fn broken_state_json_warns() {
-    // Review C126.
+    // Review C126 and C139: the defaults stay, and a warning says why.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("state.json");
     fs::write(&path, "{ not json").unwrap();
-    assert!(load_wallpaper_palette(&path, wallpaper_adaptive()).is_err());
+    let mut warnings = Vec::new();
+    let t = with_wallpaper_at(Some(path), &mut warnings);
+    assert_eq!(t, wallpaper_adaptive());
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].contains("state.json"), "{warnings:?}");
 }

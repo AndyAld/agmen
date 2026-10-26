@@ -245,6 +245,8 @@ fn hub_refs(body: &str) -> Vec<Value> {
         regex::Regex::new(
             r"(?P<who>@?\b[a-z]+(?:/[a-z0-9]+)?\b)|(?P<item>\b[A-Z](?:-\d{1,6}|\d{3})\b)|(?P<lane>\bL-[A-Z]+\b)|(?P<pr>#\d+)",
         )
+        // A pattern that failed to compile would stamp no refs rather than
+        // panic; refs_find_every_kind_in_chat_fixture proves it compiles.
         .ok()
     });
     let Some(re) = WORDS.as_ref() else {

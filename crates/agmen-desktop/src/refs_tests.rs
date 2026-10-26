@@ -74,7 +74,8 @@ fn refs_find_every_kind_in_chat_fixture() {
     );
     assert_eq!(all[1][2].1, RefTarget::Agent("sean/a1".into()));
     assert_eq!(all[8][0].1, RefTarget::Person("andy".into()));
-    // Message 5 (C133).
+    // Message 5 is all[4] (C133); message 6, the ledger GRANT, is all[5] (C144).
+    assert_eq!(text(&all[5]), ["C015", "andy/fx1"]);
     assert_eq!(all[4][0].1, RefTarget::Agent("andy/fx1".into()));
     assert_eq!(
         all[4][1].1,

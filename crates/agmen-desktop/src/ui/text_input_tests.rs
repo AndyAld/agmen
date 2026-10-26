@@ -245,9 +245,9 @@ fn layout_uses_the_inherited_font(cx: &mut TestAppContext) {
     input.update_in(cx, |input, window, cx| input.set_text("abc", window, cx));
     cx.run_until_parked();
     input.read_with(cx, |input, _| {
-        assert!(input.cached_fonts().next().is_some());
-        for font in input.cached_fonts() {
-            assert_eq!(font.family.as_ref(), ".ZedMono", "every cached layout");
+        assert!(!input.cache.is_empty());
+        for key in &input.cache {
+            assert_eq!(key.font.family.as_ref(), ".ZedMono", "every cached layout");
         }
     });
 }

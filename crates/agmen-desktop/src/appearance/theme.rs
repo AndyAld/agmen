@@ -350,7 +350,21 @@ pub(crate) fn merge_style(style: &mut Map<String, Value>, overrides: &Map<String
                 }
             }
             _ => {
-                style.insert(key.clone(), value.clone());
+                // Zed keeps the theme's own value when the override does not
+                // parse, and treats an empty accents list as no change (C142).
+                let unusable = match value {
+                    Value::Null => true,
+                    Value::String(text) => {
+                        style.get(key).is_some_and(|v| {
+                            v.as_str().and_then(|s| Rgba::try_from(s).ok()).is_some()
+                        }) && Rgba::try_from(text.as_str()).is_err()
+                    }
+                    Value::Array(list) => key == "accents" && list.is_empty(),
+                    _ => false,
+                };
+                if !unusable {
+                    style.insert(key.clone(), value.clone());
+                }
             }
         }
     }

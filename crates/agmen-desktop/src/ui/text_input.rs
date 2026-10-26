@@ -436,12 +436,6 @@ impl Shaping {
 }
 
 impl TextInput {
-    /// The fonts of the cached layouts, for tests.
-    #[cfg(test)]
-    pub(super) fn cached_fonts(&self) -> impl Iterator<Item = &Font> {
-        self.cache.iter().map(|key| &key.font)
-    }
-
     /// The layout for `width` (`None` for one line), shaped only when the
     /// text, width, font or composition changed since the last call.
     fn layout_for(
@@ -453,11 +447,7 @@ impl TextInput {
     ) -> Option<Rc<TextLayout>> {
         let (font_size, line_height) = (shaping.font_size, shaping.line_height);
         let empty = self.buffer.text().is_empty();
-        let drawn = if empty {
-            cx.global::<Appearance>().theme.text_placeholder
-        } else {
-            shaping.color
-        };
+        let drawn = drawn_color(self, cx, shaping.color);
         let marked = self.buffer.marked();
         if let Some(key) = self.cache.iter().find(|key| {
             key.text == self.buffer.text()
@@ -817,11 +807,21 @@ struct AreaPaint {
 
 /// The text to shape and its color: the placeholder while empty.
 fn display(input: &TextInput, cx: &App, color: Hsla) -> (SharedString, Hsla) {
-    let theme = &cx.global::<Appearance>().theme;
+    let drawn = drawn_color(input, cx, color);
     if input.buffer.text().is_empty() {
-        (input.placeholder.clone(), theme.text_placeholder)
+        (input.placeholder.clone(), drawn)
     } else {
-        (input.buffer.text().to_owned().into(), color)
+        (input.buffer.text().to_owned().into(), drawn)
+    }
+}
+
+/// The color the input draws its text in: the placeholder's while empty.
+/// The layout cache keys on this, so the two never drift apart (C141).
+fn drawn_color(input: &TextInput, cx: &App, color: Hsla) -> Hsla {
+    if input.buffer.text().is_empty() {
+        cx.global::<Appearance>().theme.text_placeholder
+    } else {
+        color
     }
 }
 

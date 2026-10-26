@@ -127,8 +127,13 @@ fn state_path() -> Option<PathBuf> {
 /// Marked's palette with the wallpaper utility's current colors over it. A
 /// palette file that cannot be read leaves the defaults and a warning.
 pub(crate) fn with_wallpaper(warnings: &mut Vec<String>) -> Theme {
+    with_wallpaper_at(state_path(), warnings)
+}
+
+/// [`with_wallpaper`] with the state file's path given.
+pub(crate) fn with_wallpaper_at(path: Option<PathBuf>, warnings: &mut Vec<String>) -> Theme {
     let base = wallpaper_adaptive();
-    let Some(path) = state_path() else {
+    let Some(path) = path else {
         return base;
     };
     match load_wallpaper_palette(&path, base.clone()) {
