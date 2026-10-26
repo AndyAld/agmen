@@ -16,8 +16,8 @@ use super::components::{Chip, Color, IconButton, IconSize, Label, LabelSize};
 use super::model_picker::{ModelMenu, PickerEvent};
 use super::text_input::{TextInput, TextInputEvent};
 use super::tokens::{
-    BORDER_WIDTH, MODEL_PICKER_OFFSET, RADIUS_INPUT, SPACE_8, SPACE_10, SPACE_12, SPACE_14,
-    TEXT_DEFAULT,
+    AUTO_LINE_13, BORDER_WIDTH, MODEL_PICKER_OFFSET, RADIUS_INPUT, SPACE_8, SPACE_10, SPACE_12,
+    SPACE_14, TEXT_DEFAULT,
 };
 use crate::appearance::Appearance;
 use crate::backend::{BackendError, Draft, Snapshot};
@@ -180,6 +180,7 @@ impl Composer {
     ) -> Self {
         let input = cx.new(|cx| {
             TextInput::new(cx)
+                .line_height(AUTO_LINE_13)
                 .placeholder(placeholder)
                 .multiline(MAX_INPUT_LINES)
         });
@@ -487,6 +488,7 @@ impl Render for Composer {
             .pb(SPACE_12)
             .child(
                 div()
+                    .debug_selector(|| "composer:box".into())
                     .w_full()
                     .flex()
                     .items_center()

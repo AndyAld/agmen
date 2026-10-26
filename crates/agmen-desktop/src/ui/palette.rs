@@ -8,14 +8,14 @@ use gpui::{
     Action, AnyElement, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
     InteractiveElement as _, IntoElement, ListSizingBehavior, ParentElement as _, Render,
     ScrollStrategy, SharedString, Styled as _, Subscription, UniformListScrollHandle, Window, div,
-    relative, uniform_list,
+    uniform_list,
 };
 
 use super::components::{Card, Color, HighlightedLabel, Icon, Indent, KeyHint, Label, ListItem};
 use super::palette_filter::{Match, filter};
 use super::text_input::TextInput;
 use super::tokens::{
-    BORDER_WIDTH, LINE_HEIGHT, PALETTE_INPUT_HEIGHT, PALETTE_MAX_HEIGHT, PALETTE_ROW_HEIGHT,
+    BORDER_WIDTH, PALETTE_INPUT_HEIGHT, PALETTE_INPUT_LINE, PALETTE_MAX_HEIGHT, PALETTE_ROW_HEIGHT,
     PALETTE_WIDTH, RADIUS_MD, SPACE_4, SPACE_8, SPACE_14, TEXT_DEFAULT,
 };
 use crate::appearance::Appearance;
@@ -113,7 +113,11 @@ impl CommandPalette {
         cx: &mut Context<Self>,
     ) -> Self {
         entries.truncate(MAX_ENTRIES);
-        let input = cx.new(|cx| TextInput::new(cx).placeholder("Run a command\u{2026}"));
+        let input = cx.new(|cx| {
+            TextInput::new(cx)
+                .placeholder("Run a command\u{2026}")
+                .line_height(PALETTE_INPUT_LINE)
+        });
         let input_changes = cx.observe(&input, |this, input, cx| {
             let text = input.read(cx).text();
             if text != this.query {
@@ -282,7 +286,6 @@ impl Render for CommandPalette {
             .border_color(border)
             // The input shapes text at the inherited size (critic 9, V78).
             .text_size(TEXT_DEFAULT)
-            .line_height(relative(LINE_HEIGHT))
             .child(Icon::new(UiIcon::Search).color(Color::Placeholder))
             .child(div().flex_1().min_w_0().child(self.input.clone()));
         div()

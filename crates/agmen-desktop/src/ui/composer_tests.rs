@@ -5,9 +5,9 @@ use gpui::{TestAppContext, VisualTestContext};
 
 use super::*;
 use crate::backend::{BackendError, chat_snapshot};
-use crate::ui::test_support::{click, init};
+use crate::ui::test_support::{click, init, redraw};
 use crate::ui::text_input::bind_keys;
-use crate::ui::tokens::MOCKUP_REM;
+use crate::ui::tokens::{AUTO_LINE_13, MOCKUP_REM};
 
 type Sent = Rc<RefCell<Vec<Draft>>>;
 
@@ -185,8 +185,9 @@ fn mention_handle_reads_the_leading_token() {
     assert_eq!(mention_handle(""), None);
 }
 
-#[gpui::test]
-fn direct_composer_sends_to_its_agent(cx: &mut TestAppContext) {
+/// A focused DM composer for andy/fx1 (node 650) whose sends land in
+/// `Sent`.
+fn open_direct(cx: &mut TestAppContext) -> (Entity<Composer>, Sent, &mut VisualTestContext) {
     init(cx);
     cx.update(bind_keys);
     let sent = Sent::default();
@@ -213,6 +214,44 @@ fn direct_composer_sends_to_its_agent(cx: &mut TestAppContext) {
         composer.input.focus_handle(cx).focus(window, cx);
     });
     cx.run_until_parked();
+    (composer, sent, cx)
+}
+
+#[gpui::test]
+fn the_input_row_is_the_mockups_16_px_line(cx: &mut TestAppContext) {
+    // Node 650: padding 8, a 16 px line for SF 13 and a 1 px border, 34 px
+    // in all. With no line height set, gpui's default of 1.618 times the
+    // size made the row 21 px and the box 39.
+    let (composer, _, cx) = open_direct(cx);
+    redraw(cx);
+    let input = cx.debug_bounds("composer:input").unwrap();
+    assert_eq!(input.size.height, AUTO_LINE_13);
+    let frame = cx.debug_bounds("composer:box").unwrap();
+    assert_eq!(
+        frame.size.height,
+        AUTO_LINE_13 + SPACE_8 * 2. + BORDER_WIDTH * 2.
+    );
+    let caret = composer.read_with(cx, |c, cx| c.input.read(cx).last_cursor.unwrap());
+    assert_eq!(caret.size.height, AUTO_LINE_13);
+    // Typed text keeps the same line.
+    cx.simulate_input("rebase first");
+    redraw(cx);
+    let input = cx.debug_bounds("composer:input").unwrap();
+    assert_eq!(input.size.height, AUTO_LINE_13);
+}
+
+#[gpui::test]
+fn the_chat_composers_input_row_is_the_mockups_16_px_line(cx: &mut TestAppContext) {
+    // Node 384: the placeholder beside the chips is a 16 px line too.
+    let (_, _, cx) = open_composer(cx);
+    redraw(cx);
+    let input = cx.debug_bounds("composer:input").unwrap();
+    assert_eq!(input.size.height, AUTO_LINE_13);
+}
+
+#[gpui::test]
+fn direct_composer_sends_to_its_agent(cx: &mut TestAppContext) {
+    let (composer, sent, cx) = open_direct(cx);
     composer.read_with(cx, |composer, cx| {
         assert_eq!(composer.target(cx).handle, "andy/fx1");
     });

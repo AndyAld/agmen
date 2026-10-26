@@ -38,12 +38,19 @@ pub(crate) const TEXT_XSMALL: Rems = rems_from_px(10.);
 /// wrapped values advance 14 px at 12 px).
 pub(crate) const LINE_HEIGHT: f32 = 1.2;
 
-// console.py's auto line heights between an agent's tool cards (V108,
-// V113): 14 px for an output row's 12 px code, 16 px for the 13 px Say
-// text, 13 px for the 11 px cost line.
-pub(crate) const AGENT_OUT_LINE: Pixels = px(14.);
-pub(crate) const AGENT_SAY_LINE: Pixels = px(16.);
-pub(crate) const AGENT_COST_LINE: Pixels = px(13.);
+// console.py's auto line heights: a text box is 13 px tall for 11 px
+// text, 14 px for 12 px and 16 px for 13 px, in SF Pro Text and the code
+// font alike. Text the mockup draws at those sizes takes these, not
+// LINE_HEIGHT times its rem size.
+pub(crate) const AUTO_LINE_11: Pixels = px(13.);
+pub(crate) const AUTO_LINE_12: Pixels = px(14.);
+pub(crate) const AUTO_LINE_13: Pixels = px(16.);
+
+// The same lines between an agent's tool cards (V108, V113): an output
+// row's 12 px code, the 13 px Say text and the 11 px cost line.
+pub(crate) const AGENT_OUT_LINE: Pixels = AUTO_LINE_12;
+pub(crate) const AGENT_SAY_LINE: Pixels = AUTO_LINE_13;
+pub(crate) const AGENT_COST_LINE: Pixels = AUTO_LINE_11;
 
 // Bars and docks.
 pub(crate) const TITLE_BAR_HEIGHT: Pixels = px(38.);
@@ -282,6 +289,9 @@ pub(crate) const PALETTE_WIDTH: Pixels = px(600.);
 pub(crate) const PALETTE_TOP: Pixels = px(64.);
 /// The query row, with its 1 px rule (node 11474).
 pub(crate) const PALETTE_INPUT_HEIGHT: Pixels = px(39.);
+/// The query's line, which its caret fills: 18 px (node 11481), a little
+/// taller than the 17 px box of the 14 px text beside it.
+pub(crate) const PALETTE_INPUT_LINE: Pixels = px(18.);
 /// A palette row (node 11483).
 pub(crate) const PALETTE_ROW_HEIGHT: Pixels = px(30.);
 /// The list scrolls past this: Zed's modal limit of 24 rem at 15 px.

@@ -6,6 +6,7 @@ use gpui::{Entity, TestAppContext, VisualTestContext};
 use super::*;
 use crate::keymap::{OpenSettings, Quit, SpawnWorkerWith, ToggleLeftDock};
 use crate::ui::test_support::{click, init, redraw};
+use crate::ui::tokens::PALETTE_INPUT_LINE;
 
 type Events = Rc<RefCell<Vec<String>>>;
 
@@ -160,4 +161,13 @@ fn set_query_refilters(cx: &mut TestAppContext) {
         ]
     );
     palette.read_with(cx, |p, _| assert_eq!(p.query(), "spawn worker with "));
+}
+
+#[gpui::test]
+fn the_query_caret_is_the_mockups_18_px(cx: &mut TestAppContext) {
+    // Node 11481: a 2 by 18 caret in the 39 px query row. The input took
+    // the row's 1.2 line, 16 px at a 15 px rem.
+    let (palette, _, cx) = open(cx);
+    let caret = palette.read_with(cx, |p, cx| p.input.read(cx).last_cursor.unwrap());
+    assert_eq!(caret.size.height, PALETTE_INPUT_LINE);
 }

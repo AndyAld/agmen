@@ -19,6 +19,8 @@ use gpui::{
     UnderlineStyle, Window, WrappedLine, actions, div, fill, point, px, relative, size,
 };
 
+use gpui::prelude::FluentBuilder as _;
+
 use super::text_edit::TextBuffer;
 use crate::appearance::Appearance;
 
@@ -72,6 +74,9 @@ pub(crate) struct TextInput {
     placeholder: SharedString,
     /// 1 for a single line; more lets the text wrap and grow to that many.
     max_lines: usize,
+    /// The line the input measures, shapes and draws its caret with; `None`
+    /// takes the enclosing text style's.
+    line_height: Option<Pixels>,
     layout: Option<Rc<TextLayout>>,
     /// The last few shaped layouts and what each was shaped for: layout
     /// asks with the measured width and paint with the final one.
@@ -101,6 +106,7 @@ impl TextInput {
             buffer: TextBuffer::default(),
             placeholder: SharedString::default(),
             max_lines: 1,
+            line_height: None,
             layout: None,
             cache: Vec::new(),
             #[cfg(test)]
@@ -132,6 +138,14 @@ impl TextInput {
     #[must_use]
     pub(crate) fn multiline(mut self, max_lines: usize) -> Self {
         self.max_lines = max_lines.max(1);
+        self
+    }
+
+    /// Sets the input's own line height, so its rows, its caret and its
+    /// height follow it whatever its ancestors set.
+    #[must_use]
+    pub(crate) const fn line_height(mut self, height: Pixels) -> Self {
+        self.line_height = Some(height);
         self
     }
 
@@ -718,6 +732,8 @@ impl Render for TextInput {
         div()
             .flex()
             .flex_1()
+            // The text area reads its line from the style in effect.
+            .when_some(self.line_height, |this, height| this.line_height(height))
             .key_context(crate::keymap::TEXT_INPUT_CONTEXT)
             .track_focus(&self.focus_handle)
             .cursor(CursorStyle::IBeam)
