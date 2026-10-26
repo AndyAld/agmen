@@ -12,13 +12,13 @@ use gpui::{
 };
 
 use super::components::{
-    Card, Color, HighlightedLabel, Icon, Indent, KeyHint, Label, LabelSize, ListItem,
+    Card, Color, HighlightedLabel, Icon, IconSize, Indent, KeyHint, Label, LabelSize, ListItem,
 };
 use super::palette_filter::{Match, filter};
 use super::text_input::TextInput;
 use super::tokens::{
-    BORDER_WIDTH, PALETTE_INPUT_HEIGHT, PALETTE_INPUT_LINE, PALETTE_MAX_HEIGHT, PALETTE_QUERY_TEXT,
-    PALETTE_ROW_HEIGHT, PALETTE_WIDTH, RADIUS_MD, SPACE_4, SPACE_8, SPACE_14,
+    BORDER_WIDTH, ICON_MD, ICON_SM, PALETTE_INPUT_HEIGHT, PALETTE_INPUT_LINE, PALETTE_MAX_HEIGHT,
+    PALETTE_QUERY_TEXT, PALETTE_ROW_HEIGHT, PALETTE_WIDTH, RADIUS_MD, SPACE_4, SPACE_8, SPACE_14,
 };
 use crate::appearance::Appearance;
 use crate::icons::UiIcon;
@@ -306,7 +306,20 @@ impl Render for CommandPalette {
             .border_color(border)
             // The input shapes text at the inherited size (critic 9, V78).
             .text_size(PALETTE_QUERY_TEXT)
-            .child(Icon::new(UiIcon::Search).color(Color::Placeholder))
+            // Node 11475: Lucide's glyph spans 20 of its 24 units, so at
+            // 12 px it draws the node's 10 px ring and handle, inset to
+            // keep the node's 14 px box.
+            .child(
+                div()
+                    .debug_selector(|| "command-palette:search".into())
+                    .flex_none()
+                    .p((ICON_MD - ICON_SM) / 2.)
+                    .child(
+                        Icon::new(UiIcon::Search)
+                            .size(IconSize::Small)
+                            .color(Color::Placeholder),
+                    ),
+            )
             .child(div().flex_1().min_w_0().child(self.input.clone()));
         div()
             .debug_selector(|| "command-palette".into())

@@ -6,7 +6,9 @@ use gpui::{Entity, Rems, TestAppContext, VisualTestContext, px};
 use super::*;
 use crate::keymap::{OpenSettings, Quit, SpawnWorkerWith, ToggleLeftDock};
 use crate::ui::test_support::{click, init, redraw};
-use crate::ui::tokens::{MOCKUP_REM, PALETTE_INPUT_LINE, PALETTE_QUERY_TEXT, TEXT_DEFAULT};
+use crate::ui::tokens::{
+    ICON_MD, MOCKUP_REM, PALETTE_INPUT_LINE, PALETTE_QUERY_TEXT, TEXT_DEFAULT,
+};
 
 type Events = Rc<RefCell<Vec<String>>>;
 
@@ -229,4 +231,15 @@ fn a_row_with_a_note_draws_it_at_the_end(cx: &mut TestAppContext) {
         .expect("the agy row's note");
     assert!(row.contains(&note.center()), "{note:?} in {row:?}");
     assert!(note.center().x > row.center().x, "at the row's end");
+}
+
+#[gpui::test]
+fn the_search_glyph_fills_the_mockups_box(cx: &mut TestAppContext) {
+    // Node 11475: a 14 px box whose ring and handle span about 10 px.
+    // Lucide's glyph spans 20 of its 24 units, so it draws at 12 px,
+    // inset to keep the box; at 14 px it drew about 2 px larger.
+    let (_, _, cx) = open(cx);
+    let slot = cx.debug_bounds("command-palette:search").unwrap();
+    assert_eq!(slot.size.width, ICON_MD);
+    assert_eq!(slot.size.height, ICON_MD);
 }
