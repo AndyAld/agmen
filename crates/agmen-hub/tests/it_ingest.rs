@@ -379,18 +379,17 @@ async fn it_rate_limit_retryable() {
         let _messaging = ctx.hub.start_messaging().await;
         let mut sol = Agent::connect(&ctx, &room.project, &room.sol).await;
 
-        let started = std::time::Instant::now();
-        for _ in 0..40 {
+        // The limiter judges each message when the hub ingests it, at a
+        // burst of 30 and 10 per second after. However slowly the hub works
+        // through these, under 5 s it admits at most 30 + 10 * 5 = 80, so
+        // at least one is limited without a clock assert.
+        const SENT: i64 = 80;
+        for _ in 0..SENT {
             sol.send(&fyi(&ulid())).await;
         }
-        assert!(
-            started.elapsed() < Duration::from_secs(1),
-            "{:?}",
-            started.elapsed()
-        );
         let mut acked = 0;
         let mut limited = 0;
-        for _ in 0..40 {
+        for _ in 0..SENT {
             match sol.reply().await {
                 DeliveryReply::Ack { .. } => acked += 1,
                 DeliveryReply::Nack {
@@ -403,10 +402,8 @@ async fn it_rate_limit_retryable() {
             }
         }
         assert!(limited >= 1, "nothing was rate limited");
-        assert!(
-            (30..40).contains(&acked),
-            "{acked} acked, {limited} limited"
-        );
+        assert!(acked >= 30, "{acked} acked, {limited} limited");
+        assert_eq!(acked + limited, SENT);
         assert_eq!(stored_from(&ctx, &room.sol.id).await, acked);
     })
     .await;
