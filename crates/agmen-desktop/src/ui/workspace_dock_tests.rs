@@ -81,6 +81,51 @@ fn opening_a_role_shows_its_file_tab_and_role_panel(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("agent-panel").is_none());
 }
 
+fn shown_role(workspace: &Entity<Workspace>, cx: &VisualTestContext) -> Option<String> {
+    workspace.read_with(cx, |w, _| {
+        w.left.shown_role.as_ref().map(|r| r.name.clone())
+    })
+}
+
+// Andy, 2026-10-26: the Role panel closes with its role file's tab.
+#[gpui::test]
+fn closing_a_role_file_tab_shows_the_listener_panel(cx: &mut TestAppContext) {
+    let (workspace, cx) = open(cx);
+    click(cx, "tab-roles");
+    click(cx, "role:engineer");
+    assert!(cx.debug_bounds("role-panel").is_some());
+    cx.simulate_keystrokes("cmd-w");
+    redraw(cx);
+    assert_ne!(
+        active_item(&workspace, cx),
+        Some(TabItem::RoleFile("engineer".into()))
+    );
+    assert_eq!(shown_role(&workspace, cx), None);
+    assert!(cx.debug_bounds("role-panel").is_none());
+    assert!(cx.debug_bounds("listener-panel").is_some());
+}
+
+// Closing one role's tab while another role's tab becomes active shows
+// that role's panel.
+#[gpui::test]
+fn closing_a_role_file_tab_shows_the_now_active_roles_panel(cx: &mut TestAppContext) {
+    let (workspace, cx) = open(cx);
+    click(cx, "tab-roles");
+    click(cx, "role:reviewer");
+    click(cx, "role:engineer");
+    assert_eq!(shown_role(&workspace, cx).as_deref(), Some("engineer"));
+    cx.simulate_keystrokes("cmd-w");
+    redraw(cx);
+    assert_eq!(
+        active_item(&workspace, cx),
+        Some(TabItem::RoleFile("reviewer".into())),
+        "the reviewer's tab follows the engineer's"
+    );
+    assert_eq!(shown_role(&workspace, cx).as_deref(), Some("reviewer"));
+    assert!(cx.debug_bounds("role-panel").is_some());
+    assert!(cx.debug_bounds("listener-panel").is_none());
+}
+
 #[gpui::test]
 fn opening_a_project_file_opens_its_tab(cx: &mut TestAppContext) {
     let (workspace, cx) = open(cx);

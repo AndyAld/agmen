@@ -23,10 +23,12 @@ use crate::ui::tokens::{BORDER_WIDTH, TAB_BAR_HEIGHT};
 pub(super) const MAX_TABS: usize = 32;
 
 /// What a pane tells its group.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PaneEvent {
     /// The person clicked in the pane.
     Focused,
+    /// This tab closed, or made room for a new one.
+    Closed(TabItem),
     /// The last tab closed.
     Emptied,
 }
@@ -105,10 +107,11 @@ impl Pane {
                 .enumerate()
                 .position(|(i, tab)| i != active && *tab != TabItem::Chat);
             if let Some(oldest) = oldest {
-                self.tabs.remove(oldest);
+                let closed = self.tabs.remove(oldest);
                 if oldest < self.active {
                     self.active -= 1;
                 }
+                cx.emit(PaneEvent::Closed(closed));
             }
         }
         let at = if self.tabs.is_empty() {
@@ -136,11 +139,12 @@ impl Pane {
         if self.tabs.get(index).is_none_or(|tab| *tab == TabItem::Chat) {
             return;
         }
-        self.tabs.remove(index);
+        let closed = self.tabs.remove(index);
         if index < self.active || self.active >= self.tabs.len() {
             self.active = self.active.saturating_sub(1);
         }
         cx.notify();
+        cx.emit(PaneEvent::Closed(closed));
         if self.tabs.is_empty() {
             cx.emit(PaneEvent::Emptied);
         }

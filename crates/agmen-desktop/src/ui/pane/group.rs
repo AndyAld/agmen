@@ -4,8 +4,8 @@ use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, Styled as _,
-    Subscription, Window, div,
+    App, AppContext as _, Context, Entity, EventEmitter, IntoElement, ParentElement as _, Render,
+    Styled as _, Subscription, Window, div,
 };
 
 use super::item::TabItem;
@@ -36,6 +36,13 @@ pub(crate) enum SplitError {
     OtherDirection,
 }
 
+/// What the center tells the workspace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PaneGroupEvent {
+    /// A pane closed this tab, or closed it to make room for a new one.
+    TabClosed(TabItem),
+}
+
 /// A pane and the subscription to its events, dropped together.
 #[derive(Debug)]
 struct Member {
@@ -61,6 +68,8 @@ pub(crate) struct PaneGroup {
     /// What the tabs' views read.
     sources: Rc<TabSources>,
 }
+
+impl EventEmitter<PaneGroupEvent> for PaneGroup {}
 
 impl PaneGroup {
     /// What the tabs' views read.
@@ -111,6 +120,13 @@ impl PaneGroup {
     /// The center's chat (Task 18: the palette sends spawn requests in it).
     pub(crate) fn chat(&self) -> Option<&Entity<ChatView>> {
         self.chat.as_ref()
+    }
+
+    /// Whether any pane has a tab for `item`.
+    pub(crate) fn holds(&self, item: &TabItem, cx: &App) -> bool {
+        self.members
+            .iter()
+            .any(|m| m.pane.read(cx).tabs().contains(item))
     }
 
     /// The pane with a Chat tab, if one has it.
@@ -250,8 +266,9 @@ impl PaneGroup {
         let Some(index) = self.members.iter().position(|m| m.pane == pane) else {
             return;
         };
-        match *event {
+        match event {
             PaneEvent::Focused => self.active = index,
+            PaneEvent::Closed(item) => cx.emit(PaneGroupEvent::TabClosed(item.clone())),
             PaneEvent::Emptied => {
                 // The last pane stays.
                 if self.members.len() > 1 {

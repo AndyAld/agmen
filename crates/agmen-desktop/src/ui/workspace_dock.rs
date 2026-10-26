@@ -29,7 +29,7 @@ pub(crate) struct LeftDockState {
     pub(super) git: Entity<GitPanel>,
     pub(super) roles: Entity<RolesPanel>,
     /// The role whose panel the right dock shows, set by a Roles click and
-    /// cleared when the selection changes.
+    /// cleared when the selection changes or its tab closes.
     pub(super) shown_role: Option<RoleFile>,
     _events: [Subscription; 3],
 }
@@ -126,6 +126,38 @@ impl Workspace {
         self.right_dock.open();
         let item = TabItem::RoleFile(name.to_owned());
         self.pane_group.update(cx, |group, cx| group.open(item, cx));
+        cx.notify();
+    }
+
+    /// Andy, 2026-10-26: the Role panel closes with its role file's tab.
+    /// When no pane still shows that tab, the right dock shows the now
+    /// active tab's role, if it is a role file, or else the Listener panel
+    /// (opening a role cleared the agent selection).
+    pub(super) fn tab_closed(&mut self, item: &TabItem, cx: &mut Context<Self>) {
+        let TabItem::RoleFile(name) = item else {
+            return;
+        };
+        if self
+            .left
+            .shown_role
+            .as_ref()
+            .is_none_or(|role| role.name != *name)
+        {
+            return;
+        }
+        let group = self.pane_group.read(cx);
+        if group.holds(item, cx) {
+            return;
+        }
+        self.left.shown_role = match group.active_item(cx) {
+            Some(TabItem::RoleFile(active)) => self
+                .snapshot
+                .roles
+                .iter()
+                .find(|r| r.name == active)
+                .cloned(),
+            _ => None,
+        };
         cx.notify();
     }
 

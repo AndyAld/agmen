@@ -11,7 +11,7 @@ use gpui::{
 use super::agents_panel::{AgentsPanel, AgentsPanelEvent};
 use super::chat::ChatView;
 use super::dock::{Dock, DockSide, LeftDockTabs};
-use super::pane::{PaneGroup, TabItem};
+use super::pane::{PaneGroup, PaneGroupEvent, TabItem};
 use super::status_bar::StatusBar;
 use super::title_bar::TitleBar;
 use super::tokens::{BORDER_WIDTH, LEFT_DOCK_WIDTH, RIGHT_DOCK_WIDTH};
@@ -69,6 +69,8 @@ pub(crate) struct Workspace {
     /// Task 19: the planning room's views, when the project has a plan.
     plan: plan_wiring::PlanWiring,
     _agents_events: Subscription,
+    /// Closes the Role panel with its role file's tab.
+    _pane_events: Subscription,
     // Task 13: the status bar's counts and the toast come from the chat;
     // Task 14: it also holds the take-over terminal.
     chat: Entity<ChatView>,
@@ -95,6 +97,9 @@ impl Workspace {
         });
         let tabs = starting_tabs(&snapshot);
         let pane_group = cx.new(|cx| PaneGroup::new(&snapshot, Some(chat.clone()), tabs, cx));
+        let pane_events = cx.subscribe(&pane_group, |this, _, event, cx| match event {
+            PaneGroupEvent::TabClosed(item) => this.tab_closed(item, cx),
+        });
         let left = LeftDockState::new(&snapshot, cx);
         let plan = plan_wiring::PlanWiring::new(&snapshot, cx);
         Self {
@@ -109,6 +114,7 @@ impl Workspace {
             palette: palette::PaletteState::default(),
             plan,
             _agents_events: agents_events,
+            _pane_events: pane_events,
             chat,
             _chat_changes: chat_changes,
         }
