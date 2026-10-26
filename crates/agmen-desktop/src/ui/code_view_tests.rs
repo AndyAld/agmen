@@ -138,3 +138,24 @@ fn line_one_shows_deletions_above_and_below(cx: &mut TestAppContext) {
     let below = cx.debug_bounds("gutter:1:deleted").unwrap();
     assert!(above.top() < below.top(), "{above:?} {below:?}");
 }
+
+fn number_column_width(cx: &mut TestAppContext, code_size: f32) -> gpui::Pixels {
+    init(cx);
+    cx.update(|cx| {
+        let mut appearance = cx.global::<crate::appearance::Appearance>().clone();
+        appearance.fonts.code_size = gpui::px(code_size);
+        cx.set_global(appearance);
+    });
+    let (_, cx) = cx.add_window_view(|_, _| CodeView::new(MAIN_RS, Language::Rust, Vec::new()));
+    redraw(cx);
+    cx.debug_bounds("line:10:number").unwrap().size.width
+}
+
+#[gpui::test]
+fn line_numbers_fit_the_code_font(cx: &mut TestAppContext) {
+    // Task 11 found "10" drawn as "l0" at the default 15 px code font: the
+    // number column used a fixed 7.62 px cell instead of the font's digits.
+    let small = number_column_width(cx, 10.);
+    let large = number_column_width(cx, 30.);
+    assert!(large > small * 2., "{small:?} {large:?}");
+}

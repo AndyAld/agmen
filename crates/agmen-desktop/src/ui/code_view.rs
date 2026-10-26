@@ -8,7 +8,7 @@ use std::rc::Rc;
 
 use gpui::{
     App, Context, HighlightStyle, Hsla, InteractiveElement as _, IntoElement, ParentElement as _,
-    Render, SharedString, Styled as _, StyledText, Window, div, uniform_list,
+    Pixels, Render, SharedString, Styled as _, StyledText, Window, div, uniform_list,
 };
 
 use super::syntax::{self, Language};
@@ -153,7 +153,7 @@ fn render_line(
     ix: usize,
     line: &Line,
     marks: &[GutterMark],
-    digits: usize,
+    number_width: Pixels,
     cx: &App,
 ) -> gpui::AnyElement {
     let appearance = cx.global::<Appearance>();
@@ -186,11 +186,6 @@ fn render_line(
         .h_full()
         .children(fill)
         .children(deleted);
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "a line count's digit count is tiny"
-    )]
-    let number_width = MONO_CELL_WIDTH * digits as f32;
     div()
         .debug_selector(move || format!("line:{number}"))
         .h(MONO_CELL_HEIGHT)
@@ -202,6 +197,7 @@ fn render_line(
         .gap(SPACE_10)
         .child(
             div()
+                .debug_selector(move || format!("line:{number}:number"))
                 .w(number_width)
                 .flex_none()
                 .flex()
@@ -224,11 +220,25 @@ fn render_line(
         .into_any_element()
 }
 
+/// The code font's digit width, so line numbers fit at any size; the
+/// mockup's 7.62 px cell when the font cannot be measured.
+fn digit_width(window: &Window, fonts: &crate::appearance::Fonts) -> Pixels {
+    let text = window.text_system();
+    let font_id = text.resolve_font(&gpui::font(fonts.code_family.clone()));
+    text.advance(font_id, fonts.code_size, '0')
+        .map_or(MONO_CELL_WIDTH, |size| size.width)
+}
+
 impl Render for CodeView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let appearance = cx.global::<Appearance>();
         let fonts = &appearance.fonts;
         let digits = self.lines.len().max(1).to_string().len().max(2);
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a line count's digit count is tiny"
+        )]
+        let number_width = digit_width(window, fonts) * digits as f32;
         let (lines, marks) = (self.lines.clone(), self.marks.clone());
         div()
             .size_full()
@@ -246,7 +256,7 @@ impl Render for CodeView {
                         .filter_map(|ix| {
                             lines
                                 .get(ix)
-                                .map(|line| render_line(ix, line, &marks, digits, cx))
+                                .map(|line| render_line(ix, line, &marks, number_width, cx))
                         })
                         .collect::<Vec<_>>()
                 })

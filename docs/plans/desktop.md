@@ -257,7 +257,7 @@ Screens: `desktop-agent`, `desktop-role-file`.
 
 ### Task 11: Project panel and file view
 
-- [ ] Done
+- [x] Done by a subagent (24c1acc, merged at 2c2db0b). As built: `ProjectPanel::new(worktrees, Vec<ScopeOption>, cx)` emits `OpenFile { worktree, path }`; `FileView::new(&WorktreeInfo, path, cx)` is the file tab (breadcrumb, CodeView, a Diff button that does nothing yet). `ScopeChip` (`ui/scope_chip.rs`) is shared with the Git panel; `scope_chip::branch_label` is the one reader of a worktree's head. Fix 50 is in (app.rs; main.rs's deletion marks after lines 1, 3 and 4). Differences kept: the tree sorts folders first and then names without case, as Zed does, not console.py's hand order; the chip text clips at 252 px with the 13 px code font; files other than main.rs show placeholder text until the backend reads files. The code view's line numbers now measure the code font's digits (they clipped at 15 px).
 
 Screens: `desktop-project`, `desktop-project-tests-open`.
 
@@ -271,7 +271,7 @@ Screens: `desktop-project`, `desktop-project-tests-open`.
 
 ### Task 12: Git panel and diff view
 
-- [ ] Done
+- [ ] Done except Step 1b. A subagent built the panel and diff view (1a97324, merged at adb9081, with the scope chip from Task 11 switching which worktree Changes and Commits show). As built: `GitPanel::new(worktrees, branches, Vec<ScopeOption>, cx)` emits `OpenDiff { worktree, path }`; `DiffView::new(hunks, language)` (the plan had one argument); `WorktreeHead { Branch, Detached { at, item } }` (C183) and `CommitInfo.at: Timestamp`, shown in local time (C181); hunks live on `FileChange.hunks`; the 14 branches are one const that `git_facts()` also reads. Differences kept: count badges use `Badge`, not the mockup's surface fill; section titles have no letter spacing; long branch names clip. Step 1b (OpenRef routing) waits for agmen-c7's workspace.
 
 Screens: `desktop-git`, `desktop-git-collapsed`.
 
