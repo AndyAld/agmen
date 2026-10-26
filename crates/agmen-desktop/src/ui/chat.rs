@@ -325,6 +325,13 @@ impl ChatView {
         });
     }
 
+    /// Why the backend refused the last send or action, shown above the
+    /// composer.
+    #[cfg(test)]
+    pub(crate) fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
     /// Task 18: asks for a worker on `agent` and shows the exchange it
     /// starts; a refusal shows above the composer.
     pub(crate) fn spawn_worker(&mut self, agent: &str, cx: &mut Context<Self>) {

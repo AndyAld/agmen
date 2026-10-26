@@ -75,6 +75,9 @@ fn subtitle(dialog: &AgentDialog, agent: Option<&InstalledAgent>) -> String {
                 a.name
             ),
             AgentFound::Ready { version } => format!("`{}` {version} found", a.name),
+            AgentFound::VersionUnknown => {
+                format!("`{}` found · its version could not be read", a.name)
+            }
             AgentFound::Missing => format!("`{}` not found on PATH", a.name),
         },
     }
@@ -105,7 +108,9 @@ pub(crate) fn prompt(dialog: &AgentDialog, agent: Option<&InstalledAgent>) -> Op
         (AgentDialog::Update(_), source) => {
             let minimum = match &a.found {
                 AgentFound::Outdated { minimum, .. } => format!(" to {minimum} or later"),
-                AgentFound::Ready { .. } | AgentFound::Missing => String::new(),
+                AgentFound::Ready { .. } | AgentFound::VersionUnknown | AgentFound::Missing => {
+                    String::new()
+                }
             };
             let from = source.as_ref().map_or_else(
                 || "the same way it was installed".to_owned(),

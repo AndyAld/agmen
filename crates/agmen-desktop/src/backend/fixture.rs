@@ -217,6 +217,19 @@ impl FixtureBackend {
     fn spawn_worker(&self, agent: &str) -> Result<(), BackendError> {
         let added = {
             let mut snapshot = self.state.borrow_mut();
+            // C261: the palette lists an outdated agent; its spawn is
+            // refused here, where the version rule is known.
+            let not_ready = snapshot
+                .installed_agents
+                .iter()
+                .find(|a| a.name == agent)
+                .map_or_else(|| Some("not installed".to_owned()), |a| a.not_ready());
+            if let Some(why) = not_ready {
+                return Err(BackendError::AgentNotReady {
+                    agent: agent.to_owned(),
+                    why,
+                });
+            }
             let worker = free_worker_handle(&snapshot)?;
             let added = stamp(spawn_exchange(agent, &worker), snapshot.messages.len() + 1)?;
             snapshot.messages.extend(added.iter().cloned());

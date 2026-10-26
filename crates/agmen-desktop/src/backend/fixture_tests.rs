@@ -670,6 +670,28 @@ fn spawn_worker_plays_the_delegated_exchange() {
 }
 
 #[test]
+fn spawn_worker_refuses_an_agent_that_cannot_run_one() {
+    // C261: the palette lists outdated agy; the backend that knows the
+    // version rule refuses its spawn with the switch menu's note.
+    let backend = FixtureBackend::for_screen(Screen::Chat).unwrap();
+    let before = backend.snapshot().messages.len();
+    for (agent, why) in [
+        ("agy", "update to 1.1.15+ for JSON"),
+        ("grok", "not installed"),
+        ("nope", "not installed"),
+    ] {
+        let refused = backend
+            .act(Action::SpawnWorker {
+                agent: agent.into(),
+            })
+            .unwrap_err()
+            .to_string();
+        assert_eq!(refused, format!("{agent} cannot run a worker: {why}"));
+    }
+    assert_eq!(backend.snapshot().messages.len(), before);
+}
+
+#[test]
 fn spawn_worker_skips_workers_the_screen_already_has() {
     // The plan screens have andy/fx1 in the sessions and the roster but no
     // DELEGATED for it, so counting DELEGATED messages would mint fx1 again.

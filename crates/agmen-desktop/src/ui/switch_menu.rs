@@ -33,19 +33,18 @@ pub(crate) enum RowButton {
 /// The note before a row's button, and its color.
 #[must_use]
 pub(crate) fn note(agent: &InstalledAgent) -> Option<(String, Color)> {
-    match &agent.found {
-        AgentFound::Ready { .. } => None,
-        AgentFound::Outdated { minimum, why, .. } => {
-            Some((format!("update to {minimum}+ for {why}"), Color::Warning))
-        }
-        AgentFound::Missing => Some(("not installed".into(), Color::Muted)),
-    }
+    let color = if agent.is_installed() {
+        Color::Warning
+    } else {
+        Color::Muted
+    };
+    agent.not_ready().map(|text| (text, color))
 }
 
 #[must_use]
 pub(crate) const fn row_button(agent: &InstalledAgent) -> Option<RowButton> {
     match agent.found {
-        AgentFound::Ready { .. } => None,
+        AgentFound::Ready { .. } | AgentFound::VersionUnknown => None,
         AgentFound::Outdated { .. } => Some(RowButton::Update),
         AgentFound::Missing => Some(RowButton::Add),
     }
@@ -160,11 +159,11 @@ impl SwitchMenu {
     fn row(&self, agent: &InstalledAgent) -> MenuRow {
         let id = format!("switch-menu:{}", agent.name);
         let current = agent.name == self.current.as_ref();
-        let (version, name_color, weight) = match &agent.found {
-            AgentFound::Ready { version } | AgentFound::Outdated { version, .. } => {
-                (Some(version.clone()), Color::Default, FontWeight::BOLD)
-            }
-            AgentFound::Missing => (None, Color::Muted, FontWeight::NORMAL),
+        let version = agent.version().map(str::to_owned);
+        let (name_color, weight) = if agent.is_installed() {
+            (Color::Default, FontWeight::BOLD)
+        } else {
+            (Color::Muted, FontWeight::NORMAL)
         };
         let end = if current {
             Some(
@@ -209,8 +208,10 @@ impl SwitchMenu {
                 )
             })
             .when_some(end, MenuRow::end);
-        // The current row and a missing agent's row switch to nothing.
-        let switchable = !current && version_of(agent).is_some();
+        // The current row and a missing agent's row switch to nothing. A
+        // take-over is an interactive terminal, so an agent too old for a
+        // headless worker, or of unknown version, can still run it.
+        let switchable = !current && agent.is_installed();
         match (&self.on_switch, switchable) {
             (Some(handler), true) => {
                 let (handler, name) = (handler.clone(), agent.name.clone());
@@ -247,13 +248,6 @@ impl SwitchMenu {
             }),
             None => button,
         }
-    }
-}
-
-fn version_of(agent: &InstalledAgent) -> Option<&str> {
-    match &agent.found {
-        AgentFound::Ready { version } | AgentFound::Outdated { version, .. } => Some(version),
-        AgentFound::Missing => None,
     }
 }
 

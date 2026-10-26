@@ -399,3 +399,37 @@ fn group_headings_are_mono_11_in_21_px_rows(cx: &mut TestAppContext) {
         "{text:?} against {small:?}"
     );
 }
+
+#[test]
+fn the_picker_lists_only_installed_agents() {
+    // C261: the same rule as the palette and the switch menu. An outdated
+    // agent or one whose version could not be read keeps its group; a
+    // missing one has none.
+    let groups = |found: crate::backend::AgentFound| {
+        let mut snapshot = chat_snapshot();
+        for agent in &mut snapshot.installed_agents {
+            if agent.name == "agy" {
+                agent.found = found.clone();
+            }
+        }
+        let menu = ModelMenu::new(&snapshot);
+        menu.groups
+            .iter()
+            .map(|g| g.agent.clone())
+            .zip(menu.headings.iter().map(ToString::to_string))
+            .collect::<Vec<_>>()
+    };
+    let outdated = groups(chat_snapshot().installed_agents[4].found.clone());
+    assert_eq!(
+        outdated.last(),
+        Some(&("agy".to_owned(), "agy 1.1.7".to_owned()))
+    );
+    let unknown = groups(crate::backend::AgentFound::VersionUnknown);
+    assert_eq!(unknown.last(), Some(&("agy".to_owned(), "agy".to_owned())));
+    let missing = groups(crate::backend::AgentFound::Missing);
+    assert!(
+        missing.iter().all(|(agent, _)| agent != "agy"),
+        "{missing:?}"
+    );
+    assert_eq!(missing.len(), outdated.len() - 1);
+}
