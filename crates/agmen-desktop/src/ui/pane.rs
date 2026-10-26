@@ -15,6 +15,7 @@ use gpui::{
 use super::chat::ChatView;
 use super::components::{Button, ButtonStyle, Color, Label, LabelSize, Tab};
 use super::ref_chip::RefEvent;
+use super::tab_views::{TabSources, TabViews};
 use super::tokens::{BORDER_WIDTH, BREADCRUMB_HEIGHT, SPACE_8, SPACE_14, TAB_BAR_HEIGHT};
 use crate::backend::Snapshot;
 use crate::icons::UiIcon;
@@ -62,6 +63,9 @@ pub(crate) enum TabItem {
     /// A spec file, by path.
     Spec(String),
     Settings(SettingsPage),
+    // shortcut: a placeholder tab the status bar's search button opens;
+    // Task 18 builds search (cmd-shift-f) and its view.
+    Search,
     /// A reference chip's target whose view does not exist yet.
     // shortcut: a placeholder tab; Task 12 routes each kind to its home
     // (spec 9.3) and removes this variant.
@@ -138,6 +142,7 @@ impl PaneNames {
             TabItem::Plan => "plan".into(),
             TabItem::Spec(path) => file_name(path).into(),
             TabItem::Settings(_) => "settings".into(),
+            TabItem::Search => "Search".into(),
             TabItem::Ref(target) => ref_label(target),
         }
     }
@@ -151,7 +156,11 @@ impl PaneNames {
             TabItem::RoleFile(_) => vec!["roles".into(), self.tab_label(item)],
             TabItem::Settings(page) => vec!["settings".into(), page.label().into()],
             TabItem::Spec(path) => vec![self.project.clone(), path.clone()],
-            TabItem::Chat | TabItem::Agent(_) | TabItem::Plan | TabItem::Ref(_) => {
+            TabItem::Chat
+            | TabItem::Agent(_)
+            | TabItem::Plan
+            | TabItem::Search
+            | TabItem::Ref(_) => {
                 vec![self.project.clone(), self.tab_label(item)]
             }
         }
@@ -174,6 +183,7 @@ impl PaneNames {
             TabItem::RoleFile(role) => (UiIcon::File, Color::Role(role.clone().into())),
             TabItem::Spec(_) => (UiIcon::File, Color::Warning),
             TabItem::Settings(_) => (UiIcon::Settings, Color::Placeholder),
+            TabItem::Search => (UiIcon::Search, Color::Placeholder),
             TabItem::Ref(RefTarget::File { .. }) => (UiIcon::File, Color::Accent),
             TabItem::Ref(RefTarget::Commit(_) | RefTarget::Branch { .. }) => {
                 (UiIcon::Git, Color::Success)
@@ -213,7 +223,10 @@ impl SettingsPage {
 
 /// Labels in the UI font; the rest are names people type, in the code font.
 const fn label_is_code(item: &TabItem) -> bool {
-    !matches!(item, TabItem::Chat | TabItem::Plan | TabItem::Settings(_))
+    !matches!(
+        item,
+        TabItem::Chat | TabItem::Plan | TabItem::Settings(_) | TabItem::Search
+    )
 }
 
 /// What a pane tells its group.
@@ -242,6 +255,7 @@ pub(crate) struct Pane {
     chat: Option<Entity<ChatView>>,
     /// Redraws the tab bar when the chat's badge changes.
     _chat_changes: Option<Subscription>,
+    views: TabViews,
 }
 
 impl EventEmitter<PaneEvent> for Pane {}
@@ -256,6 +270,7 @@ impl Pane {
             show_ledger: false,
             chat: None,
             _chat_changes: None,
+            views: TabViews::default(),
         }
     }
 
@@ -416,6 +431,9 @@ impl Render for Pane {
             .map(|(index, item)| self.render_tab(index, item, cx))
             .collect();
         let active = self.active_item().cloned();
+        let view = active
+            .as_ref()
+            .and_then(|item| self.views.view(item, &self.tabs, cx));
         let selector = format!("pane-{}", self.number);
         div()
             .debug_selector(|| selector)
@@ -441,6 +459,9 @@ impl Render for Pane {
                     .children(tabs),
             )
             .when_some(active, |this, item| {
+                if let Some(view) = view {
+                    return this.child(div().flex_1().min_h_0().flex().child(view));
+                }
                 let content = match (&item, &self.chat) {
                     (TabItem::Chat, Some(chat)) => div()
                         .flex_1()
@@ -507,6 +528,7 @@ pub(crate) struct PaneGroup {
     /// The next pane's number; numbers are not reused.
     next_number: usize,
     _chat_refs: Option<Subscription>,
+    sources: Rc<TabSources>,
 }
 
 impl EventEmitter<PaneGroupEvent> for PaneGroup {}
@@ -529,6 +551,7 @@ impl PaneGroup {
             active: 0,
             next_number: 0,
             _chat_refs: chat_refs,
+            sources: Rc::new(TabSources::from_snapshot(snapshot)),
         };
         group.add_pane(TabItem::Chat, chat, cx);
         group
@@ -608,8 +631,10 @@ impl PaneGroup {
         let number = self.next_number;
         self.next_number += 1;
         let names = self.names.clone();
+        let sources = self.sources.clone();
         let pane = cx.new(|cx| {
             let mut pane = Pane::new(number, names);
+            pane.views = TabViews::new(sources);
             if let Some(chat) = chat {
                 pane.set_chat(chat, cx);
             }
@@ -685,6 +710,9 @@ impl Render for PaneGroup {
             .children(panes)
     }
 }
+
+#[path = "pane_actions.rs"]
+mod actions;
 
 #[cfg(test)]
 #[path = "pane_tests.rs"]

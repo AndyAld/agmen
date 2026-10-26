@@ -32,7 +32,7 @@ use gpui::{
 
 use appearance::{Appearance, SystemMode};
 
-use ui::{Quit, ToggleLeftDock, ToggleRightDock, Workspace};
+use ui::{Quit, Workspace};
 
 const USAGE: &str = "usage: agmen-desktop [--screen <name> | --list-screens | --view <name> | --spike list [--autoscroll] | --spike notify]";
 
@@ -278,11 +278,8 @@ fn open_dev_view(
 }
 
 fn open_main_window(launch: &Launch, cx: &mut App) -> Result<()> {
-    cx.bind_keys([
-        KeyBinding::new("cmd-b", ToggleLeftDock, None),
-        KeyBinding::new("cmd-r", ToggleRightDock, None),
-        KeyBinding::new("cmd-q", Quit, None),
-    ]);
+    cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
+    ui::bind_workspace_keys(cx);
     cx.on_action(|_: &Quit, cx| cx.quit());
     assets::load_fonts(cx).context("loading the bundled fonts")?;
     let mut appearance = load_appearance(cx.window_appearance());

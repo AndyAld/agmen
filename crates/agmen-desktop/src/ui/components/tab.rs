@@ -11,7 +11,7 @@ use gpui::{
 use super::{Badge, ClickHandler, Color, Icon, IconButton, IconSize, Label, LabelSize};
 use crate::appearance::Appearance;
 use crate::icons::UiIcon;
-use crate::ui::tokens::{BORDER_WIDTH, SPACE_5, SPACE_8, SPACE_14, TAB_CLOSE_SLOT};
+use crate::ui::tokens::{BORDER_WIDTH, RADIUS_SM, SPACE_5, SPACE_8, SPACE_14, TAB_CLOSE_SLOT};
 
 /// Where the tab sits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -126,7 +126,9 @@ impl Tab {
         self
     }
 
-    fn render_dock(self) -> gpui::Stateful<gpui::Div> {
+    fn render_dock(self, cx: &App) -> gpui::Stateful<gpui::Div> {
+        let hover = cx.global::<Appearance>().theme.element_hover;
+        let selector = self.id.to_string();
         let color = if self.selected {
             Color::Default
         } else {
@@ -137,10 +139,13 @@ impl Tab {
             .color(color.clone());
         div()
             .id(self.id)
+            .debug_selector(|| selector)
             .flex()
             .flex_none()
             .items_center()
             .gap(SPACE_5)
+            .rounded(RADIUS_SM)
+            .hover(move |style| style.bg(hover))
             .when_some(self.on_click, |this, handler| {
                 this.cursor_pointer().on_click(handler)
             })
@@ -218,7 +223,7 @@ impl Tab {
 impl RenderOnce for Tab {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         match self.style {
-            TabStyle::Dock => self.render_dock(),
+            TabStyle::Dock => self.render_dock(cx),
             TabStyle::Pane => self.render_pane(cx),
         }
     }

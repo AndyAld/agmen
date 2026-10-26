@@ -12,6 +12,8 @@ mod composer;
 mod dev_views;
 mod dock;
 mod format;
+mod keys;
+mod left_dock;
 mod listener_panel;
 mod message;
 mod palette_filter;
@@ -23,6 +25,7 @@ mod roles_panel;
 mod scope_chip;
 mod status_bar;
 mod syntax;
+mod tab_views;
 #[cfg(test)]
 mod test_support;
 mod text_edit;
@@ -35,10 +38,11 @@ pub(crate) use agent_view::AgentView;
 pub(crate) use code_view::{CodeView, GutterMark};
 pub(crate) use dev_views::{DevFrame, ProjectDev, ProjectTests, RolesDev};
 pub(crate) use dock::DockSide;
+pub(crate) use keys::bind_workspace_keys;
 pub(crate) use syntax::Language;
 pub(crate) use text_input::{TextInput, bind_keys};
 pub(crate) use title_bar::TitleBar;
-pub(crate) use workspace::{Quit, ToggleLeftDock, ToggleRightDock, Workspace};
+pub(crate) use workspace::{Quit, Workspace};
 
 use gpui::App;
 

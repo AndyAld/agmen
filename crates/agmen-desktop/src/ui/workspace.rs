@@ -5,11 +5,9 @@ use gpui::{
     ParentElement as _, Render, Styled as _, Subscription, Window, actions, div,
 };
 
-use super::agent_panel::AgentPanel;
 use super::agents_panel::{AgentsPanel, AgentsPanelEvent};
 use super::chat::ChatView;
 use super::dock::{Dock, DockSide, LeftDockTabs};
-use super::listener_panel::ListenerPanel;
 use super::pane::PaneGroup;
 #[cfg(test)]
 use super::pane::{SplitDirection, TabItem};
@@ -21,6 +19,10 @@ use agmen_proto::IdentityId;
 
 use crate::backend::{AgentInfo, Snapshot};
 use crate::icons::FileIcons;
+
+#[path = "workspace_dock.rs"]
+mod dock_wiring;
+use dock_wiring::LeftDockState;
 
 actions!(workspace, [ToggleLeftDock, ToggleRightDock, Quit]);
 
@@ -35,6 +37,7 @@ pub(crate) struct Workspace {
     pane_group: Entity<PaneGroup>,
     /// The agent the right dock shows; `None` shows the Listener panel.
     selected_agent: Option<IdentityId>,
+    left: LeftDockState,
     _agents_events: Subscription,
 }
 
@@ -46,6 +49,7 @@ impl Workspace {
         });
         let chat = cx.new(|cx| ChatView::new(snapshot.clone(), window, cx));
         let pane_group = cx.new(|cx| PaneGroup::new(&snapshot, Some(chat), cx));
+        let left = LeftDockState::new(&snapshot, cx);
         Self {
             focus_handle: cx.focus_handle(),
             snapshot,
@@ -54,6 +58,7 @@ impl Workspace {
             right_dock: Dock::new(RIGHT_DOCK_WIDTH),
             agents_panel,
             selected_agent: None,
+            left,
             _agents_events: agents_events,
         }
     }
@@ -83,6 +88,7 @@ impl Workspace {
     /// The one place the selection changes; the Agents dock highlights it.
     fn set_selection(&mut self, id: Option<IdentityId>, cx: &mut Context<Self>) {
         self.selected_agent = id.clone();
+        self.left.shown_role = None;
         self.agents_panel
             .update(cx, |panel, cx| panel.set_selected(id, cx));
     }
@@ -141,8 +147,8 @@ impl Render for Workspace {
                             .h_full()
                             .flex()
                             .flex_col()
-                            .child(LeftDockTabs)
-                            .child(self.agents_panel.clone()),
+                            .child(LeftDockTabs(self.left.tab))
+                            .child(self.left_dock_content()),
                     ),
             );
         }
@@ -155,10 +161,7 @@ impl Render for Workspace {
                 .child(self.pane_group.clone()),
         );
         if self.is_dock_open(DockSide::Right) {
-            let panel = match self.shown_agent() {
-                Some(info) => AgentPanel::new(info.clone()).into_any_element(),
-                None => ListenerPanel::new(self.snapshot.listener.clone()).into_any_element(),
-            };
+            let panel = self.right_panel();
             body = body.child(
                 div()
                     .w(self.right_dock.width())
@@ -173,12 +176,12 @@ impl Render for Workspace {
                             .min_w_0()
                             .h_full()
                             .overflow_hidden()
-                            .child(panel),
+                            .children(panel),
                     ),
             );
         }
 
-        div()
+        Self::dock_actions(div(), cx)
             .track_focus(&self.focus_handle)
             .key_context("Workspace")
             .on_action(cx.listener(|this, _: &ToggleLeftDock, _, cx| {
@@ -195,10 +198,10 @@ impl Render for Workspace {
             .font_family(fonts.ui_family.clone())
             .child(TitleBar::new(&self.snapshot))
             .child(body)
-            .child(StatusBar::new(
-                &self.snapshot,
-                self.is_dock_open(DockSide::Right),
-            ))
+            .child(
+                StatusBar::new(&self.snapshot, self.is_dock_open(DockSide::Right))
+                    .panels(self.panel_buttons(cx)),
+            )
     }
 }
 
