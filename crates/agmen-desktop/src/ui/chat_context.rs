@@ -5,7 +5,9 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
-use agmen_proto::{IdentityId, MessageId, Payload, Ref, StampedEnvelope, Timestamp, Verdict};
+use agmen_proto::{
+    IdentityId, MessageId, Payload, Ref, Seq, StampedEnvelope, Stream, Timestamp, Verdict,
+};
 use gpui::SharedString;
 
 use super::components::Color;
@@ -39,10 +41,15 @@ pub(crate) struct ChatContext {
     /// Ids of the messages in the snapshot, so a reply can tell whether its
     /// parent is in the chat.
     ids: BTreeSet<MessageId>,
+    /// Hub position and client id of each message in the snapshot. The body
+    /// cache is keyed by both: a client id alone is chosen by its sender and
+    /// could be reused, and a position alone could be claimed by a message
+    /// that is not in the snapshot.
+    positions: BTreeSet<(Stream, Seq, MessageId)>,
     /// Each drawn message's body and references, found on its first draw.
     /// Only messages in the snapshot are kept, so it holds at most one entry
     /// per message.
-    bodies: RefCell<BTreeMap<MessageId, Rc<BodyText>>>,
+    bodies: RefCell<BTreeMap<(Stream, Seq, MessageId), Rc<BodyText>>>,
     offset: UtcOffset,
 }
 
@@ -65,12 +72,18 @@ impl ChatContext {
             .iter()
             .map(|m| m.client.id.clone())
             .collect();
+        let positions = snapshot
+            .messages
+            .iter()
+            .map(|m| (m.stream.clone(), m.seq, m.client.id.clone()))
+            .collect();
         Self {
             snapshot,
             known,
             roles,
             local,
             ids,
+            positions,
             bodies: RefCell::default(),
             offset: UtcOffset::default(),
         }
@@ -100,14 +113,13 @@ impl ChatContext {
     /// `env`'s body and references, found once per snapshot.
     #[must_use]
     pub(crate) fn body_of(&self, env: &StampedEnvelope) -> Rc<BodyText> {
-        if let Some(found) = self.bodies.borrow().get(&env.client.id) {
+        let key = (env.stream.clone(), env.seq, env.client.id.clone());
+        if let Some(found) = self.bodies.borrow().get(&key) {
             return found.clone();
         }
         let found = Rc::new(self.body_text(env.client.body.as_str(), &env.refs));
-        if self.ids.contains(&env.client.id) {
-            self.bodies
-                .borrow_mut()
-                .insert(env.client.id.clone(), found.clone());
+        if self.positions.contains(&key) {
+            self.bodies.borrow_mut().insert(key, found.clone());
         }
         found
     }

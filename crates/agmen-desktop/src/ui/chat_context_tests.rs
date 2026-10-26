@@ -178,3 +178,24 @@ fn bodies_are_scanned_once_per_snapshot() {
     stranger.client.id = "01JD0000000000000000000001".parse().unwrap();
     assert!(!Rc::ptr_eq(&c.body_of(&stranger), &c.body_of(&stranger)));
 }
+
+#[test]
+fn body_cache_is_keyed_by_hub_position_not_client_id() {
+    // A second sender reusing the first message's client id must not be shown
+    // the first message's cached body.
+    let mut snapshot = chat_snapshot();
+    let first = snapshot.messages[0].clone();
+    let mut spoof = serde_json::to_value(&first).unwrap();
+    spoof["seq"] = serde_json::json!(first.seq.0 + 1000);
+    spoof["from_handle"] = serde_json::json!("zed/x9");
+    spoof["body"] = serde_json::json!("a different body");
+    let spoof: StampedEnvelope = serde_json::from_value(spoof).unwrap();
+    assert_eq!(spoof.client.id, first.client.id);
+    snapshot.messages.push(spoof.clone());
+    let ctx = ChatContext::new(Rc::new(snapshot));
+    assert_eq!(
+        ctx.body_of(&first).body.as_ref(),
+        first.client.body.as_str()
+    );
+    assert_eq!(ctx.body_of(&spoof).body.as_ref(), "a different body");
+}
