@@ -277,6 +277,37 @@ fn picker_checks_the_listeners_own_model(cx: &mut TestAppContext) {
     assert_eq!(models, [None]);
 }
 
+/// The ask screen's fixture: andy's 15:52 question and its answer.
+fn ask_screen() -> Snapshot {
+    use crate::backend::{Backend as _, FixtureBackend, Screen};
+    FixtureBackend::for_screen(Screen::Ask).unwrap().snapshot()
+}
+
+#[gpui::test]
+fn the_ask_screen_opens_on_the_standing_opus(cx: &mut TestAppContext) {
+    // Fix 31 keeps "opus · high" on the ask frame's chip (node 3982): andy
+    // picked it until he changes it, so a send keeps it.
+    let (composer, sent, cx) = open_composer_with(cx, ask_screen());
+    assert_eq!(chip(&composer, cx), "opus · high");
+    send(cx, "and C016?");
+    assert_eq!(chip(&composer, cx), "opus · high");
+    let models: Vec<_> = sent.borrow().iter().map(|d| d.model.clone()).collect();
+    assert_eq!(models, [Some(opus(ChoiceScope::UntilChanged))]);
+}
+
+#[test]
+fn a_standing_model_the_picker_does_not_offer_opens_on_the_listener() {
+    let mut snapshot = chat_snapshot();
+    snapshot.standing_model = Some(ModelChoice {
+        model: Some("gpt-9".into()),
+        ..opus(ChoiceScope::UntilChanged)
+    });
+    assert_eq!(
+        ModelMenu::new(&snapshot).current().label(),
+        "codex · default"
+    );
+}
+
 #[test]
 fn a_new_snapshot_moves_the_menu_to_its_listener() {
     let mut menu = ModelMenu::new(&chat_snapshot());

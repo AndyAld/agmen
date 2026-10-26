@@ -464,6 +464,9 @@ pub(crate) struct Snapshot {
     /// The wire carries no model (agmen-proto's FYI and ANSWER have no
     /// field), so agmend reports it beside the message.
     pub(crate) message_models: BTreeMap<(Stream, Seq), ModelChoice>,
+    /// The person's "until I change it" model, which the composer's chip
+    /// opens on; `None` opens it on the listener's own model.
+    pub(crate) standing_model: Option<ModelChoice>,
 }
 
 /// One row of an agent's session, as the agent view shows it.

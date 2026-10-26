@@ -77,6 +77,7 @@ fn base(project: &str) -> Result<Snapshot, BackendError> {
         // Task 15: the model picker's models and message tags.
         models: model_groups(),
         message_models: BTreeMap::new(),
+        standing_model: None,
     })
 }
 
@@ -374,6 +375,7 @@ fn ask_snapshot(screen: Screen) -> Result<Snapshot, BackendError> {
         s.status.spend_today_usd = s.listener.workers_today_usd + s.listener.listener_today_usd;
         // V67: the question and its answer ran on opus.
         tag_from(&mut s, first, &ask_model());
+        s.standing_model = Some(ask_model());
     }
     Ok(s)
 }

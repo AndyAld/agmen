@@ -34,13 +34,14 @@ pub(super) fn model_groups() -> Vec<ModelGroup> {
 }
 
 /// The model both `ASK_CHAT` messages carry (V67): andy asked on opus at
-/// high effort for this message, and the listener answered on it.
+/// high effort, and the listener answered on it. He picked it until he
+/// changes it, so the ask frame's chip still shows it (fix 31, node 3982).
 pub(super) fn ask_model() -> ModelChoice {
     ModelChoice {
         agent: "claude".into(),
         model: Some("opus".into()),
         effort: Some(Effort::High),
-        scope: ChoiceScope::ThisMessage,
+        scope: ChoiceScope::UntilChanged,
     }
 }
 
