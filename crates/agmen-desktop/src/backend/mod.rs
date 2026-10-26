@@ -324,4 +324,16 @@ pub(crate) struct Snapshot {
     /// Change cards, keyed by the listener message they belong to.
     pub(crate) changes: BTreeMap<MessageId, ChangeCard>,
     pub(crate) plan: Option<PlanInfo>,
+    /// What local git knows, so the client can confirm the branches,
+    /// commits and files message text names (spec 9.3).
+    pub(crate) git: GitFacts,
+}
+
+/// Branches, commits and files in the person's local worktrees.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct GitFacts {
+    pub(crate) branches: std::collections::BTreeSet<String>,
+    pub(crate) commits: std::collections::BTreeSet<String>,
+    /// Paths relative to a worktree root.
+    pub(crate) files: std::collections::BTreeSet<String>,
 }

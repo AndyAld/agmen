@@ -216,7 +216,7 @@ Differences: the ● ○ ◐ glyphs draw smaller in .ZedSans than in the mockup'
 
 ### Task 8: Clickable references
 
-- [ ] Done
+- [ ] Done. `src/refs.rs` is in (as built: identities, items, lanes, roles and PRs come only from hub `refs`, which the fixture stamps as the hub would; branches, commits and files come from a client regex confirmed by the new `Snapshot.git` and DONE fields; `RefTarget::Agent` and `Person` carry handles; `Pr` from the hub's number). `ref_chip.rs` (RefChip and its hover card) is agmen-c7's, with Task 9.
 
 **Files:** Create `src/refs.rs`, `src/refs_tests.rs`, `src/ui/ref_chip.rs` (chip and hover card, built on `ui/components/` `Chip`).
 

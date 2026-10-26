@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 
 use super::{
     AgentInfo, AgentRow, AgentStatus, Approval, BackendError, ChangeCard, ChangeId, ChangeRow,
-    ChangeState, LaneInfo, ListenerInfo, PersonGroup, PlanInfo, RecentAction, RecentKind,
+    ChangeState, GitFacts, LaneInfo, ListenerInfo, PersonGroup, PlanInfo, RecentAction, RecentKind,
     SpecState, TeamRow,
 };
 
@@ -181,6 +181,106 @@ fn kind(handle: &str) -> &'static str {
     }
 }
 
+/// The mockup's worktree history: what `git` on andy's machine knows.
+pub(super) fn git_facts() -> GitFacts {
+    let set = |items: &[&str]| items.iter().map(|s| (*s).to_owned()).collect();
+    GitFacts {
+        branches: set(&[
+            "feat/c014-release-matrix",
+            "fix/c015-main-conflict",
+            "test/b-415-replay-paging",
+            "main",
+        ]),
+        commits: set(&["7c8835e", "4d9fdc8", "016f235", "9e2a71c"]),
+        files: set(&[
+            ".github/workflows/release.yml",
+            "Cargo.lock",
+            "Cargo.toml",
+            "README.md",
+            "src/app.rs",
+            "src/cylinder.rs",
+            "src/document.rs",
+            "src/main.rs",
+            "src/minimap.rs",
+            "src/ui/mod.rs",
+            "src/ui/tabs.rs",
+            "tests/it_main.rs",
+            "tests/it_tabs.rs",
+        ]),
+    }
+}
+
+/// Every handle in the mockup's chats, which the hub knows from its roster.
+const ROSTER: &[&str] = &[
+    "andy",
+    "sean",
+    "adam",
+    "andy/listen",
+    "andy/fx1",
+    "andy/t7k",
+    "andy/rv2",
+    "andy/a1",
+    "sean/a1",
+    "sean/plan",
+    "adam/coord",
+    "adam/res",
+    "andy/coord",
+    "andy/core",
+    "andy/app",
+    "andy/rev",
+    "sean/sync",
+    "sean/qa",
+    "sean/tiles",
+];
+
+/// What the hub stamps as `refs` for a body: identities it has in its
+/// roster, items, lanes and PRs (protocol section 3). Git names are left to
+/// the client.
+fn hub_refs(body: &str) -> Vec<Value> {
+    static WORDS: std::sync::LazyLock<Option<regex::Regex>> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(
+            r"(?P<who>@?\b[a-z]+(?:/[a-z0-9]+)?\b)|(?P<item>\b[A-Z](?:-\d{1,6}|\d{3})\b)|(?P<lane>\bL-[A-Z]+\b)|(?P<pr>#\d+)",
+        )
+        .ok()
+    });
+    let Some(re) = WORDS.as_ref() else {
+        return Vec::new();
+    };
+    let mut refs = Vec::new();
+    for caps in re.captures_iter(body) {
+        let Some(m) = caps.get(0) else { continue };
+        // A word that is part of a path or a longer name is not a ref.
+        let after = body[m.end()..].chars().next();
+        if after.is_some_and(|c| {
+            c == '/' || c == '.' && body[m.end() + 1..].starts_with(|n: char| n.is_alphanumeric())
+        }) {
+            continue;
+        }
+        let text = m.as_str();
+        let (kind, target) = if caps.name("who").is_some() {
+            let handle = text.trim_start_matches('@');
+            if !ROSTER.contains(&handle) {
+                continue;
+            }
+            ("identity", id_text(handle))
+        } else if caps.name("item").is_some() {
+            // The mockup writes C015; the protocol's key is C-015.
+            let key = if text.contains('-') {
+                text.to_owned()
+            } else {
+                format!("{}-{}", &text[..1], &text[1..])
+            };
+            ("item", key)
+        } else if caps.name("lane").is_some() {
+            ("lane", text.to_owned())
+        } else {
+            ("pr", text.trim_start_matches('#').to_owned())
+        };
+        refs.push(json!({"kind": kind, "start": m.start(), "end": m.end(), "target": target}));
+    }
+    refs
+}
+
 /// One chat message, before it is stamped.
 pub(super) struct Msg {
     pub(super) time: &'static str,
@@ -275,6 +375,7 @@ pub(super) fn stamp(
                 "from_handle": m.handle,
                 "from_kind": kind(m.handle),
                 "mentioned": ids(&m.mentioned),
+                "refs": hub_refs(m.body),
                 "hub_at": utc(m.time),
             });
             serde_json::from_value(value)
