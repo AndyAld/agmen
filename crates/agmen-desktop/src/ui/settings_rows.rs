@@ -93,12 +93,16 @@ pub(super) fn installed_detail(theme: &ThemeEntry) -> String {
         }
         ThemeOrigin::Agmen(t) => {
             // Only a 404, or no repository on GitHub, is "not found"; a
-            // rate limit or any other failure is a check to repeat.
+            // rate limit or any other failure is a check to repeat, and so
+            // is an install with no recorded check, whose outcome is unknown
+            // (C324).
             let missing = match t.license_check {
-                Some(crate::appearance::LicenseCheck::Failed) => {
-                    "license not checked; install again to retry"
-                }
-                Some(_) | None => "license not found",
+                Some(crate::appearance::LicenseCheck::NotFound) => "license not found",
+                Some(
+                    crate::appearance::LicenseCheck::Failed
+                    | crate::appearance::LicenseCheck::Found,
+                )
+                | None => "license not checked; install again to retry",
             };
             format!("installed by agmen \u{b7} {}", credit(t, missing))
         }

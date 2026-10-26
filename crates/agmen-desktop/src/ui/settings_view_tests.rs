@@ -574,6 +574,9 @@ fn zed_installed_theme_without_license_says_zed_keeps_it() {
         "Nord",
         ThemeOrigin::Agmen(InstalledTheme {
             id: "nord".into(),
+            // C324: "not found" needs a recorded NotFound; no record reads
+            // "not checked".
+            license_check: Some(crate::appearance::LicenseCheck::NotFound),
             ..InstalledTheme::default()
         }),
     );
@@ -593,7 +596,8 @@ fn agmen_install_without_license_says_license_not_found() {
         root.join("extension.toml"),
         "id = \"catppuccin\"\nname = \"Catppuccin\"\nversion = \"0.2.27\"\n\
          authors = [\"Catppuccin Org <hi@example.org>\"]\n\
-         repository = \"https://github.com/catppuccin/zed\"\n",
+         repository = \"https://github.com/catppuccin/zed\"\n\
+         license_check = \"not_found\"\n",
     )
     .unwrap();
     fs::write(
@@ -715,4 +719,50 @@ fn theme_hint_keeps_the_themes_path_on_one_line(cx: &mut TestAppContext) {
     let last: &'static str =
         Box::leak(format!("setting-hint:Theme:{}", words.len() - 1).into_boxed_str());
     assert!(cx.debug_bounds(last).is_some(), "every word is drawn");
+}
+
+#[test]
+fn agmen_install_with_no_recorded_check_says_not_checked() {
+    // Ruling C324: an install with no license and no license_check (one made
+    // before agmen recorded the check) has an unknown outcome, so it reads
+    // as a check to repeat, not as "not found".
+    let home = Home::new();
+    let dirs = theme_dirs(&home.config(), &home.extensions());
+    let root = dirs.agmen.join("catppuccin");
+    fs::create_dir_all(root.join("themes")).unwrap();
+    fs::write(
+        root.join("extension.toml"),
+        "id = \"catppuccin\"\nname = \"Catppuccin\"\n\
+         repository = \"https://github.com/catppuccin/zed\"\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("themes/mocha.json"),
+        r#"{"themes": [{"name": "Catppuccin Mocha", "appearance": "dark", "style": {}}]}"#,
+    )
+    .unwrap();
+    let (themes, _) = installed_themes(&dirs);
+    let entry = themes
+        .iter()
+        .find(|t| t.name == "Catppuccin Mocha")
+        .unwrap();
+    let detail = rows::installed_detail(entry);
+    assert!(
+        detail.contains("license not checked; install again to retry"),
+        "{detail}"
+    );
+    assert!(!detail.contains("license not found"), "{detail}");
+}
+
+#[gpui::test]
+fn settings_views_share_one_marketplace(cx: &mut TestAppContext) {
+    // Review C322: two Settings views (two panes) must take the same lock,
+    // or concurrent installs of one id race on its staging folder.
+    let home = Home::new();
+    let (first, cx) = open(cx, &home);
+    let sources = home.sources();
+    let second = cx.update(|_, cx| cx.new(|cx| SettingsView::new(sources, cx)));
+    let a = first.update(cx, |view, cx| view.market(cx).unwrap());
+    let b = second.update(cx, |view, cx| view.market(cx).unwrap());
+    assert!(std::sync::Arc::ptr_eq(&a, &b));
 }

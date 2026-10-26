@@ -134,6 +134,16 @@ pub(crate) const NOTICES: [(&str, &str); 5] = [
     ),
 ];
 
+/// The one marketplace client for the app, with the API bases it was made
+/// for (C322).
+struct SharedMarketplace {
+    base: String,
+    github: String,
+    market: Arc<Mutex<Marketplace>>,
+}
+
+impl gpui::Global for SharedMarketplace {}
+
 /// The dropdown that is open, if any.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Menu {
@@ -387,15 +397,30 @@ impl SettingsView {
         self.search(String::new(), cx);
     }
 
-    /// The API client, made on first use.
-    fn market(&mut self) -> Result<Arc<Mutex<Marketplace>>, MarketError> {
+    /// The API client, shared app-wide: every Settings view takes the same
+    /// lock, so two panes cannot race an install of one id (C322). Made on
+    /// first use for these sources' API bases.
+    fn market(&mut self, cx: &mut App) -> Result<Arc<Mutex<Marketplace>>, MarketError> {
         if let Some(market) = &self.market {
             return Ok(market.clone());
         }
-        let market = Arc::new(Mutex::new(Marketplace::new(
-            self.sources.market.clone(),
-            self.sources.github.clone(),
-        )?));
+        let (base, github) = (self.sources.market.clone(), self.sources.github.clone());
+        let shared = cx
+            .try_global::<SharedMarketplace>()
+            .filter(|shared| shared.base == base && shared.github == github)
+            .map(|shared| shared.market.clone());
+        let market = match shared {
+            Some(market) => market,
+            None => {
+                let market = Arc::new(Mutex::new(Marketplace::new(base.clone(), github.clone())?));
+                cx.set_global(SharedMarketplace {
+                    base,
+                    github,
+                    market: market.clone(),
+                });
+                market
+            }
+        };
         self.market = Some(market.clone());
         Ok(market)
     }
@@ -409,7 +434,7 @@ impl SettingsView {
 
     /// Asks the API for themes matching `query`, off the UI thread.
     fn search(&mut self, query: String, cx: &mut Context<Self>) {
-        let market = match self.market() {
+        let market = match self.market(cx) {
             Ok(market) => market,
             Err(err) => return self.set_status(BrowseStatus::Failed(err.to_string()), cx),
         };
@@ -460,7 +485,7 @@ impl SettingsView {
     /// Installs `ext` into agmen's themes folder, then switches to its first
     /// theme.
     fn install(&mut self, ext: ThemeExtension, cx: &mut Context<Self>) {
-        let market = match self.market() {
+        let market = match self.market(cx) {
             Ok(market) => market,
             Err(err) => return self.set_status(BrowseStatus::Failed(err.to_string()), cx),
         };

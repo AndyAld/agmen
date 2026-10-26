@@ -6,8 +6,9 @@
 //! license and its author into agmen's own `~/.config/agmen/themes/<id>/`,
 //! never into Zed's folders. Zed's archives carry no license file, so an
 //! install without one asks GitHub for the repository's license, and
-//! installs anyway when it gets none. Only a 404, or a repository that is
-//! not on GitHub, reads "license not found"; any other failure reads
+//! installs anyway when it gets none. Only a 404, a repository that is not
+//! on GitHub, or an empty license file (C323) reads "license not found";
+//! an install with no recorded outcome (C324) and any other failure reads
 //! "license not checked; install again to retry", and Install is the only
 //! retry (Andy, 2026-10-26, C305(c)). That request runs without the
 //! [`Marketplace`] lock (see [`install_shared`]), follows redirects only on
@@ -88,7 +89,8 @@ const LICENSE_CHECK_KEY: &str = "license_check";
 pub(crate) enum LicenseCheck {
     /// GitHub sent the repository's license, which is saved as `LICENSE`.
     Found,
-    /// GitHub answered 404, or the repository is not on GitHub.
+    /// GitHub answered 404, the repository is not on GitHub, or GitHub sent
+    /// an empty (0-byte) license file (ruling C323).
     NotFound,
     /// Anything else: no answer, a timeout, another status (403 and 429
     /// are GitHub's rate limits), or an answer too large or unreadable.
@@ -459,7 +461,8 @@ impl Marketplace {
     }
 }
 
-/// Installs `ext` through the shared `market` into `agmen_themes/<id>/`,
+/// Installs `ext` through the app's one shared `market` (each Settings view
+/// takes the same lock, C322) into `agmen_themes/<id>/`,
 /// replacing an older install of the same id, and returns it with the names
 /// its theme files give. The lock is held for the download from Zed and for
 /// the writes, but not for the GitHub request, so searches and other
