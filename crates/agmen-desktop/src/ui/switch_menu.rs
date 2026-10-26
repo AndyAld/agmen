@@ -18,7 +18,7 @@ use super::components::{
     Button, ButtonSize, ButtonStyle, ChangeHandler, Color, Label, LabelSize, Menu, MenuRow,
     SectionHeading,
 };
-use super::tokens::{SPACE_8, SWITCH_MENU_WIDTH};
+use super::tokens::{AUTO_LINE_11, SPACE_8, SWITCH_MENU_WIDTH};
 use crate::backend::{AgentFound, InstalledAgent};
 
 /// The button at the end of an agent's row.
@@ -279,6 +279,7 @@ impl From<SwitchMenu> for Menu {
             .footer(
                 Label::new(foot)
                     .size(LabelSize::Small)
+                    .line_height(AUTO_LINE_11)
                     .color(Color::Placeholder)
                     .wrap(),
             )

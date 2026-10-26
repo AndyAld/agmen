@@ -6,9 +6,11 @@
 use gpui::{App, FontWeight, IntoElement, RenderOnce, SharedString, Window};
 
 use super::{Color, Label, LabelSize};
+use crate::ui::tokens::AUTO_LINE_11;
 
-/// Small semibold text in the muted color, uppercased. The mockup's 6 %
-/// letter spacing is left out: gpui text has none.
+/// Small semibold text in the muted color, uppercased, on the mockup's 13 px
+/// auto line for 11 px text. The mockup's 6 % letter spacing is left out:
+/// gpui text has none.
 #[derive(Debug, IntoElement)]
 pub(crate) struct SectionHeading {
     title: SharedString,
@@ -36,6 +38,7 @@ impl RenderOnce for SectionHeading {
             .size(LabelSize::Small)
             .color(Color::Muted)
             .weight(FontWeight::SEMIBOLD)
+            .line_height(AUTO_LINE_11)
     }
 }
 

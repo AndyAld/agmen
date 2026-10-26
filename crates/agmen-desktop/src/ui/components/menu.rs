@@ -154,7 +154,9 @@ impl RenderOnce for Menu {
         let border = cx.global::<Appearance>().theme.border;
         let selector = self.id.to_string();
         let header = self.header.map(|header| {
+            let selector = format!("{selector}:header");
             div()
+                .debug_selector(|| selector)
                 .w_full()
                 .flex_none()
                 .py(SPACE_8)
@@ -164,7 +166,9 @@ impl RenderOnce for Menu {
                 .child(header)
         });
         let footer = self.footer.map(|footer| {
+            let selector = format!("{selector}:footer");
             div()
+                .debug_selector(|| selector)
                 .w_full()
                 .flex_none()
                 .pt(SPACE_8)

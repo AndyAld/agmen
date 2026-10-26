@@ -9,7 +9,8 @@ use gpui::{
 use super::{Color, Label, LabelSize};
 use crate::appearance::Appearance;
 use crate::ui::tokens::{
-    RADIUS_PILL, RADIUS_SM, SPACE_1, SPACE_5, SPACE_6, SPACE_7, TINT_FILL, TINT_STATE, tint,
+    AUTO_LINE_11, RADIUS_PILL, RADIUS_SM, SPACE_1, SPACE_5, SPACE_6, SPACE_7, TINT_FILL,
+    TINT_STATE, tint,
 };
 
 /// How a badge is filled and padded.
@@ -128,7 +129,11 @@ impl RenderOnce for Badge {
             }
             BadgeShape::State => label.size(LabelSize::Small),
             BadgeShape::Count => label.code().size(LabelSize::Small),
-            BadgeShape::Tinted | BadgeShape::Solid if self.code => label.code(),
+            // The verb badge (node 145): console.py's mono 11 on its 13 px
+            // auto line; the text keeps the code size (C242).
+            BadgeShape::Tinted | BadgeShape::Solid if self.code => {
+                label.code().line_height(AUTO_LINE_11)
+            }
             BadgeShape::Tinted | BadgeShape::Solid => {
                 label.size(LabelSize::Small).weight(FontWeight::SEMIBOLD)
             }
@@ -179,12 +184,17 @@ mod tests {
 
     #[gpui::test]
     fn tinted_badge_pads_six_each_side(cx: &mut TestAppContext) {
-        // Node 145: the verb badge pads [1, 6, 1, 6].
+        // Node 145: the verb badge pads [1, 6, 1, 6] around its 13 px line.
         let badge = rendered_size(cx, || {
             Badge::new("DONE", Color::Success).code().into_any_element()
         });
         let mut cx2 = TestAppContext::single();
-        let text = rendered_size(&mut cx2, || Label::new("DONE").code().into_any_element());
+        let text = rendered_size(&mut cx2, || {
+            Label::new("DONE")
+                .code()
+                .line_height(AUTO_LINE_11)
+                .into_any_element()
+        });
         assert_eq!(badge.width - text.width, px(12.));
         assert_eq!(badge.height - text.height, px(2.));
     }

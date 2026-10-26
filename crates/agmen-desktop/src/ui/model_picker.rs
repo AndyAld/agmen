@@ -347,6 +347,7 @@ impl ModelPicker {
         Label::new(text.to_uppercase())
             .size(LabelSize::Small)
             .weight(FontWeight::SEMIBOLD)
+            .line_height(AUTO_LINE_11)
             .color(Color::Muted)
     }
 
@@ -498,6 +499,7 @@ impl ModelPicker {
                 current.agent, self.menu.listener_handle, listener.agent
             ))
             .size(LabelSize::Small)
+            .line_height(AUTO_LINE_11)
             .color(Color::Placeholder)
             .wrap()
         })
@@ -540,6 +542,7 @@ impl RenderOnce for ModelPicker {
             .overflow_hidden()
             .child(
                 div()
+                    .debug_selector(|| "model-picker:head".into())
                     .py(SPACE_8)
                     .px(SPACE_12)
                     .border_b(BORDER_WIDTH)
@@ -550,6 +553,7 @@ impl RenderOnce for ModelPicker {
             .child(self.effort(rule))
             .child(
                 div()
+                    .debug_selector(|| "model-picker:foot".into())
                     .flex()
                     .flex_col()
                     .gap(SPACE_8)
@@ -562,6 +566,7 @@ impl RenderOnce for ModelPicker {
                     .child(
                         Label::new(foot)
                             .size(LabelSize::Small)
+                            .line_height(AUTO_LINE_11)
                             .color(Color::Placeholder)
                             .wrap(),
                     ),

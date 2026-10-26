@@ -300,3 +300,12 @@ pub(crate) fn fills_at(cx: &mut VisualTestContext, selector: &'static str) -> Ve
         .filter(|fill| fill.a > 0.)
         .collect()
 }
+
+/// Asserts `height` is `padding` plus whole lines of `line`.
+pub(crate) fn assert_lines(height: Pixels, padding: Pixels, line: Pixels) {
+    let lines = (height - padding) / line;
+    assert!(
+        lines >= 1. && (lines - lines.round()).abs() < 0.01,
+        "{height:?} is {padding:?} and {lines} lines of {line:?}"
+    );
+}

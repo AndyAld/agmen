@@ -351,6 +351,23 @@ fn effort_hint_names_each_agent() {
 }
 
 #[gpui::test]
+fn the_picker_head_and_foot_take_the_11_px_line(cx: &mut TestAppContext) {
+    // Node 3356: 8 px padding around the 13 px title line plus the 1 px
+    // rule, 30 px. Node 3411: the rule, 8 px above and 10 below 11 px lines
+    // at a 13 px pitch (text 3412 is two lines, 26 px).
+    let (_, _, cx) = open_composer(cx);
+    click(cx, "composer:model");
+    let head = cx.debug_bounds("model-picker:head").expect("the head");
+    assert_eq!(head.size.height, px(30.), "{head:?}");
+    let foot = cx.debug_bounds("model-picker:foot").expect("the foot");
+    crate::ui::test_support::assert_lines(
+        foot.size.height,
+        px(19.),
+        crate::ui::tokens::AUTO_LINE_11,
+    );
+}
+
+#[gpui::test]
 fn group_headings_are_mono_11_in_21_px_rows(cx: &mut TestAppContext) {
     // Nodes 3359 and 3360: a heading row is 21 px (padding 6 and 2 around
     // a 13 px line), its text the code font at Small (mono 11, as V93's

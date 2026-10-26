@@ -3,7 +3,7 @@ use gpui::{Bounds, TestAppContext, point, px, size};
 use super::*;
 use crate::backend::Backend as _;
 use crate::backend::{FixtureBackend, Screen};
-use crate::ui::test_support::draw;
+use crate::ui::test_support::{assert_lines, draw};
 use crate::ui::tokens::SWITCH_MENU_HEIGHT;
 
 fn agents() -> Vec<InstalledAgent> {
@@ -50,6 +50,20 @@ fn switch_menu_marks_outdated_and_missing(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("switch-menu:add-other").is_some());
     let menu = cx.debug_bounds("switch-menu").unwrap();
     assert_eq!(menu.size.width, SWITCH_MENU_WIDTH);
+}
+
+#[gpui::test]
+fn switch_menu_head_and_foot_take_the_11_px_line(cx: &mut TestAppContext) {
+    // Node 1803: 8 px padding around a 13 px line plus the 1 px rule, so
+    // 30 px. Node 1847: the rule, 8 px above and 10 below three 11 px lines
+    // at a 13 px pitch, 58 px; how many lines depends on the font.
+    let cx = draw(cx, || {
+        SwitchMenu::new(agents(), "claude", "andy/fx1").into_any_element()
+    });
+    let head = cx.debug_bounds("switch-menu:header").unwrap();
+    assert_eq!(head.size.height, px(30.), "{head:?}");
+    let foot = cx.debug_bounds("switch-menu:footer").unwrap();
+    assert_lines(foot.size.height, px(19.), crate::ui::tokens::AUTO_LINE_11);
 }
 
 #[gpui::test]

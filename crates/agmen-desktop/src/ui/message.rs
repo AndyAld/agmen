@@ -23,8 +23,8 @@ use super::needs_you::AlertLook;
 use super::ref_chip::RefEvent;
 use super::rich_text::RichText;
 use super::tokens::{
-    ALERT_BAR_WIDTH, MENTION_BAR_WIDTH, MESSAGE_AVATAR_SIZE, REPLY_INDENT, SPACE_2, SPACE_3,
-    SPACE_6, SPACE_8, SPACE_10, TINT_ALERT, TINT_MENTION, tint,
+    ALERT_BAR_WIDTH, AUTO_LINE_12, MENTION_BAR_WIDTH, MESSAGE_AVATAR_SIZE, MESSAGE_HANDLE_LINE,
+    REPLY_INDENT, SPACE_2, SPACE_3, SPACE_6, SPACE_8, SPACE_10, TINT_ALERT, TINT_MENTION, tint,
 };
 use crate::appearance::Appearance;
 use crate::backend::{Action, Draft, can_take_over};
@@ -314,10 +314,18 @@ impl MessageRow {
             .child(
                 Label::new(self.context.clock(env.hub_at))
                     .code()
+                    .line_height(AUTO_LINE_12)
                     .color(Color::Muted),
             )
-            // Mockup fix 32: the ledger line wraps like a body.
-            .child(Label::new(line).code().color(Color::Muted).wrap())
+            // Mockup fix 32: the ledger line wraps like a body. Node 287
+            // draws it in 12 px mono on its 14 px auto line.
+            .child(
+                Label::new(line)
+                    .code()
+                    .line_height(AUTO_LINE_12)
+                    .color(Color::Muted)
+                    .wrap(),
+            )
             .into_any_element()
     }
 
@@ -404,6 +412,7 @@ impl MessageRow {
                 part("handle").child(
                     Label::new(env.from_handle.clone())
                         .code()
+                        .line_height(MESSAGE_HANDLE_LINE)
                         .weight(FontWeight::BOLD)
                         .color(Color::TextMuted),
                 ),

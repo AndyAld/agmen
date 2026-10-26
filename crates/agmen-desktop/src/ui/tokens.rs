@@ -46,6 +46,9 @@ pub(crate) const LINE_HEIGHT: f32 = 1.2;
 pub(crate) const AUTO_LINE_11: Pixels = px(13.);
 pub(crate) const AUTO_LINE_12: Pixels = px(14.);
 pub(crate) const AUTO_LINE_13: Pixels = px(16.);
+/// A message's handle (node 143): console.py's 13 px bold code font on
+/// its auto line, 15 px.
+pub(crate) const MESSAGE_HANDLE_LINE: Pixels = px(15.);
 
 // The same lines between an agent's tool cards (V108, V113): an output
 // row's 12 px code, the 13 px Say text and the 11 px cost line.

@@ -396,6 +396,23 @@ fn inside_row(cx: &mut VisualTestContext, env: &StampedEnvelope, part: &str) {
     );
 }
 
+// Head 142 is 15 px: the 13 px bold handle (node 143) on its auto line of
+// 15 and the verb badge (node 145), mono 11 on an auto line of 13 inside
+// 1 px padding, so one-line messages repeat every 48 px. Ledger row 287 is
+// 18 px: 12 px mono on an auto line of 14, padded 2 and 2. The app's code
+// text stays 13 px (C242); only the line heights follow the mockup (V113).
+#[gpui::test]
+fn the_head_and_the_ledger_take_the_mockups_line_heights(cx: &mut TestAppContext) {
+    let (messages, c) = chat();
+    let o = open(cx, px(800.), vec![0, 5], c);
+    let head = o.cx.debug_bounds(sel(&messages[0], "head")).unwrap();
+    let verb = o.cx.debug_bounds(sel(&messages[0], "verb")).unwrap();
+    assert_eq!(verb.size.height, px(15.), "{verb:?}");
+    assert_eq!(head.size.height, px(15.), "{head:?}");
+    let ledger = o.cx.debug_bounds(sel(&messages[5], "ledger")).unwrap();
+    assert_eq!(ledger.size.height, px(18.), "{ledger:?}");
+}
+
 #[gpui::test]
 fn narrow_row_wraps_the_head_instead_of_cutting_it(cx: &mut TestAppContext) {
     // A two-pane split at 1280 px leaves the chat column about 256 px.
