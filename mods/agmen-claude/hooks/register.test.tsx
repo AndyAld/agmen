@@ -98,8 +98,18 @@ type Script = {
    * after the session started; undefined means /work alone.
    */
   readonly worktrees?: readonly string[]
+  /** Worktrees `git worktree list` marks prunable: their folders are gone, so no git call answers for them. */
+  readonly prunable?: readonly string[]
+  /** `git worktree list --porcelain -z`: an answer of its own, `rejects` for no answer, or undefined for git's. */
+  readonly worktreeList?: () => Partial<ProcessRunResult> | 'rejects' | undefined
   /** `git rev-parse --git-common-dir` in a folder: an answer of its own, `rejects` for no answer, or undefined for git's. */
   readonly commonDir?: (cwd: string) => Partial<ProcessRunResult> | 'rejects' | undefined
+  /** `git rev-parse --show-superproject-working-tree` in a folder; undefined means no superproject. */
+  readonly superproject?: (cwd: string) => Partial<ProcessRunResult> | undefined
+  /** The host environment every child inherits, below the call's own `env`. */
+  readonly hostEnv?: Readonly<Record<string, string>>
+  /** Paths outside /work that are not there (stat rejects); every other one is a folder. */
+  readonly absent?: (path: string) => boolean
 }
 
 /** How the identity file sits on disk under /work. */
@@ -178,6 +188,40 @@ const listed = (name: string, kind: 'file' | 'dir', isLink = false): FsEntry =>
 /** Links in /work that lead nowhere: stat answers the link, with no `realPath`. */
 const DANGLING: ReadonlySet<string> = new Set(['/work/src/x'])
 
+/** Where an absolute path lands with its `.` and `..` names resolved, as the file system resolves them. */
+function resolved(path: string): string {
+  if (!path.startsWith('/')) return path
+  const names: string[] = []
+  for (const name of path.split('/')) {
+    if (name === '..') names.pop()
+    else if (name !== '' && name !== '.') names.push(name)
+  }
+
+  return `/${names.join('/')}`
+}
+
+/** Whether `path` is `folder` or below it. */
+const isUnder = (path: string, folder: string): boolean => path === folder || path.startsWith(`${folder}/`)
+
+/**
+ * The git command a `$.process.run` argv runs, with the environment it sees:
+ * `env -u NAME ... git <args>` removes each NAME first.
+ */
+function gitCall(
+  argv: readonly string[],
+  inherited: Readonly<Record<string, string>>,
+): { readonly args: readonly string[]; readonly env: Readonly<Record<string, string>> } | undefined {
+  const env: Record<string, string> = { ...inherited }
+  let at = argv[0] === 'env' ? 1 : 0
+  while (argv[0] === 'env' && argv[at] === '-u') {
+    const name = argv[at + 1] ?? ''
+    Reflect.deleteProperty(env, name)
+    at += 2
+  }
+
+  return argv[at] === 'git' ? { args: argv.slice(at + 1), env } : undefined
+}
+
 /**
  * The paths `agmen check-path` reads from its arguments, as clap parses them:
  * an argument starting with `-` before `--` is an option, and any but
@@ -201,31 +245,80 @@ function checkPathArgs(args: readonly string[]): readonly string[] | undefined {
 /** Stands for the engine, the file system and a scripted `agmen` on PATH. */
 function world(on: On, script: Script = {}): World {
   /**
-   * The fake `git rev-parse --git-common-dir`: `.git` at /work, the absolute
-   * /work/.git anywhere in a worktree (folded, as a case-insensitive file
-   * system opens them), else no repository. git's messages are translated
-   * unless LC_ALL is C, so only a guard that sets it can read them.
+   * git's "no repository" answer, translated unless LC_ALL is C, so only a
+   * guard that sets it can read it.
    */
-  const commonDir = (cwd: string, env: Readonly<Record<string, string>> | undefined): Partial<ProcessRunResult> => {
-    const own = script.commonDir?.(cwd)
-    if (own === 'rejects') throw new Error('timed out')
-    if (own !== undefined) return own
-    if (cwd === ROOT) return { stdout: '.git\n' }
-    const fold = cwd.toLowerCase()
-    if ([ROOT, ...(script.worktrees ?? [])].some(tree => fold === tree.toLowerCase() || fold.startsWith(`${tree.toLowerCase()}/`))) {
-      return { stdout: `${ROOT}/.git\n` }
-    }
-    const message = env?.['LC_ALL'] === 'C' ? 'not a git repository (or any of the parent directories): .git' : 'Kein Git-Repository'
+  const noRepository = (env: Readonly<Record<string, string>>): Partial<ProcessRunResult> => {
+    const message = env['LC_ALL'] === 'C' ? 'not a git repository (or any of the parent directories): .git' : 'Kein Git-Repository'
 
     return { exitCode: 128, stderr: `fatal: ${message}\n` }
   }
 
-  /** The fake git: `rev-parse --show-toplevel --show-prefix` or `--git-common-dir`, `check-ignore -q` and `status`. */
-  const git = (args: readonly string[], cwd: string, env: Readonly<Record<string, string>> | undefined): Partial<ProcessRunResult> => {
+  /**
+   * Whether the environment cuts git's search short in `cwd`, as git 2.52
+   * does: GIT_COMMON_DIR set (even empty) everywhere, and below a
+   * GIT_CEILING_DIRECTORIES entry.
+   */
+  const isCut = (cwd: string, env: Readonly<Record<string, string>>): boolean =>
+    'GIT_COMMON_DIR' in env ||
+    (env['GIT_CEILING_DIRECTORIES'] ?? '').split(':').some(ceiling => ceiling !== '' && cwd.startsWith(`${ceiling}/`))
+
+  /**
+   * The fake `git rev-parse --git-common-dir`: `.git` at /work and `../.git`
+   * and so on below it, the absolute /work/.git anywhere in another worktree
+   * (folded, as a case-insensitive file system opens them), GIT_DIR when the
+   * environment names one, else no repository.
+   */
+  const commonDir = (cwd: string, env: Readonly<Record<string, string>>): Partial<ProcessRunResult> => {
+    if (isCut(cwd, env)) return noRepository(env)
+    const named = env['GIT_DIR']
+    if (named !== undefined) return { stdout: `${named}\n` }
+    const own = script.commonDir?.(cwd)
+    if (own === 'rejects') throw new Error('timed out')
+    if (own !== undefined) return own
+    if (isUnder(cwd, ROOT)) return { stdout: `${'../'.repeat(cwd.slice(ROOT.length).split('/').length - 1)}.git\n` }
+    const fold = cwd.toLowerCase()
+    if ((script.worktrees ?? []).some(tree => isUnder(fold, tree.toLowerCase()))) return { stdout: `${ROOT}/.git\n` }
+
+    return noRepository(env)
+  }
+
+  /** The fake `git worktree list --porcelain -z`: /work, `worktrees`, then `prunable`, each field ended by NUL and each entry by one more. */
+  const worktreeList = (cwd: string, env: Readonly<Record<string, string>>): Partial<ProcessRunResult> => {
+    const own = script.worktreeList?.()
+    if (own === 'rejects') throw new Error('timed out')
+    if (own !== undefined) return own
+    if (isCut(cwd, env)) return noRepository(env)
+    const named = env['GIT_WORK_TREE']
+    const trees = named === undefined ? [ROOT, ...(script.worktrees ?? []).filter(tree => tree !== ROOT)] : [named]
+    const entries = [
+      ...trees.map(tree => [`worktree ${tree}`, 'HEAD 5da28e2619e3891c5cc5a3ff2d75b6446ccb8aae', 'branch refs/heads/main']),
+      ...(script.prunable ?? []).map(tree => [
+        `worktree ${tree}`,
+        'HEAD 5da28e2619e3891c5cc5a3ff2d75b6446ccb8aae',
+        'detached',
+        'prunable gitdir file points to non-existent location',
+      ]),
+    ]
+
+    return { stdout: entries.map(fields => `${fields.join('\0')}\0\0`).join('') }
+  }
+
+  /**
+   * The fake git: `rev-parse --show-toplevel --show-prefix`,
+   * `--git-common-dir` or `--show-superproject-working-tree`, `worktree list`,
+   * `check-ignore -q` and `status`.
+   */
+  const git = (args: readonly string[], cwd: string, env: Readonly<Record<string, string>>): Partial<ProcessRunResult> => {
     const top = script.gitTop ?? ROOT
     switch (args[0]) {
+      case 'worktree':
+        return worktreeList(cwd, env)
       case 'rev-parse': {
         if (args[1] === '--git-common-dir') return commonDir(cwd, env)
+        if (args[1] === '--show-superproject-working-tree') {
+          return isCut(cwd, env) ? noRepository(env) : (script.superproject?.(cwd) ?? { stdout: '' })
+        }
         if (script.isGitRepo === false || (cwd !== top && !cwd.startsWith(`${top}/`))) {
           return { exitCode: 128, stderr: 'fatal: not a git repository' }
         }
@@ -311,15 +404,19 @@ function world(on: On, script: Script = {}): World {
   on('fs.stat', (_, e) => {
     // Broken once the watch runs: the identity test still passes, so the session connects.
     if (script.isFsBroken === true && w.spawns.length > 0) throw new Error('the file system is gone')
-    if (DANGLING.has(e.path)) return { value: { kind: 'other', size: 0, mtimeMs: 0, isLink: true } }
-    // Outside /work every path is a folder that lands where it is named. The
-    // engine makes a relative path absolute against the test's own folder, so
-    // a spelling like `~/x.ts` would otherwise be placed there and allowed.
-    if (!e.path.startsWith(`${ROOT}/`) && e.path !== ROOT) {
-      return { value: e.resolve ? { ...STAT, kind: 'dir', realPath: e.path } : { ...STAT, kind: 'dir' } }
+    const path = resolved(e.path)
+    if (DANGLING.has(path)) return { value: { kind: 'other', size: 0, mtimeMs: 0, isLink: true } }
+    // Outside /work every path but an absent one is a folder that lands where
+    // it is named. The engine makes a relative path absolute against the
+    // test's own folder, so a spelling like `~/x.ts` would otherwise be placed
+    // there and allowed.
+    if (!isUnder(path, ROOT)) {
+      if (script.absent?.(path) === true) throw new Error(`ENOENT: ${path}`)
+
+      return { value: e.resolve ? { ...STAT, kind: 'dir', realPath: path } : { ...STAT, kind: 'dir' } }
     }
-    const realPath = e.path === IDENTITY_FILE ? (script.identity?.realPath ?? IDENTITY_FILE) : (FILES[e.path] ?? ALIASES[e.path])
-    if (realPath === undefined) throw new Error(`ENOENT: ${e.path}`)
+    const realPath = path === IDENTITY_FILE ? (script.identity?.realPath ?? IDENTITY_FILE) : (FILES[path] ?? ALIASES[path])
+    if (realPath === undefined) throw new Error(`ENOENT: ${path}`)
 
     return { value: e.resolve ? { ...STAT, realPath } : STAT }
   })
@@ -351,13 +448,16 @@ function world(on: On, script: Script = {}): World {
 
       return { value: { ...OK_RUN, ...answer } }
     }
-    if (program === 'git') {
+    if (program === 'git' || program === 'env') {
+      const call = gitCall(argv, { ...script.hostEnv, ...e.init?.env })
+      if (call === undefined) return { value: { ...OK_RUN, exitCode: 127, stderr: 'env: not git' } }
+      const [subcommand = ''] = call.args
       // A throwing hook is skipped, so the call rejects as a timed-out one does.
-      if (verb === 'check-ignore' && script.isCheckIgnoreHung === true) throw new Error('timed out')
+      if (subcommand === 'check-ignore' && script.isCheckIgnoreHung === true) throw new Error('timed out')
       const cwd = e.init?.cwd ?? ROOT
-      w.gitCwds.push([argv[1] ?? '', cwd])
+      w.gitCwds.push([subcommand, cwd])
 
-      return { value: { ...OK_RUN, ...git(argv.slice(1), cwd, e.init?.env) } }
+      return { value: { ...OK_RUN, ...git(call.args, cwd, call.env) } }
     }
 
     return { value: { ...OK_RUN, ...script.command?.(argv) } }
@@ -390,7 +490,11 @@ const edit = (file_path: string) => ({ tool: 'Edit', file_path, old_string: 'a',
 
 const REV_PARSE = ['git', 'rev-parse', '--show-toplevel', '--show-prefix']
 const CHECK_IGNORE = ['git', 'check-ignore', '-q', '--', '.agmen/identity.json']
-const COMMON_DIR = ['git', 'rev-parse', '--git-common-dir']
+/** How the guard runs git: without the variables that point it elsewhere (R72a). */
+const CLEAN_GIT = ['env', '-u', 'GIT_DIR', '-u', 'GIT_WORK_TREE', '-u', 'GIT_COMMON_DIR', '-u', 'GIT_CEILING_DIRECTORIES', 'git']
+const COMMON_DIR = [...CLEAN_GIT, 'rev-parse', '--git-common-dir']
+const SUPERPROJECT = [...CLEAN_GIT, 'rev-parse', '--show-superproject-working-tree']
+const WORKTREE_LIST = [...CLEAN_GIT, 'worktree', 'list', '--porcelain', '-z']
 
 for (const surface of SURFACES) {
   describe(surface, () => {
@@ -1078,7 +1182,12 @@ for (const surface of SURFACES) {
       expect(seventieth.deny).toContain('another worktree of this repository')
       expect(outside.deny).toBeUndefined()
       expect(w.ran).toEqual(['Write'])
-      expect(w.gitCwds).toContainEqual(['rev-parse', '/work-c/ui/a.ts'])
+      // The list is read fresh on each edit, in this worktree.
+      expect(w.gitCwds.filter(([subcommand]) => subcommand === 'worktree')).toEqual([
+        ['worktree', ROOT],
+        ['worktree', ROOT],
+        ['worktree', ROOT],
+      ])
       expect(w.runs.filter(argv => argv[1] === 'check-path')).toEqual([])
     })
 
@@ -1123,6 +1232,196 @@ for (const surface of SURFACES) {
       expect(outside.deny).toContain('could not place this worktree')
       expect(w.ran).toEqual([])
       expect(w.runs.filter(argv => argv[1] === 'check-path')).toEqual([])
+    })
+
+    test('guard_judges_nested_worktrees_repositories_and_submodules', async ($, on) => {
+      const w = world(on, {
+        worktrees: [ROOT, '/work/.worktrees/b', '/work-b'],
+        // A repository cloned into the sibling, and a submodule of this worktree: each has its own common dir.
+        commonDir: cwd =>
+          isUnder(cwd, '/work-b/vendor/lib')
+            ? { stdout: '/work-b/vendor/lib/.git\n' }
+            : isUnder(cwd, '/work/mods/s')
+              ? { stdout: '/work/.git/modules/s\n' }
+              : undefined,
+        checkPath: path => allowedEntry(path, true, null),
+      })
+
+      await start($, w, surface)
+      const submodule = await $.tool.call({ tool: 'Write', file_path: '/work/mods/s/x.ts', content: 'x' })
+      const nestedWorktree = await $.tool.call(edit('/work/.worktrees/b/src/a.ts'))
+      const nestedRepository = await $.tool.call({ tool: 'Write', file_path: '/work-b/vendor/lib/x.ts', content: 'x' })
+      const scratch = await $.tool.call({ tool: 'Write', file_path: '/tmp/notes.md', content: 'x' })
+
+      // In this worktree, a submodule's path goes to check-path like any other.
+      expect(submodule.deny).toBeUndefined()
+      expect(nestedWorktree.deny).toContain('another worktree of this repository')
+      expect(nestedRepository.deny).toContain('another worktree of this repository')
+      expect(scratch.deny).toBeUndefined()
+      expect(w.ran).toEqual(['Write', 'Write'])
+      expect(w.runs.filter(argv => argv[1] === 'check-path')).toEqual([['agmen', 'check-path', '--json', '--', '/work/mods/s/x.ts']])
+      // git placed only the scratch file; the worktree list settled the rest.
+      expect(w.gitCwds.filter(([subcommand, cwd]) => subcommand === 'rev-parse' && cwd !== ROOT)).toEqual([['rev-parse', '/tmp/notes.md']])
+    })
+
+    test('guard_denies_a_write_that_recreates_a_prunable_worktree', async ($, on) => {
+      // /gone-b was deleted without `git worktree remove`: git still lists it, marked prunable.
+      const w = world(on, {
+        prunable: ['/gone-b'],
+        absent: path => isUnder(path, '/gone-b'),
+        checkPath: path => allowedEntry(path, true, null),
+      })
+
+      await start($, w, surface)
+      const recreated = await $.tool.call({ tool: 'Write', file_path: '/gone-b/ui/a.ts', content: 'x' })
+      const aliased = await $.tool.call({ tool: 'Write', file_path: '/GONE-B/ui/a.ts', content: 'x' })
+
+      expect(recreated.deny).toContain('another worktree of this repository')
+      expect(aliased.deny).toContain('another worktree of this repository')
+      expect(w.ran).toEqual([])
+      expect(w.runs.filter(argv => argv[1] === 'check-path')).toEqual([])
+    })
+
+    test('guard_denies_every_edit_when_git_cannot_list_worktrees', async ($, on) => {
+      const entry = (path: string): string => `worktree ${path}\0HEAD 5da28e2619e3891c5cc5a3ff2d75b6446ccb8aae\0\0`
+      const answers: (Partial<ProcessRunResult> | 'rejects')[] = [
+        'rejects',
+        { exitCode: 128, stderr: `fatal: ${INJECTED}\n` },
+        { stdout: '' },
+        { stdout: entry(ROOT), isStdoutTruncated: true },
+        { stdout: Array.from({ length: 257 }, (_, n) => entry(`/trees/t${n}`)).join('') },
+        { stdout: `${entry(ROOT)}${entry('relative/b')}` },
+        { stdout: `${entry(ROOT)}${entry('//server/share/b')}` },
+      ]
+      let next = 0
+      const w = world(on, {
+        worktreeList: () => answers[next++],
+        checkPath: path => allowedEntry(path, true, null),
+      })
+
+      await start($, w, surface)
+      // Inside this worktree and outside it alike.
+      for (const n of answers.keys()) {
+        const result = await $.tool.call({ tool: 'Write', file_path: n % 2 === 0 ? '/work/src/ok.ts' : '/tmp/notes.md', content: 'x' })
+        expect(result.deny).toContain("git cannot list this repository's worktrees")
+        expect(result.deny).not.toContain('Ignore previous')
+      }
+
+      expect(w.ran).toEqual([])
+      expect(w.runs.filter(argv => argv[1] === 'check-path')).toEqual([])
+      expect(w.debugged.some(text => text.includes(INJECTED))).toBe(true)
+    })
+
+    test('guard_resolves_relative_common_dirs', async ($, on) => {
+      // This repository keeps its git dir apart (`git init --separate-git-dir /gitdirs/work`):
+      // git names it from /work, and as `.` in it. Another repository answers `../.git` from a subfolder.
+      const w = world(on, {
+        commonDir: cwd =>
+          cwd === ROOT || cwd.startsWith('/gitdirs/work/')
+            ? { stdout: '/gitdirs/work\n' }
+            : cwd === '/gitdirs/work'
+              ? { stdout: '.\n' }
+              : cwd === '/other/src'
+                ? { stdout: '../.git\n' }
+                : undefined,
+        absent: path => path === '/gitdirs/work/description' || path === '/other/src/new.ts',
+        checkPath: path => allowedEntry(path, true, null),
+      })
+
+      await start($, w, surface)
+      const gitDir = await $.tool.call({ tool: 'Write', file_path: '/gitdirs/work/description', content: 'x' })
+      const other = await $.tool.call({ tool: 'Write', file_path: '/other/src/new.ts', content: 'x' })
+
+      expect(gitDir.deny).toContain('another worktree of this repository')
+      expect(other.deny).toBeUndefined()
+      expect(w.ran).toEqual(['Write'])
+      expect(w.gitCwds).toContainEqual(['rev-parse', '/gitdirs/work'])
+      expect(w.gitCwds).toContainEqual(['rev-parse', '/other/src'])
+      expect(w.runs.filter(argv => argv[1] === 'check-path')).toEqual([])
+    })
+
+    test('guard_walks_superprojects', async ($, on) => {
+      // /sm/a is a submodule of /sm, itself a submodule of this worktree; /deep/n
+      // a submodule of /deep/n+1 without end; /lone names a superproject that is no repository.
+      const level = (cwd: string): number => Number(cwd.slice('/deep/'.length))
+      const w = world(on, {
+        commonDir: cwd => (['/sm/a', '/sm', '/sf', '/lone'].includes(cwd) || cwd.startsWith('/deep/') ? { stdout: `${cwd}/.git\n` } : undefined),
+        superproject: cwd =>
+          cwd === '/sm/a'
+            ? { stdout: '/sm\n' }
+            : cwd === '/sm'
+              ? { stdout: `${ROOT}\n` }
+              : cwd === '/sf'
+                ? { exitCode: 128, stderr: `fatal: ${INJECTED}\n` }
+                : cwd === '/lone'
+                  ? { stdout: '/nowhere\n' }
+                  : cwd.startsWith('/deep/')
+                    ? { stdout: `/deep/${level(cwd) + 1}\n` }
+                    : undefined,
+        absent: path => /\/x\.ts$/.test(path),
+        checkPath: path => allowedEntry(path, true, null),
+      })
+
+      await start($, w, surface)
+      const write = async (file_path: string) => (await $.tool.call({ tool: 'Write', file_path, content: 'x' })).deny
+      const submodule = await write('/sm/a/x.ts')
+      const deep = await write('/deep/0/x.ts')
+      const failed = await write('/sf/x.ts')
+      const lone = await write('/lone/x.ts')
+      const other = await write('/elsewhere/x.ts')
+
+      expect(submodule).toContain('in a submodule of this repository')
+      expect(deep).toContain('nested more than 8 repositories deep')
+      expect(failed).toContain('git cannot tell whether')
+      expect(failed).not.toContain('Ignore previous')
+      expect(lone).toContain('git cannot tell whether')
+      expect(other).toBeUndefined()
+      expect(w.ran).toEqual(['Write'])
+      // The endless chain: a common dir and a superproject for /deep/0 to /deep/8; the ninth superproject is one too many.
+      expect(w.gitCwds.filter(([subcommand, cwd]) => subcommand === 'rev-parse' && cwd.startsWith('/deep/'))).toHaveLength(18)
+      expect(w.gitCwds).not.toContainEqual(['rev-parse', '/deep/9'])
+      // Superprojects asked: 9 for /deep, 2 for /sm (this worktree's common dir ends it), 1 each for /sf and /lone, none outside every repository.
+      expect(w.runs.filter(argv => argv.join(' ') === SUPERPROJECT.join(' '))).toHaveLength(9 + 2 + 1 + 1)
+      expect(w.runs.filter(argv => argv[1] === 'check-path')).toEqual([])
+    })
+
+    test('guard_ignores_a_git_ceiling_in_the_host_environment', async ($, on) => {
+      // A ceiling at the git dir stops git's search from its hooks folder: "not a git repository".
+      const w = world(on, {
+        hostEnv: { GIT_CEILING_DIRECTORIES: '/gitdirs/work' },
+        commonDir: cwd => (cwd === ROOT || isUnder(cwd, '/gitdirs/work') ? { stdout: '/gitdirs/work\n' } : undefined),
+        absent: path => path === '/gitdirs/work/hooks/pre-commit',
+        checkPath: path => allowedEntry(path, true, null),
+      })
+
+      await start($, w, surface)
+      const hook = await $.tool.call({ tool: 'Write', file_path: '/gitdirs/work/hooks/pre-commit', content: 'x' })
+      const scratch = await $.tool.call({ tool: 'Write', file_path: '/tmp/notes.md', content: 'x' })
+
+      expect(hook.deny).toContain('another worktree of this repository')
+      expect(scratch.deny).toBeUndefined()
+      expect(w.ran).toEqual(['Write'])
+    })
+
+    test('guard_runs_git_without_the_location_variables', async ($, on) => {
+      const w = world(on, {
+        hostEnv: { GIT_DIR: '/elsewhere/.git', GIT_WORK_TREE: '/elsewhere', GIT_COMMON_DIR: '' },
+        worktrees: [ROOT, '/work-b'],
+        checkPath: path => allowedEntry(path, true, null),
+      })
+
+      await start($, w, surface)
+      const inside = await $.tool.call(edit('/work/src/ok.ts'))
+      const sibling = await $.tool.call({ tool: 'Write', file_path: '/work-b/ui/a.ts', content: 'x' })
+      const scratch = await $.tool.call({ tool: 'Write', file_path: '/tmp/notes.md', content: 'x' })
+
+      expect(inside.deny).toBeUndefined()
+      expect(sibling.deny).toContain('another worktree of this repository')
+      expect(scratch.deny).toBeUndefined()
+      expect(w.ran).toEqual(['Edit', 'Write'])
+      // Every git call the guard made removed the four variables first.
+      const guardCalls = w.runs.filter(argv => argv[0] === 'env')
+      expect(guardCalls).toEqual([COMMON_DIR, WORKTREE_LIST, WORKTREE_LIST, WORKTREE_LIST, COMMON_DIR])
     })
 
     test('warns_on_bash_writes_outside_lanes', async ($, on) => {
