@@ -242,3 +242,228 @@ fn shaped_runs_split_at_every_boundary_kind(cx: &mut TestAppContext) {
         assert_eq!(drawn.iter().filter(|d| d.chip).count(), runs.len() + 1);
     }
 }
+
+/// A shaped line of `text` whose glyphs come in the visual order given,
+/// each `(byte, advance)`, as a bidi shaper returns them.
+fn shaped(text: &str, visual: &[(usize, f32)]) -> ShapedLine {
+    let mut x = px(0.);
+    let glyphs = visual
+        .iter()
+        .map(|&(index, advance)| {
+            let glyph = gpui::ShapedGlyph {
+                id: gpui::GlyphId(0),
+                position: point(x, px(0.)),
+                index,
+                is_emoji: false,
+            };
+            x += px(advance);
+            glyph
+        })
+        .collect();
+    let mut line = ShapedLine::default();
+    *line = std::sync::Arc::new(gpui::LineLayout {
+        font_size: px(14.),
+        width: x,
+        ascent: px(11.),
+        descent: px(3.),
+        runs: vec![gpui::ShapedRun {
+            font_id: gpui::FontId(0),
+            glyphs,
+        }],
+        len: text.len(),
+    });
+    line.text = text.to_owned().into();
+    line
+}
+
+/// One glyph `advance` wide per character of `text`, in byte order except
+/// for the characters starting in `rtl`, which come reversed.
+fn bidi(text: &str, rtl: Range<usize>, advance: f32) -> Vec<(usize, f32)> {
+    let starts: Vec<usize> = text.char_indices().map(|(at, _)| at).collect();
+    let first = starts.partition_point(|at| *at < rtl.start);
+    let last = starts.partition_point(|at| *at < rtl.end);
+    let mut order = starts.clone();
+    order[first..last].reverse();
+    order.into_iter().map(|at| (at, advance)).collect()
+}
+
+/// What "abc مرحبا بالعالم def" shapes to with CoreText: the right to left
+/// stretch at bytes 4 to 29 comes last letter first.
+fn mixed() -> (&'static str, Vec<(usize, f32)>) {
+    let text = "abc مرحبا بالعالم def";
+    let visual = bidi(text, 4..29, 10.);
+    assert_eq!(
+        visual.iter().map(|(at, _)| *at).take(7).collect::<Vec<_>>(),
+        [0, 1, 2, 3, 27, 25, 23]
+    );
+    (text, visual)
+}
+
+/// The advance of the glyphs that draw `bytes`.
+fn advance_of(visual: &[(usize, f32)], bytes: &Range<usize>) -> Pixels {
+    px(visual
+        .iter()
+        .filter(|(at, _)| bytes.contains(at))
+        .map(|(_, advance)| advance)
+        .sum())
+}
+
+/// Checks a run laid out at `width`: each byte is placed once in byte
+/// order and only spaces at a break are left out, no piece starts or ends
+/// in a space unless that is all it holds, each piece is as wide as its
+/// glyphs, and none passes the line unless one glyph draws it.
+fn assert_sound(text: &str, visual: &[(usize, f32)], width: f32) {
+    let segs = [Seg::Run(Glyphs::from(&shaped(text, visual)))];
+    let laid = lay_out(&segs, Some(width));
+    let mut at = 0;
+    for placed in &laid.placed {
+        let bytes = placed.bytes.clone();
+        let gap = &text[at..bytes.start];
+        assert!(
+            bytes.start >= at && gap.chars().all(char::is_whitespace),
+            "{gap:?} before {bytes:?} is lost at {width}"
+        );
+        at = bytes.end;
+        let piece = &text[bytes.clone()];
+        let blank = piece.chars().all(char::is_whitespace);
+        assert!(
+            blank
+                || !(piece.starts_with(char::is_whitespace)
+                    || piece.ends_with(char::is_whitespace)),
+            "{piece:?} has a space at an edge at {width}"
+        );
+        // Running sums of floats round a little.
+        let drawn = advance_of(visual, &bytes);
+        assert!(
+            (placed.bounds.size.width - drawn).abs() < px(0.01),
+            "{piece:?} is {:?} wide, its glyphs {drawn:?}, at {width}",
+            placed.bounds.size.width
+        );
+        assert!(
+            placed.bounds.right() <= px(width)
+                || visual.iter().filter(|(at, _)| bytes.contains(at)).count() == 1,
+            "{piece:?} ends at {:?}, past {width}",
+            placed.bounds.right()
+        );
+    }
+    let rest = &text[at..];
+    assert!(
+        rest.chars().all(char::is_whitespace),
+        "{rest:?} is lost at {width}"
+    );
+}
+
+#[test]
+fn right_to_left_text_keeps_every_word_at_every_width() {
+    let (text, visual) = mixed();
+    for width in (1..=25).map(|n| 10. * n as f32) {
+        assert_sound(text, &visual, width);
+    }
+}
+
+#[test]
+fn right_to_left_text_breaks_at_its_spaces_in_reading_order() {
+    let (text, visual) = mixed();
+    let segs = [Seg::Run(Glyphs::from(&shaped(text, &visual)))];
+    // "abc مرحبا" is 9 glyphs; "abc مرحبا بالعالم" would be 17.
+    let laid = lay_out(&segs, Some(120.));
+    assert_eq!(texts(&segs, &laid), [(0, "abc مرحبا"), (1, "بالعالم def")]);
+}
+
+#[test]
+fn a_long_right_to_left_word_breaks_to_fit() {
+    let text = "ب".repeat(500);
+    let visual = bidi(&text, 0..text.len(), 3.9);
+    for width in [60., 150., 276., 700.] {
+        assert_sound(&text, &visual, width);
+    }
+}
+
+#[test]
+fn right_to_left_digits_inside_a_phrase_keep_their_width() {
+    // CoreText draws "123" left to right inside the reversed phrase.
+    let text = "مرحبا 123 بالعالم";
+    let mut visual = bidi(text, 0..text.len(), 10.);
+    let digits = visual.iter().position(|(at, _)| *at == 13).unwrap();
+    visual[digits - 2..=digits].reverse();
+    for width in (1..=20).map(|n| 10. * n as f32) {
+        assert_sound(text, &visual, width);
+    }
+}
+
+#[test]
+fn zero_width_spaces_stay_and_break() {
+    // CoreText gives U+200B no glyph: the space before them carries their
+    // bytes, and a joiner rides on the letter before it.
+    let text = "c\td \u{200B}\u{200B}zz\u{200D}";
+    let visual = [(0, 7.), (1, 21.), (2, 8.), (3, 3.), (10, 6.5), (11, 6.5)];
+    for width in [10., 20., 30., 39., 40., 45., 60.] {
+        assert_sound(text, &visual, width);
+    }
+    let segs = [Seg::Run(Glyphs::from(&shaped(text, &visual)))];
+    let laid = lay_out(&segs, Some(45.));
+    assert_eq!(
+        texts(&segs, &laid),
+        [(0, "c\td \u{200B}\u{200B}"), (1, "zz\u{200D}")]
+    );
+}
+
+#[test]
+fn ligatures_and_combined_marks_keep_their_bytes() {
+    // "ffi" is one glyph at byte 2; "e" and U+0301 are one glyph.
+    let text = "office e\u{301}e\u{301} fi";
+    let visual = [
+        (0, 8.),
+        (1, 8.),
+        (2, 12.),
+        (4, 4.),
+        (5, 8.),
+        (6, 4.),
+        (7, 8.),
+        (10, 8.),
+        (13, 4.),
+        (14, 8.),
+    ];
+    for width in [8., 12., 20., 30., 40., 60., 80.] {
+        assert_sound(text, &visual, width);
+    }
+}
+
+#[test]
+fn cut_pieces_draw_their_own_glyphs_in_visual_order() {
+    let (text, visual) = mixed();
+    let line = shaped(text, &visual);
+    let segs = [Seg::Run(Glyphs::from(&line))];
+    for width in [40., 60., 90., 120., 170., 250.] {
+        let laid = lay_out(&segs, Some(width));
+        let mut cutter = Cutter::new(&line);
+        for placed in &laid.placed {
+            let piece = cutter.cut(placed.bytes.clone());
+            assert_eq!(piece.text.as_ref(), &text[placed.bytes.clone()]);
+            assert_eq!(piece.len(), placed.bytes.len());
+            assert_eq!(piece.width(), placed.bounds.size.width, "{:?}", piece.text);
+            // The piece's glyphs, back in the line's bytes, in the order
+            // the line draws them, packed from 0.
+            let drawn: Vec<(usize, Pixels)> = piece
+                .runs
+                .iter()
+                .flat_map(|run| run.glyphs.iter())
+                .map(|glyph| (glyph.index + placed.bytes.start, glyph.position.x))
+                .collect();
+            let want: Vec<usize> = visual
+                .iter()
+                .map(|(at, _)| *at)
+                .filter(|at| placed.bytes.contains(at))
+                .collect();
+            assert_eq!(
+                drawn.iter().map(|(at, _)| *at).collect::<Vec<_>>(),
+                want,
+                "{:?} at {width}",
+                piece.text
+            );
+            for (n, (_, x)) in drawn.iter().enumerate() {
+                assert_eq!(*x, px(10. * n as f32), "{:?} at {width}", piece.text);
+            }
+        }
+    }
+}

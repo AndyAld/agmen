@@ -18,12 +18,14 @@
 use std::cell::RefCell;
 use std::ops::Range;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use gpui::{
     AnyElement, App, AvailableSpace, Bounds, Element, ElementId, GlobalElementId,
-    InspectorElementId, IntoElement, LayoutId, Pixels, Point, ShapedLine, SharedString, Size,
-    Style, TextAlign, TextRun, Window, point, px, relative, size,
+    InspectorElementId, IntoElement, LayoutId, LineLayout, Pixels, Point, ShapedGlyph, ShapedLine,
+    ShapedLineCursor, ShapedRun, SharedString, Size, Style, TextAlign, TextRun, Window, point, px,
+    relative, size,
 };
 
 use super::tokens::{LINE_HEIGHT, SPACE_3, SPACE_4};
@@ -57,13 +59,20 @@ impl InlineFlow {
     }
 }
 
-/// A shaped run as the breaker sees it: where each character's glyph
-/// starts.
+/// A shaped run as the breaker sees it, in reading order: where each glyph
+/// cluster starts, and how far its glyphs advance the pen.
+///
+/// The breaker works on bytes, but a shaper draws right to left text last
+/// letter first, so a glyph's x says nothing about the bytes around it.
+/// Each stop's x is instead the advance of every glyph before it in byte
+/// order, which makes the width of any byte range the width its glyphs
+/// draw, whatever order they are drawn in.
 #[derive(Debug, Clone, Default)]
 pub(super) struct Glyphs {
     pub(super) text: SharedString,
-    /// The byte index and x of each glyph, in strictly rising byte order,
-    /// each on a character boundary and the first at byte 0.
+    /// The byte index and x of each stop, in strictly rising byte order,
+    /// each on a character boundary and the first at byte 0. A stop that
+    /// starts with whitespace holds only whitespace.
     stops: Vec<(usize, Pixels)>,
     width: Pixels,
 }
@@ -71,24 +80,94 @@ pub(super) struct Glyphs {
 impl From<&ShapedLine> for Glyphs {
     fn from(line: &ShapedLine) -> Self {
         let text = line.text.clone();
-        let mut stops: Vec<(usize, Pixels)> = Vec::with_capacity(text.len());
-        for glyph in line.runs.iter().flat_map(|run| run.glyphs.iter()) {
-            // Glyphs out of byte order (bidi text) or inside a character
-            // are no place to break, so they are skipped.
-            let rises = stops.last().is_none_or(|(at, _)| *at < glyph.index);
-            if rises && text.is_char_boundary(glyph.index) {
-                stops.push((glyph.index, glyph.position.x));
+        let width = line.width();
+        let mut stops: Vec<(usize, Pixels)> = Vec::with_capacity(text.len() + 1);
+        if !text.is_empty() {
+            stops.push((0, px(0.)));
+        }
+        let ordered = line
+            .runs
+            .iter()
+            .flat_map(|run| run.glyphs.iter().map(|glyph| glyph.index))
+            .is_sorted();
+        // A glyph inside a character counts for it.
+        if ordered {
+            // Glyphs in byte order sit where the advance before them ends.
+            for glyph in line.runs.iter().flat_map(|run| run.glyphs.iter()) {
+                push_stop(
+                    &text,
+                    &mut stops,
+                    text.floor_char_boundary(glyph.index),
+                    glyph.position.x,
+                );
+            }
+        } else {
+            let mut clusters: Vec<(usize, Pixels)> = advances(line)
+                .map(|(_, _, glyph, advance)| (text.floor_char_boundary(glyph.index), advance))
+                .collect();
+            // Stable, so the glyphs of one cluster keep their order.
+            clusters.sort_by_key(|(at, _)| *at);
+            let mut x = px(0.);
+            for (at, advance) in clusters {
+                push_stop(&text, &mut stops, at, x);
+                x += advance;
             }
         }
-        if !text.is_empty() && stops.first().is_none_or(|(at, _)| *at != 0) {
-            stops.insert(0, (0, px(0.)));
-        }
-        Self {
-            text,
-            stops,
-            width: line.width(),
-        }
+        push_stop(&text, &mut stops, text.len(), width);
+        Self { text, stops, width }
     }
+}
+
+/// Starts a stop at byte `at` and x `x`, unless one starts there already;
+/// the text's end starts none. Before it, the stop that ends at `at` is
+/// split if it starts with whitespace and goes on to other characters, so
+/// a break can trim the whitespace and keep the rest: CoreText draws no
+/// glyph for a zero width space, so the space before one carries its
+/// bytes. The whitespace keeps the advance, and the rest is drawn by no
+/// glyph.
+fn push_stop(text: &str, stops: &mut Vec<(usize, Pixels)>, at: usize, x: Pixels) {
+    let Some(&(last, _)) = stops.last() else {
+        return;
+    };
+    if last == at {
+        return;
+    }
+    let cluster = text.get(last..at).unwrap_or_default();
+    if cluster.starts_with(char::is_whitespace)
+        && let Some(rest) = cluster.find(|c: char| !c.is_whitespace())
+    {
+        stops.push((last + rest, x));
+    }
+    if at < text.len() {
+        stops.push((at, x));
+    }
+}
+
+/// Each glyph of `line` in the order it draws them, with its run, its index
+/// in the run, and its advance: the distance to the next glyph drawn, the
+/// first from 0 and the last to the line's end, so they sum to its width.
+fn advances(line: &ShapedLine) -> impl Iterator<Item = (usize, usize, &ShapedGlyph, Pixels)> {
+    let mut visual = line
+        .runs
+        .iter()
+        .enumerate()
+        .flat_map(|(r, run)| {
+            run.glyphs
+                .iter()
+                .enumerate()
+                .map(move |(g, glyph)| (r, g, glyph))
+        })
+        .peekable();
+    let mut left = px(0.);
+    std::iter::from_fn(move || {
+        let (r, g, glyph) = visual.next()?;
+        let right = visual
+            .peek()
+            .map_or(line.width(), |(_, _, next)| next.position.x);
+        let advance = right - left;
+        left = right;
+        Some((r, g, glyph, advance))
+    })
 }
 
 impl Glyphs {
@@ -118,11 +197,22 @@ impl Glyphs {
         self.stops.get(k).map_or(self.width, |(_, x)| *x)
     }
 
-    fn char_at(&self, k: usize) -> char {
+    /// The characters of stop `k`.
+    fn cluster(&self, k: usize) -> &str {
         self.text
-            .get(self.byte(k)..)
-            .and_then(|rest| rest.chars().next())
-            .unwrap_or(' ')
+            .get(self.byte(k)..self.byte(k + 1))
+            .unwrap_or_default()
+    }
+
+    /// The first character of stop `k`.
+    fn first(&self, k: usize) -> char {
+        self.cluster(k).chars().next().unwrap_or(' ')
+    }
+
+    /// Whether stop `k` is whitespace, and so nothing else, so it may hang
+    /// past a line's end and be trimmed there.
+    fn blank(&self, k: usize) -> bool {
+        self.first(k).is_whitespace()
     }
 }
 
@@ -188,8 +278,8 @@ pub(super) fn flow(
 }
 
 /// Whether a line may break before `c` when `prev` comes before it: at the
-/// start of a word, or beside an ideograph, but never before closing or
-/// after opening punctuation.
+/// start of a word, after a zero width space, or beside an ideograph, but
+/// never before closing or after opening punctuation.
 fn breaks_before(prev: Option<char>, c: char) -> bool {
     let Some(prev) = prev else {
         return false;
@@ -197,7 +287,7 @@ fn breaks_before(prev: Option<char>, c: char) -> bool {
     if c.is_whitespace() || closes(c) || opens(prev) {
         return false;
     }
-    prev.is_whitespace() || wide(c) || wide(prev)
+    prev.is_whitespace() || prev == '\u{200B}' || wide(c) || wide(prev)
 }
 
 /// Scripts written without spaces between words: CJK, kana, Hangul, Yi and
@@ -311,11 +401,11 @@ impl Breaker {
         self.place(seg, 0..0, self.next_x(), item);
     }
 
-    /// Places glyphs `start..end` of a run at `x`, less trailing spaces,
+    /// Places stops `start..end` of a run at `x`, less trailing spaces,
     /// which hang past the line's end.
     fn text(&mut self, seg: usize, glyphs: &Glyphs, start: usize, end: usize, x: Pixels) {
         let mut end = end;
-        while end > start && glyphs.char_at(end - 1).is_whitespace() {
+        while end > start && glyphs.blank(end - 1) {
             end -= 1;
         }
         if end > start {
@@ -338,12 +428,15 @@ impl Breaker {
         let mut prev = None;
         let mut k = 0;
         while k < count {
-            let c = glyphs.char_at(k);
-            if k > start && breaks_before(prev, c) {
+            let cluster = glyphs.cluster(k);
+            let first = cluster.chars().next().unwrap_or(' ');
+            let last = cluster.chars().next_back().unwrap_or(' ');
+            if k > start && breaks_before(prev, first) {
                 candidate = Some(k);
             }
             let end = x + glyphs.x(k + 1) - glyphs.x(start);
-            if !c.is_whitespace() && end > self.limit {
+            // A stop that starts with whitespace holds nothing else.
+            if !first.is_whitespace() && end > self.limit {
                 let at = match candidate.take() {
                     Some(at) => at,
                     // The first word does not fit beside what is already
@@ -359,7 +452,7 @@ impl Breaker {
                     None if k > start => k,
                     // A glyph wider than the line stays alone on it.
                     None => {
-                        prev = Some(c);
+                        prev = Some(last);
                         k += 1;
                         continue;
                     }
@@ -372,7 +465,7 @@ impl Breaker {
                 k = at;
                 continue;
             }
-            prev = Some(c);
+            prev = Some(last);
             k += 1;
         }
         self.text(seg, glyphs, start, count, x);
@@ -727,20 +820,18 @@ fn slice(
 ) -> (Vec<Piece>, Vec<AtomAt>, Pixels) {
     let mut pieces = Vec::new();
     let mut atoms = Vec::new();
-    let mut cursor = None;
+    let mut cutter = None;
     for placed in &laid.placed {
         match (state.parts.get(placed.seg), state.segs.get(placed.seg)) {
             (Some(Part::Run(line)), _) => {
-                let (seg, cut) = cursor.get_or_insert_with(|| (placed.seg, line.cursor()));
+                let (seg, cut) = cutter.get_or_insert_with(|| (placed.seg, Cutter::new(line)));
                 if *seg != placed.seg {
                     *seg = placed.seg;
-                    *cut = line.cursor();
+                    *cut = Cutter::new(line);
                 }
-                // The bytes before the piece are the space it broke at.
-                cut.take_until(placed.bytes.start);
                 pieces.push(Piece {
                     origin: origin + placed.bounds.origin,
-                    shaped: cut.take_until(placed.bytes.end),
+                    shaped: cut.cut(placed.bytes.clone()),
                     placed: placed.clone(),
                 });
             }
@@ -760,6 +851,143 @@ fn slice(
         }
     }
     (pieces, atoms, state.line_height)
+}
+
+/// Cuts a run's shaped line into the pieces a flow placed, in byte order.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "one lives on the stack at a time, while a run is cut"
+)]
+enum Cutter<'a> {
+    /// gpui's cursor, which copies each glyph once.
+    Ordered(ShapedLineCursor<'a>),
+    /// Right to left text: the cursor splits at the first glyph past a
+    /// byte in the order they are drawn, which cuts a reversed stretch in
+    /// the wrong place, so each piece collects its own glyphs.
+    Unordered(Reordered<'a>),
+}
+
+impl<'a> Cutter<'a> {
+    fn new(line: &'a ShapedLine) -> Self {
+        let ordered = line
+            .runs
+            .iter()
+            .flat_map(|run| run.glyphs.iter().map(|glyph| glyph.index))
+            .is_sorted();
+        if ordered {
+            Self::Ordered(line.cursor())
+        } else {
+            Self::Unordered(Reordered::new(line))
+        }
+    }
+
+    /// The piece that draws `bytes`, which start at or after the end of the
+    /// last piece cut, on character boundaries.
+    fn cut(&mut self, bytes: Range<usize>) -> ShapedLine {
+        match self {
+            Self::Ordered(cursor) => {
+                // The bytes before the piece are the space it broke at.
+                cursor.take_until(bytes.start);
+                cursor.take_until(bytes.end)
+            }
+            Self::Unordered(line) => line.cut(bytes),
+        }
+    }
+}
+
+/// A shaped line whose glyphs are not in byte order, indexed so a piece
+/// finds its glyphs without a pass over the whole line.
+struct Reordered<'a> {
+    line: &'a ShapedLine,
+    /// Each glyph's run, its index in the run, and its advance, in the
+    /// order the line draws them.
+    drawn: Vec<(usize, usize, Pixels)>,
+    /// Each glyph's byte and its place in `drawn`, in byte order.
+    by_byte: Vec<(usize, usize)>,
+}
+
+impl<'a> Reordered<'a> {
+    fn new(line: &'a ShapedLine) -> Self {
+        let mut drawn = Vec::new();
+        let mut by_byte = Vec::new();
+        // Measured as `Glyphs` measures them, so a piece is as wide as the
+        // flow placed it.
+        for (r, g, glyph, advance) in advances(line) {
+            by_byte.push((glyph.index, drawn.len()));
+            drawn.push((r, g, advance));
+        }
+        by_byte.sort_by_key(|(at, _)| *at);
+        Self {
+            line,
+            drawn,
+            by_byte,
+        }
+    }
+
+    /// The glyphs of `bytes` in the order the line draws them, packed from
+    /// x 0. Bidi reordering of a line cut from a paragraph keeps the order
+    /// the paragraph draws the line's characters in, so the piece reads as
+    /// a line of its own would, with the glyph shapes of the whole run.
+    fn cut(&self, bytes: Range<usize>) -> ShapedLine {
+        let from = self.by_byte.partition_point(|(at, _)| *at < bytes.start);
+        let to = self.by_byte.partition_point(|(at, _)| *at < bytes.end);
+        let mut order: Vec<usize> = self
+            .by_byte
+            .get(from..to)
+            .unwrap_or_default()
+            .iter()
+            .map(|(_, n)| *n)
+            .collect();
+        order.sort_unstable();
+        let mut runs: Vec<(usize, ShapedRun)> = Vec::new();
+        let mut x = px(0.);
+        for n in order {
+            let Some(&(r, g, advance)) = self.drawn.get(n) else {
+                continue;
+            };
+            let Some(run) = self.line.runs.get(r) else {
+                continue;
+            };
+            let Some(glyph) = run.glyphs.get(g) else {
+                continue;
+            };
+            let moved = ShapedGlyph {
+                position: point(x, glyph.position.y),
+                index: glyph.index.saturating_sub(bytes.start),
+                ..glyph.clone()
+            };
+            match runs.last_mut() {
+                Some((last, shaped)) if *last == r => shaped.glyphs.push(moved),
+                _ => runs.push((
+                    r,
+                    ShapedRun {
+                        font_id: run.font_id,
+                        glyphs: vec![moved],
+                    },
+                )),
+            }
+            x += advance;
+        }
+        // A clone keeps the line's decoration, one run over all its bytes
+        // (`request_layout` shapes each run with a single `TextRun`), which
+        // covers the piece's rebased bytes too.
+        let mut piece = self.line.clone();
+        *piece = Arc::new(LineLayout {
+            font_size: self.line.font_size,
+            width: x,
+            ascent: self.line.ascent,
+            descent: self.line.descent,
+            runs: runs.into_iter().map(|(_, run)| run).collect(),
+            len: bytes.len(),
+        });
+        piece.text = self
+            .line
+            .text
+            .get(bytes)
+            .map(SharedString::new)
+            .unwrap_or_default();
+        piece
+    }
 }
 
 /// What one flow drew, for tests: a piece of text or a chip with its label.
