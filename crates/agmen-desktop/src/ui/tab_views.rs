@@ -10,7 +10,7 @@ use gpui::{AnyView, AppContext as _, Context, Subscription, Window};
 
 use super::agent_view::AgentView;
 use super::code_view::CodeView;
-use super::diff_view::DiffView;
+use super::diff_view::{DiffTab, DiffTabEvent};
 use super::pane::{Pane, TabItem};
 use super::project_panel::FileView;
 use super::roles_panel::RoleFileView;
@@ -71,6 +71,7 @@ impl TabViews {
             TabItem::Agent(_)
                 | TabItem::RoleFile(_)
                 | TabItem::File { .. }
+                | TabItem::Diff { .. }
                 | TabItem::Settings(_)
                 | TabItem::Spec(_)
         )
@@ -110,17 +111,26 @@ impl TabViews {
                     .find(|wt| wt.handle == *worktree)?;
                 cx.new(|cx| FileView::new(wt, path, cx)).into()
             }
+            // A worktree the snapshot does not have keeps the placeholder,
+            // as a file tab does.
             TabItem::Diff { worktree, path } => {
-                // A path with no change shows the diff view's empty state.
-                let hunks = snapshot
+                let wt = snapshot
                     .worktrees
                     .iter()
-                    .find(|wt| wt.handle == *worktree)
-                    .and_then(|wt| wt.changes.iter().find(|c| c.path == *path))
-                    .map(|c| c.hunks.clone())
-                    .unwrap_or_default();
-                let language = Language::for_path(std::path::Path::new(path));
-                cx.new(|_| DiffView::new(hunks, language)).into()
+                    .find(|wt| wt.handle == *worktree)?;
+                let view = cx.new(|cx| DiffTab::new(wt, path, cx));
+                // Open file opens the file's tab in this pane.
+                events = Some(cx.subscribe(&view, |pane, _, event, cx| {
+                    let DiffTabEvent::OpenFile { worktree, path } = event;
+                    pane.open(
+                        TabItem::File {
+                            worktree: worktree.clone(),
+                            path: path.clone(),
+                        },
+                        cx,
+                    );
+                }));
+                view.into()
             }
             TabItem::Settings(_) => {
                 let sources = cx.try_global::<SettingsSources>()?.clone();

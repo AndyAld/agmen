@@ -552,3 +552,18 @@ fn a_planning_projects_chat_tab_is_the_plan() {
     let chat = super::names::PaneNames::from_snapshot(&crate::backend::chat_snapshot());
     assert_eq!(chat.tab_label(&TabItem::Chat), "chat");
 }
+
+// Review (wiredock minor 1): a diff whose worktree the snapshot does not
+// have keeps the placeholder, not the "no changes" empty state.
+#[gpui::test]
+fn a_diff_of_an_unknown_worktree_keeps_the_placeholder(cx: &mut TestAppContext) {
+    let (group, cx) = open_center(cx);
+    let diff = TabItem::Diff {
+        worktree: "nobody/gone".into(),
+        path: "src/main.rs".into(),
+    };
+    group.update(cx, |group, cx| group.open(diff, cx));
+    redraw(cx);
+    assert!(cx.debug_bounds("diff-empty").is_none());
+    assert!(cx.debug_bounds("diff-open-file").is_none());
+}

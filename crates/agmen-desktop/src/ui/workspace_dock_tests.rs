@@ -106,6 +106,23 @@ fn selecting_a_change_opens_its_diff_tab(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_diff_tab_names_its_changes_and_opens_its_file(cx: &mut TestAppContext) {
+    // V95, frame 5057 node 5206: andy/fx1 › changes › src/main.rs, then
+    // Open file, which opens the file's own tab.
+    let (workspace, cx) = open(cx);
+    click(cx, "tab-git");
+    click(cx, "git-change:src/main.rs");
+    redraw(cx);
+    crate::ui::test_support::assert_breadcrumb_glyphs(cx, 3);
+    click(cx, "diff-open-file");
+    assert!(matches!(
+        active_item(&workspace, cx),
+        Some(TabItem::File { worktree, path }) if worktree == "andy/fx1" && path == "src/main.rs"
+    ));
+    assert!(cx.debug_bounds("file-view").is_some());
+}
+
+#[gpui::test]
 fn files_and_git_buttons_open_and_toggle(cx: &mut TestAppContext) {
     let (workspace, cx) = open(cx);
     click(cx, "status-project");
