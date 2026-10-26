@@ -14,6 +14,7 @@ mod format;
 mod listener_panel;
 mod palette_filter;
 mod roles_panel;
+mod settings_view;
 mod status_bar;
 mod syntax;
 #[cfg(test)]
@@ -28,6 +29,7 @@ pub(crate) use agent_view::AgentView;
 pub(crate) use code_view::{CodeView, GutterMark};
 pub(crate) use dev_views::{DevFrame, RolesDev};
 pub(crate) use dock::DockSide;
+pub(crate) use settings_view::{SettingsSources, SettingsView};
 pub(crate) use syntax::Language;
 pub(crate) use text_input::{TextInput, bind_keys};
 pub(crate) use title_bar::TitleBar;

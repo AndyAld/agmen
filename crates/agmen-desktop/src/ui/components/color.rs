@@ -15,10 +15,6 @@ pub(crate) enum Color {
     /// The theme's `text.muted`, as a change card's "Settings changed". In
     /// Gruvbox Material Dark Hard it is brighter than `text` (#e0c89e over
     /// #d8bf94); in most Zed themes it is dimmer.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the change card is hosted by the Task 9 chat")
-    )]
     TextMuted,
     /// Secondary text, inactive icons, harness names (`text.placeholder`).
     Placeholder,
