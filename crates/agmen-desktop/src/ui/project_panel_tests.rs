@@ -6,7 +6,7 @@ use gpui::{Entity, TestAppContext, VisualTestContext};
 use super::*;
 use crate::backend::{WorktreeInfo, chat_snapshot, fixture_id};
 use crate::ui::scope_chip::ScopeOption;
-use crate::ui::test_support::{click, init, redraw};
+use crate::ui::test_support::{PlainButtonHost, click, init, redraw};
 
 fn fx1() -> WorktreeInfo {
     chat_snapshot()
@@ -234,4 +234,20 @@ fn normalized_worktrees_keep_markers_and_texts() {
     let wt = wt.normalized();
     assert!(change_marker(&wt.changes, "src/main.rs").is_some());
     assert_eq!(contents(&wt, "src/main.rs").0, "fn main() {}\n");
+}
+
+#[gpui::test]
+fn file_view_diff_button_is_plain(cx: &mut TestAppContext) {
+    // V92: node 4663 and console.py 1725 draw Diff "plain": elevated
+    // surface, padding 3/9, radius 5, 20 px tall.
+    init(cx);
+    let wt = fx1();
+    let (_, cx) = cx.add_window_view(|_, cx| {
+        let file = cx.new(|cx| FileView::new(&wt, "src/main.rs", cx));
+        PlainButtonHost::new(file, "Diff")
+    });
+    redraw(cx);
+    let want = cx.debug_bounds("want-plain").unwrap();
+    let diff = cx.debug_bounds("file-diff").unwrap();
+    assert_eq!(diff.size, want.size, "{diff:?} {want:?}");
 }

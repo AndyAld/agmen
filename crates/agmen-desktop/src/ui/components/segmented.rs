@@ -81,13 +81,17 @@ impl RenderOnce for Segmented {
             let selected = index == self.selected;
             let selector = format!("{}:{index}", self.id);
             let label_selector = format!("{selector}:label");
-            let label = Label::new(option)
-                .size(LabelSize::Small)
-                .color(if selected {
-                    Color::Accent
-                } else {
-                    Color::Placeholder
-                });
+            let label = Label::new(option).color(if selected {
+                Color::Accent
+            } else {
+                Color::Placeholder
+            });
+            // A code label keeps the code font's own size.
+            let label = if self.code {
+                label.code()
+            } else {
+                label.size(LabelSize::Small)
+            };
             div()
                 .id(SharedString::from(selector.clone()))
                 .debug_selector(|| selector)
@@ -116,11 +120,7 @@ impl RenderOnce for Segmented {
                         )
                     }
                 })
-                .child(div().debug_selector(|| label_selector).child(if self.code {
-                    label.code()
-                } else {
-                    label
-                }))
+                .child(div().debug_selector(|| label_selector).child(label))
         });
         div()
             .flex()

@@ -420,7 +420,7 @@ impl Render for FileView {
         // shortcut: Diff does nothing until Task 12's diff view can open
         // from here.
         let crumb = Breadcrumb::new(self.parts.clone())
-            .end(Button::new("file-diff", "Diff").style(ButtonStyle::Filled));
+            .end(Button::new("file-diff", "Diff").style(ButtonStyle::Plain));
         div()
             .debug_selector(|| "file-view".into())
             .size_full()
