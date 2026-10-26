@@ -284,6 +284,20 @@ fn plan_screens_show_the_planning_room_and_the_plan_panel(_cx: &mut TestAppConte
     }
 }
 
+// Shot diff (kick-off, nodes 10289 and 10290): the dim covers the window and
+// the card sits MODAL_TOP below its top, not in a zero-height row under the
+// status bar.
+#[gpui::test]
+fn kick_off_dims_the_whole_window(cx: &mut TestAppContext) {
+    let (_, cx) = open(cx, Screen::KickOff);
+    let viewport = cx.update(|window, _| window.viewport_size());
+    let dim = cx.debug_bounds("kickoff-dialog").unwrap();
+    assert_eq!(dim.origin, gpui::point(gpui::px(0.), gpui::px(0.)));
+    assert_eq!(dim.size, viewport);
+    let card = cx.debug_bounds("kickoff-dialog:card").unwrap();
+    assert_eq!(card.origin.y, crate::ui::tokens::MODAL_TOP);
+}
+
 // Task 15: the model picker screen opens the composer's picker on codex.
 #[gpui::test]
 fn model_picker_screen_opens_the_picker(cx: &mut TestAppContext) {

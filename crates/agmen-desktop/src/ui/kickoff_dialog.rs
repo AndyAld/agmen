@@ -150,6 +150,10 @@ impl KickoffDialog {
 
 impl RenderOnce for KickoffDialog {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        // With no plan there is nothing to show or to give focus to.
+        if self.model.read(cx).plan().is_none() {
+            return div();
+        }
         let focus = self.hold_focus(window, cx);
         let zone = cx
             .try_global::<LocalZone>()
@@ -196,7 +200,13 @@ impl RenderOnce for KickoffDialog {
         });
         let (cancel, kick) = (self.model.clone(), self.model.clone());
         let (dismiss, escape) = (self.model.clone(), self.model.clone());
+        // Over the whole window: the workspace lays its overlays out as rows
+        // of its column, so the dim needs a box of its own to fill.
         div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
             .track_focus(&focus)
             .key_context(KICKOFF_CONTEXT)
             .on_action(move |_: &Cancel, window, cx| {
@@ -349,6 +359,25 @@ mod tests {
         cx.simulate_keystrokes("escape");
         assert!(recording.acts.borrow().is_empty());
         model.read_with(cx, |model, _| assert!(!model.kickoff_open()));
+    }
+
+    // Review minor 2: with no plan the dialog draws nothing, so it must not
+    // take focus to a handle that is not in the tree.
+    #[gpui::test]
+    fn no_plan_takes_no_focus(cx: &mut TestAppContext) {
+        let (_, model) = plan_globals(cx, Screen::KickOff, None);
+        cx.update(|cx| {
+            model.update(cx, |model, cx| {
+                model.open_kickoff(cx);
+                model.apply(None, cx);
+            });
+        });
+        let dialog = model.clone();
+        let cx = draw(cx, move || {
+            KickoffDialog::new(dialog.clone()).into_any_element()
+        });
+        let focused = cx.update(|window, cx| model.read(cx).dialog_focus().is_focused(window));
+        assert!(!focused);
     }
 
     #[gpui::test]
