@@ -3,9 +3,9 @@
 //! R34).
 //!
 //! An accepted message is numbered and stored in one transaction, together
-//! with a `publish_outbox` row for each copy and one for the ACK; the
-//! sweeper publishes the outbox. A refused message gets a NACK and leaves
-//! nothing behind.
+//! with a `publish_outbox` row for each copy and one for the ACK, and for a
+//! ledger verb the ledger's work and the hub's answer; the sweeper publishes
+//! the outbox. A refused message gets a NACK and leaves nothing behind.
 
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
@@ -14,17 +14,18 @@ use std::time::{Duration, Instant};
 
 use agmen_proto::{
     Body, ClientEnvelope, DeliveryReply, IdentityId, IdentityKind, ItemKey, LaneName, Mention,
-    MessageId, NackReason, Payload, Seq, StampedEnvelope, Stream, Timestamp, Topics, Verb,
-    validate,
+    MessageId, NackReason, Payload, Seq, Severity, StampedEnvelope, Stream, Timestamp, Topics,
+    Verb, validate,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use sqlx::PgPool;
+use sqlx::{PgExecutor, PgPool, Postgres, Transaction};
 use tokio::sync::Notify;
 
+use crate::claims::LedgerMessage;
 use crate::db::{Role, is_unique_violation};
 use crate::http::{Hub, error_chain};
-use crate::numbering::{NumberingError, next_seq};
+use crate::numbering::{NumberingError, lock_head, next_seq};
 use crate::secrets_scan::find_secret;
 
 /// The hub's own identity id, stamped as `from` on what it posts. It holds a
@@ -165,7 +166,10 @@ impl Hub {
     /// and store every copy with its outbox rows. A fresh ACK is also
     /// queued for `ack/{from}` behind the message itself.
     ///
-    /// Storage failures answer `hub_busy`, which the client retries.
+    /// A ledger verb (CLAIM, HEARTBEAT, RELEASE, ASSIGN, FOUND, DONE) is
+    /// acted on, and the hub's answer posted, in the same transaction.
+    /// Storage and ledger failures record nothing and answer `hub_busy`,
+    /// which the client retries.
     ///
     /// # Errors
     ///
@@ -261,6 +265,14 @@ impl Hub {
         let mentioned = mentioned(verb, &env, &sender, &roster, parent.as_ref())?;
         let streams = route(verb, &env, &sender, &roster, parent.as_ref())?;
         let id = env.id.clone();
+        let ledger = LedgerMessage::handles(verb).then(|| LedgerMessage {
+            env: env.clone(),
+            from: sender.id.clone(),
+            from_handle: sender.handle.clone(),
+            from_kind: sender.kind,
+            from_owner: sender.owner.clone(),
+            hub_at,
+        });
         let draft = Draft {
             topics,
             client: env,
@@ -273,8 +285,29 @@ impl Hub {
             hub_at,
             ack: AckCopy::Queue,
         };
-        match store(pool, draft).await {
+        let mut tx = pool.begin().await.map_err(StoreError::from)?;
+        if ledger.is_some() {
+            // Ledger work locks item and claim rows, then posts to the feed.
+            // Taking the feed's head first gives every ledger transaction
+            // the lock order of a plain feed message (feed head first), so
+            // two of them cannot deadlock.
+            lock_head(&mut tx, &head_key(topics, &Stream::Feed))
+                .await
+                .map_err(StoreError::from)?;
+        }
+        match write(&mut tx, draft).await {
             Ok(recorded) => {
+                // The ledger runs in the message's transaction: if it fails,
+                // nothing is recorded and the NACK `hub_busy` makes the
+                // client resend, which runs it again.
+                if let Some(ledger) = &ledger {
+                    self.apply_ledger(&mut tx, topics, ledger)
+                        .await
+                        .map_err(|err| {
+                            Refused::internal(format!("ledger: {}", error_chain(&err)))
+                        })?;
+                }
+                tx.commit().await.map_err(StoreError::from)?;
                 self.ingest_state().outbox_ready().notify_one();
                 self.on_recorded(topics, verb, &sender.id, sender.kind, &id)
                     .await;
@@ -286,14 +319,16 @@ impl Hub {
             }
             // A copy of the same message committed first: answer as for a
             // resend.
-            Err(StoreError::Duplicate) => match recorded_reply(pool, &sender.id, &id, &hash).await?
-            {
-                Some(reply) => Ok(Handled {
-                    reply,
-                    route: ReplyRoute::Caller,
-                }),
-                None => Err(Refused::internal("duplicate row vanished")),
-            },
+            Err(StoreError::Duplicate) => {
+                drop(tx);
+                match recorded_reply(pool, &sender.id, &id, &hash).await? {
+                    Some(reply) => Ok(Handled {
+                        reply,
+                        route: ReplyRoute::Caller,
+                    }),
+                    None => Err(Refused::internal("duplicate row vanished")),
+                }
+            }
             Err(err) => Err(err.into()),
         }
     }
@@ -318,7 +353,12 @@ impl Hub {
                 None => Refused::retry(NackReason::HubBusy, Duration::from_millis(BUSY_RETRY_MS)),
             })?;
         let env = ClientEnvelope::from_json(raw).map_err(|err| NackReason::from(&err))?;
-        validate(&env, hub_at)?;
+        match validate(&env, hub_at) {
+            // A late CLAIM is recorded and answered with DENY expired
+            // (protocol 3).
+            Err(NackReason::Expired) if matches!(env.payload, Payload::Claim { .. }) => {}
+            checked => checked?,
+        }
         let verb = env.payload.verb().ok_or(NackReason::Schema)?;
         let sender = load_sender(self.pool(), topics, from)
             .await?
@@ -383,59 +423,96 @@ impl Hub {
     /// # Ok(()) }
     /// ```
     pub async fn post_as_hub(&self, topics: &Topics, post: HubPost) -> Result<Posted, PostError> {
-        let verb = match &post.payload {
-            Payload::Unknown { verb, .. } => return Err(PostError::NotHubVerb(verb.clone())),
-            payload => payload.verb(),
-        };
-        let Some(verb) = verb.filter(|verb| HUB_VERBS.contains(verb)) else {
-            let name = post.payload.verb().map_or("?", Verb::as_str);
-            return Err(PostError::NotHubVerb(name.to_owned()));
-        };
-        if post.streams.is_empty() {
-            return Err(PostError::NoStreams);
-        }
-        let hub_at = hub_now();
-        let id = new_message_id(hub_at)?;
-        let mut mentioned: BTreeSet<IdentityId> = post.mentioned.into_iter().collect();
-        if verb == Verb::Alert {
-            let roster = Roster::load(self.pool(), topics)
-                .await
-                .map_err(PostError::store)?;
-            mentioned.extend(roster.coordinators().cloned());
-        }
-        let client = ClientEnvelope {
-            v: 1,
-            id: id.clone(),
-            reply_to: post.reply_to,
-            to: Vec::new(),
-            mentions: Vec::new(),
-            items: post.items,
-            lane: post.lane,
-            body: post.body,
-            valid_until: None,
-            sent_at: hub_at,
-            payload: post.payload,
-        };
-        let hash = envelope_hash(&client).map_err(PostError::store)?;
-        let draft = Draft {
-            topics,
-            client,
-            from: hub_identity(),
-            from_handle: HUB_HANDLE.to_owned(),
-            from_kind: IdentityKind::Hub,
-            mentioned: mentioned.into_iter().collect(),
-            streams: post.streams.into_iter().collect(),
-            hash,
-            hub_at,
-            ack: AckCopy::None,
-        };
-        let recorded = store(self.pool(), draft).await.map_err(PostError::store)?;
+        let mut tx = self.pool().begin().await.map_err(PostError::store)?;
+        let posted = post_hub(&mut tx, topics, post, None).await?;
+        tx.commit().await.map_err(PostError::store)?;
         self.ingest_state().outbox_ready().notify_one();
-        Ok(Posted {
-            id,
-            copies: recorded.copies,
-        })
+        Ok(posted)
     }
+}
+
+/// [`Hub::post_as_hub`] inside `tx`, which the caller commits.
+pub(crate) async fn post_in(
+    tx: &mut Transaction<'_, Postgres>,
+    topics: &Topics,
+    post: HubPost,
+) -> Result<Posted, PostError> {
+    post_hub(tx, topics, post, None).await
+}
+
+/// [`post_in`] for an ALERT meant for the coordinators: when the project
+/// has none, it mentions `fallback`, the owning human of the identity
+/// concerned, instead (ruling R35).
+pub(crate) async fn post_alert(
+    tx: &mut Transaction<'_, Postgres>,
+    topics: &Topics,
+    post: HubPost,
+    fallback: &IdentityId,
+) -> Result<Posted, PostError> {
+    post_hub(tx, topics, post, Some(fallback)).await
+}
+
+async fn post_hub(
+    tx: &mut Transaction<'_, Postgres>,
+    topics: &Topics,
+    post: HubPost,
+    fallback: Option<&IdentityId>,
+) -> Result<Posted, PostError> {
+    let verb = match &post.payload {
+        Payload::Unknown { verb, .. } => return Err(PostError::NotHubVerb(verb.clone())),
+        payload => payload.verb(),
+    };
+    let Some(verb) = verb.filter(|verb| HUB_VERBS.contains(verb)) else {
+        let name = post.payload.verb().map_or("?", Verb::as_str);
+        return Err(PostError::NotHubVerb(name.to_owned()));
+    };
+    if post.streams.is_empty() {
+        return Err(PostError::NoStreams);
+    }
+    let hub_at = hub_now();
+    let id = new_message_id(hub_at)?;
+    let mut mentioned: BTreeSet<IdentityId> = post.mentioned.into_iter().collect();
+    if verb == Verb::Alert {
+        let roster = Roster::load(&mut **tx, topics)
+            .await
+            .map_err(PostError::store)?;
+        let mut coordinators = roster.coordinators().cloned().peekable();
+        if coordinators.peek().is_none() {
+            mentioned.extend(fallback.cloned());
+        }
+        mentioned.extend(coordinators);
+    }
+    let client = ClientEnvelope {
+        v: 1,
+        id: id.clone(),
+        reply_to: post.reply_to,
+        to: Vec::new(),
+        mentions: Vec::new(),
+        items: post.items,
+        lane: post.lane,
+        body: post.body,
+        valid_until: None,
+        sent_at: hub_at,
+        payload: post.payload,
+    };
+    let hash = envelope_hash(&client).map_err(PostError::store)?;
+    let draft = Draft {
+        topics,
+        client,
+        from: hub_identity(),
+        from_handle: HUB_HANDLE.to_owned(),
+        from_kind: IdentityKind::Hub,
+        mentioned: mentioned.into_iter().collect(),
+        streams: post.streams.into_iter().collect(),
+        hash,
+        hub_at,
+        ack: AckCopy::None,
+    };
+    let recorded = write(tx, draft).await.map_err(PostError::store)?;
+    Ok(Posted {
+        id,
+        copies: recorded.copies,
+    })
 }
 
 impl PostError {
@@ -687,7 +764,7 @@ struct Roster(Vec<Member>);
 type MemberRow = (String, String, Option<String>, Option<String>);
 
 impl Roster {
-    async fn load(pool: &PgPool, topics: &Topics) -> Result<Self, StoreError> {
+    async fn load(db: impl PgExecutor<'_>, topics: &Topics) -> Result<Self, StoreError> {
         let rows: Vec<MemberRow> = sqlx::query_as(
             "SELECT id, kind, owner_human_id, NULL::text FROM identities
              WHERE project_id = $1 AND revoked_at IS NULL
@@ -695,7 +772,7 @@ impl Roster {
              SELECT human_id, 'human', NULL, role FROM memberships WHERE project_id = $1",
         )
         .bind(topics.project().as_str())
-        .fetch_all(pool)
+        .fetch_all(db)
         .await?;
         rows.into_iter()
             .map(|(id, kind, owner, role)| {
@@ -881,6 +958,10 @@ async fn find_parent(
 ///   to, so a reply in a private thread stays private; the feed when that
 ///   message was in the feed or is unknown.
 /// - ASSIGN: the feed and the assignee's inbox.
+/// - HEARTBEAT: the sender's own inbox, so it is not in the feed (protocol
+///   4) and the ACK still names a copy.
+/// - FOUND with severity `security`: the inboxes of the sender and its
+///   owning human; the feed gets only the hub's ITEM.
 /// - Everything else: the feed.
 ///
 /// # Errors
@@ -915,6 +996,18 @@ fn route(
                 return Err(NackReason::Schema);
             }
             Ok(BTreeSet::from([Stream::Feed, Stream::Inbox(to.clone())]))
+        }
+        Verb::Heartbeat => Ok(BTreeSet::from([Stream::Inbox(sender.id.clone())])),
+        Verb::Found
+            if matches!(
+                env.payload,
+                Payload::Found {
+                    severity: Some(Severity::Security),
+                    ..
+                }
+            ) =>
+        {
+            fan_out(&[], sender, roster)
         }
         _ => Ok(feed()),
     }
@@ -981,19 +1074,21 @@ struct Recorded {
     copies: Vec<(Stream, Seq)>,
 }
 
-/// Numbers and stores every copy of `draft`, with one outbox row per copy
-/// and the ACK's outbox row, in one transaction. Streams are numbered in
-/// `BTreeSet` order, so two transactions lock `stream_heads` rows in the
-/// same order and cannot deadlock.
-async fn store(pool: &PgPool, draft: Draft<'_>) -> Result<Recorded, StoreError> {
+/// Numbers and stores every copy of `draft` in `tx`, with one outbox row
+/// per copy and the ACK's outbox row; the caller commits. Streams are
+/// numbered in `BTreeSet` order, so two transactions lock `stream_heads`
+/// rows in the same order and cannot deadlock.
+async fn write(
+    tx: &mut Transaction<'_, Postgres>,
+    draft: Draft<'_>,
+) -> Result<Recorded, StoreError> {
     let ack_at = ack_stream(&draft.streams, &draft.from)
         .ok_or_else(|| stored("a message with no stream"))?;
     let project = draft.topics.project().as_str();
     let hub_at = draft.hub_at.to_string();
-    let mut tx = pool.begin().await?;
     let mut copies = Vec::with_capacity(draft.streams.len());
     for stream in &draft.streams {
-        let seq = next_seq(&mut tx, &head_key(draft.topics, stream)).await?;
+        let seq = next_seq(tx, &head_key(draft.topics, stream)).await?;
         let seq = Seq(u64::try_from(seq).map_err(stored)?);
         let stamped = StampedEnvelope {
             client: draft.client.clone(),
@@ -1021,7 +1116,7 @@ async fn store(pool: &PgPool, draft: Draft<'_>) -> Result<Recorded, StoreError> 
         .bind(&json)
         .bind(&hub_at)
         .bind(*stream == ack_at)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await;
         match inserted {
             Ok(_) => {}
@@ -1029,7 +1124,7 @@ async fn store(pool: &PgPool, draft: Draft<'_>) -> Result<Recorded, StoreError> 
             Err(err) => return Err(err.into()),
         }
         enqueue(
-            &mut tx,
+            tx,
             draft.topics,
             &stream_topic(draft.topics, stream),
             json.as_bytes(),
@@ -1049,14 +1144,13 @@ async fn store(pool: &PgPool, draft: Draft<'_>) -> Result<Recorded, StoreError> 
             seq: ack.1,
         };
         let topic = draft.topics.ack(&draft.from);
-        enqueue(&mut tx, draft.topics, &topic, &serde_json::to_vec(&reply)?).await?;
+        enqueue(tx, draft.topics, &topic, &serde_json::to_vec(&reply)?).await?;
     }
-    tx.commit().await?;
     Ok(Recorded { ack, copies })
 }
 
 async fn enqueue(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tx: &mut Transaction<'_, Postgres>,
     topics: &Topics,
     topic: &str,
     payload: &[u8],

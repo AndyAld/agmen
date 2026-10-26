@@ -19,7 +19,7 @@ use crate::config::Config;
 use crate::emqx::{EmqxAdmin, EmqxError};
 use crate::ingest::IngestState;
 use crate::presence::PresenceState;
-use crate::{db, identities, invites, replay};
+use crate::{db, identities, invites, items, lanes, replay};
 
 /// How long the hub waits for GitHub or EMQX to answer.
 const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(10);
@@ -60,6 +60,7 @@ struct Inner {
     public_url: Url,
     ingest: IngestState,
     presence: PresenceState,
+    claim_lease: Duration,
 }
 
 impl Hub {
@@ -105,6 +106,7 @@ impl Hub {
                 public_url: config.public_url.clone(),
                 ingest: IngestState::default(),
                 presence: PresenceState::default(),
+                claim_lease: config.claim_lease,
             }),
         })
     }
@@ -123,6 +125,12 @@ impl Hub {
             .route("/v1/invites", post(invites::create))
             .route("/v1/invites/{code}/accept", post(invites::accept))
             .route("/v1/projects/{p}/streams/{s}", get(replay::stream))
+            .route(
+                "/v1/projects/{project}/lanes",
+                get(lanes::list).put(lanes::replace),
+            )
+            .route("/v1/projects/{project}/check-path", post(lanes::check_path))
+            .route("/v1/projects/{project}/items", get(items::list))
             .layer(axum::middleware::map_response(refuse_framing))
             .with_state(self.clone())
     }
@@ -149,6 +157,11 @@ impl Hub {
 
     pub(crate) fn presence(&self) -> &PresenceState {
         &self.inner.presence
+    }
+
+    /// How long a granted claim lasts without a HEARTBEAT.
+    pub(crate) fn claim_lease(&self) -> Duration {
+        self.inner.claim_lease
     }
 
     /// `path` (such as `v1/auth/device`) under the public URL, keeping any

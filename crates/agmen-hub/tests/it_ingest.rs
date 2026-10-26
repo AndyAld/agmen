@@ -27,8 +27,8 @@ use rumqttc::v5::mqttbytes::v5::{PubAckReason, SubscribeReasonCode};
 use serde_json::{Value, json};
 use support::mqtt::{self, ACK_WAIT, Client, connect_ok};
 use support::{
-    Ctx, DEV_KEY_1, Minted, Project, TestHub, broker_token, count, envelope, login, mint, mint_ok,
-    run, seed_human, seed_member, seed_project, ulid,
+    Ctx, DEV_KEY_1, Minted, Project, TestHub, broker_token, count, envelope, login, mint_kind,
+    mint_ok, run, seed_human, seed_member, seed_project, topics, ulid,
 };
 
 const ANDY: u64 = 4242;
@@ -38,13 +38,6 @@ const QUIET: Duration = Duration::from_secs(2);
 
 fn fyi(id: &str) -> Vec<u8> {
     envelope(id, "FYI", json!({}), json!({}))
-}
-
-fn topics(project: &Project) -> Topics {
-    Topics::new(
-        project.tenant.parse().unwrap(),
-        project.project.parse().unwrap(),
-    )
 }
 
 /// One identity's broker connection, subscribed to its `ack/`, its
@@ -146,21 +139,6 @@ async fn room(ctx: &Ctx) -> Room {
         andy_token,
         sol,
         coord,
-    }
-}
-
-async fn mint_kind(ctx: &Ctx, token: &str, handle: &str, project: &Project, kind: &str) -> Minted {
-    let (status, body) = mint(
-        ctx,
-        token,
-        &json!({ "handle": handle, "project": project.project, "kind": kind }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED, "mint answered {body}");
-    Minted {
-        id: body["id"].as_str().unwrap().to_owned(),
-        token: body["token"].as_str().unwrap().to_owned(),
-        body,
     }
 }
 
