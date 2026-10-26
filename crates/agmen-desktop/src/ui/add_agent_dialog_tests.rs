@@ -201,3 +201,118 @@ fn prompt_draws_its_lines_at_the_mockups_measure(cx: &mut TestAppContext) {
     let lines = text.size.height / line;
     assert!((lines - 5.).abs() < 0.2, "{lines} lines");
 }
+
+#[test]
+fn prompt_lines_read_an_unmatched_backtick_as_itself() {
+    // C275: backticks pair in order, as split_code reads them, so a last
+    // one with no partner opens no code span and the words after it still
+    // break at their spaces. Toggling at every backtick set "`b c d" and
+    // "`c d" whole.
+    assert_eq!(prompt_lines("a `b c d", 3), ["a", "`b", "c d"]);
+    assert_eq!(
+        prompt_lines("x `a b` y `c d", 1),
+        ["x", "`a b`", "y", "`c", "d"]
+    );
+    let (text, spans) = split_code("x `a b` y `c d");
+    assert_eq!(text, "x a b y `c d");
+    assert_eq!(spans.len(), 1);
+    assert_eq!(spans[0], 2..5);
+}
+
+/// The grok agent with an official URL 118 characters long.
+fn grok_with_a_long_url() -> InstalledAgent {
+    let mut grok = agent("grok");
+    let source = grok.source.as_mut().unwrap();
+    source.url = format!("https://{}", "x".repeat(110));
+    assert_eq!(source.url.chars().count(), 118);
+    grok
+}
+
+#[gpui::test]
+fn a_long_url_stays_inside_the_card(cx: &mut TestAppContext) {
+    // C275: the prompt's lines do not wrap, so a 118 character URL ran
+    // to x 1084, past the 680 px card. The clipboard keeps the URL whole.
+    let cx = draw(cx, || {
+        div()
+            .w(crate::ui::tokens::DIALOG_WIDTH)
+            .child(AddAgentDialog::new(
+                AgentDialog::Add("grok".into()),
+                Some(grok_with_a_long_url()),
+            ))
+            .into_any_element()
+    });
+    let card = cx.debug_bounds("add-agent").unwrap();
+    let prompt_box = cx.debug_bounds("add-agent:prompt").unwrap();
+    let text = cx.debug_bounds("add-agent:prompt-text").unwrap();
+    assert!(
+        card.size.width <= crate::ui::tokens::DIALOG_WIDTH,
+        "{card:?}"
+    );
+    assert!(
+        prompt_box.right() <= card.right(),
+        "{prompt_box:?} {card:?}"
+    );
+    assert!(
+        text.right() <= prompt_box.right(),
+        "{text:?} {prompt_box:?}"
+    );
+    // The URL's line wraps, so the text is taller than its set lines.
+    let asked = prompt(
+        &AgentDialog::Add("grok".into()),
+        Some(&grok_with_a_long_url()),
+    )
+    .unwrap();
+    let set = prompt_lines(&asked, crate::ui::tokens::PROMPT_COLUMNS).len();
+    let line = cx
+        .update(|_, cx| cx.global::<Appearance>().fonts.code_size * crate::ui::tokens::LINE_HEIGHT);
+    assert!(
+        text.size.height > line * (set as f32 + 0.5),
+        "{text:?}: the URL's line does not wrap"
+    );
+    click(cx, "add-agent:copy");
+    let url = grok_with_a_long_url().source.unwrap().url;
+    let copied = cx.read_from_clipboard().and_then(|item| item.text());
+    assert!(copied.is_some_and(|text| text.contains(&url)));
+}
+
+#[gpui::test]
+fn a_large_code_font_wraps_the_prompt_inside_its_box(cx: &mut TestAppContext) {
+    // C275: the prompt's measure is 69 code cells, which a large code font
+    // makes wider than the card; the lines then wrap inside the box.
+    let cx = draw(cx, || {
+        div()
+            .w(crate::ui::tokens::DIALOG_WIDTH)
+            .child(AddAgentDialog::new(
+                AgentDialog::Add("grok".into()),
+                Some(agent("grok")),
+            ))
+            .into_any_element()
+    });
+    cx.update(|_, cx| {
+        let mut appearance = cx.global::<Appearance>().clone();
+        appearance.fonts.code_size = px(30.);
+        cx.set_global(appearance);
+    });
+    crate::ui::test_support::redraw(cx);
+    let (cell, line) = cx.update(|window, cx| {
+        let fonts = &cx.global::<Appearance>().fonts;
+        (
+            crate::ui::code_view::cell_width(window, fonts),
+            fonts.code_size * crate::ui::tokens::LINE_HEIGHT,
+        )
+    });
+    let prompt_box = cx.debug_bounds("add-agent:prompt").unwrap();
+    let text = cx.debug_bounds("add-agent:prompt-text").unwrap();
+    assert!(
+        cell * crate::ui::tokens::PROMPT_COLUMNS as f32 > prompt_box.size.width,
+        "the font is not large enough to test"
+    );
+    assert!(
+        text.right() <= prompt_box.right(),
+        "{text:?} {prompt_box:?}"
+    );
+    assert!(
+        text.size.height > line * 5.5,
+        "{text:?}: the five lines do not wrap"
+    );
+}

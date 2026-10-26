@@ -141,11 +141,15 @@ pub(crate) fn prompt(dialog: &AgentDialog, agent: Option<&InstalledAgent>) -> Op
 
 /// `prompt` set in lines of at most `columns` characters (node 2428),
 /// broken only at spaces outside its code spans, so a command such as
-/// `grok --version` never splits. A word or code span wider than `columns`
-/// takes a line of its own. The lines joined by single spaces give back a
-/// prompt whose words are single spaced.
+/// `grok --version` never splits. Backticks pair in order, as code_text's
+/// `split_code` reads them, so a last one with no partner opens no span
+/// (C275). A word or code span wider than `columns` takes a line of its
+/// own, which the prompt box wraps. The lines joined by single spaces give
+/// back a prompt whose words are single spaced.
 #[must_use]
 pub(crate) fn prompt_lines(prompt: &str, columns: usize) -> Vec<String> {
+    let paired = prompt.matches('`').count() / 2 * 2;
+    let mut ticks = 0;
     let mut words = Vec::new();
     let mut word = String::new();
     let mut in_code = false;
@@ -157,7 +161,10 @@ pub(crate) fn prompt_lines(prompt: &str, columns: usize) -> Vec<String> {
                 }
             }
             _ => {
-                in_code ^= c == '`';
+                if c == '`' {
+                    ticks += 1;
+                    in_code ^= ticks <= paired;
+                }
                 word.push(c);
             }
         }
@@ -389,9 +396,12 @@ impl RenderOnce for PromptBox {
             .child(
                 div()
                     .debug_selector(|| "add-agent:prompt-text".into())
+                    // C275: a line wider than the box, such as a long
+                    // URL or the measure in a large code font, wraps
+                    // inside it.
                     .flex()
                     .flex_col()
-                    .children(lines.into_iter().map(|line| Label::new(line).code())),
+                    .children(lines.into_iter().map(|line| Label::new(line).code().wrap())),
             )
     }
 }
