@@ -586,3 +586,53 @@ fn a_narrow_composer_keeps_its_chips_and_hint_in_the_box(cx: &mut TestAppContext
         );
     }
 }
+
+/// Resizes the window to `width` and draws twice: the first frame
+/// measures the composer's box, the second lays the row out for it.
+fn resize(cx: &mut VisualTestContext, width: f32) {
+    cx.simulate_resize(gpui::size(gpui::px(width), gpui::px(120.)));
+    redraw(cx);
+    redraw(cx);
+}
+
+#[gpui::test]
+fn a_narrowing_reply_cuts_its_handle_before_the_model_chip(cx: &mut TestAppContext) {
+    // C277: removing the reply chip's shrink factor let the model chip
+    // shrink first, and no test saw it. At 700 px nothing is cut; at
+    // 300 px the reply chip is at its floor.
+    let (_, _, cx, _) = replying(cx);
+    resize(cx, 700.);
+    let (to_full, model_full) = (
+        cx.debug_bounds("composer:to").unwrap().size.width,
+        cx.debug_bounds("composer:model").unwrap().size.width,
+    );
+    resize(cx, 300.);
+    let to_floor = cx.debug_bounds("composer:to").unwrap().size.width;
+    resize(cx, 450.);
+    let to = cx.debug_bounds("composer:to").unwrap().size.width;
+    let model = cx.debug_bounds("composer:model").unwrap().size.width;
+    assert!(
+        to < to_full && to > to_floor,
+        "the reply chip {to:?} is cut, above its {to_floor:?} floor"
+    );
+    assert_eq!(model, model_full, "the model chip keeps its width");
+}
+
+#[gpui::test]
+fn a_cut_model_chip_keeps_its_caret(cx: &mut TestAppContext) {
+    // C277: removing the model chip's truncate left its label whole, so
+    // a narrow box cut its ▾ off, and no test saw it.
+    let (_, _, cx, _) = replying(cx);
+    resize(cx, 700.);
+    let full = cx.debug_bounds("composer:model").unwrap().size.width;
+    let caret = cx.debug_bounds("composer:model-caret").unwrap().size;
+    resize(cx, 300.);
+    let chip = cx.debug_bounds("composer:model").unwrap();
+    let cut = cx.debug_bounds("composer:model-caret").unwrap();
+    assert!(chip.size.width < full, "the chip {chip:?} is not cut");
+    assert_eq!(cut.size, caret);
+    assert!(
+        cut.left() >= chip.left() && cut.right() <= chip.right(),
+        "the ▾ {cut:?} is cut by the chip {chip:?}"
+    );
+}

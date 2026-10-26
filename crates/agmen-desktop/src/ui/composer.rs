@@ -420,7 +420,12 @@ impl Composer {
                         .color(Color::Default)
                         .outline(Color::Accent)
                         .leading(Label::new("◆").size(LabelSize::XSmall).color(Color::Accent))
-                        .trailing(caret()),
+                        .trailing(
+                            div()
+                                .debug_selector(|| "composer:model-caret".into())
+                                .flex_none()
+                                .child(caret()),
+                        ),
                 )
                 .when_some(picker, |this, picker| {
                     this.child(div().absolute().top_0().left_0().child(picker))
