@@ -28,3 +28,10 @@ fn agent_view_lists_tool_calls(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("agent-open-terminal").is_some());
     assert!(cx.debug_bounds("agent-stop").is_some());
 }
+
+#[test]
+fn plain_output_is_dim() {
+    // Mockup check: console.py draws plain tool output in FAINT.
+    assert_eq!(tone_color(Tone::Plain), Color::Placeholder);
+    assert_eq!(tone_color(Tone::Success), Color::Success);
+}

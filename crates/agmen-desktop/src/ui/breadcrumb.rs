@@ -7,7 +7,7 @@ use gpui::{
 };
 
 use super::components::{Color, Icon, IconSize, Label};
-use super::tokens::{BORDER_WIDTH, BREADCRUMB_HEIGHT, SPACE_6, SPACE_14};
+use super::tokens::{BORDER_WIDTH, BREADCRUMB_HEIGHT, SPACE_8, SPACE_14};
 use crate::icons::UiIcon;
 
 /// Tests find it as `breadcrumb`.
@@ -45,7 +45,7 @@ impl Breadcrumb {
 impl RenderOnce for Breadcrumb {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let last = self.parts.len().saturating_sub(1);
-        let mut row = div().flex().items_center().gap(SPACE_6);
+        let mut row = div().flex().items_center().gap(SPACE_8);
         for (ix, part) in self.parts.into_iter().enumerate() {
             if ix > 0 {
                 row = row.child(

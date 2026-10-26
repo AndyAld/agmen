@@ -417,6 +417,9 @@ pub(crate) struct RoleFile {
     /// What agmen enforces for it; `None` for base, which has no kind, and
     /// for a file that does not parse.
     pub(crate) info: Option<RoleInfo>,
+    /// The built-in role whose color its dot takes (itself, or the nearest
+    /// built-in it extends); `None` for base.
+    pub(crate) palette_role: Option<String>,
 }
 
 /// A resolved role, as the Role panel shows it.
@@ -435,6 +438,8 @@ pub(crate) struct RoleInfo {
     pub(crate) refused: Vec<String>,
     /// Who holds it, and a short note on each.
     pub(crate) used_by: Vec<(String, String)>,
+    /// The roles that extend it.
+    pub(crate) extended_by: Vec<String>,
     /// The role mention and what it expands to.
     pub(crate) mention: (String, String),
 }

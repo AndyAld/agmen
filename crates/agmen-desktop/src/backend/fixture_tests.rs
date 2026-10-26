@@ -410,14 +410,13 @@ fn role_files_cover_three_layers() {
     // Mockup fix 51: no adam/sec. Used by comes from the roster, and the
     // roles that extend this one.
     assert!(info.used_by.iter().all(|(who, _)| who != "adam/sec"));
+    // Mockup fix 51 (C179): rv2 is reading C015.
     assert_eq!(
         info.used_by,
-        [
-            // Mockup fix 51 (C179): rv2 is reading C015.
-            ("andy/rv2".to_owned(), "opencode · reading C015".to_owned()),
-            ("security-reviewer".to_owned(), "extends it".to_owned()),
-        ]
+        [("andy/rv2".to_owned(), "opencode · reading C015".to_owned())]
     );
+    // The roles that extend it are their own list, drawn dimmer.
+    assert_eq!(info.extended_by, ["security-reviewer".to_owned()]);
 }
 
 #[test]
@@ -455,4 +454,49 @@ fn status_labels_are_words() {
     assert_eq!(AgentStatus::Working.label(), "working");
     assert_eq!(AgentStatus::Idle.label(), "idle");
     assert_eq!(AgentStatus::Reading.label(), "reading");
+}
+
+#[test]
+fn role_dots_take_their_built_in_ancestors_color() {
+    // Mockup check: security-reviewer is drawn as a reviewer and docs-writer
+    // as an engineer; base has no role color.
+    let s = chat();
+    let palette = |name: &str| {
+        s.roles
+            .iter()
+            .find(|r| r.name == name)
+            .unwrap()
+            .palette_role
+            .clone()
+    };
+    assert_eq!(palette("security-reviewer").as_deref(), Some("reviewer"));
+    assert_eq!(palette("docs-writer").as_deref(), Some("engineer"));
+    assert_eq!(palette("tester").as_deref(), Some("tester"));
+    assert_eq!(palette("base"), None);
+}
+
+#[test]
+fn refused_is_what_the_kind_could_send_but_the_role_cannot() {
+    // Ruling D12: Refused is the verbs the hub lets an agent send (its kind
+    // cap) minus the role's own; verbs the kind cap blocks drop out.
+    let s = chat();
+    let info = s
+        .roles
+        .iter()
+        .find(|r| r.name == "reviewer")
+        .and_then(|r| r.info.clone())
+        .unwrap();
+    assert_eq!(
+        info.refused,
+        // In agmen_proto::Verb::ALL's order.
+        [
+            "CLAIM",
+            "HEARTBEAT",
+            "RELEASE",
+            "LEND",
+            "DONE",
+            "PROPOSAL",
+            "PUSH_REQUEST"
+        ]
+    );
 }

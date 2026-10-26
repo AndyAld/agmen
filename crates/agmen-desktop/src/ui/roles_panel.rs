@@ -86,11 +86,17 @@ impl RolesPanel {
             },
         );
         let name = role.name.clone();
-        ListItem::new(format!("role:{}", role.name), Indent::Depth(1))
+        // console.py indents role files 26 px, one level under the layer.
+        ListItem::new(format!("role:{}", role.name), Indent::Depth(0))
             .selected(self.selected.as_deref() == Some(role.name.as_str()))
             .leading(icon)
             .child(Label::new(file).code())
-            .end(role_dot(&role.name, theme.role_color(&role.name)))
+            .end(role_dot(
+                &role.name,
+                role.palette_role
+                    .as_deref()
+                    .map_or(theme.icon_muted, |palette| theme.role_color(palette)),
+            ))
             .on_click(cx.listener(move |this, _, _, cx| this.clicked(&name, cx)))
     }
 }
@@ -163,19 +169,22 @@ impl RenderOnce for RolePanel {
         // The hub checks verbs by identity kind only so far (ingest.rs
         // may_send), so the role's own lists come from its file.
         let source = div().debug_selector(|| "role-source".into()).child(
-            Label::new(
-                "Verbs and Refused are from the role file; the hub checks verbs by kind until roles reach it.",
-            )
-            .size(LabelSize::Small)
-            .color(Color::Placeholder)
-            .wrap(),
+            Label::new("From the role file; the hub caps verbs by kind.")
+                .size(LabelSize::Small)
+                .color(Color::Placeholder),
         );
-        let used_by = (!i.used_by.is_empty()).then(|| {
-            i.used_by
+        let has_users = !i.used_by.is_empty() || !i.extended_by.is_empty();
+        let used_by = has_users.then(|| {
+            let holders = i
+                .used_by
                 .into_iter()
                 .fold(KvSection::new("Used by"), |section, (who, what)| {
                     section.row(KvRow::new(who, what))
-                })
+                });
+            // Roles that extend this one, dimmer, as console.py draws them.
+            i.extended_by.into_iter().fold(holders, |section, child| {
+                section.row(KvRow::new(child, "extends it").color(Color::Placeholder))
+            })
         });
         let (handle, what) = i.mention;
         let mention = KvSection::new("Mention").row(KvRow::new(handle, what));
@@ -242,7 +251,7 @@ impl Render for RoleFileView {
         // shortcut: Duplicate does nothing until the backend writes role
         // files (Task 14).
         let duplicate = self.built_in.then(|| {
-            Button::new("role-duplicate", "Duplicate to .agmen/roles").style(ButtonStyle::Filled)
+            Button::new("role-duplicate", "Duplicate to .agmen/roles").style(ButtonStyle::Tinted)
         });
         let mut crumb = Breadcrumb::new(self.parts.clone());
         if let Some(button) = duplicate {

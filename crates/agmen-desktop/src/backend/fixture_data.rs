@@ -706,6 +706,34 @@ pub(super) fn fx1_session() -> AgentSession {
     }
 }
 
+/// The built-in role whose color a role's dot takes: itself, or the
+/// nearest built-in it extends. Base has no role color.
+fn palette_role(
+    name: &str,
+    files: &[(&str, RoleLayer, &'static str)],
+    specs: &[roles::RoleSpec],
+) -> Option<String> {
+    let mut current = name;
+    // Bounded like resolve: a chain longer than the files is a loop.
+    for _ in 0..=files.len() {
+        if current == "base" {
+            return None;
+        }
+        if files
+            .iter()
+            .any(|(n, layer, _)| *n == current && *layer == RoleLayer::BuiltIn)
+        {
+            return Some(current.to_owned());
+        }
+        current = specs
+            .iter()
+            .find(|s| s.name == current)?
+            .extends
+            .as_deref()?;
+    }
+    None
+}
+
 /// The built-in reviewer role, which the code view's dev window also shows.
 pub(crate) const REVIEWER_XML: &str = include_str!("../../../../roles/reviewer.xml");
 
@@ -765,22 +793,18 @@ pub(super) fn role_files(roster: &[PersonGroup]) -> Vec<RoleFile> {
         .iter()
         .filter_map(|(_, _, text)| roles::parse(text).ok())
         .collect();
-    // Every verb some role names, in file order, for the Refused row.
-    let mut known: Vec<&str> = Vec::new();
-    for verb in specs.iter().flat_map(|s| s.verbs.iter().flatten()) {
-        if !known.contains(&verb.as_str()) {
-            known.push(verb);
-        }
-    }
     let info = |name: &str| -> Option<RoleInfo> {
         // A role that does not resolve shows its file with no panel.
         let resolved = roles::resolve(name, &specs).ok()?;
-        let refused = known
+        // Ruling D12: what the kind could send but this role cannot.
+        let refused = agmen_proto::Verb::ALL
             .iter()
-            .filter(|v| !resolved.verbs.iter().any(|own| own == *v))
-            .map(|v| (*v).to_owned())
+            .filter(|v| roles::kind_may_send(resolved.kind, **v))
+            .map(|v| v.as_str())
+            .filter(|v| !resolved.verbs.iter().any(|own| own == v))
+            .map(str::to_owned)
             .collect();
-        let mut used_by: Vec<(String, String)> = roster
+        let used_by: Vec<(String, String)> = roster
             .iter()
             .flat_map(|group| &group.agents)
             .filter(|agent| agent.role == name)
@@ -792,12 +816,11 @@ pub(super) fn role_files(roster: &[PersonGroup]) -> Vec<RoleFile> {
                 (agent.handle.clone(), note)
             })
             .collect();
-        used_by.extend(
-            specs
-                .iter()
-                .filter(|s| s.extends.as_deref() == Some(name))
-                .map(|s| (s.name.clone(), "extends it".to_owned())),
-        );
+        let extended_by = specs
+            .iter()
+            .filter(|s| s.extends.as_deref() == Some(name))
+            .map(|s| s.name.clone())
+            .collect();
         // Spec 3.4: no agent can limit which commands a shell runs.
         let read_only_shell =
             resolved.tools.iter().any(|t| t == "shell") && resolved.edits == roles::Edits::None;
@@ -811,6 +834,7 @@ pub(super) fn role_files(roster: &[PersonGroup]) -> Vec<RoleFile> {
             verbs: resolved.verbs,
             refused,
             used_by,
+            extended_by,
             mention: (
                 format!("@{name}s"),
                 format!("role:{name} on the wire · humans and coordinators"),
@@ -824,6 +848,7 @@ pub(super) fn role_files(roster: &[PersonGroup]) -> Vec<RoleFile> {
             layer: *layer,
             text: SharedString::new_static(text),
             info: info(name),
+            palette_role: palette_role(name, &files, &specs),
         })
         .collect()
 }

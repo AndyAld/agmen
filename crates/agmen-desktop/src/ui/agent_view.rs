@@ -11,7 +11,9 @@ use gpui::{
 use super::breadcrumb::Breadcrumb;
 use super::components::{Button, ButtonStyle, Color, Icon, IconSize, Label, LabelSize};
 use super::text_input::TextInput;
-use super::tokens::{BORDER_WIDTH, RADIUS_MD, SPACE_5, SPACE_6, SPACE_8, SPACE_10, SPACE_14};
+use super::tokens::{
+    BORDER_WIDTH, RADIUS_CARD, SPACE_6, SPACE_8, SPACE_10, SPACE_12, SPACE_14, SPACE_18,
+};
 use crate::appearance::Appearance;
 use crate::backend::{AgentSession, SessionRow, Tone};
 use crate::icons::UiIcon;
@@ -53,7 +55,7 @@ const fn kind(row: &SessionRow) -> &'static str {
 
 const fn tone_color(tone: Tone) -> Color {
     match tone {
-        Tone::Plain => Color::Default,
+        Tone::Plain => Color::Placeholder,
         Tone::Success => Color::Success,
         Tone::Accent => Color::Accent,
     }
@@ -67,9 +69,9 @@ fn session_row(row: &SessionRow, cx: &App) -> gpui::AnyElement {
             .flex()
             .items_center()
             .gap(SPACE_8)
-            .py(SPACE_5)
+            .py(SPACE_6)
             .px(SPACE_10)
-            .rounded(RADIUS_MD)
+            .rounded(RADIUS_CARD)
             .border(BORDER_WIDTH)
             .border_color(theme.border)
             .bg(theme.elevated_surface)
@@ -81,7 +83,7 @@ fn session_row(row: &SessionRow, cx: &App) -> gpui::AnyElement {
             .child(
                 Label::new(name.clone())
                     .code()
-                    .weight(FontWeight::SEMIBOLD)
+                    .weight(FontWeight::BOLD)
                     .color(Color::Accent),
             )
             .child(Label::new(arg.clone()).code().color(Color::Placeholder))
@@ -105,7 +107,7 @@ fn session_row(row: &SessionRow, cx: &App) -> gpui::AnyElement {
             .child(
                 Label::new(text.clone())
                     .size(LabelSize::Small)
-                    .color(Color::Placeholder),
+                    .color(Color::Muted),
             )
             .into_any_element(),
     }
@@ -128,9 +130,9 @@ impl Render for AgentView {
             // a terminal and stop an agent (Task 14).
             .child(
                 Button::new("agent-open-terminal", "Open in terminal  ⌥O")
-                    .style(ButtonStyle::Filled),
+                    .style(ButtonStyle::Tinted),
             )
-            .child(Button::new("agent-stop", "Stop").style(ButtonStyle::Filled));
+            .child(Button::new("agent-stop", "Stop").style(ButtonStyle::Plain));
         div()
             .debug_selector(|| "agent-view".into())
             .size_full()
@@ -153,19 +155,31 @@ impl Render for AgentView {
                     .flex()
                     .flex_col()
                     .gap(SPACE_8)
-                    .p(SPACE_14)
+                    .pt(SPACE_14)
+                    .px(SPACE_18)
+                    .pb(SPACE_10)
                     .children(rows),
             )
             .child(
-                div().p(SPACE_14).child(
+                // shortcut: a box of its own until Task 9's Composer component
+                // can host a DM composer.
+                div().pt(SPACE_8).px(SPACE_14).pb(SPACE_12).child(
                     div()
+                        .flex()
+                        .items_center()
+                        .gap(SPACE_8)
                         .py(SPACE_8)
                         .px(SPACE_10)
-                        .rounded(RADIUS_MD)
+                        .rounded(RADIUS_CARD)
                         .border(BORDER_WIDTH)
                         .border_color(theme.border)
                         .bg(theme.elevated_surface)
-                        .child(self.composer.clone()),
+                        .child(div().flex_1().min_w_0().child(self.composer.clone()))
+                        .child(
+                            Icon::new(UiIcon::Enter)
+                                .size(IconSize::Small)
+                                .color(Color::Muted),
+                        ),
                 ),
             )
     }

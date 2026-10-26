@@ -11,8 +11,8 @@ use gpui::{
 use super::{ClickHandler, Color, Label, LabelSize};
 use crate::appearance::Appearance;
 use crate::ui::tokens::{
-    BORDER_WIDTH, BUTTON_HOVER_OPACITY, RADIUS_MD, RADIUS_SM, SPACE_1, SPACE_3, SPACE_5, SPACE_7,
-    SPACE_9, SPACE_10,
+    BORDER_WIDTH, BUTTON_HOVER_OPACITY, BUTTON_TINT, RADIUS_MD, RADIUS_SM, SPACE_1, SPACE_3,
+    SPACE_5, SPACE_7, SPACE_9, SPACE_10,
 };
 
 /// How the button is drawn.
@@ -25,6 +25,11 @@ pub(crate) enum ButtonStyle {
     Filled,
     /// Accent fill with semibold text, as a change card's Apply (node 7118).
     Primary,
+    /// Accent text on a faint accent fill, as Open in terminal and
+    /// Duplicate to .agmen/roles (console.py "primary" breadcrumb buttons).
+    Tinted,
+    /// Surface fill, as the agent view's Stop (console.py "plain").
+    Plain,
     /// Selected fill, as a change card's Cancel and Undo (nodes 7120, 7736).
     #[cfg_attr(
         not(test),
@@ -114,6 +119,16 @@ impl RenderOnce for Button {
                 .py(SPACE_1)
                 .px(SPACE_7)
                 .hover(move |style| style.bg(hover)),
+            ButtonStyle::Tinted | ButtonStyle::Plain => base
+                .bg(if self.style == ButtonStyle::Tinted {
+                    theme.text_accent.opacity(BUTTON_TINT)
+                } else {
+                    theme.elevated_surface
+                })
+                .rounded(RADIUS_MD)
+                .py(SPACE_3)
+                .px(SPACE_9)
+                .hover(move |style| style.bg(hover)),
             // These sit on a card whose fill is the hover color, so hover
             // fades the button instead of filling it.
             ButtonStyle::Primary | ButtonStyle::Secondary => base
@@ -133,10 +148,13 @@ impl RenderOnce for Button {
                 this.cursor_pointer().on_click(handler)
             })
             .children(self.leading)
-            .child(if primary {
-                label.weight(FontWeight::SEMIBOLD).color(Color::Background)
-            } else {
-                label.color(Color::Default)
+            .child(match self.style {
+                ButtonStyle::Primary => label.weight(FontWeight::SEMIBOLD).color(Color::Background),
+                ButtonStyle::Tinted => label.color(Color::Accent),
+                ButtonStyle::Outlined
+                | ButtonStyle::Filled
+                | ButtonStyle::Plain
+                | ButtonStyle::Secondary => label.color(Color::Default),
             })
     }
 }

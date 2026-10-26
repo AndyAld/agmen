@@ -89,11 +89,14 @@ pub(crate) const SPACE_10: Pixels = px(10.);
 pub(crate) const SPACE_12: Pixels = px(12.);
 pub(crate) const SPACE_14: Pixels = px(14.);
 pub(crate) const SPACE_16: Pixels = px(16.);
+pub(crate) const SPACE_18: Pixels = px(18.);
 
 // Radii.
 pub(crate) const RADIUS_XS: Pixels = px(2.);
 pub(crate) const RADIUS_SM: Pixels = px(4.);
 pub(crate) const RADIUS_MD: Pixels = px(5.);
+/// Tool cards and the composer box (console.py radius 6).
+pub(crate) const RADIUS_CARD: Pixels = px(6.);
 /// Menus and cards: the switch menu (node 1802) and the model picker (node 3355).
 pub(crate) const RADIUS_LG: Pixels = px(8.);
 
@@ -139,6 +142,8 @@ pub(crate) const PROGRESS_HEIGHT: Pixels = px(4.);
 
 /// How strongly a tinted badge's fill shows its color.
 pub(crate) const BADGE_TINT: f32 = 0.18;
+/// An accent-tinted button's fill (console.py "primary", #72b9a926).
+pub(crate) const BUTTON_TINT: f32 = 0.15;
 /// How strongly a waiting change card's border shows `warning` (node 7101
 /// draws it at alpha 0x88).
 #[cfg_attr(

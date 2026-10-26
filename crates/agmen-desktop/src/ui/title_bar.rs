@@ -137,8 +137,6 @@ impl RenderOnce for TitleBar {
     }
 }
 
-/// Minimize, maximize (or restore) and close, at the bar's right edge, as
-/// Zed draws them, with Lucide glyphs in place of Segoe's.
 /// A caption button: name, glyph, hit-test area, whether it shows, and
 /// what a click does on Linux.
 type WindowButton = (
@@ -149,6 +147,8 @@ type WindowButton = (
     fn(&mut Window),
 );
 
+/// Minimize, maximize (or restore) and close, at the bar's right edge, as
+/// Zed draws them, with Lucide glyphs in place of Segoe's.
 fn window_controls(platform: PlatformStyle, window: &Window, cx: &App) -> impl IntoElement {
     let theme = &cx.global::<Appearance>().theme;
     // What Linux's compositor supports; Windows always shows all three, as
