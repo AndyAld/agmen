@@ -132,7 +132,7 @@
 
 - [x] Done. `Theme.syntax` is a map by Zed's syntax names (what Task 10 looks up), not a bare ramp; Marked's ramp fills it the way Marked's syntax JSON does. The theme is chosen by name, "Wallpaper Adaptive (Balanced)". `theme_overrides` (per theme) and `experimental.theme_overrides` (global) are read when following Zed. Shot with a throwaway HOME choosing the Marked theme: translucent and blurred as intended.
 
-Andy's decision (2026-10-26): reuse what his own app Marked (`~/Projects/Marked`, MIT, Andy's project) does for color.
+Andy's decision (2026-10-26): reuse what Andy's Marked editor (MIT) does for color.
 
 **Files:** Modify `src/appearance/theme.rs`, `src/appearance/fallback.rs`, `src/appearance/mod.rs`, `src/appearance/zed.rs`; create `src/appearance/marked.rs`, `src/appearance/marked_tests.rs`.
 

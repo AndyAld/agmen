@@ -1,6 +1,6 @@
-//! Marked's palette, "Wallpaper Adaptive (Balanced)", from Andy's app
-//! Marked (`~/Projects/Marked`, MIT, `src/theme.rs`), offered as a built-in
-//! theme next to the Gruvbox fallback.
+//! Marked's palette, "Wallpaper Adaptive (Balanced)", from Andy's Marked
+//! editor (MIT, its `src/theme.rs`), offered as a built-in theme next to the
+//! Gruvbox fallback.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
