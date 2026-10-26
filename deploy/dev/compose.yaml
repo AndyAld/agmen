@@ -14,13 +14,44 @@ services:
       - ./.secrets/api-keys.txt:/opt/emqx/etc/agmen/api-keys.txt:ro
       - emqx-data:/opt/emqx/data
     extra_hosts:
-      # JWKS comes from the hub (or a test harness) on the host, port 8090.
+      # JWKS comes from the host's port 8090: the jwks service in dev and
+      # tests (docs/adr/0002-broker-emqx.md).
       - "host.docker.internal:host-gateway"
+    depends_on:
+      jwks:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "/opt/emqx/bin/emqx", "ctl", "status"]
       interval: 5s
       timeout: 5s
       retries: 20
+
+  # Static dev JWKS: the two dev signing keys from init.sh. Outlives every
+  # test process, so no test binds 8090 itself.
+  jwks:
+    image: nginx:1.30.6-alpine
+    ports:
+      - "8090:8090"
+    volumes:
+      - ./jwks/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./.secrets/jwks:/srv/jwks:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8090/v1/jwks"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  # WSS on 8443, terminating TLS in front of EMQX's WebSocket listener.
+  haproxy:
+    image: haproxy:3.4.7-alpine
+    ports:
+      - "8443:8443"
+    volumes:
+      - ./haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+      - ./.secrets/haproxy:/usr/local/etc/haproxy/tls:ro
+    depends_on:
+      emqx:
+        condition: service_healthy
 
   postgres:
     image: postgres:16.15

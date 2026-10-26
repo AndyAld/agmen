@@ -316,11 +316,12 @@ These steps apply once M0 Task 1 lands.
 **Run the dev stack and tests**
 
 ```sh
-deploy/dev/init.sh                            # once: local secrets in deploy/dev/.secrets
+deploy/dev/init.sh                            # local secrets in deploy/dev/.secrets; rerun after deploy/dev changes
 docker compose -f deploy/dev/compose.yaml up -d --wait
 set -a; . deploy/dev/.secrets/dev.env; set +a  # AGMEN_IT_* for integration tests
 cargo nextest run --workspace                 # unit tests
 cargo nextest run --workspace --profile it    # integration tests against the dev stack
+cargo nextest run --workspace --profile it-restart  # tests that restart EMQX, one at a time
 ```
 
 **The gate every change passes**
