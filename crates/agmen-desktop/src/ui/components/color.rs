@@ -12,6 +12,13 @@ pub(crate) enum Color {
     Default,
     /// Headings, chevrons and separators (`icon.muted`).
     Muted,
+    /// The theme's brightest text (`text.muted`), as a change card's
+    /// "Settings changed".
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the change card is hosted by the Task 9 chat")
+    )]
+    TextMuted,
     /// Secondary text, inactive icons, harness names (`text.placeholder`).
     Placeholder,
     /// `text.accent`.
@@ -33,6 +40,7 @@ impl Color {
         match self {
             Self::Default => theme.text,
             Self::Muted => theme.icon_muted,
+            Self::TextMuted => theme.text_muted,
             Self::Placeholder => theme.text_placeholder,
             Self::Accent => theme.text_accent,
             Self::Success => theme.success,
@@ -58,5 +66,11 @@ mod tests {
             Color::Role("engineer".into()).hsla(&theme),
             theme.role_color("engineer")
         );
+    }
+
+    #[test]
+    fn text_muted_is_the_text_muted_token() {
+        let theme = crate::appearance::Appearance::builtin().theme;
+        assert_eq!(Color::TextMuted.hsla(&theme), theme.text_muted);
     }
 }

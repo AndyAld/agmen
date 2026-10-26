@@ -3,14 +3,17 @@
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, ClickEvent, ElementId, InteractiveElement as _, IntoElement,
+    AnyElement, App, ClickEvent, ElementId, FontWeight, InteractiveElement as _, IntoElement,
     ParentElement as _, RenderOnce, SharedString, StatefulInteractiveElement as _, Styled as _,
     Window, div,
 };
 
 use super::{ClickHandler, Color, Label, LabelSize};
 use crate::appearance::Appearance;
-use crate::ui::tokens::{BORDER_WIDTH, RADIUS_MD, RADIUS_SM, SPACE_1, SPACE_5, SPACE_7, SPACE_10};
+use crate::ui::tokens::{
+    BORDER_WIDTH, BUTTON_HOVER_OPACITY, RADIUS_MD, RADIUS_SM, SPACE_1, SPACE_3, SPACE_5, SPACE_7,
+    SPACE_9, SPACE_10,
+};
 
 /// How the button is drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -20,6 +23,14 @@ pub(crate) enum ButtonStyle {
     Outlined,
     /// Selected fill, compact, as the status bar's Listener toggle.
     Filled,
+    /// Accent fill with semibold text, as a change card's Apply (node 7118).
+    Primary,
+    /// Selected fill, as a change card's Cancel and Undo (nodes 7120, 7736).
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the change card is hosted by the Task 9 chat")
+    )]
+    Secondary,
 }
 
 #[derive(IntoElement)]
@@ -94,24 +105,38 @@ impl RenderOnce for Button {
                 .border_color(theme.border)
                 .rounded(RADIUS_MD)
                 .py(SPACE_5)
-                .px(SPACE_10),
+                .px(SPACE_10)
+                .hover(move |style| style.bg(hover)),
             ButtonStyle::Filled => base
                 .bg(theme.element_selected)
                 .rounded(RADIUS_SM)
                 .py(SPACE_1)
-                .px(SPACE_7),
+                .px(SPACE_7)
+                .hover(move |style| style.bg(hover)),
+            // These sit on a card whose fill is the hover color, so hover
+            // fades the button instead of filling it.
+            ButtonStyle::Primary | ButtonStyle::Secondary => base
+                .bg(if self.style == ButtonStyle::Primary {
+                    theme.text_accent
+                } else {
+                    theme.element_selected
+                })
+                .rounded(RADIUS_MD)
+                .py(SPACE_3)
+                .px(SPACE_9)
+                .hover(|style| style.opacity(BUTTON_HOVER_OPACITY)),
         };
+        let label = Label::new(self.label).size(LabelSize::Small);
         styled
-            .hover(move |style| style.bg(hover))
             .when_some(self.on_click, |this, handler| {
                 this.cursor_pointer().on_click(handler)
             })
             .children(self.leading)
-            .child(
-                Label::new(self.label)
-                    .size(LabelSize::Small)
-                    .color(Color::Default),
-            )
+            .child(if self.style == ButtonStyle::Primary {
+                label.weight(FontWeight::SEMIBOLD).color(Color::Background)
+            } else {
+                label.color(Color::Default)
+            })
     }
 }
 
@@ -139,5 +164,36 @@ mod tests {
                 .into_any_element()
         });
         assert!(filled.width > px(14.));
+    }
+
+    #[gpui::test]
+    fn secondary_button_is_compact(cx: &mut TestAppContext) {
+        let outlined = rendered_size(cx, || Button::new("a", "Undo").into_any_element());
+        let mut cx2 = TestAppContext::single();
+        let secondary = rendered_size(&mut cx2, || {
+            Button::new("b", "Undo")
+                .style(ButtonStyle::Secondary)
+                .into_any_element()
+        });
+        // Outlined pads 5 px and draws a 1 px border; secondary pads 3 px.
+        assert_eq!(outlined.height - secondary.height, px(6.));
+    }
+
+    #[gpui::test]
+    fn primary_button_matches_secondary_height(cx: &mut TestAppContext) {
+        let primary = rendered_size(cx, || {
+            Button::new("apply", "Apply")
+                .style(ButtonStyle::Primary)
+                .on_click(|_, _, _| {})
+                .into_any_element()
+        });
+        let mut cx2 = TestAppContext::single();
+        let secondary = rendered_size(&mut cx2, || {
+            Button::new("cancel", "Cancel")
+                .style(ButtonStyle::Secondary)
+                .into_any_element()
+        });
+        assert_eq!(primary.height, secondary.height);
+        assert!(primary.width > px(0.));
     }
 }

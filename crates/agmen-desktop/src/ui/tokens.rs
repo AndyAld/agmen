@@ -114,6 +114,20 @@ pub(crate) const TOGGLE_KNOB: Pixels = px(14.);
 /// The theme dropdown (node 8107), console.py's `dropdown` default.
 pub(crate) const DROPDOWN_WIDTH: Pixels = px(300.);
 
+// Change cards in "Desktop · settings from chat" (node 6674).
+/// The card (nodes 7101 and 7719).
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the change card is hosted by the Task 9 chat")
+)]
+pub(crate) const CHANGE_CARD_WIDTH: Pixels = px(560.);
+/// A change row's setting name column (node 7107).
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the change card is hosted by the Task 9 chat")
+)]
+pub(crate) const CHANGE_SETTING_WIDTH: Pixels = px(52.);
+
 // Icons and marks.
 pub(crate) const ICON_SM: Pixels = px(12.);
 /// The dock collapse glyph (mockup node 391, V63).
@@ -133,6 +147,17 @@ pub(crate) const PROGRESS_HEIGHT: Pixels = px(4.);
 
 /// How strongly a tinted badge's fill shows its color.
 pub(crate) const BADGE_TINT: f32 = 0.18;
+/// How strongly a waiting change card's border shows `warning` (node 7101
+/// draws it at alpha 0x88).
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the change card is hosted by the Task 9 chat")
+)]
+pub(crate) const PENDING_BORDER_TINT: f32 = 0.53;
+/// How far a button on a card fades on hover. Hover is not drawn (nodes 7118,
+/// 7120); a fill change would vanish on the card's `elevated_surface`, which
+/// is the theme's `element_hover`.
+pub(crate) const BUTTON_HOVER_OPACITY: f32 = 0.85;
 
 #[cfg(test)]
 mod tests {
