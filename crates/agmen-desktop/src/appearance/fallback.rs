@@ -9,6 +9,11 @@ fn hex(value: u32) -> Hsla {
     rgb(value).into()
 }
 
+/// The built-in Gruvbox theme's name in the picker. It differs from the Zed
+/// extension's "Gruvbox Material Dark Hard", so choosing one never loads the
+/// other.
+pub(crate) const BUILTIN_THEME: &str = "Gruvbox Material Dark Hard (built in)";
+
 /// The theme used when no Zed theme can be loaded, and for keys a theme lacks.
 #[must_use]
 pub(crate) fn gruvbox_material_dark_hard() -> Theme {

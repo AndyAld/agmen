@@ -67,6 +67,8 @@ enum DevView {
     Git,
     /// The same with the Changes section folded.
     GitCollapsed,
+    /// Settings on Appearance.
+    Settings,
 }
 
 /// What the command line asked for.
@@ -112,8 +114,9 @@ impl Launch {
                 "project-tests-open" => Ok(Self::View(DevView::ProjectTestsOpen)),
                 "git" => Ok(Self::View(DevView::Git)),
                 "git-collapsed" => Ok(Self::View(DevView::GitCollapsed)),
+                "settings" => Ok(Self::View(DevView::Settings)),
                 _ => anyhow::bail!(
-                    "views: code, agent, roles, project, project-tests-open, git, git-collapsed"
+                    "views: code, agent, roles, project, project-tests-open, git, git-collapsed, settings"
                 ),
             },
             [flag, name] if flag == "--screen" => name
@@ -308,6 +311,14 @@ fn open_dev_view(
                 cx.new(|_| ui::DevFrame::new(title, view))
             })
         }
+        DevView::Settings => {
+            let home = std::env::home_dir().context("no home folder")?;
+            let sources = ui::SettingsSources::for_home(&home);
+            cx.open_window(options, |_, cx| {
+                let view = cx.new(|cx| ui::SettingsView::new(sources, cx));
+                cx.new(|_| ui::DevFrame::new(title, view))
+            })
+        }
     };
     Ok(window.context("opening the view window")?.into())
 }
@@ -415,6 +426,7 @@ mod tests {
             ("project-tests-open", DevView::ProjectTestsOpen),
             ("git", DevView::Git),
             ("git-collapsed", DevView::GitCollapsed),
+            ("settings", DevView::Settings),
         ] {
             assert_eq!(
                 Launch::parse(&args(&["--view", name])).unwrap(),

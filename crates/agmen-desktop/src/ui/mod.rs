@@ -18,6 +18,7 @@ mod palette_filter;
 mod project_panel;
 mod roles_panel;
 mod scope_chip;
+mod settings_view;
 mod status_bar;
 mod syntax;
 #[cfg(test)]
@@ -33,6 +34,7 @@ pub(crate) use code_view::{CodeView, GutterMark};
 pub(crate) use dev_views::{DevFrame, GitDev, GitDevLayout, ProjectDev, ProjectTests, RolesDev};
 pub(crate) use dock::DockSide;
 pub(crate) use scope_chip::ScopeOption;
+pub(crate) use settings_view::{SettingsSources, SettingsView};
 pub(crate) use syntax::Language;
 pub(crate) use text_input::{TextInput, bind_keys};
 pub(crate) use title_bar::TitleBar;

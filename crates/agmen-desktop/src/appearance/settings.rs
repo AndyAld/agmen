@@ -39,7 +39,8 @@ pub(crate) struct AgmenSettings {
     /// Read theme, icon theme and fonts from Zed's settings.
     pub(crate) follow_zed: bool,
     pub(crate) theme: Option<String>,
-    // shortcut: mode is stored but not applied; Task 17's theme picker uses it to pick light or dark.
+    // shortcut: mode picks which half (light or dark) the theme picker lists; it does not switch
+    // the theme when the OS changes mode. Add light and dark theme keys if people ask for that.
     pub(crate) mode: Mode,
     pub(crate) icon_theme: IconThemeChoice,
     pub(crate) fonts: FontPrefs,
@@ -113,13 +114,6 @@ impl AgmenSettings {
     ///
     /// When the existing file cannot be parsed (it is left alone), or the
     /// folder or file cannot be written.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Settings saves with it in Task 17 of the desktop plan"
-        )
-    )]
     pub(crate) fn save(&self, path: &Path) -> Result<(), AppearanceError> {
         let io = |source| AppearanceError::Io {
             path: path.to_owned(),

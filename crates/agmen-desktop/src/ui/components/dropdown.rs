@@ -13,8 +13,8 @@ use super::{ChangeHandler, Color, Icon, IconSize, Label};
 use crate::appearance::Appearance;
 use crate::icons::UiIcon;
 use crate::ui::tokens::{
-    BORDER_WIDTH, DROPDOWN_WIDTH, ICON_SM, RADIUS_LG, RADIUS_MD, SPACE_2, SPACE_3, SPACE_5,
-    SPACE_8, SPACE_10,
+    BORDER_WIDTH, DROPDOWN_MENU_MAX_HEIGHT, DROPDOWN_WIDTH, ICON_SM, RADIUS_LG, RADIUS_MD, SPACE_2,
+    SPACE_3, SPACE_5, SPACE_8, SPACE_10,
 };
 
 /// The caller owns whether the menu is open: it passes `open` and flips it in
@@ -212,9 +212,12 @@ impl RenderOnce for Dropdown {
             deferred(
                 anchored().snap_to_window().child(
                     div()
+                        .id(SharedString::from(format!("{}:menu", self.id)))
                         .occlude()
                         .mt(SPACE_2)
                         .w(DROPDOWN_WIDTH)
+                        .max_h(DROPDOWN_MENU_MAX_HEIGHT)
+                        .overflow_y_scroll()
                         .p(SPACE_2)
                         .rounded(RADIUS_LG)
                         .border(BORDER_WIDTH)
