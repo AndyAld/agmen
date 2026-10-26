@@ -13,6 +13,7 @@ use sqlx::PgPool;
 
 use crate::auth::{Caller, issue_identity_token};
 use crate::db::{Role, is_unique_violation, new_id};
+use crate::emqx::EmqxError;
 use crate::http::{ApiError, Hub};
 
 /// How long a broker token lasts (design 6.3). Clients refresh it 5
@@ -197,6 +198,12 @@ pub(crate) async fn mint(
         ));
     };
     let role: Role = role.parse().map_err(ApiError::stored)?;
+    // Parsed before the insert, so nothing after the commit can fail and
+    // lose the token shown once.
+    let topics = Topics::new(
+        tenant.parse().map_err(ApiError::stored)?,
+        request.project.clone(),
+    );
     let name = request
         .handle
         .strip_prefix(&owner_handle)
@@ -248,10 +255,6 @@ pub(crate) async fn mint(
     tx.commit().await?;
     tracing::info!(identity = %id, handle = %request.handle, owner = %human, "minted identity");
     // The roster lists the new identity, offline, before it ever connects.
-    let topics = Topics::new(
-        tenant.parse().map_err(ApiError::stored)?,
-        request.project.clone(),
-    );
     hub.presence().roster_changed(&topics);
     Ok((
         StatusCode::CREATED,
@@ -297,10 +300,10 @@ pub(crate) async fn broker_token(
 }
 
 /// `DELETE /v1/identities/{id}` (the owner's human token): revokes the
-/// identity, has its project's roster published without it, bans its
-/// username in EMQX until its last broker token has expired, and kicks its
-/// client ids off the broker. Its broker tokens are refused from then on.
-/// Repeating the call bans and kicks again, so a failed call can be
+/// identity, bans its username in EMQX until its last broker token has
+/// expired, kicks its client ids off the broker, and has its project's
+/// roster published without it. Its broker tokens are refused from then
+/// on. Repeating the call bans and kicks again, so a failed call can be
 /// retried.
 pub(crate) async fn revoke(
     State(hub): State<Hub>,
@@ -323,21 +326,48 @@ pub(crate) async fn revoke(
         return Err(ApiError::not_found("no such identity of yours"));
     };
     tracing::info!(identity = %id, owner = %human, "revoked identity");
-    let topics = Topics::new(
-        tenant.parse().map_err(ApiError::stored)?,
-        project.parse().map_err(ApiError::stored)?,
-    );
-    hub.presence().roster_changed(&topics);
-    let ban_until = Timestamp::from_second(revoked_at)
+    // From here on nothing returns early before the ban and the kick: once
+    // revoked_at is set, the identity's connections must go.
+    let failed = ban_and_kick(&hub, &id, ban_until(revoked_at)).await;
+    match (tenant.parse(), project.parse()) {
+        (Ok(tenant), Ok(project)) => hub.presence().roster_changed(&Topics::new(tenant, project)),
+        (tenant, project) => tracing::error!(
+            identity = %id,
+            tenant_ok = tenant.is_ok(),
+            project_ok = project.is_ok(),
+            "a stored tenant or project id is invalid; the roster was not published"
+        ),
+    }
+    match failed {
+        Some(err) => Err(err.into()),
+        None => Ok(StatusCode::NO_CONTENT),
+    }
+}
+
+/// When the ban of an identity revoked at `revoked_at` (Unix seconds) may
+/// end: once every broker token minted before the revocation has expired.
+/// A stored time that does not convert bans for good, since a revoked id
+/// is never used again.
+fn ban_until(revoked_at: i64) -> Timestamp {
+    Timestamp::from_second(revoked_at)
         .and_then(|at| at.checked_add(BROKER_TOKEN_TTL + BAN_MARGIN))
-        .map_err(ApiError::stored)?;
+        .unwrap_or_else(|err| {
+            tracing::error!(revoked_at, error = %err, "the revocation time is out of range; banning for good");
+            Timestamp::MAX
+        })
+}
+
+/// Bans `id`'s username until `ban_until` and kicks each of its client
+/// ids, trying every step even when one fails, and returns the first
+/// failure.
+async fn ban_and_kick(hub: &Hub, id: &str, ban_until: Timestamp) -> Option<EmqxError> {
     let mut failed = None;
     // Ban before kicking: a kicked client that reconnects with its
     // unexpired token is refused, since EMQX checks only signature and exp.
     // Past ban_until every token minted before the revocation has expired,
     // so a late retry needs no ban.
     if ban_until > Timestamp::now()
-        && let Err(err) = hub.emqx().ban_username(&id, ban_until).await
+        && let Err(err) = hub.emqx().ban_username(id, ban_until).await
     {
         tracing::warn!(identity = %id, error = %err, "ban failed");
         failed = Some(err);
@@ -349,10 +379,7 @@ pub(crate) async fn revoke(
             failed.get_or_insert(err);
         }
     }
-    match failed {
-        Some(err) => Err(err.into()),
-        None => Ok(StatusCode::NO_CONTENT),
-    }
+    failed
 }
 
 #[cfg(test)]

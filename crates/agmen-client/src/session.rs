@@ -33,7 +33,7 @@ use crate::cursor::Cursors;
 use crate::error::ClientError;
 use crate::event::ClientEvent;
 use crate::hub::HubClient;
-use crate::link::{Link, LinkParts, Routes, token_timer};
+use crate::link::{CurrentClient, Link, LinkParts, Routes, token_timer};
 use crate::mqtt_store::FileSessionStore;
 use crate::outbox::Outbox;
 use crate::replay;
@@ -48,7 +48,7 @@ const KEEP_ALIVE_SECS: u16 = 30;
 /// The broker's packet cap (ADR-0002), above the 64 KiB envelope limit.
 const MAX_PACKET: u32 = 96 * 1024;
 /// Requests the MQTT client queues (ADR-0003).
-const CLIENT_CAPACITY: usize = 64;
+pub(crate) const CLIENT_CAPACITY: usize = 64;
 /// How long a disconnected persistent session lasts at the broker (24 h).
 const DEFAULT_SESSION_EXPIRY: Duration = Duration::from_secs(86_400);
 /// How long the first connect may take, CONNACK and SUBACK together.
@@ -108,10 +108,13 @@ impl ClientKind {
 
     /// Whether the session publishes the identity's presence (protocol
     /// section 2): a retained online on each connect and a retained
-    /// offline last will. A one-shot `Cli` command does not, so it never
-    /// changes the roster.
+    /// offline last will. Only `Watch` does (ruling R65): an identity has
+    /// one `presence/{id}`, so if its `Mcp` session also set the will, an
+    /// MCP server that stopped or restarted would show the identity offline
+    /// while its watch still ran. A one-shot `Cli` command never changes
+    /// the roster.
     pub(crate) const fn publishes_presence(self) -> bool {
-        matches!(self, Self::Mcp | Self::Watch)
+        matches!(self, Self::Watch)
     }
 }
 
@@ -286,7 +289,7 @@ impl<T> SessionConfig<T> {
 /// [`Session::close`] disconnects cleanly.
 #[derive(Debug)]
 pub struct Session {
-    client: AsyncClient,
+    client: CurrentClient,
     outbox: Outbox,
     cursors: Cursors,
     wake: Arc<Notify>,
@@ -404,6 +407,7 @@ impl Session {
             .capacity(CLIENT_CAPACITY)
             .try_build()
             .map_err(ClientError::MqttClient)?;
+        let (client_tx, client) = CurrentClient::new(client);
 
         let (events_tx, events_rx) = mpsc::channel(EVENT_QUEUE);
         let (connected_tx, connected_rx) = watch::channel(false);
@@ -427,7 +431,7 @@ impl Session {
         let timer = token_timer(client.clone(), routes.ack().to_owned(), refresh_rx);
         let link = Link::new(LinkParts {
             eventloop,
-            client: client.clone(),
+            client: client_tx,
             tokens,
             identity: identity.clone(),
             persistent: kind.persistent(),
@@ -522,21 +526,12 @@ impl Session {
         let closed = tokio::time::timeout(CLOSE_WAIT, async {
             // Fails only when the session has already stopped; its result
             // says why.
-            let sent = if self.presence {
-                self.client
-                    .disconnect_with_properties(
-                        DisconnectReasonCode::DisconnectWithWillMessage,
-                        DisconnectProperties {
-                            session_expiry_interval: None,
-                            reason_string: None,
-                            user_properties: Vec::new(),
-                            server_reference: None,
-                        },
-                    )
-                    .await
-            } else {
-                self.client.disconnect().await
-            };
+            let (reason, properties) = close_disconnect(self.presence);
+            let sent = self
+                .client
+                .current()
+                .disconnect_with_properties(reason, properties)
+                .await;
             if sent.is_err() {
                 tracing::debug!("the session had already stopped");
             }
@@ -553,6 +548,24 @@ impl Session {
             }
         }
     }
+}
+
+/// The DISCONNECT that ends a session: reason 0x04 (Disconnect with Will
+/// Message) for a session that publishes presence, so the broker sends
+/// its last will and the roster shows it offline, else a normal one.
+pub(crate) fn close_disconnect(presence: bool) -> (DisconnectReasonCode, DisconnectProperties) {
+    let reason = if presence {
+        DisconnectReasonCode::DisconnectWithWillMessage
+    } else {
+        DisconnectReasonCode::NormalDisconnection
+    };
+    let properties = DisconnectProperties {
+        session_expiry_interval: None,
+        reason_string: None,
+        user_properties: Vec::new(),
+        server_reference: None,
+    };
+    (reason, properties)
 }
 
 /// The connection settings of ADR-0003 for `identity`'s `kind` client id,
@@ -641,7 +654,7 @@ pub(crate) async fn emit(events: &mpsc::Sender<ClientEvent>, event: ClientEvent)
 
 /// Publishes what the outbox holds while the session is connected.
 struct Sender {
-    client: AsyncClient,
+    client: CurrentClient,
     outbox: Outbox,
     up: String,
     events: mpsc::Sender<ClientEvent>,
@@ -688,10 +701,19 @@ impl Sender {
                 break;
             }
             let payload = serde_json::to_vec(&env).map_err(ClientError::Encode)?;
-            self.client
+            let published = self
+                .client
+                .current()
                 .publish(self.up.clone(), payload, PublishOptions::at_least_once())
-                .await
-                .map_err(|_| ClientError::Closed)?;
+                .await;
+            if let Err(err) = published {
+                // A token rotation replaced the client while this waited
+                // for room; the outbox sends it again on the next connect.
+                // When the link has stopped, the wait for a connection
+                // ends the sender.
+                tracing::debug!(error = %err, "the client refused a publish");
+                break;
+            }
             let (outbox, id) = (self.outbox.clone(), env.id.clone());
             let state = blocking(move || outbox.sent(&id, Timestamp::now())).await?;
             emit(&self.events, ClientEvent::Delivery { id: env.id, state }).await;
@@ -707,7 +729,7 @@ mod tests {
     #[test]
     fn presence_sessions_leave_an_offline_will() {
         assert!(ClientKind::Watch.publishes_presence());
-        assert!(ClientKind::Mcp.publishes_presence());
+        assert!(!ClientKind::Mcp.publishes_presence());
         assert!(!ClientKind::Cli.publishes_presence());
         let broker: Broker = "mqtt://localhost:1883".parse().unwrap();
         let id: IdentityId = "idn7k2q9".parse().unwrap();
@@ -730,6 +752,7 @@ mod tests {
         assert_eq!(&will.message[..], OFFLINE);
         assert!(will.retain);
         assert_eq!(will.qos, QoS::AtLeastOnce);
+        assert!(options(ClientKind::Mcp, None).last_will().is_none());
         assert!(options(ClientKind::Cli, None).last_will().is_none());
     }
 

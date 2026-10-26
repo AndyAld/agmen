@@ -18,6 +18,10 @@
 //! (`EventLoop::clean`), and this task drops the ones it still holds. A
 //! dropped ack costs nothing: a resumed session gets the publish again and
 //! the cursor drops the duplicate, and a lost session is covered by replay.
+//!
+//! A token rotation replaces the MQTT client and its event loop (see
+//! [`Link::rotate_token`]), so the session's other tasks reach the client
+//! through [`CurrentClient`].
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -26,7 +30,7 @@ use std::time::Duration;
 
 use agmen_proto::{IdentityId, Stream, Timestamp, Topics};
 use rumqttc_next::{
-    AsyncClient, ConnectionError, Event, EventLoop, Packet, Publish, PublishOptions, QoS,
+    AsyncClient, ConnectionError, Event, EventLoop, Outgoing, Packet, Publish, PublishOptions, QoS,
     SubscribeFilter, SubscribeReasonCode,
 };
 use tokio::sync::{mpsc, oneshot, watch};
@@ -36,7 +40,7 @@ use tokio::time::Instant;
 use crate::error::ClientError;
 use crate::event::ClientEvent;
 use crate::replay::Streams;
-use crate::session::{ClientKind, ONLINE, emit};
+use crate::session::{CLIENT_CAPACITY, CLOSE_WAIT, ClientKind, ONLINE, close_disconnect, emit};
 use crate::token::{self, TokenSource};
 
 /// Failed connection attempts in a row before the session gives up.
@@ -114,10 +118,29 @@ impl Routes {
     }
 }
 
+/// The session's current MQTT client, for the tasks other than the link.
+/// A token rotation replaces it, so they ask for it each time they use it.
+#[derive(Debug, Clone)]
+pub(crate) struct CurrentClient(watch::Receiver<AsyncClient>);
+
+impl CurrentClient {
+    /// A handle to read `client`, and the sender the link replaces it on.
+    pub(crate) fn new(client: AsyncClient) -> (watch::Sender<AsyncClient>, Self) {
+        let (tx, rx) = watch::channel(client);
+        (tx, Self(rx))
+    }
+
+    /// The client in use now.
+    pub(crate) fn current(&self) -> AsyncClient {
+        self.0.borrow().clone()
+    }
+}
+
 /// What the link task needs; [`Link::new`] adds its own state.
 pub(crate) struct LinkParts<T> {
     pub(crate) eventloop: EventLoop,
-    pub(crate) client: AsyncClient,
+    /// The client of `eventloop`; [`CurrentClient`] reads it.
+    pub(crate) client: watch::Sender<AsyncClient>,
     pub(crate) tokens: T,
     pub(crate) identity: IdentityId,
     pub(crate) persistent: bool,
@@ -230,7 +253,7 @@ impl<T: TokenSource> Link<T> {
         // Subscribing again on a resumed session changes nothing but makes
         // the broker send the retained state/head again. The request waits
         // on another task: this one must keep polling to drain the queue.
-        let (client, filters) = (self.p.client.clone(), self.p.routes.filters());
+        let (client, filters) = (self.client(), self.p.routes.filters());
         self.requests.spawn(async move {
             if let Err(err) = client.subscribe_many(filters).await {
                 tracing::warn!(error = %err, "queueing the subscribe failed");
@@ -239,7 +262,7 @@ impl<T: TokenSource> Link<T> {
         // Online again on every connect: the last will of a lost connection
         // set the retained presence offline.
         if let Some(topic) = self.p.presence.clone() {
-            let client = self.p.client.clone();
+            let client = self.client();
             self.requests.spawn(async move {
                 let retained = PublishOptions::at_least_once().retained();
                 if let Err(err) = client.publish(topic, ONLINE.to_vec(), retained).await {
@@ -349,19 +372,88 @@ impl<T: TokenSource> Link<T> {
         }
     }
 
+    /// The current client.
+    fn client(&self) -> AsyncClient {
+        self.p.client.borrow().clone()
+    }
+
     /// The token is due for renewal while connected. MQTT carries the
     /// password only in CONNECT, so reconnect with the fresh token now,
     /// rather than be dropped by the broker at `exp`.
+    ///
+    /// The old connection ends with a normal DISCONNECT (0x00), which makes
+    /// the broker discard the last will, so the roster never shows the
+    /// identity offline for a rotation. rumqttc-next ends an event loop for
+    /// good once it has sent DISCONNECT, so the session goes on with a new
+    /// client and event loop on the same options; a persistent one resumes
+    /// its broker session from the session store, as after a restart.
+    /// Publishes queued on the old client are dropped: the outbox sends
+    /// them again on the next connect, and a dropped ack costs nothing (see
+    /// the module docs).
     async fn rotate_token(&mut self) -> Result<(), ClientError> {
-        if self.refresh_token().await? {
-            tracing::info!("reconnecting with a fresh broker token");
-            // Drops the network without DISCONNECT, between polls; the next
-            // poll reconnects to the same session. Queued acks go with it.
-            self.p.eventloop.clean();
-            self.gate.lost();
-            self.p.connected.send_replace(false);
+        if !self.refresh_token().await? {
+            return Ok(());
+        }
+        tracing::info!("reconnecting with a fresh broker token");
+        self.gate.lost();
+        self.p.connected.send_replace(false);
+        let queued = self.p.client.borrow().try_disconnect();
+        match queued {
+            Ok(()) => match tokio::time::timeout(CLOSE_WAIT, self.finish_disconnect()).await {
+                Ok(finished) => finished?,
+                // The timeout may cut a poll short (see the module docs),
+                // which is harmless here: the event loop is replaced below.
+                // Dropping it closes the socket without DISCONNECT, so the
+                // broker sends the last will then.
+                Err(_) => tracing::warn!(
+                    "the broker did not take the DISCONNECT within {CLOSE_WAIT:?}; the last will may fire"
+                ),
+            },
+            Err(err) => {
+                tracing::warn!(error = %err, "queueing the DISCONNECT failed; the last will may fire");
+            }
+        }
+        let options = self.p.eventloop.options.clone();
+        let (client, eventloop) = AsyncClient::builder(options)
+            .capacity(CLIENT_CAPACITY)
+            .try_build()
+            .map_err(ClientError::MqttClient)?;
+        // Dropping the old event loop closes its socket.
+        self.p.eventloop = eventloop;
+        self.p.client.send_replace(client);
+        if self.closing() {
+            // Session::close may have queued its DISCONNECT on the old
+            // client. Queue it on the new one, which connects only to send
+            // it, so a presence session still leaves its will.
+            let (reason, properties) = close_disconnect(self.p.presence.is_some());
+            let queued = self
+                .p
+                .client
+                .borrow()
+                .try_disconnect_with_properties(reason, properties);
+            if let Err(err) = queued {
+                tracing::warn!(error = %err, "queueing the closing DISCONNECT failed");
+            }
         }
         Ok(())
+    }
+
+    /// Polls the old event loop until it has sent DISCONNECT, or until its
+    /// connection ends. Publishes that arrive meanwhile are handled but not
+    /// acked (the gate is down), so a resumed session gets them again and
+    /// the cursor drops the duplicate. The caller bounds the wait.
+    async fn finish_disconnect(&mut self) -> Result<(), ClientError> {
+        loop {
+            match self.p.eventloop.poll().await {
+                Ok(Event::Outgoing(Outgoing::Disconnect)) => return Ok(()),
+                Ok(Event::Incoming(Packet::Publish(publish))) => self.on_publish(publish).await?,
+                Ok(_) => {}
+                Err(err) => {
+                    tracing::debug!(error = %err, "the connection ended while disconnecting");
+                    return Ok(());
+                }
+            }
+        }
     }
 
     /// Fetches a fresh token for the next connect. `Ok(false)` when the hub
@@ -407,7 +499,8 @@ impl<T: TokenSource> Link<T> {
                 tracing::debug!(pkid = publish.pkid, "not acking a publish");
                 continue;
             }
-            match self.p.client.try_ack(&publish) {
+            let acked = self.p.client.borrow().try_ack(&publish);
+            match acked {
                 Ok(()) => {}
                 Err(rumqttc_next::ClientError::RequestChannelFull(_)) => {
                     // The next poll drains the queue; try again then.
@@ -462,7 +555,7 @@ impl AckGate {
 /// the token is due between polls, and subscribing again to a topic the
 /// session holds changes nothing. Ends when the link task does.
 pub(crate) async fn token_timer(
-    client: AsyncClient,
+    client: CurrentClient,
     ack: String,
     mut refresh_at: watch::Receiver<Timestamp>,
 ) {
@@ -470,8 +563,10 @@ pub(crate) async fn token_timer(
         let at = *refresh_at.borrow_and_update();
         tokio::select! {
             () = tokio::time::sleep_until(instant_at(at)) => {
-                if client.subscribe(ack.clone(), QoS::AtLeastOnce).await.is_err() {
-                    return;
+                // A client replaced meanwhile refuses the request; the link
+                // has rotated then, and moves the time on below.
+                if let Err(err) = client.current().subscribe(ack.clone(), QoS::AtLeastOnce).await {
+                    tracing::debug!(error = %err, "waking the link failed");
                 }
                 // Wait for the link to move the time on before waking it
                 // again.

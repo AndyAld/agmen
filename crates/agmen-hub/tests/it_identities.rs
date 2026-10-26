@@ -437,6 +437,88 @@ async fn it_revoked_identity_token_refused_on_every_route() {
     .await;
 }
 
+/// Once revoked_at is set, the ban and the kick happen even when a later
+/// step fails. The failure is injected through the test's own database:
+/// with its foreign key dropped, the identity's stored tenant id no longer
+/// parses, so the hub cannot name the roster to publish.
+#[tokio::test]
+async fn it_revoke_bans_and_kicks_when_the_roster_publish_fails() {
+    run(|ctx| async move {
+        let (project, token) = andy(&ctx).await;
+        let a = mint_ok(&ctx, &token, "andy/a", &project).await;
+        let broker = broker_token_ok(&ctx, &ctx.hub, &a).await;
+        let client_id = format!("{}-watch", a.id);
+        let mut client = connect_ok(mqtt::options(&client_id, &a.id, &broker)).await;
+        sqlx::query("ALTER TABLE identities DROP CONSTRAINT identities_project_id_tenant_id_fkey")
+            .execute(&ctx.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE identities SET tenant_id = 'Not A Tenant' WHERE id = $1")
+            .bind(&a.id)
+            .execute(&ctx.pool)
+            .await
+            .unwrap();
+
+        let revoked = ctx
+            .http
+            .delete(ctx.hub.url(&format!("/v1/identities/{}", a.id)))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(revoked.status(), StatusCode::NO_CONTENT);
+        let reason = client
+            .closed_within(Duration::from_secs(5))
+            .await
+            .unwrap_or_else(|e| panic!("{client_id}: {e} 5 s after revocation"));
+        assert_eq!(reason, Some(DisconnectReasonCode::AdministrativeAction));
+        assert_eq!(
+            connect_refused(mqtt::options(&client_id, &a.id, &broker)).await,
+            ConnectReturnCode::Banned
+        );
+        unban_username(&ctx.http, &a.id).await;
+    })
+    .await;
+}
+
+/// Mint parses what it needs before it commits, so a stored id that does
+/// not parse fails the request with nothing stored, instead of storing an
+/// identity whose token, shown once, never reaches the caller. Injected
+/// through the test's own database as above.
+#[tokio::test]
+async fn it_mint_fails_before_commit_on_a_bad_stored_tenant() {
+    run(|ctx| async move {
+        let (project, token) = andy(&ctx).await;
+        sqlx::query("ALTER TABLE projects DROP CONSTRAINT projects_tenant_id_fkey")
+            .execute(&ctx.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE projects SET tenant_id = 'Not A Tenant' WHERE id = $1")
+            .bind(&project.project)
+            .execute(&ctx.pool)
+            .await
+            .unwrap();
+        let (status, body) = mint(
+            &ctx,
+            &token,
+            &json!({ "handle": "andy/a", "project": project.project }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+        assert_eq!(
+            count(
+                &ctx.pool,
+                "SELECT count(*) FROM identities WHERE project_id = $1",
+                &project.project
+            )
+            .await,
+            0,
+            "nothing was stored"
+        );
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn it_revoke_kicks_and_refuses_refresh() {
     run(|ctx| async move {

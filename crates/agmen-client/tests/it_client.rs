@@ -10,15 +10,12 @@
 
 mod support;
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
-use agmen_client::{ClientError, ClientEvent, ClientKind, OutboxState, Session, TokenSource};
-use agmen_hub::{BrokerTokens, Identity, SigningKey};
+use agmen_client::{ClientEvent, ClientKind, OutboxState, Session};
 use agmen_proto::{Seq, Stream};
 use support::{
-    close, connection, delivered, dev_key, dm, fyi, messages_until, next_event, next_feed_seq,
+    ShortTokens, close, connection, delivered, dm, fyi, messages_until, next_event, next_feed_seq,
     recorded_on_feed, run, set_proxy_enabled,
 };
 
@@ -168,25 +165,6 @@ async fn it_lost_session_record_falls_back_to_replay() {
     .await;
 }
 
-/// Mints broker tokens that live 12 s, as the hub would with a short TTL,
-/// and counts them.
-#[derive(Debug, Clone)]
-struct ShortTokens {
-    tokens: Arc<BrokerTokens>,
-    identity: Identity,
-    minted: Arc<AtomicU32>,
-}
-
-impl TokenSource for ShortTokens {
-    async fn token(&self) -> Result<String, ClientError> {
-        self.minted.fetch_add(1, Ordering::SeqCst);
-        Ok(self
-            .tokens
-            .mint(&self.identity, Duration::from_secs(12))
-            .unwrap())
-    }
-}
-
 /// EMQX disconnects a client when its token expires (ADR-0002). The
 /// session swaps the token halfway through its 12 s life and reconnects
 /// with the fresh one first, so the link never drops.
@@ -194,13 +172,7 @@ impl TokenSource for ShortTokens {
 async fn it_token_refreshed_before_expiry() {
     run(|ctx| async move {
         let who = ctx.identity().await;
-        let tokens =
-            BrokerTokens::new(SigningKey::from_pem_file(dev_key()).unwrap(), Vec::new()).unwrap();
-        let source = ShortTokens {
-            tokens: Arc::new(tokens),
-            identity: who.identity.clone(),
-            minted: Arc::default(),
-        };
+        let source = ShortTokens::new(&who);
         let config = ctx
             .config(ClientKind::Mcp, &who, &ctx.broker)
             .with_token_source(source.clone());
@@ -216,7 +188,7 @@ async fn it_token_refreshed_before_expiry() {
             );
         }
         assert!(
-            source.minted.load(Ordering::SeqCst) >= 3,
+            source.minted() >= 3,
             "a token at connect, then one every 6 s"
         );
         let env = fyi("still here");

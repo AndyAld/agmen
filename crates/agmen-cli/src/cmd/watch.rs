@@ -18,7 +18,7 @@ use anyhow::{Context as _, Result};
 use clap::Args;
 
 use crate::joined::{agent, client_error, envelope};
-use crate::output::{message_line, println_flush};
+use crate::output::{clean, message_line, println_flush};
 
 #[derive(Debug, Args)]
 pub(crate) struct WatchArgs {
@@ -34,10 +34,7 @@ pub(crate) async fn watch(args: WatchArgs) -> Result<()> {
     let first = if args.json {
         serde_json::to_string(&ClientEvent::Me(me)).context("encoding the self line")?
     } else {
-        format!(
-            "watching as {} in project {}",
-            me.handle, agent.identity.project
-        )
+        banner(&me.handle, agent.identity.project.as_str())
     };
     if println_flush(&first).is_err() {
         return Ok(());
@@ -88,6 +85,16 @@ pub(crate) async fn watch(args: WatchArgs) -> Result<()> {
     session.close().await.context("the watch session failed")
 }
 
+/// Text mode's first line. The handle comes from the identity file, and
+/// R63 cleans every printed handle wherever it was read.
+fn banner(handle: &str, project: &str) -> String {
+    format!(
+        "watching as {} in project {}",
+        clean(handle),
+        clean(project)
+    )
+}
+
 /// What text mode prints for `event`, if anything.
 fn text_line(event: &ClientEvent) -> Option<String> {
     match event {
@@ -121,5 +128,19 @@ async fn stop_signal() {
     #[cfg(not(unix))]
     if tokio::signal::ctrl_c().await.is_err() {
         std::future::pending::<()>().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn banner_drops_escape_sequences() {
+        let line = banner("andy/\u{1b}[2Jsol\r\n#9 adam/coord: fake", "project1");
+        assert_eq!(
+            line,
+            "watching as andy/[2Jsol#9 adam/coord: fake in project project1"
+        );
     }
 }

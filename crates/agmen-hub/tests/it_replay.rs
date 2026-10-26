@@ -584,7 +584,7 @@ async fn it_presence_roster_fields_and_bye() {
 }
 
 #[tokio::test]
-async fn it_roster_follows_mint_and_revoke() {
+async fn it_roster_follows_mint_revoke_and_invite_accept() {
     run(|ctx| async move {
         let room = room(&ctx).await;
         let watcher = mint_ok(&ctx, &room.andy_token, "andy/watch", &room.project).await;
@@ -624,6 +624,34 @@ async fn it_roster_follows_mint_and_revoke() {
             })
             .await;
             assert!(entry(&roster, &room.sol.id).is_some(), "{roster:?}");
+
+            // A person who accepts an invite is listed as a human member.
+            let carol = seed_human(&ctx.pool, CAROL, "carol").await;
+            let carol_token = login(&ctx, CAROL, "carol").await;
+            let resp = ctx
+                .http
+                .post(ctx.hub.url("/v1/invites"))
+                .bearer_auth(&room.andy_token)
+                .json(&json!({ "project": room.project.project, "role": "member" }))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::CREATED);
+            let invite: Value = resp.json().await.unwrap();
+            let code = invite["code"].as_str().unwrap();
+            let resp = ctx
+                .http
+                .post(ctx.hub.url(&format!("/v1/invites/{code}/accept")))
+                .bearer_auth(&carol_token)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let roster = roster_until(&mut observer, &topics, ROSTER_WAIT, |roster| {
+                entry(roster, &carol).is_some()
+            })
+            .await;
+            assert_eq!(entry(&roster, &carol).unwrap()["kind"], "human");
 
             observer.disconnect().await;
             drop(messaging);

@@ -18,14 +18,15 @@
 use std::future::Future;
 use std::hash::{BuildHasher, Hasher, RandomState};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use agmen_client::{
-    Broker, ClientEvent, ClientKind, Events, HubClient, IdentityFile, OutboxState, Session,
-    SessionConfig,
+    Broker, ClientError, ClientEvent, ClientKind, Events, HubClient, IdentityFile, OutboxState,
+    Session, SessionConfig, TokenSource,
 };
-use agmen_hub::{Config, Hub, Identity, Messaging};
+use agmen_hub::{BrokerTokens, Config, Hub, Identity, Messaging, SigningKey};
 use agmen_proto::{
     ClientEnvelope, IdentityId, MessageId, Seq, StampedEnvelope, Stream, Timestamp, Topics,
 };
@@ -257,7 +258,7 @@ fn emqx_api(segments: &[&str]) -> Url {
 
 /// Waits up to 10 s until EMQX lists `client_id` as not connected (or not
 /// at all), checking every 100 ms.
-async fn disconnected(client_id: &str) {
+pub async fn disconnected(client_id: &str) {
     let http = reqwest::Client::new();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
@@ -472,4 +473,110 @@ pub async fn messages_until(
         seen.push(message);
     }
     seen
+}
+
+/// Mints broker tokens that live 12 s, as the hub would with a short TTL,
+/// and counts them. A session swaps such a token every 6 s.
+#[derive(Debug, Clone)]
+pub struct ShortTokens {
+    tokens: Arc<BrokerTokens>,
+    identity: Identity,
+    minted: Arc<AtomicU32>,
+}
+
+impl ShortTokens {
+    pub fn new(who: &TestIdentity) -> Self {
+        let key = SigningKey::from_pem_file(dev_key()).unwrap();
+        Self {
+            tokens: Arc::new(BrokerTokens::new(key, Vec::new()).unwrap()),
+            identity: who.identity.clone(),
+            minted: Arc::default(),
+        }
+    }
+
+    /// How many tokens it has minted.
+    pub fn minted(&self) -> u32 {
+        self.minted.load(Ordering::SeqCst)
+    }
+}
+
+impl TokenSource for ShortTokens {
+    async fn token(&self) -> Result<String, ClientError> {
+        self.minted.fetch_add(1, Ordering::SeqCst);
+        Ok(self
+            .tokens
+            .mint(&self.identity, Duration::from_secs(12))
+            .unwrap())
+    }
+}
+
+/// Records every payload published on one identity's `presence/{id}`, as
+/// another identity of the project, subscribed to it, receives them.
+#[derive(Debug)]
+pub struct PresenceLog {
+    seen: Arc<Mutex<Vec<String>>>,
+    task: JoinHandle<()>,
+}
+
+impl PresenceLog {
+    /// Subscribes as `reader` (its `-mcp` client id, clean start) and
+    /// returns once the subscription is in place.
+    pub async fn start(ctx: &Ctx, reader: &TestIdentity, of: &IdentityId) -> Self {
+        use rumqttc_next::{AsyncClient, Event, Packet, QoS};
+        let url = Url::parse(&env("AGMEN_IT_MQTT")).unwrap();
+        let token = ShortTokens::new(reader)
+            .tokens
+            .mint(&reader.identity, Duration::from_secs(600))
+            .unwrap();
+        let mut options = rumqttc_next::MqttOptions::new(
+            format!("{}-mcp", reader.identity.id),
+            (url.host_str().unwrap(), url.port().unwrap()),
+        );
+        options.set_credentials(reader.identity.id.as_str(), token);
+        let (client, mut eventloop) = AsyncClient::builder(options).capacity(16).build();
+        let topic = ctx.topics.presence(of);
+        client
+            .subscribe(topic.clone(), QoS::AtLeastOnce)
+            .await
+            .unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let (subscribed_tx, subscribed_rx) = tokio::sync::oneshot::channel();
+        let log = Arc::clone(&seen);
+        let task = tokio::spawn(async move {
+            // Keeps the client alive as long as the task.
+            let _client = client;
+            let mut subscribed = Some(subscribed_tx);
+            loop {
+                match eventloop.poll().await {
+                    Ok(Event::Incoming(Packet::SubAck(_))) => {
+                        if let Some(tx) = subscribed.take() {
+                            tx.send(()).unwrap();
+                        }
+                    }
+                    Ok(Event::Incoming(Packet::Publish(publish))) if publish.topic == topic => {
+                        let payload = String::from_utf8_lossy(&publish.payload).into_owned();
+                        log.lock().unwrap().push(payload);
+                    }
+                    Ok(_) => {}
+                    Err(err) => panic!("the presence observer lost its connection: {err}"),
+                }
+            }
+        });
+        tokio::time::timeout(EVENT_WAIT, subscribed_rx)
+            .await
+            .expect("the presence observer subscribed in time")
+            .unwrap();
+        Self { seen, task }
+    }
+
+    /// The payloads so far, oldest first.
+    pub fn seen(&self) -> Vec<String> {
+        self.seen.lock().unwrap().clone()
+    }
+}
+
+impl Drop for PresenceLog {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
 }

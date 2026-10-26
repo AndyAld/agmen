@@ -4,7 +4,7 @@
 
 use std::ops::RangeInclusive;
 
-use agmen_proto::{ProjectId, Timestamp};
+use agmen_proto::{ProjectId, Timestamp, Topics};
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -86,7 +86,7 @@ pub(crate) async fn create(
     let expires_at: i64 = sqlx::query_scalar(
         "INSERT INTO invites (code_hash, tenant_id, project_id, role, created_by, expires_at)
          VALUES ($1, $2, $3, $4, $5, now() + make_interval(secs => $6))
-         RETURNING extract(epoch FROM expires_at)::bigint",
+         RETURNING floor(extract(epoch FROM expires_at))::bigint",
     )
     .bind(hash_secret(&code))
     .bind(&tenant)
@@ -102,6 +102,7 @@ pub(crate) async fn create(
             code,
             project: request.project.into(),
             role: request.role,
+            // Rounded down: the reported expiry is never past the stored one.
             expires_at: Timestamp::from_second(expires_at).map_err(ApiError::stored)?,
         }),
     ))
@@ -123,8 +124,9 @@ pub(crate) struct Accepted {
     role: Role,
 }
 
-/// `POST /v1/invites/{code}/accept` (human token): joins the project. An
-/// invite works once; a second accept gets 409.
+/// `POST /v1/invites/{code}/accept` (human token): joins the project and
+/// has its roster, which lists human members, published again. An invite
+/// works once; a second accept gets 409.
 pub(crate) async fn accept(
     State(hub): State<Hub>,
     Path(code): Path<String>,
@@ -143,6 +145,12 @@ pub(crate) async fn accept(
     let Some((tenant, project, role, used, expired)) = invite else {
         return Err(ApiError::not_found("no such invite"));
     };
+    // Parsed before anything changes, so nothing after the commit can fail.
+    let role: Role = role.parse().map_err(ApiError::stored)?;
+    let topics = Topics::new(
+        tenant.parse().map_err(ApiError::stored)?,
+        project.parse().map_err(ApiError::stored)?,
+    );
     if used {
         return Err(ApiError::conflict(
             "invite_used",
@@ -162,7 +170,7 @@ pub(crate) async fn accept(
     )
     .bind(human.as_str())
     .bind(&project)
-    .bind(&role)
+    .bind(role.as_str())
     .execute(&mut *tx)
     .await?
     .rows_affected();
@@ -178,10 +186,11 @@ pub(crate) async fn accept(
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
-    tracing::info!(human = %human, %project, %role, "invite accepted");
+    tracing::info!(human = %human, %project, role = role.as_str(), "invite accepted");
+    hub.presence().roster_changed(&topics);
     Ok(Json(Accepted {
         tenant,
         project,
-        role: role.parse().map_err(ApiError::stored)?,
+        role,
     }))
 }
