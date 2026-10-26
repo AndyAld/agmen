@@ -644,7 +644,9 @@ impl SettingsView {
         let theme_names = themes.clone();
         setting(
             "Theme",
-            "Any Zed theme: yours from ~/.config/zed/themes, or one from Zed's theme extensions.",
+            // V131: gpui breaks a line at any non-letter, so a path in the hint
+            // could start a line with "/"; the dropdown lists the themes anyway.
+            "Any Zed theme: yours from Zed's themes folder, or one from Zed's theme extensions.",
             cx,
         )
         .child(
