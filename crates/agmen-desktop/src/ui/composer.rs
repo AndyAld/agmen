@@ -466,6 +466,12 @@ impl Render for Composer {
         let model = if floors.model_fits(self.box_width.get(), chip_addressed) {
             self.model_chip(floors.model, cx)
         } else {
+            // C282: the picker hangs off the chip, so it closes with it;
+            // an open picker nobody sees would take the next Escape. This
+            // render already draws the change, so nothing needs a notify.
+            if let Some(models) = &mut self.models {
+                models.set_open(false);
+            }
             None
         };
         let theme = &cx.global::<Appearance>().theme;

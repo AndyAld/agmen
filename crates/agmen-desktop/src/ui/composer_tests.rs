@@ -851,3 +851,28 @@ fn visible_widths(window: &mut gpui::Window, fill: gpui::Hsla) -> Vec<gpui::Pixe
         })
         .collect()
 }
+
+#[gpui::test]
+fn a_hidden_model_chip_closes_its_picker_so_escape_cancels_the_reply(cx: &mut TestAppContext) {
+    // C282: the picker stayed open, unseen, when its chip hid in a narrow
+    // composer, so the first Escape closed it and the reply stayed.
+    let (composer, sent, cx, _) = replying(cx);
+    resize(cx, 700.);
+    click(cx, "composer:model");
+    let open = |composer: &Entity<Composer>, cx: &mut VisualTestContext| {
+        composer.read_with(cx, |composer, _| {
+            composer.models.as_ref().is_some_and(ModelMenu::is_open)
+        })
+    };
+    assert!(open(&composer, cx), "the picker opens");
+    resize(cx, 200.);
+    assert!(cx.debug_bounds("composer:model").is_none());
+    assert!(!open(&composer, cx), "the hidden chip's picker is open");
+    cx.simulate_keystrokes("escape");
+    composer.read_with(cx, |composer, cx| {
+        assert_eq!(composer.target(cx).handle, "andy/listen");
+    });
+    cx.simulate_input("hi");
+    cx.simulate_keystrokes("enter");
+    assert_eq!(*sent.borrow(), vec![plain_hi()]);
+}
