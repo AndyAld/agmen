@@ -1,5 +1,13 @@
 //! The agmen desktop app: a GPUI console with Zed's layout.
 
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the needs-you views use it from Task 13 of the desktop plan"
+    )
+)]
+mod alerts;
 mod appearance;
 mod assets;
 #[expect(
