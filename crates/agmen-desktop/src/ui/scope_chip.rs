@@ -10,9 +10,8 @@ use gpui::{
     SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
 };
 
-use super::components::{Chip, Color, Dot, Icon, IconSize, Label, Menu};
-use super::tokens::{RADIUS_MD, SPACE_2, SPACE_3, SPACE_6, SPACE_8, SPACE_10};
-use crate::appearance::Appearance;
+use super::components::{Chip, Color, Dot, Icon, IconSize, Label, Menu, MenuRow};
+use super::tokens::{SPACE_2, SPACE_8, SPACE_10};
 use crate::backend::{AgentInfo, WorktreeInfo};
 use crate::icons::UiIcon;
 
@@ -109,32 +108,15 @@ impl ScopeChip {
         cx.notify();
     }
 
-    fn menu_row(
-        &self,
-        index: usize,
-        option: &ScopeOption,
-        cx: &mut Context<Self>,
-    ) -> gpui::Stateful<gpui::Div> {
-        let theme = &cx.global::<Appearance>().theme;
-        let hover = theme.element_hover;
-        let selector = format!("scope-chip:{index}");
-        div()
-            .id(SharedString::from(selector.clone()))
-            .debug_selector(|| selector)
-            .flex()
-            .items_center()
-            .gap(SPACE_6)
-            .py(SPACE_3)
-            .px(SPACE_8)
-            .rounded(RADIUS_MD)
-            .cursor_pointer()
-            .when(index == self.selected, |this| {
-                this.bg(theme.element_selected)
-            })
-            .hover(move |style| style.bg(hover))
-            .on_click(cx.listener(move |this, _, _, cx| this.pick(index, cx)))
-            .child(Dot::new(Color::Role(option.role.clone())))
+    /// Menu row `index`: the owner's role dot, then the option; the
+    /// selected row on the selected fill.
+    fn menu_row(&self, index: usize, option: &ScopeOption, cx: &mut Context<Self>) -> MenuRow {
+        MenuRow::new(format!("scope-chip:{index}"))
+            .picker()
+            .checked(index == self.selected)
+            .leading(Dot::new(Color::Role(option.role.clone())))
             .child(Label::new(option.label.clone()).code())
+            .on_click(cx.listener(move |this, _, _, cx| this.pick(index, cx)))
     }
 }
 

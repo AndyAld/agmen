@@ -191,6 +191,26 @@ pub(crate) fn assert_menu_frame(
     assert_eq!(row_at.left() - frame_at.left(), inset, "{row} in {frame}");
 }
 
+/// Asserts a menu's rows draw `MenuRow`'s picker look under the pointer
+/// (V119): the `checked` row keeps the selected fill, and the `other` row
+/// takes the selected fill at half strength, which shows on the menu's
+/// `elevated_surface` where `element_hover` would not.
+pub(crate) fn assert_menu_row_hover(
+    cx: &mut VisualTestContext,
+    checked: &'static str,
+    other: &'static str,
+) {
+    let theme = cx.update(|_, cx| cx.global::<Appearance>().theme.clone());
+    let hover = super::tokens::tint(theme.element_selected, super::tokens::TINT_MENU_HOVER);
+    assert_ne!(hover, theme.elevated_surface);
+    for (row, want) in [(checked, theme.element_selected), (other, hover)] {
+        let center = cx.debug_bounds(row).expect("the row").center();
+        cx.simulate_mouse_move(center, None, Modifiers::none());
+        redraw(cx);
+        assert_eq!(fills_at(cx, row), [want], "{row} under the pointer");
+    }
+}
+
 /// The solid fills among [`painted_at`]'s quads.
 pub(crate) fn fills_at(cx: &mut VisualTestContext, selector: &'static str) -> Vec<gpui::Hsla> {
     painted_at(cx, selector)

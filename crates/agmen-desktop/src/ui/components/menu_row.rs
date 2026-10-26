@@ -2,7 +2,7 @@
 //! (node 1806: a 12 px leading slot with a check on the current row, the
 //! row's content, a spacer, then the end slot) and, drawn as a picker row,
 //! the model picker's model rows (node 3361: 26 px tall, the checked row on
-//! the selected fill).
+//! the selected fill), Dropdown's options and the scope chip's worktrees.
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -23,14 +23,11 @@ use crate::ui::tokens::{
 enum Look {
     /// The switch menu's: 30 px, the selected fill under the pointer.
     Menu,
-    /// The model picker's: 26 px, the checked row on the selected fill.
+    /// The model picker's, Dropdown's and the scope chip's: 26 px, the
+    /// checked row on the selected fill.
     Picker,
 }
 
-// shortcut: Dropdown::menu_row (dropdown.rs) keeps its own row: it hugs its
-// label with 3/8 padding, may use the UI font, and draws no selected fill,
-// as the Settings frames show. Fold it into MenuRow with a compact variant
-// when another menu needs a row or the Settings frames are compared again.
 #[derive(IntoElement)]
 pub(crate) struct MenuRow {
     id: SharedString,

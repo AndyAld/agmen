@@ -5,16 +5,14 @@ use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce, SharedString,
+    App, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce, SharedString,
     StatefulInteractiveElement as _, Styled as _, Window, div,
 };
 
-use super::{ChangeHandler, Color, Icon, IconSize, Label, Menu};
+use super::{ChangeHandler, Color, Icon, IconSize, Label, Menu, MenuRow};
 use crate::appearance::Appearance;
 use crate::icons::UiIcon;
-use crate::ui::tokens::{
-    BORDER_WIDTH, DROPDOWN_WIDTH, ICON_SM, RADIUS_MD, SPACE_3, SPACE_5, SPACE_8, SPACE_10,
-};
+use crate::ui::tokens::{BORDER_WIDTH, DROPDOWN_WIDTH, RADIUS_MD, SPACE_5, SPACE_8, SPACE_10};
 
 /// The caller owns whether the menu is open: it passes `open` and flips it in
 /// `on_toggle`, so the dropdown holds no state.
@@ -109,20 +107,11 @@ impl Dropdown {
         option: &SharedString,
         on_toggle: Option<ChangeHandler<bool>>,
         on_change: Option<ChangeHandler<usize>>,
-        hover: Hsla,
-    ) -> impl IntoElement + use<> {
-        let selector = format!("{}:{index}", self.id);
-        div()
-            .id(SharedString::from(selector.clone()))
-            .debug_selector(|| selector)
-            .flex()
-            .items_center()
-            .gap(SPACE_8)
-            .py(SPACE_3)
-            .px(SPACE_8)
-            .rounded(RADIUS_MD)
-            .cursor_pointer()
-            .hover(move |style| style.bg(hover))
+    ) -> MenuRow {
+        MenuRow::new(format!("{}:{index}", self.id))
+            .picker()
+            .checked(index == self.selected)
+            .child(self.label(option.clone(), Color::Default))
             .on_click(move |_, window, cx| {
                 if let Some(handler) = &on_change {
                     handler(index, window, cx);
@@ -131,20 +120,6 @@ impl Dropdown {
                     handler(false, window, cx);
                 }
             })
-            // An empty slot on other rows keeps every label in line.
-            .child(
-                div()
-                    .size(ICON_SM)
-                    .flex_none()
-                    .when(index == self.selected, |this| {
-                        this.child(
-                            Icon::new(UiIcon::Check)
-                                .size(IconSize::Small)
-                                .color(Color::Accent),
-                        )
-                    }),
-            )
-            .child(self.label(option.clone(), Color::Default))
     }
 
     fn label(&self, text: SharedString, color: Color) -> Label {
@@ -205,8 +180,7 @@ impl RenderOnce for Dropdown {
             );
         let menu = open.then(|| {
             let rows = self.options.iter().enumerate().map(|(index, option)| {
-                self.menu_row(index, option, on_toggle.clone(), on_change.clone(), hover)
-                    .into_any_element()
+                self.menu_row(index, option, on_toggle.clone(), on_change.clone())
             });
             let close = on_toggle.clone();
             Menu::new(format!("{}:menu", self.id))
@@ -273,6 +247,17 @@ mod tests {
                 .into_any_element()
         });
         crate::ui::test_support::assert_menu_frame(cx, "theme:menu", "theme:0");
+    }
+
+    #[gpui::test]
+    fn menu_rows_hover_as_menu_rows(cx: &mut TestAppContext) {
+        let cx = open(cx, || {
+            Dropdown::new("theme", THEMES, 0)
+                .open(true)
+                .on_change(|_, _, _| {})
+                .into_any_element()
+        });
+        crate::ui::test_support::assert_menu_row_hover(cx, "theme:0", "theme:1");
     }
 
     #[gpui::test]
