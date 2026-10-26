@@ -125,10 +125,10 @@ fn the_generic_dialog_has_no_prompt(cx: &mut TestAppContext) {
 }
 
 #[test]
-fn prompt_lines_keep_each_command_whole() {
-    // Shot diff (nodes 2432 and 2433): the prompt breaks only at spaces
-    // outside its code spans, so `grok --version` ends line 4 whole instead
-    // of leaving its closing backtick to start line 5.
+fn prompt_lines_set_the_mockups_lines() {
+    // Node 2428 at its 69 character measure. Plain wrapping at spaces gives
+    // these lines too; prompt_lines_keep_each_command_whole tests the code
+    // spans.
     let asked = prompt(&AgentDialog::Add("grok".into()), Some(&agent("grok"))).unwrap();
     let lines = prompt_lines(&asked, crate::ui::tokens::PROMPT_COLUMNS);
     assert_eq!(
@@ -143,6 +143,25 @@ fn prompt_lines_keep_each_command_whole() {
     );
     // The clipboard text is the prompt itself; the lines only set it.
     assert_eq!(lines.join(" "), asked);
+}
+
+#[test]
+fn prompt_lines_keep_each_command_whole() {
+    // C276: at 68 columns plain wrapping at spaces ends line 4 with
+    // "run `grok" and starts line 5 with "--version`". The prompt breaks
+    // only at spaces outside its code spans, so the command moves to line
+    // 5 whole.
+    let asked = prompt(&AgentDialog::Add("grok".into()), Some(&agent("grok"))).unwrap();
+    assert_eq!(
+        prompt_lines(&asked, 68),
+        [
+            "Install xAI's Grok Build CLI (the `grok` command) on this machine",
+            "from xAI's official instructions at github.com/xai-org/grok-build.",
+            "Do not use the community npm package @vibe-kit/grok-cli; it also",
+            "installs a `grok` command. When it is installed, run",
+            "`grok --version` and `agmen agents scan`, and tell me both outputs.",
+        ]
+    );
 }
 
 #[test]
