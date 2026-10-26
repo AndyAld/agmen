@@ -12,7 +12,7 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
     InteractiveElement as _, IntoElement, ListAlignment, ListOffset, ListState, ParentElement as _,
-    Render, SharedString, Styled as _, Task, Window, div, list, px,
+    Render, SharedString, StyleRefinement, Styled as _, Task, WeakEntity, Window, div, list, px,
 };
 
 use super::chat_context::ChatContext;
@@ -36,16 +36,110 @@ fn visible_rows(messages: &[StampedEnvelope], show_ledger: bool) -> Vec<usize> {
         .collect()
 }
 
+/// The message list. It is a view of its own, drawn cached, so a keystroke
+/// in the composer (which redraws the chat around it) reuses the rows from
+/// the last frame; it redraws only when the chat notifies it with new rows
+/// or the list notifies it on a scroll.
+pub(crate) struct ChatStream {
+    context: Rc<ChatContext>,
+    /// Indices into the snapshot's messages of the drawn rows, oldest first.
+    rows: Vec<usize>,
+    list: ListState,
+    /// Where chips and change card buttons report.
+    chat: WeakEntity<ChatView>,
+}
+
+impl std::fmt::Debug for ChatStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChatStream")
+            .field("rows", &self.rows.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl ChatStream {
+    /// Shows `rows` of `context`'s snapshot. When the old rows lead the new
+    /// ones, the list keeps its measurements and scroll position.
+    fn set_rows(&mut self, context: Rc<ChatContext>, rows: Vec<usize>, cx: &mut Context<Self>) {
+        self.context = context;
+        let old = std::mem::replace(&mut self.rows, rows);
+        if self.rows.starts_with(&old) {
+            self.list
+                .splice(old.len()..old.len(), self.rows.len() - old.len());
+            // A card's state may have changed its row's height.
+            self.list.remeasure();
+        } else {
+            self.list.reset(self.rows.len());
+        }
+        cx.notify();
+    }
+
+    /// Shows `rows`, keeping the message at the top of the view where it
+    /// was. A view that followed the newest message keeps following it.
+    fn set_rows_keeping_top(&mut self, rows: Vec<usize>, cx: &mut Context<Self>) {
+        let top = self.list.logical_scroll_top();
+        let top_message = self.rows.get(top.item_ix).copied();
+        self.rows = rows;
+        self.list.reset(self.rows.len());
+        if let Some(message) = top_message {
+            // The first row at or after the old top: the same message, or the
+            // one after a presence line that just hid.
+            let item_ix = self.rows.partition_point(|&row| row < message);
+            let same = self.rows.get(item_ix) == Some(&message);
+            self.list.scroll_to(ListOffset {
+                item_ix,
+                offset_in_item: if same { top.offset_in_item } else { px(0.) },
+            });
+        }
+        cx.notify();
+    }
+
+    fn render_row(&self, ix: usize) -> AnyElement {
+        let Some(&index) = self.rows.get(ix) else {
+            return div().into_any_element();
+        };
+        let (on_ref, on_action) = (self.chat.clone(), self.chat.clone());
+        let row = MessageRow::new(index, self.context.clone())
+            .on_ref(move |event, _, cx| {
+                // A chip outlives its chat only while the window closes.
+                on_ref
+                    .update(cx, |_, cx| cx.emit(event))
+                    .unwrap_or_default();
+            })
+            .on_action(move |action, _, cx| {
+                on_action
+                    .update(cx, |chat, cx| chat.act(action, cx))
+                    .unwrap_or_default();
+            });
+        // The stream's side padding (node 137) sits on each row: a list lays
+        // its items out at its left edge whatever its padding.
+        div()
+            .px(SPACE_12)
+            .when(ix > 0, |this| this.pt(SPACE_2))
+            .child(row)
+            .into_any_element()
+    }
+}
+
+impl Render for ChatStream {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        list(
+            self.list.clone(),
+            cx.processor(|this, ix, _, _| this.render_row(ix)),
+        )
+        .size_full()
+        .pt(SPACE_10)
+        .pb(SPACE_6)
+    }
+}
+
 /// The chat. It hears the backend's updates, so what the person sends
 /// and the cards they apply show up here. Reference chips are passed on
 /// as [`RefEvent`]s for the center to open. Tests find a refusal from the
 /// backend as `"chat:error"`.
 pub(crate) struct ChatView {
     snapshot: Rc<Snapshot>,
-    context: Rc<ChatContext>,
-    /// Indices into `snapshot.messages` of the drawn rows, oldest first.
-    rows: Vec<usize>,
-    list: ListState,
+    stream: Entity<ChatStream>,
     show_ledger: bool,
     alerts: AlertState,
     composer: Entity<Composer>,
@@ -58,7 +152,6 @@ pub(crate) struct ChatView {
 impl std::fmt::Debug for ChatView {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ChatView")
-            .field("rows", &self.rows.len())
             .field("show_ledger", &self.show_ledger)
             .field("error", &self.error)
             .finish_non_exhaustive()
@@ -105,11 +198,17 @@ impl ChatView {
         let rows = visible_rows(&snapshot.messages, false);
         let mut alerts = AlertState::default();
         replay(&mut alerts, &snapshot);
-        Self {
-            context: Rc::new(ChatContext::new(snapshot.clone()).with_utc_offset(offset)),
-            snapshot,
+        let context = Rc::new(ChatContext::new(snapshot.clone()).with_utc_offset(offset));
+        let chat = cx.entity().downgrade();
+        let stream = cx.new(|_| ChatStream {
+            context,
             list: ListState::new(rows.len(), ListAlignment::Bottom, LIST_OVERDRAW),
             rows,
+            chat,
+        });
+        Self {
+            snapshot,
+            stream,
             show_ledger: false,
             alerts,
             composer,
@@ -137,20 +236,9 @@ impl ChatView {
             return;
         }
         self.show_ledger = on;
-        let top = self.list.logical_scroll_top();
-        let top_message = self.rows.get(top.item_ix).copied();
-        self.rows = visible_rows(&self.snapshot.messages, on);
-        self.list.reset(self.rows.len());
-        if let Some(message) = top_message {
-            // The first row at or after the old top: the same message, or the
-            // one after a presence line that just hid.
-            let item_ix = self.rows.partition_point(|&row| row < message);
-            let same = self.rows.get(item_ix) == Some(&message);
-            self.list.scroll_to(ListOffset {
-                item_ix,
-                offset_in_item: if same { top.offset_in_item } else { px(0.) },
-            });
-        }
+        let rows = visible_rows(&self.snapshot.messages, on);
+        self.stream
+            .update(cx, |stream, cx| stream.set_rows_keeping_top(rows, cx));
         cx.notify();
     }
 
@@ -172,7 +260,10 @@ impl ChatView {
         self.error = result.as_ref().err().map(|err| err.to_string().into());
         if result.is_ok() {
             // The person wants to see what they sent, wherever they had scrolled.
-            self.list.scroll_to_end();
+            self.stream.update(cx, |stream, cx| {
+                stream.list.scroll_to_end();
+                cx.notify();
+            });
         }
         cx.notify();
         result
@@ -210,52 +301,12 @@ impl ChatView {
                 *snapshot
             }
         };
-        self.set_snapshot(snapshot);
-        cx.notify();
-    }
-
-    fn set_snapshot(&mut self, snapshot: Snapshot) {
         self.snapshot = Rc::new(snapshot);
-        self.context =
-            Rc::new(ChatContext::new(self.snapshot.clone()).with_utc_offset(self.offset));
-        let old = std::mem::replace(
-            &mut self.rows,
-            visible_rows(&self.snapshot.messages, self.show_ledger),
-        );
-        if self.rows.starts_with(&old) {
-            self.list
-                .splice(old.len()..old.len(), self.rows.len() - old.len());
-            // A card's state may have changed its row's height.
-            self.list.remeasure();
-        } else {
-            self.list.reset(self.rows.len());
-        }
-    }
-
-    fn render_row(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
-        let Some(&index) = self.rows.get(ix) else {
-            return div().into_any_element();
-        };
-        let (on_ref, on_action) = (cx.entity().downgrade(), cx.entity().downgrade());
-        let row = MessageRow::new(index, self.context.clone())
-            .on_ref(move |event, _, cx| {
-                // A chip outlives its chat only while the window closes.
-                on_ref
-                    .update(cx, |_, cx| cx.emit(event))
-                    .unwrap_or_default();
-            })
-            .on_action(move |action, _, cx| {
-                on_action
-                    .update(cx, |chat, cx| chat.act(action, cx))
-                    .unwrap_or_default();
-            });
-        // The stream's side padding (node 137) sits on each row: a list lays
-        // its items out at its left edge whatever its padding.
-        div()
-            .px(SPACE_12)
-            .when(ix > 0, |this| this.pt(SPACE_2))
-            .child(row)
-            .into_any_element()
+        let context = Rc::new(ChatContext::new(self.snapshot.clone()).with_utc_offset(self.offset));
+        let rows = visible_rows(&self.snapshot.messages, self.show_ledger);
+        self.stream
+            .update(cx, |stream, cx| stream.set_rows(context, rows, cx));
+        cx.notify();
     }
 }
 
@@ -274,7 +325,7 @@ impl Focusable for ChatView {
 }
 
 impl Render for ChatView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .debug_selector(|| "chat".into())
             .flex_1()
@@ -283,14 +334,9 @@ impl Render for ChatView {
             .flex()
             .flex_col()
             .child(
-                list(
-                    self.list.clone(),
-                    cx.processor(|this, ix, _, cx| this.render_row(ix, cx)),
-                )
-                .flex_1()
-                .min_h_0()
-                .pt(SPACE_10)
-                .pb(SPACE_6),
+                self.stream
+                    .clone()
+                    .cached(StyleRefinement::default().flex_1().min_h_0()),
             )
             .when_some(self.error.clone(), |this, error| {
                 this.child(

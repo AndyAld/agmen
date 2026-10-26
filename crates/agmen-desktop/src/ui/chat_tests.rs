@@ -130,13 +130,16 @@ fn composer_sends_to_listener_by_default(cx: &mut TestAppContext) {
 #[gpui::test]
 fn sent_message_appears_in_the_list(cx: &mut TestAppContext) {
     let (chat, backend, cx) = open_screen(cx, Screen::Chat);
-    let before = chat.read_with(cx, |chat, _| chat.rows.len());
+    let before = chat.read_with(cx, |chat, cx| chat.stream.read(cx).rows.len());
     cx.simulate_input("hi");
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
     redraw(cx);
     let sent = backend.snapshot().messages.last().unwrap().clone();
-    assert_eq!(chat.read_with(cx, |chat, _| chat.rows.len()), before + 1);
+    assert_eq!(
+        chat.read_with(cx, |chat, cx| chat.stream.read(cx).rows.len()),
+        before + 1
+    );
     assert!(
         cx.debug_bounds(sel(&sent, "row")).is_some(),
         "the sent message is drawn"
@@ -215,7 +218,10 @@ fn empty_chat_shows_the_composer(cx: &mut TestAppContext) {
     let mut snapshot = chat_snapshot();
     snapshot.messages.clear();
     let (chat, cx) = open_with(cx, snapshot);
-    assert_eq!(chat.read_with(cx, |chat, _| chat.rows.len()), 0);
+    assert_eq!(
+        chat.read_with(cx, |chat, cx| chat.stream.read(cx).rows.len()),
+        0
+    );
     assert!(cx.debug_bounds("composer:model").is_some());
 }
 
@@ -262,21 +268,59 @@ fn show_ledger_keeps_the_reading_position(cx: &mut TestAppContext) {
         snapshot.messages.push(beat);
     }
     let (chat, cx) = open_with(cx, snapshot);
-    chat.update(cx, |chat, _| {
-        chat.list.scroll_to(ListOffset {
+    chat.read_with(cx, |chat, cx| {
+        chat.stream.read(cx).list.scroll_to(ListOffset {
             item_ix: 20,
             offset_in_item: px(0.),
         });
     });
     redraw(cx);
-    let top_message = |chat: &ChatView| chat.rows[chat.list.logical_scroll_top().item_ix];
-    let before = chat.read_with(cx, |chat, _| top_message(chat));
+    let top_message = |chat: &ChatView, cx: &gpui::App| {
+        let stream = chat.stream.read(cx);
+        stream.rows[stream.list.logical_scroll_top().item_ix]
+    };
+    let before = chat.read_with(cx, top_message);
 
     chat.update(cx, |chat, cx| chat.set_show_ledger(true, cx));
     redraw(cx);
-    assert_eq!(chat.read_with(cx, |chat, _| top_message(chat)), before);
+    assert_eq!(chat.read_with(cx, top_message), before);
 
     chat.update(cx, |chat, cx| chat.set_show_ledger(false, cx));
     redraw(cx);
-    assert_eq!(chat.read_with(cx, |chat, _| top_message(chat)), before);
+    assert_eq!(chat.read_with(cx, top_message), before);
+}
+
+/// Draws the window without [`redraw`]'s refresh, so cached views are
+/// reused as in a real frame.
+fn draw(cx: &mut VisualTestContext) {
+    cx.update(|window, cx| drop(window.draw(cx)));
+}
+
+fn rows_rendered() -> usize {
+    crate::ui::message::ROWS_RENDERED.with(std::cell::Cell::get)
+}
+
+#[gpui::test]
+fn typing_in_the_composer_does_not_rebuild_the_rows(cx: &mut TestAppContext) {
+    let snapshot = chat_snapshot();
+    let mention = snapshot.messages[8].clone();
+    let (chat, cx) = open_with(cx, snapshot);
+    // The first key switches the window to keyboard input, which GPUI
+    // answers with one full refresh; the keys after it are what we measure.
+    cx.simulate_input("h");
+    draw(cx);
+    let before = rows_rendered();
+    assert!(before > 0, "the first frames drew rows");
+    cx.simulate_input("ello");
+    draw(cx);
+    assert_eq!(rows_rendered(), before, "a keystroke rebuilt the rows");
+    assert!(cx.debug_bounds(sel(&mention, "row")).is_some());
+
+    // A change to what the list shows does rebuild them, with no refresh.
+    chat.update(cx, |chat, cx| chat.set_show_ledger(true, cx));
+    draw(cx);
+    assert!(
+        rows_rendered() > before,
+        "the ledger toggle kept stale rows"
+    );
 }

@@ -111,11 +111,44 @@ fn long_glue_becomes_a_word_of_its_own() {
 }
 
 #[test]
-fn short_lines_flow_word_by_word() {
-    let body = "see 4d9fdc8 now";
-    let flowed = lines(pieces(body, &[span(4..11, commit())]));
+fn words_between_chips_draw_as_one_run() {
+    let body = "see the 4d9fdc8 commit now";
+    let flowed = lines(pieces(body, &[span(8..15, commit())]));
     assert_eq!(flowed.len(), 1);
+    assert!(matches!(&flowed[0][0], Item::Run(run) if run == "see the"));
+    assert!(matches!(flowed[0][1], Item::Ref { span: 0, .. }));
+    assert!(matches!(&flowed[0][2], Item::Run(run) if run == "commit now"));
     assert_eq!(flowed[0].len(), 3);
+}
+
+/// A 32 KiB body of short lines of words, with no references.
+fn short_lines_body() -> String {
+    let body = "a few short words here\n".repeat(32 * 1024 / 23);
+    assert!(body.len() <= agmen_proto::MAX_BODY_BYTES, "{}", body.len());
+    body
+}
+
+#[test]
+fn a_32_kib_body_in_short_lines_draws_as_one_text() {
+    let body = short_lines_body();
+    let drawn = lines(pieces(&body, &[]));
+    let items: usize = drawn.iter().map(Vec::len).sum();
+    // One run per line rather than one element per word, and the lines,
+    // having no chips, join into a single text.
+    assert_eq!(items, body.lines().count());
+    assert!(items * 5 <= body.split_whitespace().count());
+    assert!(matches!(blocks(drawn).as_slice(), [Block::Text(_)]));
+}
+
+#[test]
+fn only_lines_with_chips_draw_as_rows() {
+    let body = "a\n\nsee 4d9fdc8\nc d\ne";
+    let start = body.find('4').unwrap();
+    let drawn = blocks(lines(pieces(body, &[span(start..start + 7, commit())])));
+    assert_eq!(drawn.len(), 3);
+    assert_eq!(drawn[0], Block::Text("a\n".into()));
+    assert!(matches!(&drawn[1], Block::Row(items) if items.len() == 2));
+    assert_eq!(drawn[2], Block::Text("c d\ne".into()));
 }
 
 #[test]
@@ -305,11 +338,10 @@ fn chip_wider_than_the_column_wraps_inside_it(cx: &mut TestAppContext) {
     assert!(chip.size.height > px(20.), "the chip wraps: {chip:?}");
 }
 
-#[gpui::test]
-fn a_32_kib_body_draws_quickly(cx: &mut TestAppContext) {
-    let body = "a ".repeat(16_384);
+/// The mean time to draw a frame of `body` in a 600 px column.
+fn frame_time(cx: &mut TestAppContext, body: &str) -> std::time::Duration {
     let context = Rc::new(ChatContext::new(Rc::new(chat_snapshot())));
-    let text = Rc::new(context.body_text(&body, &[]));
+    let text = Rc::new(context.body_text(body, &[]));
     let cx = host(cx, px(600.), move || {
         RichText::new("m", text.clone(), context.clone()).into_any_element()
     });
@@ -317,11 +349,28 @@ fn a_32_kib_body_draws_quickly(cx: &mut TestAppContext) {
     for _ in 0..5 {
         redraw(cx);
     }
-    let per_frame = started.elapsed() / 5;
-    // A debug build on a laptop; the bound catches per-word layout, which
-    // took seconds a frame, not small regressions.
-    assert!(
-        per_frame < std::time::Duration::from_millis(250),
-        "{per_frame:?}"
-    );
+    started.elapsed() / 5
+}
+
+/// Plan Focus 4: no frame over 16.7 ms.
+const FRAME_BUDGET: std::time::Duration = std::time::Duration::from_micros(16_700);
+
+#[gpui::test]
+fn a_32_kib_body_draws_quickly(cx: &mut TestAppContext) {
+    // Measured on an M2 Max, three runs each: release 0.4 ms for one line
+    // and 0.9 ms for 1,424 short lines; debug 8 ms and 12 ms. In release a
+    // body gets a quarter of the frame budget. Debug runs about 13 times
+    // slower, so its bound is 50 ms: 4 times the debug frame for a loaded
+    // test run, and under the 148 ms of one element per line and the 552 ms
+    // of one element per word that this replaced.
+    let bound = if cfg!(debug_assertions) {
+        std::time::Duration::from_millis(50)
+    } else {
+        FRAME_BUDGET / 4
+    };
+    let one_line = frame_time(cx, &"a ".repeat(16_384));
+    let short_lines = frame_time(&mut TestAppContext::single(), &short_lines_body());
+    for (shape, per_frame) in [("one line", one_line), ("short lines", short_lines)] {
+        assert!(per_frame < bound, "{shape}: {per_frame:?} over {bound:?}");
+    }
 }

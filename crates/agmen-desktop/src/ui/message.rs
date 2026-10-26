@@ -377,8 +377,17 @@ impl MessageRow {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many message rows this thread has rendered, so tests can tell a
+    /// cached frame from one that rebuilt the rows.
+    pub(super) static ROWS_RENDERED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 impl RenderOnce for MessageRow {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        #[cfg(test)]
+        ROWS_RENDERED.with(|count| count.set(count.get() + 1));
         let context = self.context.clone();
         let Some(env) = context.snapshot().messages.get(self.index) else {
             return div().into_any_element();

@@ -1,14 +1,14 @@
 //! A message body with its references drawn as chips (`rich_body` in
 //! `docs/mockups/scripts/console.py`).
 //!
-//! The body is laid out word by word in a wrapping row, as the mockup does,
-//! so a chip flows with the words around it. Short punctuation glued to a
-//! reference stays beside its chip with no gap (mockup fix 54). A word or
-//! chip wider than the column, such as a 500 character token, shrinks to
-//! the column and wraps inside itself. A line of more than
-//! `MAX_FLOW_WORDS` words draws its words as a few wrapping runs instead,
-//! so a 32 KiB body stays cheap to lay out. Every slice is taken at a span
-//! edge or at whitespace, so a character is never split.
+//! Each line of the body is a wrapping row of runs and chips: the words
+//! between two chips are one run, one text element that wraps inside
+//! itself, so a 32 KiB body builds an element per run rather than per word.
+//! Short punctuation glued to a reference stays beside its chip with no gap
+//! (mockup fix 54). A run or chip wider than the column, such as a 500
+//! character token, shrinks to the column and wraps inside itself; a chip
+//! is never split. Every slice is taken at a span edge or at whitespace, so
+//! a character is never split.
 
 use std::rc::Rc;
 
@@ -28,12 +28,6 @@ use crate::refs::Span;
 /// The most characters of punctuation that stay glued to a chip; a longer
 /// token beside a reference wraps as a word of its own.
 const MAX_GLUE_CHARS: usize = 8;
-
-/// Past this many words, a line draws its words as runs of text between its
-/// chips rather than one element per word.
-// shortcut: a run that wraps pushes the chip after it to a new line; flow
-// runs into chips if long lines with references become common.
-const MAX_FLOW_WORDS: usize = 256;
 
 /// One piece of a laid out body.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,9 +105,12 @@ fn push_words<'a>(text: &'a str, out: &mut Vec<Piece<'a>>) {
 }
 
 /// One element of a drawn line.
+// shortcut: a run is one box in its line's wrapping row, so a run too long
+// for the space left beside a chip starts on the next line and leaves that
+// space empty. Flowing text around chips needs an inline layout element of
+// our own; build one if people find the gaps odd.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Item<'a> {
-    Word(&'a str),
     /// Words joined by single spaces, drawn as one wrapping text.
     Run(String),
     Ref {
@@ -124,8 +121,7 @@ enum Item<'a> {
     },
 }
 
-/// The pieces as lines of items: word by word, or as runs between chips on
-/// a line of more than `MAX_FLOW_WORDS` words.
+/// The pieces as lines of items: runs of words, and chips.
 fn lines(pieces: Vec<Piece<'_>>) -> Vec<Vec<Item<'_>>> {
     let mut lines = Vec::new();
     let mut line = Vec::new();
@@ -141,13 +137,10 @@ fn lines(pieces: Vec<Piece<'_>>) -> Vec<Vec<Item<'_>>> {
 }
 
 fn items(line: Vec<Piece<'_>>) -> Vec<Item<'_>> {
-    let words = line.iter().filter(|p| matches!(p, Piece::Word(_))).count();
-    let flow = words <= MAX_FLOW_WORDS;
     let mut out = Vec::new();
     let mut run = String::new();
     for piece in line {
         match piece {
-            Piece::Word(word) if flow => out.push(Item::Word(word)),
             Piece::Word(word) => {
                 if !run.is_empty() {
                     run.push(' ');
@@ -249,9 +242,42 @@ impl RichText {
     }
 }
 
-fn word(text: impl Into<SharedString>) -> AnyElement {
-    // min_w_0 lets a word wider than the column shrink to it and wrap.
-    div().min_w_0().child(text.into()).into_any_element()
+fn run(text: String) -> AnyElement {
+    // min_w_0 lets a run wider than the column shrink to it and wrap.
+    div()
+        .min_w_0()
+        .child(SharedString::from(text))
+        .into_any_element()
+}
+
+/// A block of the drawn body: lines with no chips, joined as one text, or
+/// one line with chips as a wrapping row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Block<'a> {
+    Text(String),
+    Row(Vec<Item<'a>>),
+}
+
+/// Joins each stretch of lines without chips into one text block, so a long
+/// plain body is one element however many lines it has.
+fn blocks(lines: Vec<Vec<Item<'_>>>) -> Vec<Block<'_>> {
+    let mut out: Vec<Block<'_>> = Vec::new();
+    for line in lines {
+        let plain = match line.as_slice() {
+            [] => Some(String::new()),
+            [Item::Run(run)] => Some(run.clone()),
+            _ => None,
+        };
+        match (plain, out.last_mut()) {
+            (Some(text), Some(Block::Text(block))) => {
+                block.push('\n');
+                block.push_str(&text);
+            }
+            (Some(text), _) => out.push(Block::Text(text)),
+            (None, _) => out.push(Block::Row(line)),
+        }
+    }
+    out
 }
 
 impl RenderOnce for RichText {
@@ -259,32 +285,35 @@ impl RenderOnce for RichText {
         let theme = &cx.global::<Appearance>().theme;
         let text = self.text.clone();
         let selector = format!("{}:body", self.id);
-        let lines = lines(pieces(&text.body, &text.spans))
+        let blocks = blocks(lines(pieces(&text.body, &text.spans)))
             .into_iter()
-            .map(|items| {
-                let elements: Vec<AnyElement> = items
-                    .into_iter()
-                    .filter_map(|item| match item {
-                        Item::Word(text) => Some(word(text.to_owned())),
-                        Item::Run(run) => Some(word(run)),
-                        Item::Ref {
-                            lead,
-                            text,
-                            tail,
-                            span,
-                        } => self.chip(span, lead, text, tail),
-                    })
-                    .collect();
-                div()
-                    .w_full()
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .gap_x(SPACE_4)
-                    .gap_y(SPACE_3)
-                    // An empty line keeps its height, as a blank line in the text.
-                    .when(elements.is_empty(), |this| this.child(" "))
-                    .children(elements)
+            .map(|block| match block {
+                // An empty line keeps its height, as a blank line in the text.
+                Block::Text(text) if text.is_empty() => run(" ".to_owned()),
+                Block::Text(text) => run(text),
+                Block::Row(items) => {
+                    let elements: Vec<AnyElement> = items
+                        .into_iter()
+                        .filter_map(|item| match item {
+                            Item::Run(text) => Some(run(text)),
+                            Item::Ref {
+                                lead,
+                                text,
+                                tail,
+                                span,
+                            } => self.chip(span, lead, text, tail),
+                        })
+                        .collect();
+                    div()
+                        .w_full()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_x(SPACE_4)
+                        .gap_y(SPACE_3)
+                        .children(elements)
+                        .into_any_element()
+                }
             });
         div()
             .debug_selector(|| selector)
@@ -296,7 +325,7 @@ impl RenderOnce for RichText {
             .text_size(TEXT_DEFAULT)
             .text_color(theme.text)
             .line_height(relative(LINE_HEIGHT))
-            .children(lines)
+            .children(blocks)
     }
 }
 
