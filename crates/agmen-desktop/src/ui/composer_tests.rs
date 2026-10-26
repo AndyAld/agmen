@@ -266,18 +266,22 @@ fn reply_goes_to_the_alerts_sender_once(cx: &mut TestAppContext) {
     );
 }
 
+/// The alert `replying` answers.
+fn alert() -> agmen_proto::MessageId {
+    "01JD0000000000000000000010".parse().unwrap()
+}
+
 /// A focused composer replying to adam/coord's alert, with what it sends.
 fn replying(cx: &mut TestAppContext) -> (Entity<Composer>, Sent, &mut VisualTestContext, Target) {
     let (composer, sent, cx) = open_composer(cx);
     // Task 13: Escape ends the reply through the composer's binding.
     cx.update(|_, cx| cx.bind_keys(crate::keymap::bindings_in(crate::keymap::COMPOSER_CONTEXT)));
-    let alert: agmen_proto::MessageId = "01JD0000000000000000000010".parse().unwrap();
     let coord = Target {
         id: agent_id("adam/coord"),
         handle: "adam/coord".into(),
     };
     composer.update_in(cx, |composer, window, cx| {
-        composer.reply(coord.clone(), alert, window, cx);
+        composer.reply(coord.clone(), alert(), window, cx);
     });
     crate::ui::test_support::redraw(cx);
     (composer, sent, cx, coord)
@@ -315,6 +319,64 @@ fn the_reply_chips_close_mark_cancels_the_reply(cx: &mut TestAppContext) {
     cx.simulate_input("hi");
     cx.simulate_keystrokes("enter");
     assert_eq!(*sent.borrow(), vec![plain_hi()]);
+}
+
+#[gpui::test]
+fn a_mention_of_another_agent_drops_the_reply(cx: &mut TestAppContext) {
+    // C232: "@sean/a1 status?" after Reply on adam/coord's alert goes to
+    // sean/a1 as a plain message. Replying to the alert would make it an
+    // ANSWER that closes the alert while adam/coord never sees it.
+    let (_, sent, cx, _) = replying(cx);
+    cx.simulate_input("@sean/a1 status?");
+    crate::ui::test_support::redraw(cx);
+    assert!(
+        cx.debug_bounds("composer:cancel-reply").is_none(),
+        "the chip shows the reply is dropped"
+    );
+    cx.simulate_keystrokes("enter");
+    assert_eq!(
+        *sent.borrow(),
+        vec![Draft {
+            to: vec![agent_id("sean/a1")],
+            body: "@sean/a1 status?".into(),
+            reply_to: None,
+            model: None,
+        }]
+    );
+}
+
+#[gpui::test]
+fn a_mention_of_the_alerts_sender_keeps_the_reply(cx: &mut TestAppContext) {
+    let (_, sent, cx, coord) = replying(cx);
+    cx.simulate_input("@adam/coord ok");
+    crate::ui::test_support::redraw(cx);
+    assert!(cx.debug_bounds("composer:cancel-reply").is_some());
+    cx.simulate_keystrokes("enter");
+    assert_eq!(
+        *sent.borrow(),
+        vec![Draft {
+            to: vec![coord.id],
+            body: "@adam/coord ok".into(),
+            reply_to: Some(alert()),
+            model: None,
+        }]
+    );
+}
+
+#[gpui::test]
+fn plain_text_after_a_reply_keeps_the_reply(cx: &mut TestAppContext) {
+    let (_, sent, cx, coord) = replying(cx);
+    cx.simulate_input("on it");
+    cx.simulate_keystrokes("enter");
+    assert_eq!(
+        *sent.borrow(),
+        vec![Draft {
+            to: vec![coord.id],
+            body: "on it".into(),
+            reply_to: Some(alert()),
+            model: None,
+        }]
+    );
 }
 
 #[gpui::test]

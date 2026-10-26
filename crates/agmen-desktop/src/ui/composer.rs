@@ -196,10 +196,26 @@ impl Composer {
     /// Unknown handles stay plain text, and the message goes to the
     /// recipient, or to the sender of the message it replies to.
     fn target_for(&self, text: &str) -> &Target {
-        mention_handle(text)
-            .and_then(|handle| self.agents.iter().find(|agent| agent.handle == handle))
+        self.mentioned(text)
             .or(self.reply.as_ref().map(|(_, to)| to))
             .unwrap_or(&self.recipient)
+    }
+
+    /// The roster agent an `@mention` at the start of `text` names.
+    fn mentioned(&self, text: &str) -> Option<&Target> {
+        let handle = mention_handle(text)?;
+        self.agents.iter().find(|agent| agent.handle == handle)
+    }
+
+    /// The message `text` replies to: the pending reply, unless a leading
+    /// `@mention` names someone other than its sender (C232). A reply sent
+    /// to another agent would be an ANSWER that closes the alert while its
+    /// sender never sees it.
+    fn reply_for(&self, text: &str) -> Option<&MessageId> {
+        let (message, sender) = self.reply.as_ref()?;
+        self.mentioned(text)
+            .is_none_or(|mentioned| mentioned.id == sender.id)
+            .then_some(message)
     }
 
     fn send(&mut self, body: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -217,7 +233,7 @@ impl Composer {
         let draft = Draft {
             to: vec![target.id.clone()],
             body: body.to_owned(),
-            reply_to: self.reply.as_ref().map(|(message, _)| message.clone()),
+            reply_to: self.reply_for(body).cloned(),
             model: self
                 .models
                 .as_ref()
@@ -241,8 +257,8 @@ impl Composer {
 
     // Task 13: an alert's Reply.
     /// Starts a reply to `message`, addressed to `to`, and focuses the
-    /// input. The next message sent replies to it; an `@mention` still
-    /// picks another agent.
+    /// input. The next message sent replies to it; an `@mention` of
+    /// another agent sends a plain message to that agent instead.
     pub(crate) fn reply(
         &mut self,
         to: Target,
@@ -398,8 +414,9 @@ impl Render for Composer {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let model = self.model_chip(cx);
         let theme = &cx.global::<Appearance>().theme;
-        // Task 13: a pending reply says so and offers a way out.
-        let replying = self.reply.is_some();
+        // Task 13: a pending reply says so and offers a way out. An
+        // @mention of another agent drops it, and the chip says "to".
+        let replying = self.reply_for(self.input.read(cx).text()).is_some();
         let to = div()
             .debug_selector(|| "composer:to".into())
             .flex_none()
