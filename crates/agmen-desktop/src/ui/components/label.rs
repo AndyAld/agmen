@@ -49,7 +49,9 @@ impl LabelSize {
 #[derive(Debug, PartialEq, IntoElement)]
 pub(crate) struct Label {
     text: SharedString,
-    size: LabelSize,
+    /// `None` is [`LabelSize::Default`], or the code font's own size for
+    /// code text (C252).
+    size: Option<LabelSize>,
     color: Color,
     weight: Option<FontWeight>,
     code: bool,
@@ -66,7 +68,7 @@ impl Label {
     pub(crate) fn new(text: impl Into<SharedString>) -> Self {
         Self {
             text: text.into(),
-            size: LabelSize::Default,
+            size: None,
             color: Color::Default,
             weight: None,
             code: false,
@@ -88,7 +90,7 @@ impl Label {
 
     #[must_use]
     pub(crate) const fn size(mut self, size: LabelSize) -> Self {
-        self.size = size;
+        self.size = Some(size);
         self
     }
 
@@ -105,9 +107,10 @@ impl Label {
     }
 
     /// Sets the text in the code font, for handles, branches and other
-    /// values people type. At the default size it takes the code font's own
-    /// size; another [`LabelSize`] takes that step of the UI scale, as Zed's
-    /// `buffer_font` labels do (the Git panel's mono 11 metadata, V93).
+    /// values people type. With no size set it takes the code font's own
+    /// size; a [`LabelSize`] set with [`Label::size`], Default included,
+    /// takes that step of the UI scale, as Zed's `buffer_font` labels do
+    /// (the Git panel's mono 11 metadata, V93).
     #[must_use]
     pub(crate) const fn code(mut self) -> Self {
         self.code = true;
@@ -153,14 +156,15 @@ impl RenderOnce for Label {
             self.line_height
                 .map_or_else(|| relative(LINE_HEIGHT), gpui::DefiniteLength::from),
         );
+        let size = self.size.unwrap_or_default().rems();
         let sized = match (self.code, self.size) {
-            (true, LabelSize::Default) => base
+            (true, None) => base
                 .font_family(appearance.fonts.code_family.clone())
                 .text_size(appearance.fonts.code_size),
-            (true, _) => base
+            (true, Some(_)) => base
                 .font_family(appearance.fonts.code_family.clone())
-                .text_size(self.size.rems()),
-            (false, _) => base.text_size(self.size.rems()),
+                .text_size(size),
+            (false, _) => base.text_size(size),
         };
         sized
             .when_some(self.weight, gpui::Styled::font_weight)
@@ -333,6 +337,26 @@ mod tests {
         // The test text system measures every font alike, so only the
         // size is checked here.
         assert_eq!(small.height, ui.height, "the same text size");
+    }
+
+    #[gpui::test]
+    fn code_label_at_an_explicit_default_size_takes_text_default(cx: &mut TestAppContext) {
+        // C252: only a code label with no size set takes the code font's
+        // own size; Default asked for is TEXT_DEFAULT, as for UI text.
+        let asked = rendered_size(cx, || {
+            Label::new("andy/fx1")
+                .code()
+                .size(LabelSize::Default)
+                .into_any_element()
+        });
+        let mut cx2 = TestAppContext::single();
+        let unset = rendered_size(&mut cx2, || {
+            Label::new("andy/fx1").code().into_any_element()
+        });
+        let want = TEXT_DEFAULT.to_pixels(crate::ui::tokens::MOCKUP_REM) * LINE_HEIGHT;
+        // gpui rounds layout edges to device pixels (2 per px here).
+        assert!((asked.height - want).abs() <= gpui::px(0.25), "{asked:?}");
+        assert_ne!(asked.height, unset.height, "{asked:?} {unset:?}");
     }
 
     #[gpui::test]
