@@ -2,7 +2,7 @@
 //! worktree's identity holds. A GRANT records the commit checked out at
 //! that moment in `claims.db`; DONE diffs from it.
 
-use agmen_proto::{ItemKey, Payload, Timestamp};
+use agmen_proto::{ClientEnvelope, ItemKey, Payload, Timestamp};
 use anyhow::{Context as _, Result, bail};
 use clap::Args;
 use jiff::SignedDuration;
@@ -12,7 +12,7 @@ use super::post::body;
 use crate::claims::Claims;
 use crate::client::blocking;
 use crate::git;
-use crate::joined::{Agent, agent, envelope};
+use crate::joined::{Agent, Recorded, Via, agent, envelope};
 use crate::output::{Code, Fail, body_text, clean, println_flush};
 
 /// How long a CLAIM stays valid on its way to the hub (the hub allows 120 s
@@ -30,58 +30,88 @@ pub(crate) struct ClaimArgs {
 /// `agmen claim`: exits 0 on GRANT, 4 on DENY.
 pub(crate) async fn claim(args: ClaimArgs) -> Result<()> {
     let agent = agent().await?;
+    let (recorded, answer) = claim_item(&agent, Via::OneShot(args.wait.wait), args.item).await?;
+    Agent::print_recorded(&recorded)?;
+    match answer {
+        ClaimAnswer::Denied { .. } => Err(Fail::new(Code::Rejected, answer.line()).into()),
+        _ => println_flush(&answer.line()).context("writing to stdout"),
+    }
+}
+
+/// The hub's answer to a CLAIM.
+#[derive(Debug)]
+pub(crate) enum ClaimAnswer {
+    Granted {
+        item: ItemKey,
+        lease_until: Timestamp,
+    },
+    Denied {
+        item: ItemKey,
+        reason: String,
+        body: String,
+    },
+    /// Recorded, but the GRANT or DENY was not found right after it.
+    NotFound,
+}
+
+impl ClaimAnswer {
+    /// The answer for people and the model, every hub-supplied string
+    /// through the sanitizer.
+    pub(crate) fn line(&self) -> String {
+        match self {
+            Self::Granted { item, lease_until } => format!("granted {item} until {lease_until}"),
+            Self::Denied { item, reason, body } => {
+                format!("denied {item}: {} ({})", clean(reason), body_text(body))
+            }
+            Self::NotFound => "no GRANT or DENY found yet: check agmen inbox".to_owned(),
+        }
+    }
+}
+
+/// Claims `item` through `via` and reads the hub's answer. A GRANT, or no
+/// answer found, records the commit checked out now in `claims.db`, so
+/// DONE can diff from it.
+///
+/// # Errors
+///
+/// [`Agent::send`]'s, a failure when `HEAD` names no commit, and an error
+/// when the hub answers with something other than GRANT or DENY.
+pub(crate) async fn claim_item(
+    agent: &Agent,
+    via: Via<'_>,
+    item: ItemKey,
+) -> Result<(Recorded, ClaimAnswer)> {
     let base = git::commit(&agent.root, "HEAD")
         .await
         .context("a claim records the commit it starts from, and HEAD has none")?;
-    let mut env = envelope(
-        Payload::Claim {
-            item: args.item.clone(),
-        },
-        String::new(),
-    )?;
+    let mut env = envelope(Payload::Claim { item: item.clone() }, String::new())?;
     env.valid_until = Some(
         Timestamp::now()
             .checked_add(CLAIM_VALID)
             .context("the clock is out of range")?,
     );
-    let recorded = agent.publish(env, args.wait.wait).await?;
-    Agent::print_recorded(&recorded)?;
-    let item = args.item;
-    match agent.hub_answer(&recorded).await?.map(|m| m.client) {
+    let recorded = agent.send(via, env).await?;
+    let answer = match agent.hub_answer(&recorded).await?.map(|m| m.client) {
         Some(answer) => match answer.payload {
-            Payload::Grant {
-                item: granted,
-                lease_until,
-            } => {
-                with_claims(&agent, move |claims| claims.record(&item, &base)).await?;
-                println_flush(&format!("granted {granted} until {lease_until}"))
-                    .context("writing to stdout")
-            }
-            Payload::Deny { item, reason } => {
-                let reason = serde_json::to_value(reason)
+            Payload::Grant { item, lease_until } => ClaimAnswer::Granted { item, lease_until },
+            Payload::Deny { item, reason } => ClaimAnswer::Denied {
+                item,
+                reason: serde_json::to_value(reason)
                     .ok()
                     .and_then(|v| v.as_str().map(str::to_owned))
-                    .unwrap_or_default();
-                Err(Fail::new(
-                    Code::Rejected,
-                    format!(
-                        "denied {item}: {} ({})",
-                        clean(&reason),
-                        body_text(answer.body.as_str())
-                    ),
-                )
-                .into())
-            }
+                    .unwrap_or_default(),
+                body: answer.body.as_str().to_owned(),
+            },
             _ => bail!("the hub answered the CLAIM with something other than GRANT or DENY"),
         },
-        None => {
-            // Recorded, so the hub has decided; the answer will show in the
-            // inbox. Keep the base so DONE can diff from it.
-            with_claims(&agent, move |claims| claims.record(&item, &base)).await?;
-            println_flush("no GRANT or DENY found yet: check agmen inbox")
-                .context("writing to stdout")
-        }
+        // Recorded, so the hub has decided; the answer will show in the
+        // inbox.
+        None => ClaimAnswer::NotFound,
+    };
+    if !matches!(answer, ClaimAnswer::Denied { .. }) {
+        with_claims(agent, move |claims| claims.record(&item, &base)).await?;
     }
+    Ok((recorded, answer))
 }
 
 #[derive(Debug, Args)]
@@ -98,32 +128,46 @@ pub(crate) struct ReleaseArgs {
 /// `agmen release`.
 pub(crate) async fn release(args: ReleaseArgs) -> Result<()> {
     let agent = agent().await?;
-    let payload = Payload::Release {
-        item: args.item.clone(),
-        reason: args.reason,
-    };
-    let recorded = agent
-        .publish(envelope(payload, String::new())?, args.wait.wait)
-        .await?;
-    let item = args.item;
-    with_claims(&agent, move |claims| claims.remove(&item)).await?;
+    let recorded =
+        release_item(&agent, Via::OneShot(args.wait.wait), args.item, args.reason).await?;
     Agent::print_recorded(&recorded)
+}
+
+/// Gives up the claim of `item` through `via` and forgets it in
+/// `claims.db`.
+pub(crate) async fn release_item(
+    agent: &Agent,
+    via: Via<'_>,
+    item: ItemKey,
+    reason: Option<String>,
+) -> Result<Recorded> {
+    let payload = Payload::Release {
+        item: item.clone(),
+        reason,
+    };
+    let recorded = agent.send(via, envelope(payload, String::new())?).await?;
+    with_claims(agent, move |claims| claims.remove(&item)).await?;
+    Ok(recorded)
 }
 
 /// `agmen heartbeat`: one HEARTBEAT naming every claim `claims.db` holds.
 pub(crate) async fn heartbeat(wait: Wait) -> Result<()> {
     let agent = agent().await?;
-    let items = with_claims(&agent, |claims| claims.items()).await?;
-    if items.is_empty() {
+    let Some(env) = heartbeat_envelope(&agent).await? else {
         return println_flush("no claims to renew").context("writing to stdout");
-    }
-    let recorded = agent
-        .publish(
-            envelope(Payload::Heartbeat { items }, String::new())?,
-            wait.wait,
-        )
-        .await?;
+    };
+    let recorded = agent.send(Via::OneShot(wait.wait), env).await?;
     Agent::print_recorded(&recorded)
+}
+
+/// A HEARTBEAT naming every claim `claims.db` holds, or `None` when it
+/// holds none.
+pub(crate) async fn heartbeat_envelope(agent: &Agent) -> Result<Option<ClientEnvelope>> {
+    let items = with_claims(agent, |claims| claims.items()).await?;
+    if items.is_empty() {
+        return Ok(None);
+    }
+    envelope(Payload::Heartbeat { items }, String::new()).map(Some)
 }
 
 #[derive(Debug, Args)]
@@ -140,44 +184,66 @@ pub(crate) struct DoneArgs {
     wait: Wait,
 }
 
-/// `agmen done`: DONE with `branch` from `git rev-parse` and `changes` from
-/// `git diff --name-status --no-renames <base_sha_at_claim>...<commit>`.
+/// `agmen done`.
 pub(crate) async fn done(args: DoneArgs) -> Result<()> {
     let body = body(args.body.as_deref())?;
     let agent = agent().await?;
-    let item = args.item.clone();
-    let base = with_claims(&agent, move |claims| claims.base(&item))
+    let (recorded, line) = done_item(
+        &agent,
+        Via::OneShot(args.wait.wait),
+        args.item,
+        &args.commit,
+        body,
+    )
+    .await?;
+    Agent::print_recorded(&recorded)?;
+    println_flush(&line).context("writing to stdout")
+}
+
+/// Reports `item` done at `commit` through `via`: DONE with `branch` from
+/// `git rev-parse` and `changes` from `git diff --name-status --no-renames
+/// <base_sha_at_claim>...<commit>`. Returns where it was recorded and a
+/// line saying what it reported; the claim is forgotten in `claims.db`.
+///
+/// # Errors
+///
+/// A failure when `claims.db` holds no claim of `item` or `commit` names
+/// no commit, and [`Agent::send`]'s.
+pub(crate) async fn done_item(
+    agent: &Agent,
+    via: Via<'_>,
+    item: ItemKey,
+    commit: &str,
+    body: String,
+) -> Result<(Recorded, String)> {
+    let key = item.clone();
+    let base = with_claims(agent, move |claims| claims.base(&key))
         .await?
         .with_context(|| {
             format!(
-                "this worktree has no recorded claim of {}: claim it with agmen claim first",
-                args.item
+                "this worktree has no recorded claim of {item}: claim it with agmen claim first"
             )
         })?;
-    let commit = git::commit(&agent.root, &args.commit).await?;
+    let commit = git::commit(&agent.root, commit).await?;
     let branch = git::branch(&agent.root).await?;
     let changes = git::changes(&agent.root, &base, &commit).await?;
     let count = changes.len();
+    let line = format!(
+        "done {item} at {commit} on {}, {count} changed {}",
+        clean(&branch),
+        if count == 1 { "path" } else { "paths" }
+    );
     let payload = Payload::Done {
-        item: args.item.clone(),
-        branch: branch.clone(),
-        commit: commit.clone(),
+        item: item.clone(),
+        branch,
+        commit,
         base_sha: base,
         checks: Vec::new(),
         changes,
     };
-    let recorded = agent
-        .publish(envelope(payload, body)?, args.wait.wait)
-        .await?;
-    let item = args.item.clone();
-    with_claims(&agent, move |claims| claims.remove(&item)).await?;
-    Agent::print_recorded(&recorded)?;
-    println_flush(&format!(
-        "done {} at {commit} on {branch}, {count} changed {}",
-        args.item,
-        if count == 1 { "path" } else { "paths" }
-    ))
-    .context("writing to stdout")
+    let recorded = agent.send(via, envelope(payload, body)?).await?;
+    with_claims(agent, move |claims| claims.remove(&item)).await?;
+    Ok((recorded, line))
 }
 
 /// Runs `work` on the identity's claims file, off the async runtime.

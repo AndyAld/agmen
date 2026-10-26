@@ -61,19 +61,34 @@ struct LaneList {
 /// `agmen lanes`.
 pub(crate) async fn lanes(args: LanesArgs) -> Result<()> {
     let agent = agent().await?;
-    let project = agent.identity.project.to_string();
-    let list: LaneList = match args.action {
-        None => agent.api()?.get(&["projects", &project, "lanes"]).await?,
+    let text = match args.action {
+        None => lanes_text(&agent).await?,
         Some(LanesAction::Set { file }) => {
+            let project = agent.identity.project.to_string();
             let (content_type, body) = read_lane_file(file).await?;
             let request = setter(&agent)
                 .await?
                 .request(Method::PUT, &["projects", &project, "lanes"])
                 .header(reqwest::header::CONTENT_TYPE, content_type)
                 .body(body);
-            send(request).await.context("replacing the lanes failed")?
+            let list = send(request).await.context("replacing the lanes failed")?;
+            lane_lines(&project, list)
         }
     };
+    println_flush(&text).context("writing to stdout")
+}
+
+/// The project's lanes, one line each under a `lanes v<n> in project <p>`
+/// line.
+pub(crate) async fn lanes_text(agent: &Agent) -> Result<String> {
+    let project = agent.identity.project.to_string();
+    let list = agent.api()?.get(&["projects", &project, "lanes"]).await?;
+    Ok(lane_lines(&project, list))
+}
+
+/// What `agmen lanes` prints for `list`, every hub-supplied string through
+/// [`clean`].
+fn lane_lines(project: &str, list: LaneList) -> String {
     let mut out = vec![format!("lanes v{} in project {project}", list.v)];
     if list.lanes.is_empty() {
         out.push("no lanes: every path is unowned".to_owned());
@@ -85,7 +100,7 @@ pub(crate) async fn lanes(args: LanesArgs) -> Result<()> {
         let globs: Vec<_> = lane.globs.iter().map(|glob| clean(glob)).collect();
         out.push(format!("{}{owner}: {}", clean(&lane.name), globs.join(" ")));
     }
-    println_flush(&out.join("\n")).context("writing to stdout")
+    out.join("\n")
 }
 
 /// The file's content type and text: by extension, else JSON when it
@@ -211,7 +226,7 @@ struct CheckRequest<'a> {
 
 /// One answer, as the hub gives it and as `--json` prints it.
 #[derive(Debug, Serialize, Deserialize)]
-struct PathCheck {
+pub(crate) struct PathCheck {
     path: String,
     lane: Option<LaneName>,
     allowed: bool,
@@ -220,56 +235,80 @@ struct PathCheck {
 
 /// `agmen check-path`.
 pub(crate) async fn check_path(args: CheckPathArgs) -> Result<()> {
-    if args.paths.len() > MAX_CHECK_PATHS {
-        return Err(Fail::usage(format!("check at most {MAX_CHECK_PATHS} paths at once")).into());
-    }
+    at_most_max_paths(&args.paths)?;
     let agent = agent().await?;
     let cwd = std::env::current_dir().context("reading the working directory")?;
+    let answers = check(&agent, &cwd, args.paths).await?;
+    let text = if args.json {
+        serde_json::to_string(&answers).context("encoding the answers")?
+    } else {
+        check_lines(&answers)
+    };
+    println_flush(&text).context("writing to stdout")
+}
+
+/// Asks the hub whether `agent` may edit each of `paths` (absolute, or
+/// relative to `cwd`): one answer per path, in order, with `path` as given.
+///
+/// # Errors
+///
+/// A usage failure for more than [`MAX_CHECK_PATHS`] paths, the hub's
+/// refusal, and an error when it answers a different number of entries.
+pub(crate) async fn check(agent: &Agent, cwd: &Path, paths: Vec<String>) -> Result<Vec<PathCheck>> {
+    at_most_max_paths(&paths)?;
     let root = agent.root.clone();
     let real_root = blocking(move || {
         std::fs::canonicalize(&root).with_context(|| format!("resolving {}", root.display()))
     })
     .await?;
-    let paths = args
-        .paths
+    let placed = paths
         .iter()
         .map(|path| {
-            repo_path(&[&agent.root, &real_root], &cwd, path).unwrap_or_else(|| path.clone())
+            repo_path(&[&agent.root, &real_root], cwd, path).unwrap_or_else(|| path.clone())
         })
         .collect();
     let project = agent.identity.project.to_string();
     let request = CheckRequest {
         identity: &agent.identity.identity_id,
-        paths,
+        paths: placed,
     };
     let mut answers: Vec<PathCheck> = agent
         .api()?
         .post(&["projects", &project, "check-path"], &request)
         .await
         .context("checking the paths failed")?;
-    if answers.len() != args.paths.len() {
+    if answers.len() != paths.len() {
         bail!(
             "the hub answered {} entries for {} paths",
             answers.len(),
-            args.paths.len()
+            paths.len()
         );
     }
-    for (answer, path) in answers.iter_mut().zip(args.paths) {
+    for (answer, path) in answers.iter_mut().zip(paths) {
         answer.path = path;
     }
-    let text = if args.json {
-        serde_json::to_string(&answers).context("encoding the answers")?
-    } else {
-        answers
-            .iter()
-            .map(|a| {
-                let verdict = if a.allowed { "allowed" } else { "denied" };
-                format!("{verdict} {}: {}", clean(&a.path), clean(&a.reason))
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-    println_flush(&text).context("writing to stdout")
+    Ok(answers)
+}
+
+/// A usage failure for more than [`MAX_CHECK_PATHS`] paths, the hub's
+/// limit.
+fn at_most_max_paths(paths: &[String]) -> Result<()> {
+    if paths.len() > MAX_CHECK_PATHS {
+        return Err(Fail::usage(format!("check at most {MAX_CHECK_PATHS} paths at once")).into());
+    }
+    Ok(())
+}
+
+/// `allowed <path>: <reason>` or `denied <path>: <reason>` per answer.
+pub(crate) fn check_lines(answers: &[PathCheck]) -> String {
+    answers
+        .iter()
+        .map(|a| {
+            let verdict = if a.allowed { "allowed" } else { "denied" };
+            format!("{verdict} {}: {}", clean(&a.path), clean(&a.reason))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// `input` as a repository path: made absolute against `cwd`, `.` and `..`

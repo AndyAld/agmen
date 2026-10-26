@@ -301,7 +301,7 @@ async fn store_human_tokens(login: &Login, tokens: &HumanTokens) -> Result<()> {
 /// takes the refresh token.
 pub(crate) async fn human() -> Result<Human> {
     let login = read_login().await?.ok_or_else(Fail::not_signed_in)?;
-    let stored = get_token(login.key()?)
+    let stored = get_token(TokenStore::from_env(), login.key()?)
         .await?
         .ok_or_else(Fail::not_signed_in)?;
     let mut tokens: HumanTokens =
@@ -351,14 +351,9 @@ impl Api {
     }
 }
 
-/// The token stored under `key`.
-pub(crate) async fn get_token(key: TokenKey) -> Result<Option<String>> {
-    blocking(move || {
-        TokenStore::from_env()
-            .get(&key)
-            .context("reading the token store failed")
-    })
-    .await
+/// The token `store` holds under `key`.
+pub(crate) async fn get_token(store: TokenStore, key: TokenKey) -> Result<Option<String>> {
+    blocking(move || store.get(&key).context("reading the token store failed")).await
 }
 
 /// Stores `token` under `key`.

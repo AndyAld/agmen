@@ -1,21 +1,23 @@
 //! The identity this worktree acts as: its trusted identity file (rulings
 //! R42 to R42b, through agmen-client's `find_identity`), its token, and
 //! what every command that speaks for it shares: handle lookup (ruling
-//! R60), envelopes, and publishing through a one-shot `<id>-cli` session
-//! that waits for the hub's answer.
+//! R60), envelopes, and publishing that waits for the hub's answer, through
+//! a one-shot `<id>-cli` session (the CLI) or a session the caller holds
+//! open (`agmen mcp`).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use agmen_client::{
     ClientEvent, ClientKind, HubClient, IdentityError, IdentityFile, Joined, OutboxState, Session,
-    SessionConfig, TokenKey, find_identity, read_state, resolve_handle,
+    SessionConfig, TokenKey, TokenStore, find_identity, read_state, resolve_handle,
 };
 use agmen_proto::{
     Body, ClientEnvelope, IdentityId, Mention, MessageId, Payload, StampedEnvelope, Stream,
     Timestamp, Topics,
 };
 use anyhow::{Context as _, Result};
+use tokio::sync::Notify;
 use tokio::time::Instant;
 
 use crate::client::{Api, blocking, get_token};
@@ -66,35 +68,51 @@ pub(crate) async fn joined() -> Result<Joined> {
 /// refusal for an identity file agmen may not use.
 pub(crate) async fn agent() -> Result<Agent> {
     let joined = joined().await?;
-    let identity = joined.identity;
-    let key = TokenKey::new(&identity.hub_url, &identity.identity_id)
-        .context("the identity file's hub URL")?;
-    let token = get_token(key).await?.ok_or_else(|| {
-        Fail::new(
-            Code::NotLoggedIn,
-            format!(
-                "this machine holds no agmen token for {} at {}: run agmen leave, then agmen join \
-                 again in this worktree",
-                identity.handle,
-                identity.hub_url.origin().ascii_serialization()
-            ),
+    Agent::load(joined, TokenStore::from_env(), &paths::state_base()?).await
+}
+
+impl Agent {
+    /// The identity of `joined`, which passed the trust test, with its token
+    /// from `tokens` and its state folder in `state_base`.
+    ///
+    /// # Errors
+    ///
+    /// A [`Code::NotLoggedIn`] failure when `tokens` holds no token for it.
+    pub(crate) async fn load(
+        joined: Joined,
+        tokens: TokenStore,
+        state_base: &Path,
+    ) -> Result<Self> {
+        let identity = joined.identity;
+        let key = TokenKey::new(&identity.hub_url, &identity.identity_id)
+            .context("the identity file's hub URL")?;
+        let token = get_token(tokens, key).await?.ok_or_else(|| {
+            Fail::new(
+                Code::NotLoggedIn,
+                format!(
+                    "this machine holds no agmen token for {} at {}: run agmen leave, then agmen \
+                     join again in this worktree",
+                    identity.handle,
+                    identity.hub_url.origin().ascii_serialization()
+                ),
+            )
+        })?;
+        let hub = HubClient::new(
+            identity.hub_url.clone(),
+            identity.project.clone(),
+            identity.identity_id.clone(),
+            token.clone(),
         )
-    })?;
-    let hub = HubClient::new(
-        identity.hub_url.clone(),
-        identity.project.clone(),
-        identity.identity_id.clone(),
-        token.clone(),
-    )
-    .context("building the hub client")?;
-    let state_dir = paths::state_dir(&identity.identity_id)?;
-    Ok(Agent {
-        root: joined.root,
-        identity,
-        hub,
-        token,
-        state_dir,
-    })
+        .context("building the hub client")?;
+        let state_dir = state_base.join(identity.identity_id.as_str());
+        Ok(Self {
+            root: joined.root,
+            identity,
+            hub,
+            token,
+            state_dir,
+        })
+    }
 }
 
 /// Where a published message ended up.
@@ -211,16 +229,10 @@ impl Agent {
                 });
             }
         };
-        match state {
-            Some(OutboxState::Recorded { stream, seq }) => Ok(Recorded {
-                id,
-                stream,
-                seq: seq.0,
-            }),
-            Some(OutboxState::Rejected { reason }) => Err(Fail::rejected(reason).into()),
-            Some(OutboxState::Pending { .. }) | None => {
-                println_flush(&format!("queued id={id} (not yet recorded)"))
-                    .context("writing to stdout")?;
+        match state.and_then(|state| settled(&id, state)) {
+            Some(outcome) => outcome,
+            None => {
+                println_flush(&queued(&id)).context("writing to stdout")?;
                 Err(Fail::new(
                     Code::Queued,
                     format!(
@@ -232,6 +244,24 @@ impl Agent {
                 )
                 .into())
             }
+        }
+    }
+
+    /// Sends `env` the way `via` says and waits for the hub's answer.
+    ///
+    /// # Errors
+    ///
+    /// As [`Agent::publish`]; through a held session a message still
+    /// queued after the wait is a [`Code::Queued`] failure whose message is
+    /// `queued id=<id> (not yet recorded)`, and nothing is printed.
+    pub(crate) async fn send(&self, via: Via<'_>, env: ClientEnvelope) -> Result<Recorded> {
+        match via {
+            Via::OneShot(wait) => self.publish(env, wait).await,
+            Via::Held {
+                session,
+                answered,
+                wait,
+            } => publish_held(session, answered, env, wait).await,
         }
     }
 
@@ -254,6 +284,81 @@ impl Agent {
             .messages
             .into_iter()
             .find(|message| message.client.reply_to.as_ref() == Some(&recorded.id)))
+    }
+}
+
+/// How a command's message reaches the hub, and how long the command waits
+/// for the hub's answer.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Via<'a> {
+    /// A one-shot `<id>-cli` session per message (the CLI).
+    OneShot(Duration),
+    /// A session the caller keeps open (`agmen mcp`).
+    Held {
+        session: &'a Session,
+        /// Woken whenever the session reports a delivery.
+        answered: &'a Notify,
+        wait: Duration,
+    },
+}
+
+/// `queued id=<id> (not yet recorded)`: the hub has not answered yet.
+fn queued(id: &MessageId) -> String {
+    format!("queued id={id} (not yet recorded)")
+}
+
+/// What a final outbox state means for the command that sent `id`:
+/// recorded, or rejected for good. `None` while it is still pending.
+fn settled(id: &MessageId, state: OutboxState) -> Option<Result<Recorded>> {
+    match state {
+        OutboxState::Recorded { stream, seq } => Some(Ok(Recorded {
+            id: id.clone(),
+            stream,
+            seq: seq.0,
+        })),
+        OutboxState::Rejected { reason } => Some(Err(Fail::rejected(reason).into())),
+        OutboxState::Pending { .. } => None,
+    }
+}
+
+/// Queues `env` on `session` and waits up to `wait` for the hub's answer,
+/// looking at the outbox whenever `answered` wakes and every
+/// [`OUTBOX_POLL`].
+async fn publish_held(
+    session: &Session,
+    answered: &Notify,
+    env: ClientEnvelope,
+    wait: Duration,
+) -> Result<Recorded> {
+    let id = env.id.clone();
+    match session.publish(env).await {
+        Ok(()) => {}
+        Err(agmen_client::ClientError::EnvelopeTooLarge { .. }) => {
+            return Err(
+                Fail::rejected("schema (the message is over the 64 KiB envelope limit)").into(),
+            );
+        }
+        Err(err) => return Err(client_error(err, "queueing the message failed")),
+    }
+    let deadline = Instant::now() + wait;
+    loop {
+        // Registered before the outbox read, so a delivery reported while
+        // it runs still wakes this wait.
+        let woken = answered.notified();
+        tokio::pin!(woken);
+        woken.as_mut().enable();
+        let (outbox, read_id) = (session.outbox().clone(), id.clone());
+        let state = blocking(move || outbox.state(&read_id).context("reading the outbox")).await?;
+        if let Some(outcome) = state.and_then(|state| settled(&id, state)) {
+            return outcome;
+        }
+        tokio::select! {
+            () = tokio::time::sleep_until(deadline) => {
+                return Err(Fail::new(Code::Queued, queued(&id)).into());
+            }
+            () = &mut woken => {}
+            () = tokio::time::sleep(OUTBOX_POLL) => {}
+        }
     }
 }
 

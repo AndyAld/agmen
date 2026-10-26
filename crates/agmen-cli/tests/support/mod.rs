@@ -14,6 +14,8 @@
     reason = "each test binary uses a different subset of the helpers"
 )]
 
+pub mod mcp;
+
 use std::future::Future;
 use std::hash::{BuildHasher, Hasher, RandomState};
 use std::path::{Path, PathBuf};
@@ -313,6 +315,17 @@ impl Home {
 
     pub fn path(&self) -> &Path {
         self.dir.path()
+    }
+
+    /// The folder that holds each identity's state folder, as the CLI
+    /// places it with this home.
+    pub fn state_base(&self) -> PathBuf {
+        let base = if cfg!(target_os = "macos") {
+            self.path().join("Library/Application Support")
+        } else {
+            self.path().join("state")
+        };
+        base.join("agmen")
     }
 
     /// The token store `agmen` uses with this home.

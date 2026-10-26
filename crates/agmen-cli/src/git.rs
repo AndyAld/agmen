@@ -36,10 +36,16 @@ async fn git(dir: &Path, args: &[&str]) -> Result<Vec<u8>> {
     })?
     .with_context(|| format!("git {name} could not run"))?;
     if !output.status.success() {
-        bail!(
-            "git {name} failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+        // Errors reach the model through agmen mcp, so they carry a fixed
+        // reason and git's own words go to the debug log (ruling R44a).
+        tracing::debug!(
+            stderr = %String::from_utf8_lossy(&output.stderr).trim(),
+            "git {name} failed"
         );
+        match output.status.code() {
+            Some(code) => bail!("git {name} exited {code}"),
+            None => bail!("git {name} was killed"),
+        }
     }
     Ok(output.stdout)
 }

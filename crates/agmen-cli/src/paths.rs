@@ -12,7 +12,6 @@
 
 use std::path::PathBuf;
 
-use agmen_proto::IdentityId;
 use anyhow::{Context as _, Result};
 
 /// The config folder.
@@ -20,9 +19,9 @@ pub(crate) fn config_dir() -> Result<PathBuf> {
     base("XDG_CONFIG_HOME", ".config", "APPDATA")
 }
 
-/// The state folder of `identity`.
-pub(crate) fn state_dir(identity: &IdentityId) -> Result<PathBuf> {
-    Ok(base("XDG_STATE_HOME", ".local/state", "LOCALAPPDATA")?.join(identity.as_str()))
+/// The state folder that holds one folder per identity.
+pub(crate) fn state_base() -> Result<PathBuf> {
+    base("XDG_STATE_HOME", ".local/state", "LOCALAPPDATA")
 }
 
 /// The login file.

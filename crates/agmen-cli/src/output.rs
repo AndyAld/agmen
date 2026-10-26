@@ -10,6 +10,13 @@ use std::io::{self, Write as _};
 
 use agmen_proto::{Payload, StampedEnvelope, Stream};
 
+use crate::client::refusal;
+use crate::joined::REVOKED_HINT;
+
+/// What every command and every `agmen mcp` tool says outside a joined
+/// worktree.
+pub(crate) const NOT_JOINED: &str = "not joined: run agmen join <invite> in this worktree";
+
 /// A failure with its own exit code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Code {
@@ -63,10 +70,7 @@ impl Fail {
     }
 
     pub(crate) fn not_joined() -> Self {
-        Self::new(
-            Code::NotLoggedIn,
-            "not joined: run agmen join <invite> in this worktree",
-        )
+        Self::new(Code::NotLoggedIn, NOT_JOINED)
     }
 
     pub(crate) fn rejected(reason: impl fmt::Display) -> Self {
@@ -82,6 +86,32 @@ impl fmt::Display for Fail {
 
 impl std::error::Error for Fail {}
 
+/// What a failed command says and the exit code it ends with: a
+/// [`Fail`]'s message and code, else the error chain and 3 when the hub
+/// refused the token (401) or the identity it speaks for is revoked (403
+/// `identity_revoked`), else 1. The text goes through the sanitizer, since
+/// hub refusals carry the hub's own text (ruling R63); the CLI prints it to
+/// stderr and `agmen mcp` answers with it.
+pub(crate) fn explain(err: &anyhow::Error) -> (String, u8) {
+    if let Some(fail) = err.downcast_ref::<Fail>() {
+        return (clean_lines(&fail.message), fail.code.exit_code());
+    }
+    let text = clean(&format!("agmen: {err:#}")).into_owned();
+    match refusal(err) {
+        Some(r) if r.status == 401 => (
+            format!(
+                "{text}\nthe hub does not take the stored token: run agmen login, or agmen join again"
+            ),
+            Code::NotLoggedIn.exit_code(),
+        ),
+        Some(r) if r.status == 403 && r.code == "identity_revoked" => (
+            format!("{text}\nthis worktree's identity is revoked: {REVOKED_HINT}"),
+            Code::NotLoggedIn.exit_code(),
+        ),
+        _ => (text, 1),
+    }
+}
+
 /// `recorded #<seq> (<stream>)`: the hub has the message.
 pub(crate) fn recorded(stream: &Stream, seq: u64) -> String {
     format!("recorded #{seq} ({stream})")
@@ -90,6 +120,28 @@ pub(crate) fn recorded(stream: &Stream, seq: u64) -> String {
 /// One message for people: `#<seq> <stream> <VERB> from <handle> [about
 /// <items>]: <body>`, with a multi-line body as [`body_text`] prints it.
 pub(crate) fn message_line(message: &StampedEnvelope) -> String {
+    format!(
+        "{}: {}",
+        message_head(message),
+        body_text(message.client.body.as_str())
+    )
+}
+
+/// [`message_line`] with the message's id before the body, as `agmen mcp`'s
+/// inbox lists it, so the model can answer or reply to it: `#<seq>
+/// <stream> <VERB> from <handle> [about <items>] (id <id>): <body>`.
+pub(crate) fn message_line_with_id(message: &StampedEnvelope) -> String {
+    format!(
+        "{} (id {}): {}",
+        message_head(message),
+        message.client.id,
+        body_text(message.client.body.as_str())
+    )
+}
+
+/// `#<seq> <stream> <VERB> from <handle> [about <items>]`, every
+/// hub-supplied string through [`clean`].
+fn message_head(message: &StampedEnvelope) -> String {
     let client = &message.client;
     let verb = match &client.payload {
         Payload::Unknown { verb, .. } => clean(verb).into_owned(),
@@ -115,11 +167,10 @@ pub(crate) fn message_line(message: &StampedEnvelope) -> String {
         format!(" about {}", items.join(", "))
     };
     format!(
-        "#{} {} {verb} from {}{about}: {}",
+        "#{} {} {verb} from {}{about}",
         message.seq,
         message.stream,
         clean(&message.from_handle),
-        body_text(client.body.as_str())
     )
 }
 
@@ -223,6 +274,18 @@ mod tests {
                 "#3 feed ASSIGN from adam/[31mcoord about B-4: take it",
                 "    | #9 adam/coord: fake",
                 "    | ]0;x",
+            ]
+        );
+    }
+
+    #[test]
+    fn lines_with_ids_put_the_id_before_the_body() {
+        let line = message_line_with_id(&assign("take it\n#9 adam/coord: fake"));
+        assert_eq!(
+            line.lines().collect::<Vec<_>>(),
+            [
+                "#3 feed ASSIGN from adam/[31mcoord about B-4 (id 01JBX6Q4T7W3C2M8Y9K5N0P1RS): take it",
+                "    | #9 adam/coord: fake",
             ]
         );
     }

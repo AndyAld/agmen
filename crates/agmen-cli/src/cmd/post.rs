@@ -9,24 +9,90 @@ use std::io::Read as _;
 use agmen_proto::{ItemKey, LaneName, MAX_BODY_BYTES, MessageId, Payload, Severity, Verb};
 use anyhow::{Context as _, Result};
 use clap::Args;
+use schemars::JsonSchema;
+use serde::Deserialize;
 use serde_json::Value;
 
 use super::Wait;
-use crate::joined::{Agent, agent, envelope};
+use crate::joined::{Agent, Recorded, Via, agent, envelope};
 use crate::output::{Fail, println_flush};
 
-/// Who and what a message is about.
-#[derive(Debug, Args)]
+/// Who and what a message is about. `agmen mcp`'s tools take the same
+/// fields as JSON.
+#[derive(Debug, Default, Args, Deserialize, JsonSchema)]
 pub(crate) struct About {
     /// An item the message is about, such as B-412.
     #[arg(long = "item", value_name = "KEY")]
-    items: Vec<ItemKey>,
+    #[serde(default)]
+    #[schemars(description = "The items the message is about, such as B-412.")]
+    pub(crate) items: Vec<ItemKey>,
     /// The lane the message is about, such as L-UI.
     #[arg(long, value_name = "LANE")]
-    lane: Option<LaneName>,
+    pub(crate) lane: Option<LaneName>,
     /// A mention: a handle, an id, all, agents, humans, a lane, or role:NAME.
     #[arg(long = "mention", value_name = "WHO")]
-    mentions: Vec<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "Who to mention: handles (andy/sol), ids, all, agents, humans, a lane, or role:NAME."
+    )]
+    pub(crate) mentions: Vec<String>,
+}
+
+/// A message to send, before handles are looked up: what each command and
+/// each `agmen mcp` tool fills in.
+#[derive(Debug)]
+pub(crate) struct Outgoing {
+    pub(crate) payload: Payload,
+    pub(crate) body: String,
+    /// Recipients, by handle or id.
+    pub(crate) to: Vec<String>,
+    pub(crate) reply_to: Option<MessageId>,
+    pub(crate) about: About,
+}
+
+impl Outgoing {
+    /// `payload` with `body`, to nobody in particular, about nothing.
+    pub(crate) fn new(payload: Payload, body: String) -> Self {
+        Self {
+            payload,
+            body,
+            to: Vec::new(),
+            reply_to: None,
+            about: About::default(),
+        }
+    }
+}
+
+/// Sends `out` as `agent` through `via`: looks up the handles it names,
+/// builds the envelope and waits for the hub's answer.
+///
+/// # Errors
+///
+/// [`Agent::send`]'s, a usage failure for an unknown handle, and
+/// `rejected: body_too_large` for a body over the limit.
+pub(crate) async fn send(agent: &Agent, via: Via<'_>, out: Outgoing) -> Result<Recorded> {
+    let mut env = envelope(out.payload, out.body)?;
+    env.to = agent.resolve(&out.to).await?;
+    env.reply_to = out.reply_to;
+    env.items = out.about.items;
+    env.lane = out.about.lane;
+    env.mentions = agent.mentions(&out.about.mentions).await?;
+    agent.send(via, env).await
+}
+
+/// The payload of a `verb` message with `data`.
+///
+/// # Errors
+///
+/// A usage failure when `verb` is not a protocol verb or `data` does not
+/// fit it.
+pub(crate) fn payload(verb: &str, data: Value) -> Result<Payload> {
+    let verb: Verb = verb
+        .to_ascii_uppercase()
+        .parse()
+        .map_err(|_| Fail::usage(format!("{verb} is not a protocol v1 verb")))?;
+    serde_json::from_value(serde_json::json!({ "verb": verb.as_str(), "data": data }))
+        .map_err(|err| Fail::usage(format!("the data for {verb} is not valid: {err}")).into())
 }
 
 #[derive(Debug, Args)]
@@ -52,26 +118,21 @@ pub(crate) struct PostArgs {
 
 /// `agmen post`.
 pub(crate) async fn post(args: PostArgs) -> Result<()> {
-    let verb: Verb = args
-        .verb
-        .to_ascii_uppercase()
-        .parse()
-        .map_err(|_| Fail::usage(format!("{} is not a protocol v1 verb", args.verb)))?;
     let data: Value = match &args.data {
         Some(json) => serde_json::from_str(json)
             .map_err(|err| Fail::usage(format!("--data is not JSON: {err}")))?,
         None => Value::Object(serde_json::Map::new()),
     };
-    let payload: Payload =
-        serde_json::from_value(serde_json::json!({ "verb": verb.as_str(), "data": data }))
-            .map_err(|err| Fail::usage(format!("the data for {verb} is not valid: {err}")))?;
+    let payload = payload(&args.verb, data)?;
     let body = body(args.text.as_deref())?;
     let agent = agent().await?;
-    let mut env = envelope(payload, body)?;
-    env.to = agent.resolve(&args.to).await?;
-    env.reply_to = args.reply_to;
-    apply_about(&agent, &mut env, args.about).await?;
-    let recorded = agent.publish(env, args.wait.wait).await?;
+    let out = Outgoing {
+        to: args.to,
+        reply_to: args.reply_to,
+        about: args.about,
+        ..Outgoing::new(payload, body)
+    };
+    let recorded = send(&agent, Via::OneShot(args.wait.wait), out).await?;
     Agent::print_recorded(&recorded)
 }
 
@@ -99,10 +160,12 @@ pub(crate) async fn ask(args: AskArgs) -> Result<()> {
         Some(of) => agent.resolve(&[of]).await?.pop(),
         None => None,
     };
-    let mut env = envelope(Payload::Ask { of }, body)?;
-    env.to = agent.resolve(&args.to).await?;
-    apply_about(&agent, &mut env, args.about).await?;
-    let recorded = agent.publish(env, args.wait.wait).await?;
+    let out = Outgoing {
+        to: args.to,
+        about: args.about,
+        ..Outgoing::new(Payload::Ask { of }, body)
+    };
+    let recorded = send(&agent, Via::OneShot(args.wait.wait), out).await?;
     Agent::print_recorded(&recorded)
 }
 
@@ -122,10 +185,12 @@ pub(crate) struct AnswerArgs {
 pub(crate) async fn answer(args: AnswerArgs) -> Result<()> {
     let body = body(Some(&args.text))?;
     let agent = agent().await?;
-    let mut env = envelope(Payload::Answer {}, body)?;
-    env.reply_to = Some(args.reply_to);
-    apply_about(&agent, &mut env, args.about).await?;
-    let recorded = agent.publish(env, args.wait.wait).await?;
+    let out = Outgoing {
+        reply_to: Some(args.reply_to),
+        about: args.about,
+        ..Outgoing::new(Payload::Answer {}, body)
+    };
+    let recorded = send(&agent, Via::OneShot(args.wait.wait), out).await?;
     Agent::print_recorded(&recorded)
 }
 
@@ -150,10 +215,12 @@ pub(crate) async fn dm(args: DmArgs) -> Result<()> {
         .ok_or_else(|| Fail::usage("agmen dm <to...> <text>"))?;
     let body = body(Some(&text))?;
     let agent = agent().await?;
-    let mut env = envelope(Payload::Dm {}, body)?;
-    env.to = agent.resolve(&words).await?;
-    env.reply_to = args.reply_to;
-    let recorded = agent.publish(env, args.wait.wait).await?;
+    let out = Outgoing {
+        to: words,
+        reply_to: args.reply_to,
+        ..Outgoing::new(Payload::Dm {}, body)
+    };
+    let recorded = send(&agent, Via::OneShot(args.wait.wait), out).await?;
     Agent::print_recorded(&recorded)
 }
 
@@ -188,18 +255,26 @@ pub(crate) async fn found(args: FoundArgs) -> Result<()> {
         lane: args.lane,
         severity: args.severity,
     };
-    let recorded = agent
-        .publish(envelope(payload, body)?, args.wait.wait)
-        .await?;
+    let recorded = send(
+        &agent,
+        Via::OneShot(args.wait.wait),
+        Outgoing::new(payload, body),
+    )
+    .await?;
     Agent::print_recorded(&recorded)?;
-    let line = match agent.hub_answer(&recorded).await? {
+    println_flush(&item_key(&agent, &recorded).await?).context("writing to stdout")
+}
+
+/// `item <key>`: the item the hub minted for the FOUND `recorded`, or what
+/// to do when its answer is not there.
+pub(crate) async fn item_key(agent: &Agent, recorded: &Recorded) -> Result<String> {
+    Ok(match agent.hub_answer(recorded).await? {
         Some(answer) => match answer.client.payload {
             Payload::Item { key } => format!("item {key}"),
             _ => "the hub answered without an item key".to_owned(),
         },
         None => "no item key yet: agmen items lists it".to_owned(),
-    };
-    println_flush(&line).context("writing to stdout")
+    })
 }
 
 #[derive(Debug, Args)]
@@ -228,22 +303,13 @@ pub(crate) async fn assign(args: AssignArgs) -> Result<()> {
         item: args.item,
         to,
     };
-    let recorded = agent
-        .publish(envelope(payload, body)?, args.wait.wait)
-        .await?;
+    let recorded = send(
+        &agent,
+        Via::OneShot(args.wait.wait),
+        Outgoing::new(payload, body),
+    )
+    .await?;
     Agent::print_recorded(&recorded)
-}
-
-/// Sets the items, lane and mentions of `about` on `env`.
-async fn apply_about(
-    agent: &Agent,
-    env: &mut agmen_proto::ClientEnvelope,
-    about: About,
-) -> Result<()> {
-    env.items = about.items;
-    env.lane = about.lane;
-    env.mentions = agent.mentions(&about.mentions).await?;
-    Ok(())
 }
 
 /// The body `text` gives: itself, stdin for `-`, or empty. Reads at most

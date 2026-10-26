@@ -47,6 +47,55 @@ struct Scanned {
 /// `agmen inbox`.
 pub(crate) async fn inbox(args: InboxArgs) -> Result<()> {
     let agent = agent().await?;
+    let unread = unread(&agent, args.after).await?;
+    for message in &unread.messages {
+        let line = if args.json {
+            serde_json::to_string(&ClientEvent::Message {
+                message: Box::new(message.clone()),
+            })
+            .context("encoding a message")?
+        } else {
+            message_line(message)
+        };
+        println_flush(&line).context("writing to stdout")?;
+    }
+    if unread.messages.is_empty() && !args.json {
+        println_flush("no new messages").context("writing to stdout")?;
+    }
+    if unread.mark_read().await? {
+        eprintln!("more messages are waiting: run agmen inbox again");
+    }
+    Ok(())
+}
+
+/// The messages for this identity after its read cursors (or after
+/// `after` in each stream), oldest first. The read cursors move only on
+/// [`Unread::mark_read`], once they have been shown.
+#[derive(Debug)]
+pub(crate) struct Unread {
+    pub(crate) messages: Vec<StampedEnvelope>,
+    cursors: Cursors,
+    /// Where each read cursor moves: past everything scanned, shown or not.
+    marks: Vec<(Stream, u64)>,
+    /// More pages were left unread.
+    more: bool,
+}
+
+impl Unread {
+    /// Moves the read cursors past what was scanned. Returns whether more
+    /// messages are waiting past the pages read.
+    pub(crate) async fn mark_read(self) -> Result<bool> {
+        for (stream, last) in self.marks {
+            let cursors = self.cursors.clone();
+            blocking(move || Ok(cursors.mark_read(&stream, last)?)).await?;
+        }
+        Ok(self.more)
+    }
+}
+
+/// Reads the feed and this identity's inbox from their read cursors, or
+/// from `after`, and keeps the messages for this identity (ruling R31).
+pub(crate) async fn unread(agent: &Agent, after: Option<u64>) -> Result<Unread> {
     let db = agent.state_dir.join(STATE_DB);
     let dir = agent.state_dir.clone();
     let (cursors, outbox) = blocking(move || {
@@ -60,17 +109,16 @@ pub(crate) async fn inbox(args: InboxArgs) -> Result<()> {
     ];
     let mut scans = Vec::with_capacity(streams.len());
     for stream in streams {
-        let start = match args.after {
+        let start = match after {
             Some(after) => after,
             None => {
                 let (cursors, stream) = (cursors.clone(), stream.clone());
                 blocking(move || Ok(cursors.read_cursor(&stream)?)).await?
             }
         };
-        scans.push(scan(&agent, stream, start).await?);
+        scans.push(scan(agent, stream, start).await?);
     }
 
-    // The read cursors move past everything scanned, shown or not.
     let marks: Vec<(Stream, u64)> = scans
         .iter()
         .map(|scan| (scan.stream.clone(), scan.last))
@@ -103,29 +151,12 @@ pub(crate) async fn inbox(args: InboxArgs) -> Result<()> {
     })
     .await?;
     found.sort_by_key(|message| message.hub_at);
-
-    for message in &found {
-        let line = if args.json {
-            serde_json::to_string(&ClientEvent::Message {
-                message: Box::new(message.clone()),
-            })
-            .context("encoding a message")?
-        } else {
-            message_line(message)
-        };
-        println_flush(&line).context("writing to stdout")?;
-    }
-    if found.is_empty() && !args.json {
-        println_flush("no new messages").context("writing to stdout")?;
-    }
-    for (stream, last) in marks {
-        let cursors = cursors.clone();
-        blocking(move || Ok(cursors.mark_read(&stream, last)?)).await?;
-    }
-    if more {
-        eprintln!("more messages are waiting: run agmen inbox again");
-    }
-    Ok(())
+    Ok(Unread {
+        messages: found,
+        cursors,
+        marks,
+        more,
+    })
 }
 
 /// Reads `stream` after seq `after`, up to [`MAX_PAGES`] pages.

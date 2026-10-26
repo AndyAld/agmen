@@ -1,12 +1,13 @@
 //! The `agmen` subcommands, one file per group, dispatched from one
-//! match. `agmen mcp` (Task 13) adds a variant and a file here.
+//! match. `agmen mcp` lives in `crate::mcp` and calls the shared parts of
+//! `claim`, `inbox`, `lanes` and `post`.
 
 mod account;
-mod claim;
-mod inbox;
+pub(crate) mod claim;
+pub(crate) mod inbox;
 mod join;
-mod lanes;
-mod post;
+pub(crate) mod lanes;
+pub(crate) mod post;
 mod watch;
 
 use std::time::Duration;
@@ -67,6 +68,8 @@ enum Command {
     Items,
     /// Say whether this identity may edit each path.
     CheckPath(lanes::CheckPathArgs),
+    /// Serve this worktree's identity to an agent as MCP tools on stdin and stdout.
+    Mcp(crate::mcp::McpArgs),
 }
 
 /// How long a publishing command waits for the hub to record the message.
@@ -114,6 +117,7 @@ impl Cli {
             Command::Lanes(args) => lanes::lanes(args).await,
             Command::Items => lanes::items().await,
             Command::CheckPath(args) => lanes::check_path(args).await,
+            Command::Mcp(args) => crate::mcp::run(args).await,
         }
     }
 }

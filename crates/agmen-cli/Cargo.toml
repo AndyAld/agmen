@@ -21,10 +21,13 @@ clap = { version = "4.6.7", features = ["derive", "env"] }
 getrandom = "0.4.3"
 jiff = { version = "0.2.38", default-features = false, features = ["std", "serde"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls", "form"] }
+rmcp = { version = "3.7.0", features = ["server", "macros", "transport-io", "schemars"] }
 rusqlite = { version = "0.39.0", features = ["bundled"] }
 rustls = { version = "0.23.46", default-features = false, features = ["aws_lc_rs", "std"] }
+schemars = "1.2.3"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "signal", "time", "process"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
@@ -34,6 +37,7 @@ url = "2.5.8"
 agmen-hub = { version = "0.1.0", path = "../agmen-hub", features = ["test-hooks"] }
 assert_cmd = "2.2.2"
 axum = { version = "0.8.9", default-features = false, features = ["tokio", "http1", "json", "query"] }
+rmcp = { version = "3.7.0", features = ["client"] }
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "postgres"] }
 tempfile = "3.27.0"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "process", "io-util"] }
