@@ -111,10 +111,6 @@ pub(crate) struct Draft {
 /// Something the person does that is not a chat message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-#[expect(
-    dead_code,
-    reason = "Tasks 13 to 19 send hand back, switch, alert, spec and kick-off actions"
-)]
 pub(crate) enum Action {
     Apply(ChangeId),
     Cancel(ChangeId),
@@ -136,6 +132,7 @@ pub(crate) enum Action {
         path: String,
         sha: GitSha,
     },
+    #[expect(dead_code, reason = "no view sends the share approval yet")]
     ApproveShare,
     KickOff,
     // Task 18: a worker on an installed agent, from the command palette.
