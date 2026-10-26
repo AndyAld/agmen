@@ -10,6 +10,7 @@
         "background": "#101010",
         "terminal.ansi.green": "#00ff00",
         "terminal.foreground": "#aabbcc",
+        "editor.highlighted_line.background": "#334455",
       },
     },
   ],

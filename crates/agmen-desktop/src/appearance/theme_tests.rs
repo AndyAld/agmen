@@ -182,6 +182,18 @@ fn terminal_colors_fall_back_to_text_and_background() {
 }
 
 #[test]
+fn highlighted_line_reads_zeds_editor_key() {
+    // C313: a ref's highlighted lines take the theme's
+    // `editor.highlighted_line.background`, else the fallback's.
+    let t = load_theme(&zed_dir(), &ext_dir(), "Partial Dark").unwrap();
+    assert!(close(t.highlighted_line, hex("#334455")));
+    assert!(!close(
+        gruvbox_material_dark_hard().highlighted_line,
+        hex("#334455")
+    ));
+}
+
+#[test]
 fn unknown_theme_is_an_error() {
     let err = load_theme(&zed_dir(), &ext_dir(), "No Such Theme").unwrap_err();
     assert!(err.to_string().contains("No Such Theme"));
