@@ -21,9 +21,7 @@ use super::{
     RecentKind, RoleFile, RoleInfo, RoleLayer, SessionRow, SpecState, TeamRow, Tone,
 };
 
-fn words(list: &str) -> Vec<String> {
-    list.split_whitespace().map(str::to_owned).collect()
-}
+use crate::roles::words;
 
 fn agent(
     person: &str,
@@ -42,6 +40,7 @@ fn agent(
         harness: harness.to_owned(),
         status,
         depth,
+        item: None,
     })
 }
 
@@ -57,7 +56,11 @@ pub(super) fn roster() -> Result<Vec<PersonGroup>, BackendError> {
                 agent("andy", 1, "fx1", "engineer", "claude", Working)?,
                 agent("andy", 1, "t7k", "tester", "opencode", Working)?,
                 // Mockup fix 28: rv2 runs on a harness installed on this machine.
-                agent("andy", 2, "rv2", "reviewer", "opencode", Reading)?,
+                AgentRow {
+                    // Mockup fix 51: rv2 is reading C015's DONE.
+                    item: Some("C015".into()),
+                    ..agent("andy", 2, "rv2", "reviewer", "opencode", Reading)?
+                },
                 agent("andy", 0, "a1", "engineer", "claude", Idle)?,
             ],
         },
@@ -650,6 +653,7 @@ pub(super) fn plan_roster() -> Result<Vec<PersonGroup>, BackendError> {
             harness: harness.into(),
             status,
             depth: 0,
+            item: None,
         })
     };
     Ok(vec![
@@ -780,11 +784,11 @@ pub(super) fn role_files(roster: &[PersonGroup]) -> Vec<RoleFile> {
             .flat_map(|group| &group.agents)
             .filter(|agent| agent.role == name)
             .map(|agent| {
-                let status = format!("{:?}", agent.status).to_lowercase();
-                (
-                    agent.handle.clone(),
-                    format!("{} · {status}", agent.harness),
-                )
+                let mut note = format!("{} · {}", agent.harness, agent.status.label());
+                if let Some(item) = &agent.item {
+                    note = format!("{note} {item}");
+                }
+                (agent.handle.clone(), note)
             })
             .collect();
         used_by.extend(

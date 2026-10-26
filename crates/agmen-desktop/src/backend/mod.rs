@@ -207,6 +207,17 @@ pub(crate) enum AgentStatus {
     Reading,
 }
 
+impl AgentStatus {
+    /// The word for it in notes such as "opencode · reading".
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Working => "working",
+            Self::Idle => "idle",
+            Self::Reading => "reading",
+        }
+    }
+}
+
 /// One agent in the Agents dock.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AgentRow {
@@ -222,6 +233,8 @@ pub(crate) struct AgentRow {
     pub(crate) status: AgentStatus,
     /// How far the row is nested under the agent that delegated to it.
     pub(crate) depth: u8,
+    /// The item it works on or reads, as the hub's roster reports it.
+    pub(crate) item: Option<String>,
 }
 
 /// One person and their agents.

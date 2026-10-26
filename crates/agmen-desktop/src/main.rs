@@ -232,7 +232,7 @@ fn open_dev_view(
     let mut snapshot = backend::FixtureBackend::for_screen(backend::Screen::Chat)
         .context("building the fixture data")?
         .snapshot();
-    let title = snapshot.clone();
+    let title = ui::TitleBar::new(&snapshot);
     let window = match view {
         DevView::Code => cx.open_window(options, |_, cx| {
             let code = cx.new(|_| {

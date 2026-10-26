@@ -413,7 +413,8 @@ fn role_files_cover_three_layers() {
     assert_eq!(
         info.used_by,
         [
-            ("andy/rv2".to_owned(), "opencode · reading".to_owned()),
+            // Mockup fix 51 (C179): rv2 is reading C015.
+            ("andy/rv2".to_owned(), "opencode · reading C015".to_owned()),
             ("security-reviewer".to_owned(), "extends it".to_owned()),
         ]
     );
@@ -445,4 +446,13 @@ fn role_panels_come_from_the_role_files() {
     assert_eq!(info.mention.0, "@reviewers");
     let engineer = s.roles.iter().find(|r| r.name == "engineer").unwrap();
     assert!(engineer.info.as_ref().unwrap().bash_note.is_none());
+}
+
+#[test]
+fn status_labels_are_words() {
+    // Review C180: the label is spelled out, not taken from Debug.
+    use crate::backend::AgentStatus;
+    assert_eq!(AgentStatus::Working.label(), "working");
+    assert_eq!(AgentStatus::Idle.label(), "idle");
+    assert_eq!(AgentStatus::Reading.label(), "reading");
 }

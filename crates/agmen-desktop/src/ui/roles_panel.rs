@@ -11,7 +11,8 @@ use gpui::{
 use super::breadcrumb::Breadcrumb;
 use super::code_view::CodeView;
 use super::components::{
-    Button, ButtonStyle, Color, Icon, IconSize, Indent, KvRow, KvSection, Label, ListItem,
+    Button, ButtonStyle, Color, Icon, IconSize, Indent, KvRow, KvSection, Label, LabelSize,
+    ListItem,
 };
 use super::dock::RightDockHeader;
 use super::syntax::Language;
@@ -159,6 +160,16 @@ impl RenderOnce for RolePanel {
             .row(KvRow::new("Verbs", i.verbs.join(" ")).color(Color::Success))
             .row(KvRow::new("Refused", i.refused.join(" ")).color(Color::Error))
             .row(KvRow::new("Tier", i.tier.to_string()));
+        // The hub checks verbs by identity kind only so far (ingest.rs
+        // may_send), so the role's own lists come from its file.
+        let source = div().debug_selector(|| "role-source".into()).child(
+            Label::new(
+                "Verbs and Refused are from the role file; the hub checks verbs by kind until roles reach it.",
+            )
+            .size(LabelSize::Small)
+            .color(Color::Placeholder)
+            .wrap(),
+        );
         let used_by = (!i.used_by.is_empty()).then(|| {
             i.used_by
                 .into_iter()
@@ -182,6 +193,7 @@ impl RenderOnce for RolePanel {
                     .gap(SPACE_16)
                     .p(SPACE_14)
                     .child(enforced)
+                    .child(source)
                     .children(used_by)
                     .child(mention),
             )

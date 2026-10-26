@@ -48,6 +48,9 @@ fn role_panel_shows_enforcement(cx: &mut TestAppContext) {
     let (_, cx) = cx.add_window_view(move |_, _| RoleHost(info.clone()));
     redraw(cx);
     assert!(cx.debug_bounds("role-panel").is_some());
+    // The hub checks verbs by identity kind only, so the panel says where
+    // Refused comes from.
+    assert!(cx.debug_bounds("role-source").is_some());
 }
 
 struct RoleHost(crate::backend::RoleInfo);

@@ -43,7 +43,7 @@ impl PlatformStyle {
 
 /// Tests find the app name as `title-app`, the avatar as `title-avatar` and
 /// the window buttons as `window-control:min`, `:max` and `:close`.
-#[derive(Debug, IntoElement)]
+#[derive(Debug, Clone, IntoElement)]
 pub(crate) struct TitleBar {
     project: SharedString,
     listener: SharedString,
@@ -78,6 +78,9 @@ impl RenderOnce for TitleBar {
         let controls = match self.platform {
             PlatformStyle::Mac => false,
             PlatformStyle::Windows => true,
+            // shortcut: no window asks for client decorations yet, so X11
+            // keeps server ones and these buttons stay hidden; request them
+            // with resize edges, as Zed does, when gpui_linux is added.
             PlatformStyle::Linux => {
                 matches!(
                     window.window_decorations(),
@@ -136,56 +139,85 @@ impl RenderOnce for TitleBar {
 
 /// Minimize, maximize (or restore) and close, at the bar's right edge, as
 /// Zed draws them, with Lucide glyphs in place of Segoe's.
+/// A caption button: name, glyph, hit-test area, whether it shows, and
+/// what a click does on Linux.
+type WindowButton = (
+    &'static str,
+    UiIcon,
+    WindowControlArea,
+    bool,
+    fn(&mut Window),
+);
+
 fn window_controls(platform: PlatformStyle, window: &Window, cx: &App) -> impl IntoElement {
     let theme = &cx.global::<Appearance>().theme;
-    let maximized = window.is_maximized();
-    let buttons = [
-        ("min", UiIcon::Minus, WindowControlArea::Min),
+    // What Linux's compositor supports; Windows always shows all three, as
+    // Zed does.
+    let supported = window.window_controls();
+    let linux = platform == PlatformStyle::Linux;
+    let buttons: [WindowButton; 3] = [
+        (
+            "min",
+            UiIcon::Minus,
+            WindowControlArea::Min,
+            !linux || supported.minimize,
+            |w| w.minimize_window(),
+        ),
         (
             "max",
-            if maximized {
-                UiIcon::Copy
-            } else {
-                UiIcon::Square
-            },
+            max_glyph(window.is_maximized()),
             WindowControlArea::Max,
+            !linux || supported.maximize,
+            |w| w.zoom_window(),
         ),
-        ("close", UiIcon::Close, WindowControlArea::Close),
+        (
+            "close",
+            UiIcon::Close,
+            WindowControlArea::Close,
+            true,
+            |w| {
+                w.remove_window();
+            },
+        ),
     ];
     let (hover, icon) = (theme.element_hover, theme.text);
     let close_hover = gpui::Hsla::from(WINDOWS_CLOSE_HOVER);
     div()
         .h_full()
         .flex()
-        .children(buttons.map(|(name, glyph, area)| {
-            let close = area == WindowControlArea::Close;
-            let selector = format!("window-control:{name}");
-            div()
-                .id(name)
-                .debug_selector(|| selector)
-                .w(WINDOW_BUTTON_WIDTH)
-                .h_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .occlude()
-                // Keep the bar from starting a window move under the button.
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .hover(move |style| style.bg(if close { close_hover } else { hover }))
-                .child(glyph.render(icon, ICON_SM))
-                // Windows acts on the hit test; Linux needs the click.
-                .when(platform == PlatformStyle::Windows, |button| {
-                    button.window_control_area(area)
-                })
-                .when(platform == PlatformStyle::Linux, |button| {
-                    button.on_click(move |_, window, _| match area {
-                        WindowControlArea::Min => window.minimize_window(),
-                        WindowControlArea::Max => window.zoom_window(),
-                        WindowControlArea::Close => window.remove_window(),
-                        WindowControlArea::Drag => {}
+        .children(buttons.into_iter().filter(|(.., shown, _)| *shown).map(
+            move |(name, glyph, area, _, act)| {
+                let close = area == WindowControlArea::Close;
+                let selector = format!("window-control:{name}");
+                div()
+                    .id(name)
+                    .debug_selector(|| selector)
+                    .w(WINDOW_BUTTON_WIDTH)
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .occlude()
+                    // Keep the bar from starting a window move under the button.
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .hover(move |style| style.bg(if close { close_hover } else { hover }))
+                    .child(glyph.render(icon, ICON_SM))
+                    // Windows acts on the hit test; Linux needs the click.
+                    .when(!linux, |button| button.window_control_area(area))
+                    .when(linux, |button| {
+                        button.on_click(move |_, window, _| act(window))
                     })
-                })
-        }))
+            },
+        ))
+}
+
+/// Maximize's glyph, or restore's when the window is maximized.
+const fn max_glyph(maximized: bool) -> UiIcon {
+    if maximized {
+        UiIcon::Copy
+    } else {
+        UiIcon::Square
+    }
 }
 
 #[cfg(test)]
@@ -255,6 +287,22 @@ mod tests {
         assert_eq!(close.size.height, TITLE_BAR_HEIGHT - BORDER_WIDTH);
         let avatar = cx.debug_bounds("title-avatar").unwrap();
         assert!(avatar.right() <= min.left(), "{avatar:?} {min:?}");
+    }
+
+    #[gpui::test]
+    fn linux_title_bar_draws_no_buttons_under_server_decorations(cx: &mut TestAppContext) {
+        // Review C175: the test window, like X11 by default, has server
+        // decorations, so the compositor draws the buttons.
+        let cx = draw(cx, PlatformStyle::Linux);
+        assert!(cx.debug_bounds("title-app").is_some());
+        assert!(cx.debug_bounds("window-control:close").is_none());
+    }
+
+    #[test]
+    fn maximize_turns_into_restore_when_maximized() {
+        // Review C175.
+        assert_eq!(max_glyph(false), UiIcon::Square);
+        assert_eq!(max_glyph(true), UiIcon::Copy);
     }
 
     #[gpui::test]

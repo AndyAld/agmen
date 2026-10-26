@@ -20,10 +20,11 @@ fn agent_view_lists_tool_calls(cx: &mut TestAppContext) {
         let sel: &'static str = Box::leak(format!("session:{ix}:{kind}").into_boxed_str());
         assert!(cx.debug_bounds(sel).is_some(), "{sel}");
     }
-    assert!(
-        cx.debug_bounds("session:12:tool").is_none(),
-        "12 rows, numbered from 0"
-    );
+    // Review C177: 12 rows, numbered from 0, whatever the kind.
+    for kind in ["tool", "out", "say", "cost"] {
+        let sel: &'static str = Box::leak(format!("session:12:{kind}").into_boxed_str());
+        assert!(cx.debug_bounds(sel).is_none(), "{sel}");
+    }
     assert!(cx.debug_bounds("agent-open-terminal").is_some());
     assert!(cx.debug_bounds("agent-stop").is_some());
 }

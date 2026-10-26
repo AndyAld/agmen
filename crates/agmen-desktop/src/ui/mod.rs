@@ -30,6 +30,7 @@ pub(crate) use dev_views::{DevFrame, RolesDev};
 pub(crate) use dock::DockSide;
 pub(crate) use syntax::Language;
 pub(crate) use text_input::{TextInput, bind_keys};
+pub(crate) use title_bar::TitleBar;
 pub(crate) use workspace::{Quit, ToggleLeftDock, ToggleRightDock, Workspace};
 
 use gpui::App;

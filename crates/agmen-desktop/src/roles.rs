@@ -119,7 +119,8 @@ pub(crate) struct ResolvedRole {
     pub(crate) edits: Edits,
 }
 
-fn words(list: &str) -> Vec<String> {
+/// Splits a space-separated attribute into its words.
+pub(crate) fn words(list: &str) -> Vec<String> {
     list.split_whitespace().map(str::to_owned).collect()
 }
 
