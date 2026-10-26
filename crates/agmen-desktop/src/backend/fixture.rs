@@ -249,8 +249,8 @@ impl Backend for FixtureBackend {
         match action {
             Action::Apply(id) => self.set_change(&id, ChangeState::Applied),
             Action::Cancel(id) => self.set_change(&id, ChangeState::Cancelled),
-            // Mockup fix 44: Undo puts the card back to waiting for Apply.
-            Action::Undo(id) => self.set_change(&id, ChangeState::Pending),
+            // Andy's answer to review C93: Undo shows the card as undone.
+            Action::Undo(id) => self.set_change(&id, ChangeState::Undone),
             // shortcut: the fixture records nothing for these; the views that send
             // them (Tasks 13 to 19) add fixture behavior as they need it.
             Action::TakeOver(_)

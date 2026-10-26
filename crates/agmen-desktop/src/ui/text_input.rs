@@ -13,7 +13,7 @@ use std::rc::Rc;
 use gpui::{
     App, AvailableSpace, Bounds, ClipboardItem, ContentMask, Context, CursorStyle, Element,
     ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle,
-    Focusable, GlobalElementId, Hsla, InspectorElementId, InteractiveElement, IntoElement,
+    Focusable, Font, GlobalElementId, Hsla, InspectorElementId, InteractiveElement, IntoElement,
     KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad,
     ParentElement, Pixels, Point, Render, SharedString, Size, Style, Styled, TextAlign, TextRun,
     UTF16Selection, UnderlineStyle, Window, WrappedLine, actions, div, fill, point, px, relative,
@@ -360,11 +360,10 @@ impl TextInput {
     }
 
     /// The text runs for `text`: one run, with the marked range underlined.
-    fn runs(&self, text_len: usize, color: Hsla, window: &Window) -> Vec<TextRun> {
-        let style = window.text_style();
+    fn runs(&self, text_len: usize, color: Hsla, font: &Font) -> Vec<TextRun> {
         let run = TextRun {
             len: text_len,
-            font: style.font(),
+            font: font.clone(),
             color,
             background_color: None,
             underline: None,
@@ -404,10 +403,35 @@ struct LayoutKey {
     text: String,
     empty: bool,
     width: Option<Pixels>,
+    pub(super) font: Font,
+    color: Hsla,
     font_size: Pixels,
     line_height: Pixels,
     marked: Option<Range<usize>>,
     layout: Rc<TextLayout>,
+}
+
+/// The inherited text style an input shapes with. It is read where the
+/// element tree's style is in effect (request_layout and prepaint), never in
+/// a measure closure, which GPUI runs outside it (review C108).
+#[derive(Clone)]
+struct Shaping {
+    font: Font,
+    color: Hsla,
+    font_size: Pixels,
+    line_height: Pixels,
+}
+
+impl Shaping {
+    fn current(window: &Window) -> Self {
+        let style = window.text_style();
+        Self {
+            font: style.font(),
+            color: style.color,
+            font_size: style.font_size.to_pixels(window.rem_size()),
+            line_height: window.line_height(),
+        }
+    }
 }
 
 impl TextInput {
@@ -416,25 +440,27 @@ impl TextInput {
     fn layout_for(
         &mut self,
         width: Option<Pixels>,
+        shaping: &Shaping,
         window: &Window,
         cx: &App,
     ) -> Option<Rc<TextLayout>> {
-        let font_size = window.text_style().font_size.to_pixels(window.rem_size());
-        let line_height = window.line_height();
+        let (font_size, line_height) = (shaping.font_size, shaping.line_height);
         let empty = self.buffer.text().is_empty();
         let marked = self.buffer.marked();
         if let Some(key) = self.cache.iter().find(|key| {
             key.text == self.buffer.text()
                 && key.empty == empty
                 && key.width == width
+                && key.font == shaping.font
+                && key.color == shaping.color
                 && key.font_size == font_size
                 && key.line_height == line_height
                 && key.marked == marked
         }) {
             return Some(key.layout.clone());
         }
-        let (text, color) = display(self, cx, window);
-        let runs = self.runs(text.len(), color, window);
+        let (text, color) = display(self, cx, shaping.color);
+        let runs = self.runs(text.len(), color, &shaping.font);
         let layout = Rc::new(TextLayout::shape(
             &text,
             &runs,
@@ -454,6 +480,8 @@ impl TextInput {
             text: self.buffer.text().to_owned(),
             empty,
             width,
+            font: shaping.font.clone(),
+            color: shaping.color,
             font_size,
             line_height,
             marked,
@@ -776,15 +804,12 @@ struct AreaPaint {
 }
 
 /// The text to shape and its color: the placeholder while empty.
-fn display(input: &TextInput, cx: &App, window: &Window) -> (SharedString, Hsla) {
+fn display(input: &TextInput, cx: &App, color: Hsla) -> (SharedString, Hsla) {
     let theme = &cx.global::<Appearance>().theme;
     if input.buffer.text().is_empty() {
         (input.placeholder.clone(), theme.text_placeholder)
     } else {
-        (
-            input.buffer.text().to_owned().into(),
-            window.text_style().color,
-        )
+        (input.buffer.text().to_owned().into(), color)
     }
 }
 
@@ -826,6 +851,7 @@ impl Element for TextArea {
         // Several lines: as tall as the wrapped text, from 1 to max_lines rows.
         let max_lines = input.max_lines;
         let entity = self.input.clone();
+        let shaping = Shaping::current(window);
         let measure = move |known: Size<Option<Pixels>>,
                             available: Size<AvailableSpace>,
                             window: &mut Window,
@@ -835,7 +861,9 @@ impl Element for TextArea {
                 AvailableSpace::MinContent | AvailableSpace::MaxContent => None,
             });
             let rows = entity
-                .update(cx, |input, cx| input.layout_for(width, window, cx))
+                .update(cx, |input, cx| {
+                    input.layout_for(width, &shaping, window, cx)
+                })
                 .map_or(1, |layout| layout.visual_lines())
                 .clamp(1, max_lines);
             // rows is at most max_lines, a small number.
@@ -858,9 +886,9 @@ impl Element for TextArea {
         let line_height = window.line_height();
         let multiline = self.input.read(cx).is_multiline();
         let wrap = multiline.then_some(bounds.size.width);
-        let layout = self
-            .input
-            .update(cx, |input, cx| input.layout_for(wrap, window, cx))?;
+        let layout = self.input.update(cx, |input, cx| {
+            input.layout_for(wrap, &Shaping::current(window), window, cx)
+        })?;
         let input = self.input.read(cx);
 
         let empty = input.buffer.text().is_empty();

@@ -16,23 +16,21 @@ out="$root/target/shots"
 app="$root/target/debug/agmen-desktop"
 tries=40 # about 10 s for the window to appear
 
-all_screens=(
-	add-agent agent ask chat chat-codex chat-terminal git git-collapsed kick-off
-	listener-collapsed model-picker needs-you needs-you-answered palette plan plan-ready
-	project project-tests-open role-file running settings settings-applied settings-from-chat
-	spec switch-agent
-)
-
 if [[ $# -eq 0 ]]; then
 	echo "usage: $0 <screen>... | all" >&2
 	exit 2
 fi
+# A debug build: shots do not depend on speed, and it builds much faster.
+(cd "$root" && cargo build -p agmen-desktop --locked --quiet)
 screens=("$@")
 if [[ $1 == all ]]; then
-	screens=("${all_screens[@]}")
+	# The app's own list, so this script never drifts from Screen::ALL.
+	# bash 3.2 (macOS) has no mapfile.
+	screens=()
+	while IFS= read -r name; do
+		screens+=("$name")
+	done < <("$app" --list-screens)
 fi
-
-(cd "$root" && cargo build -p agmen-desktop --locked --quiet)
 mkdir -p "$out"
 work="$(mktemp -d)"
 pid=""

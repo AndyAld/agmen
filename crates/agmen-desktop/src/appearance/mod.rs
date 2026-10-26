@@ -71,7 +71,7 @@ pub(crate) enum SystemMode {
 /// Font choices where every key is optional; Zed's settings and agmen's
 /// settings both fill one.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub(crate) struct FontPrefs {
     pub(crate) ui_family: Option<String>,
     pub(crate) ui_size: Option<f32>,

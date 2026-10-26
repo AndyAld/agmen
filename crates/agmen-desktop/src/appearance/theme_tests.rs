@@ -496,3 +496,60 @@ fn marked_theme_is_built_in() {
     let t = load_theme(&zed_dir(), &ext_dir(), super::marked::MARKED_THEME).unwrap();
     assert!(close(t.text_accent, hex("#68acd4")));
 }
+
+#[test]
+fn stray_files_beside_extensions_are_not_errors() {
+    // Review C109: a .DS_Store among the extension folders is not a folder.
+    let dir = tempfile::tempdir().unwrap();
+    let ext = dir.path().join("ext");
+    fs::create_dir_all(ext.join("some-theme/themes")).unwrap();
+    fs::write(ext.join(".DS_Store"), b"junk").unwrap();
+    let err = load_theme(&zed_dir(), &ext, "Missing").unwrap_err();
+    assert!(!err.to_string().contains(".DS_Store"), "{err}");
+}
+
+#[test]
+fn unknown_font_keys_survive_save() {
+    // Review C110.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.toml");
+    fs::write(
+        &path,
+        "[appearance.fonts]\nui_size = 14\nfuture_key = true\n",
+    )
+    .unwrap();
+    let mut s = AgmenSettings::load(&path).unwrap();
+    s.fonts.ui_size = Some(16.0);
+    s.save(&path).unwrap();
+    let table: toml::Table = fs::read_to_string(&path).unwrap().parse().unwrap();
+    assert_eq!(
+        table["appearance"]["fonts"]["future_key"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        table["appearance"]["fonts"]["ui_size"].as_float(),
+        Some(16.0)
+    );
+}
+
+#[test]
+fn owned_font_keys_match_the_struct() {
+    let all = super::FontPrefs {
+        ui_family: Some("a".into()),
+        ui_size: Some(1.0),
+        code_family: Some("b".into()),
+        code_size: Some(1.0),
+        code_ligatures: Some(true),
+        terminal_family: Some("c".into()),
+        terminal_size: Some(1.0),
+    };
+    let value = toml::Value::try_from(all).unwrap();
+    let mut keys: Vec<String> = value.as_table().unwrap().keys().cloned().collect();
+    keys.sort();
+    let mut owned: Vec<String> = super::settings::OWNED_FONT_KEYS
+        .iter()
+        .map(|k| (*k).to_owned())
+        .collect();
+    owned.sort();
+    assert_eq!(keys, owned);
+}

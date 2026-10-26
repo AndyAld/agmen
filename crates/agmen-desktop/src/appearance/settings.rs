@@ -70,6 +70,16 @@ pub(super) const OWNED_KEYS: &[&str] = &[
     "fonts",
     "density",
 ];
+/// The `[appearance.fonts]` keys this version writes.
+pub(super) const OWNED_FONT_KEYS: &[&str] = &[
+    "ui_family",
+    "ui_size",
+    "code_family",
+    "code_size",
+    "code_ligatures",
+    "terminal_family",
+    "terminal_size",
+];
 /// A settings file is small; anything larger is refused.
 const MAX_SETTINGS_BYTES: u64 = 4 * 1024 * 1024;
 
@@ -126,11 +136,25 @@ impl AgmenSettings {
             Some(toml::Value::Table(existing)) => existing,
             _ => toml::Table::new(),
         };
+        // Font keys a newer version adds survive too (C110).
+        let mut fonts = match merged.remove("fonts") {
+            Some(toml::Value::Table(existing)) => existing,
+            _ => toml::Table::new(),
+        };
         for key in OWNED_KEYS {
             merged.remove(*key);
         }
-        if let toml::Value::Table(ours) = value {
+        for key in OWNED_FONT_KEYS {
+            fonts.remove(*key);
+        }
+        if let toml::Value::Table(mut ours) = value {
+            if let Some(toml::Value::Table(our_fonts)) = ours.remove("fonts") {
+                fonts.extend(our_fonts);
+            }
             merged.extend(ours);
+        }
+        if !fonts.is_empty() {
+            merged.insert("fonts".to_owned(), toml::Value::Table(fonts));
         }
         table.insert(TABLE.to_owned(), toml::Value::Table(merged));
         let text = toml::to_string_pretty(&table).map_err(|err| AppearanceError::Serialize {

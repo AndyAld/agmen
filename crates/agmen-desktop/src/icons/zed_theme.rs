@@ -66,6 +66,8 @@ impl IconTheme {
                 });
             }
         };
+        // Only folders are extensions; a .DS_Store beside them is not.
+        roots.retain(|root| root.is_dir());
         roots.sort();
         for root in roots {
             let themes_dir = root.join("icon_themes");

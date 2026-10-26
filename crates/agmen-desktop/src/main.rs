@@ -30,8 +30,7 @@ use appearance::{Appearance, SystemMode};
 
 use ui::{Quit, ToggleLeftDock, ToggleRightDock, Workspace};
 
-const USAGE: &str =
-    "usage: agmen-desktop [--screen <name> | --spike list [--autoscroll] | --spike notify]";
+const USAGE: &str = "usage: agmen-desktop [--screen <name> | --list-screens | --spike list [--autoscroll] | --spike notify]";
 
 /// What the command line asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,6 +43,8 @@ enum Launch {
     NotifySpike,
     /// The app showing one mockup screen's fixture state, for screenshots.
     Screen(backend::Screen),
+    /// Prints every screen name, one per line, for `scripts/shot.sh all`.
+    ListScreens,
 }
 
 impl Launch {
@@ -63,6 +64,7 @@ impl Launch {
                 _ => anyhow::bail!(USAGE),
             },
             [flag, name] if flag == "--spike" && name == "notify" => Ok(Self::NotifySpike),
+            [flag] if flag == "--list-screens" => Ok(Self::ListScreens),
             [flag, name] if flag == "--screen" => name
                 .parse()
                 .map(Self::Screen)
@@ -83,6 +85,12 @@ fn main() {
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let launch = Launch::parse(&args)?;
+    if launch == Launch::ListScreens {
+        for screen in backend::Screen::ALL {
+            println!("{}", screen.name());
+        }
+        return Ok(());
+    }
     // Spikes and screenshot screens run beside a normal app, so only the app
     // takes the instance lock.
     let listener = if launch == Launch::App {
@@ -225,7 +233,7 @@ fn open_main_window(launch: &Launch, cx: &mut App) -> Result<()> {
             })
             .map(Into::into)
         }
-        Launch::NotifySpike => return Ok(()),
+        Launch::NotifySpike | Launch::ListScreens => return Ok(()),
         Launch::ListSpike { autoscroll } => {
             let autoscroll = *autoscroll;
             cx.open_window(options, |_, cx| {
@@ -271,6 +279,10 @@ mod tests {
             Launch::Screen(backend::Screen::NeedsYou)
         );
         assert!(Launch::parse(&args(&["--screen", "nope"])).is_err());
+        assert_eq!(
+            Launch::parse(&args(&["--list-screens"])).unwrap(),
+            Launch::ListScreens
+        );
         assert!(Launch::parse(&args(&["--spike", "nope"])).is_err());
         assert!(Launch::parse(&args(&["--bogus"])).is_err());
     }

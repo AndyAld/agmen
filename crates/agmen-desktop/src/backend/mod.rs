@@ -108,6 +108,8 @@ pub(crate) enum ChangeState {
     Pending,
     Applied,
     Cancelled,
+    /// Applied, then undone by the person (Andy, review C93).
+    Undone,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

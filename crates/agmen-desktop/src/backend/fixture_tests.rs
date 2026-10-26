@@ -192,8 +192,8 @@ fn fixture_apply_changes_card_state() {
     let undone = backend.snapshot().changes.values().next().unwrap().clone();
     assert_eq!(
         undone.state,
-        ChangeState::Pending,
-        "mockup fix 44: Undo returns to pending"
+        ChangeState::Undone,
+        "Andy's answer to C93: Undo shows an undone card"
     );
     assert!(
         backend

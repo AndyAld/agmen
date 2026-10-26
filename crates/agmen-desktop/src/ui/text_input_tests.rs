@@ -63,12 +63,16 @@ fn input_backspace_key_deletes(cx: &mut TestAppContext) {
     input.read_with(cx, |input, _| assert_eq!(input.text(), "a"));
 }
 
-/// A 300 px wide window holding one input, so wrapping is testable.
+/// A 300 px wide window holding one input, so wrapping is testable. Its
+/// font is set on the wrapper, as the composer's will be.
 struct Host(gpui::Entity<TextInput>);
 
 impl gpui::Render for Host {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div().w(px(300.)).child(self.0.clone())
+        div()
+            .w(px(300.))
+            .font_family(".ZedMono")
+            .child(self.0.clone())
     }
 }
 
@@ -232,4 +236,18 @@ fn layout_is_shaped_once_per_change(cx: &mut TestAppContext) {
         cx.run_until_parked();
     }
     input.read_with(cx, |input, _| assert_eq!(input.shapes, after_change));
+}
+
+#[gpui::test]
+fn layout_uses_the_inherited_font(cx: &mut TestAppContext) {
+    // Review C108: measuring must not fall back to the default text style.
+    let (input, cx) = setup_with(cx, |i| i.multiline(6));
+    input.update_in(cx, |input, window, cx| input.set_text("abc", window, cx));
+    cx.run_until_parked();
+    input.read_with(cx, |input, _| {
+        assert!(!input.cache.is_empty());
+        for key in &input.cache {
+            assert_eq!(key.font.family.as_ref(), ".ZedMono", "every cached layout");
+        }
+    });
 }

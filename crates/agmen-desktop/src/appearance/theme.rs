@@ -275,9 +275,11 @@ fn theme_files(zed_dir: &Path, extensions_dir: &Path) -> (Vec<PathBuf>, Vec<Skip
         }
     };
     let mut dirs = vec![zed_dir.join("themes")];
+    // Only folders are extensions; a .DS_Store beside them is not (C109).
     dirs.extend(
         list(extensions_dir, &mut skipped)
             .into_iter()
+            .filter(|ext| ext.is_dir())
             .map(|ext| ext.join("themes")),
     );
     let mut files = Vec::new();
