@@ -146,11 +146,24 @@ impl Render for ScopeChip {
             .id("scope-chip")
             .debug_selector(|| "scope-chip".into())
             .w_full()
+            // Focused by the click that opens the menu, so Escape reaches it.
+            .tab_index(0)
             .cursor_pointer()
             // While open, the menu's mouse down out closes it; a click here
             // too would reopen it on mouse up (C186, as the dropdown's C81).
-            .when(!self.open, |chip| {
-                chip.on_click(cx.listener(|this, _, _, cx| this.toggle(cx)))
+            .map(|chip| {
+                if self.open {
+                    chip.on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                        if event.keystroke.key == "escape" {
+                            // As Dropdown's: the open menu takes Escape
+                            // before the panel that holds it.
+                            cx.stop_propagation();
+                            this.close(cx);
+                        }
+                    }))
+                } else {
+                    chip.on_click(cx.listener(|this, _, _, cx| this.toggle(cx)))
+                }
             })
             .child(chip(label, role));
         let menu = self.open.then(|| {

@@ -199,7 +199,8 @@ pub(crate) fn highlight(text: &str, language: Language) -> Vec<Highlight> {
 }
 
 /// Adds a [`LINE_NUMBER`] highlight for each "|" on a line that starts with
-/// one, where no other highlight (a code block, an escape) covers it. The
+/// one, where no other highlight (a code block) covers it and no backslash
+/// escapes it (GFM reads "\\|" as a literal pipe, "\\\\|" as a separator). The
 /// block grammar parses a table only when it has a delimiter row, and a
 /// spec's table may have none (console.py's `MD` does not), so the pipes
 /// are found by line, as console.py finds them.
@@ -208,12 +209,17 @@ fn with_table_pipes(text: &str, mut highlights: Vec<Highlight>) -> Vec<Highlight
         let ix = highlights.partition_point(|h| h.range.end <= at);
         highlights.get(ix).is_some_and(|h| h.range.start <= at)
     };
+    // An odd run of backslashes before a pipe escapes it.
+    let escaped = |line: &str, at: usize| {
+        line[..at].bytes().rev().take_while(|b| *b == b'\\').count() % 2 == 1
+    };
     let mut pipes = Vec::new();
     let mut start = 0;
     for line in text.split_inclusive('\n') {
         if line.trim_start_matches(' ').starts_with('|') {
             pipes.extend(
                 line.match_indices('|')
+                    .filter(|(at, _)| !escaped(line, *at))
                     .map(|(at, _)| start + at)
                     .filter(|at| !covered(*at, &highlights))
                     .map(|at| Highlight {

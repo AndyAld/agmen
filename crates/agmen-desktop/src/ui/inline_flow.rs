@@ -55,6 +55,7 @@ pub(super) enum FlowItem {
 pub(super) struct InlineFlow {
     items: Vec<FlowItem>,
     line_gap: Pixels,
+    chip_line: Option<Pixels>,
 }
 
 impl InlineFlow {
@@ -64,6 +65,7 @@ impl InlineFlow {
         Self {
             items,
             line_gap: SPACE_3,
+            chip_line: None,
         }
     }
 
@@ -71,6 +73,15 @@ impl InlineFlow {
     #[must_use]
     pub(super) const fn line_gap(mut self, gap: Pixels) -> Self {
         self.line_gap = gap;
+        self
+    }
+
+    /// The line height of the chips' labels, when they set one (as
+    /// `CodeText`'s chips take the prose line). A chip wider than the
+    /// column counts its wrapped rows at this height, not the code font's.
+    #[must_use]
+    pub(super) const fn chip_line_height(mut self, height: Pixels) -> Self {
+        self.chip_line = Some(height);
         self
     }
 }
@@ -238,7 +249,9 @@ impl Element for InlineFlow {
         let label = LabelFont {
             run: code.to_run(0),
             size: fonts.code_size,
-            line_height: window.pixel_snap(fonts.code_size * LINE_HEIGHT),
+            line_height: self
+                .chip_line
+                .unwrap_or_else(|| window.pixel_snap(fonts.code_size * LINE_HEIGHT)),
         };
         let mut atoms = Vec::new();
         let mut segs = Vec::with_capacity(self.items.len());

@@ -132,7 +132,11 @@ impl RenderOnce for CodeText {
             .text_size(self.size.rems())
             .text_color(color)
             .line_height(relative(LINE_HEIGHT))
-            .child(InlineFlow::new(items).line_gap(px(0.)))
+            .child(
+                InlineFlow::new(items)
+                    .line_gap(px(0.))
+                    .chip_line_height(line),
+            )
     }
 }
 
@@ -140,11 +144,13 @@ impl RenderOnce for CodeText {
 /// `line` tall, with the punctuation that touches it (fix 54). Tests find
 /// it as `"code-text:chip"`.
 fn chip(lead: &str, code: &str, tail: &str, color: Color, line: Pixels) -> AnyElement {
+    // shrink: a command wider than the column wraps inside it.
     let chip = Chip::new(code.to_owned())
         .reference()
         .code()
         .tinted(color)
-        .line_height(line);
+        .line_height(line)
+        .shrink();
     let chip = if lead.is_empty() {
         chip
     } else {
@@ -270,6 +276,34 @@ mod tests {
         assert_eq!(chips_one, plain_one);
         assert_eq!(plain_two, plain_one * 2., "the plain text wraps once");
         assert_eq!(chips_two, plain_two);
+    }
+
+    #[gpui::test]
+    fn a_command_wider_than_the_box_wraps_inside_it(cx: &mut TestAppContext) {
+        // A 90 character command in a 200 px box drew one 13.5 px chip line
+        // running past the box, in a block whose height counted the code
+        // font's rows. The chip wraps at the box, and the block is as tall
+        // as the chip's lines.
+        let command = "agmen agents scan --root /Users/andy/Projects/agmen --include-hidden --format json --top 9";
+        assert_eq!(command.len(), 90);
+        let cx = crate::ui::test_support::draw(cx, move || {
+            div()
+                .debug_selector(|| "box".into())
+                .w(px(200.))
+                .child(CodeText::new(format!("`{command}`")).size(LabelSize::Small))
+                .into_any_element()
+        });
+        let block = cx.debug_bounds("box").expect("the box");
+        let chip = cx.debug_bounds("code-text:chip").expect("a chip");
+        assert!(chip.right() <= block.right(), "{chip:?} past {block:?}");
+        let line = cx.update(|window, _| {
+            window.pixel_snap(LabelSize::Small.rems().to_pixels(window.rem_size()) * LINE_HEIGHT)
+        });
+        assert!(chip.size.height > line * 2., "the chip wraps: {chip:?}");
+        assert_eq!(
+            block.size.height, chip.size.height,
+            "{block:?} holds {chip:?}"
+        );
     }
 
     #[gpui::test]

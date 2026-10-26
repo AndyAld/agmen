@@ -161,9 +161,9 @@ mod tests {
     use std::cell::RefCell;
 
     use super::*;
-    use crate::ui::test_support::{click, draw};
+    use crate::ui::test_support::{click, clip_right, draw};
     use crate::ui::tokens::GLYPH_DISC;
-    use gpui::{TestAppContext, px};
+    use gpui::{Pixels, TestAppContext, px};
 
     fn alert() -> MessageId {
         "01JD0000000000000000000010".parse().unwrap()
@@ -216,26 +216,31 @@ mod tests {
         assert_eq!(jump.size.height - text.height, px(20. - 14.));
     }
 
-    #[gpui::test]
-    fn a_narrow_pane_keeps_the_banner_inside_it(cx: &mut TestAppContext) {
-        // needs-you.png at a 158 px pane: the summary shrank to nothing,
-        // then the chime chip and Jump to it drew past the pane's edge, over
-        // the Listener panel. Now the title and the chip give way and the
-        // button stays whole while the pane has room for it.
-        let jump = draw(cx, banner_in_column(needs_you(true)))
-            .debug_bounds("banner:jump")
-            .unwrap();
-        // The padding, the disc, four gaps and the button.
-        let width = SPACE_14 * 2. + GLYPH_DISC + SPACE_10 * 4. + jump.size.width;
-        let mut narrow = TestAppContext::single();
-        let narrow = draw(&mut narrow, move || {
+    /// The needs-you banner with a chime in a pane `width` wide.
+    fn narrow_banner(cx: &mut TestAppContext, width: Pixels) -> &mut gpui::VisualTestContext {
+        draw(cx, move || {
             div()
                 .w(width)
                 .flex()
                 .flex_col()
                 .child(AlertBanner::new(needs_you(true)).on_jump(|_, _, _| {}))
                 .into_any_element()
-        });
+        })
+    }
+
+    #[gpui::test]
+    fn a_narrow_pane_keeps_the_banner_inside_it(cx: &mut TestAppContext) {
+        // needs-you.png at a 158 px pane: the summary shrank to nothing,
+        // then the chime chip and Jump to it drew past the pane's edge, over
+        // the Listener panel. Now the title and the chip give way and the
+        // button stays whole while the pane has room for it.
+        let wide = draw(cx, banner_in_column(needs_you(true)));
+        let jump = wide.debug_bounds("banner:jump").unwrap();
+        let chip = wide.debug_bounds("banner:chime").unwrap();
+        // The padding, the disc, four gaps and the button.
+        let width = SPACE_14 * 2. + GLYPH_DISC + SPACE_10 * 4. + jump.size.width;
+        let mut narrow = TestAppContext::single();
+        let narrow = narrow_banner(&mut narrow, width);
         let banner = narrow.debug_bounds("banner").unwrap();
         let chime = narrow.debug_bounds("banner:chime").unwrap();
         let jump_at = narrow.debug_bounds("banner:jump").unwrap();
@@ -252,6 +257,32 @@ mod tests {
             chime.right() <= jump_at.left(),
             "{chime:?} over {jump_at:?}"
         );
+        // With room for half the chip, its wrapper reports a shrunken box;
+        // the chip is clipped there too, so its label stops at the button.
+        let mut half = TestAppContext::single();
+        let half = narrow_banner(&mut half, width + chip.size.width / 2.);
+        let jump_at = half.debug_bounds("banner:jump").unwrap();
+        let clip = clip_right(half, "banner:chime").expect("the chip's fill");
+        assert!(
+            clip <= jump_at.left(),
+            "the chip shows to {clip:?}, over {jump_at:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn a_pane_narrower_than_the_button_cuts_it_at_the_banner_edge(cx: &mut TestAppContext) {
+        let jump = draw(cx, banner_in_column(needs_you(true)))
+            .debug_bounds("banner:jump")
+            .unwrap();
+        // Half the button fits past the padding, the disc and the gaps.
+        let width = SPACE_14 * 2. + GLYPH_DISC + SPACE_10 * 4. + jump.size.width / 2.;
+        let mut narrow = TestAppContext::single();
+        let narrow = narrow_banner(&mut narrow, width);
+        let banner = narrow.debug_bounds("banner").unwrap();
+        let jump_at = narrow.debug_bounds("banner:jump").unwrap();
+        assert!(jump_at.right() > banner.right(), "the button runs past");
+        let clip = clip_right(narrow, "banner:jump").expect("the button's fill");
+        assert!(clip <= banner.right(), "{clip:?} past {banner:?}");
     }
 
     #[gpui::test]

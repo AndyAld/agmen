@@ -277,9 +277,6 @@ pub(crate) const POPOVER_SHADOW_BLUR: Pixels = px(24.);
 /// 3397) and Settings' "System", "Ligatures on" and "Comfortable" (nodes
 /// 8116, 8183 and 8210).
 pub(crate) const TINT_SEGMENT: f32 = 51. / 255.;
-/// A picker row under the pointer: `element_selected` at half strength. The
-/// mockup draws no hover.
-pub(crate) const TINT_MENU_HOVER: f32 = 0.5;
 
 /// How strongly a diff line's fill shows `created` or `deleted` (the
 /// mockup draws OK and ERR at alpha 0x22).

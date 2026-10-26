@@ -413,7 +413,14 @@ fn plain_lines_keep_the_chip_lines_pitch(cx: &mut TestAppContext) {
     // to the next whether or not they hold a chip, so two lines are 35 px.
     // Plain text drew its lines 16 px apart, chip lines 19.
     let (line, _) = heights(cx, 300., "the");
+    // Absolute values too, so a block that lost its row gap cannot pass by
+    // shrinking its one line and its two lines alike.
+    let mut app = TestAppContext::single();
+    let snapped = host(&mut app, px(300.), || div().into_any_element())
+        .update(|window, _| window.pixel_snap(TEXT_DEFAULT.to_pixels(MOCKUP_REM) * LINE_HEIGHT));
+    assert_eq!(line, snapped, "one line is a snapped TEXT_DEFAULT line");
     let (two, _) = heights(&mut TestAppContext::single(), 300., "the\nquick");
+    assert_eq!(two, px(35.), "node 8745: two lines are 35 px");
     assert_eq!(two, line * 2. + SPACE_3, "one line is {line:?}");
     // A blank line between two lines is a row of its own.
     let (three, _) = heights(&mut TestAppContext::single(), 300., "the\n\nquick");

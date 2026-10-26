@@ -199,3 +199,53 @@ fn all_caps_names_are_constants() {
         "{found:?}"
     );
 }
+
+// GFM reads "\|" in a table cell as a literal pipe, not a separator.
+#[test]
+fn an_escaped_table_pipe_is_not_a_separator() {
+    let text = "| a \\| b |\n| c \\\\| d |\n";
+    let pipes: Vec<usize> = highlight(text, Language::Markdown)
+        .into_iter()
+        .filter(|h| h.name == LINE_NUMBER)
+        .map(|h| h.range.start)
+        .collect();
+    // Line one: the outer pipes only. Line two: "\\" escapes the backslash,
+    // so the pipe after it is a separator again.
+    let second = text.find('\n').map_or(0, |at| at + 1);
+    let want: Vec<usize> = [0, 9]
+        .into_iter()
+        .chain([0, 6, 10].map(|at| second + at))
+        .collect();
+    assert_eq!(pipes, want, "{text:?}");
+}
+
+// C266: the separator pass must skip pipes another highlight covers, so the
+// highlights stay disjoint. layout_lines drops nested ranges, so only
+// highlight() itself shows an overlap.
+#[test]
+fn table_pipes_inside_a_code_block_stay_code() {
+    let text = "| A | B |\n| 1 | 2 |\n\n```\n| code |\n```\n";
+    let highlights = highlight(text, Language::Markdown);
+    let literal: Vec<&Highlight> = highlights
+        .iter()
+        .filter(|h| h.name == "text.literal")
+        .collect();
+    assert!(!literal.is_empty(), "the fenced block is text.literal");
+    for pipe in highlights.iter().filter(|h| h.name == LINE_NUMBER) {
+        assert!(
+            !literal
+                .iter()
+                .any(|l| l.range.start <= pipe.range.start && pipe.range.start < l.range.end),
+            "a separator at {:?} inside the code block",
+            pipe.range
+        );
+    }
+    for pair in highlights.windows(2) {
+        assert!(
+            pair[0].range.end <= pair[1].range.start,
+            "{:?} overlaps {:?}",
+            pair[0],
+            pair[1]
+        );
+    }
+}

@@ -5,7 +5,7 @@ use gpui::{TestAppContext, VisualTestContext};
 
 use super::*;
 use crate::backend::{BackendError, chat_snapshot};
-use crate::ui::test_support::{click, init, redraw};
+use crate::ui::test_support::{click, clip_right, init, redraw};
 use crate::ui::text_input::bind_keys;
 use crate::ui::tokens::{AUTO_LINE_13, COMPOSER_INPUT_MIN_WIDTH, MOCKUP_REM};
 
@@ -546,6 +546,20 @@ fn a_narrow_composer_keeps_its_chips_and_hint_in_the_box(cx: &mut TestAppContext
         assert!(
             bounds.right() <= frame.right(),
             "{part} {bounds:?} past {frame:?}"
+        );
+    }
+    // The wrappers above report their shrunken boxes, so each chip must
+    // also be clipped there: its label and caret show no further than the
+    // next part's left edge.
+    for (chip, next) in [
+        ("composer:to", "composer:model"),
+        ("composer:model", "composer:input"),
+    ] {
+        let clip = clip_right(cx, chip).unwrap_or_else(|| panic!("{chip} paints no fill"));
+        let next = cx.debug_bounds(next).unwrap();
+        assert!(
+            clip <= next.left(),
+            "{chip} shows to {clip:?}, over {next:?}"
         );
     }
 }
