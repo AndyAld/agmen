@@ -187,7 +187,9 @@ fn kind(handle: &str) -> &'static str {
     match handle {
         "hub" => "hub",
         "andy/listen" => "listener",
-        "adam/coord" | "andy/coord" => "coordinator",
+        // Task 13: adam is a coordinator as a person too ("human ·
+        // coordinator" in frame 6122, "adam (coordinator)" in its banner).
+        "adam/coord" | "andy/coord" | "adam" => "coordinator",
         h if h.contains('/') => "agent",
         _ => "human",
     }

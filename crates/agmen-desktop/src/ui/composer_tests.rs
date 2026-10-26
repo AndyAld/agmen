@@ -219,3 +219,42 @@ fn direct_composer_sends_to_its_agent(cx: &mut TestAppContext) {
         }]
     );
 }
+
+#[gpui::test]
+fn reply_goes_to_the_alerts_sender_once(cx: &mut TestAppContext) {
+    // Task 13: an alert's Reply addresses its sender and replies to it, then
+    // the composer goes back to the listener.
+    let (composer, sent, cx) = open_composer(cx);
+    let alert: agmen_proto::MessageId = "01JD0000000000000000000010".parse().unwrap();
+    let coord = Target {
+        id: agent_id("adam/coord"),
+        handle: "adam/coord".into(),
+    };
+    cx.update(|window, cx| window.blur(cx));
+    composer.update_in(cx, |composer, window, cx| {
+        composer.reply(coord.clone(), alert.clone(), window, cx);
+    });
+    composer.update_in(cx, |composer, window, cx| {
+        assert!(composer.input.focus_handle(cx).is_focused(window));
+        assert_eq!(composer.target(cx), &coord);
+    });
+    cx.simulate_input("Revert #10 now");
+    cx.simulate_keystrokes("enter");
+    cx.simulate_input("hi");
+    cx.simulate_keystrokes("enter");
+    assert_eq!(
+        *sent.borrow(),
+        vec![
+            Draft {
+                to: vec![coord.id.clone()],
+                body: "Revert #10 now".into(),
+                reply_to: Some(alert),
+            },
+            Draft {
+                to: vec![agent_id("andy/listen")],
+                body: "hi".into(),
+                reply_to: None,
+            },
+        ]
+    );
+}

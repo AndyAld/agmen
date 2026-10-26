@@ -34,6 +34,12 @@ pub(crate) enum ButtonStyle {
     Secondary,
     /// Surface fill, as the breadcrumb's "Show ledger" (node 135).
     Subtle,
+    /// Error fill with semibold text, as an alert's Reply and the banner's
+    /// Jump to it (nodes 5996 and 5712).
+    Danger,
+    /// Plain with a 1 px border, as an alert's own actions (nodes 5998 to
+    /// 6002).
+    Bordered,
 }
 
 #[derive(IntoElement)]
@@ -114,7 +120,7 @@ impl RenderOnce for Button {
             .flex_none()
             .items_center()
             .gap(SPACE_5);
-        let primary = self.style == ButtonStyle::Primary;
+        let primary = matches!(self.style, ButtonStyle::Primary | ButtonStyle::Danger);
         let selected = self.selected && !primary;
         let styled = match self.style {
             ButtonStyle::Outlined => base
@@ -131,7 +137,7 @@ impl RenderOnce for Button {
                 .py(SPACE_1)
                 .px(SPACE_7)
                 .hover(move |style| style.bg(hover)),
-            ButtonStyle::Tinted | ButtonStyle::Plain => base
+            ButtonStyle::Tinted | ButtonStyle::Plain | ButtonStyle::Bordered => base
                 .bg(if self.style == ButtonStyle::Tinted {
                     theme.text_accent.opacity(BUTTON_TINT)
                 } else {
@@ -140,7 +146,21 @@ impl RenderOnce for Button {
                 .rounded(RADIUS_MD)
                 .py(SPACE_3)
                 .px(SPACE_9)
+                .when(self.style == ButtonStyle::Bordered, |this| {
+                    this.border(BORDER_WIDTH).border_color(theme.border)
+                })
                 .hover(move |style| style.bg(hover)),
+            // An alert's Reply sits beside bordered actions, so its border
+            // in its own fill keeps the row one height; the error fill is the
+            // alert's tint, so hover fades it as Primary does.
+            ButtonStyle::Danger => base
+                .bg(theme.error)
+                .border(BORDER_WIDTH)
+                .border_color(theme.error)
+                .rounded(RADIUS_MD)
+                .py(SPACE_3)
+                .px(SPACE_9)
+                .hover(|style| style.opacity(BUTTON_HOVER_OPACITY)),
             // These sit on a card whose fill is the hover color, so hover
             // fades the button instead of filling it.
             ButtonStyle::Primary | ButtonStyle::Secondary => base
@@ -172,14 +192,17 @@ impl RenderOnce for Button {
             })
             .children(self.leading)
             .child(match self.style {
-                ButtonStyle::Primary => label.weight(FontWeight::SEMIBOLD).color(Color::Background),
+                ButtonStyle::Primary | ButtonStyle::Danger => {
+                    label.weight(FontWeight::SEMIBOLD).color(Color::Background)
+                }
                 ButtonStyle::Tinted => label.color(Color::Accent),
                 _ if selected => label.color(Color::Accent),
                 ButtonStyle::Outlined
                 | ButtonStyle::Filled
                 | ButtonStyle::Plain
                 | ButtonStyle::Secondary
-                | ButtonStyle::Subtle => label.color(Color::Default),
+                | ButtonStyle::Subtle
+                | ButtonStyle::Bordered => label.color(Color::Default),
             })
     }
 }
@@ -238,6 +261,22 @@ mod tests {
                 .into_any_element()
         });
         assert_eq!(off, on);
+    }
+
+    #[gpui::test]
+    fn alert_buttons_share_one_height(cx: &mut TestAppContext) {
+        // Nodes 5996 to 6002: Reply and the alert's actions sit in one 22 px
+        // row; the actions are Plain plus a 1 px border.
+        let make =
+            |style: ButtonStyle| move || Button::new("b", "Reply").style(style).into_any_element();
+        let danger = rendered_size(cx, make(ButtonStyle::Danger));
+        let mut cx2 = TestAppContext::single();
+        let bordered = rendered_size(&mut cx2, make(ButtonStyle::Bordered));
+        let mut cx3 = TestAppContext::single();
+        let plain = rendered_size(&mut cx3, make(ButtonStyle::Plain));
+        assert_eq!(bordered.height - plain.height, px(2.));
+        assert_eq!(bordered.width - plain.width, px(2.));
+        assert_eq!(danger, bordered);
     }
 
     #[gpui::test]

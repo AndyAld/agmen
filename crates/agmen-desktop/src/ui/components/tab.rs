@@ -114,7 +114,8 @@ impl Tab {
     /// find it as `"{id}:badge"`.
     #[must_use]
     pub(crate) fn badge(mut self, count: usize) -> Self {
-        self.badge = (count > 0).then(|| count.to_string().into());
+        // Task 13: large counts read 99+.
+        self.badge = (count > 0).then(|| crate::ui::format::count_label(count).into());
         self
     }
 
@@ -299,6 +300,25 @@ mod tests {
         let mut cx2 = TestAppContext::single();
         let file = rendered_size(&mut cx2, make(true));
         assert_eq!(plain, file);
+    }
+
+    #[gpui::test]
+    fn pane_tab_badge_caps_at_99(cx: &mut TestAppContext) {
+        let make = |count: usize| {
+            move || {
+                Tab::new("chat", UiIcon::Chat, "chat")
+                    .pane()
+                    .badge(count)
+                    .into_any_element()
+            }
+        };
+        let two_digits = rendered_size(cx, make(99));
+        let mut cx2 = TestAppContext::single();
+        let capped = rendered_size(&mut cx2, make(100));
+        let mut cx3 = TestAppContext::single();
+        let huge = rendered_size(&mut cx3, make(12_345));
+        assert_eq!(huge, capped);
+        assert!(capped.width > two_digits.width);
     }
 
     #[gpui::test]

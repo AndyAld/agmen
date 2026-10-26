@@ -510,3 +510,93 @@ fn cap_keeps_my_agents_owner_alerts() {
     assert!(state.needing_me().contains(&mine));
     assert!(!state.needing_me().contains(&oldest_theirs));
 }
+
+// Task 13 UI: Snooze 15 min dims the alert, and it needs me again when the
+// snooze ends unless someone cleared it meanwhile.
+
+#[test]
+fn snoozed_alert_wakes_needing_me_again() {
+    let me = andy();
+    let mut state = AlertState::default();
+    let budget = alert(ALERT_1, "andyfx10", "andy/fx1", "agent", &urgent("owner"));
+    state.on_message(&budget, &me);
+    let id: MessageId = ALERT_1.parse().unwrap();
+    assert!(state.snooze(&id));
+    assert_eq!(state.badge(), 0);
+    assert!(state.is_snoozed(&id));
+    assert!(state.wake(&id));
+    assert_eq!(state.needing_me(), std::slice::from_ref(&id));
+    assert!(!state.is_snoozed(&id));
+    assert!(!state.wake(&id), "only a snoozed alert wakes");
+    // It is still an owner alert from my agent: a coordinator's answer
+    // leaves it, mine clears it.
+    state.on_message(
+        &answer(ANSWER_1, ALERT_1, "adamcoor", "adam/coord", "coordinator"),
+        &me,
+    );
+    assert_eq!(state.badge(), 1);
+    state.on_message(
+        &answer(ANSWER_2, ALERT_1, me.id.as_str(), "andy", "human"),
+        &me,
+    );
+    assert_eq!(state.badge(), 0);
+}
+
+#[test]
+fn an_answer_ends_a_snooze() {
+    let me = andy();
+    let mut state = AlertState::default();
+    let ci = mentioning(
+        alert(
+            ALERT_1,
+            "adamcoor",
+            "adam/coord",
+            "agent",
+            &urgent("anyone"),
+        ),
+        &me.id,
+    );
+    state.on_message(&ci, &me);
+    let id: MessageId = ALERT_1.parse().unwrap();
+    assert!(state.snooze(&id));
+    state.on_message(&answer(ANSWER_1, ALERT_1, "adam0000", "adam", "human"), &me);
+    assert!(!state.is_snoozed(&id));
+    assert!(!state.wake(&id), "an answered alert does not come back");
+    assert_eq!(state.badge(), 0);
+}
+
+#[test]
+fn clear_ends_a_snooze() {
+    let me = andy();
+    let mut state = AlertState::default();
+    state.on_message(
+        &alert(ALERT_1, "andyfx10", "andy/fx1", "agent", &urgent("anyone")),
+        &me,
+    );
+    let id: MessageId = ALERT_1.parse().unwrap();
+    assert!(state.snooze(&id));
+    assert!(state.clear(&id), "clearing a snoozed alert ends it");
+    assert!(!state.wake(&id));
+}
+
+#[test]
+fn snoozed_alerts_are_bounded() {
+    let me = andy();
+    let mut state = AlertState::default();
+    let ids: Vec<MessageId> = (0..=MAX_NEEDING_ME)
+        .map(|i| format!("01JD{i:022}").parse().unwrap())
+        .collect();
+    for id in &ids {
+        let env = alert(
+            id.as_str(),
+            "andyt7k0",
+            "andy/t7k",
+            "agent",
+            &urgent("anyone"),
+        );
+        state.on_message(&env, &me);
+        state.snooze(id);
+    }
+    assert!(!state.is_snoozed(&ids[0]), "the oldest snooze drops first");
+    assert!(state.is_snoozed(&ids[MAX_NEEDING_ME]));
+}

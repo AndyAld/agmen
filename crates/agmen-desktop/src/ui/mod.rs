@@ -37,6 +37,12 @@ mod title_bar;
 mod tokens;
 mod workspace;
 
+// Task 13: needs you (the alert row's state, the banner and the toast).
+mod alert_banner;
+mod alert_row;
+mod needs_you;
+mod toast;
+
 pub(crate) use agent_view::AgentView;
 pub(crate) use code_view::{CodeView, GutterMark};
 pub(crate) use dev_views::{DevFrame, GitDev, GitDevLayout, ProjectDev, ProjectTests, RolesDev};

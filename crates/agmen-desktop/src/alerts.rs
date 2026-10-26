@@ -118,6 +118,9 @@ pub(crate) struct AlertState {
     only_me: BTreeSet<MessageId>,
     /// Alert ids seen, newest last, at most [`MAX_REMEMBERED_ALERTS`].
     seen: VecDeque<MessageId>,
+    /// Alerts I snoozed, oldest first, with whose answer clears them; at
+    /// most [`MAX_NEEDING_ME`], since each came out of `needing_me`.
+    snoozed: VecDeque<(MessageId, ClearedBy)>,
 }
 
 impl AlertState {
@@ -138,10 +141,11 @@ impl AlertState {
             }
             Payload::Answer {} => {
                 if let Some(alert) = &env.client.reply_to {
+                    let snoozed = self.snoozed.iter().find(|(id, _)| id == alert);
                     let by = if self.only_me.contains(alert) {
                         ClearedBy::OnlyMe
                     } else {
-                        ClearedBy::Anyone
+                        snoozed.map_or(ClearedBy::Anyone, |(_, by)| *by)
                     };
                     if by.cleared_by(env, me) {
                         self.clear(alert);
@@ -180,9 +184,20 @@ impl AlertState {
         }
         let id = &env.client.id;
         // A copy that outlived `seen` is still the same alert.
-        if self.needing_me.contains(id) {
+        if self.needing_me.contains(id) || self.is_snoozed(id) {
             return AlertEffect::None;
         }
+        self.push_needing(id.clone(), ClearedBy::of(needs, env, me));
+        if hushed {
+            AlertEffect::Highlight
+        } else {
+            AlertEffect::HighlightChimeNotify
+        }
+    }
+
+    /// Adds `id` to the alerts that need me, dropping the oldest past
+    /// [`MAX_NEEDING_ME`].
+    fn push_needing(&mut self, id: MessageId, by: ClearedBy) {
         if self.needing_me.len() >= MAX_NEEDING_ME {
             // Others' alerts go first, so a flood from many senders cannot
             // push out an owner alert from my own agent.
@@ -194,23 +209,14 @@ impl AlertState {
             let evicted = self.needing_me.remove(at);
             self.only_me.remove(&evicted);
         }
-        self.needing_me.push(id.clone());
-        if ClearedBy::of(needs, env, me) == ClearedBy::OnlyMe {
+        if by == ClearedBy::OnlyMe {
             self.only_me.insert(id.clone());
         }
-        if hushed {
-            AlertEffect::Highlight
-        } else {
-            AlertEffect::HighlightChimeNotify
-        }
+        self.needing_me.push(id);
     }
 
     /// The urgent alerts that need me, oldest first.
     #[must_use]
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the needs-you banner lists them in Task 13")
-    )]
     pub(crate) fn needing_me(&self) -> &[MessageId] {
         &self.needing_me
     }
@@ -222,23 +228,55 @@ impl AlertState {
     }
 
     /// Ends the need for `alert` without an ANSWER, such as after one of its
-    /// actions. Returns whether it was needing me.
+    /// actions, and ends its snooze. Returns whether it was needing me or
+    /// snoozed.
     pub(crate) fn clear(&mut self, alert: &MessageId) -> bool {
-        let before = self.needing_me.len();
+        let before = self.needing_me.len() + self.snoozed.len();
         self.needing_me.retain(|id| id != alert);
+        self.snoozed.retain(|(id, _)| id != alert);
         self.only_me.remove(alert);
-        self.needing_me.len() != before
+        self.needing_me.len() + self.snoozed.len() != before
     }
 
-    /// Snooze 15 min: the alert dims and stops needing me.
-    // shortcut: snoozing clears it for good; the view's Snooze timer (Task 13 UI)
-    // decides whether it comes back after 15 minutes.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the alert's Snooze button calls it in Task 13")
-    )]
+    /// Snooze 15 min: the alert dims and stops needing me until [`wake`]
+    /// (the chat's timer) or an answer that clears it. Returns whether it
+    /// was needing me.
+    ///
+    /// [`wake`]: Self::wake
     pub(crate) fn snooze(&mut self, alert: &MessageId) -> bool {
-        self.clear(alert)
+        if !self.needing_me.contains(alert) {
+            return false;
+        }
+        let by = if self.only_me.contains(alert) {
+            ClearedBy::OnlyMe
+        } else {
+            ClearedBy::Anyone
+        };
+        self.clear(alert);
+        if self.snoozed.len() >= MAX_NEEDING_ME {
+            self.snoozed.pop_front();
+        }
+        self.snoozed.push_back((alert.clone(), by));
+        true
+    }
+
+    /// Whether `alert` is snoozed.
+    #[must_use]
+    pub(crate) fn is_snoozed(&self, alert: &MessageId) -> bool {
+        self.snoozed.iter().any(|(id, _)| id == alert)
+    }
+
+    /// Ends `alert`'s snooze: it needs me again, cleared by the same answers
+    /// as before. Returns whether it was snoozed.
+    pub(crate) fn wake(&mut self, alert: &MessageId) -> bool {
+        let Some(at) = self.snoozed.iter().position(|(id, _)| id == alert) else {
+            return false;
+        };
+        let Some((id, by)) = self.snoozed.remove(at) else {
+            return false;
+        };
+        self.push_needing(id, by);
+        true
     }
 
     #[cfg(test)]
@@ -250,13 +288,6 @@ impl AlertState {
 /// The status bar's alert count: ALERTs in `messages` (oldest first) that
 /// are still open for me, by the same clearing rule as [`AlertState`].
 #[must_use]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the status bar derives its alert count from it in Task 13"
-    )
-)]
 pub(crate) fn alert_count(messages: &[StampedEnvelope], me: &Me) -> u32 {
     let mut open: BTreeMap<&MessageId, ClearedBy> = BTreeMap::new();
     // Alerts already answered, so a later copy does not reopen them; bounded

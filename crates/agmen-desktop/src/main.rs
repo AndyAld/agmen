@@ -4,6 +4,8 @@ mod alerts;
 mod appearance;
 mod assets;
 mod backend;
+// Task 13: the urgent-alert chime.
+mod chime;
 mod icons;
 #[cfg(unix)]
 mod instance;

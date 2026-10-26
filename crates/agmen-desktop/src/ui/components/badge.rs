@@ -18,6 +18,7 @@ pub(crate) struct Badge {
     color: Color,
     solid: bool,
     pill: bool,
+    marker: bool,
     code: bool,
     leading: Option<SharedString>,
 }
@@ -31,6 +32,7 @@ impl Badge {
             color,
             solid: false,
             pill: false,
+            marker: false,
             code: false,
             leading: None,
         }
@@ -62,6 +64,15 @@ impl Badge {
         self
     }
 
+    /// A solid marker in a message's head, as an alert's NEEDS YOU (node
+    /// 5960): padded 1 by 6, with a bold extra small label.
+    #[must_use]
+    pub(crate) const fn marker(mut self) -> Self {
+        self.solid = true;
+        self.marker = true;
+        self
+    }
+
     /// A bold glyph before the label, as the "!" of "! 1 needs you".
     #[must_use]
     pub(crate) fn leading(mut self, glyph: impl Into<SharedString>) -> Self {
@@ -80,7 +91,7 @@ impl RenderOnce for Badge {
             (tint(fill, TINT_FILL), self.color.clone())
         };
         let label = Label::new(self.label).color(text.clone());
-        let label = if self.pill {
+        let label = if self.pill || self.marker {
             label.size(LabelSize::XSmall).weight(FontWeight::BOLD)
         } else if self.code {
             label.code()
@@ -92,7 +103,11 @@ impl RenderOnce for Badge {
             base.px(SPACE_5).rounded(RADIUS_PILL)
         } else {
             base.py(SPACE_1)
-                .px(if self.solid { SPACE_7 } else { SPACE_6 })
+                .px(if self.solid && !self.marker {
+                    SPACE_7
+                } else {
+                    SPACE_6
+                })
                 .rounded(RADIUS_SM)
         };
         shaped
@@ -155,6 +170,25 @@ mod tests {
         });
         assert_eq!(pill.width - text.width, px(10.));
         assert_eq!(pill.height, text.height);
+    }
+
+    #[gpui::test]
+    fn marker_pads_six_by_one_around_bold_extra_small_text(cx: &mut TestAppContext) {
+        // Node 5960: NEEDS YOU pads [1, 6, 1, 6] around 10 px bold.
+        let marker = rendered_size(cx, || {
+            Badge::new("NEEDS YOU", Color::Error)
+                .marker()
+                .into_any_element()
+        });
+        let mut cx2 = TestAppContext::single();
+        let text = rendered_size(&mut cx2, || {
+            Label::new("NEEDS YOU")
+                .size(LabelSize::XSmall)
+                .weight(FontWeight::BOLD)
+                .into_any_element()
+        });
+        assert_eq!(marker.width - text.width, px(12.));
+        assert_eq!(marker.height - text.height, px(2.));
     }
 
     #[gpui::test]

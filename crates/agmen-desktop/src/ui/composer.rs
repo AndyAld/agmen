@@ -4,7 +4,7 @@
 
 use std::rc::Rc;
 
-use agmen_proto::IdentityId;
+use agmen_proto::{IdentityId, MessageId};
 use gpui::{
     App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
     InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
@@ -66,6 +66,8 @@ pub(crate) struct Composer {
     agents: Vec<Target>,
     /// The model chip's label; `None` draws no chip.
     model: Option<SharedString>,
+    /// The message the next send replies to, and its sender (Task 13).
+    reply: Option<(MessageId, Target)>,
     on_send: SendHandler,
     _subscriptions: [Subscription; 2],
 }
@@ -163,6 +165,7 @@ impl Composer {
             recipient,
             agents,
             model,
+            reply: None,
             on_send,
             _subscriptions: [submits, edits],
         }
@@ -175,14 +178,15 @@ impl Composer {
     }
 
     /// Unknown handles stay plain text, and the message goes to the
-    /// recipient.
+    /// recipient, or to the sender of the message it replies to.
     fn target_for(&self, text: &str) -> &Target {
         mention_handle(text)
             .and_then(|handle| self.agents.iter().find(|agent| agent.handle == handle))
+            .or(self.reply.as_ref().map(|(_, to)| to))
             .unwrap_or(&self.recipient)
     }
 
-    fn send(&self, body: &str, window: &mut Window, cx: &mut Context<Self>) {
+    fn send(&mut self, body: &str, window: &mut Window, cx: &mut Context<Self>) {
         // Blank text is not a message; the input keeps it, as if Enter had
         // not been pressed.
         if body.trim().is_empty() {
@@ -193,15 +197,35 @@ impl Composer {
         let draft = Draft {
             to: vec![self.target_for(body).id.clone()],
             body: body.to_owned(),
-            // shortcut: no reply target yet; Task 13's Reply button sets one.
-            reply_to: None,
+            reply_to: self.reply.as_ref().map(|(message, _)| message.clone()),
         };
         // The input cleared itself on Enter; a refused draft is not lost.
         // The caller shows why it was refused.
         if (self.on_send)(draft, window, cx).is_err() {
             self.input
                 .update(cx, |input, cx| input.set_text(body, window, cx));
+        } else {
+            self.reply = None;
+            cx.notify();
         }
+    }
+}
+
+// Task 13: an alert's Reply.
+impl Composer {
+    /// Starts a reply to `message`, addressed to `to`, and focuses the
+    /// input. The next message sent replies to it; an `@mention` still
+    /// picks another agent.
+    pub(crate) fn reply(
+        &mut self,
+        to: Target,
+        message: MessageId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.reply = Some((message, to));
+        self.input.focus_handle(cx).focus(window, cx);
+        cx.notify();
     }
 }
 

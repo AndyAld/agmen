@@ -65,6 +65,15 @@ impl Theme {
         a: 1.,
     };
 
+    /// Shadows under floating surfaces, the same in every theme: black,
+    /// which views fade with an alpha token (Task 13's toast, node 6004).
+    pub(crate) const SHADOW: Rgba = Rgba {
+        r: 0.,
+        g: 0.,
+        b: 0.,
+        a: 1.,
+    };
+
     /// A role's color, from the theme's player palette so it stays readable
     /// in light and dark themes. Unknown roles get the muted text color.
     pub(crate) fn role_color(&self, role: &str) -> Hsla {
