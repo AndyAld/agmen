@@ -5,6 +5,10 @@
 //! Identities publish over MQTT with broker tokens the hub minted; humans
 //! have no broker access in the MVP, so their posts call `Hub::ingest`
 //! directly, the path the web console's `POST /messages` will take.
+//!
+//! Each test runs in [`run_in_room`], which deletes the retained
+//! `state/head` the sweeper published for the test's project, so the dev
+//! broker keeps none of them.
 
 // Integration tests are test code throughout, helpers included: this lets
 // clippy's allow-*-in-tests settings cover the helpers too.
@@ -13,6 +17,8 @@
 mod support;
 
 use std::collections::BTreeSet;
+use std::future::Future;
+use std::sync::Arc;
 use std::time::Duration;
 
 use agmen_hub::{HUB_IDENTITY, HubPost};
@@ -27,8 +33,9 @@ use rumqttc::v5::mqttbytes::v5::{PubAckReason, SubscribeReasonCode};
 use serde_json::{Value, json};
 use support::mqtt::{self, ACK_WAIT, Client, connect_ok};
 use support::{
-    Ctx, DEV_KEY_1, Minted, Project, TestHub, broker_token, count, envelope, login, mint_kind,
-    mint_ok, run, seed_human, seed_member, seed_project, topics, ulid,
+    Ctx, DEV_KEY_1, Minted, Project, TestHub, broker_token, clearing, count, emqx_api, env,
+    envelope, gone_from_broker, login, mint_kind, mint_ok, run, seed_human, seed_member,
+    seed_project, topics, ulid,
 };
 
 const ANDY: u64 = 4242;
@@ -142,6 +149,30 @@ async fn room(ctx: &Ctx) -> Room {
     }
 }
 
+/// Runs `body` in a fresh [`Room`], then deletes the retained `state/head`
+/// the sweeper published for the room's project, also when `body` panics.
+///
+/// `body` drops its `Messaging` when it ends, but the hub's last PUBLISH
+/// may still be on its way to EMQX. Once EMQX no longer lists the hub's
+/// client, it has handled everything that client sent, so the deletion
+/// comes after the last `state/head`.
+async fn run_in_room<F, Fut>(body: F)
+where
+    F: FnOnce(Arc<Ctx>, Room) -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    run(|ctx| async move {
+        let room = room(&ctx).await;
+        let retained = vec![topics(&room.project).state_head()];
+        clearing(ctx, retained, |ctx| async move {
+            body(Arc::clone(&ctx), room).await;
+            gone_from_broker(&ctx.http, &ctx.hub.mqtt.client_id()).await;
+        })
+        .await;
+    })
+    .await;
+}
+
 /// Posts `raw` as `from` without the broker, as a human's post will.
 async fn ingest(ctx: &Ctx, project: &Project, from: &str, raw: &[u8]) -> DeliveryReply {
     ctx.hub
@@ -159,6 +190,13 @@ fn assert_ack(reply: &DeliveryReply, stream: &Stream, seq: u64) {
             assert_eq!((s, *n), (stream, Seq(seq)), "{reply:?}");
         }
         DeliveryReply::Nack { .. } => panic!("expected an ACK, got {reply:?}"),
+    }
+}
+
+/// The id of the message `reply` answers.
+fn reply_id(reply: &DeliveryReply) -> &str {
+    match reply {
+        DeliveryReply::Ack { id, .. } | DeliveryReply::Nack { id, .. } => id.as_str(),
     }
 }
 
@@ -227,8 +265,7 @@ fn mentioned(env: &StampedEnvelope) -> BTreeSet<String> {
 
 #[tokio::test]
 async fn it_fyi_gets_ack_and_feed() {
-    run(|ctx| async move {
-        let room = room(&ctx).await;
+    run_in_room(|ctx, room| async move {
         let _messaging = ctx.hub.start_messaging().await;
         let mut sol = Agent::connect(&ctx, &room.project, &room.sol).await;
 
@@ -254,8 +291,7 @@ async fn it_fyi_gets_ack_and_feed() {
 
 #[tokio::test]
 async fn it_duplicate_gets_same_ack() {
-    run(|ctx| async move {
-        let room = room(&ctx).await;
+    run_in_room(|ctx, room| async move {
         let _messaging = ctx.hub.start_messaging().await;
         let mut sol = Agent::connect(&ctx, &room.project, &room.sol).await;
 
@@ -276,8 +312,7 @@ async fn it_duplicate_gets_same_ack() {
 
 #[tokio::test]
 async fn it_conflicting_duplicate_nacks() {
-    run(|ctx| async move {
-        let room = room(&ctx).await;
+    run_in_room(|ctx, room| async move {
         let _messaging = ctx.hub.start_messaging().await;
         let mut sol = Agent::connect(&ctx, &room.project, &room.sol).await;
 
@@ -292,8 +327,7 @@ async fn it_conflicting_duplicate_nacks() {
 
 #[tokio::test]
 async fn it_oversize_body_final_nack() {
-    run(|ctx| async move {
-        let room = room(&ctx).await;
+    run_in_room(|ctx, room| async move {
         let _messaging = ctx.hub.start_messaging().await;
         let mut sol = Agent::connect(&ctx, &room.project, &room.sol).await;
 
@@ -318,8 +352,7 @@ async fn it_oversize_body_final_nack() {
 
 #[tokio::test]
 async fn it_secret_shaped_body_nacks() {
-    run(|ctx| async move {
-        let room = room(&ctx).await;
+    run_in_room(|ctx, room| async move {
         let _messaging = ctx.hub.start_messaging().await;
         let mut sol = Agent::connect(&ctx, &room.project, &room.sol).await;
 
@@ -339,8 +372,7 @@ async fn it_secret_shaped_body_nacks() {
 
 #[tokio::test]
 async fn it_rate_limit_retryable() {
-    run(|ctx| async move {
-        let room = room(&ctx).await;
+    run_in_room(|ctx, room| async move {
         let _messaging = ctx.hub.start_messaging().await;
         let mut sol = Agent::connect(&ctx, &room.project, &room.sol).await;
 
@@ -379,8 +411,7 @@ async fn it_rate_limit_retryable() {
 
 #[tokio::test]
 async fn it_valid_until_uses_hub_clock() {
-    run(|ctx| async move {
-        let room = room(&ctx).await;
+    run_in_room(|ctx, room| async move {
         let _messaging = ctx.hub.start_messaging().await;
         let mut sol = Agent::connect(&ctx, &room.project, &room.sol).await;
 
@@ -409,8 +440,7 @@ async fn it_valid_until_uses_hub_clock() {
 
 #[tokio::test]
 async fn it_dm_fan_out_and_privacy() {
-    run(|ctx| async move {
-        let room = room(&ctx).await;
+    run_in_room(|ctx, room| async move {
         let b = mint_ok(&ctx, &room.andy_token, "andy/b", &room.project).await;
         let carol = seed_human(&ctx.pool, CAROL, "carol").await;
         seed_member(&ctx.pool, &carol, &room.project, "member").await;
@@ -459,8 +489,7 @@ async fn it_dm_fan_out_and_privacy() {
 
 #[tokio::test]
 async fn it_non_human_forbidden_verbs() {
-    run(|ctx| async move {
-        let room = room(&ctx).await;
+    run_in_room(|ctx, room| async move {
         let _messaging = ctx.hub.start_messaging().await;
         let mut sol = Agent::connect(&ctx, &room.project, &room.sol).await;
 
@@ -511,8 +540,7 @@ async fn it_non_human_forbidden_verbs() {
 
 #[tokio::test]
 async fn it_sweeper_resumes_after_crash() {
-    run(|ctx| async move {
-        let room = room(&ctx).await;
+    run_in_room(|ctx, room| async move {
         let mut sol = Agent::connect(&ctx, &room.project, &room.sol).await;
 
         // ctx.hub never starts its sweeper, so this is a hub that died
@@ -529,7 +557,7 @@ async fn it_sweeper_resumes_after_crash() {
 
         // The restarted hub's sweeper publishes what the dead one left.
         let restarted = TestHub::start(&ctx.db_url, &ctx.github, DEV_KEY_1, &[]).await;
-        let _messaging = restarted.start_messaging().await;
+        let messaging = restarted.start_messaging().await;
         let got = sol.feed(ACK_WAIT).await.expect("the FYI after the restart");
         assert_eq!((got.client.id.as_str(), got.seq), (id.as_str(), Seq(1)));
         assert_eq!(sol.reply().await, reply);
@@ -557,14 +585,18 @@ async fn it_sweeper_resumes_after_crash() {
         assert!(head.retain);
         let head: Value = serde_json::from_slice(&head.payload).unwrap();
         assert_eq!(head["feed_seq"], 1, "{head}");
+
+        // As run_in_room does for ctx.hub: the clearing comes after the
+        // restarted hub's last PUBLISH.
+        drop(messaging);
+        gone_from_broker(&ctx.http, &restarted.mqtt.client_id()).await;
     })
     .await;
 }
 
 #[tokio::test]
 async fn it_mention_all_expands() {
-    run(|ctx| async move {
-        let room = room(&ctx).await;
+    run_in_room(|ctx, room| async move {
         let gone = mint_ok(&ctx, &room.andy_token, "andy/gone", &room.project).await;
         sqlx::query("UPDATE identities SET revoked_at = now() WHERE id = $1")
             .bind(&gone.id)
@@ -596,8 +628,7 @@ async fn it_mention_all_expands() {
 
 #[tokio::test]
 async fn it_agent_group_mention_forbidden() {
-    run(|ctx| async move {
-        let room = room(&ctx).await;
+    run_in_room(|ctx, room| async move {
         let _messaging = ctx.hub.start_messaging().await;
         let mut sol = Agent::connect(&ctx, &room.project, &room.sol).await;
 
@@ -620,8 +651,7 @@ async fn it_agent_group_mention_forbidden() {
 
 #[tokio::test]
 async fn it_reply_mentions_human_author() {
-    run(|ctx| async move {
-        let room = room(&ctx).await;
+    run_in_room(|ctx, room| async move {
         let _messaging = ctx.hub.start_messaging().await;
         let mut sol = Agent::connect(&ctx, &room.project, &room.sol).await;
 
@@ -660,8 +690,7 @@ async fn it_reply_mentions_human_author() {
 
 #[tokio::test]
 async fn it_revoked_identity_publish_nacked() {
-    run(|ctx| async move {
-        let room = room(&ctx).await;
+    run_in_room(|ctx, room| async move {
         let _messaging = ctx.hub.start_messaging().await;
         let mut sol = Agent::connect(&ctx, &room.project, &room.sol).await;
         assert_ack(&sol.post(&fyi(&ulid())).await, &Stream::Feed, 1);
@@ -680,8 +709,7 @@ async fn it_revoked_identity_publish_nacked() {
 
 #[tokio::test]
 async fn it_ask_to_routes_like_dm_and_answer_follows() {
-    run(|ctx| async move {
-        let room = room(&ctx).await;
+    run_in_room(|ctx, room| async move {
         let _messaging = ctx.hub.start_messaging().await;
         let mut sol = Agent::connect(&ctx, &room.project, &room.sol).await;
         let mut coord = Agent::connect(&ctx, &room.project, &room.coord).await;
@@ -717,8 +745,7 @@ async fn it_ask_to_routes_like_dm_and_answer_follows() {
 
 #[tokio::test]
 async fn it_alerts_mention_owner_and_coordinators() {
-    run(|ctx| async move {
-        let room = room(&ctx).await;
+    run_in_room(|ctx, room| async move {
         // adam holds the coordinator role, so ruling R35 counts him; andy
         // is an admin, which it does not.
         let adam = seed_human(&ctx.pool, 2, "adam").await;
@@ -795,25 +822,20 @@ async fn it_alerts_mention_owner_and_coordinators() {
 
 #[tokio::test]
 async fn it_hub_resubscribes_after_kick() {
-    run(|ctx| async move {
-        let room = room(&ctx).await;
+    run_in_room(|ctx, room| async move {
         let _messaging = ctx.hub.start_messaging().await;
         let mut sol = Agent::connect(&ctx, &room.project, &room.sol).await;
-        assert_ack(&sol.post(&fyi(&ulid())).await, &Stream::Feed, 1);
+        let first = sol.post(&fyi(&ulid())).await;
+        assert_ack(&first, &Stream::Feed, 1);
 
         // Kick the hub's own client off EMQX; it reconnects with a fresh
         // token and, its session being clean, subscribes again.
-        let mut url = url::Url::parse(&support::env("AGMEN_IT_EMQX_API")).unwrap();
-        url.path_segments_mut()
-            .unwrap()
-            .pop_if_empty()
-            .extend(["clients", &ctx.hub.mqtt.client_id()]);
         let kicked = ctx
             .http
-            .delete(url)
+            .delete(emqx_api(&["clients", &ctx.hub.mqtt.client_id()]))
             .basic_auth(
-                support::env("AGMEN_IT_EMQX_API_KEY"),
-                Some(support::env("AGMEN_IT_EMQX_API_SECRET")),
+                env("AGMEN_IT_EMQX_API_KEY"),
+                Some(env("AGMEN_IT_EMQX_API_SECRET")),
             )
             .send()
             .await
@@ -821,16 +843,21 @@ async fn it_hub_resubscribes_after_kick() {
         assert_eq!(kicked.status(), StatusCode::NO_CONTENT);
 
         // A publish made before the hub has subscribed again is lost (its
-        // session is clean), and the client would resend it after a
-        // timeout; do the same here until one is answered. The PUBACK says
-        // no subscriber matched unless other tests' subscribers are up.
+        // session is clean), and the client resends it with the same id
+        // after a timeout; do the same here until it is answered. The PUBACK
+        // says no subscriber matched unless other tests' subscribers are up.
+        // A kick that lands before the sweeper deletes the outbox rows makes
+        // it publish the first ACK again after the reconnect (at-least-once
+        // delivery), so a repeat of that ACK is skipped.
         let (up, ack) = (
             sol.topics.up(&sol.identity()),
             sol.topics.ack(&sol.identity()),
         );
+        let id = ulid();
+        let raw = fyi(&id);
         let deadline = std::time::Instant::now() + ACK_WAIT;
-        let reply = loop {
-            let reason = sol.client.publish(&up, &fyi(&ulid())).await;
+        let reply = 'resend: loop {
+            let reason = sol.client.publish(&up, &raw).await;
             assert!(
                 matches!(
                     reason,
@@ -838,8 +865,20 @@ async fn it_hub_resubscribes_after_kick() {
                 ),
                 "{reason:?}"
             );
-            if let Some(publish) = sol.client.recv_on(&ack, Duration::from_millis(500)).await {
-                break serde_json::from_slice::<DeliveryReply>(&publish.payload).unwrap();
+            let window = tokio::time::Instant::now() + Duration::from_millis(500);
+            while let Some(publish) = sol
+                .client
+                .recv_on(
+                    &ack,
+                    window.saturating_duration_since(tokio::time::Instant::now()),
+                )
+                .await
+            {
+                let reply: DeliveryReply = serde_json::from_slice(&publish.payload).unwrap();
+                if reply_id(&reply) == id {
+                    break 'resend reply;
+                }
+                assert_eq!(reply, first, "a reply for neither message");
             }
             assert!(
                 std::time::Instant::now() < deadline,

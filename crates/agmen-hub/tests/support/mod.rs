@@ -19,6 +19,7 @@ use std::future::Future;
 use std::hash::{BuildHasher, Hasher, RandomState};
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use agmen_hub::{
@@ -586,6 +587,88 @@ pub async fn unban_username(http: &reqwest::Client, username: &str) {
         "unban {username} answered {}",
         resp.status()
     );
+}
+
+/// How long [`clearing`] waits after a panic for late publishes: the last
+/// wills of the dropped clients, and what the hub sends for them.
+const LATE_WAIT: Duration = Duration::from_secs(2);
+
+/// The EMQX REST API URL for `segments` under `AGMEN_IT_EMQX_API`.
+pub fn emqx_api(segments: &[&str]) -> Url {
+    let mut url = Url::parse(&env("AGMEN_IT_EMQX_API")).unwrap();
+    url.path_segments_mut()
+        .unwrap()
+        .pop_if_empty()
+        .extend(segments);
+    url
+}
+
+/// Waits until EMQX no longer lists `client_id` as connected.
+pub async fn gone_from_broker(http: &reqwest::Client, client_id: &str) {
+    let deadline = tokio::time::Instant::now() + mqtt::ACK_WAIT;
+    loop {
+        let resp = http
+            .get(emqx_api(&["clients", client_id]))
+            .basic_auth(
+                env("AGMEN_IT_EMQX_API_KEY"),
+                Some(env("AGMEN_IT_EMQX_API_SECRET")),
+            )
+            .send()
+            .await
+            .unwrap();
+        if resp.status() == StatusCode::NOT_FOUND {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{client_id} is still connected"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Deletes the retained messages on `retained` through the EMQX REST API.
+/// One that is already gone (404) is fine.
+async fn clear_retained(http: &reqwest::Client, retained: &[String]) {
+    for topic in retained {
+        let resp = http
+            .delete(emqx_api(&["mqtt", "retainer", "message", topic]))
+            .basic_auth(
+                env("AGMEN_IT_EMQX_API_KEY"),
+                Some(env("AGMEN_IT_EMQX_API_SECRET")),
+            )
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                resp.status(),
+                StatusCode::NO_CONTENT | StatusCode::OK | StatusCode::NOT_FOUND
+            ),
+            "clearing {topic} answered {}",
+            resp.status()
+        );
+    }
+}
+
+/// Runs `body`, then deletes the retained messages on `retained`, also when
+/// `body` panics, so the shared dev broker keeps none of them. List only
+/// topics under projects the test created. A panic drops the body's clients
+/// without DISCONNECT, so it first waits [`LATE_WAIT`] for their last wills.
+pub async fn clearing<F, Fut>(ctx: Ctx, retained: Vec<String>, body: F)
+where
+    F: FnOnce(Arc<Ctx>) -> Fut,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    let ctx = Arc::new(ctx);
+    let outcome = tokio::spawn(body(Arc::clone(&ctx))).await;
+    if outcome.is_err() {
+        tokio::time::sleep(LATE_WAIT).await;
+    }
+    clear_retained(&ctx.http, &retained).await;
+    if let Err(err) = outcome {
+        std::panic::resume_unwind(err.into_panic());
+    }
 }
 
 /// Counts rows, for assertions on what the hub stored.

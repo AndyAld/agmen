@@ -15,9 +15,6 @@
 mod support;
 
 use std::collections::BTreeSet;
-use std::future::Future;
-use std::panic::resume_unwind;
-use std::sync::Arc;
 use std::time::Duration;
 
 use agmen_hub::{HubPost, PostError};
@@ -31,10 +28,9 @@ use rumqttc::v5::mqttbytes::v5::{LastWill, PubAckReason, SubscribeReasonCode};
 use serde_json::{Value, json};
 use support::mqtt::{self, ACK_WAIT, Client, connect_ok};
 use support::{
-    Ctx, DEV_KEY_1, Minted, Project, TestHub, env, envelope, login, mint_ok, run, seed_human,
-    seed_member, seed_project, topics, ulid,
+    Ctx, DEV_KEY_1, Minted, Project, TestHub, clearing, envelope, gone_from_broker, login, mint_ok,
+    run, seed_human, seed_member, seed_project, topics, ulid,
 };
-use url::Url;
 
 const ANDY: u64 = 4242;
 const CAROL: u64 = 77;
@@ -45,9 +41,6 @@ const DAVE: u64 = 9001;
 const KEEP_ALIVE: Duration = Duration::from_secs(5);
 /// How long a roster change may take to show up.
 const ROSTER_WAIT: Duration = Duration::from_secs(10);
-/// How long [`clearing`] waits after a panic for the last wills of the
-/// dropped clients, and a roster the hub sends for them, to arrive.
-const LATE_WAIT: Duration = Duration::from_secs(2);
 
 const ONLINE: &[u8] = br#"{"status":"online"}"#;
 const AWAY: &[u8] = br#"{"status":"away"}"#;
@@ -341,88 +334,11 @@ async fn it_replay_hub_post_refuses_state() {
     .await;
 }
 
-/// The EMQX REST API URL for `path` under `/api/v5`.
-fn emqx_api(segments: &[&str]) -> Url {
-    let mut url = Url::parse(&env("AGMEN_IT_EMQX_API")).unwrap();
-    url.path_segments_mut()
-        .unwrap()
-        .pop_if_empty()
-        .extend(segments);
-    url
-}
-
-/// Deletes the retained messages on `retained` through the EMQX REST API.
-/// One that is already gone (404) is fine.
-async fn clear_retained(http: &reqwest::Client, retained: &[String]) {
-    for topic in retained {
-        let resp = http
-            .delete(emqx_api(&["mqtt", "retainer", "message", topic]))
-            .basic_auth(
-                env("AGMEN_IT_EMQX_API_KEY"),
-                Some(env("AGMEN_IT_EMQX_API_SECRET")),
-            )
-            .send()
-            .await
-            .unwrap();
-        assert!(
-            matches!(
-                resp.status(),
-                StatusCode::NO_CONTENT | StatusCode::OK | StatusCode::NOT_FOUND
-            ),
-            "clearing {topic} answered {}",
-            resp.status()
-        );
-    }
-}
-
 /// The retained topics a presence test leaves behind for `ids`.
 fn retained_of(topics: &Topics, ids: &[&Minted]) -> Vec<String> {
     let mut retained = vec![topics.state("roster"), topics.state_head()];
     retained.extend(ids.iter().map(|m| topics.presence(&m.id.parse().unwrap())));
     retained
-}
-
-/// Runs `body`, then deletes the retained messages on `retained`, also when
-/// `body` panics. A panic drops the body's clients without DISCONNECT, so
-/// it first waits [`LATE_WAIT`] for their last wills.
-async fn clearing<F, Fut>(ctx: Ctx, retained: Vec<String>, body: F)
-where
-    F: FnOnce(Arc<Ctx>) -> Fut,
-    Fut: Future<Output = ()> + Send + 'static,
-{
-    let ctx = Arc::new(ctx);
-    let outcome = tokio::spawn(body(Arc::clone(&ctx))).await;
-    if outcome.is_err() {
-        tokio::time::sleep(LATE_WAIT).await;
-    }
-    clear_retained(&ctx.http, &retained).await;
-    if let Err(err) = outcome {
-        resume_unwind(err.into_panic());
-    }
-}
-
-/// Waits until EMQX no longer lists `client_id` as connected.
-async fn gone_from_broker(http: &reqwest::Client, client_id: &str) {
-    let deadline = tokio::time::Instant::now() + ACK_WAIT;
-    loop {
-        let resp = http
-            .get(emqx_api(&["clients", client_id]))
-            .basic_auth(
-                env("AGMEN_IT_EMQX_API_KEY"),
-                Some(env("AGMEN_IT_EMQX_API_SECRET")),
-            )
-            .send()
-            .await
-            .unwrap();
-        if resp.status() == StatusCode::NOT_FOUND {
-            return;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "{client_id} is still connected"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
 }
 
 /// `minted`'s broker connection with keep-alive [`KEEP_ALIVE`] and a last
