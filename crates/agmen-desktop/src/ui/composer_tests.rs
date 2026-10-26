@@ -219,3 +219,116 @@ fn direct_composer_sends_to_its_agent(cx: &mut TestAppContext) {
         }]
     );
 }
+
+#[gpui::test]
+fn reply_goes_to_the_alerts_sender_once(cx: &mut TestAppContext) {
+    // Task 13: an alert's Reply addresses its sender and replies to it, then
+    // the composer goes back to the listener.
+    let (composer, sent, cx) = open_composer(cx);
+    // Task 13: Escape ends the reply through the composer's binding.
+    cx.update(|_, cx| cx.bind_keys(crate::keymap::bindings_in(crate::keymap::COMPOSER_CONTEXT)));
+    let alert: agmen_proto::MessageId = "01JD0000000000000000000010".parse().unwrap();
+    let coord = Target {
+        id: agent_id("adam/coord"),
+        handle: "adam/coord".into(),
+    };
+    cx.update(|window, cx| window.blur(cx));
+    composer.update_in(cx, |composer, window, cx| {
+        composer.reply(coord.clone(), alert.clone(), window, cx);
+    });
+    composer.update_in(cx, |composer, window, cx| {
+        assert!(composer.input.focus_handle(cx).is_focused(window));
+        assert_eq!(composer.target(cx), &coord);
+    });
+    cx.simulate_input("Revert #10 now");
+    cx.simulate_keystrokes("enter");
+    cx.simulate_input("hi");
+    cx.simulate_keystrokes("enter");
+    assert_eq!(
+        *sent.borrow(),
+        vec![
+            Draft {
+                to: vec![coord.id.clone()],
+                body: "Revert #10 now".into(),
+                reply_to: Some(alert),
+            },
+            Draft {
+                to: vec![agent_id("andy/listen")],
+                body: "hi".into(),
+                reply_to: None,
+            },
+        ]
+    );
+}
+
+/// A focused composer replying to adam/coord's alert, with what it sends.
+fn replying(cx: &mut TestAppContext) -> (Entity<Composer>, Sent, &mut VisualTestContext, Target) {
+    let (composer, sent, cx) = open_composer(cx);
+    // Task 13: Escape ends the reply through the composer's binding.
+    cx.update(|_, cx| cx.bind_keys(crate::keymap::bindings_in(crate::keymap::COMPOSER_CONTEXT)));
+    let alert: agmen_proto::MessageId = "01JD0000000000000000000010".parse().unwrap();
+    let coord = Target {
+        id: agent_id("adam/coord"),
+        handle: "adam/coord".into(),
+    };
+    composer.update_in(cx, |composer, window, cx| {
+        composer.reply(coord.clone(), alert, window, cx);
+    });
+    crate::ui::test_support::redraw(cx);
+    (composer, sent, cx, coord)
+}
+
+/// The draft that sends "hi" to the listener, replying to nothing.
+fn plain_hi() -> Draft {
+    Draft {
+        to: vec![agent_id("andy/listen")],
+        body: "hi".into(),
+        reply_to: None,
+    }
+}
+
+#[gpui::test]
+fn escape_cancels_a_reply(cx: &mut TestAppContext) {
+    // Review: a Reply the person changed their mind about must not turn the
+    // next message into an ANSWER.
+    let (composer, sent, cx, coord) = replying(cx);
+    composer.read_with(cx, |composer, cx| assert_eq!(composer.target(cx), &coord));
+    cx.simulate_keystrokes("escape");
+    composer.read_with(cx, |composer, cx| {
+        assert_eq!(composer.target(cx).handle, "andy/listen");
+    });
+    cx.simulate_input("hi");
+    cx.simulate_keystrokes("enter");
+    assert_eq!(*sent.borrow(), vec![plain_hi()]);
+}
+
+#[gpui::test]
+fn the_reply_chips_close_mark_cancels_the_reply(cx: &mut TestAppContext) {
+    let (_, sent, cx, _) = replying(cx);
+    click(cx, "composer:cancel-reply");
+    cx.simulate_input("hi");
+    cx.simulate_keystrokes("enter");
+    assert_eq!(*sent.borrow(), vec![plain_hi()]);
+}
+
+#[gpui::test]
+fn a_reply_to_a_closed_alert_is_dropped(cx: &mut TestAppContext) {
+    // Review: adam answered first; a stale reply would be a second ANSWER.
+    let (composer, sent, cx, _) = replying(cx);
+    composer.update(cx, |composer, cx| {
+        composer.drop_reply_unless(|_| false, cx);
+    });
+    cx.simulate_input("hi");
+    cx.simulate_keystrokes("enter");
+    assert_eq!(*sent.borrow(), vec![plain_hi()]);
+}
+
+#[gpui::test]
+fn a_reply_to_an_open_alert_stays(cx: &mut TestAppContext) {
+    let (composer, _, cx, coord) = replying(cx);
+    composer.update(cx, |composer, cx| {
+        composer.drop_reply_unless(|_| true, cx);
+    });
+    composer.read_with(cx, |composer, cx| assert_eq!(composer.target(cx), &coord));
+    assert!(cx.debug_bounds("composer:cancel-reply").is_some());
+}

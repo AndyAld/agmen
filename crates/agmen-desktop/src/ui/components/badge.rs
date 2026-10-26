@@ -12,12 +12,25 @@ use crate::ui::tokens::{
     RADIUS_PILL, RADIUS_SM, SPACE_1, SPACE_5, SPACE_6, SPACE_7, TINT_FILL, tint,
 };
 
+/// How a badge is filled and padded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum BadgeShape {
+    /// A faint fill in the badge's color, with the label in that color.
+    #[default]
+    Tinted,
+    /// Filled with its color, the label in the background color.
+    Solid,
+    /// A solid count pill: fully rounded and padded at the sides only.
+    Pill,
+    /// A solid marker in a message's head, padded 1 by 6.
+    Marker,
+}
+
 #[derive(Debug, IntoElement)]
 pub(crate) struct Badge {
     label: SharedString,
     color: Color,
-    solid: bool,
-    pill: bool,
+    shape: BadgeShape,
     code: bool,
     leading: Option<SharedString>,
 }
@@ -29,8 +42,7 @@ impl Badge {
         Self {
             label: label.into(),
             color,
-            solid: false,
-            pill: false,
+            shape: BadgeShape::Tinted,
             code: false,
             leading: None,
         }
@@ -48,7 +60,7 @@ impl Badge {
     /// background color.
     #[must_use]
     pub(crate) const fn solid(mut self) -> Self {
-        self.solid = true;
+        self.shape = BadgeShape::Solid;
         self
     }
 
@@ -57,8 +69,15 @@ impl Badge {
     /// `tab_bar`).
     #[must_use]
     pub(crate) const fn pill(mut self) -> Self {
-        self.solid = true;
-        self.pill = true;
+        self.shape = BadgeShape::Pill;
+        self
+    }
+
+    /// A solid marker in a message's head, as an alert's NEEDS YOU (node
+    /// 5960): padded 1 by 6, with a bold extra small label.
+    #[must_use]
+    pub(crate) const fn marker(mut self) -> Self {
+        self.shape = BadgeShape::Marker;
         self
     }
 
@@ -74,26 +93,28 @@ impl RenderOnce for Badge {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = &cx.global::<Appearance>().theme;
         let fill = self.color.hsla(theme);
-        let (bg, text) = if self.solid {
-            (fill, Color::Background)
-        } else {
+        let (bg, text) = if self.shape == BadgeShape::Tinted {
             (tint(fill, TINT_FILL), self.color.clone())
+        } else {
+            (fill, Color::Background)
         };
         let label = Label::new(self.label).color(text.clone());
-        let label = if self.pill {
-            label.size(LabelSize::XSmall).weight(FontWeight::BOLD)
-        } else if self.code {
-            label.code()
-        } else {
-            label.size(LabelSize::Small).weight(FontWeight::SEMIBOLD)
+        let label = match self.shape {
+            BadgeShape::Pill | BadgeShape::Marker => {
+                label.size(LabelSize::XSmall).weight(FontWeight::BOLD)
+            }
+            BadgeShape::Tinted | BadgeShape::Solid if self.code => label.code(),
+            BadgeShape::Tinted | BadgeShape::Solid => {
+                label.size(LabelSize::Small).weight(FontWeight::SEMIBOLD)
+            }
         };
         let base = div().flex().flex_none().items_center().gap(SPACE_5).bg(bg);
-        let shaped = if self.pill {
-            base.px(SPACE_5).rounded(RADIUS_PILL)
-        } else {
-            base.py(SPACE_1)
-                .px(if self.solid { SPACE_7 } else { SPACE_6 })
-                .rounded(RADIUS_SM)
+        let shaped = match self.shape {
+            BadgeShape::Pill => base.px(SPACE_5).rounded(RADIUS_PILL),
+            BadgeShape::Solid => base.py(SPACE_1).px(SPACE_7).rounded(RADIUS_SM),
+            BadgeShape::Tinted | BadgeShape::Marker => {
+                base.py(SPACE_1).px(SPACE_6).rounded(RADIUS_SM)
+            }
         };
         shaped
             .when_some(self.leading, |this, glyph| {
@@ -155,6 +176,43 @@ mod tests {
         });
         assert_eq!(pill.width - text.width, px(10.));
         assert_eq!(pill.height, text.height);
+    }
+
+    #[gpui::test]
+    fn marker_pads_six_by_one_around_bold_extra_small_text(cx: &mut TestAppContext) {
+        // Node 5960: NEEDS YOU pads [1, 6, 1, 6] around 10 px bold.
+        let marker = rendered_size(cx, || {
+            Badge::new("NEEDS YOU", Color::Error)
+                .marker()
+                .into_any_element()
+        });
+        let mut cx2 = TestAppContext::single();
+        let text = rendered_size(&mut cx2, || {
+            Label::new("NEEDS YOU")
+                .size(LabelSize::XSmall)
+                .weight(FontWeight::BOLD)
+                .into_any_element()
+        });
+        assert_eq!(marker.width - text.width, px(12.));
+        assert_eq!(marker.height - text.height, px(2.));
+    }
+
+    #[gpui::test]
+    fn the_last_shape_wins(cx: &mut TestAppContext) {
+        // One shape at a time: a marker set after a pill draws as a marker.
+        let both = rendered_size(cx, || {
+            Badge::new("NEEDS YOU", Color::Error)
+                .pill()
+                .marker()
+                .into_any_element()
+        });
+        let mut cx2 = TestAppContext::single();
+        let marker = rendered_size(&mut cx2, || {
+            Badge::new("NEEDS YOU", Color::Error)
+                .marker()
+                .into_any_element()
+        });
+        assert_eq!(both, marker);
     }
 
     #[gpui::test]

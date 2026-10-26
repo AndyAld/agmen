@@ -336,12 +336,11 @@ pub(crate) struct AgentInfo {
     pub(crate) cache_read: u64,
 }
 
-/// The status bar's counts.
+/// The status bar's counts. Task 13: the needs-you and alert counts are
+/// not stored; the chat derives them from its messages (mockup fix 34).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct StatusSummary {
-    pub(crate) needs_you: u32,
     pub(crate) online: u32,
-    pub(crate) alerts: u32,
     pub(crate) worktrees: u32,
     pub(crate) spend_today_usd: f64,
 }

@@ -13,15 +13,17 @@ use gpui::{
     RenderOnce, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
 };
 
+use super::alert_row;
 use super::change_card::ChangeCard;
 use super::chat_context::ChatContext;
 use super::components::{Avatar, Badge, ChangeHandler, Chip, Color, Label, LabelSize};
 use super::format::title_case;
+use super::needs_you::AlertLook;
 use super::ref_chip::RefEvent;
 use super::rich_text::RichText;
 use super::tokens::{
-    MENTION_BAR_WIDTH, MESSAGE_AVATAR_SIZE, REPLY_INDENT, SPACE_2, SPACE_3, SPACE_6, SPACE_8,
-    SPACE_10, TINT_MENTION, tint,
+    ALERT_BAR_WIDTH, MENTION_BAR_WIDTH, MESSAGE_AVATAR_SIZE, REPLY_INDENT, SPACE_2, SPACE_3,
+    SPACE_6, SPACE_8, SPACE_10, TINT_ALERT, TINT_MENTION, tint,
 };
 use crate::appearance::Appearance;
 use crate::backend::Action;
@@ -36,6 +38,8 @@ enum RowKind {
     Mention,
     /// A bookkeeping verb, as one dim line with no avatar or chips.
     Ledger,
+    /// An alert that needs me, or one I snoozed: red bar and tint (Task 13).
+    Alert,
 }
 
 /// Presence bookkeeping, which the chat hides until "Show ledger". Lease
@@ -202,6 +206,9 @@ pub(crate) struct MessageRow {
     context: Rc<ChatContext>,
     on_ref: Option<ChangeHandler<RefEvent>>,
     on_action: Option<ChangeHandler<Action>>,
+    // Task 13: an alert that needs me, or one I snoozed.
+    alert: Option<AlertLook>,
+    on_reply: Option<ChangeHandler<usize>>,
 }
 
 impl std::fmt::Debug for MessageRow {
@@ -222,7 +229,28 @@ impl MessageRow {
             context,
             on_ref: None,
             on_action: None,
+            alert: None,
+            on_reply: None,
         }
+    }
+
+    /// Draws the message as an alert that needs me, or one I snoozed
+    /// (`alert_row.rs`). Its buttons report through [`Self::on_action`] and
+    /// [`Self::on_reply`].
+    #[must_use]
+    pub(crate) const fn alert(mut self, look: AlertLook) -> Self {
+        self.alert = Some(look);
+        self
+    }
+
+    /// Called with the message's index when its Reply button is clicked.
+    #[must_use]
+    pub(crate) fn on_reply(
+        mut self,
+        handler: impl Fn(usize, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_reply = Some(Rc::new(handler));
+        self
     }
 
     /// Called when a reference chip in the body is clicked or ⌘-clicked.
@@ -368,6 +396,9 @@ impl MessageRow {
                 ),
             )
             .child(part("verb").child(Badge::new(verb, verb_color).code()))
+            .when(self.alert == Some(AlertLook::NeedsMe), |this| {
+                this.child(alert_row::needs_you_marker(id))
+            })
             .child(
                 part("time").child(
                     Label::new(self.context.clock(env.hub_at))
@@ -397,11 +428,16 @@ impl RenderOnce for MessageRow {
             return div().into_any_element();
         };
         let id = env.client.id.as_str().to_owned();
-        let kind = row_kind(env, &context);
+        let kind = if self.alert.is_some() {
+            RowKind::Alert
+        } else {
+            row_kind(env, &context)
+        };
         if kind == RowKind::Ledger {
             return self.ledger(env, &id);
         }
-        let warning = cx.global::<Appearance>().theme.warning;
+        let theme = &cx.global::<Appearance>().theme;
+        let (warning, error) = (theme.warning, theme.error);
         let who = sender(env, &context);
         let avatar = Self::avatar(env, &who, &id);
         let head = self.head(env, &who, &id);
@@ -421,6 +457,7 @@ impl RenderOnce for MessageRow {
             SPACE_10
         };
         let (row_sel, bar_sel) = (format!("{id}:row"), format!("{id}:mention-bar"));
+        let alert_bar_sel = format!("{id}:alert-bar");
         let inner = div()
             .flex_1()
             .min_w_0()
@@ -440,7 +477,15 @@ impl RenderOnce for MessageRow {
                     .gap(SPACE_3)
                     .child(head)
                     .child(body)
-                    .children(card),
+                    .children(card)
+                    .when(self.alert == Some(AlertLook::NeedsMe), |this| {
+                        this.child(alert_row::alert_actions(
+                            env,
+                            self.index,
+                            self.on_action.as_ref(),
+                            self.on_reply.as_ref(),
+                        ))
+                    }),
             );
         div()
             .debug_selector(|| row_sel)
@@ -454,6 +499,17 @@ impl RenderOnce for MessageRow {
                         .flex_none()
                         .bg(warning),
                 )
+            })
+            .when(kind == RowKind::Alert, |this| {
+                this.bg(tint(error, TINT_ALERT))
+                    .opacity(alert_row::row_opacity(self.alert))
+                    .child(
+                        div()
+                            .debug_selector(|| alert_bar_sel)
+                            .w(ALERT_BAR_WIDTH)
+                            .flex_none()
+                            .bg(error),
+                    )
             })
             .child(inner)
             .into_any_element()

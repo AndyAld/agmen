@@ -210,6 +210,40 @@ pub(crate) const SHADOW_ALPHA: f32 = 170. / 255.;
 pub(crate) const SHADOW_OFFSET_Y: Pixels = px(10.);
 pub(crate) const SHADOW_BLUR: Pixels = px(30.);
 
+// Task 13: needs you (the alert row, the banner and the toast).
+/// An urgent alert that needs me: its row's fill (error 0x1c, node 5951).
+pub(crate) const TINT_ALERT: f32 = 28. / 255.;
+/// The needs-you banner's fill (error 0x26, node 5704).
+pub(crate) const TINT_BANNER: f32 = 38. / 255.;
+/// The needs-you banner's rule and the toast's border (error 0x88).
+pub(crate) const TINT_ALERT_EDGE: f32 = 136. / 255.;
+/// The answered banner's fill (success 0x1f, node 6257).
+pub(crate) const TINT_ANSWERED: f32 = 31. / 255.;
+/// The answered banner's rule (success 0x66).
+pub(crate) const TINT_ANSWERED_EDGE: f32 = 102. / 255.;
+/// The bar on the left of an alert that needs me (node 5951).
+pub(crate) const ALERT_BAR_WIDTH: Pixels = px(3.);
+/// How strongly a snoozed alert's row shows (mockup fix 43: dimmed).
+pub(crate) const SNOOZED_OPACITY: f32 = 0.5;
+/// The needs-you banner and the answered banner, each with its rule (nodes
+/// 5704 and 6257). Fixed, so Zed's 11.25 px button text (a 21.5 px Jump to
+/// it) does not leave the rule on a half pixel.
+pub(crate) const NEEDS_YOU_BANNER_HEIGHT: Pixels = px(37.);
+pub(crate) const ANSWERED_BANNER_HEIGHT: Pixels = px(35.);
+/// The disc behind the banner's "!" and the toast's app mark (nodes 5705
+/// and 6006).
+pub(crate) const GLYPH_DISC: Pixels = px(18.);
+/// The in-app toast (node 6004).
+pub(crate) const TOAST_WIDTH: Pixels = px(360.);
+/// The toast's top edge in the window (node 6004 at y 150).
+pub(crate) const TOAST_TOP: Pixels = px(150.);
+/// The toast's corners (node 6004).
+pub(crate) const RADIUS_XL: Pixels = px(10.);
+/// The toast's shadow: 8 px down, a 24 px blur, black at 0xaa.
+pub(crate) const TOAST_SHADOW_OFFSET: Pixels = px(8.);
+pub(crate) const TOAST_SHADOW_BLUR: Pixels = px(24.);
+pub(crate) const TOAST_SHADOW_ALPHA: f32 = 170. / 255.;
+
 #[cfg(test)]
 mod tests {
     use super::*;

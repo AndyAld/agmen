@@ -7,11 +7,12 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _, Window, div,
 };
 
+use super::chat::AlertCounts;
 use super::components::{Badge, Button, ButtonStyle, Color, IconButton, KeyHint, Label, LabelSize};
-use super::format::{counted, listener_label, spend_today};
+use super::format::{counted, counted_capped, listener_label, spend_today};
 use super::left_dock::PanelButtons;
 use super::tokens::{BORDER_WIDTH, SPACE_5, SPACE_10, SPACE_14, STATUS_BAR_HEIGHT};
-use super::workspace::ToggleRightDock;
+use super::workspace::{OpenAlerts, ToggleRightDock};
 use crate::backend::{Snapshot, StatusSummary};
 use crate::icons::UiIcon;
 use crate::keymap::{OpenSettings, ToggleCommandPalette};
@@ -26,6 +27,8 @@ pub(crate) struct StatusBar {
     panels: PanelButtons,
     /// Task 18: while the palette is open its hint does nothing.
     palette_open: bool,
+    /// Task 13: the chat's counts, not stored numbers (mockup fix 34).
+    alerts: AlertCounts,
 }
 
 impl StatusBar {
@@ -37,7 +40,16 @@ impl StatusBar {
             listener_toggle,
             panels: PanelButtons::default(),
             palette_open: false,
+            alerts: AlertCounts::default(),
         }
+    }
+
+    /// The red needs-you pill and the alert count, from the chat's alert
+    /// state (Task 13).
+    #[must_use]
+    pub(crate) const fn alert_counts(mut self, counts: AlertCounts) -> Self {
+        self.alerts = counts;
+        self
     }
 
     /// The files, git and search buttons and what they show as active.
@@ -110,12 +122,15 @@ impl RenderOnce for StatusBar {
             .gap(SPACE_14)
             .px(SPACE_10)
             .child(self.panels)
-            .when(s.needs_you > 0, |this| {
+            .when(self.alerts.needs_you > 0, |this| {
                 this.child(
                     div().debug_selector(|| "needs-you-pill".into()).child(
-                        Badge::new(counted(s.needs_you, "needs you", "need you"), Color::Error)
-                            .solid()
-                            .leading("!"),
+                        Badge::new(
+                            counted_capped(self.alerts.needs_you, "needs you", "need you"),
+                            Color::Error,
+                        )
+                        .solid()
+                        .leading("!"),
                     ),
                 )
             })
@@ -124,11 +139,22 @@ impl RenderOnce for StatusBar {
                 Color::Success,
                 counted(s.online, "online", "online"),
             ))
-            .child(item(
-                "⚠",
-                Color::Warning,
-                counted(s.alerts, "alert", "alerts"),
-            ))
+            // Task 13: the count opens the chat at the alert (node 456).
+            .child(
+                div()
+                    .id("status-alerts")
+                    .debug_selector(|| "status-alerts".into())
+                    .when(self.alerts.alerts > 0, |this| {
+                        this.cursor_pointer().on_click(|_, window, cx| {
+                            window.dispatch_action(Box::new(OpenAlerts), cx);
+                        })
+                    })
+                    .child(item(
+                        "⚠",
+                        Color::Warning,
+                        counted_capped(self.alerts.alerts, "alert", "alerts"),
+                    )),
+            )
             .child(item(
                 "⎇",
                 Color::Placeholder,

@@ -54,6 +54,10 @@ pub(crate) use tab::Tab;
 pub(crate) use tool_card::ToolCard;
 pub(crate) use {dropdown::Dropdown, segmented::Segmented, stepper::Stepper, toggle::Toggle};
 
+// Task 13: the needs-you banner's and the toast's glyph disc.
+mod glyph_disc;
+pub(crate) use glyph_disc::GlyphDisc;
+
 /// What a control reports when its value changes: the new value. An `Rc`, not
 /// a `Box`, because segments, menu rows and stepper buttons share one handler.
 pub(crate) type ChangeHandler<T> = Rc<dyn Fn(T, &mut Window, &mut App)>;

@@ -32,6 +32,10 @@ mod status;
 // Task 18: the command palette.
 #[path = "workspace_palette.rs"]
 mod palette;
+// Task 13: the toast over the window and the alert count's action.
+#[path = "workspace_alerts.rs"]
+mod alert_wiring;
+pub(crate) use alert_wiring::OpenAlerts;
 
 // Task 18: the actions moved to src/keymap.rs with their bindings.
 pub(crate) use crate::keymap::{Quit, ToggleLeftDock, ToggleRightDock};
@@ -57,6 +61,9 @@ pub(crate) struct Workspace {
     /// Task 18: the command palette, while open.
     palette: palette::PaletteState,
     _agents_events: Subscription,
+    // Task 13: the status bar's counts and the toast come from the chat.
+    chat: Entity<ChatView>,
+    _chat_changes: Subscription,
 }
 
 impl Workspace {
@@ -71,8 +78,9 @@ impl Workspace {
             AgentsPanelEvent::Selected(id) => this.select_agent(id, cx),
         });
         let chat = cx.new(|cx| ChatView::new(Snapshot::clone(&snapshot), window, cx));
+        let chat_changes = cx.observe(&chat, |_, _, cx| cx.notify());
         let tabs = starting_tabs(&snapshot);
-        let pane_group = cx.new(|cx| PaneGroup::new(&snapshot, Some(chat), tabs, cx));
+        let pane_group = cx.new(|cx| PaneGroup::new(&snapshot, Some(chat.clone()), tabs, cx));
         let left = LeftDockState::new(&snapshot, cx);
         Self {
             focus_handle: cx.focus_handle(),
@@ -85,6 +93,8 @@ impl Workspace {
             left,
             palette: palette::PaletteState::default(),
             _agents_events: agents_events,
+            chat,
+            _chat_changes: chat_changes,
         }
     }
 
@@ -247,7 +257,7 @@ impl Render for Workspace {
         }
 
         // Task 18: the palette's actions.
-        Self::palette_actions(Self::dock_actions(div(), cx), cx)
+        Self::alert_actions(Self::palette_actions(Self::dock_actions(div(), cx), cx), cx)
             .track_focus(&self.focus_handle)
             .key_context(crate::keymap::WORKSPACE_CONTEXT)
             .on_action(cx.listener(|this, _: &ToggleLeftDock, _, cx| {
@@ -267,10 +277,12 @@ impl Render for Workspace {
             .child(
                 StatusBar::new(&self.snapshot, self.shows_listener_toggle(cx))
                     .panels(self.panel_buttons(cx))
+                    .alert_counts(self.chat.read(cx).alert_counts())
                     .when_some(self.status_context(cx), StatusBar::context)
                     .palette_open(self.is_palette_open()),
             )
             .children(palette)
+            .children(self.alert_toast(cx))
     }
 }
 

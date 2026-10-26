@@ -58,10 +58,7 @@ fn base(project: &str) -> Result<Snapshot, BackendError> {
         listener,
         agents: BTreeMap::from([(fx1.id.clone(), fx1)]),
         status: StatusSummary {
-            needs_you: 0,
             online: 9,
-            // Mockup fix 34: the count is the ALERTs in the chat that have no answer.
-            alerts: 1,
             // Mockup fix 29: five worktrees, as the Git panel lists.
             worktrees: 5,
             spend_today_usd: spend,
@@ -97,14 +94,11 @@ impl FixtureBackend {
                 let mut msgs = chat_messages();
                 let alert = msgs.len();
                 msgs.push(urgent_alert());
-                let answered = screen == Screen::NeedsYouAnswered;
-                if answered {
+                // Task 13: the status bar counts these from the messages.
+                if screen == Screen::NeedsYouAnswered {
                     msgs.push(alert_answer(alert));
                 }
-                let mut s = with_messages("pr-3331", msgs)?;
-                s.status.alerts = if answered { 1 } else { 2 };
-                s.status.needs_you = u32::from(!answered);
-                s
+                with_messages("pr-3331", msgs)?
             }
             Screen::SettingsFromChat | Screen::SettingsApplied => {
                 let mut msgs = chat_messages();
@@ -168,9 +162,7 @@ impl FixtureBackend {
                 s.plan = Some(plan(ready, running)?);
                 // Mockup fix 35: the status bar counts this project, not pr-3331.
                 s.status = StatusSummary {
-                    needs_you: 0,
                     online: if running { 11 } else { 4 },
-                    alerts: 0,
                     worktrees: if running { 7 } else { 0 },
                     spend_today_usd: s.status.spend_today_usd,
                 };
@@ -271,7 +263,8 @@ impl Backend for FixtureBackend {
                 "to": draft.to,
                 "body": draft.body,
                 "sent_at": "2026-10-25T22:00:00Z",
-                "verb": "FYI",
+                // Task 13: a reply (an alert's Reply) answers what it replies to.
+                "verb": if draft.reply_to.is_some() { "ANSWER" } else { "FYI" },
                 "data": {},
                 "stream": "feed",
                 "seq": seq,
@@ -304,12 +297,30 @@ impl Backend for FixtureBackend {
                     ChangeState::Undone
                 }
             }),
+            // Task 13: an alert's action is my answer to it, sent to its sender.
+            Action::AnswerAlert { alert, choice } => {
+                let sender = self
+                    .state
+                    .borrow()
+                    .messages
+                    .iter()
+                    .find(|m| m.client.id == alert)
+                    .map(|m| m.from.clone())
+                    .ok_or(BackendError::Unsupported(
+                        "answering an alert the chat lacks",
+                    ))?;
+                self.send(Draft {
+                    to: vec![sender],
+                    body: choice,
+                    reply_to: Some(alert),
+                })
+            }
             // shortcut: the fixture records nothing for these; the views that send
-            // them (Tasks 13 to 19) add fixture behavior as they need it.
+            // them (Tasks 14 to 19) add fixture behavior as they need it. Snoozing
+            // stays in the person's own view (Task 13).
             Action::TakeOver(_)
             | Action::HandBack(_)
             | Action::SwitchAgent { .. }
-            | Action::AnswerAlert { .. }
             | Action::SnoozeAlert(_)
             | Action::ApproveSpec { .. }
             | Action::ApproveShare

@@ -4,20 +4,23 @@
 
 use std::rc::Rc;
 
-use agmen_proto::IdentityId;
+use agmen_proto::{IdentityId, MessageId};
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
     InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
     StatefulInteractiveElement as _, Styled as _, Subscription, Window, div,
 };
 
-use super::components::{Chip, Color, Label, LabelSize};
+use super::components::{Chip, Color, IconButton, IconSize, Label, LabelSize};
 use super::text_input::{TextInput, TextInputEvent};
 use super::tokens::{
     BORDER_WIDTH, RADIUS_INPUT, SPACE_8, SPACE_10, SPACE_12, SPACE_14, TEXT_DEFAULT,
 };
 use crate::appearance::Appearance;
 use crate::backend::{BackendError, Draft, Snapshot};
+use crate::icons::UiIcon;
+use crate::keymap::CancelReply;
 
 /// The input's placeholder (node 384). The ⏎ hint after the input already
 /// says how to send, so the placeholder does not repeat it.
@@ -66,6 +69,8 @@ pub(crate) struct Composer {
     agents: Vec<Target>,
     /// The model chip's label; `None` draws no chip.
     model: Option<SharedString>,
+    /// The message the next send replies to, and its sender (Task 13).
+    reply: Option<(MessageId, Target)>,
     on_send: SendHandler,
     _subscriptions: [Subscription; 2],
 }
@@ -163,6 +168,7 @@ impl Composer {
             recipient,
             agents,
             model,
+            reply: None,
             on_send,
             _subscriptions: [submits, edits],
         }
@@ -175,14 +181,15 @@ impl Composer {
     }
 
     /// Unknown handles stay plain text, and the message goes to the
-    /// recipient.
+    /// recipient, or to the sender of the message it replies to.
     fn target_for(&self, text: &str) -> &Target {
         mention_handle(text)
             .and_then(|handle| self.agents.iter().find(|agent| agent.handle == handle))
+            .or(self.reply.as_ref().map(|(_, to)| to))
             .unwrap_or(&self.recipient)
     }
 
-    fn send(&self, body: &str, window: &mut Window, cx: &mut Context<Self>) {
+    fn send(&mut self, body: &str, window: &mut Window, cx: &mut Context<Self>) {
         // Blank text is not a message; the input keeps it, as if Enter had
         // not been pressed.
         if body.trim().is_empty() {
@@ -193,14 +200,58 @@ impl Composer {
         let draft = Draft {
             to: vec![self.target_for(body).id.clone()],
             body: body.to_owned(),
-            // shortcut: no reply target yet; Task 13's Reply button sets one.
-            reply_to: None,
+            reply_to: self.reply.as_ref().map(|(message, _)| message.clone()),
         };
         // The input cleared itself on Enter; a refused draft is not lost.
         // The caller shows why it was refused.
         if (self.on_send)(draft, window, cx).is_err() {
             self.input
                 .update(cx, |input, cx| input.set_text(body, window, cx));
+        } else {
+            self.reply = None;
+            cx.notify();
+        }
+    }
+}
+
+// Task 13: an alert's Reply.
+impl Composer {
+    /// Starts a reply to `message`, addressed to `to`, and focuses the
+    /// input. The next message sent replies to it; an `@mention` still
+    /// picks another agent.
+    pub(crate) fn reply(
+        &mut self,
+        to: Target,
+        message: MessageId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.reply = Some((message, to));
+        self.input.focus_handle(cx).focus(window, cx);
+        cx.notify();
+    }
+
+    /// Ends the reply: the next message goes to the recipient again. Escape
+    /// and the "reply to" chip's close mark call it.
+    pub(crate) fn cancel_reply(&mut self, cx: &mut Context<Self>) {
+        if self.reply.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Ends the reply unless `open` says its message still waits for an
+    /// answer, so a reply to an alert someone else answered is not sent.
+    pub(crate) fn drop_reply_unless(
+        &mut self,
+        open: impl Fn(&MessageId) -> bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .reply
+            .as_ref()
+            .is_some_and(|(message, _)| !open(message))
+        {
+            self.cancel_reply(cx);
         }
     }
 }
@@ -214,6 +265,8 @@ impl Focusable for Composer {
 impl Render for Composer {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = &cx.global::<Appearance>().theme;
+        // Task 13: a pending reply says so and offers a way out.
+        let replying = self.reply.is_some();
         let to = div()
             .debug_selector(|| "composer:to".into())
             .flex_none()
@@ -223,11 +276,22 @@ impl Render for Composer {
                     .code()
                     .color(Color::Accent)
                     .leading(
-                        Label::new("to")
+                        Label::new(if replying { "reply to" } else { "to" })
                             .size(LabelSize::Small)
                             .color(Color::Placeholder),
                     )
-                    .trailing(caret()),
+                    .map(|chip| {
+                        if replying {
+                            chip.trailing(
+                                IconButton::new("composer:cancel-reply", UiIcon::Close)
+                                    .size(IconSize::Small)
+                                    .color(Color::Placeholder)
+                                    .on_click(cx.listener(|this, _, _, cx| this.cancel_reply(cx))),
+                            )
+                        } else {
+                            chip.trailing(caret())
+                        }
+                    }),
             );
         let model = self.model.clone().map(|model| {
             div()
@@ -249,6 +313,15 @@ impl Render for Composer {
         div()
             .w_full()
             .flex_none()
+            // Task 13: Escape ends a reply; src/keymap.rs binds it.
+            .key_context(crate::keymap::COMPOSER_CONTEXT)
+            .on_action(cx.listener(|this, _: &CancelReply, _, cx| {
+                if this.reply.is_some() {
+                    this.cancel_reply(cx);
+                } else {
+                    cx.propagate();
+                }
+            }))
             .pt(SPACE_8)
             .px(SPACE_14)
             .pb(SPACE_12)

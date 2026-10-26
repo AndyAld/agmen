@@ -29,6 +29,7 @@ pub(crate) struct Label {
     weight: Option<FontWeight>,
     code: bool,
     wrap: bool,
+    truncate: bool,
     strikethrough: bool,
     underline: bool,
 }
@@ -43,6 +44,7 @@ impl Label {
             weight: None,
             code: false,
             wrap: false,
+            truncate: false,
             strikethrough: false,
             underline: false,
         }
@@ -78,6 +80,14 @@ impl Label {
     #[must_use]
     pub(crate) const fn wrap(mut self) -> Self {
         self.wrap = true;
+        self
+    }
+
+    /// Keeps the text on one line, shrinking to the space left in its row
+    /// and ending in an ellipsis when it does not fit.
+    #[must_use]
+    pub(crate) const fn truncate(mut self) -> Self {
+        self.truncate = true;
         self
     }
 
@@ -119,6 +129,8 @@ impl RenderOnce for Label {
             .map(|this| {
                 if self.wrap {
                     this.flex_1().min_w_0()
+                } else if self.truncate {
+                    this.flex_1().min_w_0().truncate()
                 } else {
                     this.flex_none().whitespace_nowrap()
                 }
@@ -169,6 +181,32 @@ mod tests {
                 .into_any_element()
         });
         assert_eq!(struck, plain);
+    }
+
+    #[gpui::test]
+    fn truncated_label_stays_on_one_line_in_its_row(cx: &mut TestAppContext) {
+        use gpui::InteractiveElement as _;
+        let long = "adam/coord: CI on main is red after #10 merged; the release tag is blocked.";
+        let one_line = rendered_size(cx, || Label::new("adam").into_any_element());
+        let mut cx2 = TestAppContext::single();
+        let cx2 = crate::ui::test_support::draw(&mut cx2, move || {
+            div()
+                .debug_selector(|| "row".into())
+                .w(gpui::px(100.))
+                .flex()
+                .child(Label::new(long).truncate())
+                .child(
+                    div()
+                        .debug_selector(|| "after".into())
+                        .w(gpui::px(1.))
+                        .h(gpui::px(1.)),
+                )
+                .into_any_element()
+        });
+        let row = cx2.debug_bounds("row").unwrap();
+        let after = cx2.debug_bounds("after").unwrap();
+        assert!(after.right() <= row.right(), "{after:?} past {row:?}");
+        assert_eq!(row.size.height, one_line.height);
     }
 
     #[test]

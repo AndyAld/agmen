@@ -65,6 +65,16 @@ actions!(
     ]
 );
 
+// Task 13: Escape ends a reply in the composer.
+actions!(
+    composer,
+    [
+        /// Ends the composer's reply, so the next message goes to the
+        /// recipient again.
+        CancelReply,
+    ]
+);
+
 actions!(
     menu,
     [
@@ -99,6 +109,8 @@ pub(crate) const WORKSPACE_CONTEXT: &str = "Workspace";
 pub(crate) const TEXT_INPUT_CONTEXT: &str = "TextInput";
 /// The key context the command palette sets.
 pub(crate) const PALETTE_CONTEXT: &str = "CommandPalette";
+/// The key context the chat's composer sets.
+pub(crate) const COMPOSER_CONTEXT: &str = "Composer";
 /// The workspace outside any text input, for keys that type a character on
 /// a Mac layout. gpui on macOS runs a matched binding before text input, so
 /// a binding there would keep the character from ever being typed.
@@ -245,6 +257,8 @@ pub(crate) fn table() -> Vec<Binding> {
         bind("down", SelectNext, input),
         bind("enter", Confirm, input),
         bind("escape", Cancel, Some(PALETTE_CONTEXT)),
+        // Task 13: the composer's reply; its input binds no escape.
+        bind("escape", CancelReply, Some(COMPOSER_CONTEXT)),
     ]);
     table
 }
@@ -274,6 +288,7 @@ pub(crate) fn commands() -> Vec<Command> {
         window("pane: deploy search", Box::new(OpenSearch)),
         window("pane: split right", Box::new(SplitRight)),
         window("pane: close active item", Box::new(CloseActiveTab)),
+        window("composer: cancel reply", Box::new(CancelReply)),
     ];
     let panes = [
         "workspace: activate pane 1",
@@ -373,9 +388,16 @@ pub(crate) fn hint(table: &[Binding], action: &dyn Action) -> Option<String> {
 #[cfg(test)]
 #[must_use]
 pub(crate) fn text_input_bindings() -> Vec<KeyBinding> {
+    bindings_in(TEXT_INPUT_CONTEXT)
+}
+
+/// The bindings for one key context, for tests of a view without the rest.
+#[cfg(test)]
+#[must_use]
+pub(crate) fn bindings_in(context: &str) -> Vec<KeyBinding> {
     table()
         .into_iter()
-        .filter(|b| b.context == Some(TEXT_INPUT_CONTEXT))
+        .filter(|b| b.context == Some(context))
         .map(|b| b.key_binding)
         .collect()
 }

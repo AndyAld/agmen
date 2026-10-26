@@ -75,6 +75,20 @@ pub(super) struct WorkspaceState {
     right: Option<RightDock>,
     /// Task 18: the query the command palette opens on, when open.
     palette: Option<&'static str>,
+    /// Task 13: the alert moment the frame shows.
+    alert: AlertMoment,
+}
+
+/// Task 13: what a screen shows of an alert beyond its history, silently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AlertMoment {
+    None,
+    /// The oldest alert that needs me as just arrived: its toast and
+    /// "chime played" (the needs-you frame).
+    Arrives,
+    /// The last answered alert as just answered: the Answered banner (the
+    /// needs-you-answered frame).
+    Answered,
 }
 
 impl WorkspaceState {
@@ -84,16 +98,15 @@ impl WorkspaceState {
         let (left, center, right) = match screen {
             Screen::Chat
             | Screen::Ask
+            | Screen::NeedsYou
             | Screen::NeedsYouAnswered
             | Screen::SettingsFromChat
             | Screen::SettingsApplied => {
                 (LeftDock::Agents, CenterTab::Chat, Some(RightDock::Listener))
             }
-            // shortcut: the needs-you notification and the model picker are
-            // not built (Task 15); they draw over this.
-            Screen::NeedsYou | Screen::ModelPicker => {
-                (LeftDock::Agents, CenterTab::Chat, Some(RightDock::Listener))
-            }
+            // shortcut: the model picker is not built (Task 15); it draws
+            // over this.
+            Screen::ModelPicker => (LeftDock::Agents, CenterTab::Chat, Some(RightDock::Listener)),
             // Task 18: the palette opens over the chat with "spawn" typed.
             Screen::Palette => {
                 return Self {
@@ -101,6 +114,7 @@ impl WorkspaceState {
                     center: CenterTab::Chat,
                     right: Some(RightDock::Listener),
                     palette: Some("spawn"),
+                    alert: AlertMoment::None,
                 };
             }
             // shortcut: take-over's terminal block, the switch menu and the
@@ -127,6 +141,11 @@ impl WorkspaceState {
             center,
             right,
             palette: None,
+            alert: match screen {
+                Screen::NeedsYou => AlertMoment::Arrives,
+                Screen::NeedsYouAnswered => AlertMoment::Answered,
+                _ => AlertMoment::None,
+            },
         }
     }
 }
@@ -144,6 +163,11 @@ impl Workspace {
         }
         if let Some(query) = state.palette {
             self.open_palette_after_draw(query);
+        }
+        match state.alert {
+            AlertMoment::None => {}
+            AlertMoment::Arrives => self.chat.update(cx, |chat, cx| chat.show_arrival(cx)),
+            AlertMoment::Answered => self.chat.update(cx, |chat, cx| chat.show_answered(cx)),
         }
         cx.notify();
     }

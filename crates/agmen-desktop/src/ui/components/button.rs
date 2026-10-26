@@ -3,13 +3,13 @@
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, ClickEvent, ElementId, FontWeight, InteractiveElement as _, IntoElement,
+    AnyElement, App, ClickEvent, ElementId, FontWeight, Hsla, InteractiveElement as _, IntoElement,
     ParentElement as _, RenderOnce, SharedString, StatefulInteractiveElement as _, Styled as _,
     Window, div,
 };
 
 use super::{ClickHandler, Color, Label, LabelSize};
-use crate::appearance::Appearance;
+use crate::appearance::{Appearance, Theme};
 use crate::ui::tokens::{
     BORDER_WIDTH, BUTTON_HOVER_OPACITY, BUTTON_TINT, RADIUS_MD, RADIUS_SM, SPACE_1, SPACE_3,
     SPACE_5, SPACE_7, SPACE_9, SPACE_10, TINT_SELECTED, tint,
@@ -34,6 +34,41 @@ pub(crate) enum ButtonStyle {
     Secondary,
     /// Surface fill, as the breadcrumb's "Show ledger" (node 135).
     Subtle,
+    /// Error fill with semibold text, as an alert's Reply and the banner's
+    /// Jump to it (nodes 5996 and 5712).
+    Danger,
+    /// Plain with a 1 px border, as an alert's own actions (nodes 5998 to
+    /// 6002).
+    Bordered,
+}
+
+/// What changes under the pointer.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Hover {
+    /// The fill turns to this color.
+    Fill(Hsla),
+    /// The fill stays and the border turns to this color.
+    Border(Hsla),
+    /// The whole button fades.
+    Fade,
+}
+
+/// How `style` hovers in `theme`.
+fn hover(style: ButtonStyle, theme: &Theme) -> Hover {
+    match style {
+        // An accent or error fill, or a card whose fill is the hover color:
+        // fading shows on any of them.
+        ButtonStyle::Primary | ButtonStyle::Secondary | ButtonStyle::Danger => Hover::Fade,
+        ButtonStyle::Outlined
+        | ButtonStyle::Filled
+        | ButtonStyle::Tinted
+        | ButtonStyle::Plain
+        | ButtonStyle::Subtle => Hover::Fill(theme.element_hover),
+        // An alert's own actions: Andy's theme hovers in the surface's own
+        // color, so the border lightens instead (Zed's outlined buttons
+        // show their state on the border too).
+        ButtonStyle::Bordered => Hover::Border(theme.text_placeholder),
+    }
 }
 
 #[derive(IntoElement)]
@@ -105,7 +140,7 @@ impl Button {
 impl RenderOnce for Button {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = &cx.global::<Appearance>().theme;
-        let hover = theme.element_hover;
+        let hover = hover(self.style, theme);
         let selector = self.id.to_string();
         let base = div()
             .id(self.id)
@@ -114,7 +149,7 @@ impl RenderOnce for Button {
             .flex_none()
             .items_center()
             .gap(SPACE_5);
-        let primary = self.style == ButtonStyle::Primary;
+        let primary = matches!(self.style, ButtonStyle::Primary | ButtonStyle::Danger);
         let selected = self.selected && !primary;
         let styled = match self.style {
             ButtonStyle::Outlined => base
@@ -123,15 +158,13 @@ impl RenderOnce for Button {
                 .border_color(theme.border)
                 .rounded(RADIUS_MD)
                 .py(SPACE_5)
-                .px(SPACE_10)
-                .hover(move |style| style.bg(hover)),
+                .px(SPACE_10),
             ButtonStyle::Filled => base
                 .bg(theme.element_selected)
                 .rounded(RADIUS_SM)
                 .py(SPACE_1)
-                .px(SPACE_7)
-                .hover(move |style| style.bg(hover)),
-            ButtonStyle::Tinted | ButtonStyle::Plain => base
+                .px(SPACE_7),
+            ButtonStyle::Tinted | ButtonStyle::Plain | ButtonStyle::Bordered => base
                 .bg(if self.style == ButtonStyle::Tinted {
                     theme.text_accent.opacity(BUTTON_TINT)
                 } else {
@@ -140,7 +173,19 @@ impl RenderOnce for Button {
                 .rounded(RADIUS_MD)
                 .py(SPACE_3)
                 .px(SPACE_9)
-                .hover(move |style| style.bg(hover)),
+                .when(self.style == ButtonStyle::Bordered, |this| {
+                    this.border(BORDER_WIDTH).border_color(theme.border)
+                }),
+            // An alert's Reply sits beside bordered actions, so its border
+            // in its own fill keeps the row one height; the error fill is the
+            // alert's tint, so hover fades it as Primary does.
+            ButtonStyle::Danger => base
+                .bg(theme.error)
+                .border(BORDER_WIDTH)
+                .border_color(theme.error)
+                .rounded(RADIUS_MD)
+                .py(SPACE_3)
+                .px(SPACE_9),
             // These sit on a card whose fill is the hover color, so hover
             // fades the button instead of filling it.
             ButtonStyle::Primary | ButtonStyle::Secondary => base
@@ -151,15 +196,18 @@ impl RenderOnce for Button {
                 })
                 .rounded(RADIUS_MD)
                 .py(SPACE_3)
-                .px(SPACE_9)
-                .hover(|style| style.opacity(BUTTON_HOVER_OPACITY)),
+                .px(SPACE_9),
             ButtonStyle::Subtle => base
                 .bg(theme.elevated_surface)
                 .rounded(RADIUS_MD)
                 .py(SPACE_3)
-                .px(SPACE_9)
-                .hover(move |style| style.bg(hover)),
+                .px(SPACE_9),
         };
+        let styled = styled.hover(move |style| match hover {
+            Hover::Fill(fill) => style.bg(fill),
+            Hover::Border(border) => style.border_color(border),
+            Hover::Fade => style.opacity(BUTTON_HOVER_OPACITY),
+        });
         let styled = if selected {
             styled.bg(tint(theme.text_accent, TINT_SELECTED))
         } else {
@@ -172,14 +220,17 @@ impl RenderOnce for Button {
             })
             .children(self.leading)
             .child(match self.style {
-                ButtonStyle::Primary => label.weight(FontWeight::SEMIBOLD).color(Color::Background),
+                ButtonStyle::Primary | ButtonStyle::Danger => {
+                    label.weight(FontWeight::SEMIBOLD).color(Color::Background)
+                }
                 ButtonStyle::Tinted => label.color(Color::Accent),
                 _ if selected => label.color(Color::Accent),
                 ButtonStyle::Outlined
                 | ButtonStyle::Filled
                 | ButtonStyle::Plain
                 | ButtonStyle::Secondary
-                | ButtonStyle::Subtle => label.color(Color::Default),
+                | ButtonStyle::Subtle
+                | ButtonStyle::Bordered => label.color(Color::Default),
             })
     }
 }
@@ -238,6 +289,36 @@ mod tests {
                 .into_any_element()
         });
         assert_eq!(off, on);
+    }
+
+    #[gpui::test]
+    fn alert_buttons_share_one_height(cx: &mut TestAppContext) {
+        // Nodes 5996 to 6002: Reply and the alert's actions sit in one 22 px
+        // row; the actions are Plain plus a 1 px border.
+        let make =
+            |style: ButtonStyle| move || Button::new("b", "Reply").style(style).into_any_element();
+        let danger = rendered_size(cx, make(ButtonStyle::Danger));
+        let mut cx2 = TestAppContext::single();
+        let bordered = rendered_size(&mut cx2, make(ButtonStyle::Bordered));
+        let mut cx3 = TestAppContext::single();
+        let plain = rendered_size(&mut cx3, make(ButtonStyle::Plain));
+        assert_eq!(bordered.height - plain.height, px(2.));
+        assert_eq!(bordered.width - plain.width, px(2.));
+        assert_eq!(danger, bordered);
+    }
+
+    #[test]
+    fn bordered_hover_shows_where_the_hover_fill_matches_the_surface() {
+        // Gruvbox Material Dark Hard: element.hover and the elevated surface
+        // are both #282828 (reference sheet A4), so a fill change is unseen.
+        let mut theme = Appearance::builtin().theme;
+        theme.element_hover = theme.elevated_surface;
+        let shown = match hover(ButtonStyle::Bordered, &theme) {
+            Hover::Fill(fill) => fill != theme.elevated_surface,
+            Hover::Border(border) => border != theme.border,
+            Hover::Fade => true,
+        };
+        assert!(shown, "{:?}", hover(ButtonStyle::Bordered, &theme));
     }
 
     #[gpui::test]

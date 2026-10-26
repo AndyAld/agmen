@@ -25,6 +25,8 @@ enum ChipShape {
     Compact,
     /// A chip in a message's head row (node 300): no fill of its own, 1 by 7.
     Inline,
+    /// A note in a banner (node 5709): selected fill, 1 by 7, a 4 px gap.
+    Note,
     /// A reference in message text (`rich_body`): no fill of its own, 4 px
     /// at the sides only, a small radius.
     Reference,
@@ -84,6 +86,14 @@ impl Chip {
     #[must_use]
     pub(crate) const fn compact(mut self) -> Self {
         self.shape = ChipShape::Compact;
+        self
+    }
+
+    /// A note in a banner, as "♪ chime played" (node 5709): a selected
+    /// fill, 1 by 7 padding and a 4 px gap.
+    #[must_use]
+    pub(crate) const fn note(mut self) -> Self {
+        self.shape = ChipShape::Note;
         self
     }
 
@@ -211,12 +221,13 @@ impl RenderOnce for Chip {
             ChipShape::Default => (Some(SPACE_3), SPACE_8, RADIUS_MD, SPACE_6),
             ChipShape::Compact => (Some(SPACE_2), SPACE_7, RADIUS_SM, SPACE_5),
             ChipShape::Inline => (Some(SPACE_1), SPACE_7, RADIUS_SM, SPACE_5),
+            ChipShape::Note => (Some(SPACE_1), SPACE_7, RADIUS_SM, SPACE_4),
             ChipShape::Reference => (None, SPACE_4, RADIUS_REF, SPACE_4),
         };
         let fill = match (&self.tint, self.shape) {
             (Some(color), _) => Some(tint(color.hsla(theme), TINT_FILL)),
             (None, ChipShape::Default) => Some(theme.elevated_surface),
-            (None, ChipShape::Compact) => Some(theme.element_selected),
+            (None, ChipShape::Compact | ChipShape::Note) => Some(theme.element_selected),
             (None, ChipShape::Inline | ChipShape::Reference) => None,
         };
         div()
@@ -372,6 +383,27 @@ mod tests {
         });
         assert_eq!(chip.width - text.width, px(16.));
         assert_eq!(chip.height - text.height, px(4.));
+    }
+
+    #[gpui::test]
+    fn note_chip_pads_seven_by_one_with_a_four_px_gap(cx: &mut TestAppContext) {
+        // Node 5709, "♪ chime played": 93 by 15, padding [1, 7], gap 4.
+        let chip = rendered_size(cx, || {
+            Chip::new("chime played")
+                .note()
+                .leading(Label::new("♪").size(LabelSize::Small))
+                .into_any_element()
+        });
+        let mut cx2 = TestAppContext::single();
+        let text = rendered_size(&mut cx2, || {
+            div()
+                .flex()
+                .child(Label::new("♪").size(LabelSize::Small))
+                .child(Label::new("chime played").size(LabelSize::Small))
+                .into_any_element()
+        });
+        assert_eq!(chip.width - text.width, px(14.) + SPACE_4);
+        assert_eq!(chip.height - text.height, px(2.));
     }
 
     #[gpui::test]

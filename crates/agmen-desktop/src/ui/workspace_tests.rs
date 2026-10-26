@@ -119,10 +119,13 @@ fn hide_button_closes_left_dock(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn needs_you_pill_only_above_zero(cx: &mut TestAppContext) {
+    // Task 13: the pill follows the chat's alerts, not a stored number.
+    use crate::backend::{Backend as _, FixtureBackend, Screen};
     init(cx);
     let (_, cx) = cx.add_window_view(|window, cx| {
-        let mut snapshot = chat_snapshot();
-        snapshot.status.needs_you = 1;
+        let snapshot = FixtureBackend::for_screen(Screen::NeedsYou)
+            .unwrap()
+            .snapshot();
         Workspace::new(snapshot, window, cx)
     });
     redraw(cx);
@@ -271,11 +274,14 @@ fn show_ledger_button_reveals_presence_lines(cx: &mut TestAppContext) {
 fn chat_tab_badge_matches_needs_you(cx: &mut TestAppContext) {
     use crate::backend::{Backend as _, FixtureBackend, Screen};
     init(cx);
-    for screen in [Screen::Chat, Screen::NeedsYou, Screen::NeedsYouAnswered] {
+    for (screen, needs_you) in [
+        (Screen::Chat, 0),
+        (Screen::NeedsYou, 1),
+        (Screen::NeedsYouAnswered, 0),
+    ] {
         let mut app = TestAppContext::single();
         init(&mut app);
         let snapshot = FixtureBackend::for_screen(screen).unwrap().snapshot();
-        let needs_you = snapshot.status.needs_you as usize;
         let (workspace, app) =
             app.add_window_view(|window, cx| Workspace::new(snapshot, window, cx));
         redraw(app);
