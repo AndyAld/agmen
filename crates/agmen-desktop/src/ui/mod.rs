@@ -14,6 +14,8 @@ mod diff_view;
 mod dock;
 mod format;
 mod git_panel;
+// agmen-c7 fix-hosting: the file icons a workspace's first frame draws.
+mod icon_preload;
 mod keys;
 mod left_dock;
 mod listener_panel;

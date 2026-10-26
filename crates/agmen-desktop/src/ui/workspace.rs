@@ -1,10 +1,11 @@
 //! The window's root view: title bar, docks, center and status bar.
 
+use std::rc::Rc;
+
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, SharedString, Styled as _, Subscription, Window,
-    actions, div,
+    AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, Styled as _, Subscription, Window, actions, div,
 };
 
 use super::agents_panel::{AgentsPanel, AgentsPanelEvent};
@@ -25,13 +26,16 @@ mod dock_wiring;
 use dock_wiring::LeftDockState;
 #[path = "workspace_screen.rs"]
 mod screen_state;
+// agmen-c7 fix-hosting: the status bar's context text and Listener toggle.
+#[path = "workspace_status.rs"]
+mod status;
 
 actions!(workspace, [ToggleLeftDock, ToggleRightDock, Quit]);
 
 /// The window's root view.
 pub(crate) struct Workspace {
     focus_handle: FocusHandle,
-    snapshot: Snapshot,
+    snapshot: Rc<Snapshot>,
     left_dock: Dock,
     right_dock: Dock,
     agents_panel: Entity<AgentsPanel>,
@@ -51,11 +55,16 @@ pub(crate) struct Workspace {
 
 impl Workspace {
     pub(crate) fn new(snapshot: Snapshot, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        // agmen-c7 fix-hosting: the first frame draws the snapshot's file
+        // icons, even in a window macOS will not draw again, and the center
+        // shares the snapshot.
+        super::icon_preload::preload_snapshot(&snapshot, cx);
+        let snapshot = Rc::new(snapshot);
         let agents_panel = cx.new(|_| AgentsPanel::new(snapshot.roster.clone()));
         let agents_events = cx.subscribe(&agents_panel, |this, _, event, cx| match event {
             AgentsPanelEvent::Selected(id) => this.select_agent(id, cx),
         });
-        let chat = cx.new(|cx| ChatView::new(snapshot.clone(), window, cx));
+        let chat = cx.new(|cx| ChatView::new(Snapshot::clone(&snapshot), window, cx));
         let tabs = starting_tabs(&snapshot);
         let pane_group = cx.new(|cx| PaneGroup::new(&snapshot, Some(chat), tabs, cx));
         let left = LeftDockState::new(&snapshot, cx);
@@ -110,17 +119,6 @@ impl Workspace {
         self.set_selection(shown, cx);
         self.right_dock.open();
         cx.notify();
-    }
-
-    /// What the status bar shows in the listener's place: "settings" while
-    /// Settings is the active tab (frame "Desktop · settings", node 8240),
-    /// `None` for the listener.
-    pub(crate) fn status_context(&self, cx: &App) -> Option<SharedString> {
-        matches!(
-            self.pane_group.read(cx).active_item(cx),
-            Some(TabItem::Settings(_))
-        )
-        .then(|| "settings".into())
     }
 
     /// The agent the right dock shows, or `None` for the Listener panel.
@@ -257,7 +255,7 @@ impl Render for Workspace {
             .child(TitleBar::new(&self.snapshot))
             .child(body)
             .child(
-                StatusBar::new(&self.snapshot, self.is_dock_open(DockSide::Right))
+                StatusBar::new(&self.snapshot, self.shows_listener_toggle(cx))
                     .panels(self.panel_buttons(cx))
                     .when_some(self.status_context(cx), StatusBar::context),
             )

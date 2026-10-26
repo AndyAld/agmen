@@ -73,6 +73,17 @@ pub(crate) enum Language {
 }
 
 impl Language {
+    /// The name Zed's status bar gives the language.
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Rust => "Rust",
+            Self::Toml => "TOML",
+            Self::Xml => "XML",
+            Self::Markdown => "Markdown",
+            Self::Plain => "Plain Text",
+        }
+    }
+
     pub(crate) fn for_path(path: &Path) -> Self {
         match path.extension().and_then(|e| e.to_str()) {
             Some("rs") => Self::Rust,

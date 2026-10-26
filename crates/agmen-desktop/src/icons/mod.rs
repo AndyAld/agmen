@@ -1,6 +1,10 @@
 //! UI icons (Lucide) and file icons (the Zed icon theme, or the OS).
 
+// agmen-c7 fix-hosting: render the first frame's theme icons ahead.
+mod preload;
 mod system;
+#[cfg(test)]
+pub(crate) mod test_theme;
 mod zed_theme;
 
 use std::cell::{Cell, RefCell};
@@ -9,8 +13,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, Global, Hsla, Image, ImageFormat, IntoElement as _, Pixels, Styled as _, Svg,
-    img, svg,
+    AnyElement, App, Global, Hsla, Image, ImageFormat, IntoElement as _, Pixels, RenderImage,
+    Styled as _, Svg, img, svg,
 };
 
 use system::IconKind;
@@ -23,6 +27,9 @@ use crate::appearance::IconThemeChoice;
 pub(crate) enum FileIcon {
     /// An SVG from the person's Zed icon theme, drawn in its own colors.
     Svg(PathBuf),
+    /// The same SVG rendered ahead by [`FileIcons::preload`], so it draws
+    /// without waiting for a load.
+    Rendered(Arc<RenderImage>),
     /// The operating system's icon.
     Image(Arc<Image>),
     /// agmen's Lucide fallback.
@@ -33,6 +40,7 @@ impl FileIcon {
     pub(crate) fn render(&self, color: Hsla, size: Pixels) -> AnyElement {
         match self {
             Self::Svg(path) => img(path.clone()).size(size).flex_none().into_any_element(),
+            Self::Rendered(image) => img(image.clone()).size(size).flex_none().into_any_element(),
             Self::Image(image) => img(image.clone()).size(size).flex_none().into_any_element(),
             Self::Ui(icon) => icon.render(color, size).into_any_element(),
         }
@@ -54,6 +62,8 @@ pub(crate) struct FileIcons {
     theme: Option<IconTheme>,
     system: bool,
     cache: RefCell<HashMap<IconKind, Slot>>,
+    /// Theme SVGs rendered ahead, by path; at most `preload::MAX_PRELOADED`.
+    rendered: RefCell<HashMap<PathBuf, Arc<RenderImage>>>,
     wanted: RefCell<Vec<IconKind>>,
     /// Whether a lookup task is running.
     fetching: Cell<bool>,
@@ -85,6 +95,7 @@ impl FileIcons {
             theme,
             system,
             cache: RefCell::new(HashMap::new()),
+            rendered: RefCell::new(HashMap::new()),
             wanted: RefCell::new(Vec::new()),
             fetching: Cell::new(false),
         };
@@ -106,7 +117,10 @@ impl FileIcons {
             }
         });
         if let Some(svg) = themed {
-            return FileIcon::Svg(svg);
+            return match self.rendered.borrow().get(&svg) {
+                Some(image) => FileIcon::Rendered(image.clone()),
+                None => FileIcon::Svg(svg),
+            };
         }
         if self.system
             && let Some(image) = self.system_icon(icon_kind(path, is_dir))

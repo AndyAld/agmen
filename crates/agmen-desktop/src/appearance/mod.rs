@@ -196,9 +196,12 @@ pub(crate) fn zed_extensions_dir(home: &Path) -> PathBuf {
     home.join("Library/Application Support/Zed/extensions/installed")
 }
 
+/// The name of agmen's settings file.
+pub(crate) const SETTINGS_FILE_NAME: &str = "settings.toml";
+
 /// agmen's settings file under the config folder (`~/.config`).
 pub(crate) fn agmen_settings_path(config: &Path) -> PathBuf {
-    config.join("agmen/settings.toml")
+    config.join("agmen").join(SETTINGS_FILE_NAME)
 }
 
 /// The theme folders under the config folder and Zed's extensions folder.

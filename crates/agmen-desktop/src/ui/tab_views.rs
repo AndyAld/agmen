@@ -1,13 +1,14 @@
-//! The views center tabs show for items whose view is built: a role's file
-//! (Task 10), a worktree file (Task 11), a change's diff (Task 12), and
-//! Settings and its file (Task 17).
+//! The views center tabs show for items whose view is built: an agent's
+//! session and a role's file (Task 10), a worktree file (Task 11), a
+//! change's diff (Task 12), and Settings and its file (Task 17).
 
 use std::collections::HashMap;
 use std::path::Path;
 use std::rc::Rc;
 
-use gpui::{AnyView, AppContext as _, Context, Subscription};
+use gpui::{AnyView, AppContext as _, Context, Subscription, Window};
 
+use super::agent_view::AgentView;
 use super::code_view::CodeView;
 use super::diff_view::DiffView;
 use super::pane::{Pane, TabItem};
@@ -15,20 +16,19 @@ use super::project_panel::FileView;
 use super::roles_panel::RoleFileView;
 use super::settings_view::{SettingsEvent, SettingsSources, SettingsView};
 use super::syntax::Language;
-use crate::backend::{RoleFile, Snapshot, WorktreeInfo};
+use crate::backend::Snapshot;
 
-/// The data the views read, from the snapshot.
-#[derive(Debug, Clone, Default)]
+/// The data the views read: the snapshot the center was built from,
+/// shared with the workspace.
+#[derive(Debug, Clone)]
 pub(crate) struct TabSources {
-    roles: Vec<RoleFile>,
-    worktrees: Vec<WorktreeInfo>,
+    snapshot: Rc<Snapshot>,
 }
 
 impl TabSources {
-    pub(crate) fn from_snapshot(snapshot: &Snapshot) -> Self {
+    pub(crate) fn from_snapshot(snapshot: &Rc<Snapshot>) -> Self {
         Self {
-            roles: snapshot.roles.clone(),
-            worktrees: snapshot.worktrees.clone(),
+            snapshot: Rc::clone(snapshot),
         }
     }
 }
@@ -41,7 +41,6 @@ struct TabView {
 
 /// One pane's views, made the first time their tab shows and kept while
 /// the tab stays open.
-#[derive(Default)]
 pub(crate) struct TabViews {
     sources: Rc<TabSources>,
     views: HashMap<TabItem, TabView>,
@@ -68,7 +67,7 @@ impl TabViews {
     pub(crate) const fn draws_breadcrumb(item: &TabItem) -> bool {
         matches!(
             item,
-            TabItem::RoleFile(_) | TabItem::File { .. } | TabItem::Settings(_)
+            TabItem::Agent(_) | TabItem::RoleFile(_) | TabItem::File { .. } | TabItem::Settings(_)
         )
     }
 
@@ -79,6 +78,7 @@ impl TabViews {
         &mut self,
         item: &TabItem,
         open: &[TabItem],
+        window: &mut Window,
         cx: &mut Context<Pane>,
     ) -> Option<AnyView> {
         self.views.retain(|key, _| open.contains(key));
@@ -86,14 +86,20 @@ impl TabViews {
             return Some(tab.view.clone());
         }
         let mut events = None;
+        let snapshot = &self.sources.snapshot;
         let view: AnyView = match item {
+            // An agent with no session on this machine keeps the placeholder.
+            TabItem::Agent(id) => {
+                let session = snapshot.sessions.get(id)?.clone();
+                cx.new(|cx| AgentView::new(snapshot, id, session, window, cx))
+                    .into()
+            }
             TabItem::RoleFile(name) => {
-                let role = self.sources.roles.iter().find(|r| r.name == *name)?;
+                let role = snapshot.roles.iter().find(|r| r.name == *name)?;
                 cx.new(|cx| RoleFileView::new(role, cx)).into()
             }
             TabItem::File { worktree, path } => {
-                let wt = self
-                    .sources
+                let wt = snapshot
                     .worktrees
                     .iter()
                     .find(|wt| wt.handle == *worktree)?;
@@ -101,8 +107,7 @@ impl TabViews {
             }
             TabItem::Diff { worktree, path } => {
                 // A path with no change shows the diff view's empty state.
-                let hunks = self
-                    .sources
+                let hunks = snapshot
                     .worktrees
                     .iter()
                     .find(|wt| wt.handle == *worktree)

@@ -21,17 +21,18 @@ pub(crate) struct StatusBar {
     status: StatusSummary,
     /// The listener's state, or what the active tab is about.
     context: SharedString,
-    right_dock_open: bool,
+    /// Whether to offer the Listener toggle, which reopens the right dock.
+    listener_toggle: bool,
     panels: PanelButtons,
 }
 
 impl StatusBar {
     #[must_use]
-    pub(crate) fn new(snapshot: &Snapshot, right_dock_open: bool) -> Self {
+    pub(crate) fn new(snapshot: &Snapshot, listener_toggle: bool) -> Self {
         Self {
             status: snapshot.status.clone(),
             context: listener_label(&snapshot.listener.agent, &snapshot.listener.state).into(),
-            right_dock_open,
+            listener_toggle,
             panels: PanelButtons::default(),
         }
     }
@@ -43,8 +44,8 @@ impl StatusBar {
         self
     }
 
-    /// Shows `context` in the listener's place, as "settings" while
-    /// Settings is the active tab (frame "Desktop · settings", node 8240).
+    /// Shows `context`, what the active tab is about
+    /// (`Workspace::status_context`), in the listener's place.
     #[must_use]
     pub(crate) fn context(mut self, context: impl Into<SharedString>) -> Self {
         self.context = context.into();
@@ -134,7 +135,7 @@ impl RenderOnce for StatusBar {
                     .size(LabelSize::Small)
                     .color(Color::Placeholder),
             )
-            .when(!self.right_dock_open, |this| {
+            .when(self.listener_toggle, |this| {
                 this.child(
                     Button::new("listener-toggle", "Listener")
                         .style(ButtonStyle::Filled)
