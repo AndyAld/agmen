@@ -158,7 +158,7 @@ fn payload_round_trip_all_verbs() {
     let payloads = every_payload();
     assert_eq!(payloads.len(), Verb::ALL.len(), "one sample per verb");
     for (payload, verb) in payloads.iter().zip(Verb::ALL) {
-        assert_eq!(payload.verb(), verb);
+        assert_eq!(payload.verb(), Some(verb));
         let value = serde_json::to_value(payload).unwrap();
         let object = value.as_object().unwrap();
         assert_eq!(object.len(), 2, "{value}");
@@ -211,4 +211,32 @@ fn push_request_ref_is_named_ref_on_the_wire() {
     })
     .unwrap();
     assert_eq!(value["data"]["ref"], json!("refs/heads/main"));
+}
+
+#[test]
+fn verb_parses_from_wire_name() {
+    for verb in Verb::ALL {
+        assert_eq!(verb.as_str().parse::<Verb>().unwrap(), verb);
+    }
+    let err = "WAVE".parse::<Verb>().unwrap_err();
+    assert!(
+        matches!(&err, ProtoError::UnknownVerb(name) if name == "WAVE"),
+        "{err}"
+    );
+    assert!("claim".parse::<Verb>().is_err());
+}
+
+#[test]
+fn unknown_payload_serializes_its_verb_and_data() {
+    let unknown = Payload::Unknown {
+        verb: "WAVE".to_owned(),
+        data: json!({"pull": 7}),
+    };
+    assert_eq!(unknown.verb(), None);
+    let value = serde_json::to_value(&unknown).unwrap();
+    assert_eq!(value, json!({"verb": "WAVE", "data": {"pull": 7}}));
+    // Only the reader path of StampedEnvelope builds Unknown; Payload alone
+    // stays strict, so a known verb with bad data is never hidden as Unknown.
+    assert!(serde_json::from_value::<Payload>(value).is_err());
+    assert!(serde_json::from_value::<Payload>(json!({"verb": "CLAIM", "data": {}})).is_err());
 }

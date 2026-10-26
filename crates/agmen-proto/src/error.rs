@@ -32,6 +32,10 @@ pub enum ProtoError {
     /// A client envelope carries a field that protocol v1 does not define.
     #[error("unknown field `{0}`")]
     UnknownField(String),
+    /// A verb name that protocol v1 does not define. A client envelope with
+    /// one is refused; a stamped envelope keeps it as `Payload::Unknown`.
+    #[error("unknown verb `{0}`")]
+    UnknownVerb(String),
     /// The JSON does not match protocol v1.
     #[error("envelope does not match protocol v1")]
     Schema(#[from] serde_json::Error),

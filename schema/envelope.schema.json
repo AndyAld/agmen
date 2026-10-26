@@ -56,7 +56,7 @@
       "format": "date-time"
     },
     "to": {
-      "description": "DM recipients, 1 to 8; empty for every other verb. Parses from a list,\n`null`, or a missing field.",
+      "description": "Recipients: 1 to 8 on DM, 0 to 8 on ASK (an ASK with recipients goes\nto their inboxes, like a DM), and empty for every other verb. Parses\nfrom a list, `null`, or a missing field.",
       "type": [
         "array",
         "null"
@@ -82,7 +82,7 @@
       "format": "date-time"
     }
   },
-  "oneOf": [
+  "anyOf": [
     {
       "description": "Joins the room; the hub updates the roster.",
       "type": "object",
@@ -165,7 +165,7 @@
       ]
     },
     {
-      "description": "A question; goes to the feed.",
+      "description": "A question; goes to the feed, or to the inboxes in `to` when it is set.",
       "type": "object",
       "properties": {
         "data": {

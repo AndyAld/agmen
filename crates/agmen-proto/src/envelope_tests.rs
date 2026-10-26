@@ -66,7 +66,7 @@ fn parse(value: &Value) -> Result<ClientEnvelope, ProtoError> {
 #[test]
 fn spec_example_parses_and_round_trips() {
     let env = parse(&done_json()).unwrap();
-    assert_eq!(env.payload.verb(), Verb::Done);
+    assert_eq!(env.payload.verb(), Some(Verb::Done));
     assert!(env.to.is_empty());
     let again = parse(&serde_json::to_value(&env).unwrap()).unwrap();
     assert_eq!(again, env);
@@ -133,7 +133,7 @@ fn stamped_envelope_tolerates_unknown_fields() {
     assert_eq!(env.seq, Seq(1842));
     assert_eq!(env.from_kind, IdentityKind::Agent);
     assert_eq!(env.refs[0].kind, RefKind::Item);
-    assert_eq!(env.client.payload.verb(), Verb::Done);
+    assert_eq!(env.client.payload.verb(), Some(Verb::Done));
     let round: StampedEnvelope =
         serde_json::from_value(serde_json::to_value(&env).unwrap()).unwrap();
     assert_eq!(round, env);
@@ -259,4 +259,84 @@ fn mentions_only_on_chat_verbs() {
     fyi.mentions.truncate(8);
     fyi.mentions.push(Mention::Humans);
     assert_eq!(validate(&fyi, now()), Ok(()));
+}
+
+#[test]
+fn ask_takes_zero_to_eight_recipients() {
+    let mut ask = envelope(Payload::Ask { of: None });
+    assert_eq!(validate(&ask, now()), Ok(()));
+    ask.to = vec![id(1)];
+    assert_eq!(validate(&ask, now()), Ok(()));
+    ask.to = (0..8).map(id).collect();
+    assert_eq!(validate(&ask, now()), Ok(()));
+    ask.to = (0..9).map(id).collect();
+    assert_eq!(validate(&ask, now()), Err(NackReason::Schema));
+}
+
+/// A stamped FYI with its verb and data replaced by ones this version lacks.
+fn stamped_with_verb(verb: &str, data: Value) -> Value {
+    json!({
+        "v": 1,
+        "id": "01JBX6Q4T7W3C2M8Y9K5N0P1RS",
+        "verb": verb,
+        "data": data,
+        "body": "hi",
+        "sent_at": NOW,
+        "stream": "feed",
+        "seq": 1843,
+        "from": "idn7k2q9",
+        "from_handle": "andy/sol",
+        "from_kind": "agent",
+        "hub_at": NOW
+    })
+}
+
+#[test]
+fn stamped_envelope_keeps_unknown_verb() {
+    let data = json!({"pull": 7, "nested": {"ok": true}});
+    let value = stamped_with_verb("WAVE", data.clone());
+    let env: StampedEnvelope = serde_json::from_value(value).unwrap();
+    assert_eq!(env.seq, Seq(1843));
+    assert_eq!(env.stream, Stream::Feed);
+    assert_eq!(
+        env.client.payload,
+        Payload::Unknown {
+            verb: "WAVE".to_owned(),
+            data: data.clone()
+        }
+    );
+    assert_eq!(env.client.payload.verb(), None);
+    let out = serde_json::to_value(&env).unwrap();
+    assert_eq!(out["verb"], json!("WAVE"));
+    assert_eq!(out["data"], data);
+    let round: StampedEnvelope = serde_json::from_value(out).unwrap();
+    assert_eq!(round, env);
+}
+
+#[test]
+fn stamped_envelope_still_checks_known_verb_data() {
+    let value = stamped_with_verb("CLAIM", json!({"item": "not a key"}));
+    assert!(serde_json::from_value::<StampedEnvelope>(value).is_err());
+}
+
+#[test]
+fn client_envelope_rejects_unknown_verb() {
+    let mut value = done_json();
+    value["verb"] = json!("WAVE");
+    let err = parse(&value).unwrap_err();
+    assert!(
+        matches!(&err, ProtoError::UnknownVerb(name) if name == "WAVE"),
+        "{err}"
+    );
+    assert_eq!(NackReason::from(&err), NackReason::Schema);
+    assert!(serde_json::from_value::<ClientEnvelope>(value).is_err());
+}
+
+#[test]
+fn validate_rejects_unknown_payload() {
+    let env = envelope(Payload::Unknown {
+        verb: "WAVE".to_owned(),
+        data: json!({}),
+    });
+    assert_eq!(validate(&env, now()), Err(NackReason::Schema));
 }

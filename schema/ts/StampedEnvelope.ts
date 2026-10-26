@@ -77,8 +77,9 @@ id: MessageId,
  */
 reply_to: MessageId | null, 
 /**
- * DM recipients, 1 to 8; empty for every other verb. Parses from a list,
- * `null`, or a missing field.
+ * Recipients: 1 to 8 on DM, 0 to 8 on ASK (an ASK with recipients goes
+ * to their inboxes, like a DM), and empty for every other verb. Parses
+ * from a list, `null`, or a missing field.
  */
 to: Array<IdentityId>, 
 /**

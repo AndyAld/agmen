@@ -19,7 +19,7 @@ use crate::verbs::{Payload, Verb};
 /// The largest raw envelope the hub parses, in bytes (protocol section 8).
 pub const MAX_ENVELOPE_BYTES: usize = 64 * 1024;
 
-/// The most DM recipients, and the most identity mentions, in one message.
+/// The most DM or ASK recipients, and the most identity mentions, in one message.
 const MAX_ADDRESSEES: usize = 8;
 
 /// How far past `valid_until` the hub still accepts a message, for clock skew.
@@ -109,8 +109,9 @@ pub struct ClientEnvelope {
     pub id: MessageId,
     /// The id of an earlier message this one answers or threads under.
     pub reply_to: Option<MessageId>,
-    /// DM recipients, 1 to 8; empty for every other verb. Parses from a list,
-    /// `null`, or a missing field.
+    /// Recipients: 1 to 8 on DM, 0 to 8 on ASK (an ASK with recipients goes
+    /// to their inboxes, like a DM), and empty for every other verb. Parses
+    /// from a list, `null`, or a missing field.
     #[serde(default)]
     #[schemars(with = "Option<Vec<IdentityId>>")]
     pub to: Vec<IdentityId>,
@@ -206,13 +207,15 @@ pub struct StampedEnvelope {
 
 fn lenient_client<'de, D: Deserializer<'de>>(deserializer: D) -> Result<ClientEnvelope, D::Error> {
     WireClient::deserialize(deserializer)?
-        .into_envelope()
+        .into_lenient()
         .map_err(de::Error::custom)
 }
 
 /// The client fields as they arrive, before the body limit, the payload and
 /// the unknown-field rule are checked. `serde(deny_unknown_fields)` does not
 /// work with `flatten`, so unknown fields are collected and checked by hand.
+/// `verb` is a plain string so the reader path can keep a verb it does not
+/// know as `Payload::Unknown`.
 #[derive(Deserialize)]
 struct WireClient {
     v: u8,
@@ -231,7 +234,7 @@ struct WireClient {
     #[serde(default)]
     valid_until: Option<Timestamp>,
     sent_at: Timestamp,
-    verb: Verb,
+    verb: String,
     data: serde_json::Value,
     #[serde(flatten)]
     unknown: BTreeMap<String, IgnoredAny>,
@@ -242,19 +245,39 @@ fn null_as_empty<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<Ident
 }
 
 impl WireClient {
+    /// The hub's ingest rules: no unknown fields and no unknown verbs.
     fn into_strict(self) -> Result<ClientEnvelope, ProtoError> {
         if let Some(name) = self.unknown.keys().next() {
             return Err(ProtoError::UnknownField(name.clone()));
         }
-        self.into_envelope()
+        let verb = self.verb.parse::<Verb>()?;
+        self.into_envelope(Some(verb))
     }
 
-    fn into_envelope(self) -> Result<ClientEnvelope, ProtoError> {
+    /// The reader's rules: unknown fields are ignored and an unknown verb
+    /// becomes `Payload::Unknown`.
+    fn into_lenient(self) -> Result<ClientEnvelope, ProtoError> {
+        // An unknown verb is not an error here: it becomes Payload::Unknown.
+        let verb = self.verb.parse::<Verb>().ok();
+        self.into_envelope(verb)
+    }
+
+    /// Builds the envelope; `verb` is `self.verb` parsed, or `None` when this
+    /// version does not know it.
+    fn into_envelope(self, verb: Option<Verb>) -> Result<ClientEnvelope, ProtoError> {
         let body = Body::try_from(self.body)?;
-        let mut tagged = serde_json::Map::new();
-        tagged.insert("verb".to_owned(), self.verb.as_str().into());
-        tagged.insert("data".to_owned(), self.data);
-        let payload = serde_json::from_value(serde_json::Value::Object(tagged))?;
+        let payload = match verb {
+            Some(verb) => {
+                let mut tagged = serde_json::Map::new();
+                tagged.insert("verb".to_owned(), verb.as_str().into());
+                tagged.insert("data".to_owned(), self.data);
+                serde_json::from_value(serde_json::Value::Object(tagged))?
+            }
+            None => Payload::Unknown {
+                verb: self.verb,
+                data: self.data,
+            },
+        };
         Ok(ClientEnvelope {
             v: self.v,
             id: self.id,
@@ -274,7 +297,8 @@ impl WireClient {
 /// Checks the rules a parsed envelope must follow before the hub records it,
 /// judging `valid_until` by the hub's clock.
 ///
-/// It checks the version, `to` (1 to 8 recipients on DM, none elsewhere),
+/// It checks the verb (`Payload::Unknown` is `schema`), the version, `to`
+/// (1 to 8 recipients on DM, 0 to 8 on ASK, none elsewhere),
 /// `reply_to` on the verbs that answer something, `valid_until` on CLAIM
 /// with a 120 s skew allowance, and `mentions` (only on FYI, ASK, ANSWER and
 /// ALERT, at most 8 identities). The body limit holds by construction of
@@ -303,14 +327,18 @@ pub fn validate(env: &ClientEnvelope, hub_now: Timestamp) -> Result<(), NackReas
         env.body.as_str().len() <= MAX_BODY_BYTES,
         "Body enforces the limit"
     );
-    let verb = env.payload.verb();
+    // Only a StampedEnvelope parses to Payload::Unknown; the hub never takes one.
+    let Some(verb) = env.payload.verb() else {
+        return Err(NackReason::Schema);
+    };
     if env.v != 1 {
         return Err(NackReason::Schema);
     }
-    let recipients_ok = if verb == Verb::Dm {
-        (1..=MAX_ADDRESSEES).contains(&env.to.len())
-    } else {
-        env.to.is_empty()
+    let recipients_ok = match verb {
+        Verb::Dm => (1..=MAX_ADDRESSEES).contains(&env.to.len()),
+        // An ASK with `to` is routed like a DM; without it, it goes to the feed.
+        Verb::Ask => env.to.len() <= MAX_ADDRESSEES,
+        _ => env.to.is_empty(),
     };
     if !recipients_ok {
         return Err(NackReason::Schema);

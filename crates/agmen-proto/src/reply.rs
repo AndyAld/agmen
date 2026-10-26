@@ -115,6 +115,7 @@ impl From<&ProtoError> for NackReason {
             ProtoError::Malformed { .. }
             | ProtoError::EnvelopeTooLarge { .. }
             | ProtoError::UnknownField(_)
+            | ProtoError::UnknownVerb(_)
             | ProtoError::Schema(_)
             | ProtoError::NotUpTopic => Self::Schema,
         }

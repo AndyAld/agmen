@@ -9,11 +9,13 @@
 //! when a later minor version adds an optional field (protocol section 9).
 
 use std::fmt;
+use std::str::FromStr;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+use crate::error::ProtoError;
 use crate::ids::{GitSha, IdentityId, ItemKey, LaneName, RoleName, Seq, Timestamp};
 
 /// A verb and its `data`. Serializes as `{"verb": "CLAIM", "data": {...}}`;
@@ -36,7 +38,7 @@ pub enum Payload {
     Bye {},
     /// A chat message: the text is in `body`.
     Fyi {},
-    /// A question; goes to the feed.
+    /// A question; goes to the feed, or to the inboxes in `to` when it is set.
     Ask {
         /// Who should answer, when one identity should.
         of: Option<IdentityId>,
@@ -235,6 +237,25 @@ pub enum Payload {
         /// The feed seq the state reflects.
         as_of_seq: Seq,
     },
+    /// A verb this version does not know, kept with its raw `data`.
+    ///
+    /// Only a `StampedEnvelope` parses to it, so a reader can advance its
+    /// `(stream, seq)` cursor past a verb a later minor version added
+    /// (protocol section 9). A `ClientEnvelope` with an unknown verb fails
+    /// to parse, and `validate` rejects this variant with `schema`. It
+    /// serializes back to the same `verb` and `data`.
+    ///
+    /// The JSON Schema and TypeScript in `schema/` leave it out: they
+    /// describe the v1 verbs, and a reader that meets another verb skips it.
+    #[serde(untagged, skip_deserializing)]
+    #[schemars(skip)]
+    #[ts(skip)]
+    Unknown {
+        /// The verb name as it arrived.
+        verb: String,
+        /// The `data` as it arrived.
+        data: serde_json::Value,
+    },
 }
 
 /// A verb name without its data, such as `CLAIM`.
@@ -358,11 +379,27 @@ impl fmt::Display for Verb {
     }
 }
 
+impl FromStr for Verb {
+    type Err = ProtoError;
+
+    /// Parses a wire name such as `PUSH_REQUEST`.
+    ///
+    /// # Errors
+    ///
+    /// [`ProtoError::UnknownVerb`] for a name protocol v1 does not define.
+    fn from_str(name: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|verb| verb.as_str() == name)
+            .ok_or_else(|| ProtoError::UnknownVerb(name.to_owned()))
+    }
+}
+
 impl Payload {
-    /// The payload's verb.
+    /// The payload's verb, or `None` for `Payload::Unknown`.
     #[must_use]
-    pub const fn verb(&self) -> Verb {
-        match self {
+    pub const fn verb(&self) -> Option<Verb> {
+        Some(match self {
             Self::Hello { .. } => Verb::Hello,
             Self::Bye {} => Verb::Bye,
             Self::Fyi {} => Verb::Fyi,
@@ -393,7 +430,8 @@ impl Payload {
             Self::Alert { .. } => Verb::Alert,
             Self::Dm {} => Verb::Dm,
             Self::State { .. } => Verb::State,
-        }
+            Self::Unknown { .. } => return None,
+        })
     }
 }
 
