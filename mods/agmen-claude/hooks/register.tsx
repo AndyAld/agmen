@@ -631,12 +631,27 @@ async function placed($: EngineInterface, path: string): Promise<Placed | undefi
  */
 const folded = (path: string): string => path.normalize('NFKC').toUpperCase().toLowerCase()
 
+/** Code points HFS+ ignores when it looks a name up, as git's is_hfs_dotgit skips them (R72b). */
+const HFS_IGNORABLE = /[‌-‏‪-‮⁪-⁯﻿]/g
+
 /**
- * Whether a name of `path` is `.git`, compared folded and with trailing dots
- * and spaces dropped, as Windows opens `.git.` as `.git`: a git dir or a
- * worktree's `.git` file. `.gitignore` and `.github` are not.
+ * Whether `name` opens a git dir or a worktree's `.git` file, matched as git's
+ * is_hfs_dotgit and is_ntfs_dotgit do (R72b): HFS+ ignorable code points
+ * dropped, folded, cut at the first `:` (an NTFS stream such as
+ * `.git::$INDEX_ALLOCATION`), trailing dots and spaces dropped (Windows opens
+ * `.git.` as `.git`), then `.git` or an 8.3 short name `git~<digits>`. git
+ * itself takes only `git~1`; any number denies more. `.gitignore`, `.github`
+ * and `.git~1` are not.
  */
-const hasGitName = (path: string): boolean => path.split(/[\\/]/).some(name => folded(name).replace(/[. ]+$/, '') === '.git')
+function isGitName(name: string): boolean {
+  const bare = folded(name.replace(HFS_IGNORABLE, ''))
+    .replace(/:.*$/s, '')
+    .replace(/[. ]+$/, '')
+  return bare === '.git' || /^git~[0-9]+$/.test(bare)
+}
+
+/** Whether a name of `path` is a git name (`isGitName`). */
+const hasGitName = (path: string): boolean => path.split(/[\\/]/).some(isGitName)
 
 /** Whether `path` is `folder` or below it. */
 const isWithin = (path: string, folder: string): boolean =>

@@ -1485,6 +1485,44 @@ for (const surface of SURFACES) {
       ])
     })
 
+    test('guard_denies_git_names_as_git_matches_them', async ($, on) => {
+      const w = world(on, {
+        commonDir: cwd => (cwd === ROOT ? { stdout: '/gitdirs/work\n' } : undefined),
+        checkPath: path => allowedEntry(path, true, null),
+      })
+
+      await start($, w, surface)
+      const write = async (file_path: string) => (await $.tool.call({ tool: 'Write', file_path, content: 'x' })).deny
+      const denied = [
+        // NTFS streams: the name before the first ':' is what Windows opens.
+        await write('/work/mods/s/.git::$INDEX_ALLOCATION/hooks/pre-commit'),
+        await write('/work/mods/s/.Git. :x/config'),
+        // 8.3 short names.
+        await write('/work/mods/s/GIT~1/hooks/pre-commit'),
+        await write('/work/mods/s/git~12/config'),
+        await write('/work/mods/s/git~1:y/config'),
+        // HFS+ ignorable code points, which HFS+ drops when it looks a name up.
+        await write('/work/mods/s/.g‌it/hooks/pre-commit'),
+        await write('/work/mods/s/﻿.git/config'),
+        await write('/work/mods/s/.GI‪t⁯/config'),
+      ]
+      const allowed = [
+        await write('/work/git~a/x.ts'),
+        await write('/work/mods/s/git~1x/x.ts'),
+        await write('/work/mods/s/.git~1/x.ts'),
+        await write('/work/mods/s/.g​it/x.ts'),
+      ]
+
+      for (const deny of denied) expect(deny).toContain('has a .git name')
+      for (const deny of allowed) expect(deny).toBeUndefined()
+      expect(w.runs.filter(argv => argv[1] === 'check-path').map(argv => argv[4])).toEqual([
+        '/work/git~a/x.ts',
+        '/work/mods/s/git~1x/x.ts',
+        '/work/mods/s/.git~1/x.ts',
+        '/work/mods/s/.g​it/x.ts',
+      ])
+    })
+
     test('guard_runs_git_without_the_location_variables', async ($, on) => {
       const w = world(on, {
         hostEnv: { GIT_DIR: '/elsewhere/.git', GIT_WORK_TREE: '/elsewhere', GIT_COMMON_DIR: '' },
