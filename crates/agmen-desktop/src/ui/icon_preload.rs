@@ -35,8 +35,9 @@ pub(super) fn preload_snapshot(snapshot: &Snapshot, cx: &App) {
 /// Every file and folder name the snapshot's views ask icons for, each once:
 /// the theme's default file and folder (an empty name), which unmapped
 /// names such as a tree's root fall to, the settings file, Settings' icon
-/// preview, role files (the Roles tab and role file tabs), then the
-/// worktrees' files and folders (the Project tree and the Git panel's
+/// preview, role files (the Roles tab and role file tabs), the plan's spec
+/// files (spec tabs, which need no worktree), then the worktrees' files and
+/// folders (the Project tree and the Git panel's
 /// changes), shallowest first, so a preload limit leaves out the deepest.
 fn snapshot_entries(snapshot: &Snapshot) -> Vec<(String, bool)> {
     let mut seen = HashSet::new();
@@ -54,6 +55,15 @@ fn snapshot_entries(snapshot: &Snapshot) -> Vec<(String, bool)> {
     }
     for role in &snapshot.roles {
         add(&role_file_name(&role.name), false);
+    }
+    if let Some(plan) = &snapshot.plan {
+        let specs = plan.specs.iter().map(|spec| &spec.path);
+        let reviewed = plan.reviews.iter().map(|review| &review.path);
+        for path in specs.chain(reviewed) {
+            if let Some(name) = Path::new(path).file_name().and_then(|name| name.to_str()) {
+                add(name, false);
+            }
+        }
     }
     // Each path's parts with their depth; a part before the last is a
     // folder.

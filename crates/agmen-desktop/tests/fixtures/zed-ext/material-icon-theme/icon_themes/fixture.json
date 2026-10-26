@@ -20,14 +20,17 @@
         "Cargo.toml": "cargo",
         "Cargo.lock": "lock",
         "azure-pipelines.yml": "azure",
-        "Dockerfile": "docker"
+        "Dockerfile": "docker",
+        "README.md": "readme"
       },
       "file_suffixes": {
         "rs": "rust",
         "toml": "toml",
         "tar.gz": "tgz",
         "gz": "gz",
-        "yml": "yaml"
+        "yml": "yaml",
+        "md": "markdown",
+        "xml": "xml"
       },
       "file_icons": {
         "default": {
@@ -59,6 +62,15 @@
         },
         "yaml": {
           "path": "./icons/yaml.svg"
+        },
+        "markdown": {
+          "path": "./icons/markdown.svg"
+        },
+        "readme": {
+          "path": "./icons/readme.svg"
+        },
+        "xml": {
+          "path": "./icons/xml.svg"
         }
       }
     }

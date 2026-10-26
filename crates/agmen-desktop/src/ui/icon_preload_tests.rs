@@ -55,6 +55,52 @@ fn a_workspace_draws_its_theme_icons_on_the_first_frame(cx: &mut TestAppContext)
     );
 }
 
+// t19: a spec tab (ridgeline-design.md on the plan screens, with no
+// worktree) drew an empty icon slot, because no preload named the plan's
+// spec files. Every theme SVG any screen's first frame asks for is ready
+// by then, so none is still loading after it.
+#[gpui::test]
+fn every_screen_draws_its_theme_icons_on_the_first_frame(cx: &mut TestAppContext) {
+    init(cx);
+    cx.update(|cx| cx.set_global(material_icons()));
+    let icons_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/zed-ext/material-icon-theme/icons");
+    let theme_svgs: Vec<PathBuf> = std::fs::read_dir(&icons_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    let mut waiting = Vec::new();
+    for screen in Screen::ALL {
+        // Each screen starts with nothing rendered or loading, so one
+        // screen's icons cannot cover another's.
+        cx.update(|cx| {
+            cx.set_global(material_icons());
+            for svg in &theme_svgs {
+                cx.remove_asset::<ImgResourceLoader>(&Resource::Path(svg.as_path().into()));
+            }
+        });
+        let snapshot = FixtureBackend::for_screen(screen).unwrap().snapshot();
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let mut workspace = Workspace::new(snapshot, window, cx);
+            workspace.show_screen(screen, cx);
+            workspace
+        });
+        cx.update(|window, cx| drop(window.draw(cx)));
+        for svg in &theme_svgs {
+            let loading = cx.update(|_, cx| {
+                cx.has_asset::<ImgResourceLoader>(&Resource::Path(svg.as_path().into()))
+            });
+            if loading {
+                waiting.push(format!("{screen:?}: {}", svg.display()));
+            }
+        }
+    }
+    assert!(
+        waiting.is_empty(),
+        "loading after the first frame: {waiting:?}"
+    );
+}
+
 #[test]
 fn snapshot_entries_cover_trees_tabs_and_the_preview() {
     let entries = snapshot_entries(&chat_snapshot());
