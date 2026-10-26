@@ -1,0 +1,23 @@
+# Every value that names agmen's own infrastructure, in one place. Replace
+# each value once that infrastructure exists; kustomization.yaml copies
+# them into the manifests (README.md lists where each goes). The
+# local-config annotation keeps this ConfigMap out of the build output, so
+# it never reaches the cluster.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agmen-placeholders
+  annotations:
+    config.kubernetes.io/local-config: "true"
+data:
+  # The IngressClass the cluster's ingress controller serves.
+  ingress-class: placeholder-ingress-class
+  # The cert-manager ClusterIssuer that signs both hosts' certificates.
+  cluster-issuer: placeholder-cluster-issuer
+  # The API host; the hub's AGMEN_PUBLIC_URL is https://<api-host>.
+  api-host: api.agmen.example
+  # The MQTT over WebSocket host.
+  mqtt-ws-host: mqtt-ws.agmen.example
+  # The hub image: agmen's registry and a build-<N> tag from the Jenkins
+  # Image stage (AGMEN_REGISTRY). build-0 is a tag no build produces.
+  hub-image: registry.agmen.example/agmen-hub:build-0

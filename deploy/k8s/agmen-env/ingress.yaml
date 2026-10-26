@@ -1,16 +1,18 @@
-# HAProxy ingress with cert-manager certificates. The hosts are
-# placeholders until Andy picks agmen's domain (README.md). The EMQX
-# dashboard and REST API (18083) and plain MQTT (1883) get no ingress.
+# Ingress for the API and MQTT over WebSocket, with a cert-manager
+# certificate per host. The ingress class, the ClusterIssuer and both hosts
+# are set from placeholders.yaml; the values here are overwritten. Nothing
+# here is specific to one ingress controller: add your controller's
+# annotations in a component (examples/haproxy-ingress has HAProxy's). The
+# EMQX dashboard and REST API (18083) and plain MQTT (1883) get no ingress.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: agmen-api
   namespace: agmen
   annotations:
-    cert-manager.io/cluster-issuer: "letsencrypt-prod"
-    haproxy.org/ssl-redirect: "true"
+    cert-manager.io/cluster-issuer: placeholder-cluster-issuer
 spec:
-  ingressClassName: haproxy
+  ingressClassName: placeholder-ingress-class
   rules:
     - host: api.agmen.example
       http:
@@ -27,19 +29,18 @@ spec:
         - api.agmen.example
       secretName: agmen-api-tls
 ---
-# MQTT over WebSocket to EMQX 8083, path /mqtt. Clients keep the link open
-# with a 30 s keep-alive (ADR-0003), well inside the 1 h tunnel timeout.
+# MQTT over WebSocket to EMQX 8083, path /mqtt. Clients send a keep-alive
+# every 30 s (ADR-0003), so the controller's idle timeout for this
+# WebSocket must be longer than 30 s.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: agmen-mqtt-ws
   namespace: agmen
   annotations:
-    cert-manager.io/cluster-issuer: "letsencrypt-prod"
-    haproxy.org/ssl-redirect: "true"
-    haproxy.org/timeout-tunnel: "1h"
+    cert-manager.io/cluster-issuer: placeholder-cluster-issuer
 spec:
-  ingressClassName: haproxy
+  ingressClassName: placeholder-ingress-class
   rules:
     - host: mqtt-ws.agmen.example
       http:

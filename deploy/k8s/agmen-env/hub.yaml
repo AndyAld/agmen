@@ -1,8 +1,9 @@
 # The agmen hub. Its env vars are read in crates/agmen-hub/src/config.rs.
-# Jenkins pushes registry.agmen.example/agmen-hub:build-<N> from main; the
-# registry is a placeholder until agmen has its own, and build-0 is a tag no
-# build produces, so the pod waits in ImagePullBackOff until the tag is set
-# to a real build (README.md).
+# The image and the host in AGMEN_PUBLIC_URL come from placeholders.yaml
+# (hub-image, api-host); the values here are overwritten. Jenkins pushes
+# <AGMEN_REGISTRY>/agmen-hub:build-<N> from main, and build-0 is a tag no
+# build produces, so the pod waits in ImagePullBackOff until hub-image
+# names a real build (README.md).
 apiVersion: v1
 kind: Service
 metadata:
