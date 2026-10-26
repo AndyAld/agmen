@@ -229,7 +229,7 @@ Differences: the ● ○ ◐ glyphs draw smaller in .ZedSans than in the mockup'
 ### Task 9: Chat pane, messages and composer
 
 - [ ] Done
-- Differences kept (V112, agmen-c7's fixers on desktop/c7 67d69d3): the chat tab has no × (Pane::close refuses the chat; its close slot follows fix 40, so the tab is 4 px wider than node 116); the change card subline says "widens lanes and budget", built from the rows' settings, where node 7104 says "access and budget".
+- Differences kept (V112, agmen-c7's fixers on desktop/c7 67d69d3): the chat tab has no × (Pane::close refuses the chat; its close slot follows fix 40, so the tab is 4 px wider than node 116); the change card subline says "widens lanes and budget", built from the rows' settings, where node 7104 says "access and budget". Narrow chips are cut, not wrapped.
 
 Screens: `desktop-chat`.
 
@@ -305,7 +305,7 @@ Screens: `desktop-needs-you`, `desktop-needs-you-answered`.
 ### Task 14: Take-over terminal in the chat, switching and adding agents
 
 - [ ] Done
-- Differences kept (V112): the switch menu (1802) opens above the terminal head at 1280 and 1440 wide, since below would cover the input box; the add agent title (2420) is 18 px (LabelSize::Title) where the mockup has 17; the agent prompt (2430) ends "tell me both outputs" as console.py:2078 does, where spec 5.2 ends with the commands.
+- Differences kept (V112): the switch menu (1802) opens above the terminal head at 1280 and 1440 wide, since below would cover the input box; the add agent title (2420) is 18 px (LabelSize::Title) where the mockup has 17; the agent prompt (2430) ends "tell me both outputs" as console.py:2078 does, where spec 5.2 ends with the commands. The add agent prompt matches 3 of the mockup's 5 line breaks; no single width gives all 5.
 
 Screens: `desktop-chat-terminal`, `desktop-chat-codex`, `desktop-switch-agent`, `desktop-add-agent`.
 
@@ -384,7 +384,7 @@ Screens: `desktop-palette`.
 ### Task 19: Planning room, spec review and kick-off
 
 - [ ] Done
-- Differences kept (V112): Request changes (9189) and Pause all (10953) are disabled (no backend action yet); spec headings are not bold (syntax colors carry no weight, 9193); the right dock keeps its collapse button (8936) and the breadcrumb keeps Show ledger (8729); the plan room composer placeholder keeps "their keys", has no "⏎ send" and clips at 1280 (8927); shares are approved before kick-off and the client cannot know R-1 to R-12 (10296, 10310); the kick-off title is 18 px (LabelSize::Title) where the mockup has 17 (10291); Kick off padding is 7/12 (9046); dialog buttons are 30 px with 12 px padding like the add agent dialog (10318, 10320).
+- Differences kept (V112): Request changes (9189) and Pause all (10953) are disabled (no backend action yet); spec headings are not bold (syntax colors carry no weight, 9193); the right dock keeps its collapse button (8936) and the breadcrumb keeps Show ledger (8729); the plan room composer placeholder keeps "their keys", has no "⏎ send" and clips at 1280 (8927); shares are approved before kick-off and the client cannot know R-1 to R-12 (10296, 10310); the kick-off title is 18 px (LabelSize::Title) where the mockup has 17 (10291); Kick off padding is 7/12 (9046); dialog buttons are 30 px with 12 px padding like the add agent dialog (10318, 10320). The done check labels sit at x 1005 against the mockup's 1004, since their glyph boxes differ by 1 px.
 
 Screens: `desktop-plan`, `desktop-spec`, `desktop-plan-ready`, `desktop-kick-off`, `desktop-running`.
 
