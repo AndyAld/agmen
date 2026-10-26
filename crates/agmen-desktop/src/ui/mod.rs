@@ -16,6 +16,8 @@ mod format;
 mod git_panel;
 // agmen-c7 fix-hosting: the file icons a workspace's first frame draws.
 mod icon_preload;
+// C287: the clip truncated labels and the composer's chips paint under.
+mod ink_clip;
 mod inline_flow;
 mod left_dock;
 mod listener_panel;

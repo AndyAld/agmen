@@ -8,6 +8,7 @@ use gpui::{
 
 use super::Color;
 use crate::appearance::Appearance;
+use crate::ui::ink_clip::{Bleed, InkClip};
 use crate::ui::tokens::{
     LINE_HEIGHT, TEXT_DEFAULT, TEXT_LARGE, TEXT_SMALL, TEXT_TITLE, TEXT_XSMALL,
 };
@@ -149,7 +150,7 @@ impl Label {
 }
 
 impl RenderOnce for Label {
-    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let appearance = cx.global::<Appearance>();
         let color = self.color.hsla(&appearance.theme);
         let base = div().text_color(color).line_height(
@@ -157,6 +158,27 @@ impl RenderOnce for Label {
                 .map_or_else(|| relative(LINE_HEIGHT), gpui::DefiniteLength::from),
         );
         let size = self.size.unwrap_or_default().rems();
+        // C287: gpui's truncate clips to the label's box, which cut the
+        // glyphs of a font taller than a fixed line (the composer's chips
+        // set the code font on a 14 px one). The label clips at its sides
+        // and lets the font's overflow of the line show, as TextInput does
+        // (C264a).
+        let bleed = self.truncate.then(|| {
+            // The font the label inherits, with what it sets itself.
+            let mut font = window.text_style().font();
+            let font_size = match (self.code, self.size) {
+                (true, None) => appearance.fonts.code_size,
+                _ => size.to_pixels(window.rem_size()),
+            };
+            if self.code {
+                font.family = appearance.fonts.code_family.clone();
+            }
+            if let Some(weight) = self.weight {
+                font.weight = weight;
+            }
+            let line = self.line_height.unwrap_or(font_size * LINE_HEIGHT);
+            Bleed::of_font(&font, font_size, line, window)
+        });
         let sized = match (self.code, self.size) {
             (true, None) => base
                 .font_family(appearance.fonts.code_family.clone())
@@ -166,7 +188,7 @@ impl RenderOnce for Label {
                 .text_size(size),
             (false, _) => base.text_size(size),
         };
-        sized
+        let label = sized
             .when_some(self.weight, gpui::Styled::font_weight)
             .when(self.strikethrough, gpui::Styled::line_through)
             .when(self.underline, gpui::Styled::underline)
@@ -176,192 +198,21 @@ impl RenderOnce for Label {
                     // would also grow it down a column with free height.
                     this.w_full().min_w_0()
                 } else if self.truncate {
-                    this.flex_1().min_w_0().truncate()
+                    // gpui's truncate without its overflow_hidden: the
+                    // InkClip below clips instead.
+                    this.flex_1().min_w_0().whitespace_nowrap().text_ellipsis()
                 } else {
                     this.flex_none().whitespace_nowrap()
                 }
             })
-            .child(self.text)
+            .child(self.text);
+        match bleed {
+            Some(bleed) => InkClip::new(label, bleed).into_any_element(),
+            None => label.into_any_element(),
+        }
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::ui::test_support::rendered_size;
-    use gpui::TestAppContext;
-
-    #[gpui::test]
-    fn label_renders(cx: &mut TestAppContext) {
-        let size = rendered_size(cx, || {
-            Label::new("agmen")
-                .size(LabelSize::Small)
-                .color(Color::Muted)
-                .weight(FontWeight::SEMIBOLD)
-                .into_any_element()
-        });
-        assert!(size.width > gpui::px(0.) && size.height > gpui::px(0.));
-    }
-
-    #[gpui::test]
-    fn large_label_is_taller(cx: &mut TestAppContext) {
-        let small = rendered_size(cx, || {
-            Label::new("A").size(LabelSize::XSmall).into_any_element()
-        });
-        let mut cx2 = TestAppContext::single();
-        let large = rendered_size(&mut cx2, || {
-            Label::new("A").size(LabelSize::Large).into_any_element()
-        });
-        assert!(large.height > small.height);
-    }
-
-    #[gpui::test]
-    fn strikethrough_keeps_the_label_size(cx: &mut TestAppContext) {
-        assert_ne!(Label::new("$5.00").strikethrough(), Label::new("$5.00"));
-        let plain = rendered_size(cx, || Label::new("$5.00").code().into_any_element());
-        let mut cx2 = TestAppContext::single();
-        let struck = rendered_size(&mut cx2, || {
-            Label::new("$5.00")
-                .code()
-                .strikethrough()
-                .into_any_element()
-        });
-        assert_eq!(struck, plain);
-    }
-
-    #[gpui::test]
-    fn truncated_label_stays_on_one_line_in_its_row(cx: &mut TestAppContext) {
-        use gpui::InteractiveElement as _;
-        let long = "adam/coord: CI on main is red after #10 merged; the release tag is blocked.";
-        let one_line = rendered_size(cx, || Label::new("adam").into_any_element());
-        let mut cx2 = TestAppContext::single();
-        let cx2 = crate::ui::test_support::draw(&mut cx2, move || {
-            div()
-                .debug_selector(|| "row".into())
-                .w(gpui::px(100.))
-                .flex()
-                .child(Label::new(long).truncate())
-                .child(
-                    div()
-                        .debug_selector(|| "after".into())
-                        .w(gpui::px(1.))
-                        .h(gpui::px(1.)),
-                )
-                .into_any_element()
-        });
-        let row = cx2.debug_bounds("row").unwrap();
-        let after = cx2.debug_bounds("after").unwrap();
-        assert!(after.right() <= row.right(), "{after:?} past {row:?}");
-        assert_eq!(row.size.height, one_line.height);
-    }
-
-    #[gpui::test]
-    fn wrapped_label_in_a_column_is_as_tall_as_its_text(cx: &mut TestAppContext) {
-        // The plan panel's goal, note and lanes (nodes 8944, 9010, 9029) hug
-        // their lines. flex_1 grew them into a definite column's free height.
-        use gpui::InteractiveElement as _;
-        let one_line = rendered_size(cx, || Label::new("agmen").into_any_element());
-        let mut cx2 = TestAppContext::single();
-        let cx2 = crate::ui::test_support::draw(&mut cx2, || {
-            div()
-                .debug_selector(|| "column".into())
-                .w(gpui::px(200.))
-                .h(gpui::px(300.))
-                .flex()
-                .flex_col()
-                .child(Label::new("agmen").wrap())
-                .child(
-                    div()
-                        .debug_selector(|| "after".into())
-                        .w(gpui::px(1.))
-                        .h(gpui::px(1.)),
-                )
-                .into_any_element()
-        });
-        let column = cx2.debug_bounds("column").unwrap();
-        let after = cx2.debug_bounds("after").unwrap();
-        assert_eq!(after.top() - column.top(), one_line.height);
-    }
-
-    #[gpui::test]
-    fn wrapped_label_in_a_row_takes_the_rest_of_it_and_wraps(cx: &mut TestAppContext) {
-        use gpui::InteractiveElement as _;
-        let long = "adam/coord: CI on main is red after #10 merged; the release tag is blocked.";
-        let one_line = rendered_size(cx, || Label::new("adam").into_any_element());
-        let mut cx2 = TestAppContext::single();
-        let cx2 = crate::ui::test_support::draw(&mut cx2, move || {
-            div()
-                .debug_selector(|| "row".into())
-                .w(gpui::px(100.))
-                .flex()
-                .child(div().w(gpui::px(20.)).h(gpui::px(1.)).flex_none())
-                .child(Label::new(long).wrap())
-                .child(
-                    div()
-                        .debug_selector(|| "after".into())
-                        .w(gpui::px(1.))
-                        .h(gpui::px(1.))
-                        .flex_none(),
-                )
-                .into_any_element()
-        });
-        let row = cx2.debug_bounds("row").unwrap();
-        let after = cx2.debug_bounds("after").unwrap();
-        assert_eq!(after.right(), row.right(), "the label fills the row");
-        assert!(row.size.height > one_line.height * 2., "{row:?} wraps");
-    }
-
-    #[test]
-    fn underline_is_a_distinct_style() {
-        assert_ne!(Label::new("#9").underline(), Label::new("#9"));
-    }
-
-    #[gpui::test]
-    fn code_label_takes_a_size_from_the_ui_scale(cx: &mut TestAppContext) {
-        // V93: the Git panel's mono 11 metadata is the code font at Small;
-        // a code label at the default size keeps the code font's own size.
-        const TEXT: &str = "+2 \u{2212}5";
-        let code = rendered_size(cx, || Label::new(TEXT).code().into_any_element());
-        let mut cx2 = TestAppContext::single();
-        let small = rendered_size(&mut cx2, || {
-            Label::new(TEXT)
-                .code()
-                .size(LabelSize::Small)
-                .into_any_element()
-        });
-        let mut cx3 = TestAppContext::single();
-        let ui = rendered_size(&mut cx3, || {
-            Label::new(TEXT).size(LabelSize::Small).into_any_element()
-        });
-        assert!(small.height < code.height, "{small:?} {code:?}");
-        // The test text system measures every font alike, so only the
-        // size is checked here.
-        assert_eq!(small.height, ui.height, "the same text size");
-    }
-
-    #[gpui::test]
-    fn code_label_at_an_explicit_default_size_takes_text_default(cx: &mut TestAppContext) {
-        // C252: only a code label with no size set takes the code font's
-        // own size; Default asked for is TEXT_DEFAULT, as for UI text.
-        let asked = rendered_size(cx, || {
-            Label::new("andy/fx1")
-                .code()
-                .size(LabelSize::Default)
-                .into_any_element()
-        });
-        let mut cx2 = TestAppContext::single();
-        let unset = rendered_size(&mut cx2, || {
-            Label::new("andy/fx1").code().into_any_element()
-        });
-        let want = TEXT_DEFAULT.to_pixels(crate::ui::tokens::MOCKUP_REM) * LINE_HEIGHT;
-        // gpui rounds layout edges to device pixels (2 per px here).
-        assert!((asked.height - want).abs() <= gpui::px(0.25), "{asked:?}");
-        assert_ne!(asked.height, unset.height, "{asked:?} {unset:?}");
-    }
-
-    #[gpui::test]
-    fn code_label_renders(cx: &mut TestAppContext) {
-        let size = rendered_size(cx, || Label::new("andy/fx1").code().into_any_element());
-        assert!(size.width > gpui::px(0.));
-    }
-}
+#[path = "label_tests.rs"]
+mod tests;
