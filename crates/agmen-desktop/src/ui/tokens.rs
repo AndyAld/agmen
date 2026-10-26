@@ -361,6 +361,8 @@ mod tests {
         assert!((at_15(TEXT_DEFAULT) - 13.125).abs() < 0.001);
         assert!((at_15(TEXT_SMALL) - 11.25).abs() < 0.001);
         assert!((at_15(TEXT_XSMALL) - 9.375).abs() < 0.001);
+        // Node 11480's query, one step off the scale.
+        assert!((at_15(PALETTE_QUERY_TEXT) - 14.).abs() < 0.001);
     }
 
     #[test]

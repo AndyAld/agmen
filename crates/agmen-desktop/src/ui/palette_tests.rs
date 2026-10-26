@@ -1,12 +1,12 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use gpui::{Entity, TestAppContext, VisualTestContext, px};
+use gpui::{Entity, Rems, TestAppContext, VisualTestContext, px};
 
 use super::*;
 use crate::keymap::{OpenSettings, Quit, SpawnWorkerWith, ToggleLeftDock};
 use crate::ui::test_support::{click, init, redraw};
-use crate::ui::tokens::PALETTE_INPUT_LINE;
+use crate::ui::tokens::{MOCKUP_REM, PALETTE_INPUT_LINE, PALETTE_QUERY_TEXT, TEXT_DEFAULT};
 
 type Events = Rc<RefCell<Vec<String>>>;
 
@@ -178,7 +178,7 @@ fn the_query_is_14_px_one_step_above_the_rows(cx: &mut TestAppContext) {
     // caret ends the text, so its x from the input's left is the text's
     // width at the query's size.
     let (palette, _, cx) = open(cx);
-    cx.update(|window, _| window.set_rem_size(crate::ui::tokens::MOCKUP_REM));
+    cx.update(|window, _| window.set_rem_size(MOCKUP_REM));
     palette.update_in(cx, |p, window, cx| p.set_query("spawn", window, cx));
     redraw(cx);
     let (input, caret) = palette.read_with(cx, |p, cx| {
@@ -188,13 +188,14 @@ fn the_query_is_14_px_one_step_above_the_rows(cx: &mut TestAppContext) {
     let drawn = caret.left() - input.left();
     let (query, row) = cx.update(|window, _| {
         let run = window.text_style().to_run("spawn".len());
-        let width = |size: f32| {
+        let width = |size: Rems| {
+            let size = size.to_pixels(MOCKUP_REM);
             window
                 .text_system()
-                .shape_line("spawn".into(), px(size), std::slice::from_ref(&run), None)
+                .shape_line("spawn".into(), size, std::slice::from_ref(&run), None)
                 .width()
         };
-        (width(14.), width(13.125))
+        (width(PALETTE_QUERY_TEXT), width(TEXT_DEFAULT))
     });
     assert!(row < query, "{row:?} {query:?}");
     assert!(
