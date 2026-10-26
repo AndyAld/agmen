@@ -51,3 +51,4 @@ url = "2.5.8"
 # never reaches the hub binary's build.
 agmen-hub = { version = "0.1.0", path = ".", features = ["test-hooks"] }
 rumqttc = { version = "0.25.1", default-features = false }
+tokio = { version = "1.54.1", features = ["io-util"] }

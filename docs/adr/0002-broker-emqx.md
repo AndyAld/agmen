@@ -197,6 +197,6 @@ Every test mints its own identity ids (`id` plus 8 random `[a-z0-9]`), client id
 - The authentication chain has two authenticators, and both must stay in read-only config. Removing cinfo lets any client id use a valid token; removing both lets anonymous clients in (ADR-0001).
 - Durable sessions keep sessions and messages on disk under `/opt/emqx/data/ds` (`sessions/`, `messages/`); the cluster StatefulSet must keep `/opt/emqx/data` on its persistent volume, as dev does with `emqx-data`.
 - rumqttc's TLS features fail `cargo deny` today (see WSS above); Task 3 decides how agmen-client gets WSS.
-- CI does not run `--profile it-restart`: the Jenkins `rust` container has no Docker CLI or socket. It runs locally.
+- CI runs `--profile it-restart` in the Jenkins Integration stage, after the `it` run and before the stack is torn down. `dockerd` in the `docker` container also listens on a socket in an `emptyDir` shared with the `rust` container (`ci/kubePod.yaml`), and the `rust` container installs the Docker CLI and the compose plugin as static binaries, each checked against a sha256 pinned per architecture in the `Jenkinsfile`, then runs the profile with `DOCKER_HOST` set to that socket.
 - Not tested here: durable shared subscriptions for the hub (`durable_shared_subs`), whether a kick also discards a persistent session's queue, and token behavior with no `exp` (from source only).
 - Revisit if EMQX's license terms change, at a second node, or if a later EMQX version changes `verify_claims` or cinfo semantics.

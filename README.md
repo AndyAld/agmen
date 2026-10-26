@@ -339,7 +339,7 @@ For the mod: `claude plugin validate mods/agmen-claude`, `tsc -p mods/agmen-clau
 
 ## Deployment
 
-The hosted beta runs on the GroupDrive RKE2 cluster through its existing GitOps flow: Jenkins builds the hub image into Nexus (`docker.groupdrive.xyz`), and ArgoCD syncs manifests from `groupdrive/Kubernetes` (`agmen-env/`). EMQX (one node) and Postgres run as StatefulSets on Ceph RBD with pinned image tags, secrets come from Vault through the Vault Secrets Operator, and HAProxy ingress with Let's Encrypt serves the API and MQTT over WebSocket on port 443. Postgres is dumped nightly to Ceph object storage. Details: [docs/design.md](docs/design.md#69-hosting).
+agmen runs on its own Kubernetes cluster, image registry, secret store and domain, separate from GroupDrive's. The cluster manifests live in their own repository, `agmen-kubernetes` (`https://git.groupdrive.xyz/groupdrive/agmen-kubernetes`, mirrored to the private `github.com/AndyAld/agmen-kubernetes`), which ArgoCD in agmen's cluster syncs. Jenkins builds the hub image from this repository (`crates/agmen-hub/Dockerfile`) and pushes it to agmen's registry (`AGMEN_REGISTRY`). EMQX (one node) and Postgres run as StatefulSets with pinned image tags, the pods read Kubernetes Secrets that any secret store can fill, and Postgres is dumped nightly to S3 compatible storage. Details: `agmen-env/README.md` in agmen-kubernetes, and [docs/design.md](docs/design.md#69-hosting).
 
 ## Contributing
 

@@ -36,8 +36,12 @@ const HUB_TOKEN_TTL: Duration = Duration::from_secs(3600);
 const KEEP_ALIVE_SECS: u16 = 30;
 /// The broker's packet cap (ADR-0002), above the 64 KiB envelope limit.
 const MAX_PACKET: u32 = 96 * 1024;
-/// How long the first connect may take, CONNACK and SUBACK together.
+/// How long one step of the first connect (the CONNACK, or the SUBACK) may
+/// take.
 const CONNECT_WAIT: Duration = Duration::from_secs(10);
+/// Failed first connect attempts before the hub gives up: about two
+/// minutes with [`retry_delay`].
+const FIRST_CONNECT_FAILURES: u32 = 10;
 /// Failed connection attempts in a row before the hub gives up and exits.
 const MAX_FAILURES: u32 = 60;
 /// The first reconnect delay; it doubles up to [`MAX_RETRY_DELAY`].
@@ -58,10 +62,12 @@ pub enum MessagingError {
     /// The MQTT client settings are invalid.
     #[error("the MQTT client settings are invalid")]
     Client(#[source] rumqttc_next::ClientBuildError),
-    /// The broker refused or dropped the connection.
+    /// The broker refused or dropped the last of the first connect
+    /// attempts.
     #[error("connecting to the broker failed")]
     Connect(#[source] ConnectionError),
-    /// The first CONNACK or SUBACK did not come in time.
+    /// The broker did not answer a step of the last first connect attempt
+    /// in time.
     #[error("the broker did not answer within {CONNECT_WAIT:?}")]
     Timeout,
     /// The broker refused the `up/` or the `presence/` subscription.
@@ -120,7 +126,10 @@ impl Hub {
     /// and starts ingest, the presence task, the sweeper and the lease
     /// sweeper ([`Hub::run_lease_sweeper`]). It returns once both
     /// subscriptions are granted, so nothing published to `up/` afterwards
-    /// is missed.
+    /// is missed. A failed, refused or unanswered connect step is retried
+    /// with backoff, about two minutes in all: in the cluster EMQX reads
+    /// this hub's own `/v1/jwks`, so after a cold start it refuses the hub
+    /// until it has fetched the keys.
     ///
     /// # Errors
     ///
@@ -154,12 +163,7 @@ impl Hub {
             .try_build()
             .map_err(MessagingError::Client)?;
         let filters = [config.up_filter(), PRESENCE_FILTER.to_owned()];
-        tokio::time::timeout(
-            CONNECT_WAIT,
-            first_connect(&client, &mut eventloop, &filters),
-        )
-        .await
-        .map_err(|_| MessagingError::Timeout)??;
+        first_connect(&client, &mut eventloop, &filters, CONNECT_WAIT).await?;
         tracing::info!(client_id = %config.client_id(), ?filters, "subscribed to up/ and presence/");
         // What an earlier connection of this hub read no longer holds.
         self.presence().clear();
@@ -199,24 +203,50 @@ fn subscribe_filters(filters: &Filters) -> impl Iterator<Item = SubscribeFilter>
         .map(|filter| SubscribeFilter::new(filter.as_str(), QoS::AtLeastOnce))
 }
 
-/// Polls until CONNACK, subscribes, and polls until the SUBACK.
+/// Polls until CONNACK, subscribes, and polls until the SUBACK, retrying a
+/// failed connection, or a step that takes longer than `wait`, up to
+/// [`FIRST_CONNECT_FAILURES`] times.
 async fn first_connect(
     client: &AsyncClient,
     eventloop: &mut EventLoop,
     filters: &Filters,
+    wait: Duration,
 ) -> Result<(), MessagingError> {
     let mut subscribed = false;
+    let mut failures = 0_u32;
     loop {
-        match eventloop.poll().await.map_err(MessagingError::Connect)? {
-            Event::Incoming(Packet::ConnAck(_)) if !subscribed => {
+        // A step that times out counts as a failure like a refused connect:
+        // a broker that is still starting may accept TCP and answer late.
+        // Polling again after the timeout reconnects if the connect itself
+        // was cut short, since rumqttc keeps no connection until CONNACK.
+        let error = match tokio::time::timeout(wait, eventloop.poll()).await {
+            Ok(Ok(Event::Incoming(Packet::ConnAck(_)))) if !subscribed => {
                 subscribe(client, filters)?;
                 subscribed = true;
+                continue;
             }
-            Event::Incoming(Packet::SubAck(ack)) => {
+            Ok(Ok(Event::Incoming(Packet::SubAck(ack)))) => {
                 return check_suback(filters, &ack.return_codes);
             }
-            _ => {}
+            Ok(Ok(_)) => continue,
+            Ok(Err(err)) => {
+                tracing::warn!(error = %err, "connecting to the broker failed");
+                MessagingError::Connect(err)
+            }
+            Err(_elapsed) => {
+                tracing::warn!(?wait, "the broker did not answer in time");
+                MessagingError::Timeout
+            }
+        };
+        failures += 1;
+        if failures >= FIRST_CONNECT_FAILURES {
+            return Err(error);
         }
+        tracing::warn!(failures, "retrying the first broker connect");
+        // The session is clean, so a subscription made before the failure
+        // is gone.
+        subscribed = false;
+        tokio::time::sleep(retry_delay(failures)).await;
     }
 }
 
@@ -388,7 +418,74 @@ async fn handle(hub: &Hub, client: &AsyncClient, publish: &Publish) {
 
 #[cfg(test)]
 mod tests {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
     use super::*;
+
+    /// MQTT 5 CONNACK: session not present, success, no properties.
+    const CONNACK: [u8; 5] = [0x20, 0x03, 0x00, 0x00, 0x00];
+
+    /// Reads one MQTT packet and returns its first byte and its body.
+    async fn read_packet(conn: &mut TcpStream) -> (u8, Vec<u8>) {
+        let header = conn.read_u8().await.unwrap();
+        let mut len = 0_usize;
+        for shift in [0, 7, 14, 21] {
+            let byte = conn.read_u8().await.unwrap();
+            len |= usize::from(byte & 0x7f) << shift;
+            if byte & 0x80 == 0 {
+                break;
+            }
+        }
+        let mut body = vec![0; len];
+        conn.read_exact(&mut body).await.unwrap();
+        (header, body)
+    }
+
+    /// A broker that accepts the first connection and never answers it, as
+    /// EMQX may while it starts, then answers the second one properly.
+    async fn slow_then_ready_broker(listener: TcpListener) -> [TcpStream; 2] {
+        let (silent, _) = listener.accept().await.unwrap();
+        let (mut conn, _) = listener.accept().await.unwrap();
+        let (connect, _) = read_packet(&mut conn).await;
+        assert_eq!(connect, 0x10, "expected CONNECT");
+        conn.write_all(&CONNACK).await.unwrap();
+        let (subscribe, body) = read_packet(&mut conn).await;
+        assert_eq!(subscribe, 0x82, "expected SUBSCRIBE");
+        // SUBACK for the same packet id: no properties, granted QoS 1 for
+        // both filters.
+        conn.write_all(&[0x90, 0x05, body[0], body[1], 0x00, 0x01, 0x01])
+            .await
+            .unwrap();
+        [silent, conn]
+    }
+
+    #[tokio::test]
+    async fn first_connect_retries_after_a_step_times_out() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let broker = tokio::spawn(slow_then_ready_broker(listener));
+        let options = MqttOptions::new("agmen-hub-test", ("127.0.0.1".to_owned(), port));
+        let (client, mut eventloop) = AsyncClient::builder(options)
+            .capacity(QUEUE)
+            .try_build()
+            .unwrap();
+
+        let connected = tokio::time::timeout(
+            Duration::from_secs(10),
+            first_connect(
+                &client,
+                &mut eventloop,
+                &["agmen/v1/+/+/up/+".to_owned(), PRESENCE_FILTER.to_owned()],
+                Duration::from_millis(300),
+            ),
+        )
+        .await
+        .expect("first_connect did not finish within 10 s");
+
+        assert!(connected.is_ok(), "{connected:?}");
+        broker.await.unwrap();
+    }
 
     #[test]
     fn retry_delays_double_to_the_cap() {
