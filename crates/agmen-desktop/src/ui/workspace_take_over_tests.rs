@@ -130,3 +130,46 @@ fn a_live_switch_moves_the_left_docks_harness(cx: &mut TestAppContext) {
     });
     assert_eq!(harness.as_deref(), Some("codex"));
 }
+
+#[gpui::test]
+fn the_switch_menu_leaves_the_terminal_input_and_composer_clear(cx: &mut TestAppContext) {
+    // Fix 27 at Andy's 1280 and the mockup's 1440: the menu hangs from its
+    // chip, above or below the head, and covers neither the agent's input
+    // box (the cursor's row and the rule above it) nor the composer.
+    let (_, backend, cx) = open(cx, Screen::SwitchAgent);
+    let (cursor_row, _) = backend.snapshot().take_overs[&fixture_id("andy/fx1")]
+        .screen
+        .cursor()
+        .unwrap();
+    for viewport in [
+        gpui::size(gpui::px(1280.), gpui::px(901.)),
+        gpui::size(gpui::px(1440.), gpui::px(900.)),
+    ] {
+        cx.simulate_resize(viewport);
+        settle(cx);
+        let head = cx.debug_bounds("terminal:head").unwrap();
+        let chip = cx.debug_bounds("terminal:agent").unwrap();
+        let menu = cx.debug_bounds("switch-menu").expect("the menu stays open");
+        let screen = cx.debug_bounds("terminal:screen").unwrap();
+        let composer = cx.debug_bounds("composer:input").unwrap();
+        let input_top = screen.top()
+            + crate::ui::tokens::SPACE_8
+            + crate::ui::tokens::MONO_CELL_HEIGHT * f32::from(cursor_row - 1);
+        let px1 = gpui::px(1.);
+        let hangs =
+            (menu.top() - head.bottom()).abs() <= px1 || (menu.bottom() - head.top()).abs() <= px1;
+        assert!(hangs, "{viewport:?}: {menu:?} does not hang from {head:?}");
+        assert!(
+            !menu.intersects(&chip),
+            "{viewport:?}: {menu:?} covers the chip"
+        );
+        assert!(
+            !menu.intersects(&composer),
+            "{viewport:?}: {menu:?} covers the composer {composer:?}"
+        );
+        assert!(
+            menu.bottom() <= input_top || menu.top() >= screen.bottom(),
+            "{viewport:?}: {menu:?} covers the input box at {input_top:?}"
+        );
+    }
+}

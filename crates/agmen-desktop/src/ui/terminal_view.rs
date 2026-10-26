@@ -13,8 +13,8 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, Bounds, Context, EventEmitter, FocusHandle, Focusable, FontWeight, Hsla,
     InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, RenderOnce, Rgba,
-    SharedString, StatefulInteractiveElement as _, Styled as _, StyledText, TextRun, WeakEntity,
-    Window, anchored, canvas, deferred, div, font, point, px, size,
+    SharedString, Size, StatefulInteractiveElement as _, Styled as _, StyledText, TextRun,
+    WeakEntity, Window, anchored, canvas, deferred, div, font, point, px, size,
 };
 
 use super::add_agent_dialog::{AddAgentDialog, AgentDialog};
@@ -170,11 +170,34 @@ fn start_label(start: &SessionStart) -> String {
 }
 
 /// Where the chip and the head were drawn last, for the menu's place.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 struct Anchors {
     chip: Option<Bounds<Pixels>>,
     head: Option<Bounds<Pixels>>,
+    /// The agent's screen, as much of it as the window shows.
+    screen: Option<Bounds<Pixels>>,
     menu: Option<Pixels>,
+}
+
+/// Where the switch menu may go in a `viewport` window: above the status
+/// bar, and above the agent's input box on its `screen`, whose top rule is
+/// the row over the cursor's, so the menu never covers what the person
+/// types into or the composer below. With no cursor, the screen's bottom
+/// ends it.
+fn menu_area(
+    viewport: Size<Pixels>,
+    screen: Option<Bounds<Pixels>>,
+    cursor_row: Option<u16>,
+) -> Bounds<Pixels> {
+    let mut bottom = viewport.height - STATUS_BAR_HEIGHT;
+    if let Some(screen) = screen {
+        // The grid's rows start SPACE_8 below its top (`TerminalGrid`).
+        let input = cursor_row.map_or(screen.bottom(), |row| {
+            screen.top() + SPACE_8 + MONO_CELL_HEIGHT * f32::from(row.saturating_sub(1))
+        });
+        bottom = bottom.min(input).min(screen.bottom());
+    }
+    Bounds::new(point(px(0.), px(0.)), size(viewport.width, bottom))
 }
 
 /// The take-over terminal of one agent. Tests find it as `"terminal"`, its
@@ -205,12 +228,13 @@ pub(crate) struct TerminalView {
     /// Where keyboard focus moves on the next frame, once the element that
     /// holds it is in the window.
     focus_next: Option<FocusHandle>,
-    /// Frames drawn again since the menu opened, to measure its place.
+    /// Frames drawn again in a row because what the menu is placed from
+    /// moved, as on opening or after a resize.
     menu_frames: u8,
 }
 
-/// The most frames the open menu draws again to measure its place: one for
-/// the chip and head, one for the menu's own height.
+/// The most frames in a row the open menu draws again to measure its place:
+/// one for the chip and head, one for the menu's own height, one spare.
 const MAX_MEASURE_FRAMES: u8 = 3;
 
 impl std::fmt::Debug for TerminalView {
@@ -274,6 +298,12 @@ impl TerminalView {
     #[cfg(test)]
     pub(crate) fn harness(&self) -> &str {
         &self.take_over.harness
+    }
+
+    /// What the last Check again found.
+    #[cfg(test)]
+    pub(crate) fn note(&self) -> Option<&str> {
+        self.note.as_deref()
     }
 
     /// Takes the backend's latest state of the session and the agents,
@@ -425,10 +455,41 @@ impl TerminalView {
             }))
     }
 
-    fn head(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    /// The head row, with the open `menu` hanging from it.
+    fn head(&self, menu: Option<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let anchors = self.anchors.clone();
         let worker = self.worker.clone();
+        // Each item takes a line as tall as the head, so the ones that do
+        // not fit wrap onto a hidden second line, whole and from the end:
+        // a narrow pane drops the live chip first and keeps the buttons.
+        let line = |item: AnyElement| {
+            div()
+                .h(TERMINAL_HEAD_HEIGHT)
+                .flex()
+                .items_center()
+                .child(item)
+        };
+        let info = [
+            div()
+                .debug_selector(|| "terminal:start".into())
+                .child(
+                    Label::new(start_label(&self.take_over.start))
+                        .code()
+                        .color(Color::Placeholder),
+                )
+                .into_any_element(),
+            Label::new(self.handle.clone())
+                .code()
+                .color(Color::Role(self.role.clone()))
+                .into_any_element(),
+            Chip::new("live · stays on this machine")
+                .inline()
+                .tinted(Color::Accent)
+                .leading(Label::new("●").size(LabelSize::XSmall).color(Color::Accent))
+                .into_any_element(),
+        ];
         div()
+            .debug_selector(|| "terminal:head".into())
             .relative()
             .h(TERMINAL_HEAD_HEIGHT)
             .w_full()
@@ -442,24 +503,16 @@ impl TerminalView {
             .child(Icon::new(UiIcon::Terminal).color(Color::Accent))
             .child(self.agent_chip(cx))
             .child(
-                div().debug_selector(|| "terminal:start".into()).child(
-                    Label::new(start_label(&self.take_over.start))
-                        .code()
-                        .color(Color::Placeholder),
-                ),
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h(TERMINAL_HEAD_HEIGHT)
+                    .overflow_hidden()
+                    .flex()
+                    .flex_wrap()
+                    .gap_x(SPACE_10)
+                    .children(info.map(line)),
             )
-            .child(
-                Label::new(self.handle.clone())
-                    .code()
-                    .color(Color::Role(self.role.clone())),
-            )
-            .child(
-                Chip::new("live · stays on this machine")
-                    .inline()
-                    .tinted(Color::Accent)
-                    .leading(Label::new("●").size(LabelSize::XSmall).color(Color::Accent)),
-            )
-            .child(div().flex_1())
             // shortcut: Open as tab draws but does nothing until the center
             // has a terminal tab (spec 5.4); the pane's TabItem has no
             // Terminal variant yet, and the pane belongs to agmen-c7.
@@ -483,23 +536,30 @@ impl TerminalView {
                     ..anchors.get()
                 });
             }))
+            .children(menu)
     }
 
-    /// The switch menu, placed by `place_menu` from the last frame's chip
-    /// and head; `None` until both were drawn once.
+    /// The switch menu, a child of the head: `place_menu` picks its side
+    /// and room from the last frame's chip and head, and the head's place
+    /// in this frame's layout sets where it draws, so a resize never leaves
+    /// it at the head's old place. `None` until both were drawn once.
     fn menu(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let anchors = self.anchors.get();
         let (chip, head) = (anchors.chip?, anchors.head?);
-        let viewport = window.viewport_size();
-        // The menu stays above the status bar.
-        let area = Bounds::new(
-            point(px(0.), px(0.)),
-            size(viewport.width, viewport.height - STATUS_BAR_HEIGHT),
+        let area = menu_area(
+            window.viewport_size(),
+            anchors.screen,
+            self.screen.cursor().map(|(row, _)| row),
         );
         let height = anchors.menu.unwrap_or(SWITCH_MENU_HEIGHT);
         let place = place_menu(chip, head, size(SWITCH_MENU_WIDTH, height), area);
-        // Cut to its side's room, the menu fits, so gpui's snap into the
-        // window never moves it over the chip.
+        // From the head's top left: under the chip, at the head's bottom
+        // or top edge. Cut to its side's room, the menu fits, so gpui's
+        // snap into the window never moves it over the chip.
+        let offset = point(
+            place.position.x - head.left(),
+            place.position.y - head.top(),
+        );
         let worker = self.worker.clone();
         let view = cx.entity().downgrade();
         let dialog_view = view.clone();
@@ -523,37 +583,49 @@ impl TerminalView {
             with_view(&dialog_view, cx, |this, cx| this.open_dialog(dialog, cx));
         });
         let probe = self.anchors.clone();
+        let max_height = place.max_height;
         let close =
             cx.listener(|this, _: &gpui::MouseDownEvent, _, cx| this.set_menu_open(false, cx));
         let dialog_open = self.dialog.is_some();
+        // The head centers its children; at the head's top left, the
+        // offset counts from there.
         Some(
-            deferred(
-                anchored()
-                    .position(place.position)
-                    .anchor(place.anchor)
-                    .snap_to_window()
-                    .child(
-                        div()
-                            .occlude()
-                            .relative()
-                            .track_focus(&self.menu_focus)
-                            // Escape closes it; src/keymap.rs binds it.
-                            .key_context(SWITCH_MENU_CONTEXT)
-                            .on_action(cx.listener(|this, _: &Cancel, _, cx| {
-                                this.set_menu_open(false, cx);
-                            }))
-                            // The dialog over the menu takes the clicks.
-                            .when(!dialog_open, |this| this.on_mouse_down_out(close))
-                            .child(menu)
-                            .child(bounds_probe(move |bounds| {
-                                probe.set(Anchors {
-                                    menu: Some(bounds.size.height),
-                                    ..probe.get()
-                                });
-                            })),
-                    ),
-            )
-            .into_any_element(),
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .child(deferred(
+                    anchored()
+                        .offset(offset)
+                        .anchor(place.anchor)
+                        .snap_to_window()
+                        .child(
+                            div()
+                                .occlude()
+                                .relative()
+                                .track_focus(&self.menu_focus)
+                                // Escape closes it; src/keymap.rs binds it.
+                                .key_context(SWITCH_MENU_CONTEXT)
+                                .on_action(cx.listener(|this, _: &Cancel, _, cx| {
+                                    this.set_menu_open(false, cx);
+                                }))
+                                // The dialog over the menu takes the clicks.
+                                .when(!dialog_open, |this| this.on_mouse_down_out(close))
+                                .child(menu)
+                                .child(bounds_probe(move |bounds| {
+                                    // A menu cut to its room is not its own
+                                    // height; keep the last whole one, or
+                                    // it would stay on a side too short.
+                                    if bounds.size.height < max_height {
+                                        probe.set(Anchors {
+                                            menu: Some(bounds.size.height),
+                                            ..probe.get()
+                                        });
+                                    }
+                                })),
+                        ),
+                ))
+                .into_any_element(),
         )
     }
 
@@ -643,17 +715,20 @@ impl Render for TerminalView {
             window.defer(cx, move |window, cx| window.focus(&focus, cx));
         }
         let border = tint(cx.global::<Appearance>().theme.text_accent, TINT_PENDING);
+        let anchors = self.anchors.clone();
         let menu = if self.menu_open {
-            let menu = self.menu(window, cx);
-            // The chip and the head are measured as they draw, and the menu
-            // after its first frame: draw once more with what was measured.
-            let measured = self.anchors.get();
-            if (menu.is_none() || measured.menu.is_none()) && self.menu_frames < MAX_MEASURE_FRAMES
-            {
-                self.menu_frames += 1;
-                cx.on_next_frame(window, |_, _, cx| cx.notify());
-            }
-            menu
+            // Placed from what was measured last frame; once this frame is
+            // drawn, draw again if the chip, the head or the menu moved.
+            let used = self.anchors.get();
+            cx.on_next_frame(window, move |this, _, cx| {
+                if !this.menu_open || this.anchors.get() == used {
+                    this.menu_frames = 0;
+                } else if this.menu_frames < MAX_MEASURE_FRAMES {
+                    this.menu_frames += 1;
+                    cx.notify();
+                }
+            });
+            self.menu(window, cx)
         } else {
             None
         };
@@ -667,8 +742,11 @@ impl Render for TerminalView {
             .track_focus(&self.focus)
             .key_context("Terminal")
             .h(TERMINAL_BLOCK_HEIGHT)
+            // A short window shrinks it to its head, so the composer and
+            // Hand back stay in the window.
+            .flex_shrink_1()
+            .min_h(SPACE_6 + BORDER_WIDTH * 2. + TERMINAL_HEAD_HEIGHT)
             .w_full()
-            .flex_none()
             .pt(SPACE_6)
             .px(SPACE_12)
             .child(
@@ -681,10 +759,23 @@ impl Render for TerminalView {
                     .border(BORDER_WIDTH)
                     .border_color(border)
                     .bg(cx.global::<Appearance>().theme.terminal_background)
-                    .child(self.head(cx))
-                    .child(TerminalGrid(self.screen.clone())),
+                    .child(self.head(menu, cx))
+                    .child(
+                        div()
+                            .relative()
+                            .flex_1()
+                            .min_h_0()
+                            .flex()
+                            .flex_col()
+                            .child(TerminalGrid(self.screen.clone()))
+                            .child(bounds_probe(move |bounds| {
+                                anchors.set(Anchors {
+                                    screen: Some(bounds),
+                                    ..anchors.get()
+                                });
+                            })),
+                    ),
             )
-            .children(menu)
             .children(dialog)
     }
 }
