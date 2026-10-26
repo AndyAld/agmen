@@ -93,13 +93,20 @@ impl RenderOnce for AlertBanner {
             .items_center()
             .gap(SPACE_10)
             .px(SPACE_14)
+            // A pane too narrow even for the disc and the button cuts the
+            // banner at its edge instead of drawing over the next panel.
+            .overflow_hidden()
             .bg(needs_you)
             .border_b(BORDER_WIDTH)
             .border_color(edge);
+        // In a narrow pane the summary goes first, then the title and the
+        // chime chip are cut, so the button stays whole.
         let title = |text: &'static str| {
-            Label::new(text)
-                .weight(FontWeight::SEMIBOLD)
-                .color(Color::TextMuted)
+            div().min_w_0().overflow_hidden().child(
+                Label::new(text)
+                    .weight(FontWeight::SEMIBOLD)
+                    .color(Color::TextMuted),
+            )
         };
         match self.banner {
             Banner::NeedsYou {
@@ -116,7 +123,8 @@ impl RenderOnce for AlertBanner {
                         this.child(
                             div()
                                 .debug_selector(|| "banner:chime".into())
-                                .flex_none()
+                                .min_w_0()
+                                .overflow_hidden()
                                 .child(Chip::new("chime played").note().leading(
                                     Label::new("♪").size(LabelSize::Small).color(Color::Accent),
                                 )),
@@ -154,6 +162,7 @@ mod tests {
 
     use super::*;
     use crate::ui::test_support::{click, draw};
+    use crate::ui::tokens::GLYPH_DISC;
     use gpui::{TestAppContext, px};
 
     fn alert() -> MessageId {
@@ -205,6 +214,44 @@ mod tests {
                 .into_any_element()
         });
         assert_eq!(jump.size.height - text.height, px(20. - 14.));
+    }
+
+    #[gpui::test]
+    fn a_narrow_pane_keeps_the_banner_inside_it(cx: &mut TestAppContext) {
+        // needs-you.png at a 158 px pane: the summary shrank to nothing,
+        // then the chime chip and Jump to it drew past the pane's edge, over
+        // the Listener panel. Now the title and the chip give way and the
+        // button stays whole while the pane has room for it.
+        let jump = draw(cx, banner_in_column(needs_you(true)))
+            .debug_bounds("banner:jump")
+            .unwrap();
+        // The padding, the disc, four gaps and the button.
+        let width = SPACE_14 * 2. + GLYPH_DISC + SPACE_10 * 4. + jump.size.width;
+        let mut narrow = TestAppContext::single();
+        let narrow = draw(&mut narrow, move || {
+            div()
+                .w(width)
+                .flex()
+                .flex_col()
+                .child(AlertBanner::new(needs_you(true)).on_jump(|_, _, _| {}))
+                .into_any_element()
+        });
+        let banner = narrow.debug_bounds("banner").unwrap();
+        let chime = narrow.debug_bounds("banner:chime").unwrap();
+        let jump_at = narrow.debug_bounds("banner:jump").unwrap();
+        assert_eq!(banner.size.width, width);
+        assert_eq!(
+            jump_at.size.width, jump.size.width,
+            "the button stays whole"
+        );
+        assert!(
+            jump_at.right() <= banner.right(),
+            "{jump_at:?} past {banner:?}"
+        );
+        assert!(
+            chime.right() <= jump_at.left(),
+            "{chime:?} over {jump_at:?}"
+        );
     }
 
     #[gpui::test]
