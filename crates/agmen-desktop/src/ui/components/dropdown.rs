@@ -187,6 +187,9 @@ impl RenderOnce for Dropdown {
                     if open {
                         this.on_key_down(move |event, window, cx| {
                             if event.keystroke.key == "escape" {
+                                // Settings and modals close on Escape too;
+                                // the open menu takes it first.
+                                cx.stop_propagation();
                                 handler(false, window, cx);
                             }
                         })
@@ -241,6 +244,7 @@ mod tests {
     use crate::ui::test_support::{click, rendered_size};
     use crate::ui::tokens::DROPDOWN_WIDTH;
     use gpui::{Entity, TestAppContext, VisualTestContext};
+    use std::cell::Cell;
 
     const THEMES: [&str; 3] = ["Gruvbox Material Dark Hard", "One Dark", "Ayu Light"];
 
@@ -332,5 +336,25 @@ mod tests {
 
         cx.simulate_keystrokes("escape");
         assert!(!caller.read_with(cx, |caller, _| caller.flag));
+    }
+
+    #[gpui::test]
+    fn escape_on_the_open_menu_stays_in_the_dropdown(cx: &mut TestAppContext) {
+        let outer = Rc::new(Cell::new(false));
+        let seen = outer.clone();
+        let (_, cx) = open_with_caller(cx, false, move |open, set| {
+            let seen = seen.clone();
+            div()
+                .on_key_down(move |_, _, _| seen.set(true))
+                .child(
+                    Dropdown::new("theme", THEMES, 0)
+                        .open(open)
+                        .on_toggle(move |open, window, cx| set(open, window, cx)),
+                )
+                .into_any_element()
+        });
+        click(cx, "theme");
+        cx.simulate_keystrokes("escape");
+        assert!(!outer.get());
     }
 }

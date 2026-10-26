@@ -13,15 +13,13 @@ use crate::appearance::Appearance;
 use crate::ui::tokens::{BORDER_WIDTH, RADIUS_MD, SPACE_3, SPACE_9};
 
 /// Font size bounds, from the plan's `size_stepper_bounds`.
-const DEFAULT_MIN: u32 = 6;
-const DEFAULT_MAX: u32 = 72;
+const MIN: u32 = 6;
+const MAX: u32 = 72;
 
 #[derive(IntoElement)]
 pub(crate) struct Stepper {
     id: SharedString,
     value: u32,
-    min: u32,
-    max: u32,
     on_change: Option<ChangeHandler<u32>>,
 }
 
@@ -30,8 +28,6 @@ impl std::fmt::Debug for Stepper {
         f.debug_struct("Stepper")
             .field("id", &self.id)
             .field("value", &self.value)
-            .field("min", &self.min)
-            .field("max", &self.max)
             .finish_non_exhaustive()
     }
 }
@@ -45,18 +41,8 @@ impl Stepper {
         Self {
             id: id.into(),
             value,
-            min: DEFAULT_MIN,
-            max: DEFAULT_MAX,
             on_change: None,
         }
-    }
-
-    /// The lowest and highest values, in either order.
-    #[must_use]
-    pub(crate) fn range(mut self, a: u32, b: u32) -> Self {
-        self.min = a.min(b);
-        self.max = a.max(b);
-        self
     }
 
     /// Called with the new value when a button is clicked.
@@ -71,19 +57,19 @@ impl Stepper {
 
     /// The value shown: the given value clamped to the range.
     fn shown(&self) -> u32 {
-        self.value.clamp(self.min, self.max)
+        self.value.clamp(MIN, MAX)
     }
 
     /// The value one step down, or `None` at the minimum.
     fn decremented(&self) -> Option<u32> {
         let value = self.shown();
-        (value > self.min).then(|| value - 1)
+        (value > MIN).then(|| value - 1)
     }
 
     /// The value one step up, or `None` at the maximum.
     fn incremented(&self) -> Option<u32> {
         let value = self.shown();
-        (value < self.max).then(|| value + 1)
+        (value < MAX).then(|| value + 1)
     }
 }
 
@@ -199,8 +185,6 @@ mod tests {
         assert_eq!(at_max.decremented(), Some(71));
         assert_eq!(Stepper::new("size", 2).shown(), 6);
         assert_eq!(Stepper::new("size", 90).shown(), 72);
-        let custom = Stepper::new("size", 3).range(10, 4);
-        assert_eq!((custom.shown(), custom.decremented()), (4, None));
     }
 
     #[gpui::test]
@@ -221,17 +205,5 @@ mod tests {
     #[gpui::test]
     fn stepper_decrements_one_step(cx: &mut TestAppContext) {
         assert_eq!(click_at(cx, 15, "size:decrement"), Some(14));
-    }
-
-    #[gpui::test]
-    fn custom_range_disables_increment_at_its_max(cx: &mut TestAppContext) {
-        let make = || Stepper::new("size", 12).range(10, 12);
-        assert_eq!(click_with(cx, make, "size:increment"), None);
-    }
-
-    #[gpui::test]
-    fn custom_range_steps_below_the_default_min(cx: &mut TestAppContext) {
-        let make = || Stepper::new("size", 3).range(2, 4);
-        assert_eq!(click_with(cx, make, "size:decrement"), Some(2));
     }
 }
