@@ -42,7 +42,9 @@ pub(crate) const LINE_HEIGHT: f32 = 1.2;
 // console.py's auto line heights: a text box is 13 px tall for 11 px
 // text, 14 px for 12 px and 16 px for 13 px, in SF Pro Text and the code
 // font alike. Text the mockup draws at those sizes takes these, not
-// LINE_HEIGHT times its rem size.
+// LINE_HEIGHT times its rem size. The 10 px code glyphs, as the take-over
+// chip's `>_` (node 301), sit on a 12 px line.
+pub(crate) const AUTO_LINE_10: Pixels = px(12.);
 pub(crate) const AUTO_LINE_11: Pixels = px(13.);
 pub(crate) const AUTO_LINE_12: Pixels = px(14.);
 pub(crate) const AUTO_LINE_13: Pixels = px(16.);

@@ -23,8 +23,9 @@ use super::needs_you::AlertLook;
 use super::ref_chip::RefEvent;
 use super::rich_text::RichText;
 use super::tokens::{
-    ALERT_BAR_WIDTH, AUTO_LINE_12, MENTION_BAR_WIDTH, MESSAGE_AVATAR_SIZE, MESSAGE_HANDLE_LINE,
-    REPLY_INDENT, SPACE_2, SPACE_3, SPACE_6, SPACE_8, SPACE_10, TINT_ALERT, TINT_MENTION, tint,
+    ALERT_BAR_WIDTH, AUTO_LINE_10, AUTO_LINE_11, AUTO_LINE_12, MENTION_BAR_WIDTH,
+    MESSAGE_AVATAR_SIZE, MESSAGE_HANDLE_LINE, REPLY_INDENT, SPACE_2, SPACE_3, SPACE_6, SPACE_8,
+    SPACE_10, TINT_ALERT, TINT_MENTION, tint,
 };
 use crate::appearance::Appearance;
 use crate::backend::{Action, Draft, can_take_over};
@@ -350,10 +351,21 @@ impl MessageRow {
                     .inline()
                     .tinted(Color::Accent)
                     .outline(Color::Accent)
-                    .leading(Label::new(">_").code().color(Color::Accent))
+                    // Node 300: the glyph (node 301) on its 12 px line and
+                    // the label and key (node 302, SF 11) on their 13 px
+                    // one make the chip 17 px.
+                    .line_height(AUTO_LINE_11)
+                    .leading(
+                        Label::new(">_")
+                            .code()
+                            .size(LabelSize::XSmall)
+                            .line_height(AUTO_LINE_10)
+                            .color(Color::Accent),
+                    )
                     .trailing(
                         Label::new(crate::keymap::open_in_terminal_hint())
                             .size(LabelSize::Small)
+                            .line_height(AUTO_LINE_11)
                             .color(Color::Accent),
                     ),
             )

@@ -556,3 +556,17 @@ fn change_card_stays_on_the_listener_message_it_belongs_to(cx: &mut TestAppConte
         assert!(o.cx.debug_bounds(card_sel).is_none(), "row {ix}");
     }
 }
+
+#[gpui::test]
+fn the_take_over_chip_is_the_mockups_17_px(cx: &mut TestAppContext) {
+    // Node 300: a 1 px border and 1 px padding around the label's 13 px
+    // line (node 302, SF 11), 17 px in all. The `>_` glyph (node 301) is
+    // 10 px mono on a 12 px line; at the code size on its own line it
+    // made the chip 20 px.
+    let (messages, c) = chat();
+    let o = open(cx, px(800.), (0..messages.len()).collect(), c);
+    let chip =
+        o.cx.debug_bounds(sel(&messages[6], "open-in-terminal"))
+            .unwrap();
+    assert_eq!(chip.size.height, px(17.));
+}
