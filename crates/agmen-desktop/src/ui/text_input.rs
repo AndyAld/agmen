@@ -508,14 +508,6 @@ impl Bleed {
             below: (baseline + descent.abs() - line_height).max(px(0.)),
         }
     }
-
-    /// `bounds` grown by the bleed above and below.
-    fn around(self, bounds: Bounds<Pixels>) -> Bounds<Pixels> {
-        Bounds::from_corners(
-            point(bounds.left(), bounds.top() - self.above),
-            point(bounds.right(), bounds.bottom() + self.below),
-        )
-    }
 }
 
 impl TextLayout {
@@ -567,6 +559,50 @@ impl TextLayout {
         } else {
             1
         }
+    }
+
+    /// The hard lines whose boxes meet `bounds` when the text's top left
+    /// sits at `origin`, and the mask they paint under (C273): `bounds`,
+    /// grown by the bleed on a side only where the outermost of those
+    /// lines starts or ends inside, so a line cut by the edge, or one
+    /// scrolled past it, shows nothing beyond the input.
+    fn in_view(
+        &self,
+        origin: Point<Pixels>,
+        bounds: Bounds<Pixels>,
+    ) -> (Range<usize>, Bounds<Pixels>) {
+        // Tops are row aligned with the scroll, up to rounding.
+        const EPSILON: Pixels = px(0.01);
+        let bottoms = self.tops.iter().skip(1).copied().chain([self.height]);
+        let boxes = self
+            .tops
+            .iter()
+            .zip(bottoms)
+            .map(|(&top, bottom)| (origin.y + top, origin.y + bottom));
+        let first = boxes
+            .clone()
+            .take_while(|&(_, bottom)| bottom <= bounds.top() + EPSILON)
+            .count();
+        let end = boxes
+            .clone()
+            .take_while(|&(top, _)| top < bounds.bottom() - EPSILON)
+            .count()
+            .max(first);
+        let grow_above = boxes
+            .clone()
+            .nth(first)
+            .is_some_and(|(top, _)| top >= bounds.top() - EPSILON);
+        let grow_below = end
+            .checked_sub(1)
+            .and_then(|last| boxes.clone().nth(last))
+            .is_some_and(|(_, bottom)| bottom <= bounds.bottom() + EPSILON);
+        let above = if grow_above { self.bleed.above } else { px(0.) };
+        let below = if grow_below { self.bleed.below } else { px(0.) };
+        let mask = Bounds::from_corners(
+            point(bounds.left(), bounds.top() - above),
+            point(bounds.right(), bounds.bottom() + below),
+        );
+        (first..end, mask)
     }
 
     /// The hard line holding `offset`.
@@ -1006,17 +1042,23 @@ impl Element for TextArea {
         let Some(paint) = prepaint.take() else {
             return;
         };
-        let scroll = self.input.read(cx).scroll;
+        let origin = bounds.origin - self.input.read(cx).scroll;
         let mut failed = false;
-        // C264a: a font taller than the line paints past the line box; the
-        // mask grows by that much so it never cuts descenders.
-        let mask = paint.layout.bleed.around(bounds);
-        window.with_content_mask(Some(ContentMask { bounds: mask }), |window| {
+        // C273: the selection stays inside the input.
+        window.with_content_mask(Some(ContentMask { bounds }), |window| {
             for quad in paint.selection {
                 window.paint_quad(quad);
             }
-            for (line, top) in paint.layout.lines.iter().zip(&paint.layout.tops) {
-                let at = bounds.origin - scroll + point(px(0.), *top);
+        });
+        // C264a: a font taller than the line paints past the line box; the
+        // mask grows by that much so it never cuts descenders. C273: only
+        // the lines in view paint, and only past an edge they start or end
+        // at. The caret paints under the same mask.
+        let (in_view, mask) = paint.layout.in_view(origin, bounds);
+        let lines = paint.layout.lines.iter().zip(&paint.layout.tops);
+        window.with_content_mask(Some(ContentMask { bounds: mask }), |window| {
+            for (line, top) in lines.skip(in_view.start).take(in_view.len()) {
+                let at = origin + point(px(0.), *top);
                 failed |= line
                     .paint(
                         at,
