@@ -105,6 +105,8 @@ pub(crate) enum Action {
     ApproveSpec { path: String, sha: GitSha },
     ApproveShare,
     KickOff,
+    // Task 18: a worker on an installed agent, from the command palette.
+    SpawnWorker { agent: String },
 }
 
 /// What a subscriber hears.

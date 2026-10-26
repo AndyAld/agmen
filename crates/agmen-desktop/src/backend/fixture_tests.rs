@@ -543,3 +543,63 @@ fn git_facts_know_every_worktree_commit() {
         }
     }
 }
+
+// Task 18: the palette's "spawn worker with <agent>" plays the 15:31 exchange.
+#[test]
+fn spawn_worker_plays_the_delegated_exchange() {
+    let backend = FixtureBackend::for_screen(Screen::Chat).unwrap();
+    let mut updates = backend.subscribe();
+    let before = backend.snapshot().messages.len();
+    backend
+        .act(Action::SpawnWorker {
+            agent: "codex".into(),
+        })
+        .unwrap();
+    let s = backend.snapshot();
+    let new = &s.messages[before..];
+    let verbs: Vec<_> = new
+        .iter()
+        .map(|m| m.client.payload.verb().map(agmen_proto::Verb::as_str))
+        .collect();
+    assert_eq!(verbs, [Some("FYI"), Some("ANSWER"), Some("DELEGATED")]);
+    assert_eq!(new[0].from_handle.as_str(), "andy");
+    assert_eq!(new[0].client.body.as_str(), "Spawn a worker with codex");
+    assert_eq!(new[0].client.to, std::slice::from_ref(&s.listener_id));
+    for reply in &new[1..] {
+        assert_eq!(reply.from_handle.as_str(), "andy/listen");
+        assert_eq!(reply.client.reply_to, Some(new[0].client.id.clone()));
+    }
+    let Payload::Delegated { worker, agent, .. } = &new[2].client.payload else {
+        panic!("not a DELEGATED: {:?}", new[2].client.payload);
+    };
+    assert_eq!(agent, "codex");
+    // andy/fx1 is the fixture's first worker, so this one is andy/fx2.
+    assert_eq!(worker.as_str(), "andyfx20");
+    assert!(
+        new[2]
+            .client
+            .body
+            .as_str()
+            .starts_with("andy/fx2 · Engineer · codex")
+    );
+    // Each message reaches the views as it is added.
+    for expected in new {
+        let Some(Update::Message(env)) = futures::executor::block_on(updates.next()) else {
+            panic!("no message update");
+        };
+        assert_eq!(&*env, expected);
+    }
+    // A second spawn gets the next worker.
+    backend
+        .act(Action::SpawnWorker {
+            agent: "claude".into(),
+        })
+        .unwrap();
+    let last = backend.snapshot().messages.pop().unwrap();
+    assert!(
+        last.client
+            .body
+            .as_str()
+            .starts_with("andy/fx3 · Engineer · claude")
+    );
+}

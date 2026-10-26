@@ -99,8 +99,29 @@ pub(crate) const WORKSPACE_CONTEXT: &str = "Workspace";
 pub(crate) const TEXT_INPUT_CONTEXT: &str = "TextInput";
 /// The key context the command palette sets.
 pub(crate) const PALETTE_CONTEXT: &str = "CommandPalette";
+/// The workspace outside any text input, for keys that type a character on
+/// a Mac layout. gpui on macOS runs a matched binding before text input, so
+/// a binding there would keep the character from ever being typed.
+pub(crate) const WORKSPACE_OUTSIDE_INPUT_CONTEXT: &str = "Workspace && !TextInput";
 /// The palette's query input: deeper than [`TEXT_INPUT_CONTEXT`] alone.
 pub(crate) const PALETTE_INPUT_CONTEXT: &str = "CommandPalette > TextInput";
+
+/// The command palette's keys, which the status bar's hint shows.
+pub(crate) const TOGGLE_PALETTE_KEYS: &str = "cmd-shift-p";
+/// Take-over's keys, which the "Open in terminal" chip shows.
+pub(crate) const OPEN_IN_TERMINAL_KEYS: &str = "alt-o";
+
+/// The status bar's ⌘⇧P, without building the binding table.
+#[must_use]
+pub(crate) fn palette_hint() -> String {
+    glyphs(TOGGLE_PALETTE_KEYS)
+}
+
+/// The "Open in terminal" chip's ⌥O, without building the binding table.
+#[must_use]
+pub(crate) fn open_in_terminal_hint() -> String {
+    glyphs(OPEN_IN_TERMINAL_KEYS)
+}
 
 /// One binding: the keys as Zed writes them and the context they apply in.
 #[derive(Clone)]
@@ -184,7 +205,7 @@ pub(crate) fn table() -> Vec<Binding> {
         bind("cmd-c", input::Copy, text),
         // Quit works in every window, the dev views too.
         bind("cmd-q", Quit, None),
-        bind("cmd-shift-p", ToggleCommandPalette, ws),
+        bind(TOGGLE_PALETTE_KEYS, ToggleCommandPalette, ws),
         bind("cmd-b", ToggleLeftDock, ws),
         // Zed shows ⌘R for the right dock; the hint takes the first binding.
         bind("cmd-r", ToggleRightDock, ws),
@@ -196,9 +217,14 @@ pub(crate) fn table() -> Vec<Binding> {
         bind("cmd-w", CloseActiveTab, ws),
         bind("cmd-\\", SplitRight, ws),
         bind("ctrl-`", ToggleTerminal, ws),
-        // On a Mac layout ⌥O types "ø"; gpui gives a focused text input
-        // the character first when the platform prefers it (unverified).
-        bind("alt-o", OpenInTerminal, ws),
+        // On a Mac layout ⌥O types "ø", and gpui_macos never lets a text
+        // input take the character first (prefer_character_input is always
+        // false), so ⌥O stays the input's there.
+        bind(
+            OPEN_IN_TERMINAL_KEYS,
+            OpenInTerminal,
+            Some(WORKSPACE_OUTSIDE_INPUT_CONTEXT),
+        ),
         // The mockup's hint on "spawn worker…"; Zed's cmd-n (new file)
         // has no agmen counterpart.
         bind("cmd-n", SpawnWorker, ws),
@@ -268,6 +294,8 @@ pub(crate) fn commands() -> Vec<Command> {
     );
     commands.extend([
         window("agmen: open settings", Box::new(OpenSettings)),
+        // Zed's palette lists its own toggle too.
+        window("command palette: toggle", Box::new(ToggleCommandPalette)),
         window("workspace: toggle vim mode", Box::new(ToggleVimMode)),
         Command {
             label: "agmen: quit".into(),

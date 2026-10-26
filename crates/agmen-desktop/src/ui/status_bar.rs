@@ -167,7 +167,6 @@ impl RenderOnce for StatusBar {
 
 /// Task 18: the ⌘⇧P hint, which opens the palette while it is closed.
 fn palette_trigger(palette_open: bool) -> impl IntoElement {
-    let keys = crate::keymap::hint(&crate::keymap::table(), &ToggleCommandPalette);
     div()
         .id("palette-trigger")
         .debug_selector(|| "palette-trigger".into())
@@ -176,5 +175,5 @@ fn palette_trigger(palette_open: bool) -> impl IntoElement {
                 window.dispatch_action(Box::new(ToggleCommandPalette), cx);
             })
         })
-        .children(keys.map(KeyHint::new))
+        .child(KeyHint::new(crate::keymap::palette_hint()))
 }

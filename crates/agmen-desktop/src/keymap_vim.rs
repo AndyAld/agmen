@@ -3,11 +3,10 @@
 // shortcut: the desktop app only records the choice; vim keys come with the
 // terminal UI's keymap, and the desktop reads this setting when they do.
 
-use std::fs;
 use std::path::Path;
 
-/// A settings file is small; anything larger is refused.
-const MAX_SETTINGS_BYTES: u64 = 4 * 1024 * 1024;
+use crate::appearance::{AppearanceError, read_settings_table, write_settings_table};
+
 /// The table this setting lives in.
 const TABLE: &str = "keys";
 /// The setting's key in [`TABLE`].
@@ -21,23 +20,6 @@ pub(crate) enum VimMode {
     On,
 }
 
-/// What can go wrong reading or writing the setting.
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum VimModeError {
-    #[error("cannot read or write {}: {source}", path.display())]
-    Io {
-        path: std::path::PathBuf,
-        source: std::io::Error,
-    },
-    #[error("{} is {len} bytes, too large for a settings file", path.display())]
-    TooLarge { path: std::path::PathBuf, len: u64 },
-    #[error("cannot parse {}: {message}", path.display())]
-    Parse {
-        path: std::path::PathBuf,
-        message: String,
-    },
-}
-
 /// Flips vim mode in the settings file at `path`, keeping every other key,
 /// and returns the new mode. A missing file or key counts as off.
 ///
@@ -45,28 +27,8 @@ pub(crate) enum VimModeError {
 ///
 /// When the file cannot be read, parsed or written; a file that does not
 /// parse is left alone.
-pub(crate) fn toggle_vim_mode(path: &Path) -> Result<VimMode, VimModeError> {
-    let io = |source| VimModeError::Io {
-        path: path.to_owned(),
-        source,
-    };
-    let mut table = match fs::metadata(path) {
-        Ok(meta) if meta.len() > MAX_SETTINGS_BYTES => {
-            return Err(VimModeError::TooLarge {
-                path: path.to_owned(),
-                len: meta.len(),
-            });
-        }
-        Ok(_) => fs::read_to_string(path)
-            .map_err(io)?
-            .parse::<toml::Table>()
-            .map_err(|err| VimModeError::Parse {
-                path: path.to_owned(),
-                message: err.to_string(),
-            })?,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => toml::Table::new(),
-        Err(err) => return Err(io(err)),
-    };
+pub(crate) fn toggle_vim_mode(path: &Path) -> Result<VimMode, AppearanceError> {
+    let mut table = read_settings_table(path)?.unwrap_or_default();
     let mut keys = match table.remove(TABLE) {
         Some(toml::Value::Table(keys)) => keys,
         _ => toml::Table::new(),
@@ -74,22 +36,14 @@ pub(crate) fn toggle_vim_mode(path: &Path) -> Result<VimMode, VimModeError> {
     let on = !matches!(keys.get(KEY), Some(toml::Value::Boolean(true)));
     keys.insert(KEY.to_owned(), toml::Value::Boolean(on));
     table.insert(TABLE.to_owned(), toml::Value::Table(keys));
-    let text = toml::to_string_pretty(&table).map_err(|err| VimModeError::Parse {
-        path: path.to_owned(),
-        message: err.to_string(),
-    })?;
-    if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir).map_err(io)?;
-    }
-    // Through a temporary file and a rename, so a crash never leaves half a file.
-    let tmp = path.with_extension("toml.tmp");
-    fs::write(&tmp, text).map_err(io)?;
-    fs::rename(&tmp, path).map_err(io)?;
+    write_settings_table(path, &table)?;
     Ok(if on { VimMode::On } else { VimMode::Off })
 }
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
 
     #[test]
@@ -116,7 +70,7 @@ mod tests {
         fs::write(&path, "not = [toml").unwrap();
         assert!(matches!(
             toggle_vim_mode(&path),
-            Err(VimModeError::Parse { .. })
+            Err(AppearanceError::Parse { .. })
         ));
         assert_eq!(fs::read_to_string(&path).unwrap(), "not = [toml");
     }

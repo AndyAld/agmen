@@ -78,7 +78,11 @@ fn cmd_shift_p_lists_what_the_workspace_can_run(cx: &mut TestAppContext) {
     }
     // Take-over has no handler until its view lands, so it is not listed.
     assert!(!rows.iter().any(|r| r.contains("terminal")), "{rows:?}");
-    assert!(!rows.iter().any(|r| r.contains("command palette")));
+    // Zed's palette lists its own toggle with its key.
+    assert!(
+        rows.contains(&"command palette: toggle".to_owned()),
+        "{rows:?}"
+    );
 
     cx.simulate_keystrokes("cmd-shift-p");
     redraw(cx);
@@ -130,7 +134,7 @@ fn agents_and_roles_open_from_the_palette(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn spawn_row_asks_the_listener_and_shows_the_chat(cx: &mut TestAppContext) {
+fn spawn_row_opens_the_delegated_flow_in_the_chat(cx: &mut TestAppContext) {
     let (workspace, backend, cx) = open_screen(cx, Screen::Chat);
     click(cx, "pane-0:tab-1");
     let before = backend.snapshot().messages.len();
@@ -145,14 +149,65 @@ fn spawn_row_asks_the_listener_and_shows_the_chat(cx: &mut TestAppContext) {
     assert_eq!(rows.len(), 5);
     cx.simulate_keystrokes("down enter");
     cx.run_until_parked();
+    // The plan: here the row opens the fixture's DELEGATED flow, andy's
+    // ask, the listener's ANSWER and its DELEGATED with the chosen agent.
     let messages = backend.snapshot().messages;
-    assert_eq!(messages.len(), before + 1);
-    let sent = messages.last().unwrap();
+    assert_eq!(messages.len(), before + 3);
+    let sent = &messages[before];
     assert_eq!(sent.client.body.as_str(), "Spawn a worker with codex");
     let listener = workspace.read_with(cx, |w, _| w.snapshot.listener_id.clone());
     assert_eq!(sent.client.to, [listener]);
+    let delegated = messages.last().unwrap();
+    assert!(
+        matches!(
+            &delegated.client.payload,
+            agmen_proto::Payload::Delegated { agent, .. } if agent == "codex"
+        ),
+        "{:?}",
+        delegated.client.payload
+    );
+    assert_eq!(delegated.client.reply_to, Some(sent.client.id.clone()));
     let active = workspace.read_with(cx, |w, cx| w.pane_group.read(cx).active_item(cx));
     assert_eq!(active, Some(TabItem::Chat));
+    // The chat shows the exchange.
+    let shown = workspace.read_with(cx, |w, cx| {
+        w.pane_group
+            .read(cx)
+            .chat()
+            .map(|chat| chat.read(cx).message_count())
+    });
+    assert_eq!(shown, Some(before + 3));
+}
+
+#[gpui::test]
+fn clicking_another_input_keeps_its_focus(cx: &mut TestAppContext) {
+    // Zed's modal layer puts the focus back only while it is still in the
+    // modal: a click that closes the palette keeps what it focused.
+    let (workspace, cx) = open(cx);
+    cx.simulate_keystrokes("cmd-shift-p");
+    redraw(cx);
+    assert!(shown(&workspace, cx).is_some());
+    click(cx, "composer:input");
+    assert!(
+        shown(&workspace, cx).is_none(),
+        "the click closed the palette"
+    );
+    let composer_focused = workspace.update_in(cx, |w, window, cx| {
+        w.pane_group
+            .read(cx)
+            .chat()
+            .map(|chat| chat.focus_handle(cx).is_focused(window))
+    });
+    assert_eq!(composer_focused, Some(true));
+}
+
+#[gpui::test]
+fn escape_puts_the_focus_back(cx: &mut TestAppContext) {
+    let (workspace, cx) = open(cx);
+    cx.simulate_keystrokes("cmd-shift-p escape");
+    redraw(cx);
+    let focused = workspace.update_in(cx, |w, window, _| w.focus_handle.is_focused(window));
+    assert!(focused);
 }
 
 #[gpui::test]

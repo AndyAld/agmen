@@ -2,14 +2,12 @@ use gpui::Keystroke;
 
 use super::*;
 
-/// Whether the palette leaves `action` out: its own toggle and keys, and
-/// the text input's editing keys.
+/// Whether the palette leaves `action` out: its menu keys and the text
+/// input's editing keys. Zed lists the palette's own toggle, so it does too.
 #[must_use]
 pub(crate) fn is_internal(action: &dyn Action) -> bool {
     let name = action.name();
-    name.starts_with("menu::")
-        || name.starts_with("text_input::")
-        || action.partial_eq(&ToggleCommandPalette)
+    name.starts_with("menu::") || name.starts_with("text_input::")
 }
 
 /// The bindings whose keystrokes match `keys` in `context`.
@@ -87,7 +85,7 @@ fn palette_entries_are_unique_and_skip_internal_actions() {
 #[test]
 fn v86_set_is_bound_in_the_workspace() {
     let ws = Some(WORKSPACE_CONTEXT);
-    let cases: [(&str, Box<dyn Action>); 15] = [
+    let cases: [(&str, Box<dyn Action>); 14] = [
         ("cmd-b", Box::new(ToggleLeftDock)),
         ("cmd-r", Box::new(ToggleRightDock)),
         ("cmd-alt-b", Box::new(ToggleRightDock)),
@@ -101,7 +99,6 @@ fn v86_set_is_bound_in_the_workspace() {
         ("cmd-,", Box::new(OpenSettings)),
         ("cmd-shift-f", Box::new(OpenSearch)),
         ("ctrl-`", Box::new(ToggleTerminal)),
-        ("alt-o", Box::new(OpenInTerminal)),
         ("cmd-n", Box::new(SpawnWorker)),
     ];
     for (keys, action) in cases {
@@ -173,4 +170,64 @@ fn quit_runs_without_a_window() {
         .unwrap();
     assert_eq!(quit.scope, Scope::App);
     assert_eq!(quit.label, "agmen: quit");
+}
+
+/// Whether `binding` applies with `stack` focused, outermost first, as
+/// gpui's keymap decides it: the predicate matches at some depth.
+fn applies(binding: &Binding, stack: &[&str]) -> bool {
+    let contexts: Vec<gpui::KeyContext> = stack
+        .iter()
+        .map(|c| gpui::KeyContext::parse(c).unwrap())
+        .collect();
+    binding
+        .key_binding
+        .predicate()
+        .is_none_or(|predicate| predicate.depth_of(&contexts).is_some())
+}
+
+#[test]
+fn alt_o_leaves_text_inputs_their_character() {
+    // gpui on macOS runs a matched binding before text input
+    // (prefer_character_input is always false), so a binding inside a text
+    // input would make "ø" impossible to type.
+    let table = table();
+    let alt_o: Vec<_> = table
+        .iter()
+        .filter(|b| b.keys == OPEN_IN_TERMINAL_KEYS)
+        .collect();
+    assert_eq!(alt_o.len(), 1);
+    assert!(alt_o[0].key_binding.action().partial_eq(&OpenInTerminal));
+    assert!(applies(alt_o[0], &[WORKSPACE_CONTEXT]));
+    assert!(!applies(alt_o[0], &[WORKSPACE_CONTEXT, TEXT_INPUT_CONTEXT]));
+    assert!(!applies(
+        alt_o[0],
+        &[WORKSPACE_CONTEXT, PALETTE_CONTEXT, TEXT_INPUT_CONTEXT]
+    ));
+}
+
+#[test]
+fn palette_lists_its_own_toggle_with_its_key() {
+    let commands = commands();
+    let toggle = commands
+        .iter()
+        .find(|c| c.action.partial_eq(&ToggleCommandPalette))
+        .expect("Zed's palette lists command palette: toggle");
+    assert_eq!(toggle.label, "command palette: toggle");
+    assert_eq!(toggle.scope, Scope::Window);
+    assert_eq!(hint(&table(), &ToggleCommandPalette), Some(palette_hint()));
+}
+
+#[test]
+fn hint_keys_have_one_home() {
+    let table = table();
+    assert_eq!(
+        hint(&table, &ToggleCommandPalette),
+        Some(glyphs(TOGGLE_PALETTE_KEYS))
+    );
+    assert_eq!(
+        hint(&table, &OpenInTerminal),
+        Some(glyphs(OPEN_IN_TERMINAL_KEYS))
+    );
+    assert_eq!(palette_hint(), "⌘⇧P");
+    assert_eq!(open_in_terminal_hint(), "⌥O");
 }

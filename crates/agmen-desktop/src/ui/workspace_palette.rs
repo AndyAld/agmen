@@ -4,12 +4,12 @@
 //! handlers reach its state.
 
 use gpui::{
-    AnyElement, AppContext as _, Context, Div, Entity, FocusHandle, InteractiveElement as _,
-    IntoElement, ParentElement as _, SharedString, Styled as _, Subscription, Window, div,
+    AnyElement, AppContext as _, Context, Div, Entity, FocusHandle, Focusable as _,
+    InteractiveElement as _, IntoElement, ParentElement as _, SharedString, Styled as _,
+    Subscription, Window, div,
 };
 
 use super::Workspace;
-use crate::backend::Draft;
 use crate::keymap::{
     self, Scope, SpawnWorker, SpawnWorkerWith, ToggleAgentsPanel, ToggleCommandPalette,
     ToggleRolesPanel, ToggleVimMode,
@@ -122,14 +122,17 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Closes the palette and puts the focus back where it was.
+    /// Closes the palette and puts the focus back where it was, as Zed's
+    /// modal layer does: only while the focus is still in the palette. A
+    /// click that closed it keeps whatever the click focused.
     fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.palette.open.take().is_none() {
+        let Some((palette, _)) = self.palette.open.take() else {
             return;
-        }
-        match self.palette.return_focus.take() {
-            Some(focus) => window.focus(&focus, cx),
-            None => window.focus(&self.focus_handle, cx),
+        };
+        let return_focus = self.palette.return_focus.take();
+        if palette.focus_handle(cx).contains_focused(window, cx) {
+            let focus = return_focus.unwrap_or_else(|| self.focus_handle.clone());
+            window.focus(&focus, cx);
         }
         cx.notify();
     }
@@ -142,22 +145,14 @@ impl Workspace {
         }
     }
 
-    /// Asks the listener for a worker on `agent` from the chat, the way the
-    /// fixture's DELEGATED exchange starts (andy's 15:31 message), and
-    /// shows the chat.
-    // shortcut: a chat message stands in for Backend::act(Spawn), which a
-    // later plan adds; the fixture's listener does not answer it.
+    /// Opens the fixture's DELEGATED flow for a worker on `agent` (andy's
+    /// ask, the listener's ANSWER and DELEGATED, as at 15:31) and shows the
+    /// chat.
     fn spawn_worker(&mut self, agent: &str, cx: &mut Context<Self>) {
-        let draft = Draft {
-            to: vec![self.snapshot.listener_id.clone()],
-            body: format!("Spawn a worker with {agent}"),
-            reply_to: None,
-        };
         self.pane_group
             .update(cx, |group, cx| group.open(TabItem::Chat, cx));
         if let Some(chat) = self.pane_group.read(cx).chat().cloned() {
-            // The chat shows a refusal above its composer.
-            let _shown_in_chat = chat.update(cx, |chat, cx| chat.send(draft, cx));
+            chat.update(cx, |chat, cx| chat.spawn_worker(agent, cx));
         }
     }
 

@@ -250,7 +250,7 @@ impl Render for Workspace {
         // Task 18: the palette's actions.
         Self::palette_actions(Self::dock_actions(div(), cx), cx)
             .track_focus(&self.focus_handle)
-            .key_context("Workspace")
+            .key_context(crate::keymap::WORKSPACE_CONTEXT)
             .on_action(cx.listener(|this, _: &ToggleLeftDock, _, cx| {
                 this.toggle_dock(DockSide::Left, cx);
             }))

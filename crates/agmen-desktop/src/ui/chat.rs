@@ -222,6 +222,12 @@ impl ChatView {
         }
     }
 
+    /// How many messages the chat holds.
+    #[cfg(test)]
+    pub(crate) fn message_count(&self) -> usize {
+        self.snapshot.messages.len()
+    }
+
     /// The chat tab's red count: urgent alerts that need me (Task 13).
     pub(crate) fn badge(&self) -> usize {
         self.alerts.badge()
@@ -263,14 +269,32 @@ impl ChatView {
         };
         self.error = result.as_ref().err().map(|err| err.to_string().into());
         if result.is_ok() {
-            // The person wants to see what they sent, wherever they had scrolled.
-            self.stream.update(cx, |stream, cx| {
-                stream.list.scroll_to_end();
-                cx.notify();
-            });
+            self.show_newest(cx);
         }
         cx.notify();
         result
+    }
+
+    /// The person wants to see what they sent, wherever they had scrolled.
+    fn show_newest(&self, cx: &mut Context<Self>) {
+        self.stream.update(cx, |stream, cx| {
+            stream.list.scroll_to_end();
+            cx.notify();
+        });
+    }
+
+    /// Task 18: asks for a worker on `agent` and shows the exchange it
+    /// starts; a refusal shows above the composer.
+    pub(crate) fn spawn_worker(&mut self, agent: &str, cx: &mut Context<Self>) {
+        self.act(
+            Action::SpawnWorker {
+                agent: agent.to_owned(),
+            },
+            cx,
+        );
+        if self.error.is_none() {
+            self.show_newest(cx);
+        }
     }
 
     /// Does `action` through the backend, such as a change card's Apply.
