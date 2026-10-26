@@ -11,8 +11,9 @@ use gpui::{
 use super::{ClickHandler, Color, Label, LabelSize};
 use crate::appearance::Appearance;
 use crate::ui::tokens::{
-    BORDER_WIDTH, BUTTON_HOVER_OPACITY, BUTTON_TINT, RADIUS_MD, RADIUS_SM, SPACE_1, SPACE_3,
-    SPACE_5, SPACE_7, SPACE_9, SPACE_10, TINT_SELECTED, tint,
+    BORDER_WIDTH, BUTTON_HOVER_OPACITY, BUTTON_TINT, RADIUS_CARD, RADIUS_MD, RADIUS_SM, SPACE_1,
+    SPACE_2, SPACE_3, SPACE_5, SPACE_6, SPACE_7, SPACE_8, SPACE_9, SPACE_10, SPACE_12,
+    TINT_SELECTED, tint,
 };
 
 /// How the button is drawn.
@@ -36,13 +37,30 @@ pub(crate) enum ButtonStyle {
     Subtle,
 }
 
+/// How big the button is drawn; its style keeps its fill and border.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum ButtonSize {
+    /// The style's own padding and small text.
+    #[default]
+    Default,
+    /// Padding 2 by 8 and radius 4, as the take-over terminal's Open as tab
+    /// and the switch menu's Update… (nodes 1143, 1833).
+    Compact,
+    /// Padding 6 by 12, radius 6 and body text, as a dialog's Cancel and
+    /// Check again (nodes 2443, 2445).
+    Large,
+}
+
 #[derive(IntoElement)]
 pub(crate) struct Button {
     id: ElementId,
     label: SharedString,
     style: ButtonStyle,
+    size: ButtonSize,
+    weight: Option<FontWeight>,
     selected: bool,
     leading: Option<AnyElement>,
+    trailing: Option<AnyElement>,
     on_click: Option<ClickHandler>,
 }
 
@@ -62,8 +80,11 @@ impl Button {
             id: id.into(),
             label: label.into(),
             style: ButtonStyle::Outlined,
+            size: ButtonSize::Default,
+            weight: None,
             selected: false,
             leading: None,
+            trailing: None,
             on_click: None,
         }
     }
@@ -82,6 +103,26 @@ impl Button {
     #[must_use]
     pub(crate) const fn selected(mut self, selected: bool) -> Self {
         self.selected = selected;
+        self
+    }
+
+    #[must_use]
+    pub(crate) const fn size(mut self, size: ButtonSize) -> Self {
+        self.size = size;
+        self
+    }
+
+    /// The label's weight, over the style's own.
+    #[must_use]
+    pub(crate) const fn weight(mut self, weight: FontWeight) -> Self {
+        self.weight = Some(weight);
+        self
+    }
+
+    /// Something drawn after the label, such as Hand back's ×.
+    #[must_use]
+    pub(crate) fn trailing(mut self, trailing: impl IntoElement) -> Self {
+        self.trailing = Some(trailing.into_any_element());
         self
     }
 
@@ -165,22 +206,47 @@ impl RenderOnce for Button {
         } else {
             styled
         };
-        let label = Label::new(self.label).size(LabelSize::Small);
+        // Later padding and radius replace the style's.
+        let (styled, text) = match self.size {
+            ButtonSize::Default => (styled, LabelSize::Small),
+            ButtonSize::Compact => (
+                styled
+                    .py(SPACE_2)
+                    .px(SPACE_8)
+                    .rounded(RADIUS_SM)
+                    .gap(SPACE_5),
+                LabelSize::Small,
+            ),
+            ButtonSize::Large => (
+                styled.py(SPACE_6).px(SPACE_12).rounded(RADIUS_CARD),
+                LabelSize::Default,
+            ),
+        };
+        let label = Label::new(self.label).size(text);
         styled
             .when_some(self.on_click, |this, handler| {
                 this.cursor_pointer().on_click(handler)
             })
             .children(self.leading)
-            .child(match self.style {
-                ButtonStyle::Primary => label.weight(FontWeight::SEMIBOLD).color(Color::Background),
-                ButtonStyle::Tinted => label.color(Color::Accent),
-                _ if selected => label.color(Color::Accent),
-                ButtonStyle::Outlined
-                | ButtonStyle::Filled
-                | ButtonStyle::Plain
-                | ButtonStyle::Secondary
-                | ButtonStyle::Subtle => label.color(Color::Default),
+            .child({
+                let label = match self.style {
+                    ButtonStyle::Primary => {
+                        label.weight(FontWeight::SEMIBOLD).color(Color::Background)
+                    }
+                    ButtonStyle::Tinted => label.color(Color::Accent),
+                    _ if selected => label.color(Color::Accent),
+                    ButtonStyle::Outlined
+                    | ButtonStyle::Filled
+                    | ButtonStyle::Plain
+                    | ButtonStyle::Secondary
+                    | ButtonStyle::Subtle => label.color(Color::Default),
+                };
+                match self.weight {
+                    Some(weight) => label.weight(weight),
+                    None => label,
+                }
             })
+            .children(self.trailing)
     }
 }
 
@@ -238,6 +304,62 @@ mod tests {
                 .into_any_element()
         });
         assert_eq!(off, on);
+    }
+
+    // Task 14: the terminal head's and switch menu's compact buttons (nodes
+    // 1143, 1833: padding 2 by 8, radius 4) and the dialog's large ones
+    // (nodes 2443, 2445: padding 6 by 12, body text).
+    #[gpui::test]
+    fn compact_button_pads_two_by_eight(cx: &mut TestAppContext) {
+        let button = rendered_size(cx, || {
+            Button::new("tab", "Open as tab")
+                .style(ButtonStyle::Secondary)
+                .size(ButtonSize::Compact)
+                .into_any_element()
+        });
+        let mut cx2 = TestAppContext::single();
+        let text = rendered_size(&mut cx2, || {
+            Label::new("Open as tab")
+                .size(LabelSize::Small)
+                .into_any_element()
+        });
+        assert_eq!(button.width - text.width, px(16.));
+        assert_eq!(button.height - text.height, px(4.));
+    }
+
+    #[gpui::test]
+    fn large_button_sets_body_text(cx: &mut TestAppContext) {
+        let button = rendered_size(cx, || {
+            Button::new("check", "Check again")
+                .style(ButtonStyle::Primary)
+                .size(ButtonSize::Large)
+                .into_any_element()
+        });
+        let mut cx2 = TestAppContext::single();
+        let text = rendered_size(&mut cx2, || {
+            Label::new("Check again")
+                .weight(FontWeight::SEMIBOLD)
+                .into_any_element()
+        });
+        assert_eq!(button.width - text.width, px(24.));
+        assert_eq!(button.height - text.height, px(12.));
+    }
+
+    #[gpui::test]
+    fn trailing_follows_the_label(cx: &mut TestAppContext) {
+        let plain = rendered_size(cx, || {
+            Button::new("back", "Hand back")
+                .size(ButtonSize::Compact)
+                .into_any_element()
+        });
+        let mut cx2 = TestAppContext::single();
+        let with = rendered_size(&mut cx2, || {
+            Button::new("back", "Hand back")
+                .size(ButtonSize::Compact)
+                .trailing(Label::new("×").size(LabelSize::Small))
+                .into_any_element()
+        });
+        assert!(with.width > plain.width + SPACE_5);
     }
 
     #[gpui::test]

@@ -27,6 +27,12 @@ use crate::alerts::{AlertState, Me};
 use crate::backend::{Action, BackendError, BackendHandle, Draft, Snapshot, Update};
 use crate::local_time::LocalZone;
 
+// Task 14: the take-over terminal between the messages and the composer.
+#[path = "chat_take_over.rs"]
+mod take_over;
+use take_over::TakeOverSlot;
+pub(crate) use take_over::TerminalPopup;
+
 /// The indices of the messages the chat draws, oldest first.
 #[must_use]
 fn visible_rows(messages: &[StampedEnvelope], show_ledger: bool) -> Vec<usize> {
@@ -148,6 +154,7 @@ pub(crate) struct ChatView {
     /// Why the last send or action failed, until the next one succeeds.
     error: Option<SharedString>,
     zone: TimeZone,
+    take_over: TakeOverSlot,
     _updates: Option<Task<()>>,
 }
 
@@ -210,7 +217,7 @@ impl ChatView {
             rows,
             chat,
         });
-        Self {
+        let mut chat = Self {
             snapshot,
             stream,
             show_ledger: false,
@@ -218,8 +225,11 @@ impl ChatView {
             composer,
             error: None,
             zone,
+            take_over: TakeOverSlot::default(),
             _updates: updates,
-        }
+        };
+        chat.sync_take_over(cx);
+        chat
     }
 
     /// The chat tab's red count: urgent alerts that need me (Task 13).
@@ -317,6 +327,7 @@ impl ChatView {
         let rows = visible_rows(&self.snapshot.messages, self.show_ledger);
         self.stream
             .update(cx, |stream, cx| stream.set_rows(context, rows, cx));
+        self.sync_take_over(cx);
         cx.notify();
     }
 }
@@ -357,6 +368,7 @@ impl Render for ChatView {
                     .clone()
                     .cached(StyleRefinement::default().flex_1().min_h_0()),
             )
+            .children(self.shown_terminal())
             .when_some(self.error.clone(), |this, error| {
                 this.child(
                     div()

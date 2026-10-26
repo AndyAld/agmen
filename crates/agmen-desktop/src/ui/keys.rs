@@ -3,9 +3,8 @@
 //! Bindings are Zed's wherever agmen has the same action (finding V86, from
 //! Zed's `assets/keymaps/default-macos.json` at 08cbb88). Task 18's
 //! `keymap.rs` absorbs this list when it lists every binding for the
-//! palette. The palette (cmd-shift-p), search (cmd-shift-f) and the
-//! terminal (ctrl-backtick) belong to Tasks 18 and 14 and are not bound
-//! here.
+//! palette. The palette (cmd-shift-p) and search (cmd-shift-f) belong to
+//! Task 18 and are not bound here.
 
 use gpui::{Action, App, KeyBinding, actions};
 
@@ -45,6 +44,25 @@ pub(crate) struct ActivatePane(pub(crate) usize);
 #[action(namespace = workspace, no_json)]
 pub(crate) struct ShowLeftDockTab(pub(crate) LeftDockTab);
 
+// Task 14: take-over in the chat (spec 5.4, V86).
+actions!(
+    workspace,
+    [
+        /// Takes over the agent of the newest DONE that offers "Open in
+        /// terminal" (agmen's ⌥O).
+        OpenInTerminal,
+        /// Hides or shows the take-over terminal (Zed's
+        /// `terminal_panel::Toggle`).
+        ToggleTerminal,
+    ]
+);
+
+/// Takes over this agent's session in the chat: the agent view's Open in
+/// terminal.
+#[derive(Debug, Clone, PartialEq, Eq, Action)]
+#[action(namespace = workspace, no_json)]
+pub(crate) struct TakeOverAgent(pub(crate) agmen_proto::IdentityId);
+
 /// The key context the workspace's root sets.
 const CONTEXT: &str = "Workspace";
 
@@ -69,6 +87,9 @@ pub(crate) fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-9", ActivatePane(8), ctx),
         KeyBinding::new("cmd-w", CloseActiveTab, ctx),
         KeyBinding::new("cmd-\\", SplitRight, ctx),
+        // Task 14 (V86): agmen's Open in terminal, and Zed's terminal toggle.
+        KeyBinding::new("alt-o", OpenInTerminal, ctx),
+        KeyBinding::new("ctrl-`", ToggleTerminal, ctx),
     ]
 }
 
@@ -95,7 +116,7 @@ mod tests {
     #[test]
     fn other_tasks_keys_stay_unbound() {
         let bindings = bindings();
-        for key in ["cmd-shift-p", "cmd-shift-f", "ctrl-`", "cmd-q"] {
+        for key in ["cmd-shift-p", "cmd-shift-f", "cmd-q"] {
             let typed = [Keystroke::parse(key).unwrap()];
             assert!(
                 bindings
@@ -103,6 +124,23 @@ mod tests {
                     .all(|b| b.match_keystrokes(&typed).is_none()),
                 "{key} is bound here"
             );
+        }
+    }
+
+    #[test]
+    fn take_over_keys_are_bound() {
+        // V86: ctrl-` is Zed's terminal toggle; alt-o is agmen's own.
+        for (key, action) in [
+            ("alt-o", &OpenInTerminal as &dyn Action),
+            ("ctrl-`", &ToggleTerminal),
+        ] {
+            let typed = [Keystroke::parse(key).unwrap()];
+            let bound: Vec<_> = bindings()
+                .into_iter()
+                .filter(|b| b.match_keystrokes(&typed) == Some(false))
+                .collect();
+            assert_eq!(bound.len(), 1, "{key}");
+            assert!(bound[0].action().partial_eq(action), "{key}");
         }
     }
 

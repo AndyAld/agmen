@@ -25,6 +25,9 @@ mod dock_wiring;
 use dock_wiring::LeftDockState;
 #[path = "workspace_screen.rs"]
 mod screen_state;
+// Task 14: take-over keys and the Agent panel following the chat.
+#[path = "workspace_take_over.rs"]
+mod take_over;
 
 actions!(workspace, [ToggleLeftDock, ToggleRightDock, Quit]);
 
@@ -47,6 +50,9 @@ pub(crate) struct Workspace {
     selected_agent: Option<IdentityId>,
     left: LeftDockState,
     _agents_events: Subscription,
+    /// Task 14: the center's chat, which holds the take-over terminal.
+    chat: Entity<ChatView>,
+    _chat_changes: Subscription,
 }
 
 impl Workspace {
@@ -57,7 +63,8 @@ impl Workspace {
         });
         let chat = cx.new(|cx| ChatView::new(snapshot.clone(), window, cx));
         let tabs = starting_tabs(&snapshot);
-        let pane_group = cx.new(|cx| PaneGroup::new(&snapshot, Some(chat), tabs, cx));
+        let pane_group = cx.new(|cx| PaneGroup::new(&snapshot, Some(chat.clone()), tabs, cx));
+        let chat_changes = cx.observe(&chat, |this, _, cx| this.follow_chat(cx));
         let left = LeftDockState::new(&snapshot, cx);
         Self {
             focus_handle: cx.focus_handle(),
@@ -69,6 +76,8 @@ impl Workspace {
             selected_agent: None,
             left,
             _agents_events: agents_events,
+            chat,
+            _chat_changes: chat_changes,
         }
     }
 
@@ -114,13 +123,16 @@ impl Workspace {
 
     /// What the status bar shows in the listener's place: "settings" while
     /// Settings is the active tab (frame "Desktop · settings", node 8240),
-    /// `None` for the listener.
+    /// "andy/fx1 · taken over" while a session is taken over, `None` for
+    /// the listener.
     pub(crate) fn status_context(&self, cx: &App) -> Option<SharedString> {
         matches!(
             self.pane_group.read(cx).active_item(cx),
             Some(TabItem::Settings(_))
         )
         .then(|| "settings".into())
+        // Task 14: "andy/fx1 · taken over" (node 1265).
+        .or_else(|| self.chat.read(cx).take_over_status(cx))
     }
 
     /// The agent the right dock shows, or `None` for the Listener panel.
@@ -239,7 +251,7 @@ impl Render for Workspace {
             );
         }
 
-        Self::dock_actions(div(), cx)
+        Self::take_over_actions(Self::dock_actions(div(), cx), cx)
             .track_focus(&self.focus_handle)
             .key_context("Workspace")
             .on_action(cx.listener(|this, _: &ToggleLeftDock, _, cx| {

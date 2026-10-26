@@ -24,7 +24,7 @@ use super::tokens::{
     SPACE_10, TINT_MENTION, tint,
 };
 use crate::appearance::Appearance;
-use crate::backend::Action;
+use crate::backend::{Action, can_take_over};
 
 /// How a message row is drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -186,10 +186,14 @@ fn sender(env: &StampedEnvelope, context: &ChatContext) -> Sender {
 }
 
 /// Whether the row offers "Open in terminal": a DONE from an agent this
-/// person's agmend runs (plan Task 9; spec 5.4 allows take-over only there).
+/// person's agmend runs (plan Task 9; spec 5.4 allows take-over only there)
+/// that can be taken over now: it has a live session here and is not
+/// taken over already (Task 14, review C224).
 #[must_use]
-fn offers_take_over(env: &StampedEnvelope, context: &ChatContext) -> bool {
-    matches!(env.client.payload, Payload::Done { .. }) && context.is_local_agent(&env.from_handle)
+pub(super) fn offers_take_over(env: &StampedEnvelope, context: &ChatContext) -> bool {
+    matches!(env.client.payload, Payload::Done { .. })
+        && context.is_local_agent(&env.from_handle)
+        && can_take_over(context.snapshot(), &env.from)
 }
 
 /// One message, the one at an index in the context's snapshot, so a frame

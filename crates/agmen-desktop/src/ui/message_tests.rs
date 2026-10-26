@@ -311,14 +311,10 @@ fn open_in_terminal_on_a_local_agents_done(cx: &mut TestAppContext) {
         o.cx.debug_bounds(sel(fx1_done, "open-in-terminal"))
             .is_some()
     );
-    // andy/a1 is andy's too, so its DONE offers Open in terminal as well.
-    // The mockup draws the button on fx1's DONE only; Task 14 (take-over)
-    // settles whether every local agent's DONE keeps it.
-    assert!(
-        o.cx.debug_bounds(sel(&messages[0], "open-in-terminal"))
-            .is_some()
-    );
-    for i in [1, 2, 3, 4, 7, 8] {
+    // andy/a1 is andy's too, but has no live session on this machine to
+    // take over, so its DONE offers nothing: the mockup draws the button on
+    // fx1's DONE only (Task 14, review C224).
+    for i in [0, 1, 2, 3, 4, 7, 8] {
         assert!(
             o.cx.debug_bounds(sel(&messages[i], "open-in-terminal"))
                 .is_none(),
@@ -381,11 +377,14 @@ fn narrow_row_wraps_the_head_instead_of_cutting_it(cx: &mut TestAppContext) {
     let o = open(cx, px(300.), vec![0, 6], c);
     for env in [&messages[0], &messages[6]] {
         inside_row(o.cx, env, "verb");
-        inside_row(o.cx, env, "open-in-terminal");
-        let head = o.cx.debug_bounds(sel(env, "head")).unwrap();
-        let verb = o.cx.debug_bounds(sel(env, "verb")).unwrap();
-        assert!(head.size.height > verb.size.height * 1.5, "{head:?}");
     }
+    // Only fx1's DONE offers Open in terminal (Task 14); its chip wraps the
+    // head to a second line.
+    let fx1 = &messages[6];
+    inside_row(o.cx, fx1, "open-in-terminal");
+    let head = o.cx.debug_bounds(sel(fx1, "head")).unwrap();
+    let verb = o.cx.debug_bounds(sel(fx1, "verb")).unwrap();
+    assert!(head.size.height > verb.size.height * 1.5, "{head:?}");
 }
 
 #[gpui::test]

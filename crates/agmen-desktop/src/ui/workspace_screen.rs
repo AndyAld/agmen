@@ -11,6 +11,7 @@ use crate::backend::Screen;
 use crate::ui::git_panel::GitSection;
 use crate::ui::left_dock::LeftDockTab;
 use crate::ui::pane::{SettingsPage, TabItem};
+use crate::ui::{add_agent_dialog::AgentDialog, chat::TerminalPopup};
 
 /// The file the Project and Git frames open from the mockup's worktree.
 const MAIN_RS: &str = "src/main.rs";
@@ -67,12 +68,26 @@ pub(super) enum RightDock {
     Role,
 }
 
+/// What a screen opens over the take-over terminal (Task 14).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Popup {
+    /// The switch agent menu (frame "Desktop · switch agent").
+    SwitchMenu,
+    /// The add agent dialog for grok over the menu ("Desktop · add agent").
+    AddMissingAgent,
+}
+
+/// The agent the add agent frame adds: the one the switch menu lists as
+/// missing.
+const MOCKUP_MISSING_AGENT: &str = "grok";
+
 /// What a screen shows beyond its fixture data; `None` is a closed dock.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct WorkspaceState {
     left: Option<LeftDock>,
     center: CenterTab,
     right: Option<RightDock>,
+    popup: Option<Popup>,
 }
 
 impl WorkspaceState {
@@ -92,8 +107,7 @@ impl WorkspaceState {
             Screen::NeedsYou | Screen::ModelPicker | Screen::Palette => {
                 (LeftDock::Agents, CenterTab::Chat, Some(RightDock::Listener))
             }
-            // shortcut: take-over's terminal block, the switch menu and the
-            // add-agent dialog are not built; the chat stands in.
+            // Task 14: the fixture takes fx1 over; the popups open below.
             Screen::ChatTerminal | Screen::ChatCodex | Screen::SwitchAgent | Screen::AddAgent => {
                 (LeftDock::Agents, CenterTab::Chat, Some(RightDock::Agent))
             }
@@ -111,10 +125,16 @@ impl WorkspaceState {
                 (LeftDock::Agents, CenterTab::Chat, Some(RightDock::Listener))
             }
         };
+        let popup = match screen {
+            Screen::SwitchAgent => Some(Popup::SwitchMenu),
+            Screen::AddAgent => Some(Popup::AddMissingAgent),
+            _ => None,
+        };
         Self {
             left: Some(left),
             center,
             right,
+            popup,
         }
     }
 }
@@ -129,6 +149,14 @@ impl Workspace {
         if let Some(item) = self.center_item(state.center) {
             self.pane_group
                 .update(cx, |group, cx| group.open_last(item, cx));
+        }
+        match state.popup {
+            Some(Popup::SwitchMenu) => self.show_terminal_popup(TerminalPopup::SwitchMenu, cx),
+            Some(Popup::AddMissingAgent) => {
+                let dialog = AgentDialog::Add(MOCKUP_MISSING_AGENT.into());
+                self.show_terminal_popup(TerminalPopup::Dialog(dialog), cx);
+            }
+            None => {}
         }
         cx.notify();
     }

@@ -4,8 +4,8 @@
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, IntoElement, ParentElement as _, RenderOnce, SharedString, Styled as _,
-    Window, div,
+    AnyElement, App, FontWeight, IntoElement, ParentElement as _, RenderOnce, SharedString,
+    Styled as _, Window, div,
 };
 
 use super::{Color, Label, LabelSize};
@@ -46,6 +46,7 @@ pub(crate) struct Chip {
     underline: bool,
     shrink: bool,
     full_width: bool,
+    weight: Option<FontWeight>,
 }
 
 impl std::fmt::Debug for Chip {
@@ -76,7 +77,16 @@ impl Chip {
             underline: false,
             shrink: false,
             full_width: false,
+            weight: None,
         }
+    }
+
+    /// The label's weight, as the take-over terminal's bold agent chip
+    /// (node 1134).
+    #[must_use]
+    pub(crate) const fn weight(mut self, weight: FontWeight) -> Self {
+        self.weight = Some(weight);
+        self
     }
 
     /// The composer's chips (nodes 376 and 380): a selected fill, tighter
@@ -206,6 +216,10 @@ impl RenderOnce for Chip {
             label
         };
         let label = if self.shrink { label.wrap() } else { label };
+        let label = match self.weight {
+            Some(weight) => label.weight(weight),
+            None => label,
+        };
         // A reference sits in a line of text, so it pads only its sides.
         let (py, px, radius, gap) = match self.shape {
             ChipShape::Default => (Some(SPACE_3), SPACE_8, RADIUS_MD, SPACE_6),

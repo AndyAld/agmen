@@ -149,7 +149,9 @@ impl Workspace {
                 .map(|info| RolePanel::new(role.name.clone(), info).into_any_element());
         }
         Some(match self.shown_agent() {
-            Some(info) => AgentPanel::new(info.clone()).into_any_element(),
+            Some(info) => AgentPanel::new(info.clone())
+                .taken_over(self.snapshot.take_overs.contains_key(&info.id))
+                .into_any_element(),
             None => ListenerPanel::new(self.snapshot.listener.clone()).into_any_element(),
         })
     }

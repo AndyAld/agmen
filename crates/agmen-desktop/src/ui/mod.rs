@@ -37,6 +37,12 @@ mod title_bar;
 mod tokens;
 mod workspace;
 
+// Task 14: take-over in the chat, the switch agent menu and the add agent
+// dialog.
+mod add_agent_dialog;
+mod switch_menu;
+mod terminal_view;
+
 pub(crate) use agent_view::AgentView;
 pub(crate) use code_view::{CodeView, GutterMark};
 pub(crate) use dev_views::{DevFrame, GitDev, GitDevLayout, ProjectDev, ProjectTests, RolesDev};
