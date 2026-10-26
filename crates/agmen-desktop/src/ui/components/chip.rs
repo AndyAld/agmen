@@ -4,7 +4,7 @@
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, FontWeight, IntoElement, ParentElement as _, RenderOnce, SharedString,
+    AnyElement, App, FontWeight, IntoElement, ParentElement as _, Pixels, RenderOnce, SharedString,
     Styled as _, Window, div,
 };
 
@@ -52,6 +52,7 @@ pub(crate) struct Chip {
     shrink: bool,
     full_width: bool,
     weight: Option<FontWeight>,
+    line_height: Option<Pixels>,
 }
 
 impl std::fmt::Debug for Chip {
@@ -83,6 +84,7 @@ impl Chip {
             shrink: false,
             full_width: false,
             weight: None,
+            line_height: None,
         }
     }
 
@@ -214,6 +216,14 @@ impl Chip {
         self
     }
 
+    /// The label's line height, so a chip in a line of prose is no taller
+    /// than the line (node 2440).
+    #[must_use]
+    pub(crate) const fn line_height(mut self, height: Pixels) -> Self {
+        self.line_height = Some(height);
+        self
+    }
+
     /// Fills its row, with the trailing element at the far end.
     #[must_use]
     pub(crate) const fn full_width(mut self) -> Self {
@@ -239,6 +249,10 @@ impl RenderOnce for Chip {
         let label = if self.shrink { label.wrap() } else { label };
         let label = match self.weight {
             Some(weight) => label.weight(weight),
+            None => label,
+        };
+        let label = match self.line_height {
+            Some(height) => label.line_height(height),
             None => label,
         };
         // A reference sits in a line of text, so it pads only its sides.

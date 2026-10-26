@@ -7,7 +7,7 @@ use std::ops::Range;
 
 use gpui::{Bounds, Pixels, ShapedGlyph, ShapedLine, SharedString, Size, point, px, size};
 
-use crate::ui::tokens::{SPACE_3, SPACE_4};
+use crate::ui::tokens::SPACE_4;
 
 /// A shaped run as the breaker sees it, in reading order: where each glyph
 /// cluster starts, and how far its glyphs advance the pen.
@@ -206,13 +206,14 @@ pub(super) struct Flow {
 }
 
 /// Lays out `segs` in lines `width` wide (one line with no width), each at
-/// least `line_height` tall, `SPACE_3` apart, with `SPACE_4` between items.
+/// least `line_height` tall, `line_gap` apart, with `SPACE_4` between items.
 /// An atom wider than the line takes the line's width and the height
 /// `wrapped_height(seg, width)` gives it.
 pub(super) fn flow(
     segs: &[Seg],
     width: Option<Pixels>,
     line_height: Pixels,
+    line_gap: Pixels,
     mut wrapped_height: impl FnMut(usize, Pixels) -> Pixels,
 ) -> Flow {
     let mut breaker = Breaker::new(width.unwrap_or(Pixels::MAX), line_height);
@@ -226,7 +227,7 @@ pub(super) fn flow(
             Seg::Atom(natural) => breaker.atom(seg, *natural),
         }
     }
-    breaker.finish()
+    breaker.finish(line_gap)
 }
 
 /// Whether a line may break before `c` when `prev` comes before it: at the
@@ -423,11 +424,11 @@ impl Breaker {
         self.text(seg, glyphs, start, count, x);
     }
 
-    fn finish(mut self) -> Flow {
+    fn finish(mut self, line_gap: Pixels) -> Flow {
         let mut top = px(0.);
         for line in &mut self.lines {
             line.top = top;
-            top = top + line.height + SPACE_3;
+            top = top + line.height + line_gap;
         }
         for placed in &mut self.placed {
             if let Some(line) = self.lines.get(placed.line) {

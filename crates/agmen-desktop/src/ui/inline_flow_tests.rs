@@ -20,7 +20,7 @@ fn atom(width: f32, height: f32) -> Seg {
 
 /// Lays out `segs` at `width`; an atom wider than the line is 40 px tall.
 fn lay_out(segs: &[Seg], width: Option<f32>) -> Flow {
-    flow(segs, width.map(px), LINE, |_, _| px(40.))
+    flow(segs, width.map(px), LINE, SPACE_3, |_, _| px(40.))
 }
 
 /// The text of each placed piece of a run, with its line.

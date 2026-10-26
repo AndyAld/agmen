@@ -8,8 +8,8 @@ use std::ops::Range;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce,
-    SharedString, Styled as _, Window, div, relative,
+    AnyElement, App, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, RenderOnce,
+    SharedString, Styled as _, Window, div, px, relative,
 };
 
 use super::{Chip, Color, LabelSize};
@@ -111,15 +111,18 @@ impl CodeText {
 }
 
 impl RenderOnce for CodeText {
-    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let color = self.color.hsla(&cx.global::<Appearance>().theme);
+        // The prose's line, snapped as the flow snaps it: a chip is no
+        // taller, so the lines keep the mockup's pitch (node 2440).
+        let line = window.pixel_snap(self.size.rems().to_pixels(window.rem_size()) * LINE_HEIGHT);
         let (text, spans) = split_code(&self.source);
         let items = pieces(&text, &spans)
             .into_iter()
             .map(|piece| match piece {
                 Piece::Words(words) => FlowItem::Run(words.into()),
                 Piece::Code { lead, code, tail } => FlowItem::Chip {
-                    element: chip(lead, code, tail, self.color.clone()),
+                    element: chip(lead, code, tail, self.color.clone(), line),
                     label: code.to_owned().into(),
                 },
             })
@@ -129,15 +132,19 @@ impl RenderOnce for CodeText {
             .text_size(self.size.rems())
             .text_color(color)
             .line_height(relative(LINE_HEIGHT))
-            .child(InlineFlow::new(items))
+            .child(InlineFlow::new(items).line_gap(px(0.)))
     }
 }
 
 /// A command as a monospace chip in `color`'s reference fill (fix 48),
-/// with the punctuation that touches it (fix 54). Tests find it as
-/// `"code-text:chip"`.
-fn chip(lead: &str, code: &str, tail: &str, color: Color) -> AnyElement {
-    let chip = Chip::new(code.to_owned()).reference().code().tinted(color);
+/// `line` tall, with the punctuation that touches it (fix 54). Tests find
+/// it as `"code-text:chip"`.
+fn chip(lead: &str, code: &str, tail: &str, color: Color, line: Pixels) -> AnyElement {
+    let chip = Chip::new(code.to_owned())
+        .reference()
+        .code()
+        .tinted(color)
+        .line_height(line);
     let chip = if lead.is_empty() {
         chip
     } else {
@@ -230,6 +237,39 @@ mod tests {
         });
         let chip = cx.debug_bounds("code-text:chip").expect("a chip");
         assert!(chip.size.width > px(0.));
+    }
+
+    #[gpui::test]
+    fn chips_keep_the_prose_line_pitch(cx: &mut TestAppContext) {
+        // Node 2440: 12 px prose lines 14 px apart. A chip sits in the
+        // line, so the lines that hold one are no taller and no further
+        // apart than plain ones.
+        let plain = "agmen looks for grok on PATH, runs grok --version, and checks that it starts.";
+        let chips =
+            "agmen looks for `grok` on PATH, runs `grok --version`, and checks that it starts.";
+        let cx = crate::ui::test_support::draw(cx, move || {
+            let block = |id: &'static str, source: &'static str, width: f32| {
+                div()
+                    .debug_selector(move || id.into())
+                    .w(px(width))
+                    .child(CodeText::new(source).size(LabelSize::Small))
+            };
+            div()
+                .flex()
+                .flex_col()
+                .items_start()
+                .child(block("plain-one", plain, 900.))
+                .child(block("chips-one", chips, 900.))
+                .child(block("plain-two", plain, 330.))
+                .child(block("chips-two", chips, 330.))
+                .into_any_element()
+        });
+        let [plain_one, chips_one, plain_two, chips_two] =
+            ["plain-one", "chips-one", "plain-two", "chips-two"]
+                .map(|id| cx.debug_bounds(id).expect(id).size.height);
+        assert_eq!(chips_one, plain_one);
+        assert_eq!(plain_two, plain_one * 2., "the plain text wraps once");
+        assert_eq!(chips_two, plain_two);
     }
 
     #[gpui::test]
