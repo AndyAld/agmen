@@ -5,9 +5,8 @@ use gpui::{
     SharedString, Styled as _, TextRun, Window, div, px,
 };
 
-use super::{Color, Label, LabelSize, SectionHeading};
+use super::{Color, Label, LabelSize, SectionHeading, WordWrap};
 use crate::appearance::{Appearance, Fonts};
-use crate::ui::code_view::cell_width;
 use crate::ui::tokens::{AUTO_LINE_12, KV_LABEL_WIDTH, SPACE_7, SPACE_10, TEXT_SMALL};
 
 /// A label in a fixed column and a wrapping value in the code font. Tests
@@ -42,13 +41,7 @@ impl KvRow {
 
 impl RenderOnce for KvRow {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        // GPUI's wrapper also breaks before '/', which splits a handle such
-        // as "andy/fx1" (V77). Each word is its own flex item, so lines
-        // break only at spaces; a word wider than the column still wraps.
-        // The space is a one cell gap, which flex leaves out at a line's
-        // end, so a value that fits exactly stays on one line (C219).
         let fonts = &cx.global::<Appearance>().fonts;
-        let space = cell_width(window, fonts);
         // Both columns draw 14 px lines, as the mockup's 12 px text boxes
         // (nodes 397 and 398), and the higher baseline moves down to the
         // other, so label and value share one at any font.
@@ -56,26 +49,15 @@ impl RenderOnce for KvRow {
         let shift = baseline_shift(window, fonts, &self.label, first);
         let label = self.label.clone();
         let label_selector = format!("kv-label:{label}:{}", self.row);
-        // Runs of spaces and edge spaces draw no empty words; tabs and
-        // newlines also split, since a value is one line of text (C240).
-        let words = self.value.split_whitespace().enumerate().map(|(i, word)| {
-            let selector = format!("kv-word:{label}:{}:{i}", self.row);
-            div().debug_selector(|| selector).max_w_full().child(
-                Label::new(word.to_owned())
-                    .color(self.color.clone())
-                    .code()
-                    .line_height(AUTO_LINE_12)
-                    .wrap(),
-            )
-        });
-        let value = div()
+        // A handle such as "andy/fx1" stays whole (V77); a value is one
+        // line of text, so tabs and newlines split words too (C240).
+        let value = WordWrap::new(format!("kv-word:{label}:{}", self.row), self.value)
+            .code()
+            .color(self.color)
+            .line_height(AUTO_LINE_12)
             .mt((-shift).max(px(0.)))
             .flex_1()
-            .min_w_0()
-            .flex()
-            .flex_wrap()
-            .gap_x(space)
-            .children(words);
+            .min_w_0();
         div()
             .w_full()
             .flex()

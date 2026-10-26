@@ -35,6 +35,7 @@ mod tab;
 mod toggle;
 mod tool_card;
 mod tooltip;
+mod word_wrap;
 // Task 18: the command palette's row label.
 mod highlighted_label;
 pub(crate) use highlighted_label::HighlightedLabel;
@@ -71,6 +72,7 @@ pub(crate) use status_dot::StatusDot;
 pub(crate) use tab::Tab;
 pub(crate) use tool_card::ToolCard;
 pub(crate) use tooltip::Tooltip;
+pub(crate) use word_wrap::WordWrap;
 // Task 19.
 pub(crate) use {
     check_row::CheckRow, modal::Modal, section_header::SectionHeader, table_card::TableCard,
