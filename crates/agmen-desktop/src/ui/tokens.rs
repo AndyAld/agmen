@@ -311,9 +311,12 @@ pub(crate) const PALETTE_ROW_HEIGHT: Pixels = px(30.);
 pub(crate) const PALETTE_MAX_HEIGHT: Pixels = px(360.);
 /// How strongly every drop shadow's black shows (#000000aa, mockup fix 58).
 pub(crate) const SHADOW_ALPHA: f32 = 170. / 255.;
-/// The palette's drop shadow (node 11473): 10 px down, a 30 px blur.
+/// The palette's drop shadow (node 11473): 10 px down, a 30 px blur
+/// radius. gpui takes `BoxShadow::blur_radius` as the Gaussian's sigma
+/// (its shader draws 3 sigmas out), and a Figma or CSS blur radius is two
+/// sigmas, so the node's 30 is 15 here.
 pub(crate) const SHADOW_OFFSET_Y: Pixels = px(10.);
-pub(crate) const SHADOW_BLUR: Pixels = px(30.);
+pub(crate) const SHADOW_BLUR: Pixels = px(30. / 2.);
 
 /// A floating surface's drop shadow: [`Theme::SHADOW`] at [`SHADOW_ALPHA`],
 /// `offset_y` down and blurred `blur`.

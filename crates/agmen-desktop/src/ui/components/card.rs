@@ -40,7 +40,8 @@ impl Card {
 
 impl Card {
     /// Lifts the card above the window with the mockup's drop shadow, as
-    /// the command palette (node 11473): 10 px down, blurred 30 px.
+    /// the command palette (node 11473): 10 px down, blurred 30 px
+    /// ([`SHADOW_BLUR`] says how gpui takes that).
     #[must_use]
     pub(crate) fn elevated(mut self) -> Self {
         self.style.box_shadow = Some(vec![drop_shadow(SHADOW_OFFSET_Y, SHADOW_BLUR)]);
@@ -113,8 +114,12 @@ mod tests {
         let mut card = Card::new().elevated();
         let shadows = card.style().box_shadow.clone().unwrap();
         assert_eq!(shadows.len(), 1);
-        assert_eq!(shadows[0].offset.y, crate::ui::tokens::SHADOW_OFFSET_Y);
-        assert_eq!(shadows[0].blur_radius, crate::ui::tokens::SHADOW_BLUR);
+        // Node 11473: 0 by 10, blur radius 30. gpui blurs with
+        // `blur_radius` as the Gaussian's sigma, and a Figma blur radius is
+        // two sigmas, so the shadow takes 15.
+        assert_eq!(shadows[0].offset.x, px(0.));
+        assert_eq!(shadows[0].offset.y, px(10.));
+        assert_eq!(shadows[0].blur_radius, px(15.));
         assert!((shadows[0].color.a - 170. / 255.).abs() < 0.001);
         assert!(Card::new().style().box_shadow.is_none());
     }
