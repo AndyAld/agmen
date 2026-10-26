@@ -166,7 +166,7 @@ impl Pane {
         };
         let tab = match (item, &self.chat) {
             (TabItem::Chat, Some(chat)) => tab.badge(chat.read(cx).badge()),
-            (TabItem::RoleFile(_) | TabItem::SettingsFile(_), _) => {
+            (TabItem::RoleFile(_) | TabItem::SettingsFile(_) | TabItem::Spec(_), _) => {
                 match cx.try_global::<FileIcons>() {
                     Some(icons) => {
                         let name = self.names.tab_label(item);

@@ -15,6 +15,7 @@ use super::project_panel::FileView;
 use super::roles_panel::RoleFileView;
 use super::settings_view::{SettingsEvent, SettingsSources, SettingsView};
 use super::syntax::Language;
+use super::{plan_model::PlanHandle, spec_view::SpecView};
 use crate::backend::{RoleFile, Snapshot, WorktreeInfo};
 
 /// The data the views read, from the snapshot.
@@ -68,7 +69,7 @@ impl TabViews {
     pub(crate) const fn draws_breadcrumb(item: &TabItem) -> bool {
         matches!(
             item,
-            TabItem::RoleFile(_) | TabItem::File { .. } | TabItem::Settings(_)
+            TabItem::RoleFile(_) | TabItem::File { .. } | TabItem::Settings(_) | TabItem::Spec(_)
         )
     }
 
@@ -126,6 +127,11 @@ impl TabViews {
                 let text = settings_file_text(path);
                 cx.new(|_| CodeView::new(&text, Language::Toml, Vec::new()))
                     .into()
+            }
+            // Task 19: a spec's tab, over the workspace's plan model.
+            TabItem::Spec(path) => {
+                let model = cx.try_global::<PlanHandle>()?.0.clone();
+                cx.new(|cx| SpecView::new(model, path, cx)).into()
             }
             _ => return None,
         };

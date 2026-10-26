@@ -22,6 +22,9 @@ struct AgentName {
 pub(super) struct PaneNames {
     project: String,
     agents: BTreeMap<IdentityId, AgentName>,
+    /// Task 19: the project has a plan, so its chat is the planning room's
+    /// "plan" tab (frame "Desktop · plan", node 8719).
+    planning: bool,
 }
 
 /// The last part of a slash separated path.
@@ -48,6 +51,7 @@ impl PaneNames {
         Self {
             project: snapshot.project.clone(),
             agents,
+            planning: snapshot.plan.is_some(),
         }
     }
 
@@ -72,6 +76,7 @@ impl PaneNames {
     /// The tab's label, as the mockup's tab bar (console.py `tab_bar`).
     pub(super) fn tab_label(&self, item: &TabItem) -> String {
         match item {
+            TabItem::Chat if self.planning => "plan".into(),
             TabItem::Chat => "chat".into(),
             TabItem::Agent(id) => self.handle(id),
             TabItem::File { path, .. } => file_name(path).into(),

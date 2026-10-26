@@ -55,6 +55,8 @@ pub(super) enum CenterTab {
     /// fx1's main.rs diff.
     Diff,
     Settings,
+    /// Task 19: the plan's design spec (frame "Desktop · spec").
+    Spec,
 }
 
 /// The right dock's panel.
@@ -65,6 +67,8 @@ pub(super) enum RightDock {
     Agent,
     /// reviewer's Role panel.
     Role,
+    /// Task 19: the plan panel, or the Review panel beside a spec tab.
+    Plan,
 }
 
 /// What a screen shows beyond its fixture data; `None` is a closed dock.
@@ -105,11 +109,12 @@ impl WorkspaceState {
             Screen::Git => (LeftDock::Git, CenterTab::Diff, None),
             Screen::GitCollapsed => (LeftDock::GitChangesFolded, CenterTab::Diff, None),
             Screen::Settings => (LeftDock::Agents, CenterTab::Settings, None),
-            // shortcut: the plan and spec tabs and the Plan and Review panels
-            // are not built (Task 19); the chat and the Listener stand in.
-            Screen::Plan | Screen::Spec | Screen::PlanReady | Screen::KickOff | Screen::Running => {
-                (LeftDock::Agents, CenterTab::Chat, Some(RightDock::Listener))
+            // Task 19: the chat is the plan tab; KickOff adds the dialog
+            // (`show_screen`).
+            Screen::Plan | Screen::PlanReady | Screen::KickOff | Screen::Running => {
+                (LeftDock::Agents, CenterTab::Chat, Some(RightDock::Plan))
             }
+            Screen::Spec => (LeftDock::Agents, CenterTab::Spec, Some(RightDock::Plan)),
         };
         Self {
             left: Some(left),
@@ -129,6 +134,10 @@ impl Workspace {
         if let Some(item) = self.center_item(state.center) {
             self.pane_group
                 .update(cx, |group, cx| group.open_last(item, cx));
+        }
+        // Task 19: the kick-off frame shows the confirm dialog.
+        if screen == Screen::KickOff {
+            self.open_kickoff(cx);
         }
         cx.notify();
     }
@@ -170,7 +179,8 @@ impl Workspace {
                 self.right_dock.close();
                 self.set_selection(None, cx);
             }
-            Some(RightDock::Listener) => {
+            // With nothing selected, a project with a plan shows its plan.
+            Some(RightDock::Listener | RightDock::Plan) => {
                 self.set_selection(None, cx);
                 self.right_dock.open();
             }
@@ -204,6 +214,7 @@ impl Workspace {
                 path: MAIN_RS.into(),
             },
             CenterTab::Settings => TabItem::Settings(SettingsPage::default()),
+            CenterTab::Spec => TabItem::Spec(super::plan_wiring::mockup_spec(&self.snapshot)?),
         })
     }
 }

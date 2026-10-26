@@ -9,13 +9,6 @@ mod icons;
 mod instance;
 mod local_time;
 mod notify;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the plan panel uses it from Task 19 of the desktop plan"
-    )
-)]
 mod plan;
 mod refs;
 mod roles;

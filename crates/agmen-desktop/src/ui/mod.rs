@@ -36,6 +36,15 @@ mod text_input;
 mod title_bar;
 mod tokens;
 mod workspace;
+// Task 19: the planning room, plan panel, spec tab and kick-off dialog.
+mod kickoff_dialog;
+mod plan_model;
+mod plan_panel;
+mod plan_room;
+#[cfg(test)]
+mod plan_test_support;
+mod review_panel;
+mod spec_view;
 
 pub(crate) use agent_view::AgentView;
 pub(crate) use code_view::{CodeView, GutterMark};

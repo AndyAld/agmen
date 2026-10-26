@@ -283,10 +283,13 @@ impl Backend for FixtureBackend {
             | Action::HandBack(_)
             | Action::SwitchAgent { .. }
             | Action::AnswerAlert { .. }
-            | Action::SnoozeAlert(_)
-            | Action::ApproveSpec { .. }
-            | Action::ApproveShare
-            | Action::KickOff => Ok(()),
+            | Action::SnoozeAlert(_) => Ok(()),
+            // Task 19: the planning room's actions change the plan.
+            Action::ApproveSpec { .. } | Action::ApproveShare | Action::KickOff => {
+                super::fixture_plan::act(&mut self.state.borrow_mut(), action)?;
+                self.publish(&Update::Snapshot(Box::new(self.snapshot())));
+                Ok(())
+            }
         }
     }
 

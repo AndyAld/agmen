@@ -25,6 +25,9 @@ mod dock_wiring;
 use dock_wiring::LeftDockState;
 #[path = "workspace_screen.rs"]
 mod screen_state;
+// Task 19: the planning room, plan panel and kick-off dialog.
+#[path = "workspace_plan.rs"]
+mod plan_wiring;
 
 actions!(workspace, [ToggleLeftDock, ToggleRightDock, Quit]);
 
@@ -46,6 +49,8 @@ pub(crate) struct Workspace {
     /// The agent the right dock shows; `None` shows the Listener panel.
     selected_agent: Option<IdentityId>,
     left: LeftDockState,
+    /// Task 19: the planning room's views, when the project has a plan.
+    plan: plan_wiring::PlanWiring,
     _agents_events: Subscription,
 }
 
@@ -59,6 +64,7 @@ impl Workspace {
         let tabs = starting_tabs(&snapshot);
         let pane_group = cx.new(|cx| PaneGroup::new(&snapshot, Some(chat), tabs, cx));
         let left = LeftDockState::new(&snapshot, cx);
+        let plan = plan_wiring::PlanWiring::new(&snapshot, cx);
         Self {
             focus_handle: cx.focus_handle(),
             snapshot,
@@ -68,6 +74,7 @@ impl Workspace {
             agents_panel,
             selected_agent: None,
             left,
+            plan,
             _agents_events: agents_events,
         }
     }
@@ -121,6 +128,8 @@ impl Workspace {
             Some(TabItem::Settings(_))
         )
         .then(|| "settings".into())
+        // Task 19: "ridgeline · planning" in a project with a plan.
+        .or_else(|| self.plan_status_context(cx))
     }
 
     /// The agent the right dock shows, or `None` for the Listener panel.
@@ -149,6 +158,8 @@ fn starting_tabs(snapshot: &Snapshot) -> Vec<TabItem> {
     if agents.any(|agent| agent.role == MOCKUP_ROLE) {
         tabs.push(TabItem::RoleFile(MOCKUP_ROLE.into()));
     }
+    // Task 19: the plan's spec beside the plan tab (frame 8640, tab 9174).
+    tabs.extend(plan_wiring::mockup_spec(snapshot).map(TabItem::Spec));
     tabs
 }
 
@@ -219,10 +230,12 @@ impl Render for Workspace {
                 .child(self.pane_group.clone()),
         );
         if self.is_dock_open(DockSide::Right) {
-            let panel = self.right_panel();
+            let panel = self.right_panel(cx);
+            // Task 19: the plan panel is wider than the other panels.
+            let width = self.plan_dock_width(cx).unwrap_or(self.right_dock.width());
             body = body.child(
                 div()
-                    .w(self.right_dock.width())
+                    .w(width)
                     .flex_none()
                     .h_full()
                     .flex()
@@ -239,7 +252,10 @@ impl Render for Workspace {
             );
         }
 
-        Self::dock_actions(div(), cx)
+        // Task 19: the plan's actions, and the kick-off dialog over everything.
+        let overlay = self.plan_overlay(cx);
+        Self::plan_actions(Self::dock_actions(div(), cx), cx)
+            .relative()
             .track_focus(&self.focus_handle)
             .key_context("Workspace")
             .on_action(cx.listener(|this, _: &ToggleLeftDock, _, cx| {
@@ -261,6 +277,7 @@ impl Render for Workspace {
                     .panels(self.panel_buttons(cx))
                     .when_some(self.status_context(cx), StatusBar::context),
             )
+            .children(overlay)
     }
 }
 

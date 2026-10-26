@@ -69,6 +69,8 @@ pub(crate) fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-9", ActivatePane(8), ctx),
         KeyBinding::new("cmd-w", CloseActiveTab, ctx),
         KeyBinding::new("cmd-\\", SplitRight, ctx),
+        // Task 19: Escape closes the kick-off dialog.
+        KeyBinding::new("escape", super::kickoff_dialog::CloseKickoffDialog, ctx),
     ]
 }
 

@@ -219,3 +219,21 @@ fn direct_composer_sends_to_its_agent(cx: &mut TestAppContext) {
         }]
     );
 }
+
+// Task 19: the planning room's composer talks to the planner (node 8927).
+#[gpui::test]
+fn planning_composer_targets_the_planner(cx: &mut TestAppContext) {
+    use crate::backend::{Backend as _, FixtureBackend, Screen};
+    init(cx);
+    let snapshot = FixtureBackend::for_screen(Screen::Plan).unwrap().snapshot();
+    let (composer, cx) =
+        cx.add_window_view(|window, cx| Composer::new(&snapshot, |_, _, _| Ok(()), window, cx));
+    composer.read_with(cx, |composer, cx| {
+        assert_eq!(composer.target(cx).handle, "sean/plan");
+        assert_eq!(composer.model, None);
+        assert_eq!(
+            composer.input.read(cx).placeholder_text(),
+            "Plan with sean/plan · it runs on sean's machine with their keys"
+        );
+    });
+}

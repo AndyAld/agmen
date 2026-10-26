@@ -142,6 +142,12 @@ impl TextInput {
         self
     }
 
+    /// Task 19: what the empty input shows, for tests.
+    #[cfg(test)]
+    pub(crate) fn placeholder_text(&self) -> &str {
+        &self.placeholder
+    }
+
     /// Lets the text wrap and grow to `max_lines` before it scrolls, with
     /// Shift-Enter for a newline.
     #[must_use]

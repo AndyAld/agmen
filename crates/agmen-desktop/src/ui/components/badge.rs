@@ -19,6 +19,7 @@ pub(crate) struct Badge {
     solid: bool,
     pill: bool,
     code: bool,
+    neutral: bool,
     leading: Option<SharedString>,
 }
 
@@ -32,6 +33,7 @@ impl Badge {
             solid: false,
             pill: false,
             code: false,
+            neutral: false,
             leading: None,
         }
     }
@@ -46,6 +48,14 @@ impl Badge {
 
     /// Fills the badge with its color and sets the text on it in the
     /// background color.
+    /// Task 19: a count chip on the elevated surface instead of a tint,
+    /// with no padding above or below (a dock section's count, node 8688).
+    #[must_use]
+    pub(crate) const fn neutral(mut self) -> Self {
+        self.neutral = true;
+        self
+    }
+
     #[must_use]
     pub(crate) const fn solid(mut self) -> Self {
         self.solid = true;
@@ -76,6 +86,8 @@ impl RenderOnce for Badge {
         let fill = self.color.hsla(theme);
         let (bg, text) = if self.solid {
             (fill, Color::Background)
+        } else if self.neutral {
+            (theme.elevated_surface, self.color.clone())
         } else {
             (tint(fill, TINT_FILL), self.color.clone())
         };
@@ -90,6 +102,8 @@ impl RenderOnce for Badge {
         let base = div().flex().flex_none().items_center().gap(SPACE_5).bg(bg);
         let shaped = if self.pill {
             base.px(SPACE_5).rounded(RADIUS_PILL)
+        } else if self.neutral {
+            base.px(SPACE_6).rounded(RADIUS_SM)
         } else {
             base.py(SPACE_1)
                 .px(if self.solid { SPACE_7 } else { SPACE_6 })
@@ -155,6 +169,21 @@ mod tests {
         });
         assert_eq!(pill.width - text.width, px(10.));
         assert_eq!(pill.height, text.height);
+    }
+
+    // Task 19: the dock section's count chip (node 8688) has no padding above.
+    #[gpui::test]
+    fn neutral_badge_pads_six_each_side_and_none_above(cx: &mut TestAppContext) {
+        let badge = rendered_size(cx, || {
+            Badge::new("4", Color::Placeholder)
+                .code()
+                .neutral()
+                .into_any_element()
+        });
+        let mut cx2 = TestAppContext::single();
+        let text = rendered_size(&mut cx2, || Label::new("4").code().into_any_element());
+        assert_eq!(badge.width - text.width, px(12.));
+        assert_eq!(badge.height, text.height);
     }
 
     #[gpui::test]

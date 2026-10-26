@@ -11,8 +11,8 @@ use gpui::{
 use super::{ClickHandler, Color, Label, LabelSize};
 use crate::appearance::Appearance;
 use crate::ui::tokens::{
-    BORDER_WIDTH, BUTTON_HOVER_OPACITY, BUTTON_TINT, RADIUS_MD, RADIUS_SM, SPACE_1, SPACE_3,
-    SPACE_5, SPACE_7, SPACE_9, SPACE_10, TINT_SELECTED, tint,
+    BORDER_WIDTH, BUTTON_HOVER_OPACITY, BUTTON_TINT, RADIUS_INPUT, RADIUS_MD, RADIUS_SM, SPACE_1,
+    SPACE_3, SPACE_5, SPACE_7, SPACE_8, SPACE_9, SPACE_10, SPACE_12, SPACE_14, TINT_SELECTED, tint,
 };
 
 /// How the button is drawn.
@@ -42,6 +42,9 @@ pub(crate) struct Button {
     label: SharedString,
     style: ButtonStyle,
     selected: bool,
+    // Task 19: the 32 px buttons of the plan panel and kick-off dialog.
+    large: bool,
+    disabled: bool,
     leading: Option<AnyElement>,
     on_click: Option<ClickHandler>,
 }
@@ -63,6 +66,8 @@ impl Button {
             label: label.into(),
             style: ButtonStyle::Outlined,
             selected: false,
+            large: false,
+            disabled: false,
             leading: None,
             on_click: None,
         }
@@ -86,6 +91,23 @@ impl Button {
     }
 
     /// Something drawn before the label, such as a glyph.
+    /// Task 19: 13 px text and padding that makes a 32 px button with or
+    /// without a border (nodes 9777 and 10953): Primary pads 8 by 14,
+    /// Outlined 7 by 12 inside its border.
+    #[must_use]
+    pub(crate) const fn large(mut self) -> Self {
+        self.large = true;
+        self
+    }
+
+    /// Task 19: a button that cannot be clicked now, its label dimmed, as
+    /// "Kick off · waiting on sean" (node 9046).
+    #[must_use]
+    pub(crate) const fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
+    }
+
     #[must_use]
     pub(crate) fn leading(mut self, leading: impl IntoElement) -> Self {
         self.leading = Some(leading.into_any_element());
@@ -105,7 +127,13 @@ impl Button {
 impl RenderOnce for Button {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = &cx.global::<Appearance>().theme;
-        let hover = theme.element_hover;
+        // A disabled button does not light up under the pointer: its hover
+        // fill is the outlined fill it is drawn with.
+        let hover = if self.disabled {
+            theme.elevated_surface
+        } else {
+            theme.element_hover
+        };
         let selector = self.id.to_string();
         let base = div()
             .id(self.id)
@@ -165,13 +193,29 @@ impl RenderOnce for Button {
         } else {
             styled
         };
-        let label = Label::new(self.label).size(LabelSize::Small);
+        let styled = if self.large {
+            let (py, px) = if primary {
+                (SPACE_8, SPACE_14)
+            } else {
+                (SPACE_7, SPACE_12)
+            };
+            styled.py(py).px(px).rounded(RADIUS_INPUT)
+        } else {
+            styled
+        };
+        let label = Label::new(self.label).size(if self.large {
+            LabelSize::Default
+        } else {
+            LabelSize::Small
+        });
+        let on_click = if self.disabled { None } else { self.on_click };
         styled
-            .when_some(self.on_click, |this, handler| {
+            .when_some(on_click, |this, handler| {
                 this.cursor_pointer().on_click(handler)
             })
             .children(self.leading)
             .child(match self.style {
+                _ if self.disabled => label.color(Color::Placeholder),
                 ButtonStyle::Primary => label.weight(FontWeight::SEMIBOLD).color(Color::Background),
                 ButtonStyle::Tinted => label.color(Color::Accent),
                 _ if selected => label.color(Color::Accent),
@@ -256,5 +300,41 @@ mod tests {
         });
         assert_eq!(primary.height, secondary.height);
         assert!(primary.width > px(0.));
+    }
+
+    // Task 19: the plan panel's Kick off and Pause all (nodes 9046, 9777,
+    // 10953) and the dialog's buttons are 13 px text, 32 tall.
+    #[gpui::test]
+    fn large_buttons_are_one_height_with_or_without_a_border(cx: &mut TestAppContext) {
+        let primary = rendered_size(cx, || {
+            Button::new("go", "Kick off · 7 agents")
+                .style(ButtonStyle::Primary)
+                .large()
+                .into_any_element()
+        });
+        let mut cx2 = TestAppContext::single();
+        let outlined = rendered_size(&mut cx2, || {
+            Button::new("pause", "Pause all").large().into_any_element()
+        });
+        let mut cx3 = TestAppContext::single();
+        let text = rendered_size(&mut cx3, || Label::new("Pause all").into_any_element());
+        assert_eq!(primary.height, outlined.height);
+        assert_eq!(primary.height - text.height, px(16.));
+    }
+
+    #[gpui::test]
+    fn disabled_button_ignores_clicks(cx: &mut TestAppContext) {
+        let clicked = std::rc::Rc::new(std::cell::Cell::new(false));
+        let flag = clicked.clone();
+        let cx = crate::ui::test_support::draw(cx, move || {
+            let flag = flag.clone();
+            Button::new("wait", "Kick off · waiting on sean")
+                .large()
+                .disabled(true)
+                .on_click(move |_, _, _| flag.set(true))
+                .into_any_element()
+        });
+        crate::ui::test_support::click(cx, "wait");
+        assert!(!clicked.get());
     }
 }

@@ -176,6 +176,27 @@ pub(crate) const TINT_SELECTED: f32 = 38. / 255.;
 /// A waiting change card's `warning` border (0x88, node 7101).
 pub(crate) const TINT_PENDING: f32 = 136. / 255.;
 
+// Task 19: the plan panel, its team table and the kick-off dialog
+// (frames "Desktop · plan", node 8935, and "Desktop · kick off", node 10290).
+/// The plan panel (console.py `plan_panel`, fixed w 470); the Review panel
+/// keeps the right dock's 340.
+pub(crate) const PLAN_PANEL_WIDTH: Pixels = px(470.);
+/// The team table's role, handle, lane and owner columns (node 8947).
+pub(crate) const TEAM_ROLE_COLUMN: Pixels = px(100.);
+pub(crate) const TEAM_HANDLE_COLUMN: Pixels = px(40.);
+pub(crate) const TEAM_HARNESS_COLUMN: Pixels = px(100.);
+pub(crate) const TEAM_LANE_COLUMN: Pixels = px(56.);
+pub(crate) const TEAM_OWNER_COLUMN: Pixels = px(32.);
+/// The kick-off dialog's card, and how far it sits below the window's top.
+pub(crate) const MODAL_WIDTH: Pixels = px(620.);
+pub(crate) const MODAL_TOP: Pixels = px(150.);
+pub(crate) const RADIUS_MODAL: Pixels = px(10.);
+/// The dialog's padding (node 10290, padding 20).
+pub(crate) const SPACE_20: Pixels = px(20.);
+/// The dim behind a dialog: the window background at 0xa0 (node 10289
+/// draws black; this theme has no overlay token).
+pub(crate) const MODAL_DIM: f32 = 160. / 255.;
+
 /// `color` at `alpha` of its own opacity: the one way views derive a fill
 /// the theme has no token for.
 #[must_use]

@@ -91,6 +91,19 @@ impl Composer {
         cx: &mut Context<Self>,
     ) -> Self {
         let agents = roster_targets(snapshot);
+        // Task 19: a project with a plan talks to its planner, with no model
+        // chip: the planner runs its own (frame "Desktop · plan", node 8927).
+        if let Some((planner, placeholder)) = super::plan_room::planner_target(snapshot) {
+            return Self::build(
+                agents,
+                planner,
+                placeholder.into(),
+                None,
+                Rc::new(on_send),
+                window,
+                cx,
+            );
+        }
         let listener = agents
             .iter()
             .find(|agent| agent.id == snapshot.listener_id)
