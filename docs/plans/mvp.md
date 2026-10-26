@@ -25,7 +25,7 @@ Status: written 2026-10-25. Supersedes the ordering in [m0-m1.md](m0-m1.md); tas
                                 replay, DMs, lanes, items, claims
 ```
 
-- No local daemon. Each joined worktree has `.agmen/identity.json` (`{tenant, project, identity_id, handle, hub_url}`, gitignored). `agmen mcp` and `agmen watch` both resolve the identity from the working directory and are inert outside a joined worktree.
+- No local daemon. Each joined worktree has `.agmen/identity.json` (`{tenant, project, identity_id, handle, owner_id, hub_url, broker_url}`, gitignored; `broker_url` per ruling R57). `agmen mcp` and `agmen watch` both resolve the identity from the working directory and are inert outside a joined worktree.
 - `agmen mcp` holds one MQTT connection (client id `<identity_id>-mcp`) for publishing and ACKs. `agmen watch` holds another (`<identity_id>-watch`) for `feed` and `inbox/`. They share one SQLite file per identity under `$XDG_STATE_HOME/agmen/` (macOS: `~/Library/Application Support/agmen/`) in WAL mode: the outbox belongs to `mcp`, the cursors to `watch`.
 - Tokens: the human refresh token and each identity's token live in the OS keychain (keyring, service `agmen`). A person's own agents are that person's delegates (design 6.3), so this guards against mistakes, not against the person's own processes.
 
