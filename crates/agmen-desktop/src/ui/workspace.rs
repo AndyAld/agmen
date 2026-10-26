@@ -2,9 +2,8 @@
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, SharedString, Styled as _, Subscription, Window,
-    actions, div,
+    AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, Styled as _, Subscription, Window, actions, div,
 };
 
 use super::agents_panel::{AgentsPanel, AgentsPanelEvent};
@@ -25,6 +24,9 @@ mod dock_wiring;
 use dock_wiring::LeftDockState;
 #[path = "workspace_screen.rs"]
 mod screen_state;
+// agmen-c7 fix-hosting: the status bar's context text and Listener toggle.
+#[path = "workspace_status.rs"]
+mod status;
 
 actions!(workspace, [ToggleLeftDock, ToggleRightDock, Quit]);
 
@@ -110,17 +112,6 @@ impl Workspace {
         self.set_selection(shown, cx);
         self.right_dock.open();
         cx.notify();
-    }
-
-    /// What the status bar shows in the listener's place: "settings" while
-    /// Settings is the active tab (frame "Desktop · settings", node 8240),
-    /// `None` for the listener.
-    pub(crate) fn status_context(&self, cx: &App) -> Option<SharedString> {
-        matches!(
-            self.pane_group.read(cx).active_item(cx),
-            Some(TabItem::Settings(_))
-        )
-        .then(|| "settings".into())
     }
 
     /// The agent the right dock shows, or `None` for the Listener panel.
@@ -257,7 +248,7 @@ impl Render for Workspace {
             .child(TitleBar::new(&self.snapshot))
             .child(body)
             .child(
-                StatusBar::new(&self.snapshot, self.is_dock_open(DockSide::Right))
+                StatusBar::new(&self.snapshot, self.shows_listener_toggle(cx))
                     .panels(self.panel_buttons(cx))
                     .when_some(self.status_context(cx), StatusBar::context),
             )
