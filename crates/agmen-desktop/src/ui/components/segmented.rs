@@ -5,15 +5,16 @@ use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, RenderOnce,
+    App, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, RenderOnce,
     SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
 };
 
 use super::{ChangeHandler, Color, Label, LabelSize};
-use crate::appearance::{Appearance, Theme};
+use crate::appearance::Appearance;
 use crate::ui::tokens::{BORDER_WIDTH, RADIUS_MD, SPACE_3, SPACE_10, SPACE_12, TINT_SEGMENT, tint};
 
-/// How a control draws: each caller's look from the mockup.
+/// How a control's options are set: each caller's padding and font from the
+/// mockup. Both looks fill the selected option alike.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum Look {
     /// Settings' controls (frame 7908, nodes 8111, 8182 and 8209): the UI
@@ -30,14 +31,6 @@ impl Look {
         match self {
             Self::Ui => SPACE_10,
             Self::Code => SPACE_12,
-        }
-    }
-
-    /// The selected option's fill. Both looks draw `text_accent` at 0x33
-    /// (nodes 8116, 8183, 8210 and 3397, and console.py `seg`).
-    fn selected_fill(self, theme: &Theme) -> Hsla {
-        match self {
-            Self::Ui | Self::Code => tint(theme.text_accent, TINT_SEGMENT),
         }
     }
 }
@@ -101,7 +94,9 @@ impl RenderOnce for Segmented {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = &cx.global::<Appearance>().theme;
         let hover = theme.element_hover;
-        let fill = self.look.selected_fill(theme);
+        // The selected option's fill: `text_accent` at 0x33 in both looks
+        // (nodes 8116, 8183, 8210 and 3397, and console.py `seg`).
+        let fill = tint(theme.text_accent, TINT_SEGMENT);
         let last = self.options.len().saturating_sub(1);
         let root_selector = self.id.to_string();
         let segments = self.options.into_iter().enumerate().map(|(index, option)| {
@@ -193,12 +188,12 @@ mod tests {
         assert_eq!(side_padding(cx, true), SPACE_12);
     }
 
-    /// The selected fill `look` draws in the app's theme.
-    fn selected_fill_of(cx: &mut TestAppContext, look: Look) -> gpui::Hsla {
-        crate::ui::test_support::init(cx);
-        let theme = cx.update(|cx| cx.global::<Appearance>().theme.clone());
-        let fill = look.selected_fill(&theme);
-        // Both mockup looks draw #72b9a9 (`text_accent`) at 0x33.
+    #[test]
+    fn selected_option_fills_the_accent_at_0x33() {
+        // Both looks draw #72b9a9 (`text_accent`) at 0x33: nodes 8116, 8183
+        // and 8210 in frame 7908 and node 3397 in frame 2971.
+        let theme = Appearance::builtin().theme;
+        let fill = tint(theme.text_accent, TINT_SEGMENT);
         assert_eq!(
             (fill.h, fill.s, fill.l),
             (
@@ -207,19 +202,7 @@ mod tests {
                 theme.text_accent.l
             )
         );
-        fill
-    }
-
-    #[gpui::test]
-    fn settings_look_fills_the_selected_option_at_0x33(cx: &mut TestAppContext) {
-        // Nodes 8116, 8183 and 8210 in frame 7908.
-        assert!((selected_fill_of(cx, Look::Ui).a - 0.2).abs() < 0.0001);
-    }
-
-    #[gpui::test]
-    fn effort_look_fills_the_selected_option_at_0x33(cx: &mut TestAppContext) {
-        // Node 3397 in frame 2971.
-        assert!((selected_fill_of(cx, Look::Code).a - 0.2).abs() < 0.0001);
+        assert!((fill.a - 0.2).abs() < 0.0001);
     }
 
     #[gpui::test]
