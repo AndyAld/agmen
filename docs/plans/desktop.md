@@ -106,7 +106,7 @@
 
 ### Task 4: Native notification and single instance
 
-- [ ] Done
+- [x] Done. `notify(tag, title, body, cx)`; instance forwarding polled every 250 ms (`shortcut:`); spikes skip the instance lock so they run beside the app.
 
 **Files:**
 - Create: `src/notify.rs`, `src/instance.rs`, `src/instance_tests.rs`

@@ -1,6 +1,8 @@
 //! The agmen desktop app: a GPUI console with Zed's layout.
 
 mod appearance;
+mod instance;
+mod notify;
 mod spike;
 mod ui;
 
@@ -16,6 +18,8 @@ use appearance::{Appearance, SystemMode};
 
 use ui::{Quit, ToggleLeftDock, ToggleRightDock, Workspace};
 
+const USAGE: &str = "usage: agmen-desktop [--spike list [--autoscroll] | --spike notify]";
+
 /// What the command line asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Launch {
@@ -23,6 +27,8 @@ enum Launch {
     App,
     /// Spike S8's list check, optionally scrolling by itself and quitting.
     ListSpike { autoscroll: bool },
+    /// Spike S8's notification check: post one, then quit.
+    NotifySpike,
 }
 
 impl Launch {
@@ -32,9 +38,10 @@ impl Launch {
             [flag, name, rest @ ..] if flag == "--spike" && name == "list" => match rest {
                 [] => Ok(Self::ListSpike { autoscroll: false }),
                 [a] if a == "--autoscroll" => Ok(Self::ListSpike { autoscroll: true }),
-                _ => anyhow::bail!("usage: agmen-desktop [--spike list [--autoscroll]]"),
+                _ => anyhow::bail!(USAGE),
             },
-            _ => anyhow::bail!("usage: agmen-desktop [--spike list [--autoscroll]]"),
+            [flag, name] if flag == "--spike" && name == "notify" => Ok(Self::NotifySpike),
+            _ => anyhow::bail!(USAGE),
         }
     }
 }
@@ -50,8 +57,35 @@ fn main() {
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let launch = Launch::parse(&args)?;
+    // Spikes run beside a normal app, so only the app takes the instance lock.
+    let listener = if launch == Launch::App {
+        let dir = std::env::home_dir()
+            .context("no home folder")?
+            .join("Library/Application Support/agmen");
+        match instance::acquire(&dir, &args).context("checking for a running agmen-desktop")? {
+            instance::Instance::Primary(listener) => Some(listener),
+            instance::Instance::Secondary => return Ok(()),
+        }
+    } else {
+        None
+    };
     let platform = Rc::new(gpui_macos::MacPlatform::new(false));
     Application::with_platform(platform).run(move |cx: &mut App| {
+        if launch == Launch::NotifySpike {
+            notify::notify("spike", "agmen", "adam/coord needs you", cx);
+            // Leave time for the background post before quitting.
+            cx.spawn(async |cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(3))
+                    .await;
+                cx.update(|cx| cx.quit());
+            })
+            .detach();
+            return;
+        }
+        if let Some(listener) = listener {
+            watch_instance(listener, cx);
+        }
         if let Err(err) = open_main_window(&launch, cx) {
             // The run loop owns the process from here, so report and quit.
             eprintln!("agmen-desktop: {err:#}");
@@ -78,6 +112,24 @@ fn load_appearance(os: WindowAppearance) -> Appearance {
         eprintln!("agmen-desktop: {warning}");
     }
     appearance
+}
+
+/// Brings the app forward when a second launch hands over.
+fn watch_instance(listener: instance::Listener, cx: &mut App) {
+    // shortcut: polls every 250 ms; a channel the run loop wakes on would be better.
+    cx.spawn(async move |cx| {
+        loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(250))
+                .await;
+            if let Some(forwarded) = listener.try_recv()
+                && forwarded.focus
+            {
+                cx.update(|cx| cx.activate(true));
+            }
+        }
+    })
+    .detach();
 }
 
 fn window_options(cx: &App) -> WindowOptions {
@@ -112,6 +164,7 @@ fn open_main_window(launch: &Launch, cx: &mut App) -> Result<()> {
                 workspace
             })
             .map(Into::into),
+        Launch::NotifySpike => return Ok(()),
         Launch::ListSpike { autoscroll } => {
             let autoscroll = *autoscroll;
             cx.open_window(options, |_, cx| {
@@ -146,6 +199,10 @@ mod tests {
         assert_eq!(
             Launch::parse(&args(&["--spike", "list", "--autoscroll"])).unwrap(),
             Launch::ListSpike { autoscroll: true }
+        );
+        assert_eq!(
+            Launch::parse(&args(&["--spike", "notify"])).unwrap(),
+            Launch::NotifySpike
         );
         assert!(Launch::parse(&args(&["--spike", "nope"])).is_err());
         assert!(Launch::parse(&args(&["--bogus"])).is_err());
