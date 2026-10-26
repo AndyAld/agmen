@@ -42,6 +42,7 @@ mod tab;
     expect(dead_code, reason = "used by the Task 17 settings view")
 )]
 mod toggle;
+mod tool_card;
 
 pub(crate) use avatar::Avatar;
 pub(crate) use badge::Badge;
@@ -57,6 +58,7 @@ pub(crate) use list_item::{Indent, ListItem};
 pub(crate) use progress::ProgressBar;
 pub(crate) use status_dot::StatusDot;
 pub(crate) use tab::Tab;
+pub(crate) use tool_card::ToolCard;
 #[expect(unused_imports, reason = "used by the Task 17 settings view")]
 pub(crate) use {dropdown::Dropdown, segmented::Segmented, stepper::Stepper, toggle::Toggle};
 
