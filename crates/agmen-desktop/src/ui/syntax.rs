@@ -10,8 +10,10 @@ use std::path::Path;
 use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter};
 
 /// Files larger than this are shown plain: highlighting runs on the UI
-/// thread and must stay quick.
-pub(crate) const MAX_HIGHLIGHT_BYTES: usize = 512 * 1024;
+/// thread and must stay quick (about 14 ms per 100 KB in release, ADR-0012).
+// shortcut: UI-thread highlighting caps files at 128 KiB; highlight on the
+// background executor when larger files need colors.
+const MAX_HIGHLIGHT_BYTES: usize = 128 * 1024;
 
 /// The highlight names asked of every grammar, Zed's names. A capture maps
 /// to the longest of these that prefixes it (`keyword.function` to `keyword`).
@@ -101,8 +103,15 @@ impl Language {
             ),
             Self::Plain => return None,
         };
-        // A query that does not compile leaves the file plain.
-        let mut config = HighlightConfiguration::new(language, name, query, "", "").ok()?;
+        // A query that does not compile leaves the file plain. Configurations
+        // are cached per language, so this logs once per language.
+        let mut config = match HighlightConfiguration::new(language, name, query, "", "") {
+            Ok(config) => config,
+            Err(err) => {
+                eprintln!("agmen-desktop: the {name} highlight query does not build: {err}");
+                return None;
+            }
+        };
         config.configure(NAMES);
         Some(config)
     }
@@ -120,6 +129,8 @@ thread_local! {
     static CONFIGS: RefCell<Vec<(Language, Option<HighlightConfiguration>)>> =
         const { RefCell::new(Vec::new()) };
     static HIGHLIGHTER: RefCell<Highlighter> = RefCell::new(Highlighter::new());
+    /// Languages whose highlight error was already logged.
+    static LOGGED: RefCell<Vec<Language>> = const { RefCell::new(Vec::new()) };
 }
 
 /// The highlights in `text`, sorted and never overlapping (the innermost
@@ -140,32 +151,42 @@ pub(crate) fn highlight(text: &str, language: Language) -> Vec<Highlight> {
         else {
             return Vec::new();
         };
-        HIGHLIGHTER.with_borrow_mut(|highlighter| run(highlighter, config, text))
+        HIGHLIGHTER.with_borrow_mut(|highlighter| {
+            run(highlighter, config, text).unwrap_or_else(|err| {
+                // Once per language: a grammar that fails tends to fail again.
+                LOGGED.with_borrow_mut(|logged| {
+                    if !logged.contains(&language) {
+                        logged.push(language);
+                        eprintln!("agmen-desktop: highlighting {language:?} stopped: {err}");
+                    }
+                });
+                Vec::new()
+            })
+        })
     })
 }
 
+/// Highlights `text`, or the error that stopped it before any event.
 fn run(
     highlighter: &mut Highlighter,
     config: &HighlightConfiguration,
     text: &str,
-) -> Vec<Highlight> {
-    let Ok(events) = highlighter.highlight(config, text.as_bytes(), None, None, |_| None) else {
-        return Vec::new();
-    };
+) -> Result<Vec<Highlight>, tree_sitter_highlight::Error> {
+    let events = highlighter.highlight(config, text.as_bytes(), None, None, |_| None)?;
     let mut out: Vec<Highlight> = Vec::new();
-    let mut stack: Vec<&'static str> = Vec::new();
+    // One entry per open capture, None for a name agmen did not ask for, so
+    // every HighlightEnd pops its own HighlightStart (C154).
+    let mut stack: Vec<Option<&'static str>> = Vec::new();
     for event in events {
         match event {
             Ok(HighlightEvent::HighlightStart(h)) => {
-                if let Some(name) = NAMES.get(h.0) {
-                    stack.push(name);
-                }
+                stack.push(NAMES.get(h.0).copied());
             }
             Ok(HighlightEvent::HighlightEnd) => {
                 stack.pop();
             }
             Ok(HighlightEvent::Source { start, end }) => {
-                let (Some(name), true) = (
+                let (Some(Some(name)), true) = (
                     stack.last(),
                     text.is_char_boundary(start) && text.is_char_boundary(end),
                 ) else {
@@ -186,7 +207,7 @@ fn run(
             Err(_) => break,
         }
     }
-    out
+    Ok(out)
 }
 
 #[cfg(test)]

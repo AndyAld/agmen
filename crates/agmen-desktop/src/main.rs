@@ -234,12 +234,11 @@ fn open_dev_view(
     let window: gpui::Result<gpui::AnyWindowHandle> = match view {
         DevView::Code => cx
             .open_window(options, |_, cx| {
-                cx.new(|cx| {
+                cx.new(|_| {
                     ui::CodeView::new(
                         REVIEWER_XML,
                         ui::Language::for_path(std::path::Path::new("roles/reviewer.xml")),
                         vec![ui::GutterMark::Modified(11..12)],
-                        cx,
                     )
                 })
             })

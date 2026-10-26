@@ -319,7 +319,9 @@ pub(crate) fn merge_style(style: &mut Map<String, Value>, overrides: &Map<String
         match (into.as_object_mut(), from.as_object()) {
             (Some(into), Some(from)) => {
                 for (k, v) in from {
-                    into.insert(k.clone(), v.clone());
+                    if !unusable(k, into.get(k), v) {
+                        into.insert(k.clone(), v.clone());
+                    }
                 }
             }
             _ => *into = from.clone(),
@@ -350,22 +352,24 @@ pub(crate) fn merge_style(style: &mut Map<String, Value>, overrides: &Map<String
                 }
             }
             _ => {
-                // Zed keeps the theme's own value when the override does not
-                // parse, and treats an empty accents list as no change (C142).
-                let unusable = match value {
-                    Value::Null => true,
-                    Value::String(text) => {
-                        style.get(key).is_some_and(|v| {
-                            v.as_str().and_then(|s| Rgba::try_from(s).ok()).is_some()
-                        }) && Rgba::try_from(text.as_str()).is_err()
-                    }
-                    Value::Array(list) => key == "accents" && list.is_empty(),
-                    _ => false,
-                };
-                if !unusable {
+                if !unusable(key, style.get(key), value) {
                     style.insert(key.clone(), value.clone());
                 }
             }
         }
+    }
+}
+
+/// Whether an override for `key` keeps the theme's `existing` value: Zed
+/// does so for a null, for a string that is not a color where the theme has
+/// a color, and for an empty accents list (C142, C148).
+fn unusable(key: &str, existing: Option<&Value>, value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::String(_) => {
+            existing.and_then(parse_color).is_some() && parse_color(value).is_none()
+        }
+        Value::Array(list) => key == "accents" && list.is_empty(),
+        _ => false,
     }
 }

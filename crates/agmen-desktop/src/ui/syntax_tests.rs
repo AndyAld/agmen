@@ -45,7 +45,9 @@ fn highlight_toml_and_markdown() {
     let toml = names_of("[package]\nname = \"agmen\"\n", Language::Toml);
     assert!(has(&toml, "\"agmen\"", "string"), "{toml:?}");
     let md = names_of("# Title\n\nSome text.\n", Language::Markdown);
-    assert!(!md.is_empty(), "markdown gets at least its heading");
+    // Review C157: the heading's text is a title and its marker punctuation.
+    assert!(has(&md, "Title", "text.title"), "{md:?}");
+    assert!(has(&md, "#", "punctuation"), "{md:?}");
 }
 
 #[test]
@@ -81,4 +83,30 @@ fn language_from_path() {
         Language::Markdown
     );
     assert_eq!(Language::for_path(Path::new("notes.txt")), Language::Plain);
+}
+
+#[test]
+#[ignore = "a timing for ADR-0012; run with cargo test --release -- --ignored --nocapture"]
+fn time_the_highlight_cap() {
+    // Review C160: real Rust (this crate's text input), repeated to the cap.
+    let source = include_str!("text_input.rs");
+    let mut text = String::new();
+    while text.len() + source.len() <= MAX_HIGHLIGHT_BYTES {
+        text.push_str(source);
+    }
+    let mut runs = Vec::new();
+    for _ in 0..5 {
+        let start = std::time::Instant::now();
+        let found = highlight(&text, Language::Rust);
+        runs.push(start.elapsed());
+        assert!(!found.is_empty());
+    }
+    runs.sort();
+    println!(
+        "{} bytes: min {:?}, median {:?}, max {:?}",
+        text.len(),
+        runs[0],
+        runs[2],
+        runs[4]
+    );
 }

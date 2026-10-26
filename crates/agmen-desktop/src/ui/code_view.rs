@@ -11,7 +11,10 @@ use gpui::{
 };
 
 use super::syntax::{self, Language};
-use super::tokens::{MONO_CELL_HEIGHT, MONO_CELL_WIDTH, SPACE_10, SPACE_12, SPACE_16};
+use super::tokens::{
+    DELETED_MARK_HEIGHT, GUTTER_MARK_WIDTH, MONO_CELL_HEIGHT, MONO_CELL_WIDTH, SPACE_10, SPACE_12,
+    SPACE_16,
+};
 use crate::appearance::{Appearance, Theme};
 
 /// A change mark beside a line. Line numbers start at 1; ranges are
@@ -33,20 +36,21 @@ pub(crate) enum GutterMark {
 
 /// One line of text and its highlights, as byte ranges within the line.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Line {
-    pub(crate) text: SharedString,
-    pub(crate) highlights: Vec<(Range<usize>, &'static str)>,
+struct Line {
+    text: SharedString,
+    highlights: Vec<(Range<usize>, &'static str)>,
 }
 
 /// Splits `text` into lines and clips each highlight to the lines it covers.
-/// A final newline does not make an extra empty line.
-pub(crate) fn layout_lines(text: &str, language: Language) -> Vec<Line> {
+/// A final newline does not make an extra empty line, and a CRLF ending
+/// counts as one line break.
+fn layout_lines(text: &str, language: Language) -> Vec<Line> {
     let highlights = syntax::highlight(text, language);
     let mut lines = Vec::new();
     let mut next = 0;
     let mut start = 0;
     for piece in text.split_inclusive('\n') {
-        let end = start + piece.trim_end_matches('\n').len();
+        let end = start + piece.trim_end_matches('\n').trim_end_matches('\r').len();
         let mut own = Vec::new();
         // Highlights are sorted; skip those that end before this line.
         while let Some(h) = highlights.get(next) {
@@ -79,7 +83,7 @@ pub(crate) fn layout_lines(text: &str, language: Language) -> Vec<Line> {
 
 /// The theme's color for a Zed syntax name, or the nearest parent name's
 /// (`keyword.function` falls back to `keyword`).
-pub(crate) fn syntax_color(theme: &Theme, name: &str) -> Option<Hsla> {
+fn syntax_color(theme: &Theme, name: &str) -> Option<Hsla> {
     let mut name = name;
     loop {
         if let Some(color) = theme.syntax.get(name) {
@@ -96,12 +100,7 @@ pub(crate) struct CodeView {
 }
 
 impl CodeView {
-    pub(crate) fn new(
-        text: &str,
-        language: Language,
-        marks: Vec<GutterMark>,
-        _cx: &mut Context<Self>,
-    ) -> Self {
+    pub(crate) fn new(text: &str, language: Language, marks: Vec<GutterMark>) -> Self {
         Self {
             lines: Rc::new(layout_lines(text, language)),
             marks: Rc::new(marks),
@@ -109,11 +108,21 @@ impl CodeView {
     }
 }
 
-fn mark_for(marks: &[GutterMark], line: u32) -> Option<(&'static str, bool)> {
+/// The Added or Modified mark that fills line `line`'s gutter.
+fn fill_mark(marks: &[GutterMark], line: u32) -> Option<&GutterMark> {
+    marks.iter().find(|m| match m {
+        GutterMark::Added(r) | GutterMark::Modified(r) => r.contains(&line),
+        GutterMark::Deleted(_) => false,
+    })
+}
+
+/// Where a deletion mark sits on line `line`'s row: at its bottom edge for
+/// lines removed after it, or at line 1's top edge for lines removed above
+/// the first line (`Deleted(0)`). Returns the mark's own line number.
+fn deleted_mark(marks: &[GutterMark], line: u32) -> Option<(u32, bool)> {
     marks.iter().find_map(|m| match m {
-        GutterMark::Added(r) if r.contains(&line) => Some(("added", true)),
-        GutterMark::Modified(r) if r.contains(&line) => Some(("modified", true)),
-        GutterMark::Deleted(at) if *at == line => Some(("deleted", false)),
+        GutterMark::Deleted(at) if *at == line => Some((*at, false)),
+        GutterMark::Deleted(0) if line == 1 => Some((0, true)),
         GutterMark::Added(_) | GutterMark::Modified(_) | GutterMark::Deleted(_) => None,
     })
 }
@@ -128,7 +137,6 @@ fn render_line(
     let appearance = cx.global::<Appearance>();
     let theme = &appearance.theme;
     let number = u32::try_from(ix + 1).unwrap_or(u32::MAX);
-    let mark = mark_for(marks, number);
     let highlights: Vec<(Range<usize>, HighlightStyle)> = line
         .highlights
         .iter()
@@ -144,26 +152,33 @@ fn render_line(
             })
         })
         .collect();
-    let gutter = match mark {
-        Some((kind, true)) => {
-            let color = if kind == "added" {
-                theme.created
-            } else {
-                theme.modified
-            };
-            div()
-                .debug_selector(move || format!("gutter:{number}:{kind}"))
-                .w(gpui::px(4.))
-                .h_full()
-                .bg(color)
-        }
-        Some((kind, false)) => div()
+    let fill = fill_mark(marks, number).map(|mark| {
+        let (kind, color) = match mark {
+            GutterMark::Added(_) => ("added", theme.created),
+            GutterMark::Modified(_) | GutterMark::Deleted(_) => ("modified", theme.modified),
+        };
+        div()
             .debug_selector(move || format!("gutter:{number}:{kind}"))
-            .w(gpui::px(4.))
-            .text_color(theme.deleted)
-            .child("▾"),
-        None => div().w(gpui::px(4.)),
-    };
+            .absolute()
+            .inset_0()
+            .bg(color)
+    });
+    let deleted = deleted_mark(marks, number).map(|(at, top)| {
+        let edge = div()
+            .debug_selector(move || format!("gutter:{at}:deleted"))
+            .absolute()
+            .left_0()
+            .right_0()
+            .h(DELETED_MARK_HEIGHT)
+            .bg(theme.deleted);
+        if top { edge.top_0() } else { edge.bottom_0() }
+    });
+    let gutter = div()
+        .relative()
+        .w(GUTTER_MARK_WIDTH)
+        .h_full()
+        .children(fill)
+        .children(deleted);
     #[expect(
         clippy::cast_precision_loss,
         reason = "a line count's digit count is tiny"
@@ -172,6 +187,9 @@ fn render_line(
     div()
         .debug_selector(move || format!("line:{number}"))
         .h(MONO_CELL_HEIGHT)
+        .line_height(MONO_CELL_HEIGHT)
+        .w_full()
+        .overflow_hidden()
         .flex()
         .items_center()
         .gap(SPACE_10)
@@ -185,7 +203,17 @@ fn render_line(
                 .child(number.to_string()),
         )
         .child(gutter.flex_none())
-        .child(StyledText::new(line.text.clone()).with_highlights(highlights))
+        .child(
+            // shortcut: long lines are clipped; sideways scroll when the file
+            // and diff views need to show them whole.
+            div()
+                .debug_selector(move || format!("line:{number}:text"))
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .child(StyledText::new(line.text.clone()).with_highlights(highlights)),
+        )
         .into_any_element()
 }
 

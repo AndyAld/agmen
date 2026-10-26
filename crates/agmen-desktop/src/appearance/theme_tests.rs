@@ -645,3 +645,23 @@ fn bad_override_values_keep_the_themes_own() {
     assert_eq!(style["accents"][0], "#abcdef");
     assert_eq!(style["background"], "#010101", "good values still apply");
 }
+
+#[test]
+fn bad_nested_override_values_keep_the_themes_own() {
+    // Review C148: the C142 rule holds inside syntax entries and players.
+    let mut style: serde_json::Map<String, serde_json::Value> = serde_json::from_str(
+        r##"{"syntax": {"comment": {"color": "#111111", "font_style": "italic"}},
+             "players": [{"cursor": "#222222", "selection": "#333333"}]}"##,
+    )
+    .unwrap();
+    let overrides = serde_json::from_str(
+        r##"{"syntax": {"comment": {"color": null, "font_style": "normal"}},
+             "players": [{"cursor": "not a color", "selection": "#444444"}]}"##,
+    )
+    .unwrap();
+    super::theme::merge_style(&mut style, &overrides);
+    assert_eq!(style["syntax"]["comment"]["color"], "#111111");
+    assert_eq!(style["syntax"]["comment"]["font_style"], "normal");
+    assert_eq!(style["players"][0]["cursor"], "#222222");
+    assert_eq!(style["players"][0]["selection"], "#444444");
+}

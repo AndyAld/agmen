@@ -1,4 +1,4 @@
-use gpui::TestAppContext;
+use gpui::{AppContext as _, TestAppContext};
 
 use super::*;
 use crate::ui::syntax::Language;
@@ -14,7 +14,7 @@ fn code_view_marks_gutter(cx: &mut TestAppContext) {
         GutterMark::Added(7..8),
         GutterMark::Deleted(4),
     ];
-    let (_, cx) = cx.add_window_view(|_, cx| CodeView::new(MAIN_RS, Language::Rust, marks, cx));
+    let (_, cx) = cx.add_window_view(|_, _| CodeView::new(MAIN_RS, Language::Rust, marks));
     redraw(cx);
     assert!(cx.debug_bounds("line:1").is_some());
     assert!(cx.debug_bounds("line:12").is_some());
@@ -61,4 +61,68 @@ fn syntax_color_falls_back_to_the_parent_name() {
         theme.syntax.get("string").copied()
     );
     assert_eq!(syntax_color(&theme, "nothing.like.this"), None);
+}
+
+/// Hosts a code view in a 200 px wide box, narrower than a long line.
+struct Narrow(gpui::Entity<CodeView>);
+
+impl gpui::Render for Narrow {
+    fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+        div()
+            .w(gpui::px(200.))
+            .h(gpui::px(300.))
+            .child(self.0.clone())
+    }
+}
+
+#[gpui::test]
+fn long_lines_stay_on_one_row(cx: &mut TestAppContext) {
+    // Review C149: a line wider than the pane must not wrap over the next.
+    init(cx);
+    let text = format!("{}\nshort\n", "x".repeat(400));
+    let (_, cx) = cx.add_window_view(|_, cx| {
+        let code = cx.new(|_| CodeView::new(&text, Language::Plain, Vec::new()));
+        Narrow(code)
+    });
+    redraw(cx);
+    let first = cx.debug_bounds("line:1:text").unwrap();
+    let second = cx.debug_bounds("line:2").unwrap();
+    assert!(first.size.height <= MONO_CELL_HEIGHT, "{first:?}");
+    assert!(
+        first.size.width <= gpui::px(200.),
+        "clipped to the pane: {first:?}"
+    );
+    assert!(first.bottom() <= second.top(), "{first:?} {second:?}");
+}
+
+#[gpui::test]
+fn deleted_marks_sit_inside_their_row(cx: &mut TestAppContext) {
+    // Review C153: Deleted(0) marks lines removed above line 1, and every
+    // deleted mark stays inside its line's row and gutter.
+    init(cx);
+    let marks = vec![
+        GutterMark::Deleted(0),
+        GutterMark::Deleted(4),
+        GutterMark::Modified(2..3),
+    ];
+    let (_, cx) = cx.add_window_view(|_, _| CodeView::new(MAIN_RS, Language::Rust, marks));
+    redraw(cx);
+    let above = cx.debug_bounds("gutter:0:deleted").unwrap();
+    let line1 = cx.debug_bounds("line:1").unwrap();
+    assert!(above.top() >= line1.top() && above.bottom() <= line1.bottom());
+    let after4 = cx.debug_bounds("gutter:4:deleted").unwrap();
+    let line4 = cx.debug_bounds("line:4").unwrap();
+    assert!(after4.top() >= line4.top() && after4.bottom() <= line4.bottom());
+    assert!(after4.size.width <= gpui::px(4.), "{after4:?}");
+    // Review C157: a Modified mark shows.
+    assert!(cx.debug_bounds("gutter:2:modified").is_some());
+    assert!(cx.debug_bounds("gutter:3:modified").is_none());
+}
+
+#[test]
+fn crlf_lines_drop_the_carriage_return() {
+    // Review C158.
+    let lines = layout_lines("a\r\nb\r\n", Language::Plain);
+    let texts: Vec<&str> = lines.iter().map(|l| l.text.as_ref()).collect();
+    assert_eq!(texts, ["a", "b"]);
 }

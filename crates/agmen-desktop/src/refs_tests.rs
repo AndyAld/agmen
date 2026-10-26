@@ -97,7 +97,9 @@ fn refs_ignore_version_numbers() {
     let known = Known::from_snapshot(&chat_snapshot());
     // The known commit is the positive control: the scan runs on this body.
     let spans = spans_of(
-        "Codex 0.164.0 or v1.2.3, see 2026-10-25 at 4d9fdc8",
+        // Review C145: build 20261025 and issue 1234567 are digit runs the
+        // commit pattern matches; no known commit has them, so they stay plain.
+        "Codex 0.164.0 or v1.2.3, build 20261025, issue 1234567, see 2026-10-25 at 4d9fdc8",
         &[],
         &known,
     );

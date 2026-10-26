@@ -207,7 +207,7 @@ impl RoleFileView {
             .map_or("", |(_, _, slug)| *slug);
         let language = Language::for_path(Path::new(&file));
         let text = role.text.clone();
-        let code = cx.new(|cx| CodeView::new(&text, language, Vec::new(), cx));
+        let code = cx.new(|_| CodeView::new(&text, language, Vec::new()));
         Self {
             parts: ["roles".into(), slug.into(), file.into()],
             built_in: role.layer == RoleLayer::BuiltIn,
