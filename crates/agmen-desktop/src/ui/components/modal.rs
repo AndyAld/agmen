@@ -4,13 +4,17 @@
 //! dismisses it, as a click outside a Zed modal does.
 
 use gpui::{
-    AnyElement, App, ClickEvent, InteractiveElement as _, IntoElement, MouseButton, ParentElement,
-    Pixels, RenderOnce, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
+    AnyElement, App, ClickEvent, Hsla, InteractiveElement as _, IntoElement, MouseButton,
+    ParentElement, Pixels, RenderOnce, SharedString, StatefulInteractiveElement as _, Styled as _,
+    Window, div,
 };
 
 use super::ClickHandler;
-use crate::appearance::Appearance;
-use crate::ui::tokens::{BORDER_WIDTH, RADIUS_XL, SPACE_12, SPACE_20, TINT_DIM, tint};
+use crate::appearance::{Appearance, Theme};
+use crate::ui::tokens::{
+    BORDER_WIDTH, RADIUS_XL, SHADOW_BLUR, SHADOW_OFFSET_Y, SPACE_12, SPACE_20, TINT_DIM,
+    drop_shadow, tint,
+};
 
 /// Tests find the dim as `id` and the card as `"{id}:card"`.
 #[derive(IntoElement)]
@@ -60,6 +64,12 @@ impl ParentElement for Modal {
     }
 }
 
+/// The dim's fill: the mockup's black, the same in every theme, so the
+/// background and every surface under it darken.
+fn dim_fill() -> Hsla {
+    tint(Theme::SHADOW.into(), TINT_DIM)
+}
+
 impl RenderOnce for Modal {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = &cx.global::<Appearance>().theme;
@@ -81,7 +91,8 @@ impl RenderOnce for Modal {
             .border(BORDER_WIDTH)
             .border_color(theme.border)
             .rounded(RADIUS_XL)
-            .shadow_lg()
+            // The palette's shadow, as node 2418 casts it.
+            .shadow(vec![drop_shadow(SHADOW_OFFSET_Y, SHADOW_BLUR)])
             .children(self.children);
         let dim = div()
             .id(self.id)
@@ -95,7 +106,7 @@ impl RenderOnce for Modal {
             .flex_col()
             .items_center()
             .pt(self.top)
-            .bg(tint(theme.background, TINT_DIM))
+            .bg(dim_fill())
             .child(card);
         match self.on_dismiss {
             Some(handler) => dim.on_click(handler),
@@ -114,6 +125,16 @@ mod tests {
     use crate::ui::test_support::{click, draw};
     use crate::ui::tokens::{MODAL_TOP, MODAL_WIDTH};
     use gpui::{TestAppContext, px};
+
+    #[test]
+    fn the_dim_darkens_the_window_with_black() {
+        // Shot diff (nodes 2417 and 10289): #000000 at 0xa0, so the
+        // background and every surface under it darken.
+        let theme = Appearance::builtin().theme;
+        let dim = dim_fill();
+        assert_eq!(dim, tint(Theme::SHADOW.into(), TINT_DIM));
+        assert!(dim.l < theme.background.l, "{dim:?} does not darken");
+    }
 
     #[gpui::test]
     fn card_sits_below_the_top_and_dismisses_only_outside(cx: &mut TestAppContext) {

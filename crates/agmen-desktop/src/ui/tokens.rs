@@ -197,9 +197,8 @@ pub(crate) const DIALOG_WIDTH: Pixels = px(680.);
 pub(crate) const DIALOG_TOP: Pixels = px(120.);
 /// A dialog's padding (node 2418).
 pub(crate) const SPACE_20: Pixels = px(20.);
-/// The dim over the window behind a dialog (0xa0, nodes 2417 and 10289),
-/// of the background color; the mockup draws black, and the theme has no
-/// overlay token.
+/// The dim over the window behind a dialog: black at 0xa0 (nodes 2417
+/// and 10289).
 pub(crate) const TINT_DIM: f32 = 160. / 255.;
 
 // Task 19: the plan panel, its team table and the kick-off dialog
