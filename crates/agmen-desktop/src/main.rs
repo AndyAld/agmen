@@ -23,6 +23,14 @@ mod icons;
 #[cfg(unix)]
 mod instance;
 mod notify;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the plan panel uses it from Task 19 of the desktop plan"
+    )
+)]
+mod plan;
 mod spike;
 mod ui;
 
