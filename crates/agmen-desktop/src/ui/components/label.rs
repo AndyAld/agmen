@@ -8,6 +8,7 @@ use gpui::{
 
 use super::Color;
 use crate::appearance::Appearance;
+use crate::ui::ink_clip::{Bleed, InkClip};
 use crate::ui::tokens::{
     LINE_HEIGHT, TEXT_DEFAULT, TEXT_LARGE, TEXT_SMALL, TEXT_TITLE, TEXT_XSMALL,
 };
@@ -149,7 +150,7 @@ impl Label {
 }
 
 impl RenderOnce for Label {
-    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let appearance = cx.global::<Appearance>();
         let color = self.color.hsla(&appearance.theme);
         let base = div().text_color(color).line_height(
@@ -157,6 +158,27 @@ impl RenderOnce for Label {
                 .map_or_else(|| relative(LINE_HEIGHT), gpui::DefiniteLength::from),
         );
         let size = self.size.unwrap_or_default().rems();
+        // C287: gpui's truncate clips to the label's box, which cut the
+        // glyphs of a font taller than a fixed line (the composer's chips
+        // set the code font on a 14 px one). The label clips at its sides
+        // and lets the font's overflow of the line show, as TextInput does
+        // (C264a).
+        let bleed = self.truncate.then(|| {
+            // The font the label inherits, with what it sets itself.
+            let mut font = window.text_style().font();
+            let font_size = match (self.code, self.size) {
+                (true, None) => appearance.fonts.code_size,
+                _ => size.to_pixels(window.rem_size()),
+            };
+            if self.code {
+                font.family = appearance.fonts.code_family.clone();
+            }
+            if let Some(weight) = self.weight {
+                font.weight = weight;
+            }
+            let line = self.line_height.unwrap_or(font_size * LINE_HEIGHT);
+            Bleed::of_font(&font, font_size, line, window)
+        });
         let sized = match (self.code, self.size) {
             (true, None) => base
                 .font_family(appearance.fonts.code_family.clone())
@@ -166,7 +188,7 @@ impl RenderOnce for Label {
                 .text_size(size),
             (false, _) => base.text_size(size),
         };
-        sized
+        let label = sized
             .when_some(self.weight, gpui::Styled::font_weight)
             .when(self.strikethrough, gpui::Styled::line_through)
             .when(self.underline, gpui::Styled::underline)
@@ -176,12 +198,18 @@ impl RenderOnce for Label {
                     // would also grow it down a column with free height.
                     this.w_full().min_w_0()
                 } else if self.truncate {
-                    this.flex_1().min_w_0().truncate()
+                    // gpui's truncate without its overflow_hidden: the
+                    // InkClip below clips instead.
+                    this.flex_1().min_w_0().whitespace_nowrap().text_ellipsis()
                 } else {
                     this.flex_none().whitespace_nowrap()
                 }
             })
-            .child(self.text)
+            .child(self.text);
+        match bleed {
+            Some(bleed) => InkClip::new(label, bleed).into_any_element(),
+            None => label.into_any_element(),
+        }
     }
 }
 

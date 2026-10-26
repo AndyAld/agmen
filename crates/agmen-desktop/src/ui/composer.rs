@@ -15,6 +15,7 @@ use gpui::{
 };
 
 use super::components::{Chip, Color, IconButton, IconSize, Label, LabelSize};
+use super::ink_clip::InkClip;
 use super::model_picker::{ModelMenu, PickerEvent};
 use super::text_input::{TextInput, TextInputEvent};
 use super::tokens::{
@@ -423,7 +424,9 @@ impl Composer {
                     ),
             )
         });
-        Some(
+        // C287: the wrapper clips at its sides only, so the chip's label
+        // shows the glyphs its own clip lets through.
+        Some(InkClip::sides(
             div()
                 .id("composer-model")
                 .debug_selector(|| "composer:model".into())
@@ -432,7 +435,6 @@ impl Composer {
                 // below that the composer hides it. The picker is
                 // deferred, so the clip does not cut it.
                 .min_w(floor)
-                .overflow_hidden()
                 .cursor_pointer()
                 // C81: while open, mouse down outside the picker closes it;
                 // a click here too would reopen it on mouse up.
@@ -465,7 +467,7 @@ impl Composer {
                 .when_some(picker, |this, picker| {
                     this.child(div().absolute().top_0().left_0().child(picker))
                 }),
-        )
+        ))
     }
 }
 
@@ -494,48 +496,50 @@ impl Render for Composer {
         };
         let theme = &cx.global::<Appearance>().theme;
         let to = chip_addressed.then(|| {
-            div()
-                .debug_selector(|| "composer:to".into())
-                .overflow_hidden()
-                // C260 and C278: the handle gives way, then the chip
-                // stops at its lead and its close mark or ▾, so the way
-                // out of a reply stays whole.
-                .min_w(floors.to)
-                .when(replying, |this| {
-                    // C260: while replying, the handle gives way first,
-                    // then the model chip.
-                    this.flex_shrink(REPLY_CHIP_SHRINK)
-                })
-                .child(
-                    // C260: a narrow box cuts the handle, not the close
-                    // mark or the caret after it.
-                    Chip::new(self.target(cx).handle.clone())
-                        .compact()
-                        .code()
-                        // Node 378: 12 px mono on its 14 px line.
-                        .line_height(AUTO_LINE_12)
-                        .truncate()
-                        .color(Color::Accent)
-                        .leading(
-                            Label::new(lead)
-                                .size(LabelSize::Small)
-                                .color(Color::Placeholder),
-                        )
-                        .map(|chip| {
-                            if replying {
-                                chip.trailing(
-                                    IconButton::new("composer:cancel-reply", UiIcon::Close)
-                                        .size(IconSize::Small)
-                                        .color(Color::Placeholder)
-                                        .on_click(
-                                            cx.listener(|this, _, _, cx| this.cancel_reply(cx)),
-                                        ),
-                                )
-                            } else {
-                                chip.trailing(caret())
-                            }
-                        }),
-                )
+            // C287: clipped at its sides only, as the model chip is.
+            InkClip::sides(
+                div()
+                    .debug_selector(|| "composer:to".into())
+                    // C260 and C278: the handle gives way, then the chip
+                    // stops at its lead and its close mark or ▾, so the way
+                    // out of a reply stays whole.
+                    .min_w(floors.to)
+                    .when(replying, |this| {
+                        // C260: while replying, the handle gives way first,
+                        // then the model chip.
+                        this.flex_shrink(REPLY_CHIP_SHRINK)
+                    })
+                    .child(
+                        // C260: a narrow box cuts the handle, not the close
+                        // mark or the caret after it.
+                        Chip::new(self.target(cx).handle.clone())
+                            .compact()
+                            .code()
+                            // Node 378: 12 px mono on its 14 px line.
+                            .line_height(AUTO_LINE_12)
+                            .truncate()
+                            .color(Color::Accent)
+                            .leading(
+                                Label::new(lead)
+                                    .size(LabelSize::Small)
+                                    .color(Color::Placeholder),
+                            )
+                            .map(|chip| {
+                                if replying {
+                                    chip.trailing(
+                                        IconButton::new("composer:cancel-reply", UiIcon::Close)
+                                            .size(IconSize::Small)
+                                            .color(Color::Placeholder)
+                                            .on_click(
+                                                cx.listener(|this, _, _, cx| this.cancel_reply(cx)),
+                                            ),
+                                    )
+                                } else {
+                                    chip.trailing(caret())
+                                }
+                            }),
+                    ),
+            )
         });
         div()
             .w_full()

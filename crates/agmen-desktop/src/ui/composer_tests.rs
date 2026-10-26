@@ -897,3 +897,74 @@ fn the_chips_are_the_mockups_12_px_mono_lines(cx: &mut TestAppContext) {
     let frame = cx.debug_bounds("composer:box").unwrap();
     assert_eq!(frame.size.height, gpui::px(38.));
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn the_composer_chips_show_tall_and_deep_glyphs_inside_the_box() {
+    // C287: each chip's label sets the code font on a 14 px line, and its
+    // wrapper clipped to the chip, 2 px above and below that line (3 px
+    // with the model chip's outline), so at a 16 and 20 px code font it
+    // cut what the label itself no longer cuts.
+    use crate::ui::test_support::{Ink, TALL_AND_DEEP, core_text_app, painted_at, unscaled};
+    for size in [13., 16., 20.] {
+        let mut app = core_text_app();
+        init(&mut app);
+        app.update(|cx| {
+            crate::assets::load_fonts(cx).unwrap();
+            bind_keys(cx);
+            let mut appearance = cx.global::<Appearance>().clone();
+            appearance.fonts.code_size = gpui::px(size);
+            cx.set_global(appearance);
+        });
+        let snapshot = chat_snapshot();
+        let (_, cx) = app.add_window_view(|window, cx| {
+            window.set_rem_size(MOCKUP_REM);
+            Composer::new(&snapshot, |_, _, _| Ok(()), window, cx)
+        });
+        resize(cx, 800.);
+        // The box clips at the inside of its border.
+        let frame = cx
+            .debug_bounds("composer:box")
+            .unwrap()
+            .dilate(-crate::ui::tokens::BORDER_WIDTH);
+        for chip in ["composer:to", "composer:model"] {
+            let at = format!("{chip} at a {size} px code font");
+            let bounds = cx.debug_bounds(chip).unwrap();
+            let fill = painted_at(cx, chip);
+            let [fill, ..] = fill.as_slice() else {
+                panic!("{at} paints no fill");
+            };
+            let (mask, ink) = cx.update(|window, cx| {
+                let fonts = cx.global::<Appearance>().fonts.clone();
+                // The label is centered in the chip.
+                let top = bounds.center().y - AUTO_LINE_12 / 2.;
+                let ink = Ink::of(
+                    window,
+                    TALL_AND_DEEP,
+                    &gpui::font(fonts.code_family),
+                    fonts.code_size,
+                    top,
+                    AUTO_LINE_12,
+                );
+                (
+                    unscaled(fill.content_mask.bounds, window.scale_factor()),
+                    ink,
+                )
+            });
+            let near = gpui::px(0.01);
+            assert!(
+                mask.top() <= ink.glyphs.0 + near && mask.bottom() >= ink.glyphs.1 - near,
+                "{at}: the mask {mask:?} cuts the glyphs from {:?} to {:?}",
+                ink.glyphs.0,
+                ink.glyphs.1
+            );
+            // The label's glyphs stay inside the box's border.
+            assert!(
+                ink.font.0 >= frame.top() && ink.font.1 <= frame.bottom(),
+                "{at}: the font from {:?} to {:?} reaches past {frame:?}",
+                ink.font.0,
+                ink.font.1
+            );
+        }
+    }
+}

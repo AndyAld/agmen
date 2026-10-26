@@ -21,6 +21,7 @@ use gpui::{
 
 use gpui::prelude::FluentBuilder as _;
 
+use super::ink_clip::Bleed;
 use super::text_edit::TextBuffer;
 use crate::appearance::Appearance;
 
@@ -486,28 +487,6 @@ struct TextLayout {
     /// How far the glyphs reach above the first line box and below the
     /// last, where a font taller than the line overflows it (C264a).
     bleed: Bleed,
-}
-
-/// How far painted glyphs reach past their line boxes.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
-struct Bleed {
-    above: Pixels,
-    below: Pixels,
-}
-
-impl Bleed {
-    /// The overflow of a line shaped with `ascent` and `descent` in a
-    /// `line_height` box: ascent plus |descent| minus the line height,
-    /// split where gpui's paint puts the baseline (half the spare height
-    /// plus the ascent, as kv.rs's painted_baseline reads it). Zero on a
-    /// side the glyphs do not reach past.
-    fn of(ascent: Pixels, descent: Pixels, line_height: Pixels) -> Self {
-        let baseline = (line_height - ascent - descent) / 2. + ascent;
-        Self {
-            above: (ascent - baseline).max(px(0.)),
-            below: (baseline + descent.abs() - line_height).max(px(0.)),
-        }
-    }
 }
 
 impl TextLayout {

@@ -175,3 +175,120 @@ fn code_label_renders(cx: &mut TestAppContext) {
     let size = rendered_size(cx, || Label::new("andy/fx1").code().into_any_element());
     assert!(size.width > gpui::px(0.));
 }
+
+/// A truncated label holding [`TALL_AND_DEEP`](crate::ui::test_support::TALL_AND_DEEP)
+/// at a `rem` px UI font, in the UI family as the workspace sets it.
+#[cfg(target_os = "macos")]
+struct InkHost {
+    rem: gpui::Pixels,
+    label: fn() -> Label,
+}
+
+#[cfg(target_os = "macos")]
+impl gpui::Render for InkHost {
+    fn render(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        use gpui::InteractiveElement as _;
+        window.set_rem_size(self.rem);
+        let family = cx.global::<Appearance>().fonts.ui_family.clone();
+        div().p(gpui::px(40.)).font_family(family).child(
+            div()
+                .debug_selector(|| "ink-row".into())
+                .w(gpui::px(300.))
+                .flex()
+                // The strikethrough paints under the glyphs' mask.
+                .child((self.label)().strikethrough()),
+        )
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_truncated_label_shows_its_tallest_and_deepest_glyphs() {
+    // C287: gpui's truncate clips to the label's box. The composer's chips
+    // set the code font on a 14 px line, so the box cut the descenders by
+    // 0.6 px at a 13 px code font and Ë's dots by 3.4 px and the
+    // descenders by 4.7 px at 20 px.
+    use crate::ui::test_support::{Ink, TALL_AND_DEEP, core_text_app, init, redraw, unscaled};
+    use crate::ui::tokens::AUTO_LINE_12;
+    // What, the UI and code font sizes, whether the label is code, and
+    // the label.
+    type Case = (&'static str, f32, f32, bool, fn() -> Label);
+    let cases: [Case; 6] = [13., 16., 20.]
+        .map(|size| -> [Case; 2] {
+            [
+                ("code on its 14 px line", 15., size, true, || {
+                    Label::new(TALL_AND_DEEP)
+                        .code()
+                        .line_height(AUTO_LINE_12)
+                        .truncate()
+                }),
+                ("UI on its 1.2 line", size, 15., false, || {
+                    Label::new(TALL_AND_DEEP).truncate()
+                }),
+            ]
+        })
+        .concat()
+        .try_into()
+        .unwrap();
+    for (what, rem, code, is_code, label) in cases {
+        let at = format!("{what}, UI {rem} px, code {code} px");
+        let mut app = core_text_app();
+        init(&mut app);
+        app.update(|cx| {
+            crate::assets::load_fonts(cx).unwrap();
+            let mut appearance = cx.global::<Appearance>().clone();
+            appearance.fonts.code_size = gpui::px(code);
+            cx.set_global(appearance);
+        });
+        let (_, cx) = app.add_window_view(move |_, _| InkHost {
+            rem: gpui::px(rem),
+            label,
+        });
+        redraw(cx);
+        let row = cx.debug_bounds("ink-row").unwrap();
+        let (mask, ink, device_px) = cx.update(|window, cx| {
+            let fonts = cx.global::<Appearance>().fonts.clone();
+            let (family, size) = if is_code {
+                (fonts.code_family, fonts.code_size)
+            } else {
+                (fonts.ui_family, TEXT_DEFAULT.to_pixels(window.rem_size()))
+            };
+            let scale = window.scale_factor();
+            let [struck] = window.painted_underlines()[..] else {
+                panic!("{at}: one strikethrough");
+            };
+            let ink = Ink::of(
+                window,
+                TALL_AND_DEEP,
+                &gpui::font(family),
+                size,
+                row.top(),
+                row.size.height,
+            );
+            (
+                unscaled(struck.content_mask.bounds, scale),
+                ink,
+                gpui::px(1. / scale),
+            )
+        });
+        // A content mask snaps to device pixels.
+        let near = gpui::px(0.01);
+        assert!(
+            mask.top() <= ink.glyphs.0 + near && mask.bottom() >= ink.glyphs.1 - near,
+            "{at}: the mask {mask:?} cuts the glyphs from {:?} to {:?}",
+            ink.glyphs.0,
+            ink.glyphs.1
+        );
+        // As C264a and C273 grow TextInput's: by the font's overflow of the
+        // line and no further, and not at all sideways.
+        assert!(
+            mask.top() >= row.top().min(ink.font.0) - device_px
+                && mask.bottom() <= row.bottom().max(ink.font.1) + device_px
+                && mask.left() >= row.left() - device_px
+                && mask.right() <= row.right() + device_px,
+            "{at}: the mask {mask:?} reaches past the label {row:?} and the font from {:?} to {:?}",
+            ink.font.0,
+            ink.font.1
+        );
+    }
+}
