@@ -116,7 +116,7 @@ fi
 chmod 600 "$dir/tls/ca.key"
 
 ensure_env AGMEN_IT_JWT_DIR "$dir/jwt"
-ensure_env AGMEN_IT_MQTT_WSS wss://localhost:8443/mqtt
+ensure_env AGMEN_IT_MQTT_WSS "wss://localhost:${AGMEN_DEV_WSS_PORT:-8443}/mqtt"
 ensure_env AGMEN_IT_WSS_CA "$dir/tls/ca.pem"
 
 # EMQX (uid 1000), nginx and HAProxy run as non-root users in their

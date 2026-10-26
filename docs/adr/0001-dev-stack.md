@@ -16,6 +16,8 @@ Integration tests run against the real broker and database (README, Contributing
 | EMQX | `emqx/emqx:6.3.2` | Newest stable, released 2026-10-22. The Docker Official `emqx` image stopped at 5.8.x after the BSL change |
 | Postgres | `postgres:16.15` | Newest 16.x patch |
 | Toxiproxy | `ghcr.io/shopify/toxiproxy:2.13.0` | Newest release; the ghcr tag has no `v` prefix |
+| JWKS | `nginx:1.30.6-alpine` | Serves the dev JWKS on 8090 (added in spike S1; see the amendment) |
+| HAProxy | `haproxy:3.4.7-alpine` | TLS front for WSS on host port 8443, or `AGMEN_DEV_WSS_PORT` where 8443 is taken, like the cluster's HAProxy ingress (added in spike S1; see the amendment) |
 
 **CI images** (`ci/kubePod.yaml`): `rust:1.99.1-bookworm` and `docker:29.9.2-dind`. Tools are pinned in the `Jenkinsfile`: cargo-nextest 0.9.149, cargo-deny 0.20.2.
 
@@ -42,6 +44,6 @@ Spike S1 changed the dev stack. Details and test results are in [ADR-0002](0002-
 
 - **JWKS:** a `jwks` service (`nginx:1.30.6-alpine`, newest stable, checked on Docker Hub 2026-10-25) serves `deploy/dev/.secrets/jwks/jwks.json` at `http://localhost:8090/v1/jwks`, and EMQX keeps reading it as `host.docker.internal:8090`. It outlives every test process, so no test binds 8090. `init.sh` generates the dev ES256 keys (`.secrets/jwt/agmen-dev-1.pem`, `agmen-dev-2.pem`, both published, and `untrusted.pem`, never published) and rebuilds `jwks.json` on every run. EMQX `depends_on` the `jwks` service being healthy.
 - **WSS:** a `haproxy` service (`haproxy:3.4.7-alpine`, the current LTS tag, checked on Docker Hub 2026-10-25) terminates TLS on 8443 and forwards to `emqx:8083`, with a dev CA and certificate from `init.sh`.
-- **EMQX config:** a `cinfo` authenticator now runs before the JWT one to bind client ids to the username, and `durable_sessions` is on.
+- **EMQX config:** a `cinfo` authenticator now runs before the JWT one to bind client ids to the username. Spike S1 turned `durable_sessions` on; ruling R71 turned it off again (ADR-0002).
 - **`init.sh`** still keeps existing files. It adds `AGMEN_IT_JWT_DIR`, `AGMEN_IT_MQTT_WSS` and `AGMEN_IT_WSS_CA` to an existing `dev.env` when they are missing, so rerun it after pulling changes to `deploy/dev`.
 - **nextest:** a third profile, `it-restart`, runs integration tests whose names contain `restart` (they restart EMQX) one at a time; the `it` profile skips them.

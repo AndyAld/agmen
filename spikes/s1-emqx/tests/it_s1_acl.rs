@@ -8,6 +8,11 @@
 //! EMQX and runs only under `--profile it-restart` (`.config/nextest.toml`).
 //! It runs agmen-client against an in-process hub through agmen-client's
 //! own test harness, shared as it is.
+//!
+//! Run with `cargo nextest run -p s1-emqx --profile it`, and the restart
+//! test with `--profile it-restart`, after `deploy/dev/init.sh` and
+//! `docker compose -f deploy/dev/compose.yaml up -d --wait`, with
+//! `deploy/dev/.secrets/dev.env` exported (`set -a; . deploy/dev/.secrets/dev.env; set +a`).
 
 // Integration tests are test code throughout, helpers included: this lets
 // clippy's allow-*-in-tests settings cover the helpers too.
@@ -452,6 +457,51 @@ async fn it_subscribe_other_tenant_refused() {
     );
 }
 
+/// An identity's wildcard filters cannot reach past its own topics. Every
+/// filter that would widen the ACL gets SUBACK 0x87; the six filters the
+/// ACL names succeed.
+#[tokio::test]
+async fn it_wildcard_subscriptions_cannot_widen_acl() {
+    let a = new_id();
+    let base = format!("agmen/v1/{TENANT}/{PROJECT}");
+    let mut client = connect_ok(tcp_options(&format!("{a}-watch"), &a, &identity_token(&a))).await;
+    for filter in [
+        "#".to_owned(),
+        "agmen/#".to_owned(),
+        format!("{base}/#"),
+        format!("{base}/+"),
+        format!("{base}/up/+"),
+        format!("{base}/up/{a}"),
+        format!("{base}/inbox/+"),
+        format!("{base}/ack/+"),
+        format!("agmen/v1/{TENANT}/+/feed"),
+        format!("agmen/v1/+/{PROJECT}/feed"),
+        "agmen/v1/+/+/state/#".to_owned(),
+        format!("agmen/v1/{TENANT}/+/presence/+"),
+        format!("$share/g/{base}/inbox/+"),
+    ] {
+        assert_eq!(
+            client.subscribe(&filter).await,
+            SubscribeReasonCode::NotAuthorized,
+            "{filter}"
+        );
+    }
+    for filter in [
+        format!("{base}/feed"),
+        format!("{base}/inbox/{a}"),
+        format!("{base}/ack/{a}"),
+        format!("{base}/state/head"),
+        format!("{base}/state/#"),
+        format!("{base}/presence/+"),
+    ] {
+        assert_eq!(
+            client.subscribe(&filter).await,
+            SubscribeReasonCode::Success(QoS::AtLeastOnce),
+            "{filter}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn it_no_acl_claim_is_denied() {
     let a = new_id();
@@ -493,6 +543,9 @@ async fn it_bad_signature_refused() {
     let a = new_id();
     let token = sign_with(UNTRUSTED_KEY, &identity_claims(&a, now_secs() + 3600));
     assert_refused(tcp_options(&format!("{a}-mcp"), &a, &token)).await;
+    // A token past its exp, signed with the dev key, is refused at CONNACK too.
+    let expired = sign(&identity_claims(&a, now_secs() - 600));
+    assert_refused(tcp_options(&format!("{a}-mcp"), &a, &expired)).await;
     // Control: the same claims signed with the dev key connect.
     connect_ok(tcp_options(&format!("{a}-mcp"), &a, &identity_token(&a))).await;
 }
@@ -655,6 +708,12 @@ async fn it_wss_behind_haproxy() {
         .await
         .expect("hub got nothing");
     assert_eq!(got.payload.as_ref(), b"hello");
+    // ACLs hold through the proxy too.
+    let b = new_id();
+    assert_eq!(
+        wss_publish(&format!("{a}-cli"), &a, &identity_token(&a), &up_topic(&b)).await,
+        PubAckReason::NotAuthorized
+    );
 }
 
 /// R4: one token binds to `<sub>-mcp`, `<sub>-watch` and `<sub>-cli`, and

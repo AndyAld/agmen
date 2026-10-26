@@ -6,7 +6,7 @@ Amended: 2026-10-26 (ruling R71: durable sessions off)
 
 ## Context
 
-The MVP broker is EMQX on a single node (design section 4.3, MVP plan). Spike S1 checks that EMQX can carry agmen's identity model on its own: a hub-signed JWT per identity, an `acl` claim that names that identity's topics in full, a deny when nothing matches, a disconnect at expiry, a REST kick for revocation, a shared subscription for the hub, a packet size cap, and MQTT over WebSocket behind HAProxy. Task 7 (`BrokerTokens::mint`, `GET /v1/jwks`, `EmqxAdmin::kick`) and Task 8 (the hub's MQTT client) build on what this ADR records.
+The MVP broker is EMQX on a single node, Adam's choice on 2026-10-25 (design section 4.3, MVP plan). Design section 6.3 requires that a client can publish only to its own `up/{identity_id}`, that one person's agents can never post as another's, that revocation takes effect on live connections, and that no guard fails open. Spike S1 checks that EMQX can carry agmen's identity model on its own: a hub-signed JWT per identity, an `acl` claim that names that identity's topics in full, a deny when nothing matches, a disconnect at expiry, a REST kick for revocation, a shared subscription for the hub, a packet size cap, and MQTT over WebSocket behind HAProxy. Task 7 (`BrokerTokens::mint`, `GET /v1/jwks`, `EmqxAdmin::kick`) and Task 8 (the hub's MQTT client) build on what this ADR records.
 
 This replaces the Mosquitto ADR planned in m0-m1 Task 2. The tests are `spikes/s1-emqx/tests/it_s1_acl.rs`, run against `deploy/dev` on `emqx/emqx:6.3.2`. Behavior marked "from source" was read in the EMQX 6.3.2 tag on GitHub (`apps/emqx_auth_jwt/src/emqx_authn_jwt.erl`, `apps/emqx_auth_cinfo/src/emqx_authn_cinfo.erl`, `apps/emqx/src/emqx_channel.erl`, `apps/emqx_auth/src/emqx_authz/emqx_authz_rule_raw.erl`, `apps/emqx_auth/src/emqx_authn/emqx_authn_utils.erl`) and not tested.
 
@@ -14,7 +14,7 @@ This replaces the Mosquitto ADR planned in m0-m1 Task 2. The tests are `spikes/s
 
 ### License
 
-EMQX 5.9 and later ship under BSL 1.1. Its Additional Use Grant allows production use of **a single node**, as long as we do not offer EMQX "to third parties on a hosted or embedded basis" (`LICENSE` in the 6.3.2 tag). `GET /api/v5/license` on the dev node reports `"type": "community"`, `"max_connections": 10000000`. That covers our own team on one node. Before outside teams join (M6), or before we cluster, we need a commercial license or another broker (design section 9, open question "EMQX license before outside teams").
+EMQX 5.9 and later ship under BSL 1.1. Its Additional Use Grant allows production use of **a single node**, as long as we do not offer EMQX "to third parties on a hosted or embedded basis" (`LICENSE` in the 6.3.2 tag). EMQX also prints at boot: "To enable clustering or use EMQX for external commercial purposes, a commercial license is required." `GET /api/v5/license` on the dev node reports `"type": "community"`, `"max_connections": 10000000`. That covers our own team on one node. Before outside teams join (M6), or before we cluster, we need a commercial license or another broker (design section 9, open question "EMQX license before outside teams").
 
 ### Identity token
 
@@ -36,7 +36,7 @@ The hub signs one ES256 JWT per identity. Header: `{"alg": "ES256", "typ": "JWT"
 }
 ```
 
-The client connects with username = identity id and password = the token. Rules the hub must keep:
+Identity ids are hub-minted `[a-z0-9]{8,32}` (`IdentityId` in `crates/agmen-proto/src/ids.rs`, protocol conventions), so an id never holds `/`, `+` or `#` and cannot widen a topic. The client connects with username = identity id and password = the token. Rules the hub must keep:
 
 - **Always set `exp`.** EMQX checks `exp` only when the claim is present; a token without it never expires and is never disconnected (from source).
 - **Never mint `is_superuser`, `clientid_override` or `client_attrs`.** EMQX honors all three from a verified token (from source): `is_superuser: true` skips the ACL, and `clientid_override` replaces the client id the kick relies on.
@@ -165,6 +165,8 @@ Order: the hub commits `revoked_at` first, so the identity can get no fresh brok
 - Packet over 96 KB: EMQX closes the socket (log `{shutdown,emsgsize}`) with no DISCONNECT 0x95 and no PUBACK. rumqttc never sends such a packet: it reads the limit from CONNACK and fails the publish locally: `EventLoop::poll` returns `OutgoingPacketTooLarge` and drops the connection. The client must check envelope size (64 KiB) before publishing.
 - rumqttc 0.25.1 reports a server DISCONNECT as `ConnectionError::MqttState(StateError::ServerDisconnect { reason_code, .. })`, not as an incoming packet.
 - A QoS 1 publish to a topic nobody subscribes to gets PUBACK 0x10 (no matching subscribers), which is a success.
+- Timings from adam's run (9866443): a token with `exp` 5 s ahead was disconnected after 4.5 to 4.8 s, because claims are whole seconds; a REST kick produced DISCONNECT 0x98 within 0.1 s; 100 publishes to a two-member share group split 50 and 50.
+- After `docker compose restart emqx` returns, EMQX refuses logins for about 8 s (adam's run). A client reconnecting after a broker restart must retry; agmen-client's link task does after its first connect (1 s doubling to 30 s, `crates/agmen-client/src/link.rs`).
 
 ### WSS behind HAProxy
 
@@ -174,7 +176,7 @@ That test uses a small raw client (tokio-rustls, async-tungstenite 0.29 and rumq
 
 ## Results
 
-`cargo nextest run -p s1-emqx --profile it` (13 tests) and `--profile it-restart` (1 test), on `emqx/emqx:6.3.2`.
+`cargo nextest run -p s1-emqx --profile it` (14 tests) and `--profile it-restart` (1 test), on `emqx/emqx:6.3.2`.
 
 RED, before this spike changed `emqx.conf` (JWKS already served): `it_client_ids_bound_to_identity` failed (`<B>-mcp` connected with A's token), and `it_persistent_session_survives_restart` (since replaced, see below) failed (`session_present` false after the restart). The first runs also showed that EMQX closes an oversized packet without DISCONNECT and that rumqttc reports DISCONNECT as an error; those tests were corrected to assert what EMQX does.
 
@@ -183,17 +185,20 @@ RED, before this spike changed `emqx.conf` (JWKS already served): `it_client_ids
 | `it_publish_to_own_up_allowed` | A publishes QoS 1 to `up/A`; a hub-token subscriber on `$share/<g>/agmen/v1/+/+/up/+` receives it | Pass |
 | `it_publish_to_other_up_refused` | A publishes to `up/B`: PUBACK 0x87, nothing reaches the hub within 2 s | Pass |
 | `it_subscribe_other_tenant_refused` | A's own feed: SUBACK granted QoS 1; `agmen/v1/t2/p1/feed`: SUBACK 0x87 | Pass |
+| `it_wildcard_subscriptions_cannot_widen_acl` | A as `<A>-watch` subscribes to `#`, `agmen/#`, `agmen/v1/<t>/<p>/#`, `agmen/v1/<t>/<p>/+`, `up/+`, `up/A`, `inbox/+`, `ack/+`, `agmen/v1/<t>/+/feed`, `agmen/v1/+/<p>/feed`, `agmen/v1/+/+/state/#`, `agmen/v1/<t>/+/presence/+` and `$share/g/agmen/v1/<t>/<p>/inbox/+`: each SUBACK 0x87; its own `feed`, `inbox/A`, `ack/A`, `state/head`, `state/#` and `presence/+`: granted QoS 1 | Pass |
 | `it_no_acl_claim_is_denied` | Valid token without `acl`: publishes to `up/A`, `presence/A`, `feed` and `other` (retained or not) get 0x87; subscribes to `feed`, `inbox/A`, `ack/A`, `state/#`, `presence/+` and `#` get 0x87 | Pass |
-| `it_bad_signature_refused` | Same claims signed with `untrusted.pem` (header `kid` still `agmen-dev-1`): CONNACK refused; signed with the dev key: connects | Pass |
+| `it_bad_signature_refused` | Same claims signed with `untrusted.pem` (header `kid` still `agmen-dev-1`): CONNACK refused; signed with the dev key with `exp` 600 s in the past: CONNACK refused; signed with the dev key: connects | Pass |
 | `it_expiry_disconnects` | `exp` = now + 5 s: dropped after `exp` and within 10 s, with DISCONNECT 0x87 | Pass |
 | `it_rest_kick_disconnects` | `DELETE /api/v5/clients/<A>-mcp`: 204, DISCONNECT 0x98 within 2 s, then GET is 404 and a second DELETE is 404 | Pass |
 | `it_hub_shared_subscription` | Two hub clients in one group, 100 QoS 1 publishes: all 100 arrive once, both clients get some | Pass |
 | `it_offline_session_replays_after_restart` | Replaces `it_persistent_session_survives_restart`, which asserted the broker-side persistence R71 removes. Through agmen-client and an in-process hub: a watch session (`clean_start = false`, expiry 300 s) gets feed seq 1 live and closes; feed seq 2 to 4 and a DM are recorded while it is offline; `docker compose restart emqx`; EMQX no longer lists the session; the watch reconnects and gets feed seq 2 to 4 in order and the DM by replay, and nothing twice within 2 s | Not yet run against a restart (R71 run pending). With the restart replaced by a clean-start connect that discards the session: pass; with no session loss at all, the test fails as meant (the broker still lists the session) |
 | `it_packet_over_limit_refused` | 60 KiB publish: PUBACK success and the hub receives it; 100 KiB: rumqttc fails locally, a raw client gets the socket closed and the hub receives nothing | Pass |
 | `it_websocket_listener` | `it_publish_to_own_up_allowed` with A over `ws://localhost:8083/mqtt` | Pass |
-| `it_wss_behind_haproxy` | A raw MQTT client over `wss://localhost:8443/mqtt` through HAProxy: CONNACK success, PUBACK success, the hub receives it | Pass |
+| `it_wss_behind_haproxy` | A raw MQTT client over `wss://localhost:8443/mqtt` through HAProxy: CONNACK success, PUBACK success, the hub receives it; a second connection as `<A>-cli` publishing to `up/B`: PUBACK 0x87 | Pass |
 | `it_client_ids_bound_to_identity` | One token: `-mcp`, `-watch` and `-cli` connected together, each publish reaches the hub; refused: `<B>-mcp`, `<A>`, `<A>-`, `<A>-mcpx`, `<A>-mcp-watch`, `<A>-MCP`, `x<A>-mcp`, `agmen-hub-<x>`, a newline suffix, A's token under username B, A's token as `agmen-hub`, and the hub token on `<A>-mcp` | Pass |
 | `it_hub_token_scope` | Hub token publishes to `inbox/A` (A receives it); publishing to `up/A` or `elsewhere/x` and subscribing to `inbox/+` get 0x87 | Pass |
+
+Adam ran Spike S1 independently (commit 9866443, 2026-10-25, rumqttc 0.25.1, 16 tests, 4 runs, all passing) and agrees with these results on every test both runs share. Its wildcard filter test, its expired-token case and its ACL check through HAProxy are kept above, and its timings are under "Observed broker behavior". Its unknown-`kid` case is not kept: EMQX tries every JWKS key whatever the `kid` says (see JWKS), so it repeats the untrusted-key case. Two of its decisions are superseded: one token per client id through a `clientid` claim (see "Client ids"), and durable sessions on (R71).
 
 ### Test isolation
 
@@ -203,6 +208,8 @@ Every test mints its own identity ids (`id` plus 8 random `[a-z0-9]`), client id
 
 - Task 7 mints the two token shapes above, serves `/v1/jwks` with the rotation rule above, and on revocation bans the identity's username, then kicks three client ids, not two (see "REST ban"). Task 8 connects as `agmen-hub-<instance>` with the hub claims.
 - The authentication chain has two authenticators, and both must stay in read-only config. Removing cinfo lets any client id use a valid token; removing both lets anonymous clients in (ADR-0001).
+- Two settings are load-bearing: `on_missing_jwt = deny` and `sources = []`. EMQX 6.3.2 ships a file authz source by default, and `no_match = deny` alone would not remove it.
+- The JWKS endpoint is a hard dependency for new connections. If EMQX cannot fetch keys, no one can log in. That fails closed, but the hub's `/v1/jwks` (in the cluster) and the `jwks` compose service (in dev) must be up whenever clients connect.
 - Durable sessions are off (R71): a broker restart drops every session and its queued messages, and each client pays one replay pass from the hub when it reconnects. Turn them on again only on an EMQX release that fixes `matches_filter`, after the Task 15s stall harness (`spikes/s5-ds-stall`, commit `68e20c3` on branch `mvp/t15s`) shows no stalls with them on.
 - rumqttc's TLS features fail `cargo deny` today (see WSS above); Task 3 decides how agmen-client gets WSS.
 - CI runs `--profile it-restart` in the Jenkins Integration stage, after the `it` run and before the stack is torn down. `dockerd` in the `docker` container also listens on a socket in an `emptyDir` shared with the `rust` container (`ci/kubePod.yaml`), and the `rust` container installs the Docker CLI and the compose plugin as static binaries, each checked against a sha256 pinned per architecture in the `Jenkinsfile`, then runs the profile with `DOCKER_HOST` set to that socket.

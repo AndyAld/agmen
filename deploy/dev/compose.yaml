@@ -42,10 +42,12 @@ services:
       retries: 30
 
   # WSS on 8443, terminating TLS in front of EMQX's WebSocket listener.
+  # Where 8443 is taken, export AGMEN_DEV_WSS_PORT before init.sh and
+  # docker compose, or edit AGMEN_IT_MQTT_WSS in .secrets/dev.env to match.
   haproxy:
     image: haproxy:3.4.7-alpine
     ports:
-      - "8443:8443"
+      - "${AGMEN_DEV_WSS_PORT:-8443}:8443"
     volumes:
       - ./haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
       - ./.secrets/haproxy:/usr/local/etc/haproxy/tls:ro

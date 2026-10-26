@@ -62,7 +62,7 @@ pipeline {
         container('docker') {
           sh '''
             set -eu
-            apk add --no-cache bash
+            apk add --no-cache bash openssl
             deploy/dev/init.sh
             ${COMPOSE} up -d --wait
           '''
