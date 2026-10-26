@@ -6,20 +6,20 @@ use gpui::{AnyElement, Context, Render, TestAppContext, VisualTestContext, Windo
 
 use super::*;
 use crate::backend::{Backend, FixtureBackend, Screen, Snapshot, chat_snapshot};
-use crate::local_time::UtcOffset;
 use crate::refs::RefTarget;
 use crate::ui::test_support::{click, init, redraw};
 use crate::ui::tokens::{MENTION_BAR_WIDTH, MOCKUP_REM, REPLY_INDENT};
+use jiff::tz::{TimeZone, offset};
 
 /// Mountain daylight time, as the mockup's clock shows.
-const MDT: UtcOffset = UtcOffset::from_minutes(-6 * 60);
+const MDT: TimeZone = TimeZone::fixed(offset(-6));
 
 fn snapshot_of(screen: Screen) -> Snapshot {
     FixtureBackend::for_screen(screen).unwrap().snapshot()
 }
 
 fn context_of(snapshot: Snapshot) -> Rc<ChatContext> {
-    Rc::new(ChatContext::new(Rc::new(snapshot)).with_utc_offset(MDT))
+    Rc::new(ChatContext::new(Rc::new(snapshot)).with_zone(MDT))
 }
 
 fn chat() -> (Vec<StampedEnvelope>, Rc<ChatContext>) {
@@ -141,14 +141,23 @@ fn senders_show_role_or_human() {
 }
 
 #[test]
-fn times_show_at_the_offset() {
+fn times_show_in_the_zone() {
     let (messages, c) = chat();
     assert_eq!(c.clock(messages[0].hub_at), "15:27");
     assert_eq!(c.clock(messages[8].hub_at), "15:45");
-    let east = ChatContext::new(Rc::new(chat_snapshot()))
-        .with_utc_offset(UtcOffset::from_minutes(14 * 60));
+    let east = ChatContext::new(Rc::new(chat_snapshot())).with_zone(TimeZone::fixed(offset(14)));
     // 21:27 UTC plus 14 hours wraps to the next day.
     assert_eq!(east.clock(messages[0].hub_at), "11:27");
+}
+
+#[test]
+fn times_follow_daylight_saving_per_message() {
+    // Each time takes its own offset in the zone, not one read at launch:
+    // Denver is UTC-6 in October and UTC-7 in December.
+    let denver = TimeZone::get("America/Denver").unwrap();
+    let c = ChatContext::new(Rc::new(chat_snapshot())).with_zone(denver);
+    assert_eq!(c.clock("2026-10-26T21:27:00Z".parse().unwrap()), "15:27");
+    assert_eq!(c.clock("2026-12-26T21:27:00Z".parse().unwrap()), "14:27");
 }
 
 type Heard<T> = Rc<RefCell<Vec<T>>>;
@@ -302,7 +311,9 @@ fn open_in_terminal_on_a_local_agents_done(cx: &mut TestAppContext) {
         o.cx.debug_bounds(sel(fx1_done, "open-in-terminal"))
             .is_some()
     );
-    // andy/a1 is andy's too; its ALERT is not a DONE.
+    // andy/a1 is andy's too, so its DONE offers Open in terminal as well.
+    // The mockup draws the button on fx1's DONE only; Task 14 (take-over)
+    // settles whether every local agent's DONE keeps it.
     assert!(
         o.cx.debug_bounds(sel(&messages[0], "open-in-terminal"))
             .is_some()
@@ -445,4 +456,61 @@ fn narrow_row_keeps_the_change_card_inside(cx: &mut TestAppContext) {
     // with both docks open.
     assert_rows_fit(cx, px(300.));
     assert_rows_fit(&mut TestAppContext::single(), px(276.));
+}
+
+#[gpui::test]
+fn change_card_stays_on_the_listener_message_it_belongs_to(cx: &mut TestAppContext) {
+    // C222: the hub keeps client ids unique per sender only, so another
+    // sender can reuse the settings message's id, before it or after it.
+    let mut snapshot = snapshot_of(Screen::SettingsFromChat);
+    let (id, card) = snapshot
+        .changes
+        .iter()
+        .next()
+        .map(|(id, card)| (id.clone(), card.clone()))
+        .unwrap();
+    let real = snapshot
+        .messages
+        .iter()
+        .find(|m| m.client.id == id)
+        .unwrap()
+        .clone();
+    let sean = snapshot
+        .messages
+        .iter()
+        .find(|m| m.from_handle == "sean")
+        .unwrap()
+        .clone();
+    let spoof = |seq: u64| {
+        let mut spoof = real.clone();
+        spoof.from = sean.from.clone();
+        spoof.from_handle = sean.from_handle.clone();
+        spoof.from_kind = sean.from_kind;
+        spoof.seq = agmen_proto::Seq(seq);
+        spoof
+    };
+    let (before, after) = (spoof(0), spoof(real.seq.0 + 1000));
+    snapshot.messages.insert(0, before.clone());
+    snapshot.messages.push(after.clone());
+    let real_ix = snapshot
+        .messages
+        .iter()
+        .position(|m| m.client.id == id && m.from == real.from)
+        .unwrap();
+    let last = snapshot.messages.len() - 1;
+    let c = context_of(snapshot);
+
+    assert_eq!(verb_badge(&real, &c), ("SETTINGS".into(), Color::Accent));
+    for env in [&before, &after] {
+        assert_eq!(verb_badge(env, &c), ("ANSWER".into(), Color::Default));
+    }
+    let card_sel: &'static str = Box::leak(format!("{}:card", card.id).into_boxed_str());
+    let o = open(cx, px(800.), vec![real_ix], c.clone());
+    assert!(o.cx.debug_bounds(card_sel).is_some());
+    for ix in [0, last] {
+        let mut spoof_cx = TestAppContext::single();
+        let o = open(&mut spoof_cx, px(800.), vec![ix], c.clone());
+        assert!(o.cx.debug_bounds(sel(&real, "row")).is_some(), "row {ix}");
+        assert!(o.cx.debug_bounds(card_sel).is_none(), "row {ix}");
+    }
 }

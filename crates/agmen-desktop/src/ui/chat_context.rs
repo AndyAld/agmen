@@ -9,11 +9,11 @@ use agmen_proto::{
     IdentityId, MessageId, Payload, Ref, Seq, StampedEnvelope, Stream, Timestamp, Verdict,
 };
 use gpui::SharedString;
+use jiff::tz::TimeZone;
 
 use super::components::Color;
 use super::format::{clock, money_of, title_case};
-use crate::backend::{AgentInfo, AgentStatus, Snapshot};
-use crate::local_time::UtcOffset;
+use crate::backend::{AgentInfo, AgentStatus, ChangeCard, Snapshot};
 use crate::refs::{Known, RefTarget, Span, find_refs};
 
 /// How many entries a hover card row lists before it says "and N more".
@@ -46,11 +46,16 @@ pub(crate) struct ChatContext {
     /// could be reused, and a position alone could be claimed by a message
     /// that is not in the snapshot.
     positions: BTreeSet<(Stream, Seq, MessageId)>,
+    /// Hub position and client id of the message each change card belongs
+    /// to: the first message by hub position from the listener with the
+    /// card's id. Another sender may reuse that id (the hub keeps ids unique
+    /// per sender only), and its message gets no card.
+    card_rows: BTreeSet<(Stream, Seq, MessageId)>,
     /// Each drawn message's body and references, found on its first draw.
     /// Only messages in the snapshot are kept, so it holds at most one entry
     /// per message.
     bodies: RefCell<BTreeMap<(Stream, Seq, MessageId), Rc<BodyText>>>,
-    offset: UtcOffset,
+    zone: TimeZone,
 }
 
 impl ChatContext {
@@ -77,6 +82,18 @@ impl ChatContext {
             .iter()
             .map(|m| (m.stream.clone(), m.seq, m.client.id.clone()))
             .collect();
+        let card_rows = snapshot
+            .changes
+            .keys()
+            .filter_map(|id| {
+                snapshot
+                    .messages
+                    .iter()
+                    .filter(|m| &m.client.id == id && m.from == snapshot.listener_id)
+                    .map(|m| (m.stream.clone(), m.seq, m.client.id.clone()))
+                    .min()
+            })
+            .collect();
         Self {
             snapshot,
             known,
@@ -84,15 +101,16 @@ impl ChatContext {
             local,
             ids,
             positions,
+            card_rows,
             bodies: RefCell::default(),
-            offset: UtcOffset::default(),
+            zone: TimeZone::UTC,
         }
     }
 
-    /// Shows times at `offset` from UTC.
+    /// Shows times in `zone`.
     #[must_use]
-    pub(crate) const fn with_utc_offset(mut self, offset: UtcOffset) -> Self {
-        self.offset = offset;
+    pub(crate) fn with_zone(mut self, zone: TimeZone) -> Self {
+        self.zone = zone;
         self
     }
 
@@ -124,6 +142,18 @@ impl ChatContext {
         found
     }
 
+    /// The change card `env` carries, if it is the listener message the
+    /// card belongs to.
+    #[must_use]
+    pub(crate) fn change_card(&self, env: &StampedEnvelope) -> Option<&ChangeCard> {
+        let key = (env.stream.clone(), env.seq, env.client.id.clone());
+        if self.card_rows.contains(&key) {
+            self.snapshot.changes.get(&env.client.id)
+        } else {
+            None
+        }
+    }
+
     /// The lowercase role of the roster agent `handle`.
     pub(crate) fn role(&self, handle: &str) -> Option<&str> {
         self.roles.get(handle).map(String::as_str)
@@ -143,10 +173,10 @@ impl ChatContext {
         self.ids.contains(id)
     }
 
-    /// `at` as `15:27` at the context's offset.
+    /// `at` as `15:27` in the context's zone.
     #[must_use]
     pub(crate) fn clock(&self, at: Timestamp) -> String {
-        clock(at, self.offset)
+        clock(at, &self.zone)
     }
 
     /// The chip's text color (`ref_color` in console.py): an agent in its

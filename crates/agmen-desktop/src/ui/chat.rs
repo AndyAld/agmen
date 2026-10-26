@@ -4,9 +4,10 @@
 //! under the listener message they belong to, and ledger presence lines
 //! (HELLO, BYE, ROLLCALL, HEARTBEAT) hide until "Show ledger".
 
+use std::collections::BTreeSet;
 use std::rc::Rc;
 
-use agmen_proto::StampedEnvelope;
+use agmen_proto::{MessageId, Seq, StampedEnvelope, Stream};
 use futures::StreamExt as _;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -14,6 +15,7 @@ use gpui::{
     InteractiveElement as _, IntoElement, ListAlignment, ListOffset, ListState, ParentElement as _,
     Render, SharedString, StyleRefinement, Styled as _, Task, WeakEntity, Window, div, list, px,
 };
+use jiff::tz::TimeZone;
 
 use super::chat_context::ChatContext;
 use super::components::{Color, Label, LabelSize};
@@ -23,7 +25,7 @@ use super::ref_chip::RefEvent;
 use super::tokens::{LIST_OVERDRAW, SPACE_2, SPACE_6, SPACE_10, SPACE_12, SPACE_14};
 use crate::alerts::{AlertState, Me};
 use crate::backend::{Action, BackendError, BackendHandle, Draft, Snapshot, Update};
-use crate::local_time::UtcOffset;
+use crate::local_time::LocalZone;
 
 /// The indices of the messages the chat draws, oldest first.
 #[must_use]
@@ -145,7 +147,7 @@ pub(crate) struct ChatView {
     composer: Entity<Composer>,
     /// Why the last send or action failed, until the next one succeeds.
     error: Option<SharedString>,
-    offset: UtcOffset,
+    zone: TimeZone,
     _updates: Option<Task<()>>,
 }
 
@@ -164,7 +166,9 @@ impl ChatView {
     /// The chat over `snapshot`, sending and acting through the
     /// [`BackendHandle`] global when there is one.
     pub(crate) fn new(snapshot: Snapshot, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let offset = cx.try_global::<UtcOffset>().copied().unwrap_or_default();
+        let zone = cx
+            .try_global::<LocalZone>()
+            .map_or(TimeZone::UTC, |local| local.0.clone());
         let chat = cx.entity().downgrade();
         let composer = cx.new(|cx| {
             Composer::new(
@@ -198,7 +202,7 @@ impl ChatView {
         let rows = visible_rows(&snapshot.messages, false);
         let mut alerts = AlertState::default();
         replay(&mut alerts, &snapshot);
-        let context = Rc::new(ChatContext::new(snapshot.clone()).with_utc_offset(offset));
+        let context = Rc::new(ChatContext::new(snapshot.clone()).with_zone(zone.clone()));
         let chat = cx.entity().downgrade();
         let stream = cx.new(|_| ChatStream {
             context,
@@ -213,7 +217,7 @@ impl ChatView {
             alerts,
             composer,
             error: None,
-            offset,
+            zone,
             _updates: updates,
         }
     }
@@ -294,15 +298,22 @@ impl ChatView {
                 snapshot
             }
             Update::Snapshot(snapshot) => {
-                let mut alerts = AlertState::default();
-                alerts.prefs = self.alerts.prefs.clone();
-                replay(&mut alerts, &snapshot);
-                self.alerts = alerts;
+                // Only messages the chat has not seen update the alerts, so
+                // an alert the person snoozed or cleared stays that way.
+                let seen: BTreeSet<(&Stream, Seq, &MessageId)> =
+                    self.snapshot.messages.iter().map(position).collect();
+                for env in &snapshot.messages {
+                    if !seen.contains(&position(env)) {
+                        // Task 13 plays the chime and posts the notification
+                        // from this effect, as for a single message.
+                        let _effect = self.alerts.on_message(env, &me);
+                    }
+                }
                 *snapshot
             }
         };
         self.snapshot = Rc::new(snapshot);
-        let context = Rc::new(ChatContext::new(self.snapshot.clone()).with_utc_offset(self.offset));
+        let context = Rc::new(ChatContext::new(self.snapshot.clone()).with_zone(self.zone.clone()));
         let rows = visible_rows(&self.snapshot.messages, self.show_ledger);
         self.stream
             .update(cx, |stream, cx| stream.set_rows(context, rows, cx));
@@ -310,10 +321,18 @@ impl ChatView {
     }
 }
 
+/// Where the hub put `env`, with its client id: a client id alone is
+/// unique per sender only.
+fn position(env: &StampedEnvelope) -> (&Stream, Seq, &MessageId) {
+    (&env.stream, env.seq, &env.client.id)
+}
+
 /// Feeds every message in `snapshot` to `alerts`, oldest first.
 fn replay(alerts: &mut AlertState, snapshot: &Snapshot) {
     let me = Me::from(snapshot);
     for env in &snapshot.messages {
+        // History replays without a chime or notification: only alerts that
+        // arrive while the chat is open make an effect.
         let _effect = alerts.on_message(env, &me);
     }
 }

@@ -111,6 +111,20 @@ fn long_glue_becomes_a_word_of_its_own() {
 }
 
 #[test]
+fn chip_free_lines_keep_their_indent() {
+    // C228: indented logs and code keep each line's leading whitespace; a
+    // tab draws as four spaces.
+    let body = "  panicked:\n    at main.rs:3\n\tat lib.rs:9\n4d9fdc8 is the cause";
+    let start = body.find("4d9fdc8").unwrap();
+    let drawn = blocks(lines(pieces(body, &[span(start..start + 7, commit())])));
+    assert_eq!(
+        drawn[0],
+        Block::Text("  panicked:\n    at main.rs:3\n    at lib.rs:9".into())
+    );
+    assert!(matches!(&drawn[1], Block::Row(items) if items.len() == 2));
+}
+
+#[test]
 fn words_between_chips_draw_as_one_run() {
     let body = "see the 4d9fdc8 commit now";
     let flowed = lines(pieces(body, &[span(8..15, commit())]));
@@ -355,7 +369,10 @@ fn frame_time(cx: &mut TestAppContext, body: &str) -> std::time::Duration {
 /// Plan Focus 4: no frame over 16.7 ms.
 const FRAME_BUDGET: std::time::Duration = std::time::Duration::from_micros(16_700);
 
+// a_32_kib_body_in_short_lines_draws_as_one_text is the gate; wall-clock
+// time swings with machine load, so this timing runs only on request.
 #[gpui::test]
+#[ignore = "wall-clock timing; run with cargo nextest run --release --run-ignored only a_32_kib_body_draws_quickly"]
 fn a_32_kib_body_draws_quickly(cx: &mut TestAppContext) {
     // Measured on an M2 Max, three runs each: release 0.4 ms for one line
     // and 0.9 ms for 1,424 short lines; debug 8 ms and 12 ms. In release a

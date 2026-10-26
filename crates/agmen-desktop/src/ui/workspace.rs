@@ -34,6 +34,12 @@ pub(crate) struct Workspace {
     right_dock: Dock,
     agents_panel: Entity<AgentsPanel>,
     /// The center: the chat, and the tabs and splits its chips open.
+    ///
+    /// The plan's `Workspace::split(direction)` lives here as
+    /// `PaneGroup::split(direction, item, cx)`. The palette (Task 18) reaches
+    /// it by dispatching the `SplitRight` action (`keys.rs`), which
+    /// `workspace_dock.rs` routes to `PaneGroup::split_active_right`; a split
+    /// down gets its own action the same way.
     pane_group: Entity<PaneGroup>,
     /// The agent the right dock shows; `None` shows the Listener panel.
     selected_agent: Option<IdentityId>,
@@ -138,8 +144,10 @@ impl Workspace {
 /// The tabs the center opens behind the chat: the mockup's agent tab and
 /// role file tab (console.py `tab_bar`: andy/fx1 and reviewer.xml), when the
 /// roster has that agent and role.
-// shortcut: the mockup's tabs stand in for the tabs the person left open;
-// restore those instead once agmend keeps them.
+// shortcut: the mockup's tabs stand in for the tabs the person left open.
+// No task in the desktop plan restores tabs yet; the change that restores
+// them once agmend keeps them deletes this function and its call in
+// Workspace::new, so production windows stop opening the mockup's tabs.
 fn starting_tabs(snapshot: &Snapshot) -> Vec<TabItem> {
     let agents = || snapshot.roster.iter().flat_map(|group| &group.agents);
     let fx1 = format!("{}/fx1", snapshot.me);

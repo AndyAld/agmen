@@ -97,7 +97,7 @@ fn row_kind(env: &StampedEnvelope, context: &ChatContext) -> RowKind {
 /// REVIEW is green for pass and red for changes (mockup fix 42).
 #[must_use]
 fn verb_badge(env: &StampedEnvelope, context: &ChatContext) -> (String, Color) {
-    if context.snapshot().changes.contains_key(&env.client.id) {
+    if context.change_card(env).is_some() {
         return ("SETTINGS".to_owned(), Color::Accent);
     }
     let payload = &env.client.payload;
@@ -403,7 +403,7 @@ impl RenderOnce for MessageRow {
         let head = self.head(env, &who, &id);
         let body = RichText::new(id.clone(), context.body_of(env), context.clone())
             .when_some(self.on_ref.clone(), RichText::on_ref);
-        let card = context.snapshot().changes.get(&env.client.id).map(|card| {
+        let card = context.change_card(env).map(|card| {
             ChangeCard::new(card.clone(), &context.snapshot().roster).when_some(
                 self.on_action.clone(),
                 |card, handler| {
