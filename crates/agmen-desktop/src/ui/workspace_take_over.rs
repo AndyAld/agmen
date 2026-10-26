@@ -44,8 +44,11 @@ impl Workspace {
     /// tab its roster, and reference chips route against its worktrees and
     /// roles, so a new worktree's chips open and a removed one's do not
     /// (review C294).
-    // shortcut: the Git and Project panels keep the worktrees they were
-    // built with; they follow too once the live backend (ADR-0011) sends
+    // shortcut: the Git and Project panels, the center's TabViews and the
+    // plan room keep the snapshot they were built with, so after an update
+    // a new worktree's file chip opens a placeholder tab and its branch chip
+    // a Git panel on another worktree (C314). Latent while nothing sends
+    // such updates; they follow too once the live backend (ADR-0011) sends
     // worktree changes.
     pub(super) fn follow_chat(&mut self, cx: &mut Context<Self>) {
         let chat = Rc::clone(self.chat.read(cx).snapshot());

@@ -6,7 +6,7 @@ use std::path::Path;
 
 use gpui::{
     AnyElement, App, Context, Div, FontWeight, InteractiveElement as _, IntoElement,
-    ParentElement as _, RenderOnce, SharedString, Styled as _, Window, div,
+    ParentElement as _, SharedString, Styled as _, div,
 };
 
 use super::{ICON_PREVIEW_NAMES, SettingsView};
@@ -15,10 +15,12 @@ use crate::appearance::{
     ThemeOrigin,
 };
 use crate::icons::FileIcons;
-use crate::ui::components::{Button, Color, DetailRow, Label, LabelSize, Segmented, Stepper};
+use crate::ui::components::{
+    Button, Color, DetailRow, Label, LabelSize, Segmented, Stepper, WordWrap,
+};
 use crate::ui::tokens::{
     AUTO_LINE_11, BORDER_WIDTH, ICON_PREVIEW, RADIUS_MD, SETTING_LABEL_WIDTH, SPACE_3, SPACE_6,
-    SPACE_8, SPACE_10, SPACE_12, SPACE_16, TEXT_SMALL,
+    SPACE_8, SPACE_10, SPACE_12, SPACE_16,
 };
 
 /// A font family as the list shows it: Zed's dotted names by their fonts.
@@ -190,52 +192,22 @@ pub(super) fn setting(label: &'static str, hint: &'static str, cx: &App) -> Div 
                         .weight(FontWeight::MEDIUM)
                         .color(Color::TextMuted),
                 )
-                .child(Hint { label, text: hint }),
+                .child(hint_words(label, hint)),
         )
 }
 
 /// A setting's hint. Tests find word `i` as `"setting-hint:{label}:{i}"`.
-#[derive(IntoElement)]
-struct Hint {
-    label: &'static str,
-    text: &'static str,
-}
-
-impl RenderOnce for Hint {
-    fn render(self, window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        // V131: gpui's wrapper breaks before any '/', so the Theme hint's
-        // "~/.config/zed/themes" could start a line with "/". Each word is
-        // its own flex item, as KvRow's values are, so lines break only at
-        // spaces, as the mockup's text boxes do; the gap is one space of
-        // the hint's font, which flex leaves out at a line's end.
-        let mut font = window.text_style().font();
-        font.weight = FontWeight::NORMAL;
-        let size = TEXT_SMALL.to_pixels(window.rem_size());
-        let text = window.text_system();
-        let space = text
-            .advance(text.resolve_font(&font), size, ' ')
-            .map_or(SPACE_3, |advance| advance.width);
-        let label = self.label;
-        let words = self.text.split_whitespace().enumerate().map(|(i, word)| {
-            div()
-                .debug_selector(move || format!("setting-hint:{label}:{i}"))
-                .max_w_full()
-                .child(
-                    // The mockup's 11 px hint advances 13 px a line (node 8095).
-                    Label::new(word)
-                        .size(LabelSize::Small)
-                        .line_height(AUTO_LINE_11)
-                        .color(Color::Placeholder)
-                        .wrap(),
-                )
-        });
-        div()
-            .w_full()
-            .flex()
-            .flex_wrap()
-            .gap_x(space)
-            .children(words)
-    }
+fn hint_words(label: &'static str, text: &'static str) -> WordWrap {
+    // V131: gpui's wrapper breaks before any '/', so the Theme hint's
+    // "~/.config/zed/themes" could start a line with "/". The hint breaks
+    // only at spaces and keeps the path whole, where the mockup's node
+    // 8104 breaks after "~/.config/zed/" (a kept difference, Task 17).
+    // The mockup's 11 px hint advances 13 px a line (node 8095).
+    WordWrap::new(format!("setting-hint:{label}"), text)
+        .size(LabelSize::Small)
+        .line_height(AUTO_LINE_11)
+        .color(Color::Placeholder)
+        .w_full()
 }
 
 /// The control column of a setting.

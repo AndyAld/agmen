@@ -120,6 +120,39 @@ fn selecting_change_opens_diff_tab(cx: &mut TestAppContext) {
     panel.read_with(cx, |p, _| assert_eq!(p.selected(), Some("Cargo.lock")));
 }
 
+#[gpui::test]
+fn select_commit_ignores_a_commit_the_scoped_worktree_lacks(cx: &mut TestAppContext) {
+    // C313: 9e2a71c is andy/fx1's, so with andy/t7k scoped no row lights.
+    let (panel, cx) = panel(cx);
+    let t7k = crate::backend::fixture_id("andy/t7k");
+    let sha: GitSha = "9e2a71c".parse().unwrap();
+    panel.update(cx, |p, cx| {
+        p.switch(&t7k, cx);
+        p.select_commit(&sha, cx);
+    });
+    panel.read_with(cx, |p, _| assert_eq!(p.selected_commit(), None));
+}
+
+#[gpui::test]
+fn git_panel_keeps_one_selection(cx: &mut TestAppContext) {
+    // C320, V137: frame 5057 has one selected row, so a change click
+    // clears the selected commit and a selected commit clears the change.
+    let (panel, cx) = panel(cx);
+    let sha: GitSha = "9e2a71c".parse().unwrap();
+    panel.update(cx, |p, cx| p.select_commit(&sha, cx));
+    redraw(cx);
+    click(cx, "git-change:Cargo.lock");
+    panel.read_with(cx, |p, _| {
+        assert_eq!(p.selected(), Some("Cargo.lock"));
+        assert_eq!(p.selected_commit(), None, "the change click clears it");
+    });
+    panel.update(cx, |p, cx| p.select_commit(&sha, cx));
+    panel.read_with(cx, |p, _| {
+        assert_eq!(p.selected_commit(), Some(&sha));
+        assert_eq!(p.selected(), None, "the commit clears the change");
+    });
+}
+
 #[test]
 fn worktree_rows_name_head_and_agent() {
     let worktrees = chat_snapshot().worktrees;

@@ -13,6 +13,8 @@ use jiff::tz::TimeZone;
 
 use super::components::Color;
 use super::format::{clock, money_of, title_case};
+use super::pane::TabItem;
+use super::workspace::{RefRoute, route};
 use crate::backend::{AgentInfo, AgentStatus, ChangeCard, ModelChoice, Snapshot};
 use crate::refs::{Known, RefTarget, Span, find_refs};
 
@@ -213,6 +215,28 @@ impl ChatContext {
             RefTarget::Lane(_) => Color::Warning,
             RefTarget::Commit(_) | RefTarget::File { .. } | RefTarget::Pr(_) => Color::Accent,
         }
+    }
+
+    /// [`ChatContext::card`] for a chip in a message `from` sent. A file
+    /// that opens in a worktree `from` does not own, the reader's own copy
+    /// (`workspace_refs::route`), adds where it opens, so the reader knows
+    /// which copy a click shows (review C315).
+    #[must_use]
+    pub(crate) fn card_from(&self, target: &RefTarget, from: &IdentityId) -> RefCard {
+        let mut card = self.card(target);
+        if let RefRoute::Tab {
+            item: TabItem::File { worktree, .. },
+            ..
+        } = route(&self.snapshot, target, from)
+            && self
+                .snapshot
+                .worktrees
+                .iter()
+                .any(|wt| wt.handle == worktree && wt.owner != *from)
+        {
+            card.rows.push(("Opens in", worktree));
+        }
+        card
     }
 
     /// The hover card for `target` (spec 9.3: agent state and spend, branch

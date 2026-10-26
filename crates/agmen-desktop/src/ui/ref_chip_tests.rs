@@ -223,3 +223,40 @@ fn flush_side_drops_its_padding(cx: &mut TestAppContext) {
     let flush = rendered_size(&mut cx2, make(true));
     assert_eq!(padded.width - flush.width, px(4.));
 }
+
+/// Hovers a file chip for `src/main.rs` that `from` sent and returns
+/// whether its card has an "Opens in" row.
+fn card_names_where_it_opens(cx: &mut TestAppContext, from: &str) -> bool {
+    let context = ctx();
+    let from = fixture_id(from);
+    let cx = host(cx, move || {
+        RefChip::new(
+            "m1:ref:0",
+            "src/main.rs:2-8",
+            file("src/main.rs", Some((2, 8))),
+            Color::Accent,
+        )
+        .card(context.clone())
+        .on_ref(from.clone(), |_, _, _| {})
+        .into_any_element()
+    });
+    let center = cx.debug_bounds("m1:ref:0").unwrap().center();
+    cx.simulate_mouse_move(center, None, Modifiers::none());
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(2));
+    cx.run_until_parked();
+    redraw(cx);
+    assert!(cx.debug_bounds(REF_CARD_SELECTOR).is_some());
+    cx.debug_bounds("kv-label:Opens in:0").is_some()
+}
+
+#[gpui::test]
+fn fallback_file_card_names_the_readers_worktree(cx: &mut TestAppContext) {
+    // C315: the chip builds its card for its message's sender.
+    assert!(card_names_where_it_opens(cx, "sean"));
+}
+
+#[gpui::test]
+fn senders_own_file_card_names_no_worktree(cx: &mut TestAppContext) {
+    assert!(!card_names_where_it_opens(cx, "andy/t7k"));
+}
