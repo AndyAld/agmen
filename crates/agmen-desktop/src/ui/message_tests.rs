@@ -302,7 +302,9 @@ fn open_in_terminal_on_a_local_agents_done(cx: &mut TestAppContext) {
         o.cx.debug_bounds(sel(fx1_done, "open-in-terminal"))
             .is_some()
     );
-    // andy/a1 is andy's too; its ALERT is not a DONE.
+    // andy/a1 is andy's too, so its DONE offers Open in terminal as well.
+    // The mockup draws the button on fx1's DONE only; Task 14 (take-over)
+    // settles whether every local agent's DONE keeps it.
     assert!(
         o.cx.debug_bounds(sel(&messages[0], "open-in-terminal"))
             .is_some()
