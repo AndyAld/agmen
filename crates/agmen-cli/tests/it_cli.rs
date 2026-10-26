@@ -326,11 +326,7 @@ async fn it_handles_resolve_through_the_roster() {
         assert_exit(&out, 2);
         assert!(stderr(&out).contains("nobody/here"), "{}", stderr(&out));
 
-        // A HELLO makes the hub publish the roster.
-        let hello = luna
-            .run(&["post", "HELLO", "--data", r#"{"client":"tests/0"}"#])
-            .await;
-        assert_exit(&hello, 0);
+        // No HELLO: minting sol made the hub publish the roster.
         let deadline = Instant::now() + WAIT;
         loop {
             let out = luna.run(&["dm", &sol.identity.handle, "by handle"]).await;
@@ -472,8 +468,45 @@ async fn it_lanes_and_check_path() {
             ]
         );
 
+        // Titles come from peers: an escape sequence or a line break in one
+        // never reaches the terminal.
+        let out = sol.run(&["found", "red \u{1b}[31malert\r\nB-9 fake"]).await;
+        assert_exit(&out, 0);
         let out = sol.run(&["items"]).await;
         assert_exit(&out, 0);
+        let text = stdout(&out);
+        assert!(!text.contains('\u{1b}'), "{text:?}");
+        assert!(text.contains("red [31malertB-9 fake"), "{text:?}");
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn it_revoked_identity_exits_3_over_http() {
+    run(Ingest::On, |ctx| async move {
+        let sol = ctx.member(Role::Member, "sol", "agent").await;
+        // Revoked behind the worktree's back: its file and token stay.
+        let resp = reqwest::Client::new()
+            .delete(
+                ctx.base
+                    .join(&format!("v1/identities/{}", sol.identity.identity_id))
+                    .unwrap(),
+            )
+            .bearer_auth(&sol.human.access_token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::NO_CONTENT);
+        for args in [&["lanes"][..], &["items"], &["check-path", "--", "a.rs"]] {
+            let out = sol.run(args).await;
+            assert_exit(&out, 3);
+            let err = stderr(&out);
+            assert!(err.contains("identity_revoked"), "{args:?}: {err}");
+            assert!(
+                err.contains("run agmen leave, then agmen join"),
+                "{args:?}: {err}"
+            );
+        }
     })
     .await;
 }

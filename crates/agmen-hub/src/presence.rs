@@ -215,8 +215,9 @@ impl PresenceState {
         *self.view.lock().unwrap_or_else(PoisonError::into_inner) = View::default();
     }
 
-    /// Queues a roster publish for `topics`' project.
-    fn roster_changed(&self, topics: &Topics) {
+    /// Queues a roster publish for `topics`' project: its presence changed,
+    /// or an identity was minted or revoked in it.
+    pub(crate) fn roster_changed(&self, topics: &Topics) {
         self.pending
             .lock()
             .unwrap_or_else(PoisonError::into_inner)

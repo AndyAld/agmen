@@ -5,8 +5,9 @@
 //! (ruling R17).
 //!
 //! Ids and projects are random per test, so tests run in parallel. Each
-//! test deletes the retained `state/` topics its hub published for its own
-//! project, even when it fails.
+//! test deletes the retained messages left for its own project (the
+//! `state/` topics its hub published and each identity's `presence/{id}`)
+//! and lifts the EMQX ban on each identity it revoked, even when it fails.
 
 #![allow(
     dead_code,
@@ -186,34 +187,75 @@ where
         Ingest::Off => None,
     };
     let topics = hub.seed_project().await.expect("seed a project");
-    let retained = vec![topics.state("roster"), topics.state_head()];
     let ctx = Ctx {
         hub,
         base,
-        topics,
+        topics: topics.clone(),
         _messaging: messaging,
         server,
     };
+    // The body owns the hub's messaging, so the hub publishes nothing once
+    // it has ended.
     let outcome = tokio::spawn(body(ctx)).await;
-    clear_retained(&retained).await;
+    clean_up(&db.url, &topics).await;
     db.drop_db().await;
     if let Err(err) = outcome {
         std::panic::resume_unwind(err.into_panic());
     }
 }
 
-/// Deletes the retained message on each of `topics` through the EMQX REST
-/// API. One that is already gone (404) is fine.
-async fn clear_retained(topics: &[String]) {
+/// Deletes the retained `state/roster`, `state/head` and each identity's
+/// `presence/{id}` in `topics`' project, and lifts the ban on each revoked
+/// identity, as the test's database lists them.
+async fn clean_up(db_url: &str, topics: &Topics) {
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(db_url)
+        .await
+        .expect("connect to the test database");
+    let identities: Vec<(String, bool)> =
+        sqlx::query_as("SELECT id, revoked_at IS NOT NULL FROM identities WHERE project_id = $1")
+            .bind(topics.project().as_str())
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    pool.close().await;
+    let mut retained = vec![topics.state("roster"), topics.state_head()];
+    for (id, revoked) in &identities {
+        // A watch killed without DISCONNECT leaves its last will to the
+        // broker; wait until it has gone, so the will comes before the
+        // deletion.
+        for suffix in ["watch", "mcp"] {
+            disconnected(&format!("{id}-{suffix}")).await;
+        }
+        retained.push(topics.presence(&id.parse().unwrap()));
+        if *revoked {
+            emqx_delete(&["banned", "username", id]).await;
+        }
+    }
+    for topic in &retained {
+        emqx_delete(&["mqtt", "retainer", "message", topic]).await;
+    }
+}
+
+/// The EMQX REST API URL for `segments` under `AGMEN_IT_EMQX_API`.
+fn emqx_api(segments: &[&str]) -> Url {
+    let mut url = Url::parse(&env("AGMEN_IT_EMQX_API")).unwrap();
+    url.path_segments_mut()
+        .unwrap()
+        .pop_if_empty()
+        .extend(segments);
+    url
+}
+
+/// Waits up to 10 s until EMQX lists `client_id` as not connected (or not
+/// at all), checking every 100 ms.
+async fn disconnected(client_id: &str) {
     let http = reqwest::Client::new();
-    for topic in topics {
-        let mut url = Url::parse(&env("AGMEN_IT_EMQX_API")).unwrap();
-        url.path_segments_mut()
-            .unwrap()
-            .pop_if_empty()
-            .extend(["mqtt", "retainer", "message", topic]);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
         let resp = http
-            .delete(url)
+            .get(emqx_api(&["clients", client_id]))
             .basic_auth(
                 env("AGMEN_IT_EMQX_API_KEY"),
                 Some(env("AGMEN_IT_EMQX_API_SECRET")),
@@ -221,12 +263,39 @@ async fn clear_retained(topics: &[String]) {
             .send()
             .await
             .unwrap();
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return;
+        }
+        let client: serde_json::Value = resp.json().await.unwrap();
+        if client["connected"] == false {
+            return;
+        }
         assert!(
-            matches!(resp.status().as_u16(), 200 | 204 | 404),
-            "clearing {topic} answered {}",
-            resp.status()
+            tokio::time::Instant::now() < deadline,
+            "{client_id} is still connected"
         );
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+/// `DELETE` on the EMQX REST API at `segments`. Nothing there (404) is
+/// fine.
+async fn emqx_delete(segments: &[&str]) {
+    let resp = reqwest::Client::new()
+        .delete(emqx_api(segments))
+        .basic_auth(
+            env("AGMEN_IT_EMQX_API_KEY"),
+            Some(env("AGMEN_IT_EMQX_API_SECRET")),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        matches!(resp.status().as_u16(), 200 | 204 | 404),
+        "deleting {} answered {}",
+        segments.join("/"),
+        resp.status()
+    );
 }
 
 /// A temp home for one person's `agmen`: its config, state and token store.

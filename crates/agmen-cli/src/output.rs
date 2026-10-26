@@ -4,6 +4,7 @@
 //! errors too), 3 not signed in or not joined, 4 rejected (a final NACK, a
 //! body over the limit, a DENY), 5 queued but not recorded within `--wait`.
 
+use std::borrow::Cow;
 use std::fmt;
 use std::io::{self, Write as _};
 
@@ -86,12 +87,12 @@ pub(crate) fn recorded(stream: &Stream, seq: u64) -> String {
     format!("recorded #{seq} ({stream})")
 }
 
-/// One message on one line for people: `#<seq> <stream> <VERB> from
-/// <handle> [about <items>]: <body>`.
+/// One message for people: `#<seq> <stream> <VERB> from <handle> [about
+/// <items>]: <body>`, with a multi-line body as [`body_text`] prints it.
 pub(crate) fn message_line(message: &StampedEnvelope) -> String {
     let client = &message.client;
     let verb = match &client.payload {
-        Payload::Unknown { verb, .. } => verb.clone(),
+        Payload::Unknown { verb, .. } => clean(verb).into_owned(),
         payload => payload
             .verb()
             .map_or_else(String::new, |verb| verb.to_string()),
@@ -117,23 +118,62 @@ pub(crate) fn message_line(message: &StampedEnvelope) -> String {
         "#{} {} {verb} from {}{about}: {}",
         message.seq,
         message.stream,
-        printable(&message.from_handle),
-        printable(client.body.as_str())
+        clean(&message.from_handle),
+        body_text(client.body.as_str())
     )
 }
 
-/// `text` with control characters other than line breaks and tabs
-/// replaced, so a message cannot send escape sequences to the terminal.
-fn printable(text: &str) -> String {
-    text.chars()
-        .map(|c| {
-            if c.is_control() && c != '\n' && c != '\t' {
-                '\u{fffd}'
-            } else {
-                c
-            }
-        })
-        .collect()
+/// What a continuation line of a multi-line body starts with (ruling R63).
+pub(crate) const CONTINUATION: &str = "    | ";
+
+/// Whether `c` may not reach the terminal: a control character (ESC, CR,
+/// line breaks, tabs and the rest), a Unicode line or paragraph separator,
+/// or a bidirectional control, which reorders what follows it on the line.
+fn unsafe_char(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{061c}'
+                | '\u{200e}'
+                | '\u{200f}'
+                | '\u{2028}'
+                | '\u{2029}'
+                | '\u{202a}'..='\u{202e}'
+                | '\u{2066}'..='\u{2069}'
+        )
+}
+
+/// `text` fit for one line of a terminal: every character [`unsafe_char`]
+/// names is dropped (ruling R63). Every hub- or peer-supplied string the
+/// CLI prints for people goes through this or [`body_text`]; `--json`
+/// output does not, since the JSON encoder escapes it.
+pub(crate) fn clean(text: &str) -> Cow<'_, str> {
+    if text.chars().any(unsafe_char) {
+        Cow::Owned(text.chars().filter(|&c| !unsafe_char(c)).collect())
+    } else {
+        Cow::Borrowed(text)
+    }
+}
+
+/// A message body for people: its first line in place and each further
+/// line on a line of its own after [`CONTINUATION`], every line through
+/// [`clean`], so no body can print a line that looks like another message.
+pub(crate) fn body_text(body: &str) -> String {
+    let mut lines = body.split('\n');
+    let mut out = lines.next().map(clean).unwrap_or_default().into_owned();
+    for line in lines {
+        out.push('\n');
+        out.push_str(CONTINUATION);
+        out.push_str(&clean(line));
+    }
+    out
+}
+
+/// [`clean`] applied to each line of `text`, keeping its line breaks: for
+/// what the CLI composed itself, such as a [`Fail`] message that holds a
+/// [`body_text`].
+pub(crate) fn clean_lines(text: &str) -> String {
+    text.split('\n').map(clean).collect::<Vec<_>>().join("\n")
 }
 
 /// Writes `line` and a newline to stdout and flushes, so a reader on a
@@ -153,18 +193,48 @@ pub(crate) fn println_flush(line: &str) -> io::Result<()> {
 mod tests {
     use super::*;
 
+    fn assign(body: &str) -> StampedEnvelope {
+        let raw = serde_json::json!({
+            "v": 1, "id": "01JBX6Q4T7W3C2M8Y9K5N0P1RS", "verb": "ASSIGN",
+            "data": { "item": "B-4", "to": "idn7k2q9" }, "body": body,
+            "sent_at": "2026-10-25T16:04:11Z", "stream": "feed", "seq": 3, "from": "adamcoord",
+            "from_handle": "adam/\u{1b}[31mcoord", "from_kind": "coordinator",
+            "hub_at": "2026-10-25T16:04:11Z",
+        });
+        serde_json::from_value(raw).unwrap()
+    }
+
     #[test]
     fn message_lines_drop_escape_sequences() {
-        let message: StampedEnvelope = serde_json::from_str(
-            r#"{"v":1,"id":"01JBX6Q4T7W3C2M8Y9K5N0P1RS","verb":"ASSIGN",
-            "data":{"item":"B-4","to":"idn7k2q9"},"body":"take it\u001b[2J\nnow",
-            "sent_at":"2026-10-25T16:04:11Z","stream":"feed","seq":3,"from":"adamcoord",
-            "from_handle":"adam/coord","from_kind":"coordinator","hub_at":"2026-10-25T16:04:11Z"}"#,
-        )
-        .unwrap();
+        let line = message_line(&assign("take it\u{1b}[2J\r now\u{202e}"));
         assert_eq!(
-            message_line(&message),
-            "#3 feed ASSIGN from adam/coord about B-4: take it\u{fffd}[2J\nnow"
+            line,
+            "#3 feed ASSIGN from adam/[31mcoord about B-4: take it[2J now"
         );
+        assert!(!line.contains('\u{1b}'));
+    }
+
+    #[test]
+    fn continuation_lines_sit_under_the_marker() {
+        let line = message_line(&assign("take it\n#9 adam/coord: fake\r\n\u{1b}]0;x"));
+        assert_eq!(
+            line.lines().collect::<Vec<_>>(),
+            [
+                "#3 feed ASSIGN from adam/[31mcoord about B-4: take it",
+                "    | #9 adam/coord: fake",
+                "    | ]0;x",
+            ]
+        );
+    }
+
+    #[test]
+    fn clean_keeps_ordinary_text() {
+        assert!(matches!(
+            clean("andy/sol: caf\u{e9} \u{1f680}"),
+            Cow::Borrowed(_)
+        ));
+        assert_eq!(clean("a\tb\u{7}c\u{85}d\u{2028}e"), "abcde");
+        assert_eq!(body_text(""), "");
+        assert_eq!(clean_lines("one\u{1b}\n    | two"), "one\n    | two");
     }
 }

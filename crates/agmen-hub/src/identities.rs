@@ -4,7 +4,7 @@
 use std::fmt;
 use std::time::Duration;
 
-use agmen_proto::{IdentityId, IdentityKind, ProjectId, TenantId, Timestamp};
+use agmen_proto::{IdentityId, IdentityKind, ProjectId, TenantId, Timestamp, Topics};
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -247,6 +247,12 @@ pub(crate) async fn mint(
     let token = issue_identity_token(&mut tx, human.as_str(), &id).await?;
     tx.commit().await?;
     tracing::info!(identity = %id, handle = %request.handle, owner = %human, "minted identity");
+    // The roster lists the new identity, offline, before it ever connects.
+    let topics = Topics::new(
+        tenant.parse().map_err(ApiError::stored)?,
+        request.project.clone(),
+    );
+    hub.presence().roster_changed(&topics);
     Ok((
         StatusCode::CREATED,
         Json(Minted {
@@ -291,10 +297,11 @@ pub(crate) async fn broker_token(
 }
 
 /// `DELETE /v1/identities/{id}` (the owner's human token): revokes the
-/// identity, bans its username in EMQX until its last broker token has
-/// expired, and kicks its client ids off the broker. Its broker tokens are
-/// refused from then on. Repeating the call bans and kicks again, so a
-/// failed call can be retried.
+/// identity, has its project's roster published without it, bans its
+/// username in EMQX until its last broker token has expired, and kicks its
+/// client ids off the broker. Its broker tokens are refused from then on.
+/// Repeating the call bans and kicks again, so a failed call can be
+/// retried.
 pub(crate) async fn revoke(
     State(hub): State<Hub>,
     Path(id): Path<String>,
@@ -303,19 +310,24 @@ pub(crate) async fn revoke(
     let human = caller.human()?;
     // Commit the revocation before banning and kicking, so a client that
     // reconnects in between cannot get a fresh broker token.
-    let revoked: Option<(String, i64)> = sqlx::query_as(
+    let revoked: Option<(String, String, String, i64)> = sqlx::query_as(
         "UPDATE identities SET revoked_at = coalesce(revoked_at, now())
          WHERE id = $1 AND owner_human_id = $2
-         RETURNING id, extract(epoch FROM revoked_at)::bigint",
+         RETURNING id, tenant_id, project_id, extract(epoch FROM revoked_at)::bigint",
     )
     .bind(&id)
     .bind(human.as_str())
     .fetch_optional(hub.pool())
     .await?;
-    let Some((id, revoked_at)) = revoked else {
+    let Some((id, tenant, project, revoked_at)) = revoked else {
         return Err(ApiError::not_found("no such identity of yours"));
     };
     tracing::info!(identity = %id, owner = %human, "revoked identity");
+    let topics = Topics::new(
+        tenant.parse().map_err(ApiError::stored)?,
+        project.parse().map_err(ApiError::stored)?,
+    );
+    hub.presence().roster_changed(&topics);
     let ban_until = Timestamp::from_second(revoked_at)
         .and_then(|at| at.checked_add(BROKER_TOKEN_TTL + BAN_MARGIN))
         .map_err(ApiError::stored)?;

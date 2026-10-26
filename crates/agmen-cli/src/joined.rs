@@ -19,7 +19,7 @@ use anyhow::{Context as _, Result};
 use tokio::time::Instant;
 
 use crate::client::{Api, blocking, get_token};
-use crate::output::{Code, Fail, println_flush};
+use crate::output::{Code, Fail, clean, println_flush};
 use crate::paths;
 
 /// How often a waiting publish also looks at the outbox, in case another
@@ -298,6 +298,9 @@ async fn await_answer(
     }
 }
 
+/// What to do about an identity the hub refuses for good.
+pub(crate) const REVOKED_HINT: &str = "run agmen leave, then agmen join";
+
 /// `err` with `what` as context, or a not-signed-in failure when the hub
 /// refused the identity for good (revoked, or its token is unknown).
 pub(crate) fn client_error(err: agmen_client::ClientError, what: &str) -> anyhow::Error {
@@ -305,8 +308,9 @@ pub(crate) fn client_error(err: agmen_client::ClientError, what: &str) -> anyhow
         return Fail::new(
             Code::NotLoggedIn,
             format!(
-                "the hub refused this worktree's identity ({err}); it may have been revoked: run \
-                 agmen leave, then agmen join"
+                "the hub refused this worktree's identity ({}); it may have been revoked: \
+                 {REVOKED_HINT}",
+                clean(&err.to_string())
             ),
         )
         .into();

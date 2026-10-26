@@ -12,7 +12,7 @@ use crate::client::{
     Login, blocking, forget_login, http, human, read_login, refusal, save_login, send, token_grant,
     url,
 };
-use crate::output::Fail;
+use crate::output::{Fail, clean};
 
 /// RFC 8628 section 3.4.
 const DEVICE_CODE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
@@ -55,10 +55,10 @@ pub(crate) async fn login(args: LoginArgs) -> Result<()> {
     let start: DeviceStart = send(http()?.post(url(&hub, &["auth", "device"])))
         .await
         .context("starting the device login failed")?;
-    println!("Your code is {}", start.user_code);
+    println!("Your code is {}", clean(&start.user_code));
     println!(
         "Open {} to confirm it. It expires in {} minutes.",
-        start.verification_uri_complete,
+        clean(&start.verification_uri_complete),
         start.expires_in / 60
     );
     let mut interval = Duration::from_secs(start.interval.max(1));
@@ -103,14 +103,18 @@ pub(crate) async fn login(args: LoginArgs) -> Result<()> {
         handle: me.handle,
     };
     save_login(&login, &tokens).await?;
-    println!("signed in as {}", login.handle);
+    println!("signed in as {}", clean(&login.handle));
     Ok(())
 }
 
 /// `agmen logout`.
 pub(crate) async fn logout() -> Result<()> {
     match forget_login().await? {
-        Some(login) => println!("signed out of {} as {}", login.hub_url, login.handle),
+        Some(login) => println!(
+            "signed out of {} as {}",
+            login.hub_url,
+            clean(&login.handle)
+        ),
         None => println!("not signed in"),
     }
     Ok(())
@@ -124,24 +128,34 @@ pub(crate) async fn whoami() -> Result<()> {
         .me()
         .await
         .context("reading who is signed in failed")?;
-    println!("{} ({}) at {}", me.handle, me.id, human.login.hub_url);
+    println!(
+        "{} ({}) at {}",
+        clean(&me.handle),
+        me.id,
+        human.login.hub_url
+    );
     if me.projects.is_empty() {
         println!("no projects yet: accept an invite with agmen join <invite>");
     }
     for project in &me.projects {
         println!(
             "  project {} ({}, tenant {}): {}",
-            project.project, project.name, project.tenant, project.role
+            clean(&project.project),
+            clean(&project.name),
+            clean(&project.tenant),
+            clean(&project.role)
         );
     }
     let cwd = std::env::current_dir().context("reading the working directory")?;
     match blocking(move || Ok(find_identity(&cwd))).await? {
         Ok(Some(joined)) => println!(
             "this worktree: {} ({}) in project {}",
-            joined.identity.handle, joined.identity.identity_id, joined.identity.project
+            clean(&joined.identity.handle),
+            joined.identity.identity_id,
+            joined.identity.project
         ),
         Ok(None) => {}
-        Err(err) => println!("this worktree: {err}"),
+        Err(err) => println!("this worktree: {}", clean(&err.to_string())),
     }
     Ok(())
 }
@@ -232,14 +246,14 @@ pub(crate) async fn invite(args: InviteArgs) -> Result<()> {
     };
     println!(
         "single-use invite to project {} as {}, open until {}:",
-        created.project,
+        clean(&created.project),
         match args.role {
             InviteRole::Member => "member",
             InviteRole::Coordinator => "coordinator",
         },
-        created.expires_at
+        clean(&created.expires_at)
     );
-    println!("  agmen join {}", created.code);
+    println!("  agmen join {}", clean(&created.code));
     Ok(())
 }
 

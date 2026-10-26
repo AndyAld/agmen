@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use crate::client::{Human, blocking, delete_token, human, refusal, send, set_token};
 use crate::git;
 use crate::joined::joined;
-use crate::output::Fail;
+use crate::output::{Fail, clean};
 
 /// The longest name after `<handle>/` (the hub's rule).
 const MAX_NAME: usize = 32;
@@ -135,7 +135,7 @@ pub(crate) async fn join(args: JoinArgs) -> Result<()> {
         Ok(minted) => minted,
         Err(err) => {
             return Err(match refusal(&err) {
-                Some(r) if r.code == "bad_handle" => Fail::usage(r.description.clone()).into(),
+                Some(r) if r.code == "bad_handle" => Fail::usage(clean(&r.description)).into(),
                 Some(r) if r.code == "handle_taken" => {
                     anyhow::anyhow!("{handle} is taken in this project; pick another with --handle")
                 }
@@ -173,10 +173,8 @@ pub(crate) async fn join(args: JoinArgs) -> Result<()> {
             root.display()
         );
     }
-    println!(
-        "joined project {} as {} ({})",
-        identity.project, identity.handle, identity.identity_id
-    );
+    let (handle, id) = (clean(&identity.handle), &identity.identity_id);
+    println!("joined project {} as {handle} ({id})", identity.project);
     Ok(())
 }
 
@@ -323,7 +321,8 @@ pub(crate) async fn leave() -> Result<()> {
     delete_token(key).await?;
     println!(
         "left: revoked {} ({})",
-        identity.handle, identity.identity_id
+        clean(&identity.handle),
+        identity.identity_id
     );
     Ok(())
 }

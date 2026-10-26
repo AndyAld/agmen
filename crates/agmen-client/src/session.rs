@@ -20,7 +20,10 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use agmen_proto::{ClientEnvelope, IdentityId, MAX_ENVELOPE_BYTES, Stream, Timestamp, Topics};
-use rumqttc_next::{AckMode, AsyncClient, MqttOptions, PublishOptions, Transport};
+use rumqttc_next::{
+    AckMode, AsyncClient, DisconnectProperties, DisconnectReasonCode, LastWill, MqttOptions,
+    PublishOptions, QoS, Transport,
+};
 use serde::{Deserialize, Serialize, Serializer};
 use tokio::sync::{Notify, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
@@ -59,6 +62,11 @@ const EVENT_QUEUE: usize = 256;
 /// message another process enqueued is sent even when nothing wakes this
 /// one.
 const SENDER_IDLE: Duration = Duration::from_secs(5);
+/// The retained `presence/{id}` a session publishes when it connects
+/// (protocol section 2).
+pub(crate) const ONLINE: &[u8] = br#"{"status":"online"}"#;
+/// Its last will, retained on the same topic.
+const OFFLINE: &[u8] = br#"{"status":"offline"}"#;
 
 /// Which of its three client ids a session connects as (ADR-0002).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -96,6 +104,14 @@ impl ClientKind {
     /// Whether the session delivers feed and inbox messages.
     pub(crate) const fn reads_streams(self) -> bool {
         matches!(self, Self::Watch)
+    }
+
+    /// Whether the session publishes the identity's presence (protocol
+    /// section 2): a retained online on each connect and a retained
+    /// offline last will. A one-shot `Cli` command does not, so it never
+    /// changes the roster.
+    pub(crate) const fn publishes_presence(self) -> bool {
+        matches!(self, Self::Mcp | Self::Watch)
     }
 }
 
@@ -276,6 +292,9 @@ pub struct Session {
     wake: Arc<Notify>,
     /// Tells the link task that DISCONNECT is coming.
     closing: Arc<AtomicBool>,
+    /// Whether the session publishes presence, so its DISCONNECT asks the
+    /// broker to send the last will.
+    presence: bool,
     tasks: Task<Result<(), ClientError>>,
 }
 
@@ -369,7 +388,18 @@ impl Session {
         let (outbox, cursors) = open_state(state_dir.clone()).await?;
         let token = tokens.token().await?;
         let refresh_at = token::refresh_at(Timestamp::now(), token::expiry(&token)?);
-        let options = mqtt_options(kind, &broker, &identity, token, &state_dir, session_expiry)?;
+        let presence = kind
+            .publishes_presence()
+            .then(|| topics.presence(&identity));
+        let options = mqtt_options(
+            kind,
+            &broker,
+            &identity,
+            token,
+            &state_dir,
+            session_expiry,
+            presence.as_deref(),
+        )?;
         let (client, eventloop) = AsyncClient::builder(options)
             .capacity(CLIENT_CAPACITY)
             .try_build()
@@ -408,6 +438,7 @@ impl Session {
             refresh_at: refresh_tx,
             ready: Some(ready_tx),
             closing: closing.clone(),
+            presence: presence.clone(),
         });
         let sender = Sender {
             client: client.clone(),
@@ -429,6 +460,7 @@ impl Session {
             cursors,
             wake,
             closing,
+            presence: presence.is_some(),
             tasks,
         };
         match tokio::time::timeout(CONNECT_WAIT, ready_rx).await {
@@ -476,7 +508,9 @@ impl Session {
     }
 
     /// Sends DISCONNECT, so the broker keeps a persistent session for its
-    /// expiry and forgets a `Cli` one, then stops the session's tasks.
+    /// expiry and forgets a `Cli` one, then stops the session's tasks. A
+    /// session that publishes presence disconnects with reason 0x04, so the
+    /// broker sends its last will and the roster shows it offline.
     ///
     /// # Errors
     ///
@@ -488,7 +522,22 @@ impl Session {
         let closed = tokio::time::timeout(CLOSE_WAIT, async {
             // Fails only when the session has already stopped; its result
             // says why.
-            if self.client.disconnect().await.is_err() {
+            let sent = if self.presence {
+                self.client
+                    .disconnect_with_properties(
+                        DisconnectReasonCode::DisconnectWithWillMessage,
+                        DisconnectProperties {
+                            session_expiry_interval: None,
+                            reason_string: None,
+                            user_properties: Vec::new(),
+                            server_reference: None,
+                        },
+                    )
+                    .await
+            } else {
+                self.client.disconnect().await
+            };
+            if sent.is_err() {
                 tracing::debug!("the session had already stopped");
             }
             (&mut self.tasks.0).await
@@ -525,7 +574,9 @@ pub(crate) fn clean_options(
 }
 
 /// [`clean_options`], except that a persistent session keeps its MQTT
-/// session record in `state_dir` and lasts `session_expiry` at the broker.
+/// session record in `state_dir` and lasts `session_expiry` at the broker,
+/// and that a session with a `presence` topic leaves a retained offline
+/// there as its last will.
 fn mqtt_options(
     kind: ClientKind,
     broker: &Broker,
@@ -533,8 +584,18 @@ fn mqtt_options(
     token: String,
     state_dir: &Path,
     session_expiry: Duration,
+    presence: Option<&str>,
 ) -> Result<MqttOptions, ClientError> {
     let mut options = clean_options(kind, broker, identity, token)?;
+    if let Some(topic) = presence {
+        options.set_last_will(LastWill::new(
+            topic,
+            OFFLINE.to_vec(),
+            QoS::AtLeastOnce,
+            true,
+            None,
+        ));
+    }
     if kind.persistent() {
         let client_id = options.client_id();
         let store = FileSessionStore::new(state_dir.join(format!("{client_id}.mqtt")));
@@ -642,6 +703,35 @@ impl Sender {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn presence_sessions_leave_an_offline_will() {
+        assert!(ClientKind::Watch.publishes_presence());
+        assert!(ClientKind::Mcp.publishes_presence());
+        assert!(!ClientKind::Cli.publishes_presence());
+        let broker: Broker = "mqtt://localhost:1883".parse().unwrap();
+        let id: IdentityId = "idn7k2q9".parse().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let topic = "agmen/v1/tenant01/project1/presence/idn7k2q9";
+        let options = |kind, presence| {
+            mqtt_options(
+                kind,
+                &broker,
+                &id,
+                "token".to_owned(),
+                dir.path(),
+                DEFAULT_SESSION_EXPIRY,
+                presence,
+            )
+            .unwrap()
+        };
+        let will = options(ClientKind::Watch, Some(topic)).last_will().unwrap();
+        assert_eq!(&will.topic[..], topic.as_bytes());
+        assert_eq!(&will.message[..], OFFLINE);
+        assert!(will.retain);
+        assert_eq!(will.qos, QoS::AtLeastOnce);
+        assert!(options(ClientKind::Cli, None).last_will().is_none());
+    }
 
     #[test]
     fn mqtts_connects_over_tls() {

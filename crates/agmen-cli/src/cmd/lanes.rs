@@ -9,6 +9,7 @@
 //! only from lane names, handles and fixed phrases. It exits 0 whenever the
 //! check ran, allowed or not.
 
+use std::borrow::Cow;
 use std::path::{Component, Path, PathBuf};
 
 use agmen_proto::{IdentityId, LaneName};
@@ -19,12 +20,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::client::{Api, blocking, human, read_login, send};
 use crate::joined::{Agent, agent};
-use crate::output::{Fail, println_flush};
+use crate::output::{Fail, clean, println_flush};
 
 /// The most paths one check asks about (the hub's limit).
 const MAX_CHECK_PATHS: usize = 500;
-/// The largest lane file read.
-const MAX_LANE_FILE: u64 = 1024 * 1024;
+/// The largest lane file sent, in bytes.
+const MAX_LANE_FILE: usize = 1024 * 1024;
 
 #[derive(Debug, Args)]
 pub(crate) struct LanesArgs {
@@ -80,8 +81,9 @@ pub(crate) async fn lanes(args: LanesArgs) -> Result<()> {
     for lane in list.lanes {
         let owner = lane
             .owner_handle
-            .map_or_else(String::new, |o| format!(" (owner {o})"));
-        out.push(format!("{}{owner}: {}", lane.name, lane.globs.join(" ")));
+            .map_or_else(String::new, |o| format!(" (owner {})", clean(&o)));
+        let globs: Vec<_> = lane.globs.iter().map(|glob| clean(glob)).collect();
+        out.push(format!("{}{owner}: {}", clean(&lane.name), globs.join(" ")));
     }
     println_flush(&out.join("\n")).context("writing to stdout")
 }
@@ -90,11 +92,7 @@ pub(crate) async fn lanes(args: LanesArgs) -> Result<()> {
 /// parses as JSON, else TOML.
 async fn read_lane_file(file: PathBuf) -> Result<(&'static str, String)> {
     blocking(move || {
-        use std::io::Read as _;
-        let mut text = String::new();
-        std::fs::File::open(&file)
-            .and_then(|f| f.take(MAX_LANE_FILE).read_to_string(&mut text))
-            .with_context(|| format!("reading {}", file.display()))?;
+        let text = read_lane_text(&file)?;
         let kind = match file.extension().and_then(|ext| ext.to_str()) {
             Some("toml") => "application/toml",
             Some("json") => "application/json",
@@ -104,6 +102,27 @@ async fn read_lane_file(file: PathBuf) -> Result<(&'static str, String)> {
         Ok((kind, text))
     })
     .await
+}
+
+/// The whole of `file` as text. Reads at most one byte past
+/// [`MAX_LANE_FILE`] and refuses a larger file: a file cut short can still
+/// parse, and the PUT would then replace the lanes with part of them.
+fn read_lane_text(file: &Path) -> Result<String> {
+    use std::io::Read as _;
+    let limit = u64::try_from(MAX_LANE_FILE + 1).unwrap_or(u64::MAX);
+    let mut raw = Vec::new();
+    std::fs::File::open(file)
+        .and_then(|f| f.take(limit).read_to_end(&mut raw))
+        .with_context(|| format!("reading {}", file.display()))?;
+    if raw.len() > MAX_LANE_FILE {
+        return Err(Fail::usage(format!(
+            "{} is over {MAX_LANE_FILE} bytes, the largest lane file agmen sends",
+            file.display()
+        ))
+        .into());
+    }
+    String::from_utf8(raw)
+        .map_err(|_| Fail::usage(format!("{} is not UTF-8", file.display())).into())
 }
 
 /// Who replaces lanes: the signed-in person when they signed in at this
@@ -143,20 +162,34 @@ pub(crate) async fn items() -> Result<()> {
         out.push("no items".to_owned());
     }
     for item in list.items {
-        let lane = item
-            .lane
-            .map_or_else(String::new, |lane| format!(" [{lane}]"));
-        let held = match (item.holder_handle, item.lease_until) {
-            (Some(holder), Some(until)) => format!(", held by {holder} until {until}"),
-            (Some(holder), None) => format!(", held by {holder}"),
-            _ => String::new(),
-        };
-        let title = item
-            .title
-            .unwrap_or_else(|| "(security: title hidden)".to_owned());
-        out.push(format!("{} {}{lane}{held}: {title}", item.key, item.state));
+        out.push(item_line(&item));
     }
     println_flush(&out.join("\n")).context("writing to stdout")
+}
+
+/// One line of `agmen items`: `<key> <state> [<lane>], held by <holder>
+/// until <lease>: <title>`, every field the hub gave through [`clean`].
+fn item_line(item: &ItemView) -> String {
+    let lane = item
+        .lane
+        .as_deref()
+        .map_or_else(String::new, |lane| format!(" [{}]", clean(lane)));
+    let held = match (&item.holder_handle, &item.lease_until) {
+        (Some(holder), Some(until)) => {
+            format!(", held by {} until {}", clean(holder), clean(until))
+        }
+        (Some(holder), None) => format!(", held by {}", clean(holder)),
+        _ => String::new(),
+    };
+    let title = item
+        .title
+        .as_deref()
+        .map_or(Cow::Borrowed("(security: title hidden)"), clean);
+    format!(
+        "{} {}{lane}{held}: {title}",
+        clean(&item.key),
+        clean(&item.state)
+    )
 }
 
 #[derive(Debug, Args)]
@@ -231,7 +264,7 @@ pub(crate) async fn check_path(args: CheckPathArgs) -> Result<()> {
             .iter()
             .map(|a| {
                 let verdict = if a.allowed { "allowed" } else { "denied" };
-                format!("{verdict} {}: {}", a.path, a.reason)
+                format!("{verdict} {}: {}", clean(&a.path), clean(&a.reason))
             })
             .collect::<Vec<_>>()
             .join("\n")
@@ -282,6 +315,48 @@ fn repo_path(roots: &[&Path], cwd: &Path, input: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lane_files_over_the_limit_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let lane = "[[lanes]]\nname = \"L-UI\"\nglobs = [\"/ui/\"]\n";
+        let mut text = lane.repeat(MAX_LANE_FILE / lane.len());
+        text.push_str(&"#".repeat(MAX_LANE_FILE - text.len()));
+        let at_limit = dir.path().join("at.toml");
+        std::fs::write(&at_limit, &text).unwrap();
+        assert_eq!(read_lane_text(&at_limit).unwrap().len(), MAX_LANE_FILE);
+
+        text.push('#');
+        let over = dir.path().join("over.toml");
+        std::fs::write(&over, &text).unwrap();
+        let err = read_lane_text(&over).unwrap_err();
+        let fail = err.downcast_ref::<Fail>().unwrap();
+        assert_eq!(fail.code, crate::output::Code::Usage);
+        assert!(fail.message.contains("1048576 bytes"), "{}", fail.message);
+    }
+
+    #[test]
+    fn item_lines_drop_escape_sequences() {
+        let item = ItemView {
+            key: "B-7".to_owned(),
+            title: Some("fix \u{1b}[2J\u{1b}]0;owned\u{7}the\r\nbuild".to_owned()),
+            lane: Some("L-UI\u{1b}[0m".to_owned()),
+            state: "claimed".to_owned(),
+            holder_handle: Some("adam/\u{1b}[31mcoord".to_owned()),
+            lease_until: None,
+        };
+        let line = item_line(&item);
+        assert!(!line.contains('\u{1b}'), "{line:?}");
+        assert_eq!(
+            line,
+            "B-7 claimed [L-UI[0m], held by adam/[31mcoord: fix [2J]0;ownedthebuild"
+        );
+        let hidden = ItemView {
+            title: None,
+            ..item
+        };
+        assert!(item_line(&hidden).ends_with(": (security: title hidden)"));
+    }
 
     #[test]
     fn repo_paths() {

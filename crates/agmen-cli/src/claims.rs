@@ -4,7 +4,7 @@
 //! identity's state folder, beside agmen-client's `agmen.db`, whose schema
 //! stays agmen-client's own. `agmen mcp` (Task 13) uses the same file.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use agmen_proto::{GitSha, ItemKey, Timestamp};
@@ -16,7 +16,11 @@ const CLAIMS_DB: &str = "claims.db";
 /// How long a connection waits for another process's write lock.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 /// The most claims `items` returns; a HEARTBEAT names each.
-const MAX_ITEMS: i64 = 256;
+///
+/// shortcut: a HEARTBEAT renews at most 256 claims, and `items` warns
+/// when more are recorded; send several HEARTBEATs if one identity ever
+/// holds that many.
+const MAX_ITEMS: usize = 256;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS claims (
@@ -31,6 +35,8 @@ CREATE TABLE IF NOT EXISTS claims (
 #[derive(Debug)]
 pub(crate) struct Claims {
     conn: Connection,
+    /// The file, for error messages.
+    path: PathBuf,
 }
 
 impl Claims {
@@ -41,24 +47,27 @@ impl Claims {
         let path = state_dir.join(CLAIMS_DB);
         let conn =
             Connection::open(&path).with_context(|| format!("opening {}", path.display()))?;
-        conn.busy_timeout(BUSY_TIMEOUT)?;
+        conn.busy_timeout(BUSY_TIMEOUT)
+            .with_context(|| format!("setting the lock timeout of {}", path.display()))?;
         conn.execute_batch(SCHEMA)
             .with_context(|| format!("creating the table in {}", path.display()))?;
-        Ok(Self { conn })
+        Ok(Self { conn, path })
     }
 
     /// Records that `item` was granted with `base` checked out. A claim
     /// already recorded (a renewed grant) keeps its first base.
     pub(crate) fn record(&self, item: &ItemKey, base: &GitSha) -> Result<()> {
-        self.conn.execute(
-            "INSERT INTO claims (item, base_sha, claimed_at_ms) VALUES (?1, ?2, ?3)
-             ON CONFLICT (item) DO NOTHING",
-            params![
-                item.as_str(),
-                base.as_str(),
-                Timestamp::now().as_millisecond()
-            ],
-        )?;
+        self.conn
+            .execute(
+                "INSERT INTO claims (item, base_sha, claimed_at_ms) VALUES (?1, ?2, ?3)
+                 ON CONFLICT (item) DO NOTHING",
+                params![
+                    item.as_str(),
+                    base.as_str(),
+                    Timestamp::now().as_millisecond()
+                ],
+            )
+            .with_context(|| format!("recording the claim of {item} in {}", self.path.display()))?;
         Ok(())
     }
 
@@ -71,25 +80,51 @@ impl Claims {
                 params![item.as_str()],
                 |row| row.get(0),
             )
-            .optional()?;
-        base.map(|sha| sha.parse().context("claims.db holds an invalid commit id"))
-            .transpose()
+            .optional()
+            .with_context(|| format!("reading the claim of {item} in {}", self.path.display()))?;
+        base.map(|sha| {
+            sha.parse()
+                .with_context(|| format!("{} holds an invalid commit id", self.path.display()))
+        })
+        .transpose()
     }
 
-    /// The recorded claims, oldest first.
+    /// The recorded claims, oldest first, at most [`MAX_ITEMS`] of them; a
+    /// warning on stderr says when more are recorded.
     pub(crate) fn items(&self) -> Result<Vec<ItemKey>> {
+        let reading = || format!("reading the claims in {}", self.path.display());
         let mut stmt = self
             .conn
-            .prepare("SELECT item FROM claims ORDER BY claimed_at_ms, item LIMIT ?1")?;
-        let rows = stmt.query_map(params![MAX_ITEMS], |row| row.get::<_, String>(0))?;
-        rows.map(|item| item?.parse().context("claims.db holds an invalid item key"))
-            .collect()
+            .prepare("SELECT item FROM claims ORDER BY claimed_at_ms, item LIMIT ?1")
+            .with_context(reading)?;
+        // One row past the cap tells whether the cap cut any off.
+        let limit = i64::try_from(MAX_ITEMS + 1).unwrap_or(i64::MAX);
+        let mut items = stmt
+            .query_map(params![limit], |row| row.get::<_, String>(0))
+            .with_context(reading)?
+            .map(|item| {
+                item.with_context(reading)?
+                    .parse()
+                    .with_context(|| format!("{} holds an invalid item key", self.path.display()))
+            })
+            .collect::<Result<Vec<ItemKey>>>()?;
+        if items.len() > MAX_ITEMS {
+            items.truncate(MAX_ITEMS);
+            tracing::warn!(
+                path = %self.path.display(),
+                "more than {MAX_ITEMS} claims are recorded; this HEARTBEAT renews the oldest {MAX_ITEMS}"
+            );
+        }
+        Ok(items)
     }
 
     /// Forgets `item`'s claim.
     pub(crate) fn remove(&self, item: &ItemKey) -> Result<()> {
         self.conn
-            .execute("DELETE FROM claims WHERE item = ?1", params![item.as_str()])?;
+            .execute("DELETE FROM claims WHERE item = ?1", params![item.as_str()])
+            .with_context(|| {
+                format!("removing the claim of {item} from {}", self.path.display())
+            })?;
         Ok(())
     }
 }
@@ -115,5 +150,28 @@ mod tests {
         // A second open of the same file sees the rows.
         let again = Claims::open(dir.path()).unwrap();
         assert_eq!(again.items().unwrap(), [b2]);
+    }
+
+    #[test]
+    fn items_stop_at_the_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let claims = Claims::open(dir.path()).unwrap();
+        let base: GitSha = "aaaaaaa".parse().unwrap();
+        for n in 1..=MAX_ITEMS + 1 {
+            let item: ItemKey = format!("B-{n}").parse().unwrap();
+            claims.record(&item, &base).unwrap();
+        }
+        assert_eq!(claims.items().unwrap().len(), MAX_ITEMS);
+    }
+
+    #[test]
+    fn errors_name_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let claims = Claims::open(dir.path()).unwrap();
+        claims.conn.execute_batch("DROP TABLE claims").unwrap();
+        let err = claims.items().unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains("reading the claims in"), "{text}");
+        assert!(text.contains("claims.db"), "{text}");
     }
 }

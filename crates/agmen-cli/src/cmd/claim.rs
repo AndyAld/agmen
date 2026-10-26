@@ -13,7 +13,7 @@ use crate::claims::Claims;
 use crate::client::blocking;
 use crate::git;
 use crate::joined::{Agent, agent, envelope};
-use crate::output::{Code, Fail, println_flush};
+use crate::output::{Code, Fail, body_text, clean, println_flush};
 
 /// How long a CLAIM stays valid on its way to the hub (the hub allows 120 s
 /// of clock skew past it).
@@ -64,7 +64,11 @@ pub(crate) async fn claim(args: ClaimArgs) -> Result<()> {
                     .unwrap_or_default();
                 Err(Fail::new(
                     Code::Rejected,
-                    format!("denied {item}: {reason} ({})", answer.body),
+                    format!(
+                        "denied {item}: {} ({})",
+                        clean(&reason),
+                        body_text(answer.body.as_str())
+                    ),
                 )
                 .into())
             }

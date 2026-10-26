@@ -18,7 +18,8 @@ use std::process::ExitCode;
 use clap::Parser as _;
 
 use crate::client::refusal;
-use crate::output::{Code, Fail};
+use crate::joined::REVOKED_HINT;
+use crate::output::{Code, Fail, clean, clean_lines};
 
 fn main() -> ExitCode {
     // clap prints help, version and usage errors itself, the last with
@@ -58,16 +59,26 @@ fn main() -> ExitCode {
 }
 
 /// Prints `err` and picks the exit code: a [`Fail`]'s own, 3 when the hub
-/// refused the token (401), else 1.
+/// refused the token (401) or the identity it speaks for is revoked (403
+/// `identity_revoked`), else 1. What it prints goes through the output
+/// sanitizer, since hub refusals carry the hub's own text (ruling R63).
 fn report(err: &anyhow::Error) -> ExitCode {
     if let Some(fail) = err.downcast_ref::<Fail>() {
-        eprintln!("{}", fail.message);
+        eprintln!("{}", clean_lines(&fail.message));
         return ExitCode::from(fail.code.exit_code());
     }
-    eprintln!("agmen: {err:#}");
-    if refusal(err).is_some_and(|r| r.status == 401) {
-        eprintln!("the hub does not take the stored token: run agmen login, or agmen join again");
-        return ExitCode::from(Code::NotLoggedIn.exit_code());
+    eprintln!("{}", clean(&format!("agmen: {err:#}")));
+    match refusal(err) {
+        Some(r) if r.status == 401 => {
+            eprintln!(
+                "the hub does not take the stored token: run agmen login, or agmen join again"
+            );
+            ExitCode::from(Code::NotLoggedIn.exit_code())
+        }
+        Some(r) if r.status == 403 && r.code == "identity_revoked" => {
+            eprintln!("this worktree's identity is revoked: {REVOKED_HINT}");
+            ExitCode::from(Code::NotLoggedIn.exit_code())
+        }
+        _ => ExitCode::FAILURE,
     }
-    ExitCode::FAILURE
 }

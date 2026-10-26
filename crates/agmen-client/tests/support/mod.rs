@@ -5,7 +5,10 @@
 //! Ids, projects and client ids are random per test, so tests run in
 //! parallel and never touch each other's broker sessions. The token store
 //! is never involved: tests hand the identity's hub token to `HubClient`
-//! directly, so nothing reaches the user's keychain.
+//! directly, so nothing reaches the user's keychain. [`run`] deletes the
+//! retained messages a test leaves for its project (`state/roster`,
+//! `state/head`, and each identity's `presence/{id}`), so the dev broker
+//! keeps none of them.
 
 #![allow(
     dead_code,
@@ -15,6 +18,7 @@
 use std::future::Future;
 use std::hash::{BuildHasher, Hasher, RandomState};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use agmen_client::{
@@ -151,6 +155,9 @@ pub struct Ctx {
     pub proxied: Broker,
     /// Holds the identities' state folders.
     pub state: TempDir,
+    /// The identities [`Ctx::identity`] made, whose presence [`run`]
+    /// clears.
+    seeded: Arc<Mutex<Vec<IdentityId>>>,
     _messaging: Messaging,
     server: JoinHandle<()>,
 }
@@ -162,7 +169,8 @@ impl Drop for Ctx {
 }
 
 /// Runs `body` against a fresh database and an in-process hub with a fresh
-/// project, then drops the database, even when `body` panics.
+/// project, then deletes the project's retained messages and drops the
+/// database, even when `body` panics.
 pub async fn run<F, Fut>(body: F)
 where
     F: FnOnce(Ctx) -> Fut,
@@ -204,20 +212,98 @@ where
         .await
         .expect("start messaging");
     let topics = hub.seed_project().await.expect("seed a project");
+    let seeded = Arc::new(Mutex::new(Vec::new()));
     let ctx = Ctx {
         hub,
         base,
-        topics,
+        topics: topics.clone(),
         broker: env("AGMEN_IT_MQTT").parse().unwrap(),
         proxied: env("AGMEN_IT_MQTT_PROXIED").parse().unwrap(),
         state: tempfile::tempdir().unwrap(),
+        seeded: Arc::clone(&seeded),
         _messaging: messaging,
         server,
     };
+    // The body owns the hub's messaging, so the hub publishes nothing once
+    // it has ended.
     let outcome = tokio::spawn(body(ctx)).await;
+    let ids = seeded.lock().unwrap().clone();
+    let mut retained = vec![topics.state("roster"), topics.state_head()];
+    for id in &ids {
+        // A session dropped without DISCONNECT leaves its last will to the
+        // broker; wait until it has gone, so the will comes before the
+        // deletion.
+        for kind in [ClientKind::Watch, ClientKind::Mcp] {
+            disconnected(&format!("{id}-{}", kind.suffix())).await;
+        }
+        retained.push(topics.presence(id));
+    }
+    clear_retained(&retained).await;
     db.drop_db().await;
     if let Err(err) = outcome {
         std::panic::resume_unwind(err.into_panic());
+    }
+}
+
+/// The EMQX REST API URL for `segments` under `AGMEN_IT_EMQX_API`.
+fn emqx_api(segments: &[&str]) -> Url {
+    let mut url = Url::parse(&env("AGMEN_IT_EMQX_API")).unwrap();
+    url.path_segments_mut()
+        .unwrap()
+        .pop_if_empty()
+        .extend(segments);
+    url
+}
+
+/// Waits up to 10 s until EMQX lists `client_id` as not connected (or not
+/// at all), checking every 100 ms.
+async fn disconnected(client_id: &str) {
+    let http = reqwest::Client::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let resp = http
+            .get(emqx_api(&["clients", client_id]))
+            .basic_auth(
+                env("AGMEN_IT_EMQX_API_KEY"),
+                Some(env("AGMEN_IT_EMQX_API_SECRET")),
+            )
+            .send()
+            .await
+            .unwrap();
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return;
+        }
+        let client: serde_json::Value = resp.json().await.unwrap();
+        if client["connected"] == false {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{client_id} is still connected"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Deletes the retained message on each of `topics` through the EMQX REST
+/// API. One that is already gone (404) is fine.
+pub async fn clear_retained(topics: &[String]) {
+    let http = reqwest::Client::new();
+    for topic in topics {
+        let resp = http
+            .delete(emqx_api(&["mqtt", "retainer", "message", topic]))
+            .basic_auth(
+                env("AGMEN_IT_EMQX_API_KEY"),
+                Some(env("AGMEN_IT_EMQX_API_SECRET")),
+            )
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            matches!(resp.status().as_u16(), 200 | 204 | 404),
+            "clearing {topic} answered {}",
+            resp.status()
+        );
     }
 }
 
@@ -240,6 +326,7 @@ impl Ctx {
             .seed_identity(&self.topics)
             .await
             .expect("seed an identity");
+        self.seeded.lock().unwrap().push(identity.id.clone());
         TestIdentity { identity, token }
     }
 

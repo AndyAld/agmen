@@ -584,6 +584,56 @@ async fn it_presence_roster_fields_and_bye() {
 }
 
 #[tokio::test]
+async fn it_roster_follows_mint_and_revoke() {
+    run(|ctx| async move {
+        let room = room(&ctx).await;
+        let watcher = mint_ok(&ctx, &room.andy_token, "andy/watch", &room.project).await;
+        let topics = topics(&room.project);
+        let retained = retained_of(&topics, &[&watcher]);
+        clearing(ctx, retained, |ctx| async move {
+            let messaging = ctx.hub.start_messaging().await;
+            let mut observer = connect_with_will(&ctx, &room.project, &watcher).await;
+            subscribe(&mut observer, &topics.state("roster")).await;
+
+            // Minted and never connected, with no HELLO: listed, offline.
+            let fresh = mint_ok(&ctx, &room.andy_token, "andy/fresh", &room.project).await;
+            let roster = roster_until(&mut observer, &topics, ROSTER_WAIT, |roster| {
+                entry(roster, &fresh.id).is_some()
+            })
+            .await;
+            assert_eq!(
+                entry(&roster, &fresh.id).unwrap(),
+                &json!({
+                    "identity_id": fresh.id, "handle": "andy/fresh", "kind": "agent",
+                    "status": "offline",
+                })
+            );
+
+            // Revoked: gone from the roster.
+            let resp = ctx
+                .http
+                .delete(ctx.hub.url(&format!("/v1/identities/{}", fresh.id)))
+                .bearer_auth(&room.andy_token)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+            support::unban_username(&ctx.http, &fresh.id).await;
+            let roster = roster_until(&mut observer, &topics, ROSTER_WAIT, |roster| {
+                entry(roster, &fresh.id).is_none()
+            })
+            .await;
+            assert!(entry(&roster, &room.sol.id).is_some(), "{roster:?}");
+
+            observer.disconnect().await;
+            drop(messaging);
+        })
+        .await;
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn it_rollcall_answered_by_hub() {
     run(|ctx| async move {
         let room = room(&ctx).await;

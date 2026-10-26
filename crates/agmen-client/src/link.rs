@@ -26,8 +26,8 @@ use std::time::Duration;
 
 use agmen_proto::{IdentityId, Stream, Timestamp, Topics};
 use rumqttc_next::{
-    AsyncClient, ConnectionError, Event, EventLoop, Packet, Publish, QoS, SubscribeFilter,
-    SubscribeReasonCode,
+    AsyncClient, ConnectionError, Event, EventLoop, Packet, Publish, PublishOptions, QoS,
+    SubscribeFilter, SubscribeReasonCode,
 };
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinSet;
@@ -36,7 +36,7 @@ use tokio::time::Instant;
 use crate::error::ClientError;
 use crate::event::ClientEvent;
 use crate::replay::Streams;
-use crate::session::{ClientKind, emit};
+use crate::session::{ClientKind, ONLINE, emit};
 use crate::token::{self, TokenSource};
 
 /// Failed connection attempts in a row before the session gives up.
@@ -131,6 +131,9 @@ pub(crate) struct LinkParts<T> {
     pub(crate) ready: Option<oneshot::Sender<Result<(), ClientError>>>,
     /// Set by `Session::close` before it queues DISCONNECT.
     pub(crate) closing: Arc<AtomicBool>,
+    /// The identity's `presence/{id}`, for a session that publishes
+    /// presence.
+    pub(crate) presence: Option<String>,
 }
 
 /// The link task.
@@ -233,6 +236,17 @@ impl<T: TokenSource> Link<T> {
                 tracing::warn!(error = %err, "queueing the subscribe failed");
             }
         });
+        // Online again on every connect: the last will of a lost connection
+        // set the retained presence offline.
+        if let Some(topic) = self.p.presence.clone() {
+            let client = self.p.client.clone();
+            self.requests.spawn(async move {
+                let retained = PublishOptions::at_least_once().retained();
+                if let Err(err) = client.publish(topic, ONLINE.to_vec(), retained).await {
+                    tracing::warn!(error = %err, "queueing the online presence failed");
+                }
+            });
+        }
         self.p.streams.on_connected();
         Ok(Flow::Continue)
     }

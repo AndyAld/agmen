@@ -7,8 +7,9 @@
 //! directly, the path the web console's `POST /messages` will take.
 //!
 //! Each test runs in [`run_in_room`], which deletes the retained
-//! `state/head` the sweeper published for the test's project, so the dev
-//! broker keeps none of them.
+//! `state/head` the sweeper published and the `state/roster` the presence
+//! task published (minting an identity changes the roster) for the test's
+//! project, so the dev broker keeps none of them.
 
 // Integration tests are test code throughout, helpers included: this lets
 // clippy's allow-*-in-tests settings cover the helpers too.
@@ -150,7 +151,8 @@ async fn room(ctx: &Ctx) -> Room {
 }
 
 /// Runs `body` in a fresh [`Room`], then deletes the retained `state/head`
-/// the sweeper published for the room's project, also when `body` panics.
+/// and `state/roster` the hub published for the room's project, also when
+/// `body` panics.
 ///
 /// `body` drops its `Messaging` when it ends, but the hub's last PUBLISH
 /// may still be on its way to EMQX. Once EMQX no longer lists the hub's
@@ -163,7 +165,8 @@ where
 {
     run(|ctx| async move {
         let room = room(&ctx).await;
-        let retained = vec![topics(&room.project).state_head()];
+        let topics = topics(&room.project);
+        let retained = vec![topics.state_head(), topics.state("roster")];
         clearing(ctx, retained, |ctx| async move {
             body(Arc::clone(&ctx), room).await;
             gone_from_broker(&ctx.http, &ctx.hub.mqtt.client_id()).await;
