@@ -618,6 +618,43 @@ fn agmen_install_without_license_says_license_not_found() {
 }
 
 #[test]
+fn agmen_install_whose_license_check_failed_says_not_checked() {
+    // C305(c), Andy: a rate limit or any failure other than a 404 is not a
+    // missing license; the row says so and that Install is the retry.
+    let home = Home::new();
+    let dirs = theme_dirs(&home.config(), &home.extensions());
+    let root = dirs.agmen.join("catppuccin");
+    fs::create_dir_all(root.join("themes")).unwrap();
+    fs::write(
+        root.join("themes/mocha.json"),
+        r#"{"themes": [{"name": "Catppuccin Mocha", "appearance": "dark", "style": {}}]}"#,
+    )
+    .unwrap();
+    for (check, says, never) in [
+        (
+            "failed",
+            "license not checked; install again to retry",
+            "license not found",
+        ),
+        ("not_found", "license not found", "license not checked"),
+    ] {
+        fs::write(
+            root.join("extension.toml"),
+            format!("id = \"catppuccin\"\nlicense_check = \"{check}\"\n"),
+        )
+        .unwrap();
+        let (themes, _) = installed_themes(&dirs);
+        let entry = themes
+            .iter()
+            .find(|t| t.name == "Catppuccin Mocha")
+            .unwrap();
+        let detail = rows::installed_detail(entry);
+        assert!(detail.contains(says), "{check}: {detail}");
+        assert!(!detail.contains(never), "{check}: {detail}");
+    }
+}
+
+#[test]
 fn unlabeled_license_file_says_it_is_kept() {
     // C303: a LICENSE that has no readable first line is still kept.
     for origin in [ThemeOrigin::Agmen, ThemeOrigin::ZedExtension] {

@@ -472,6 +472,9 @@ fn install_saves_the_repository_license_when_the_archive_has_none() {
     // The label is kept in the manifest, so it reads back after a restart.
     let manifest = fs::read_to_string(root.join(MANIFEST)).unwrap();
     assert!(manifest.contains("license = \"MIT\""), "{manifest}");
+    // C305(c): the outcome is kept too, as one of a closed set of words.
+    assert!(manifest.contains("license_check = \"found\""), "{manifest}");
+    assert_eq!(installed.license_check, Some(LicenseCheck::Found));
     assert_eq!(read_installed(&root).unwrap(), installed);
     assert!(root.join("themes/catppuccin-mocha.json").is_file());
     let seen = server.requests();
@@ -527,6 +530,8 @@ fn install_without_any_license_marks_it_not_found() {
         .unwrap();
     assert!(installed.licenses.is_empty(), "{installed:?}");
     assert_eq!(installed.license, None);
+    // C305(c): only a 404, or no repository on GitHub, is "not found".
+    assert_eq!(installed.license_check, Some(LicenseCheck::NotFound));
     assert_eq!(installed.authors, ["Catppuccin Org <hi@example.org>"]);
     assert_eq!(
         installed.repository.as_deref(),
@@ -567,6 +572,7 @@ fn github_outage_does_not_back_off() {
         .install(&catppuccin(), home.path(), Instant::now())
         .unwrap();
     assert!(installed.licenses.is_empty(), "{installed:?}");
+    assert_eq!(installed.license_check, Some(LicenseCheck::Failed));
     assert_eq!(market.retry_at, None);
     assert_eq!(market.failures, 0);
 }
@@ -602,6 +608,7 @@ fn non_github_repository_installs_without_a_request() {
         installed.repository.as_deref(),
         Some("https://gitlab.com/catppuccin/zed")
     );
+    assert_eq!(installed.license_check, Some(LicenseCheck::NotFound));
     assert!(matches!(
         github.accept(),
         Err(ref err) if err.kind() == std::io::ErrorKind::WouldBlock
@@ -629,6 +636,7 @@ fn oversized_repo_license_is_not_saved() {
         .install(&catppuccin(), home.path(), Instant::now())
         .unwrap();
     assert!(installed.licenses.is_empty(), "{installed:?}");
+    assert_eq!(installed.license_check, Some(LicenseCheck::Failed));
     assert!(!home.path().join("catppuccin/LICENSE").exists());
 }
 
@@ -688,6 +696,15 @@ fn license_label_drops_controls_and_bidi_marks() {
         Some("AB".into())
     );
     assert_eq!(license_label(" \t\u{202e} "), None);
+    // C310: every format character (category Cf) and the line and
+    // paragraph separators go too.
+    assert_eq!(
+        license_label(
+            "M\u{200b}I\u{200d}T\u{feff}\u{ad} \u{206a}\u{206b}\u{206c}\u{206d}\u{206e}\u{206f}\
+             A\u{2028}B\u{2029}C\u{e0001}\u{e0041}\u{e007f}\u{600}\u{180e}\u{2060}\u{fff9}"
+        ),
+        Some("MIT ABC".into())
+    );
     let exact = "y".repeat(MAX_LICENSE_LABEL_CHARS);
     assert_eq!(license_label(&exact), Some(exact.clone()));
 }
@@ -717,6 +734,7 @@ fn license_answer_over_cap_is_not_found() {
     let server = license_fixture(200, answer.to_string().into_bytes());
     let (home, installed) = install_from(&server);
     assert!(installed.licenses.is_empty(), "{installed:?}");
+    assert_eq!(installed.license_check, Some(LicenseCheck::Failed));
     assert!(!home.path().join("catppuccin/LICENSE").exists());
 }
 
@@ -729,6 +747,7 @@ fn license_in_another_encoding_is_not_saved() {
     let server = license_fixture(200, answer.to_string().into_bytes());
     let (_home, installed) = install_from(&server);
     assert!(installed.licenses.is_empty(), "{installed:?}");
+    assert_eq!(installed.license_check, Some(LicenseCheck::Failed));
 }
 
 #[test]
@@ -753,6 +772,7 @@ fn license_request_gives_up_after_its_timeout() {
         .install(&catppuccin(), home.path(), Instant::now())
         .unwrap();
     assert!(installed.licenses.is_empty(), "{installed:?}");
+    assert_eq!(installed.license_check, Some(LicenseCheck::Failed));
     assert!(
         started.elapsed() < Duration::from_secs(5),
         "{:?}",
@@ -795,6 +815,8 @@ fn license_redirect_to_another_host_is_not_followed() {
     let server = license_fixture(302, to.into_bytes());
     let (home, installed) = install_from(&server);
     assert!(installed.licenses.is_empty(), "{installed:?}");
+    // The stopped redirect is GitHub's answer, not a missing license.
+    assert_eq!(installed.license_check, Some(LicenseCheck::Failed));
     assert!(!home.path().join("catppuccin/LICENSE").exists());
     assert!(matches!(
         other.accept(),
@@ -892,8 +914,10 @@ fn shared_install_releases_the_lock_while_asking_github() {
     };
     assert!(market.try_lock().is_ok());
     drop(held);
-    let installed = install.join().unwrap().unwrap();
+    let (installed, names) = install.join().unwrap().unwrap();
     assert!(installed.licenses.is_empty(), "{installed:?}");
+    // C311: the theme names are read while the write still holds the lock.
+    assert_eq!(names, ["Catppuccin Mocha"]);
 }
 
 #[test]
@@ -1214,4 +1238,155 @@ fn unreadable_manifest_is_reported() {
     let read = read_installed(&root).unwrap();
     assert!(read.authors.is_empty());
     assert!(read.manifest_error.is_some(), "{read:?}");
+}
+
+#[test]
+fn github_failures_read_license_not_checked() {
+    // C305(c), Andy: a rate limit, a server error or an answer that does not
+    // parse says nothing about the repository's license, so the install
+    // records that the check failed, and Install is the retry.
+    let not_json = b"<html>rate limited</html>".to_vec();
+    let mut not_base64: serde_json::Value =
+        serde_json::from_slice(&license_json(MIT.as_bytes())).unwrap();
+    not_base64["content"] = "%%%".into();
+    let cases: Vec<(u16, Vec<u8>)> = vec![
+        (403, Vec::new()),
+        (429, Vec::new()),
+        (500, Vec::new()),
+        (200, not_json),
+        (200, not_base64.to_string().into_bytes()),
+    ];
+    for (status, body) in cases {
+        let server = license_fixture(status, body);
+        let (home, installed) = install_from(&server);
+        assert!(installed.licenses.is_empty(), "{status}: {installed:?}");
+        assert_eq!(
+            installed.license_check,
+            Some(LicenseCheck::Failed),
+            "{status}"
+        );
+        let manifest = fs::read_to_string(home.path().join("catppuccin").join(MANIFEST)).unwrap();
+        assert!(
+            manifest.contains("license_check = \"failed\""),
+            "{status}: {manifest}"
+        );
+    }
+}
+
+#[test]
+fn unreachable_github_reads_license_not_checked() {
+    // C305(c): nothing listens on GitHub's port, so the request fails at once.
+    let server = Fixture::serve(
+        1,
+        vec![(
+            "/extensions/catppuccin/",
+            200,
+            license_less_archive(MANIFEST_TOML),
+        )],
+    );
+    let closed = TcpListener::bind("127.0.0.1:0").unwrap();
+    let github_base = format!("http://{}", closed.local_addr().unwrap());
+    drop(closed);
+    let mut market = Marketplace::new(&server.base, github_base).unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let installed = market
+        .install(&catppuccin(), home.path(), Instant::now())
+        .unwrap();
+    assert_eq!(installed.license_check, Some(LicenseCheck::Failed));
+}
+
+#[test]
+fn archive_license_keys_never_outrank_github() {
+    // C309: the archive's own manifest may carry a license label and even a
+    // check outcome; agmen keeps only what GitHub said.
+    let dirty = format!("{MANIFEST_TOML}license = \"Apache-2.0\"\nlicense_check = \"found\"\n");
+    let archive_bytes = license_less_archive(&dirty);
+
+    // GitHub has no license: the archive's label is dropped.
+    let server = Fixture::serve(
+        2,
+        vec![("/extensions/catppuccin/", 200, archive_bytes.clone())],
+    );
+    let (home, installed) = install_from(&server);
+    assert_eq!(installed.license, None, "{installed:?}");
+    assert_eq!(installed.license_check, Some(LicenseCheck::NotFound));
+    let manifest = fs::read_to_string(home.path().join("catppuccin").join(MANIFEST)).unwrap();
+    assert!(!manifest.contains("Apache"), "{manifest}");
+
+    // GitHub returns a file it did not label: its first line, not the
+    // archive's label.
+    let server = Fixture::serve(
+        2,
+        vec![
+            ("/extensions/catppuccin/", 200, archive_bytes),
+            (
+                "/repos/",
+                200,
+                license_json_with(MIT.as_bytes(), &serde_json::Value::Null),
+            ),
+        ],
+    );
+    let (_home, installed) = install_from(&server);
+    assert_eq!(
+        installed.license.as_deref(),
+        Some("Copyright (c) 2023 Catppuccin")
+    );
+    assert_eq!(installed.license_check, Some(LicenseCheck::Found));
+}
+
+#[test]
+fn archive_license_key_gives_way_to_its_license_file() {
+    // C309: an archive with its own LICENSE is labeled by that file, never
+    // by a label its manifest claims, and no check is recorded.
+    let dirty = format!("{MANIFEST_TOML}license = \"Apache-2.0\"\nlicense_check = \"failed\"\n");
+    let bytes = archive(&[
+        ("extension.toml", &dirty),
+        ("LICENSE", "MIT License\n"),
+        ("themes/catppuccin-mocha.json", THEME_JSON),
+    ]);
+    let server = Fixture::serve(1, vec![("/extensions/catppuccin/", 200, bytes)]);
+    let (_home, installed) = install_from(&server);
+    assert_eq!(installed.license.as_deref(), Some("MIT License"));
+    assert_eq!(installed.license_check, None);
+}
+
+#[test]
+fn listing_repository_is_asked_when_the_manifest_names_none() {
+    // C312 (M11): the archive's manifest has no repository, so the
+    // listing's is asked.
+    let manifest = "id = \"catppuccin\"\nname = \"Catppuccin\"\nversion = \"0.2.27\"\n";
+    let server = Fixture::serve(
+        2,
+        vec![
+            (
+                "/extensions/catppuccin/",
+                200,
+                license_less_archive(manifest),
+            ),
+            ("/repos/", 200, license_json(MIT.as_bytes())),
+        ],
+    );
+    let mut market = Marketplace::new(&server.base, &server.base).unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let ext = ThemeExtension {
+        repository: Some("https://github.com/listed/elsewhere".into()),
+        ..catppuccin()
+    };
+    let installed = market.install(&ext, home.path(), Instant::now()).unwrap();
+    assert_eq!(installed.license.as_deref(), Some("MIT"));
+    assert_eq!(
+        server.requests()[1].line,
+        "GET /repos/listed/elsewhere/license HTTP/1.1"
+    );
+}
+
+#[test]
+fn empty_repository_license_reads_not_found() {
+    // C305(c): GitHub answered, and the file is empty; asking again gets the
+    // same, so this is "not found", not a failed check.
+    let server = license_fixture(200, license_json(b""));
+    let (home, installed) = install_from(&server);
+    assert!(installed.licenses.is_empty(), "{installed:?}");
+    assert_eq!(installed.license_check, Some(LicenseCheck::NotFound));
+    assert!(!home.path().join("catppuccin/LICENSE").exists());
 }

@@ -18,7 +18,7 @@ pub(crate) use catalog::{
 };
 pub(crate) use fallback::BUILTIN_THEME;
 pub(crate) use marketplace::{
-    API_BASE, EXTENSIONS_PAGE, GITHUB_API, InstalledTheme, MarketError, Marketplace,
+    API_BASE, EXTENSIONS_PAGE, GITHUB_API, InstalledTheme, LicenseCheck, MarketError, Marketplace,
     ThemeExtension, install_shared,
 };
 pub(crate) use settings::{
