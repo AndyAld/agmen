@@ -36,13 +36,6 @@ pub(crate) const STATUS_BAR_HEIGHT: Pixels = px(28.);
 pub(crate) const LEFT_DOCK_WIDTH: Pixels = px(272.);
 pub(crate) const RIGHT_DOCK_WIDTH: Pixels = px(340.);
 pub(crate) const TAB_BAR_HEIGHT: Pixels = px(34.);
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the chat pane uses it in Task 9 of the desktop plan"
-    )
-)]
 pub(crate) const BREADCRUMB_HEIGHT: Pixels = px(32.);
 /// Where the title bar's text starts, past the traffic lights at x 12 to 68
 /// and the mockup's spacer.

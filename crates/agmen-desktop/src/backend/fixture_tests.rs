@@ -368,3 +368,50 @@ fn undoing_a_narrowing_change_ends_undone() {
     let card = backend.snapshot().changes.values().next().unwrap().clone();
     assert_eq!(card.state, ChangeState::Undone);
 }
+
+#[test]
+fn fx1_session_matches_console_py() {
+    // SESSION in console.py, with mockup fix 41 (the edit is +2 -5).
+    use crate::backend::SessionRow;
+    let s = chat();
+    let fx1 = s
+        .sessions
+        .get(&crate::backend::fixture_id("andy/fx1"))
+        .unwrap();
+    assert_eq!(fx1.item, "C015");
+    assert_eq!(fx1.branch, "fix/c015-main-conflict");
+    assert_eq!(fx1.rows.len(), 12);
+    let tools: Vec<(&str, &str)> = fx1
+        .rows
+        .iter()
+        .filter_map(|r| match r {
+            SessionRow::Tool { name, arg } => Some((name.as_str(), arg.as_str())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(tools[0], ("Read", "src/main.rs"));
+    assert_eq!(tools[2], ("Edit", "src/main.rs  +2 -5"));
+    assert_eq!(tools.len(), 6);
+    assert!(matches!(&fx1.rows[9], SessionRow::Cost(t) if t == "turn 4 · $0.31 · 44 s"));
+}
+
+#[test]
+fn role_files_cover_three_layers() {
+    use crate::backend::RoleLayer;
+    let s = chat();
+    let count = |layer| s.roles.iter().filter(|r| r.layer == layer).count();
+    assert_eq!(count(RoleLayer::BuiltIn), 8);
+    assert_eq!(count(RoleLayer::Project), 1);
+    assert_eq!(count(RoleLayer::Personal), 1);
+    let reviewer = s.roles.iter().find(|r| r.name == "reviewer").unwrap();
+    assert!(reviewer.text.contains("<role name=\"reviewer\""));
+    let info = reviewer.info.as_ref().unwrap();
+    assert_eq!(info.tier, "deep");
+    // Mockup fix 51: no adam/sec, and rv2 is on C015.
+    assert!(info.used_by.iter().all(|(who, _)| who != "adam/sec"));
+    assert!(
+        info.used_by
+            .iter()
+            .any(|(who, what)| who == "andy/rv2" && what.contains("C015"))
+    );
+}

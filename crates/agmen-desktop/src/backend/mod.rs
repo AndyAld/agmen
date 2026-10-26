@@ -334,6 +334,76 @@ pub(crate) struct Snapshot {
     /// What local git knows, so the client can confirm the branches,
     /// commits and files message text names (spec 9.3).
     pub(crate) git: GitFacts,
+    /// Live sessions of agents on this machine, by identity.
+    pub(crate) sessions: BTreeMap<IdentityId, AgentSession>,
+    /// Role files from every layer (spec 3.5).
+    pub(crate) roles: Vec<RoleFile>,
+}
+
+/// One row of an agent's session, as the agent view shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SessionRow {
+    /// A tool call: its name and argument.
+    Tool { name: String, arg: String },
+    /// What a tool printed.
+    Out { text: String, tone: Tone },
+    /// What the agent said.
+    Say(String),
+    /// A turn's cost line.
+    Cost(String),
+}
+
+/// How a line of tool output reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Tone {
+    Plain,
+    Success,
+    Accent,
+}
+
+/// An agent's live session: what it is on, and what it did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AgentSession {
+    pub(crate) item: String,
+    pub(crate) branch: String,
+    pub(crate) rows: Vec<SessionRow>,
+}
+
+/// Where a role file lives (spec 3.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum RoleLayer {
+    BuiltIn,
+    /// `.agmen/roles/` in the project's repo.
+    Project,
+    /// `~/.config/agmen/roles/`.
+    Personal,
+}
+
+/// One role file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RoleFile {
+    pub(crate) name: String,
+    pub(crate) layer: RoleLayer,
+    pub(crate) text: String,
+    /// What agmen enforces for it, when the console has resolved it.
+    pub(crate) info: Option<RoleInfo>,
+}
+
+/// A resolved role, as the Role panel shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RoleInfo {
+    pub(crate) kind: String,
+    pub(crate) tools: Vec<String>,
+    /// A limit agmen states but cannot enforce, such as Bash read-only.
+    pub(crate) bash_note: Option<String>,
+    pub(crate) edits: String,
+    pub(crate) verbs: Vec<String>,
+    pub(crate) refused: Vec<String>,
+    pub(crate) tier: String,
+    /// Who holds it, and a short note on each.
+    pub(crate) used_by: Vec<(String, String)>,
+    /// The role mention and what it expands to.
+    pub(crate) mention: Option<(String, String)>,
 }
 
 /// Branches, commits and files in the person's local worktrees.

@@ -12,9 +12,9 @@ use agmen_proto::{GitSha, IdentityId, StampedEnvelope};
 use serde_json::{Value, json};
 
 use super::{
-    AgentInfo, AgentRow, AgentStatus, Approval, BackendError, ChangeCard, ChangeId, ChangeRow,
-    ChangeState, GitFacts, LaneInfo, ListenerInfo, PersonGroup, PlanInfo, RecentAction, RecentKind,
-    SpecState, TeamRow,
+    AgentInfo, AgentRow, AgentSession, AgentStatus, Approval, BackendError, ChangeCard, ChangeId,
+    ChangeRow, ChangeState, GitFacts, LaneInfo, ListenerInfo, PersonGroup, PlanInfo, RecentAction,
+    RecentKind, RoleFile, RoleInfo, RoleLayer, SessionRow, SpecState, TeamRow, Tone,
 };
 
 fn words(list: &str) -> Vec<String> {
@@ -663,4 +663,100 @@ pub(super) fn plan_roster() -> Result<Vec<PersonGroup>, BackendError> {
             agents: vec![row("sean/plan", "planner", "gemini", Working)?],
         },
     ])
+}
+
+/// `SESSION` in console.py: andy/fx1's turn, with mockup fix 41 (+2 -5).
+pub(super) fn fx1_session() -> AgentSession {
+    let tool = |name: &str, arg: &str| SessionRow::Tool {
+        name: name.into(),
+        arg: arg.into(),
+    };
+    let out = |text: &str, tone| SessionRow::Out {
+        text: text.into(),
+        tone,
+    };
+    AgentSession {
+        item: "C015".into(),
+        branch: "fix/c015-main-conflict".into(),
+        rows: vec![
+            tool("Read", "src/main.rs"),
+            tool("Bash", "git show 4d9fdc8 --stat"),
+            out("2 files changed, 14 insertions(+), 3 deletions(-)", Tone::Plain),
+            SessionRow::Say(
+                "Both sides add modules. Keeping cylinder, document, minimap and tabs; dropping the conflict markers.".into(),
+            ),
+            tool("Edit", "src/main.rs  +2 -5"),
+            tool("Bash", "cargo test"),
+            out("test result: ok. 71 passed; 0 failed", Tone::Success),
+            tool("Bash", "git push -u origin fix/c015-main-conflict"),
+            out("ok", Tone::Plain),
+            SessionRow::Cost("turn 4 · $0.31 · 44 s".into()),
+            tool("agmen", "done C015"),
+            out("recorded #1866 (feed)", Tone::Accent),
+        ],
+    }
+}
+
+/// The built-in roles ship in the binary from the repo's `roles/` folder
+/// (spec 3.2); the project and personal ones are the mockup's examples.
+pub(super) fn role_files() -> Vec<RoleFile> {
+    let built_in = |name: &str, text: &str| RoleFile {
+        name: name.into(),
+        layer: RoleLayer::BuiltIn,
+        text: text.into(),
+        info: None,
+    };
+    let words = |list: &str| {
+        list.split_whitespace()
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    let mut reviewer = built_in("reviewer", include_str!("../../../../roles/reviewer.xml"));
+    reviewer.info = Some(RoleInfo {
+        kind: "agent".into(),
+        tools: words("Read Grep Glob Bash"),
+        bash_note: Some("read-only by rule only; not enforceable".into()),
+        edits: "none".into(),
+        verbs: words("REVIEW ASK ANSWER FYI DM"),
+        refused: words("CLAIM DONE PUSH_REQUEST ASSIGN RULING"),
+        tier: "deep".into(),
+        // Mockup fix 51: rv2 reviews C015, and adam/sec is not in the roster.
+        used_by: vec![("andy/rv2".into(), "opencode · reading C015".into())],
+        mention: Some((
+            "@reviewers".into(),
+            "role:reviewer on the wire · humans and coordinators".into(),
+        )),
+    });
+    let example = |name: &str, layer, text: &str| RoleFile {
+        name: name.into(),
+        layer,
+        text: text.into(),
+        info: None,
+    };
+    vec![
+        built_in("base", include_str!("../../../../roles/base.xml")),
+        built_in("listener", include_str!("../../../../roles/listener.xml")),
+        built_in(
+            "coordinator",
+            include_str!("../../../../roles/coordinator.xml"),
+        ),
+        built_in("planner", include_str!("../../../../roles/planner.xml")),
+        built_in(
+            "researcher",
+            include_str!("../../../../roles/researcher.xml"),
+        ),
+        built_in("engineer", include_str!("../../../../roles/engineer.xml")),
+        built_in("tester", include_str!("../../../../roles/tester.xml")),
+        reviewer,
+        example(
+            "security-reviewer",
+            RoleLayer::Project,
+            "<role name=\"security-reviewer\" extends=\"reviewer\" kind=\"agent\" tier=\"deep\" version=\"1\">\n  <summary>Reviews a DONE for security only.</summary>\n</role>\n",
+        ),
+        example(
+            "docs-writer",
+            RoleLayer::Personal,
+            "<role name=\"docs-writer\" extends=\"engineer\" kind=\"agent\" tier=\"standard\" version=\"1\">\n  <summary>Writes docs in docs/**.</summary>\n  <edits scope=\"paths\" globs=\"docs/**\" />\n</role>\n",
+        ),
+    ]
 }

@@ -243,7 +243,7 @@ Screens: `desktop-chat`.
 
 ### Task 10: Center tabs: agent view and role file
 
-- [ ] Done
+- [x] Done. Syntax and the code view in 76699c6; the agent view, the Roles tab, the role file tab (Duplicate to .agmen/roles on built-ins only) and the Role panel after it. Checked alone with `--view agent` and `--view roles` until Task 9's tabs host them. Fix 55 is in (a role-colored dot ends each Roles row). Fix 50's deletion marks wait for the main.rs file view in Task 11, the file the +2 -5 edit touched. Open in terminal and Stop do nothing until Task 14; the button is grey, not the mockup's green tint.
 
 Screens: `desktop-agent`, `desktop-role-file`.
 

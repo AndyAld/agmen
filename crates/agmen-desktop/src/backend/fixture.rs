@@ -9,8 +9,9 @@ use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use serde_json::json;
 
 use super::fixture_data::{
-    Msg, alert_answer, ask_messages, chat_messages, fx1, git_facts, id, listener, plan,
-    plan_messages, plan_roster, roster, settings_card, settings_messages, stamp, urgent_alert,
+    Msg, alert_answer, ask_messages, chat_messages, fx1, fx1_session, git_facts, id, listener,
+    plan, plan_messages, plan_roster, role_files, roster, settings_card, settings_messages, stamp,
+    urgent_alert,
 };
 use super::{
     Action, Backend, BackendError, ChangeState, Draft, RecentAction, RecentKind, Screen, Snapshot,
@@ -67,6 +68,8 @@ fn base(project: &str) -> Result<Snapshot, BackendError> {
         changes: BTreeMap::new(),
         plan: None,
         git: git_facts(),
+        sessions: BTreeMap::from([(id("andy/fx1")?, fx1_session())]),
+        roles: role_files(),
     })
 }
 

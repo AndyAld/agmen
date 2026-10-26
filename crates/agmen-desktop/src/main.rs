@@ -15,10 +15,6 @@ mod assets;
     reason = "views send and act through Backend from Task 9 (chat composer) of the desktop plan"
 )]
 mod backend;
-#[expect(
-    dead_code,
-    reason = "file icons get their first view in Task 11 (Project panel) of the desktop plan"
-)]
 mod icons;
 #[cfg(unix)]
 mod instance;
@@ -51,13 +47,17 @@ use appearance::{Appearance, SystemMode};
 
 use ui::{Quit, ToggleLeftDock, ToggleRightDock, Workspace};
 
-const USAGE: &str = "usage: agmen-desktop [--screen <name> | --list-screens | --spike list [--autoscroll] | --spike notify]";
+const USAGE: &str = "usage: agmen-desktop [--screen <name> | --list-screens | --view <name> | --spike list [--autoscroll] | --spike notify]";
 
 /// The views `--view` can show alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DevView {
     /// The code view on `roles/reviewer.xml`.
     Code,
+    /// andy/fx1's session in the agent view.
+    Agent,
+    /// The Roles tab with reviewer.xml open.
+    Roles,
 }
 
 /// The role file the code view shows: a built-in role, from the repo.
@@ -100,7 +100,9 @@ impl Launch {
             [flag] if flag == "--list-screens" => Ok(Self::ListScreens),
             [flag, name] if flag == "--view" => match name.as_str() {
                 "code" => Ok(Self::View(DevView::Code)),
-                _ => anyhow::bail!("views: code"),
+                "agent" => Ok(Self::View(DevView::Agent)),
+                "roles" => Ok(Self::View(DevView::Roles)),
+                _ => anyhow::bail!("views: code, agent, roles"),
             },
             [flag, name] if flag == "--screen" => name
                 .parse()
@@ -222,6 +224,62 @@ fn window_options(cx: &App) -> WindowOptions {
     }
 }
 
+/// Opens one view alone, for `--view`.
+fn open_dev_view(
+    view: DevView,
+    options: WindowOptions,
+    cx: &mut App,
+) -> Result<gpui::AnyWindowHandle> {
+    use backend::Backend as _;
+    let window: gpui::Result<gpui::AnyWindowHandle> = match view {
+        DevView::Code => cx
+            .open_window(options, |_, cx| {
+                cx.new(|cx| {
+                    ui::CodeView::new(
+                        REVIEWER_XML,
+                        ui::Language::for_path(std::path::Path::new("roles/reviewer.xml")),
+                        vec![ui::GutterMark::Modified(11..12)],
+                        cx,
+                    )
+                })
+            })
+            .map(Into::into),
+        DevView::Agent => {
+            let mut snapshot = backend::FixtureBackend::for_screen(backend::Screen::Chat)
+                .context("building the fixture data")?
+                .snapshot();
+            let (id, session) = snapshot
+                .sessions
+                .pop_first()
+                .context("the fixture has no agent session")?;
+            let handle = snapshot
+                .agents
+                .remove(&id)
+                .map_or_else(|| id.to_string(), |agent| agent.handle);
+            cx.open_window(options, |_, cx| {
+                cx.new(|cx| ui::AgentView::new(handle, session, cx))
+            })
+            .map(Into::into)
+        }
+        DevView::Roles => {
+            let roles = backend::FixtureBackend::for_screen(backend::Screen::Chat)
+                .context("building the fixture data")?
+                .snapshot()
+                .roles;
+            let reviewer = roles
+                .iter()
+                .find(|role| role.name == "reviewer")
+                .context("the fixture has no reviewer role")?
+                .clone();
+            cx.open_window(options, |_, cx| {
+                cx.new(|cx| ui::RolesDev::new(roles, reviewer, cx))
+            })
+            .map(Into::into)
+        }
+    };
+    window.context("opening the view window")
+}
+
 fn open_main_window(launch: &Launch, cx: &mut App) -> Result<()> {
     cx.bind_keys([
         KeyBinding::new("cmd-b", ToggleLeftDock, None),
@@ -271,18 +329,7 @@ fn open_main_window(launch: &Launch, cx: &mut App) -> Result<()> {
             .map(Into::into)
         }
         Launch::NotifySpike | Launch::ListScreens => return Ok(()),
-        Launch::View(DevView::Code) => cx
-            .open_window(options, |_, cx| {
-                cx.new(|cx| {
-                    ui::CodeView::new(
-                        REVIEWER_XML,
-                        ui::Language::for_path(std::path::Path::new("roles/reviewer.xml")),
-                        vec![ui::GutterMark::Modified(11..12)],
-                        cx,
-                    )
-                })
-            })
-            .map(Into::into),
+        Launch::View(view) => Ok(open_dev_view(*view, options, cx)?),
         Launch::ListSpike { autoscroll } => {
             let autoscroll = *autoscroll;
             cx.open_window(options, |_, cx| {
@@ -328,6 +375,18 @@ mod tests {
             Launch::Screen(backend::Screen::NeedsYou)
         );
         assert!(Launch::parse(&args(&["--screen", "nope"])).is_err());
+        for (name, view) in [
+            ("code", DevView::Code),
+            ("agent", DevView::Agent),
+            ("roles", DevView::Roles),
+        ] {
+            assert_eq!(
+                Launch::parse(&args(&["--view", name])).unwrap(),
+                Launch::View(view)
+            );
+        }
+        assert!(Launch::parse(&args(&["--view", "nope"])).is_err());
+        assert!(USAGE.contains("--view <name>"));
         assert_eq!(
             Launch::parse(&args(&["--list-screens"])).unwrap(),
             Launch::ListScreens
