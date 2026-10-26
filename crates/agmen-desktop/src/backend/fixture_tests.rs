@@ -108,23 +108,85 @@ fn fixture_roster_groups() {
 
 #[test]
 fn status_counts_follow_one_rule() {
-    // Mockup fixes 29, 34 and 36.
+    // Mockup fixes 29, 34 and 36. The alert and needs-you counts are not
+    // stored: the status bar derives them from the messages (Task 13).
+    use crate::alerts::{AlertState, Me, alert_count};
     let chat = chat();
     assert_eq!(chat.status.worktrees, 5);
-    assert_eq!(chat.status.alerts, 1);
     let total = chat.listener.workers_today_usd + chat.listener.listener_today_usd;
     assert!(
         (total - chat.status.spend_today_usd).abs() < 0.005,
         "{total}"
     );
-    let needs = FixtureBackend::for_screen(Screen::NeedsYou)
-        .unwrap()
-        .snapshot();
-    assert_eq!((needs.status.alerts, needs.status.needs_you), (2, 1));
-    let answered = FixtureBackend::for_screen(Screen::NeedsYouAnswered)
-        .unwrap()
-        .snapshot();
-    assert_eq!((answered.status.alerts, answered.status.needs_you), (1, 0));
+    for (screen, alerts, needs_you) in [
+        (Screen::Chat, 1, 0),
+        (Screen::NeedsYou, 2, 1),
+        (Screen::NeedsYouAnswered, 1, 0),
+    ] {
+        let s = FixtureBackend::for_screen(screen).unwrap().snapshot();
+        let me = Me::from(&s);
+        let mut state = AlertState::default();
+        for m in &s.messages {
+            state.on_message(m, &me);
+        }
+        assert_eq!(
+            (alert_count(&s.messages, &me), state.badge()),
+            (alerts, needs_you),
+            "{screen:?}"
+        );
+    }
+}
+
+// Task 13: answering an alert.
+
+#[test]
+fn answering_an_alert_posts_my_answer() {
+    let backend = FixtureBackend::for_screen(Screen::NeedsYou).unwrap();
+    let alert = backend.snapshot().messages.last().unwrap().clone();
+    let mut updates = backend.subscribe();
+    backend
+        .act(Action::AnswerAlert {
+            alert: alert.client.id.clone(),
+            choice: "Revert #10".into(),
+        })
+        .unwrap();
+    let Some(Update::Message(m)) = futures::executor::block_on(updates.next()) else {
+        panic!("no update");
+    };
+    assert!(matches!(m.client.payload, Payload::Answer {}));
+    assert_eq!(m.client.reply_to.as_ref(), Some(&alert.client.id));
+    assert_eq!(m.client.body.as_str(), "Revert #10");
+    assert_eq!(m.client.to, vec![alert.from.clone()]);
+    assert_eq!(m.from_handle, "andy");
+    assert_eq!(backend.snapshot().messages.last(), Some(&*m));
+}
+
+#[test]
+fn answering_an_unknown_alert_is_refused() {
+    let backend = FixtureBackend::for_screen(Screen::Chat).unwrap();
+    let before = backend.snapshot().messages.len();
+    let missing = backend.act(Action::AnswerAlert {
+        alert: "01JZ0000000000000000000000".parse().unwrap(),
+        choice: "Revert #10".into(),
+    });
+    assert!(missing.is_err());
+    assert_eq!(backend.snapshot().messages.len(), before);
+}
+
+#[test]
+fn a_reply_is_an_answer() {
+    let backend = FixtureBackend::for_screen(Screen::NeedsYou).unwrap();
+    let alert = backend.snapshot().messages.last().unwrap().clone();
+    backend
+        .send(Draft {
+            to: vec![alert.from.clone()],
+            body: "Reverting".into(),
+            reply_to: Some(alert.client.id.clone()),
+        })
+        .unwrap();
+    let sent = backend.snapshot().messages.last().unwrap().clone();
+    assert!(matches!(sent.client.payload, Payload::Answer {}));
+    assert_eq!(sent.client.reply_to, Some(alert.client.id));
 }
 
 #[test]

@@ -227,10 +227,13 @@ fn empty_chat_shows_the_composer(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn badge_counts_alerts_that_need_me(cx: &mut TestAppContext) {
-    for screen in [Screen::Chat, Screen::NeedsYou, Screen::NeedsYouAnswered] {
+    for (screen, needs_you) in [
+        (Screen::Chat, 0),
+        (Screen::NeedsYou, 1),
+        (Screen::NeedsYouAnswered, 0),
+    ] {
         let mut app = TestAppContext::single();
-        let (chat, backend, app) = open_screen(&mut app, screen);
-        let needs_you = backend.snapshot().status.needs_you as usize;
+        let (chat, _backend, app) = open_screen(&mut app, screen);
         assert_eq!(
             chat.read_with(app, |chat, _| chat.badge()),
             needs_you,

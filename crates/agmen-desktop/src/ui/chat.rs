@@ -23,9 +23,15 @@ use super::composer::Composer;
 use super::message::{MessageRow, is_presence};
 use super::ref_chip::RefEvent;
 use super::tokens::{LIST_OVERDRAW, SPACE_2, SPACE_6, SPACE_10, SPACE_12, SPACE_14};
-use crate::alerts::{AlertState, Me};
+use crate::alerts::AlertState;
 use crate::backend::{Action, BackendError, BackendHandle, Draft, Snapshot, Update};
 use crate::local_time::LocalZone;
+
+// Task 13: the banner, toast, chime and notification for alerts.
+#[path = "chat_alerts.rs"]
+mod alert_wiring;
+use super::needs_you::AlertLook;
+pub(crate) use alert_wiring::AlertCounts;
 
 /// The indices of the messages the chat draws, oldest first.
 #[must_use]
@@ -49,6 +55,8 @@ pub(crate) struct ChatStream {
     list: ListState,
     /// Where chips and change card buttons report.
     chat: WeakEntity<ChatView>,
+    /// Task 13: how alert rows draw, by message index.
+    looks: Rc<std::collections::BTreeMap<usize, AlertLook>>,
 }
 
 impl std::fmt::Debug for ChatStream {
@@ -101,7 +109,15 @@ impl ChatStream {
             return div().into_any_element();
         };
         let (on_ref, on_action) = (self.chat.clone(), self.chat.clone());
+        let on_reply = self.chat.clone();
         let row = MessageRow::new(index, self.context.clone())
+            .when_some(self.looks.get(&index).copied(), MessageRow::alert)
+            .on_reply(move |index, window, cx| {
+                // A row outlives its chat only while the window closes.
+                on_reply
+                    .update(cx, |chat, cx| chat.reply(index, window, cx))
+                    .unwrap_or_default();
+            })
             .on_ref(move |event, _, cx| {
                 // A chip outlives its chat only while the window closes.
                 on_ref
@@ -144,6 +160,8 @@ pub(crate) struct ChatView {
     stream: Entity<ChatStream>,
     show_ledger: bool,
     alerts: AlertState,
+    /// Task 13: the banner, toast and snooze state beside `alerts`.
+    alert_ui: alert_wiring::ChatAlerts,
     composer: Entity<Composer>,
     /// Why the last send or action failed, until the next one succeeds.
     error: Option<SharedString>,
@@ -200,8 +218,8 @@ impl ChatView {
         });
         let snapshot = Rc::new(snapshot);
         let rows = visible_rows(&snapshot.messages, false);
-        let mut alerts = AlertState::default();
-        replay(&mut alerts, &snapshot);
+        let (alerts, alert_ui) = alert_wiring::replay(&snapshot);
+        let looks = Rc::new(super::needs_you::alert_looks(&alerts, &snapshot.messages));
         let context = Rc::new(ChatContext::new(snapshot.clone()).with_zone(zone.clone()));
         let chat = cx.entity().downgrade();
         let stream = cx.new(|_| ChatStream {
@@ -209,12 +227,14 @@ impl ChatView {
             list: ListState::new(rows.len(), ListAlignment::Bottom, LIST_OVERDRAW),
             rows,
             chat,
+            looks,
         });
         Self {
             snapshot,
             stream,
             show_ledger: false,
             alerts,
+            alert_ui,
             composer,
             error: None,
             zone,
@@ -275,21 +295,30 @@ impl ChatView {
 
     /// Does `action` through the backend, such as a change card's Apply.
     fn act(&mut self, action: Action, cx: &mut Context<Self>) {
+        // Task 13: Snooze is also the person's own view of the alert.
+        let snooze = match &action {
+            Action::SnoozeAlert(alert) => Some(alert.clone()),
+            _ => None,
+        };
         let result = match cx.try_global::<BackendHandle>() {
             Some(backend) => backend.0.act(action),
             None => Err(BackendError::Unsupported("acting without a backend")),
         };
+        if let (Some(alert), true) = (snooze, result.is_ok()) {
+            self.snooze(alert, cx);
+        }
         self.error = result.err().map(|err| err.to_string().into());
         cx.notify();
     }
 
     fn apply(&mut self, update: Update, cx: &mut Context<Self>) {
-        let me = Me::from(&*self.snapshot);
+        // Task 13: what live messages ask of the window, signalled once the
+        // chat has them.
+        let mut signals = Vec::new();
         let snapshot = match update {
             Update::Message(env) => {
-                // Task 13 plays the chime and posts the notification from
-                // this effect; the chat only keeps the count.
-                let _effect = self.alerts.on_message(&env, &me);
+                let earlier = self.snapshot.clone();
+                signals.push(self.hear(&env, &earlier.messages));
                 // shortcut: each message clones the snapshot and rebuilds the
                 // context, O(messages); keep messages in a persistent list if
                 // long chats lag.
@@ -300,13 +329,12 @@ impl ChatView {
             Update::Snapshot(snapshot) => {
                 // Only messages the chat has not seen update the alerts, so
                 // an alert the person snoozed or cleared stays that way.
+                let old = self.snapshot.clone();
                 let seen: BTreeSet<(&Stream, Seq, &MessageId)> =
-                    self.snapshot.messages.iter().map(position).collect();
+                    old.messages.iter().map(position).collect();
                 for env in &snapshot.messages {
                     if !seen.contains(&position(env)) {
-                        // Task 13 plays the chime and posts the notification
-                        // from this effect, as for a single message.
-                        let _effect = self.alerts.on_message(env, &me);
+                        signals.push(self.hear(env, &snapshot.messages));
                     }
                 }
                 *snapshot
@@ -317,6 +345,10 @@ impl ChatView {
         let rows = visible_rows(&self.snapshot.messages, self.show_ledger);
         self.stream
             .update(cx, |stream, cx| stream.set_rows(context, rows, cx));
+        self.refresh_alerts(cx);
+        for signal in &signals {
+            self.signal(signal, cx);
+        }
         cx.notify();
     }
 }
@@ -327,16 +359,6 @@ fn position(env: &StampedEnvelope) -> (&Stream, Seq, &MessageId) {
     (&env.stream, env.seq, &env.client.id)
 }
 
-/// Feeds every message in `snapshot` to `alerts`, oldest first.
-fn replay(alerts: &mut AlertState, snapshot: &Snapshot) {
-    let me = Me::from(snapshot);
-    for env in &snapshot.messages {
-        // History replays without a chime or notification: only alerts that
-        // arrive while the chat is open make an effect.
-        let _effect = alerts.on_message(env, &me);
-    }
-}
-
 impl Focusable for ChatView {
     fn focus_handle(&self, cx: &gpui::App) -> FocusHandle {
         self.composer.focus_handle(cx)
@@ -344,7 +366,7 @@ impl Focusable for ChatView {
 }
 
 impl Render for ChatView {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .debug_selector(|| "chat".into())
             .flex_1()
@@ -352,6 +374,8 @@ impl Render for ChatView {
             .min_h_0()
             .flex()
             .flex_col()
+            // Task 13: the needs-you or answered banner (node 5704).
+            .children(self.banner_element(cx))
             .child(
                 self.stream
                     .clone()
@@ -372,3 +396,7 @@ impl Render for ChatView {
 #[cfg(test)]
 #[path = "chat_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "chat_alert_tests.rs"]
+mod alert_tests;

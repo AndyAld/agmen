@@ -343,6 +343,8 @@ fn open_main_window(launch: &Launch, cx: &mut App) -> Result<()> {
             );
             let snapshot = backend.snapshot();
             cx.set_global(backend::BackendHandle(backend));
+            // Task 13: live alerts chime and post notifications.
+            cx.set_global(ui::AlarmHandle::system());
             cx.open_window(options, |window, cx| {
                 let workspace = cx.new(|cx| {
                     let mut workspace = Workspace::new(snapshot, window, cx);

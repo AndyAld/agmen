@@ -25,6 +25,9 @@ mod dock_wiring;
 use dock_wiring::LeftDockState;
 #[path = "workspace_screen.rs"]
 mod screen_state;
+// Task 13: the toast over the window.
+#[path = "workspace_alerts.rs"]
+mod alert_wiring;
 
 actions!(workspace, [ToggleLeftDock, ToggleRightDock, Quit]);
 
@@ -47,6 +50,9 @@ pub(crate) struct Workspace {
     selected_agent: Option<IdentityId>,
     left: LeftDockState,
     _agents_events: Subscription,
+    // Task 13: the status bar's counts and the toast come from the chat.
+    chat: Entity<ChatView>,
+    _chat_changes: Subscription,
 }
 
 impl Workspace {
@@ -56,8 +62,9 @@ impl Workspace {
             AgentsPanelEvent::Selected(id) => this.select_agent(id, cx),
         });
         let chat = cx.new(|cx| ChatView::new(snapshot.clone(), window, cx));
+        let chat_changes = cx.observe(&chat, |_, _, cx| cx.notify());
         let tabs = starting_tabs(&snapshot);
-        let pane_group = cx.new(|cx| PaneGroup::new(&snapshot, Some(chat), tabs, cx));
+        let pane_group = cx.new(|cx| PaneGroup::new(&snapshot, Some(chat.clone()), tabs, cx));
         let left = LeftDockState::new(&snapshot, cx);
         Self {
             focus_handle: cx.focus_handle(),
@@ -69,6 +76,8 @@ impl Workspace {
             selected_agent: None,
             left,
             _agents_events: agents_events,
+            chat,
+            _chat_changes: chat_changes,
         }
     }
 
@@ -259,8 +268,10 @@ impl Render for Workspace {
             .child(
                 StatusBar::new(&self.snapshot, self.is_dock_open(DockSide::Right))
                     .panels(self.panel_buttons(cx))
+                    .alert_counts(self.chat.read(cx).alert_counts())
                     .when_some(self.status_context(cx), StatusBar::context),
             )
+            .children(self.alert_toast(cx))
     }
 }
 

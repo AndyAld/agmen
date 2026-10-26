@@ -42,6 +42,7 @@ mod alert_banner;
 mod alert_row;
 mod needs_you;
 mod toast;
+pub(crate) use needs_you::AlarmHandle;
 
 pub(crate) use agent_view::AgentView;
 pub(crate) use code_view::{CodeView, GutterMark};

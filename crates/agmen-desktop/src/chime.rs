@@ -52,14 +52,12 @@ impl Chime {
     /// Starts the chime unless one is still sounding.
     pub(crate) fn play(&self) -> Played {
         let mut playing = self.playing.borrow_mut();
-        if let Some(child) = playing.as_mut() {
-            match child.try_wait() {
-                // Still sounding.
-                Ok(None) => return Played::StillPlaying,
-                // It finished (and is reaped now), or its status cannot be
-                // read; either way a new chime may start.
-                Ok(Some(_)) | Err(_) => {}
-            }
+        // A player that finished is reaped by `try_wait`; one whose status
+        // cannot be read is left to the next chime.
+        if let Some(child) = playing.as_mut()
+            && matches!(child.try_wait(), Ok(None))
+        {
+            return Played::StillPlaying;
         }
         let started = Command::new(&self.program)
             .args(&self.args)

@@ -73,6 +73,9 @@ pub(super) struct WorkspaceState {
     left: Option<LeftDock>,
     center: CenterTab,
     right: Option<RightDock>,
+    /// Task 13: the oldest alert that needs me shows as just arrived, with
+    /// its toast and "chime played" (the needs-you frame), silently.
+    alert_arrives: bool,
 }
 
 impl WorkspaceState {
@@ -82,14 +85,15 @@ impl WorkspaceState {
         let (left, center, right) = match screen {
             Screen::Chat
             | Screen::Ask
+            | Screen::NeedsYou
             | Screen::NeedsYouAnswered
             | Screen::SettingsFromChat
             | Screen::SettingsApplied => {
                 (LeftDock::Agents, CenterTab::Chat, Some(RightDock::Listener))
             }
-            // shortcut: the needs-you notification, the model picker and the
-            // palette are not built (Tasks 15 and 18); they draw over this.
-            Screen::NeedsYou | Screen::ModelPicker | Screen::Palette => {
+            // shortcut: the model picker and the palette are not built (Tasks
+            // 15 and 18); they draw over this.
+            Screen::ModelPicker | Screen::Palette => {
                 (LeftDock::Agents, CenterTab::Chat, Some(RightDock::Listener))
             }
             // shortcut: take-over's terminal block, the switch menu and the
@@ -115,6 +119,7 @@ impl WorkspaceState {
             left: Some(left),
             center,
             right,
+            alert_arrives: matches!(screen, Screen::NeedsYou),
         }
     }
 }
@@ -129,6 +134,9 @@ impl Workspace {
         if let Some(item) = self.center_item(state.center) {
             self.pane_group
                 .update(cx, |group, cx| group.open_last(item, cx));
+        }
+        if state.alert_arrives {
+            self.chat.update(cx, |chat, cx| chat.show_arrival(cx));
         }
         cx.notify();
     }

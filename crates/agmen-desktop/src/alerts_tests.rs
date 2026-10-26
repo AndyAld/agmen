@@ -309,11 +309,12 @@ fn chat_tab_badge_counts() {
         &me,
     );
     assert_eq!(state.badge(), 0);
-    // The badge agrees with the status bar's needs-you count on every screen.
+    // Only the needs-you screen has an alert that needs me. The status
+    // bar's pill reads this badge (Task 13), so they cannot disagree.
     for s in Screen::ALL {
         let snapshot = screen(s);
         let (state, _) = replay(&snapshot, AlertPrefs::default());
-        assert_eq!(state.badge(), snapshot.status.needs_you as usize, "{s:?}");
+        assert_eq!(state.badge(), usize::from(s == Screen::NeedsYou), "{s:?}");
     }
 }
 
@@ -391,12 +392,18 @@ fn alert_count_answered_is_one() {
 }
 
 #[test]
-fn alert_count_matches_status_summary() {
-    for s in Screen::ALL {
+fn alert_count_on_other_screens() {
+    // Task 13 dropped the stored count `alert_count_matches_status_summary`
+    // compared with; the status bar shows this count instead.
+    for (s, open) in [
+        (Screen::Plan, 0),
+        (Screen::Running, 0),
+        (Screen::SettingsFromChat, 1),
+    ] {
         let snapshot = screen(s);
         assert_eq!(
             alert_count(&snapshot.messages, &Me::from(&snapshot)),
-            snapshot.status.alerts,
+            open,
             "{s:?}"
         );
     }
