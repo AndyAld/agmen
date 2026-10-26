@@ -396,15 +396,31 @@ fn a_run_after_a_chip_fills_the_rest_of_the_line(cx: &mut TestAppContext) {
         &format!("4d9fdc8 {words}"),
     );
     // The bound below separates the bug from the fix only if the words
-    // alone take exactly two lines. Without a chip they are one text, which
-    // wraps with no gap between its lines.
+    // alone take exactly two lines. Without a chip they are one text, whose
+    // lines keep the flow's SPACE_3 between them.
     assert!(
-        (plain - line * 2.).abs() < px(0.5),
+        (plain - (line * 2. + SPACE_3)).abs() < px(0.5),
         "the words alone wrap once: {plain:?}, one line is {line:?}"
     );
     // The chip's line, then one more, SPACE_3 apart; the bug drew three.
     let two_lines = chip.max(line) + line + SPACE_3 + px(0.5);
     assert!(flowed <= two_lines, "{flowed:?} over {two_lines:?}");
+}
+
+#[gpui::test]
+fn plain_lines_keep_the_chip_lines_pitch(cx: &mut TestAppContext) {
+    // Node 8745: a body's rows are 16 px lines 3 px apart, 19 px from one
+    // to the next whether or not they hold a chip, so two lines are 35 px.
+    // Plain text drew its lines 16 px apart, chip lines 19.
+    let (line, _) = heights(cx, 300., "the");
+    let (two, _) = heights(&mut TestAppContext::single(), 300., "the\nquick");
+    assert_eq!(two, line * 2. + SPACE_3, "one line is {line:?}");
+    // A blank line between two lines is a row of its own.
+    let (three, _) = heights(&mut TestAppContext::single(), 300., "the\n\nquick");
+    assert_eq!(three, line * 3. + SPACE_3 * 2., "one line is {line:?}");
+    // A chip line after plain lines keeps the same 3 px between rows.
+    let (mixed, chip) = heights(&mut TestAppContext::single(), 300., "the\nsee 4d9fdc8");
+    assert_eq!(mixed, line + SPACE_3 + chip.max(line), "{chip:?}");
 }
 
 /// The fixture message whose body contains `needle`, drawn as `"m"` in a

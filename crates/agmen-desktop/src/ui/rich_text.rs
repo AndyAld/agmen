@@ -15,8 +15,8 @@ use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce,
-    SharedString, Styled as _, Window, div, relative,
+    AnyElement, App, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, RenderOnce,
+    SharedString, Styled as _, Window, div,
 };
 
 use super::chat_context::{BodyText, ChatContext};
@@ -272,10 +272,17 @@ impl RichText {
     }
 }
 
-fn run(text: String) -> AnyElement {
+/// A block of plain lines. Each line takes `line` and the [`SPACE_3`] row
+/// gap under it, as a line of chips does in the flow (node 8745: 16 px
+/// rows 3 px apart). Half a gap above and below comes back as margin, so
+/// the block is as tall as its rows and the gaps between them, and its
+/// first row sits at its top.
+fn run(text: String, line: Pixels) -> AnyElement {
     // min_w_0 lets a run wider than the column shrink to it and wrap.
     div()
         .min_w_0()
+        .line_height(line + SPACE_3)
+        .my(-SPACE_3 / 2.)
         .child(SharedString::from(text))
         .into_any_element()
 }
@@ -311,16 +318,19 @@ fn blocks(lines: Vec<Vec<Item<'_>>>) -> Vec<Block<'_>> {
 }
 
 impl RenderOnce for RichText {
-    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = &cx.global::<Appearance>().theme;
+        // A row's line, snapped as gpui's Text snaps it: the flow reads it
+        // from this style, and plain text adds the row gap to it.
+        let line = window.pixel_snap(TEXT_DEFAULT.to_pixels(window.rem_size()) * LINE_HEIGHT);
         let text = self.text.clone();
         let selector = format!("{}:body", self.id);
         let blocks = blocks(lines(pieces(&text.body, &text.spans)))
             .into_iter()
             .map(|block| match block {
                 // An empty line keeps its height, as a blank line in the text.
-                Block::Text(text) if text.is_empty() => run(" ".to_owned()),
-                Block::Text(text) => run(text),
+                Block::Text(text) if text.is_empty() => run(" ".to_owned(), line),
+                Block::Text(text) => run(text, line),
                 Block::Row(items) => InlineFlow::new(
                     items
                         .into_iter()
@@ -351,7 +361,7 @@ impl RenderOnce for RichText {
             .gap_y(SPACE_3)
             .text_size(TEXT_DEFAULT)
             .text_color(theme.text)
-            .line_height(relative(LINE_HEIGHT))
+            .line_height(line)
             .children(blocks)
     }
 }
