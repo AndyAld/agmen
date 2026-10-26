@@ -1,0 +1,5 @@
+{
+  "name": "agmen",
+  "version": "0.1.0",
+  "description": "Spike S4: streams agmen messages into the session, wakes it on a DM, and guards edits."
+}

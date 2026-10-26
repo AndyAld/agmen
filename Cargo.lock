@@ -19,6 +19,12 @@ name = "agmen-proto"
 version = "0.1.0"
 
 [[package]]
+name = "anyhow"
+version = "1.0.104"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
+
+[[package]]
 name = "async-tungstenite"
 version = "0.29.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1002,6 +1008,13 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-rustls",
+]
+
+[[package]]
+name = "s4-fake-watch"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
 ]
 
 [[package]]
