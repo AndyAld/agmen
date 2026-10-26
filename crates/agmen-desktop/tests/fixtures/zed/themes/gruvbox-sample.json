@@ -1,21 +1,42 @@
 {
   "$schema": "https://zed.dev/schema/themes/v0.2.0.json",
-  "name": "Gruvbox Sample",
-  "author": "agmen test fixture",
+  "name": "Gruvbox Material Mix",
+  "author": "agmen test fixture, key shape and values of Andy's installed theme",
   "themes": [
     {
-      "name": "Gruvbox Sample Dark",
+      "name": "Gruvbox Material Dark Hard",
       "appearance": "dark",
       "style": {
         "background": "#1d2021",
-        "text": "#d8bf94",
+        "surface.background": "#1d2021",
+        "elevated_surface.background": "#282828",
+        "element.selected": "#3c3836",
+        "element.hover": "#282828",
         "border": "#3c3836",
+        "border.variant": "#282828",
+        "text": "#d8bf94",
+        "text.muted": "#e0c89e",
+        "text.placeholder": "#928374",
+        "text.accent": "#72b9a9",
+        "icon.muted": "#7c6f64",
+        "editor.background": "#1d2021",
+        "editor.line_number": "#504945",
+        "error": "#ed675f",
+        "warning": "#dda752",
+        "success": "#afbf5c",
+        "info": "#72b9a9",
+        "created": "#afbf5c",
+        "modified": "#dda752",
+        "deleted": "#ed675f",
         "terminal.ansi.red": "#ed675f",
-        "players": [{ "cursor": "#72b9a9" }, { "cursor": "#da7f98" }]
+        "players": [
+          { "cursor": "#72b9a9", "background": "#72b9a920", "selection": "#72b9a930" },
+          { "cursor": "#da7f98", "background": "#da7f9820", "selection": "#da7f9830" }
+        ]
       }
     },
     {
-      "name": "Gruvbox Sample Light",
+      "name": "Gruvbox Material Light Hard",
       "appearance": "light",
       "style": { "background": "#f9f5d7ff", "text": "#654735" }
     }

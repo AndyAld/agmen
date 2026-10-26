@@ -28,7 +28,11 @@ fn material_theme_found_by_name() {
 fn icon_theme_stem_beats_suffix() {
     let t = theme();
     assert_eq!(name(t.file("Cargo.lock")), "lock.svg");
-    assert_eq!(name(t.file("Cargo.toml")), "toml.svg");
+    assert_eq!(
+        name(t.file("Cargo.toml")),
+        "cargo.svg",
+        "its own stem key, not the toml suffix"
+    );
     assert_eq!(name(t.file("main.rs")), "rust.svg");
 }
 
@@ -36,7 +40,6 @@ fn icon_theme_stem_beats_suffix() {
 fn icon_theme_longest_suffix_wins() {
     // "tar.gz" beats "gz"; and gz.svg does not exist, so plain .gz falls to the default.
     assert_eq!(name(theme().file("logs.tar.gz")), "tgz.svg");
-    assert_eq!(name(theme().file("x.gz")), "file.svg");
 }
 
 #[test]
@@ -48,9 +51,24 @@ fn icon_theme_named_folder_open_and_closed() {
 }
 
 #[test]
-fn icon_theme_missing_file_falls_back() {
-    // An unknown type gets the theme's default icon.
+fn icon_theme_unknown_type_gets_default() {
     assert_eq!(name(theme().file("README.weird")), "file.svg");
+}
+
+#[test]
+fn icon_theme_missing_svg_falls_back_to_default() {
+    // "gz" maps to icons/gz.svg, which the extension does not ship.
+    assert_eq!(name(theme().file("x.gz")), "file.svg");
+}
+
+#[test]
+fn icon_theme_follows_zeds_order() {
+    let t = theme();
+    // The whole name is checked against stems before any suffix.
+    assert_eq!(name(t.file("azure-pipelines.yml")), "azure.svg");
+    assert_eq!(name(t.file("ci.yml")), "yaml.svg");
+    // With no suffix match, the part before the first dot is tried as a stem.
+    assert_eq!(name(t.file("Dockerfile.prod")), "docker.svg");
 }
 
 #[test]
@@ -69,14 +87,11 @@ fn icon_paths_stay_inside_the_theme() {
 }
 
 #[test]
-fn every_ui_icon_asset_exists() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets");
-    for icon in UiIcon::ALL {
-        assert!(root.join(icon.path()).is_file(), "{}", icon.path());
-        assert!(
-            crate::assets::Assets::get(icon.path()).is_some(),
-            "{}",
-            icon.path()
-        );
-    }
+fn icon_theme_parse_failures_are_named() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("broken/icon_themes");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("t.json"), "{ nope").unwrap();
+    let err = IconTheme::load(dir.path(), "Anything").unwrap_err();
+    assert!(err.to_string().contains("t.json"), "{err}");
 }

@@ -1,14 +1,12 @@
-//! Spike S8's list check. It opens a real window, so it runs only with
-//! `AGMEN_GUI=1`: `AGMEN_GUI=1 cargo nextest run -p agmen-desktop --release list_measures_10k_rows`.
+//! Spike S8's list check. It opens a real window and must run on a release
+//! build with the window visible, so it is ignored by default:
+//! `cargo nextest run -p agmen-desktop --release --run-ignored only list_measures_10k_rows`.
 
 use std::process::Command;
 
 #[test]
+#[ignore = "opens a window; run with --release --run-ignored only"]
 fn list_measures_10k_rows() {
-    if std::env::var_os("AGMEN_GUI").is_none() {
-        eprintln!("skipped: set AGMEN_GUI=1 to open a window");
-        return;
-    }
     let out = Command::new(env!("CARGO_BIN_EXE_agmen-desktop"))
         .args(["--spike", "list", "--autoscroll"])
         .output()
@@ -23,14 +21,26 @@ fn list_measures_10k_rows() {
     let field = |name: &str| -> f64 {
         line.split_whitespace()
             .find_map(|kv| kv.strip_prefix(&format!("{name}=")))
-            .unwrap()
+            .unwrap_or_else(|| panic!("no {name} in {line}"))
             .parse()
             .unwrap()
     };
-    assert!((field("frames") - 3000.0).abs() < f64::EPSILON);
-    assert!(field("lowest_row_reached") >= 9_990.0);
-    // macOS paces a hidden or tiled-away window at about 35 ms a frame
-    // whatever the row cost (ADR-0010), so this bounds stalls instead of
-    // asserting the 144 Hz p99 a visible window gets.
-    assert!(field("max_ms") < 100.0, "a frame stalled: {line}");
+    assert!(
+        (field("last_rendered_row") - 9_999.0).abs() < f64::EPSILON,
+        "the last row was never rendered"
+    );
+    assert!(
+        field("max_jump_rows") <= 10.0,
+        "the list jumped instead of scrolling"
+    );
+    // macOS paces a window that is not in front at about 35 ms a frame
+    // whatever the row cost (ADR-0010), so the spike times only frames shown
+    // while the window was active, and needs most of the run in front.
+    let (timed, skipped) = (field("frames"), field("inactive_frames"));
+    eprintln!("timed {timed} frames, skipped {skipped} while the window was not in front");
+    assert!(
+        timed >= 2_000.0,
+        "too few frames in front to measure; keep the window in front"
+    );
+    assert!(field("p99_ms") < 16.7, "p99 over one 60 Hz frame: {line}");
 }

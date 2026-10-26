@@ -2,7 +2,13 @@
 
 mod appearance;
 mod assets;
+mod backend;
+#[expect(
+    dead_code,
+    reason = "file icons get their first view in Task 11 (Project panel) of the desktop plan"
+)]
 mod icons;
+#[cfg(unix)]
 mod instance;
 mod notify;
 mod spike;
@@ -39,7 +45,14 @@ impl Launch {
             [] => Ok(Self::App),
             [flag, name, rest @ ..] if flag == "--spike" && name == "list" => match rest {
                 [] => Ok(Self::ListSpike { autoscroll: false }),
-                [a] if a == "--autoscroll" => Ok(Self::ListSpike { autoscroll: true }),
+                [a] if a == "--autoscroll" => {
+                    // Frame times from a debug build say nothing about the app.
+                    anyhow::ensure!(
+                        !cfg!(debug_assertions),
+                        "--autoscroll measures frame times; run a release build"
+                    );
+                    Ok(Self::ListSpike { autoscroll: true })
+                }
                 _ => anyhow::bail!(USAGE),
             },
             [flag, name] if flag == "--spike" && name == "notify" => Ok(Self::NotifySpike),
@@ -91,9 +104,9 @@ fn main() -> Result<()> {
                 watch_instance(listener, cx);
             }
             if let Err(err) = open_main_window(&launch, cx) {
-                // The run loop owns the process from here, so report and quit.
+                // The run loop owns the process from here, so report and exit 1.
                 eprintln!("agmen-desktop: {err:#}");
-                cx.quit();
+                std::process::exit(1);
             }
         });
     Ok(())
@@ -120,7 +133,8 @@ fn load_appearance(os: WindowAppearance) -> Appearance {
 
 /// Brings the app forward when a second launch hands over.
 fn watch_instance(listener: instance::Listener, cx: &mut App) {
-    // shortcut: polls every 250 ms; a channel the run loop wakes on would be better.
+    // shortcut: polls every 250 ms, so focus lags up to 250 ms and the app wakes 4 times a
+    // second; switch to a channel the run loop wakes on when idle wakeups matter.
     cx.spawn(async move |cx| {
         loop {
             cx.background_executor()
@@ -156,6 +170,7 @@ fn open_main_window(launch: &Launch, cx: &mut App) -> Result<()> {
         KeyBinding::new("cmd-q", Quit, None),
     ]);
     cx.on_action(|_: &Quit, cx| cx.quit());
+    assets::load_fonts(cx).context("loading the bundled fonts")?;
     let appearance = load_appearance(cx.window_appearance());
     let extensions = std::env::home_dir()
         .map(|home| appearance::zed_extensions_dir(&home))
@@ -172,7 +187,7 @@ fn open_main_window(launch: &Launch, cx: &mut App) -> Result<()> {
     let window = match launch {
         Launch::App => cx
             .open_window(options, |window, cx| {
-                let workspace = cx.new(|cx| Workspace::new(window, cx));
+                let workspace = cx.new(|cx| Workspace::new(backend::chat_snapshot(), window, cx));
                 window.focus(&workspace.focus_handle(cx), cx);
                 workspace
             })
@@ -210,8 +225,9 @@ mod tests {
             Launch::ListSpike { autoscroll: false }
         );
         assert_eq!(
-            Launch::parse(&args(&["--spike", "list", "--autoscroll"])).unwrap(),
-            Launch::ListSpike { autoscroll: true }
+            Launch::parse(&args(&["--spike", "list", "--autoscroll"])).is_ok(),
+            !cfg!(debug_assertions),
+            "autoscroll runs only in release builds"
         );
         assert_eq!(
             Launch::parse(&args(&["--spike", "notify"])).unwrap(),

@@ -22,7 +22,7 @@
 - Icons: UI icons are Lucide SVGs, embedded with `include_bytes!`, with Lucide's ISC notice in `crates/agmen-desktop/assets/icons/LICENSE-lucide.txt` and shown in Settings → About. File and folder icons are read at runtime from the person's installed Zed icon theme, and from the OS when there is none. Zed's own UI icon SVGs are never committed (no license of their own in a GPL-3.0-or-later repo).
 - Zed's files are read-only: agmen never writes under `~/.config/zed` or `~/Library/Application Support/Zed`.
 - agmen's settings: `~/.config/agmen/settings.toml` (spec 9.4), on macOS too, because the terminal UI reads the same file.
-- Look: 1440 by 900 window; colors from the theme, with the mockup's "Gruvbox Material Dark Hard" values as the built-in fallback (`console.py` lines 22 to 37); UI font from Zed's `ui_font_family` (default ".SystemUIFont", the mockup's SF Pro Text) at `ui_font_size` 15; code font from `buffer_font_family` "CaskaydiaCove Nerd Font Mono" at `buffer_font_size` 13. Sizes from `console.py`: title bar 38 px, status bar 28 px, left dock 272 px, right dock 340 px, tab bar 34 px, breadcrumb bar 32 px, tree rows 24 px, monospace cell 7.62 by 18 px at 13 px.
+- Look: 1440 by 900 window; colors from the theme, with the mockup's "Gruvbox Material Dark Hard" values as the built-in fallback (`console.py` lines 22 to 37); fonts and sizes as Zed shows them now (Andy, 2026-10-26): `ui_font_family` (unset means Zed's `.ZedSans`, IBM Plex Sans) at `ui_font_size` (15 for Andy), `buffer_font_family` (CaskaydiaCove Nerd Font Mono) at `buffer_font_size` (13); unset sizes use Zed's 16 and 15. IBM Plex Sans and Lilex ship in `assets/fonts/` under the SIL OFL 1.1. The window's rem size is `ui_font_size`, and text uses Zed's scale only (`rems_from_px` 16, 14, 12, 10 in `ui/tokens.rs`); code text uses the buffer font at its px size. The mockup's SF Pro Text and fixed 11 to 13 px sizes are superseded. Sizes from `console.py`: title bar 38 px, status bar 28 px, left dock 272 px, right dock 340 px, tab bar 34 px, breadcrumb bar 32 px, tree rows 24 px, monospace cell 7.62 by 18 px at 13 px.
 - Copy: plain words, no em or en dashes, in code, UI text, docs and commits. Commit messages: one short line, no trailers.
 - Gate, all green before every commit:
   ```sh
@@ -90,7 +90,8 @@
 
 ### Task 3: Virtualized 10,000-row list and text input with IME
 
-- [x] Done. Single-line input (ledger ruling); editing logic in `ui/text_edit.rs`; list test bounds stalls instead of asserting p99 (a hidden window is paced at 35 ms). Hand IME check still open.
+- [x] Done, except the hand check below. The input is multi-line on request (Andy, 2026-10-26): `TextInput::new(cx).multiline(max_lines)` wraps, grows to `max_lines`, then scrolls; Shift-Enter adds a newline and Enter submits; one line scrolls sideways; both paint inside a content mask; `set_text`; text is capped at 64 KiB. The spike scrolls only after the first layout, until the last row renders and back, and times only frames shown while the window is active; its test is `#[ignore]` and runs with `--release --run-ignored only`.
+- [ ] Hand IME check: type with Kotoeri (Japanese) and the emoji picker in the running app, and record what was typed in ADR-0010.
 
 **Files:**
 - Create: `src/ui/text_input.rs` (single and multi line input, the GPUI input-handler pattern from gpui's `examples/input.rs`), `src/ui/text_input_tests.rs`, `src/spike.rs` (`--spike list` mode)
@@ -124,7 +125,25 @@
 
 ### Task 5: Icons: Lucide, the Zed icon theme, and macOS file icons
 
-- [x] Done. `FileIcons` global resolves Zed theme, then Finder, then Lucide; file icons draw with `img()` (own colors), UI icons with `svg()` (tinted). Lucide's license shows in About (Task 17).
+- [x] Done. `FileIcons` global resolves Zed theme, then Finder, then Lucide; file icons draw with `img()` (own colors), UI icons with `svg()` (tinted). Lucide's license shows in About (Task 17). Interfaces as built: `UiIcon::render(color, size)` (the plan said `icon`); `IconTheme::load` returns `AppearanceError` (no separate `IconError`); `chevron_icons` is not read (Lucide chevrons are used); `FileIcons::icon(path, is_dir, open)` replaces `file_icon(name, is_dir, open, cx)` and looks up by file name and type, so the path need not exist. Finder icons are looked up by type (`iconForContentType`), cut to one 64 px representation (about 20 KB), on the background executor, with the Lucide icon until they arrive. Zed's lookup order: whole name, each suffix, then the first prefix, each in stems then suffixes, then `default`; a mapping to a missing SVG counts as no match. The ADR screenshot of Finder icons waits for Task 11's Project panel, the first view that draws file icons.
+
+### Task 2b: Marked's styles and themes
+
+- [ ] Done
+
+Andy's decision (2026-10-26): reuse what his own app Marked (`~/Projects/Marked`, MIT, Andy's project) does for color.
+
+**Files:** Modify `src/appearance/theme.rs`, `src/appearance/fallback.rs`, `src/appearance/mod.rs`, `src/appearance/zed.rs`; create `src/appearance/marked.rs`, `src/appearance/marked_tests.rs`.
+
+**Interfaces:**
+- `Theme` gains Marked's tokens where it lacks them: `element`, `accents: Vec<Hsla>`, `syntax: Vec<Hsla>` (an 8-color ramp), `selection`. `destructive` and `informational` are aliases of `error` and `info`, not new fields.
+- `marked::wallpaper_adaptive()` returns Marked's default palette "Wallpaper Adaptive (Balanced)" (Marked `src/theme.rs:32` to `80`: background `#101010b8`, accent `#68acd4`, the syntax ramp `#aea1db` to `#c5ab72`), offered as a built-in theme next to the Gruvbox fallback.
+- `marked::load_wallpaper_palette(path)` reads the wallpaper utility's `state.json` (`active_palette.accent`, `accents`, `syntax`, as Marked `src/theme.rs:84` to `130` does) and overlays it on the built-in palette. The file is at `%LOCALAPPDATA%/ZedWallpaperThemeButton/state.json`, which exists on Windows only today; on macOS the function is wired but finds nothing (`shortcut:` until the utility runs here).
+- Zed's `theme_overrides` (from `settings.json`, keyed by theme name, or `experimental.theme_overrides`) are applied over the active theme's style before it becomes a `Theme`.
+- The syntax colors for `ui/syntax.rs` (Task 10) come from the theme's `syntax` map, with Marked's Zed-style syntax JSON (Marked `src/theme.rs` near line 240) as the shape for the built-in themes.
+- Translucent backgrounds (alpha below 1) use GPUI's own window background appearance (`WindowBackgroundAppearance::Blurred` or `Transparent`). Do not copy Marked's `windows_blur.rs`, which uses `unsafe`.
+- [ ] **Step 1: Tests:** `wallpaper_adaptive_matches_marked` (accent `#68acd4`, eight syntax colors, background alpha 0xb8), `state_json_overrides_accent_and_syntax` (tempdir file), `missing_state_json_keeps_defaults`, `theme_overrides_replace_keys` (an override of `background` wins over the theme file), `translucent_theme_requests_blur`.
+- [ ] **Step 2:** Implement; gate; shot `chat` with the Marked theme chosen. **Commit** `Add Marked's palette and Zed theme overrides`
 
 **Files:**
 - Create: `crates/agmen-desktop/assets/icons/lucide/*.svg` (only the icons used: `users`, `folder-tree`, `git-branch`, `user`, `search`, `square-terminal`, `messages-square`, `bell`, `settings`, `chevron-down`, `chevron-right`, `chevron-left`, `sparkle`, `diff`, `pencil`, `x`, `check`, `plus`, `minus`, `corner-down-left`, `circle-alert`, `panel-right`, `file`, `folder`, `folder-open`), `assets/icons/LICENSE-lucide.txt`, `src/assets.rs` (GPUI `AssetSource`), `src/icons/mod.rs`, `src/icons/zed_theme.rs`, `src/icons/system.rs`, `src/icons/zed_theme_tests.rs`, `tests/fixtures/zed/icon_theme/icon_themes/fixture.json` plus three small SVGs
@@ -178,27 +197,30 @@ From here every task follows the same shape: write the view's tests (GPUI `TestA
 
 ### Task 7: Title bar, status bar, left dock Agents tab, right dock Listener panel
 
-- [ ] Done
+- [x] Done. Deviations: the component layer below came first; the dock tab strip uses 8 px gaps so it fits 272 px; tree depth 2 indents one more 14 px step; text uses Zed's text scale and code text the code font size, so mono values read 13 px where the mockup draws 12.
 
 Screens: `desktop-chat` (frame only), `desktop-listener-collapsed`.
 
-**Files:** Create `src/ui/title_bar.rs`, `src/ui/status_bar.rs`, `src/ui/agents_panel.rs`, `src/ui/listener_panel.rs`, `src/ui/agent_panel.rs` (right dock for a selected agent), `src/ui/kv.rs` (the two-column label/value sections), tests alongside. Modify `src/ui/workspace.rs`, `src/ui/dock.rs`.
+**Files:** Create `src/ui/title_bar.rs`, `src/ui/status_bar.rs`, `src/ui/agents_panel.rs`, `src/ui/listener_panel.rs`, `src/ui/agent_panel.rs` (right dock for a selected agent), `src/ui/format.rs`, `src/ui/tokens.rs`, `src/ui/components/`, tests alongside. Modify `src/ui/workspace.rs`, `src/ui/dock.rs`. The two-column label/value sections are `components::KvRow` and `KvSection`.
 
 **Interfaces:**
 - Consumes: `Snapshot`, `Theme`, `UiIcon`.
 - Produces: `AgentsPanel` emits `AgentsPanelEvent::Selected(IdentityId)`; the workspace swaps the right dock between `ListenerPanel` and `AgentPanel`. Status bar `StatusBar` shows needs-you count (red pill when above 0), online, alerts, worktrees, a context line, today's spend, a "Listener" toggle that appears only while the right dock is closed, and the right-side icon buttons with ⌘⇧P.
-- [ ] **Step 1: Tests:** `agents_panel_groups_and_folds` (folding "sean" hides 2 rows), `status_bar_shows_toggle_only_when_dock_closed`, `selecting_agent_shows_agent_panel`, `spend_formats_cents` (14.2 shows "$14.20 today"), `tokens_format_like_mockup` (96000 in, 8000 out, 6 h 40 min shows "96k in · 8k out · up 6 h 40 min").
-- [ ] **Step 2:** Implement with the mockup's text and colors: status dots ● ○ ◐ from `STATUS`, role labels from `ROLE`, harness names right-aligned, dimmed.
+- [x] **Step 0: Component layer.** `src/ui/tokens.rs` holds every size, spacing, radius and text size (Zed's text scale in rems: Large 16, Default 14, Small 12, XSmall 10 over 16; layout in px). `src/ui/components/` holds stateless `RenderOnce` components with builder methods that take colors only from `Theme`: `Label`, `Icon`, `IconButton`, `Button`, `Chip`, `Badge`, `Avatar`, `StatusDot`, `KeyHint`, `ListItem`, `Tab`, `Divider`, `KvRow`, `KvSection`, `ProgressBar`, and the `Color` names they resolve. Views compose them and add only layout. Nothing comes from Zed's `ui` crate (GPL-3.0-or-later); only gpui (Apache-2.0).
+- [x] **Step 1: Tests:** `agents_panel_groups_and_folds` (folding "sean" hides 2 rows), `status_bar_shows_toggle_only_when_dock_closed`, `selecting_agent_shows_agent_panel`, `spend_formats_cents` (14.2 shows "$14.20 today"), `tokens_format_like_mockup` (96000 in, 8000 out, 6 h 40 min shows "96k in · 8k out · up 6 h 40 min").
+- [x] **Step 2:** Implement with the mockup's text and colors: status dots ● ○ ◐ from `STATUS`, role labels from `ROLE`, harness names right-aligned, dimmed.
 - [ ] **Step 3:** Shots: `chat`, `listener-collapsed`; compare. Gate. **Commit** `Add the title bar, status bar, Agents dock and Listener panel`
+
+Differences: the ● ○ ◐ glyphs draw smaller in .ZedSans than in the mockup's SF Pro; section headings have no 6% letter spacing (gpui has none); ⟨ and ⟩ are Lucide chevrons; code values are 13 px, so some kv values wrap one more line.
 
 ### Task 8: Clickable references
 
 - [ ] Done
 
-**Files:** Create `src/refs.rs`, `src/refs_tests.rs`, `src/ui/ref_chip.rs` (chip and hover card).
+**Files:** Create `src/refs.rs`, `src/refs_tests.rs`, `src/ui/ref_chip.rs` (chip and hover card, built on `ui/components/` `Chip`).
 
 **Interfaces:**
-- Produces: `pub(crate) enum RefTarget { Agent(String), Person(String), Role(String), Branch { name: String, at: Option<String> }, Commit(String), File { path: String, lines: Option<(u32, u32)> }, Item(String), Lane(String), Pr(u32) }`; `pub(crate) struct Span { range: Range<usize>, target: RefTarget }`; `fn find_refs(body: &str, hub_refs: &[agmen_proto::Ref], known: &Known) -> Vec<Span>` (sorted, non-overlapping; hub refs first, then the regex from `console.py` `REF_RE`, each regex match kept only when `Known` confirms it: handles in the roster, branches and commits named in earlier DONE and CLAIM messages, files in fixture worktrees). `Known` is built from `Snapshot`.
+- Produces: `pub(crate) enum RefTarget { Agent(String), Person(String), Role(String), Branch { name: String, at: Option<String> }, Commit(String), File { path: String, lines: Option<(u32, u32)> }, Item(String), Lane(String), Pr(u32) }`; `pub(crate) struct Span { range: Range<usize>, target: RefTarget }`; `fn find_refs(body: &str, hub_refs: &[agmen_proto::Ref], known: &Known) -> Vec<Span>` (sorted, non-overlapping; hub refs first, then the regex from `console.py` `REF_RE`, each regex match kept only when `Known` confirms it: handles in the roster, branches and commits named in any earlier message body, DONE, CLAIM or hub ref, files in fixture worktrees). `Known` is built from `Snapshot`.
 - `RefChip` renders a colored chip (agent in its role color, others per `ref_color` in `console.py`); hover card per spec 9.3; click emits `OpenRef(RefTarget)`, ⌘-click `OpenRefInSplit(RefTarget)`.
 - [ ] **Step 1: Tests:** `refs_find_every_kind_in_chat_fixture` (the 9 fixture bodies give the chips the mockup shows, e.g. message 2: `4d9fdc8` commit, `src/main.rs:2-8` file with lines (2, 8), `@sean/a1` agent), `refs_ignore_non_commit_hex` ("abc1234" unknown stays plain), `refs_ignore_version_numbers`, `refs_reject_offsets_off_char_boundary` (a hub ref ending inside "é" is dropped, no panic), `refs_prefer_hub_ref_over_regex_overlap`, `refs_pr_and_item_and_lane`.
 - [ ] **Step 2:** Implement; regexes in `LazyLock`. Gate. **Commit** `Find and render clickable references`
@@ -213,7 +235,7 @@ Screens: `desktop-chat`.
 
 **Interfaces:**
 - Consumes: `TextInput`, `find_refs`, `RefChip`, `Backend::send`.
-- Produces: `Pane` with `tabs: Vec<Tab>`, `fn open(&mut self, item: TabItem, cx)`, `fn activate(...)`, `fn close(...)`; `pub(crate) enum TabItem { Chat, Agent(IdentityId), File { worktree, path }, Diff { worktree, path }, RoleFile(String), Plan, Spec(String), Settings(SettingsPage) }`. `ChatView` with `show_ledger: bool`. `Composer` shows the "to <target>" chip (default the listener), the model chip (Task 16 opens it), the input with the mockup's placeholder, and the ⏎ hint.
+- Produces: `Pane` with `tabs: Vec<Tab>`, `fn open(&mut self, item: TabItem, cx)`, `fn activate(...)`, `fn close(...)`; `pub(crate) enum TabItem { Chat, Agent(IdentityId), File { worktree, path }, Diff { worktree, path }, RoleFile(String), Plan, Spec(String), Settings(SettingsPage) }`. `ChatView` with `show_ledger: bool`. `Composer` shows the "to <target>" chip (default the listener), the model chip (Task 15 opens it), the input (`TextInput::multiline(6)`) with the mockup's placeholder, and the ⏎ hint.
 - [ ] **Step 1: Tests:** `chat_hides_ledger_by_default` (the GRANT line shows, other ledger verbs such as HEARTBEAT do not, until "Show ledger"), `reply_indents_under_parent`, `mention_of_me_gets_yellow_bar` (sean's FYI to @andy), `verb_badge_colors` (from `VERB_COLOR`), `message_wraps_long_token` (a 500-character token wraps within the pane width), `composer_sends_to_listener_by_default` (submit "hi": `Draft.to` is `andy/listen`), `composer_at_mention_overrides_target`. `cmd_click_ref_opens_split` (the center splits into two panes side by side, Zed style; `Workspace::split(direction: SplitDirection)` with `SplitDirection { Right, Down }`).
 - [ ] **Step 2:** Implement: avatar letter in role color, handle bold, role label, verb badge, time, body with chips; "Open in terminal ⌥O" chip on a local agent's DONE.
 - [ ] **Step 3:** Shot `chat`; compare. Gate. **Commit** `Add the chat pane with messages, references and composer`
@@ -238,7 +260,7 @@ Screens: `desktop-agent`, `desktop-role-file`.
 
 Screens: `desktop-project`, `desktop-project-tests-open`.
 
-**Files:** Create `src/ui/project_panel.rs`, `src/ui/scope_chip.rs` (worktree chip, shared with Task 12), tests alongside.
+**Files:** Create `src/ui/project_panel.rs`, `src/ui/scope_chip.rs` (worktree chip built on `ui/components/` `Chip`, shared with Task 12), tests alongside.
 
 **Interfaces:**
 - Consumes: `Snapshot.worktrees` (`WorktreeInfo { owner: IdentityId, branch: String, files: Vec<FileNode>, changes: Vec<FileChange>, commits: Vec<CommitInfo>, state: WorktreeState }`), `file_icon`, `CodeView`.
@@ -315,13 +337,20 @@ Screens: `desktop-settings-from-chat`, `desktop-settings-applied`.
 - [ ] **Step 1: Tests:** `widening_card_waits_for_apply`, `apply_turns_card_into_applied_with_undo`, `before_value_struck_through`.
 - [ ] **Step 2:** Implement; shots; compare. Gate. **Commit** `Add Apply, Cancel and Undo change cards in the chat`
 
-### Task 17: Settings → Appearance
+### Task 17: Settings → Appearance, and themes from Zed
 
 - [ ] Done
 
+Andy's decision (2026-10-26): the theme picker covers the themes Zed already has and Zed's theme marketplace. Research with sources: `.superpowers/sdd/mvp/zed-themes-research.md` in the main checkout.
+
+- Installed: themes in `~/.config/zed/themes/`, `~/Library/Application Support/Zed/extensions/installed/*/themes/*.json` and the index `extensions/index.json`, read-only.
+- Marketplace through `api.zed.dev`, GET only (HEAD returns 404): `GET /extensions?max_schema_version=1&provides=themes&filter=<query>`, `GET /extensions/{id}`, `GET /extensions/{id}/{version}/download`. The User-Agent names agmen and its version; the list is cached for 1 hour; errors back off (1, 2, 4 ... up to 60 minutes) and the picker says the marketplace is unreachable.
+- Installing copies the theme JSON with the extension's LICENSE and author into agmen's own themes folder (`~/.config/agmen/themes/<id>/`), never into Zed's. A theme with no license file cannot be installed. The picker credits Zed with a link to zed.dev/extensions and shows each theme's author, license and repository.
+- Tests add: `marketplace_list_parses_and_caches_an_hour` (a local HTTP fixture, not the real API), `install_refuses_theme_without_license`, `installed_theme_keeps_license_and_author`, `picker_lists_installed_before_marketplace`.
+
 Screens: `desktop-settings`.
 
-**Files:** Create `src/ui/settings_view.rs`, `src/ui/controls.rs` (toggle, segmented control, dropdown, stepper), tests alongside.
+**Files:** Create `src/ui/settings_view.rs`, `src/ui/controls.rs` (toggle, segmented control, dropdown, stepper, built on `ui/components/`), tests alongside.
 
 **Interfaces:**
 - Consumes: `AgmenSettings`, `ZedSettings`, the list of installed Zed themes and icon themes.
@@ -363,6 +392,26 @@ Screens: `desktop-plan`, `desktop-spec`, `desktop-plan-ready`, `desktop-kick-off
 - [ ] **Step 1:** Capture all 25 screens with `shot.sh` into `target/shots/`, build a side-by-side sheet (mockup left, app right) in the scratch dir, and list the remaining differences per screen in this file.
 - [ ] **Step 2:** `rg 'shortcut:' crates/agmen-desktop` and list each in ADR-0010's Consequences.
 - [ ] **Step 3:** Full gate; tell Andy it is ready for the review loop.
+
+## Work claimed by agmen-c7 (Andy, 2026-10-26)
+
+agmen-c7 builds these on branch `desktop/c7` and hands over SHAs to merge; skip them here: Task 16 (change cards); Task 17's controls (toggle, segmented, dropdown, stepper in `ui/components/`; the Settings view stays here); Task 13's `src/alerts.rs` logic and its tests (no banner, toast, chime or notification); Task 18's fuzzy filter `src/ui/palette_filter.rs` (the palette view and keymap stay here); Task 19's `src/plan.rs` logic and its tests. This file keeps one writer: tick those boxes on merge.
+
+## Mockup fixes to build (Andy, 2026-10-26)
+
+agmen-c7 found 31 mockup bugs (`.superpowers/sdd/desktop/findings-for-agent.md` items 27 to 57 in the main checkout, node ids in its `mockup-bugs.md`). Andy's decision: build each suggested fix, not the mockup as drawn, and leave `docs/mockups` alone. Each task notes the fixes in its Differences line:
+
+- Task 6 fixture: rv2 runs on an installed harness (opencode), not grok (28); "5 worktrees" in the status bar (29); the alert count is derived (chat 1, needs you 2, answered 1) (34); spend adds up (workers $13.78 plus listener $0.42 is $14.20; the ask frame shows listener $0.73 and a 15:52 Recent row) (36); andy/fx1 has run about 14 min, 10 working (39); one edit size, +2 -5, hunk `@@ -1,15 +1,12 @@` (41); rv2's worktree is detached @9e2a71c on C015, and adam/sec is dropped from Used by (51); sean/plan keeps one harness across projects (52); app.rs is in PROJECT (50).
+- Task 9: ledger bodies wrap (32); every tab reserves its close slot, one tab bar builder (40); REVIEW's badge color follows the verdict (42).
+- Task 8: no gap between a chip and punctuation after it (54).
+- Task 10: Roles rows show a role-colored dot (55); gutter deletion marks after lines 1, 3 and 4 (50).
+- Task 13: Revert and Reply lead to the answered state, Snooze dims the alert (43); ⌘R keeps the alert, ASK or picker open (45).
+- Task 14: the switch menu hangs from its `claude ▾` chip (27); agy's Update… and the generic row do not open the Grok dialog (38); command names are monospace chips, no backticks (48).
+- Task 15: the picker opens with the listener's own "codex · default", effort row hidden, and a footer line when a model of another agent runs one turn (31).
+- Task 16: Undo returns the card to its pending state, Cancel shows a cancelled card, Audit log is not a link (44).
+- Task 17: the Follow Zed knob uses a theme color (49); segmented controls draw no divider after the last option (57).
+- Task 18: the palette shows only what matches the query (30).
+- Task 19: the spec view has an approved state and links back where it came from (33); per-project status bar counts (35); person rows 26 px (46); the planning room uses the Agents dock builder (47); "2 specs" (53).
 
 ## Notes for Andy
 

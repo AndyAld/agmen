@@ -6,19 +6,60 @@
     {
       "name": "Material Icon Theme",
       "appearance": "dark",
-      "directory_icons": { "collapsed": "./icons/folder.svg", "expanded": "./icons/folder-open.svg" },
-      "named_directory_icons": {
-        "src": { "collapsed": "./icons/folder-src.svg", "expanded": "./icons/folder-src-open.svg" }
+      "directory_icons": {
+        "collapsed": "./icons/folder.svg",
+        "expanded": "./icons/folder-open.svg"
       },
-      "file_stems": { "Cargo.toml": "toml", "Cargo.lock": "lock" },
-      "file_suffixes": { "rs": "rust", "toml": "toml", "tar.gz": "tgz", "gz": "gz" },
+      "named_directory_icons": {
+        "src": {
+          "collapsed": "./icons/folder-src.svg",
+          "expanded": "./icons/folder-src-open.svg"
+        }
+      },
+      "file_stems": {
+        "Cargo.toml": "cargo",
+        "Cargo.lock": "lock",
+        "azure-pipelines.yml": "azure",
+        "Dockerfile": "docker"
+      },
+      "file_suffixes": {
+        "rs": "rust",
+        "toml": "toml",
+        "tar.gz": "tgz",
+        "gz": "gz",
+        "yml": "yaml"
+      },
       "file_icons": {
-        "default": { "path": "./icons/file.svg" },
-        "rust": { "path": "./icons/rust.svg" },
-        "toml": { "path": "./icons/toml.svg" },
-        "lock": { "path": "./icons/lock.svg" },
-        "tgz": { "path": "./icons/tgz.svg" },
-        "gz": { "path": "./icons/gz.svg" }
+        "default": {
+          "path": "./icons/file.svg"
+        },
+        "rust": {
+          "path": "./icons/rust.svg"
+        },
+        "toml": {
+          "path": "./icons/toml.svg"
+        },
+        "lock": {
+          "path": "./icons/lock.svg"
+        },
+        "tgz": {
+          "path": "./icons/tgz.svg"
+        },
+        "gz": {
+          "path": "./icons/gz.svg"
+        },
+        "cargo": {
+          "path": "./icons/cargo.svg"
+        },
+        "docker": {
+          "path": "./icons/docker.svg"
+        },
+        "azure": {
+          "path": "./icons/azure.svg"
+        },
+        "yaml": {
+          "path": "./icons/yaml.svg"
+        }
       }
     }
   ]

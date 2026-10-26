@@ -48,13 +48,6 @@ pub(crate) struct Theme {
 impl Theme {
     /// A role's color, from the theme's player palette so it stays readable
     /// in light and dark themes. Unknown roles get the muted text color.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the Agents dock uses it in Task 7 of the desktop plan"
-        )
-    )]
     pub(crate) fn role_color(&self, role: &str) -> Hsla {
         let slot = match role {
             "planner" => 0,
@@ -87,9 +80,17 @@ impl Theme {
         }
         let players = match style.get("players").and_then(Value::as_array) {
             Some(list) if !list.is_empty() => {
+                // A player without a cursor color keeps the fallback's color
+                // for that slot, so later slots do not shift.
                 let mut out: Vec<Hsla> = list
                     .iter()
-                    .filter_map(|p| p.get("cursor").and_then(parse_color))
+                    .enumerate()
+                    .map(|(i, p)| {
+                        p.get("cursor")
+                            .and_then(parse_color)
+                            .or_else(|| base.players.get(i).copied())
+                            .unwrap_or(base.text)
+                    })
                     .collect();
                 // Keep every slot role_color uses, even for short palettes.
                 out.extend(base.players.iter().skip(out.len()).copied());
@@ -169,9 +170,11 @@ pub(crate) fn load_theme(
     extensions_dir: &Path,
     name: &str,
 ) -> Result<Theme, AppearanceError> {
+    let mut unreadable = Vec::new();
     for path in theme_files(zed_dir, extensions_dir) {
-        // A file that does not parse is someone else's problem; keep looking.
+        // A file that does not parse is skipped, and named if nothing matches.
         let Ok(family) = read_jsonc::<Family>(&path) else {
+            unreadable.push(path);
             continue;
         };
         if let Some(theme) = family.themes.into_iter().find(|t| t.name == name) {
@@ -181,7 +184,14 @@ pub(crate) fn load_theme(
             ));
         }
     }
-    Err(AppearanceError::ThemeNotFound(name.to_owned()))
+    if unreadable.is_empty() {
+        Err(AppearanceError::ThemeNotFound(name.to_owned()))
+    } else {
+        Err(AppearanceError::ThemeNotFoundSkipped {
+            name: name.to_owned(),
+            skipped: unreadable,
+        })
+    }
 }
 
 fn theme_files(zed_dir: &Path, extensions_dir: &Path) -> Vec<PathBuf> {

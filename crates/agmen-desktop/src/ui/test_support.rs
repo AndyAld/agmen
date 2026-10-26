@@ -1,0 +1,67 @@
+//! Helpers for GPUI view tests.
+
+use gpui::{
+    AnyElement, Context, IntoElement, ParentElement as _, Pixels, Render, Size, Styled as _,
+    TestAppContext, VisualTestContext, Window, div,
+};
+use gpui::{InteractiveElement as _, Modifiers};
+
+use super::tokens::MOCKUP_REM;
+use crate::appearance::{Appearance, IconThemeChoice};
+use crate::icons::FileIcons;
+
+/// Sets the globals every view reads: the built-in appearance and Lucide
+/// file icons.
+pub(crate) fn init(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        cx.set_global(Appearance::builtin());
+        let (icons, _) = FileIcons::new(&IconThemeChoice::Lucide, std::path::Path::new(""));
+        cx.set_global(icons);
+    });
+}
+
+/// A view that renders one component, wrapped in a box sized to it.
+struct Harness(Box<dyn Fn() -> AnyElement>);
+
+impl Render for Harness {
+    fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        window.set_rem_size(MOCKUP_REM);
+        div()
+            .size_full()
+            .flex()
+            .items_start()
+            .child(div().debug_selector(|| "smoke".into()).child((self.0)()))
+    }
+}
+
+/// Renders `make()` in a test window and returns its laid out size.
+pub(crate) fn rendered_size(
+    cx: &mut TestAppContext,
+    make: impl Fn() -> AnyElement + 'static,
+) -> Size<Pixels> {
+    init(cx);
+    let (_, cx) = cx.add_window_view(|_, _| Harness(Box::new(make)));
+    redraw(cx);
+    cx.debug_bounds("smoke")
+        .map(|bounds| bounds.size)
+        .unwrap_or_default()
+}
+
+/// Draws the window once so `debug_bounds` sees the current state.
+pub(crate) fn redraw(cx: &mut VisualTestContext) {
+    cx.update(|window, cx| {
+        window.refresh();
+        // The arena is cleared on the next frame.
+        drop(window.draw(cx));
+    });
+}
+
+/// Clicks the middle of the element with debug selector `selector`.
+pub(crate) fn click(cx: &mut VisualTestContext, selector: &'static str) {
+    redraw(cx);
+    let bounds = cx
+        .debug_bounds(selector)
+        .unwrap_or_else(|| panic!("nothing is drawn with selector {selector}"));
+    cx.simulate_click(bounds.center(), Modifiers::none());
+    redraw(cx);
+}

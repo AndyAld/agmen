@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use gpui::TestAppContext;
+use gpui::{AppContext as _, TestAppContext};
 
 use super::*;
 use crate::appearance::Appearance;
@@ -61,4 +61,126 @@ fn input_backspace_key_deletes(cx: &mut TestAppContext) {
     cx.simulate_input("ab");
     cx.simulate_keystrokes("backspace");
     input.read_with(cx, |input, _| assert_eq!(input.text(), "a"));
+}
+
+/// A 300 px wide window holding one input, so wrapping is testable.
+struct Host(gpui::Entity<TextInput>);
+
+impl gpui::Render for Host {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().w(px(300.)).child(self.0.clone())
+    }
+}
+
+fn setup_with(
+    cx: &mut TestAppContext,
+    build: impl FnOnce(TextInput) -> TextInput + 'static,
+) -> (gpui::Entity<TextInput>, &mut gpui::VisualTestContext) {
+    cx.update(|cx| {
+        cx.set_global(Appearance::builtin());
+        bind_keys(cx);
+    });
+    let (host, cx) = cx.add_window_view(|_, cx| Host(cx.new(|cx| build(TextInput::new(cx)))));
+    let input = host.read_with(cx, |host, _| host.0.clone());
+    input.update_in(cx, |input, window, cx| {
+        input.focus_handle(cx).focus(window, cx)
+    });
+    cx.run_until_parked();
+    (input, cx)
+}
+
+#[gpui::test]
+fn shift_enter_inserts_newline_and_enter_sends_all(cx: &mut TestAppContext) {
+    let (input, cx) = setup_with(cx, |i| i.multiline(6));
+    let sent = Rc::new(RefCell::new(Vec::new()));
+    let sink = sent.clone();
+    cx.update(|_, cx| {
+        cx.subscribe(&input, move |_, event: &TextInputEvent, _| {
+            let TextInputEvent::Submit(text) = event;
+            sink.borrow_mut().push(text.clone());
+        })
+        .detach();
+    });
+    cx.simulate_input("a");
+    cx.simulate_keystrokes("shift-enter");
+    cx.simulate_input("b");
+    input.read_with(cx, |input, _| assert_eq!(input.text(), "a\nb"));
+    cx.simulate_keystrokes("enter");
+    assert_eq!(*sent.borrow(), vec!["a\nb".to_owned()]);
+}
+
+#[gpui::test]
+fn single_line_ignores_shift_enter(cx: &mut TestAppContext) {
+    let (input, cx) = setup(cx);
+    cx.simulate_input("a");
+    cx.simulate_keystrokes("shift-enter");
+    input.read_with(cx, |input, _| assert_eq!(input.text(), "a"));
+}
+
+#[gpui::test]
+fn set_text_replaces_and_puts_cursor_at_end(cx: &mut TestAppContext) {
+    let (input, cx) = setup(cx);
+    input.update_in(cx, |input, window, cx| input.set_text("hello", window, cx));
+    cx.simulate_input("!");
+    input.read_with(cx, |input, _| assert_eq!(input.text(), "hello!"));
+}
+
+#[gpui::test]
+fn long_token_keeps_cursor_in_bounds(cx: &mut TestAppContext) {
+    for multiline in [false, true] {
+        let (input, cx) = if multiline {
+            setup_with(cx, |i| i.multiline(6))
+        } else {
+            setup(cx)
+        };
+        let token = "x".repeat(500);
+        input.update_in(cx, |input, window, cx| input.set_text(&token, window, cx));
+        cx.run_until_parked();
+        input.read_with(cx, |input, _| {
+            let (bounds, cursor) = (input.last_bounds.unwrap(), input.last_cursor.unwrap());
+            assert!(
+                bounds.contains(&cursor.origin),
+                "multiline {multiline}: cursor {cursor:?} outside {bounds:?}"
+            );
+        });
+        if multiline {
+            input.read_with(cx, |input, _| {
+                assert!(input.visual_lines > 1, "a long token wraps")
+            });
+        }
+    }
+}
+
+#[gpui::test]
+fn multiline_grows_to_max_lines(cx: &mut TestAppContext) {
+    let (input, cx) = setup_with(cx, |i| i.multiline(3));
+    let tall = (0..10)
+        .map(|n| n.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    input.update_in(cx, |input, window, cx| input.set_text(&tall, window, cx));
+    cx.run_until_parked();
+    let lh = cx.update(|window, _| window.line_height());
+    input.read_with(cx, |input, _| {
+        let height = input.last_bounds.unwrap().size.height;
+        assert!(
+            (height - lh * 3.0).abs() < gpui::px(0.5),
+            "height {height:?}, line {lh:?}"
+        );
+    });
+}
+
+#[gpui::test]
+fn up_and_down_move_between_lines(cx: &mut TestAppContext) {
+    let (input, cx) = setup_with(cx, |i| i.multiline(6));
+    input.update_in(cx, |input, window, cx| {
+        input.set_text("abc\ndef", window, cx)
+    });
+    cx.run_until_parked();
+    cx.simulate_keystrokes("up");
+    cx.simulate_input("X");
+    input.read_with(cx, |input, _| assert_eq!(input.text(), "abcX\ndef"));
+    cx.simulate_keystrokes("down");
+    cx.simulate_input("Y");
+    input.read_with(cx, |input, _| assert_eq!(input.text(), "abcX\ndefY"));
 }

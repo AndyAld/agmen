@@ -24,7 +24,7 @@ pub(crate) fn gruvbox_material_dark_hard() -> Theme {
         surface: hex(bg),
         elevated_surface: hex(surf),
         element_selected: hex(sel),
-        element_hover: hex(sel),
+        element_hover: hex(surf),
         border: hex(sel),
         border_variant: hex(surf),
         text: hex(text),

@@ -53,46 +53,75 @@ impl IconTheme {
     ///
     /// # Errors
     ///
-    /// When no installed extension defines it.
+    /// When no installed extension defines it; the error names the folders
+    /// and files that could not be read on the way.
     pub(crate) fn load(extensions_dir: &Path, name: &str) -> Result<Self, AppearanceError> {
-        let mut roots: Vec<PathBuf> = fs::read_dir(extensions_dir)
-            .map(|dir| dir.flatten().map(|e| e.path()).collect())
-            .unwrap_or_default();
+        let mut unreadable = Vec::new();
+        let mut roots = match fs::read_dir(extensions_dir) {
+            Ok(dir) => entries(dir, extensions_dir, &mut unreadable),
+            Err(err) => {
+                return Err(AppearanceError::Io {
+                    path: extensions_dir.to_owned(),
+                    source: err,
+                });
+            }
+        };
         roots.sort();
         for root in roots {
-            let Ok(files) = fs::read_dir(root.join("icon_themes")) else {
+            let themes_dir = root.join("icon_themes");
+            let Ok(dir) = fs::read_dir(&themes_dir) else {
+                // Most extensions ship no icon themes; that is not an error.
                 continue;
             };
-            let mut files: Vec<PathBuf> = files.flatten().map(|e| e.path()).collect();
+            let mut files = entries(dir, &themes_dir, &mut unreadable);
             files.sort();
             for file in files
                 .iter()
                 .filter(|p| p.extension().is_some_and(|e| e == "json"))
             {
-                // A theme file that does not parse is skipped, not fatal.
                 let Ok(family) = read_jsonc::<Family>(file) else {
+                    unreadable.push(file.clone());
                     continue;
                 };
                 if let Some(theme) = family.themes.into_iter().find(|t| t.name == name) {
+                    let root = root.canonicalize().map_err(|source| AppearanceError::Io {
+                        path: root.clone(),
+                        source,
+                    })?;
                     return Ok(Self { root, theme });
                 }
             }
         }
-        Err(AppearanceError::ThemeNotFound(name.to_owned()))
+        if unreadable.is_empty() {
+            Err(AppearanceError::ThemeNotFound(name.to_owned()))
+        } else {
+            Err(AppearanceError::ThemeNotFoundSkipped {
+                name: name.to_owned(),
+                skipped: unreadable,
+            })
+        }
     }
 
-    /// The icon for a file named `name`: the exact name, then the longest
-    /// suffix (`tar.gz` before `gz`), then the theme's default, the order
-    /// Zed uses. `None` when the mapped SVG is missing or outside the theme.
+    /// The icon for a file named `name`, in Zed's order: the whole name, then
+    /// each suffix after a dot (longest first), each looked up in the stems
+    /// and then the suffixes; then the part before the first dot; then the
+    /// theme's `default`. A mapping whose SVG is missing, or lies outside the
+    /// extension, counts as no match, so the search goes on.
     pub(crate) fn file(&self, name: &str) -> Option<PathBuf> {
-        let by_stem = self.theme.file_stems.get(name);
-        let by_suffix = || {
-            name.match_indices('.')
-                .map(|(i, _)| &name[i + 1..])
-                .find_map(|suffix| self.theme.file_suffixes.get(suffix))
+        let lookup = |key: &str| {
+            self.theme
+                .file_stems
+                .get(key)
+                .or_else(|| self.theme.file_suffixes.get(key))
+                .and_then(|typ| self.icon(typ))
         };
-        let key = by_stem.or_else(by_suffix);
-        key.and_then(|k| self.icon(k))
+        let suffixes = name.match_indices('.').map(|(i, _)| &name[i + 1..]);
+        let first_prefix = name.split_once('.').map(|(prefix, _)| prefix);
+        std::iter::once(name)
+            .chain(suffixes)
+            .chain(first_prefix)
+            .filter(|key| !key.is_empty())
+            .find_map(lookup)
             .or_else(|| self.icon("default"))
     }
 
@@ -132,3 +161,19 @@ impl IconTheme {
         (path.starts_with(&root) && path.is_file()).then_some(path)
     }
 }
+
+/// The paths in `dir`, recording entries that cannot be read under `at`.
+fn entries(dir: fs::ReadDir, at: &Path, unreadable: &mut Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for entry in dir {
+        match entry {
+            Ok(entry) => out.push(entry.path()),
+            Err(_) => unreadable.push(at.to_owned()),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+#[path = "zed_theme_tests.rs"]
+mod tests;

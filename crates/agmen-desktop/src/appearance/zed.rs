@@ -20,7 +20,7 @@ pub(crate) enum Mode {
     System,
 }
 
-/// Zed's `theme` setting: a name, or a light and dark pair.
+/// Zed's `theme` and `icon_theme` settings: a name, or a light and dark pair.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize)]
 #[serde(untagged)]
 pub(crate) enum ThemeChoice {
@@ -50,27 +50,19 @@ impl ThemeChoice {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct ZedSettings {
     pub(crate) theme: Option<ThemeChoice>,
-    pub(crate) icon_theme: Option<String>,
+    pub(crate) icon_theme: Option<ThemeChoice>,
     pub(crate) fonts: FontPrefs,
 }
 
 #[derive(Deserialize)]
 struct Raw {
     theme: Option<ThemeChoice>,
-    icon_theme: Option<IconThemeSetting>,
+    icon_theme: Option<ThemeChoice>,
     ui_font_family: Option<String>,
     ui_font_size: Option<f32>,
     buffer_font_family: Option<String>,
     buffer_font_size: Option<f32>,
     terminal: Option<RawTerminal>,
-}
-
-/// Zed's `icon_theme` is a name or a light and dark pair, like `theme`.
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum IconThemeSetting {
-    Named(String),
-    BySystem { dark: String },
 }
 
 #[derive(Deserialize)]
@@ -90,9 +82,7 @@ pub(crate) fn read_zed_settings(dir: &Path) -> Result<ZedSettings, AppearanceErr
     let terminal = raw.terminal;
     Ok(ZedSettings {
         theme: raw.theme,
-        icon_theme: raw.icon_theme.map(|t| match t {
-            IconThemeSetting::Named(name) | IconThemeSetting::BySystem { dark: name } => name,
-        }),
+        icon_theme: raw.icon_theme,
         fonts: FontPrefs {
             ui_family: raw.ui_font_family,
             ui_size: raw.ui_font_size,

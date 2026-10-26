@@ -42,6 +42,36 @@ static FILES: &[(&str, &[u8])] = lucide![
     "x",
 ];
 
+macro_rules! fonts {
+    ($($path:literal),* $(,)?) => {
+        &[$(include_bytes!(concat!("../assets/fonts/", $path)) as &[u8]),*]
+    };
+}
+
+/// Zed's default fonts, which Zed itself bundles: IBM Plex Sans (`.ZedSans`)
+/// and Lilex (`.ZedMono`), both under the SIL Open Font License 1.1, whose
+/// text ships next to them. GPUI maps the dotted names to these families.
+static FONTS: &[&[u8]] = fonts![
+    "ibm-plex-sans/IBMPlexSans-Regular.ttf",
+    "ibm-plex-sans/IBMPlexSans-Italic.ttf",
+    "ibm-plex-sans/IBMPlexSans-SemiBold.ttf",
+    "ibm-plex-sans/IBMPlexSans-SemiBoldItalic.ttf",
+    "lilex/Lilex-Regular.ttf",
+    "lilex/Lilex-Italic.ttf",
+    "lilex/Lilex-Bold.ttf",
+    "lilex/Lilex-BoldItalic.ttf",
+];
+
+/// Registers the bundled fonts with GPUI's text system.
+///
+/// # Errors
+///
+/// When the text system rejects a font file.
+pub(crate) fn load_fonts(cx: &gpui::App) -> gpui::Result<()> {
+    cx.text_system()
+        .add_fonts(FONTS.iter().map(|bytes| Cow::Borrowed(*bytes)).collect())
+}
+
 /// Lucide's ISC license, which must ship with the icons (shown in About).
 #[expect(
     dead_code,
@@ -73,5 +103,18 @@ impl AssetSource for Assets {
             .filter(|(p, _)| p.starts_with(path))
             .map(|(p, _)| SharedString::from(*p))
             .collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bundled_fonts_are_truetype() {
+        assert_eq!(FONTS.len(), 8);
+        for font in FONTS {
+            assert!(font.starts_with(&[0, 1, 0, 0]), "not a TrueType file");
+        }
     }
 }

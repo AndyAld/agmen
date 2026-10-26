@@ -9,10 +9,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, Global, Hsla, Image, ImageFormat, IntoElement as _, Pixels, Styled as _, Svg, img,
-    svg,
+    AnyElement, App, Global, Hsla, Image, ImageFormat, IntoElement as _, Pixels, Styled as _, Svg,
+    img, svg,
 };
 
+use system::IconKind;
 pub(crate) use zed_theme::IconTheme;
 
 use crate::appearance::IconThemeChoice;
@@ -38,18 +39,28 @@ impl FileIcon {
     }
 }
 
+/// An OS icon lookup: running, or done (with no icon when the OS had none).
+#[derive(Debug, Clone)]
+enum Slot {
+    Pending,
+    Ready(Option<Arc<Image>>),
+}
+
 /// Resolves file and folder icons: the Zed icon theme, then the OS, then
-/// Lucide. Held as a GPUI global; OS icons are cached by file type.
+/// Lucide. Held as a GPUI global. OS icons are looked up by type on the
+/// background executor; until one arrives the Lucide icon stands in.
 #[derive(Debug)]
 pub(crate) struct FileIcons {
     theme: Option<IconTheme>,
     system: bool,
-    cache: RefCell<HashMap<String, Option<Arc<Image>>>>,
+    cache: RefCell<HashMap<IconKind, Slot>>,
+    wanted: RefCell<Vec<IconKind>>,
 }
 
 impl Global for FileIcons {}
 
-/// OS icons are cached per file type; past this many types, they are not.
+/// OS icons are cached per file type; past this many types, they are not
+/// looked up at all (about 20 KB each).
 const MAX_CACHED_TYPES: usize = 512;
 
 impl FileIcons {
@@ -72,11 +83,13 @@ impl FileIcons {
             theme,
             system,
             cache: RefCell::new(HashMap::new()),
+            wanted: RefCell::new(Vec::new()),
         };
         (icons, warning)
     }
 
-    /// The icon for the file or folder at `path`.
+    /// The icon for a file or folder named by the last part of `path`. Call
+    /// [`FileIcons::fetch_wanted`] after a frame that asked for icons.
     pub(crate) fn icon(&self, path: &Path, is_dir: bool, open: bool) -> FileIcon {
         let name = path
             .file_name()
@@ -93,7 +106,7 @@ impl FileIcons {
             return FileIcon::Svg(svg);
         }
         if self.system
-            && let Some(image) = self.system_icon(path, is_dir)
+            && let Some(image) = self.system_icon(icon_kind(path, is_dir))
         {
             return FileIcon::Image(image);
         }
@@ -104,25 +117,55 @@ impl FileIcons {
         })
     }
 
-    fn system_icon(&self, path: &Path, is_dir: bool) -> Option<Arc<Image>> {
-        let key = if is_dir {
-            "/folder".to_owned()
-        } else {
-            path.extension()
-                .and_then(|e| e.to_str())
-                .map_or_else(|| "/none".to_owned(), str::to_ascii_lowercase)
-        };
-        if let Some(hit) = self.cache.borrow().get(&key) {
-            return hit.clone();
-        }
-        let image = system::icon_tiff(path)
-            .map(|tiff| Arc::new(Image::from_bytes(ImageFormat::Tiff, tiff)));
+    fn system_icon(&self, kind: IconKind) -> Option<Arc<Image>> {
         let mut cache = self.cache.borrow_mut();
-        if cache.len() < MAX_CACHED_TYPES {
-            cache.insert(key, image.clone());
+        match cache.get(&kind) {
+            Some(Slot::Ready(image)) => image.clone(),
+            Some(Slot::Pending) => None,
+            None => {
+                if cache.len() < MAX_CACHED_TYPES {
+                    cache.insert(kind.clone(), Slot::Pending);
+                    self.wanted.borrow_mut().push(kind);
+                }
+                None
+            }
         }
-        image
     }
+
+    /// Looks up, off the UI thread, every OS icon that frames asked for, and
+    /// repaints when each one arrives.
+    pub(crate) fn fetch_wanted(cx: &mut App) {
+        let wanted = std::mem::take(&mut *cx.global::<Self>().wanted.borrow_mut());
+        for kind in wanted {
+            cx.spawn(async move |cx| {
+                let lookup = kind.clone();
+                let tiff = cx
+                    .background_executor()
+                    .spawn(async move { system::icon_tiff(&lookup) })
+                    .await;
+                let image = tiff.map(|bytes| Arc::new(Image::from_bytes(ImageFormat::Tiff, bytes)));
+                cx.update(|cx| {
+                    cx.global::<Self>()
+                        .cache
+                        .borrow_mut()
+                        .insert(kind, Slot::Ready(image));
+                    cx.refresh_windows();
+                });
+            })
+            .detach();
+        }
+    }
+}
+
+fn icon_kind(path: &Path, is_dir: bool) -> IconKind {
+    if is_dir {
+        return IconKind::Folder;
+    }
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map_or(IconKind::Plain, |e| {
+            IconKind::Extension(e.to_ascii_lowercase())
+        })
 }
 
 /// agmen's UI icons, all Lucide (ISC).
@@ -234,5 +277,83 @@ impl UiIcon {
 }
 
 #[cfg(test)]
-#[path = "zed_theme_tests.rs"]
-mod tests;
+mod tests {
+    use std::path::Path;
+
+    use gpui::TestAppContext;
+
+    use super::*;
+
+    #[test]
+    fn every_ui_icon_asset_exists() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets");
+        // A new variant must be added to ALL: this match stops compiling otherwise.
+        for icon in UiIcon::ALL {
+            match icon {
+                UiIcon::Agents
+                | UiIcon::Project
+                | UiIcon::Git
+                | UiIcon::Roles
+                | UiIcon::Search
+                | UiIcon::Terminal
+                | UiIcon::Chat
+                | UiIcon::Bell
+                | UiIcon::Settings
+                | UiIcon::ChevronDown
+                | UiIcon::ChevronRight
+                | UiIcon::ChevronLeft
+                | UiIcon::Sparkle
+                | UiIcon::Diff
+                | UiIcon::Pencil
+                | UiIcon::Close
+                | UiIcon::Check
+                | UiIcon::Plus
+                | UiIcon::Minus
+                | UiIcon::Enter
+                | UiIcon::Alert
+                | UiIcon::PanelRight
+                | UiIcon::File
+                | UiIcon::Folder
+                | UiIcon::FolderOpen => {}
+            }
+            assert!(root.join(icon.path()).is_file(), "{}", icon.path());
+            assert!(
+                crate::assets::Assets::get(icon.path()).is_some(),
+                "{}",
+                icon.path()
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn os_icons_arrive_in_the_background(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let (icons, _) = FileIcons::new(&IconThemeChoice::System, Path::new(""));
+            cx.set_global(icons);
+        });
+        let first = cx.read(|cx| {
+            cx.global::<FileIcons>()
+                .icon(Path::new("a.rs"), false, false)
+        });
+        assert!(matches!(first, FileIcon::Ui(UiIcon::File)), "{first:?}");
+        cx.update(FileIcons::fetch_wanted);
+        cx.run_until_parked();
+        let later = cx.read(|cx| {
+            cx.global::<FileIcons>()
+                .icon(Path::new("b.rs"), false, false)
+        });
+        if cfg!(target_os = "macos") {
+            assert!(matches!(later, FileIcon::Image(_)), "{later:?}");
+        }
+    }
+
+    #[test]
+    fn folders_and_files_get_their_kind() {
+        assert_eq!(icon_kind(Path::new("src"), true), IconKind::Folder);
+        assert_eq!(
+            icon_kind(Path::new("x/Main.RS"), false),
+            IconKind::Extension("rs".into())
+        );
+        assert_eq!(icon_kind(Path::new("Makefile"), false), IconKind::Plain);
+    }
+}

@@ -26,8 +26,16 @@ pub(crate) enum AppearanceError {
     TooLarge { path: PathBuf, len: u64 },
     #[error("cannot parse {}: {message}", path.display())]
     Parse { path: PathBuf, message: String },
+    #[error("cannot write {}: {message}", path.display())]
+    Serialize { path: PathBuf, message: String },
     #[error("no installed Zed theme is named \"{0}\"")]
     ThemeNotFound(String),
+    #[error(
+        "no installed Zed theme is named \"{name}\" ({} theme files could not be read: {})",
+        skipped.len(),
+        skipped.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
+    )]
+    ThemeNotFoundSkipped { name: String, skipped: Vec<PathBuf> },
 }
 
 /// Whether the OS is in light or dark mode right now.
@@ -74,40 +82,26 @@ impl Fonts {
                 .unwrap_or(default)
                 .clamp(*FONT_SIZES.start(), *FONT_SIZES.end()))
         };
-        let code_size = size(prefs.code_size, 13.0);
+        // Zed's own defaults (assets/settings/default.json) for unset keys.
+        let code_size = size(prefs.code_size, 15.0);
         Self {
             ui_family: prefs
                 .ui_family
                 .clone()
-                .unwrap_or_else(|| ".SystemUIFont".into())
+                .unwrap_or_else(|| ".ZedSans".into())
                 .into(),
-            ui_size: size(prefs.ui_size, 15.0),
+            ui_size: size(prefs.ui_size, 16.0),
             code_family: prefs
                 .code_family
                 .clone()
-                .unwrap_or_else(|| "Menlo".into())
+                .unwrap_or_else(|| ".ZedMono".into())
                 .into(),
             code_size,
             code_ligatures: prefs.code_ligatures.unwrap_or(true),
             terminal_family: prefs.terminal_family.clone().map(Into::into),
             terminal_size: prefs
                 .terminal_size
-                .map_or(code_size, |s| size(Some(s), 13.0)),
-        }
-    }
-
-    fn overlay(base: &FontPrefs, top: &FontPrefs) -> FontPrefs {
-        FontPrefs {
-            ui_family: top.ui_family.clone().or_else(|| base.ui_family.clone()),
-            ui_size: top.ui_size.or(base.ui_size),
-            code_family: top.code_family.clone().or_else(|| base.code_family.clone()),
-            code_size: top.code_size.or(base.code_size),
-            code_ligatures: top.code_ligatures.or(base.code_ligatures),
-            terminal_family: top
-                .terminal_family
-                .clone()
-                .or_else(|| base.terminal_family.clone()),
-            terminal_size: top.terminal_size.or(base.terminal_size),
+                .map_or(code_size, |s| size(Some(s), 15.0)),
         }
     }
 }
@@ -187,13 +181,17 @@ pub(crate) fn resolve_paths(config: &Path, extensions: &Path, system: SystemMode
     let zed = if agmen.follow_zed {
         match zed::read_zed_settings(&zed_dir) {
             Ok(zed) => Some(zed),
-            Err(AppearanceError::Io { source, .. })
+            Err(AppearanceError::Io { source, path })
                 if source.kind() == std::io::ErrorKind::NotFound =>
             {
+                warnings.push(format!(
+                    "Follow Zed is on, but there are no Zed settings at {}; using agmen's own",
+                    path.display()
+                ));
                 None
             }
             Err(err) => {
-                warnings.push(err.to_string());
+                warnings.push(format!("{err}; using agmen's own settings"));
                 None
             }
         }
@@ -201,40 +199,48 @@ pub(crate) fn resolve_paths(config: &Path, extensions: &Path, system: SystemMode
         None
     };
 
-    let (theme_name, prefs, icon_theme, mut source) = match &zed {
+    // Zed's choices when following Zed, agmen's own otherwise.
+    let (theme_name, prefs, icon_theme, wanted) = match &zed {
         Some(z) => (
             z.theme.as_ref().map(|t| t.name_for(system).to_owned()),
             z.fonts.clone(),
-            z.icon_theme
-                .clone()
-                .map_or(IconThemeChoice::System, IconThemeChoice::Zed),
+            z.icon_theme.as_ref().map_or(IconThemeChoice::System, |t| {
+                IconThemeChoice::Zed(t.name_for(system).to_owned())
+            }),
             AppearanceSource::Zed,
-        ),
-        None if agmen.follow_zed => (
-            None,
-            agmen.fonts.clone(),
-            IconThemeChoice::System,
-            AppearanceSource::Builtin,
         ),
         None => (
             agmen.theme.clone(),
-            Fonts::overlay(&FontPrefs::default(), &agmen.fonts),
+            agmen.fonts.clone(),
             agmen.icon_theme.clone(),
             AppearanceSource::Agmen,
         ),
     };
 
-    let theme = match theme_name {
-        Some(name) => theme::load_theme(&zed_dir, extensions, &name).unwrap_or_else(|err| {
-            warnings.push(format!("{err}; using the built-in Gruvbox theme"));
-            source = AppearanceSource::Builtin;
-            fallback::gruvbox_material_dark_hard()
-        }),
-        None => {
-            if source != AppearanceSource::Builtin {
-                source = AppearanceSource::Builtin;
+    let (theme, source) = match theme_name {
+        Some(name) => match theme::load_theme(&zed_dir, extensions, &name) {
+            Ok(theme) => (theme, wanted),
+            Err(err) => {
+                warnings.push(format!("{err}; using the built-in Gruvbox theme"));
+                (
+                    fallback::gruvbox_material_dark_hard(),
+                    AppearanceSource::Builtin,
+                )
             }
-            fallback::gruvbox_material_dark_hard()
+        },
+        None => {
+            let place = if wanted == AppearanceSource::Zed {
+                "Zed's settings name"
+            } else {
+                "agmen's settings.toml names"
+            };
+            warnings.push(format!(
+                "{place} no theme; using the built-in Gruvbox theme"
+            ));
+            (
+                fallback::gruvbox_material_dark_hard(),
+                AppearanceSource::Builtin,
+            )
         }
     };
 

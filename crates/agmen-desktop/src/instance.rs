@@ -8,7 +8,7 @@
 
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
-use std::os::unix::fs::PermissionsExt as _;
+use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
@@ -25,6 +25,9 @@ const READ_TIMEOUT: Duration = Duration::from_secs(2);
 /// How often a second launch retries while the first is still starting.
 const CONNECT_TRIES: u32 = 20;
 const CONNECT_PAUSE: Duration = Duration::from_millis(100);
+/// The accept loop gives up after this many errors in a row.
+const MAX_ACCEPT_ERRORS: u32 = 50;
+const ACCEPT_ERROR_PAUSE: Duration = Duration::from_millis(100);
 
 /// What can go wrong taking the instance lock or forwarding to it.
 #[derive(Debug, thiserror::Error)]
@@ -87,7 +90,12 @@ pub(crate) fn acquire(dir: &Path, args: &[String]) -> Result<Instance, InstanceE
         let path = path.to_owned();
         move |source| InstanceError::Io { path, source }
     };
-    fs::create_dir_all(dir).map_err(io(dir))?;
+    // The socket inside accepts launches, so only this user may reach it.
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+        .map_err(io(dir))?;
     let lock_path = dir.join(LOCK);
     let lock = OpenOptions::new()
         .create(true)
@@ -98,10 +106,14 @@ pub(crate) fn acquire(dir: &Path, args: &[String]) -> Result<Instance, InstanceE
     let socket = dir.join(SOCKET);
     match lock.try_lock() {
         Ok(()) => listen(lock, &socket).map(Instance::Primary),
-        Err(TryLockError::WouldBlock) => {
-            forward(&socket, args)?;
-            Ok(Instance::Secondary)
-        }
+        Err(TryLockError::WouldBlock) => match forward(&socket, args) {
+            Ok(()) => Ok(Instance::Secondary),
+            // The holder may have been exiting; if the lock is free now, take over.
+            Err(InstanceError::NoAnswer { .. }) if lock.try_lock().is_ok() => {
+                listen(lock, &socket).map(Instance::Primary)
+            }
+            Err(err) => Err(err),
+        },
         Err(TryLockError::Error(source)) => Err(InstanceError::Io {
             path: lock_path,
             source,
@@ -126,8 +138,19 @@ fn listen(lock: File, socket: &Path) -> Result<Listener, InstanceError> {
     std::thread::Builder::new()
         .name("agmen-instance".into())
         .spawn(move || {
+            let mut errors_in_a_row = 0_u32;
             for stream in listener.incoming() {
-                let Ok(stream) = stream else { continue };
+                let Ok(stream) = stream else {
+                    // A persistent error (EMFILE, say) must not spin a core.
+                    errors_in_a_row += 1;
+                    if errors_in_a_row >= MAX_ACCEPT_ERRORS {
+                        eprintln!("agmen-desktop: stopped taking second launches after {errors_in_a_row} errors");
+                        break;
+                    }
+                    std::thread::sleep(ACCEPT_ERROR_PAUSE);
+                    continue;
+                };
+                errors_in_a_row = 0;
                 if let Some(forwarded) = read_forward(stream)
                     && tx.send(forwarded).is_err()
                 {
@@ -163,11 +186,22 @@ fn forward(socket: &Path, args: &[String]) -> Result<(), InstanceError> {
         focus: true,
         args: args.to_vec(),
     };
-    let mut line = serde_json::to_vec(&message).map_err(|err| InstanceError::Io {
-        path: socket.to_owned(),
-        source: err.into(),
-    })?;
-    line.push(b'\n');
+    let encode = |message: &Forwarded| {
+        let mut line = serde_json::to_vec(message).map_err(|err| InstanceError::Io {
+            path: socket.to_owned(),
+            source: err.into(),
+        })?;
+        line.push(b'\n');
+        Ok::<_, InstanceError>(line)
+    };
+    let mut line = encode(&message)?;
+    if line.len() > MAX_FORWARD_BYTES {
+        // Too long to forward: still bring the first instance forward.
+        line = encode(&Forwarded {
+            focus: true,
+            args: Vec::new(),
+        })?;
+    }
     for _ in 0..CONNECT_TRIES {
         if let Ok(mut stream) = UnixStream::connect(socket) {
             return stream.write_all(&line).map_err(|source| InstanceError::Io {
