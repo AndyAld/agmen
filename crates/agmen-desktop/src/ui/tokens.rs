@@ -272,10 +272,11 @@ pub(crate) const MODEL_PICKER_OFFSET: Point<Pixels> = Point {
 /// A model row (node 3361): `MenuRow::picker`.
 pub(crate) const PICKER_ROW_HEIGHT: Pixels = px(26.);
 /// The model picker's, the toast's and every menu's drop shadow (nodes
-/// 3355, 6004 and 1802): 8 px down, a 24 px blur, through
-/// [`drop_shadow`].
+/// 3355, 6004 and 1802): 8 px down, through [`drop_shadow`].
 pub(crate) const POPOVER_SHADOW_OFFSET: Pixels = px(8.);
-pub(crate) const POPOVER_SHADOW_BLUR: Pixels = px(24.);
+/// The same shadow's blur: the nodes' 24 px blur radius as a sigma of 12.
+/// [`SHADOW_BLUR`] says why every shadow token halves the mockup's radius.
+pub(crate) const POPOVER_SHADOW_BLUR: Pixels = px(12.);
 /// A selected segment in both looks (0x33): the effort row's "high" (node
 /// 3397) and Settings' "System", "Ligatures on" and "Comfortable" (nodes
 /// 8116, 8183 and 8210).
@@ -315,11 +316,18 @@ pub(crate) const PALETTE_ROW_HEIGHT: Pixels = px(30.);
 pub(crate) const PALETTE_MAX_HEIGHT: Pixels = px(360.);
 /// How strongly every drop shadow's black shows (#000000aa, mockup fix 58).
 pub(crate) const SHADOW_ALPHA: f32 = 170. / 255.;
-/// The palette's drop shadow (node 11473): 10 px down, a 30 px blur
-/// radius. gpui takes `BoxShadow::blur_radius` as the Gaussian's sigma
-/// (its shader draws 3 sigmas out), and a Figma or CSS blur radius is two
-/// sigmas, so the node's 30 is 15 here.
+/// The palette's and every dialog's drop shadow (nodes 11473, 2418 and
+/// 10290): 10 px down, through [`drop_shadow`].
 pub(crate) const SHADOW_OFFSET_Y: Pixels = px(10.);
+/// The same shadow's blur: the nodes' 30 px blur radius as a sigma of 15.
+///
+/// Every shadow token holds half its figcraft node's blur radius. gpui
+/// (zed 08cbb88) takes `BoxShadow::blur_radius` as the Gaussian's sigma:
+/// `crates/gpui/src/window.rs:4596` passes it to the shadow primitive
+/// unchanged, and `crates/gpui_apple/src/shaders.metal:540` and `:1093`
+/// blur with it as `sigma` (drawing 3 sigmas out, line 476). A figcraft,
+/// Figma or CSS blur radius is two sigmas, so a node's radius R is
+/// `px(R / 2)` here.
 pub(crate) const SHADOW_BLUR: Pixels = px(30. / 2.);
 
 /// A floating surface's drop shadow: [`Theme::SHADOW`] at [`SHADOW_ALPHA`],

@@ -241,13 +241,15 @@ mod tests {
 
     #[test]
     fn the_frame_casts_the_popover_shadow() {
-        // Node 1802: one drop shadow, #000000aa, 8 px down, a 24 px blur.
-        // gpui's tests cannot read painted shadows, so this reads the card.
+        // Node 1802: one drop shadow, #000000aa, 8 px down, a 24 px blur
+        // radius. gpui's `blur_radius` is the Gaussian's sigma, half a
+        // Figma radius, so the card asks for 12. gpui's tests cannot read
+        // painted shadows, so this reads the card.
         let mut card = card(None, DROPDOWN_MENU_MAX_HEIGHT);
         let shadows = card.style().box_shadow.clone().unwrap();
         assert_eq!(shadows.len(), 1, "{shadows:?}");
         assert_eq!(shadows[0].offset, point(px(0.), POPOVER_SHADOW_OFFSET));
-        assert_eq!(shadows[0].blur_radius, POPOVER_SHADOW_BLUR);
+        assert_eq!(shadows[0].blur_radius, px(12.));
         assert_eq!(shadows[0].spread_radius, px(0.));
         assert!((shadows[0].color.a - SHADOW_ALPHA).abs() < 0.001);
     }
