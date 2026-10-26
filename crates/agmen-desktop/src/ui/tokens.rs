@@ -125,7 +125,8 @@ pub(crate) const DOCK_BUTTON: gpui::Size<Pixels> = gpui::Size {
     width: px(17.),
     height: px(20.),
 };
-/// The leading slot of an Agents row: the status glyph's box (V62).
+/// The narrowest leading slot of a row: the status glyph's box (V62). Wider
+/// content, such as a chevron or a file icon, widens it.
 pub(crate) const LEADING_SLOT: Pixels = px(10.);
 pub(crate) const ICON_MD: Pixels = px(14.);
 /// A file or folder icon in the Project panel (console.py `ficon`).
