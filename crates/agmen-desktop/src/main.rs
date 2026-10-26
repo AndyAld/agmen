@@ -1,5 +1,6 @@
 //! The agmen desktop app: a GPUI console with Zed's layout.
 
+mod appearance;
 mod ui;
 
 use std::rc::Rc;
@@ -7,8 +8,10 @@ use std::rc::Rc;
 use anyhow::{Context as _, Result};
 use gpui::{
     App, AppContext as _, Application, Bounds, Focusable as _, KeyBinding, TitlebarOptions,
-    WindowBounds, WindowOptions, point, px, size,
+    WindowAppearance, WindowBounds, WindowOptions, point, px, size,
 };
+
+use appearance::{Appearance, SystemMode};
 
 use ui::{Quit, ToggleLeftDock, ToggleRightDock, Workspace};
 
@@ -31,6 +34,25 @@ fn main() {
     });
 }
 
+fn load_appearance(os: WindowAppearance) -> Appearance {
+    let system = match os {
+        WindowAppearance::Light | WindowAppearance::VibrantLight => SystemMode::Light,
+        WindowAppearance::Dark | WindowAppearance::VibrantDark => SystemMode::Dark,
+    };
+    let Some(home) = std::env::home_dir() else {
+        let mut builtin = Appearance::builtin();
+        builtin
+            .warnings
+            .push("no home folder; using the built-in theme".into());
+        return builtin;
+    };
+    let appearance = appearance::resolve(&home, system);
+    for warning in &appearance.warnings {
+        eprintln!("agmen-desktop: {warning}");
+    }
+    appearance
+}
+
 fn open_main_window(cx: &mut App) -> Result<()> {
     cx.bind_keys([
         KeyBinding::new("cmd-b", ToggleLeftDock, None),
@@ -38,6 +60,7 @@ fn open_main_window(cx: &mut App) -> Result<()> {
         KeyBinding::new("cmd-q", Quit, None),
     ]);
     cx.on_action(|_: &Quit, cx| cx.quit());
+    cx.set_global(load_appearance(cx.window_appearance()));
 
     let bounds = Bounds::centered(None, size(px(1440.), px(900.)), cx);
     let window = cx

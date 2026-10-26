@@ -1,0 +1,23 @@
+{
+  "$schema": "https://zed.dev/schema/themes/v0.2.0.json",
+  "name": "Gruvbox Sample",
+  "author": "agmen test fixture",
+  "themes": [
+    {
+      "name": "Gruvbox Sample Dark",
+      "appearance": "dark",
+      "style": {
+        "background": "#1d2021",
+        "text": "#d8bf94",
+        "border": "#3c3836",
+        "terminal.ansi.red": "#ed675f",
+        "players": [{ "cursor": "#72b9a9" }, { "cursor": "#da7f98" }]
+      }
+    },
+    {
+      "name": "Gruvbox Sample Light",
+      "appearance": "light",
+      "style": { "background": "#f9f5d7ff", "text": "#654735" }
+    }
+  ]
+}

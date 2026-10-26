@@ -68,7 +68,7 @@
 
 ### Task 2: Zed theme, fonts and agmen's appearance settings
 
-- [ ] Done
+- [x] Done. Fonts are `FontPrefs` (all optional) in both settings sources, resolved to `Fonts`; role colors from the `players` palette (ledger ruling).
 
 **Files:**
 - Create: `src/appearance/mod.rs`, `src/appearance/zed.rs` (settings.json reader), `src/appearance/theme.rs` (theme JSON to `Theme`), `src/appearance/fallback.rs` (mockup colors), `src/appearance/settings.rs` (agmen `settings.toml`), `src/appearance/theme_tests.rs`, `tests/fixtures/zed/settings.json`, `tests/fixtures/zed/themes/partial.json`

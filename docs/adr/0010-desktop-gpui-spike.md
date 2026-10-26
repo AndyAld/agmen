@@ -22,12 +22,12 @@ The desktop app is a GPUI app with Zed's layout (design 4.2 and 6.8, spec sectio
 
 | Check | How | Outcome |
 |---|---|---|
-| Window with Zed's layout | `cargo run -p agmen-desktop`: transparent title bar with inset traffic lights, left dock 272 px, center, right dock 340 px, status bar; ⌘B and ⌘R toggle the docks; test `workspace_toggles_docks` | Works on macOS 27.2. AeroSpace, the tiling window manager on Andy's Mac, resizes the window after it opens |
+| Window with Zed's layout | `cargo run -p agmen-desktop`: transparent title bar with inset traffic lights, left dock 272 px, center, right dock 340 px, status bar; ⌘B and ⌘R toggle the docks; test `workspace_toggles_docks` | Works on macOS 27.2. AeroSpace, the tiling window manager on Andy's Mac, tiles the window; floating it gives 1280 by 900, because `Bounds::centered` clamps to the primary display's visible width |
 | 10,000-row virtualized list | Task 3 | pending |
 | Text input with IME | Task 3 | pending |
 | Native notification | Task 4 | pending |
 | Single instance | Task 4 | pending |
-| Zed theme and fonts | Task 2 | pending |
+| Zed theme and fonts | `appearance::resolve` reads `~/.config/zed/settings.json` (JSONC with comments and trailing commas, through `jsonc-parser` 0.34, MIT, nesting capped at 512), finds the theme in `~/.config/zed/themes/` or an installed extension, fills missing keys from a built-in copy of the mockup's Gruvbox colors, and reads `~/.config/agmen/settings.toml`; 14 tests | Works: Andy's "Gruvbox Material Dark Hard" and fonts load; no Zed, a missing theme or a bad file falls back with a warning. Role colors come from the theme's `players` palette, which matches every mockup role color |
 | System file icons without `unsafe` | Task 5 | pending |
 
 ## Consequences

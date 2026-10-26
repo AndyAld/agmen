@@ -1,0 +1,15 @@
+// Zed settings, shaped like a real one: tabs, comments, trailing commas.
+{
+	// The UI
+	"icon_theme": "Material Icon Theme",
+	"theme": "Gruvbox Sample Dark",
+	"ui_font_size": 15,
+	"buffer_font_size": 13,
+	"buffer_font_family": "CaskaydiaCove Nerd Font Mono", // the code font
+	"buffer_line_height": "comfortable",
+	"terminal": {
+		"font_size": 13,
+	},
+	/* block comment */
+	"vim_mode": false,
+}

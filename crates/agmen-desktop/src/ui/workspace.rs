@@ -1,11 +1,12 @@
 //! The window's root view: title bar, docks, center and status bar.
 
 use gpui::{
-    App, Context, FocusHandle, Focusable, Hsla, InteractiveElement, IntoElement, ParentElement,
-    Pixels, Render, Styled, Window, actions, div, px, rgb,
+    App, Context, FocusHandle, Focusable, InteractiveElement, IntoElement, ParentElement, Pixels,
+    Render, Styled, Window, actions, div, px,
 };
 
 use super::dock::{Dock, DockSide};
+use crate::appearance::{Appearance, Theme};
 
 actions!(workspace, [ToggleLeftDock, ToggleRightDock, Quit]);
 
@@ -53,18 +54,16 @@ impl Focusable for Workspace {
     }
 }
 
-// shortcut: fixed Gruvbox colors until Task 2 loads the Zed theme.
-fn color(hex: u32) -> Hsla {
-    rgb(hex).into()
-}
-
-fn region(label: &'static str) -> impl IntoElement {
-    div().text_color(color(0x928374)).child(label)
+fn region(theme: &Theme, label: &'static str) -> impl IntoElement {
+    div().text_color(theme.text_placeholder).child(label)
 }
 
 impl Render for Workspace {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let border = color(0x3c3836);
+        let appearance = cx.global::<Appearance>();
+        let theme = &appearance.theme;
+        let fonts = &appearance.fonts;
+        let border = theme.border;
         let mut body = div().flex().flex_row().flex_1().min_h_0();
         if self.is_dock_open(DockSide::Left) {
             body = body.child(
@@ -75,10 +74,10 @@ impl Render for Workspace {
                     .border_r_1()
                     .border_color(border)
                     .p_2()
-                    .child(region("Left dock")),
+                    .child(region(theme, "Left dock")),
             );
         }
-        body = body.child(div().flex_1().h_full().p_2().child(region("Center")));
+        body = body.child(div().flex_1().h_full().p_2().child(region(theme, "Center")));
         if self.is_dock_open(DockSide::Right) {
             body = body.child(
                 div()
@@ -88,7 +87,7 @@ impl Render for Workspace {
                     .border_l_1()
                     .border_color(border)
                     .p_2()
-                    .child(region("Right dock")),
+                    .child(region(theme, "Right dock")),
             );
         }
 
@@ -104,8 +103,10 @@ impl Render for Workspace {
             .size_full()
             .flex()
             .flex_col()
-            .bg(color(0x1d2021))
-            .text_color(color(0xd8bf94))
+            .bg(theme.background)
+            .text_color(theme.text)
+            .font_family(fonts.ui_family.clone())
+            .text_size(fonts.ui_size)
             .child(
                 div()
                     .h(TITLE_BAR_HEIGHT)
@@ -127,7 +128,7 @@ impl Render for Workspace {
                     .px_2()
                     .flex()
                     .items_center()
-                    .child(region("Status bar")),
+                    .child(region(theme, "Status bar")),
             )
     }
 }
@@ -139,6 +140,7 @@ mod tests {
 
     #[gpui::test]
     fn workspace_toggles_docks(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_global(Appearance::builtin()));
         let (workspace, cx) = cx.add_window_view(Workspace::new);
         workspace.read_with(cx, |w, _| {
             assert!(w.is_dock_open(DockSide::Left));

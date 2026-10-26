@@ -1,0 +1,197 @@
+//! Zed theme JSON (schema v0.2.0) to the colors agmen paints with.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use gpui::{Hsla, Rgba};
+use serde::Deserialize;
+use serde_json::{Map, Value};
+
+use super::AppearanceError;
+use super::fallback::gruvbox_material_dark_hard;
+use super::zed::read_jsonc;
+
+/// How many theme files a search reads at most.
+const MAX_THEME_FILES: usize = 2_000;
+
+/// The colors agmen paints with, from one Zed theme.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Theme {
+    pub(crate) background: Hsla,
+    pub(crate) surface: Hsla,
+    pub(crate) elevated_surface: Hsla,
+    pub(crate) element_selected: Hsla,
+    pub(crate) element_hover: Hsla,
+    pub(crate) border: Hsla,
+    pub(crate) border_variant: Hsla,
+    pub(crate) text: Hsla,
+    pub(crate) text_muted: Hsla,
+    pub(crate) text_placeholder: Hsla,
+    pub(crate) text_accent: Hsla,
+    pub(crate) icon_muted: Hsla,
+    pub(crate) editor_background: Hsla,
+    pub(crate) line_number: Hsla,
+    pub(crate) error: Hsla,
+    pub(crate) warning: Hsla,
+    pub(crate) success: Hsla,
+    pub(crate) info: Hsla,
+    pub(crate) created: Hsla,
+    pub(crate) modified: Hsla,
+    pub(crate) deleted: Hsla,
+    /// `terminal.ansi.*`: black, red, green, yellow, blue, magenta, cyan,
+    /// white, then the bright variants in the same order.
+    pub(crate) ansi: [Hsla; 16],
+    /// The `players` cursor colors.
+    pub(crate) players: Vec<Hsla>,
+}
+
+impl Theme {
+    /// A role's color, from the theme's player palette so it stays readable
+    /// in light and dark themes. Unknown roles get the muted text color.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the Agents dock uses it in Task 7 of the desktop plan"
+        )
+    )]
+    pub(crate) fn role_color(&self, role: &str) -> Hsla {
+        let slot = match role {
+            "planner" => 0,
+            "coordinator" => 1,
+            "reviewer" => 2,
+            "engineer" => 3,
+            "researcher" => 4,
+            "tester" => 6,
+            "listener" => return self.text_placeholder,
+            _ => return self.text_muted,
+        };
+        self.players.get(slot).copied().unwrap_or(self.text_muted)
+    }
+
+    fn from_style(style: &Map<String, Value>, base: Self) -> Self {
+        let pick = |keys: &[&str], default: Hsla| {
+            keys.iter()
+                .find_map(|key| style.get(*key).and_then(parse_color))
+                .unwrap_or(default)
+        };
+        let ansi_names = [
+            "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white",
+        ];
+        let mut ansi = base.ansi;
+        for (i, name) in ansi_names.iter().enumerate() {
+            ansi[i] = pick(&[&format!("terminal.ansi.{name}")], base.ansi[i]);
+            ansi[i + 8] = pick(&[&format!("terminal.ansi.bright_{name}")], base.ansi[i + 8]);
+        }
+        let players = match style.get("players").and_then(Value::as_array) {
+            Some(list) if !list.is_empty() => {
+                let mut out: Vec<Hsla> = list
+                    .iter()
+                    .filter_map(|p| p.get("cursor").and_then(parse_color))
+                    .collect();
+                // Keep every slot role_color uses, even for short palettes.
+                out.extend(base.players.iter().skip(out.len()).copied());
+                out
+            }
+            _ => base.players.clone(),
+        };
+        Self {
+            background: pick(&["background"], base.background),
+            surface: pick(&["surface.background"], base.surface),
+            elevated_surface: pick(&["elevated_surface.background"], base.elevated_surface),
+            element_selected: pick(&["element.selected"], base.element_selected),
+            element_hover: pick(&["element.hover"], base.element_hover),
+            border: pick(&["border"], base.border),
+            border_variant: pick(&["border.variant"], base.border_variant),
+            text: pick(&["text"], base.text),
+            text_muted: pick(&["text.muted"], base.text_muted),
+            text_placeholder: pick(&["text.placeholder"], base.text_placeholder),
+            text_accent: pick(&["text.accent"], base.text_accent),
+            icon_muted: pick(&["icon.muted"], base.icon_muted),
+            editor_background: pick(&["editor.background"], base.editor_background),
+            line_number: pick(&["editor.line_number"], base.line_number),
+            error: pick(&["error"], base.error),
+            warning: pick(&["warning"], base.warning),
+            success: pick(&["success"], base.success),
+            info: pick(&["info"], base.info),
+            created: pick(&["version_control.added", "created"], base.created),
+            modified: pick(&["version_control.modified", "modified"], base.modified),
+            deleted: pick(&["version_control.deleted", "deleted"], base.deleted),
+            ansi,
+            players,
+        }
+    }
+}
+
+fn parse_color(value: &Value) -> Option<Hsla> {
+    value
+        .as_str()
+        .and_then(|s| Rgba::try_from(s).ok())
+        .map(Hsla::from)
+}
+
+#[derive(Deserialize)]
+struct Family {
+    themes: Vec<FamilyTheme>,
+}
+
+#[derive(Deserialize)]
+struct FamilyTheme {
+    name: String,
+    #[serde(default)]
+    style: Map<String, Value>,
+}
+
+/// Loads the theme named `name` from `zed_dir/themes/*.json`, then from
+/// `extensions_dir/*/themes/*.json`. Keys the theme lacks come from the
+/// built-in theme.
+///
+/// # Errors
+///
+/// When no readable theme file defines `name`.
+pub(crate) fn load_theme(
+    zed_dir: &Path,
+    extensions_dir: &Path,
+    name: &str,
+) -> Result<Theme, AppearanceError> {
+    for path in theme_files(zed_dir, extensions_dir) {
+        // A file that does not parse is someone else's problem; keep looking.
+        let Ok(family) = read_jsonc::<Family>(&path) else {
+            continue;
+        };
+        if let Some(theme) = family.themes.into_iter().find(|t| t.name == name) {
+            return Ok(Theme::from_style(
+                &theme.style,
+                gruvbox_material_dark_hard(),
+            ));
+        }
+    }
+    Err(AppearanceError::ThemeNotFound(name.to_owned()))
+}
+
+fn theme_files(zed_dir: &Path, extensions_dir: &Path) -> Vec<PathBuf> {
+    let mut dirs = vec![zed_dir.join("themes")];
+    if let Ok(entries) = fs::read_dir(extensions_dir) {
+        let mut exts: Vec<PathBuf> = entries.flatten().map(|e| e.path().join("themes")).collect();
+        exts.sort();
+        dirs.extend(exts);
+    }
+    let mut files = Vec::new();
+    for dir in dirs {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        let mut found: Vec<PathBuf> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|ext| ext == "json"))
+            .collect();
+        found.sort();
+        files.extend(found);
+        if files.len() >= MAX_THEME_FILES {
+            files.truncate(MAX_THEME_FILES);
+            break;
+        }
+    }
+    files
+}
