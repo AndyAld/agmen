@@ -434,7 +434,7 @@ pub(crate) struct RoleInfo {
     pub(crate) edits: Edits,
     /// The role's own verbs, then base's.
     pub(crate) verbs: Vec<String>,
-    /// Verbs other roles have that the hub refuses for this one.
+    /// Verbs the role's kind could send that the role file withholds (D12).
     pub(crate) refused: Vec<String>,
     /// Who holds it, and a short note on each.
     pub(crate) used_by: Vec<(String, String)>,
