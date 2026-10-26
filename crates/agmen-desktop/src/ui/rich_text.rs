@@ -1,14 +1,15 @@
 //! A message body with its references drawn as chips (`rich_body` in
 //! `docs/mockups/scripts/console.py`).
 //!
-//! Each line of the body is a wrapping row of runs and chips: the words
-//! between two chips are one run, one text element that wraps inside
-//! itself, so a 32 KiB body builds an element per run rather than per word.
+//! Lines with no chips join into one text element. A line with chips is an
+//! [`InlineFlow`]: the words between two chips are one shaped run that
+//! fills the rest of a chip's line and wraps word by word, so a 32 KiB body
+//! shapes a run per stretch of words rather than an element per word.
 //! Short punctuation glued to a reference stays beside its chip with no gap
-//! (mockup fix 54). A run or chip wider than the column, such as a 500
-//! character token, shrinks to the column and wraps inside itself; a chip
-//! is never split. Every slice is taken at a span edge or at whitespace, so
-//! a character is never split.
+//! (mockup fix 54). A word or chip wider than the column, such as a 500
+//! character token, takes the column and wraps inside itself; a chip is
+//! never split. Every slice is taken at a span edge or at whitespace, so a
+//! character is never split.
 
 use std::rc::Rc;
 
@@ -20,8 +21,9 @@ use gpui::{
 
 use super::chat_context::{BodyText, ChatContext};
 use super::components::ChangeHandler;
+use super::inline_flow::{FlowItem, InlineFlow};
 use super::ref_chip::{RefChip, RefEvent};
-use super::tokens::{LINE_HEIGHT, SPACE_3, SPACE_4, TEXT_DEFAULT};
+use super::tokens::{LINE_HEIGHT, SPACE_3, TEXT_DEFAULT};
 use crate::appearance::Appearance;
 use crate::refs::Span;
 
@@ -125,13 +127,9 @@ fn push_indent<'a>(line: &'a str, out: &mut Vec<Piece<'a>>) -> usize {
 }
 
 /// One element of a drawn line.
-// shortcut: a run is one box in its line's wrapping row, so a run too long
-// for the space left beside a chip starts on the next line and leaves that
-// space empty. Flowing text around chips needs an inline layout element of
-// our own; build one if people find the gaps odd.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Item<'a> {
-    /// Words joined by single spaces, drawn as one wrapping text.
+    /// Words joined by single spaces, shaped as one run.
     Run(String),
     Ref {
         lead: &'a str,
@@ -256,11 +254,14 @@ impl RichText {
             .when_some(handler, |chip, handler| {
                 chip.on_ref(move |event, window, cx| handler(event, window, cx))
             });
-        // min_w_0 lets a chip wider than the column shrink to it; the glue
-        // is short, so it never needs to.
+        // The flow lays this out as a root, at the column's width when it
+        // is wider: max_w_full caps it there, and min_w_0 lets the chip
+        // shrink to that and wrap, while the glue is short and never needs
+        // to.
         Some(
             div()
                 .flex()
+                .max_w_full()
                 .min_w_0()
                 .items_center()
                 .when(!lead.is_empty(), |this| this.child(lead.to_owned()))
@@ -280,7 +281,7 @@ fn run(text: String) -> AnyElement {
 }
 
 /// A block of the drawn body: lines with no chips, joined as one text, or
-/// one line with chips as a wrapping row.
+/// one line with chips as an inline flow.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Block<'a> {
     Text(String),
@@ -320,29 +321,26 @@ impl RenderOnce for RichText {
                 // An empty line keeps its height, as a blank line in the text.
                 Block::Text(text) if text.is_empty() => run(" ".to_owned()),
                 Block::Text(text) => run(text),
-                Block::Row(items) => {
-                    let elements: Vec<AnyElement> = items
+                Block::Row(items) => InlineFlow::new(
+                    items
                         .into_iter()
                         .filter_map(|item| match item {
-                            Item::Run(text) => Some(run(text)),
+                            Item::Run(text) => Some(FlowItem::Run(text.into())),
                             Item::Ref {
                                 lead,
                                 text,
                                 tail,
                                 span,
-                            } => self.chip(span, lead, text, tail),
+                            } => self
+                                .chip(span, lead, text, tail)
+                                .map(|element| FlowItem::Chip {
+                                    element,
+                                    label: text.to_owned().into(),
+                                }),
                         })
-                        .collect();
-                    div()
-                        .w_full()
-                        .flex()
-                        .flex_wrap()
-                        .items_center()
-                        .gap_x(SPACE_4)
-                        .gap_y(SPACE_3)
-                        .children(elements)
-                        .into_any_element()
-                }
+                        .collect(),
+                )
+                .into_any_element(),
             });
         div()
             .debug_selector(|| selector)
