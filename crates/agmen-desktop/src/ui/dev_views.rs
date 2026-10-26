@@ -305,8 +305,11 @@ impl DevFrame {
 }
 
 impl Render for DevFrame {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let appearance = cx.global::<Appearance>();
+        // Text sizes are rems, so they follow the UI font size, as in the
+        // workspace; without this the dev views drew at gpui's 16 px.
+        window.set_rem_size(appearance.fonts.ui_size);
         div()
             .size_full()
             .flex()
@@ -392,6 +395,27 @@ mod tests {
             cx.debug_bounds("diff-hunk:0").is_some(),
             "the diff stays open"
         );
+    }
+
+    #[gpui::test]
+    fn dev_frame_sets_the_rem_to_the_ui_font_size(cx: &mut TestAppContext) {
+        // The Settings subagent found --view windows drew at gpui's 16 px
+        // rem while the workspace uses the person's UI font size.
+        init(cx);
+        cx.update(|cx| {
+            let mut appearance = cx.global::<Appearance>().clone();
+            appearance.fonts.ui_size = gpui::px(15.);
+            cx.set_global(appearance);
+        });
+        let title = TitleBar::new(&chat_snapshot());
+        let (_, cx) = cx.add_window_view(|_, cx| {
+            let content =
+                cx.new(|_| crate::ui::CodeView::new("x", crate::ui::Language::Plain, Vec::new()));
+            DevFrame::new(title, content)
+        });
+        redraw(cx);
+        let rem = cx.update(|window, _| window.rem_size());
+        assert_eq!(rem, gpui::px(15.));
     }
 
     #[gpui::test]
