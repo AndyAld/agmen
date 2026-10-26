@@ -82,7 +82,6 @@ fn title(state: ChangeState) -> &'static str {
         ChangeState::Pending => "Waiting for you",
         ChangeState::Applied => "Settings changed",
         ChangeState::Cancelled => "Change cancelled",
-        // shortcut: minimal Undone arms so the merge builds; agmen-c7 renders Undone fully (V68).
         ChangeState::Undone => "Change undone",
     }
 }
@@ -106,7 +105,7 @@ fn subline(card: &backend::ChangeCard) -> String {
         }
         ChangeState::Applied => "applied by agmend".to_owned(),
         ChangeState::Cancelled => "nothing changed".to_owned(),
-        ChangeState::Undone => format!("undone by {}", card.requested_by),
+        ChangeState::Undone => "settings restored".to_owned(),
     };
     format!("requested by {} · {what}", card.requested_by)
 }
@@ -127,9 +126,15 @@ fn join_settings<'a>(settings: impl IntoIterator<Item = &'a str>) -> String {
     }
 }
 
-/// The old value, struck through; dimmed once the change is cancelled.
+/// Whether the card is settled with nothing in effect: cancelled, or undone
+/// (Andy, review C93). Its rows stay for the record, dimmed, with no buttons.
+const fn is_void(state: ChangeState) -> bool {
+    matches!(state, ChangeState::Cancelled | ChangeState::Undone)
+}
+
+/// The old value, struck through; dimmed once the change is void.
 fn before_label(row: &ChangeRow, state: ChangeState) -> Label {
-    let color = if state == ChangeState::Cancelled {
+    let color = if is_void(state) {
         Color::Placeholder
     } else {
         Color::Error
@@ -141,8 +146,7 @@ fn before_label(row: &ChangeRow, state: ChangeState) -> Label {
 }
 
 fn row(row: &ChangeRow, target: Color, state: ChangeState, before: String) -> impl IntoElement {
-    // A cancelled card keeps its rows for the record, dimmed.
-    let (target, after) = if state == ChangeState::Cancelled {
+    let (target, after) = if is_void(state) {
         (Color::Placeholder, Color::Placeholder)
     } else {
         (target, Color::Success)

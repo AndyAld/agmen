@@ -258,3 +258,32 @@ fn long_before_value_wraps_inside_the_card(cx: &mut TestAppContext) {
     let head = cx.debug_bounds("chg-fx1-lanes-budget:waiting").unwrap();
     assert!(before.right() <= head.right(), "{before:?} past {head:?}");
 }
+
+#[gpui::test]
+fn undone_narrowing_card_has_no_buttons(cx: &mut TestAppContext) {
+    init(cx);
+    let card = crate::backend::ChangeCard {
+        id: ChangeId("chg-narrow".into()),
+        requested_by: "andy".into(),
+        widens: false,
+        rows: vec![ChangeRow {
+            target: "andy/fx1".into(),
+            setting: "budget".into(),
+            before: "$8.00".into(),
+            after: "$5.00".into(),
+        }],
+        state: ChangeState::Undone,
+    };
+    assert_eq!(subline(&card), "requested by andy · settings restored");
+    let (_, cx) = cx.add_window_view(move |_, _| {
+        let card = card.clone();
+        Lone(Box::new(move || {
+            ChangeCard::new(card.clone(), &[]).into_any_element()
+        }))
+    });
+    redraw(cx);
+    assert!(shown(cx, "chg-narrow:undone"));
+    for button in ["chg-narrow:apply", "chg-narrow:cancel", "chg-narrow:undo"] {
+        assert!(cx.debug_bounds(button).is_none(), "{button} shown");
+    }
+}
