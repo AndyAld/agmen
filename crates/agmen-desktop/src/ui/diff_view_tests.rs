@@ -106,3 +106,37 @@ fn diff_columns_use_the_code_font_cell(cx: &mut TestAppContext) {
     let text = cx.debug_bounds("diff-row:3:text").unwrap();
     assert!(close(text.left(), cell * 4.), "{text:?} {cell:?}");
 }
+
+#[test]
+fn conflict_markers_do_not_bend_the_code_around_them() {
+    // Frame 5057 node 5215: "mod cylinder;" after "<<<<<<< HEAD" keeps its
+    // keyword color, and ">>>>>>> 4d9fdc8" is plain text.
+    let rows = layout_rows(&main_rs_hunks(), Language::Rust);
+    let line = |text: &str| {
+        rows.iter()
+            .find_map(|row| match row {
+                Row::Line { line, .. } if line.text.as_ref() == text => Some(line.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no row {text}"))
+    };
+    let alone = |text: &str, language| layout_lines(&format!("{text}\n"), language).remove(0);
+    assert_eq!(
+        line("mod cylinder;"),
+        alone("mod cylinder;", Language::Rust)
+    );
+    assert_eq!(line("mod minimap;"), alone("mod minimap;", Language::Rust));
+    for marker in ["<<<<<<< HEAD", "=======", ">>>>>>> 4d9fdc8"] {
+        assert_eq!(line(marker), alone(marker, Language::Plain), "{marker}");
+    }
+}
+
+#[test]
+fn conflict_markers_are_recognized() {
+    for marker in ["<<<<<<< HEAD", "=======", ">>>>>>> 4d9fdc8", "||||||| base"] {
+        assert!(is_conflict_marker(marker), "{marker}");
+    }
+    for code in ["========", "a <<<<<<< b", "<<<<<<<<", "== x"] {
+        assert!(!is_conflict_marker(code), "{code}");
+    }
+}

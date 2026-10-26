@@ -30,28 +30,53 @@ enum Row {
     },
 }
 
-/// Every hunk's header and lines, highlighted as `language`. Each hunk is
-/// highlighted as one text, so a construct that spans lines keeps its
-/// colors; the base and the worktree side are mixed, as a unified diff is.
+/// Whether `text` is a merge conflict marker line (`<<<<<<< HEAD`,
+/// `|||||||`, `=======`, `>>>>>>> 4d9fdc8`), which is not code.
+fn is_conflict_marker(text: &str) -> bool {
+    let Some((mark, rest)) = text.split_at_checked(7) else {
+        return false;
+    };
+    let labeled = rest.is_empty() || rest.starts_with(' ');
+    match mark {
+        "=======" => rest.is_empty(),
+        "<<<<<<<" | "|||||||" | ">>>>>>>" => labeled,
+        _ => false,
+    }
+}
+
+/// Every hunk's header and lines, highlighted as `language`. Each hunk's
+/// code is highlighted as one text, so a construct that spans lines keeps
+/// its colors; the base and the worktree side are mixed, as a unified diff
+/// is. Conflict markers are left out of that text and drawn plain, so the
+/// parser does not miscolor the code next to them (node 5215).
 fn layout_rows(hunks: &[Hunk], language: Language) -> Vec<Row> {
     let mut rows = Vec::new();
     for hunk in hunks {
         rows.push(Row::Header(hunk.header().into()));
+        let code = || {
+            hunk.lines
+                .iter()
+                .filter(|line| !is_conflict_marker(&line.text))
+        };
         // One newline after every line, so an empty last line keeps its row.
-        let text: String = hunk
-            .lines
-            .iter()
-            .flat_map(|line| [line.text.as_str(), "\n"])
-            .collect();
+        let text: String = code().flat_map(|line| [line.text.as_str(), "\n"]).collect();
         let laid = layout_lines(&text, language);
         debug_assert_eq!(
             laid.len(),
-            hunk.lines.len(),
-            "one laid out line per diff line"
+            code().count(),
+            "one laid out line per code line"
         );
-        rows.extend(hunk.lines.iter().zip(laid).map(|(diff, line)| Row::Line {
-            kind: diff.kind,
-            line,
+        let mut laid = laid.into_iter();
+        rows.extend(hunk.lines.iter().map(|diff| {
+            let line = if is_conflict_marker(&diff.text) {
+                None
+            } else {
+                laid.next()
+            };
+            Row::Line {
+                kind: diff.kind,
+                line: line.unwrap_or_else(|| Line::plain(&diff.text)),
+            }
         }));
     }
     rows
