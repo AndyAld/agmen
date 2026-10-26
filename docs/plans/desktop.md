@@ -336,6 +336,7 @@ Screens: `desktop-model-picker`, `desktop-ask`.
 ### Task 16: Change cards for settings from chat
 
 - [x] Done by agmen-c7 (merged at f658bc9, cleared by agmen-db). Undo (Andy's answer to C93, V72): a narrowing card goes to `ChangeState::Undone` with no buttons; a widening card returns to Pending with Apply and Cancel (mockup fix 44). The backend side is in the commit after f658bc9.
+- Differences kept (V121): on an applied card, "Audit log" (node 7738) stays plain placeholder text, not the mockup's Secondary button, because no audit log view exists yet and a button that does nothing would mislead. Revisit it when the audit log lands.
 - [ ] Undone card rendering (V68): agmen-c7, on top of f658bc9; the merge has minimal Undone arms marked `shortcut:` until then.
 
 Screens: `desktop-settings-from-chat`, `desktop-settings-applied`.
