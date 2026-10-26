@@ -246,8 +246,38 @@ fn assert_card_fits(cx: &mut TestAppContext, screen: Screen, width: gpui::Pixels
     let full: Vec<gpui::Pixels> = (0..card.rows.len())
         .map(|i| bounds(wide, &format!("{}:before:{i}", card.id)).size.width)
         .collect();
+    let one_line = bounds(wide, &format!("{}:subline", card.id)).size.height;
     let (card, cx) = card_window(cx, screen, width);
     let outer = bounds(cx, &format!("{}:card", card.id));
+    // The subline's box shrinks with the row whether or not its text wraps,
+    // so its right edge alone cannot show an overflow: text wider than the box
+    // must wrap onto more lines.
+    let text = subline(&card);
+    let mut natural_cx = TestAppContext::single();
+    init(&mut natural_cx);
+    let (_, natural_cx) = natural_cx.add_window_view(move |_, _| {
+        let text = text.clone();
+        Lone(Box::new(move || {
+            div()
+                .flex()
+                .items_start()
+                .child(
+                    div()
+                        .debug_selector(|| "natural".into())
+                        .child(Label::new(text.clone()).size(LabelSize::Small)),
+                )
+                .into_any_element()
+        }))
+    });
+    redraw(natural_cx);
+    let natural = bounds(natural_cx, "natural").size.width;
+    let subline_box = bounds(cx, &format!("{}:subline", card.id));
+    if natural > subline_box.size.width {
+        assert!(
+            subline_box.size.height > one_line,
+            "{screen:?} at {width:?}: subline {subline_box:?} is {natural:?} of text on one line"
+        );
+    }
     assert_eq!(outer.size.width, width, "{screen:?}");
     for part in part_selectors(&card) {
         let inner = bounds(cx, &part);
