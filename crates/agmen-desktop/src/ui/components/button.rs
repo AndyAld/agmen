@@ -11,9 +11,9 @@ use gpui::{
 use super::{ClickHandler, Color, Label, LabelSize};
 use crate::appearance::{Appearance, Theme};
 use crate::ui::tokens::{
-    BORDER_WIDTH, BUTTON_HOVER_OPACITY, BUTTON_TINT, RADIUS_CARD, RADIUS_INPUT, RADIUS_MD,
-    RADIUS_SM, SPACE_1, SPACE_2, SPACE_3, SPACE_4, SPACE_5, SPACE_6, SPACE_7, SPACE_8, SPACE_9,
-    SPACE_10, SPACE_12, SPACE_14, TINT_SELECTED, tint,
+    AUTO_LINE_12, BORDER_WIDTH, BUTTON_HOVER_OPACITY, BUTTON_TINT, RADIUS_CARD, RADIUS_INPUT,
+    RADIUS_MD, RADIUS_SM, SPACE_1, SPACE_2, SPACE_3, SPACE_4, SPACE_5, SPACE_6, SPACE_7, SPACE_8,
+    SPACE_9, SPACE_10, SPACE_12, SPACE_14, TINT_SELECTED, tint,
 };
 
 /// How the button is drawn.
@@ -84,8 +84,9 @@ pub(crate) enum ButtonSize {
     /// Padding 2 by 8 and radius 4, as the take-over terminal's Open as tab
     /// and the switch menu's Update… (nodes 1143, 1833).
     Compact,
-    /// Padding 4 by 10 and 6 between its parts, as the add agent dialog's
-    /// Copy prompt (node 2435).
+    /// Padding 4 by 10 and 6 between its parts around the 14 px line of
+    /// the mockup's 12 px text, as the add agent dialog's Copy prompt (node
+    /// 2435, 22 px).
     Medium,
     /// Radius 6 and body text, as a dialog's Cancel and Check again or
     /// Kick off (node 10320): Primary pads 6 by 14 (node 2445), the other
@@ -316,6 +317,11 @@ impl RenderOnce for Button {
         };
         let (styled, text) = sized(styled, self.size, self.style);
         let label = Label::new(self.label).size(text);
+        let label = if self.size == ButtonSize::Medium {
+            label.line_height(AUTO_LINE_12)
+        } else {
+            label
+        };
         let on_click = if self.disabled { None } else { self.on_click };
         styled
             .when_some(on_click, |this, handler| {
@@ -531,10 +537,12 @@ mod tests {
         let text = rendered_size(&mut cx2, || {
             Label::new("Copy prompt")
                 .size(LabelSize::Small)
+                .line_height(AUTO_LINE_12)
                 .into_any_element()
         });
         assert_eq!(button.width - text.width, px(20.));
         assert_eq!(button.height - text.height, px(8.));
+        assert_eq!(button.height, px(22.));
     }
 
     // Task 14 review: a dialog's Cancel (node 2443) is outlined on the

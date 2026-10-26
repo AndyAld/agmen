@@ -316,3 +316,47 @@ fn a_large_code_font_wraps_the_prompt_inside_its_box(cx: &mut TestAppContext) {
         "{text:?}: the five lines do not wrap"
     );
 }
+
+#[gpui::test]
+fn the_body_below_the_title_keeps_the_mockups_spacing(cx: &mut TestAppContext) {
+    // Node 2418 stacks its parts 12 px apart. A heading is 13 px (node
+    // 2422), so heading and gaps put 37 px between the parts around it.
+    // The docs row is 16 px (node 2423), the copy row 22 (node 2434, the
+    // Copy prompt button's 4 px padding around a 14 px line) and the fine
+    // print 11 px lines at a 13 px pitch (node 2441). The prompt box and
+    // the Then paragraph keep the 13 px code font's lines (accepted).
+    let cx = draw(cx, || {
+        div()
+            .w(crate::ui::tokens::DIALOG_WIDTH)
+            .child(AddAgentDialog::new(
+                AgentDialog::Add("grok".into()),
+                Some(agent("grok")),
+            ))
+            .into_any_element()
+    });
+    let mut at = |part: &'static str| cx.debug_bounds(part).unwrap_or_else(|| panic!("{part}"));
+    let title = at("add-agent:title");
+    let source = at("add-agent:source");
+    let prompt = at("add-agent:prompt");
+    let copy_row = at("add-agent:copy-row");
+    let then = at("add-agent:then");
+    let fine_print = at("add-agent:fine-print");
+    let footer = at("add-agent:footer");
+    assert_eq!(source.size.height, px(16.), "{source:?}");
+    assert_eq!(copy_row.size.height, px(22.), "{copy_row:?}");
+    crate::ui::test_support::assert_lines(
+        fine_print.size.height,
+        px(0.),
+        crate::ui::tokens::AUTO_LINE_11,
+    );
+    for (above, below, gap) in [
+        (title, source, 37.),
+        (source, prompt, 37.),
+        (prompt, copy_row, 12.),
+        (copy_row, then, 37.),
+        (then, fine_print, 12.),
+        (fine_print, footer, 12.),
+    ] {
+        assert_eq!(below.top() - above.bottom(), px(gap), "{above:?} {below:?}");
+    }
+}

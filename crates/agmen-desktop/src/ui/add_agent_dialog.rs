@@ -17,7 +17,8 @@ use super::components::{
     SectionHeading,
 };
 use super::tokens::{
-    BORDER_WIDTH, PROMPT_COLUMNS, RADIUS_CARD, RADIUS_REF, SPACE_4, SPACE_8, SPACE_10, SPACE_12,
+    AUTO_LINE_11, AUTO_LINE_12, AUTO_LINE_13, BORDER_WIDTH, PROMPT_COLUMNS, RADIUS_CARD,
+    RADIUS_REF, SPACE_4, SPACE_8, SPACE_10, SPACE_12,
 };
 use crate::appearance::Appearance;
 use crate::backend::{AgentFound, InstalledAgent};
@@ -271,14 +272,20 @@ impl AddAgentDialog {
     /// to do when agmend knows no source.
     fn source_row(&self) -> impl IntoElement + use<> {
         let source = self.agent.as_ref().and_then(|a| a.source.clone());
-        let row = div().flex().items_center().gap(SPACE_8);
+        let row = div()
+            .debug_selector(|| "add-agent:source".into())
+            .flex()
+            .items_center()
+            .gap(SPACE_8);
         match (source, &self.dialog) {
             (Some(source), _) => {
                 let url = format!("https://{}", source.url);
-                row.child(Label::new(format!(
-                    "Follow {}'s official instructions:",
-                    source.vendor
-                )))
+                // Node 2423: 13 px text on its 16 px auto line, beside
+                // the link's code on the 14 px line of the mockup's 12 px.
+                row.child(
+                    Label::new(format!("Follow {}'s official instructions:", source.vendor))
+                        .line_height(AUTO_LINE_13),
+                )
                 .child(
                     div()
                         .id("add-agent:link")
@@ -290,6 +297,7 @@ impl AddAgentDialog {
                         .child(
                             Label::new(format!("{} ↗", source.url))
                                 .code()
+                                .line_height(AUTO_LINE_12)
                                 .color(Color::Accent)
                                 .underline(),
                         ),
@@ -299,12 +307,14 @@ impl AddAgentDialog {
                 Label::new(
                     "Install it from its maker's official instructions, so its command is on PATH.",
                 )
+                .line_height(AUTO_LINE_13)
                 .wrap(),
             ),
             (None, _) => row.child(
                 Label::new(
                     "agmen has no official source on record for it; use the one it came from.",
                 )
+                .line_height(AUTO_LINE_13)
                 .wrap(),
             ),
         }
@@ -345,15 +355,22 @@ impl AddAgentDialog {
             ))
             .child(PromptBox(prompt))
             .child(
-                div().flex().items_center().gap(SPACE_8).child(copy).child(
-                    Label::new(
-                        "paste it into Claude Code, Codex or any agent with a shell; your \
+                div()
+                    .debug_selector(|| "add-agent:copy-row".into())
+                    .flex()
+                    .items_center()
+                    .gap(SPACE_8)
+                    .child(copy)
+                    .child(
+                        Label::new(
+                            "paste it into Claude Code, Codex or any agent with a shell; your \
                              listener has none",
-                    )
-                    .size(LabelSize::Small)
-                    .color(Color::Placeholder)
-                    .wrap(),
-                ),
+                        )
+                        .size(LabelSize::Small)
+                        .line_height(AUTO_LINE_11)
+                        .color(Color::Placeholder)
+                        .wrap(),
+                    ),
             )
     }
 
@@ -431,6 +448,7 @@ impl RenderOnce for AddAgentDialog {
             .gap(SPACE_12)
             .child(
                 div()
+                    .debug_selector(|| "add-agent:title".into())
                     .flex()
                     .items_center()
                     .gap(SPACE_10)
@@ -450,18 +468,27 @@ impl RenderOnce for AddAgentDialog {
             .child(self.source_row())
             .when_some(prompt, |this, prompt| this.child(self.prompt_block(prompt)))
             .child(SectionHeading::new("Then"))
-            .child(CodeText::new(self.then_text()).size(LabelSize::Small))
             .child(
-                Label::new(if has_prompt {
-                    "agmen runs no installers itself: install steps change, and the prompt \
+                div()
+                    .debug_selector(|| "add-agent:then".into())
+                    .child(CodeText::new(self.then_text()).size(LabelSize::Small)),
+            )
+            .child(
+                div()
+                    .debug_selector(|| "add-agent:fine-print".into())
+                    .child(
+                    Label::new(if has_prompt {
+                        "agmen runs no installers itself: install steps change, and the prompt \
                      names the official source so an agent does not pick up a look-alike \
                      package."
-                } else {
-                    "agmen runs no installers itself: install steps change between releases."
-                })
-                .size(LabelSize::Small)
-                .color(Color::Placeholder)
-                .wrap(),
+                    } else {
+                        "agmen runs no installers itself: install steps change between releases."
+                    })
+                    .size(LabelSize::Small)
+                    .line_height(AUTO_LINE_11)
+                    .color(Color::Placeholder)
+                    .wrap(),
+                ),
             )
             .when_some(self.note.clone(), |this, note| {
                 this.child(
@@ -474,6 +501,7 @@ impl RenderOnce for AddAgentDialog {
             })
             .child(
                 div()
+                    .debug_selector(|| "add-agent:footer".into())
                     .w_full()
                     .flex()
                     .justify_end()
