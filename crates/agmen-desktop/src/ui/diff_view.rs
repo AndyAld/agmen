@@ -7,14 +7,14 @@ use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, Context, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, Render,
-    SharedString, Styled as _, Window, div, uniform_list,
+    App, Context, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
+    Render, SharedString, Styled as _, Window, div, uniform_list,
 };
 
-use super::code_view::{Line, layout_lines, styled_line};
+use super::code_view::{Line, cell_width, layout_lines, styled_line};
 use super::components::{Color, Label};
 use super::syntax::Language;
-use super::tokens::{DIFF_TINT, MONO_CELL_HEIGHT, MONO_CELL_WIDTH, SPACE_8, SPACE_16};
+use super::tokens::{DIFF_TINT, MONO_CELL_HEIGHT, SPACE_8, SPACE_16};
 use crate::appearance::Appearance;
 use crate::backend::{DiffLineKind, Hunk};
 
@@ -80,7 +80,9 @@ const fn kind_slug(kind: DiffLineKind) -> &'static str {
     }
 }
 
-fn render_row(ix: usize, header_ix: usize, row: &Row, cx: &App) -> gpui::AnyElement {
+/// `cell` is the code font's cell; console.py puts the sign at column 2
+/// and code at column 4.
+fn render_row(ix: usize, header_ix: usize, row: &Row, cell: Pixels, cx: &App) -> gpui::AnyElement {
     let theme = &cx.global::<Appearance>().theme;
     let number = ix + 1;
     let base = div()
@@ -95,7 +97,7 @@ fn render_row(ix: usize, header_ix: usize, row: &Row, cx: &App) -> gpui::AnyElem
     match row {
         Row::Header(text) => base
             .debug_selector(move || format!("diff-hunk:{header_ix}"))
-            .pl(MONO_CELL_WIDTH * 2.)
+            .pl(cell * 2.)
             .text_color(theme.text_accent)
             .child(text.clone())
             .into_any_element(),
@@ -118,9 +120,10 @@ fn render_row(ix: usize, header_ix: usize, row: &Row, cx: &App) -> gpui::AnyElem
                 })
                 .child(
                     div()
+                        .debug_selector(move || format!("diff-row:{number}:sign"))
                         .flex_none()
-                        .w(MONO_CELL_WIDTH * 2.)
-                        .ml(MONO_CELL_WIDTH * 2.)
+                        .w(cell * 2.)
+                        .ml(cell * 2.)
                         .font_weight(FontWeight::BOLD)
                         .text_color(sign_color)
                         .child(sign),
@@ -129,6 +132,7 @@ fn render_row(ix: usize, header_ix: usize, row: &Row, cx: &App) -> gpui::AnyElem
                     // shortcut: long lines are clipped, as in the code view;
                     // sideways scroll comes with it.
                     div()
+                        .debug_selector(move || format!("diff-row:{number}:text"))
                         .flex_1()
                         .min_w_0()
                         .overflow_hidden()
@@ -140,9 +144,10 @@ fn render_row(ix: usize, header_ix: usize, row: &Row, cx: &App) -> gpui::AnyElem
 }
 
 impl Render for DiffView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let appearance = cx.global::<Appearance>();
         let fonts = &appearance.fonts;
+        let cell = cell_width(window, fonts);
         let body = div()
             .size_full()
             .flex()
@@ -177,7 +182,8 @@ impl Render for DiffView {
                 range
                     .filter_map(|ix| {
                         let header = headers.get(ix).copied().unwrap_or(0);
-                        rows.get(ix).map(|row| render_row(ix, header, row, cx))
+                        rows.get(ix)
+                            .map(|row| render_row(ix, header, row, cell, cx))
                     })
                     .collect::<Vec<_>>()
             })
