@@ -374,22 +374,28 @@ mod tests {
         assert!(!focused);
     }
 
-    // Shot diff (node 10320): Cancel and Kick off pad 6 above and below,
-    // as the add agent dialog's buttons, not the plan panel's taller ones.
+    // Shot diff (node 10320): Cancel and Kick off are the add agent dialog's
+    // buttons (ButtonSize::Large), not the plan panel's taller ones.
     #[gpui::test]
-    fn buttons_pad_six_above_and_below(cx: &mut TestAppContext) {
-        let mut label_cx = TestAppContext::single();
-        let text = crate::ui::test_support::rendered_size(&mut label_cx, || {
-            Label::new("Kick off 7 agents")
-                .weight(FontWeight::SEMIBOLD)
+    fn buttons_are_the_dialog_size(cx: &mut TestAppContext) {
+        use crate::ui::test_support::rendered_size;
+        let mut cancel_cx = TestAppContext::single();
+        let cancel = rendered_size(&mut cancel_cx, || {
+            Button::new("c", "Cancel")
+                .style(ButtonStyle::Inset)
+                .size(ButtonSize::Large)
+                .into_any_element()
+        });
+        let mut go_cx = TestAppContext::single();
+        let go = rendered_size(&mut go_cx, || {
+            Button::new("g", "Kick off 7 agents")
+                .style(ButtonStyle::Primary)
+                .size(ButtonSize::Large)
                 .into_any_element()
         });
         let (_, _, cx) = open(cx);
-        let go = cx.debug_bounds("kickoff:go").unwrap();
-        assert_eq!(
-            go.size.height,
-            text.height + crate::ui::tokens::SPACE_6 * 2.
-        );
+        assert_eq!(cx.debug_bounds("kickoff:cancel").unwrap().size, cancel);
+        assert_eq!(cx.debug_bounds("kickoff:go").unwrap().size.width, go.width);
     }
 
     #[gpui::test]
