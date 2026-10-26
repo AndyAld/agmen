@@ -95,3 +95,28 @@ fn results_are_capped() {
     assert_eq!(filter("", &entries).len(), MAX_RESULTS);
     assert_eq!(filter("e", &entries).len(), MAX_RESULTS);
 }
+
+#[test]
+fn word_start_late_beats_mid_word_early() {
+    let entries = ["Undock", "Toggle the left dock"];
+    let got = filter("dock", &entries);
+    assert_eq!(labels(&got), [1, 0]);
+}
+
+#[test]
+fn whitespace_inside_query_is_ignored() {
+    let entries = ["Spawn worker with codex"];
+    assert_eq!(filter("sp w", &entries), filter("spw", &entries));
+    assert_eq!(
+        highlighted(entries[0], &filter("sp w", &entries)[0]),
+        ["Sp", "w"]
+    );
+}
+
+#[test]
+fn camel_case_hump_is_a_word_start() {
+    let entries = ["profile", "openFile"];
+    let got = filter("of", &entries);
+    assert_eq!(labels(&got), [1, 0]);
+    assert_eq!(highlighted(entries[1], &got[0]), ["o", "F"]);
+}

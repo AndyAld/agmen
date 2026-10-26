@@ -23,6 +23,9 @@ const BASE: i64 = 1;
 const WORD_START: i64 = 10;
 const CONSECUTIVE: i64 = 8;
 const GAP: i64 = 3;
+/// The start offset costs at most this much, so a word start late in a label
+/// still beats a mid-word match near its start.
+const MAX_START_PENALTY: usize = 3;
 /// Marks a cell where the query prefix cannot end.
 const NONE: i64 = i64::MIN / 2;
 
@@ -49,11 +52,12 @@ pub(crate) fn filter<S: AsRef<str>>(query: &str, labels: &[S]) -> Vec<Match> {
         .take(MAX_QUERY_CHARS)
         .map(fold)
         .collect();
+    let mut scratch = Scratch::default();
     let mut matches: Vec<Match> = labels
         .iter()
         .enumerate()
         .filter_map(|(index, label)| {
-            let (score, ranges) = score(&query, label.as_ref())?;
+            let (score, ranges) = score(&query, label.as_ref(), &mut scratch)?;
             Some(Match {
                 index,
                 score,
@@ -67,20 +71,33 @@ pub(crate) fn filter<S: AsRef<str>>(query: &str, labels: &[S]) -> Vec<Match> {
     matches
 }
 
+/// Buffers reused across labels, so a keystroke allocates per match, not per
+/// label.
+#[derive(Debug, Default)]
+struct Scratch {
+    chars: Vec<(usize, char)>,
+    best: Vec<i64>,
+    from: Vec<usize>,
+}
+
 /// Scores the best alignment of `query` (already folded) in `label`.
-fn score(query: &[char], label: &str) -> Option<(i64, Vec<Range<usize>>)> {
+fn score(query: &[char], label: &str, scratch: &mut Scratch) -> Option<(i64, Vec<Range<usize>>)> {
     if query.is_empty() {
         return Some((0, Vec::new()));
     }
-    let chars: Vec<(usize, char)> = label.char_indices().take(MAX_LABEL_CHARS).collect();
+    let Scratch { chars, best, from } = scratch;
+    chars.clear();
+    chars.extend(label.char_indices().take(MAX_LABEL_CHARS));
     let (m, n) = (query.len(), chars.len());
     if m > n {
         return None;
     }
     // best[i * n + j]: best score with query[i] matched at chars[j].
     // from[i * n + j]: where query[i - 1] matched on that path.
-    let mut best = vec![NONE; m * n];
-    let mut from = vec![0_usize; m * n];
+    best.clear();
+    best.resize(m * n, NONE);
+    from.clear();
+    from.resize(m * n, 0);
     for (i, &q) in query.iter().enumerate() {
         // Best cell in row i - 1 at or before j - 2, for a gapped step.
         let mut gapped: Option<(i64, usize)> = None;
@@ -96,13 +113,13 @@ fn score(query: &[char], label: &str) -> Option<(i64, Vec<Range<usize>>)> {
                 continue;
             }
             let bonus = BASE
-                + if is_word_start(&chars, j) {
+                + if is_word_start(chars, j) {
                     WORD_START
                 } else {
                     0
                 };
             if i == 0 {
-                best[j] = bonus - i64::try_from(j).unwrap_or(i64::MAX / 4);
+                best[j] = bonus - i64::try_from(j.min(MAX_START_PENALTY)).unwrap_or(0);
                 continue;
             }
             let run = best[(i - 1) * n + j - 1];
@@ -132,7 +149,7 @@ fn score(query: &[char], label: &str) -> Option<(i64, Vec<Range<usize>>)> {
         hits[i] = j;
         j = from[i * n + j];
     }
-    Some((top, ranges(&chars, &hits)))
+    Some((top, ranges(chars, &hits)))
 }
 
 /// Merges the matched char positions into byte ranges.
