@@ -144,8 +144,10 @@ impl Workspace {
 /// The tabs the center opens behind the chat: the mockup's agent tab and
 /// role file tab (console.py `tab_bar`: andy/fx1 and reviewer.xml), when the
 /// roster has that agent and role.
-// shortcut: the mockup's tabs stand in for the tabs the person left open;
-// restore those instead once agmend keeps them.
+// shortcut: the mockup's tabs stand in for the tabs the person left open.
+// No task in the desktop plan restores tabs yet; the change that restores
+// them once agmend keeps them deletes this function and its call in
+// Workspace::new, so production windows stop opening the mockup's tabs.
 fn starting_tabs(snapshot: &Snapshot) -> Vec<TabItem> {
     let agents = || snapshot.roster.iter().flat_map(|group| &group.agents);
     let fx1 = format!("{}/fx1", snapshot.me);
