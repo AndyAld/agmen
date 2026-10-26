@@ -93,6 +93,10 @@ type Script = {
   /** check-ignore gets no answer: the engine rejects the call, as it does past `timeoutMs`. */
   readonly isCheckIgnoreHung?: boolean
   readonly command?: (argv: readonly string[]) => Partial<ProcessRunResult>
+  /** The repository's worktrees `git worktree list` names; undefined means /work alone. */
+  readonly worktrees?: readonly string[]
+  /** `git worktree list` exits 128. */
+  readonly isWorktreeListBroken?: boolean
 }
 
 /** How the identity file sits on disk under /work. */
@@ -152,6 +156,17 @@ const FILES: Readonly<Record<string, string>> = {
   '/work/link/a.ts': '/work/ui/a.ts',
 }
 
+/**
+ * Case aliases a case-insensitive file system opens but does not store: stat
+ * answers each with its own spelling as `realPath`, as the engine documents
+ * (FsStat.realPath), and no folder listing names them.
+ */
+const ALIASES: Readonly<Record<string, string>> = {
+  '/work/UI': '/work/UI',
+  '/work/UI/a.ts': '/work/UI/a.ts',
+  '/work/ui/A.ts': '/work/ui/A.ts',
+}
+
 /** An entry of a /work folder listing; a link is `other`, as the engine lists it. */
 const listed = (name: string, kind: 'file' | 'dir', isLink = false): FsEntry =>
   isLink ? { name, kind: 'other', size: 0, mtimeMs: 0, isLink } : { name, kind, size: kind === 'file' ? 1 : 0, mtimeMs: 0, isLink }
@@ -194,6 +209,10 @@ function world(on: On, script: Script = {}): World {
       }
       case 'check-ignore':
         return { exitCode: script.checkIgnoreExit ?? 0 }
+      case 'worktree':
+        if (script.isWorktreeListBroken === true) return { exitCode: 128, stderr: 'fatal: broken' }
+
+        return { stdout: (script.worktrees ?? [ROOT]).map(path => `worktree ${path}\nHEAD ${'a'.repeat(40)}\nbranch refs/heads/main\n\n`).join('') }
       default:
         return { exitCode: script.gitStatusExitCode ?? 0, stdout: script.gitStatus ?? '', stderr: script.gitStatusStderr ?? '' }
     }
@@ -254,11 +273,19 @@ function world(on: On, script: Script = {}): World {
   })
   on('fs.list', (_, e) => {
     const layout = script.identity ?? {}
-    if (e.path === ROOT) {
-      return { value: [listed(layout.dirName ?? '.agmen', 'dir', layout.isDirLink), listed('src', 'dir'), listed('ui', 'dir')] }
-    }
     if (e.path === `${ROOT}/.agmen`) return { value: [listed(layout.fileName ?? 'identity.json', 'file', layout.isFileLink)] }
-    throw new Error(`ENOENT: ${e.path}`)
+    if (FILES[e.path] !== e.path) throw new Error(`ENOENT: ${e.path}`)
+    // A folder of FILES lists the names stored in it.
+    const children = Object.keys(FILES)
+      .filter(path => path.startsWith(`${e.path}/`) && !path.slice(e.path.length + 1).includes('/'))
+      .map(path => {
+        const name = path.slice(e.path.length + 1)
+        const isDir = Object.keys(FILES).some(other => other.startsWith(`${path}/`))
+
+        return listed(name, isDir ? 'dir' : 'file', FILES[path] !== path)
+      })
+
+    return { value: e.path === ROOT ? [listed(layout.dirName ?? '.agmen', 'dir', layout.isDirLink), ...children] : children }
   })
   on('fs.stat', (_, e) => {
     // Broken once the watch runs: the identity test still passes, so the session connects.
@@ -270,7 +297,7 @@ function world(on: On, script: Script = {}): World {
     if (!e.path.startsWith(`${ROOT}/`) && e.path !== ROOT) {
       return { value: e.resolve ? { ...STAT, kind: 'dir', realPath: e.path } : { ...STAT, kind: 'dir' } }
     }
-    const realPath = e.path === IDENTITY_FILE ? (script.identity?.realPath ?? IDENTITY_FILE) : FILES[e.path]
+    const realPath = e.path === IDENTITY_FILE ? (script.identity?.realPath ?? IDENTITY_FILE) : (FILES[e.path] ?? ALIASES[e.path])
     if (realPath === undefined) throw new Error(`ENOENT: ${e.path}`)
 
     return { value: e.resolve ? { ...STAT, realPath } : STAT }
@@ -342,6 +369,7 @@ const edit = (file_path: string) => ({ tool: 'Edit', file_path, old_string: 'a',
 
 const REV_PARSE = ['git', 'rev-parse', '--show-toplevel', '--show-prefix']
 const CHECK_IGNORE = ['git', 'check-ignore', '-q', '--', '.agmen/identity.json']
+const WORKTREE_LIST = ['git', 'worktree', 'list', '--porcelain']
 
 for (const surface of SURFACES) {
   describe(surface, () => {
@@ -392,7 +420,7 @@ for (const surface of SURFACES) {
       await start($, w, surface, '/work/src')
 
       expect(w.asked).toEqual(['/work/src/.agmen/identity.json', IDENTITY_FILE])
-      expect(w.runs).toEqual([REV_PARSE, CHECK_IGNORE, ['agmen', '--version']])
+      expect(w.runs).toEqual([REV_PARSE, CHECK_IGNORE, ['agmen', '--version'], WORKTREE_LIST])
       expect(w.spawns).toEqual([['agmen', 'watch', '--json']])
       expect(w.notified).toEqual([])
     })
@@ -402,7 +430,7 @@ for (const surface of SURFACES) {
 
       await start($, w, surface)
 
-      expect(w.runs).toEqual([REV_PARSE, CHECK_IGNORE, ['agmen', '--version']])
+      expect(w.runs).toEqual([REV_PARSE, CHECK_IGNORE, ['agmen', '--version'], WORKTREE_LIST])
       expect(w.gitCwds).toContainEqual(['check-ignore', ROOT])
       expect(w.spawns).toEqual([['agmen', 'watch', '--json']])
       expect(w.notified).toEqual([])
@@ -964,6 +992,65 @@ for (const surface of SURFACES) {
       expect(notebook.deny).toBeUndefined()
       expect(w.ran).toEqual(['Edit', 'Write', 'NotebookEdit'])
       expect(w.runs).toContainEqual(['agmen', 'check-path', '--json', '--', '/work/src/new/deep/x.ts'])
+    })
+
+    test('guard_denies_case_aliases', async ($, on) => {
+      // Lane L-UI = ui/** is held by adam/coord; the hub matches globs case-sensitively.
+      const w = world(on, {
+        checkPath: path =>
+          path.startsWith('/work/ui/')
+            ? allowedEntry(path, false, 'lane L-UI held by adam/coord')
+            : allowedEntry(path, true, 'unowned'),
+      })
+
+      await start($, w, surface)
+      const aliased = ['/work/UI/a.ts', '/work/UI/new.ts', '/work/ui/A.ts']
+      for (const file_path of aliased) {
+        const result = await $.tool.call({ tool: 'Write', file_path, content: 'x' })
+        expect(result.deny).toContain('not spelled as the file system stores it')
+      }
+      // The worktree root itself under another spelling.
+      const rootAlias = await $.tool.call(edit('/WORK/src/ok.ts'))
+      expect(rootAlias.deny).toContain('another spelling')
+      // A new name keeps its own spelling: only what exists must match.
+      const fresh = await $.tool.call({ tool: 'Write', file_path: '/work/src/New.ts', content: 'x' })
+
+      expect(fresh.deny).toBeUndefined()
+      expect(w.ran).toEqual(['Write'])
+      expect(w.runs.filter(argv => argv[1] === 'check-path')).toEqual([['agmen', 'check-path', '--json', '--', '/work/src/New.ts']])
+    })
+
+    test('guard_lets_paths_outside_the_worktrees_run', async ($, on) => {
+      const w = world(on, {
+        worktrees: [ROOT, '/work-b'],
+        checkPath: path => allowedEntry(path, false, 'not a repository path'),
+      })
+
+      await start($, w, surface)
+      const scratch = await $.tool.call({ tool: 'Write', file_path: '/private/tmp/claude-501/scratchpad/notes.md', content: 'x' })
+      const memory = await $.tool.call(edit('/Users/andy/.claude/projects/agmen/memory/MEMORY.md'))
+      const sibling = await $.tool.call({ tool: 'Write', file_path: '/work-b/ui/a.ts', content: 'x' })
+      const siblingAlias = await $.tool.call(edit('/WORK-B/ui/a.ts'))
+
+      expect(scratch.deny).toBeUndefined()
+      expect(memory.deny).toBeUndefined()
+      expect(sibling.deny).toContain('another worktree of this repository')
+      expect(siblingAlias.deny).toContain('another worktree of this repository')
+      expect(w.ran).toEqual(['Write', 'Edit'])
+      expect(w.runs.filter(argv => argv[1] === 'check-path')).toEqual([])
+    })
+
+    test('guard_sends_outside_paths_to_check_path_when_git_cannot_list_worktrees', async ($, on) => {
+      const w = world(on, {
+        isWorktreeListBroken: true,
+        checkPath: path => allowedEntry(path, false, 'not a repository path'),
+      })
+
+      await start($, w, surface)
+      const result = await $.tool.call({ tool: 'Write', file_path: '/tmp/notes.md', content: 'x' })
+
+      expect(result.deny).toContain('check-path says: "not a repository path"')
+      expect(w.ran).toEqual([])
     })
 
     test('warns_on_bash_writes_outside_lanes', async ($, on) => {

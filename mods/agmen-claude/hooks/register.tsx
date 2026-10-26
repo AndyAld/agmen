@@ -8,8 +8,9 @@ import type { StampedEnvelope } from '../../../schema/ts/StampedEnvelope'
 //   becomes a meta row ($.session.append) that the model reads as data.
 // - Wake-up: such a message wakes an idle session with $.prompt.submit (never
 //   asUser), at most once per WAKE_INTERVAL_MS, naming what arrived.
-// - Lane guard: Edit, Write and NotebookEdit run only where `agmen
-//   check-path` allows; every error or timeout denies. After a Bash call,
+// - Lane guard: in this repository's worktrees, Edit, Write and NotebookEdit
+//   run only where `agmen check-path` allows; every error or timeout denies.
+//   A path outside every worktree is not agmen's to judge. After a Bash call,
 //   changes outside the lanes are reported in a meta row.
 // - Command: /agmen runs a few `agmen` subcommands and shows the result.
 // All of it waits for `.agmen/identity.json` at the session's git worktree
@@ -168,10 +169,25 @@ type Joined =
   | { readonly kind: 'found'; readonly root: string }
   | { readonly kind: 'refused'; readonly why: string }
 
+/**
+ * Where the repository's worktrees land, read once at start: this session's
+ * root and the others `git worktree list` names, every link followed.
+ * `others` is undefined when git could not list them.
+ */
+type Worktrees = {
+  readonly root: string
+  readonly others: readonly string[] | undefined
+}
+
+/** Where a placed path lies against the repository's worktrees. */
+type Location = 'root' | 'other' | 'alias' | 'outside' | 'unknown'
+
 /** What the hooks share for one load of the module. */
 type State = {
   /** The worktree holding `.agmen/identity.json`, once the CLI checked out; undefined while inert. */
   root: string | undefined
+  /** Read with `root`; undefined while inert. */
+  worktrees: Worktrees | undefined
   /** A start is under way (session.start and /agmen join can overlap). */
   isStarting: boolean
   self: Self | undefined
@@ -534,23 +550,76 @@ const isUnplaceable = (path: string): boolean =>
 /** A name the walk cannot add back: empty, `.`, `..`, or itself a drive (`C:...`). */
 const isUnplaceableName = (name: string): boolean => name === '' || name === '.' || name === '..' || /^[A-Za-z]:/.test(name)
 
+/** Where `path` lands, every link followed; undefined when stat cannot place it. */
+const realPathOf = async ($: EngineInterface, path: string): Promise<string | undefined> =>
+  (await $.fs.stat(path, { resolve: true }).catch(() => undefined))?.realPath
+
+/** A placed path: where its existing part lands, and the names below it not there yet. */
+type Placed = { readonly head: string; readonly tail: readonly string[] }
+
 /**
  * Where `path` lands, every link followed, or undefined to deny (R43).
  * Something at the path is judged by where it lands, and denied when it
  * lands nowhere (a dangling or looping link). Only when nothing is there
  * (`stat` rejects) is the path placed by its nearest existing folder.
  */
-async function placed($: EngineInterface, path: string): Promise<string | undefined> {
+async function placed($: EngineInterface, path: string): Promise<Placed | undefined> {
   if (isUnplaceable(path)) return undefined
   let head = path
   const tail: string[] = []
   for (let depth = 0; depth < WALK_MAX; depth += 1) {
     const stat = await $.fs.stat(head, { resolve: true }).catch(() => undefined)
-    if (stat !== undefined) return stat.realPath === undefined ? undefined : joinPath(stat.realPath, tail)
+    if (stat !== undefined) return stat.realPath === undefined ? undefined : { head: stat.realPath, tail }
     const split = splitPath(head)
     if (split === undefined || isUnplaceableName(split.name)) return undefined
     tail.unshift(split.name)
     head = split.folder
+  }
+
+  return undefined
+}
+
+/**
+ * A spelling folded for comparing paths the way a case- and
+ * Unicode-insensitive file system (APFS, NTFS) may open them. Only for
+ * deciding which worktree a path could be in: over-matching denies.
+ */
+const folded = (path: string): string => path.normalize('NFKC').toUpperCase().toLowerCase()
+
+/** Whether `path` is `folder` or below it. */
+const isWithin = (path: string, folder: string): boolean =>
+  path === folder || ['/', '\\'].some(sep => path.startsWith(folder.endsWith(sep) ? folder : `${folder}${sep}`))
+
+/**
+ * Where `real` lies: in this session's worktree under its exact spelling,
+ * in another worktree of the repository, in one of them under another
+ * spelling (a case or Unicode alias), outside them all, or `unknown` when
+ * git could not list the other worktrees.
+ */
+function locate(worktrees: Worktrees, real: string): Location {
+  if (isWithin(real, worktrees.root)) return 'root'
+  const fold = folded(real)
+  if (isWithin(fold, folded(worktrees.root))) return 'alias'
+  if (worktrees.others === undefined) return 'unknown'
+
+  return worktrees.others.some(other => isWithin(fold, folded(other))) ? 'other' : 'outside'
+}
+
+/**
+ * Why `head` (below `root`, every link followed) is reached through another
+ * spelling than the one stored, or undefined when each name from `root`
+ * down is stored under exactly that name. The engine's realPath keeps a case
+ * alias's own spelling, and the hub matches lane globs case-sensitively, so
+ * `UI/a.ts` would pass as unowned where `ui/**` is held.
+ */
+async function aliasedBecause($: EngineInterface, root: string, head: string): Promise<string | undefined> {
+  const names = head.slice(root.length).split(/[\\/]/).filter(name => name !== '')
+  if (names.length > WALK_MAX) return `${head} is more than ${WALK_MAX} folders deep`
+  let folder = root
+  for (const name of names) {
+    const entry = await storedEntry($, folder, name)
+    if (typeof entry === 'string') return entry
+    folder = joinPath(folder, [name])
   }
 
   return undefined
@@ -611,11 +680,9 @@ async function untrustedBecause($: EngineInterface, root: string): Promise<strin
   if (file.isLink) return `${IDENTITY_NAME} is a symbolic link`
   if (file.kind !== 'file') return `${IDENTITY_NAME} is not a file`
 
-  const real = async (path: string): Promise<string | undefined> =>
-    (await $.fs.stat(path, { resolve: true }).catch(() => undefined))?.realPath
-  const realRoot = await real(root)
+  const realRoot = await realPathOf($, root)
   const expected = realRoot === undefined ? undefined : joinPath(realRoot, IDENTITY_FILE)
-  if (expected === undefined || (await real(joinPath(root, IDENTITY_FILE))) !== expected) {
+  if (expected === undefined || (await realPathOf($, joinPath(root, IDENTITY_FILE))) !== expected) {
     return `it does not land at ${expected ?? joinPath(root, IDENTITY_FILE)}`
   }
 
@@ -726,10 +793,34 @@ async function checkPaths($: EngineInterface, root: string, paths: readonly stri
   }
 }
 
-/** Judges an edit of `path`: the deny reason, or undefined to let it run. */
-async function judgeEdit($: EngineInterface, root: string, path: string): Promise<string | undefined> {
-  const real = await placed($, path)
-  if (real === undefined) return `agmen: cannot tell where ${path} lands, so the edit is denied.`
+/**
+ * Judges an edit of `path`: the deny reason, or undefined to let it run. A
+ * path outside every worktree of the repository (a scratch file, Claude
+ * Code's memory) is not agmen's to judge and runs; one in another worktree
+ * is denied.
+ */
+async function judgeEdit($: EngineInterface, root: string, worktrees: Worktrees, path: string): Promise<string | undefined> {
+  const place = await placed($, path)
+  if (place === undefined) return `agmen: cannot tell where ${path} lands, so the edit is denied.`
+  const real = joinPath(place.head, place.tail)
+  switch (locate(worktrees, real)) {
+    case 'outside':
+      return undefined
+    case 'other':
+      return `agmen: ${path} is in another worktree of this repository, so the edit is denied. Edit it from a session in that worktree.`
+    case 'alias':
+      return `agmen: ${path} reaches this worktree through another spelling (a case or Unicode alias), so the edit is denied. Use the path as it is stored.`
+    case 'root': {
+      const why = await aliasedBecause($, worktrees.root, place.head)
+      if (why !== undefined) {
+        debug($, `edit of ${path} denied: ${why}`)
+        return `agmen: ${path} is not spelled as the file system stores it (a case or Unicode alias), so the edit is denied. Use the path as it is stored.`
+      }
+      break
+    }
+    case 'unknown':
+      break
+  }
   const checked = await checkPaths($, root, [real])
   if (!checked.isOk) return `agmen: ${checked.why}, so the edit is denied.`
   const [entry] = checked.entries
@@ -875,6 +966,36 @@ async function cliProblem($: EngineInterface, root: string): Promise<string | un
   return undefined
 }
 
+/**
+ * The worktrees of `root`'s repository: `root`, and the others `git
+ * worktree list --porcelain` names, each where it lands. Undefined when
+ * `root` cannot be placed; `others` undefined when git cannot list them.
+ */
+async function readWorktrees($: EngineInterface, root: string): Promise<Worktrees | undefined> {
+  const realRoot = await realPathOf($, root)
+  if (realRoot === undefined) return undefined
+  const ran = await $.process
+    .run(['git', 'worktree', 'list', '--porcelain'], { cwd: root, timeoutMs: GIT_TIMEOUT_MS })
+    .catch(() => undefined)
+  if (ran === undefined || ran.exitCode !== 0) {
+    debug($, `git worktree list failed: ${ran === undefined ? 'no answer' : quote(ran.stderr)}`)
+    return { root: realRoot, others: undefined }
+  }
+  const listed = ran.stdout
+    .split('\n')
+    .filter(text => text.startsWith('worktree '))
+    .map(text => text.slice('worktree '.length))
+    .slice(0, WALK_MAX)
+  const others: string[] = []
+  for (const path of listed) {
+    // A worktree whose folder is gone (prunable) still counts, as named.
+    const real = (await realPathOf($, path)) ?? path
+    if (real !== realRoot) others.push(real)
+  }
+
+  return { root: realRoot, others: listed.length === 0 ? undefined : others }
+}
+
 /** Shows one notification; where no channel sends it (desktop, -p), a toast instead. */
 async function notify($: EngineInterface, text: string): Promise<void> {
   const sent = await $.ui.notify(text, { title: 'agmen' })
@@ -905,6 +1026,7 @@ async function begin($: EngineInterface, state: State, cwd: string): Promise<voi
     state.isStarting = false
   }
   if (root === undefined) return
+  state.worktrees = await readWorktrees($, root)
   state.root = root
   void watch($, state, root).catch((error: unknown) => {
     $.ui.log(`agmen: agmen watch failed: ${quote(String(error))}; messages do not reach this session.`)
@@ -1028,7 +1150,10 @@ export const register: Register = on => {
   on('tool.call', { tool: ['Edit', 'Write', 'NotebookEdit'] }, async ($, e, next) => {
     if (state.root === undefined) return next(e)
     const path = e.tool === 'NotebookEdit' ? e.notebook_path : e.file_path
-    const deny = await judgeEdit($, state.root, path)
+    const deny =
+      state.worktrees === undefined
+        ? 'agmen: cannot tell where this worktree lands, so the edit is denied.'
+        : await judgeEdit($, state.root, state.worktrees, path)
 
     return deny === undefined ? next(e) : { deny }
   }).catch(($, e, next) => (next.called ? next(e) : { deny: 'agmen: the lane guard failed, so the edit is denied.' }))
