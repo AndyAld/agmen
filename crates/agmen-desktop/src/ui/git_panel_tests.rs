@@ -235,3 +235,14 @@ fn section_counts_draw_as_count_chips(cx: &mut TestAppContext) {
     let count = at(cx, "git-count:changes");
     assert_eq!(count.size.height, gpui::px(13.5), "{count:?}");
 }
+
+#[gpui::test]
+fn count_chips_are_drawn_on_the_elevated_surface(cx: &mut TestAppContext) {
+    // V114, drawn per C254: node 5113's chip fills with the elevated
+    // surface (`Badge::count`).
+    let (_, cx) = panel(cx);
+    redraw(cx);
+    let theme = cx.update(|_, cx| cx.global::<crate::appearance::Appearance>().theme.clone());
+    let fills = crate::ui::test_support::fills_at(cx, "git-count:changes");
+    assert_eq!(fills, [theme.elevated_surface]);
+}

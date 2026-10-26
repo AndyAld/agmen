@@ -131,10 +131,15 @@ impl ParentElement for ListItem {
     }
 }
 
+/// The fill a row takes on hover: none on a selected row, which keeps its
+/// selected fill.
+fn hover_fill(selected: bool, theme: &crate::appearance::Theme) -> Option<gpui::Hsla> {
+    (!selected).then_some(theme.element_hover)
+}
+
 impl RenderOnce for ListItem {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = &cx.global::<Appearance>().theme;
-        let hover = theme.element_hover;
         let row_selector = self.id.to_string();
         let leading_selector = format!("{}:leading", self.id);
         div()
@@ -155,7 +160,9 @@ impl RenderOnce for ListItem {
             .pr(SPACE_10)
             .when_some(self.radius, |this, radius| this.rounded(radius))
             .when(self.selected, |this| this.bg(theme.element_selected))
-            .hover(move |style| style.bg(hover))
+            .when_some(hover_fill(self.selected, theme), |this, fill| {
+                this.hover(move |style| style.bg(fill))
+            })
             .when_some(self.on_click, |this, handler| {
                 this.cursor_pointer().on_click(handler)
             })
@@ -195,6 +202,32 @@ mod tests {
         assert_eq!(Indent::Tree(0).padding(), px(10.));
         assert_eq!(Indent::Page.padding(), px(10.));
         assert_eq!(Indent::Tree(3).padding(), px(10. + 14. * 3.));
+    }
+
+    #[gpui::test]
+    fn selected_rows_keep_their_fill_on_hover(cx: &mut TestAppContext) {
+        // V117 (C245, drawn per C253): hovering a selected row keeps the
+        // selected fill, as Zed's lists do; an unselected row takes hover.
+        let theme = crate::appearance::Appearance::builtin().theme;
+        assert_ne!(theme.element_selected, theme.element_hover);
+        let cx = crate::ui::test_support::draw(cx, || {
+            gpui::div()
+                .w(gpui::px(200.))
+                .child(
+                    ListItem::new("on", Indent::Group)
+                        .selected(true)
+                        .child(Label::new("on")),
+                )
+                .child(ListItem::new("off", Indent::Group).child(Label::new("off")))
+                .into_any_element()
+        });
+        for (row, want) in [("on", theme.element_selected), ("off", theme.element_hover)] {
+            let center = cx.debug_bounds(row).unwrap().center();
+            cx.simulate_mouse_move(center, None, gpui::Modifiers::none());
+            crate::ui::test_support::redraw(cx);
+            let fills = crate::ui::test_support::fills_at(cx, row);
+            assert_eq!(fills, [want], "{row}");
+        }
     }
 
     #[gpui::test]

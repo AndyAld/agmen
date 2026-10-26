@@ -6,15 +6,14 @@ use std::rc::Rc;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Window, anchored, deferred, div,
+    StatefulInteractiveElement as _, Styled as _, Window, div,
 };
 
-use super::{Card, ChangeHandler, Color, Icon, IconSize, Label};
+use super::{ChangeHandler, Color, Icon, IconSize, Label};
 use crate::appearance::Appearance;
 use crate::icons::UiIcon;
 use crate::ui::tokens::{
-    BORDER_WIDTH, DROPDOWN_MENU_MAX_HEIGHT, DROPDOWN_WIDTH, ICON_SM, RADIUS_MD, SPACE_2, SPACE_3,
-    SPACE_5, SPACE_8, SPACE_10,
+    BORDER_WIDTH, DROPDOWN_WIDTH, ICON_SM, RADIUS_MD, SPACE_3, SPACE_5, SPACE_8, SPACE_10,
 };
 
 /// The caller owns whether the menu is open: it passes `open` and flips it in
@@ -207,33 +206,18 @@ impl RenderOnce for Dropdown {
         let menu = open.then(|| {
             let rows = self.options.iter().enumerate().map(|(index, option)| {
                 self.menu_row(index, option, on_toggle.clone(), on_change.clone(), hover)
+                    .into_any_element()
             });
-            // Deferred so the menu paints over the rows below the dropdown.
-            deferred(
-                anchored().snap_to_window().child(
-                    div()
-                        .occlude()
-                        .mt(SPACE_2)
-                        .when_some(on_toggle.clone(), |this, handler| {
-                            this.on_mouse_down_out(move |_, window, cx| handler(false, window, cx))
-                        })
-                        .child(
-                            Card::new()
-                                .w(DROPDOWN_WIDTH)
-                                .max_h(DROPDOWN_MENU_MAX_HEIGHT)
-                                .p(SPACE_2)
-                                .gap_0()
-                                .child(
-                                    div()
-                                        .id(SharedString::from(format!("{}:menu", self.id)))
-                                        .flex()
-                                        .flex_col()
-                                        .min_h_0()
-                                        .overflow_y_scroll()
-                                        .children(rows),
-                                ),
-                        ),
-                ),
+            let close = on_toggle.clone();
+            super::menu::menu(
+                SharedString::from(format!("{}:menu", self.id)),
+                Some(DROPDOWN_WIDTH),
+                rows,
+                move |window, cx| {
+                    if let Some(handler) = &close {
+                        handler(false, window, cx);
+                    }
+                },
             )
         });
         div()

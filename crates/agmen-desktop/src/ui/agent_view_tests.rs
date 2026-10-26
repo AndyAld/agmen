@@ -70,9 +70,15 @@ fn agent_header_buttons_are_8_px_apart(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn rows_between_cards_take_the_mockups_line_heights(cx: &mut TestAppContext) {
-    // V108: console.py's auto line heights are 14 px for 12 px code (the ⎿
-    // rows), 16 px for 13 px text (Say) and 13 px for 11 px text (cost).
+    // V108, V113 (ruling C243): console.py's rows between tool cards are
+    // 14 px (the ⎿ rows), 16 px (Say) and 13 px (cost) tall at any font size.
     init(cx);
+    cx.update(|cx| {
+        let mut appearance = cx.global::<crate::appearance::Appearance>().clone();
+        // Andy's code size, where a 14/12 ratio gave 15.17 px.
+        appearance.fonts.code_size = gpui::px(13.);
+        cx.set_global(appearance);
+    });
     let (_, cx) = open_fx1(cx);
     redraw(cx);
     let mut height = |sel: &'static str| cx.debug_bounds(sel).unwrap().size.height;
