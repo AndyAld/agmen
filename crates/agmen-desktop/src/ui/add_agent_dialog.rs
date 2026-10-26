@@ -353,7 +353,7 @@ impl RenderOnce for AddAgentDialog {
             }
         };
         // The terminal hosts this in a `Modal` DIALOG_WIDTH wide.
-        let content = div()
+        div()
             .debug_selector(|| "add-agent".into())
             .flex()
             .flex_col()
@@ -419,8 +419,7 @@ impl RenderOnce for AddAgentDialog {
                             .size(ButtonSize::Large)
                             .on_click(handler(self.on_check.clone())),
                     ),
-            );
-        content
+            )
     }
 }
 

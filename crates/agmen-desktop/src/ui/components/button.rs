@@ -3,9 +3,9 @@
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, ClickEvent, ElementId, FontWeight, Hsla, InteractiveElement as _, IntoElement,
-    ParentElement as _, RenderOnce, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Window, div,
+    AnyElement, App, ClickEvent, Div, ElementId, FontWeight, Hsla, InteractiveElement as _,
+    IntoElement, ParentElement as _, RenderOnce, SharedString, Stateful,
+    StatefulInteractiveElement as _, Styled as _, Window, div,
 };
 
 use super::{ClickHandler, Color, Label, LabelSize};
@@ -110,6 +110,45 @@ fn fill(style: ButtonStyle, theme: &Theme) -> Hsla {
         ButtonStyle::Tinted => theme.text_accent.opacity(BUTTON_TINT),
         ButtonStyle::Inset => theme.background,
         ButtonStyle::Danger => theme.error,
+    }
+}
+
+/// `styled` padded and rounded for `size`, with its label's size. Later
+/// padding and radius replace the style's.
+fn sized(
+    styled: Stateful<Div>,
+    size: ButtonSize,
+    style: ButtonStyle,
+) -> (Stateful<Div>, LabelSize) {
+    match size {
+        ButtonSize::Default => (styled, LabelSize::Small),
+        ButtonSize::Compact => (
+            styled
+                .py(SPACE_2)
+                .px(SPACE_8)
+                .rounded(RADIUS_SM)
+                .gap(SPACE_5),
+            LabelSize::Small,
+        ),
+        ButtonSize::Medium => (
+            styled.py(SPACE_4).px(SPACE_10).gap(SPACE_6),
+            LabelSize::Small,
+        ),
+        ButtonSize::Large => (
+            styled.py(SPACE_6).px(SPACE_12).rounded(RADIUS_CARD),
+            LabelSize::Default,
+        ),
+        ButtonSize::Tall => {
+            let (py, px) = if style == ButtonStyle::Primary {
+                (SPACE_8, SPACE_14)
+            } else {
+                (SPACE_7, SPACE_12)
+            };
+            (
+                styled.py(py).px(px).rounded(RADIUS_INPUT),
+                LabelSize::Default,
+            )
+        }
     }
 }
 
@@ -275,37 +314,7 @@ impl RenderOnce for Button {
         } else {
             styled
         };
-        // Later padding and radius replace the style's.
-        let (styled, text) = match self.size {
-            ButtonSize::Default => (styled, LabelSize::Small),
-            ButtonSize::Compact => (
-                styled
-                    .py(SPACE_2)
-                    .px(SPACE_8)
-                    .rounded(RADIUS_SM)
-                    .gap(SPACE_5),
-                LabelSize::Small,
-            ),
-            ButtonSize::Medium => (
-                styled.py(SPACE_4).px(SPACE_10).gap(SPACE_6),
-                LabelSize::Small,
-            ),
-            ButtonSize::Large => (
-                styled.py(SPACE_6).px(SPACE_12).rounded(RADIUS_CARD),
-                LabelSize::Default,
-            ),
-            ButtonSize::Tall => {
-                let (py, px) = if self.style == ButtonStyle::Primary {
-                    (SPACE_8, SPACE_14)
-                } else {
-                    (SPACE_7, SPACE_12)
-                };
-                (
-                    styled.py(py).px(px).rounded(RADIUS_INPUT),
-                    LabelSize::Default,
-                )
-            }
-        };
+        let (styled, text) = sized(styled, self.size, self.style);
         let label = Label::new(self.label).size(text);
         let on_click = if self.disabled { None } else { self.on_click };
         styled
