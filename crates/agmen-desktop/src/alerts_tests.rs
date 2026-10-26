@@ -415,3 +415,77 @@ fn alert_count_keeps_owner_alerts_open_for_the_owner() {
         "a copy after the answer does not reopen it"
     );
 }
+
+#[test]
+fn quiet_hours_silence_normal_alerts_from_others() {
+    let me = andy();
+    let normal = json!({"need": "look", "urgency": "normal", "needs": "anyone", "actions": []});
+    let mut state = quiet();
+    let others = mentioning(
+        alert(ALERT_1, "seana100", "sean/a1", "agent", &normal),
+        &me.id,
+    );
+    assert_eq!(state.on_message(&others, &me), AlertEffect::None);
+    // My agents and coordinators still notify.
+    let mine = alert(ALERT_2, "andyfx10", "andy/fx1", "agent", &normal);
+    assert_eq!(state.on_message(&mine, &me), AlertEffect::Notify);
+    let coordinator = mentioning(
+        alert(ALERT_3, "adamcoor", "adam/coord", "coordinator", &normal),
+        &me.id,
+    );
+    assert_eq!(state.on_message(&coordinator, &me), AlertEffect::Notify);
+}
+
+#[test]
+fn quiet_hours_silence_a_muted_senders_urgent_alert() {
+    let me = andy();
+    let sean: IdentityId = "seana100".parse().unwrap();
+    let mut state = quiet();
+    state.prefs.muted.insert(sean.clone());
+    let muted = mentioning(
+        alert(
+            ALERT_1,
+            sean.as_str(),
+            "sean/a1",
+            "agent",
+            &urgent("anyone"),
+        ),
+        &me.id,
+    );
+    assert_eq!(state.on_message(&muted, &me), AlertEffect::None);
+    assert!(state.needing_me().is_empty());
+}
+
+#[test]
+fn evicted_alert_redelivered_counts_once() {
+    let me = andy();
+    let mut state = AlertState::default();
+    let urgent_alert = alert(ALERT_1, "andyfx10", "andy/fx1", "agent", &urgent("anyone"));
+    state.on_message(&urgent_alert, &me);
+    let normal = json!({"need": "look", "urgency": "normal", "needs": "anyone", "actions": []});
+    for i in 0..MAX_REMEMBERED_ALERTS {
+        let id = format!("01JE{i:022}");
+        state.on_message(&alert(&id, "seana100", "sean/a1", "agent", &normal), &me);
+    }
+    assert_eq!(state.on_message(&urgent_alert, &me), AlertEffect::None);
+    assert_eq!(state.badge(), 1);
+}
+
+#[test]
+fn needing_me_is_capped_oldest_out() {
+    let me = andy();
+    let mut state = AlertState::default();
+    for i in 0..MAX_NEEDING_ME + 5 {
+        let id = format!("01JE{i:022}");
+        state.on_message(
+            &alert(&id, "andyfx10", "andy/fx1", "agent", &urgent("owner")),
+            &me,
+        );
+    }
+    assert_eq!(state.badge(), MAX_NEEDING_ME);
+    let oldest: MessageId = format!("01JE{:022}", 0).parse().unwrap();
+    let kept: MessageId = format!("01JE{:022}", 5).parse().unwrap();
+    assert!(!state.needing_me().contains(&oldest));
+    assert_eq!(state.needing_me().first(), Some(&kept));
+    assert!(!state.clear(&oldest), "its owner-only mark went with it");
+}

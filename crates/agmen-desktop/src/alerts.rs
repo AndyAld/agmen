@@ -5,8 +5,8 @@
 //! `mentioned`, which it does for the sender's owners and for coordinators
 //! (protocol 4, ALERT). A normal one gives a plain notification; an urgent
 //! one needs me: highlight, chime and notification. During quiet hours an
-//! urgent alert from someone else's agent only highlights, while my own
-//! agents' and coordinators' still sound.
+//! urgent alert from someone else's agent only highlights and a normal one
+//! makes no effect, while my own agents' and coordinators' still sound.
 //!
 //! A `needs: anyone` alert clears at the first ANSWER replying to it. A
 //! `needs: owner` alert from my own agent stays until I answer it; one from
@@ -23,6 +23,10 @@ use crate::backend::Snapshot;
 /// How many alert ids the state remembers to ignore redeliveries. A copy
 /// arriving after this many newer alerts is treated as new.
 pub(crate) const MAX_REMEMBERED_ALERTS: usize = 1024;
+
+/// At most this many alerts need me at once; past it the oldest drops off
+/// the badge, so a flood of urgent alerts cannot grow the state forever.
+pub(crate) const MAX_NEEDING_ME: usize = 256;
 
 /// The person running this app.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -63,7 +67,8 @@ pub(crate) enum QuietHours {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct AlertPrefs {
     /// During quiet hours, urgent alerts from others highlight without a chime
-    /// or notification; my own agents' and coordinators' still sound.
+    /// or notification and normal ones make no effect; my own agents' and
+    /// coordinators' still sound and notify.
     pub(crate) quiet_hours: QuietHours,
     /// Senders whose urgent alerts arrive as normal ones.
     pub(crate) muted: BTreeSet<IdentityId>,
@@ -157,17 +162,33 @@ impl AlertState {
         if !reaches_me {
             return AlertEffect::None;
         }
+        // During quiet hours only my own agents and coordinators make a sound
+        // or a notification.
+        let hushed = self.prefs.quiet_hours == QuietHours::On
+            && !mine
+            && env.from_kind != IdentityKind::Coordinator;
         let urgent = urgency == Urgency::Urgent && !self.prefs.muted.contains(&env.from);
         if !urgent {
-            return AlertEffect::Notify;
+            return if hushed {
+                AlertEffect::None
+            } else {
+                AlertEffect::Notify
+            };
         }
         let id = &env.client.id;
+        // A copy that outlived `seen` is still the same alert.
+        if self.needing_me.contains(id) {
+            return AlertEffect::None;
+        }
+        if self.needing_me.len() >= MAX_NEEDING_ME {
+            let oldest = self.needing_me.remove(0);
+            self.only_me.remove(&oldest);
+        }
         self.needing_me.push(id.clone());
         if ClearedBy::of(needs, env, me) == ClearedBy::OnlyMe {
             self.only_me.insert(id.clone());
         }
-        let coordinator = env.from_kind == IdentityKind::Coordinator;
-        if self.prefs.quiet_hours == QuietHours::On && !mine && !coordinator {
+        if hushed {
             AlertEffect::Highlight
         } else {
             AlertEffect::HighlightChimeNotify
