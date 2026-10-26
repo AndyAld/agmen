@@ -17,7 +17,7 @@ use gpui::{
 
 use super::components::{ChangeHandler, Color, Label, LabelSize, MenuRow, Radio, Segmented};
 use super::tokens::{
-    BORDER_WIDTH, DROPDOWN_MENU_MAX_HEIGHT, MODEL_PICKER_WIDTH, POPOVER_SHADOW_BLUR,
+    AUTO_LINE_11, BORDER_WIDTH, DROPDOWN_MENU_MAX_HEIGHT, MODEL_PICKER_WIDTH, POPOVER_SHADOW_BLUR,
     POPOVER_SHADOW_OFFSET, RADIUS_LG, SPACE_2, SPACE_4, SPACE_6, SPACE_8, SPACE_10, SPACE_12,
     SPACE_14, drop_shadow,
 };
@@ -347,11 +347,26 @@ impl ModelPicker {
         let current = &self.menu.current;
         let groups = self.menu.groups.iter().zip(self.menu.headings.iter());
         let children = groups.flat_map(|(group, heading)| {
+            // Mono 11 in a 21 px row (nodes 3359 and 3360): the code font
+            // at Small on its 13 px auto line (V93).
+            let agent = &group.agent;
             let heading = div()
+                .debug_selector(|| format!("model-picker:heading:{agent}"))
+                .flex()
                 .pt(SPACE_6)
                 .px(SPACE_10)
                 .pb(SPACE_2)
-                .child(Label::new(heading.clone()).code().color(Color::Placeholder))
+                .child(
+                    div()
+                        .debug_selector(|| format!("model-picker:heading-text:{agent}"))
+                        .child(
+                            Label::new(heading.clone())
+                                .code()
+                                .size(LabelSize::Small)
+                                .line_height(AUTO_LINE_11)
+                                .color(Color::Placeholder),
+                        ),
+                )
                 .into_any_element();
             let configured = self.menu.offers_configured(group).then_some(None);
             let names = group.models.iter().map(|m| Some(m.as_str()));

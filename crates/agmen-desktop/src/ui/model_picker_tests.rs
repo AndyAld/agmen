@@ -349,3 +349,53 @@ fn effort_hint_names_each_agent() {
         "claude takes low to max and agy low to high; codex, opencode and gemini take a model only."
     );
 }
+
+#[gpui::test]
+fn group_headings_are_mono_11_in_21_px_rows(cx: &mut TestAppContext) {
+    // Nodes 3359 and 3360: a heading row is 21 px (padding 6 and 2 around
+    // a 13 px line), its text the code font at Small (mono 11, as V93's
+    // Git panel metadata), not the code font's own 13 px.
+    let (_, _, cx) = open_composer(cx);
+    click(cx, "composer:model");
+    let heading = cx
+        .debug_bounds("model-picker:heading:claude")
+        .expect("the heading");
+    let first = cx
+        .debug_bounds("model-picker:claude:default")
+        .or_else(|| cx.debug_bounds("model-picker:claude:haiku"))
+        .expect("the first claude row");
+    assert_eq!(heading.size.height, px(21.), "{heading:?}");
+    assert_eq!(first.top(), heading.bottom(), "{first:?} under {heading:?}");
+    let text = cx
+        .debug_bounds("model-picker:heading-text:claude")
+        .expect("the heading text");
+    let snapshot = chat_snapshot();
+    let version = snapshot
+        .installed_agents
+        .iter()
+        .find(|agent| agent.name == "claude")
+        .and_then(|agent| agent.version())
+        .expect("claude's version");
+    let label = format!("claude {version}");
+    let (small, code) = cx.update(|window, cx| {
+        let fonts = &cx.global::<crate::appearance::Appearance>().fonts;
+        let mut style = window.text_style();
+        style.font_family = fonts.code_family.clone();
+        let run = style.to_run(label.len());
+        let width = |size| {
+            window
+                .text_system()
+                .shape_line(label.clone().into(), size, std::slice::from_ref(&run), None)
+                .width()
+        };
+        (
+            width(crate::ui::tokens::TEXT_SMALL.to_pixels(MOCKUP_REM)),
+            width(fonts.code_size),
+        )
+    });
+    assert!(small < code, "{small:?} {code:?}");
+    assert!(
+        (text.size.width - small).abs() < px(1.),
+        "{text:?} against {small:?}"
+    );
+}
