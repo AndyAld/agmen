@@ -59,14 +59,16 @@ fn cmd_shift_p_lists_what_the_workspace_can_run(cx: &mut TestAppContext) {
     redraw(cx);
     assert!(cx.debug_bounds("command-palette").is_some());
     let rows = shown(&workspace, cx).unwrap();
-    // One spawn row per installed agent (fix 28: grok is not installed).
-    for agent in ["claude", "codex", "opencode", "gemini", "agy"] {
-        let label = format!("agmen: spawn worker with {agent}");
-        assert!(rows.contains(&label), "{label} in {rows:?}");
-    }
-    assert!(!rows.iter().any(|r| r.contains("grok")));
+    // One spawn row per ready agent, in installed order: grok is not
+    // installed (fix 28) and agy 1.1.7 is older than the 1.1.15 agmen needs
+    // for JSON, so neither can run a worker.
     assert_eq!(rows[0], "agmen: spawn worker\u{2026}");
-    assert_eq!(rows[1], "agmen: spawn worker with claude");
+    let spawn: Vec<&str> = rows[1..5].iter().map(String::as_str).collect();
+    assert_eq!(
+        spawn,
+        ["claude", "codex", "opencode", "gemini"].map(|a| format!("agmen: spawn worker with {a}"))
+    );
+    assert!(!rows.iter().any(|r| r.contains("grok") || r.contains("agy")));
     for label in [
         "workspace: toggle left dock",
         "agents panel: toggle focus",
@@ -166,7 +168,7 @@ fn spawn_row_opens_the_delegated_flow_in_the_chat(cx: &mut TestAppContext) {
             .all(|r| r.starts_with("agmen: spawn worker with ")),
         "{rows:?}"
     );
-    assert_eq!(rows.len(), 5);
+    assert_eq!(rows.len(), 4, "{rows:?}");
     cx.simulate_keystrokes("down enter");
     cx.run_until_parked();
     // The plan: here the row opens the fixture's DELEGATED flow, andy's
@@ -266,10 +268,10 @@ fn palette_screen_opens_with_spawn_typed(cx: &mut TestAppContext) {
     assert_eq!(row.size, gpui::size(gpui::px(590.), gpui::px(30.)));
     assert_eq!(row.origin.x - bounds.origin.x, gpui::px(5.));
     assert_eq!(row.origin.y - bounds.origin.y, gpui::px(1. + 39. + 4.));
-    // "spawn worker…" and five agents: fix 28 drops grok, fix 30 the rows
-    // that do not match.
-    let last = cx.debug_bounds("palette-row:5").unwrap();
-    assert!(cx.debug_bounds("palette-row:6").is_none());
+    // "spawn worker…" and four agents: fix 28 drops grok, the outdated agy
+    // has no row, and fix 30 drops the rows that do not match.
+    let last = cx.debug_bounds("palette-row:4").unwrap();
+    assert!(cx.debug_bounds("palette-row:5").is_none());
     assert_eq!(
         bounds.size.height,
         last.origin.y + last.size.height + gpui::px(4. + 1.) - bounds.origin.y

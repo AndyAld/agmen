@@ -10,6 +10,7 @@ use gpui::{
 };
 
 use super::Workspace;
+use crate::backend::AgentFound;
 use crate::keymap::{
     self, Scope, SpawnWorker, SpawnWorkerWith, ToggleAgentsPanel, ToggleCommandPalette,
     ToggleRolesPanel, ToggleVimMode,
@@ -57,7 +58,7 @@ impl Workspace {
 
     /// The rows the focused view can run: every command whose action a
     /// view on the focus path handles or the app handles, with a spawn row
-    /// per installed agent after "spawn worker…". Zed lists only available
+    /// per ready agent after "spawn worker…". Zed lists only available
     /// actions too, so take-over's keys show once its view handles them.
     fn palette_entries(&self, window: &Window, cx: &Context<Self>) -> Vec<PaletteEntry> {
         let table = keymap::table();
@@ -78,13 +79,14 @@ impl Workspace {
         entries
     }
 
-    /// `agmen: spawn worker with <agent>` for each installed agent, in the
-    /// order the backend lists them.
+    /// `agmen: spawn worker with <agent>` for each agent that can run a
+    /// worker, in the order the backend lists them: not a missing one, nor
+    /// an outdated one (agy 1.1.7 needs 1.1.15 for JSON).
     fn spawn_entries(&self) -> impl Iterator<Item = PaletteEntry> + '_ {
         self.snapshot
             .installed_agents
             .iter()
-            .filter(|agent| agent.is_installed())
+            .filter(|agent| matches!(agent.found, AgentFound::Ready { .. }))
             .map(|agent| {
                 PaletteEntry::new(
                     format!("agmen: spawn worker with {}", agent.name),
