@@ -9,7 +9,8 @@ use gpui::{
 use super::ClickHandler;
 use crate::appearance::Appearance;
 use crate::ui::tokens::{
-    AGENT_ROW_HEIGHT, LEADING_SLOT, SPACE_6, SPACE_7, SPACE_10, TREE_INDENT_BASE, TREE_INDENT_STEP,
+    AGENT_ROW_HEIGHT, LEADING_SLOT, RADIUS_MD, SPACE_6, SPACE_7, SPACE_8, SPACE_10,
+    TREE_INDENT_BASE, TREE_INDENT_STEP,
 };
 
 /// Where a row's content starts.
@@ -21,15 +22,18 @@ pub(crate) enum Indent {
     Depth(u8),
     /// A file tree row at this depth, which draws its own chevron.
     Tree(u8),
+    /// A row in a list of pages, such as Settings' page list (node 8050):
+    /// flush with the list's padding, 8 px gaps and a rounded fill.
+    Page,
 }
 
 impl Indent {
-    /// The row's left padding: 10 for a group, 26 + 14 * depth for an item,
-    /// 10 + 14 * depth for a file tree row.
+    /// The row's left padding: 10 for a group or a page, 26 + 14 * depth for
+    /// an item, 10 + 14 * depth for a file tree row.
     #[must_use]
     pub(crate) fn padding(self) -> Pixels {
         match self {
-            Self::Group => SPACE_10,
+            Self::Group | Self::Page => SPACE_10,
             Self::Depth(depth) => TREE_INDENT_BASE + TREE_INDENT_STEP * f32::from(depth),
             Self::Tree(depth) => SPACE_10 + TREE_INDENT_STEP * f32::from(depth),
         }
@@ -133,7 +137,9 @@ impl RenderOnce for ListItem {
             .gap(match self.indent {
                 Indent::Group | Indent::Tree(_) => SPACE_6,
                 Indent::Depth(_) => SPACE_7,
+                Indent::Page => SPACE_8,
             })
+            .when(self.indent == Indent::Page, |this| this.rounded(RADIUS_MD))
             .pl(self.indent.padding())
             .pr(SPACE_10)
             .when(self.selected, |this| this.bg(theme.element_selected))
@@ -175,6 +181,7 @@ mod tests {
         assert_eq!(Indent::Depth(1).padding(), px(40.));
         assert_eq!(Indent::Depth(2).padding(), px(26. + 14. * 2.));
         assert_eq!(Indent::Tree(0).padding(), px(10.));
+        assert_eq!(Indent::Page.padding(), px(10.));
         assert_eq!(Indent::Tree(3).padding(), px(10. + 14. * 3.));
     }
 

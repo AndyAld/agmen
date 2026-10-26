@@ -18,12 +18,13 @@ use self::rows::{
 };
 use super::breadcrumb::Breadcrumb;
 use super::components::{
-    Button, Color, Dropdown, Icon, IconSize, Label, LabelSize, Segmented, Toggle,
+    Button, ButtonStyle, Color, Dropdown, Icon, IconSize, Indent, Label, LabelSize, ListItem,
+    Segmented, Toggle,
 };
 use super::text_input::{TextInput, TextInputEvent};
 use super::tokens::{
-    BORDER_WIDTH, RADIUS_MD, SETTINGS_PAGES_WIDTH, SPACE_2, SPACE_3, SPACE_6, SPACE_8, SPACE_10,
-    SPACE_12, SPACE_24,
+    BORDER_WIDTH, RADIUS_MD, SETTINGS_PAGE_ROW_HEIGHT, SETTINGS_PAGES_WIDTH, SPACE_2, SPACE_3,
+    SPACE_6, SPACE_8, SPACE_12, SPACE_24,
 };
 use crate::appearance::{
     API_BASE, AgmenSettings, Appearance, AppearanceSource, EXTENSIONS_PAGE, FontPrefs, Fonts,
@@ -534,46 +535,32 @@ impl SettingsView {
         }
     }
 
+    /// The rule right of the page list (node 8049), as the other chrome
+    /// rules.
+    fn page_list_rule(cx: &App) -> gpui::Hsla {
+        super::rule_color(cx)
+    }
+
     fn page_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = &cx.global::<Appearance>().theme;
-        let (selected, hover, rule) = (theme.element_selected, theme.element_hover, theme.border);
         let rows = PAGES.iter().map(|&(page, title, slug, icon)| {
             let on = page == self.page;
-            let selector = format!("settings-page:{slug}");
-            div()
-                .id(SharedString::from(selector.clone()))
-                .debug_selector(|| selector)
-                .flex()
-                .items_center()
-                .gap(SPACE_8)
-                .py(SPACE_6)
-                .px(SPACE_10)
-                .rounded(RADIUS_MD)
-                .cursor_pointer()
-                .map(|this| {
-                    if on {
-                        this.bg(selected)
-                    } else {
-                        this.hover(move |style| style.bg(hover))
-                    }
-                })
+            let color = if on {
+                Color::Default
+            } else {
+                Color::Placeholder
+            };
+            ListItem::new(format!("settings-page:{slug}"), Indent::Page)
+                .height(SETTINGS_PAGE_ROW_HEIGHT)
+                .selected(on)
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.page = page;
                     this.menu = None;
                     cx.notify();
                 }))
-                .child(Icon::new(icon).size(IconSize::Medium).color(if on {
-                    Color::Default
-                } else {
-                    Color::Placeholder
-                }))
+                .leading(Icon::new(icon).size(IconSize::Medium).color(color.clone()))
                 .child(
                     Label::new(title)
-                        .color(if on {
-                            Color::Default
-                        } else {
-                            Color::Placeholder
-                        })
+                        .color(color)
                         .when(on, |label| label.weight(FontWeight::MEDIUM)),
                 )
         });
@@ -587,7 +574,7 @@ impl SettingsView {
             .py(SPACE_12)
             .px(SPACE_8)
             .border_r(BORDER_WIDTH)
-            .border_color(rule)
+            .border_color(Self::page_list_rule(cx))
             .children(rows)
     }
 
@@ -874,8 +861,9 @@ impl SettingsView {
             "Saved to {}. The terminal UI reads the same file; there, :set theme=\u{2026} and :set icons=nerd|none change it, and the font is your terminal's.",
             tilde(&self.sources.settings_path(), self.sources.config.parent())
         );
+        // Right under the last rule, as node 8214 (V102).
         div()
-            .py(SPACE_6)
+            .debug_selector(|| "settings-footer-text".into())
             .child(
                 Label::new(saved_to)
                     .size(LabelSize::Small)
@@ -1085,9 +1073,11 @@ impl Render for SettingsView {
         let path = self.sources.settings_path();
         // shortcut: there are no workspace tabs yet, so the event has no subscriber and the file's
         // path shows in the footer; the workspace opens it in a code tab once tabs exist.
-        let open_file = Button::new("open-settings-toml", "Open settings.toml").on_click(
-            cx.listener(move |_, _, _, cx| cx.emit(SettingsEvent::OpenFile(path.clone()))),
-        );
+        let open_file = Button::new("open-settings-toml", "Open settings.toml")
+            .style(ButtonStyle::Plain)
+            .on_click(
+                cx.listener(move |_, _, _, cx| cx.emit(SettingsEvent::OpenFile(path.clone()))),
+            );
         let error = self.error.clone().map(|err| {
             Label::new(err)
                 .size(LabelSize::Small)
@@ -1124,10 +1114,12 @@ impl Render for SettingsView {
                             .py(SPACE_8)
                             .px(SPACE_24)
                             .child(
-                                Label::new(title)
-                                    .size(LabelSize::Large)
-                                    .weight(FontWeight::SEMIBOLD)
-                                    .color(Color::TextMuted),
+                                div().debug_selector(|| "settings-title".into()).child(
+                                    Label::new(title)
+                                        .size(LabelSize::Title)
+                                        .weight(FontWeight::SEMIBOLD)
+                                        .color(Color::TextMuted),
+                                ),
                             )
                             .children(body)
                             .children(error),

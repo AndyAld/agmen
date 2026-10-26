@@ -54,8 +54,10 @@ pub(super) fn installed_detail(theme: &ThemeEntry) -> String {
     let by = author
         .map(|a| format!("by {a} \u{b7} "))
         .unwrap_or_default();
-    let credit = |t: &InstalledTheme| {
-        let license = t.license.as_deref().unwrap_or("no license file");
+    // Zed never copies a LICENSE into the folders it installs, so a Zed
+    // install without one is no fault of the theme (V107).
+    let credit = |t: &InstalledTheme, missing: &str| {
+        let license = t.license.as_deref().unwrap_or(missing);
         let repo = t
             .repository
             .as_ref()
@@ -73,9 +75,15 @@ pub(super) fn installed_detail(theme: &ThemeEntry) -> String {
         ThemeOrigin::BuiltIn => "built into agmen".to_owned(),
         ThemeOrigin::ZedUser => "your Zed themes folder".to_owned(),
         ThemeOrigin::ZedExtension(t) => {
-            format!("installed in Zed ({}) \u{b7} {}", t.id, credit(t))
+            format!(
+                "installed in Zed ({}) \u{b7} {}",
+                t.id,
+                credit(t, "license kept by Zed")
+            )
         }
-        ThemeOrigin::Agmen(t) => format!("installed by agmen \u{b7} {}", credit(t)),
+        ThemeOrigin::Agmen(t) => {
+            format!("installed by agmen \u{b7} {}", credit(t, "no license file"))
+        }
     };
     format!("{by}{from}")
 }
@@ -170,6 +178,7 @@ pub(super) fn browse_row(
 /// One setting: its label and hint on the left; the caller adds controls.
 pub(super) fn setting(label: &'static str, hint: &'static str, cx: &App) -> Div {
     div()
+        .debug_selector(|| format!("setting:{label}"))
         .w_full()
         .flex()
         .items_start()
