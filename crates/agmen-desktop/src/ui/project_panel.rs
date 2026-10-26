@@ -18,7 +18,7 @@ use super::scope_chip::{ScopeChip, ScopeChipEvent, ScopeOption, branch_label};
 use super::syntax::Language;
 use super::tokens::{ICON_LG, ICON_SM, PROJECT_ROW_HEIGHT, SPACE_6};
 use crate::appearance::Appearance;
-use crate::backend::{ChangeKind, FileChange, WorktreeHead, WorktreeInfo};
+use crate::backend::{ChangeKind, FileChange, WorktreeHead, WorktreeInfo, normalize_path};
 use crate::icons::{FileIcons, UiIcon};
 
 /// What the Project panel tells the workspace.
@@ -158,7 +158,9 @@ fn push_children(
 
 /// The marker a changed file shows at the row's end, and its color.
 fn change_marker(changes: &[FileChange], path: &str) -> Option<(&'static str, Color)> {
-    let change = changes.iter().find(|change| change.path == path)?;
+    let change = changes
+        .iter()
+        .find(|change| normalize_path(&change.path) == path)?;
     Some(match change.kind {
         ChangeKind::Modified => ("M", Color::Warning),
         ChangeKind::Added => ("A", Color::Success),
@@ -193,7 +195,7 @@ impl EventEmitter<ProjectPanelEvent> for ProjectPanel {}
 
 impl ProjectPanel {
     /// Shows the first worktree with its root open; `options` are the
-    /// scope chip's, one per worktree in the same order.
+    /// scope chip's, one per worktree.
     pub(crate) fn new(
         worktrees: Vec<WorktreeInfo>,
         options: Vec<ScopeOption>,
@@ -378,30 +380,19 @@ pub(crate) struct FileView {
     code: Entity<CodeView>,
 }
 
-/// mockup console.py `MAIN_RS`: fx1's main.rs after the fix.
-const FX1_MAIN_RS: &str = "mod app;\nmod cylinder;\nmod document;\nmod minimap;\nmod ui;\n\nuse ui::tabs::Tabs;\n\nfn main() -> anyhow::Result<()> {\n    let tabs = Tabs::default();\n    app::run(tabs)\n}\n";
-
 /// The text and change marks of `path` in `worktree`.
 fn contents(worktree: &WorktreeInfo, path: &str) -> (String, Vec<GutterMark>) {
-    // shortcut: the fixture holds no file contents, so main.rs shows the
-    // mockup's text and every other file a placeholder line; read the file
-    // from the worktree and its marks from `git diff` when the live backend
-    // serves files (ADR-0011).
-    if worktree.handle == "andy/fx1" && path == "src/main.rs" {
-        // The fix added `mod ui;` and the new `use`, and removed the
-        // conflict markers, `mod tabs;` and the old `use` (mockup fix 50).
-        let marks = vec![
-            GutterMark::Deleted(1),
-            GutterMark::Deleted(3),
-            GutterMark::Deleted(4),
-            GutterMark::Added(5..6),
-            GutterMark::Added(7..8),
-        ];
-        return (FX1_MAIN_RS.to_owned(), marks);
-    }
-    (
-        format!("{path}: the fixture has no contents for this file.\n"),
-        Vec::new(),
+    // shortcut: a file the backend has not read shows a placeholder line;
+    // the live backend reads files and their marks from `git diff`
+    // (ADR-0011).
+    worktree.texts.get(path).map_or_else(
+        || {
+            (
+                format!("{path}: the fixture has no contents for this file.\n"),
+                Vec::new(),
+            )
+        },
+        |file| (file.text.clone(), file.marks.clone()),
     )
 }
 

@@ -28,6 +28,7 @@ fn rv2() -> WorktreeInfo {
         files: vec!["README.md".into()],
         changes: Vec::new(),
         commits: Vec::new(),
+        texts: std::collections::BTreeMap::new(),
         state: crate::backend::WorktreeState::Reading,
     }
 }
@@ -198,4 +199,28 @@ fn file_view_marks_deletions(cx: &mut TestAppContext) {
     view.read_with(cx, |file, _| {
         assert_eq!(file.parts(), ["andy/fx1", "src", "main.rs"]);
     });
+}
+
+#[gpui::test]
+fn clicking_the_open_chip_closes_its_menu(cx: &mut TestAppContext) {
+    // Review C186: the menu's mouse down out closes it, so the chip itself
+    // must not reopen it on the same click.
+    let (_, cx) = panel(cx, vec![fx1(), rv2()]);
+    click(cx, "scope-chip");
+    assert!(cx.debug_bounds("scope-chip:0").is_some());
+    click(cx, "scope-chip");
+    assert!(cx.debug_bounds("scope-chip:0").is_none());
+}
+
+#[test]
+fn change_markers_match_paths_with_empty_segments() {
+    // Review C189: the tree drops empty segments, so the marker must too.
+    let change = FileChange {
+        path: "src//main.rs".into(),
+        kind: crate::backend::ChangeKind::Modified,
+        added: 1,
+        removed: 0,
+        hunks: Vec::new(),
+    };
+    assert!(change_marker(std::slice::from_ref(&change), "src/main.rs").is_some());
 }

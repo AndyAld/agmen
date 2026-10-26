@@ -500,3 +500,15 @@ fn refused_is_what_the_kind_could_send_but_the_role_cannot() {
         ]
     );
 }
+
+#[test]
+fn git_facts_know_every_worktree_commit() {
+    // Review C191: refs confirm commits against git_facts, so every commit
+    // the Git panel lists must be there.
+    let s = chat();
+    for wt in &s.worktrees {
+        for c in &wt.commits {
+            assert!(s.git.commits.contains(&c.sha.to_string()), "{}", c.sha);
+        }
+    }
+}

@@ -18,15 +18,7 @@ use super::tokens::{
 };
 use crate::appearance::{Appearance, Theme};
 
-/// A change mark beside a line. Line numbers start at 1; ranges are
-/// end-exclusive.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum GutterMark {
-    Added(Range<u32>),
-    Modified(Range<u32>),
-    /// Lines were deleted just after this line.
-    Deleted(u32),
-}
+pub(crate) use crate::backend::GutterMark;
 
 /// One line of text and its highlights, as byte ranges within the line.
 #[derive(Debug, Clone, PartialEq, Eq)]

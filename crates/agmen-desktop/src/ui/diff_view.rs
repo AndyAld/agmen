@@ -62,12 +62,26 @@ fn layout_rows(hunks: &[Hunk], language: Language) -> Vec<Row> {
 /// and an empty diff as `diff-empty`.
 pub(crate) struct DiffView {
     rows: Rc<Vec<Row>>,
+    /// Which hunk each row's header is, so selectors count hunks.
+    headers: Rc<Vec<usize>>,
 }
 
 impl DiffView {
     pub(crate) fn new(hunks: Vec<Hunk>, language: Language) -> Self {
+        let rows = layout_rows(&hunks, language);
+        let headers = rows
+            .iter()
+            .scan(0, |seen, row| {
+                let ix = *seen;
+                if matches!(row, Row::Header(_)) {
+                    *seen += 1;
+                }
+                Some(ix)
+            })
+            .collect();
         Self {
-            rows: Rc::new(layout_rows(&hunks, language)),
+            rows: Rc::new(rows),
+            headers: Rc::new(headers),
         }
     }
 }
@@ -158,19 +172,7 @@ impl Render for DiffView {
                     .child(Label::new("No changes to show").color(Color::Placeholder)),
             );
         }
-        // Which hunk each row's header is, so selectors count hunks.
-        let rows = self.rows.clone();
-        let headers: Rc<Vec<usize>> = Rc::new(
-            rows.iter()
-                .scan(0, |seen, row| {
-                    let ix = *seen;
-                    if matches!(row, Row::Header(_)) {
-                        *seen += 1;
-                    }
-                    Some(ix)
-                })
-                .collect(),
-        );
+        let (rows, headers) = (self.rows.clone(), self.headers.clone());
         // The mockup leaves one blank row above the first header.
         body.pt(MONO_CELL_HEIGHT + SPACE_8).child(
             uniform_list("diff-rows", rows.len(), move |range, _window, cx| {

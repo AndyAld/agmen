@@ -17,10 +17,10 @@ use crate::roles;
 
 use super::{
     AgentInfo, AgentRow, AgentSession, AgentStatus, Approval, BackendError, ChangeCard, ChangeId,
-    ChangeKind, ChangeRow, ChangeState, CommitInfo, DiffLine, DiffLineKind, FileChange, GitFacts,
-    Hunk, LaneInfo, ListenerInfo, PersonGroup, PlanInfo, RecentAction, RecentKind, RoleFile,
-    RoleInfo, RoleLayer, SessionRow, SpecState, TeamRow, Tone, WorktreeHead, WorktreeInfo,
-    WorktreeState,
+    ChangeKind, ChangeRow, ChangeState, CommitInfo, DiffLine, DiffLineKind, FileChange, FileText,
+    GitFacts, GutterMark, Hunk, LaneInfo, ListenerInfo, PersonGroup, PlanInfo, RecentAction,
+    RecentKind, RoleFile, RoleInfo, RoleLayer, SessionRow, SpecState, TeamRow, Tone, WorktreeHead,
+    WorktreeInfo, WorktreeState,
 };
 
 use crate::roles::words;
@@ -198,7 +198,10 @@ pub(super) fn git_facts() -> GitFacts {
     let set = |items: &[&str]| items.iter().map(|s| (*s).to_owned()).collect();
     GitFacts {
         branches: set(&BRANCHES),
-        commits: set(&["7c8835e", "4d9fdc8", "016f235", "9e2a71c"]),
+        // Every commit worktrees() lists (C191).
+        commits: set(&[
+            "7c8835e", "4d9fdc8", "016f235", "9e2a71c", "a41c0d2", "5be3f19",
+        ]),
         files: set(&[
             ".github/workflows/release.yml",
             "Cargo.lock",
@@ -882,12 +885,14 @@ pub(super) fn worktrees() -> Result<Vec<WorktreeInfo>, BackendError> {
             changes: Vec::new(),
             commits,
             state,
+            texts: BTreeMap::new(),
         })
     };
     let branch = |name: &str| WorktreeHead::Branch(name.into());
     let resolve = commit("9e2a71c", "Resolve mod list", "andy/fx1", "21:31")?;
     let fx1 = WorktreeInfo {
         changes: fx1_changes(),
+        texts: BTreeMap::from([("src/main.rs".to_owned(), fx1_main_rs())]),
         ..worktree(
             "andy/fx1",
             branch("fix/c015-main-conflict"),
@@ -950,12 +955,12 @@ pub(super) fn worktrees() -> Result<Vec<WorktreeInfo>, BackendError> {
 fn commit(sha: &str, subject: &str, author: &str, utc: &str) -> Result<CommitInfo, BackendError> {
     let bad = |what: &str| BackendError::BadFixture(format!("commit {sha}: {what}"));
     Ok(CommitInfo {
-        sha: sha.parse().map_err(|_| bad("sha"))?,
+        sha: sha.parse().map_err(|err| bad(&format!("sha: {err}")))?,
         subject: subject.into(),
         author: author.into(),
         at: format!("2026-10-25T{utc}:00Z")
             .parse()
-            .map_err(|_| bad("time"))?,
+            .map_err(|err| bad(&format!("time: {err}")))?,
     })
 }
 
@@ -1049,3 +1054,19 @@ pub(super) const BRANCHES: [&str; 14] = [
     "test/b-412-tabs-order",
     "test/b-415-replay-paging",
 ];
+
+/// console.py `MAIN_RS`: fx1's main.rs after the fix. The fix added `mod
+/// ui;` and the new `use`, and removed the conflict markers, `mod tabs;` and
+/// the old `use` (mockup fix 50).
+fn fx1_main_rs() -> FileText {
+    FileText {
+        text: "mod app;\nmod cylinder;\nmod document;\nmod minimap;\nmod ui;\n\nuse ui::tabs::Tabs;\n\nfn main() -> anyhow::Result<()> {\n    let tabs = Tabs::default();\n    app::run(tabs)\n}\n".into(),
+        marks: vec![
+            GutterMark::Deleted(1),
+            GutterMark::Deleted(3),
+            GutterMark::Deleted(4),
+            GutterMark::Added(5..6),
+            GutterMark::Added(7..8),
+        ],
+    }
+}
