@@ -198,10 +198,13 @@ impl ChatView {
         if !self.alerts.snooze(&alert) {
             return;
         }
+        // At its cap, `AlertState::snooze` drops the oldest snoozed alert;
+        // its timer goes with it, so the timers stay within the snoozed
+        // alerts and the cap below never cancels a live snooze.
+        self.drop_stale_snooze_timers();
         let timers = &mut self.alert_ui.snooze_timers;
         if timers.len() >= MAX_NEEDING_ME {
-            // Dropping the oldest timer cancels it; that alert stays
-            // snoozed until it is answered.
+            // The bound itself; with the line above it is not reached.
             let (_, oldest) = timers.remove(0);
             drop(oldest);
         }
@@ -214,6 +217,21 @@ impl ChatView {
         });
         timers.push((alert, timer));
         self.refresh_alerts(cx);
+    }
+
+    /// Cancels the timers of alerts no longer snoozed: answered, cleared,
+    /// or dropped at the snooze cap.
+    fn drop_stale_snooze_timers(&mut self) {
+        let alerts = &self.alerts;
+        self.alert_ui
+            .snooze_timers
+            .retain(|(id, _)| alerts.is_snoozed(id));
+    }
+
+    /// How many snooze timers run.
+    #[cfg(test)]
+    pub(super) const fn snooze_timer_count(&self) -> usize {
+        self.alert_ui.snooze_timers.len()
     }
 
     fn wake(&mut self, alert: &MessageId, cx: &mut Context<Self>) {
@@ -243,6 +261,7 @@ impl ChatView {
     pub(super) fn refresh_alerts(&mut self, cx: &mut Context<Self>) {
         let me = Me::from(&*self.snapshot);
         self.alert_ui.needs_you.forget_closed(&self.alerts);
+        self.drop_stale_snooze_timers();
         // A pending Reply to an alert that closed would answer it again.
         let alerts = &self.alerts;
         self.composer.update(cx, |composer, cx| {

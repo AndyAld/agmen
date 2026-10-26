@@ -425,3 +425,35 @@ fn sender_actions_are_bounded() {
     assert_eq!(buttons.len(), MAX_ALERT_ACTIONS + 2);
     assert_eq!(buttons.last(), Some(&AlertButton::Snooze));
 }
+
+#[test]
+fn a_catch_up_keeps_the_newest_urgent_alerts_chime_and_notice() {
+    let notice = |tag: &str| Notice {
+        tag: tag.to_owned(),
+        title: String::new(),
+        body: String::new(),
+    };
+    let urgent = |tag: &str| Signals {
+        chime: Some(tag.parse().unwrap()),
+        notice: Some(notice(tag)),
+        toast: true,
+        answered: false,
+    };
+    let normal = |tag: &str| Signals {
+        notice: Some(notice(tag)),
+        ..Signals::default()
+    };
+    let older = "01JE0000000000000000000ACE";
+    let newer = "01JE0000000000000000000NEW";
+    let caught = Signals::catch_up([normal("n1"), urgent(older), urgent(newer), normal("n2")]);
+    assert_eq!(
+        caught,
+        urgent(newer),
+        "a later normal alert does not replace it"
+    );
+    assert_eq!(
+        Signals::catch_up([normal("n1"), normal("n2")]),
+        normal("n2")
+    );
+    assert_eq!(Signals::catch_up([]), Signals::default());
+}
