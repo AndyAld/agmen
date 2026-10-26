@@ -136,7 +136,8 @@ impl Outbox {
     /// Records that message `id` was just published: one more attempt, and
     /// due again after the backoff (1 s doubling to 60 s, with 20% jitter)
     /// unless the hub answers first. A message the hub already answered
-    /// keeps its state.
+    /// keeps its state, and a retryable NACK that arrived before this call
+    /// keeps its delay when that delay ends later than the backoff.
     ///
     /// # Errors
     ///
@@ -151,8 +152,9 @@ impl Outbox {
         };
         let attempts = attempts.saturating_add(1);
         let next_at = later(now, jittered(backoff(attempts)));
+        // The hub's reply can beat this call: keep a later due time it set.
         tx.execute(
-            "UPDATE outbox SET attempts = ?2, next_at_ms = ?3 WHERE id = ?1",
+            "UPDATE outbox SET attempts = ?2, next_at_ms = max(next_at_ms, ?3) WHERE id = ?1",
             params![id.as_str(), attempts, next_at],
         )?;
         tx.commit()?;
@@ -205,13 +207,19 @@ impl Outbox {
                 retry_after_ms,
                 ..
             } => {
-                // The hub's delay is exact; only the client's own guess is
-                // spread out.
-                let delay = retry_after_ms
-                    .map_or_else(|| jittered(backoff(attempts.max(1))), Duration::from_millis);
+                // The hub's delay is exact, and a reconnect waits it out
+                // (the hold); only the client's own guess is spread out.
+                let now = Timestamp::now();
+                let (next_at, hold) = match retry_after_ms {
+                    Some(ms) => {
+                        let until = later(now, Duration::from_millis(*ms));
+                        (until, Some(until))
+                    }
+                    None => (later(now, jittered(backoff(attempts.max(1)))), None),
+                };
                 tx.execute(
-                    "UPDATE outbox SET next_at_ms = ?2 WHERE id = ?1",
-                    params![id.as_str(), later(Timestamp::now(), delay)],
+                    "UPDATE outbox SET next_at_ms = ?2, hold_until_ms = ?3 WHERE id = ?1",
+                    params![id.as_str(), next_at, hold],
                 )?;
                 OutboxState::Pending { attempts }
             }
@@ -236,10 +244,13 @@ impl Outbox {
     }
 
     /// Makes every pending message due at `now`, so a new connection sends
-    /// what the last one may have lost without waiting out the backoff.
+    /// what the last one may have lost without waiting out the backoff. A
+    /// message the hub told to wait (`retry_after_ms`) falls due when that
+    /// wait ends instead, never earlier.
     pub(crate) fn retry_now(&self, now: Timestamp) -> Result<(), ClientError> {
         self.db.lock().execute(
-            "UPDATE outbox SET next_at_ms = ?1 WHERE state = 'pending' AND next_at_ms > ?1",
+            "UPDATE outbox SET next_at_ms = max(?1, coalesce(hold_until_ms, ?1))
+             WHERE state = 'pending' AND next_at_ms > ?1",
             params![now.as_millisecond()],
         )?;
         Ok(())
@@ -327,7 +338,66 @@ fn later(now: Timestamp, delay: Duration) -> i64 {
 
 #[cfg(test)]
 mod tests {
+    use jiff::SignedDuration;
+
     use super::*;
+
+    fn fyi(id: &str) -> ClientEnvelope {
+        let raw = format!(
+            r#"{{"v":1,"id":"{id}","verb":"FYI","data":{{}},"body":"hi","sent_at":"2026-10-25T16:04:11Z"}}"#
+        );
+        ClientEnvelope::from_json(raw.as_bytes()).unwrap()
+    }
+
+    fn retry_later(id: &MessageId, retry_after_ms: Option<u64>) -> DeliveryReply {
+        DeliveryReply::Nack {
+            id: id.clone(),
+            retryable: true,
+            retry_after_ms,
+            reason: NackReason::RateLimited,
+        }
+    }
+
+    #[test]
+    fn retry_now_waits_out_the_hubs_delay() {
+        let dir = tempfile::tempdir().unwrap();
+        let outbox = Outbox::open(dir.path().join("identity.db")).unwrap();
+        let (held, backed_off, released) = (
+            fyi("01JBX6Q4T7W3C2M8Y9K5N0P1R1"),
+            fyi("01JBX6Q4T7W3C2M8Y9K5N0P1R2"),
+            fyi("01JBX6Q4T7W3C2M8Y9K5N0P1R3"),
+        );
+        for env in [&held, &backed_off, &released] {
+            outbox.enqueue(env).unwrap();
+        }
+        outbox.apply(&retry_later(&held.id, Some(5000))).unwrap();
+        // A later NACK without a delay lifts the hub's earlier hold.
+        outbox
+            .apply(&retry_later(&released.id, Some(5000)))
+            .unwrap();
+        outbox.apply(&retry_later(&released.id, None)).unwrap();
+        let now = Timestamp::now();
+        outbox.sent(&backed_off.id, now).unwrap();
+        let at = |secs| now.checked_add(SignedDuration::from_secs(secs)).unwrap();
+        assert!(outbox.due(now).unwrap().is_empty());
+
+        outbox.retry_now(now).unwrap();
+        let ids =
+            |envs: Vec<ClientEnvelope>| envs.into_iter().map(|env| env.id).collect::<Vec<_>>();
+        assert_eq!(
+            ids(outbox.due(now).unwrap()),
+            [backed_off.id.clone(), released.id.clone()],
+            "only the client's own backoff is skipped"
+        );
+        assert_eq!(
+            ids(outbox.due(at(4)).unwrap()),
+            [backed_off.id.clone(), released.id.clone()]
+        );
+        assert_eq!(
+            ids(outbox.due(at(5)).unwrap()),
+            [held.id, backed_off.id, released.id]
+        );
+    }
 
     #[test]
     fn backoff_doubles_to_the_cap() {

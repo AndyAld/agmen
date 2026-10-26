@@ -113,6 +113,29 @@ fn outbox_honors_retry_after() {
 }
 
 #[test]
+fn retry_after_survives_a_late_send_record() {
+    // The hub can answer before the sender records the attempt.
+    let (_dir, path) = db_file();
+    let outbox = Outbox::open(&path).unwrap();
+    outbox.enqueue(&fyi(1)).unwrap();
+    outbox
+        .apply(&DeliveryReply::Nack {
+            id: message_id(1),
+            retryable: true,
+            retry_after_ms: Some(5000),
+            reason: NackReason::RateLimited,
+        })
+        .unwrap();
+    let now = Timestamp::now();
+    assert_eq!(
+        outbox.sent(&message_id(1), now).unwrap(),
+        OutboxState::Pending { attempts: 1 }
+    );
+    assert!(outbox.due(after(now, 4)).unwrap().is_empty());
+    assert_eq!(ids(&outbox.due(after(now, 5)).unwrap()), [message_id(1)]);
+}
+
+#[test]
 fn outbox_records_ack_and_backs_off_after_a_send() {
     let (_dir, path) = db_file();
     let outbox = Outbox::open(&path).unwrap();

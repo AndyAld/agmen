@@ -1,7 +1,16 @@
-//! Where hub tokens are kept (ruling R17): the OS keychain under service
-//! `agmen` in normal runs, or one file per token in the directory that
-//! `AGMEN_TOKEN_STORE_DIR` names, which tests and the end-to-end runs set
-//! so they never touch the user's keychain.
+//! Where hub tokens are kept (rulings R17 and R53).
+//!
+//! - When `AGMEN_TOKEN_STORE_DIR` is set, one file per token in that
+//!   directory, on every platform. Tests and the end-to-end runs set it so
+//!   they never touch the user's keychain.
+//! - Otherwise, on macOS and Windows, the OS keychain under service `agmen`.
+//! - Otherwise, on Linux, one file per token in `$XDG_STATE_HOME/agmen`, or
+//!   `~/.local/state/agmen` when `XDG_STATE_HOME` is unset (R53). The kernel
+//!   key retention service loses its keys on a reboot, and the Secret
+//!   Service store pulls in crates `cargo deny` rejects.
+//!
+//! A directory store keeps its directory at mode 0700 and each token file
+//! at 0600, written to a temporary file and renamed into place.
 //!
 //! Every token is keyed by the hub's origin and the id it acts as (ruling
 //! R42), so an identity file that names another hub finds no token to
@@ -31,7 +40,9 @@ pub enum TokenStoreError {
     /// The OS keychain failed.
     #[error("the OS keychain failed")]
     Keychain(#[source] keyring_core::Error),
-    /// This platform has no keychain agmen supports.
+    /// This platform has no keychain agmen supports: Linux (which keeps
+    /// tokens in `$XDG_STATE_HOME/agmen` unless neither that nor `HOME` is
+    /// set) and anything but macOS and Windows.
     #[error("this platform has no keychain agmen can use; set AGMEN_TOKEN_STORE_DIR")]
     NoKeychain,
     /// Reading or writing a token file failed.
@@ -106,8 +117,9 @@ impl fmt::Display for TokenKey {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum TokenStore {
-    /// The OS keychain: Keychain Services on macOS, the kernel key
-    /// retention service on Linux, Credential Manager on Windows.
+    /// The OS keychain: Keychain Services on macOS, Credential Manager on
+    /// Windows. Other platforms, Linux included, fail with
+    /// [`TokenStoreError::NoKeychain`].
     Keychain,
     /// One file per token, readable only by the owner, in this directory.
     Dir(PathBuf),
@@ -117,31 +129,22 @@ impl TokenStore {
     /// The variable that names a directory store.
     pub const DIR_VAR: &str = "AGMEN_TOKEN_STORE_DIR";
 
-    /// A directory store when `AGMEN_TOKEN_STORE_DIR` is set and not empty,
+    /// The store for this run: a directory store in `AGMEN_TOKEN_STORE_DIR`
+    /// when it is set and not empty; else, on Linux, a directory store in
+    /// `$XDG_STATE_HOME/agmen` or `$HOME/.local/state/agmen` (ruling R53);
     /// else the keychain.
     #[must_use]
     pub fn from_env() -> Self {
-        Self::from_dir_var(std::env::var_os(Self::DIR_VAR))
-    }
-
-    /// [`TokenStore::from_env`] with the variable's value given.
-    ///
-    /// ```
-    /// use agmen_client::TokenStore;
-    /// use std::path::PathBuf;
-    /// assert_eq!(TokenStore::from_dir_var(None), TokenStore::Keychain);
-    /// assert_eq!(TokenStore::from_dir_var(Some("".into())), TokenStore::Keychain);
-    /// assert_eq!(
-    ///     TokenStore::from_dir_var(Some("/tmp/home".into())),
-    ///     TokenStore::Dir(PathBuf::from("/tmp/home"))
-    /// );
-    /// ```
-    #[must_use]
-    pub fn from_dir_var(value: Option<OsString>) -> Self {
-        match value {
-            Some(dir) if !dir.is_empty() => Self::Dir(dir.into()),
-            _ => Self::Keychain,
+        let var = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
+        if let Some(dir) = var(Self::DIR_VAR) {
+            return Self::Dir(dir.into());
         }
+        if cfg!(target_os = "linux")
+            && let Some(dir) = xdg_state_dir(var("XDG_STATE_HOME"), var("HOME"))
+        {
+            return Self::Dir(dir);
+        }
+        Self::Keychain
     }
 
     /// The token stored under `key`, if any. This reads a file or the
@@ -224,13 +227,6 @@ fn os_store() -> Result<Arc<CredentialStore>, TokenStoreError> {
     Ok(store)
 }
 
-#[cfg(target_os = "linux")]
-fn os_store() -> Result<Arc<CredentialStore>, TokenStoreError> {
-    let store: Arc<CredentialStore> =
-        linux_keyutils_keyring_store::Store::new().map_err(TokenStoreError::Keychain)?;
-    Ok(store)
-}
-
 #[cfg(target_os = "windows")]
 fn os_store() -> Result<Arc<CredentialStore>, TokenStoreError> {
     let store: Arc<CredentialStore> =
@@ -238,12 +234,23 @@ fn os_store() -> Result<Arc<CredentialStore>, TokenStoreError> {
     Ok(store)
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn os_store() -> Result<Arc<CredentialStore>, TokenStoreError> {
     Err(TokenStoreError::NoKeychain)
 }
 
-/// Writes `bytes` to `path` in `dir`, creating `dir` so only the owner can
+/// Linux's token directory (ruling R53): `$XDG_STATE_HOME/agmen`, or
+/// `$HOME/.local/state/agmen` when `XDG_STATE_HOME` is unset or relative
+/// (the XDG base directory spec says to ignore a relative one). `None` when
+/// neither gives an absolute path.
+fn xdg_state_dir(xdg_state_home: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
+    let absolute = |value: Option<OsString>| value.map(PathBuf::from).filter(|p| p.is_absolute());
+    let base = absolute(xdg_state_home)
+        .or_else(|| absolute(home).map(|home| home.join(".local").join("state")))?;
+    Some(base.join("agmen"))
+}
+
+/// Writes `bytes` to `path` in `dir`, making `dir` so only the owner can
 /// enter it, through a temporary file only the owner can read, then renames
 /// it into place, so a reader sees the old token or the new one, never part
 /// of one.
@@ -253,6 +260,16 @@ fn write_private(dir: &Path, path: &Path, bytes: &[u8]) -> io::Result<()> {
     #[cfg(unix)]
     std::os::unix::fs::DirBuilderExt::mode(&mut folder, 0o700);
     folder.create(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        // A folder made earlier with the umask's mode (on Linux the
+        // identities' state folders share `$XDG_STATE_HOME/agmen`) would let
+        // others list which hubs and ids have tokens.
+        if fs::metadata(dir)?.permissions().mode() & 0o077 != 0 {
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+        }
+    }
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(".tmp");
     let tmp = PathBuf::from(tmp);
@@ -308,10 +325,9 @@ mod tests {
         assert!(name[4..].bytes().all(|b| b.is_ascii_hexdigit()));
     }
 
-    #[test]
-    fn directory_store_round_trip() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = TokenStore::Dir(dir.path().join("tokens"));
+    /// Stores, replaces, reads and deletes a token in `store`, which must
+    /// be a directory store in `dir`, and checks the modes on the way.
+    fn round_trip(store: &TokenStore, dir: &Path) {
         let (ours, theirs) = (key("https://hub.example.com"), key("https://evil.example"));
         assert_eq!(store.get(&ours).unwrap(), None);
         store.set(&ours, "secret-1").unwrap();
@@ -325,14 +341,61 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
-            let path = dir.path().join("tokens").join(ours.file_name());
-            let mode = fs::metadata(path).unwrap().permissions().mode();
+            let mode = fs::metadata(dir.join(ours.file_name()))
+                .unwrap()
+                .permissions()
+                .mode();
             assert_eq!(mode & 0o777, 0o600);
-            let folder = fs::metadata(dir.path().join("tokens")).unwrap();
+            let folder = fs::metadata(dir).unwrap();
             assert_eq!(folder.permissions().mode() & 0o777, 0o700);
         }
         store.delete(&ours).unwrap();
         store.delete(&ours).unwrap();
         assert_eq!(store.get(&ours).unwrap(), None);
+    }
+
+    #[test]
+    fn directory_store_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let tokens = dir.path().join("tokens");
+        round_trip(&TokenStore::Dir(tokens.clone()), &tokens);
+    }
+
+    #[test]
+    fn linux_store_lives_in_xdg_state_home() {
+        let state = tempfile::tempdir().unwrap();
+        let dir = xdg_state_dir(Some(state.path().into()), Some("/home/nobody".into())).unwrap();
+        assert_eq!(dir, state.path().join("agmen"));
+        // An identity's state folder made it first, with the umask's mode.
+        fs::create_dir(&dir).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        round_trip(&TokenStore::Dir(dir.clone()), &dir);
+    }
+
+    #[test]
+    fn linux_store_falls_back_to_home() {
+        let home = || Some(OsString::from("/home/andy"));
+        let fallback = PathBuf::from("/home/andy/.local/state/agmen");
+        assert_eq!(xdg_state_dir(None, home()), Some(fallback.clone()));
+        assert_eq!(
+            xdg_state_dir(Some("relative/state".into()), home()),
+            Some(fallback),
+            "a relative XDG_STATE_HOME is ignored"
+        );
+        assert_eq!(xdg_state_dir(None, None), None);
+        assert_eq!(xdg_state_dir(None, Some("relative".into())), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_has_no_keychain() {
+        assert!(matches!(
+            TokenStore::Keychain.get(&key("https://hub.example.com")),
+            Err(TokenStoreError::NoKeychain)
+        ));
     }
 }

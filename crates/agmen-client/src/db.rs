@@ -15,14 +15,14 @@ use crate::error::ClientError;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The schema version this build writes, kept in `PRAGMA user_version`.
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 /// Version 1. `outbox.n` keeps enqueue order. A pending row is due once
 /// `next_at_ms` (Unix milliseconds) has passed; `recorded` rows carry
 /// where the hub recorded them and `rejected` rows the final NACK reason.
 /// `cursors` holds, per stream, the last seq `agmen watch` delivered and the
 /// last seq the inbox listed (ruling R45).
-const SCHEMA: &str = "
+const SCHEMA_V1: &str = "
 CREATE TABLE outbox (
     n INTEGER PRIMARY KEY AUTOINCREMENT,
     id TEXT NOT NULL UNIQUE,
@@ -44,6 +44,12 @@ CREATE TABLE cursors (
 ) STRICT;
 ";
 
+/// Version 2, applied on top of version 1. `hold_until_ms` is when the
+/// delay the hub named in the last retryable NACK (`retry_after_ms`) runs
+/// out, in Unix milliseconds, or NULL when the hub named none. A reconnect
+/// does not resend a row before its hold runs out.
+const SCHEMA_V2: &str = "ALTER TABLE outbox ADD COLUMN hold_until_ms INTEGER;";
+
 /// One connection to the identity's file, shared by the clones of an
 /// `Outbox` or `Cursors`.
 #[derive(Debug, Clone)]
@@ -51,7 +57,8 @@ pub(crate) struct Db(Arc<Mutex<Connection>>);
 
 impl Db {
     /// Opens (creating it if needed) the file at `path` in WAL mode with
-    /// `synchronous=FULL` and a 5 s busy timeout, and creates the tables.
+    /// `synchronous=FULL` and a 5 s busy timeout, and creates the tables or
+    /// brings an older file's tables up to [`SCHEMA_VERSION`].
     pub(crate) fn open(path: &Path) -> Result<Self, ClientError> {
         let mut conn = Connection::open(path)?;
         conn.busy_timeout(BUSY_TIMEOUT)?;
@@ -66,7 +73,12 @@ impl Db {
         let version: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         match version {
             0 => {
-                tx.execute_batch(SCHEMA)?;
+                tx.execute_batch(SCHEMA_V1)?;
+                tx.execute_batch(SCHEMA_V2)?;
+                tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+            }
+            1 => {
+                tx.execute_batch(SCHEMA_V2)?;
                 tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
             }
             SCHEMA_VERSION => {}
@@ -112,4 +124,53 @@ pub(crate) fn to_sql_seq(seq: u64) -> Result<i64, ClientError> {
 /// A stored seq or count, which the schema keeps non-negative.
 pub(crate) fn from_sql_int(value: i64) -> Result<u64, ClientError> {
     u64::try_from(value).map_err(|_| ClientError::Stored(format!("negative value {value}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_version_1_file_gains_the_hold_column() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("identity.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(SCHEMA_V1).unwrap();
+            conn.pragma_update(None, "user_version", 1).unwrap();
+            conn.execute(
+                "INSERT INTO outbox (id, envelope, next_at_ms) VALUES ('a', '{}', 7)",
+                [],
+            )
+            .unwrap();
+        }
+        let db = Db::open(&path).unwrap();
+        let conn = db.lock();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        let row: (i64, Option<i64>) = conn
+            .query_row(
+                "SELECT next_at_ms, hold_until_ms FROM outbox WHERE id = 'a'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(row, (7, None), "the old row is kept, with no hold");
+    }
+
+    #[test]
+    fn a_newer_file_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("identity.db");
+        Connection::open(&path)
+            .unwrap()
+            .pragma_update(None, "user_version", SCHEMA_VERSION + 1)
+            .unwrap();
+        assert!(matches!(
+            Db::open(&path),
+            Err(ClientError::StoreVersion(v)) if v == SCHEMA_VERSION + 1
+        ));
+    }
 }
