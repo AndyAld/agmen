@@ -12,19 +12,22 @@ use super::components::{Color, Icon, IconSize, Indent, Label, LabelSize, ListIte
 use super::format::title_case;
 use super::tokens::SPACE_6;
 use crate::backend::{AgentRow, PersonGroup};
+use agmen_proto::IdentityId;
+
 use crate::icons::UiIcon;
 
 /// What the Agents panel tells the workspace.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum AgentsPanelEvent {
-    /// An agent row was clicked; holds its handle.
-    Selected(String),
+    /// An agent row was clicked; holds its identity id.
+    Selected(IdentityId),
 }
 
 pub(crate) struct AgentsPanel {
     roster: Vec<PersonGroup>,
     folded: BTreeSet<String>,
-    selected: Option<String>,
+    /// The row the right dock shows; the workspace sets it.
+    selected: Option<IdentityId>,
 }
 
 impl EventEmitter<AgentsPanelEvent> for AgentsPanel {}
@@ -46,11 +49,21 @@ impl AgentsPanel {
         cx.notify();
     }
 
-    /// Selects the agent with `handle` and tells the workspace.
-    pub(crate) fn select(&mut self, handle: &str, cx: &mut Context<Self>) {
-        self.selected = Some(handle.to_owned());
-        cx.emit(AgentsPanelEvent::Selected(handle.to_owned()));
+    /// Tells the workspace a row was clicked; the workspace decides what is
+    /// selected and calls [`AgentsPanel::set_selected`].
+    fn clicked(&mut self, id: &IdentityId, cx: &mut Context<Self>) {
+        cx.emit(AgentsPanelEvent::Selected(id.clone()));
+    }
+
+    /// Highlights the row the right dock shows, or none.
+    pub(crate) fn set_selected(&mut self, id: Option<IdentityId>, cx: &mut Context<Self>) {
+        self.selected = id;
         cx.notify();
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn selected(&self) -> Option<&IdentityId> {
+        self.selected.as_ref()
     }
 
     /// The agent rows shown, in order: every agent of each unfolded person.
@@ -81,22 +94,25 @@ impl AgentsPanel {
     }
 
     fn agent_row(&self, agent: &AgentRow, cx: &mut Context<Self>) -> ListItem {
-        let handle = agent.handle.clone();
-        ListItem::new(format!("agent:{handle}"), Indent::Depth(agent.depth))
-            .selected(self.selected.as_deref() == Some(handle.as_str()))
-            .leading(StatusDot::new(agent.status))
-            .child(Label::new(agent.name.clone()).code())
-            .child(
-                Label::new(title_case(&agent.role))
-                    .size(LabelSize::Small)
-                    .color(Color::Role(agent.role.clone().into())),
-            )
-            .end(
-                Label::new(agent.harness.clone())
-                    .code()
-                    .color(Color::Placeholder),
-            )
-            .on_click(cx.listener(move |this, _, _, cx| this.select(&handle, cx)))
+        let id = agent.id.clone();
+        ListItem::new(
+            format!("agent:{}", agent.handle),
+            Indent::Depth(agent.depth),
+        )
+        .selected(self.selected.as_ref() == Some(&id))
+        .leading(StatusDot::new(agent.status))
+        .child(Label::new(agent.name.clone()).code())
+        .child(
+            Label::new(title_case(&agent.role))
+                .size(LabelSize::Small)
+                .color(Color::Role(agent.role.clone().into())),
+        )
+        .end(
+            Label::new(agent.harness.clone())
+                .code()
+                .color(Color::Placeholder),
+        )
+        .on_click(cx.listener(move |this, _, _, cx| this.clicked(&id, cx)))
     }
 }
 

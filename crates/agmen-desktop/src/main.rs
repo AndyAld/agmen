@@ -2,6 +2,10 @@
 
 mod appearance;
 mod assets;
+#[expect(
+    dead_code,
+    reason = "views send and act through Backend from Task 9 (chat composer) of the desktop plan"
+)]
 mod backend;
 #[expect(
     dead_code,
@@ -23,10 +27,12 @@ use gpui::{
 };
 
 use appearance::{Appearance, SystemMode};
+use backend::Backend as _;
 
 use ui::{Quit, ToggleLeftDock, ToggleRightDock, Workspace};
 
-const USAGE: &str = "usage: agmen-desktop [--spike list [--autoscroll] | --spike notify]";
+const USAGE: &str =
+    "usage: agmen-desktop [--screen <name> | --spike list [--autoscroll] | --spike notify]";
 
 /// What the command line asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,6 +43,8 @@ enum Launch {
     ListSpike { autoscroll: bool },
     /// Spike S8's notification check: post one, then quit.
     NotifySpike,
+    /// The app showing one mockup screen's fixture state, for screenshots.
+    Screen(backend::Screen),
 }
 
 impl Launch {
@@ -56,6 +64,10 @@ impl Launch {
                 _ => anyhow::bail!(USAGE),
             },
             [flag, name] if flag == "--spike" && name == "notify" => Ok(Self::NotifySpike),
+            [flag, name] if flag == "--screen" => name
+                .parse()
+                .map(Self::Screen)
+                .map_err(|err: String| anyhow::anyhow!(err)),
             _ => anyhow::bail!(USAGE),
         }
     }
@@ -72,7 +84,8 @@ fn main() {
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let launch = Launch::parse(&args)?;
-    // Spikes run beside a normal app, so only the app takes the instance lock.
+    // Spikes and screenshot screens run beside a normal app, so only the app
+    // takes the instance lock.
     let listener = if launch == Launch::App {
         let dir = std::env::home_dir()
             .context("no home folder")?
@@ -171,13 +184,14 @@ fn open_main_window(launch: &Launch, cx: &mut App) -> Result<()> {
     ]);
     cx.on_action(|_: &Quit, cx| cx.quit());
     assets::load_fonts(cx).context("loading the bundled fonts")?;
-    let appearance = load_appearance(cx.window_appearance());
+    let mut appearance = load_appearance(cx.window_appearance());
     let extensions = std::env::home_dir()
         .map(|home| appearance::zed_extensions_dir(&home))
         .unwrap_or_default();
     let (file_icons, warning) = icons::FileIcons::new(&appearance.icon_theme, &extensions);
     if let Some(warning) = warning {
         eprintln!("agmen-desktop: {warning}");
+        appearance.warnings.push(warning);
     }
     cx.set_global(appearance);
     cx.set_global(file_icons);
@@ -185,13 +199,20 @@ fn open_main_window(launch: &Launch, cx: &mut App) -> Result<()> {
 
     let options = window_options(cx);
     let window = match launch {
-        Launch::App => cx
-            .open_window(options, |window, cx| {
-                let workspace = cx.new(|cx| Workspace::new(backend::chat_snapshot(), window, cx));
+        Launch::App | Launch::Screen(_) => {
+            let screen = match launch {
+                Launch::Screen(screen) => *screen,
+                _ => backend::Screen::Chat,
+            };
+            // shortcut: the fixture stands in for agmend until its local API exists (ADR-0011).
+            let snapshot = backend::FixtureBackend::for_screen(screen).snapshot();
+            cx.open_window(options, |window, cx| {
+                let workspace = cx.new(|cx| Workspace::new(snapshot, window, cx));
                 window.focus(&workspace.focus_handle(cx), cx);
                 workspace
             })
-            .map(Into::into),
+            .map(Into::into)
+        }
         Launch::NotifySpike => return Ok(()),
         Launch::ListSpike { autoscroll } => {
             let autoscroll = *autoscroll;
@@ -233,6 +254,11 @@ mod tests {
             Launch::parse(&args(&["--spike", "notify"])).unwrap(),
             Launch::NotifySpike
         );
+        assert_eq!(
+            Launch::parse(&args(&["--screen", "needs-you"])).unwrap(),
+            Launch::Screen(backend::Screen::NeedsYou)
+        );
+        assert!(Launch::parse(&args(&["--screen", "nope"])).is_err());
         assert!(Launch::parse(&args(&["--spike", "nope"])).is_err());
         assert!(Launch::parse(&args(&["--bogus"])).is_err());
     }

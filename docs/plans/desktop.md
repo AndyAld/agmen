@@ -92,6 +92,7 @@
 
 - [x] Done, except the hand check below. The input is multi-line on request (Andy, 2026-10-26): `TextInput::new(cx).multiline(max_lines)` wraps, grows to `max_lines`, then scrolls; Shift-Enter adds a newline and Enter submits; one line scrolls sideways; both paint inside a content mask; `set_text`; text is capped at 64 KiB. The spike scrolls only after the first layout, until the last row renders and back, and times only frames shown while the window is active; its test is `#[ignore]` and runs with `--release --run-ignored only`.
 - [ ] Hand IME check: type with Kotoeri (Japanese) and the emoji picker in the running app, and record what was typed in ADR-0010.
+- [ ] Rerun `list_measures_10k_rows` on an idle machine and record it in ADR-0010; the only run so far (17.46 ms p99, under load) misses its own 16.7 ms assertion. If it still misses, take it to Andy (review C69).
 
 **Files:**
 - Create: `src/ui/text_input.rs` (single and multi line input, the GPUI input-handler pattern from gpui's `examples/input.rs`), `src/ui/text_input_tests.rs`, `src/spike.rs` (`--spike list` mode)
@@ -167,7 +168,7 @@ From here every task follows the same shape: write the view's tests (GPUI `TestA
 
 ### Task 6: Backend trait, fixture data, and the screenshot harness
 
-- [ ] Done
+- [x] Done. As built: `Draft { to: Vec<IdentityId>, body, reply_to }` (the model choice joins it in Task 15); `Update::Message(Box<StampedEnvelope>)`; roster rows and agent details carry `id: IdentityId`, and `Snapshot.agents` is keyed by it (review C62); `Snapshot` adds `me_id`, `listener_id`, `messages`, `changes` (cards keyed by message id), `plan`; worktrees, installed agents and models join it in Tasks 11, 12, 14 and 15. The fixture builds the mockup fixes for Task 6 (28, 29, 34, 35, 36, 39, 52, 53). `shot.sh` uses `scripts/window-id.swift` to find the window, since the app cannot read its own CGWindowID without `unsafe`. ADR-0011.
 
 **Files:**
 - Create: `src/backend/mod.rs` (trait and types), `src/backend/fixture.rs` (mockup data), `src/backend/fixture_tests.rs`, `scripts/shot.sh`, `docs/adr/0011-desktop-backend-trait.md`

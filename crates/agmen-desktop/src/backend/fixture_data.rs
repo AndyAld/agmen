@@ -1,0 +1,518 @@
+//! The mockup's data (`docs/mockups/scripts/console.py`), with the mockup
+//! fixes Andy chose (plan, "Mockup fixes to build"). Messages are built as
+//! wire JSON, so the fixture uses only the protocol's public format.
+//!
+//! The mockup names items `C015`; protocol item keys need a dash
+//! (`^[A-Z]{1,4}-[0-9]{1,6}$`), so bodies keep the mockup's text and the
+//! structured `item` fields say `C-015`.
+
+use std::collections::BTreeMap;
+
+use agmen_proto::{IdentityId, StampedEnvelope};
+use serde_json::{Value, json};
+
+use super::{
+    AgentInfo, AgentRow, AgentStatus, Approval, ChangeCard, ChangeId, ChangeRow, ChangeState,
+    LaneInfo, ListenerInfo, PersonGroup, PlanInfo, RecentAction, SpecState, TeamRow,
+};
+
+fn words(list: &str) -> Vec<String> {
+    list.split_whitespace().map(str::to_owned).collect()
+}
+
+fn agent(
+    person: &str,
+    depth: u8,
+    name: &str,
+    role: &str,
+    harness: &str,
+    status: AgentStatus,
+) -> AgentRow {
+    let handle = format!("{person}/{name}");
+    AgentRow {
+        id: id(&handle),
+        handle,
+        name: name.to_owned(),
+        role: role.to_owned(),
+        harness: harness.to_owned(),
+        status,
+        depth,
+    }
+}
+
+pub(super) fn roster() -> Vec<PersonGroup> {
+    use AgentStatus::{Idle, Reading, Working};
+    vec![
+        PersonGroup {
+            person: "andy".into(),
+            you: true,
+            agents: vec![
+                agent("andy", 0, "listen", "listener", "codex", Idle),
+                agent("andy", 1, "fx1", "engineer", "claude", Working),
+                agent("andy", 1, "t7k", "tester", "opencode", Working),
+                // Mockup fix 28: rv2 runs on a harness installed on this machine.
+                agent("andy", 2, "rv2", "reviewer", "opencode", Reading),
+                agent("andy", 0, "a1", "engineer", "claude", Idle),
+            ],
+        },
+        PersonGroup {
+            person: "sean".into(),
+            you: false,
+            agents: vec![
+                agent("sean", 0, "a1", "engineer", "codex", Working),
+                agent("sean", 0, "plan", "planner", "gemini", Idle),
+            ],
+        },
+        PersonGroup {
+            person: "adam".into(),
+            you: false,
+            agents: vec![
+                agent("adam", 0, "coord", "coordinator", "claude", Working),
+                agent("adam", 0, "res", "researcher", "agy", Working),
+            ],
+        },
+    ]
+}
+
+pub(super) fn listener() -> ListenerInfo {
+    let recent = |time: &str, text: &str| RecentAction {
+        time: time.into(),
+        text: text.into(),
+    };
+    ListenerInfo {
+        handle: "andy/listen".into(),
+        agent: "codex".into(),
+        state: "idle".into(),
+        harness_label: "Codex 0.164.0 over ACP".into(),
+        role_label: "Listener (built-in)".into(),
+        can_use: words("Read Grep Glob git_log git_show git_diff git_status"),
+        never: words("Edit Write Bash"),
+        takes_work_from: "andy, coordinators".into(),
+        per_worker_usd: 5.00,
+        // Mockup fix 36: workers plus listener is the status bar's $14.20.
+        workers_today_usd: 13.78,
+        workers_cap_usd: 20.00,
+        workers_running: 3,
+        workers_max: 4,
+        listener_today_usd: 0.42,
+        listener_cap_usd: 2.00,
+        tokens_in: 96_000,
+        tokens_out: 8_000,
+        uptime_minutes: 400,
+        recent: vec![
+            recent("15:31", "delegated andy/fx1 · Engineer · claude"),
+            recent("14:06", "delegated andy/t7k · Tester · opencode"),
+            recent("13:52", "answered: is C012 merged? (git_log)"),
+        ],
+    }
+}
+
+pub(super) fn fx1() -> AgentInfo {
+    AgentInfo {
+        id: id("andy/fx1"),
+        handle: "andy/fx1".into(),
+        role_label: "Engineer (built-in)".into(),
+        harness_label: "Claude Code 2.1.310 · CLI adapter".into(),
+        model: "sonnet (standard tier)".into(),
+        delegated_by: Some("andy/listen at 15:31".into()),
+        state: "working".into(),
+        tools: words("Read Edit Write Bash Grep Glob"),
+        edits: "lane L-CORE".into(),
+        verbs: words("CLAIM DONE PUSH_REQUEST FOUND chat"),
+        refused: words("ASSIGN RULING LEND REVIEW"),
+        branch: "fix/c015-main-conflict".into(),
+        base: "origin/main @4d9fdc8".into(),
+        worktree_state: "1 commit, pushed, clean".into(),
+        cleanup: "removed with its branch after merge".into(),
+        spent_usd: 1.20,
+        budget_usd: 5.00,
+        // Mockup fix 39: delegated at 15:31, about 14 minutes before 15:45.
+        since_launch_minutes: 14,
+        working_minutes: 10,
+        tokens_in: 418_000,
+        tokens_out: 36_000,
+        cache_read: 1_900_000,
+    }
+}
+
+/// A stable identity id for a mockup handle: the handle without `/`,
+/// padded to the protocol's 8 characters.
+#[expect(
+    clippy::expect_used,
+    reason = "fixture handles are lowercase ASCII; fixture_handles_make_ids checks every one"
+)]
+pub(super) fn id(handle: &str) -> IdentityId {
+    let flat: String = handle.chars().filter(char::is_ascii_alphanumeric).collect();
+    format!("{flat:0<8}")
+        .parse()
+        .expect("a fixture handle makes a valid identity id")
+}
+
+fn kind(handle: &str) -> &'static str {
+    match handle {
+        "hub" => "hub",
+        "andy/listen" => "listener",
+        "adam/coord" | "andy/coord" => "coordinator",
+        h if h.contains('/') => "agent",
+        _ => "human",
+    }
+}
+
+/// One chat message, before it is stamped.
+pub(super) struct Msg {
+    pub(super) time: &'static str,
+    pub(super) handle: &'static str,
+    pub(super) verb: &'static str,
+    pub(super) data: Value,
+    pub(super) body: &'static str,
+    /// The index of the earlier message this one answers.
+    pub(super) reply_to: Option<usize>,
+    pub(super) to: Vec<&'static str>,
+    pub(super) mentioned: Vec<&'static str>,
+    pub(super) items: Vec<&'static str>,
+}
+
+fn msg(time: &'static str, handle: &'static str, verb: &'static str, body: &'static str) -> Msg {
+    Msg {
+        time,
+        handle,
+        verb,
+        data: json!({}),
+        body,
+        reply_to: None,
+        to: Vec::new(),
+        mentioned: Vec::new(),
+        items: Vec::new(),
+    }
+}
+
+impl Msg {
+    fn data(mut self, data: Value) -> Self {
+        self.data = data;
+        self
+    }
+    fn reply_to(mut self, ix: usize) -> Self {
+        self.reply_to = Some(ix);
+        self
+    }
+    fn to(mut self, handle: &'static str) -> Self {
+        self.to.push(handle);
+        self
+    }
+    fn mentions(mut self, handles: &[&'static str]) -> Self {
+        self.mentioned.extend_from_slice(handles);
+        self
+    }
+    fn items(mut self, items: &[&'static str]) -> Self {
+        self.items.extend_from_slice(items);
+        self
+    }
+}
+
+/// The ULID-shaped id of the message at `seq`.
+pub(super) fn message_id(seq: usize) -> String {
+    format!("01JC{seq:022}")
+}
+
+/// Mountain time 15:27 on 2026-10-25 is 21:27 UTC.
+fn utc(time: &str) -> String {
+    let (h, m) = time.split_once(':').unwrap_or(("0", "0"));
+    let h: u32 = h.parse().unwrap_or(0);
+    format!("2026-10-25T{:02}:{m}:00Z", (h + 6) % 24)
+}
+
+/// Stamps `msgs` as the hub would, numbering from `first_seq`.
+pub(super) fn stamp(msgs: Vec<Msg>, first_seq: usize) -> Vec<StampedEnvelope> {
+    msgs.into_iter()
+        .enumerate()
+        .filter_map(|(i, m)| {
+            let seq = first_seq + i;
+            let ids = |handles: &[&str]| -> Vec<String> {
+                handles.iter().map(|h| id(h).to_string()).collect()
+            };
+            let value = json!({
+                "v": 1,
+                "id": message_id(seq),
+                "reply_to": m.reply_to.map(|r| message_id(first_seq + r)),
+                "to": ids(&m.to),
+                "items": m.items,
+                "body": m.body,
+                "sent_at": utc(m.time),
+                "verb": m.verb,
+                "data": m.data,
+                "stream": "feed",
+                "seq": seq,
+                "from": id(m.handle).to_string(),
+                "from_handle": m.handle,
+                "from_kind": kind(m.handle),
+                "mentioned": ids(&m.mentioned),
+                "hub_at": utc(m.time),
+            });
+            let stamped = serde_json::from_value(value);
+            debug_assert!(stamped.is_ok(), "fixture message {seq}: {stamped:?}");
+            stamped.ok()
+        })
+        .collect()
+}
+
+fn done(item: &str, branch: &str, commit: &str, passed: u32) -> Value {
+    json!({
+        "item": item, "branch": branch, "commit": commit, "base_sha": "4d9fdc8",
+        "checks": [{"name": "cargo test", "passed": passed, "failed": 0, "baseline": null}],
+        "changes": [{"status": "M", "path": "src/main.rs"}],
+    })
+}
+
+/// `CHAT` in console.py: the desktop-chat story.
+pub(super) fn chat_messages() -> Vec<Msg> {
+    vec![
+        msg("15:27", "andy/a1", "DONE",
+            "C014 feat/c014-release-matrix@7c8835e · PR #9 · release.yml matrix: windows, macos-26, linux")
+            .data(done("C-014", "feat/c014-release-matrix", "7c8835e", 42)).items(&["C-014"]),
+        msg("15:28", "andy/a1", "ALERT",
+            "main does not compile: 4d9fdc8 committed conflict markers at src/main.rs:2-8. \
+             @sean/a1 please hold pushes to main until the fix lands.")
+            .data(json!({"need": "hold pushes to main", "urgency": "normal", "needs": "anyone", "actions": []}))
+            .mentions(&["sean/a1"]),
+        msg("15:31", "andy", "FYI", "Spawn another worker to fix main and keep Sean's changes")
+            .to("andy/listen").mentions(&["andy/listen"]),
+        msg("15:31", "andy/listen", "ANSWER",
+            "git_show: Sean's 016f235 and 4d9fdc8 are on main; 4d9fdc8 left markers at src/main.rs:2-8. Delegating.")
+            .reply_to(2).mentions(&["andy"]),
+        msg("15:31", "andy/listen", "DELEGATED",
+            "andy/fx1 · Engineer · claude · sonnet · $5.00 · fix/c015-main-conflict")
+            .data(json!({"worker": id("andy/fx1").to_string(), "agent": "claude", "role": "engineer",
+                         "model": "sonnet", "tier": "standard", "budget_usd": 5.0, "item": "C-015"}))
+            .reply_to(2).items(&["C-015"]),
+        msg("15:33", "hub", "GRANT", "C015 to andy/fx1, lease 30 min")
+            .data(json!({"item": "C-015", "lease_until": "2026-10-25T22:03:00Z"}))
+            .items(&["C-015"]),
+        msg("15:41", "andy/fx1", "DONE",
+            "C015 fix/c015-main-conflict@9e2a71c · cargo test 71 passed, 0 failed · keeps cylinder, document, minimap and tabs from both sides")
+            .data(done("C-015", "fix/c015-main-conflict", "9e2a71c", 71)).items(&["C-015"]),
+        msg("15:44", "andy/rv2", "REVIEW", "pass · 0 findings · traced the mod list and both callers")
+            .data(json!({"verdict": "pass", "findings": [], "traced": "the mod list and both callers"}))
+            .reply_to(6).mentions(&["andy/fx1"]),
+        msg("15:45", "sean", "FYI", "@andy merging #10 after CI. Sorry about the markers.")
+            .mentions(&["andy"]),
+    ]
+}
+
+/// `ALERT_MSG`: adam/coord's urgent alert (desktop-needs-you).
+pub(super) fn urgent_alert() -> Msg {
+    msg("15:58", "adam/coord", "ALERT",
+        "@andy CI on main is red after #10 merged: it_tabs, 3 failed. The release tag is blocked. Revert #10, or hotfix on a branch?")
+        .data(json!({
+            "need": "decide: revert #10 or hotfix on a branch",
+            "urgency": "urgent",
+            "needs": "anyone",
+            "actions": ["Hotfix: spawn an engineer", "Revert #10", "Snooze 15 min"],
+        }))
+        .mentions(&["andy"])
+}
+
+/// `ANSWER_MSG`: adam answers his own alert; `alert` is its index.
+pub(super) fn alert_answer(alert: usize) -> Msg {
+    msg(
+        "15:59",
+        "adam",
+        "ANSWER",
+        "Revert #10 now. @sean/a1 hotfixes it_tabs on fix/c016-it-tabs. Clearing this.",
+    )
+    .reply_to(alert)
+    .mentions(&["sean/a1"])
+}
+
+/// `SETTINGS_CHAT`: the listener changes settings from chat. Returns the
+/// messages and the index of the listener's settings message, which carries
+/// the change card.
+pub(super) fn settings_messages(first: usize) -> (Vec<Msg>, usize) {
+    let msgs = vec![
+        msg("15:50", "andy", "FYI",
+            "Give andy/fx1 edit access to L-INFRA until 18:00 and raise its budget to $8.")
+            .to("andy/listen").mentions(&["andy/listen"]),
+        msg("15:50", "andy/listen", "ANSWER",
+            "Both changes widen what andy/fx1 may do, so they wait for your Apply.")
+            .reply_to(first).mentions(&["andy"]),
+        msg("15:51", "sean", "FYI", "@andy/listen turn off push approval for andy's agents")
+            .mentions(&["andy/listen"]),
+        msg("15:51", "andy/listen", "ANSWER",
+            "Only andy can change andy's settings, so I changed nothing. @andy, sean asked for this.")
+            .reply_to(first + 2).mentions(&["andy", "sean"]),
+    ];
+    (msgs, first + 1)
+}
+
+pub(super) fn settings_card(state: ChangeState) -> ChangeCard {
+    let row = |setting: &str, before: &str, after: &str| ChangeRow {
+        target: "andy/fx1".into(),
+        setting: setting.into(),
+        before: before.into(),
+        after: after.into(),
+    };
+    ChangeCard {
+        id: ChangeId("chg-fx1-lanes-budget".into()),
+        requested_by: "andy".into(),
+        widens: true,
+        rows: vec![
+            row("lanes", "L-CORE", "L-CORE, L-INFRA deploy/** until 18:00"),
+            row("budget", "$5.00", "$8.00"),
+        ],
+        state,
+    }
+}
+
+/// `ASK_CHAT`: a question to the listener on another model.
+pub(super) fn ask_messages(first: usize) -> Vec<Msg> {
+    vec![
+        msg("15:52", "andy", "FYI",
+            "Why does C014's release matrix skip linux-musl, and should C016 add it?")
+            .to("andy/listen").mentions(&["andy/listen"]),
+        msg("15:52", "andy/listen", "ANSWER",
+            "release.yml builds x86_64-unknown-linux-gnu only; 7c8835e dropped musl and its message gives no reason. Adding it is a CI change in lane L-INFRA. Want me to delegate C016 to a Tester? (git_show 7c8835e · 41k tokens · $0.31 · 18 s)")
+            .reply_to(first).mentions(&["andy"]),
+    ]
+}
+
+/// `PLAN_CHAT`, `PLAN_READY` and `PLAN_RUN`: planning Ridgeline.
+pub(super) fn plan_messages(ready: bool, running: bool) -> Vec<Msg> {
+    let mut msgs = vec![
+        msg("15:40", "andy", "FYI",
+            "Greenfield: Ridgeline, offline trail maps for iOS and Android on a Rust core. Can you draft the team and the first specs?")
+            .to("sean/plan").mentions(&["sean/plan"]),
+        // Mockup fix 53: two specs, not three.
+        msg("15:41", "sean/plan", "PROPOSAL",
+            "Plan v1 is on the right: 7 agents, 2 specs, 4 lanes, about $105/day. Open question: who owns map tiles? The license decides whether we self-host them.")
+            .data(json!({"options": [], "deadline": null})),
+        msg("15:43", "sean", "FYI",
+            "Run tile research on my machine with agy. I'll take sync too, on opencode."),
+        msg("15:44", "sean/plan", "PROPOSAL",
+            "Plan v2: tiles (new tile-researcher role) and sync run on sean's machine; tile-sources.md added for the researcher to fill in.")
+            .data(json!({"options": [], "deadline": null})).reply_to(2),
+        msg("15:47", "andy", "FYI",
+            "Approved ridgeline-design.md. Make the reviewer deep tier and give core to codex.")
+            .to("sean/plan").mentions(&["sean/plan"]),
+        msg("15:48", "sean/plan", "PROPOSAL",
+            "Plan v3: reviewer on opus, core on codex. Waiting on sean's approval of the design spec and his 3 agents.")
+            .data(json!({"options": [], "deadline": null})).reply_to(4),
+    ];
+    if ready || running {
+        msgs.push(
+            msg("15:52", "sean", "DECISION", "Approved ridgeline-design.md and my 3 agents ($40/day).")
+                .data(json!({"outcome": "GO", "option": null, "subject": "docs/specs/ridgeline-design.md"}))
+                .reply_to(5),
+        );
+    }
+    if running {
+        let first = msgs.len();
+        msgs.extend([
+            msg("15:55", "andy", "DECISION", "Kick off plan v3.")
+                .data(json!({"outcome": "GO", "option": null, "subject": null})),
+            msg("15:55", "hub", "STATE",
+                "lanes L-CORE L-APP L-SYNC L-TESTS and items R-1 to R-12 created from docs/plans/m0.md")
+                .data(json!({"key": "plan.ridgeline", "v": 3, "as_of_seq": first})),
+            msg("15:55", "andy/coord", "ASSIGN",
+                "R-1 to @andy/core, R-2 to @andy/app, R-3 to @sean/sync, R-4 to @sean/qa")
+                .data(json!({"item": "R-1", "to": id("andy/core").to_string()}))
+                .items(&["R-1", "R-2", "R-3", "R-4"])
+                .mentions(&["andy/core", "andy/app", "sean/sync", "sean/qa"]),
+            msg("15:56", "andy/core", "DM",
+                "@sean/sync the tile cache API lands in core first. I'll post its signature before you build on it, so we don't both write one.")
+                .to("sean/sync").mentions(&["sean/sync"]),
+            msg("15:56", "sean/sync", "ANSWER",
+                "Agreed. I'll stub sync against your trait and swap in the real one when R-1 is DONE.")
+                .reply_to(first + 3).mentions(&["andy/core"]),
+            msg("15:57", "sean/tiles", "FYI", "Starting the tile licensing survey for tile-sources.md."),
+        ]);
+    }
+    msgs
+}
+
+/// `TEAM` and the plan panel (desktop-plan, -plan-ready, -running).
+pub(super) fn plan(ready: bool, running: bool) -> PlanInfo {
+    let team =
+        |role: &str, label: &str, handle: &str, harness: &str, lane: &str, owner: &str, usd| {
+            TeamRow {
+                role: role.into(),
+                role_label: label.into(),
+                handle: handle.into(),
+                harness: harness.into(),
+                lane: lane.into(),
+                owner: owner.into(),
+                usd_per_day: usd,
+            }
+        };
+    let both = |sean: Approval| {
+        BTreeMap::from([("andy".into(), Approval::Approved), ("sean".into(), sean)])
+    };
+    let sean = if ready || running {
+        Approval::Approved
+    } else {
+        Approval::Waiting
+    };
+    let lane = |name: &str, path: &str| LaneInfo {
+        name: name.into(),
+        paths: vec![path.into()],
+    };
+    PlanInfo {
+        name: "ridgeline".into(),
+        version: 3,
+        goal: "Offline trail maps for iOS and Android on a shared Rust core. First milestone: a downloaded region renders with no network.".into(),
+        team: vec![
+            team("coordinator", "Coordinator", "coord", "claude · sonnet", "board", "andy", 10),
+            team("engineer", "Engineer", "core", "codex", "L-CORE", "andy", 20),
+            team("engineer", "Engineer", "app", "claude · sonnet", "L-APP", "andy", 20),
+            team("reviewer", "Reviewer", "rev", "claude · opus", "all", "andy", 15),
+            team("engineer", "Engineer", "sync", "opencode", "L-SYNC", "sean", 20),
+            team("tester", "Tester", "qa", "gemini", "L-TESTS", "sean", 10),
+            team("researcher", "Tile Researcher", "tiles", "agy", "none", "sean", 10),
+        ],
+        specs: vec![
+            SpecState { path: "docs/specs/ridgeline-design.md".into(), draft_note: None, approvals: both(sean) },
+            SpecState {
+                path: "docs/specs/tile-sources.md".into(),
+                draft_note: Some("draft, researcher fills in".into()),
+                approvals: BTreeMap::new(),
+            },
+            SpecState { path: "docs/plans/m0.md".into(), draft_note: None, approvals: both(Approval::Approved) },
+            SpecState { path: ".agmen/roles/tile-researcher.xml".into(), draft_note: None, approvals: both(Approval::Approved) },
+        ],
+        lanes: vec![
+            lane("L-CORE", "core/**"),
+            lane("L-APP", "app/**"),
+            lane("L-SYNC", "sync/**"),
+            lane("L-TESTS", "tests/**"),
+        ],
+        repo_exists: true,
+        branch_merged: ready || running,
+        shares_approved: BTreeMap::from([("andy".into(), true), ("sean".into(), ready || running)]),
+        running,
+    }
+}
+
+/// The planning room roster (desktop-plan's left dock).
+pub(super) fn plan_roster() -> Vec<PersonGroup> {
+    use AgentStatus::{Idle, Working};
+    let row = |handle: &str, role: &str, harness: &str, status| AgentRow {
+        id: id(handle),
+        handle: handle.into(),
+        name: handle.rsplit('/').next().unwrap_or(handle).into(),
+        role: role.into(),
+        harness: harness.into(),
+        status,
+        depth: 0,
+    };
+    vec![
+        // Mockup fix 52: sean/plan keeps its pr-3331 harness, gemini.
+        PersonGroup {
+            person: "andy".into(),
+            you: true,
+            agents: vec![row("andy/listen", "listener", "codex", Idle)],
+        },
+        PersonGroup {
+            person: "sean".into(),
+            you: false,
+            agents: vec![row("sean/plan", "planner", "gemini", Working)],
+        },
+    ]
+}

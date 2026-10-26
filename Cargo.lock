@@ -90,7 +90,9 @@ dependencies = [
 name = "agmen-desktop"
 version = "0.1.0"
 dependencies = [
+ "agmen-proto",
  "anyhow",
+ "futures",
  "gpui",
  "gpui_macos",
  "jsonc-parser",

@@ -2,7 +2,7 @@ use super::*;
 use crate::backend::chat_snapshot;
 use crate::ui::test_support::{click, init, redraw};
 use crate::ui::tokens::{TREE_INDENT_BASE, TREE_INDENT_STEP};
-use gpui::{AppContext as _, TestAppContext};
+use gpui::TestAppContext;
 
 #[gpui::test]
 fn agents_panel_groups_and_folds(cx: &mut TestAppContext) {
@@ -61,7 +61,6 @@ fn selecting_a_row_emits_its_handle(cx: &mut TestAppContext) {
     click(cx, "agent:sean/plan");
     assert_eq!(
         *events.borrow(),
-        vec![AgentsPanelEvent::Selected("sean/plan".into())]
+        vec![AgentsPanelEvent::Selected("seanplan".parse().unwrap())]
     );
-    let _ = cx.new(|_| ());
 }

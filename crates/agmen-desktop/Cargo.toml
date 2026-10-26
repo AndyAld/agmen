@@ -11,7 +11,9 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+agmen-proto = { version = "0.1.0", path = "../agmen-proto" }
 anyhow = "1.0.104"
+futures = { version = "0.3.34", default-features = false, features = ["std"] }
 gpui = { version = "0.2.2", git = "https://github.com/zed-industries/zed", rev = "08cbb88a152c3751a43e853425a70e9f631a5918" }
 jsonc-parser = { version = "0.34.0", features = ["serde"] }
 serde = { version = "1.0.229", features = ["derive"] }

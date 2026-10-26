@@ -50,6 +50,33 @@ fn status_bar_shows_toggle_only_when_dock_closed(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn listener_toggle_shows_the_listener_after_an_agent(cx: &mut TestAppContext) {
+    let (workspace, cx) = open(cx);
+    click(cx, "agent:andy/fx1");
+    assert!(cx.debug_bounds("agent-panel").is_some());
+    click(cx, "close-right-dock");
+    click(cx, "listener-toggle");
+    assert!(
+        cx.debug_bounds("listener-panel").is_some(),
+        "the toggle says Listener"
+    );
+    assert!(cx.debug_bounds("agent-panel").is_none());
+    workspace.read_with(cx, |w, _| assert!(w.shown_agent().is_none()));
+}
+
+#[gpui::test]
+fn rows_without_details_are_not_highlighted(cx: &mut TestAppContext) {
+    let (workspace, cx) = open(cx);
+    click(cx, "agent:andy/fx1");
+    click(cx, "agent:sean/a1");
+    workspace.read_with(cx, |w, cx| {
+        assert!(w.shown_agent().is_none());
+        assert_eq!(w.agents_panel.read(cx).selected(), None);
+    });
+    assert!(cx.debug_bounds("listener-panel").is_some());
+}
+
+#[gpui::test]
 fn selecting_agent_shows_agent_panel(cx: &mut TestAppContext) {
     let (workspace, cx) = open(cx);
     assert!(cx.debug_bounds("listener-panel").is_some());
@@ -58,6 +85,11 @@ fn selecting_agent_shows_agent_panel(cx: &mut TestAppContext) {
     click(cx, "agent:andy/fx1");
     workspace.read_with(cx, |w, _| {
         assert_eq!(w.shown_agent().map(|a| a.handle.as_str()), Some("andy/fx1"));
+        assert_eq!(
+            w.shown_agent().map(|a| a.id.as_str()),
+            Some("andyfx10"),
+            "selection carries the identity id"
+        );
     });
     assert!(cx.debug_bounds("agent-panel").is_some());
     assert!(cx.debug_bounds("listener-panel").is_none());

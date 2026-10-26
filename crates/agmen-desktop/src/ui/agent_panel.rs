@@ -115,7 +115,10 @@ mod tests {
     #[gpui::test]
     fn agent_panel_renders(cx: &mut TestAppContext) {
         let size = rendered_size(cx, || {
-            let info = chat_snapshot().agents.remove("andy/fx1").unwrap();
+            let info = chat_snapshot()
+                .agents
+                .remove(&"andyfx10".parse::<agmen_proto::IdentityId>().unwrap())
+                .unwrap();
             div()
                 .w(crate::ui::tokens::RIGHT_DOCK_WIDTH)
                 .child(AgentPanel::new(info))

@@ -1,141 +1,259 @@
-//! The mockup's data for the chat screen, from `docs/mockups/scripts/console.py`.
+//! [`FixtureBackend`]: the mockup's data behind the [`Backend`] trait, one
+//! state per mockup screen.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 
+use agmen_proto::MAX_BODY_BYTES;
+use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
+use serde_json::json;
+
+use super::fixture_data::{
+    Msg, alert_answer, ask_messages, chat_messages, fx1, id, listener, plan, plan_messages,
+    plan_roster, roster, settings_card, settings_messages, stamp, urgent_alert,
+};
 use super::{
-    AgentInfo, AgentRow, AgentStatus, ListenerInfo, PersonGroup, RecentAction, Snapshot,
-    StatusSummary,
+    Action, Backend, BackendError, ChangeState, Draft, RecentAction, Screen, Snapshot,
+    StatusSummary, Update,
 };
 
-fn words(list: &str) -> Vec<String> {
-    list.split_whitespace().map(str::to_owned).collect()
-}
-
-fn agent(
-    person: &str,
-    depth: u8,
-    name: &str,
-    role: &str,
-    harness: &str,
-    status: AgentStatus,
-) -> AgentRow {
-    AgentRow {
-        handle: format!("{person}/{name}"),
-        name: name.to_owned(),
-        role: role.to_owned(),
-        harness: harness.to_owned(),
-        status,
-        depth,
-    }
-}
-
-fn roster() -> Vec<PersonGroup> {
-    use AgentStatus::{Idle, Reading, Working};
-    vec![
-        PersonGroup {
-            person: "andy".into(),
-            you: true,
-            agents: vec![
-                agent("andy", 0, "listen", "listener", "codex", Idle),
-                agent("andy", 1, "fx1", "engineer", "claude", Working),
-                agent("andy", 1, "t7k", "tester", "opencode", Working),
-                agent("andy", 2, "rv2", "reviewer", "grok", Reading),
-                agent("andy", 0, "a1", "engineer", "claude", Idle),
-            ],
-        },
-        PersonGroup {
-            person: "sean".into(),
-            you: false,
-            agents: vec![
-                agent("sean", 0, "a1", "engineer", "codex", Working),
-                agent("sean", 0, "plan", "planner", "gemini", Idle),
-            ],
-        },
-        PersonGroup {
-            person: "adam".into(),
-            you: false,
-            agents: vec![
-                agent("adam", 0, "coord", "coordinator", "claude", Working),
-                agent("adam", 0, "res", "researcher", "agy", Working),
-            ],
-        },
-    ]
-}
-
-fn listener() -> ListenerInfo {
-    let recent = |time: &str, text: &str| RecentAction {
-        time: time.into(),
-        text: text.into(),
-    };
-    ListenerInfo {
-        handle: "andy/listen".into(),
-        agent: "codex".into(),
-        state: "idle".into(),
-        harness_label: "Codex 0.164.0 over ACP".into(),
-        role_label: "Listener (built-in)".into(),
-        can_use: words("Read Grep Glob git_log git_show git_diff git_status"),
-        never: words("Edit Write Bash"),
-        takes_work_from: "andy, coordinators".into(),
-        per_worker_usd: 5.00,
-        workers_today_usd: 11.20,
-        workers_cap_usd: 20.00,
-        workers_running: 3,
-        workers_max: 4,
-        listener_today_usd: 0.42,
-        listener_cap_usd: 2.00,
-        tokens_in: 96_000,
-        tokens_out: 8_000,
-        uptime_minutes: 400,
-        recent: vec![
-            recent("15:31", "delegated andy/fx1 · Engineer · claude"),
-            recent("14:06", "delegated andy/t7k · Tester · opencode"),
-            recent("13:52", "answered: is C012 merged? (git_log)"),
-        ],
-    }
-}
-
-fn fx1() -> AgentInfo {
-    AgentInfo {
-        handle: "andy/fx1".into(),
-        role_label: "Engineer (built-in)".into(),
-        harness_label: "Claude Code 2.1.310 · CLI adapter".into(),
-        model: "sonnet (standard tier)".into(),
-        delegated_by: Some("andy/listen at 15:31".into()),
-        state: "working".into(),
-        tools: words("Read Edit Write Bash Grep Glob"),
-        edits: "lane L-CORE".into(),
-        verbs: words("CLAIM DONE PUSH_REQUEST FOUND chat"),
-        refused: words("ASSIGN RULING LEND REVIEW"),
-        branch: "fix/c015-main-conflict".into(),
-        base: "origin/main @4d9fdc8".into(),
-        worktree_state: "1 commit, pushed, clean".into(),
-        cleanup: "removed with its branch after merge".into(),
-        spent_usd: 1.20,
-        budget_usd: 5.00,
-        since_launch_minutes: 72,
-        working_minutes: 41,
-        tokens_in: 418_000,
-        tokens_out: 36_000,
-        cache_read: 1_900_000,
-    }
+/// Serves one mockup screen's state, and keeps what is sent and done in
+/// memory so the views can be driven without agmend.
+#[derive(Debug)]
+pub(crate) struct FixtureBackend {
+    state: RefCell<Snapshot>,
+    subscribers: RefCell<Vec<UnboundedSender<Update>>>,
 }
 
 /// The state the `desktop-chat` render shows.
+#[cfg(test)]
 #[must_use]
 pub(crate) fn chat_snapshot() -> Snapshot {
+    FixtureBackend::for_screen(Screen::Chat).snapshot()
+}
+
+fn recent(time: &str, text: &str) -> RecentAction {
+    RecentAction {
+        time: time.into(),
+        text: text.into(),
+    }
+}
+
+fn base(project: &str) -> Snapshot {
     let fx1 = fx1();
+    let listener = listener();
+    let spend = listener.workers_today_usd + listener.listener_today_usd;
     Snapshot {
-        project: "pr-3331".into(),
+        project: project.into(),
         me: "andy".into(),
+        me_id: id("andy"),
+        listener_id: id("andy/listen"),
         roster: roster(),
-        listener: listener(),
-        agents: BTreeMap::from([(fx1.handle.clone(), fx1)]),
+        listener,
+        agents: BTreeMap::from([(fx1.id.clone(), fx1)]),
         status: StatusSummary {
             needs_you: 0,
             online: 9,
-            alerts: 2,
-            worktrees: 4,
-            spend_today_usd: 14.20,
+            // Mockup fix 34: the count is the ALERTs in the chat that have no answer.
+            alerts: 1,
+            // Mockup fix 29: five worktrees, as the Git panel lists.
+            worktrees: 5,
+            spend_today_usd: spend,
         },
+        messages: Vec::new(),
+        changes: BTreeMap::new(),
+        plan: None,
     }
 }
+
+fn with_messages(mut s: Snapshot, msgs: Vec<Msg>) -> Snapshot {
+    s.messages = stamp(msgs, 1);
+    s
+}
+
+impl FixtureBackend {
+    /// The state `screen`'s render shows.
+    #[must_use]
+    pub(crate) fn for_screen(screen: Screen) -> Self {
+        let snapshot = match screen {
+            Screen::NeedsYou | Screen::NeedsYouAnswered => {
+                let mut msgs = chat_messages();
+                let alert = msgs.len();
+                msgs.push(urgent_alert());
+                let answered = screen == Screen::NeedsYouAnswered;
+                if answered {
+                    msgs.push(alert_answer(alert));
+                }
+                let mut s = with_messages(base("pr-3331"), msgs);
+                s.status.alerts = if answered { 1 } else { 2 };
+                s.status.needs_you = u32::from(!answered);
+                s
+            }
+            Screen::SettingsFromChat | Screen::SettingsApplied => {
+                let mut msgs = chat_messages();
+                let (more, card_ix) = settings_messages(msgs.len());
+                msgs.extend(more);
+                let mut s = with_messages(base("pr-3331"), msgs);
+                let state = if screen == Screen::SettingsApplied {
+                    ChangeState::Applied
+                } else {
+                    ChangeState::Pending
+                };
+                if let Some(m) = s.messages.get(card_ix) {
+                    s.changes.insert(m.client.id.clone(), settings_card(state));
+                }
+                s.listener.recent.insert(
+                    0,
+                    recent("15:50", "waiting for Apply: andy/fx1 lanes and budget"),
+                );
+                s
+            }
+            Screen::Ask | Screen::ModelPicker => {
+                let mut msgs = chat_messages();
+                if screen == Screen::Ask {
+                    let first = msgs.len();
+                    msgs.extend(ask_messages(first));
+                }
+                let mut s = with_messages(base("pr-3331"), msgs);
+                if screen == Screen::Ask {
+                    // Mockup fix 36: the answer's $0.31 shows in the listener's spend.
+                    s.listener.listener_today_usd = 0.73;
+                    s.listener.recent.insert(
+                        0,
+                        recent("15:52", "answered: musl in C014 (git_show, opus)"),
+                    );
+                    s.status.spend_today_usd =
+                        s.listener.workers_today_usd + s.listener.listener_today_usd;
+                }
+                s
+            }
+            Screen::Plan | Screen::Spec | Screen::PlanReady | Screen::KickOff | Screen::Running => {
+                let ready = matches!(screen, Screen::PlanReady | Screen::KickOff);
+                let running = screen == Screen::Running;
+                let mut s = with_messages(base("ridgeline"), plan_messages(ready, running));
+                s.roster = plan_roster();
+                s.plan = Some(plan(ready, running));
+                // Mockup fix 35: the status bar counts this project, not pr-3331.
+                s.status = StatusSummary {
+                    needs_you: 0,
+                    online: if running { 11 } else { 4 },
+                    alerts: 0,
+                    worktrees: if running { 7 } else { 0 },
+                    spend_today_usd: s.status.spend_today_usd,
+                };
+                s
+            }
+            Screen::Chat
+            | Screen::ChatCodex
+            | Screen::ChatTerminal
+            | Screen::SwitchAgent
+            | Screen::AddAgent
+            | Screen::Agent
+            | Screen::ListenerCollapsed
+            | Screen::Palette
+            | Screen::RoleFile
+            | Screen::Project
+            | Screen::ProjectTestsOpen
+            | Screen::Git
+            | Screen::GitCollapsed
+            | Screen::Settings => with_messages(base("pr-3331"), chat_messages()),
+        };
+        Self {
+            state: RefCell::new(snapshot),
+            subscribers: RefCell::new(Vec::new()),
+        }
+    }
+
+    fn publish(&self, update: &Update) {
+        // A dropped receiver means that view is gone; forget its sender.
+        self.subscribers
+            .borrow_mut()
+            .retain(|tx| tx.unbounded_send(update.clone()).is_ok());
+    }
+
+    fn set_change(&self, id: &super::ChangeId, state: ChangeState) -> Result<(), BackendError> {
+        {
+            let mut snapshot = self.state.borrow_mut();
+            let card = snapshot
+                .changes
+                .values_mut()
+                .find(|card| &card.id == id)
+                .ok_or_else(|| BackendError::NoSuchChange(id.to_string()))?;
+            card.state = state;
+        }
+        let snapshot = self.snapshot();
+        self.publish(&Update::Snapshot(Box::new(snapshot)));
+        Ok(())
+    }
+}
+
+impl Backend for FixtureBackend {
+    fn snapshot(&self) -> Snapshot {
+        self.state.borrow().clone()
+    }
+
+    fn send(&self, draft: Draft) -> Result<(), BackendError> {
+        if draft.body.len() > MAX_BODY_BYTES {
+            return Err(BackendError::BodyTooLarge {
+                len: draft.body.len(),
+                max: MAX_BODY_BYTES,
+            });
+        }
+        let message = {
+            let mut snapshot = self.state.borrow_mut();
+            let seq = snapshot.messages.len() + 1;
+            let value = json!({
+                "v": 1,
+                "id": super::fixture_data::message_id(seq),
+                "reply_to": draft.reply_to,
+                "to": draft.to,
+                "body": draft.body,
+                "sent_at": "2026-10-25T22:00:00Z",
+                "verb": "FYI",
+                "data": {},
+                "stream": "feed",
+                "seq": seq,
+                "from": snapshot.me_id,
+                "from_handle": snapshot.me,
+                "from_kind": "human",
+                "mentioned": draft.to,
+                "hub_at": "2026-10-25T22:00:00Z",
+            });
+            let message: agmen_proto::StampedEnvelope = serde_json::from_value(value)
+                .map_err(|_| BackendError::Unsupported("a message the protocol rejects"))?;
+            snapshot.messages.push(message.clone());
+            message
+        };
+        self.publish(&Update::Message(Box::new(message)));
+        Ok(())
+    }
+
+    fn act(&self, action: Action) -> Result<(), BackendError> {
+        match action {
+            Action::Apply(id) => self.set_change(&id, ChangeState::Applied),
+            Action::Cancel(id) => self.set_change(&id, ChangeState::Cancelled),
+            // Mockup fix 44: Undo puts the card back to waiting for Apply.
+            Action::Undo(id) => self.set_change(&id, ChangeState::Pending),
+            // shortcut: the fixture records nothing for these; the views that send
+            // them (Tasks 13 to 19) add fixture behavior as they need it.
+            Action::TakeOver(_)
+            | Action::HandBack(_)
+            | Action::SwitchAgent { .. }
+            | Action::AnswerAlert { .. }
+            | Action::SnoozeAlert(_)
+            | Action::ApproveSpec { .. }
+            | Action::ApproveShare
+            | Action::KickOff => Ok(()),
+        }
+    }
+
+    fn subscribe(&self) -> UnboundedReceiver<Update> {
+        let (tx, rx) = unbounded();
+        self.subscribers.borrow_mut().push(tx);
+        rx
+    }
+}
+
+#[cfg(test)]
+#[path = "fixture_tests.rs"]
+mod tests;

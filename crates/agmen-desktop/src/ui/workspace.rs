@@ -14,6 +14,8 @@ use super::status_bar::StatusBar;
 use super::title_bar::TitleBar;
 use super::tokens::{LEFT_DOCK_WIDTH, RIGHT_DOCK_WIDTH};
 use crate::appearance::Appearance;
+use agmen_proto::IdentityId;
+
 use crate::backend::{AgentInfo, Snapshot};
 use crate::icons::FileIcons;
 
@@ -26,8 +28,8 @@ pub(crate) struct Workspace {
     left_dock: Dock,
     right_dock: Dock,
     agents_panel: Entity<AgentsPanel>,
-    /// The handle picked in the Agents dock, if any.
-    selected_agent: Option<String>,
+    /// The agent the right dock shows; `None` shows the Listener panel.
+    selected_agent: Option<IdentityId>,
     _agents_events: Subscription,
 }
 
@@ -35,7 +37,7 @@ impl Workspace {
     pub(crate) fn new(snapshot: Snapshot, _window: &mut Window, cx: &mut Context<Self>) -> Self {
         let agents_panel = cx.new(|_| AgentsPanel::new(snapshot.roster.clone()));
         let agents_events = cx.subscribe(&agents_panel, |this, _, event, cx| match event {
-            AgentsPanelEvent::Selected(handle) => this.select_agent(handle, cx),
+            AgentsPanelEvent::Selected(id) => this.select_agent(id, cx),
         });
         Self {
             focus_handle: cx.focus_handle(),
@@ -58,14 +60,31 @@ impl Workspace {
     pub(crate) fn toggle_dock(&mut self, side: DockSide, cx: &mut Context<Self>) {
         match side {
             DockSide::Left => self.left_dock.toggle(),
-            DockSide::Right => self.right_dock.toggle(),
+            DockSide::Right => {
+                self.right_dock.toggle();
+                // Closing the dock drops the selection, so the status bar's
+                // Listener toggle reopens it on the Listener panel.
+                if !self.right_dock.is_open() {
+                    self.set_selection(None, cx);
+                }
+            }
         }
         cx.notify();
     }
 
-    /// Shows `handle`'s Agent panel in the right dock, opening the dock.
-    fn select_agent(&mut self, handle: &str, cx: &mut Context<Self>) {
-        self.selected_agent = Some(handle.to_owned());
+    /// The one place the selection changes; the Agents dock highlights it.
+    fn set_selection(&mut self, id: Option<IdentityId>, cx: &mut Context<Self>) {
+        self.selected_agent = id.clone();
+        self.agents_panel
+            .update(cx, |panel, cx| panel.set_selected(id, cx));
+    }
+
+    /// Shows the agent's panel in the right dock, opening the dock. An agent
+    /// without details (the listener, other people's agents) shows the
+    /// Listener panel and no highlighted row.
+    fn select_agent(&mut self, id: &IdentityId, cx: &mut Context<Self>) {
+        let shown = self.snapshot.agents.contains_key(id).then(|| id.clone());
+        self.set_selection(shown, cx);
         self.right_dock.open();
         cx.notify();
     }
@@ -76,7 +95,7 @@ impl Workspace {
     pub(crate) fn shown_agent(&self) -> Option<&AgentInfo> {
         self.selected_agent
             .as_ref()
-            .and_then(|handle| self.snapshot.agents.get(handle))
+            .and_then(|id| self.snapshot.agents.get(id))
     }
 }
 
