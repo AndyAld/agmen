@@ -1,16 +1,28 @@
 //! Which ALERTs need the person, and what each new message should do to the
 //! window (spec 8, Task 13 of the desktop plan).
 //!
-//! An urgent ALERT needs me when it mentions me, or comes from one of my own
-//! agents or from a coordinator. A `needs: anyone` alert clears at the first
-//! ANSWER replying to it; a `needs: owner` alert from my own agent stays
-//! until I answer it. The status bar's alert count comes from the same rule.
+//! An ALERT reaches me when I own its sender or the hub stamped me into
+//! `mentioned`, which it does for the sender's owners and for coordinators
+//! (protocol 4, ALERT). A normal one gives a plain notification; an urgent
+//! one needs me: highlight, chime and notification. During quiet hours an
+//! urgent alert from someone else's agent only highlights, while my own
+//! agents' and coordinators' still sound.
+//!
+//! A `needs: anyone` alert clears at the first ANSWER replying to it. A
+//! `needs: owner` alert from my own agent stays until I answer it; one from
+//! someone else's agent clears for me at the first answer, as it does for a
+//! coordinator at their reply. The status bar's alert count uses the same
+//! clearing rule.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use agmen_proto::{IdentityId, IdentityKind, MessageId, Needs, Payload, StampedEnvelope, Urgency};
 
 use crate::backend::Snapshot;
+
+/// How many alert ids the state remembers to ignore redeliveries. A copy
+/// arriving after this many newer alerts is treated as new.
+pub(crate) const MAX_REMEMBERED_ALERTS: usize = 1024;
 
 /// The person running this app.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -61,31 +73,71 @@ pub(crate) struct AlertPrefs {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum AlertEffect {
     None,
+    /// A native notification only: a normal ALERT that reaches me.
+    Notify,
     Highlight,
     HighlightChimeNotify,
+}
+
+/// Whose ANSWER clears an alert for me.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ClearedBy {
+    Anyone,
+    /// A `needs: owner` alert from my own agent.
+    OnlyMe,
+}
+
+impl ClearedBy {
+    fn of(needs: Needs, alert: &StampedEnvelope, me: &Me) -> Self {
+        if needs == Needs::Owner && me.owns(alert) {
+            Self::OnlyMe
+        } else {
+            Self::Anyone
+        }
+    }
+
+    fn cleared_by(self, answer: &StampedEnvelope, me: &Me) -> bool {
+        self == Self::Anyone || answer.from == me.id
+    }
 }
 
 /// The urgent alerts that need me, oldest first.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct AlertState {
-    pub(crate) needing_me: Vec<MessageId>,
     pub(crate) prefs: AlertPrefs,
-    /// `needs: owner` alerts from my own agents: only my answer clears them.
-    only_mine: BTreeSet<MessageId>,
+    needing_me: Vec<MessageId>,
+    /// Alerts in `needing_me` that only my answer clears.
+    only_me: BTreeSet<MessageId>,
+    /// Alert ids seen, newest last, at most [`MAX_REMEMBERED_ALERTS`].
+    seen: VecDeque<MessageId>,
 }
 
 impl AlertState {
     /// Updates the state for one message and says how the window reacts.
-    /// Only ALERTs make an effect; an ANSWER may clear one.
+    /// Only a first delivery of an ALERT makes an effect; an ANSWER may
+    /// clear one.
     pub(crate) fn on_message(&mut self, env: &StampedEnvelope, me: &Me) -> AlertEffect {
         match &env.client.payload {
-            Payload::Alert { urgency, needs, .. } => self.on_alert(env, *urgency, *needs, me),
+            Payload::Alert { urgency, needs, .. } => {
+                if self.seen.contains(&env.client.id) {
+                    return AlertEffect::None;
+                }
+                if self.seen.len() >= MAX_REMEMBERED_ALERTS {
+                    self.seen.pop_front();
+                }
+                self.seen.push_back(env.client.id.clone());
+                self.on_alert(env, *urgency, *needs, me)
+            }
             Payload::Answer {} => {
-                if let Some(alert) = &env.client.reply_to
-                    && clears(self.only_mine.contains(alert), env, me)
-                {
-                    self.needing_me.retain(|id| id != alert);
-                    self.only_mine.remove(alert);
+                if let Some(alert) = &env.client.reply_to {
+                    let by = if self.only_me.contains(alert) {
+                        ClearedBy::OnlyMe
+                    } else {
+                        ClearedBy::Anyone
+                    };
+                    if by.cleared_by(env, me) {
+                        self.clear(alert);
+                    }
                 }
                 AlertEffect::None
             }
@@ -100,25 +152,21 @@ impl AlertState {
         needs: Needs,
         me: &Me,
     ) -> AlertEffect {
-        let mentions_me = env.mentioned.contains(&me.id);
         let mine = me.owns(env);
-        let coordinator = env.from_kind == IdentityKind::Coordinator;
+        let reaches_me = env.from != me.id && (mine || env.mentioned.contains(&me.id));
+        if !reaches_me {
+            return AlertEffect::None;
+        }
         let urgent = urgency == Urgency::Urgent && !self.prefs.muted.contains(&env.from);
-        let needs_me = urgent && env.from != me.id && (mentions_me || mine || coordinator);
-        if !needs_me {
-            return if mentions_me {
-                AlertEffect::Highlight
-            } else {
-                AlertEffect::None
-            };
+        if !urgent {
+            return AlertEffect::Notify;
         }
         let id = &env.client.id;
-        if !self.needing_me.contains(id) {
-            self.needing_me.push(id.clone());
+        self.needing_me.push(id.clone());
+        if ClearedBy::of(needs, env, me) == ClearedBy::OnlyMe {
+            self.only_me.insert(id.clone());
         }
-        if only_mine(needs, env, me) {
-            self.only_mine.insert(id.clone());
-        }
+        let coordinator = env.from_kind == IdentityKind::Coordinator;
         if self.prefs.quiet_hours == QuietHours::On && !mine && !coordinator {
             AlertEffect::Highlight
         } else {
@@ -126,39 +174,63 @@ impl AlertState {
         }
     }
 
+    /// The urgent alerts that need me, oldest first.
+    #[must_use]
+    pub(crate) fn needing_me(&self) -> &[MessageId] {
+        &self.needing_me
+    }
+
     /// The red count on the chat tab and the status bar's needs-you count.
     #[must_use]
     pub(crate) fn badge(&self) -> usize {
         self.needing_me.len()
     }
-}
 
-fn only_mine(needs: Needs, alert: &StampedEnvelope, me: &Me) -> bool {
-    needs == Needs::Owner && me.owns(alert)
-}
+    /// Ends the need for `alert` without an ANSWER, such as after one of its
+    /// actions. Returns whether it was needing me.
+    pub(crate) fn clear(&mut self, alert: &MessageId) -> bool {
+        let before = self.needing_me.len();
+        self.needing_me.retain(|id| id != alert);
+        self.only_me.remove(alert);
+        self.needing_me.len() != before
+    }
 
-/// Whether `answer` clears its alert for me.
-fn clears(only_mine: bool, answer: &StampedEnvelope, me: &Me) -> bool {
-    !only_mine || answer.from == me.id
+    /// Snooze 15 min: the alert dims and stops needing me.
+    // shortcut: snoozing clears it for good; the view's Snooze timer (Task 13 UI)
+    // decides whether it comes back after 15 minutes.
+    pub(crate) fn snooze(&mut self, alert: &MessageId) -> bool {
+        self.clear(alert)
+    }
+
+    #[cfg(test)]
+    fn remembered_len(&self) -> usize {
+        self.seen.len()
+    }
 }
 
 /// The status bar's alert count: ALERTs in `messages` (oldest first) that
 /// are still open for me, by the same clearing rule as [`AlertState`].
 #[must_use]
 pub(crate) fn alert_count(messages: &[StampedEnvelope], me: &Me) -> u32 {
-    // Each open alert, and whether only my answer clears it.
-    let mut open: BTreeMap<&MessageId, bool> = BTreeMap::new();
+    let mut open: BTreeMap<&MessageId, ClearedBy> = BTreeMap::new();
+    // Alerts already answered, so a later copy does not reopen them; bounded
+    // by the number of messages.
+    let mut answered: BTreeSet<&MessageId> = BTreeSet::new();
     for env in messages {
         match &env.client.payload {
             Payload::Alert { needs, .. } => {
-                open.insert(&env.client.id, only_mine(*needs, env, me));
+                if !answered.contains(&env.client.id) {
+                    open.entry(&env.client.id)
+                        .or_insert_with(|| ClearedBy::of(*needs, env, me));
+                }
             }
             Payload::Answer {} => {
                 if let Some(alert) = &env.client.reply_to
-                    && let Some(&mine) = open.get(alert)
-                    && clears(mine, env, me)
+                    && let Some(by) = open.get(alert)
+                    && by.cleared_by(env, me)
                 {
                     open.remove(alert);
+                    answered.insert(alert);
                 }
             }
             _ => {}
