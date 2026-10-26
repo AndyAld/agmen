@@ -566,9 +566,10 @@ fn a_narrow_reply_keeps_the_input_and_the_close_mark(cx: &mut TestAppContext) {
 fn a_narrow_composer_keeps_its_chips_and_hint_in_the_box(cx: &mut TestAppContext) {
     // Node 375 clips its content. In a narrow window the chips and the ⏎
     // drew past the box's right edge, over the right dock.
+    // C278: from 200 px the model chip hides; at 260 px both chips show,
+    // cut.
     let (composer, _, cx) = open_composer(cx);
-    cx.simulate_resize(gpui::size(gpui::px(200.), gpui::px(120.)));
-    redraw(cx);
+    resize(cx, 260.);
     assert_input_keeps_its_caret(&composer, cx);
     assert_parts_in_the_box(cx);
     // The wrappers above report their shrunken boxes, so each chip must
@@ -593,6 +594,77 @@ fn resize(cx: &mut VisualTestContext, width: f32) {
     cx.simulate_resize(gpui::size(gpui::px(width), gpui::px(120.)));
     redraw(cx);
     redraw(cx);
+}
+
+/// Asserts nothing the composer paints shows outside its box: every
+/// painted quad is clipped to the box or lies inside it.
+fn assert_nothing_past_the_box(cx: &mut VisualTestContext, at: &str) {
+    let frame = cx.debug_bounds("composer:box").unwrap();
+    let outside: Vec<_> = cx.update(|window, _| {
+        let scale = window.scale_factor();
+        window
+            .painted_quads()
+            .into_iter()
+            .filter_map(|quad| {
+                let shown = quad.bounds.intersect(&quad.content_mask.bounds);
+                let (left, right) = (
+                    gpui::px(shown.left().0 / scale),
+                    gpui::px(shown.right().0 / scale),
+                );
+                let inside = left >= frame.left() - gpui::px(0.01)
+                    && right <= frame.right() + gpui::px(0.01);
+                (right > left && !inside).then_some((left, right))
+            })
+            .collect()
+    });
+    assert!(outside.is_empty(), "{at}: {outside:?} shows past {frame:?}");
+}
+
+#[gpui::test]
+fn a_200_px_composer_hides_the_model_chip_and_keeps_the_input(cx: &mut TestAppContext) {
+    // C278: while replying, the reply chip's floor, the input's 80 px and
+    // the ⏎ ran past the box below about 245 px, and the model chip was a
+    // sliver with neither ◆ nor ▾. The model chip hides, the input keeps
+    // its floor and the box clips the ⏎.
+    let (composer, sent, cx, coord) = replying(cx);
+    let whole = cx.debug_bounds("composer:cancel-reply").unwrap();
+    for reply in [false, true] {
+        if reply {
+            composer.update_in(cx, |composer, window, cx| {
+                composer.reply(coord.clone(), alert(), window, cx);
+            });
+        } else {
+            composer.update(cx, |composer, cx| composer.cancel_reply(cx));
+        }
+        resize(cx, 200.);
+        let at = if reply { "replying" } else { "not replying" };
+        assert!(
+            cx.debug_bounds("composer:model").is_none(),
+            "{at}: the model chip is drawn"
+        );
+        assert_input_keeps_its_caret(&composer, cx);
+        assert_nothing_past_the_box(cx, at);
+        let frame = cx.debug_bounds("composer:box").unwrap();
+        let window = cx.update(|window, _| window.viewport_size());
+        assert!(
+            frame.right() <= gpui::px(0.) + window.width,
+            "{at}: {frame:?}"
+        );
+        if reply {
+            let close = cx.debug_bounds("composer:cancel-reply").unwrap();
+            let chip = cx.debug_bounds("composer:to").unwrap();
+            assert_eq!(close.size, whole.size, "{close:?}");
+            assert!(
+                close.left() >= chip.left() && close.right() <= chip.right(),
+                "{close:?} cut by {chip:?}"
+            );
+            assert!(close.right() <= frame.right(), "{close:?} cut by {frame:?}");
+        }
+    }
+    click(cx, "composer:cancel-reply");
+    cx.simulate_input("hi");
+    cx.simulate_keystrokes("enter");
+    assert_eq!(*sent.borrow(), vec![plain_hi()]);
 }
 
 #[gpui::test]

@@ -2,6 +2,7 @@
 //! the model chip, the input and the ⏎ hint. An agent's view uses it for a
 //! DM, with neither chip (frame "Desktop · agent", node 650).
 
+use std::cell::Cell;
 use std::rc::Rc;
 
 use agmen_proto::{IdentityId, MessageId};
@@ -9,8 +10,8 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::{
     Anchor, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable, Hsla,
     InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, TextRun, Window, anchored,
-    deferred, div,
+    StatefulInteractiveElement as _, Styled as _, Subscription, TextRun, Window, anchored, canvas,
+    deferred, div, px,
 };
 
 use super::components::{Chip, Color, IconButton, IconSize, Label, LabelSize};
@@ -84,6 +85,9 @@ pub(crate) struct Composer {
     models: Option<ModelMenu>,
     /// The message the next send replies to, and its sender (Task 13).
     reply: Option<(MessageId, Target)>,
+    /// The box's width in the last frame, which decides whether the model
+    /// chip fits (C278); `None` until the box is first laid out.
+    box_width: Rc<Cell<Option<Pixels>>>,
     on_send: SendHandler,
     _subscriptions: [Subscription; 2],
 }
@@ -198,6 +202,7 @@ impl Composer {
             addressing: Addressing::Chip,
             models,
             reply: None,
+            box_width: Rc::default(),
             on_send,
             _subscriptions: [submits, edits],
         }
@@ -366,7 +371,11 @@ impl Composer {
     /// The model chip (node 380) and, while open, the picker above it. The
     /// picker's bottom left corner sits [`MODEL_PICKER_OFFSET`] from the
     /// chip's top left.
-    fn model_chip(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+    fn model_chip(
+        &self,
+        floor: Pixels,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement + use<>> {
         let models = self.models.as_ref()?;
         let open = models.is_open();
         let entity = cx.entity().downgrade();
@@ -400,9 +409,10 @@ impl Composer {
                 .id("composer-model")
                 .debug_selector(|| "composer:model".into())
                 .relative()
-                // A narrow box clips the chip rather than letting it run
-                // past its edge; the picker is deferred, so not clipped.
-                .min_w_0()
+                // C278: the chip shrinks to its ◆ and ▾ and no further;
+                // below that the composer hides it. The picker is
+                // deferred, so the clip does not cut it.
+                .min_w(floor)
                 .overflow_hidden()
                 .cursor_pointer()
                 // C81: while open, mouse down outside the picker closes it;
@@ -419,7 +429,11 @@ impl Composer {
                         .truncate()
                         .color(Color::Default)
                         .outline(Color::Accent)
-                        .leading(Label::new("◆").size(LabelSize::XSmall).color(Color::Accent))
+                        .leading(
+                            Label::new(MODEL_MARK)
+                                .size(LabelSize::XSmall)
+                                .color(Color::Accent),
+                        )
                         .trailing(
                             div()
                                 .debug_selector(|| "composer:model-caret".into())
@@ -442,28 +456,31 @@ impl Focusable for Composer {
 
 impl Render for Composer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let model = self.model_chip(cx);
-        let appearance = cx.global::<Appearance>();
-        let theme = &appearance.theme;
-        let fonts = appearance.fonts.clone();
+        let fonts = cx.global::<Appearance>().fonts.clone();
         // Task 13: a pending reply says so and offers a way out. An
         // @mention of another agent drops it, and the chip says "to".
         let replying = self.reply_for(self.input.read(cx).text()).is_some();
         let lead = if replying { "reply to" } else { "to" };
-        let to = (self.addressing == Addressing::Chip).then(|| {
+        let floors = Floors::measure(lead, replying, &fonts, window);
+        let chip_addressed = self.addressing == Addressing::Chip;
+        let model = if floors.model_fits(self.box_width.get(), chip_addressed) {
+            self.model_chip(floors.model, cx)
+        } else {
+            None
+        };
+        let theme = &cx.global::<Appearance>().theme;
+        let to = chip_addressed.then(|| {
             div()
                 .debug_selector(|| "composer:to".into())
                 .overflow_hidden()
-                .map(|this| {
-                    if replying {
-                        // C260: the handle gives way first, then the model
-                        // chip; "reply to" and the close mark keep their
-                        // width, so the way out of a reply stays whole.
-                        this.min_w(reply_chip_floor(lead, &fonts, window))
-                            .flex_shrink(REPLY_CHIP_SHRINK)
-                    } else {
-                        this.min_w_0()
-                    }
+                // C260 and C278: the handle gives way, then the chip
+                // stops at its lead and its close mark or ▾, so the way
+                // out of a reply stays whole.
+                .min_w(floors.to)
+                .when(replying, |this| {
+                    // C260: while replying, the handle gives way first,
+                    // then the model chip.
+                    this.flex_shrink(REPLY_CHIP_SHRINK)
                 })
                 .child(
                     // C260: a narrow box cuts the handle, not the close
@@ -497,7 +514,7 @@ impl Render for Composer {
         div()
             .w_full()
             .flex_none()
-            // The font reply_chip_floor measures "reply to" in.
+            // The font Floors::measure sets the parts in.
             .font_family(fonts.ui_family.clone())
             // Task 13 and Task 15: Escape closes the open model picker and
             // goes no further (C87, C113), else ends a reply; src/keymap.rs
@@ -520,8 +537,9 @@ impl Render for Composer {
                     .debug_selector(|| "composer:box".into())
                     .w_full()
                     // Node 375 clips. The chips clip in their own
-                    // wrappers; this cuts the ⏎ in a pane too narrow for
-                    // the padding, the gaps and the ⏎.
+                    // wrappers; this cuts the input and the ⏎ in a pane
+                    // too narrow for the "to" chip, the input's floor and
+                    // the ⏎ (C278).
                     .overflow_hidden()
                     .flex()
                     .items_center()
@@ -550,8 +568,9 @@ impl Render for Composer {
                         div()
                             .debug_selector(|| "composer:send-hint".into())
                             .flex_none()
-                            .child(Label::new("⏎").color(Color::Muted)),
-                    ),
+                            .child(Label::new(SEND_HINT).color(Color::Muted)),
+                    )
+                    .child(self.box_probe(cx)),
             )
     }
 }
@@ -569,35 +588,112 @@ fn roster_targets(snapshot: &Snapshot) -> Vec<Target> {
         .collect()
 }
 
+impl Composer {
+    /// An empty layer over the box that keeps its width for the next
+    /// frame, and renders again when it changed (C278).
+    fn box_probe(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
+        let box_width = self.box_width.clone();
+        let composer = cx.entity_id();
+        canvas(
+            move |bounds, _, cx| {
+                let width = Some(bounds.size.width);
+                if box_width.replace(width) != width {
+                    // This frame laid the row out for the old width.
+                    cx.defer(move |cx| cx.notify(composer));
+                }
+            },
+            |_, (), _, _| {},
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+    }
+}
+
 /// How much harder the reply chip shrinks than the model chip: enough that
 /// its handle is cut to nothing before the model chip gives up any width.
 const REPLY_CHIP_SHRINK: f32 = 1000.;
 
-/// The narrowest the reply chip gets: its padding, gaps, `lead` label and
-/// close mark, with the handle cut to nothing (C260). `lead` is measured in
-/// the UI font the composer sets on itself, at the label's Small size.
-fn reply_chip_floor(lead: &str, fonts: &Fonts, window: &Window) -> Pixels {
+/// The mark before the model chip's label.
+const MODEL_MARK: &str = "◆";
+
+/// The ▾ after a chip's label.
+const CARET: &str = "▾";
+
+/// The send hint at the end of the row (node 385).
+const SEND_HINT: &str = "⏎";
+
+/// The narrowest each part of the composer's row gets, measured in the UI
+/// font the composer sets on itself.
+#[derive(Debug, Clone, Copy)]
+struct Floors {
+    /// The "to" chip: its padding, gaps, lead label and close mark or ▾,
+    /// with the handle cut to nothing (C260).
+    to: Pixels,
+    /// The model chip: its padding, gaps, ◆ and ▾, with the model's name
+    /// cut to nothing (C278).
+    model: Pixels,
+    /// The ⏎ hint, which keeps its width.
+    hint: Pixels,
+}
+
+impl Floors {
+    fn measure(lead: &str, replying: bool, fonts: &Fonts, window: &Window) -> Self {
+        let width = |text: &str, size: LabelSize| ui_text_width(text, size, fonts, window);
+        let caret = width(CARET, LabelSize::XSmall);
+        let to_end = if replying { ICON_SM } else { caret };
+        Self {
+            to: Chip::compact_floor(width(lead, LabelSize::Small), to_end),
+            model: Chip::compact_floor(width(MODEL_MARK, LabelSize::XSmall), caret),
+            hint: width(SEND_HINT, LabelSize::Default),
+        }
+    }
+
+    /// Whether the model chip fits a box `box_width` wide at its floor,
+    /// beside the "to" chip (when `with_to`), the input and the ⏎ at
+    /// theirs (C278). Below that it hides rather than show a sliver with
+    /// neither ◆ nor ▾. A box not laid out yet shows it.
+    fn model_fits(self, box_width: Option<Pixels>, with_to: bool) -> bool {
+        let Some(box_width) = box_width else {
+            return true;
+        };
+        let to = if with_to { self.to + SPACE_8 } else { px(0.) };
+        // The box's border and padding, then the parts and the gaps
+        // between them.
+        let needed = (BORDER_WIDTH + SPACE_10) * 2.
+            + to
+            + self.model
+            + SPACE_8
+            + COMPOSER_INPUT_MIN_WIDTH
+            + SPACE_8
+            + self.hint;
+        box_width >= needed
+    }
+}
+
+/// How wide `text` sets in the UI font at `size`, ceiled as gpui's Text
+/// measures its width.
+fn ui_text_width(text: &str, size: LabelSize, fonts: &Fonts, window: &Window) -> Pixels {
     let run = TextRun {
-        len: lead.len(),
+        len: text.len(),
         font: gpui::font(fonts.ui_family.clone()),
         color: Hsla::default(),
         background_color: None,
         underline: None,
         strikethrough: None,
     };
-    let size = LabelSize::Small.rems().to_pixels(window.rem_size());
-    // Ceiled as gpui's Text measures its width.
-    let lead = window
+    let size = size.rems().to_pixels(window.rem_size());
+    window
         .text_system()
-        .shape_line(lead.to_owned().into(), size, &[run], None)
+        .shape_line(text.to_owned().into(), size, &[run], None)
         .width()
-        .ceil();
-    Chip::compact_floor(lead, ICON_SM)
+        .ceil()
 }
 
 /// The ▾ after a chip's label.
 fn caret() -> Label {
-    Label::new("▾")
+    Label::new(CARET)
         .size(LabelSize::XSmall)
         .color(Color::Placeholder)
 }
