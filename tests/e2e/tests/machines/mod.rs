@@ -273,7 +273,7 @@ impl Sessions {
 /// Runs `body` with an in-process hub as agmen-cli's `support::run` does,
 /// and once it has ended, even by panicking (which kills its child
 /// processes), ends every session in its [`Sessions`]. Without this each
-/// `agmen watch` and `agmen mcp` would leave a durable session on the
+/// `agmen watch` and `agmen mcp` would leave a persistent session on the
 /// shared broker for a day.
 pub async fn run<F, Fut>(body: F)
 where
@@ -296,9 +296,7 @@ where
 
 /// Ends the persistent session `client_id` once its process has stopped:
 /// connects as that client with a clean start and no session expiry, which
-/// makes the broker discard the session, and disconnects. EMQX's REST API
-/// cannot do it: `DELETE /clients/{id}` answers 204 for an offline durable
-/// session and keeps it.
+/// makes the broker discard the session, and disconnects.
 async fn forget_session(client_id: &str, login: &Login) {
     let options = crate::mqtt::options(client_id, &login.identity, &login.token);
     let raw = crate::mqtt::connect_ok(options).await;
