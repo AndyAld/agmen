@@ -13,17 +13,16 @@
 mod support;
 
 use std::collections::BTreeSet;
-use std::hash::{BuildHasher, Hasher, RandomState};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
-use agmen_proto::{DeliveryReply, IdentityKind, NackReason, Seq, StampedEnvelope, Stream, Topics};
+use agmen_proto::{DeliveryReply, IdentityKind, NackReason, Seq, StampedEnvelope, Stream};
 use jiff::Timestamp;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 use support::{
-    Ctx, Minted, Project, login, mint, mint_ok, run, run_with_lease, seed_human, seed_member,
-    seed_project,
+    Ctx, Minted, Project, envelope, login, mint_kind, mint_ok, run, run_with_lease, seed_human,
+    seed_member, seed_project, topics, ulid,
 };
 use tokio::sync::Barrier;
 use tokio::task::JoinSet;
@@ -34,42 +33,6 @@ const ADAM: u64 = 5151;
 const SHORT_LEASE: Duration = Duration::from_secs(2);
 /// How long a test waits for the lease sweeper.
 const SWEEP_WAIT: Duration = Duration::from_secs(10);
-
-/// A fresh ULID-shaped message id: 26 Crockford digits, the first 0 to 7.
-fn ulid() -> String {
-    const CROCKFORD: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
-    let mut id = String::from("0");
-    while id.len() < 26 {
-        let mut hasher = RandomState::new().build_hasher();
-        hasher.write_u128(
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos(),
-        );
-        let mut bits = hasher.finish();
-        for _ in 0..12 {
-            if id.len() == 26 {
-                break;
-            }
-            id.push(char::from(CROCKFORD[usize::try_from(bits % 32).unwrap()]));
-            bits /= 32;
-        }
-    }
-    id
-}
-
-/// A client envelope: `verb` with `data`, plus any `extra` top-level fields.
-fn envelope(id: &str, verb: &str, data: Value, extra: Value) -> Vec<u8> {
-    let mut env = json!({
-        "v": 1, "id": id, "verb": verb, "data": data,
-        "body": "ledger test", "sent_at": Timestamp::now().to_string(),
-    });
-    for (key, value) in extra.as_object().unwrap() {
-        env[key] = value.clone();
-    }
-    serde_json::to_vec(&env).unwrap()
-}
 
 fn valid_for_a_minute() -> Value {
     json!({ "valid_until": (Timestamp::now() + Duration::from_secs(60)).to_string() })
@@ -104,13 +67,6 @@ fn done(id: &str, item: &str, paths: &[&str]) -> Vec<u8> {
     )
 }
 
-fn topics(project: &Project) -> Topics {
-    Topics::new(
-        project.tenant.parse().unwrap(),
-        project.project.parse().unwrap(),
-    )
-}
-
 /// A project where andy (an admin) owns agent sol, and adam (a
 /// coordinator) owns coordinator adam/coord.
 #[derive(Debug)]
@@ -140,21 +96,6 @@ async fn room(ctx: &Ctx) -> Room {
         adam,
         sol,
         coord,
-    }
-}
-
-async fn mint_kind(ctx: &Ctx, token: &str, handle: &str, project: &Project, kind: &str) -> Minted {
-    let (status, body) = mint(
-        ctx,
-        token,
-        &json!({ "handle": handle, "project": project.project, "kind": kind }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED, "mint answered {body}");
-    Minted {
-        id: body["id"].as_str().unwrap().to_owned(),
-        token: body["token"].as_str().unwrap().to_owned(),
-        body,
     }
 }
 
@@ -642,7 +583,7 @@ async fn it_check_path() {
             json!({ "identity": room.sol.id, "paths": ["api/y.rs"] }),
         )
         .await;
-        assert_eq!(answer[0]["reason"], "lane L-API not claimed", "{answer}");
+        assert_eq!(answer[0]["reason"], "not claimed", "{answer}");
         assert_eq!(answer[0]["allowed"], false);
 
         let (status, _) = check(
@@ -678,7 +619,7 @@ async fn it_done_out_of_lane_alerts() {
         assert_eq!(verb, "ALERT");
         assert!(data["need"].as_str().unwrap().contains(&item), "{data}");
         let body = alert.client.body.as_str();
-        assert!(body.contains("api/y.rs (L-API)"), "{body}");
+        assert!(body.contains("\"api/y.rs\" (L-API)"), "{body}");
         assert!(
             !body.contains("ui/x.ts") && !body.contains("README.md"),
             "{body}"
@@ -736,7 +677,7 @@ async fn it_done_alert_falls_back_to_owner() {
         assert_eq!(mentioned, [andy]);
         let body = alert.client.body.as_str();
         assert!(
-            body.contains("api/f49.rs") && !body.contains("api/f50.rs"),
+            body.contains("\"api/f49.rs\"") && !body.contains("api/f50.rs"),
             "{body}"
         );
         assert!(body.ends_with("and 10 more"), "{body}");
@@ -980,6 +921,78 @@ async fn it_release_frees_item() {
             &claim_answer(&ctx, &room.project, &other.id, &item).await,
             &item,
         );
+    })
+    .await;
+}
+
+/// Makes every write to `items` fail (`on`) or work again, through a
+/// statement trigger in the test's own database.
+async fn fail_item_writes(ctx: &Ctx, on: bool) {
+    let sql = if on {
+        "CREATE FUNCTION it_fail() RETURNS trigger LANGUAGE plpgsql AS
+             $$ BEGIN RAISE EXCEPTION 'injected ledger failure'; END $$;
+         CREATE TRIGGER it_fail BEFORE INSERT OR UPDATE ON items
+             FOR EACH STATEMENT EXECUTE FUNCTION it_fail();"
+    } else {
+        "DROP TRIGGER it_fail ON items; DROP FUNCTION it_fail();"
+    };
+    sqlx::raw_sql(sql).execute(&ctx.pool).await.unwrap();
+}
+
+fn assert_busy(reply: &DeliveryReply) {
+    assert!(
+        matches!(
+            reply,
+            DeliveryReply::Nack {
+                reason: NackReason::HubBusy,
+                retryable: true,
+                ..
+            }
+        ),
+        "expected a retryable hub_busy NACK, got {reply:?}"
+    );
+}
+
+#[tokio::test]
+async fn it_ledger_failure_records_nothing() {
+    run(|ctx| async move {
+        let room = room(&ctx).await;
+        ui_and_api_lanes(&ctx, &room).await;
+        let item = found_key(&ctx, &room.project, &room.sol.id, Some("L-UI")).await;
+        assert_granted(
+            &claim_answer(&ctx, &room.project, &room.sol.id, &item).await,
+            &item,
+        );
+
+        // While the ledger fails, a FOUND or DONE is refused whole: never an
+        // ACK without the ITEM, or a DONE that skipped its lane check.
+        fail_item_writes(&ctx, true).await;
+        let found_id = ulid();
+        let found_raw = found(&found_id, "another problem", None, None);
+        assert_busy(&post(&ctx, &room.project, &room.sol.id, &found_raw).await);
+        let done_id = ulid();
+        let done_raw = done(&done_id, &item, &["api/y.rs"]);
+        assert_busy(&post(&ctx, &room.project, &room.sol.id, &done_raw).await);
+        let stored: i64 = sqlx::query_scalar("SELECT count(*) FROM messages WHERE id = ANY($1)")
+            .bind([found_id.as_str(), done_id.as_str()])
+            .fetch_one(&ctx.pool)
+            .await
+            .unwrap();
+        assert_eq!(stored, 0, "a refused message leaves nothing behind");
+
+        // The client's resend runs the ledger again.
+        fail_item_writes(&ctx, false).await;
+        post_ok(&ctx, &room.project, &room.sol.id, &found_raw).await;
+        let (env, _) = answer(&ctx, &found_id).await;
+        assert_eq!(
+            verb_data(&env),
+            ("ITEM".to_owned(), json!({ "key": "B-2" }))
+        );
+        post_ok(&ctx, &room.project, &room.sol.id, &done_raw).await;
+        let (alert, _) = answer(&ctx, &done_id).await;
+        assert_eq!(verb_data(&alert).0, "ALERT");
+        let body = alert.client.body.as_str();
+        assert!(body.contains("\"api/y.rs\" (L-API)"), "{body}");
     })
     .await;
 }

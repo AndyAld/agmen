@@ -6,12 +6,12 @@ use agmen_proto::{Body, IdentityId, ItemKey, LaneName, Payload, Severity, Stream
 use axum::Json;
 use axum::extract::{Path, State};
 use serde::Serialize;
-use sqlx::PgPool;
+use sqlx::{PgConnection, Postgres, Transaction};
 
 use crate::auth::Caller;
 use crate::claims::{LedgerError, LedgerMessage};
 use crate::http::{ApiError, Hub};
-use crate::ingest::HubPost;
+use crate::ingest::{HubPost, post_in};
 use crate::lanes::member_of;
 
 /// The prefix of the keys FOUND mints: B for bug, as in `B-412`.
@@ -33,63 +33,60 @@ const fn severity_str(severity: Severity) -> &'static str {
     }
 }
 
-impl Hub {
-    /// FOUND: mints the next `B-<n>` key, stores the item, and answers with
-    /// ITEM `{key}` in the feed and the finder's inbox. The ITEM carries
-    /// only the key and lane, so a security finding's title stays in the
-    /// finder's inboxes (protocol 4).
-    pub(crate) async fn found(
-        &self,
-        topics: &Topics,
-        msg: &LedgerMessage,
-        title: &str,
-        lane: Option<&LaneName>,
-        severity: Option<Severity>,
-    ) -> Result<(), LedgerError> {
-        let project = topics.project().as_str();
-        let mut tx = self.pool().begin().await?;
-        let n: i64 = sqlx::query_scalar(
-            "INSERT INTO item_counters (project_id, prefix, n) VALUES ($1, $2, 1)
-             ON CONFLICT (project_id, prefix) DO UPDATE SET n = item_counters.n + 1
-             RETURNING n",
-        )
-        .bind(project)
-        .bind(FOUND_PREFIX)
-        .fetch_one(&mut *tx)
-        .await?;
-        let key: ItemKey = format!("{FOUND_PREFIX}-{n}").parse()?;
-        sqlx::query(
-            "INSERT INTO items (project_id, key, title, lane, severity, created_by)
-             VALUES ($1, $2, $3, $4, $5, $6)",
-        )
-        .bind(project)
-        .bind(key.as_str())
-        .bind(title)
-        .bind(lane.map(LaneName::as_str))
-        .bind(severity.map(severity_str))
-        .bind(msg.from.as_str())
-        .execute(&mut *tx)
-        .await?;
-        tx.commit().await?;
-        let body = match lane {
-            Some(lane) => format!("{key} ({lane})"),
-            None => key.to_string(),
-        };
-        self.post_as_hub(
-            topics,
-            HubPost {
-                payload: Payload::Item { key: key.clone() },
-                body: Body::try_from(body)?,
-                reply_to: Some(msg.env.id.clone()),
-                items: vec![key],
-                lane: lane.cloned(),
-                mentioned: Vec::new(),
-                streams: vec![Stream::Feed, Stream::Inbox(msg.from.clone())],
-            },
-        )
-        .await?;
-        Ok(())
-    }
+/// FOUND: mints the next `B-<n>` key, stores the item, and answers in `tx`
+/// with ITEM `{key}` in the feed and the finder's inbox. The ITEM carries
+/// only the key and lane, so a security finding's title stays in the
+/// finder's inboxes (protocol 4).
+pub(crate) async fn found(
+    tx: &mut Transaction<'_, Postgres>,
+    topics: &Topics,
+    msg: &LedgerMessage,
+    title: &str,
+    lane: Option<&LaneName>,
+    severity: Option<Severity>,
+) -> Result<(), LedgerError> {
+    let project = topics.project().as_str();
+    let n: i64 = sqlx::query_scalar(
+        "INSERT INTO item_counters (project_id, prefix, n) VALUES ($1, $2, 1)
+         ON CONFLICT (project_id, prefix) DO UPDATE SET n = item_counters.n + 1
+         RETURNING n",
+    )
+    .bind(project)
+    .bind(FOUND_PREFIX)
+    .fetch_one(&mut **tx)
+    .await?;
+    let key: ItemKey = format!("{FOUND_PREFIX}-{n}").parse()?;
+    sqlx::query(
+        "INSERT INTO items (project_id, key, title, lane, severity, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6)",
+    )
+    .bind(project)
+    .bind(key.as_str())
+    .bind(title)
+    .bind(lane.map(LaneName::as_str))
+    .bind(severity.map(severity_str))
+    .bind(msg.from.as_str())
+    .execute(&mut **tx)
+    .await?;
+    let body = match lane {
+        Some(lane) => format!("{key} ({lane})"),
+        None => key.to_string(),
+    };
+    post_in(
+        tx,
+        topics,
+        HubPost {
+            payload: Payload::Item { key: key.clone() },
+            body: Body::try_from(body)?,
+            reply_to: Some(msg.env.id.clone()),
+            items: vec![key],
+            lane: lane.cloned(),
+            mentioned: Vec::new(),
+            streams: vec![Stream::Feed, Stream::Inbox(msg.from.clone())],
+        },
+    )
+    .await?;
+    Ok(())
 }
 
 /// ASSIGN: records `to` as `item`'s assignee, which lets it claim the item
@@ -97,7 +94,7 @@ impl Hub {
 /// the assignee's inbox; an unknown item, or an assignee that is a human,
 /// records nothing.
 pub(crate) async fn assign(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     project: &str,
     item: &ItemKey,
     to: &IdentityId,
@@ -110,7 +107,7 @@ pub(crate) async fn assign(
     .bind(project)
     .bind(item.as_str())
     .bind(to.as_str())
-    .execute(pool)
+    .execute(conn)
     .await?;
     if assigned.rows_affected() == 0 {
         tracing::debug!(%item, %to, "ASSIGN recorded nothing");
@@ -121,7 +118,7 @@ pub(crate) async fn assign(
 /// Moves `item` to done when `holder` holds its active claim, which closes
 /// it to new claims.
 pub(crate) async fn mark_done(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     project: &str,
     item: &ItemKey,
     holder: &IdentityId,
@@ -136,7 +133,7 @@ pub(crate) async fn mark_done(
     .bind(project)
     .bind(item.as_str())
     .bind(holder.as_str())
-    .execute(pool)
+    .execute(conn)
     .await?;
     Ok(())
 }

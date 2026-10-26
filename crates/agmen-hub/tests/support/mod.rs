@@ -24,6 +24,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use agmen_hub::{
     Config, DEFAULT_CLAIM_LEASE, EmqxConfig, GithubConfig, Hub, Messaging, MqttConfig, Secret,
 };
+use agmen_proto::Topics;
+use jiff::Timestamp;
 use reqwest::StatusCode;
 use reqwest::redirect::Policy;
 use serde_json::{Value, json};
@@ -66,6 +68,50 @@ pub fn new_id() -> String {
         }
     }
     id
+}
+
+/// A fresh ULID-shaped message id: 26 Crockford digits, the first 0 to 7.
+pub fn ulid() -> String {
+    const CROCKFORD: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+    let mut id = String::from("0");
+    while id.len() < 26 {
+        let mut hasher = RandomState::new().build_hasher();
+        hasher.write_u128(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        );
+        let mut bits = hasher.finish();
+        for _ in 0..12 {
+            if id.len() == 26 {
+                break;
+            }
+            id.push(char::from(CROCKFORD[usize::try_from(bits % 32).unwrap()]));
+            bits /= 32;
+        }
+    }
+    id
+}
+
+/// A client envelope: `verb` with `data`, plus any `extra` top-level fields.
+pub fn envelope(id: &str, verb: &str, data: Value, extra: Value) -> Vec<u8> {
+    let mut env = json!({
+        "v": 1, "id": id, "verb": verb, "data": data,
+        "body": "hello", "sent_at": Timestamp::now().to_string(),
+    });
+    for (key, value) in extra.as_object().unwrap() {
+        env[key] = value.clone();
+    }
+    serde_json::to_vec(&env).unwrap()
+}
+
+/// The broker topics of `project`.
+pub fn topics(project: &Project) -> Topics {
+    Topics::new(
+        project.tenant.parse().unwrap(),
+        project.project.parse().unwrap(),
+    )
 }
 
 /// A database of its own on the `AGMEN_IT_PG` server.
@@ -455,10 +501,21 @@ pub struct Minted {
 }
 
 pub async fn mint_ok(ctx: &Ctx, human_token: &str, handle: &str, project: &Project) -> Minted {
+    mint_kind(ctx, human_token, handle, project, "agent").await
+}
+
+/// Mints an identity of `kind` in `project` with `human_token`.
+pub async fn mint_kind(
+    ctx: &Ctx,
+    human_token: &str,
+    handle: &str,
+    project: &Project,
+    kind: &str,
+) -> Minted {
     let (status, body) = mint(
         ctx,
         human_token,
-        &json!({ "handle": handle, "project": project.project, "kind": "agent" }),
+        &json!({ "handle": handle, "project": project.project, "kind": kind }),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "mint answered {body}");

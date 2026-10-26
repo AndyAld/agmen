@@ -12,11 +12,10 @@ use agmen_proto::{
     Body, ClientEnvelope, DenyReason, IdentityId, IdentityKind, ItemKey, LaneName, NackReason,
     Payload, ProtoError, Stream, Timestamp, Topics, Verb, validate,
 };
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{PgConnection, PgExecutor, Postgres, Transaction};
 
-use crate::db::is_unique_violation;
 use crate::http::{Hub, error_chain};
-use crate::ingest::{HubPost, PostError};
+use crate::ingest::{HubPost, PostError, post_in};
 
 /// Expired claims one sweep releases at most.
 const SWEEP_BATCH: i64 = 100;
@@ -85,107 +84,33 @@ pub enum LeaseSweepError {
 }
 
 impl Hub {
-    /// Acts on a ledger verb the hub just recorded. A failure is logged and
-    /// nothing else: the message is recorded and ACKed either way, and the
-    /// client tries again with a new message (a CLAIM again, say).
-    pub(crate) async fn apply_ledger(&self, topics: &Topics, msg: &LedgerMessage) {
+    /// Acts on a ledger verb ingest has just written in `tx`, posting the
+    /// hub's answer in `tx` too, so the message, its effects and the answer
+    /// commit together or not at all.
+    pub(crate) async fn apply_ledger(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        topics: &Topics,
+        msg: &LedgerMessage,
+    ) -> Result<(), LedgerError> {
         let project = topics.project().as_str();
-        let applied = match &msg.env.payload {
-            Payload::Claim { item } => self.claim(topics, msg, item).await,
+        match &msg.env.payload {
+            Payload::Claim { item } => claim(tx, topics, msg, item, self.claim_lease()).await,
             Payload::Heartbeat { items } => {
-                renew(self.pool(), project, &msg.from, items, self.claim_lease()).await
+                renew(tx, project, &msg.from, items, self.claim_lease()).await
             }
-            Payload::Release { item, .. } => release(self.pool(), project, msg, item).await,
-            Payload::Assign { item, to } => {
-                crate::items::assign(self.pool(), project, item, to).await
-            }
+            Payload::Release { item, .. } => release(tx, project, msg, item).await,
+            Payload::Assign { item, to } => crate::items::assign(tx, project, item, to).await,
             Payload::Found {
                 title,
                 lane,
                 severity,
-            } => {
-                self.found(topics, msg, title, lane.as_ref(), *severity)
-                    .await
-            }
+            } => crate::items::found(tx, topics, msg, title, lane.as_ref(), *severity).await,
             Payload::Done { item, changes, .. } => {
-                self.check_done(topics, msg, item, changes).await
+                crate::lanes::check_done(tx, topics, msg, item, changes).await
             }
             _ => Ok(()),
-        };
-        if let Err(err) = applied {
-            tracing::error!(id = %msg.env.id, from = %msg.from, error = %error_chain(&err), "ledger failed");
         }
-    }
-
-    /// Answers a CLAIM with GRANT or DENY in the claimant's inbox and the
-    /// feed (protocol 4). A CLAIM past its `valid_until` by more than the
-    /// skew allowance, judged by the hub's clock, gets DENY `expired`.
-    async fn claim(
-        &self,
-        topics: &Topics,
-        msg: &LedgerMessage,
-        item: &ItemKey,
-    ) -> Result<(), LedgerError> {
-        // Ingest admitted the CLAIM, so validate passes or finds it late.
-        let late = validate(&msg.env, msg.hub_at) == Err(NackReason::Expired);
-        let decided = if late {
-            Decided::denied(DenyReason::Expired, None)
-        } else {
-            decide(
-                self.pool(),
-                topics.project().as_str(),
-                msg,
-                item,
-                self.claim_lease(),
-            )
-            .await?
-        };
-        if let Some(lapsed) = &decided.lapsed {
-            self.post_lease_expired(topics, item, decided.lane.clone(), lapsed)
-                .await?;
-        }
-        let claimant = &msg.from_handle;
-        let (payload, body) = match decided.outcome {
-            Outcome::Granted { lease_until } => (
-                Payload::Grant {
-                    item: item.clone(),
-                    lease_until,
-                },
-                format!("{item} granted to {claimant} until {lease_until}"),
-            ),
-            Outcome::Denied { reason, holder } => {
-                let why = match (reason, holder) {
-                    (DenyReason::HeldBy, Some(holder)) => format!("held by {holder}"),
-                    (DenyReason::HeldBy, None) => "held by another identity".to_owned(),
-                    (DenyReason::Expired, _) => {
-                        "the CLAIM arrived after its valid_until".to_owned()
-                    }
-                    (DenyReason::NotInLane, _) => "its lane belongs to another identity".to_owned(),
-                    (DenyReason::Closed, _) => format!("no open item {item}"),
-                };
-                (
-                    Payload::Deny {
-                        item: item.clone(),
-                        reason,
-                    },
-                    format!("{item} denied to {claimant}: {why}"),
-                )
-            }
-        };
-        self.post_as_hub(
-            topics,
-            HubPost {
-                payload,
-                body: Body::try_from(body)?,
-                reply_to: Some(msg.env.id.clone()),
-                items: vec![item.clone()],
-                lane: decided.lane,
-                mentioned: Vec::new(),
-                streams: vec![Stream::Feed, Stream::Inbox(msg.from.clone())],
-            },
-        )
-        .await?;
-        Ok(())
     }
 
     /// Releases claims whose lease ran out and posts RELEASE
@@ -267,42 +192,104 @@ impl Hub {
                 .map(str::parse)
                 .transpose()
                 .map_err(stored)?;
-            self.post_lease_expired(&topics, &item.parse().map_err(stored)?, lane, &lapsed)
+            let item = item.parse().map_err(stored)?;
+            self.post_as_hub(&topics, lease_expired(&item, lane, &lapsed)?)
                 .await?;
         }
         Ok(rows.len())
     }
+}
 
-    /// Posts RELEASE `lease_expired` for `item`, mentioning the holder.
-    async fn post_lease_expired(
-        &self,
-        topics: &Topics,
-        item: &ItemKey,
-        lane: Option<LaneName>,
-        lapsed: &Lapsed,
-    ) -> Result<(), LedgerError> {
-        tracing::info!(%item, holder = %lapsed.holder, "lease expired");
-        self.post_as_hub(
+/// The RELEASE `lease_expired` for `item`, mentioning the holder.
+fn lease_expired(
+    item: &ItemKey,
+    lane: Option<LaneName>,
+    lapsed: &Lapsed,
+) -> Result<HubPost, LedgerError> {
+    tracing::info!(%item, holder = %lapsed.holder, "lease expired");
+    Ok(HubPost {
+        payload: Payload::Release {
+            item: item.clone(),
+            reason: Some(LEASE_EXPIRED.to_owned()),
+        },
+        body: Body::try_from(format!(
+            "{item} released: {}'s lease ran out",
+            lapsed.handle
+        ))?,
+        reply_to: None,
+        items: vec![item.clone()],
+        lane,
+        mentioned: vec![lapsed.holder.clone()],
+        streams: vec![Stream::Feed],
+    })
+}
+
+/// Answers a CLAIM with GRANT or DENY in the claimant's inbox and the feed
+/// (protocol 4). A CLAIM past its `valid_until` by more than the skew
+/// allowance, judged by the hub's clock, gets DENY `expired`.
+async fn claim(
+    tx: &mut Transaction<'_, Postgres>,
+    topics: &Topics,
+    msg: &LedgerMessage,
+    item: &ItemKey,
+    lease: Duration,
+) -> Result<(), LedgerError> {
+    // Ingest admitted the CLAIM, so validate passes or finds it late.
+    let late = validate(&msg.env, msg.hub_at) == Err(NackReason::Expired);
+    let decided = if late {
+        Decided::denied(DenyReason::Expired, None)
+    } else {
+        decide(tx, topics.project().as_str(), msg, item, lease).await?
+    };
+    if let Some(lapsed) = &decided.lapsed {
+        post_in(
+            tx,
             topics,
-            HubPost {
-                payload: Payload::Release {
-                    item: item.clone(),
-                    reason: Some(LEASE_EXPIRED.to_owned()),
-                },
-                body: Body::try_from(format!(
-                    "{item} released: {}'s lease ran out",
-                    lapsed.handle
-                ))?,
-                reply_to: None,
-                items: vec![item.clone()],
-                lane,
-                mentioned: vec![lapsed.holder.clone()],
-                streams: vec![Stream::Feed],
-            },
+            lease_expired(item, decided.lane.clone(), lapsed)?,
         )
         .await?;
-        Ok(())
     }
+    let claimant = &msg.from_handle;
+    let (payload, body) = match decided.outcome {
+        Outcome::Granted { lease_until } => (
+            Payload::Grant {
+                item: item.clone(),
+                lease_until,
+            },
+            format!("{item} granted to {claimant} until {lease_until}"),
+        ),
+        Outcome::Denied { reason, holder } => {
+            let why = match (reason, holder) {
+                (DenyReason::HeldBy, Some(holder)) => format!("held by {holder}"),
+                (DenyReason::HeldBy, None) => "held by another identity".to_owned(),
+                (DenyReason::Expired, _) => "the CLAIM arrived after its valid_until".to_owned(),
+                (DenyReason::NotInLane, _) => "its lane belongs to another identity".to_owned(),
+                (DenyReason::Closed, _) => format!("no open item {item}"),
+            };
+            (
+                Payload::Deny {
+                    item: item.clone(),
+                    reason,
+                },
+                format!("{item} denied to {claimant}: {why}"),
+            )
+        }
+    };
+    post_in(
+        tx,
+        topics,
+        HubPost {
+            payload,
+            body: Body::try_from(body)?,
+            reply_to: Some(msg.env.id.clone()),
+            items: vec![item.clone()],
+            lane: decided.lane,
+            mentioned: Vec::new(),
+            streams: vec![Stream::Feed, Stream::Inbox(msg.from.clone())],
+        },
+    )
+    .await?;
+    Ok(())
 }
 
 /// A claim whose lease ran out, released on the way to a decision.
@@ -359,8 +346,8 @@ fn timestamp_ms(ms: i64) -> Result<Timestamp, LedgerError> {
 /// An item's state, lane, assignee and lane owner.
 type ItemLock = (String, Option<String>, Option<String>, Option<String>);
 
-/// Decides a CLAIM of `item` in one transaction that holds the item's row
-/// lock, so CLAIMs of one item are decided one at a time:
+/// Decides a CLAIM of `item` in `tx`, which then holds the item's row lock
+/// until it commits, so CLAIMs of one item are decided one at a time:
 ///
 /// - no item, or one that is done: `closed`;
 /// - an item in a lane with an owner, from anyone but that owner, a
@@ -370,13 +357,12 @@ type ItemLock = (String, Option<String>, Option<String>, Option<String>);
 /// - an active claim by the claimant: granted again with a fresh lease;
 /// - otherwise granted.
 async fn decide(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     project: &str,
     msg: &LedgerMessage,
     item: &ItemKey,
     lease: Duration,
 ) -> Result<Decided, LedgerError> {
-    let mut tx = pool.begin().await?;
     let row: Option<ItemLock> = sqlx::query_as(
         "SELECT i.state, i.lane, i.assigned_to, l.owner_identity_id
          FROM items i
@@ -386,7 +372,7 @@ async fn decide(
     )
     .bind(project)
     .bind(item.as_str())
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut **tx)
     .await?;
     let Some((state, lane, assigned_to, owner)) = row else {
         return Ok(Decided::denied(DenyReason::Closed, None));
@@ -407,20 +393,8 @@ async fn decide(
     {
         return Ok(Decided::denied(DenyReason::NotInLane, lane));
     }
-    let lapsed = release_lapsed(&mut tx, project, item).await?;
-    let outcome = match take(&mut tx, project, item, &msg.from, lease).await? {
-        // The item lock should make a lost insert impossible; the index
-        // still has the last word, and its failure rolled the release back.
-        Taken::Lost => {
-            return Ok(Decided {
-                outcome: Outcome::Denied {
-                    reason: DenyReason::HeldBy,
-                    holder: None,
-                },
-                lane,
-                lapsed: None,
-            });
-        }
+    let lapsed = release_lapsed(tx, project, item).await?;
+    let outcome = match take(tx, project, item, &msg.from, lease).await? {
         Taken::Granted(ms) => Outcome::Granted {
             lease_until: timestamp_ms(ms)?,
         },
@@ -429,7 +403,6 @@ async fn decide(
             holder: Some(handle),
         },
     };
-    tx.commit().await?;
     Ok(Decided {
         outcome,
         lane,
@@ -444,12 +417,13 @@ enum Taken {
     Granted(i64),
     /// Another identity, with this handle, holds the item.
     Held(String),
-    /// The insert lost to a concurrent claim; the transaction is aborted.
-    Lost,
 }
 
 /// Grants `item` to `from`: renews the lease when `from` already holds it,
-/// refuses when another identity does, else inserts the claim.
+/// refuses when another identity does, else inserts the claim. The item's
+/// row lock makes a concurrent insert impossible; if the unique index still
+/// refuses one, the error aborts the CLAIM's transaction and the client
+/// resends.
 async fn take(
     tx: &mut Transaction<'_, Postgres>,
     project: &str,
@@ -479,8 +453,8 @@ async fn take(
             .await?,
         )),
         Some((_, handle)) => Ok(Taken::Held(handle)),
-        None => {
-            let inserted = sqlx::query_scalar(
+        None => Ok(Taken::Granted(
+            sqlx::query_scalar(
                 "INSERT INTO claims (project_id, item_key, identity_id, lease_until)
                  VALUES ($1, $2, $3, now() + $4 * interval '1 millisecond')
                  RETURNING (extract(epoch FROM lease_until) * 1000)::bigint",
@@ -490,13 +464,8 @@ async fn take(
             .bind(from.as_str())
             .bind(lease_ms(lease))
             .fetch_one(&mut **tx)
-            .await;
-            match inserted {
-                Ok(ms) => Ok(Taken::Granted(ms)),
-                Err(err) if is_unique_violation(&err) => Ok(Taken::Lost),
-                Err(err) => Err(err.into()),
-            }
-        }
+            .await?,
+        )),
     }
 }
 
@@ -528,7 +497,7 @@ async fn release_lapsed(
 /// HEARTBEAT: renews the leases `from` holds on `items`. A lease that has
 /// already run out stays out; the sweeper releases it.
 async fn renew(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     project: &str,
     from: &IdentityId,
     items: &[ItemKey],
@@ -544,7 +513,7 @@ async fn renew(
     .bind(from.as_str())
     .bind(&keys)
     .bind(lease_ms(lease))
-    .execute(pool)
+    .execute(conn)
     .await?;
     tracing::debug!(%from, renewed = renewed.rows_affected(), "heartbeat");
     Ok(())
@@ -553,7 +522,7 @@ async fn renew(
 /// RELEASE: ends `item`'s active claim when the sender holds it or is a
 /// coordinator (protocol 4). From anyone else it changes nothing.
 async fn release(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     project: &str,
     msg: &LedgerMessage,
     item: &ItemKey,
@@ -567,7 +536,7 @@ async fn release(
     .bind(item.as_str())
     .bind(msg.from.as_str())
     .bind(msg.from_kind == IdentityKind::Coordinator)
-    .execute(pool)
+    .execute(conn)
     .await?;
     if released.rows_affected() == 0 {
         tracing::debug!(%item, from = %msg.from, "RELEASE released nothing");
@@ -586,7 +555,7 @@ pub(crate) struct LaneHolder {
 /// Who holds a live claim on an item with a lane in `project`, oldest claim
 /// first.
 pub(crate) async fn lane_holders(
-    pool: &PgPool,
+    db: impl PgExecutor<'_>,
     project: &str,
 ) -> Result<Vec<LaneHolder>, LedgerError> {
     let rows: Vec<(String, String, String)> = sqlx::query_as(
@@ -599,7 +568,7 @@ pub(crate) async fn lane_holders(
          ORDER BY c.granted_at, c.id",
     )
     .bind(project)
-    .fetch_all(pool)
+    .fetch_all(db)
     .await?;
     rows.into_iter()
         .map(|(lane, identity, handle)| {

@@ -59,3 +59,27 @@ pub async fn next_seq(
         source,
     })
 }
+
+/// Locks `stream`'s head inside `tx` without taking a seq, creating it at 0
+/// when the stream is new (the next [`next_seq`] still hands out 1).
+///
+/// A transaction that numbers `stream` only after locking other rows takes
+/// this first, so it locks rows in the same order as one that numbers
+/// `stream` straight away, and the two cannot deadlock.
+pub(crate) async fn lock_head(
+    tx: &mut Transaction<'_, Postgres>,
+    stream: &str,
+) -> Result<(), NumberingError> {
+    sqlx::query(
+        "INSERT INTO stream_heads (stream, seq) VALUES ($1, 0)
+         ON CONFLICT (stream) DO UPDATE SET seq = stream_heads.seq",
+    )
+    .bind(stream)
+    .execute(&mut **tx)
+    .await
+    .map(drop)
+    .map_err(|source| NumberingError::Database {
+        stream: stream.to_owned(),
+        source,
+    })
+}

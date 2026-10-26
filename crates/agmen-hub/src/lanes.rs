@@ -25,13 +25,13 @@ use regex_automata::dfa::{Automaton, StartKind, dense};
 use regex_automata::nfa::thompson;
 use regex_automata::util::{start, syntax};
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
+use sqlx::{PgExecutor, PgPool, Postgres, Transaction};
 
 use crate::auth::Caller;
 use crate::claims::{LaneHolder, LedgerError, LedgerMessage, lane_holders};
 use crate::http::{ApiError, Hub};
 use crate::identities::Identity;
-use crate::ingest::HubPost;
+use crate::ingest::{HubPost, post_alert};
 use crate::items::mark_done;
 
 /// The most lanes one project may have.
@@ -52,6 +52,17 @@ const OVERLAP_BUDGET: u64 = 20_000_000;
 /// The most out-of-lane paths an ALERT lists by name (ruling R35).
 const MAX_LISTED_PATHS: usize = 50;
 
+// check-path's fixed reasons (ruling R44c). Beside `lane <LANE> held by
+// <HANDLE>`, the plugin's guard shows only the phrases in its
+// CHECK_PATH_PHRASES (mods/agmen-claude/hooks/register.tsx), so a new
+// phrase here goes there in the same change.
+/// A path in no lane.
+const UNOWNED: &str = "unowned";
+/// A path in a lane nobody holds a claim in; the lane is in `lane`.
+const NOT_CLAIMED: &str = "not claimed";
+/// A path that is empty, absolute, or has an empty, `.` or `..` segment.
+const NOT_A_REPO_PATH: &str = "not a repository path";
+
 /// A project's lanes, compiled for matching paths.
 #[derive(Debug, Default)]
 struct Lanes(Vec<CompiledLane>);
@@ -64,11 +75,11 @@ struct CompiledLane {
 
 impl Lanes {
     /// The lanes of `project` as stored.
-    async fn load(pool: &PgPool, project: &str) -> Result<Self, LedgerError> {
+    async fn load(db: impl PgExecutor<'_>, project: &str) -> Result<Self, LedgerError> {
         let rows: Vec<(String, Vec<String>)> =
             sqlx::query_as("SELECT name, globs FROM lanes WHERE project_id = $1 ORDER BY name")
                 .bind(project)
-                .fetch_all(pool)
+                .fetch_all(db)
                 .await?;
         rows.into_iter()
             .map(|(name, globs)| {
@@ -624,10 +635,10 @@ fn judge(lanes: &Lanes, holders: &[LaneHolder], identity: &IdentityId, path: Str
         reason: reason.to_owned(),
     };
     let Some(repo) = repo_path(&path) else {
-        return outside(path, false, "not a repository path");
+        return outside(path, false, NOT_A_REPO_PATH);
     };
     let Some(lane) = lanes.lane_of(repo).cloned() else {
-        return outside(path, true, "unowned");
+        return outside(path, true, UNOWNED);
     };
     let in_lane: Vec<&LaneHolder> = holders
         .iter()
@@ -637,7 +648,7 @@ fn judge(lanes: &Lanes, holders: &[LaneHolder], identity: &IdentityId, path: Str
     let (allowed, reason) = match (own, in_lane.first()) {
         (Some(own), _) => (true, format!("lane {lane} held by {}", own.handle)),
         (None, Some(other)) => (false, format!("lane {lane} held by {}", other.handle)),
-        (None, None) => (false, format!("lane {lane} not claimed")),
+        (None, None) => (false, NOT_CLAIMED.to_owned()),
     };
     PathCheck {
         path,
@@ -655,68 +666,66 @@ struct Stray {
     lane: Option<LaneName>,
 }
 
-impl Hub {
-    /// Checks a recorded DONE: closes the item when the sender holds it, and
-    /// when a changed path lies in a lane the sender holds no claim in (or
-    /// is no repository path), posts an ALERT naming those paths to the
-    /// coordinators, or to the sender's owner when the project has none
-    /// (ruling R35).
-    pub(crate) async fn check_done(
-        &self,
-        topics: &Topics,
-        msg: &LedgerMessage,
-        item: &ItemKey,
-        changes: &[Change],
-    ) -> Result<(), LedgerError> {
-        let project = topics.project().as_str();
-        mark_done(self.pool(), project, item, &msg.from).await?;
-        let lanes = Lanes::load(self.pool(), project).await?;
-        let holders = lane_holders(self.pool(), project).await?;
-        let held: BTreeSet<&LaneName> = holders
-            .iter()
-            .filter(|holder| holder.identity == msg.from)
-            .map(|holder| &holder.lane)
-            .collect();
-        let strays: Vec<Stray> = changes
-            .iter()
-            .filter_map(|change| match repo_path(&change.path) {
-                None => Some(Stray {
+/// Checks a DONE ingest has just written in `tx`: closes the item when the
+/// sender holds it, and when a changed path lies in a lane the sender holds
+/// no claim in (or is no repository path), posts an ALERT naming those
+/// paths to the coordinators, or to the sender's owner when the project has
+/// none (ruling R35).
+pub(crate) async fn check_done(
+    tx: &mut Transaction<'_, Postgres>,
+    topics: &Topics,
+    msg: &LedgerMessage,
+    item: &ItemKey,
+    changes: &[Change],
+) -> Result<(), LedgerError> {
+    let project = topics.project().as_str();
+    mark_done(tx, project, item, &msg.from).await?;
+    let lanes = Lanes::load(&mut **tx, project).await?;
+    let holders = lane_holders(&mut **tx, project).await?;
+    let held: BTreeSet<&LaneName> = holders
+        .iter()
+        .filter(|holder| holder.identity == msg.from)
+        .map(|holder| &holder.lane)
+        .collect();
+    let strays: Vec<Stray> = changes
+        .iter()
+        .filter_map(|change| match repo_path(&change.path) {
+            None => Some(Stray {
+                path: change.path.clone(),
+                lane: None,
+            }),
+            Some(path) => lanes
+                .lane_of(path)
+                .filter(|lane| !held.contains(lane))
+                .map(|lane| Stray {
                     path: change.path.clone(),
-                    lane: None,
+                    lane: Some(lane.clone()),
                 }),
-                Some(path) => lanes
-                    .lane_of(path)
-                    .filter(|lane| !held.contains(lane))
-                    .map(|lane| Stray {
-                        path: change.path.clone(),
-                        lane: Some(lane.clone()),
-                    }),
-            })
-            .collect();
-        if strays.is_empty() {
-            return Ok(());
-        }
-        let alert = HubPost {
-            payload: Payload::Alert {
-                need: format!(
-                    "{item}: DONE changed {} outside the claimed lanes",
-                    plural(strays.len(), "path")
-                ),
-                urgency: Urgency::Normal,
-                needs: Needs::Anyone,
-                actions: Vec::new(),
-            },
-            body: Body::try_from(stray_body(&msg.from_handle, item, &strays))?,
-            reply_to: Some(msg.env.id.clone()),
-            items: vec![item.clone()],
-            lane: None,
-            mentioned: Vec::new(),
-            streams: vec![Stream::Feed],
-        };
-        let fallback = msg.from_owner.as_ref().unwrap_or(&msg.from);
-        self.post_alert(topics, alert, fallback).await?;
-        Ok(())
+        })
+        .collect();
+    if strays.is_empty() {
+        return Ok(());
     }
+    let alert = HubPost {
+        payload: Payload::Alert {
+            need: format!(
+                "{item}: DONE changed {} outside the claimed lanes",
+                plural(strays.len(), "path")
+            ),
+            urgency: Urgency::Normal,
+            needs: Needs::Anyone,
+            actions: Vec::new(),
+        },
+        body: Body::try_from(stray_body(&msg.from_handle, item, &strays))?,
+        reply_to: Some(msg.env.id.clone()),
+        items: vec![item.clone()],
+        lane: None,
+        mentioned: Vec::new(),
+        streams: vec![Stream::Feed],
+    };
+    let fallback = msg.from_owner.as_ref().unwrap_or(&msg.from);
+    post_alert(tx, topics, alert, fallback).await?;
+    Ok(())
 }
 
 fn plural(n: usize, what: &str) -> String {
@@ -728,7 +737,10 @@ fn plural(n: usize, what: &str) -> String {
 }
 
 /// The ALERT text for `strays`: at most [`MAX_LISTED_PATHS`] paths, one per
-/// line, then "and N more", and never more than a body holds.
+/// line, then "and N more", and never more than a body holds. Each path is
+/// the client's own text, so it is quoted with Rust's string escapes: a
+/// newline or other control character in it cannot start a line of the
+/// hub's text (ruling R44c).
 fn stray_body(handle: &str, item: &ItemKey, strays: &[Stray]) -> String {
     let mut body = format!("{handle}'s DONE for {item} changed paths outside its claimed lanes:");
     // Room for the "and N more" line.
@@ -736,8 +748,8 @@ fn stray_body(handle: &str, item: &ItemKey, strays: &[Stray]) -> String {
     let mut listed = 0;
     for stray in strays.iter().take(MAX_LISTED_PATHS) {
         let line = match &stray.lane {
-            Some(lane) => format!("\n- {} ({lane})", stray.path),
-            None => format!("\n- {} (not a repository path)", stray.path),
+            Some(lane) => format!("\n- {:?} ({lane})", stray.path),
+            None => format!("\n- {:?} ({NOT_A_REPO_PATH})", stray.path),
         };
         if body.len() + line.len() > limit {
             break;
