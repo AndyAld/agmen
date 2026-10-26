@@ -9,6 +9,7 @@ mod components;
 mod composer;
 mod dock;
 mod format;
+mod inline_flow;
 mod listener_panel;
 mod message;
 mod palette_filter;

@@ -1,12 +1,16 @@
 use std::rc::Rc;
 
-use gpui::{AnyElement, Context, Render, TestAppContext, VisualTestContext, Window, div, px};
+use gpui::{
+    AnyElement, Context, Modifiers, Render, TestAppContext, VisualTestContext, Window, div, px,
+};
 
 use super::*;
 use crate::backend::chat_snapshot;
 use crate::refs::RefTarget;
 use crate::ui::chat_context::ChatContext;
-use crate::ui::test_support::{init, redraw};
+use crate::ui::inline_flow::{Drawn, take_drawn, take_estimates};
+use crate::ui::ref_chip::REF_CARD_SELECTOR;
+use crate::ui::test_support::{click, init, redraw, rendered_size};
 use crate::ui::tokens::MOCKUP_REM;
 
 fn span(range: std::ops::Range<usize>, target: RefTarget) -> Span {
@@ -338,6 +342,258 @@ fn chip_wider_than_the_column_wraps_inside_it(cx: &mut TestAppContext) {
     assert!(chip.size.height > px(20.), "the chip wraps: {chip:?}");
 }
 
+/// The height of `body` drawn in a column `width` wide, and the height of
+/// its first chip.
+fn heights(cx: &mut TestAppContext, width: f32, body: &str) -> (gpui::Pixels, gpui::Pixels) {
+    let context = Rc::new(ChatContext::new(Rc::new(chat_snapshot())));
+    let text = Rc::new(context.body_text(body, &[]));
+    let cx = host(cx, px(width), move || {
+        RichText::new("m", text.clone(), context.clone()).into_any_element()
+    });
+    let body = cx.debug_bounds("body").unwrap().size.height;
+    let chip = cx.debug_bounds("m:ref:0").map_or(px(0.), |b| b.size.height);
+    (body, chip)
+}
+
+#[gpui::test]
+fn a_run_after_a_chip_fills_the_rest_of_the_line(cx: &mut TestAppContext) {
+    // About one and a half lines of words after a chip, at 300 px: the
+    // words fill the chip's line and wrap once, two lines in all. The bug
+    // drew the chip alone, then the words below it in two more lines.
+    let words = "the quick brown fox jumps over the lazy dog and runs on far away";
+    let (plain, _) = heights(cx, 300., words);
+    let (flowed, chip) = heights(
+        &mut TestAppContext::single(),
+        300.,
+        &format!("4d9fdc8 {words}"),
+    );
+    let line = (plain - SPACE_3) / 2.;
+    assert!(plain > line * 1.5, "the words alone wrap once: {plain:?}");
+    let two_lines = chip.max(line) * 2. + SPACE_3 + px(0.5);
+    assert!(flowed <= two_lines, "{flowed:?} over {two_lines:?}");
+}
+
+/// The fixture message whose body contains `needle`, drawn as `"m"` in a
+/// column `width` wide, with what its chip paragraph laid out.
+fn fixture_flow<'a>(
+    cx: &'a mut TestAppContext,
+    width: f32,
+    needle: &str,
+) -> (Vec<Drawn>, &'a mut VisualTestContext) {
+    let snapshot = chat_snapshot();
+    let m = snapshot
+        .messages
+        .iter()
+        .find(|m| m.client.body.as_str().contains(needle))
+        .unwrap()
+        .clone();
+    let context = Rc::new(ChatContext::new(Rc::new(snapshot)));
+    let text = Rc::new(context.body_text(m.client.body.as_str(), &m.refs));
+    let cx = host(cx, px(width), move || {
+        RichText::new("m", text.clone(), context.clone()).into_any_element()
+    });
+    let drawn = take_drawn().pop().unwrap_or_default();
+    (drawn, cx)
+}
+
+/// The line of the first piece of text that starts with `start`.
+fn text_line(drawn: &[Drawn], start: &str) -> usize {
+    drawn
+        .iter()
+        .find(|d| !d.chip && d.text.starts_with(start))
+        .unwrap_or_else(|| panic!("no text starts with {start:?} in {drawn:#?}"))
+        .line
+}
+
+/// The line of the chip labelled `label`.
+fn chip_line(drawn: &[Drawn], label: &str) -> usize {
+    drawn
+        .iter()
+        .find(|d| d.chip && d.text == label)
+        .unwrap_or_else(|| panic!("no chip {label:?} in {drawn:#?}"))
+        .line
+}
+
+#[gpui::test]
+fn alert_text_flows_beside_its_chips(cx: &mut TestAppContext) {
+    // The 15:28 ALERT in the chat shot: "please hold pushes" started a line
+    // of its own under @sean/a1; the mockup flows it on.
+    let (drawn, _) = fixture_flow(cx, 700., "please hold pushes");
+    assert_eq!(chip_line(&drawn, "4d9fdc8"), 0);
+    assert_eq!(text_line(&drawn, "committed conflict markers at"), 0);
+    assert_eq!(
+        text_line(&drawn, "please"),
+        chip_line(&drawn, "@sean/a1"),
+        "{drawn:#?}"
+    );
+}
+
+#[gpui::test]
+fn done_text_flows_beside_its_chips(cx: &mut TestAppContext) {
+    // The 15:41 DONE: "· cargo test 71 passed" started a new line.
+    let (drawn, _) = fixture_flow(cx, 700., "cargo test 71 passed");
+    assert_eq!(
+        text_line(&drawn, "· cargo test 71 passed"),
+        chip_line(&drawn, "fix/c015-main-conflict@9e2a71c"),
+        "{drawn:#?}"
+    );
+}
+
+#[gpui::test]
+fn nothing_drawn_passes_the_body_edge(_cx: &mut TestAppContext) {
+    let snapshot = chat_snapshot();
+    let mut checked = 0;
+    for width in [300., 450., 700.] {
+        for m in &snapshot.messages {
+            let context = Rc::new(ChatContext::new(Rc::new(snapshot.clone())));
+            let text = Rc::new(context.body_text(m.client.body.as_str(), &m.refs));
+            let mut app = TestAppContext::single();
+            let cx = host(&mut app, px(width), move || {
+                RichText::new("m", text.clone(), context.clone()).into_any_element()
+            });
+            let body = cx.debug_bounds("body").unwrap();
+            for drawn in take_drawn().into_iter().flatten() {
+                checked += 1;
+                assert!(
+                    drawn.bounds.right() <= body.right() + px(0.5)
+                        && drawn.bounds.left() >= body.left() - px(0.5),
+                    "{drawn:?} outside {body:?} at {width}"
+                );
+            }
+        }
+    }
+    assert!(checked > 20, "only {checked} pieces drawn");
+}
+
+#[gpui::test]
+fn chips_draw_where_the_flow_put_them(_cx: &mut TestAppContext) {
+    for width in [450., 700.] {
+        let mut app = TestAppContext::single();
+        let (drawn, cx) = fixture_flow(&mut app, width, "please hold pushes");
+        let chips: Vec<&Drawn> = drawn.iter().filter(|d| d.chip).collect();
+        assert_eq!(chips.len(), 3);
+        for (i, placed) in chips.iter().enumerate() {
+            let selector: &'static str = Box::leak(format!("m:ref:{i}").into_boxed_str());
+            let chip = cx.debug_bounds(selector).unwrap();
+            // The chip sits inside its holder, after any leading glue.
+            let slack = px(1.);
+            assert!(
+                chip.left() >= placed.bounds.left() - slack
+                    && chip.right() <= placed.bounds.right() + slack
+                    && (chip.top() - placed.bounds.top()).abs() <= slack
+                    && (chip.bottom() - placed.bounds.bottom()).abs() <= slack,
+                "{selector} drawn at {chip:?}, placed at {:?}",
+                placed.bounds
+            );
+        }
+    }
+}
+
+#[gpui::test]
+fn chip_height_estimate_matches_its_layout(_cx: &mut TestAppContext) {
+    let path = "crates/agmen-desktop/src/ui/components/key_hint.rs:10-20";
+    let mut snapshot = chat_snapshot();
+    snapshot
+        .git
+        .files
+        .insert("crates/agmen-desktop/src/ui/components/key_hint.rs".into());
+    let bodies = [
+        format!("see {path}."),
+        format!("({path}) and more words after it"),
+        "C015 fix/c015-main-conflict@9e2a71c · cargo test".to_owned(),
+    ];
+    let mut estimates = Vec::new();
+    take_estimates();
+    for width in [90., 120., 150., 200., 260.] {
+        for body in &bodies {
+            let context = Rc::new(ChatContext::new(Rc::new(snapshot.clone())));
+            let text = Rc::new(context.body_text(body, &[]));
+            let mut app = TestAppContext::single();
+            host(&mut app, px(width), move || {
+                RichText::new("m", text.clone(), context.clone()).into_any_element()
+            });
+            estimates.extend(take_estimates());
+        }
+    }
+    assert!(estimates.len() >= 5, "{estimates:?}");
+    for (estimated, laid_out) in estimates {
+        assert!(
+            (estimated - laid_out).abs() <= px(0.5),
+            "estimated {estimated:?}, laid out {laid_out:?}"
+        );
+    }
+}
+
+#[gpui::test]
+fn chips_in_a_flow_keep_their_size(cx: &mut TestAppContext) {
+    // Padding and font come from the chip itself, so a chip drawn in the
+    // flow is the size of the same chip drawn alone.
+    let (_, cx) = fixture_flow(cx, 700., "please hold pushes");
+    let in_flow = cx.debug_bounds("m:ref:2").unwrap().size;
+    let snapshot = chat_snapshot();
+    let m = &snapshot.messages[1];
+    let context = ChatContext::new(Rc::new(snapshot.clone()));
+    let target = context.body_text(m.client.body.as_str(), &m.refs).spans[2]
+        .target
+        .clone();
+    let color = context.chip_color(&target);
+    let alone = rendered_size(&mut TestAppContext::single(), move || {
+        RefChip::new("chip", "@sean/a1", target.clone(), color.clone()).into_any_element()
+    });
+    assert_eq!(in_flow, alone);
+}
+
+type Heard = Rc<std::cell::RefCell<Vec<RefEvent>>>;
+
+/// The fixture ALERT body with a handler that records chip events.
+fn listening_body(cx: &mut TestAppContext) -> (Heard, RefTarget, &mut VisualTestContext) {
+    let heard: Heard = Rc::default();
+    let sink = heard.clone();
+    let snapshot = chat_snapshot();
+    let m = snapshot.messages[1].clone();
+    let context = Rc::new(ChatContext::new(Rc::new(snapshot)));
+    let text = Rc::new(context.body_text(m.client.body.as_str(), &m.refs));
+    let target = text.spans[2].target.clone();
+    let cx = host(cx, px(700.), move || {
+        let sink = sink.clone();
+        let handler: ChangeHandler<RefEvent> =
+            Rc::new(move |event, _, _| sink.borrow_mut().push(event));
+        RichText::new("m", text.clone(), context.clone())
+            .on_ref(handler)
+            .into_any_element()
+    });
+    (heard, target, cx)
+}
+
+#[gpui::test]
+fn click_through_flow_opens_ref(cx: &mut TestAppContext) {
+    let (heard, target, cx) = listening_body(cx);
+    click(cx, "m:ref:2");
+    assert_eq!(*heard.borrow(), [RefEvent::OpenRef(target)]);
+}
+
+#[gpui::test]
+fn cmd_click_through_flow_opens_ref_in_split(cx: &mut TestAppContext) {
+    let (heard, target, cx) = listening_body(cx);
+    let center = cx.debug_bounds("m:ref:2").unwrap().center();
+    let secondary = cx.update(|_, cx| Modifiers::secondary_key(cx));
+    cx.simulate_click(center, secondary);
+    assert_eq!(*heard.borrow(), [RefEvent::OpenRefInSplit(target)]);
+}
+
+#[gpui::test]
+fn hover_through_flow_shows_the_card(cx: &mut TestAppContext) {
+    let (_, _, cx) = listening_body(cx);
+    assert!(cx.debug_bounds(REF_CARD_SELECTOR).is_none());
+    let center = cx.debug_bounds("m:ref:2").unwrap().center();
+    cx.simulate_mouse_move(center, None, Modifiers::none());
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(2));
+    cx.run_until_parked();
+    redraw(cx);
+    assert!(cx.debug_bounds(REF_CARD_SELECTOR).is_some());
+}
+
 /// The mean time to draw a frame of `body` in a 600 px column.
 fn frame_time(cx: &mut TestAppContext, body: &str) -> std::time::Duration {
     let context = Rc::new(ChatContext::new(Rc::new(chat_snapshot())));
@@ -355,22 +611,66 @@ fn frame_time(cx: &mut TestAppContext, body: &str) -> std::time::Duration {
 /// Plan Focus 4: no frame over 16.7 ms.
 const FRAME_BUDGET: std::time::Duration = std::time::Duration::from_micros(16_700);
 
+/// The time `per_frame` may take: `debug` in a debug build, else `release`.
+fn bound(debug: u64, release: std::time::Duration) -> std::time::Duration {
+    if cfg!(debug_assertions) {
+        std::time::Duration::from_millis(debug)
+    } else {
+        release
+    }
+}
+
 #[gpui::test]
 fn a_32_kib_body_draws_quickly(cx: &mut TestAppContext) {
-    // Measured on an M2 Max, three runs each: release 0.4 ms for one line
-    // and 0.9 ms for 1,424 short lines; debug 8 ms and 12 ms. In release a
-    // body gets a quarter of the frame budget. Debug runs about 13 times
-    // slower, so its bound is 50 ms: 4 times the debug frame for a loaded
-    // test run, and under the 148 ms of one element per line and the 552 ms
-    // of one element per word that this replaced.
-    let bound = if cfg!(debug_assertions) {
-        std::time::Duration::from_millis(50)
-    } else {
-        FRAME_BUDGET / 4
+    // Measured on an M2 Max, three runs each, release then debug: one line
+    // 0.4 and 8 ms, 1,424 short lines 0.8 and 11 ms, one paragraph with a
+    // chip in the middle 0.8 and 12 ms, a chip every 200 bytes 2.7 to 3.1
+    // and 30 ms. In release a body gets a quarter of the frame budget.
+    // Debug runs about 13 times slower, so a debug bound is 4 times the
+    // debug frame for a loaded test run (a chip every 200 bytes took 87 ms
+    // once in a full parallel run); the plain bodies' 50 ms is also under
+    // the 148 ms of one element per line and the 552 ms of one element per
+    // word that this replaced.
+    let quarter = FRAME_BUDGET / 4;
+    let chips_every = |bytes: usize| {
+        let words = "a ".repeat((bytes - 8) / 2);
+        format!("{words}4d9fdc8 ").repeat(32_000 / bytes)
     };
-    let one_line = frame_time(cx, &"a ".repeat(16_384));
-    let short_lines = frame_time(&mut TestAppContext::single(), &short_lines_body());
-    for (shape, per_frame) in [("one line", one_line), ("short lines", short_lines)] {
+    let one_chip = format!("{}4d9fdc8 {}", "a ".repeat(8_000), "b ".repeat(8_000));
+    let shapes = [
+        (
+            "one line",
+            frame_time(cx, &"a ".repeat(16_384)),
+            bound(50, quarter),
+        ),
+        (
+            "short lines",
+            frame_time(&mut TestAppContext::single(), &short_lines_body()),
+            bound(50, quarter),
+        ),
+        (
+            "one chip",
+            frame_time(&mut TestAppContext::single(), &one_chip),
+            bound(50, quarter),
+        ),
+        (
+            "a chip per 200 bytes",
+            frame_time(&mut TestAppContext::single(), &chips_every(200)),
+            bound(120, quarter),
+        ),
+        // A chip every 32 bytes, 1,000 in all, is over the frame budget:
+        // each chip is its own element tree, laid out at about 7 us in
+        // release. Measured 13 to 15 ms in release and 130 to 137 ms in
+        // debug; the flex row this replaced took 21 to 31 ms in release.
+        // Rows are cached, so it costs only when the stream redraws. The
+        // bound guards against it getting worse.
+        (
+            "a chip per 32 bytes",
+            frame_time(&mut TestAppContext::single(), &chips_every(32)),
+            bound(550, FRAME_BUDGET * 2),
+        ),
+    ];
+    for (shape, per_frame, bound) in shapes {
         assert!(per_frame < bound, "{shape}: {per_frame:?} over {bound:?}");
     }
 }
