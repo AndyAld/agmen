@@ -58,7 +58,9 @@ pub(crate) enum BackendError {
 pub(crate) trait Backend: 'static {
     /// Everything the window shows now.
     fn snapshot(&self) -> Snapshot;
-    /// Sends a message as the person.
+    /// Sends a message as the person. A draft with a model comes back in an
+    /// [`Update::Snapshot`] whose `message_models` carries its tag; one
+    /// without comes back as an [`Update::Message`].
     ///
     /// # Errors
     ///
