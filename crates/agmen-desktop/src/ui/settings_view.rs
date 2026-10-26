@@ -29,7 +29,7 @@ use crate::appearance::{
     API_BASE, AgmenSettings, Appearance, AppearanceSource, EXTENSIONS_PAGE, FontPrefs, Fonts,
     GITHUB_API, IconThemeChoice, InstalledTheme, MarketError, Marketplace, Mode, SystemMode,
     ThemeEntry, ThemeExtension, ThemeOrigin, agmen_settings_path, install_shared, installed_themes,
-    picker_entries, resolve_paths, theme_dirs, theme_names, zed_extensions_dir,
+    picker_entries, resolve_paths, theme_dirs, zed_extensions_dir,
 };
 use crate::icons::{FileIcons, IconTheme, UiIcon};
 
@@ -467,13 +467,9 @@ impl SettingsView {
         self.set_status(BrowseStatus::Installing(ext.name.clone()), cx);
         let dir = theme_dirs(&self.sources.config, &self.sources.extensions).agmen;
         let task = cx.background_executor().spawn(async move {
-            // C305: the lock is released while GitHub is asked.
-            install_shared(&market, &ext, &dir, Instant::now())
-                .map(|installed| {
-                    let names = theme_names(&dir.join(&installed.id));
-                    (installed, names)
-                })
-                .map_err(|err| err.to_string())
+            // C305: the lock is released while GitHub is asked. C311: the
+            // names are read under it, after the write.
+            install_shared(&market, &ext, &dir, Instant::now()).map_err(|err| err.to_string())
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;

@@ -56,8 +56,8 @@ pub(super) fn installed_detail(theme: &ThemeEntry) -> String {
         .unwrap_or_default();
     // Zed never copies a LICENSE into the folders it installs, so a Zed
     // install without one is no fault of the theme (V107). agmen's own
-    // install has none only when neither the archive nor the repository
-    // had one (Andy, 2026-10-26).
+    // install has none when neither the archive nor the repository had
+    // one, or when asking GitHub failed (Andy, 2026-10-26, C305(c)).
     let credit = |t: &InstalledTheme, missing: &str| {
         // A license file without a readable line is still kept (C303).
         let unlabeled = if t.licenses.is_empty() {
@@ -90,10 +90,15 @@ pub(super) fn installed_detail(theme: &ThemeEntry) -> String {
             )
         }
         ThemeOrigin::Agmen(t) => {
-            format!(
-                "installed by agmen \u{b7} {}",
-                credit(t, "license not found")
-            )
+            // Only a 404, or no repository on GitHub, is "not found"; a
+            // rate limit or any other failure is a check to repeat.
+            let missing = match t.license_check {
+                Some(crate::appearance::LicenseCheck::Failed) => {
+                    "license not checked; install again to retry"
+                }
+                Some(_) | None => "license not found",
+            };
+            format!("installed by agmen \u{b7} {}", credit(t, missing))
         }
     };
     format!("{by}{from}")

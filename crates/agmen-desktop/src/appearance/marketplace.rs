@@ -5,11 +5,13 @@
 //! up to 60 minutes. An install copies the theme files, the extension's
 //! license and its author into agmen's own `~/.config/agmen/themes/<id>/`,
 //! never into Zed's folders. Zed's archives carry no license file, so an
-//! install without one asks GitHub for the repository's license; when none
-//! is found it installs anyway, and the picker says "license not found"
-//! (Andy, 2026-10-26). That request runs without the [`Marketplace`] lock
-//! (see [`install_shared`]), follows redirects only on its first origin and
-//! sends no Referer (C304, C305).
+//! install without one asks GitHub for the repository's license, and
+//! installs anyway when it gets none. Only a 404, or a repository that is
+//! not on GitHub, reads "license not found"; any other failure reads
+//! "license not checked; install again to retry", and Install is the only
+//! retry (Andy, 2026-10-26, C305(c)). That request runs without the
+//! [`Marketplace`] lock (see [`install_shared`]), follows redirects only on
+//! its first origin and sends no Referer (C304, C305).
 
 use std::collections::HashMap;
 use std::fs;
@@ -20,6 +22,7 @@ use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
+use unicode_properties::{GeneralCategory, UnicodeGeneralCategory as _};
 
 use super::theme::Family;
 use super::zed::parse_jsonc;
@@ -74,6 +77,34 @@ const MAX_LICENSE_REDIRECTS: usize = 5;
 const MAX_LICENSE_LABEL_CHARS: usize = 80;
 /// The `extension.toml` key that keeps the license label GitHub detected.
 const LICENSE_KEY: &str = "license";
+/// The `extension.toml` key that keeps the [`LicenseCheck`].
+const LICENSE_CHECK_KEY: &str = "license_check";
+
+/// What asking GitHub for a repository's license found, kept in the
+/// `extension.toml` agmen writes as `license_check` (C305(c)). Absent when
+/// the archive carried its own license file and nothing was asked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum LicenseCheck {
+    /// GitHub sent the repository's license, which is saved as `LICENSE`.
+    Found,
+    /// GitHub answered 404, or the repository is not on GitHub.
+    NotFound,
+    /// Anything else: no answer, a timeout, another status (403 and 429
+    /// are GitHub's rate limits), or an answer too large or unreadable.
+    Failed,
+}
+
+impl LicenseCheck {
+    /// The word kept in `extension.toml`, as serde names it.
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Found => "found",
+            Self::NotFound => "not_found",
+            Self::Failed => "failed",
+        }
+    }
+}
 
 /// The manifest file of an installed theme extension.
 const MANIFEST: &str = "extension.toml";
@@ -158,6 +189,8 @@ struct Manifest {
     /// is shown.
     #[serde(skip_serializing_if = "Option::is_none")]
     license: Option<toml::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    license_check: Option<LicenseCheck>,
 }
 
 /// A theme extension installed by agmen or by Zed, as read back from its
@@ -177,6 +210,9 @@ pub(crate) struct InstalledTheme {
     /// bidi characters and at most [`MAX_LICENSE_LABEL_CHARS`] long. `None`
     /// with `licenses` not empty means the file has no readable line.
     pub(crate) license: Option<String>,
+    /// What agmen's install found when it asked GitHub, as its manifest
+    /// keeps it; `None` when nothing was asked.
+    pub(crate) license_check: Option<LicenseCheck>,
     /// Why the manifest could not be read, when it could not; the install
     /// is still listed, without author or repository (C236).
     pub(crate) manifest_error: Option<String>,
@@ -341,19 +377,24 @@ impl Marketplace {
         self.record(&archive, now);
         let mut unpacked = unpack(&ext.id, &archive?)?;
         keep_parsed_themes(&ext.id, &mut unpacked)?;
-        let license = if unpacked.licenses.is_empty() {
-            unpacked
+        let mut license = None;
+        if unpacked.licenses.is_empty() {
+            let repo = unpacked
                 .manifest
                 .as_deref()
                 .and_then(parse_manifest)
                 .and_then(|manifest| manifest.repository)
                 .or_else(|| ext.repository.clone())
                 .as_deref()
-                .and_then(github_repo)
-                .and_then(|repo| self.license_request(&repo))
-        } else {
-            None
-        };
+                .and_then(github_repo);
+            match repo.map(|repo| self.license_request(&repo)) {
+                None => unpacked.license_check = Some(LicenseCheck::NotFound),
+                // The parts are checked, so this is not expected; it is
+                // still no answer about the repository.
+                Some(None) => unpacked.license_check = Some(LicenseCheck::Failed),
+                Some(request) => license = request,
+            }
+        }
         Ok(Download {
             ext: ext.clone(),
             unpacked,
@@ -419,9 +460,12 @@ impl Marketplace {
 }
 
 /// Installs `ext` through the shared `market` into `agmen_themes/<id>/`,
-/// replacing an older install of the same id. The lock is held for the
-/// download from Zed and for the writes, but not for the GitHub request, so
-/// searches and other installs never wait on GitHub (C305).
+/// replacing an older install of the same id, and returns it with the names
+/// its theme files give. The lock is held for the download from Zed and for
+/// the writes, but not for the GitHub request, so searches and other
+/// installs never wait on GitHub (C305). The names are read before the lock
+/// is released, so a second install of the same id cannot swap the folder
+/// while they are read (C311).
 ///
 /// # Errors
 ///
@@ -432,16 +476,18 @@ pub(crate) fn install_shared(
     ext: &ThemeExtension,
     agmen_themes: &Path,
     now: Instant,
-) -> Result<InstalledTheme, MarketError> {
+) -> Result<(InstalledTheme, Vec<String>), MarketError> {
     let mut download = market
         .lock()
         .map_err(|_| MarketError::Poisoned)?
         .download(ext, now)?;
     download.fetch_license();
-    // Writes stay under the lock, so two installs of one id never share a
-    // staging folder.
+    // Writes and the read of the names stay under the lock, so two installs
+    // of one id never share a staging folder or read a folder mid-swap.
     let _writing = market.lock().map_err(|_| MarketError::Poisoned)?;
-    download.write(agmen_themes)
+    let installed = download.write(agmen_themes)?;
+    let names = super::theme_names(&agmen_themes.join(&installed.id));
+    Ok((installed, names))
 }
 
 /// A downloaded extension, not yet written.
@@ -455,14 +501,22 @@ pub(crate) struct Download {
 
 impl Download {
     /// Asks GitHub for the repository license, when the archive had none,
-    /// and keeps it with its label. Any failure leaves the install without
-    /// one ("license not found"); it blocks for at most the license timeout.
+    /// and keeps it with its label and the [`LicenseCheck`]. A failure
+    /// leaves the install without one; it blocks for at most the license
+    /// timeout.
     pub(crate) fn fetch_license(&mut self) {
-        if let Some(found) = self.license.take().and_then(|request| request.fetch()) {
-            self.unpacked
-                .licenses
-                .push((REPO_LICENSE_FILE.to_owned(), found.text));
-            self.unpacked.license_label = found.label;
+        let Some(request) = self.license.take() else {
+            return;
+        };
+        match request.fetch() {
+            Ok(found) => {
+                self.unpacked
+                    .licenses
+                    .push((REPO_LICENSE_FILE.to_owned(), found.text));
+                self.unpacked.license_label = found.label;
+                self.unpacked.license_check = Some(LicenseCheck::Found);
+            }
+            Err(check) => self.unpacked.license_check = Some(check),
         }
     }
 
@@ -493,24 +547,28 @@ struct RepoLicense {
 }
 
 impl LicenseRequest {
-    /// The license, decoded; `None` when the repository has none (404), when
-    /// the request or its answer fails, or when the text is over
-    /// [`MAX_LICENSE_BYTES`]. One request, without a token, and it never
-    /// counts toward the backoff, which is about Zed's API.
-    fn fetch(&self) -> Option<RepoLicense> {
+    /// The license, decoded. [`LicenseCheck::NotFound`] when GitHub answers
+    /// 404 or sends an empty file; [`LicenseCheck::Failed`] when the request
+    /// or its answer fails in any other way, or the text is over
+    /// [`MAX_LICENSE_BYTES`] (C305(c)). One request, without a token, and it
+    /// never counts toward the backoff, which is about Zed's API.
+    fn fetch(&self) -> Result<RepoLicense, LicenseCheck> {
         let request = self
             .client
             .get(self.url.clone())
             .header(reqwest::header::ACCEPT, "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28")
             .timeout(self.timeout);
-        // Each `.ok()?` here is deliberate: any failure (network, 404, 5xx,
-        // too large, not JSON, not base64) means "license not found" for
-        // this install, and the install goes on without one.
-        let body = read(request, &self.url, MAX_LICENSE_ANSWER_BYTES).ok()?;
-        let answer: LicenseAnswer = serde_json::from_slice(&body).ok()?;
+        // Each failure maps to an outcome rather than an error: the install
+        // goes on without a license, and its row says why.
+        let body = read(request, &self.url, MAX_LICENSE_ANSWER_BYTES).map_err(|err| match err {
+            MarketError::Status { status: 404, .. } => LicenseCheck::NotFound,
+            _ => LicenseCheck::Failed,
+        })?;
+        let answer: LicenseAnswer =
+            serde_json::from_slice(&body).map_err(|_| LicenseCheck::Failed)?;
         if answer.encoding != "base64" {
-            return None;
+            return Err(LicenseCheck::Failed);
         }
         // GitHub wraps the base64 in lines of 60 characters.
         let packed: Vec<u8> = answer
@@ -520,13 +578,20 @@ impl LicenseRequest {
             .collect();
         // Four base64 characters carry three bytes: refuse before decoding.
         if packed.len() / 4 * 3 > MAX_LICENSE_BYTES + 3 {
-            return None;
+            return Err(LicenseCheck::Failed);
         }
         let text = base64::engine::general_purpose::STANDARD
             .decode(&packed)
-            .ok()?;
+            .map_err(|_| LicenseCheck::Failed)?;
+        if text.is_empty() {
+            // An empty file: asking again would get the same.
+            return Err(LicenseCheck::NotFound);
+        }
+        if text.len() > MAX_LICENSE_BYTES {
+            return Err(LicenseCheck::Failed);
+        }
         let label = answer.license.and_then(DetectedLicense::label);
-        (!text.is_empty() && text.len() <= MAX_LICENSE_BYTES).then_some(RepoLicense { text, label })
+        Ok(RepoLicense { text, label })
     }
 }
 
@@ -664,20 +729,25 @@ impl DetectedLicense {
     }
 }
 
-/// `line` as a license label: without control or bidi characters, trimmed,
-/// and cut to [`MAX_LICENSE_LABEL_CHARS`] with an ellipsis; `None` when
-/// nothing is left. The text is untrusted: a bidi override could reorder
-/// the credit line, and one long line would make its row tall (C303).
+/// `line` as a license label: without control or format characters
+/// (categories Cc and Cf, which hold every bidi mark, zero-width character
+/// and tag character) or line and paragraph separators, trimmed, and cut to
+/// [`MAX_LICENSE_LABEL_CHARS`] with an ellipsis; `None` when nothing is
+/// left. The text is untrusted: a bidi override could reorder the credit
+/// line, an invisible character could hide in it, and one long line would
+/// make its row tall (C303, C310).
 fn license_label(line: &str) -> Option<String> {
-    let bidi = |c: char| {
-        matches!(
-            c,
-            '\u{61c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
-        )
-    };
     let clean: String = line
         .chars()
-        .filter(|&c| !c.is_control() && !bidi(c))
+        .filter(|c| {
+            !matches!(
+                c.general_category(),
+                GeneralCategory::Control
+                    | GeneralCategory::Format
+                    | GeneralCategory::LineSeparator
+                    | GeneralCategory::ParagraphSeparator
+            )
+        })
         .collect();
     let clean = clean.trim();
     if clean.is_empty() {
@@ -718,6 +788,8 @@ struct Unpacked {
     licenses: Vec<(String, Vec<u8>)>,
     /// The label GitHub gave the repository license, kept in the manifest.
     license_label: Option<String>,
+    /// What asking GitHub found, kept in the manifest.
+    license_check: Option<LicenseCheck>,
 }
 
 /// Reads the `.tar.gz` in memory, keeping the manifest, `themes/*.json` and
@@ -805,14 +877,34 @@ fn keep_parsed_themes(id: &str, unpacked: &mut Unpacked) -> Result<(), MarketErr
     Ok(())
 }
 
-/// `manifest` with its `license` key set to `label`.
-fn with_license_key(manifest: &[u8], label: &str) -> Result<Vec<u8>, String> {
+/// `manifest` with its `license` and `license_check` keys set from what
+/// GitHub said, and removed when GitHub said nothing: an archive's own
+/// values never reach the install, so the label comes only from the
+/// repository's license (Andy, C309). A manifest that needs no change keeps
+/// its bytes, comments included.
+fn with_license_keys(
+    manifest: &[u8],
+    label: Option<&str>,
+    check: Option<LicenseCheck>,
+) -> Result<Vec<u8>, String> {
     let text = std::str::from_utf8(manifest).map_err(|err| err.to_string())?;
     let mut table: toml::Table = toml::from_str(text).map_err(|err| err.to_string())?;
-    table.insert(
-        LICENSE_KEY.to_owned(),
-        toml::Value::String(label.to_owned()),
-    );
+    let had_keys = table.remove(LICENSE_KEY).is_some() | table.remove(LICENSE_CHECK_KEY).is_some();
+    if !had_keys && label.is_none() && check.is_none() {
+        return Ok(manifest.to_vec());
+    }
+    if let Some(label) = label {
+        table.insert(
+            LICENSE_KEY.to_owned(),
+            toml::Value::String(label.to_owned()),
+        );
+    }
+    if let Some(check) = check {
+        table.insert(
+            LICENSE_CHECK_KEY.to_owned(),
+            toml::Value::String(check.as_str().to_owned()),
+        );
+    }
     toml::to_string(&table)
         .map(String::into_bytes)
         .map_err(|err| err.to_string())
@@ -842,6 +934,7 @@ fn write_install(
             authors: ext.authors.clone(),
             repository: ext.repository.clone(),
             license: None,
+            license_check: None,
         })
         .map_err(|err| MarketError::Archive {
             id: id.clone(),
@@ -849,15 +942,15 @@ fn write_install(
         })?
         .into_bytes(),
     };
-    let manifest = match &unpacked.license_label {
-        Some(label) => {
-            with_license_key(&manifest, label).map_err(|message| MarketError::Archive {
-                id: id.clone(),
-                message,
-            })?
-        }
-        None => manifest,
-    };
+    let manifest = with_license_keys(
+        &manifest,
+        unpacked.license_label.as_deref(),
+        unpacked.license_check,
+    )
+    .map_err(|message| MarketError::Archive {
+        id: id.clone(),
+        message,
+    })?;
     fs::create_dir_all(agmen_themes).map_err(io(agmen_themes))?;
     let staging = agmen_themes.join(format!(".{id}.partial"));
     let old = agmen_themes.join(format!(".{id}.old"));
@@ -985,6 +1078,7 @@ pub(crate) fn read_installed(root: &Path) -> Option<InstalledTheme> {
         repository: manifest.repository,
         licenses,
         license,
+        license_check: manifest.license_check,
         manifest_error,
     })
 }
