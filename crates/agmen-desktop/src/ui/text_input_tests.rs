@@ -520,6 +520,54 @@ fn a_scrolled_input_paints_only_the_lines_in_view() {
 
 #[cfg(target_os = "macos")]
 #[test]
+fn lines_cut_by_a_fractional_scroll_still_paint() {
+    // C280: scrolled half a line, the input shows the bottom half of line
+    // 2 and the top half of line 5 around lines 3 and 4. Skipping a partly
+    // visible line would blank it, as a long message scrolled by a
+    // fraction of a row. in_view names lines 2 to 5, and the paint shows
+    // it: the marked text draws one underline per painted line, and line
+    // 5's underline, below the input, is masked out, so lines 2 to 4 show
+    // theirs.
+    for rem in [15., 20.] {
+        with_three_line_input(rem, |input, cx| {
+            let line_4 = EIGHT_LINES.match_indices('\n').nth(2).unwrap().0 + 1;
+            input.update_in(cx, |input, window, cx| {
+                input.replace_and_mark_text_in_range(
+                    None,
+                    EIGHT_LINES,
+                    Some(line_4..line_4),
+                    window,
+                    cx,
+                );
+            });
+            crate::ui::test_support::redraw(cx);
+            let row = crate::ui::tokens::AUTO_LINE_13;
+            input.update(cx, |input, _| input.scroll.y = row * 1.5);
+            crate::ui::test_support::redraw(cx);
+            let scroll = input.read_with(cx, |input, _| input.scroll);
+            assert_eq!(scroll.y, row * 1.5, "the cursor on line 4 keeps the scroll");
+            let (lines, mask, area) = input.read_with(cx, |input, _| {
+                let area = input.last_bounds.unwrap();
+                let (lines, mask) = input
+                    .layout
+                    .as_ref()
+                    .unwrap()
+                    .in_view(area.origin - scroll, area);
+                (lines, mask, area)
+            });
+            assert_eq!(lines, 1..5, "at a {rem} px rem lines 2 to 5 are in view");
+            assert_eq!(mask, area, "both cut lines keep the mask at the edges");
+            let underlines = cx.update(|window, _| window.painted_underlines().len());
+            assert_eq!(
+                underlines, 3,
+                "at a {rem} px rem lines 2 to 4 show their underlines, the cut line 2 included"
+            );
+        });
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn a_line_cut_by_the_edges_paints_nothing_past_them() {
     // C273: one long line wraps to more rows than the input shows. With
     // the cursor in the middle, rows hide above and below, and the mask
