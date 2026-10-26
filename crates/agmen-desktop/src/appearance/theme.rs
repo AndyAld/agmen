@@ -42,6 +42,10 @@ pub(crate) struct Theme {
     /// `terminal.ansi.*`: black, red, green, yellow, blue, magenta, cyan,
     /// white, then the bright variants in the same order.
     pub(crate) ansi: [Hsla; 16],
+    /// `terminal.foreground`, or the theme's `text` (Task 14).
+    pub(crate) terminal_foreground: Hsla,
+    /// `terminal.background`, or the theme's `background` (Task 14).
+    pub(crate) terminal_background: Hsla,
     /// The `players` cursor colors.
     pub(crate) players: Vec<Hsla>,
     /// Fills for controls at rest (`element.background`).
@@ -138,19 +142,25 @@ impl Theme {
             .and_then(|p| p.get("selection"))
             .and_then(parse_color)
             .unwrap_or(base.selection);
+        let (text, background) = (
+            pick(&["text"], base.text),
+            pick(&["background"], base.background),
+        );
         Self {
+            terminal_foreground: pick(&["terminal.foreground"], text),
+            terminal_background: pick(&["terminal.background"], background),
             element: pick(&["element.background"], base.element),
             selection,
             accents,
             syntax,
-            background: pick(&["background"], base.background),
+            background,
             surface: pick(&["surface.background"], base.surface),
             elevated_surface: pick(&["elevated_surface.background"], base.elevated_surface),
             element_selected: pick(&["element.selected"], base.element_selected),
             element_hover: pick(&["element.hover"], base.element_hover),
             border: pick(&["border"], base.border),
             border_variant: pick(&["border.variant"], base.border_variant),
-            text: pick(&["text"], base.text),
+            text,
             text_muted: pick(&["text.muted"], base.text_muted),
             text_placeholder: pick(&["text.placeholder"], base.text_placeholder),
             text_accent: pick(&["text.accent"], base.text_accent),

@@ -76,6 +76,7 @@ pub(crate) fn wallpaper_adaptive() -> Theme {
     let accent = c("#68acd4", base.text_accent);
     let text = c("#f4f4f5", base.text);
     let muted = c("#a1a1aa", base.text_muted);
+    let background = c("#101010b8", base.background);
     let ramp: Vec<Hsla> = [
         "#aea1db", "#e0a29c", "#b5bd88", "#97abb7", "#63bec9", "#d99db3", "#89a4de", "#c5ab72",
     ]
@@ -90,7 +91,7 @@ pub(crate) fn wallpaper_adaptive() -> Theme {
     .collect();
     let border = c("#ffffff15", base.border);
     Theme {
-        background: c("#101010b8", base.background),
+        background,
         surface: c("#121214a0", base.surface),
         elevated_surface: c("#18181be0", base.elevated_surface),
         element: c("#20202480", base.element),
@@ -111,6 +112,9 @@ pub(crate) fn wallpaper_adaptive() -> Theme {
         warning: c("#abad69", base.warning),
         info: c("#6faad7", base.info),
         syntax: syntax_from_ramp(&ramp, accent, text, muted),
+        // Marked has no terminal colors of its own: its text and background.
+        terminal_foreground: text,
+        terminal_background: background,
         accents,
         ..base
     }
