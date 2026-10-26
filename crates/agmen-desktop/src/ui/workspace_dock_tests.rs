@@ -312,6 +312,7 @@ fn settings_home(cx: &mut VisualTestContext) -> (tempfile::TempDir, std::path::P
         config,
         extensions: home.path().join("extensions"),
         market: "http://127.0.0.1:9".into(),
+        github: "http://127.0.0.1:9".into(),
     };
     cx.update(|_, cx| cx.set_global(sources));
     (home, file)

@@ -27,8 +27,8 @@ use super::tokens::{
 };
 use crate::appearance::{
     API_BASE, AgmenSettings, Appearance, AppearanceSource, EXTENSIONS_PAGE, FontPrefs, Fonts,
-    IconThemeChoice, InstalledTheme, MarketError, Marketplace, Mode, SystemMode, ThemeEntry,
-    ThemeExtension, ThemeOrigin, agmen_settings_path, installed_themes, picker_entries,
+    GITHUB_API, IconThemeChoice, InstalledTheme, MarketError, Marketplace, Mode, SystemMode,
+    ThemeEntry, ThemeExtension, ThemeOrigin, agmen_settings_path, installed_themes, picker_entries,
     resolve_paths, theme_dirs, theme_names, zed_extensions_dir,
 };
 use crate::icons::{FileIcons, IconTheme, UiIcon};
@@ -42,6 +42,8 @@ pub(crate) struct SettingsSources {
     pub(crate) extensions: PathBuf,
     /// Zed's extension API: [`API_BASE`] in the app.
     pub(crate) market: String,
+    /// GitHub's API, asked for licenses: [`GITHUB_API`] in the app.
+    pub(crate) github: String,
 }
 
 impl SettingsSources {
@@ -52,6 +54,7 @@ impl SettingsSources {
             config: home.join(".config"),
             extensions: zed_extensions_dir(home),
             market: API_BASE.to_owned(),
+            github: GITHUB_API.to_owned(),
         }
     }
 
@@ -384,7 +387,10 @@ impl SettingsView {
         if let Some(market) = &self.market {
             return Ok(market.clone());
         }
-        let market = Arc::new(Mutex::new(Marketplace::new(self.sources.market.clone())?));
+        let market = Arc::new(Mutex::new(Marketplace::new(
+            self.sources.market.clone(),
+            self.sources.github.clone(),
+        )?));
         self.market = Some(market.clone());
         Ok(market)
     }
@@ -944,7 +950,7 @@ impl SettingsView {
                 )
                 .child(
                     Label::new(
-                        "Each keeps its author and license; one without a license file is not installed.",
+                        "Each keeps its author and license; when agmen finds no license, it says so.",
                     )
                     .size(LabelSize::Small)
                     .color(Color::Placeholder)
