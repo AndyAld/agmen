@@ -489,3 +489,24 @@ fn needing_me_is_capped_oldest_out() {
     assert_eq!(state.needing_me().first(), Some(&kept));
     assert!(!state.clear(&oldest), "its owner-only mark went with it");
 }
+
+#[test]
+fn cap_keeps_my_agents_owner_alerts() {
+    let me = andy();
+    let mut state = AlertState::default();
+    let budget = alert(ALERT_1, "andyfx10", "andy/fx1", "agent", &urgent("owner"));
+    state.on_message(&budget, &me);
+    for i in 0..MAX_NEEDING_ME {
+        let id = format!("01JE{i:022}");
+        let theirs = mentioning(
+            alert(&id, "seana100", "sean/a1", "agent", &urgent("anyone")),
+            &me.id,
+        );
+        state.on_message(&theirs, &me);
+    }
+    assert_eq!(state.badge(), MAX_NEEDING_ME);
+    let mine: MessageId = ALERT_1.parse().unwrap();
+    let oldest_theirs: MessageId = format!("01JE{:022}", 0).parse().unwrap();
+    assert!(state.needing_me().contains(&mine));
+    assert!(!state.needing_me().contains(&oldest_theirs));
+}

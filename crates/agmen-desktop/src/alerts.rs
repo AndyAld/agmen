@@ -24,8 +24,10 @@ use crate::backend::Snapshot;
 /// arriving after this many newer alerts is treated as new.
 pub(crate) const MAX_REMEMBERED_ALERTS: usize = 1024;
 
-/// At most this many alerts need me at once; past it the oldest drops off
-/// the badge, so a flood of urgent alerts cannot grow the state forever.
+/// At most this many alerts need me at once; past it the oldest one that is
+/// not an owner alert from my own agent drops off the badge (the oldest of
+/// all when every one is), so a flood of urgent alerts cannot grow the state
+/// forever.
 pub(crate) const MAX_NEEDING_ME: usize = 256;
 
 /// The person running this app.
@@ -181,8 +183,15 @@ impl AlertState {
             return AlertEffect::None;
         }
         if self.needing_me.len() >= MAX_NEEDING_ME {
-            let oldest = self.needing_me.remove(0);
-            self.only_me.remove(&oldest);
+            // Others' alerts go first, so a flood from many senders cannot
+            // push out an owner alert from my own agent.
+            let at = self
+                .needing_me
+                .iter()
+                .position(|id| !self.only_me.contains(id))
+                .unwrap_or(0);
+            let evicted = self.needing_me.remove(at);
+            self.only_me.remove(&evicted);
         }
         self.needing_me.push(id.clone());
         if ClearedBy::of(needs, env, me) == ClearedBy::OnlyMe {
