@@ -248,6 +248,7 @@ pub(crate) fn resolve_paths(config: &Path, extensions: &Path, system: SystemMode
             &zed.as_ref()
                 .map(|z| z.overrides_for(&name))
                 .unwrap_or_default(),
+            &mut warnings,
         ) {
             Ok(theme) => (theme, wanted),
             Err(err) => {

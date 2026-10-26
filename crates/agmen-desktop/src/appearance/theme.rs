@@ -205,7 +205,7 @@ pub(crate) fn load_theme(
     extensions_dir: &Path,
     name: &str,
 ) -> Result<Theme, AppearanceError> {
-    load_theme_with(zed_dir, extensions_dir, name, &Map::new())
+    load_theme_with(zed_dir, extensions_dir, name, &Map::new(), &mut Vec::new())
 }
 
 /// Loads the theme named `name`, as `load_theme` does, with Zed's `theme_overrides` merged over the theme's own
@@ -219,9 +219,12 @@ pub(crate) fn load_theme_with(
     extensions_dir: &Path,
     name: &str,
     overrides: &Map<String, Value>,
+    warnings: &mut Vec<String>,
 ) -> Result<Theme, AppearanceError> {
     if name == super::marked::MARKED_THEME {
-        return Ok(super::marked::with_wallpaper());
+        let marked = super::marked::with_wallpaper(warnings);
+        // Overrides apply to the built-in theme too (review C125).
+        return Ok(Theme::from_style(overrides, marked));
     }
     let (files, mut unreadable) = theme_files(zed_dir, extensions_dir);
     for path in files {
@@ -235,7 +238,7 @@ pub(crate) fn load_theme_with(
         };
         if let Some(theme) = family.themes.into_iter().find(|t| t.name == name) {
             let mut style = theme.style;
-            style.extend(overrides.clone());
+            merge_style(&mut style, overrides);
             return Ok(Theme::from_style(&style, gruvbox_material_dark_hard()));
         }
     }
@@ -305,5 +308,50 @@ pub(crate) fn window_background(theme: &Theme) -> gpui::WindowBackgroundAppearan
         gpui::WindowBackgroundAppearance::Blurred
     } else {
         gpui::WindowBackgroundAppearance::Opaque
+    }
+}
+
+/// Merges `overrides` into a theme `style` the way Zed's `modify_theme`
+/// does: `syntax` per highlight name (and per field within one), `players`
+/// per index (and per field within one), every other key replaced.
+pub(crate) fn merge_style(style: &mut Map<String, Value>, overrides: &Map<String, Value>) {
+    fn merge_fields(into: &mut Value, from: &Value) {
+        match (into.as_object_mut(), from.as_object()) {
+            (Some(into), Some(from)) => {
+                for (k, v) in from {
+                    into.insert(k.clone(), v.clone());
+                }
+            }
+            _ => *into = from.clone(),
+        }
+    }
+    for (key, value) in overrides {
+        match (key.as_str(), style.get_mut(key)) {
+            ("syntax", Some(Value::Object(names))) => {
+                if let Some(over) = value.as_object() {
+                    for (name, entry) in over {
+                        match names.get_mut(name) {
+                            Some(existing) => merge_fields(existing, entry),
+                            None => {
+                                names.insert(name.clone(), entry.clone());
+                            }
+                        }
+                    }
+                }
+            }
+            ("players", Some(Value::Array(players))) => {
+                if let Some(over) = value.as_array() {
+                    for (i, player) in over.iter().enumerate() {
+                        match players.get_mut(i) {
+                            Some(existing) => merge_fields(existing, player),
+                            None => players.push(player.clone()),
+                        }
+                    }
+                }
+            }
+            _ => {
+                style.insert(key.clone(), value.clone());
+            }
+        }
     }
 }

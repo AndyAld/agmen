@@ -403,7 +403,8 @@ struct LayoutKey {
     text: String,
     empty: bool,
     width: Option<Pixels>,
-    pub(super) font: Font,
+    font: Font,
+    /// The color drawn: the text's, or the placeholder's while empty.
     color: Hsla,
     font_size: Pixels,
     line_height: Pixels,
@@ -435,6 +436,12 @@ impl Shaping {
 }
 
 impl TextInput {
+    /// The fonts of the cached layouts, for tests.
+    #[cfg(test)]
+    pub(super) fn cached_fonts(&self) -> impl Iterator<Item = &Font> {
+        self.cache.iter().map(|key| &key.font)
+    }
+
     /// The layout for `width` (`None` for one line), shaped only when the
     /// text, width, font or composition changed since the last call.
     fn layout_for(
@@ -446,13 +453,18 @@ impl TextInput {
     ) -> Option<Rc<TextLayout>> {
         let (font_size, line_height) = (shaping.font_size, shaping.line_height);
         let empty = self.buffer.text().is_empty();
+        let drawn = if empty {
+            cx.global::<Appearance>().theme.text_placeholder
+        } else {
+            shaping.color
+        };
         let marked = self.buffer.marked();
         if let Some(key) = self.cache.iter().find(|key| {
             key.text == self.buffer.text()
                 && key.empty == empty
                 && key.width == width
                 && key.font == shaping.font
-                && key.color == shaping.color
+                && key.color == drawn
                 && key.font_size == font_size
                 && key.line_height == line_height
                 && key.marked == marked
@@ -481,7 +493,7 @@ impl TextInput {
             empty,
             width,
             font: shaping.font.clone(),
-            color: shaping.color,
+            color: drawn,
             font_size,
             line_height,
             marked,

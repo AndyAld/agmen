@@ -25,11 +25,13 @@ fi
 screens=("$@")
 if [[ $1 == all ]]; then
 	# The app's own list, so this script never drifts from Screen::ALL.
-	# bash 3.2 (macOS) has no mapfile.
+	# Read the list first, so a failing binary stops the script (set -e)
+	# instead of yielding no screens; bash 3.2 (macOS) has no mapfile.
+	list="$("$app" --list-screens)"
 	screens=()
 	while IFS= read -r name; do
 		screens+=("$name")
-	done < <("$app" --list-screens)
+	done <<<"$list"
 fi
 mkdir -p "$out"
 work="$(mktemp -d)"

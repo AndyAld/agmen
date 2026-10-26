@@ -245,9 +245,25 @@ fn layout_uses_the_inherited_font(cx: &mut TestAppContext) {
     input.update_in(cx, |input, window, cx| input.set_text("abc", window, cx));
     cx.run_until_parked();
     input.read_with(cx, |input, _| {
-        assert!(!input.cache.is_empty());
-        for key in &input.cache {
-            assert_eq!(key.font.family.as_ref(), ".ZedMono", "every cached layout");
+        assert!(input.cached_fonts().next().is_some());
+        for font in input.cached_fonts() {
+            assert_eq!(font.family.as_ref(), ".ZedMono", "every cached layout");
         }
     });
+}
+
+#[gpui::test]
+fn a_new_placeholder_color_reshapes(cx: &mut TestAppContext) {
+    // Review C116: the empty input draws the placeholder color.
+    let (input, cx) = setup_with(cx, |i| i.multiline(6).placeholder("Ask"));
+    cx.run_until_parked();
+    let before = input.read_with(cx, |input, _| input.shapes);
+    cx.update(|_, cx| {
+        let mut appearance = cx.global::<Appearance>().clone();
+        appearance.theme.text_placeholder = gpui::red();
+        cx.set_global(appearance);
+    });
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    input.read_with(cx, |input, _| assert!(input.shapes > before));
 }
