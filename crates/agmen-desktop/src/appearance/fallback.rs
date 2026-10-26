@@ -51,7 +51,7 @@ pub(crate) fn gruvbox_material_dark_hard() -> Theme {
             .into_iter()
             .map(hex)
             .collect(),
-        element: hex(surf),
+        element: hex(bg),
         selection: rgba(0x72b9_a930).into(),
         accents: [accent, mag, err, org, grn, warn, ok]
             .into_iter()

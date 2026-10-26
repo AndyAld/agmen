@@ -3,17 +3,12 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, FontWeight, InteractiveElement as _, IntoElement, MouseButton, ParentElement as _,
-    RenderOnce, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
-    WindowControlArea, div,
+    RenderOnce, SharedString, Styled as _, Window, WindowControlArea, div,
 };
 
-use super::components::{Avatar, Chip, Color, Label};
+use super::components::{Avatar, Chip, Color, IconButton, IconButtonStyle, IconSize, Label};
 use super::format::listener_label;
-use super::tokens::{
-    BORDER_WIDTH, ICON_SM, SPACE_10, SPACE_12, TITLE_BAR_HEIGHT, TRAFFIC_LIGHTS_INSET,
-    WINDOW_BUTTON_WIDTH, WINDOWS_CLOSE_HOVER,
-};
-use crate::appearance::Appearance;
+use super::tokens::{BORDER_WIDTH, SPACE_10, SPACE_12, TITLE_BAR_HEIGHT, TRAFFIC_LIGHTS_INSET};
 use crate::backend::Snapshot;
 use crate::icons::UiIcon;
 
@@ -132,7 +127,7 @@ impl RenderOnce for TitleBar {
             )
             .when(controls, |bar| {
                 bar.child(div().w(SPACE_12))
-                    .child(window_controls(platform, window, cx))
+                    .child(window_controls(platform, window))
             })
     }
 }
@@ -149,8 +144,7 @@ type WindowButton = (
 
 /// Minimize, maximize (or restore) and close, at the bar's right edge, as
 /// Zed draws them, with Lucide glyphs in place of Segoe's.
-fn window_controls(platform: PlatformStyle, window: &Window, cx: &App) -> impl IntoElement {
-    let theme = &cx.global::<Appearance>().theme;
+fn window_controls(platform: PlatformStyle, window: &Window) -> impl IntoElement {
     // What Linux's compositor supports; Windows always shows all three, as
     // Zed does.
     let supported = window.window_controls();
@@ -180,33 +174,27 @@ fn window_controls(platform: PlatformStyle, window: &Window, cx: &App) -> impl I
             },
         ),
     ];
-    let (hover, icon) = (theme.element_hover, theme.text);
-    let close_hover = gpui::Hsla::from(WINDOWS_CLOSE_HOVER);
     div()
         .h_full()
         .flex()
         .children(buttons.into_iter().filter(|(.., shown, _)| *shown).map(
             move |(name, glyph, area, _, act)| {
-                let close = area == WindowControlArea::Close;
-                let selector = format!("window-control:{name}");
-                div()
-                    .id(name)
-                    .debug_selector(|| selector)
-                    .w(WINDOW_BUTTON_WIDTH)
-                    .h_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .occlude()
-                    // Keep the bar from starting a window move under the button.
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .hover(move |style| style.bg(if close { close_hover } else { hover }))
-                    .child(glyph.render(icon, ICON_SM))
-                    // Windows acts on the hit test; Linux needs the click.
-                    .when(!linux, |button| button.window_control_area(area))
-                    .when(linux, |button| {
-                        button.on_click(move |_, window, _| act(window))
-                    })
+                let style = if area == WindowControlArea::Close {
+                    IconButtonStyle::CaptionClose
+                } else {
+                    IconButtonStyle::Caption
+                };
+                let button =
+                    IconButton::new(SharedString::from(format!("window-control:{name}")), glyph)
+                        .style(style)
+                        .color(Color::Default)
+                        .size(IconSize::Small);
+                // Windows acts on the hit test; Linux needs the click.
+                if linux {
+                    button.on_click(move |_, window, _| act(window))
+                } else {
+                    button.window_control_area(area)
+                }
             },
         ))
 }

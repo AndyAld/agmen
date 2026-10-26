@@ -34,15 +34,25 @@ impl Render for Harness {
     }
 }
 
+/// Draws `make()` in a test window, so a test can read the bounds of the
+/// selectors inside it with `debug_bounds`.
+pub(crate) fn draw(
+    cx: &mut TestAppContext,
+    make: impl Fn() -> AnyElement + 'static,
+) -> &mut VisualTestContext {
+    init(cx);
+    let (_, cx) = cx.add_window_view(|_, _| Harness(Box::new(make)));
+    redraw(cx);
+    cx
+}
+
 /// Renders `make()` in a test window and returns its laid out size.
 pub(crate) fn rendered_size(
     cx: &mut TestAppContext,
     make: impl Fn() -> AnyElement + 'static,
 ) -> Size<Pixels> {
-    init(cx);
-    let (_, cx) = cx.add_window_view(|_, _| Harness(Box::new(make)));
-    redraw(cx);
-    cx.debug_bounds("smoke")
+    draw(cx, make)
+        .debug_bounds("smoke")
         .map(|bounds| bounds.size)
         .unwrap_or_default()
 }

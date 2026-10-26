@@ -55,11 +55,7 @@ impl RenderOnce for ListenerPanel {
             .recent
             .into_iter()
             .fold(KvSection::new("Recent"), |section, action| {
-                // Work the listener started reads bright; its answers read dim.
-                let color = match action.kind {
-                    RecentKind::Delegated | RecentKind::Waiting => Color::Default,
-                    RecentKind::Answered => Color::Placeholder,
-                };
+                let color = recent_color(action.kind);
                 section.row(KvRow::new(action.time, action.text).color(color))
             });
         div()
@@ -84,12 +80,34 @@ impl RenderOnce for ListenerPanel {
     }
 }
 
+/// A Recent row's text color (console.py 1504 to 1511).
+#[must_use]
+const fn recent_color(kind: RecentKind) -> Color {
+    // Work the listener started reads bright; its answers read dim. A
+    // settings change reads as a warning while it waits, then as an accent.
+    match kind {
+        RecentKind::Delegated => Color::Default,
+        RecentKind::Answered => Color::Placeholder,
+        RecentKind::Waiting => Color::Warning,
+        RecentKind::Applied => Color::Accent,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::backend::chat_snapshot;
     use crate::ui::test_support::rendered_size;
     use gpui::{TestAppContext, px};
+
+    #[test]
+    fn recent_rows_take_their_kind_color() {
+        // V73 and V65: console.py 1504 to 1511 (WARN, ACCENT, TEXT, FAINT).
+        assert_eq!(recent_color(RecentKind::Waiting), Color::Warning);
+        assert_eq!(recent_color(RecentKind::Applied), Color::Accent);
+        assert_eq!(recent_color(RecentKind::Delegated), Color::Default);
+        assert_eq!(recent_color(RecentKind::Answered), Color::Placeholder);
+    }
 
     #[gpui::test]
     fn listener_panel_renders(cx: &mut TestAppContext) {

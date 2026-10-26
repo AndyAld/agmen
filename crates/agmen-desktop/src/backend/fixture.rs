@@ -118,14 +118,21 @@ impl FixtureBackend {
                 if let Some(m) = s.messages.get(card_ix) {
                     s.changes.insert(m.client.id.clone(), settings_card(state));
                 }
-                s.listener.recent.insert(
-                    0,
+                // console.py 1504 to 1508: the row follows the card's state.
+                let row = if state == ChangeState::Applied {
+                    recent(
+                        "15:50",
+                        "changed andy/fx1 lanes and budget (Undo)",
+                        RecentKind::Applied,
+                    )
+                } else {
                     recent(
                         "15:50",
                         "waiting for Apply: andy/fx1 lanes and budget",
                         RecentKind::Waiting,
-                    ),
-                );
+                    )
+                };
+                s.listener.recent.insert(0, row);
                 s
             }
             Screen::Ask | Screen::ModelPicker => {

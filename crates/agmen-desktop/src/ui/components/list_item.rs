@@ -143,10 +143,13 @@ impl RenderOnce for ListItem {
             })
             .when_some(self.leading, |this, leading| {
                 this.child(
+                    // A minimum, not a fixed width: status glyphs line up in it
+                    // (V62), while a 12 px chevron or a file icon keeps its
+                    // own width instead of overflowing into the name (V74).
                     div()
                         .flex()
                         .flex_none()
-                        .w(LEADING_SLOT)
+                        .min_w(LEADING_SLOT)
                         .justify_center()
                         .debug_selector(|| leading_selector)
                         .child(leading),
@@ -162,7 +165,7 @@ impl RenderOnce for ListItem {
 mod tests {
     use super::*;
     use crate::ui::components::Label;
-    use crate::ui::test_support::rendered_size;
+    use crate::ui::test_support::{draw, rendered_size};
     use gpui::{TestAppContext, px};
 
     #[test]
@@ -187,6 +190,32 @@ mod tests {
                 .into_any_element()
         });
         assert_eq!(size.height, AGENT_ROW_HEIGHT);
+    }
+
+    #[gpui::test]
+    fn leading_slot_fits_wider_content(cx: &mut TestAppContext) {
+        // V74 and V83: a 12 px chevron or a 16 px file icon keeps its width,
+        // while a narrow glyph still gets the fixed slot (V62).
+        let cx = draw(cx, || {
+            div()
+                .w(px(300.))
+                .child(
+                    ListItem::new("wide", Indent::Group)
+                        .leading(div().w(px(16.)).h(px(12.)))
+                        .child(Label::new("andy")),
+                )
+                .child(
+                    ListItem::new("narrow", Indent::Depth(0))
+                        .leading(div().w(px(6.)).h(px(6.)))
+                        .child(Label::new("fx1")),
+                )
+                .into_any_element()
+        });
+        assert_eq!(cx.debug_bounds("wide:leading").unwrap().size.width, px(16.));
+        assert_eq!(
+            cx.debug_bounds("narrow:leading").unwrap().size.width,
+            LEADING_SLOT
+        );
     }
 
     #[gpui::test]

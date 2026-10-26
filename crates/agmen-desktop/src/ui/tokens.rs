@@ -42,13 +42,6 @@ pub(crate) const BREADCRUMB_HEIGHT: Pixels = px(32.);
 pub(crate) const TRAFFIC_LIGHTS_INSET: Pixels = px(96.);
 /// A Windows or Linux caption button's width, as Zed's.
 pub(crate) const WINDOW_BUTTON_WIDTH: Pixels = px(36.);
-/// The close button's hover fill, Windows' own red (#e81123), as Zed's.
-pub(crate) const WINDOWS_CLOSE_HOVER: gpui::Rgba = gpui::Rgba {
-    r: 232. / 255.,
-    g: 17. / 255.,
-    b: 32. / 255.,
-    a: 1.,
-};
 
 // Rows.
 pub(crate) const AGENT_ROW_HEIGHT: Pixels = px(26.);
@@ -135,7 +128,8 @@ pub(crate) const DOCK_BUTTON: gpui::Size<Pixels> = gpui::Size {
     width: px(17.),
     height: px(20.),
 };
-/// The leading slot of an Agents row: the status glyph's box (V62).
+/// The narrowest leading slot of a row: the status glyph's box (V62). Wider
+/// content, such as a chevron or a file icon, widens it.
 pub(crate) const LEADING_SLOT: Pixels = px(10.);
 pub(crate) const ICON_MD: Pixels = px(14.);
 /// A file or folder icon in the Project panel (console.py `ficon`).

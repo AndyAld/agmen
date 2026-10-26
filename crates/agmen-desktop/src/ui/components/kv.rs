@@ -1,8 +1,8 @@
 //! Label and value rows under an uppercase heading, as in the right dock.
 
 use gpui::{
-    App, FontWeight, IntoElement, ParentElement as _, RenderOnce, SharedString, Styled as _,
-    Window, div,
+    App, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce,
+    SharedString, Styled as _, Window, div,
 };
 
 use super::{Color, Label, LabelSize};
@@ -35,7 +35,29 @@ impl KvRow {
 
 impl RenderOnce for KvRow {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        let value = Label::new(self.value).color(self.color).wrap();
+        // GPUI's wrapper also breaks before '/', which splits a handle such
+        // as "andy/fx1" (V77). Each word is its own flex item, so lines
+        // break only at spaces; a word wider than the column still wraps.
+        let label = self.label.clone();
+        let words = self
+            .value
+            .split_inclusive(' ')
+            .enumerate()
+            .map(|(i, word)| {
+                let selector = format!("kv-word:{label}:{i}");
+                div().debug_selector(|| selector).max_w_full().child(
+                    Label::new(word.to_owned())
+                        .color(self.color.clone())
+                        .code()
+                        .wrap(),
+                )
+            });
+        let value = div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .flex_wrap()
+            .children(words.collect::<Vec<_>>());
         div()
             .w_full()
             .flex()
@@ -48,7 +70,7 @@ impl RenderOnce for KvRow {
                         .color(Color::Placeholder),
                 ),
             )
-            .child(value.code())
+            .child(value)
     }
 }
 
@@ -96,12 +118,44 @@ impl RenderOnce for KvSection {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::test_support::rendered_size;
+    use crate::ui::test_support::{draw, rendered_size};
+    use crate::ui::tokens::{RIGHT_DOCK_WIDTH, SPACE_14};
     use gpui::{TestAppContext, px};
 
     #[test]
     fn section_title_is_uppercase() {
         assert_eq!(KvSection::new("Runs").title.as_ref(), "RUNS");
+    }
+
+    #[gpui::test]
+    fn kv_values_wrap_between_words(cx: &mut TestAppContext) {
+        // V77: frame 6674 breaks "waiting for Apply: andy/fx1 lanes and
+        // budget" at a space, never inside the handle.
+        let cx = draw(cx, || {
+            div()
+                .w(RIGHT_DOCK_WIDTH - SPACE_14 * 2.)
+                .child(KvRow::new(
+                    "Recent",
+                    "waiting for Apply: andy/fx1 lanes and budget",
+                ))
+                .into_any_element()
+        });
+        let mut word = |i: usize| {
+            cx.debug_bounds(Box::leak(format!("kv-word:Recent:{i}").into_boxed_str()))
+                .unwrap_or_else(|| panic!("word {i} is not drawn on its own"))
+        };
+        let (first, handle, last) = (word(0), word(3), word(6));
+        assert_eq!(
+            handle.size.height, first.size.height,
+            "andy/fx1 stays on one line"
+        );
+        assert_eq!(handle.origin.x, first.origin.x, "andy/fx1 moves down whole");
+        let second = word(1);
+        // The code font is monospaced: "waiting " is 8 cells and "for " 4,
+        // so the space that separates them is drawn.
+        assert_eq!(first.size.width, second.size.width * 2.);
+        assert_eq!(second.origin.x, first.origin.x + first.size.width);
+        assert!(last.origin.y > first.origin.y, "the value still wraps");
     }
 
     #[gpui::test]

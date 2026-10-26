@@ -55,6 +55,16 @@ pub(crate) struct Theme {
 }
 
 impl Theme {
+    /// The Windows caption close button's hover fill, the same in every
+    /// theme: Zed's own red, #e81120 (platform_windows.rs in Zed's
+    /// platform_title_bar crate).
+    pub(crate) const WINDOWS_CLOSE_HOVER: Rgba = Rgba {
+        r: 232. / 255.,
+        g: 17. / 255.,
+        b: 32. / 255.,
+        a: 1.,
+    };
+
     /// A role's color, from the theme's player palette so it stays readable
     /// in light and dark themes. Unknown roles get the muted text color.
     pub(crate) fn role_color(&self, role: &str) -> Hsla {

@@ -119,6 +119,46 @@ fn gruvbox_hard_matches_mockup() {
 }
 
 #[test]
+fn fallback_matches_the_sample_themes_ui_keys() {
+    // V76: the fallback is Andy's theme, so each UI key the sample sets
+    // (taken from that theme) must resolve to the fallback's own value.
+    let t = load_theme(&zed_dir(), &ext_dir(), "Gruvbox Material Dark Hard").unwrap();
+    let f = gruvbox_material_dark_hard();
+    let pairs = [
+        ("background", t.background, f.background),
+        ("surface", t.surface, f.surface),
+        ("elevated_surface", t.elevated_surface, f.elevated_surface),
+        ("element", t.element, f.element),
+        ("element_selected", t.element_selected, f.element_selected),
+        ("element_hover", t.element_hover, f.element_hover),
+        ("border", t.border, f.border),
+        ("border_variant", t.border_variant, f.border_variant),
+        ("text", t.text, f.text),
+        ("text_muted", t.text_muted, f.text_muted),
+        ("text_placeholder", t.text_placeholder, f.text_placeholder),
+        ("text_accent", t.text_accent, f.text_accent),
+        ("icon_muted", t.icon_muted, f.icon_muted),
+        (
+            "editor_background",
+            t.editor_background,
+            f.editor_background,
+        ),
+        ("line_number", t.line_number, f.line_number),
+        ("error", t.error, f.error),
+        ("warning", t.warning, f.warning),
+        ("success", t.success, f.success),
+        ("info", t.info, f.info),
+        ("created", t.created, f.created),
+        ("modified", t.modified, f.modified),
+        ("deleted", t.deleted, f.deleted),
+        ("selection", t.selection, f.selection),
+    ];
+    for (key, theme, fallback) in pairs {
+        assert!(close(theme, fallback), "{key}: {theme:?} vs {fallback:?}");
+    }
+}
+
+#[test]
 fn partial_theme_fills_from_fallback() {
     let t = load_theme(&zed_dir(), &ext_dir(), "Partial Dark").unwrap();
     let fallback = gruvbox_material_dark_hard();

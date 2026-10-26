@@ -2,7 +2,7 @@ use super::*;
 use crate::backend::chat_snapshot;
 use crate::ui::test_support::{click, init, redraw};
 use crate::ui::tokens::{TREE_INDENT_BASE, TREE_INDENT_STEP};
-use gpui::TestAppContext;
+use gpui::{TestAppContext, px};
 
 #[gpui::test]
 fn agents_panel_groups_and_folds(cx: &mut TestAppContext) {
@@ -78,5 +78,22 @@ fn status_glyphs_sit_in_a_fixed_slot(cx: &mut TestAppContext) {
     ] {
         let lead = cx.debug_bounds(row).unwrap();
         assert_eq!(lead.size.width, crate::ui::tokens::LEADING_SLOT, "{row}");
+    }
+}
+
+#[gpui::test]
+fn person_chevrons_keep_their_width(cx: &mut TestAppContext) {
+    // V74: node 49 puts the 12 px chevron at x 10, so node 51's name starts
+    // at x 28 (10 + 12 + gap 6).
+    init(cx);
+    let (_, cx) = cx.add_window_view(|_, _| AgentsPanel::new(chat_snapshot().roster));
+    redraw(cx);
+    for person in ["person:andy", "person:sean", "person:adam"] {
+        let row = cx.debug_bounds(person).unwrap();
+        let lead = cx
+            .debug_bounds(Box::leak(format!("{person}:leading").into_boxed_str()))
+            .unwrap();
+        assert_eq!(lead.origin.x - row.origin.x, px(10.), "{person}");
+        assert_eq!(lead.size.width, crate::ui::tokens::ICON_SM, "{person}");
     }
 }

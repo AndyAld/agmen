@@ -269,6 +269,8 @@ pub(crate) enum RecentKind {
     Answered,
     /// A settings change waits for the person.
     Waiting,
+    /// It applied a settings change, which the person can undo.
+    Applied,
 }
 
 /// The right dock's Listener panel.
