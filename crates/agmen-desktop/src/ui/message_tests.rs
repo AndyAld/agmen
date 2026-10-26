@@ -120,6 +120,32 @@ fn reply_without_its_parent_is_a_plain_message() {
     assert_eq!(row_kind(&snapshot.messages[2], &c), RowKind::Mention);
 }
 
+// Shot diff (running, nodes 10739, 10776, 10806): a team agent's row shows
+// its plan role, as the roster would once it runs.
+#[test]
+fn team_agents_show_their_plan_role() {
+    let snapshot = snapshot_of(Screen::Running);
+    let messages = snapshot.messages.clone();
+    let c = context_of(snapshot);
+    let of = |handle: &str| {
+        let env = messages.iter().find(|m| m.from_handle == handle).unwrap();
+        let who = sender(env, &c);
+        (who.label, who.color)
+    };
+    assert_eq!(
+        of("andy/core"),
+        ("Engineer".into(), Color::Role("engineer".into()))
+    );
+    assert_eq!(
+        of("sean/sync"),
+        ("Engineer".into(), Color::Role("engineer".into()))
+    );
+    assert_eq!(
+        of("sean/tiles"),
+        ("Researcher".into(), Color::Role("researcher".into()))
+    );
+}
+
 #[test]
 fn senders_show_role_or_human() {
     let (messages, c) = chat();

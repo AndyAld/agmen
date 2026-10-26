@@ -142,7 +142,10 @@ impl FixtureBackend {
                 let running = screen == Screen::Running;
                 let mut s = with_messages("ridgeline", plan_messages(ready, running))?;
                 s.roster = plan_roster()?;
-                s.plan = Some(plan(ready, running)?);
+                let plan = plan(ready, running)?;
+                // Git on andy's machine knows the plan's files, not pr-3331's.
+                s.git.files = plan.specs.iter().map(|spec| spec.path.clone()).collect();
+                s.plan = Some(plan);
                 // Mockup fix 35: the status bar counts this project, not pr-3331.
                 s.status = StatusSummary {
                     online: if running { 11 } else { 4 },

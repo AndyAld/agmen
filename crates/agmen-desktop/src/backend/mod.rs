@@ -201,6 +201,9 @@ pub(crate) struct TeamRow {
     pub(crate) lane: String,
     pub(crate) owner: String,
     pub(crate) usd_per_day: u32,
+    /// The agent's identity, which the hub makes at kick-off; `None` while
+    /// the plan is a plan.
+    pub(crate) id: Option<IdentityId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

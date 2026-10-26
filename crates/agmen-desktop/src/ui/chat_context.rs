@@ -34,7 +34,8 @@ pub(crate) struct BodyText {
 pub(crate) struct ChatContext {
     snapshot: Rc<Snapshot>,
     known: Known,
-    /// Each roster agent's lowercase role, by handle.
+    /// Each roster agent's lowercase role, by handle, then each plan team
+    /// member's.
     roles: BTreeMap<String, String>,
     /// Handles of the agents this person's agmend runs.
     local: BTreeSet<String>,
@@ -71,6 +72,12 @@ impl ChatContext {
                     local.insert(agent.handle.clone());
                 }
             }
+        }
+        // A plan's team has its roles before its agents join the roster.
+        for row in snapshot.plan.iter().flat_map(|plan| &plan.team) {
+            roles
+                .entry(format!("{}/{}", row.owner, row.handle))
+                .or_insert_with(|| row.role.clone());
         }
         let ids = snapshot
             .messages
