@@ -295,7 +295,11 @@ impl MessageRow {
                     .tinted(Color::Accent)
                     .outline(Color::Accent)
                     .leading(Label::new(">_").code().color(Color::Accent))
-                    .trailing(Label::new("⌥O").size(LabelSize::Small).color(Color::Accent)),
+                    .trailing(
+                        Label::new(crate::keymap::open_in_terminal_hint())
+                            .size(LabelSize::Small)
+                            .color(Color::Accent),
+                    ),
             )
     }
 }

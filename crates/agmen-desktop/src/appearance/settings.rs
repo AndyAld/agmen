@@ -92,7 +92,7 @@ impl AgmenSettings {
     ///
     /// When the file exists but is too large, unreadable, or not valid.
     pub(crate) fn load(path: &Path) -> Result<Self, AppearanceError> {
-        let Some(mut table) = read_table(path)? else {
+        let Some(mut table) = read_settings_table(path)? else {
             return Ok(Self::default());
         };
         let Some(value) = table.remove(TABLE) else {
@@ -115,11 +115,7 @@ impl AgmenSettings {
     /// When the existing file cannot be parsed (it is left alone), or the
     /// folder or file cannot be written.
     pub(crate) fn save(&self, path: &Path) -> Result<(), AppearanceError> {
-        let io = |source| AppearanceError::Io {
-            path: path.to_owned(),
-            source,
-        };
-        let mut table = read_table(path)?.unwrap_or_default();
+        let mut table = read_settings_table(path)?.unwrap_or_default();
         let value = toml::Value::try_from(self).map_err(|err| AppearanceError::Serialize {
             path: path.to_owned(),
             message: err.to_string(),
@@ -151,21 +147,45 @@ impl AgmenSettings {
             merged.insert("fonts".to_owned(), toml::Value::Table(fonts));
         }
         table.insert(TABLE.to_owned(), toml::Value::Table(merged));
-        let text = toml::to_string_pretty(&table).map_err(|err| AppearanceError::Serialize {
-            path: path.to_owned(),
-            message: err.to_string(),
-        })?;
-        if let Some(dir) = path.parent() {
-            fs::create_dir_all(dir).map_err(io)?;
-        }
-        let tmp = path.with_extension("toml.tmp");
-        fs::write(&tmp, text).map_err(io)?;
-        fs::rename(&tmp, path).map_err(io)
+        write_settings_table(path, &table)
     }
 }
 
-/// The whole file as a table, `None` when it does not exist.
-fn read_table(path: &Path) -> Result<Option<toml::Table>, AppearanceError> {
+/// Writes `table` as the whole settings file at `path`, creating its
+/// folder, through a temporary file and a rename so a crash never leaves
+/// half a file.
+///
+/// # Errors
+///
+/// When the table cannot be written as TOML, or the folder or file cannot
+/// be written.
+pub(crate) fn write_settings_table(
+    path: &Path,
+    table: &toml::Table,
+) -> Result<(), AppearanceError> {
+    let io = |source| AppearanceError::Io {
+        path: path.to_owned(),
+        source,
+    };
+    let text = toml::to_string_pretty(table).map_err(|err| AppearanceError::Serialize {
+        path: path.to_owned(),
+        message: err.to_string(),
+    })?;
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).map_err(io)?;
+    }
+    let tmp = path.with_extension("toml.tmp");
+    fs::write(&tmp, text).map_err(io)?;
+    fs::rename(&tmp, path).map_err(io)
+}
+
+/// The whole settings file at `path` as a table, `None` when it does not
+/// exist.
+///
+/// # Errors
+///
+/// When the file is too large, unreadable, or not valid TOML.
+pub(crate) fn read_settings_table(path: &Path) -> Result<Option<toml::Table>, AppearanceError> {
     let io = |source| AppearanceError::Io {
         path: path.to_owned(),
         source,

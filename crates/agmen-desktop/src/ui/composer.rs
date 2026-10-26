@@ -268,6 +268,7 @@ impl Render for Composer {
                     .children(model)
                     .child(
                         div()
+                            .debug_selector(|| "composer:input".into())
                             .flex_1()
                             .min_w_0()
                             .flex()

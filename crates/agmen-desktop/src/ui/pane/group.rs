@@ -102,6 +102,11 @@ impl PaneGroup {
         Some((item, label))
     }
 
+    /// The center's chat (Task 18: the palette sends spawn requests in it).
+    pub(crate) fn chat(&self) -> Option<&Entity<ChatView>> {
+        self.chat.as_ref()
+    }
+
     /// The pane with a Chat tab, if one has it.
     fn chat_pane(&self, cx: &App) -> Option<usize> {
         self.members

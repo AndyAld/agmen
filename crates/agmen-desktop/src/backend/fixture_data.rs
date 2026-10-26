@@ -6,6 +6,7 @@
 //! (`^[A-Z]{1,4}-[0-9]{1,6}$`), so bodies keep the mockup's text and the
 //! structured `item` fields say `C-015`.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use agmen_proto::{GitSha, IdentityId, StampedEnvelope};
@@ -300,7 +301,7 @@ pub(super) struct Msg {
     pub(super) handle: &'static str,
     pub(super) verb: &'static str,
     pub(super) data: Value,
-    pub(super) body: &'static str,
+    pub(super) body: Cow<'static, str>,
     /// The index of the earlier message this one answers.
     pub(super) reply_to: Option<usize>,
     pub(super) to: Vec<&'static str>,
@@ -308,13 +309,18 @@ pub(super) struct Msg {
     pub(super) items: Vec<&'static str>,
 }
 
-fn msg(time: &'static str, handle: &'static str, verb: &'static str, body: &'static str) -> Msg {
+fn msg(
+    time: &'static str,
+    handle: &'static str,
+    verb: &'static str,
+    body: impl Into<Cow<'static, str>>,
+) -> Msg {
     Msg {
         time,
         handle,
         verb,
         data: json!({}),
-        body,
+        body: body.into(),
         reply_to: None,
         to: Vec::new(),
         mentioned: Vec::new(),
@@ -378,7 +384,7 @@ pub(super) fn stamp(
                 "reply_to": m.reply_to.map(|r| message_id(first_seq + r)),
                 "to": ids(&m.to),
                 "items": m.items,
-                "body": m.body,
+                "body": &*m.body,
                 "sent_at": utc(m.time),
                 "verb": m.verb,
                 "data": m.data,
@@ -388,7 +394,7 @@ pub(super) fn stamp(
                 "from_handle": m.handle,
                 "from_kind": kind(m.handle),
                 "mentioned": ids(&m.mentioned),
-                "refs": hub_refs(m.body),
+                "refs": hub_refs(&m.body),
                 "hub_at": utc(m.time),
             });
             serde_json::from_value(value)
@@ -437,6 +443,42 @@ pub(super) fn chat_messages() -> Vec<Msg> {
             .reply_to(6).mentions(&["andy/fx1"]),
         msg("15:45", "sean", "FYI", "@andy merging #10 after CI. Sorry about the markers.")
             .mentions(&["andy"]),
+    ]
+}
+
+// Task 18: the palette's spawn rows play the 15:31 DELEGATED exchange.
+/// andy asks the listener for a worker on `agent`, and the listener answers
+/// and delegates it to `worker` (such as `andy/fx2`), as at 15:31. The model
+/// is the agent's own default: the mockup draws only claude's.
+pub(super) fn spawn_exchange(agent: &str, worker: &str) -> Vec<Msg> {
+    vec![
+        msg(
+            "16:00",
+            "andy",
+            "FYI",
+            format!("Spawn a worker with {agent}"),
+        )
+        .to("andy/listen")
+        .mentions(&["andy/listen"]),
+        msg(
+            "16:00",
+            "andy/listen",
+            "ANSWER",
+            format!("Delegating to a {agent} worker."),
+        )
+        .reply_to(0)
+        .mentions(&["andy"]),
+        msg(
+            "16:00",
+            "andy/listen",
+            "DELEGATED",
+            format!("{worker} · Engineer · {agent} · default · $5.00"),
+        )
+        .data(
+            json!({"worker": id_text(worker), "agent": agent, "role": "engineer",
+                     "model": "default", "tier": "standard", "budget_usd": 5.0, "item": null}),
+        )
+        .reply_to(0),
     ]
 }
 

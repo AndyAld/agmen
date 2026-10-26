@@ -14,10 +14,9 @@ use gpui::{
     App, AvailableSpace, Bounds, ClipboardItem, ContentMask, Context, CursorStyle, Element,
     ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle,
     Focusable, Font, GlobalElementId, Hsla, InspectorElementId, InteractiveElement, IntoElement,
-    KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad,
-    ParentElement, Pixels, Point, Render, SharedString, Size, Style, Styled, TextAlign, TextRun,
-    UTF16Selection, UnderlineStyle, Window, WrappedLine, actions, div, fill, point, px, relative,
-    size,
+    LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, ParentElement,
+    Pixels, Point, Render, SharedString, Size, Style, Styled, TextAlign, TextRun, UTF16Selection,
+    UnderlineStyle, Window, WrappedLine, actions, div, fill, point, px, relative, size,
 };
 
 use super::text_edit::TextBuffer;
@@ -45,8 +44,6 @@ actions!(
     ]
 );
 
-const CONTEXT: &str = "TextInput";
-
 /// Shaped layouts kept per input; a frame uses at most two widths.
 const MAX_CACHED_LAYOUTS: usize = 3;
 
@@ -54,29 +51,11 @@ const MAX_CACHED_LAYOUTS: usize = 3;
 /// takes bodies of at most 32 KiB, so the cap leaves room for that.
 const MAX_TEXT_BYTES: usize = 64 * 1024;
 
-/// Binds the input's keys; call once at startup.
+/// Binds the input's keys, which `src/keymap.rs` lists; the app binds
+/// them with the rest through `keymap::bind_all`.
+#[cfg(test)]
 pub(crate) fn bind_keys(cx: &mut App) {
-    let ctx = Some(CONTEXT);
-    cx.bind_keys([
-        KeyBinding::new("backspace", Backspace, ctx),
-        KeyBinding::new("delete", Delete, ctx),
-        KeyBinding::new("left", Left, ctx),
-        KeyBinding::new("right", Right, ctx),
-        KeyBinding::new("up", Up, ctx),
-        KeyBinding::new("down", Down, ctx),
-        KeyBinding::new("shift-left", SelectLeft, ctx),
-        KeyBinding::new("shift-right", SelectRight, ctx),
-        KeyBinding::new("cmd-a", SelectAll, ctx),
-        KeyBinding::new("home", Home, ctx),
-        KeyBinding::new("cmd-left", Home, ctx),
-        KeyBinding::new("end", End, ctx),
-        KeyBinding::new("cmd-right", End, ctx),
-        KeyBinding::new("enter", Submit, ctx),
-        KeyBinding::new("shift-enter", Newline, ctx),
-        KeyBinding::new("cmd-v", Paste, ctx),
-        KeyBinding::new("cmd-x", Cut, ctx),
-        KeyBinding::new("cmd-c", Copy, ctx),
-    ]);
+    cx.bind_keys(crate::keymap::text_input_bindings());
 }
 
 /// What the input tells its owner.
@@ -733,7 +712,7 @@ impl Render for TextInput {
         div()
             .flex()
             .flex_1()
-            .key_context(CONTEXT)
+            .key_context(crate::keymap::TEXT_INPUT_CONTEXT)
             .track_focus(&self.focus_handle)
             .cursor(CursorStyle::IBeam)
             .on_action(

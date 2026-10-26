@@ -15,7 +15,9 @@ use serde::{Deserialize, Serialize};
 
 pub(crate) use catalog::{PickerEntry, ThemeEntry, ThemeOrigin, installed_themes, picker_entries};
 pub(crate) use fallback::BUILTIN_THEME;
-pub(crate) use settings::{AgmenSettings, Density, IconThemeChoice};
+pub(crate) use settings::{
+    AgmenSettings, Density, IconThemeChoice, read_settings_table, write_settings_table,
+};
 pub(crate) use theme::{Theme, ThemeDirs, window_background};
 pub(crate) use zed::{Mode, read_jsonc};
 

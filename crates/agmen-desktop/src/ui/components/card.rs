@@ -4,10 +4,14 @@
 use gpui::prelude::Refineable as _;
 use gpui::{
     AnyElement, App, IntoElement, ParentElement, RenderOnce, StyleRefinement, Styled, Window, div,
+    px,
 };
 
 use crate::appearance::Appearance;
-use crate::ui::tokens::{BORDER_WIDTH, RADIUS_LG, SPACE_6, SPACE_10, SPACE_12};
+use crate::ui::tokens::{
+    BORDER_WIDTH, RADIUS_LG, SHADOW_ALPHA, SHADOW_BLUR, SHADOW_OFFSET_Y, SPACE_6, SPACE_10,
+    SPACE_12, tint,
+};
 
 /// A column on the elevated surface with the theme's `border`, rounded, padded
 /// 10 by 12 with 6 between its children. Callers change the width, padding
@@ -33,6 +37,20 @@ impl Card {
             style: StyleRefinement::default(),
             children: Vec::new(),
         }
+    }
+}
+
+impl Card {
+    /// Lifts the card above the window with the mockup's drop shadow, as
+    /// the command palette (node 11473): black at [`SHADOW_ALPHA`], 10 px
+    /// down, blurred 30 px.
+    #[must_use]
+    pub(crate) fn elevated(mut self) -> Self {
+        self.style.box_shadow = Some(vec![
+            gpui::BoxShadow::new(px(0.), SHADOW_OFFSET_Y, tint(gpui::black(), SHADOW_ALPHA))
+                .blur_radius(SHADOW_BLUR),
+        ]);
+        self
     }
 }
 
@@ -94,5 +112,16 @@ mod tests {
                 .into_any_element()
         });
         assert_eq!(card, size(px(300.), px(26.)));
+    }
+
+    #[test]
+    fn elevated_card_casts_the_palette_shadow() {
+        let mut card = Card::new().elevated();
+        let shadows = card.style().box_shadow.clone().unwrap();
+        assert_eq!(shadows.len(), 1);
+        assert_eq!(shadows[0].offset.y, crate::ui::tokens::SHADOW_OFFSET_Y);
+        assert_eq!(shadows[0].blur_radius, crate::ui::tokens::SHADOW_BLUR);
+        assert!((shadows[0].color.a - 170. / 255.).abs() < 0.001);
+        assert!(Card::new().style().box_shadow.is_none());
     }
 }

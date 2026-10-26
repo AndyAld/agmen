@@ -42,6 +42,7 @@ pub(crate) struct ListItem {
     id: SharedString,
     indent: Indent,
     height: Pixels,
+    radius: Option<Pixels>,
     selected: bool,
     leading: Option<AnyElement>,
     children: Vec<AnyElement>,
@@ -67,6 +68,7 @@ impl ListItem {
             id: id.into(),
             indent,
             height: AGENT_ROW_HEIGHT,
+            radius: None,
             selected: false,
             leading: None,
             children: Vec::new(),
@@ -78,6 +80,13 @@ impl ListItem {
     #[must_use]
     pub(crate) const fn height(mut self, height: Pixels) -> Self {
         self.height = height;
+        self
+    }
+
+    /// Rounds the row's selected and hover fill, as a palette row.
+    #[must_use]
+    pub(crate) const fn radius(mut self, radius: Pixels) -> Self {
+        self.radius = Some(radius);
         self
     }
 
@@ -136,6 +145,7 @@ impl RenderOnce for ListItem {
             })
             .pl(self.indent.padding())
             .pr(SPACE_10)
+            .when_some(self.radius, |this, radius| this.rounded(radius))
             .when(self.selected, |this| this.bg(theme.element_selected))
             .hover(move |style| style.bg(hover))
             .when_some(self.on_click, |this, handler| {
@@ -227,5 +237,15 @@ mod tests {
                 .into_any_element()
         });
         assert_eq!(size.height, crate::ui::tokens::PROJECT_ROW_HEIGHT);
+    }
+
+    #[test]
+    fn list_item_takes_a_radius() {
+        let row = ListItem::new("row", Indent::Group);
+        assert_eq!(row.radius, None);
+        assert_eq!(
+            row.radius(crate::ui::tokens::RADIUS_MD).radius,
+            Some(crate::ui::tokens::RADIUS_MD)
+        );
     }
 }

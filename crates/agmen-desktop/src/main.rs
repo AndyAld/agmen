@@ -7,6 +7,8 @@ mod backend;
 mod icons;
 #[cfg(unix)]
 mod instance;
+// Task 18: every key binding and the palette's entries.
+mod keymap;
 mod local_time;
 mod notify;
 #[cfg_attr(
@@ -26,8 +28,8 @@ use std::rc::Rc;
 
 use anyhow::{Context as _, Result};
 use gpui::{
-    App, AppContext as _, Application, Bounds, Focusable as _, KeyBinding, TitlebarOptions,
-    WindowAppearance, WindowBounds, WindowOptions, point, px, size,
+    App, AppContext as _, Application, Bounds, Focusable as _, TitlebarOptions, WindowAppearance,
+    WindowBounds, WindowOptions, point, px, size,
 };
 
 use appearance::{Appearance, SystemMode};
@@ -306,8 +308,7 @@ fn open_dev_view(
 }
 
 fn open_main_window(launch: &Launch, cx: &mut App) -> Result<()> {
-    cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
-    ui::bind_workspace_keys(cx);
+    keymap::bind_all(cx);
     cx.on_action(|_: &Quit, cx| cx.quit());
     assets::load_fonts(cx).context("loading the bundled fonts")?;
     let mut appearance = load_appearance(cx.window_appearance());
@@ -326,7 +327,6 @@ fn open_main_window(launch: &Launch, cx: &mut App) -> Result<()> {
     if let Some(home) = std::env::home_dir() {
         cx.set_global(ui::SettingsSources::for_home(&home));
     }
-    ui::bind_keys(cx);
 
     let options = window_options(cx);
     let window = match launch {

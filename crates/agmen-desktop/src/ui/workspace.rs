@@ -5,7 +5,7 @@ use std::rc::Rc;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, Styled as _, Subscription, Window, actions, div,
+    ParentElement as _, Render, Styled as _, Subscription, Window, div,
 };
 
 use super::agents_panel::{AgentsPanel, AgentsPanelEvent};
@@ -29,8 +29,12 @@ mod screen_state;
 // agmen-c7 fix-hosting: the status bar's context text and Listener toggle.
 #[path = "workspace_status.rs"]
 mod status;
+// Task 18: the command palette.
+#[path = "workspace_palette.rs"]
+mod palette;
 
-actions!(workspace, [ToggleLeftDock, ToggleRightDock, Quit]);
+// Task 18: the actions moved to src/keymap.rs with their bindings.
+pub(crate) use crate::keymap::{Quit, ToggleLeftDock, ToggleRightDock};
 
 /// The window's root view.
 pub(crate) struct Workspace {
@@ -50,6 +54,8 @@ pub(crate) struct Workspace {
     /// The agent the right dock shows; `None` shows the Listener panel.
     selected_agent: Option<IdentityId>,
     left: LeftDockState,
+    /// Task 18: the command palette, while open.
+    palette: palette::PaletteState,
     _agents_events: Subscription,
 }
 
@@ -77,6 +83,7 @@ impl Workspace {
             agents_panel,
             selected_agent: None,
             left,
+            palette: palette::PaletteState::default(),
             _agents_events: agents_events,
         }
     }
@@ -177,6 +184,8 @@ impl Focusable for Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Task 18: the palette over everything.
+        let palette = self.palette_overlay(window, cx);
         // Fetch the OS file icons the last frame asked for, off the render path.
         cx.defer(FileIcons::fetch_wanted);
         let appearance = cx.global::<Appearance>();
@@ -237,9 +246,10 @@ impl Render for Workspace {
             );
         }
 
-        Self::dock_actions(div(), cx)
+        // Task 18: the palette's actions.
+        Self::palette_actions(Self::dock_actions(div(), cx), cx)
             .track_focus(&self.focus_handle)
-            .key_context("Workspace")
+            .key_context(crate::keymap::WORKSPACE_CONTEXT)
             .on_action(cx.listener(|this, _: &ToggleLeftDock, _, cx| {
                 this.toggle_dock(DockSide::Left, cx);
             }))
@@ -257,8 +267,10 @@ impl Render for Workspace {
             .child(
                 StatusBar::new(&self.snapshot, self.shows_listener_toggle(cx))
                     .panels(self.panel_buttons(cx))
-                    .when_some(self.status_context(cx), StatusBar::context),
+                    .when_some(self.status_context(cx), StatusBar::context)
+                    .palette_open(self.is_palette_open()),
             )
+            .children(palette)
     }
 }
 

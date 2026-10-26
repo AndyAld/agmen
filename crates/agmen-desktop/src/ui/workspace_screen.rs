@@ -73,6 +73,8 @@ pub(super) struct WorkspaceState {
     left: Option<LeftDock>,
     center: CenterTab,
     right: Option<RightDock>,
+    /// Task 18: the query the command palette opens on, when open.
+    palette: Option<&'static str>,
 }
 
 impl WorkspaceState {
@@ -87,10 +89,19 @@ impl WorkspaceState {
             | Screen::SettingsApplied => {
                 (LeftDock::Agents, CenterTab::Chat, Some(RightDock::Listener))
             }
-            // shortcut: the needs-you notification, the model picker and the
-            // palette are not built (Tasks 15 and 18); they draw over this.
-            Screen::NeedsYou | Screen::ModelPicker | Screen::Palette => {
+            // shortcut: the needs-you notification and the model picker are
+            // not built (Task 15); they draw over this.
+            Screen::NeedsYou | Screen::ModelPicker => {
                 (LeftDock::Agents, CenterTab::Chat, Some(RightDock::Listener))
+            }
+            // Task 18: the palette opens over the chat with "spawn" typed.
+            Screen::Palette => {
+                return Self {
+                    left: Some(LeftDock::Agents),
+                    center: CenterTab::Chat,
+                    right: Some(RightDock::Listener),
+                    palette: Some("spawn"),
+                };
             }
             // shortcut: take-over's terminal block, the switch menu and the
             // add-agent dialog are not built; the chat stands in.
@@ -115,6 +126,7 @@ impl WorkspaceState {
             left: Some(left),
             center,
             right,
+            palette: None,
         }
     }
 }
@@ -129,6 +141,9 @@ impl Workspace {
         if let Some(item) = self.center_item(state.center) {
             self.pane_group
                 .update(cx, |group, cx| group.open_last(item, cx));
+        }
+        if let Some(query) = state.palette {
+            self.open_palette_after_draw(query);
         }
         cx.notify();
     }

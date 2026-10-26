@@ -7,6 +7,9 @@
 
 mod fixture;
 mod fixture_data;
+// Task 18: installed agents, for the palette's spawn rows.
+mod installed;
+pub(crate) use installed::InstalledAgent;
 mod screen;
 mod worktree;
 
@@ -102,6 +105,8 @@ pub(crate) enum Action {
     ApproveSpec { path: String, sha: GitSha },
     ApproveShare,
     KickOff,
+    // Task 18: a worker on an installed agent, from the command palette.
+    SpawnWorker { agent: String },
 }
 
 /// What a subscriber hears.
@@ -368,6 +373,8 @@ pub(crate) struct Snapshot {
     pub(crate) roles: Vec<RoleFile>,
     /// The worktrees on this machine, the person's own first.
     pub(crate) worktrees: Vec<WorktreeInfo>,
+    /// Task 18: the terminal agents agmen knows, installed or not.
+    pub(crate) installed_agents: Vec<InstalledAgent>,
 }
 
 /// One row of an agent's session, as the agent view shows it.

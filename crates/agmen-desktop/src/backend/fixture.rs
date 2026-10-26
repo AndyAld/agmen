@@ -10,8 +10,8 @@ use serde_json::json;
 
 use super::fixture_data::{
     Msg, alert_answer, ask_messages, chat_messages, fx1, fx1_session, git_facts, id, listener,
-    plan, plan_messages, plan_roster, role_files, roster, settings_card, settings_messages, stamp,
-    urgent_alert, worktrees,
+    plan, plan_messages, plan_roster, role_files, roster, settings_card, settings_messages,
+    spawn_exchange, stamp, urgent_alert, worktrees,
 };
 use super::{
     Action, Backend, BackendError, ChangeState, Draft, RecentAction, RecentKind, Screen, Snapshot,
@@ -73,6 +73,8 @@ fn base(project: &str) -> Result<Snapshot, BackendError> {
         sessions: BTreeMap::from([(id("andy/fx1")?, fx1_session())]),
         roles,
         worktrees: worktrees()?,
+        // Task 18: console.py INSTALLED.
+        installed_agents: super::installed::fixture(),
     })
 }
 
@@ -222,6 +224,31 @@ impl FixtureBackend {
     }
 }
 
+impl FixtureBackend {
+    /// Task 18: plays the 15:31 DELEGATED exchange for a worker on `agent`,
+    /// numbering the worker after the ones already delegated.
+    // shortcut: the fixture stands in for agmend's Spawn; a later plan sends
+    // it to agmend, and the listener's answer comes from the hub.
+    fn spawn_worker(&self, agent: &str) -> Result<(), BackendError> {
+        let added = {
+            let mut snapshot = self.state.borrow_mut();
+            let delegated = snapshot
+                .messages
+                .iter()
+                .filter(|m| matches!(m.client.payload, agmen_proto::Payload::Delegated { .. }))
+                .count();
+            let worker = format!("andy/fx{}", delegated + 1);
+            let added = stamp(spawn_exchange(agent, &worker), snapshot.messages.len() + 1)?;
+            snapshot.messages.extend(added.iter().cloned());
+            added
+        };
+        for message in added {
+            self.publish(&Update::Message(Box::new(message)));
+        }
+        Ok(())
+    }
+}
+
 impl Backend for FixtureBackend {
     fn snapshot(&self) -> Snapshot {
         self.state.borrow().clone()
@@ -287,6 +314,8 @@ impl Backend for FixtureBackend {
             | Action::ApproveSpec { .. }
             | Action::ApproveShare
             | Action::KickOff => Ok(()),
+            // Task 18: the palette's spawn rows.
+            Action::SpawnWorker { agent } => self.spawn_worker(&agent),
         }
     }
 
