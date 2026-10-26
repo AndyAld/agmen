@@ -1,6 +1,6 @@
 //! The chat's composer (frame "Desktop · chat", node 374): the "to" chip,
 //! the model chip, the input and the ⏎ hint. An agent's view uses it for a
-//! DM, without the model chip.
+//! DM, with neither chip (frame "Desktop · agent", node 650).
 
 use std::rc::Rc;
 
@@ -25,9 +25,8 @@ use crate::backend::{BackendError, Draft, Snapshot};
 use crate::icons::UiIcon;
 use crate::keymap::Dismiss;
 
-/// The input's placeholder (node 384). The ⏎ hint after the input already
-/// says how to send, so the placeholder does not repeat it.
-const PLACEHOLDER: &str = "Ask or tell your listener · @ to mention someone else";
+/// The input's placeholder (node 384).
+const PLACEHOLDER: &str = "Ask or tell your listener · @ to mention someone else · ⏎ send";
 
 /// How many lines the input grows to before it scrolls.
 const MAX_INPUT_LINES: usize = 6;
@@ -37,6 +36,16 @@ const MAX_INPUT_LINES: usize = 6;
 pub(crate) enum ComposerEvent {
     /// The model chip opened the model picker.
     PickModel,
+}
+
+/// How the composer picks who a message goes to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Addressing {
+    /// The "to" chip names the target, which a leading `@mention` or a
+    /// reply changes (node 375).
+    Chip,
+    /// A DM: no chip, and every message goes to the recipient (node 650).
+    Fixed,
 }
 
 /// Who a message goes to.
@@ -70,6 +79,7 @@ pub(crate) struct Composer {
     recipient: Target,
     /// Every agent in the roster, which an `@mention` can address.
     agents: Vec<Target>,
+    addressing: Addressing,
     /// The model chip and its picker (Task 15); `None` draws no chip.
     models: Option<ModelMenu>,
     /// The message the next send replies to, and its sender (Task 13).
@@ -82,6 +92,7 @@ impl std::fmt::Debug for Composer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Composer")
             .field("recipient", &self.recipient)
+            .field("addressing", &self.addressing)
             .field("models", &self.models)
             .finish_non_exhaustive()
     }
@@ -131,9 +142,9 @@ impl Composer {
         )
     }
 
-    /// A DM composer for `agent`'s view (`desktop-agent.webp`): its "to"
-    /// chip names the agent and it draws no model chip, since the agent
-    /// runs its own model. An `@mention` still addresses another agent.
+    /// A DM composer for `agent`'s view (node 650): it draws no "to" chip
+    /// and every message goes to `agent`, so an `@mention` stays text in
+    /// the DM. It draws no model chip, since the agent runs its own model.
     pub(crate) fn direct(
         snapshot: &Snapshot,
         agent: Target,
@@ -145,15 +156,18 @@ impl Composer {
             "Message {} · sent as a DM, recorded by the hub",
             agent.handle
         );
-        Self::build(
-            roster_targets(snapshot),
-            agent,
-            placeholder.into(),
-            None,
-            Rc::new(on_send),
-            window,
-            cx,
-        )
+        Self {
+            addressing: Addressing::Fixed,
+            ..Self::build(
+                roster_targets(snapshot),
+                agent,
+                placeholder.into(),
+                None,
+                Rc::new(on_send),
+                window,
+                cx,
+            )
+        }
     }
 
     fn build(
@@ -180,6 +194,7 @@ impl Composer {
             input,
             recipient,
             agents,
+            addressing: Addressing::Chip,
             models,
             reply: None,
             on_send,
@@ -201,8 +216,12 @@ impl Composer {
             .unwrap_or(&self.recipient)
     }
 
-    /// The roster agent an `@mention` at the start of `text` names.
+    /// The roster agent an `@mention` at the start of `text` names; none
+    /// in a DM, which has one fixed recipient.
     fn mentioned(&self, text: &str) -> Option<&Target> {
+        if self.addressing == Addressing::Fixed {
+            return None;
+        }
         let handle = mention_handle(text)?;
         self.agents.iter().find(|agent| agent.handle == handle)
     }
@@ -417,32 +436,36 @@ impl Render for Composer {
         // Task 13: a pending reply says so and offers a way out. An
         // @mention of another agent drops it, and the chip says "to".
         let replying = self.reply_for(self.input.read(cx).text()).is_some();
-        let to = div()
-            .debug_selector(|| "composer:to".into())
-            .flex_none()
-            .child(
-                Chip::new(self.target(cx).handle.clone())
-                    .compact()
-                    .code()
-                    .color(Color::Accent)
-                    .leading(
-                        Label::new(if replying { "reply to" } else { "to" })
-                            .size(LabelSize::Small)
-                            .color(Color::Placeholder),
-                    )
-                    .map(|chip| {
-                        if replying {
-                            chip.trailing(
-                                IconButton::new("composer:cancel-reply", UiIcon::Close)
-                                    .size(IconSize::Small)
-                                    .color(Color::Placeholder)
-                                    .on_click(cx.listener(|this, _, _, cx| this.cancel_reply(cx))),
-                            )
-                        } else {
-                            chip.trailing(caret())
-                        }
-                    }),
-            );
+        let to = (self.addressing == Addressing::Chip).then(|| {
+            div()
+                .debug_selector(|| "composer:to".into())
+                .flex_none()
+                .child(
+                    Chip::new(self.target(cx).handle.clone())
+                        .compact()
+                        .code()
+                        .color(Color::Accent)
+                        .leading(
+                            Label::new(if replying { "reply to" } else { "to" })
+                                .size(LabelSize::Small)
+                                .color(Color::Placeholder),
+                        )
+                        .map(|chip| {
+                            if replying {
+                                chip.trailing(
+                                    IconButton::new("composer:cancel-reply", UiIcon::Close)
+                                        .size(IconSize::Small)
+                                        .color(Color::Placeholder)
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| this.cancel_reply(cx)),
+                                        ),
+                                )
+                            } else {
+                                chip.trailing(caret())
+                            }
+                        }),
+                )
+        });
         div()
             .w_full()
             .flex_none()
@@ -474,7 +497,7 @@ impl Render for Composer {
                     .border(BORDER_WIDTH)
                     .border_color(theme.border)
                     .bg(theme.elevated_surface)
-                    .child(to)
+                    .children(to)
                     .children(model)
                     .child(
                         div()

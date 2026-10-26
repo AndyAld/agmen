@@ -6,8 +6,7 @@ use gpui::{
     Styled as _, Window, div,
 };
 
-use super::components::{Breadcrumb, Button, ButtonStyle};
-use super::diff_view::DiffView;
+use super::diff_view::{DiffTab, DiffView};
 use super::git_panel::{GitPanel, GitPanelEvent, GitSection};
 use super::project_panel::{FileView, ProjectPanel, ProjectPanelEvent};
 use super::roles_panel::{RoleFileView, RolePanel, RolesPanel, RolesPanelEvent};
@@ -195,10 +194,10 @@ pub(crate) enum GitDevLayout {
 pub(crate) struct GitDev {
     worktrees: Vec<WorktreeInfo>,
     panel: Entity<GitPanel>,
-    /// The open diff's worktree handle and path.
     /// The worktree handle and path whose diff is open, if any.
     open: Option<(String, String)>,
-    diff: Entity<DiffView>,
+    /// The open change's diff tab, or an empty diff while none is open.
+    diff: AnyView,
 }
 
 impl GitDev {
@@ -221,16 +220,20 @@ impl GitDev {
             if let Some((_, path)) = &first {
                 panel.set_selected(path);
             }
-            if layout == GitDevLayout::ChangesFolded {
-                panel.toggle_section(GitSection::Changes, cx);
-            }
+            panel.set_folded(
+                GitSection::Changes,
+                layout == GitDevLayout::ChangesFolded,
+                cx,
+            );
         });
         cx.subscribe(&panel, |this, _, event: &GitPanelEvent, cx| {
             let GitPanelEvent::OpenDiff { worktree, path } = event;
             this.open(worktree, path, cx);
         })
         .detach();
-        let diff = cx.new(|_| DiffView::new(Vec::new(), Language::Plain));
+        let diff = cx
+            .new(|_| DiffView::new(Vec::new(), Language::Plain))
+            .into();
         let mut this = Self {
             worktrees,
             panel,
@@ -244,15 +247,12 @@ impl GitDev {
     }
 
     fn open(&mut self, worktree: &str, path: &str, cx: &mut Context<Self>) {
-        let hunks = self
-            .worktrees
-            .iter()
-            .find(|w| w.handle == worktree)
-            .and_then(|w| w.changes.iter().find(|c| c.path == path))
-            .map(|c| c.hunks.clone())
-            .unwrap_or_default();
-        let language = Language::for_path(std::path::Path::new(path));
-        self.diff = cx.new(|_| DiffView::new(hunks, language));
+        let Some(wt) = self.worktrees.iter().find(|w| w.handle == worktree) else {
+            return;
+        };
+        // shortcut: Open file does nothing here; the dev window hosts no
+        // file tabs. The workspace opens the file (tab_views.rs).
+        self.diff = cx.new(|cx| DiffTab::new(wt, path, cx)).into();
         self.open = Some((worktree.to_owned(), path.to_owned()));
         cx.notify();
     }
@@ -262,11 +262,6 @@ impl Render for GitDev {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = &cx.global::<Appearance>().theme;
         let rule = super::rule_color(cx);
-        let (worktree, path) = self.open.clone().unwrap_or_default();
-        // shortcut: Open file does nothing until the workspace hosts the
-        // Project panel's file tabs (Task 11 and agmen-c7's wiring).
-        let crumb = Breadcrumb::new([worktree.into(), "changes".into(), path.into()])
-            .end(Button::new("diff-open-file", "Open file").style(ButtonStyle::Filled));
         div()
             .size_full()
             .flex()
@@ -284,11 +279,8 @@ impl Render for GitDev {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .flex()
-                    .flex_col()
                     .bg(theme.editor_background)
-                    .child(crumb)
-                    .child(div().flex_1().min_h_0().child(self.diff.clone())),
+                    .child(self.diff.clone()),
             )
             .child(
                 div()
@@ -376,6 +368,9 @@ mod tests {
         });
         redraw(cx);
         assert!(cx.debug_bounds("diff-hunk:0").is_some());
+        // V95: the same diff tab as the workspace's, crumb and button.
+        assert!(cx.debug_bounds("diff-tab").is_some());
+        assert!(cx.debug_bounds("diff-open-file").is_some());
         view.read_with(cx, |v, _| {
             assert_eq!(v.open.as_ref().map(|o| o.1.as_str()), Some("src/main.rs"));
         });

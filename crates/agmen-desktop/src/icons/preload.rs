@@ -39,6 +39,9 @@ impl FileIcons {
             return;
         };
         let mut rendered = self.rendered.borrow_mut();
+        // The limit bounds this call's work, not the cache, so a later
+        // workspace still gets its icons.
+        let mut added = 0;
         for (name, is_dir) in entries {
             let svgs = if is_dir {
                 [theme.folder(name, false), theme.folder(name, true)]
@@ -46,7 +49,7 @@ impl FileIcons {
                 [theme.file(name), None]
             };
             for svg in svgs.into_iter().flatten() {
-                if rendered.len() >= limit {
+                if added >= limit {
                     return;
                 }
                 if rendered.contains_key(&svg) {
@@ -59,6 +62,7 @@ impl FileIcons {
                     .and_then(|bytes| renderer.render_single_frame(&bytes, 1.0).ok());
                 if let Some(image) = image {
                     rendered.insert(svg, image);
+                    added += 1;
                 }
             }
         }

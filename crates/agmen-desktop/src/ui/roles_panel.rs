@@ -15,7 +15,7 @@ use super::components::{
 };
 use super::dock::RightDockHeader;
 use super::syntax::Language;
-use super::tokens::{ICON_MD, SPACE_6, SPACE_14, SPACE_16};
+use super::tokens::{ICON_LG, SPACE_6, SPACE_14, SPACE_16};
 use crate::appearance::Appearance;
 use crate::backend::{RoleFile, RoleInfo, RoleLayer};
 use crate::icons::{FileIcons, UiIcon};
@@ -78,16 +78,13 @@ impl RolesPanel {
         let file = role_file_name(&role.name);
         let theme = &cx.global::<Appearance>().theme;
         let icon_color = theme.icon_muted;
+        // Node 11564: a 16 px icon, so the name starts at x 49 (C216).
         let icon = cx.try_global::<FileIcons>().map_or_else(
-            || {
-                Icon::new(UiIcon::File)
-                    .size(IconSize::Small)
-                    .into_any_element()
-            },
+            || UiIcon::File.render(icon_color, ICON_LG).into_any_element(),
             |icons| {
                 icons
                     .icon(Path::new(&file), false, false)
-                    .render(icon_color, ICON_MD)
+                    .render(icon_color, ICON_LG)
             },
         );
         let name = role.name.clone();

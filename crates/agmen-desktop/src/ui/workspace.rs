@@ -86,7 +86,7 @@ impl Workspace {
         let agents_events = cx.subscribe(&agents_panel, |this, _, event, cx| match event {
             AgentsPanelEvent::Selected(id) => this.select_agent(id, cx),
         });
-        let chat = cx.new(|cx| ChatView::new(Snapshot::clone(&snapshot), window, cx));
+        let chat = cx.new(|cx| ChatView::new(Rc::clone(&snapshot), window, cx));
         // Task 13: the status bar's counts and the toast redraw on any change;
         // Task 14: the roster and the Agent panel follow the chat's snapshot.
         let chat_changes = cx.observe(&chat, |this, _, cx| {

@@ -192,8 +192,16 @@ impl GitPanel {
 
     /// Folds or unfolds `section`.
     pub(crate) fn toggle_section(&mut self, section: GitSection, cx: &mut Context<Self>) {
-        if !self.folded.remove(&section) {
+        let folded = !self.folded.contains(&section);
+        self.set_folded(section, folded, cx);
+    }
+
+    /// Folds `section` when `folded`, else unfolds it.
+    pub(crate) fn set_folded(&mut self, section: GitSection, folded: bool, cx: &mut Context<Self>) {
+        if folded {
             self.folded.insert(section);
+        } else {
+            self.folded.remove(&section);
         }
         cx.notify();
     }

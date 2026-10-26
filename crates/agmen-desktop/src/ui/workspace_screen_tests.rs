@@ -350,3 +350,44 @@ fn a_plan_spec_click_opens_its_tab_and_escape_closes_the_dialog(cx: &mut TestApp
     });
     assert!(cx.debug_bounds(REVIEW).is_some());
 }
+
+// Review (screens minor 3): showing the collapsed git screen twice keeps
+// the Changes section folded, whatever state it starts in.
+#[gpui::test]
+fn the_collapsed_git_screen_folds_changes_each_time(cx: &mut TestAppContext) {
+    let (workspace, cx) = open(cx, Screen::GitCollapsed);
+    workspace.update(cx, |w, cx| w.show_screen(Screen::GitCollapsed, cx));
+    redraw(cx);
+    assert!(cx.debug_bounds("git-change:src/main.rs").is_none());
+    workspace.update(cx, |w, cx| w.show_screen(Screen::Git, cx));
+    redraw(cx);
+    assert!(cx.debug_bounds("git-change:src/main.rs").is_some());
+}
+
+// Review (screens minor 2): every screen that names the mockup's agent or
+// its worktree has it in its fixture, so the screen never falls back to
+// something else silently.
+#[test]
+fn screens_find_the_mockup_agent_and_worktree_in_their_fixture() {
+    let mut checked = 0;
+    for screen in Screen::ALL {
+        let state = WorkspaceState::for_screen(screen);
+        let snapshot = FixtureBackend::for_screen(screen).unwrap().snapshot();
+        if state.right == Some(RightDock::Agent) || state.center == CenterTab::Agent {
+            assert!(
+                super::super::mockup_agent(&snapshot).is_some(),
+                "{screen:?} lacks its agent"
+            );
+            checked += 1;
+        }
+        if matches!(state.center, CenterTab::File | CenterTab::Diff) {
+            let handle = super::super::mockup_handle(&snapshot);
+            assert!(
+                snapshot.worktrees.iter().any(|wt| wt.handle == handle),
+                "{screen:?} lacks {handle}"
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked >= 9, "checked {checked}");
+}

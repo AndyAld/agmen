@@ -26,6 +26,16 @@ pub(super) struct Line {
     highlights: Vec<(Range<usize>, &'static str)>,
 }
 
+impl Line {
+    /// `text` with no syntax colors.
+    pub(super) fn plain(text: &str) -> Self {
+        Self {
+            text: SharedString::from(text.to_owned()),
+            highlights: Vec::new(),
+        }
+    }
+}
+
 /// Splits `text` into lines and clips each highlight to the lines it covers.
 /// A final newline does not make an extra empty line, and a CRLF ending
 /// counts as one line break.

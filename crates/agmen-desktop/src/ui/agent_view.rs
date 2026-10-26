@@ -6,10 +6,11 @@ use agmen_proto::IdentityId;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
-    Render, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
+    Pixels, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
 };
 
 use super::chat::refusal;
+use super::code_view::cell_width;
 use super::components::{Breadcrumb, Button, ButtonStyle, Color, Label, LabelSize, ToolCard};
 use super::composer::{Composer, Target};
 use super::tokens::{SPACE_6, SPACE_8, SPACE_10, SPACE_14, SPACE_18};
@@ -113,18 +114,24 @@ const fn out_colors(tone: Tone) -> (Color, Color) {
     (tone_color(tone), tone_color(tone))
 }
 
-fn session_row(row: &SessionRow) -> gpui::AnyElement {
+/// Row `ix`; `cell` is the code font's cell, which output lines indent by.
+fn session_row(ix: usize, row: &SessionRow, cell: Pixels) -> gpui::AnyElement {
     match row {
         SessionRow::Tool { name, arg } => {
             ToolCard::new(name.clone(), arg.clone()).into_any_element()
         }
         SessionRow::Out { text, tone } => {
             let (glyph, text_color) = out_colors(*tone);
+            // console.py draws "   ⎿ text": three cells before the ⎿.
             div()
                 .flex()
                 .gap(SPACE_8)
-                .pl(SPACE_14)
-                .child(Label::new("⎿").code().color(glyph))
+                .pl(cell * 3.)
+                .child(
+                    div()
+                        .debug_selector(move || format!("session:{ix}:glyph"))
+                        .child(Label::new("⎿").code().color(glyph)),
+                )
                 .child(Label::new(text.clone()).code().color(text_color).wrap())
                 .into_any_element()
         }
@@ -142,11 +149,15 @@ fn session_row(row: &SessionRow) -> gpui::AnyElement {
 }
 
 impl Render for AgentView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = &cx.global::<Appearance>().theme;
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let appearance = cx.global::<Appearance>();
+        let theme = &appearance.theme;
+        let cell = cell_width(window, &appearance.fonts);
         let rows = self.session.rows.iter().enumerate().map(|(ix, row)| {
             let selector = format!("session:{ix}:{}", kind(row));
-            div().debug_selector(|| selector).child(session_row(row))
+            div()
+                .debug_selector(|| selector)
+                .child(session_row(ix, row, cell))
         });
         let buttons = div()
             .flex()

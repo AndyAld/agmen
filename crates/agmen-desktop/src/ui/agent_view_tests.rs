@@ -60,8 +60,8 @@ fn breadcrumb_splits_handle_item_and_branch_with_a_glyph(cx: &mut TestAppContext
 
 #[gpui::test]
 fn composer_is_the_chat_composer_addressed_to_the_agent(cx: &mut TestAppContext) {
-    // V78: Task 9's Composer, its "to" chip on the agent, not a box of its
-    // own.
+    // V78: Task 9's Composer addressed to the agent, not a box of its own.
+    // Node 650 holds only the placeholder and the ⏎ hint: no "to" chip.
     init(cx);
     let (view, cx) = open_fx1(cx);
     redraw(cx);
@@ -70,7 +70,8 @@ fn composer_is_the_chat_composer_addressed_to_the_agent(cx: &mut TestAppContext)
         assert_eq!(target.handle, "andy/fx1");
         assert_eq!(target.id, crate::backend::fixture_id("andy/fx1"));
     });
-    assert!(cx.debug_bounds("composer:to").is_some());
+    assert!(cx.debug_bounds("composer:to").is_none());
+    assert!(cx.debug_bounds("composer:input").is_some());
     // The agent runs its own model, so the listener's model chip is not
     // drawn (console.py `build_d_agent`).
     assert!(cx.debug_bounds("composer:model").is_none());
@@ -149,4 +150,22 @@ fn refused_dm_shows_why_until_the_next_send(cx: &mut TestAppContext) {
     view.read_with(cx, |view, cx| {
         assert_eq!(view.composer.read(cx).text(cx), "")
     });
+}
+
+#[gpui::test]
+fn output_rows_indent_three_code_cells(cx: &mut TestAppContext) {
+    // Nodes 627, 637 and 648 draw "   ⎿ text": three code cells, then ⎿.
+    init(cx);
+    let (_, cx) = open_fx1(cx);
+    redraw(cx);
+    let cell = cx.update(|window, cx| {
+        crate::ui::code_view::cell_width(window, &cx.global::<Appearance>().fonts)
+    });
+    let row = cx.debug_bounds("session:2:out").unwrap();
+    let glyph = cx.debug_bounds("session:2:glyph").unwrap();
+    let indent = glyph.origin.x - row.origin.x;
+    assert!(
+        (indent - cell * 3.).abs() < gpui::px(0.5),
+        "indent {indent:?}, cell {cell:?}"
+    );
 }

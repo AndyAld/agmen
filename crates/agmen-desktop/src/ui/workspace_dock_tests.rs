@@ -106,6 +106,23 @@ fn selecting_a_change_opens_its_diff_tab(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_diff_tab_names_its_changes_and_opens_its_file(cx: &mut TestAppContext) {
+    // V95, frame 5057 node 5206: andy/fx1 › changes › src/main.rs, then
+    // Open file, which opens the file's own tab.
+    let (workspace, cx) = open(cx);
+    click(cx, "tab-git");
+    click(cx, "git-change:src/main.rs");
+    redraw(cx);
+    crate::ui::test_support::assert_breadcrumb_glyphs(cx, 3);
+    click(cx, "diff-open-file");
+    assert!(matches!(
+        active_item(&workspace, cx),
+        Some(TabItem::File { worktree, path }) if worktree == "andy/fx1" && path == "src/main.rs"
+    ));
+    assert!(cx.debug_bounds("file-view").is_some());
+}
+
+#[gpui::test]
 fn files_and_git_buttons_open_and_toggle(cx: &mut TestAppContext) {
     let (workspace, cx) = open(cx);
     click(cx, "status-project");
@@ -208,6 +225,22 @@ fn cmd_w_closes_the_active_tab(cx: &mut TestAppContext) {
     assert_eq!(active_item(&workspace, cx), Some(TabItem::Chat));
 }
 
+// Review (wiredock minor 4): cmd-w on a split pane's last tab closes the
+// pane, through Pane::close and PaneEvent::Emptied.
+#[gpui::test]
+fn cmd_w_on_a_split_panes_last_tab_closes_the_pane(cx: &mut TestAppContext) {
+    let (workspace, cx) = open(cx);
+    click(cx, "status-search");
+    cx.simulate_keystrokes("cmd-\\");
+    assert_eq!(pane_count(&workspace, cx), 2);
+    let tabs = workspace.read_with(cx, |w, cx| {
+        w.pane_group.read(cx).panes()[1].read(cx).tabs().to_vec()
+    });
+    assert_eq!(tabs, [TabItem::Search], "the split pane's only tab");
+    cx.simulate_keystrokes("cmd-w");
+    assert_eq!(pane_count(&workspace, cx), 1);
+}
+
 #[gpui::test]
 fn cmd_backslash_splits_right(cx: &mut TestAppContext) {
     let (workspace, cx) = open(cx);
@@ -260,6 +293,17 @@ fn settings_button_opens_the_settings_tab(cx: &mut TestAppContext) {
     // Frame "Desktop · settings", node 8240.
     assert_eq!(status_context(&workspace, cx), Some("settings".into()));
     assert!(cx.debug_bounds("status-context").is_some());
+}
+
+// Review (wirec7 minor 2): with no SettingsSources global (no home
+// folder, main.rs), the Settings tab keeps the pane's placeholder.
+#[gpui::test]
+fn settings_without_sources_keep_the_placeholder(cx: &mut TestAppContext) {
+    let (workspace, cx) = open(cx);
+    click(cx, "status-settings");
+    assert_eq!(active_item(&workspace, cx), Some(SETTINGS));
+    assert!(cx.debug_bounds("settings-page:appearance").is_none());
+    assert!(cx.debug_bounds("breadcrumb").is_some(), "the pane's crumb");
 }
 
 #[gpui::test]

@@ -38,8 +38,9 @@ fn open(
     let handle: Rc<dyn Backend> = backend.clone();
     cx.update(|cx| cx.set_global(BackendHandle(handle)));
     let snapshot = backend.snapshot();
-    let (host, cx) =
-        cx.add_window_view(|window, cx| Host(cx.new(|cx| ChatView::new(snapshot, window, cx))));
+    let (host, cx) = cx.add_window_view(|window, cx| {
+        Host(cx.new(|cx| ChatView::new(std::rc::Rc::new(snapshot), window, cx)))
+    });
     let chat = host.read_with(cx, |host, _| host.0.clone());
     settle(cx);
     (chat, backend, cx)
@@ -263,8 +264,9 @@ fn the_menu_never_covers_the_chip_in_a_short_window(cx: &mut TestAppContext) {
     let handle: Rc<dyn Backend> = backend.clone();
     cx.update(|cx| cx.set_global(BackendHandle(handle)));
     let snapshot = backend.snapshot();
-    let (_host, cx) =
-        cx.add_window_view(|window, cx| FullHost(cx.new(|cx| ChatView::new(snapshot, window, cx))));
+    let (_host, cx) = cx.add_window_view(|window, cx| {
+        FullHost(cx.new(|cx| ChatView::new(std::rc::Rc::new(snapshot), window, cx)))
+    });
     let viewport = gpui::size(px(1000.), px(300.));
     cx.simulate_resize(viewport);
     settle(cx);

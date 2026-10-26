@@ -7,16 +7,17 @@ use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, Context, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
-    Render, SharedString, Styled as _, Window, div, uniform_list,
+    App, AppContext as _, Context, Entity, EventEmitter, FontWeight, InteractiveElement as _,
+    IntoElement, ParentElement as _, Pixels, Render, SharedString, Styled as _, Window, div,
+    uniform_list,
 };
 
 use super::code_view::{Line, cell_width, layout_lines, styled_line};
-use super::components::{Color, Label};
+use super::components::{Breadcrumb, Button, ButtonStyle, Color, Label};
 use super::syntax::Language;
 use super::tokens::{DIFF_TINT, MONO_CELL_HEIGHT, SPACE_8, SPACE_16};
 use crate::appearance::Appearance;
-use crate::backend::{DiffLineKind, Hunk};
+use crate::backend::{DiffLineKind, Hunk, WorktreeInfo};
 
 /// One row of the view.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,28 +30,53 @@ enum Row {
     },
 }
 
-/// Every hunk's header and lines, highlighted as `language`. Each hunk is
-/// highlighted as one text, so a construct that spans lines keeps its
-/// colors; the base and the worktree side are mixed, as a unified diff is.
+/// Whether `text` is a merge conflict marker line (`<<<<<<< HEAD`,
+/// `|||||||`, `=======`, `>>>>>>> 4d9fdc8`), which is not code.
+fn is_conflict_marker(text: &str) -> bool {
+    let Some((mark, rest)) = text.split_at_checked(7) else {
+        return false;
+    };
+    let labeled = rest.is_empty() || rest.starts_with(' ');
+    match mark {
+        "=======" => rest.is_empty(),
+        "<<<<<<<" | "|||||||" | ">>>>>>>" => labeled,
+        _ => false,
+    }
+}
+
+/// Every hunk's header and lines, highlighted as `language`. Each hunk's
+/// code is highlighted as one text, so a construct that spans lines keeps
+/// its colors; the base and the worktree side are mixed, as a unified diff
+/// is. Conflict markers are left out of that text and drawn plain, so the
+/// parser does not miscolor the code next to them (node 5215).
 fn layout_rows(hunks: &[Hunk], language: Language) -> Vec<Row> {
     let mut rows = Vec::new();
     for hunk in hunks {
         rows.push(Row::Header(hunk.header().into()));
+        let code = || {
+            hunk.lines
+                .iter()
+                .filter(|line| !is_conflict_marker(&line.text))
+        };
         // One newline after every line, so an empty last line keeps its row.
-        let text: String = hunk
-            .lines
-            .iter()
-            .flat_map(|line| [line.text.as_str(), "\n"])
-            .collect();
+        let text: String = code().flat_map(|line| [line.text.as_str(), "\n"]).collect();
         let laid = layout_lines(&text, language);
         debug_assert_eq!(
             laid.len(),
-            hunk.lines.len(),
-            "one laid out line per diff line"
+            code().count(),
+            "one laid out line per code line"
         );
-        rows.extend(hunk.lines.iter().zip(laid).map(|(diff, line)| Row::Line {
-            kind: diff.kind,
-            line,
+        let mut laid = laid.into_iter();
+        rows.extend(hunk.lines.iter().map(|diff| {
+            let line = if is_conflict_marker(&diff.text) {
+                None
+            } else {
+                laid.next()
+            };
+            Row::Line {
+                kind: diff.kind,
+                line: line.unwrap_or_else(|| Line::plain(&diff.text)),
+            }
         }));
     }
     rows
@@ -191,6 +217,70 @@ impl Render for DiffView {
             })
             .flex_1(),
         )
+    }
+}
+
+/// What a diff tab asks its host to do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DiffTabEvent {
+    /// Open file: open `path` in worktree `worktree` (a handle) in its own
+    /// tab.
+    OpenFile { worktree: String, path: String },
+}
+
+/// A change's diff as a center tab shows it (frame "Desktop · git", node
+/// 5206): the breadcrumb "worktree › changes › path" ending in Open file,
+/// over the diff. The workspace and the Git dev window both use it, as
+/// FileView is the file tab's. Tests find the button as `diff-open-file`.
+pub(crate) struct DiffTab {
+    worktree: SharedString,
+    path: SharedString,
+    diff: Entity<DiffView>,
+}
+
+impl EventEmitter<DiffTabEvent> for DiffTab {}
+
+impl DiffTab {
+    /// `path`'s diff in `worktree`; a path with no change shows the diff
+    /// view's empty state.
+    pub(crate) fn new(worktree: &WorktreeInfo, path: &str, cx: &mut Context<Self>) -> Self {
+        let hunks = worktree
+            .changes
+            .iter()
+            .find(|change| change.path == path)
+            .map(|change| change.hunks.clone())
+            .unwrap_or_default();
+        let language = Language::for_path(std::path::Path::new(path));
+        Self {
+            worktree: worktree.handle.clone().into(),
+            path: path.to_owned().into(),
+            diff: cx.new(|_| DiffView::new(hunks, language)),
+        }
+    }
+}
+
+impl Render for DiffTab {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = &cx.global::<Appearance>().theme;
+        // Node 5213 is a plain button (V92).
+        let open = Button::new("diff-open-file", "Open file")
+            .style(ButtonStyle::Plain)
+            .on_click(cx.listener(|this, _, _, cx| {
+                cx.emit(DiffTabEvent::OpenFile {
+                    worktree: this.worktree.to_string(),
+                    path: this.path.to_string(),
+                });
+            }));
+        let crumb =
+            Breadcrumb::new([self.worktree.clone(), "changes".into(), self.path.clone()]).end(open);
+        div()
+            .debug_selector(|| "diff-tab".into())
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(theme.editor_background)
+            .child(crumb)
+            .child(div().flex_1().min_h_0().child(self.diff.clone()))
     }
 }
 

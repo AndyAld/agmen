@@ -1,8 +1,8 @@
 //! The file icons a workspace's first frame draws, rendered ahead so the
 //! frame has them (`icons/preload.rs` says why).
 
-use std::collections::BTreeSet;
-use std::path::Path;
+use std::collections::HashSet;
+use std::path::{Component, Path};
 
 use gpui::App;
 
@@ -33,15 +33,17 @@ pub(super) fn preload_snapshot(snapshot: &Snapshot, cx: &App) {
 }
 
 /// Every file and folder name the snapshot's views ask icons for, each once:
-/// the worktrees' files and folders (the Project tree and the Git panel's
-/// changes), role files (the Roles tab and role file tabs), the settings
-/// file, Settings' icon preview, and the theme's default file and folder
-/// (an empty name), which unmapped names such as a tree's root fall to.
+/// the theme's default file and folder (an empty name), which unmapped
+/// names such as a tree's root fall to, the settings file, Settings' icon
+/// preview, role files (the Roles tab and role file tabs), then the
+/// worktrees' files and folders (the Project tree and the Git panel's
+/// changes), shallowest first, so a preload limit leaves out the deepest.
 fn snapshot_entries(snapshot: &Snapshot) -> Vec<(String, bool)> {
-    let mut names = BTreeSet::new();
+    let mut seen = HashSet::new();
+    let mut names = Vec::new();
     let mut add = |name: &str, is_dir: bool| {
-        if names.len() < MAX_ENTRIES {
-            names.insert((name.to_owned(), is_dir));
+        if names.len() < MAX_ENTRIES && seen.insert((name.to_owned(), is_dir)) {
+            names.push((name.to_owned(), is_dir));
         }
     };
     add("", true);
@@ -53,21 +55,33 @@ fn snapshot_entries(snapshot: &Snapshot) -> Vec<(String, bool)> {
     for role in &snapshot.roles {
         add(&role_file_name(&role.name), false);
     }
+    // Each path's parts with their depth; a part before the last is a
+    // folder.
+    let mut parts: Vec<(usize, &str, bool)> = Vec::new();
     for worktree in &snapshot.worktrees {
         let changed = worktree.changes.iter().map(|change| &change.path);
         for path in worktree.files.iter().chain(changed) {
-            let path = Path::new(path);
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                add(name, false);
-            }
-            for folder in path.ancestors().skip(1) {
-                if let Some(name) = folder.file_name().and_then(|n| n.to_str()) {
-                    add(name, true);
-                }
-            }
+            let normal: Vec<&str> = Path::new(path)
+                .components()
+                .filter_map(|part| match part {
+                    Component::Normal(name) => name.to_str(),
+                    _ => None,
+                })
+                .collect();
+            let last = normal.len().saturating_sub(1);
+            parts.extend(
+                normal
+                    .into_iter()
+                    .enumerate()
+                    .map(|(depth, name)| (depth, name, depth < last)),
+            );
         }
     }
-    names.into_iter().collect()
+    parts.sort_by_key(|(depth, _, _)| *depth);
+    for (_, name, is_dir) in parts {
+        add(name, is_dir);
+    }
+    names
 }
 
 #[cfg(test)]
