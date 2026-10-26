@@ -43,10 +43,13 @@ fn highlight_xml_tags() {
 fn highlight_toml_and_markdown() {
     let toml = names_of("[package]\nname = \"agmen\"\n", Language::Toml);
     assert!(has(&toml, "\"agmen\"", "string"), "{toml:?}");
-    let md = names_of("# Title\n\nSome text.\n", Language::Markdown);
-    // Review C157: the heading's text is a title and its marker punctuation.
-    assert!(has(&md, "Title", "text.title"), "{md:?}");
-    assert!(has(&md, "#", "punctuation"), "{md:?}");
+    let md = names_of("# Title\n\nSome text.\n- item\n", Language::Markdown);
+    // Review C157, then the spec shot diff: the heading, its marker
+    // included, is one accent run (agmen's query), and a list marker is
+    // warning colored.
+    assert!(has(&md, "# Title\n", "tag"), "{md:?}");
+    assert!(has(&md, "- ", "type"), "{md:?}");
+    assert!(!md.iter().any(|(t, _)| t.contains("Some text")), "{md:?}");
 }
 
 #[test]

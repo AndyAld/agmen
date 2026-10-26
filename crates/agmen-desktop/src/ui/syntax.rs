@@ -62,6 +62,10 @@ const NAMES: &[&str] = &[
 /// draw role files (see the file's header).
 const XML_HIGHLIGHTS: &str = include_str!("queries/xml.scm");
 
+/// agmen's Markdown highlights, which color headings, list markers and a
+/// spec's status line as the mockup draws a spec (see the file's header).
+const MARKDOWN_HIGHLIGHTS: &str = include_str!("queries/markdown.scm");
+
 /// A file type with a grammar, or none.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Language {
@@ -110,7 +114,7 @@ impl Language {
             Self::Markdown => (
                 tree_sitter_md::LANGUAGE.into(),
                 "markdown",
-                tree_sitter_md::HIGHLIGHT_QUERY_BLOCK,
+                MARKDOWN_HIGHLIGHTS,
             ),
             Self::Plain => return None,
         };
