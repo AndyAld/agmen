@@ -460,6 +460,11 @@ impl Render for Pane {
             )
             .when_some(active, |this, item| {
                 if let Some(view) = view {
+                    let this = if TabViews::draws_breadcrumb(&item) {
+                        this
+                    } else {
+                        this.child(self.render_breadcrumb(&item, cx))
+                    };
                     return this.child(div().flex_1().min_h_0().flex().child(view));
                 }
                 let content = match (&item, &self.chat) {

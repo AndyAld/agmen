@@ -1,15 +1,16 @@
 //! The views center tabs show for items whose view is built: a role's file
-//! (Task 10) and a worktree file (Task 11). Each view draws its own
-//! breadcrumb, so the pane draws none above it.
+//! (Task 10), a worktree file (Task 11) and a change's diff (Task 12).
 
 use std::collections::HashMap;
 use std::rc::Rc;
 
 use gpui::{AnyView, App, AppContext as _};
 
+use super::diff_view::DiffView;
 use super::pane::TabItem;
 use super::project_panel::FileView;
 use super::roles_panel::RoleFileView;
+use super::syntax::Language;
 use crate::backend::{RoleFile, Snapshot, WorktreeInfo};
 
 /// The data the views read, from the snapshot.
@@ -52,6 +53,12 @@ impl TabViews {
         }
     }
 
+    /// Whether `item`'s view draws its own breadcrumb, so the pane draws
+    /// none above it.
+    pub(crate) const fn draws_breadcrumb(item: &TabItem) -> bool {
+        matches!(item, TabItem::RoleFile(_) | TabItem::File { .. })
+    }
+
     /// The view for `item`, or `None` when it has no view yet and the pane
     /// shows its placeholder. Views of tabs no longer in `open` are
     /// dropped, so the cache holds at most one view per open tab.
@@ -77,6 +84,19 @@ impl TabViews {
                     .iter()
                     .find(|wt| wt.handle == *worktree)?;
                 cx.new(|cx| FileView::new(wt, path, cx)).into()
+            }
+            TabItem::Diff { worktree, path } => {
+                // A path with no change shows the diff view's empty state.
+                let hunks = self
+                    .sources
+                    .worktrees
+                    .iter()
+                    .find(|wt| wt.handle == *worktree)
+                    .and_then(|wt| wt.changes.iter().find(|c| c.path == *path))
+                    .map(|c| c.hunks.clone())
+                    .unwrap_or_default();
+                let language = Language::for_path(std::path::Path::new(path));
+                cx.new(|_| DiffView::new(hunks, language)).into()
             }
             _ => return None,
         };

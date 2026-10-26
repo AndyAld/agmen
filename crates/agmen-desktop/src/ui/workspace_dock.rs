@@ -4,13 +4,13 @@
 
 use gpui::{
     AnyElement, AppContext as _, Context, Div, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, Styled as _, Subscription, div,
+    Subscription,
 };
 
 use super::Workspace;
 use crate::backend::{RoleFile, Snapshot};
 use crate::ui::agent_panel::AgentPanel;
-use crate::ui::components::{Color, Label};
+use crate::ui::git_panel::{GitPanel, GitPanelEvent};
 use crate::ui::keys::{
     ActivatePane, CloseActiveTab, OpenSearch, ShowLeftDockTab, SplitRight, ToggleGitPanel,
     ToggleProjectPanel,
@@ -26,22 +26,33 @@ use crate::ui::scope_chip::ScopeOption;
 pub(crate) struct LeftDockState {
     pub(super) tab: LeftDockTab,
     project: Entity<ProjectPanel>,
+    git: Entity<GitPanel>,
     roles: Entity<RolesPanel>,
     /// The role whose panel the right dock shows, set by a Roles click and
     /// cleared when the selection changes.
     pub(super) shown_role: Option<RoleFile>,
-    _events: [Subscription; 2],
+    _events: [Subscription; 3],
 }
 
 impl LeftDockState {
     pub(crate) fn new(snapshot: &Snapshot, cx: &mut Context<Workspace>) -> Self {
         let options = ScopeOption::for_worktrees(&snapshot.worktrees, &snapshot.agents);
         let worktrees = snapshot.worktrees.clone();
-        let project = cx.new(|cx| ProjectPanel::new(worktrees, options, cx));
+        let project = cx.new(|cx| ProjectPanel::new(worktrees, options.clone(), cx));
+        let (worktrees, branches) = (snapshot.worktrees.clone(), snapshot.git.branches.clone());
+        let git = cx.new(|cx| GitPanel::new(worktrees, branches, options, cx));
         let roles = cx.new(|_| RolesPanel::new(snapshot.roles.clone()));
         let project_events = cx.subscribe(&project, |this, _, event, cx| {
             let ProjectPanelEvent::OpenFile { worktree, path } = event;
             this.open_file(worktree, path, cx);
+        });
+        let git_events = cx.subscribe(&git, |this, _, event, cx| {
+            let GitPanelEvent::OpenDiff { worktree, path } = event;
+            let item = TabItem::Diff {
+                worktree: worktree.clone(),
+                path: path.clone(),
+            };
+            this.pane_group.update(cx, |group, cx| group.open(item, cx));
         });
         let roles_events = cx.subscribe(&roles, |this, _, event, cx| {
             let RolesPanelEvent::Open(name) = event;
@@ -50,9 +61,10 @@ impl LeftDockState {
         Self {
             tab: LeftDockTab::Agents,
             project,
+            git,
             roles,
             shown_role: None,
-            _events: [project_events, roles_events],
+            _events: [project_events, git_events, roles_events],
         }
     }
 }
@@ -116,16 +128,7 @@ impl Workspace {
         match self.left.tab {
             LeftDockTab::Agents => self.agents_panel.clone().into_any_element(),
             LeftDockTab::Project => self.left.project.clone().into_any_element(),
-            // shortcut: a placeholder until Task 12's GitPanel replaces this
-            // arm.
-            LeftDockTab::Git => div()
-                .debug_selector(|| "git-placeholder".into())
-                .flex_1()
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(Label::new("Git").color(Color::Placeholder))
-                .into_any_element(),
+            LeftDockTab::Git => self.left.git.clone().into_any_element(),
             LeftDockTab::Roles => self.left.roles.clone().into_any_element(),
         }
     }

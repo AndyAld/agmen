@@ -39,7 +39,7 @@ fn clicking_each_tab_switches_content_and_selection(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("agent:andy/fx1").is_some());
     let cases = [
         ("tab-project", LeftDockTab::Project, "project-panel"),
-        ("tab-git", LeftDockTab::Git, "git-placeholder"),
+        ("tab-git", LeftDockTab::Git, "git-scope"),
         ("tab-roles", LeftDockTab::Roles, "role:engineer"),
         ("tab-agents", LeftDockTab::Agents, "agent:andy/fx1"),
     ];
@@ -91,6 +91,18 @@ fn opening_a_project_file_opens_its_tab(cx: &mut TestAppContext) {
         Some(TabItem::File { path, .. }) if path == "Cargo.toml"
     ));
     assert!(cx.debug_bounds("file-view").is_some());
+}
+
+#[gpui::test]
+fn selecting_a_change_opens_its_diff_tab(cx: &mut TestAppContext) {
+    let (workspace, cx) = open(cx);
+    click(cx, "tab-git");
+    click(cx, "git-change:src/main.rs");
+    assert!(matches!(
+        active_item(&workspace, cx),
+        Some(TabItem::Diff { path, .. }) if path == "src/main.rs"
+    ));
+    assert!(cx.debug_bounds("diff-hunk:0").is_some());
 }
 
 #[gpui::test]
