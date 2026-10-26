@@ -112,6 +112,12 @@ fn a_refusal_shows_only_where_it_happened(cx: &mut TestAppContext) {
     redraw(cx);
     assert_eq!(recording.acts.borrow().len(), 2);
     assert!(cx.debug_bounds("spec:error").is_none());
+    // Review minor 1: each refusal is kept for its own view; the later one
+    // does not replace the earlier.
+    model.read_with(cx, |model, _| {
+        assert!(model.error(&ErrorSource::Spec(DESIGN.into())).is_some());
+        assert!(model.error(&ErrorSource::KickOff).is_some());
+    });
 }
 
 #[gpui::test]
