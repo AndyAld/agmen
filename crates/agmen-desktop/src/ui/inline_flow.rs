@@ -97,13 +97,15 @@ impl LabelFont {
             .ceil();
         let overhead = natural.width - unwrapped;
         // A label that fails to shape counts as one row; its own layout in
-        // prepaint still wraps it.
+        // prepaint still wraps it. In a column narrower than the padding
+        // and glue the label still gets a positive width, so the estimate
+        // never depends on how a wrap at zero or less behaves.
         let rows: usize = text_system
             .shape_text(
                 label.clone(),
                 self.size,
                 &[self.run(label)],
-                Some(width - overhead),
+                Some((width - overhead).max(px(1.))),
                 None,
             )
             .map_or(1, |lines| {

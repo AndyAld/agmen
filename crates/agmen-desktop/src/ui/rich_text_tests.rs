@@ -538,7 +538,8 @@ fn chip_height_estimate_matches_its_layout(_cx: &mut TestAppContext) {
     ];
     let mut estimates = Vec::new();
     take_estimates();
-    for width in [90., 120., 150., 200., 260.] {
+    // 12 px leaves the label no room once padding and glue are taken.
+    for width in [12., 90., 120., 150., 200., 260.] {
         for body in &bodies {
             let context = Rc::new(ChatContext::new(Rc::new(snapshot.clone())));
             let text = Rc::new(context.body_text(body, &[]));
