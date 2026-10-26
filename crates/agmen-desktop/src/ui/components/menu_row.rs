@@ -144,7 +144,8 @@ impl RenderOnce for MenuRow {
         div()
             .id(self.id)
             .debug_selector(|| selector)
-            .h(if picker {
+            // The mockup's height is the least; a large UI font grows it.
+            .min_h(if picker {
                 PICKER_ROW_HEIGHT
             } else {
                 MENU_ROW_HEIGHT
@@ -200,6 +201,50 @@ mod tests {
                 .into_any_element()
         });
         assert_eq!(size.height, PICKER_ROW_HEIGHT);
+    }
+
+    /// A picker row and a menu row at a 40 px UI font, inside Settings'
+    /// range, with their labels found as `"{row}:label"`.
+    struct LargeFont;
+
+    impl gpui::Render for LargeFont {
+        fn render(&mut self, window: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+            window.set_rem_size(px(40.));
+            let label = |id: &'static str, text: &'static str| {
+                div()
+                    .debug_selector(move || format!("{id}:label"))
+                    .child(Label::new(text))
+            };
+            div()
+                .w(px(800.))
+                .child(
+                    MenuRow::new("picker")
+                        .picker()
+                        .child(label("picker", "opus")),
+                )
+                .child(MenuRow::new("menu").child(label("menu", "claude")))
+        }
+    }
+
+    #[gpui::test]
+    fn rows_grow_to_hold_a_large_font(cx: &mut TestAppContext) {
+        // A fixed 26 px row let a label at a large UI font run into the
+        // next row. The mockup's height is the least a row takes.
+        crate::ui::test_support::init(cx);
+        let (_, cx) = cx.add_window_view(|_, _| LargeFont);
+        crate::ui::test_support::redraw(cx);
+        for (row, selector, least) in [
+            ("picker", "picker:label", PICKER_ROW_HEIGHT),
+            ("menu", "menu:label", MENU_ROW_HEIGHT),
+        ] {
+            let bounds = cx.debug_bounds(row).expect("the row");
+            let label = cx.debug_bounds(selector).expect("the label");
+            assert!(label.size.height > least, "{row}: the font is large");
+            assert!(
+                bounds.top() <= label.top() && label.bottom() <= bounds.bottom(),
+                "{row} {bounds:?} holds {label:?}"
+            );
+        }
     }
 
     #[gpui::test]
