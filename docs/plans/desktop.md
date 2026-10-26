@@ -402,7 +402,7 @@ Screens: `desktop-plan`, `desktop-spec`, `desktop-plan-ready`, `desktop-kick-off
 - [ ] Done
 
 - [ ] **Step 1:** Capture all 25 screens with `shot.sh` into `target/shots/`, build a side-by-side sheet (mockup left, app right) in the scratch dir, and list the remaining differences per screen in this file.
-- [ ] **Step 2:** `rg 'shortcut:' crates/agmen-desktop` and list each in ADR-0010's Consequences.
+- [x] **Step 2:** `rg 'shortcut:' crates/agmen-desktop` and list each in ADR-0010's Consequences. Done: 46 at ff47dcd, in ADR-0010's "Deliberate shortcuts" table.
 - [ ] **Step 3:** Full gate; tell Andy it is ready for the review loop.
 
 ## Work claimed by agmen-c7 (Andy, 2026-10-26)

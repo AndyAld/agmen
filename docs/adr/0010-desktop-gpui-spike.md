@@ -42,3 +42,56 @@ The desktop app is a GPUI app with Zed's layout (design 4.2 and 6.8, spec sectio
 - Build machines need Xcode. With `runtime_shaders` they do not need the Metal Toolchain, at the cost of compiling shaders at each start (not measured yet).
 - Unverified: Windows and Linux (nothing has run there), packaging, signing and notarization.
 - Window chrome: the title bar takes the platform's style (`PlatformStyle`). On macOS it leaves 96 px for the traffic lights. On Windows it draws minimize, maximize (restore when maximized) and close at the right edge, 36 px each as Zed's, and marks them and the bar with GPUI's `WindowControlArea` so Windows hit-tests them natively. Linux draws the same buttons only under client-side decorations, with click handlers, as Zed does, and only those `window_controls()` reports. No window asks for client decorations yet, so on X11 the server's decorations stay and agmen's buttons do not show (server decorations for now); Zed requests client decorations with resize edges itself (`zed.rs` near line 367), and agmen will when it adds `gpui_linux`. Zed's Windows buttons use Segoe glyphs chosen by an `unsafe` `RtlGetVersion` call; agmen draws Lucide `minus`, `square`, `copy` and `x` (from the same v1.61.0 archive) instead. Only the macOS look has run; the Windows and Linux layouts are checked by tests on macOS, not on those platforms.
+
+### Deliberate shortcuts (Task 20, desktop/gpui at ff47dcd)
+
+Each is a `shortcut:` comment in `crates/agmen-desktop/src`, naming its ceiling and what triggers a revisit. `rg 'shortcut:' crates/agmen-desktop` lists them; there are 46.
+
+| Where | Shortcut |
+|---|---|
+| `alerts.rs:66` | quiet hours and muted agents are plain values the caller fills in; read them from AgmenSettings once its settings file has them (spec 9.4). The person's alert preferences. |
+| `appearance/catalog.rs:120` | reads the manifest once per theme file; cache by folder if an extension with many theme files makes the scan slow. |
+| `appearance/marked.rs:125` | no macOS path until the wallpaper utility runs on macOS. |
+| `appearance/settings.rs:42` | mode picks which half (light or dark) the theme picker lists; it does not switch the theme when the OS changes mode. Add light and dark theme keys if people ask for that. |
+| `backend/fixture.rs:215` | the fixture stands in for agmend's Spawn; a later plan sends it to agmend, and the listener's answer comes from the hub. |
+| `backend/fixture.rs:355` | the fixture records nothing for this; snoozing stays in the person's own view (Task 13). |
+| `backend/fixture_data.rs:253` | a stand-in for the hub's own stamp_refs; once the fixture is replaced by agmend, the hub's refs arrive on the wire and this goes. |
+| `backend/take_over.rs:6` | the screens are fixture grids; spike S10 picks the PTY and the terminal emulator that fill `TerminalScreen` behind `Backend`, and keys typed into the terminal reach nothing until then. |
+| `icons/system.rs:9` | Windows (shell icons) and Linux (freedesktop theme) return None until S8 runs there. |
+| `keymap_vim.rs:3` | the desktop app only records the choice; vim keys come with the terminal UI's keymap, and the desktop reads this setting when they do. |
+| `main.rs:116` | macOS only until spike S8 runs on Windows and Linux (ADR-0010). |
+| `main.rs:193` | polls every 250 ms, so focus lags up to 250 ms and the app wakes 4 times a second; switch to a channel the run loop wakes on when idle wakeups matter. |
+| `main.rs:333` | the fixture stands in for agmend until its local API exists (ADR-0011). |
+| `notify.rs:57` | Windows and Linux use GPUI's notifications until S8 runs there. |
+| `roles.rs:124` | a copy of agmen-hub's private `may_send` (ingest.rs) for the three role kinds; read one shared table once agmen-proto exports it. |
+| `roles.rs:202` | a child's verbs replace its parent's additions instead of being checked as a narrowing; the hub caps verbs at the identity kind anyway. |
+| `ui/agent_view.rs:194` | Stop does nothing until the hub backend can stop an agent. |
+| `ui/chat.rs:375` | each message clones the snapshot and rebuilds the context, O(messages); keep messages in a persistent list if long chats lag. |
+| `ui/chat_context.rs:281` | PR cards come from the GitHub App (spec 10), a later plan; until then the card says so. |
+| `ui/chat_context.rs:363` | ahead and behind counts need the worktree data Task 12 adds; until then the card shows the worktree's own state line. |
+| `ui/code_view.rs:270` | long lines are clipped; sideways scroll when the file and diff views need to show them whole. |
+| `ui/dev_views.rs:253` | Open file does nothing here; the dev window hosts no file tabs. The workspace opens the file (tab_views.rs). |
+| `ui/diff_view.rs:184` | long lines are clipped, as in the code view; sideways scroll comes with it. |
+| `ui/pane/group.rs:223` | one direction per center, so the group is a flat list; nested splits need a tree of groups if people ask for them. |
+| `ui/pane/item.rs:44` | a placeholder tab the status bar's search button opens; Task 18 builds search (cmd-shift-f) and its view. |
+| `ui/pane/tabs.rs:288` | every other item shows its name until its view is built (agent and role file in Task 10, file and diff in Tasks 11 and 12, settings in 17, plan and spec in 19). |
+| `ui/plan_panel.rs:259` | the backend has no pause action yet (desktop plan, Task 19), so Pause all draws disabled; enable it once agmend has one. |
+| `ui/plan_room.rs:182` | team rows take no click; the backend has no details to show for them. Emit `AgentsPanelEvent::Selected` with `TeamRow::id` once it does. |
+| `ui/project_panel.rs:84` | the whole tree is built from one list of every path, as the fixture holds it. The live backend needs the worktree's root path and lazy loading per folder before large repos (100k files) reach it. |
+| `ui/project_panel.rs:173` | derived from the head until the backend gives each worktree's root path (the live backend, ADR-0011). |
+| `ui/project_panel.rs:384` | a file the backend has not read shows a placeholder line; the live backend reads files and their marks from `git diff` (ADR-0011). |
+| `ui/project_panel.rs:427` | Diff does nothing until Task 12's diff view can open from here. |
+| `ui/roles_panel.rs:267` | Duplicate does nothing until the backend writes role files (Task 14). |
+| `ui/settings_view.rs:148` | a flat list capped at 40 rows; a virtual list (Task 3's) if people browse all ~700. |
+| `ui/settings_view.rs:238` | scans on the UI thread when Settings opens or an install ends; move to the background executor if a person's extension folder makes opening Settings slow. |
+| `ui/spec_view.rs:58` | only the fixture's design spec has text; agmend serves the others at their commit once its local API exists. |
+| `ui/spec_view.rs:115` | the backend has no changes-requested action, so Request changes draws disabled; enable it once agmend records one. |
+| `ui/syntax.rs:4` | Markdown uses the block grammar only (headings, lists, code fences); inline emphasis and links come with the inline grammar's injection when a screen needs them. |
+| `ui/syntax.rs:14` | UI-thread highlighting caps files at 128 KiB; highlight on the background executor when larger files need colors. |
+| `ui/tab_views.rs:179` | the text is read when the tab is first drawn and kept while it stays open, so a change made in Settings after that shows once the tab is reopened; reload it on Settings' saves when the file tab gets edited in place. |
+| `ui/terminal_view.rs:519` | Open as tab draws but does nothing until the center has a terminal tab (spec 5.4); the pane's TabItem has no Terminal variant yet, and the pane belongs to agmen-c7. |
+| `ui/title_bar.rs:76` | no window asks for client decorations yet, so X11 keeps server ones and these buttons stay hidden; request them with resize edges, as Zed does, when gpui_linux is added. |
+| `ui/workspace.rs:184` | the mockup's tabs stand in for the tabs the person left open. No task in the desktop plan restores tabs yet; the change that restores them once agmend keeps them deletes this function and its call in Workspace::new, so production windows stop opening the mockup's tabs. |
+| `ui/workspace_palette.rs:174` | the result goes to stderr only; show it in the window once the status bar has a place for transient notes. |
+| `ui/workspace_refs.rs:78` | items, lanes and PRs show their hover card only; the board (items and lanes) and the GitHub App (PR cards, spec 10) are later plans, and each gives its kind a place to open. |
+| `ui/workspace_refs.rs:95` | no per-commit diff; once the backend gives a commit its own hunks, a commit opens those instead. |
