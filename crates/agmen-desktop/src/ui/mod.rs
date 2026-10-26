@@ -26,7 +26,7 @@ mod workspace;
 
 pub(crate) use agent_view::AgentView;
 pub(crate) use code_view::{CodeView, GutterMark};
-pub(crate) use dev_views::RolesDev;
+pub(crate) use dev_views::{DevFrame, RolesDev};
 pub(crate) use dock::DockSide;
 pub(crate) use syntax::Language;
 pub(crate) use text_input::{TextInput, bind_keys};

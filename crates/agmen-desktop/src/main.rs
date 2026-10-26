@@ -224,29 +224,29 @@ fn window_options(cx: &App) -> WindowOptions {
     }
 }
 
-/// Opens one view alone, for `--view`.
+/// Opens one view alone under the title bar, for `--view`.
 fn open_dev_view(
     view: DevView,
     options: WindowOptions,
     cx: &mut App,
 ) -> Result<gpui::AnyWindowHandle> {
     use backend::Backend as _;
-    let window: gpui::Result<gpui::AnyWindowHandle> = match view {
-        DevView::Code => cx
-            .open_window(options, |_, cx| {
-                cx.new(|_| {
-                    ui::CodeView::new(
-                        REVIEWER_XML,
-                        ui::Language::for_path(std::path::Path::new("roles/reviewer.xml")),
-                        vec![ui::GutterMark::Modified(11..12)],
-                    )
-                })
-            })
-            .map(Into::into),
+    let mut snapshot = backend::FixtureBackend::for_screen(backend::Screen::Chat)
+        .context("building the fixture data")?
+        .snapshot();
+    let title = snapshot.clone();
+    let window = match view {
+        DevView::Code => cx.open_window(options, |_, cx| {
+            let code = cx.new(|_| {
+                ui::CodeView::new(
+                    REVIEWER_XML,
+                    ui::Language::for_path(std::path::Path::new("roles/reviewer.xml")),
+                    vec![ui::GutterMark::Modified(11..12)],
+                )
+            });
+            cx.new(|_| ui::DevFrame::new(title, code))
+        }),
         DevView::Agent => {
-            let mut snapshot = backend::FixtureBackend::for_screen(backend::Screen::Chat)
-                .context("building the fixture data")?
-                .snapshot();
             let (id, session) = snapshot
                 .sessions
                 .pop_first()
@@ -256,27 +256,24 @@ fn open_dev_view(
                 .remove(&id)
                 .map_or_else(|| id.to_string(), |agent| agent.handle);
             cx.open_window(options, |_, cx| {
-                cx.new(|cx| ui::AgentView::new(handle, session, cx))
+                let agent = cx.new(|cx| ui::AgentView::new(handle, session, cx));
+                cx.new(|_| ui::DevFrame::new(title, agent))
             })
-            .map(Into::into)
         }
         DevView::Roles => {
-            let roles = backend::FixtureBackend::for_screen(backend::Screen::Chat)
-                .context("building the fixture data")?
-                .snapshot()
-                .roles;
+            let roles = snapshot.roles;
             let reviewer = roles
                 .iter()
                 .find(|role| role.name == "reviewer")
                 .context("the fixture has no reviewer role")?
                 .clone();
             cx.open_window(options, |_, cx| {
-                cx.new(|cx| ui::RolesDev::new(roles, reviewer, cx))
+                let view = cx.new(|cx| ui::RolesDev::new(roles, reviewer, cx));
+                cx.new(|_| ui::DevFrame::new(title, view))
             })
-            .map(Into::into)
         }
     };
-    window.context("opening the view window")
+    Ok(window.context("opening the view window")?.into())
 }
 
 fn open_main_window(launch: &Launch, cx: &mut App) -> Result<()> {

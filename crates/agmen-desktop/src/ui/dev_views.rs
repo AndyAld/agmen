@@ -2,14 +2,15 @@
 //! hosts it, so screenshots can be compared with the mockups.
 
 use gpui::{
-    AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, Styled as _, Window,
-    div,
+    AnyView, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render,
+    Styled as _, Window, div,
 };
 
 use super::roles_panel::{RoleFileView, RolePanel, RolesPanel};
+use super::title_bar::TitleBar;
 use super::tokens::{BORDER_WIDTH, LEFT_DOCK_WIDTH, RIGHT_DOCK_WIDTH};
 use crate::appearance::Appearance;
-use crate::backend::{RoleFile, RoleInfo};
+use crate::backend::{RoleFile, RoleInfo, Snapshot};
 
 /// The Roles tab, reviewer.xml open, and its Role panel
 /// (`desktop-role-file.webp`).
@@ -66,5 +67,38 @@ impl Render for RolesDev {
                             .map(|info| RolePanel::new(self.name.clone(), info)),
                     ),
             )
+    }
+}
+
+/// A dev view under the app's title bar, so the window chrome (macOS
+/// traffic lights, or the Windows and Linux buttons) sits where it will in
+/// the workspace.
+pub(crate) struct DevFrame {
+    /// What the title bar shows.
+    title: Snapshot,
+    content: AnyView,
+}
+
+impl DevFrame {
+    pub(crate) fn new(snapshot: Snapshot, content: impl Into<AnyView>) -> Self {
+        Self {
+            title: snapshot,
+            content: content.into(),
+        }
+    }
+}
+
+impl Render for DevFrame {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let appearance = cx.global::<Appearance>();
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(appearance.theme.background)
+            .text_color(appearance.theme.text)
+            .font_family(appearance.fonts.ui_family.clone())
+            .child(TitleBar::new(&self.title))
+            .child(div().flex_1().min_h_0().child(self.content.clone()))
     }
 }

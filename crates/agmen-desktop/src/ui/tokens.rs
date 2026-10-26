@@ -40,6 +40,15 @@ pub(crate) const BREADCRUMB_HEIGHT: Pixels = px(32.);
 /// Where the title bar's text starts, past the traffic lights at x 12 to 68
 /// and the mockup's spacer.
 pub(crate) const TRAFFIC_LIGHTS_INSET: Pixels = px(96.);
+/// A Windows or Linux caption button's width, as Zed's.
+pub(crate) const WINDOW_BUTTON_WIDTH: Pixels = px(36.);
+/// The close button's hover fill, Windows' own red (#e81123), as Zed's.
+pub(crate) const WINDOWS_CLOSE_HOVER: gpui::Rgba = gpui::Rgba {
+    r: 232. / 255.,
+    g: 17. / 255.,
+    b: 32. / 255.,
+    a: 1.,
+};
 
 // Rows.
 pub(crate) const AGENT_ROW_HEIGHT: Pixels = px(26.);

@@ -30,6 +30,8 @@ static FILES: &[(&str, &[u8])] = lucide![
     "git-branch",
     "messages-square",
     "minus",
+    "square",
+    "copy",
     "panel-right",
     "pencil",
     "plus",
