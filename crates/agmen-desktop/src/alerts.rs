@@ -80,7 +80,8 @@ pub(crate) struct AlertPrefs {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum AlertEffect {
     None,
-    /// A native notification only: a normal ALERT that reaches me.
+    /// A native notification only: a normal ALERT that reaches me, except
+    /// during quiet hours when it is not from my own agent or a coordinator.
     Notify,
     Highlight,
     HighlightChimeNotify,
