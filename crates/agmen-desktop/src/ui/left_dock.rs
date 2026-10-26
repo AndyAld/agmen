@@ -5,9 +5,14 @@ use gpui::{
 };
 
 use super::components::{IconButton, Tab};
-use super::keys::{OpenSearch, ShowLeftDockTab, ToggleGitPanel, ToggleProjectPanel};
 use super::tokens::SPACE_10;
 use crate::icons::UiIcon;
+use crate::keymap::{OpenSearch, ToggleGitPanel, ToggleProjectPanel};
+
+/// Shows a left dock tab, opening the dock: a click on the tab strip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, gpui::Action)]
+#[action(namespace = workspace, no_json)]
+pub(crate) struct ShowLeftDockTab(pub(crate) LeftDockTab);
 
 /// Which panel the left dock shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]

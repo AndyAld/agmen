@@ -193,6 +193,23 @@ pub(crate) const BUTTON_TINT: f32 = 0.15;
 /// is the theme's `element_hover`.
 pub(crate) const BUTTON_HOVER_OPACITY: f32 = 0.85;
 
+// Task 18: the command palette (node 11473).
+/// The palette's width.
+pub(crate) const PALETTE_WIDTH: Pixels = px(600.);
+/// From the window's top to the palette's: 26 below the 38 px title bar.
+pub(crate) const PALETTE_TOP: Pixels = px(64.);
+/// The query row, with its 1 px rule (node 11474).
+pub(crate) const PALETTE_INPUT_HEIGHT: Pixels = px(39.);
+/// A palette row (node 11483).
+pub(crate) const PALETTE_ROW_HEIGHT: Pixels = px(30.);
+/// The list scrolls past this: Zed's modal limit of 24 rem at 15 px.
+pub(crate) const PALETTE_MAX_HEIGHT: Pixels = px(360.);
+/// A drop shadow's black, as the palette's (#000000aa): the one
+/// untokened color, through [`tint`] (mockup fix 58).
+pub(crate) const SHADOW_ALPHA: f32 = 170. / 255.;
+pub(crate) const SHADOW_OFFSET_Y: Pixels = px(10.);
+pub(crate) const SHADOW_BLUR: Pixels = px(30.);
+
 #[cfg(test)]
 mod tests {
     use super::*;

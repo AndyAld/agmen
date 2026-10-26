@@ -2,13 +2,13 @@ use gpui::{SharedString, TestAppContext, VisualTestContext};
 
 use super::*;
 use crate::backend::chat_snapshot;
+use crate::keymap::bind_all;
 use crate::ui::dock::DockSide;
-use crate::ui::keys::bind_workspace_keys;
 use crate::ui::test_support::{click, init, redraw};
 
 fn open(cx: &mut TestAppContext) -> (Entity<Workspace>, &mut VisualTestContext) {
     init(cx);
-    cx.update(bind_workspace_keys);
+    cx.update(bind_all);
     let (workspace, cx) =
         cx.add_window_view(|window, cx| Workspace::new(chat_snapshot(), window, cx));
     workspace.update_in(cx, |w, window, cx| w.focus_handle.focus(window, cx));

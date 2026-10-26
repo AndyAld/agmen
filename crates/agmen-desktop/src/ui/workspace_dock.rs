@@ -9,13 +9,13 @@ use gpui::{
 
 use super::Workspace;
 use crate::backend::{RoleFile, Snapshot};
+use crate::keymap::{
+    ActivatePane, CloseActiveTab, OpenSearch, OpenSettings, SplitRight, ToggleGitPanel,
+    ToggleProjectPanel,
+};
 use crate::ui::agent_panel::AgentPanel;
 use crate::ui::git_panel::{GitPanel, GitPanelEvent};
-use crate::ui::keys::{
-    ActivatePane, CloseActiveTab, OpenSearch, OpenSettings, ShowLeftDockTab, SplitRight,
-    ToggleGitPanel, ToggleProjectPanel,
-};
-use crate::ui::left_dock::{LeftDockTab, PanelButtons};
+use crate::ui::left_dock::{LeftDockTab, PanelButtons, ShowLeftDockTab};
 use crate::ui::listener_panel::ListenerPanel;
 use crate::ui::pane::{SettingsPage, TabItem};
 use crate::ui::project_panel::{ProjectPanel, ProjectPanelEvent};

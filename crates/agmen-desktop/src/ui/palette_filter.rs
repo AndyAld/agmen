@@ -4,10 +4,6 @@
 //! case and the query's whitespace. A small dynamic program picks the best
 //! alignment: matches at word starts and in consecutive runs score higher, and
 //! among matches in the first few characters, an earlier start ranks higher.
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by the Task 18 palette view")
-)]
 
 use std::ops::Range;
 

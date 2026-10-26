@@ -30,6 +30,9 @@ mod stepper;
 mod tab;
 mod toggle;
 mod tool_card;
+// Task 18: the command palette's row label.
+mod highlighted_label;
+pub(crate) use highlighted_label::HighlightedLabel;
 
 pub(crate) use avatar::Avatar;
 pub(crate) use badge::Badge;

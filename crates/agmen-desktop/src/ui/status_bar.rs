@@ -4,17 +4,17 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce, SharedString,
-    Styled as _, Window, div,
+    StatefulInteractiveElement as _, Styled as _, Window, div,
 };
 
 use super::components::{Badge, Button, ButtonStyle, Color, IconButton, KeyHint, Label, LabelSize};
 use super::format::{counted, listener_label, spend_today};
-use super::keys::OpenSettings;
 use super::left_dock::PanelButtons;
 use super::tokens::{BORDER_WIDTH, SPACE_5, SPACE_10, SPACE_14, STATUS_BAR_HEIGHT};
 use super::workspace::ToggleRightDock;
 use crate::backend::{Snapshot, StatusSummary};
 use crate::icons::UiIcon;
+use crate::keymap::{OpenSettings, ToggleCommandPalette};
 
 #[derive(Debug, IntoElement)]
 pub(crate) struct StatusBar {
@@ -23,6 +23,8 @@ pub(crate) struct StatusBar {
     context: SharedString,
     right_dock_open: bool,
     panels: PanelButtons,
+    /// Task 18: while the palette is open its hint does nothing.
+    palette_open: bool,
 }
 
 impl StatusBar {
@@ -33,6 +35,7 @@ impl StatusBar {
             context: listener_label(&snapshot.listener.agent, &snapshot.listener.state).into(),
             right_dock_open,
             panels: PanelButtons::default(),
+            palette_open: false,
         }
     }
 
@@ -40,6 +43,15 @@ impl StatusBar {
     #[must_use]
     pub(crate) const fn panels(mut self, panels: PanelButtons) -> Self {
         self.panels = panels;
+        self
+    }
+
+    /// Task 18: whether the palette is open. While it is, a click on the
+    /// ⌘⇧P hint is the click outside that closes it, so the hint takes no
+    /// click of its own and does not reopen it (C113).
+    #[must_use]
+    pub(crate) const fn palette_open(mut self, open: bool) -> Self {
+        self.palette_open = open;
         self
     }
 
@@ -149,6 +161,20 @@ impl RenderOnce for StatusBar {
                 ("status-chat", UiIcon::Chat),
                 ("status-bell", UiIcon::Bell),
             ]))
-            .child(KeyHint::new("⌘⇧P"))
+            .child(palette_trigger(self.palette_open))
     }
+}
+
+/// Task 18: the ⌘⇧P hint, which opens the palette while it is closed.
+fn palette_trigger(palette_open: bool) -> impl IntoElement {
+    let keys = crate::keymap::hint(&crate::keymap::table(), &ToggleCommandPalette);
+    div()
+        .id("palette-trigger")
+        .debug_selector(|| "palette-trigger".into())
+        .when(!palette_open, |this| {
+            this.cursor_pointer().on_click(|_, window, cx| {
+                window.dispatch_action(Box::new(ToggleCommandPalette), cx);
+            })
+        })
+        .children(keys.map(KeyHint::new))
 }

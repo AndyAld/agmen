@@ -73,6 +73,8 @@ fn base(project: &str) -> Result<Snapshot, BackendError> {
         sessions: BTreeMap::from([(id("andy/fx1")?, fx1_session())]),
         roles,
         worktrees: worktrees()?,
+        // Task 18: console.py INSTALLED.
+        installed_agents: super::installed::fixture(),
     })
 }
 
