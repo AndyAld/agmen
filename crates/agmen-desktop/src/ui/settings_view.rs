@@ -18,12 +18,13 @@ use self::rows::{
 };
 use super::breadcrumb::Breadcrumb;
 use super::components::{
-    Button, Color, Dropdown, Icon, IconSize, Label, LabelSize, Segmented, Toggle,
+    Button, ButtonStyle, Color, Dropdown, Icon, IconSize, Indent, InputFrame, Label, LabelSize,
+    Link, ListItem, Segmented, Toggle,
 };
 use super::text_input::{TextInput, TextInputEvent};
 use super::tokens::{
-    BORDER_WIDTH, RADIUS_MD, SETTINGS_PAGES_WIDTH, SPACE_2, SPACE_3, SPACE_6, SPACE_8, SPACE_10,
-    SPACE_12, SPACE_24,
+    BORDER_WIDTH, RADIUS_MD, SETTINGS_PAGE_ROW_HEIGHT, SETTINGS_PAGES_WIDTH, SPACE_2, SPACE_3,
+    SPACE_6, SPACE_8, SPACE_12, SPACE_24,
 };
 use crate::appearance::{
     API_BASE, AgmenSettings, Appearance, AppearanceSource, EXTENSIONS_PAGE, FontPrefs, Fonts,
@@ -534,46 +535,32 @@ impl SettingsView {
         }
     }
 
+    /// The rule right of the page list (node 8049), as the other chrome
+    /// rules.
+    fn page_list_rule(cx: &App) -> gpui::Hsla {
+        super::rule_color(cx)
+    }
+
     fn page_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = &cx.global::<Appearance>().theme;
-        let (selected, hover, rule) = (theme.element_selected, theme.element_hover, theme.border);
         let rows = PAGES.iter().map(|&(page, title, slug, icon)| {
             let on = page == self.page;
-            let selector = format!("settings-page:{slug}");
-            div()
-                .id(SharedString::from(selector.clone()))
-                .debug_selector(|| selector)
-                .flex()
-                .items_center()
-                .gap(SPACE_8)
-                .py(SPACE_6)
-                .px(SPACE_10)
-                .rounded(RADIUS_MD)
-                .cursor_pointer()
-                .map(|this| {
-                    if on {
-                        this.bg(selected)
-                    } else {
-                        this.hover(move |style| style.bg(hover))
-                    }
-                })
+            let color = if on {
+                Color::Default
+            } else {
+                Color::Placeholder
+            };
+            ListItem::new(format!("settings-page:{slug}"), Indent::Page)
+                .height(SETTINGS_PAGE_ROW_HEIGHT)
+                .selected(on)
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.page = page;
                     this.menu = None;
                     cx.notify();
                 }))
-                .child(Icon::new(icon).size(IconSize::Medium).color(if on {
-                    Color::Default
-                } else {
-                    Color::Placeholder
-                }))
+                .leading(Icon::new(icon).size(IconSize::Medium).color(color.clone()))
                 .child(
                     Label::new(title)
-                        .color(if on {
-                            Color::Default
-                        } else {
-                            Color::Placeholder
-                        })
+                        .color(color)
                         .when(on, |label| label.weight(FontWeight::MEDIUM)),
                 )
         });
@@ -587,7 +574,7 @@ impl SettingsView {
             .py(SPACE_12)
             .px(SPACE_8)
             .border_r(BORDER_WIDTH)
-            .border_color(rule)
+            .border_color(Self::page_list_rule(cx))
             .children(rows)
     }
 
@@ -690,20 +677,15 @@ impl SettingsView {
                         ),
                 )
                 .child(
-                    div()
-                        .id("browse-themes")
-                        .debug_selector(|| "browse-themes".into())
-                        .cursor_pointer()
-                        .on_click(cx.listener(|this, _, window, cx| this.toggle_browse(window, cx)))
-                        .child(
-                            Label::new(if self.browse.is_some() {
-                                "Close Zed themes"
-                            } else {
-                                "Browse Zed themes\u{2026}"
-                            })
-                            .size(LabelSize::Small)
-                            .color(Color::Accent),
-                        ),
+                    Link::new(
+                        "browse-themes",
+                        if self.browse.is_some() {
+                            "Close Zed themes"
+                        } else {
+                            "Browse Zed themes\u{2026}"
+                        },
+                    )
+                    .on_click(cx.listener(|this, _, window, cx| this.toggle_browse(window, cx))),
                 )
                 .children(self.browse_panel(cx)),
         )
@@ -874,8 +856,9 @@ impl SettingsView {
             "Saved to {}. The terminal UI reads the same file; there, :set theme=\u{2026} and :set icons=nerd|none change it, and the font is your terminal's.",
             tilde(&self.sources.settings_path(), self.sources.config.parent())
         );
+        // Right under the last rule, as node 8214 (V102).
         div()
-            .py(SPACE_6)
+            .debug_selector(|| "settings-footer-text".into())
             .child(
                 Label::new(saved_to)
                     .size(LabelSize::Small)
@@ -913,7 +896,7 @@ impl SettingsView {
     fn browse_panel(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
         let browse = self.browse.as_ref()?;
         let theme = &cx.global::<Appearance>().theme;
-        let (border, hover) = (theme.border, theme.element_hover);
+        let border = theme.border;
         let status = match &browse.status {
             BrowseStatus::Loading => {
                 Some(Label::new("Asking Zed's extension list\u{2026}").color(Color::Placeholder))
@@ -932,7 +915,7 @@ impl SettingsView {
             .into_iter()
             .take(MAX_BROWSE_ROWS)
             .enumerate()
-            .map(|(ix, entry)| browse_row(ix, entry, hover, cx));
+            .map(|(ix, entry)| browse_row(ix, entry, cx));
         Some(
             div()
                 .debug_selector(|| "browse-panel".into())
@@ -956,16 +939,8 @@ impl SettingsView {
                                 .color(Color::Placeholder),
                         )
                         .child(
-                            div()
-                                .id("zed-extensions-link")
-                                .debug_selector(|| "zed-extensions-link".into())
-                                .cursor_pointer()
-                                .on_click(|_, _, cx| cx.open_url(EXTENSIONS_PAGE))
-                                .child(
-                                    Label::new(EXTENSIONS_PAGE)
-                                        .size(LabelSize::Small)
-                                        .color(Color::Accent),
-                                ),
+                            Link::new("zed-extensions-link", EXTENSIONS_PAGE)
+                                .on_click(|_, _, cx| cx.open_url(EXTENSIONS_PAGE)),
                         ),
                 )
                 .child(
@@ -976,15 +951,7 @@ impl SettingsView {
                     .color(Color::Placeholder)
                     .wrap(),
                 )
-                .child(
-                    div()
-                        .py(SPACE_3)
-                        .px(SPACE_8)
-                        .rounded(RADIUS_MD)
-                        .border(BORDER_WIDTH)
-                        .border_color(border)
-                        .child(browse.search.clone()),
-                )
+                .child(InputFrame::new().child(browse.search.clone()))
                 .when(!browse.query.is_empty(), |this| {
                     this.child(
                         Label::new(format!("Matching \u{201c}{}\u{201d}", browse.query))
@@ -1085,9 +1052,11 @@ impl Render for SettingsView {
         let path = self.sources.settings_path();
         // shortcut: there are no workspace tabs yet, so the event has no subscriber and the file's
         // path shows in the footer; the workspace opens it in a code tab once tabs exist.
-        let open_file = Button::new("open-settings-toml", "Open settings.toml").on_click(
-            cx.listener(move |_, _, _, cx| cx.emit(SettingsEvent::OpenFile(path.clone()))),
-        );
+        let open_file = Button::new("open-settings-toml", "Open settings.toml")
+            .style(ButtonStyle::Plain)
+            .on_click(
+                cx.listener(move |_, _, _, cx| cx.emit(SettingsEvent::OpenFile(path.clone()))),
+            );
         let error = self.error.clone().map(|err| {
             Label::new(err)
                 .size(LabelSize::Small)
@@ -1124,10 +1093,12 @@ impl Render for SettingsView {
                             .py(SPACE_8)
                             .px(SPACE_24)
                             .child(
-                                Label::new(title)
-                                    .size(LabelSize::Large)
-                                    .weight(FontWeight::SEMIBOLD)
-                                    .color(Color::TextMuted),
+                                div().debug_selector(|| "settings-title".into()).child(
+                                    Label::new(title)
+                                        .size(LabelSize::Title)
+                                        .weight(FontWeight::SEMIBOLD)
+                                        .color(Color::TextMuted),
+                                ),
                             )
                             .children(body)
                             .children(error),

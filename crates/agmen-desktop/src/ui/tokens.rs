@@ -21,6 +21,11 @@ pub(crate) const MOCKUP_REM: Pixels = px(15.);
 // uses. At a 15 px rem: Large 15, Default 13.125, Small 11.25, XSmall 9.375.
 // The mockup's 13 px text is Default, its 11 and 12 px text is Small, and
 // its 10 px glyphs are XSmall. Code text uses the code font's own size.
+/// A page title, such as Settings' "Appearance" (node 8091): 18 px at a
+/// 15 px rem. Zed's `TextSize` stops at Large; its `HeadlineSize` steps
+/// (rems 1.125 and 1.27) give 16.875 and 19.05 px there, so this is a step
+/// of agmen's own, written as Zed writes `TextSize`.
+pub(crate) const TEXT_TITLE: Rems = rems_from_px(19.2);
 pub(crate) const TEXT_LARGE: Rems = rems_from_px(16.);
 pub(crate) const TEXT_DEFAULT: Rems = rems_from_px(14.);
 pub(crate) const TEXT_SMALL: Rems = rems_from_px(12.);
@@ -46,6 +51,8 @@ pub(crate) const WINDOW_BUTTON_WIDTH: Pixels = px(36.);
 // Rows.
 pub(crate) const AGENT_ROW_HEIGHT: Pixels = px(26.);
 pub(crate) const PROJECT_ROW_HEIGHT: Pixels = px(24.);
+/// A Settings page row (node 8050).
+pub(crate) const SETTINGS_PAGE_ROW_HEIGHT: Pixels = px(28.);
 /// A tree row's left padding at depth 0, past the group row's chevron.
 pub(crate) const TREE_INDENT_BASE: Pixels = px(26.);
 /// Extra left padding per level of depth.
@@ -165,6 +172,7 @@ mod tests {
     #[test]
     fn text_sizes_follow_zed_at_15px_rem() {
         let at_15 = |r: Rems| r.to_pixels(MOCKUP_REM).as_f32();
+        assert!((at_15(TEXT_TITLE) - 18.).abs() < 0.001);
         assert!((at_15(TEXT_LARGE) - 15.).abs() < 0.001);
         assert!((at_15(TEXT_DEFAULT) - 13.125).abs() < 0.001);
         assert!((at_15(TEXT_SMALL) - 11.25).abs() < 0.001);

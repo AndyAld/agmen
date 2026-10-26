@@ -281,7 +281,7 @@ fn about_carries_every_linked_crates_license() {
 #[test]
 fn zed_extension_themes_show_author_and_repository() {
     // Review C202: read from the extension's own extension.toml. Zed keeps
-    // no license file in its installed folders, so the line says so.
+    // no license file in its installed folders, so the line says Zed has it.
     let home = Home::new();
     let nord = home.extensions().join("nord");
     fs::create_dir_all(nord.join("themes")).unwrap();
@@ -311,7 +311,7 @@ fn zed_extension_themes_show_author_and_repository() {
         "{detail}"
     );
     assert!(detail.contains("installed in Zed (nord)"), "{detail}");
-    assert!(detail.contains("no license file"), "{detail}");
+    assert!(detail.contains("license kept by Zed"), "{detail}");
 }
 
 fn offered(id: &str) -> ThemeExtension {
@@ -460,4 +460,115 @@ fn unreadable_manifest_keeps_the_license_and_says_why() {
     let detail = rows::installed_detail(&theme);
     assert!(detail.contains("MIT License"), "{detail}");
     assert!(detail.contains("expected `]`"), "{detail}");
+}
+
+/// Opens Settings at Andy's 15 px rem, the size the mockup was drawn at.
+fn open_at_mockup_rem<'a>(
+    cx: &'a mut TestAppContext,
+    home: &Home,
+) -> (Entity<SettingsView>, &'a mut VisualTestContext) {
+    let (view, cx) = open(cx, home);
+    cx.update(|window, _| window.set_rem_size(crate::ui::tokens::MOCKUP_REM));
+    redraw(cx);
+    (view, cx)
+}
+
+fn height(cx: &mut VisualTestContext, selector: &'static str) -> f32 {
+    cx.debug_bounds(selector)
+        .unwrap_or_else(|| panic!("nothing is drawn as {selector}"))
+        .size
+        .height
+        .as_f32()
+}
+
+#[gpui::test]
+fn page_title_is_18_px(cx: &mut TestAppContext) {
+    // V97: node 8091 is 18 px Semibold.
+    let home = Home::new();
+    let (_, cx) = open_at_mockup_rem(cx, &home);
+    let line = height(cx, "settings-title");
+    // gpui snaps the 21.6 px line to 21.5; Large's line is 18.
+    assert!(
+        (line - 18. * crate::ui::tokens::LINE_HEIGHT).abs() < 0.25,
+        "{line}"
+    );
+}
+
+#[gpui::test]
+fn open_settings_toml_is_a_plain_button(cx: &mut TestAppContext) {
+    // V98: node 8046 is plain, 20 px tall: 3 px padding, no border.
+    let home = Home::new();
+    let (_, cx) = open_at_mockup_rem(cx, &home);
+    let tall = height(cx, "open-settings-toml");
+    assert!((tall - 19.5).abs() < 0.01, "{tall}");
+}
+
+#[gpui::test]
+fn page_list_rule_is_the_chrome_rule(cx: &mut TestAppContext) {
+    // V99: node 8049 draws border.variant, as the other chrome rules.
+    init(cx);
+    cx.update(|cx| {
+        let mut appearance = Appearance::builtin();
+        appearance.theme.border = hex("#ff0000");
+        appearance.theme.border_variant = hex("#00ff00");
+        cx.set_global(appearance);
+        assert_eq!(SettingsView::page_list_rule(cx), hex("#00ff00"));
+    });
+}
+
+#[gpui::test]
+fn page_rows_are_28_px_list_items(cx: &mut TestAppContext) {
+    // V100, V102: nodes 8050 are 28 px rows with the icon in a leading slot.
+    let home = Home::new();
+    let (_, cx) = open_at_mockup_rem(cx, &home);
+    assert!(cx.debug_bounds("settings-page:keys:leading").is_some());
+    let row = height(cx, "settings-page:keys");
+    assert!((row - 28.).abs() < 0.01, "{row}");
+    click(cx, "settings-page:keys");
+    assert!(cx.debug_bounds("settings-placeholder").is_some());
+}
+
+#[gpui::test]
+fn dropdowns_are_28_px(cx: &mut TestAppContext) {
+    // V102: node 8107 is 28 px tall.
+    let home = Home::new();
+    let (_, cx) = open_at_mockup_rem(cx, &home);
+    let tall = height(cx, "theme");
+    assert!((tall - 28.).abs() < 0.01, "{tall}");
+}
+
+#[gpui::test]
+fn footer_sits_under_the_last_rule(cx: &mut TestAppContext) {
+    // V102: node 8214 starts right under the Chat density rule.
+    let home = Home::new();
+    let (_, cx) = open_at_mockup_rem(cx, &home);
+    let density = cx.debug_bounds("setting:Chat density").unwrap();
+    let footer = cx.debug_bounds("settings-footer-text").unwrap();
+    assert_eq!(footer.origin.y, density.bottom());
+}
+
+#[test]
+fn zed_installed_theme_without_license_says_zed_keeps_it() {
+    // V107: Zed never copies a LICENSE into its installed folders, so a
+    // missing file there is no fault of the theme.
+    let zed = entry(
+        "Nord",
+        ThemeOrigin::ZedExtension(InstalledTheme {
+            id: "nord".into(),
+            ..InstalledTheme::default()
+        }),
+    );
+    let detail = rows::installed_detail(&zed);
+    assert!(detail.contains("license kept by Zed"), "{detail}");
+    assert!(!detail.contains("no license file"), "{detail}");
+
+    let ours = entry(
+        "Nord",
+        ThemeOrigin::Agmen(InstalledTheme {
+            id: "nord".into(),
+            ..InstalledTheme::default()
+        }),
+    );
+    let detail = rows::installed_detail(&ours);
+    assert!(detail.contains("no license file"), "{detail}");
 }

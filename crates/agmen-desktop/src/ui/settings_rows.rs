@@ -15,7 +15,7 @@ use crate::appearance::{
     ThemeOrigin,
 };
 use crate::icons::FileIcons;
-use crate::ui::components::{Button, Color, Label, LabelSize, Segmented, Stepper};
+use crate::ui::components::{Button, Color, DetailRow, Label, LabelSize, Segmented, Stepper};
 use crate::ui::tokens::{
     BORDER_WIDTH, ICON_PREVIEW, RADIUS_MD, SETTING_LABEL_WIDTH, SPACE_3, SPACE_6, SPACE_8,
     SPACE_10, SPACE_12, SPACE_16,
@@ -54,8 +54,10 @@ pub(super) fn installed_detail(theme: &ThemeEntry) -> String {
     let by = author
         .map(|a| format!("by {a} \u{b7} "))
         .unwrap_or_default();
-    let credit = |t: &InstalledTheme| {
-        let license = t.license.as_deref().unwrap_or("no license file");
+    // Zed never copies a LICENSE into the folders it installs, so a Zed
+    // install without one is no fault of the theme (V107).
+    let credit = |t: &InstalledTheme, missing: &str| {
+        let license = t.license.as_deref().unwrap_or(missing);
         let repo = t
             .repository
             .as_ref()
@@ -73,9 +75,15 @@ pub(super) fn installed_detail(theme: &ThemeEntry) -> String {
         ThemeOrigin::BuiltIn => "built into agmen".to_owned(),
         ThemeOrigin::ZedUser => "your Zed themes folder".to_owned(),
         ThemeOrigin::ZedExtension(t) => {
-            format!("installed in Zed ({}) \u{b7} {}", t.id, credit(t))
+            format!(
+                "installed in Zed ({}) \u{b7} {}",
+                t.id,
+                credit(t, "license kept by Zed")
+            )
         }
-        ThemeOrigin::Agmen(t) => format!("installed by agmen \u{b7} {}", credit(t)),
+        ThemeOrigin::Agmen(t) => {
+            format!("installed by agmen \u{b7} {}", credit(t, "no license file"))
+        }
     };
     format!("{by}{from}")
 }
@@ -113,10 +121,8 @@ pub(super) fn density_row(density: Density, cx: &mut Context<SettingsView>) -> A
 pub(super) fn browse_row(
     ix: usize,
     entry: PickerEntry,
-    hover: gpui::Hsla,
     cx: &mut Context<SettingsView>,
 ) -> impl IntoElement + use<> {
-    let selector = format!("browse:{ix}");
     let (name, detail, action): (String, String, AnyElement) = match entry {
         PickerEntry::Installed(t) => {
             let detail = installed_detail(&t);
@@ -140,36 +146,13 @@ pub(super) fn browse_row(
             (name, detail, install.into_any_element())
         }
     };
-    div()
-        .id(SharedString::from(selector.clone()))
-        .debug_selector(|| selector)
-        .flex()
-        .items_center()
-        .gap(SPACE_10)
-        .py(SPACE_3)
-        .px(SPACE_8)
-        .rounded(RADIUS_MD)
-        .hover(move |style| style.bg(hover))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .child(Label::new(name))
-                .child(
-                    Label::new(detail)
-                        .size(LabelSize::Small)
-                        .color(Color::Placeholder)
-                        .wrap(),
-                ),
-        )
-        .child(action)
+    DetailRow::new(format!("browse:{ix}"), name, detail).end(action)
 }
 
 /// One setting: its label and hint on the left; the caller adds controls.
 pub(super) fn setting(label: &'static str, hint: &'static str, cx: &App) -> Div {
     div()
+        .debug_selector(|| format!("setting:{label}"))
         .w_full()
         .flex()
         .items_start()

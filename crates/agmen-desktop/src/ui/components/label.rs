@@ -8,7 +8,9 @@ use gpui::{
 
 use super::Color;
 use crate::appearance::Appearance;
-use crate::ui::tokens::{LINE_HEIGHT, TEXT_DEFAULT, TEXT_LARGE, TEXT_SMALL, TEXT_XSMALL};
+use crate::ui::tokens::{
+    LINE_HEIGHT, TEXT_DEFAULT, TEXT_LARGE, TEXT_SMALL, TEXT_TITLE, TEXT_XSMALL,
+};
 
 /// Zed's UI text sizes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -17,7 +19,16 @@ pub(crate) enum LabelSize {
     Small,
     #[default]
     Default,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Zed's scale; the Settings title, its one user, is Title now (V97)"
+        )
+    )]
     Large,
+    /// A page title (V97), above Zed's text sizes.
+    Title,
 }
 
 /// One line of text, or a wrapping block with [`Label::wrap`].
@@ -118,6 +129,7 @@ impl RenderOnce for Label {
                 LabelSize::Small => TEXT_SMALL,
                 LabelSize::Default => TEXT_DEFAULT,
                 LabelSize::Large => TEXT_LARGE,
+                LabelSize::Title => TEXT_TITLE,
             })
         };
         sized
