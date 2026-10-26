@@ -7,16 +7,17 @@ use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, Context, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
-    Render, SharedString, Styled as _, Window, div, uniform_list,
+    App, AppContext as _, Context, Entity, FontWeight, InteractiveElement as _, IntoElement,
+    ParentElement as _, Pixels, Render, SharedString, Styled as _, Window, div, uniform_list,
 };
 
+use super::breadcrumb::Breadcrumb;
 use super::code_view::{Line, cell_width, layout_lines, styled_line};
-use super::components::{Color, Label};
+use super::components::{Button, ButtonStyle, Color, Label};
 use super::syntax::Language;
 use super::tokens::{DIFF_TINT, MONO_CELL_HEIGHT, SPACE_8, SPACE_16};
 use crate::appearance::Appearance;
-use crate::backend::{DiffLineKind, Hunk};
+use crate::backend::{DiffLineKind, Hunk, WorktreeInfo};
 
 /// One row of the view.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,11 +30,25 @@ enum Row {
     },
 }
 
+/// Whether `text` is a merge conflict marker line: seven `<`, `=`, `|` or
+/// `>`, alone or before a space.
+fn is_conflict_marker(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let Some(&mark) = bytes.first() else {
+        return false;
+    };
+    let run = bytes.iter().take_while(|&&b| b == mark).count();
+    matches!(mark, b'<' | b'=' | b'|' | b'>')
+        && run == 7
+        && matches!(bytes.get(7), None | Some(b' '))
+}
+
 /// Every hunk's header and lines, highlighted as `language`. Each side of a
 /// hunk is highlighted as one text, as Zed highlights the old and the new
 /// buffer: context and added lines from the worktree side, removed lines
 /// from the base side. Mixing the two would make one side's conflict
-/// markers turn the rest of the hunk into types (V103).
+/// markers turn the rest of the hunk into types (V103). A conflict marker
+/// line is not code, so it draws in the text color (V111).
 fn layout_rows(hunks: &[Hunk], language: Language) -> Vec<Row> {
     let mut rows = Vec::new();
     for hunk in hunks {
@@ -58,6 +73,11 @@ fn layout_rows(hunks: &[Hunk], language: Language) -> Vec<Row> {
                 DiffLineKind::Added => new.next(),
                 DiffLineKind::Removed => old.next(),
             }?;
+            let line = if is_conflict_marker(&line.text) {
+                Line::plain(line.text)
+            } else {
+                line
+            };
             Some(Row::Line {
                 kind: diff.kind,
                 line,
@@ -207,6 +227,59 @@ impl Render for DiffView {
             })
             .flex_1(),
         )
+    }
+}
+
+/// A change's diff in a center tab: the worktree, `changes` and the path in
+/// the breadcrumb with Open file at its end, then the diff
+/// (`desktop-git.webp`). Tests find it as `diff-tab` and the button as
+/// `diff-open-file`.
+pub(crate) struct DiffTab {
+    parts: Vec<SharedString>,
+    diff: Entity<DiffView>,
+}
+
+impl DiffTab {
+    /// `path`'s change in `worktree`; a path without a change shows an
+    /// empty diff.
+    pub(crate) fn new(worktree: &WorktreeInfo, path: &str, cx: &mut Context<Self>) -> Self {
+        let hunks = worktree
+            .changes
+            .iter()
+            .find(|change| change.path == path)
+            .map(|change| change.hunks.clone())
+            .unwrap_or_default();
+        let language = Language::for_path(std::path::Path::new(path));
+        let diff = cx.new(|_| DiffView::new(hunks, language));
+        let parts = vec![
+            SharedString::from(worktree.handle.clone()),
+            "changes".into(),
+            SharedString::from(path.to_owned()),
+        ];
+        Self { parts, diff }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn parts(&self) -> Vec<&str> {
+        self.parts.iter().map(SharedString::as_ref).collect()
+    }
+}
+
+impl Render for DiffTab {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = &cx.global::<Appearance>().theme;
+        // shortcut: Open file does nothing until the workspace hosts the
+        // Project panel's file tabs (Task 11 and agmen-c7's wiring).
+        let crumb = Breadcrumb::new(self.parts.clone())
+            .end(Button::new("diff-open-file", "Open file").style(ButtonStyle::Plain));
+        div()
+            .debug_selector(|| "diff-tab".into())
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(theme.editor_background)
+            .child(crumb)
+            .child(div().flex_1().min_h_0().child(self.diff.clone()))
     }
 }
 

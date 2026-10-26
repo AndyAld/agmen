@@ -6,9 +6,7 @@ use gpui::{
     Styled as _, Window, div,
 };
 
-use super::breadcrumb::Breadcrumb;
-use super::components::{Button, ButtonStyle};
-use super::diff_view::DiffView;
+use super::diff_view::{DiffTab, DiffView};
 use super::git_panel::{GitPanel, GitPanelEvent, GitSection};
 use super::project_panel::{FileView, ProjectPanel, ProjectPanelEvent};
 use super::roles_panel::{RoleFileView, RolePanel, RolesPanel, RolesPanelEvent};
@@ -196,10 +194,11 @@ pub(crate) enum GitDevLayout {
 pub(crate) struct GitDev {
     worktrees: Vec<WorktreeInfo>,
     panel: Entity<GitPanel>,
-    /// The open diff's worktree handle and path.
     /// The worktree handle and path whose diff is open, if any.
     open: Option<(String, String)>,
-    diff: Entity<DiffView>,
+    tab: Option<Entity<DiffTab>>,
+    /// Shown while no diff is open.
+    empty: Entity<DiffView>,
 }
 
 impl GitDev {
@@ -231,12 +230,13 @@ impl GitDev {
             this.open(worktree, path, cx);
         })
         .detach();
-        let diff = cx.new(|_| DiffView::new(Vec::new(), Language::Plain));
+        let empty = cx.new(|_| DiffView::new(Vec::new(), Language::Plain));
         let mut this = Self {
             worktrees,
             panel,
             open: None,
-            diff,
+            tab: None,
+            empty,
         };
         if let Some((worktree, path)) = first {
             this.open(&worktree, &path, cx);
@@ -245,15 +245,11 @@ impl GitDev {
     }
 
     fn open(&mut self, worktree: &str, path: &str, cx: &mut Context<Self>) {
-        let hunks = self
+        self.tab = self
             .worktrees
             .iter()
             .find(|w| w.handle == worktree)
-            .and_then(|w| w.changes.iter().find(|c| c.path == path))
-            .map(|c| c.hunks.clone())
-            .unwrap_or_default();
-        let language = Language::for_path(std::path::Path::new(path));
-        self.diff = cx.new(|_| DiffView::new(hunks, language));
+            .map(|w| cx.new(|cx| DiffTab::new(w, path, cx)));
         self.open = Some((worktree.to_owned(), path.to_owned()));
         cx.notify();
     }
@@ -263,11 +259,10 @@ impl Render for GitDev {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = &cx.global::<Appearance>().theme;
         let rule = super::rule_color(cx);
-        let (worktree, path) = self.open.clone().unwrap_or_default();
-        // shortcut: Open file does nothing until the workspace hosts the
-        // Project panel's file tabs (Task 11 and agmen-c7's wiring).
-        let crumb = Breadcrumb::new([worktree.into(), "changes".into(), path.into()])
-            .end(Button::new("diff-open-file", "Open file").style(ButtonStyle::Filled));
+        let center: AnyView = self
+            .tab
+            .clone()
+            .map_or_else(|| self.empty.clone().into(), Into::into);
         div()
             .size_full()
             .flex()
@@ -281,16 +276,7 @@ impl Render for GitDev {
                     .border_color(rule)
                     .child(self.panel.clone()),
             )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .bg(theme.editor_background)
-                    .child(crumb)
-                    .child(div().flex_1().min_h_0().child(self.diff.clone())),
-            )
+            .child(div().flex_1().min_w_0().child(center))
             .child(
                 div()
                     .w(RIGHT_DOCK_WIDTH)

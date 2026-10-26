@@ -26,6 +26,16 @@ pub(super) struct Line {
     highlights: Vec<(Range<usize>, &'static str)>,
 }
 
+impl Line {
+    /// `text` with no highlights, drawn in the text color.
+    pub(super) const fn plain(text: SharedString) -> Self {
+        Self {
+            text,
+            highlights: Vec::new(),
+        }
+    }
+}
+
 #[cfg(test)]
 impl Line {
     /// The line's highlights, as byte ranges within it and syntax names.
