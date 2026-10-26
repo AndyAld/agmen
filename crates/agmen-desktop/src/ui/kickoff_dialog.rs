@@ -150,26 +150,20 @@ impl KickoffDialog {
 
 impl RenderOnce for KickoffDialog {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        // With no plan there is nothing to show or to give focus to.
-        if self.model.read(cx).plan().is_none() {
-            return div();
-        }
-        let focus = self.hold_focus(window, cx);
         let zone = cx
             .try_global::<LocalZone>()
             .map_or(TimeZone::UTC, |local| local.0.clone());
         let background = cx.global::<Appearance>().theme.background;
         let model = self.model.read(cx);
         let error = model.error(&ErrorSource::KickOff).cloned();
-        let (title, boxes, bullets, go) = match model.plan() {
-            Some(plan) => (
-                format!("Kick off {} (plan v{})", plan.name, plan.version),
-                owner_boxes(plan, model.me(), &zone),
-                what_happens(plan),
-                format!("Kick off {}", plan::agent_count(plan.team.len())),
-            ),
-            None => return div(),
+        // With no plan there is nothing to show or to give focus to.
+        let Some(plan) = model.plan() else {
+            return div();
         };
+        let title = format!("Kick off {} (plan v{})", plan.name, plan.version);
+        let (boxes, bullets) = (owner_boxes(plan, model.me(), &zone), what_happens(plan));
+        let go = format!("Kick off {}", plan::agent_count(plan.team.len()));
+        let focus = self.hold_focus(window, cx);
         let boxes = boxes.into_iter().map(|owner| {
             let selector = format!("kickoff:owner:{}", owner.owner);
             let (status, color) = owner.approval;
