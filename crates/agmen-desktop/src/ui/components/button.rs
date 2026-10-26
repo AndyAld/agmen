@@ -98,6 +98,7 @@ impl RenderOnce for Button {
             .flex_none()
             .items_center()
             .gap(SPACE_5);
+        let primary = self.style == ButtonStyle::Primary;
         let styled = match self.style {
             ButtonStyle::Outlined => base
                 .bg(theme.elevated_surface)
@@ -116,7 +117,7 @@ impl RenderOnce for Button {
             // These sit on a card whose fill is the hover color, so hover
             // fades the button instead of filling it.
             ButtonStyle::Primary | ButtonStyle::Secondary => base
-                .bg(if self.style == ButtonStyle::Primary {
+                .bg(if primary {
                     theme.text_accent
                 } else {
                     theme.element_selected
@@ -132,7 +133,7 @@ impl RenderOnce for Button {
                 this.cursor_pointer().on_click(handler)
             })
             .children(self.leading)
-            .child(if self.style == ButtonStyle::Primary {
+            .child(if primary {
                 label.weight(FontWeight::SEMIBOLD).color(Color::Background)
             } else {
                 label.color(Color::Default)

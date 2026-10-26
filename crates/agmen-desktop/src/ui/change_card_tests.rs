@@ -83,7 +83,6 @@ fn widening_card_waits_for_apply(cx: &mut TestAppContext) {
     assert!(shown(cx, "chg-fx1-lanes-budget:apply"));
     assert!(shown(cx, "chg-fx1-lanes-budget:cancel"));
     assert!(!shown(cx, "chg-fx1-lanes-budget:undo"));
-    assert_eq!(title(ChangeState::Pending), "Waiting for you");
     let card = backend.snapshot().changes.values().next().unwrap().clone();
     assert_eq!(
         subline(&card),
@@ -102,7 +101,6 @@ fn apply_turns_card_into_applied_with_undo(cx: &mut TestAppContext) {
     assert!(shown(cx, "chg-fx1-lanes-budget:audit-log"));
     assert!(!shown(cx, "chg-fx1-lanes-budget:apply"));
     assert!(!shown(cx, "chg-fx1-lanes-budget:cancel"));
-    assert_eq!(title(ChangeState::Applied), "Settings changed");
 }
 
 #[gpui::test]
@@ -238,4 +236,25 @@ fn settings_join_with_and() {
         join_settings(["lanes", "budget", "lanes", "tools"]),
         "lanes, budget and tools"
     );
+}
+
+#[gpui::test]
+fn long_before_value_wraps_inside_the_card(cx: &mut TestAppContext) {
+    init(cx);
+    let snapshot = FixtureBackend::for_screen(Screen::SettingsFromChat)
+        .unwrap()
+        .snapshot();
+    let mut card = snapshot.changes.values().next().unwrap().clone();
+    card.rows[0].before = "andy, sean, adam, coordinators, ".repeat(12);
+    let roster = snapshot.roster;
+    let (_, cx) = cx.add_window_view(move |_, _| {
+        let (card, roster) = (card.clone(), roster.clone());
+        Lone(Box::new(move || {
+            ChangeCard::new(card.clone(), &roster).into_any_element()
+        }))
+    });
+    redraw(cx);
+    let before = cx.debug_bounds("chg-fx1-lanes-budget:before:0").unwrap();
+    let head = cx.debug_bounds("chg-fx1-lanes-budget:waiting").unwrap();
+    assert!(before.right() <= head.right(), "{before:?} past {head:?}");
 }

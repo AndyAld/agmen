@@ -137,7 +137,7 @@ fn before_label(row: &ChangeRow, state: ChangeState) -> Label {
         .strikethrough()
 }
 
-fn row(row: &ChangeRow, target: Color, state: ChangeState) -> impl IntoElement {
+fn row(row: &ChangeRow, target: Color, state: ChangeState, before: String) -> impl IntoElement {
     // A cancelled card keeps its rows for the record, dimmed.
     let (target, after) = if state == ChangeState::Cancelled {
         (Color::Placeholder, Color::Placeholder)
@@ -156,7 +156,14 @@ fn row(row: &ChangeRow, target: Color, state: ChangeState) -> impl IntoElement {
                     .color(Color::Placeholder),
             ),
         )
-        .child(before_label(row, state))
+        .child(
+            div()
+                .debug_selector(|| before)
+                .flex()
+                .flex_initial()
+                .min_w_0()
+                .child(before_label(row, state).wrap()),
+        )
         .child(Label::new("→").size(LabelSize::Small).color(Color::Muted))
         .child(Label::new(row.after.clone()).code().color(after).wrap())
 }
@@ -193,11 +200,14 @@ impl RenderOnce for ChangeCard {
                     .size(LabelSize::Small)
                     .color(Color::Placeholder),
             );
-        let rows = card
-            .rows
-            .iter()
-            .zip(self.target_colors)
-            .map(|(change, target)| row(change, target, state));
+        let rows =
+            card.rows
+                .iter()
+                .zip(self.target_colors)
+                .enumerate()
+                .map(|(i, (change, target))| {
+                    row(change, target, state, format!("{}:before:{i}", card.id))
+                });
 
         let button = |name: &str, label: &'static str, style: ButtonStyle, action: Action| {
             let handler = self.on_action.clone();
