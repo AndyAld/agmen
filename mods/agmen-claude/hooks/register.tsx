@@ -67,6 +67,13 @@ const LANE_NAME = /^L-[A-Z0-9-]{1,40}$/
 // proto has no rule for them, so this one keeps spaces and punctuation out.
 const HANDLE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,31}(?:\/[A-Za-z0-9][A-Za-z0-9._-]{0,31})?$/
 const MAX_BODY_BYTES = 32_768
+/**
+ * check-path reasons a deny may show, beside `lane <lane> held by <handle>`
+ * (docs/plans/mvp.md, `it_check_path`). A reason of any other shape is not
+ * shown: it could carry text the model would read as instructions.
+ */
+const CHECK_PATH_PHRASES = ['unowned'] as const
+const HELD_BY = /^lane (\S+) held by (\S+)$/
 
 /** The oldest `agmen` this plugin accepts: the workspace's first version. */
 const MIN_AGMEN_VERSION = [0, 1, 0] as const
@@ -722,10 +729,24 @@ async function judgeEdit($: EngineInterface, root: string, path: string): Promis
   if (entry?.allowed === true) return undefined
   const lane = entry?.lane === null || entry?.lane === undefined ? '' : ` (${entry.lane})`
 
-  // check-path's `reason` is a field of its answer, quoted as data like a message body.
-  const reason = entry?.reason === null || entry?.reason === undefined ? 'no reason given' : JSON.stringify(quote(entry.reason))
+  return `agmen: ${path} is outside this session's lanes${lane}, ${shownReason($, entry?.reason ?? null)}. Claim the item first, or ask the lane owner.`
+}
 
-  return `agmen: ${path} is outside this session's lanes${lane}, check-path says: ${reason}. Claim the item first, or ask the lane owner.`
+/** Whether a check-path reason has a shape a deny may show (R44a): a known phrase, or a held lane with checked fields. */
+function isKnownReason(reason: string): boolean {
+  if (CHECK_PATH_PHRASES.some(phrase => phrase === reason)) return true
+  const held = HELD_BY.exec(reason)
+
+  return held !== null && matches(held[1], LANE_NAME) && matches(held[2], HANDLE)
+}
+
+/** What a deny says about check-path's reason: a known shape, quoted, or fixed text, with the raw reason in the debug log. */
+function shownReason($: EngineInterface, reason: string | null): string {
+  if (reason === null) return 'check-path gave no reason'
+  if (isKnownReason(reason)) return `check-path says: ${JSON.stringify(reason)}`
+  debug($, `check-path gave an unrecognized reason: ${quote(reason)}`)
+
+  return 'check-path gave an unrecognized reason'
 }
 
 /** Paths `git status --porcelain=v1 -z` lists, a rename by its new name, at most BASH_PATHS_MAX. */
