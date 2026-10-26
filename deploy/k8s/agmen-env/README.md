@@ -21,11 +21,12 @@ All in namespace `agmen`:
 - **`agmen-postgres`**: StatefulSet, `postgres:16.15`, 10 GiB PVC.
 - **`agmen-hub`**: Deployment, one replica, `Recreate` (two pods would share the broker client id `agmen-hub-main`). Readiness is `GET /healthz` (the database answers `SELECT 1` within 0.8 s), liveness `GET /livez`. The hub serves HTTP before it connects to EMQX and retries its first broker connect for about two minutes, so a cold start, when EMQX has not yet fetched the JWKS, settles without a crash loop.
 - **Ingress** (HAProxy, `ingressClassName: haproxy`, cert-manager `letsencrypt-prod`): `api.` goes to the hub on 8080; `mqtt-ws.` path `/mqtt` goes to EMQX 8083 with a 1 h tunnel timeout. The dashboard and REST API (18083) and plain MQTT (1883) have no ingress.
+- **NetworkPolicies** (`network-policies.yaml`): Postgres 5432 accepts only the hub and the dump pods; EMQX 1883 and 18083 accept only the hub; EMQX 8083 stays open for the ingress controller. Traffic inside the cluster is plaintext (`sslmode=disable`, plain MQTT and HTTP), so these policies are the only guard on it.
 - **`agmen-pg-dump`**: CronJob at 03:00 `America/Denver` (`.spec.timeZone` set explicitly). An init container runs `pg_dump --format=custom` with `postgres:16.15`, then `amazon/aws-cli:2.38.5` uploads it to `s3://<bucket>/postgres/agmen-<UTC time>.dump` on agmen's Ceph RGW.
 
 ## Cluster requirements
 
-The new cluster needs the HAProxy ingress controller (haproxytech, which reads the `haproxy.org/*` annotations), cert-manager with a `letsencrypt-prod` ClusterIssuer, the Vault Secrets Operator, ArgoCD, a Ceph RBD storage class and Kubernetes 1.27 or later (CronJob `timeZone`).
+The new cluster needs the HAProxy ingress controller (haproxytech, which reads the `haproxy.org/*` annotations), cert-manager with a `letsencrypt-prod` ClusterIssuer, the Vault Secrets Operator, ArgoCD, a Ceph RBD storage class, a network plugin that enforces NetworkPolicy (Calico or Cilium, for example; flannel alone ignores them) and Kubernetes 1.27 or later (CronJob `timeZone`).
 
 ## Vault
 
@@ -60,6 +61,6 @@ Set a lifecycle rule on the bucket to expire old dumps; the CronJob never delete
 
 ## Checked
 
-- `kubeconform` v0.8.0 (from its container image, `-strict`, with the CRDs-catalog schemas for VSO and ArgoCD): 23 resources, all valid.
+- `kubeconform` v0.8.0 (from its container image, `-strict`, with the CRDs-catalog schemas for VSO and ArgoCD): 25 resources, all valid.
 - `kubectl apply --dry-run=client` needs a cluster to resolve kinds, and none was configured when these were written.
 - Not checked against a live cluster: everything above, including the `haproxy.org/timeout-tunnel` annotation and VSO's handling of `excludes` with templates.
