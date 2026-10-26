@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use gpui::{AppContext as _, Entity, Focusable as _, TestAppContext, VisualTestContext};
+use gpui::{AppContext as _, Entity, Focusable as _, TestAppContext, VisualTestContext, px};
 
 use super::*;
 use crate::backend::{Draft, Snapshot, chat_snapshot};
@@ -203,8 +203,20 @@ fn picker_opens_above_the_chip(cx: &mut TestAppContext) {
     click(cx, "composer:model");
     let picker = cx.debug_bounds("model-picker").expect("the picker");
     let chip = cx.debug_bounds("composer:model").expect("the chip");
-    assert!(picker.bottom() <= chip.top(), "{picker:?} over {chip:?}");
-    assert_eq!(picker.left(), chip.left());
+    // Node 3355 sits 43 px left of the chip (node 3349) and ends 31 px
+    // above its top, 22 px clear of the composer box's top border.
+    assert_eq!(
+        picker.left(),
+        chip.left() - px(43.),
+        "{picker:?} by {chip:?}"
+    );
+    // The picker's height is a fractional 442.5 px at the mockup's rem, and
+    // GPUI rounds its origin to a whole pixel.
+    let rise = chip.top() - picker.bottom();
+    assert!(
+        (rise - px(31.)).abs() <= px(0.5),
+        "{picker:?} over {chip:?}"
+    );
 }
 
 #[gpui::test]
