@@ -630,3 +630,26 @@ fn page_list_rule_is_drawn_in_the_chrome_rule_color(cx: &mut TestAppContext) {
         .expect("the page list draws a right rule");
     assert_eq!(rule.border_color, theme.border_variant);
 }
+
+#[gpui::test]
+fn theme_hint_keeps_the_themes_path_on_one_line(cx: &mut TestAppContext) {
+    // V131: gpui's wrapper breaks before any '/', so the path drew as
+    // "~/.config/zed" then "/themes, ...". Each hint word is its own flex
+    // item (as KvRow's values), so lines break only at spaces.
+    let home = Home::new();
+    let (_, cx) = open_at_mockup_rem(cx, &home);
+    let words: Vec<&str> = THEME_HINT.split_whitespace().collect();
+    let ix = words
+        .iter()
+        .position(|w| w.starts_with("~/.config/zed/themes"))
+        .expect("the hint names Zed's themes folder");
+    let selector: &'static str = Box::leak(format!("setting-hint:Theme:{ix}").into_boxed_str());
+    let path = height(cx, selector);
+    assert!(
+        (path - AUTO_LINE_11.as_f32()).abs() < 0.01,
+        "the path draws on one 13 px line, not {path}"
+    );
+    let last: &'static str =
+        Box::leak(format!("setting-hint:Theme:{}", words.len() - 1).into_boxed_str());
+    assert!(cx.debug_bounds(last).is_some(), "every word is drawn");
+}
