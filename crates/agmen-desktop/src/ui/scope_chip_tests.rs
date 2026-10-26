@@ -130,3 +130,18 @@ fn menu_rows_hover_as_menu_rows(cx: &mut TestAppContext) {
     click(cx, "scope-chip");
     crate::ui::test_support::assert_menu_row_hover(cx, "scope-chip:0", "scope-chip:1");
 }
+
+#[gpui::test]
+fn escape_closes_the_open_menu(cx: &mut TestAppContext) {
+    // C272: as Dropdown and the switch menu, Escape closes the open menu.
+    init(cx);
+    let s = chat_snapshot();
+    let options = ScopeOption::for_worktrees(&s.worktrees, &s.agents);
+    let (_, cx) = cx.add_window_view(|_, _| ScopeChip::new(options));
+    redraw(cx);
+    click(cx, "scope-chip");
+    assert!(cx.debug_bounds("scope-chip:menu").is_some());
+    cx.simulate_keystrokes("escape");
+    redraw(cx);
+    assert!(cx.debug_bounds("scope-chip:menu").is_none());
+}
