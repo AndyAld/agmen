@@ -208,12 +208,7 @@ impl FixtureBackend {
     fn spawn_worker(&self, agent: &str) -> Result<(), BackendError> {
         let added = {
             let mut snapshot = self.state.borrow_mut();
-            let delegated = snapshot
-                .messages
-                .iter()
-                .filter(|m| matches!(m.client.payload, agmen_proto::Payload::Delegated { .. }))
-                .count();
-            let worker = format!("andy/fx{}", delegated + 1);
+            let worker = free_worker_handle(&snapshot)?;
             let added = stamp(spawn_exchange(agent, &worker), snapshot.messages.len() + 1)?;
             snapshot.messages.extend(added.iter().cloned());
             added
@@ -348,6 +343,37 @@ impl Backend for FixtureBackend {
         self.subscribers.borrow_mut().push(tx);
         rx
     }
+}
+
+/// The most workers one fixture session can spawn.
+const MAX_SPAWNED: usize = 99;
+
+/// The first `andy/fxN` no worker in the roster, the agents, the sessions
+/// or a DELEGATED already has.
+fn free_worker_handle(snapshot: &Snapshot) -> Result<String, BackendError> {
+    let roster = snapshot
+        .roster
+        .iter()
+        .flat_map(|group| group.agents.iter().map(|agent| &agent.id));
+    let delegated = snapshot
+        .messages
+        .iter()
+        .filter_map(|m| match &m.client.payload {
+            agmen_proto::Payload::Delegated { worker, .. } => Some(worker),
+            _ => None,
+        });
+    let taken: std::collections::BTreeSet<_> = roster
+        .chain(snapshot.agents.keys())
+        .chain(snapshot.sessions.keys())
+        .chain(delegated)
+        .collect();
+    for n in 1..=MAX_SPAWNED {
+        let handle = format!("andy/fx{n}");
+        if !taken.contains(&id(&handle)?) {
+            return Ok(handle);
+        }
+    }
+    Err(BackendError::Unsupported("more spawned workers than the fixture holds"))
 }
 
 // Task 15: the ask and model picker screens, and answers to questions.
