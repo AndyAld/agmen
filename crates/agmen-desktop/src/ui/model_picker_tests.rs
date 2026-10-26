@@ -1,7 +1,10 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use gpui::{AppContext as _, Entity, Focusable as _, TestAppContext, VisualTestContext, px};
+use gpui::{
+    AppContext as _, Entity, Focusable as _, Modifiers, MouseButton, TestAppContext,
+    VisualTestContext, px,
+};
 
 use super::*;
 use crate::backend::{Draft, Snapshot, chat_snapshot};
@@ -449,4 +452,88 @@ fn the_picker_lists_only_installed_agents() {
         "{missing:?}"
     );
     assert_eq!(missing.len(), outdated.len() - 1);
+}
+
+/// C283: a composer replying to adam/coord's alert, its picker open on
+/// claude with an effort level pressed and the pointer released off it, so
+/// the level took focus and no click picked it.
+fn effort_pressed_and_dragged_off(
+    cx: &mut TestAppContext,
+) -> (Entity<Composer>, Sent, &mut VisualTestContext) {
+    let (composer, sent, cx) = open_composer(cx);
+    let coord = chat_snapshot()
+        .roster
+        .iter()
+        .flat_map(|g| &g.agents)
+        .find(|a| a.handle == "adam/coord")
+        .map(|a| crate::ui::composer::Target {
+            id: a.id.clone(),
+            handle: a.handle.clone(),
+        })
+        .unwrap();
+    let alert = "01JD0000000000000000000010".parse().unwrap();
+    composer.update_in(cx, |composer, window, cx| {
+        composer.reply(coord, alert, window, cx);
+    });
+    click(cx, "composer:model");
+    click(cx, "model-picker:claude:opus");
+    click(cx, "composer:model");
+    let level = cx.debug_bounds("model-picker:effort-level:1").unwrap();
+    let head = cx.debug_bounds("model-picker:head").unwrap();
+    cx.simulate_mouse_down(level.center(), MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(head.center(), MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_up(head.center(), MouseButton::Left, Modifiers::none());
+    redraw(cx);
+    assert!(
+        cx.debug_bounds("model-picker").is_some(),
+        "no click closed it"
+    );
+    let input_focused = composer.update_in(cx, |composer, window, cx| {
+        composer.focus_handle(cx).is_focused(window)
+    });
+    assert!(!input_focused, "the pressed level holds focus");
+    (composer, sent, cx)
+}
+
+/// After the picker closed: Escape still ends the reply, and typing still
+/// reaches the input.
+fn assert_escape_and_typing_reach_the_composer(sent: &Sent, cx: &mut VisualTestContext) {
+    redraw(cx);
+    assert!(cx.debug_bounds("model-picker").is_none());
+    cx.simulate_keystrokes("escape");
+    send(cx, "hi");
+    let sent: Vec<_> = sent
+        .borrow()
+        .iter()
+        .map(|d| (d.body.clone(), d.reply_to.clone()))
+        .collect();
+    assert_eq!(sent, [("hi".to_owned(), None)]);
+}
+
+#[gpui::test]
+fn escape_from_a_pressed_effort_level_gives_focus_back(cx: &mut TestAppContext) {
+    let (_, sent, cx) = effort_pressed_and_dragged_off(cx);
+    cx.simulate_keystrokes("escape");
+    assert_escape_and_typing_reach_the_composer(&sent, cx);
+}
+
+#[gpui::test]
+fn mouse_down_outside_a_pressed_effort_level_gives_focus_back(cx: &mut TestAppContext) {
+    let (_, sent, cx) = effort_pressed_and_dragged_off(cx);
+    let outside = gpui::point(px(1.), px(1.));
+    assert!(!cx.debug_bounds("model-picker").unwrap().contains(&outside));
+    cx.simulate_mouse_down(outside, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_up(outside, MouseButton::Left, Modifiers::none());
+    assert_escape_and_typing_reach_the_composer(&sent, cx);
+}
+
+#[gpui::test]
+fn hiding_the_chip_under_a_pressed_effort_level_gives_focus_back(cx: &mut TestAppContext) {
+    // C282 closes the picker when its chip hides in a narrow composer.
+    let (_, sent, cx) = effort_pressed_and_dragged_off(cx);
+    let height = cx.update(|window, _| window.bounds().size.height);
+    cx.simulate_resize(gpui::size(px(200.), height));
+    redraw(cx);
+    assert!(cx.debug_bounds("composer:model").is_none());
+    assert_escape_and_typing_reach_the_composer(&sent, cx);
 }

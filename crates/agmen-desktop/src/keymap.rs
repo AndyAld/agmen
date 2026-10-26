@@ -124,6 +124,9 @@ pub(crate) const SWITCH_MENU_CONTEXT: &str = "SwitchMenu";
 pub(crate) const AGENT_DIALOG_CONTEXT: &str = "AgentDialog";
 /// The key context the chat's composer sets.
 pub(crate) const COMPOSER_CONTEXT: &str = "Composer";
+/// The key context the composer's model picker sets. No key binds it; the
+/// composer reads it to tell whether focus is inside the picker (C283).
+pub(crate) const MODEL_PICKER_CONTEXT: &str = "ModelPicker";
 /// The workspace outside any text input, for keys that type a character on
 /// a Mac layout. gpui on macOS runs a matched binding before text input, so
 /// a binding there would keep the character from ever being typed.

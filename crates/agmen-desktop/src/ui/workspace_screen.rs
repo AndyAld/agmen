@@ -213,8 +213,7 @@ impl Workspace {
         }
         // Task 15: the frame shows the composer's model picker open.
         if state.model_picker {
-            self.chat
-                .update(cx, |chat, cx| chat.set_model_picker_open(true, cx));
+            self.chat.update(cx, |chat, cx| chat.open_model_picker(cx));
         }
         // Task 19: the kick-off frame shows the confirm dialog.
         if state.kickoff {

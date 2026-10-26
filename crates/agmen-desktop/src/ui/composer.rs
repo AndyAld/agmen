@@ -336,14 +336,35 @@ impl Composer {
         }
     }
 
-    /// Opens or closes the model picker.
-    pub(crate) fn set_model_picker_open(&mut self, open: bool, cx: &mut Context<Self>) {
+    /// Opens the model picker.
+    pub(crate) fn open_model_picker(&mut self, cx: &mut Context<Self>) {
         if let Some(models) = &mut self.models
-            && models.is_open() != open
+            && !models.is_open()
         {
-            models.set_open(open);
-            if open {
-                cx.emit(ComposerEvent::PickModel);
+            models.set_open(true);
+            cx.emit(ComposerEvent::PickModel);
+            cx.notify();
+        }
+    }
+
+    /// Closes the model picker. Every close comes here: an effort level
+    /// takes focus on mouse down (Tab reaches it too) and its focus goes
+    /// with the picker, so focus inside the picker goes back to the input,
+    /// or Escape would no longer reach the composer and typing would go
+    /// nowhere (C283).
+    fn close_model_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(models) = &mut self.models
+            && models.is_open()
+        {
+            // The last frame still drew the picker, so its context is on
+            // the focused element's path while focus is inside it.
+            let focus_inside = window
+                .context_stack()
+                .iter()
+                .any(|context| context.contains(crate::keymap::MODEL_PICKER_CONTEXT));
+            models.set_open(false);
+            if focus_inside {
+                self.input.focus_handle(cx).focus(window, cx);
             }
             cx.notify();
         }
@@ -352,13 +373,10 @@ impl Composer {
     fn on_pick(&mut self, event: &PickerEvent, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(models) = &mut self.models {
             models.apply(event);
-            if event.closes() {
-                models.set_open(false);
-                // A click on an effort level focuses it; typing goes back
-                // to the input.
-                self.input.focus_handle(cx).focus(window, cx);
-            }
             cx.notify();
+            if event.closes() {
+                self.close_model_picker(window, cx);
+            }
         }
     }
 
@@ -395,9 +413,10 @@ impl Composer {
                     .snap_to_window()
                     .child(
                         div()
-                            .on_mouse_down_out(move |_, _, cx| {
+                            .key_context(crate::keymap::MODEL_PICKER_CONTEXT)
+                            .on_mouse_down_out(move |_, window, cx| {
                                 on_close
-                                    .update(cx, |this, cx| this.set_model_picker_open(false, cx))
+                                    .update(cx, |this, cx| this.close_model_picker(window, cx))
                                     .unwrap_or_default();
                             })
                             .child(picker),
@@ -419,7 +438,7 @@ impl Composer {
                 // a click here too would reopen it on mouse up.
                 .when(!open, |this| {
                     this.on_click(cx.listener(|this, _, _, cx| {
-                        this.set_model_picker_open(true, cx);
+                        this.open_model_picker(cx);
                     }))
                 })
                 .child(
@@ -467,11 +486,8 @@ impl Render for Composer {
             self.model_chip(floors.model, cx)
         } else {
             // C282: the picker hangs off the chip, so it closes with it;
-            // an open picker nobody sees would take the next Escape. This
-            // render already draws the change, so nothing needs a notify.
-            if let Some(models) = &mut self.models {
-                models.set_open(false);
-            }
+            // an open picker nobody sees would take the next Escape.
+            self.close_model_picker(window, cx);
             None
         };
         let theme = &cx.global::<Appearance>().theme;
@@ -526,9 +542,9 @@ impl Render for Composer {
             // goes no further (C87, C113), else ends a reply; src/keymap.rs
             // binds it.
             .key_context(crate::keymap::COMPOSER_CONTEXT)
-            .on_action(cx.listener(|this, _: &Dismiss, _, cx| {
+            .on_action(cx.listener(|this, _: &Dismiss, window, cx| {
                 if this.models.as_ref().is_some_and(ModelMenu::is_open) {
-                    this.set_model_picker_open(false, cx);
+                    this.close_model_picker(window, cx);
                 } else if this.reply.is_some() {
                     this.cancel_reply(cx);
                 } else {

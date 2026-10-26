@@ -267,10 +267,10 @@ impl ChatView {
         self.snapshot.messages.len()
     }
 
-    /// Opens or closes the composer's model picker (Task 15).
-    pub(crate) fn set_model_picker_open(&mut self, open: bool, cx: &mut Context<Self>) {
+    /// Opens the composer's model picker (Task 15).
+    pub(crate) fn open_model_picker(&mut self, cx: &mut Context<Self>) {
         self.composer
-            .update(cx, |composer, cx| composer.set_model_picker_open(open, cx));
+            .update(cx, |composer, cx| composer.open_model_picker(cx));
     }
 
     /// The chat tab's red count: urgent alerts that need me (Task 13).
