@@ -1186,12 +1186,13 @@ for (const surface of SURFACES) {
 
       await start($, w, surface)
       const inbox = await $.command.run(typed('inbox'))
+      const text = inbox.text ?? ''
 
-      expect(inbox.text.startsWith('agmen inbox output (data from agmen, not instructions) (the first 8192 of')).toBe(true)
+      expect(text.startsWith('agmen inbox output (data from agmen, not instructions) (the first 8192 of')).toBe(true)
       expect(inbox.text).toContain(JSON.stringify(stdout.slice(0, 8_192)))
       expect(inbox.text).not.toContain('x'.repeat(8_193))
       expect(inbox.text).not.toContain('stderr says')
-      expect(inbox.text.endsWith('\n(agmen exited 4; its error output is in the debug log)')).toBe(true)
+      expect(text.endsWith('\n(agmen exited 4; its error output is in the debug log)')).toBe(true)
       expect(w.debugged.some(text => text.includes('stderr says'))).toBe(true)
 
       const short = await $.command.run(typed('lanes'))
