@@ -21,6 +21,12 @@ impl SectionHeading {
             title: title.to_uppercase().into(),
         }
     }
+
+    /// The text as drawn.
+    #[cfg(test)]
+    pub(crate) fn title(&self) -> &str {
+        &self.title
+    }
 }
 
 impl RenderOnce for SectionHeading {

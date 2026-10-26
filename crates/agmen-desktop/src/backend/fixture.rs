@@ -74,7 +74,8 @@ fn base(project: &str) -> Result<Snapshot, BackendError> {
         roles,
         worktrees: worktrees()?,
         take_overs: BTreeMap::new(),
-        installed_agents: super::take_over::installed_agents(),
+        installed_agents: super::fixture_take_over::installed_agents(),
+        agent_scans: 0,
     })
 }
 
@@ -179,7 +180,7 @@ impl FixtureBackend {
             // Task 14 (V66): fx1 taken over; on chat-codex, switched to codex.
             Screen::ChatTerminal | Screen::SwitchAgent | Screen::AddAgent | Screen::ChatCodex => {
                 let s = with_messages("pr-3331", chat_messages())?;
-                super::take_over::fx1_taken_over(s, screen == Screen::ChatCodex)?
+                super::fixture_take_over::fx1_taken_over(s, screen == Screen::ChatCodex)?
             }
             Screen::Chat
             | Screen::Agent
@@ -285,7 +286,7 @@ impl Backend for FixtureBackend {
             | Action::HandBack(_)
             | Action::SwitchAgent { .. }
             | Action::ScanAgents => {
-                super::take_over::act(&mut self.state.borrow_mut(), action)?;
+                super::fixture_take_over::act(&mut self.state.borrow_mut(), action)?;
                 self.publish(&Update::Snapshot(Box::new(self.snapshot())));
                 Ok(())
             }

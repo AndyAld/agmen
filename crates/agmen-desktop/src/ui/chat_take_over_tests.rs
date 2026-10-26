@@ -220,3 +220,72 @@ fn check_again_says_the_agent_is_still_missing(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("add-agent:note").is_some());
     assert!(cx.debug_bounds("add-agent").is_some());
 }
+
+#[gpui::test]
+fn open_in_terminal_shows_a_hidden_terminal_again(cx: &mut TestAppContext) {
+    // Review: ctrl-` hid it, then fx1's Open in terminal must bring it back.
+    let (chat, _backend, cx) = open(cx, Screen::ChatTerminal);
+    chat.update_in(cx, |chat, window, cx| chat.toggle_terminal(window, cx));
+    settle(cx);
+    assert!(cx.debug_bounds("terminal").is_none());
+    chat.update(cx, |chat, cx| {
+        chat.take_over_agent(fixture_id("andy/fx1"), cx);
+    });
+    settle(cx);
+    assert!(cx.debug_bounds("terminal").is_some());
+    let view = chat
+        .read_with(cx, |chat, _| chat.terminal().cloned())
+        .unwrap();
+    assert!(cx.update(|window, cx| view.focus_handle(cx).is_focused(window)));
+}
+
+/// The chat filling a window of any size.
+struct FullHost(Entity<ChatView>);
+
+impl Render for FullHost {
+    fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        window.set_rem_size(MOCKUP_REM);
+        div().size_full().flex().flex_col().child(self.0.clone())
+    }
+}
+
+#[gpui::test]
+fn the_menu_never_covers_the_chip_in_a_short_window(cx: &mut TestAppContext) {
+    // Fix 27 in a window with room for the menu on neither side: the menu
+    // is cut to its side's room instead of snapped over the chip.
+    init(cx);
+    cx.update(bind_keys);
+    let backend = Rc::new(FixtureBackend::for_screen(Screen::ChatTerminal).unwrap());
+    let handle: Rc<dyn Backend> = backend.clone();
+    cx.update(|cx| cx.set_global(BackendHandle(handle)));
+    let snapshot = backend.snapshot();
+    let (_host, cx) =
+        cx.add_window_view(|window, cx| FullHost(cx.new(|cx| ChatView::new(snapshot, window, cx))));
+    let viewport = gpui::size(px(1000.), px(300.));
+    cx.simulate_resize(viewport);
+    settle(cx);
+    click(cx, "terminal:agent");
+    settle(cx);
+    redraw(cx);
+    let chip = cx.debug_bounds("terminal:agent").unwrap();
+    let menu = cx.debug_bounds("switch-menu").expect("the menu opens");
+    assert!(!menu.intersects(&chip), "fix 27: {menu:?} covers {chip:?}");
+    assert!(
+        menu.bottom() <= viewport.height,
+        "{menu:?} leaves the window"
+    );
+}
+
+#[gpui::test]
+fn check_again_says_why_the_scan_failed(cx: &mut TestAppContext) {
+    // Review: a failed ScanAgents ends the check with its error.
+    let (_chat, _backend, cx) = open(cx, Screen::ChatTerminal);
+    click(cx, "terminal:agent");
+    settle(cx);
+    click(cx, "switch-menu:grok:add");
+    settle(cx);
+    cx.update(|_, cx| cx.remove_global::<BackendHandle>());
+    click(cx, "add-agent:check");
+    settle(cx);
+    assert!(cx.debug_bounds("add-agent:note").is_some());
+}

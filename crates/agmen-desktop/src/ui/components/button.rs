@@ -3,16 +3,16 @@
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, ClickEvent, ElementId, FontWeight, InteractiveElement as _, IntoElement,
+    AnyElement, App, ClickEvent, ElementId, FontWeight, Hsla, InteractiveElement as _, IntoElement,
     ParentElement as _, RenderOnce, SharedString, StatefulInteractiveElement as _, Styled as _,
     Window, div,
 };
 
 use super::{ClickHandler, Color, Label, LabelSize};
-use crate::appearance::Appearance;
+use crate::appearance::{Appearance, Theme};
 use crate::ui::tokens::{
     BORDER_WIDTH, BUTTON_HOVER_OPACITY, BUTTON_TINT, RADIUS_CARD, RADIUS_MD, RADIUS_SM, SPACE_1,
-    SPACE_2, SPACE_3, SPACE_5, SPACE_6, SPACE_7, SPACE_8, SPACE_9, SPACE_10, SPACE_12,
+    SPACE_2, SPACE_3, SPACE_4, SPACE_5, SPACE_6, SPACE_7, SPACE_8, SPACE_9, SPACE_10, SPACE_12,
     TINT_SELECTED, tint,
 };
 
@@ -35,6 +35,8 @@ pub(crate) enum ButtonStyle {
     Secondary,
     /// Surface fill, as the breadcrumb's "Show ledger" (node 135).
     Subtle,
+    /// Background fill with a border, as a dialog's Cancel (node 2443).
+    Inset,
 }
 
 /// How big the button is drawn; its style keeps its fill and border.
@@ -46,9 +48,23 @@ pub(crate) enum ButtonSize {
     /// Padding 2 by 8 and radius 4, as the take-over terminal's Open as tab
     /// and the switch menu's Update… (nodes 1143, 1833).
     Compact,
+    /// Padding 4 by 10 and 6 between its parts, as the add agent dialog's
+    /// Copy prompt (node 2435).
+    Medium,
     /// Padding 6 by 12, radius 6 and body text, as a dialog's Cancel and
     /// Check again (nodes 2443, 2445).
     Large,
+}
+
+/// The fill `style` draws in `theme`, before hover and selection.
+fn fill(style: ButtonStyle, theme: &Theme) -> Hsla {
+    match style {
+        ButtonStyle::Outlined | ButtonStyle::Plain | ButtonStyle::Subtle => theme.elevated_surface,
+        ButtonStyle::Filled | ButtonStyle::Secondary => theme.element_selected,
+        ButtonStyle::Primary => theme.text_accent,
+        ButtonStyle::Tinted => theme.text_accent.opacity(BUTTON_TINT),
+        ButtonStyle::Inset => theme.background,
+    }
 }
 
 #[derive(IntoElement)]
@@ -157,9 +173,9 @@ impl RenderOnce for Button {
             .gap(SPACE_5);
         let primary = self.style == ButtonStyle::Primary;
         let selected = self.selected && !primary;
+        let base = base.bg(fill(self.style, theme));
         let styled = match self.style {
-            ButtonStyle::Outlined => base
-                .bg(theme.elevated_surface)
+            ButtonStyle::Outlined | ButtonStyle::Inset => base
                 .border(BORDER_WIDTH)
                 .border_color(theme.border)
                 .rounded(RADIUS_MD)
@@ -167,17 +183,11 @@ impl RenderOnce for Button {
                 .px(SPACE_10)
                 .hover(move |style| style.bg(hover)),
             ButtonStyle::Filled => base
-                .bg(theme.element_selected)
                 .rounded(RADIUS_SM)
                 .py(SPACE_1)
                 .px(SPACE_7)
                 .hover(move |style| style.bg(hover)),
             ButtonStyle::Tinted | ButtonStyle::Plain => base
-                .bg(if self.style == ButtonStyle::Tinted {
-                    theme.text_accent.opacity(BUTTON_TINT)
-                } else {
-                    theme.elevated_surface
-                })
                 .rounded(RADIUS_MD)
                 .py(SPACE_3)
                 .px(SPACE_9)
@@ -185,17 +195,11 @@ impl RenderOnce for Button {
             // These sit on a card whose fill is the hover color, so hover
             // fades the button instead of filling it.
             ButtonStyle::Primary | ButtonStyle::Secondary => base
-                .bg(if primary {
-                    theme.text_accent
-                } else {
-                    theme.element_selected
-                })
                 .rounded(RADIUS_MD)
                 .py(SPACE_3)
                 .px(SPACE_9)
                 .hover(|style| style.opacity(BUTTON_HOVER_OPACITY)),
             ButtonStyle::Subtle => base
-                .bg(theme.elevated_surface)
                 .rounded(RADIUS_MD)
                 .py(SPACE_3)
                 .px(SPACE_9)
@@ -217,6 +221,10 @@ impl RenderOnce for Button {
                     .gap(SPACE_5),
                 LabelSize::Small,
             ),
+            ButtonSize::Medium => (
+                styled.py(SPACE_4).px(SPACE_10).gap(SPACE_6),
+                LabelSize::Small,
+            ),
             ButtonSize::Large => (
                 styled.py(SPACE_6).px(SPACE_12).rounded(RADIUS_CARD),
                 LabelSize::Default,
@@ -236,6 +244,7 @@ impl RenderOnce for Button {
                     ButtonStyle::Tinted => label.color(Color::Accent),
                     _ if selected => label.color(Color::Accent),
                     ButtonStyle::Outlined
+                    | ButtonStyle::Inset
                     | ButtonStyle::Filled
                     | ButtonStyle::Plain
                     | ButtonStyle::Secondary
@@ -378,5 +387,50 @@ mod tests {
         });
         assert_eq!(primary.height, secondary.height);
         assert!(primary.width > px(0.));
+    }
+
+    // Task 14 review: Copy prompt pads 4 by 10 (node 2435).
+    #[gpui::test]
+    fn medium_button_pads_four_by_ten(cx: &mut TestAppContext) {
+        let button = rendered_size(cx, || {
+            Button::new("copy", "Copy prompt")
+                .style(ButtonStyle::Secondary)
+                .size(ButtonSize::Medium)
+                .into_any_element()
+        });
+        let mut cx2 = TestAppContext::single();
+        let text = rendered_size(&mut cx2, || {
+            Label::new("Copy prompt")
+                .size(LabelSize::Small)
+                .into_any_element()
+        });
+        assert_eq!(button.width - text.width, px(20.));
+        assert_eq!(button.height - text.height, px(8.));
+    }
+
+    // Task 14 review: a dialog's Cancel (node 2443) is outlined on the
+    // background fill, the same size as Outlined.
+    #[gpui::test]
+    fn inset_button_keeps_the_outlined_size(cx: &mut TestAppContext) {
+        let outlined = rendered_size(cx, || {
+            Button::new("a", "Cancel")
+                .size(ButtonSize::Large)
+                .into_any_element()
+        });
+        let mut cx2 = TestAppContext::single();
+        let inset = rendered_size(&mut cx2, || {
+            Button::new("b", "Cancel")
+                .style(ButtonStyle::Inset)
+                .size(ButtonSize::Large)
+                .into_any_element()
+        });
+        assert_eq!(outlined, inset);
+    }
+
+    #[test]
+    fn inset_fills_with_the_background() {
+        let theme = Appearance::builtin().theme;
+        assert_eq!(fill(ButtonStyle::Inset, &theme), theme.background);
+        assert_eq!(fill(ButtonStyle::Outlined, &theme), theme.elevated_surface);
     }
 }

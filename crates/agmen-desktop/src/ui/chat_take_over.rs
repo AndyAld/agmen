@@ -60,13 +60,21 @@ impl ChatView {
             self.take_over.hidden = false;
             return;
         };
-        let Some(take_over) = snapshot.take_overs.get(&worker).cloned() else {
-            return;
-        };
-        let agents = snapshot.installed_agents.clone();
         if fresh.is_some() {
             self.take_over.hidden = false;
         }
+        self.show_terminal_of(worker, cx);
+    }
+
+    /// Shows `worker`'s take-over terminal, made fresh or with the
+    /// snapshot's latest state; with `worker` not taken over it does
+    /// nothing.
+    fn show_terminal_of(&mut self, worker: IdentityId, cx: &mut Context<Self>) {
+        let snapshot = self.snapshot.clone();
+        let Some(take_over) = snapshot.take_overs.get(&worker).cloned() else {
+            return;
+        };
+        let (agents, scans) = (snapshot.installed_agents.clone(), snapshot.agent_scans);
         let current = self
             .take_over
             .terminal
@@ -74,7 +82,7 @@ impl ChatView {
             .filter(|view| view.read(cx).worker() == &worker)
             .cloned();
         if let Some(view) = current {
-            view.update(cx, |view, cx| view.set_state(take_over, agents, cx));
+            view.update(cx, |view, cx| view.set_state(take_over, agents, scans, cx));
             return;
         }
         let row = snapshot
@@ -84,10 +92,16 @@ impl ChatView {
             .find(|agent| agent.id == worker);
         let handle = row.map_or_else(|| worker.to_string(), |row| row.handle.clone());
         let role = row.map_or_else(String::new, |row| row.role.clone());
-        let view = cx.new(|cx| TerminalView::new(worker, handle, role, take_over, agents, cx));
-        self.take_over._events = Some(cx.subscribe(&view, |chat, _, event, cx| {
+        let view =
+            cx.new(|cx| TerminalView::new(worker, handle, role, take_over, agents, scans, cx));
+        self.take_over._events = Some(cx.subscribe(&view, |chat, view, event, cx| {
             let TerminalEvent::Act(action) = event;
             chat.act(action.clone(), cx);
+            // `act` keeps only this action's error, so a failed scan ends
+            // the dialog's Check again with it.
+            if let (Action::ScanAgents, Some(error)) = (action, chat.error.clone()) {
+                view.update(cx, |view, cx| view.scan_failed(error, cx));
+            }
         }));
         self.take_over.terminal = Some(view);
     }
@@ -98,8 +112,19 @@ impl ChatView {
     }
 
     /// Takes over `agent`'s session: the agent view's Open in terminal.
+    /// Already taken over, its terminal shows again, even after ctrl-` hid
+    /// it, and takes the keyboard.
     pub(crate) fn take_over_agent(&mut self, agent: IdentityId, cx: &mut Context<Self>) {
-        self.act(Action::TakeOver(agent), cx);
+        if !self.snapshot.take_overs.contains_key(&agent) {
+            self.act(Action::TakeOver(agent), cx);
+            return;
+        }
+        self.take_over.hidden = false;
+        self.show_terminal_of(agent, cx);
+        if let Some(view) = &self.take_over.terminal {
+            view.update(cx, |view, _| view.request_focus());
+        }
+        cx.notify();
     }
 
     /// Opens the terminal's menu or a dialog over it; with nothing taken

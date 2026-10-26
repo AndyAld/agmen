@@ -355,11 +355,13 @@ pub(crate) struct StatusSummary {
     pub(crate) spend_today_usd: f64,
 }
 
-// Task 14: take-over in the chat and the terminal agents on this machine.
+// Task 14: take-over in the chat and the terminal agents on this machine;
+// the fixture's side of it in its own module.
+mod fixture_take_over;
 mod take_over;
 pub(crate) use take_over::{
-    AgentFound, InstalledAgent, SessionStart, TakeOver, TermCell, TermColor, TerminalScreen,
-    can_take_over,
+    AgentFound, AgentSource, InstalledAgent, SessionStart, TakeOver, TermCell, TermColor,
+    TerminalScreen, can_take_over,
 };
 
 /// Everything the window shows at one moment.
@@ -393,6 +395,9 @@ pub(crate) struct Snapshot {
     pub(crate) take_overs: BTreeMap<IdentityId, TakeOver>,
     /// Task 14: the terminal agents agmend looked for on this machine.
     pub(crate) installed_agents: Vec<InstalledAgent>,
+    /// Task 14: how many agent scans agmend has finished, so Check again
+    /// knows its scan's result from any other update.
+    pub(crate) agent_scans: u64,
 }
 
 /// One row of an agent's session, as the agent view shows it.

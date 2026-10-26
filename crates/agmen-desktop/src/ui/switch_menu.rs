@@ -10,7 +10,8 @@ use std::rc::Rc;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     Anchor, App, Bounds, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
-    Pixels, Point, RenderOnce, SharedString, Size, Styled as _, Window, div, point,
+    Pixels, Point, RenderOnce, SharedString, Size, StatefulInteractiveElement as _, Styled as _,
+    Window, div, point,
 };
 
 use super::add_agent_dialog::AgentDialog;
@@ -58,14 +59,19 @@ pub(crate) struct Placement {
     pub(crate) position: Point<Pixels>,
     /// The menu's corner at `position`.
     pub(crate) anchor: Anchor,
+    /// The room on the chosen side; a taller menu is cut to it and its
+    /// list scrolls.
+    pub(crate) max_height: Pixels,
 }
 
 /// The menu's place for the agent `chip` in the terminal `head`: its top
 /// at the head's bottom when the menu fits above `area`'s bottom, else its
-/// bottom at the head's top; when neither fits, the roomier side. Either
-/// way it never covers the chip (mockup fix 27), which gpui's own anchor
-/// flip would, since it flips around one point. Its left edge is the
-/// chip's, moved left as far as it must to stay in `area`.
+/// bottom at the head's top; when neither fits, the roomier side, with
+/// `max_height` cutting the menu to that side's room. Either way it never
+/// covers the chip (mockup fix 27), which gpui's own anchor flip would,
+/// since it flips around one point, and which gpui's snap into the window
+/// would for a menu taller than its room. Its left edge is the chip's,
+/// moved left as far as it must to stay in `area`.
 #[must_use]
 pub(crate) fn place_menu(
     chip: Bounds<Pixels>,
@@ -80,11 +86,13 @@ pub(crate) fn place_menu(
         Placement {
             position: point(x, head.bottom()),
             anchor: Anchor::TopLeft,
+            max_height: below.max(Pixels::ZERO),
         }
     } else {
         Placement {
             position: point(x, head.top()),
             anchor: Anchor::BottomLeft,
+            max_height: above.max(Pixels::ZERO),
         }
     }
 }
@@ -100,6 +108,7 @@ pub(crate) struct SwitchMenu {
     handle: SharedString,
     on_switch: Option<ChangeHandler<String>>,
     on_dialog: Option<ChangeHandler<AgentDialog>>,
+    max_height: Option<Pixels>,
 }
 
 impl std::fmt::Debug for SwitchMenu {
@@ -125,7 +134,16 @@ impl SwitchMenu {
             handle: handle.into(),
             on_switch: None,
             on_dialog: None,
+            max_height: None,
         }
+    }
+
+    /// Cuts the menu to `height`; its list of agents scrolls in what is
+    /// left between the heading and the foot.
+    #[must_use]
+    pub(crate) const fn max_height(mut self, height: Pixels) -> Self {
+        self.max_height = Some(height);
+        self
     }
 
     /// Called with the agent of a row clicked to switch to; never the
@@ -277,9 +295,11 @@ impl RenderOnce for SwitchMenu {
             .gap_0()
             .overflow_hidden()
             .shadow_lg()
+            .when_some(self.max_height, gpui::Styled::max_h)
             .child(
                 div()
                     .w_full()
+                    .flex_none()
                     .py(SPACE_8)
                     .px(SPACE_12)
                     .border_b(BORDER_WIDTH)
@@ -288,7 +308,11 @@ impl RenderOnce for SwitchMenu {
             )
             .child(
                 div()
+                    .id("switch-menu:list")
                     .w_full()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
                     .flex()
                     .flex_col()
                     .p(SPACE_4)
@@ -298,6 +322,7 @@ impl RenderOnce for SwitchMenu {
             .child(
                 div()
                     .w_full()
+                    .flex_none()
                     .pt(SPACE_8)
                     .px(SPACE_12)
                     .pb(SPACE_10)

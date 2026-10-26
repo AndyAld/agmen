@@ -83,6 +83,7 @@ fn menu_hangs_below_the_head_when_it_fits() {
     let p = place_menu(chip(), head(), menu(), area(872.));
     assert_eq!(p.anchor, Anchor::TopLeft);
     assert_eq!(p.position, point(chip().left(), head().bottom()));
+    assert!(p.max_height >= menu().height, "a menu that fits is not cut");
     assert!(!placed(&p, menu()).intersects(&chip()));
 }
 
@@ -103,7 +104,12 @@ fn menu_takes_the_roomier_side_when_neither_fits() {
     let chip = Bounds::new(point(px(20.), px(174.)), size(px(72.), px(20.)));
     let p = place_menu(chip, head, menu(), area(500.));
     assert_eq!(p.anchor, Anchor::TopLeft);
-    assert!(!placed(&p, menu()).intersects(&chip));
+    // Cut to the 300 px below, so the window's snap has nothing to move.
+    assert_eq!(p.max_height, px(300.));
+    let cut = size(menu().width, menu().height.min(p.max_height));
+    let bounds = placed(&p, cut);
+    assert!(!bounds.intersects(&chip));
+    assert!(bounds.bottom() <= px(500.));
 }
 
 #[test]

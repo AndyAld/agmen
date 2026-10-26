@@ -22,12 +22,14 @@ fn open(
     let handle: Rc<dyn Backend> = backend.clone();
     cx.update(|cx| cx.set_global(BackendHandle(handle)));
     let snapshot = backend.snapshot();
+    // As main.rs does: the root takes focus before the first frame, so a
+    // view that asks for focus as it draws, such as an open menu, gets it.
     let (workspace, cx) = cx.add_window_view(|window, cx| {
         let mut workspace = Workspace::new(snapshot, window, cx);
         workspace.show_screen(screen, cx);
+        workspace.focus_handle.focus(window, cx);
         workspace
     });
-    workspace.update_in(cx, |w, window, cx| w.focus_handle.focus(window, cx));
     settle(cx);
     (workspace, backend, cx)
 }
@@ -96,4 +98,33 @@ fn the_agent_views_button_takes_over_in_the_chat(cx: &mut TestAppContext) {
     let active = workspace.read_with(cx, |w, cx| w.pane_group.read(cx).active_item(cx));
     assert_eq!(active, Some(TabItem::Chat));
     assert!(cx.debug_bounds("terminal").is_some());
+}
+
+#[gpui::test]
+fn escape_closes_the_menu_the_screen_opened(cx: &mut TestAppContext) {
+    // Review: the switch-agent screen opens the menu with focus elsewhere.
+    let (_, _, cx) = open(cx, Screen::SwitchAgent);
+    assert!(cx.debug_bounds("switch-menu").is_some());
+    cx.simulate_keystrokes("escape");
+    settle(cx);
+    assert!(cx.debug_bounds("switch-menu").is_none());
+}
+
+#[gpui::test]
+fn a_live_switch_moves_the_left_docks_harness(cx: &mut TestAppContext) {
+    // V66 node 2463: after the switch, fx1's Agents row says codex.
+    let (workspace, _, cx) = open(cx, Screen::ChatTerminal);
+    crate::ui::test_support::click(cx, "terminal:agent");
+    settle(cx);
+    crate::ui::test_support::click(cx, "switch-menu:codex");
+    settle(cx);
+    let fx1 = fixture_id("andy/fx1");
+    let harness = workspace.read_with(cx, |w, cx| {
+        w.agents_panel
+            .read(cx)
+            .visible_agents()
+            .find(|a| a.id == fx1)
+            .map(|a| a.harness.clone())
+    });
+    assert_eq!(harness.as_deref(), Some("codex"));
 }

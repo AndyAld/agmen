@@ -1,11 +1,11 @@
 //! Label and value rows under an uppercase heading, as in the right dock.
 
 use gpui::{
-    App, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce,
-    SharedString, Styled as _, Window, div,
+    App, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce, SharedString,
+    Styled as _, Window, div,
 };
 
-use super::{Color, Label, LabelSize};
+use super::{Color, Label, LabelSize, SectionHeading};
 use crate::ui::tokens::{KV_LABEL_WIDTH, SPACE_7, SPACE_10};
 
 /// A label in a fixed column and a wrapping value in the code font.
@@ -77,7 +77,7 @@ impl RenderOnce for KvRow {
 /// A heading and its rows.
 #[derive(Debug, IntoElement)]
 pub(crate) struct KvSection {
-    title: SharedString,
+    heading: SectionHeading,
     rows: Vec<KvRow>,
 }
 
@@ -86,7 +86,7 @@ impl KvSection {
     #[must_use]
     pub(crate) fn new(title: &str) -> Self {
         Self {
-            title: title.to_uppercase().into(),
+            heading: SectionHeading::new(title),
             rows: Vec::new(),
         }
     }
@@ -105,12 +105,7 @@ impl RenderOnce for KvSection {
             .flex()
             .flex_col()
             .gap(SPACE_7)
-            .child(
-                Label::new(self.title)
-                    .size(LabelSize::Small)
-                    .color(Color::Muted)
-                    .weight(FontWeight::SEMIBOLD),
-            )
+            .child(self.heading)
             .children(self.rows)
     }
 }
@@ -124,7 +119,7 @@ mod tests {
 
     #[test]
     fn section_title_is_uppercase() {
-        assert_eq!(KvSection::new("Runs").title.as_ref(), "RUNS");
+        assert_eq!(KvSection::new("Runs").heading.title(), "RUNS");
     }
 
     #[gpui::test]

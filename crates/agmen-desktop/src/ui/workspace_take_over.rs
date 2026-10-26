@@ -36,13 +36,25 @@ impl Workspace {
             .update(cx, |group, cx| group.open(TabItem::Chat, cx));
     }
 
-    /// Takes the chat's agents and take-overs, which the Agent panel shows:
-    /// the chat hears the backend's updates; the workspace does not.
+    /// Takes the chat's agents, take-overs and roster, which the Agent
+    /// panel and the left dock's Agents tab show (a live switch moves an
+    /// agent's harness): the chat hears the backend's updates; the
+    /// workspace does not.
     pub(super) fn follow_chat(&mut self, cx: &mut Context<Self>) {
         let chat = self.chat.read(cx).snapshot();
-        if chat.take_overs != self.snapshot.take_overs || chat.agents != self.snapshot.agents {
-            self.snapshot.take_overs = chat.take_overs.clone();
-            self.snapshot.agents = chat.agents.clone();
+        let roster = (chat.roster != self.snapshot.roster).then(|| chat.roster.clone());
+        let panel = (chat.take_overs != self.snapshot.take_overs
+            || chat.agents != self.snapshot.agents)
+            .then(|| (chat.take_overs.clone(), chat.agents.clone()));
+        if let Some(roster) = roster {
+            self.snapshot.roster.clone_from(&roster);
+            self.agents_panel
+                .update(cx, |panel, cx| panel.set_roster(roster, cx));
+            cx.notify();
+        }
+        if let Some((take_overs, agents)) = panel {
+            self.snapshot.take_overs = take_overs;
+            self.snapshot.agents = agents;
             cx.notify();
         }
     }

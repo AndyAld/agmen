@@ -1,4 +1,4 @@
-use gpui::TestAppContext;
+use gpui::{Focusable as _, TestAppContext};
 
 use super::*;
 use crate::backend::chat_snapshot;
@@ -74,4 +74,49 @@ fn composer_is_the_chat_composer_addressed_to_the_agent(cx: &mut TestAppContext)
     // The agent runs its own model, so the listener's model chip is not
     // drawn (console.py `build_d_agent`).
     assert!(cx.debug_bounds("composer:model").is_none());
+}
+
+/// The agent view under a root that records the take-over actions that
+/// reach it, as the workspace's root handles them.
+struct Recorder {
+    view: Entity<AgentView>,
+    seen: Vec<String>,
+}
+
+impl Render for Recorder {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        use crate::ui::keys::OpenInTerminal;
+        div()
+            .size_full()
+            .on_action(cx.listener(|this, _: &OpenInTerminal, _, _| {
+                this.seen.push("open-in-terminal".into());
+            }))
+            .on_action(cx.listener(|this, action: &TakeOverAgent, _, _| {
+                this.seen.push(format!("take-over {}", action.0));
+            }))
+            .child(self.view.clone())
+    }
+}
+
+#[gpui::test]
+fn alt_o_in_the_agent_view_takes_over_its_own_agent(cx: &mut TestAppContext) {
+    // Review: ⌥O, as the view's button says, acts on this view's agent,
+    // not on the agent of the chat's newest DONE.
+    init(cx);
+    let snapshot = chat_snapshot();
+    let id = crate::backend::fixture_id("andy/fx1");
+    let session = snapshot.sessions.get(&id).unwrap().clone();
+    let (recorder, cx) = cx.add_window_view(|window, cx| Recorder {
+        view: cx.new(|cx| AgentView::new(&snapshot, &id, session, window, cx)),
+        seen: Vec::new(),
+    });
+    redraw(cx);
+    let view = recorder.read_with(cx, |r, _| r.view.clone());
+    let composer = view.read_with(cx, |v, _| v.composer.clone());
+    cx.update(|window, cx| window.focus(&composer.focus_handle(cx), cx));
+    redraw(cx);
+    cx.dispatch_action(crate::ui::keys::OpenInTerminal);
+    cx.run_until_parked();
+    let seen = recorder.read_with(cx, |r, _| r.seen.clone());
+    assert_eq!(seen, [format!("take-over {id}")]);
 }

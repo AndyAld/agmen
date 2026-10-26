@@ -55,6 +55,13 @@ impl AgentsPanel {
         cx.emit(AgentsPanelEvent::Selected(id.clone()));
     }
 
+    /// Task 14: takes the backend's roster, such as an agent's harness
+    /// after a live switch.
+    pub(crate) fn set_roster(&mut self, roster: Vec<PersonGroup>, cx: &mut Context<Self>) {
+        self.roster = roster;
+        cx.notify();
+    }
+
     /// Highlights the row the right dock shows, or none.
     pub(crate) fn set_selected(&mut self, id: Option<IdentityId>, cx: &mut Context<Self>) {
         self.selected = id;

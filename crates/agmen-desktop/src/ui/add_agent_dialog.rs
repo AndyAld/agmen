@@ -264,6 +264,7 @@ impl AddAgentDialog {
             if copied { "Copied" } else { "Copy prompt" },
         )
         .style(ButtonStyle::Secondary)
+        .size(ButtonSize::Medium)
         .leading(
             Icon::new(if copied {
                 crate::icons::UiIcon::Check
@@ -411,6 +412,7 @@ impl RenderOnce for AddAgentDialog {
                     .gap(SPACE_8)
                     .child(
                         Button::new("add-agent:cancel", "Cancel")
+                            .style(ButtonStyle::Inset)
                             .size(ButtonSize::Large)
                             .on_click(handler(self.on_cancel.clone())),
                     )

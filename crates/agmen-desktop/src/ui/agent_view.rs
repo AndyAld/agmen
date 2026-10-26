@@ -10,7 +10,7 @@ use gpui::{
 
 use super::components::{Breadcrumb, Button, ButtonStyle, Color, Label, LabelSize, ToolCard};
 use super::composer::{Composer, Target};
-use super::keys::TakeOverAgent;
+use super::keys::{OpenInTerminal, TakeOverAgent};
 use super::tokens::{SPACE_6, SPACE_8, SPACE_10, SPACE_14, SPACE_18};
 use crate::appearance::Appearance;
 use crate::backend::{AgentSession, BackendError, BackendHandle, SessionRow, Snapshot, Tone};
@@ -143,8 +143,15 @@ impl Render for AgentView {
             // shortcut: Stop does nothing until the hub backend can stop an
             // agent.
             .child(Button::new("agent-stop", "Stop").style(ButtonStyle::Plain));
+        let id = self.id.clone();
         div()
             .debug_selector(|| "agent-view".into())
+            // Task 14: ⌥O here is this view's button, so it takes over this
+            // view's agent, not the agent of the chat's newest DONE; the
+            // action stops here.
+            .on_action(move |_: &OpenInTerminal, window, cx| {
+                window.dispatch_action(Box::new(TakeOverAgent(id.clone())), cx);
+            })
             .size_full()
             .flex()
             .flex_col()

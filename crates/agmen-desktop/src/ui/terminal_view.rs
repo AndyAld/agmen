@@ -13,8 +13,8 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, Bounds, Context, EventEmitter, FocusHandle, Focusable, FontWeight, Hsla,
     InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, RenderOnce, Rgba,
-    SharedString, StatefulInteractiveElement as _, Styled as _, StyledText, TextRun, Window,
-    anchored, canvas, deferred, div, font, point, px, size,
+    SharedString, StatefulInteractiveElement as _, Styled as _, StyledText, TextRun, WeakEntity,
+    Window, anchored, canvas, deferred, div, font, point, px, size,
 };
 
 use super::add_agent_dialog::{AddAgentDialog, AgentDialog};
@@ -185,13 +185,17 @@ pub(crate) struct TerminalView {
     screen: Rc<TerminalScreen>,
     agents: Vec<InstalledAgent>,
     focus: FocusHandle,
-    chip_focus: FocusHandle,
+    /// The open menu's; it takes Escape however the menu was opened.
+    menu_focus: FocusHandle,
     dialog_focus: FocusHandle,
     menu_open: bool,
     dialog: Option<AgentDialog>,
     copied: bool,
-    /// Check again ran, and the scan's result has not come back.
-    checking: bool,
+    /// How many agent scans had finished when Check again ran, until the
+    /// scan's own result comes back.
+    checking: Option<u64>,
+    /// How many agent scans the backend has finished.
+    scans: u64,
     /// What the last Check again found.
     note: Option<SharedString>,
     anchors: Rc<Cell<Anchors>>,
@@ -220,13 +224,15 @@ impl std::fmt::Debug for TerminalView {
 impl EventEmitter<TerminalEvent> for TerminalView {}
 
 impl TerminalView {
-    /// `handle`'s taken-over session; keyboard focus moves into it.
+    /// `handle`'s taken-over session, after `scans` agent scans; keyboard
+    /// focus moves into it.
     pub(crate) fn new(
         worker: IdentityId,
         handle: impl Into<SharedString>,
         role: impl Into<SharedString>,
         take_over: TakeOver,
         agents: Vec<InstalledAgent>,
+        scans: u64,
         cx: &mut Context<Self>,
     ) -> Self {
         let focus = cx.focus_handle();
@@ -239,12 +245,13 @@ impl TerminalView {
             agents,
             focus_next: Some(focus.clone()),
             focus,
-            chip_focus: cx.focus_handle(),
+            menu_focus: cx.focus_handle(),
             dialog_focus: cx.focus_handle(),
             menu_open: false,
             dialog: None,
             copied: false,
-            checking: false,
+            checking: None,
+            scans,
             note: None,
             anchors: Rc::default(),
             menu_frames: 0,
@@ -266,13 +273,15 @@ impl TerminalView {
         &self.take_over.harness
     }
 
-    /// Takes the backend's latest state of the session and the agents. A
-    /// pending Check again reads its result here: the dialog closes when
-    /// the agent is now ready, or says it is not.
+    /// Takes the backend's latest state of the session and the agents,
+    /// after `scans` agent scans. A pending Check again reads its result
+    /// once a scan has finished since it ran, not on any other update: the
+    /// dialog closes when the agent is now ready, or says it is not.
     pub(crate) fn set_state(
         &mut self,
         take_over: TakeOver,
         agents: Vec<InstalledAgent>,
+        scans: u64,
         cx: &mut Context<Self>,
     ) {
         if take_over != self.take_over {
@@ -280,13 +289,31 @@ impl TerminalView {
             self.take_over = take_over;
         }
         self.agents = agents;
-        if std::mem::take(&mut self.checking) {
+        self.scans = scans;
+        if self.checking.is_some_and(|before| before != scans) {
+            self.checking = None;
             self.note = self.check_result();
             if self.note.is_none() {
+                // Back to the menu, which takes the keyboard again.
                 self.dialog = None;
+                self.focus_next = Some(self.menu_focus.clone());
             }
         }
         cx.notify();
+    }
+
+    /// Check again: asks the backend for a scan and waits for its result.
+    fn check_again(&mut self, cx: &mut Context<Self>) {
+        self.checking = Some(self.scans);
+        self.act(Action::ScanAgents, cx);
+    }
+
+    /// The scan Check again asked for failed: the dialog says why.
+    pub(crate) fn scan_failed(&mut self, error: SharedString, cx: &mut Context<Self>) {
+        if self.checking.take().is_some() {
+            self.note = Some(error);
+            cx.notify();
+        }
     }
 
     /// Why the dialog's agent is not ready yet; `None` when it is.
@@ -320,12 +347,18 @@ impl TerminalView {
         self.focus_next = Some(self.focus.clone());
     }
 
-    /// Opens or closes the switch menu, as a click on the agent chip.
+    /// Opens or closes the switch menu, as a click on the agent chip. Open,
+    /// it takes the keyboard, so Escape closes it however it was opened;
+    /// closed, the terminal takes the keyboard back.
     pub(crate) fn set_menu_open(&mut self, open: bool, cx: &mut Context<Self>) {
         self.menu_open = open;
         self.menu_frames = 0;
-        if !open {
+        if open {
+            self.focus_next = Some(self.menu_focus.clone());
+        } else {
             self.dialog = None;
+            self.checking = None;
+            self.focus_next = Some(self.focus.clone());
         }
         cx.notify();
     }
@@ -336,7 +369,7 @@ impl TerminalView {
         self.dialog = Some(dialog);
         self.copied = false;
         self.note = None;
-        self.checking = false;
+        self.checking = None;
         self.focus_next = Some(self.dialog_focus.clone());
         cx.notify();
     }
@@ -345,7 +378,8 @@ impl TerminalView {
     /// the switch menu).
     fn close_dialog(&mut self, cx: &mut Context<Self>) {
         self.dialog = None;
-        self.focus_next = Some(self.chip_focus.clone());
+        self.checking = None;
+        self.focus_next = Some(self.menu_focus.clone());
         cx.notify();
     }
 
@@ -353,34 +387,24 @@ impl TerminalView {
         cx.emit(TerminalEvent::Act(action));
     }
 
-    /// The agent chip, `claude ▾`: it opens the menu, and Escape closes it.
+    /// The agent chip, `claude ▾`: it opens the menu.
     fn agent_chip(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let anchors = self.anchors.clone();
         let open = self.menu_open;
         div()
             .id("terminal:agent")
             .debug_selector(|| "terminal:agent".into())
-            .track_focus(&self.chip_focus)
             .relative()
             .flex_none()
             .cursor_pointer()
-            .map(|this| {
-                // While open, the menu's mouse down out closes it; a click
-                // here too would reopen it (review C81).
-                if open {
-                    this.on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
-                        if event.keystroke.key == "escape" {
-                            cx.stop_propagation();
-                            this.set_menu_open(false, cx);
-                        }
-                    }))
-                } else {
-                    this.on_click(cx.listener(|this, _, _, cx| this.set_menu_open(true, cx)))
-                }
+            // While open, the menu's mouse down out closes it; a click here
+            // too would reopen it (review C81).
+            .when(!open, |this| {
+                this.on_click(cx.listener(|this, _, _, cx| this.set_menu_open(true, cx)))
             })
             .child(
                 Chip::new(self.take_over.harness.clone())
-                    .compact()
+                    .picker()
                     .code()
                     .weight(FontWeight::BOLD)
                     .color(Color::Default)
@@ -471,6 +495,8 @@ impl TerminalView {
         );
         let height = anchors.menu.unwrap_or(SWITCH_MENU_HEIGHT);
         let place = place_menu(chip, head, size(SWITCH_MENU_WIDTH, height), area);
+        // Cut to its side's room, the menu fits, so gpui's snap into the
+        // window never moves it over the chip.
         let worker = self.worker.clone();
         let view = cx.entity().downgrade();
         let dialog_view = view.clone();
@@ -479,22 +505,19 @@ impl TerminalView {
             self.take_over.harness.clone(),
             self.handle.clone(),
         )
+        .max_height(place.max_height)
         .on_switch(move |agent, _, cx| {
             let action = Action::SwitchAgent {
                 worker: worker.clone(),
                 agent,
             };
-            // The menu outlives its view only while the window closes.
-            view.update(cx, |this, cx| {
+            with_view(&view, cx, |this, cx| {
                 this.set_menu_open(false, cx);
                 this.act(action, cx);
-            })
-            .unwrap_or_default();
+            });
         })
         .on_dialog(move |dialog, _, cx| {
-            dialog_view
-                .update(cx, |this, cx| this.open_dialog(dialog, cx))
-                .unwrap_or_default();
+            with_view(&dialog_view, cx, |this, cx| this.open_dialog(dialog, cx));
         });
         let probe = self.anchors.clone();
         let close =
@@ -510,6 +533,13 @@ impl TerminalView {
                         div()
                             .occlude()
                             .relative()
+                            .track_focus(&self.menu_focus)
+                            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                                if event.keystroke.key == "escape" {
+                                    cx.stop_propagation();
+                                    this.set_menu_open(false, cx);
+                                }
+                            }))
                             // The dialog over the menu takes the clicks.
                             .when(!dialog_open, |this| this.on_mouse_down_out(close))
                             .child(menu)
@@ -541,26 +571,13 @@ impl TerminalView {
             .copied(self.copied)
             .note(self.note.clone())
             .on_copied(move |_, cx| {
-                copied_view
-                    .update(cx, |this, cx| {
-                        this.copied = true;
-                        cx.notify();
-                    })
-                    .unwrap_or_default();
+                with_view(&copied_view, cx, |this, cx| {
+                    this.copied = true;
+                    cx.notify();
+                });
             })
-            .on_cancel(move |_, cx| {
-                cancel_view
-                    .update(cx, |this, cx| this.close_dialog(cx))
-                    .unwrap_or_default();
-            })
-            .on_check(move |_, cx| {
-                check_view
-                    .update(cx, |this, cx| {
-                        this.checking = true;
-                        this.act(Action::ScanAgents, cx);
-                    })
-                    .unwrap_or_default();
-            });
+            .on_cancel(move |_, cx| with_view(&cancel_view, cx, Self::close_dialog))
+            .on_check(move |_, cx| with_view(&check_view, cx, Self::check_again));
         let viewport = window.viewport_size();
         Some(
             deferred(
@@ -595,6 +612,18 @@ impl TerminalView {
             .into_any_element(),
         )
     }
+}
+
+/// Runs `update` on the terminal behind `view`, from the menu or the
+/// dialog it drew.
+fn with_view(
+    view: &WeakEntity<TerminalView>,
+    cx: &mut App,
+    update: impl FnOnce(&mut TerminalView, &mut Context<TerminalView>),
+) {
+    // The menu and the dialog outlive their view only while the window
+    // closes, when there is nothing left to update.
+    view.update(cx, update).unwrap_or_default();
 }
 
 /// An empty layer over its parent that reports the parent's window bounds
