@@ -58,6 +58,10 @@ const NAMES: &[&str] = &[
     "variable.parameter",
 ];
 
+/// agmen's XML highlights, which color tags and attributes as the mockups
+/// draw role files (see the file's header).
+const XML_HIGHLIGHTS: &str = include_str!("queries/xml.scm");
+
 /// A file type with a grammar, or none.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Language {
@@ -91,11 +95,7 @@ impl Language {
                 "toml",
                 tree_sitter_toml_ng::HIGHLIGHTS_QUERY,
             ),
-            Self::Xml => (
-                tree_sitter_xml::LANGUAGE_XML.into(),
-                "xml",
-                tree_sitter_xml::XML_HIGHLIGHT_QUERY,
-            ),
+            Self::Xml => (tree_sitter_xml::LANGUAGE_XML.into(), "xml", XML_HIGHLIGHTS),
             Self::Markdown => (
                 tree_sitter_md::LANGUAGE.into(),
                 "markdown",
