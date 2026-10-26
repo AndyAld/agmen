@@ -158,7 +158,10 @@ impl Workspace {
 
     /// Records vim mode in agmen's settings file.
     fn toggle_vim_mode(cx: &Context<Self>) {
+        // shortcut: the result goes to stderr only; show it in the window
+        // once the status bar has a place for transient notes.
         let Some(sources) = cx.try_global::<SettingsSources>() else {
+            eprintln!("agmen-desktop: vim mode not saved: no settings folder is known");
             return;
         };
         let path = crate::appearance::agmen_settings_path(&sources.config);
