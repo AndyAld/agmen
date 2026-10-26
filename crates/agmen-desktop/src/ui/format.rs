@@ -2,8 +2,7 @@
 //! views show them.
 
 use agmen_proto::Timestamp;
-
-use crate::local_time::UtcOffset;
+use jiff::tz::TimeZone;
 
 /// Dollars with cents: `$14.20`. Values that are not finite show `$0.00`.
 #[must_use]
@@ -103,16 +102,6 @@ pub(crate) fn counted(count: u32, one: &str, many: &str) -> String {
     format!("{count} {}", if count == 1 { one } else { many })
 }
 
-/// `at` as a 24 hour `15:27` at `offset` from UTC.
-#[must_use]
-pub(crate) fn clock(at: Timestamp, offset: UtcOffset) -> String {
-    let secs = at
-        .as_second()
-        .saturating_add(i64::from(offset.minutes()) * 60);
-    let day = secs.rem_euclid(86_400);
-    format!("{:02}:{:02}", day / 3600, day % 3600 / 60)
-}
-
 /// A lowercase name with its first letter capitalized: `engineer` to
 /// `Engineer`.
 #[must_use]
@@ -123,14 +112,9 @@ pub(crate) fn title_case(name: &str) -> String {
     })
 }
 
-/// A time of day as `15:31`, in `tz`; views pass
-/// `jiff::tz::TimeZone::system()`, which is UTC when the system zone cannot
-/// be read.
+/// `at` as a 24 hour `15:31` in `tz`, at the offset `tz` has at that moment.
 #[must_use]
-// shortcut: two clocks, this one for the Git panel and `clock` at a fixed
-// offset for the chat; fold the chat onto this one when its `UtcOffset`
-// shortcut (local_time.rs) is taken up.
-pub(crate) fn clock_in_zone(at: agmen_proto::Timestamp, tz: &jiff::tz::TimeZone) -> String {
+pub(crate) fn clock(at: Timestamp, tz: &TimeZone) -> String {
     at.to_zoned(tz.clone()).strftime("%H:%M").to_string()
 }
 
@@ -185,16 +169,6 @@ mod tests {
     }
 
     #[test]
-    fn clock_shows_the_time_at_the_offset() {
-        let at: Timestamp = "2026-10-26T21:27:40Z".parse().unwrap();
-        let mdt = UtcOffset::from_minutes(-6 * 60);
-        assert_eq!(clock(at, mdt), "15:27");
-        assert_eq!(clock(at, UtcOffset::default()), "21:27");
-        // 21:27 UTC plus 14 hours wraps to the next day.
-        assert_eq!(clock(at, UtcOffset::from_minutes(14 * 60)), "11:27");
-    }
-
-    #[test]
     fn role_names_title_case() {
         assert_eq!(title_case("engineer"), "Engineer");
         assert_eq!(title_case(""), "");
@@ -207,12 +181,15 @@ mod tests {
 
     #[test]
     fn clock_shows_hours_and_minutes_in_the_zone() {
-        let at: agmen_proto::Timestamp = "2026-10-25T21:31:00Z".parse().unwrap();
-        let denver = jiff::tz::TimeZone::get("America/Denver").unwrap();
-        assert_eq!(clock_in_zone(at, &denver), "15:31");
-        assert_eq!(clock_in_zone(at, &jiff::tz::TimeZone::UTC), "21:31");
-        let morning: agmen_proto::Timestamp = "2026-10-25T07:05:00Z".parse().unwrap();
-        assert_eq!(clock_in_zone(morning, &jiff::tz::TimeZone::UTC), "07:05");
+        let at: Timestamp = "2026-10-25T21:31:40Z".parse().unwrap();
+        let denver = TimeZone::get("America/Denver").unwrap();
+        assert_eq!(clock(at, &denver), "15:31");
+        assert_eq!(clock(at, &TimeZone::UTC), "21:31");
+        let morning: Timestamp = "2026-10-25T07:05:00Z".parse().unwrap();
+        assert_eq!(clock(morning, &TimeZone::UTC), "07:05");
+        // 21:31 UTC plus 14 hours wraps to the next day.
+        let east = TimeZone::fixed(jiff::tz::offset(14));
+        assert_eq!(clock(at, &east), "11:31");
     }
 
     #[test]

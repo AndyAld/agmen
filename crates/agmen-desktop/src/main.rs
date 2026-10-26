@@ -321,7 +321,7 @@ fn open_main_window(launch: &Launch, cx: &mut App) -> Result<()> {
     }
     cx.set_global(appearance);
     cx.set_global(file_icons);
-    cx.set_global(local_time::UtcOffset::system());
+    cx.set_global(local_time::LocalZone::system());
     // Without a home folder the Settings tab shows a placeholder.
     if let Some(home) = std::env::home_dir() {
         cx.set_global(ui::SettingsSources::for_home(&home));

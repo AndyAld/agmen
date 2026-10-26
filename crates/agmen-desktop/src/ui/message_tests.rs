@@ -6,20 +6,20 @@ use gpui::{AnyElement, Context, Render, TestAppContext, VisualTestContext, Windo
 
 use super::*;
 use crate::backend::{Backend, FixtureBackend, Screen, Snapshot, chat_snapshot};
-use crate::local_time::UtcOffset;
 use crate::refs::RefTarget;
 use crate::ui::test_support::{click, init, redraw};
 use crate::ui::tokens::{MENTION_BAR_WIDTH, MOCKUP_REM, REPLY_INDENT};
+use jiff::tz::{TimeZone, offset};
 
 /// Mountain daylight time, as the mockup's clock shows.
-const MDT: UtcOffset = UtcOffset::from_minutes(-6 * 60);
+const MDT: TimeZone = TimeZone::fixed(offset(-6));
 
 fn snapshot_of(screen: Screen) -> Snapshot {
     FixtureBackend::for_screen(screen).unwrap().snapshot()
 }
 
 fn context_of(snapshot: Snapshot) -> Rc<ChatContext> {
-    Rc::new(ChatContext::new(Rc::new(snapshot)).with_utc_offset(MDT))
+    Rc::new(ChatContext::new(Rc::new(snapshot)).with_zone(MDT))
 }
 
 fn chat() -> (Vec<StampedEnvelope>, Rc<ChatContext>) {
@@ -141,14 +141,23 @@ fn senders_show_role_or_human() {
 }
 
 #[test]
-fn times_show_at_the_offset() {
+fn times_show_in_the_zone() {
     let (messages, c) = chat();
     assert_eq!(c.clock(messages[0].hub_at), "15:27");
     assert_eq!(c.clock(messages[8].hub_at), "15:45");
-    let east = ChatContext::new(Rc::new(chat_snapshot()))
-        .with_utc_offset(UtcOffset::from_minutes(14 * 60));
+    let east = ChatContext::new(Rc::new(chat_snapshot())).with_zone(TimeZone::fixed(offset(14)));
     // 21:27 UTC plus 14 hours wraps to the next day.
     assert_eq!(east.clock(messages[0].hub_at), "11:27");
+}
+
+#[test]
+fn times_follow_daylight_saving_per_message() {
+    // Each time takes its own offset in the zone, not one read at launch:
+    // Denver is UTC-6 in October and UTC-7 in December.
+    let denver = TimeZone::get("America/Denver").unwrap();
+    let c = ChatContext::new(Rc::new(chat_snapshot())).with_zone(denver);
+    assert_eq!(c.clock("2026-10-26T21:27:00Z".parse().unwrap()), "15:27");
+    assert_eq!(c.clock("2026-12-26T21:27:00Z".parse().unwrap()), "14:27");
 }
 
 type Heard<T> = Rc<RefCell<Vec<T>>>;

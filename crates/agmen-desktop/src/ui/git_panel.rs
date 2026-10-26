@@ -12,7 +12,7 @@ use gpui::{
 };
 
 use super::components::{Badge, Color, Icon, IconSize, Indent, Label, LabelSize, ListItem};
-use super::format::clock_in_zone;
+use super::format::clock;
 use super::scope_chip::{ScopeChip, ScopeChipEvent, ScopeOption};
 use super::tokens::{BORDER_WIDTH, ICON_MD, PROJECT_ROW_HEIGHT, RADIUS_MD, SPACE_2, SPACE_6};
 use crate::appearance::Appearance;
@@ -106,7 +106,7 @@ fn commit_author<'a>(author: &'a str, owner: &str) -> &'a str {
 
 /// The commit row's tooltip: author and time of day in `tz`.
 fn commit_tooltip(commit: &CommitInfo, tz: &jiff::tz::TimeZone) -> String {
-    format!("{} · {}", commit.author, clock_in_zone(commit.at, tz))
+    format!("{} · {}", commit.author, clock(commit.at, tz))
 }
 
 /// A branch cut to its type and item, as the Commits header shows it:
