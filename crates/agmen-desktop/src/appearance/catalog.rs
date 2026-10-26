@@ -83,6 +83,26 @@ pub(crate) fn installed_themes(dirs: &ThemeDirs) -> (Vec<ThemeEntry>, Vec<Skippe
     (out, skipped)
 }
 
+/// The theme names an installed extension's `themes/` folder defines;
+/// files that do not read are left out.
+#[must_use]
+pub(crate) fn theme_names(extension: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(extension.join("themes")) else {
+        return Vec::new();
+    };
+    let mut files: Vec<_> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+        .collect();
+    files.sort();
+    files
+        .iter()
+        .filter_map(|path| read_jsonc::<Family>(path).ok())
+        .flat_map(|family| family.themes.into_iter().map(|theme| theme.name))
+        .collect()
+}
+
 /// Which folder a theme file was found in.
 fn origin_of(path: &Path, dirs: &ThemeDirs) -> ThemeOrigin {
     let top = |root: &Path| {

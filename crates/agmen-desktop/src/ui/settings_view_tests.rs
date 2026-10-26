@@ -311,3 +311,91 @@ fn zed_extension_themes_show_author_and_repository() {
     assert!(detail.contains("installed in Zed (nord)"), "{detail}");
     assert!(detail.contains("no license file"), "{detail}");
 }
+
+fn offered(id: &str) -> ThemeExtension {
+    ThemeExtension {
+        id: id.into(),
+        name: id.into(),
+        version: "1.0.0".into(),
+        description: None,
+        authors: Vec::new(),
+        repository: None,
+        download_count: 0,
+    }
+}
+
+fn status(view: &Entity<SettingsView>, cx: &mut VisualTestContext) -> BrowseStatus {
+    view.read_with(cx, |view, _| view.browse.as_ref().unwrap().status.clone())
+}
+
+#[gpui::test]
+fn stale_search_does_not_overwrite_newer(cx: &mut TestAppContext) {
+    // Review C209: answers can come back out of order.
+    let home = Home::new();
+    let (view, cx) = open(cx, &home);
+    click(cx, "browse-themes");
+    let second = view.update(cx, |view, cx| {
+        let first = view.search_generation;
+        view.search("nord".into(), cx);
+        let second = view.search_generation;
+        assert_ne!(first, second);
+
+        view.searched(second, Ok(vec![offered("nord")]), cx);
+        view.searched(first, Ok(vec![offered("everything")]), cx);
+        view.searched(first, Err("late failure".into()), cx);
+
+        let browse = view.browse.as_ref().unwrap();
+        assert_eq!(browse.results, [offered("nord")]);
+        assert_eq!(browse.status, BrowseStatus::Ready);
+        second
+    });
+
+    // Closed and opened again: a search from before is still older.
+    view.update(cx, |view, _| view.browse = None);
+    click(cx, "browse-themes");
+    view.update(cx, |view, cx| {
+        let newest = view.search_generation;
+        assert_ne!(newest, second);
+        view.searched(second, Ok(vec![offered("old panel")]), cx);
+        assert!(view.browse.as_ref().unwrap().results.is_empty());
+    });
+}
+
+#[gpui::test]
+fn shadowed_install_warns(cx: &mut TestAppContext) {
+    // Review C210: "Fixture Dark" is already in ~/.config/zed/themes, so the
+    // installed copy is never listed; say so instead of a silent Ready.
+    let home = Home::new();
+    home.write_settings(
+        "[appearance]\nfollow_zed = false\ntheme = \"Fixture Dark Two\"\nmode = \"dark\"\n",
+    );
+    let (view, cx) = open(cx, &home);
+    click(cx, "browse-themes");
+    let installed = InstalledTheme {
+        id: "fixture-copy".into(),
+        ..InstalledTheme::default()
+    };
+    view.update(cx, |view, cx| {
+        view.installed(&installed, &["Fixture Dark".to_owned()], cx);
+    });
+
+    match status(&view, cx) {
+        BrowseStatus::Failed(text) => {
+            assert!(text.contains("Fixture Dark"), "{text}");
+            assert!(text.contains("your Zed themes folder"), "{text}");
+        }
+        other => panic!("expected a warning, got {other:?}"),
+    }
+    assert_eq!(home.saved().theme.as_deref(), Some("Fixture Dark Two"));
+}
+
+#[gpui::test]
+fn zed_credit_links_to_the_extensions_page(cx: &mut TestAppContext) {
+    // Review C201. The link is not clicked here: clicking opens a browser.
+    let home = Home::new();
+    let (_, cx) = open(cx, &home);
+    assert!(cx.debug_bounds("zed-extensions-link").is_none());
+    click(cx, "browse-themes");
+    assert!(cx.debug_bounds("zed-extensions-link").is_some());
+    assert_eq!(EXTENSIONS_PAGE, "https://zed.dev/extensions");
+}

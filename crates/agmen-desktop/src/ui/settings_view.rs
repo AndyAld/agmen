@@ -27,9 +27,9 @@ use super::tokens::{
 };
 use crate::appearance::{
     API_BASE, AgmenSettings, Appearance, AppearanceSource, EXTENSIONS_PAGE, FontPrefs, Fonts,
-    IconThemeChoice, MarketError, Marketplace, Mode, SystemMode, ThemeEntry, ThemeExtension,
-    ThemeOrigin, agmen_settings_path, installed_themes, picker_entries, resolve_paths, theme_dirs,
-    zed_extensions_dir,
+    IconThemeChoice, InstalledTheme, MarketError, Marketplace, Mode, SystemMode, ThemeEntry,
+    ThemeExtension, ThemeOrigin, agmen_settings_path, installed_themes, picker_entries,
+    resolve_paths, theme_dirs, theme_names, zed_extensions_dir,
 };
 use crate::icons::{FileIcons, IconTheme, UiIcon};
 
@@ -180,6 +180,10 @@ pub(crate) struct SettingsView {
     error: Option<String>,
     market: Option<Arc<Mutex<Marketplace>>>,
     browse: Option<Browse>,
+    /// Counts searches, so only the newest one's answer is shown (C209).
+    /// Kept here, not in `Browse`, so a search from before the panel was
+    /// closed and opened again is still older.
+    search_generation: u64,
 }
 
 impl EventEmitter<SettingsEvent> for SettingsView {}
@@ -219,6 +223,7 @@ impl SettingsView {
             error,
             market: None,
             browse: None,
+            search_generation: 0,
         };
         view.rescan();
         view
@@ -392,6 +397,8 @@ impl SettingsView {
             Ok(market) => market,
             Err(err) => return self.set_status(BrowseStatus::Failed(err.to_string()), cx),
         };
+        self.search_generation = self.search_generation.wrapping_add(1);
+        let generation = self.search_generation;
         if let Some(browse) = &mut self.browse {
             browse.query.clone_from(&query);
         }
@@ -405,19 +412,33 @@ impl SettingsView {
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
-            this.update(cx, |this, cx| match result {
-                Ok(results) => {
-                    if let Some(browse) = &mut this.browse {
-                        browse.results = results;
-                    }
-                    this.set_status(BrowseStatus::Ready, cx);
-                }
-                Err(err) => this.set_status(BrowseStatus::Failed(err), cx),
-            })
-            // An error means Settings closed meanwhile: nothing to show.
-            .unwrap_or(());
+            this.update(cx, |this, cx| this.searched(generation, result, cx))
+                // An error means Settings closed meanwhile: nothing to show.
+                .unwrap_or(());
         })
         .detach();
+    }
+
+    /// Shows the answer to search number `generation`.
+    fn searched(
+        &mut self,
+        generation: u64,
+        result: Result<Vec<ThemeExtension>, String>,
+        cx: &mut Context<Self>,
+    ) {
+        if generation != self.search_generation {
+            // An older search, or the panel closed: a newer answer counts.
+            return;
+        }
+        match result {
+            Ok(results) => {
+                if let Some(browse) = &mut self.browse {
+                    browse.results = results;
+                }
+                self.set_status(BrowseStatus::Ready, cx);
+            }
+            Err(err) => self.set_status(BrowseStatus::Failed(err), cx),
+        }
     }
 
     /// Installs `ext` into agmen's themes folder, then switches to its first
@@ -434,30 +455,50 @@ impl SettingsView {
                 .lock()
                 .map_err(|_| "the theme list is unavailable after an earlier crash".to_owned())?
                 .install(&ext, &dir, Instant::now())
+                .map(|installed| {
+                    let names = theme_names(&dir.join(&installed.id));
+                    (installed, names)
+                })
                 .map_err(|err| err.to_string())
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             this.update(cx, |this, cx| match result {
-                Ok(installed) => {
-                    this.rescan();
-                    let first = this.themes.iter().find_map(|t| match &t.origin {
-                        ThemeOrigin::Agmen(theme) if theme.id == installed.id => {
-                            Some(t.name.clone())
-                        }
-                        _ => None,
-                    });
-                    this.set_status(BrowseStatus::Ready, cx);
-                    if let Some(name) = first {
-                        this.change(cx, |s| s.theme = Some(name));
-                    }
-                }
+                Ok((installed, names)) => this.installed(&installed, &names, cx),
                 Err(err) => this.set_status(BrowseStatus::Failed(err), cx),
             })
             // An error means Settings closed meanwhile: nothing to show.
             .unwrap_or(());
         })
         .detach();
+    }
+
+    /// Lists a fresh install, whose theme files name `names`, and switches
+    /// to its first theme. When another theme already has each of those
+    /// names, the install is not listed, so the status says which (C210).
+    fn installed(&mut self, installed: &InstalledTheme, names: &[String], cx: &mut Context<Self>) {
+        self.rescan();
+        let first = self.themes.iter().find_map(|t| match &t.origin {
+            ThemeOrigin::Agmen(theme) if theme.id == installed.id => Some(t.name.clone()),
+            _ => None,
+        });
+        let Some(name) = first else {
+            let title = installed.name.as_deref().unwrap_or(&installed.id);
+            let shadow = names
+                .iter()
+                .find_map(|name| self.themes.iter().find(|t| &t.name == name));
+            let warning = match shadow {
+                Some(theme) => format!(
+                    "Installed {title}, but \u{201c}{}\u{201d} already names a theme ({}), which agmen keeps using",
+                    theme.name,
+                    rows::installed_detail(theme)
+                ),
+                None => format!("Installed {title}, but none of its themes could be read"),
+            };
+            return self.set_status(BrowseStatus::Failed(warning), cx);
+        };
+        self.set_status(BrowseStatus::Ready, cx);
+        self.change(cx, |s| s.theme = Some(name));
     }
 
     /// A handler for a component's `on_change` that calls `f` on this view.
@@ -883,9 +924,33 @@ impl SettingsView {
                 .border(BORDER_WIDTH)
                 .border_color(border)
                 .child(
-                    Label::new(format!(
-                        "Themes from Zed extensions ({EXTENSIONS_PAGE}). Each keeps its author and license; one without a license file is not installed."
-                    ))
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap(SPACE_3)
+                        .child(
+                            Label::new("Themes from Zed extensions at")
+                                .size(LabelSize::Small)
+                                .color(Color::Placeholder),
+                        )
+                        .child(
+                            div()
+                                .id("zed-extensions-link")
+                                .debug_selector(|| "zed-extensions-link".into())
+                                .cursor_pointer()
+                                .on_click(|_, _, cx| cx.open_url(EXTENSIONS_PAGE))
+                                .child(
+                                    Label::new(EXTENSIONS_PAGE)
+                                        .size(LabelSize::Small)
+                                        .color(Color::Accent),
+                                ),
+                        ),
+                )
+                .child(
+                    Label::new(
+                        "Each keeps its author and license; one without a license file is not installed.",
+                    )
                     .size(LabelSize::Small)
                     .color(Color::Placeholder)
                     .wrap(),

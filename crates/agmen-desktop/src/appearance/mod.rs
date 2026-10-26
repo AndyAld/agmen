@@ -13,7 +13,9 @@ use std::path::{Path, PathBuf};
 use gpui::{Global, Pixels, SharedString, px};
 use serde::{Deserialize, Serialize};
 
-pub(crate) use catalog::{PickerEntry, ThemeEntry, ThemeOrigin, installed_themes, picker_entries};
+pub(crate) use catalog::{
+    PickerEntry, ThemeEntry, ThemeOrigin, installed_themes, picker_entries, theme_names,
+};
 pub(crate) use fallback::BUILTIN_THEME;
 pub(crate) use marketplace::{
     API_BASE, EXTENSIONS_PAGE, InstalledTheme, MarketError, Marketplace, ThemeExtension,
