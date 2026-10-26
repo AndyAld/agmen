@@ -20,7 +20,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use agmen_client::{
     Broker, ClientEvent, ClientKind, Events, HubClient, OutboxState, Session, SessionConfig,
 };
-use agmen_hub::{Config, EmqxConfig, GithubConfig, Hub, Identity, Messaging, MqttConfig, Secret};
+use agmen_hub::{Config, Hub, Identity, Messaging};
 use agmen_proto::{
     ClientEnvelope, IdentityId, MessageId, Seq, StampedEnvelope, Stream, Timestamp, Topics,
 };
@@ -137,12 +137,6 @@ impl TestDb {
     }
 }
 
-/// Host and port from an `mqtt://host:port` variable.
-fn mqtt_addr(var: &str) -> (String, u16) {
-    let url = Url::parse(&env(var)).unwrap();
-    (url.host_str().unwrap().to_owned(), url.port().unwrap())
-}
-
 /// Everything a test gets from [`run`].
 #[derive(Debug)]
 pub struct Ctx {
@@ -177,32 +171,30 @@ where
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let base = Url::parse(&format!("http://{addr}")).unwrap();
-    let (host, port) = mqtt_addr("AGMEN_IT_MQTT");
-    let config = Config {
-        database_url: Secret::new(db.url.clone()),
-        listen: addr,
-        public_url: base.clone(),
-        // The client tests never sign in with GitHub; nothing listens here.
-        github: GithubConfig {
-            client_id: "agmen-client-tests".to_owned(),
-            client_secret: Secret::new("unused"),
-            url: Url::parse("http://127.0.0.1:9/").unwrap(),
-            api_url: Url::parse("http://127.0.0.1:9/").unwrap(),
-        },
-        emqx: EmqxConfig {
-            api_url: Url::parse(&env("AGMEN_IT_EMQX_API")).unwrap(),
-            api_key: env("AGMEN_IT_EMQX_API_KEY"),
-            api_secret: Secret::new(env("AGMEN_IT_EMQX_API_SECRET")),
-        },
-        mqtt: MqttConfig {
-            host,
-            port,
-            instance: new_id(),
-            share_group: new_id(),
-        },
-        jwt_signing_key: dev_key(),
-        jwt_extra_keys: Vec::new(),
-    };
+    let (instance, share_group) = (new_id(), new_id());
+    let signing_key = dev_key().to_str().unwrap().to_owned();
+    // Built through the hub's own variable parser, so a setting the hub adds
+    // later takes its default here instead of breaking this harness.
+    let config = Config::from_lookup(|name| {
+        Some(match name {
+            "AGMEN_DATABASE_URL" => db.url.clone(),
+            "AGMEN_LISTEN" => addr.to_string(),
+            "AGMEN_PUBLIC_URL" => base.to_string(),
+            "AGMEN_GITHUB_CLIENT_ID" => "agmen-client-tests".to_owned(),
+            "AGMEN_GITHUB_CLIENT_SECRET" => "unused".to_owned(),
+            // The client tests never sign in with GitHub; nothing listens here.
+            "AGMEN_GITHUB_URL" | "AGMEN_GITHUB_API_URL" => "http://127.0.0.1:9/".to_owned(),
+            "AGMEN_EMQX_API_URL" => env("AGMEN_IT_EMQX_API"),
+            "AGMEN_EMQX_API_KEY" => env("AGMEN_IT_EMQX_API_KEY"),
+            "AGMEN_EMQX_API_SECRET" => env("AGMEN_IT_EMQX_API_SECRET"),
+            "AGMEN_MQTT_URL" => env("AGMEN_IT_MQTT"),
+            "AGMEN_HUB_INSTANCE" => instance.clone(),
+            "AGMEN_MQTT_SHARE_GROUP" => share_group.clone(),
+            "AGMEN_JWT_SIGNING_KEY" => signing_key.clone(),
+            _ => return None,
+        })
+    })
+    .expect("build the hub config");
     let hub = Hub::connect(&config).await.expect("start the hub");
     let router = hub.router();
     let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
