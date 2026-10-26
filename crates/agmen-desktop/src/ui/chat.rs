@@ -328,6 +328,8 @@ fn position(env: &StampedEnvelope) -> (&Stream, Seq, &MessageId) {
 fn replay(alerts: &mut AlertState, snapshot: &Snapshot) {
     let me = Me::from(snapshot);
     for env in &snapshot.messages {
+        // History replays without a chime or notification: only alerts that
+        // arrive while the chat is open make an effect.
         let _effect = alerts.on_message(env, &me);
     }
 }
