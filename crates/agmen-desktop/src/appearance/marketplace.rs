@@ -41,7 +41,10 @@ const FIRST_BACKOFF: Duration = Duration::from_secs(60);
 const MAX_BACKOFF: Duration = Duration::from_secs(60 * 60);
 /// How many queries the list cache holds; the oldest goes first.
 const MAX_CACHED_QUERIES: usize = 32;
-/// Every request gives up after this long.
+/// Every request gives up after this long. It is set on each request as
+/// well as on the clients: in blocking reqwest, a client's timeout bounds
+/// each read, so a slow drip would never end; a request's bounds the whole
+/// answer (C308).
 const TIMEOUT: Duration = Duration::from_secs(20);
 /// The full theme list was 259,792 bytes in October 2026.
 const MAX_LIST_BYTES: u64 = 8 * 1024 * 1024;
@@ -194,6 +197,8 @@ pub(crate) struct Marketplace {
     retry_at: Option<Instant>,
     /// [`LICENSE_TIMEOUT`]; tests shorten it.
     license_timeout: Duration,
+    /// [`TIMEOUT`]; tests shorten it.
+    timeout: Duration,
 }
 
 impl Marketplace {
@@ -244,6 +249,7 @@ impl Marketplace {
             failures: 0,
             retry_at: None,
             license_timeout: LICENSE_TIMEOUT,
+            timeout: TIMEOUT,
         })
     }
 
@@ -404,7 +410,11 @@ impl Marketplace {
     }
 
     fn fetch(&self, url: &reqwest::Url, limit: u64) -> Result<Vec<u8>, MarketError> {
-        read(self.client.get(url.clone()), url, limit)
+        read(
+            self.client.get(url.clone()).timeout(self.timeout),
+            url,
+            limit,
+        )
     }
 }
 

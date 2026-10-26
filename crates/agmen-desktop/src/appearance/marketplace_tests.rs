@@ -311,6 +311,48 @@ fn marketplace_backs_off_after_errors() {
 }
 
 #[test]
+fn search_gives_up_after_its_timeout_while_the_body_drips() {
+    // C308: the client's timeout bounds each read; the request's own
+    // timeout bounds the whole answer. The stub sends its headers, then one
+    // byte every 100 ms, for at most 6 s.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let stub = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        stream.set_write_timeout(Some(FIXTURE_TIMEOUT)).unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        for _ in 0..100 {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            if line.trim().is_empty() {
+                break;
+            }
+        }
+        let mut stream = stream;
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\n")
+            .unwrap();
+        for _ in 0..60 {
+            if stream.write_all(b" ").is_err() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    });
+    let mut market = Marketplace::new(&base, &base).unwrap();
+    market.timeout = Duration::from_millis(500);
+
+    let started = Instant::now();
+    assert!(market.search("", Instant::now()).is_err());
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        started.elapsed()
+    );
+    stub.join().unwrap();
+}
+
+#[test]
 fn unparsable_list_backs_off() {
     // Review C208: an HTML error page sent with status 200.
     let server = Fixture::serve(1, vec![("/extensions", 200, b"<html>busy</html>".to_vec())]);
