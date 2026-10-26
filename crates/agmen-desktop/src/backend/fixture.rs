@@ -373,7 +373,9 @@ fn free_worker_handle(snapshot: &Snapshot) -> Result<String, BackendError> {
             return Ok(handle);
         }
     }
-    Err(BackendError::Unsupported("more spawned workers than the fixture holds"))
+    Err(BackendError::Unsupported(
+        "more spawned workers than the fixture holds",
+    ))
 }
 
 // Task 15: the ask and model picker screens, and answers to questions.

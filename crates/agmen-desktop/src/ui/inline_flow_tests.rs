@@ -478,3 +478,79 @@ fn cut_pieces_draw_their_own_glyphs_in_visual_order() {
         }
     }
 }
+
+/// A test app that shapes with CoreText, which draws right to left text
+/// last letter first, where gpui's test text system keeps byte order.
+#[cfg(target_os = "macos")]
+fn core_text_app() -> TestAppContext {
+    TestAppContext::build_with_text_system(
+        gpui::TestDispatcher::new(0),
+        None,
+        std::sync::Arc::new(gpui_apple::AppleTextSystem::new()),
+    )
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn right_to_left_text_cuts_whole_with_the_real_shaper() {
+    let text = "abc مرحبا بالعالم def";
+    let mut app = core_text_app();
+    init(&mut app);
+    let mut cuts = 0;
+    for width in [60., 90., 120., 160., 220., 400.] {
+        let (_, cx) = app.add_window_view(move |_, _| Host {
+            width: px(width),
+            items: Box::new(move || vec![box_atom("x"), FlowItem::Run(text.into()), box_atom("y")]),
+        });
+        // CoreText draws the Arabic last letter first, so the flow cuts
+        // this run with `Cutter::Unordered`.
+        let mut indices: Vec<usize> = cx.update(|window, _| {
+            let run = window.text_style().to_run(text.len());
+            let line = window
+                .text_system()
+                .shape_line(text.into(), px(13.), &[run], None);
+            line.runs
+                .iter()
+                .flat_map(|run| run.glyphs.iter().map(|glyph| glyph.index))
+                .collect()
+        });
+        assert!(!indices.is_sorted(), "glyphs in byte order: {indices:?}");
+        take_drawn();
+        redraw(cx);
+        let drawn = take_drawn().pop().unwrap_or_default();
+        let pieces: Vec<&str> = drawn
+            .iter()
+            .filter(|d| !d.chip)
+            .map(|d| d.text.as_ref())
+            .collect();
+        cuts += pieces.len().saturating_sub(1);
+        // Every byte is drawn once, in order, whatever the lines.
+        assert_eq!(
+            pieces.concat().replace(' ', ""),
+            text.replace(' ', ""),
+            "at {width}: {pieces:?}"
+        );
+        assert_eq!(drawn.iter().filter(|d| d.chip).count(), 2, "at {width}");
+        // Each glyph is drawn once, by the piece that holds its byte.
+        let mut start = 0;
+        let mut glyphs: Vec<usize> = Vec::new();
+        for d in drawn.iter().filter(|d| !d.chip) {
+            start = text[start..].find(d.text.as_ref()).unwrap() + start;
+            let bytes = start..start + d.text.len();
+            assert!(
+                d.glyphs.iter().all(|at| bytes.contains(at)),
+                "at {width}: {:?} draws {:?}",
+                d.text,
+                d.glyphs
+            );
+            glyphs.extend(&d.glyphs);
+            start = bytes.end;
+        }
+        // A line breaks at a space and draws none there.
+        indices.retain(|at| !(text.as_bytes()[*at] == b' ' && !glyphs.contains(at)));
+        glyphs.sort_unstable();
+        indices.sort_unstable();
+        assert_eq!(glyphs, indices, "at {width}");
+    }
+    assert!(cuts > 0, "no width cut the run");
+}

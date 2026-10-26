@@ -63,7 +63,6 @@ impl InlineFlow {
     }
 }
 
-
 /// The code font a chip label is drawn in, as `Label::code` sets it.
 struct LabelFont {
     run: TextRun,
@@ -302,6 +301,13 @@ impl Element for InlineFlow {
                 bounds: Bounds::new(piece.origin, piece.placed.bounds.size),
                 text: piece.shaped.text.clone(),
                 chip: false,
+                glyphs: piece
+                    .shaped
+                    .runs
+                    .iter()
+                    .flat_map(|run| run.glyphs.iter())
+                    .map(|glyph| glyph.index + piece.placed.bytes.start)
+                    .collect(),
             })
             .collect();
         for atom in atoms {
@@ -328,6 +334,7 @@ impl Element for InlineFlow {
                 bounds: Bounds::new(origin, atom.placed.bounds.size),
                 text: atom.label,
                 chip: true,
+                glyphs: Vec::new(),
             });
         }
         #[cfg(test)]
@@ -570,6 +577,8 @@ pub(super) struct Drawn {
     pub(super) bounds: Bounds<Pixels>,
     pub(super) text: SharedString,
     pub(super) chip: bool,
+    /// The run byte each of a piece's glyphs draws, in drawing order.
+    pub(super) glyphs: Vec<usize>,
 }
 
 #[cfg(test)]

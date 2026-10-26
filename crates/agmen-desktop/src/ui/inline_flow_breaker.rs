@@ -96,7 +96,9 @@ fn push_stop(text: &str, stops: &mut Vec<(usize, Pixels)>, at: usize, x: Pixels)
 /// Each glyph of `line` in the order it draws them, with its run, its index
 /// in the run, and its advance: the distance to the next glyph drawn, the
 /// first from 0 and the last to the line's end, so they sum to its width.
-pub(super) fn advances(line: &ShapedLine) -> impl Iterator<Item = (usize, usize, &ShapedGlyph, Pixels)> {
+pub(super) fn advances(
+    line: &ShapedLine,
+) -> impl Iterator<Item = (usize, usize, &ShapedGlyph, Pixels)> {
     let mut visual = line
         .runs
         .iter()
