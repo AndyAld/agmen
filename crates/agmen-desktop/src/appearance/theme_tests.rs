@@ -139,6 +139,12 @@ fn role_colors_come_from_players() {
     assert!(close(t.role_color("reviewer"), hex("#ed675f")));
     assert!(close(t.role_color("tester"), hex("#afbf5c")));
     assert!(close(t.role_color("unknown-role"), t.text_muted));
+    // The mockup's #a89984, within the mix's rounding.
+    let listener = t.role_color("listener").to_rgb();
+    let want = hex("#a89984").to_rgb();
+    assert!((listener.r - want.r).abs() < 6.0 / 255.0, "{listener:?}");
+    assert!((listener.g - want.g).abs() < 8.0 / 255.0, "{listener:?}");
+    assert!((listener.b - want.b).abs() < 8.0 / 255.0, "{listener:?}");
 }
 
 fn home_with(settings_toml: Option<&str>) -> tempfile::TempDir {

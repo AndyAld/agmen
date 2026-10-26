@@ -63,7 +63,7 @@ impl Render for Workspace {
         let appearance = cx.global::<Appearance>();
         let theme = &appearance.theme;
         let fonts = &appearance.fonts;
-        let border = theme.border;
+        let border = theme.border_variant;
         let mut body = div().flex().flex_row().flex_1().min_h_0();
         if self.is_dock_open(DockSide::Left) {
             body = body.child(

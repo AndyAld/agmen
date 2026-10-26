@@ -63,7 +63,9 @@ impl Theme {
             "engineer" => 3,
             "researcher" => 4,
             "tester" => 6,
-            "listener" => return self.text_placeholder,
+            // The mockup's listener is between placeholder and body text
+            // (#a89984 in Gruvbox); no theme key holds it, so mix the two.
+            "listener" => return mix(self.text_placeholder, self.text, 0.3),
             _ => return self.text_muted,
         };
         self.players.get(slot).copied().unwrap_or(self.text_muted)
@@ -121,6 +123,19 @@ impl Theme {
             players,
         }
     }
+}
+
+/// `a` moved `t` of the way toward `b`, in RGB.
+fn mix(a: Hsla, b: Hsla, t: f32) -> Hsla {
+    let (a, b) = (a.to_rgb(), b.to_rgb());
+    let lerp = |x: f32, y: f32| x + (y - x) * t;
+    Rgba {
+        r: lerp(a.r, b.r),
+        g: lerp(a.g, b.g),
+        b: lerp(a.b, b.b),
+        a: lerp(a.a, b.a),
+    }
+    .into()
 }
 
 fn parse_color(value: &Value) -> Option<Hsla> {

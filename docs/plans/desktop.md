@@ -76,7 +76,7 @@
 
 **Interfaces:**
 - Produces:
-  - `pub(crate) struct Theme` (Clone) with fields `background, surface, elevated_surface, element_selected, border, border_variant, text, text_muted, text_placeholder, text_accent, editor_background, error, warning, success, info, ansi: [Hsla; 16], players: Vec<Hsla>` and `fn role_color(&self, role: &RoleName) -> Hsla` (from the ansi palette: listener `ansi[7]` dim, coordinator magenta, planner cyan, researcher green, engineer bright yellow or orange, tester yellow, reviewer red; spec 9.4).
+  - `pub(crate) struct Theme` (Clone) with fields `background, surface, elevated_surface, element_selected, border, border_variant, text, text_muted, text_placeholder, text_accent, editor_background, error, warning, success, info, ansi: [Hsla; 16], players: Vec<Hsla>` and `fn role_color(&self, role: &RoleName) -> Hsla` (from the theme's `players` palette: planner 0, coordinator 1, reviewer 2, engineer 3, researcher 4, tester 6; listener mixes `text.placeholder` 30% toward `text`, which gives the mockup's #a89984 within a few steps, since no theme key holds that color).
   - `pub(crate) struct Fonts { ui_family: SharedString, ui_size: Pixels, code_family: SharedString, code_size: Pixels, code_ligatures: bool, terminal_family: Option<SharedString>, terminal_size: Pixels }`.
   - `pub(crate) struct ZedSettings { theme: ThemeChoice, icon_theme: Option<String>, fonts: Fonts }`; `pub(crate) enum ThemeChoice { Named(String), BySystem { mode: Mode, light: String, dark: String } }`; `fn read_zed_settings(dir: &Path) -> Result<ZedSettings, AppearanceError>` (`dir` is `~/.config/zed` in the app, a fixture in tests).
   - `fn load_theme(zed_dir: &Path, extensions_dir: &Path, name: &str) -> Result<Theme, AppearanceError>` searching `zed_dir/themes/*.json` then `extensions_dir/*/themes/*.json`, filling missing keys from `fallback::gruvbox_material_dark_hard()`.
@@ -90,7 +90,7 @@
 
 ### Task 3: Virtualized 10,000-row list and text input with IME
 
-- [ ] Done
+- [x] Done. Single-line input (ledger ruling); editing logic in `ui/text_edit.rs`; list test bounds stalls instead of asserting p99 (a hidden window is paced at 35 ms). Hand IME check still open.
 
 **Files:**
 - Create: `src/ui/text_input.rs` (single and multi line input, the GPUI input-handler pattern from gpui's `examples/input.rs`), `src/ui/text_input_tests.rs`, `src/spike.rs` (`--spike list` mode)
