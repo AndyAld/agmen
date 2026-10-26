@@ -14,6 +14,8 @@ mod diff_view;
 mod dock;
 mod format;
 mod git_panel;
+// agmen-c7 fix-hosting: the file icons a workspace's first frame draws.
+mod icon_preload;
 mod keys;
 mod left_dock;
 mod listener_panel;
@@ -47,8 +49,6 @@ pub(crate) use syntax::Language;
 pub(crate) use text_input::{TextInput, bind_keys};
 pub(crate) use title_bar::TitleBar;
 pub(crate) use workspace::{Quit, Workspace};
-// agmen-c7 fix-hosting: the icon preload reads Settings' preview names.
-pub(crate) use settings_view::ICON_PREVIEW_NAMES;
 
 use gpui::App;
 

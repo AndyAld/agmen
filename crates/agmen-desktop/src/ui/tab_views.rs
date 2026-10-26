@@ -18,16 +18,17 @@ use super::settings_view::{SettingsEvent, SettingsSources, SettingsView};
 use super::syntax::Language;
 use crate::backend::Snapshot;
 
-/// The data the views read: the snapshot the center was built from.
+/// The data the views read: the snapshot the center was built from,
+/// shared with the workspace.
 #[derive(Debug, Clone)]
 pub(crate) struct TabSources {
-    snapshot: Snapshot,
+    snapshot: Rc<Snapshot>,
 }
 
 impl TabSources {
-    pub(crate) fn from_snapshot(snapshot: &Snapshot) -> Self {
+    pub(crate) fn from_snapshot(snapshot: &Rc<Snapshot>) -> Self {
         Self {
-            snapshot: snapshot.clone(),
+            snapshot: Rc::clone(snapshot),
         }
     }
 }

@@ -44,6 +44,12 @@ const LAYERS: [(RoleLayer, &str, &str); 3] = [
     (RoleLayer::Personal, "~/.config/agmen/roles", "personal"),
 ];
 
+/// A role's file name, as the Roles panel, its tab and the status bar
+/// show it.
+pub(crate) fn role_file_name(role: &str) -> String {
+    format!("{role}.xml")
+}
+
 impl RolesPanel {
     pub(crate) const fn new(roles: Vec<RoleFile>) -> Self {
         Self {
@@ -69,7 +75,7 @@ impl RolesPanel {
     }
 
     fn role_row(&self, role: &RoleFile, cx: &mut Context<Self>) -> ListItem {
-        let file = format!("{}.xml", role.name);
+        let file = role_file_name(&role.name);
         let theme = &cx.global::<Appearance>().theme;
         let icon_color = theme.icon_muted;
         let icon = cx.try_global::<FileIcons>().map_or_else(
@@ -229,7 +235,7 @@ pub(crate) struct RoleFileView {
 
 impl RoleFileView {
     pub(crate) fn new(role: &RoleFile, cx: &mut Context<Self>) -> Self {
-        let file = format!("{}.xml", role.name);
+        let file = role_file_name(&role.name);
         let slug = LAYERS
             .iter()
             .find(|(layer, ..)| *layer == role.layer)

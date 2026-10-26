@@ -1,5 +1,7 @@
 //! The window's root view: title bar, docks, center and status bar.
 
+use std::rc::Rc;
+
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
@@ -33,7 +35,7 @@ actions!(workspace, [ToggleLeftDock, ToggleRightDock, Quit]);
 /// The window's root view.
 pub(crate) struct Workspace {
     focus_handle: FocusHandle,
-    snapshot: Snapshot,
+    snapshot: Rc<Snapshot>,
     left_dock: Dock,
     right_dock: Dock,
     agents_panel: Entity<AgentsPanel>,
@@ -53,11 +55,16 @@ pub(crate) struct Workspace {
 
 impl Workspace {
     pub(crate) fn new(snapshot: Snapshot, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        // agmen-c7 fix-hosting: the first frame draws the snapshot's file
+        // icons, even in a window macOS will not draw again, and the center
+        // shares the snapshot.
+        super::icon_preload::preload_snapshot(&snapshot, cx);
+        let snapshot = Rc::new(snapshot);
         let agents_panel = cx.new(|_| AgentsPanel::new(snapshot.roster.clone()));
         let agents_events = cx.subscribe(&agents_panel, |this, _, event, cx| match event {
             AgentsPanelEvent::Selected(id) => this.select_agent(id, cx),
         });
-        let chat = cx.new(|cx| ChatView::new(snapshot.clone(), window, cx));
+        let chat = cx.new(|cx| ChatView::new(Snapshot::clone(&snapshot), window, cx));
         let tabs = starting_tabs(&snapshot);
         let pane_group = cx.new(|cx| PaneGroup::new(&snapshot, Some(chat), tabs, cx));
         let left = LeftDockState::new(&snapshot, cx);

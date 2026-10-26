@@ -21,8 +21,8 @@ impl Workspace {
     /// What the status bar shows in the listener's place for the active
     /// tab, or `None` for the listener's state.
     pub(crate) fn status_context(&self, cx: &App) -> Option<SharedString> {
-        let item = self.pane_group.read(cx).active_item(cx)?;
-        context_for(&item, &self.snapshot).map(Into::into)
+        let (item, label) = self.pane_group.read(cx).active_tab(cx)?;
+        context_for(&item, &label, &self.snapshot).map(Into::into)
     }
 
     /// Whether the status bar offers the Listener toggle.
@@ -32,21 +32,21 @@ impl Workspace {
     }
 }
 
-/// The context text for `item`. Items the snapshot does not know, and tabs
-/// no frame draws (the settings file, search, plan and spec), give `None`,
-/// which keeps the listener's state.
-fn context_for(item: &TabItem, snapshot: &Snapshot) -> Option<String> {
+/// The context text for `item`, whose tab reads `label`, so the status bar
+/// names an agent or role file as its tab does. Items the snapshot does not
+/// know, and tabs no frame draws (the settings file, search, plan and
+/// spec), give `None`, which keeps the listener's state.
+fn context_for(item: &TabItem, label: &str, snapshot: &Snapshot) -> Option<String> {
     match item {
         TabItem::Agent(id) => snapshot
             .roster
             .iter()
             .flat_map(|group| &group.agents)
             .find(|agent| agent.id == *id)
-            .map(|agent| format!("{} · {}", agent.handle, agent.status.label())),
-        TabItem::RoleFile(role) => {
-            let file = format!("{role}.xml");
-            let language = Language::for_path(Path::new(&file)).name();
-            Some(format!("{file} · {language}"))
+            .map(|agent| format!("{label} · {}", agent.status.label())),
+        TabItem::RoleFile(_) => {
+            let language = Language::for_path(Path::new(label)).name();
+            Some(format!("{label} · {language}"))
         }
         TabItem::File { worktree, .. } | TabItem::Diff { worktree, .. } => snapshot
             .worktrees

@@ -67,7 +67,7 @@ impl PaneGroup {
     /// showing `chat` when given. A click on one of the chat's reference
     /// chips opens a tab, a ⌘-click a split.
     pub(crate) fn new(
-        snapshot: &Snapshot,
+        snapshot: &Rc<Snapshot>,
         chat: Option<Entity<ChatView>>,
         tabs: Vec<TabItem>,
         cx: &mut Context<Self>,
@@ -93,6 +93,13 @@ impl PaneGroup {
             pane.activate(0, cx);
         });
         group
+    }
+
+    /// The active pane's active tab and its label, as its tab shows it.
+    pub(crate) fn active_tab(&self, cx: &App) -> Option<(TabItem, String)> {
+        let item = self.active_item(cx)?;
+        let label = self.names.tab_label(&item);
+        Some((item, label))
     }
 
     /// The pane with a Chat tab, if one has it.

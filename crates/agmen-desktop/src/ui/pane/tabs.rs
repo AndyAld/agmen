@@ -5,14 +5,14 @@ use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Context, Entity, EventEmitter, InteractiveElement as _, IntoElement, MouseButton,
+    App, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement, MouseButton,
     ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
     Subscription, Window, div,
 };
 
 use super::item::TabItem;
 use super::names::{PaneNames, label_is_code};
-use crate::icons::FileIcons;
+use crate::icons::{FileIcon, FileIcons};
 use crate::ui::chat::ChatView;
 use crate::ui::components::{Breadcrumb, Button, ButtonStyle, Color, Label, Tab};
 use crate::ui::tab_views::TabViews;
@@ -166,18 +166,26 @@ impl Pane {
         };
         let tab = match (item, &self.chat) {
             (TabItem::Chat, Some(chat)) => tab.badge(chat.read(cx).badge()),
-            (TabItem::RoleFile(_) | TabItem::SettingsFile(_), _) => {
-                match cx.try_global::<FileIcons>() {
-                    Some(icons) => {
-                        let name = self.names.tab_label(item);
-                        tab.file_icon(icons.icon(Path::new(&name), false, false))
-                    }
-                    None => tab,
-                }
-            }
-            _ => tab,
+            _ => match self.tab_file_icon(item, cx) {
+                Some(icon) => tab.file_icon(icon),
+                None => tab,
+            },
         };
         if label_is_code(item) { tab.code() } else { tab }
+    }
+
+    /// The icon theme's icon for a tab that shows a file, named by its
+    /// label; `None` keeps the tab's UI icon.
+    pub(super) fn tab_file_icon(&self, item: &TabItem, cx: &App) -> Option<FileIcon> {
+        if !matches!(
+            item,
+            TabItem::File { .. } | TabItem::RoleFile(_) | TabItem::SettingsFile(_)
+        ) {
+            return None;
+        }
+        let icons = cx.try_global::<FileIcons>()?;
+        let name = self.names.tab_label(item);
+        Some(icons.icon(Path::new(&name), false, false))
     }
 
     fn render_breadcrumb(&self, item: &TabItem, cx: &mut Context<Self>) -> Breadcrumb {

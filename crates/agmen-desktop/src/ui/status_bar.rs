@@ -44,8 +44,8 @@ impl StatusBar {
         self
     }
 
-    /// Shows `context` in the listener's place, as "settings" while
-    /// Settings is the active tab (frame "Desktop · settings", node 8240).
+    /// Shows `context`, what the active tab is about
+    /// (`Workspace::status_context`), in the listener's place.
     #[must_use]
     pub(crate) fn context(mut self, context: impl Into<SharedString>) -> Self {
         self.context = context.into();

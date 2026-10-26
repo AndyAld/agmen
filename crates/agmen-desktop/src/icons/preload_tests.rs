@@ -7,17 +7,8 @@ use gpui::{
 
 use super::*;
 use crate::appearance::IconThemeChoice;
-use crate::backend::chat_snapshot;
+use crate::icons::test_theme::material_icons;
 use crate::icons::{FileIcon, UiIcon};
-
-/// The test icon theme: a few Material mappings with tiny SVGs.
-fn icons() -> FileIcons {
-    let ext = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/zed-ext");
-    let choice = IconThemeChoice::Zed("Material Icon Theme".into());
-    let (icons, warning) = FileIcons::new(&choice, &ext);
-    assert!(warning.is_none(), "{warning:?}");
-    icons
-}
 
 fn svg_of(icon: &FileIcon) -> Option<PathBuf> {
     match icon {
@@ -45,7 +36,7 @@ fn first_frame_waits_for(icon: FileIcon, svg: &Path, cx: &mut TestAppContext) ->
 
 #[gpui::test]
 fn preloaded_theme_icons_draw_on_the_first_frame(cx: &mut TestAppContext) {
-    let icons = icons();
+    let icons = material_icons();
     let path = Path::new("main.rs");
     let before = icons.icon(path, false, false);
     let svg = svg_of(&before).unwrap();
@@ -65,7 +56,7 @@ fn preloaded_theme_icons_draw_on_the_first_frame(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn preload_stops_at_its_limit(cx: &mut TestAppContext) {
-    let icons = icons();
+    let icons = material_icons();
     let renderer = cx.update(|cx| cx.svg_renderer());
     icons.preload_up_to([("main.rs", false), ("Cargo.lock", false)], &renderer, 1);
     let rendered = ["main.rs", "Cargo.lock"]
@@ -89,35 +80,4 @@ fn lucide_and_system_choices_preload_nothing() {
         icons.icon(Path::new("main.rs"), false, false),
         FileIcon::Ui(UiIcon::File)
     ));
-}
-
-#[test]
-fn snapshot_entries_cover_trees_tabs_and_the_preview() {
-    let entries = snapshot_entries(&chat_snapshot());
-    for (name, is_dir) in [
-        // The Project tree's files and folders, and the Git panel's changes.
-        ("main.rs", false),
-        ("tabs.rs", false),
-        ("Cargo.lock", false),
-        ("src", true),
-        ("ui", true),
-        ("tests", true),
-        // Role file and settings file tabs, and the Roles tab.
-        ("reviewer.xml", false),
-        ("settings.toml", false),
-        // Settings' icon preview.
-        ("release.yml", false),
-        // The theme's defaults, such as the tree's root folder.
-        ("", true),
-        ("", false),
-    ] {
-        assert!(
-            entries.iter().any(|(n, d)| n == name && *d == is_dir),
-            "{name} {is_dir}"
-        );
-    }
-    let mut unique = entries.clone();
-    unique.sort();
-    unique.dedup();
-    assert_eq!(unique.len(), entries.len(), "each name once");
 }

@@ -3,6 +3,8 @@
 // agmen-c7 fix-hosting: render the first frame's theme icons ahead.
 mod preload;
 mod system;
+#[cfg(test)]
+pub(crate) mod test_theme;
 mod zed_theme;
 
 use std::cell::{Cell, RefCell};
@@ -14,8 +16,6 @@ use gpui::{
     AnyElement, App, Global, Hsla, Image, ImageFormat, IntoElement as _, Pixels, RenderImage,
     Styled as _, Svg, img, svg,
 };
-
-pub(crate) use preload::preload_snapshot;
 
 use system::IconKind;
 pub(crate) use zed_theme::IconTheme;

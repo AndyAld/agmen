@@ -5,28 +5,17 @@
 //! reports the window occluded (covered, on another Space, or behind the
 //! lock screen), so a window that opens there keeps its first frames and
 //! icons that load afterwards never draw: `--screen` shots taken that way
-//! had empty icon slots in the trees and tabs. Rendering the snapshot's
-//! icons before the window opens puts them in the first frame; any other
-//! icon still loads in the background.
+//! had empty icon slots in the trees and tabs. Rendering a window's icons
+//! before its first frame (`ui/icon_preload.rs` names them) puts them in
+//! that frame; any other icon still loads in the background.
 
-use std::collections::BTreeSet;
-use std::path::Path;
-
-use gpui::{App, SvgRenderer};
+use gpui::SvgRenderer;
 
 use super::FileIcons;
-use crate::backend::Snapshot;
-use crate::ui::ICON_PREVIEW_NAMES;
 
 /// The most theme SVGs rendered ahead: about 0.4 ms each in a release
 /// build and 10 ms in a debug build (Material icons, 2026-10-26).
 const MAX_PRELOADED: usize = 128;
-
-/// The most names [`snapshot_entries`] collects.
-const MAX_ENTRIES: usize = 2048;
-
-/// The settings file, which Settings opens in a tab.
-const SETTINGS_FILE: &str = "settings.toml";
 
 impl FileIcons {
     /// Renders now the theme SVG of each entry, a file or folder name and
@@ -74,60 +63,6 @@ impl FileIcons {
             }
         }
     }
-}
-
-/// Renders the icons of every name in `snapshot` ahead, through the
-/// [`FileIcons`] global; call it before the window opens.
-pub(crate) fn preload_snapshot(snapshot: &Snapshot, cx: &App) {
-    let Some(icons) = cx.try_global::<FileIcons>() else {
-        return;
-    };
-    let entries = snapshot_entries(snapshot);
-    let renderer = cx.svg_renderer();
-    icons.preload(
-        entries
-            .iter()
-            .map(|(name, is_dir)| (name.as_str(), *is_dir)),
-        &renderer,
-    );
-}
-
-/// Every file and folder name the snapshot's views ask icons for, each once:
-/// the worktrees' files and folders (the Project tree and the Git panel's
-/// changes), role files (the Roles tab and role file tabs), the settings
-/// file, Settings' icon preview, and the theme's default file and folder
-/// (an empty name), which unmapped names such as a tree's root fall to.
-pub(crate) fn snapshot_entries(snapshot: &Snapshot) -> Vec<(String, bool)> {
-    let mut names = BTreeSet::new();
-    let mut add = |name: &str, is_dir: bool| {
-        if names.len() < MAX_ENTRIES {
-            names.insert((name.to_owned(), is_dir));
-        }
-    };
-    add("", true);
-    add("", false);
-    add(SETTINGS_FILE, false);
-    for (name, is_dir) in ICON_PREVIEW_NAMES {
-        add(name, is_dir);
-    }
-    for role in &snapshot.roles {
-        add(&format!("{}.xml", role.name), false);
-    }
-    for worktree in &snapshot.worktrees {
-        let changed = worktree.changes.iter().map(|change| &change.path);
-        for path in worktree.files.iter().chain(changed) {
-            let path = Path::new(path);
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                add(name, false);
-            }
-            for folder in path.ancestors().skip(1) {
-                if let Some(name) = folder.file_name().and_then(|n| n.to_str()) {
-                    add(name, true);
-                }
-            }
-        }
-    }
-    names.into_iter().collect()
 }
 
 #[cfg(test)]

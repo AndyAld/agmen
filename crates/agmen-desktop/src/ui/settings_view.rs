@@ -1178,7 +1178,7 @@ fn size_stepper(
 }
 
 /// The icon theme preview's files and folders: the mockup's eight.
-pub(crate) const ICON_PREVIEW_NAMES: [(&str, bool); 8] = [
+pub(super) const ICON_PREVIEW_NAMES: [(&str, bool); 8] = [
     ("src", true),
     ("tests", true),
     ("main.rs", false),

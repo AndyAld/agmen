@@ -1,3 +1,5 @@
+use std::rc::Rc;
+
 use gpui::{
     AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, Styled as _,
     TestAppContext, VisualTestContext, Window, div,
@@ -8,7 +10,9 @@ use super::item::SettingsPage;
 use super::names::PaneNames;
 use super::tabs::{MAX_TABS, Pane};
 use super::*;
-use crate::backend::chat_snapshot;
+use crate::backend::{Snapshot, chat_snapshot};
+use crate::icons::FileIcon;
+use crate::icons::test_theme::material_icons;
 use crate::ui::chat::ChatView;
 use crate::ui::test_support::{click, init, redraw};
 use crate::ui::tokens::{MOCKUP_REM, TAB_CLOSE_SLOT};
@@ -25,7 +29,7 @@ impl Render for Host {
 
 fn open_center(cx: &mut TestAppContext) -> (Entity<PaneGroup>, &mut VisualTestContext) {
     init(cx);
-    let snapshot = chat_snapshot();
+    let snapshot = Rc::new(chat_snapshot());
     let group = cx.new(|cx| PaneGroup::new(&snapshot, None, Vec::new(), cx));
     let host = group.clone();
     let (_, cx) = cx.add_window_view(|_, _| Host(host));
@@ -40,8 +44,8 @@ fn open_center_with_chat(
 ) -> (Entity<PaneGroup>, Entity<ChatView>, &mut VisualTestContext) {
     init(cx);
     let (host, cx) = cx.add_window_view(|window, cx| {
-        let snapshot = chat_snapshot();
-        let chat = cx.new(|cx| ChatView::new(snapshot.clone(), window, cx));
+        let snapshot = Rc::new(chat_snapshot());
+        let chat = cx.new(|cx| ChatView::new(Snapshot::clone(&snapshot), window, cx));
         Host(cx.new(|cx| PaneGroup::new(&snapshot, Some(chat), tabs, cx)))
     });
     let group = host.read_with(cx, |host, _| host.0.clone());
@@ -484,4 +488,55 @@ fn agent_tab_hosts_the_agent_view_when_the_agent_has_a_session(cx: &mut TestAppC
     pane.update(cx, |pane, cx| pane.open(sean, cx));
     redraw(cx);
     assert!(cx.debug_bounds("agent-view").is_none());
+}
+
+// agmen-c7 fix-hosting-review: a file tab draws the icon theme's file icon.
+#[gpui::test]
+fn file_tabs_draw_the_icon_themes_file_icon(cx: &mut TestAppContext) {
+    // Frame 4507, node 4658: the main.rs tab draws Material's Rust icon.
+    let (group, cx) = open_center(cx);
+    cx.update(|_, cx| cx.set_global(material_icons()));
+    let pane = first_pane(&group, cx);
+    let main_rs = TabItem::File {
+        worktree: "andy/fx1".into(),
+        path: "crates/agmen-desktop/src/main.rs".into(),
+    };
+    let reviewer = TabItem::RoleFile("reviewer".into());
+    for item in [main_rs, reviewer] {
+        let icon = pane.read_with(cx, |pane, cx| pane.tab_file_icon(&item, cx));
+        assert!(
+            matches!(icon, Some(FileIcon::Svg(_) | FileIcon::Rendered(_))),
+            "{item:?}: {icon:?}"
+        );
+    }
+    // A diff tab keeps its ± icon (frame 5057).
+    let diff = TabItem::Diff {
+        worktree: "andy/fx1".into(),
+        path: "crates/agmen-desktop/src/main.rs".into(),
+    };
+    assert!(
+        pane.read_with(cx, |pane, cx| pane.tab_file_icon(&diff, cx))
+            .is_none()
+    );
+}
+
+// agmen-c7 fix-hosting-review: the center's views read the shared snapshot.
+#[gpui::test]
+fn the_center_shares_the_snapshot_it_was_built_from(cx: &mut TestAppContext) {
+    init(cx);
+    let snapshot = Rc::new(chat_snapshot());
+    let _group = cx.new(|cx| PaneGroup::new(&snapshot, None, Vec::new(), cx));
+    assert!(Rc::strong_count(&snapshot) > 1);
+}
+
+// agmen-c7 fix-hosting-review: the status bar names the active tab by its label.
+#[gpui::test]
+fn active_tab_gives_the_item_and_its_label(cx: &mut TestAppContext) {
+    let (group, cx) = open_center(cx);
+    let reviewer = TabItem::RoleFile("reviewer".into());
+    for (item, label) in [(fx1(), "andy/fx1"), (reviewer, "reviewer.xml")] {
+        group.update(cx, |group, cx| group.open(item.clone(), cx));
+        let active = group.read_with(cx, |group, cx| group.active_tab(cx));
+        assert_eq!(active, Some((item, label.to_owned())));
+    }
 }

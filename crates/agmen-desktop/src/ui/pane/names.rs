@@ -9,6 +9,7 @@ use crate::backend::Snapshot;
 use crate::icons::UiIcon;
 use crate::refs::RefTarget;
 use crate::ui::components::Color;
+use crate::ui::roles_panel::role_file_name;
 
 /// An agent's handle and role, for its tab.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,7 +77,7 @@ impl PaneNames {
             TabItem::Agent(id) => self.handle(id),
             TabItem::File { path, .. } => file_name(path).into(),
             TabItem::Diff { path, .. } => format!("{} (diff)", file_name(path)),
-            TabItem::RoleFile(role) => format!("{role}.xml"),
+            TabItem::RoleFile(role) => role_file_name(role),
             TabItem::Plan => "plan".into(),
             TabItem::Spec(path) => file_name(path).into(),
             TabItem::Settings(_) => "settings".into(),
@@ -119,13 +120,10 @@ impl PaneNames {
                     Color::Role(agent.role.clone().into())
                 }),
             ),
-            // shortcut: Lucide's file icon; Task 11 shows the icon theme's
-            // file icons here once the Project panel reads them.
-            TabItem::File { .. } => (UiIcon::File, Color::Muted),
+            // The icon theme's file icon (`Pane::tab_file_icon`), or Lucide's
+            // in the muted icon color, as the Project and Roles panels draw it.
+            TabItem::File { .. } | TabItem::RoleFile(_) => (UiIcon::File, Color::Muted),
             TabItem::Diff { .. } => (UiIcon::Diff, Color::Warning),
-            // The icon theme's file icon (`Pane::render_tab`), or Lucide's
-            // in the muted icon color, as the Roles panel draws it.
-            TabItem::RoleFile(_) => (UiIcon::File, Color::Muted),
             TabItem::Spec(_) => (UiIcon::File, Color::Warning),
             TabItem::Settings(_) => (UiIcon::Settings, Color::Placeholder),
             TabItem::SettingsFile(_) => (UiIcon::File, Color::Muted),
