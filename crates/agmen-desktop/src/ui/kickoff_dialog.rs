@@ -235,7 +235,7 @@ impl RenderOnce for KickoffDialog {
                             .child(
                                 Button::new("kickoff:cancel", "Cancel")
                                     .style(ButtonStyle::Inset)
-                                    .size(ButtonSize::Tall)
+                                    .size(ButtonSize::Large)
                                     .on_click(move |_, window, cx| {
                                         cancel.update(cx, |m, cx| m.close_kickoff(window, cx));
                                     }),
@@ -243,7 +243,7 @@ impl RenderOnce for KickoffDialog {
                             .child(
                                 Button::new("kickoff:go", go)
                                     .style(ButtonStyle::Primary)
-                                    .size(ButtonSize::Tall)
+                                    .size(ButtonSize::Large)
                                     .on_click(move |_, window, cx| {
                                         kick.update(cx, |m, cx| m.kick_off(window, cx));
                                     }),
@@ -372,6 +372,24 @@ mod tests {
         });
         let focused = cx.update(|window, cx| model.read(cx).dialog_focus().is_focused(window));
         assert!(!focused);
+    }
+
+    // Shot diff (node 10320): Cancel and Kick off pad 6 above and below,
+    // as the add agent dialog's buttons, not the plan panel's taller ones.
+    #[gpui::test]
+    fn buttons_pad_six_above_and_below(cx: &mut TestAppContext) {
+        let mut label_cx = TestAppContext::single();
+        let text = crate::ui::test_support::rendered_size(&mut label_cx, || {
+            Label::new("Kick off 7 agents")
+                .weight(FontWeight::SEMIBOLD)
+                .into_any_element()
+        });
+        let (_, _, cx) = open(cx);
+        let go = cx.debug_bounds("kickoff:go").unwrap();
+        assert_eq!(
+            go.size.height,
+            text.height + crate::ui::tokens::SPACE_6 * 2.
+        );
     }
 
     #[gpui::test]
