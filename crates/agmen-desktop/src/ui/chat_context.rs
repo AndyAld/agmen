@@ -12,7 +12,7 @@ use gpui::SharedString;
 
 use super::components::Color;
 use super::format::{clock, money_of, title_case};
-use crate::backend::{AgentInfo, AgentStatus, Snapshot};
+use crate::backend::{AgentInfo, AgentStatus, ChangeCard, Snapshot};
 use crate::local_time::UtcOffset;
 use crate::refs::{Known, RefTarget, Span, find_refs};
 
@@ -46,6 +46,11 @@ pub(crate) struct ChatContext {
     /// could be reused, and a position alone could be claimed by a message
     /// that is not in the snapshot.
     positions: BTreeSet<(Stream, Seq, MessageId)>,
+    /// Hub position and client id of the message each change card belongs
+    /// to: the first message by hub position from the listener with the
+    /// card's id. Another sender may reuse that id (the hub keeps ids unique
+    /// per sender only), and its message gets no card.
+    card_rows: BTreeSet<(Stream, Seq, MessageId)>,
     /// Each drawn message's body and references, found on its first draw.
     /// Only messages in the snapshot are kept, so it holds at most one entry
     /// per message.
@@ -77,6 +82,18 @@ impl ChatContext {
             .iter()
             .map(|m| (m.stream.clone(), m.seq, m.client.id.clone()))
             .collect();
+        let card_rows = snapshot
+            .changes
+            .keys()
+            .filter_map(|id| {
+                snapshot
+                    .messages
+                    .iter()
+                    .filter(|m| &m.client.id == id && m.from == snapshot.listener_id)
+                    .map(|m| (m.stream.clone(), m.seq, m.client.id.clone()))
+                    .min()
+            })
+            .collect();
         Self {
             snapshot,
             known,
@@ -84,6 +101,7 @@ impl ChatContext {
             local,
             ids,
             positions,
+            card_rows,
             bodies: RefCell::default(),
             offset: UtcOffset::default(),
         }
@@ -122,6 +140,18 @@ impl ChatContext {
             self.bodies.borrow_mut().insert(key, found.clone());
         }
         found
+    }
+
+    /// The change card `env` carries, if it is the listener message the
+    /// card belongs to.
+    #[must_use]
+    pub(crate) fn change_card(&self, env: &StampedEnvelope) -> Option<&ChangeCard> {
+        let key = (env.stream.clone(), env.seq, env.client.id.clone());
+        if self.card_rows.contains(&key) {
+            self.snapshot.changes.get(&env.client.id)
+        } else {
+            None
+        }
     }
 
     /// The lowercase role of the roster agent `handle`.

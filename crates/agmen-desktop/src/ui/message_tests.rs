@@ -446,3 +446,60 @@ fn narrow_row_keeps_the_change_card_inside(cx: &mut TestAppContext) {
     assert_rows_fit(cx, px(300.));
     assert_rows_fit(&mut TestAppContext::single(), px(276.));
 }
+
+#[gpui::test]
+fn change_card_stays_on_the_listener_message_it_belongs_to(cx: &mut TestAppContext) {
+    // C222: the hub keeps client ids unique per sender only, so another
+    // sender can reuse the settings message's id, before it or after it.
+    let mut snapshot = snapshot_of(Screen::SettingsFromChat);
+    let (id, card) = snapshot
+        .changes
+        .iter()
+        .next()
+        .map(|(id, card)| (id.clone(), card.clone()))
+        .unwrap();
+    let real = snapshot
+        .messages
+        .iter()
+        .find(|m| m.client.id == id)
+        .unwrap()
+        .clone();
+    let sean = snapshot
+        .messages
+        .iter()
+        .find(|m| m.from_handle == "sean")
+        .unwrap()
+        .clone();
+    let spoof = |seq: u64| {
+        let mut spoof = real.clone();
+        spoof.from = sean.from.clone();
+        spoof.from_handle = sean.from_handle.clone();
+        spoof.from_kind = sean.from_kind;
+        spoof.seq = agmen_proto::Seq(seq);
+        spoof
+    };
+    let (before, after) = (spoof(0), spoof(real.seq.0 + 1000));
+    snapshot.messages.insert(0, before.clone());
+    snapshot.messages.push(after.clone());
+    let real_ix = snapshot
+        .messages
+        .iter()
+        .position(|m| m.client.id == id && m.from == real.from)
+        .unwrap();
+    let last = snapshot.messages.len() - 1;
+    let c = context_of(snapshot);
+
+    assert_eq!(verb_badge(&real, &c), ("SETTINGS".into(), Color::Accent));
+    for env in [&before, &after] {
+        assert_eq!(verb_badge(env, &c), ("ANSWER".into(), Color::Default));
+    }
+    let card_sel: &'static str = Box::leak(format!("{}:card", card.id).into_boxed_str());
+    let o = open(cx, px(800.), vec![real_ix], c.clone());
+    assert!(o.cx.debug_bounds(card_sel).is_some());
+    for ix in [0, last] {
+        let mut spoof_cx = TestAppContext::single();
+        let o = open(&mut spoof_cx, px(800.), vec![ix], c.clone());
+        assert!(o.cx.debug_bounds(sel(&real, "row")).is_some(), "row {ix}");
+        assert!(o.cx.debug_bounds(card_sel).is_none(), "row {ix}");
+    }
+}
