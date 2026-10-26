@@ -275,3 +275,39 @@ fn about_carries_every_linked_crates_license() {
     assert!(has("font-kit", "Permission is hereby granted"));
     assert!(has("scap", "MIT License"));
 }
+
+#[test]
+fn zed_extension_themes_show_author_and_repository() {
+    // Review C202: read from the extension's own extension.toml. Zed keeps
+    // no license file in its installed folders, so the line says so.
+    let home = Home::new();
+    let nord = home.extensions().join("nord");
+    fs::create_dir_all(nord.join("themes")).unwrap();
+    fs::write(
+        nord.join("extension.toml"),
+        "id = \"nord\"\nname = \"Nord\"\nversion = \"1.0.0\"\n\
+         authors = [\"Nord Folks <nord@example.org>\"]\n\
+         repository = \"https://github.com/example/nord\"\n",
+    )
+    .unwrap();
+    fs::write(
+        nord.join("themes/nord.json"),
+        r#"{"themes": [{"name": "Nord", "appearance": "dark", "style": {}}]}"#,
+    )
+    .unwrap();
+    let dirs = theme_dirs(&home.config(), &home.extensions());
+    let (themes, _) = installed_themes(&dirs);
+    let entry = themes.iter().find(|t| t.name == "Nord").unwrap();
+
+    let detail = rows::installed_detail(entry);
+    assert!(
+        detail.contains("by Nord Folks <nord@example.org>"),
+        "{detail}"
+    );
+    assert!(
+        detail.contains("https://github.com/example/nord"),
+        "{detail}"
+    );
+    assert!(detail.contains("installed in Zed (nord)"), "{detail}");
+    assert!(detail.contains("no license file"), "{detail}");
+}

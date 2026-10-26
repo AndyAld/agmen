@@ -11,7 +11,8 @@ use gpui::{
 
 use super::SettingsView;
 use crate::appearance::{
-    AgmenSettings, Appearance, Density, PickerEntry, ThemeEntry, ThemeExtension, ThemeOrigin,
+    AgmenSettings, Appearance, Density, InstalledTheme, PickerEntry, ThemeEntry, ThemeExtension,
+    ThemeOrigin,
 };
 use crate::icons::FileIcons;
 use crate::ui::components::{Button, Color, Label, LabelSize, Segmented, Stepper};
@@ -39,24 +40,36 @@ pub(super) fn tilde(path: &Path, home: Option<&Path>) -> String {
 
 /// The credit line of an installed theme: who made it and where it is from.
 pub(super) fn installed_detail(theme: &ThemeEntry) -> String {
-    let by = theme
-        .author
-        .as_ref()
+    let manifest = match &theme.origin {
+        ThemeOrigin::ZedExtension(t) | ThemeOrigin::Agmen(t) => Some(t),
+        ThemeOrigin::BuiltIn | ThemeOrigin::ZedUser => None,
+    };
+    // The theme file's own author first, as Zed shows it; else the
+    // extension's authors.
+    let author = theme.author.clone().or_else(|| {
+        manifest
+            .filter(|t| !t.authors.is_empty())
+            .map(|t| t.authors.join(", "))
+    });
+    let by = author
         .map(|a| format!("by {a} \u{b7} "))
         .unwrap_or_default();
+    let credit = |t: &InstalledTheme| {
+        let license = t.license.as_deref().unwrap_or("no license file");
+        let repo = t
+            .repository
+            .as_ref()
+            .map(|r| format!(" \u{b7} {r}"))
+            .unwrap_or_default();
+        format!("{license}{repo}")
+    };
     let from = match &theme.origin {
         ThemeOrigin::BuiltIn => "built into agmen".to_owned(),
         ThemeOrigin::ZedUser => "your Zed themes folder".to_owned(),
-        ThemeOrigin::ZedExtension(id) => format!("installed in Zed ({id})"),
-        ThemeOrigin::Agmen(t) => {
-            let license = t.license.as_deref().unwrap_or("no license file");
-            let repo = t
-                .repository
-                .as_ref()
-                .map(|r| format!(" \u{b7} {r}"))
-                .unwrap_or_default();
-            format!("installed by agmen \u{b7} {license}{repo}")
+        ThemeOrigin::ZedExtension(t) => {
+            format!("installed in Zed ({}) \u{b7} {}", t.id, credit(t))
         }
+        ThemeOrigin::Agmen(t) => format!("installed by agmen \u{b7} {}", credit(t)),
     };
     format!("{by}{from}")
 }

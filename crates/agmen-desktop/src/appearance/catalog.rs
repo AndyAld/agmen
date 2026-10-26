@@ -17,8 +17,9 @@ pub(crate) enum ThemeOrigin {
     BuiltIn,
     /// The person's own `~/.config/zed/themes/`.
     ZedUser,
-    /// A Zed extension, by id.
-    ZedExtension(String),
+    /// A Zed extension, with what its `extension.toml` says (only the id
+    /// when it has none).
+    ZedExtension(InstalledTheme),
     /// Installed by agmen from Zed's extensions.
     Agmen(InstalledTheme),
 }
@@ -96,7 +97,13 @@ fn origin_of(path: &Path, dirs: &ThemeDirs) -> ThemeOrigin {
         return ThemeOrigin::Agmen(installed);
     }
     if let Some(id) = top(&dirs.extensions) {
-        return ThemeOrigin::ZedExtension(id.to_string_lossy().into_owned());
+        // shortcut: reads the manifest once per theme file; cache by folder if an extension
+        // with many theme files makes the scan slow.
+        let read = read_installed(&dirs.extensions.join(&id));
+        return ThemeOrigin::ZedExtension(read.unwrap_or_else(|| InstalledTheme {
+            id: id.to_string_lossy().into_owned(),
+            ..InstalledTheme::default()
+        }));
     }
     ThemeOrigin::ZedUser
 }
@@ -117,8 +124,7 @@ pub(crate) fn picker_entries(
 ) -> Vec<PickerEntry> {
     let installed_id = |id: &str| {
         installed.iter().any(|entry| match &entry.origin {
-            ThemeOrigin::ZedExtension(ext) => ext == id,
-            ThemeOrigin::Agmen(theme) => theme.id == id,
+            ThemeOrigin::ZedExtension(theme) | ThemeOrigin::Agmen(theme) => theme.id == id,
             ThemeOrigin::BuiltIn | ThemeOrigin::ZedUser => false,
         })
     };
