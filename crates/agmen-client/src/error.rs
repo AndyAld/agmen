@@ -101,6 +101,10 @@ pub enum ClientError {
         #[source]
         source: serde_json::Error,
     },
+    /// A state read through a session lost its subscription before the
+    /// broker answered it, for example to a reconnect.
+    #[error("the state read's subscription did not complete")]
+    StateRead(#[source] rumqttc_next::SubscribeNoticeError),
     /// The identity's state folder could not be created.
     #[error("creating the state folder {path} failed")]
     StateDir {

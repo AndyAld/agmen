@@ -31,7 +31,7 @@ use std::time::Duration;
 use agmen_proto::{IdentityId, Stream, Timestamp, Topics};
 use rumqttc_next::{
     AsyncClient, ConnectionError, Event, EventLoop, Outgoing, Packet, Publish, PublishOptions, QoS,
-    SubscribeFilter, SubscribeReasonCode,
+    SubscribeFilter, SubscribeNoticeError, SubscribeReasonCode,
 };
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinSet;
@@ -41,6 +41,7 @@ use crate::error::ClientError;
 use crate::event::ClientEvent;
 use crate::replay::Streams;
 use crate::session::{CLIENT_CAPACITY, CLOSE_WAIT, ClientKind, ONLINE, close_disconnect, emit};
+use crate::state::StateSlot;
 use crate::token::{self, TokenSource};
 
 /// Failed connection attempts in a row before the session gives up.
@@ -101,6 +102,11 @@ impl Routes {
             .collect()
     }
 
+    /// Whether the session subscribes to `topic` on every connect.
+    pub(crate) fn subscribes(&self, topic: &str) -> bool {
+        self.route(topic).is_some()
+    }
+
     fn route(&self, topic: &str) -> Option<Route> {
         if topic == self.ack {
             return Some(Route::Reply);
@@ -157,6 +163,8 @@ pub(crate) struct LinkParts<T> {
     /// The identity's `presence/{id}`, for a session that publishes
     /// presence.
     pub(crate) presence: Option<String>,
+    /// The state read in flight (`Session::read_state`), if any.
+    pub(crate) state_reads: StateSlot,
 }
 
 /// The link task.
@@ -171,8 +179,10 @@ pub(crate) struct Link<T> {
     /// Handled publishes whose acks did not fit the client's queue yet,
     /// each with the connection it arrived on.
     unacked: VecDeque<(Publish, u64)>,
-    /// Subscribe requests waiting for room in the client's queue.
-    requests: JoinSet<()>,
+    /// Requests waiting for room in the client's queue, and the session's
+    /// own subscribes waiting for their SUBACK. One ends with an error when
+    /// the broker refused such a subscribe.
+    requests: JoinSet<Result<(), ClientError>>,
 }
 
 /// Whether the link keeps running.
@@ -197,7 +207,11 @@ impl<T: TokenSource> Link<T> {
     /// Runs until the session disconnects (`Ok`) or the link fails for good.
     pub(crate) async fn run(mut self) -> Result<(), ClientError> {
         loop {
-            while self.requests.try_join_next().is_some() {}
+            while let Some(done) = self.requests.try_join_next() {
+                if let Ok(Err(err)) = done {
+                    return Err(err);
+                }
+            }
             self.flush_acks();
             let due = Timestamp::now() >= *self.p.refresh_at.borrow();
             if due && self.gate.is_up() && !self.closing() {
@@ -253,10 +267,30 @@ impl<T: TokenSource> Link<T> {
         // Subscribing again on a resumed session changes nothing but makes
         // the broker send the retained state/head again. The request waits
         // on another task: this one must keep polling to drain the queue.
+        // The SUBACK comes back through the tracked notice, because the
+        // link cannot tell its own SUBACK from a state read's (see
+        // `on_suback`). A refusal stops the session when the link next
+        // wakes, at most a keep-alive later.
         let (client, filters) = (self.client(), self.p.routes.filters());
         self.requests.spawn(async move {
-            if let Err(err) = client.subscribe_many(filters).await {
-                tracing::warn!(error = %err, "queueing the subscribe failed");
+            let notice = match client.subscribe_many_tracked(filters).await {
+                Ok(notice) => notice,
+                Err(err) => {
+                    tracing::warn!(error = %err, "queueing the subscribe failed");
+                    return Ok(());
+                }
+            };
+            match notice.wait_completion_async().await {
+                Ok(()) => Ok(()),
+                Err(SubscribeNoticeError::V5SubAckFailure(codes)) => {
+                    Err(ClientError::Subscribe(format!("{codes:?}")))
+                }
+                // The connection went before the SUBACK; the next connect
+                // subscribes again.
+                Err(err) => {
+                    tracing::debug!(error = %err, "the subscribe did not complete");
+                    Ok(())
+                }
             }
         });
         // Online again on every connect: the last will of a lost connection
@@ -268,29 +302,29 @@ impl<T: TokenSource> Link<T> {
                 if let Err(err) = client.publish(topic, ONLINE.to_vec(), retained).await {
                     tracing::warn!(error = %err, "queueing the online presence failed");
                 }
+                Ok(())
             });
         }
         self.p.streams.on_connected();
         Ok(Flow::Continue)
     }
 
+    /// The first SUBACK answers the first connect's subscribe: nothing else
+    /// subscribes before `Session::connect` returns. Later ones may answer
+    /// a state read's subscribe, which its caller judges, so the link
+    /// leaves them to the tracked notices (see `on_connected`).
     fn on_suback(&mut self, codes: &[SubscribeReasonCode]) -> Result<Flow, ClientError> {
+        let Some(ready) = self.p.ready.take() else {
+            return Ok(Flow::Continue);
+        };
         if let Some(refused) = codes
             .iter()
             .find(|code| !matches!(code, SubscribeReasonCode::Success(_)))
         {
-            let err = ClientError::Subscribe(format!("{refused:?}"));
-            return match self.p.ready.take() {
-                Some(ready) => {
-                    report(ready, Err(err));
-                    Ok(Flow::Stop)
-                }
-                None => Err(err),
-            };
+            report(ready, Err(ClientError::Subscribe(format!("{refused:?}"))));
+            return Ok(Flow::Stop);
         }
-        if let Some(ready) = self.p.ready.take() {
-            report(ready, Ok(()));
-        }
+        report(ready, Ok(()));
         Ok(Flow::Continue)
     }
 
@@ -299,10 +333,12 @@ impl<T: TokenSource> Link<T> {
         let generation = self.gate.generation();
         let topic = String::from_utf8_lossy(&publish.topic).into_owned();
         let streams = &self.p.streams;
+        let offered = self.p.state_reads.offer(&topic, &publish.payload);
         match self.p.routes.route(&topic) {
             Some(Route::Reply) => streams.on_reply(&publish.payload).await?,
             Some(Route::Head) => streams.on_head(&publish.payload).await?,
             Some(Route::Message(stream)) => streams.on_message(stream, &publish.payload).await?,
+            None if offered => {}
             None => {
                 tracing::warn!(%topic, "dropped a publish on a topic this session does not read")
             }

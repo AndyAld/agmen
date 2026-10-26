@@ -11,9 +11,9 @@ mod support;
 use std::time::{Duration, Instant};
 
 use agmen_cli::McpOptions;
-use agmen_client::{HubClient, TokenKey};
+use agmen_client::{ClientEvent, ClientKind, Events, HubClient, Session, SessionConfig, TokenKey};
 use agmen_hub::Role;
-use agmen_proto::{Payload, StampedEnvelope, Stream};
+use agmen_proto::{Mention, Payload, StampedEnvelope, Stream};
 use serde_json::json;
 use support::mcp::{Mcp, text_of};
 use support::{Ingest, Member, WAIT, assert_exit, run, stdout};
@@ -23,22 +23,44 @@ fn options(who: &Member) -> McpOptions {
     McpOptions::new(who.wt.path(), who.home.tokens(), who.home.state_base())
 }
 
-/// `stream` as `who` reads it through the hub's replay API.
-async fn read(base: &url::Url, who: &Member, stream: &Stream) -> Vec<StampedEnvelope> {
+/// `who`'s hub client, with the identity token `agmen join` stored.
+fn hub_client(base: &url::Url, who: &Member) -> HubClient {
     let token = who
         .home
         .tokens()
         .get(&TokenKey::new(base, &who.identity.identity_id).unwrap())
         .unwrap()
         .expect("join stored the identity token");
-    let hub = HubClient::new(
+    HubClient::new(
         base.clone(),
         who.identity.project.clone(),
         who.identity.identity_id.clone(),
         token,
     )
-    .unwrap();
-    hub.page(stream, 0).await.unwrap().messages
+    .unwrap()
+}
+
+/// `stream` as `who` reads it through the hub's replay API.
+async fn read(base: &url::Url, who: &Member, stream: &Stream) -> Vec<StampedEnvelope> {
+    hub_client(base, who)
+        .page(stream, 0)
+        .await
+        .unwrap()
+        .messages
+}
+
+/// Reads `events` until they stay quiet for 500 ms, and panics when the
+/// session lost its connection or stopped meanwhile.
+async fn assert_never_dropped(events: &mut Events) {
+    while let Ok(event) = tokio::time::timeout(Duration::from_millis(500), events.recv()).await {
+        match event {
+            None => panic!("the held -cli session stopped"),
+            Some(ClientEvent::Connection { connected: false }) => {
+                panic!("the broker dropped the held -cli session")
+            }
+            Some(_) => {}
+        }
+    }
 }
 
 /// The message id the inbox tool shows on the line that contains `needle`.
@@ -257,6 +279,82 @@ async fn it_lanes_check_path_and_state() {
         let result = mcp.call("state", json!({ "key": "a/b" })).await;
         assert_eq!(result.is_error, Some(true), "{}", text_of(&result));
         mcp.stop().await;
+    })
+    .await;
+}
+
+/// Ruling R68: the state tool and every handle lookup read retained state
+/// through the server's own `-mcp` session. `<id>-cli` belongs to one-shot
+/// commands and the plugin's hooks, and connecting as it would make the
+/// broker drop whichever of them holds it (session takeover).
+#[tokio::test(flavor = "multi_thread")]
+async fn it_state_and_handles_never_take_the_cli_client_id() {
+    run(Ingest::On, |ctx| async move {
+        let sol = ctx.member(Role::Member, "sol", "agent").await;
+        let luna = ctx.member(Role::Member, "luna", "agent").await;
+        let luna_handle = &luna.identity.handle;
+        let mcp = Mcp::start(options(&sol)).await;
+        // The hub publishes state/head once the feed has a message.
+        let text = mcp
+            .text("post", json!({ "verb": "FYI", "body": "hi" }))
+            .await;
+        assert_eq!(text, "recorded #1 (feed)");
+
+        // A concurrent agmen command or hook of the same identity.
+        let state_dir = tempfile::tempdir().unwrap();
+        let config = SessionConfig::new(
+            ClientKind::Cli,
+            sol.identity.topics(),
+            hub_client(&ctx.base, &sol),
+            sol.identity.broker_url.clone(),
+            state_dir.path(),
+        );
+        let (cli, mut events) = Session::connect(config).await.unwrap();
+
+        let text = mcp.text("state", json!({})).await;
+        assert!(text.starts_with("state/head: {"), "{text}");
+        let text = mcp.text("state", json!({ "key": "roster" })).await;
+        assert!(text.contains(luna_handle.as_str()), "{text}");
+        let text = mcp
+            .text("dm", json!({ "to": [luna_handle], "body": "by handle" }))
+            .await;
+        assert!(text.starts_with("recorded #"), "{text}");
+        let text = mcp
+            .text("ask", json!({ "body": "which way?", "of": luna_handle }))
+            .await;
+        assert!(text.starts_with("recorded #"), "{text}");
+        let text = mcp
+            .text(
+                "post",
+                json!({ "verb": "FYI", "body": "see this", "mentions": [luna_handle] }),
+            )
+            .await;
+        assert!(text.starts_with("recorded #"), "{text}");
+        // A state key with nothing retained answers after the short wait.
+        let text = mcp.text("state", json!({ "key": "nothing" })).await;
+        assert_eq!(text, "state/nothing: nothing retained");
+
+        assert_never_dropped(&mut events).await;
+        cli.close().await.unwrap();
+        mcp.stop().await;
+
+        // The ASK and the FYI named luna by handle and reached her.
+        let feed = read(&ctx.base, &luna, &Stream::Feed).await;
+        let luna_id = &luna.identity.identity_id;
+        assert!(
+            feed.iter().any(|message| matches!(
+                &message.client.payload,
+                Payload::Ask { of: Some(of) } if of == luna_id
+            )),
+            "{feed:?}"
+        );
+        assert!(
+            feed.iter().any(|message| message
+                .client
+                .mentions
+                .contains(&Mention::Identity(luna_id.clone()))),
+            "{feed:?}"
+        );
     })
     .await;
 }

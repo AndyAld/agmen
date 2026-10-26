@@ -72,11 +72,11 @@ impl Outgoing {
 /// `rejected: body_too_large` for a body over the limit.
 pub(crate) async fn send(agent: &Agent, via: Via<'_>, out: Outgoing) -> Result<Recorded> {
     let mut env = envelope(out.payload, out.body)?;
-    env.to = agent.resolve(&out.to).await?;
+    env.to = agent.resolve(via, &out.to).await?;
     env.reply_to = out.reply_to;
     env.items = out.about.items;
     env.lane = out.about.lane;
-    env.mentions = agent.mentions(&out.about.mentions).await?;
+    env.mentions = agent.mentions(via, &out.about.mentions).await?;
     agent.send(via, env).await
 }
 
@@ -157,7 +157,10 @@ pub(crate) async fn ask(args: AskArgs) -> Result<()> {
     let body = body(Some(&args.text))?;
     let agent = agent().await?;
     let of = match args.of {
-        Some(of) => agent.resolve(&[of]).await?.pop(),
+        Some(of) => agent
+            .resolve(Via::OneShot(args.wait.wait), &[of])
+            .await?
+            .pop(),
         None => None,
     };
     let out = Outgoing {
@@ -295,7 +298,7 @@ pub(crate) async fn assign(args: AssignArgs) -> Result<()> {
     let body = body(args.body.as_deref())?;
     let agent = agent().await?;
     let to = agent
-        .resolve(&[args.identity])
+        .resolve(Via::OneShot(args.wait.wait), &[args.identity])
         .await?
         .pop()
         .context("resolving the assignee gave no id")?;

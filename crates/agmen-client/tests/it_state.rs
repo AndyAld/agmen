@@ -16,7 +16,7 @@ use agmen_proto::{ClientEnvelope, IdentityId, Timestamp};
 use serde_json::{Value, json};
 use support::{
     Ctx, PresenceLog, ShortTokens, TestIdentity, close, delivered, disconnected, new_message_id,
-    run,
+    run, subscribed_to,
 };
 
 /// How many times a test reads the roster before giving up on the hub
@@ -214,6 +214,85 @@ async fn it_token_rotation_keeps_presence_online() {
         assert!(seen.iter().all(|payload| payload == ONLINE), "{seen:?}");
         roster_status(&ctx, &reader, &id, "online").await;
         close(session).await;
+    })
+    .await;
+}
+
+/// Ruling R68: a session reads retained state through its own connection,
+/// so it never takes the `-cli` client id from a one-shot command. A read
+/// leaves the session's subscriptions as it found them (a watch keeps
+/// `state/head`) and never drops the connection.
+#[tokio::test(flavor = "multi_thread")]
+async fn it_session_reads_state_on_its_own_connection() {
+    run(|ctx| async move {
+        let who = ctx.identity().await;
+        let id = who.identity.id.clone();
+        let (mcp, mut events) = Session::connect(ctx.config(ClientKind::Mcp, &who, &ctx.broker))
+            .await
+            .unwrap();
+        // Nothing is retained in a fresh project.
+        assert_eq!(mcp.read_state("roster").await.unwrap(), None);
+        for bad in ["", "a/b", "+", "#", "head/#"] {
+            assert!(
+                matches!(mcp.read_state(bad).await, Err(ClientError::StateKey(_))),
+                "{bad:?}"
+            );
+        }
+
+        let greeting = hello();
+        mcp.publish(greeting.clone()).await.unwrap();
+        delivered(&mut events, &greeting.id).await;
+        let mut roster = Value::Null;
+        for _ in 0..ROSTER_READS {
+            if let Some(state) = mcp.read_state("roster").await.unwrap() {
+                roster = state;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        assert_eq!(
+            resolve_handle(&roster, &who.identity.handle).unwrap(),
+            Some(id.clone()),
+            "{roster}"
+        );
+        let head = mcp
+            .read_state("head")
+            .await
+            .unwrap()
+            .expect("the hub published state/head");
+        assert_eq!(head["feed_seq"], 1, "{head}");
+        subscribed_to(&format!("{id}-mcp"), &[ctx.topics.ack(&id)]).await;
+
+        // A watch subscribes to state/head itself and keeps it, at QoS 1.
+        let (watch, watch_events) =
+            Session::connect(ctx.config(ClientKind::Watch, &who, &ctx.broker))
+                .await
+                .unwrap();
+        drop(watch_events);
+        let head = watch.read_state("head").await.unwrap().expect("state/head");
+        assert_eq!(head["feed_seq"], 1, "{head}");
+        let roster = watch.read_state("roster").await.unwrap();
+        assert!(roster.is_some());
+        let mut want = vec![
+            ctx.topics.ack(&id),
+            ctx.topics.feed(),
+            ctx.topics.inbox(&id),
+            ctx.topics.state_head(),
+        ];
+        want.sort();
+        subscribed_to(&format!("{id}-watch"), &want).await;
+        close(watch).await;
+
+        while let Ok(event) = tokio::time::timeout(Duration::from_millis(300), events.recv()).await
+        {
+            assert!(event.is_some(), "the mcp session stopped");
+            assert_ne!(
+                event,
+                Some(ClientEvent::Connection { connected: false }),
+                "the mcp session dropped"
+            );
+        }
+        close(mcp).await;
     })
     .await;
 }

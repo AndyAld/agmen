@@ -25,6 +25,7 @@ use rumqttc_next::{
     PublishOptions, QoS, Transport,
 };
 use serde::{Deserialize, Serialize, Serializer};
+use serde_json::Value;
 use tokio::sync::{Notify, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use url::Url;
@@ -37,6 +38,7 @@ use crate::link::{CurrentClient, Link, LinkParts, Routes, token_timer};
 use crate::mqtt_store::FileSessionStore;
 use crate::outbox::Outbox;
 use crate::replay;
+use crate::state::{StateReads, StateSlot};
 use crate::token::{self, TokenSource};
 
 /// The identity's SQLite file in its state folder.
@@ -298,6 +300,7 @@ pub struct Session {
     /// Whether the session publishes presence, so its DISCONNECT asks the
     /// broker to send the last will.
     presence: bool,
+    state_reads: StateReads,
     tasks: Task<Result<(), ClientError>>,
 }
 
@@ -428,6 +431,7 @@ impl Session {
             events_tx.clone(),
         );
         let routes = Routes::new(&topics, &identity, kind);
+        let state_slot = StateSlot::default();
         let timer = token_timer(client.clone(), routes.ack().to_owned(), refresh_rx);
         let link = Link::new(LinkParts {
             eventloop,
@@ -435,7 +439,7 @@ impl Session {
             tokens,
             identity: identity.clone(),
             persistent: kind.persistent(),
-            routes,
+            routes: routes.clone(),
             streams,
             events: events_tx.clone(),
             connected: connected_tx,
@@ -443,6 +447,7 @@ impl Session {
             ready: Some(ready_tx),
             closing: closing.clone(),
             presence: presence.clone(),
+            state_reads: state_slot.clone(),
         });
         let sender = Sender {
             client: client.clone(),
@@ -465,6 +470,7 @@ impl Session {
             wake,
             closing,
             presence: presence.is_some(),
+            state_reads: StateReads::new(topics, routes, state_slot),
             tasks,
         };
         match tokio::time::timeout(CONNECT_WAIT, ready_rx).await {
@@ -497,6 +503,36 @@ impl Session {
         blocking(move || outbox.enqueue(&env)).await?;
         self.wake.notify_one();
         Ok(())
+    }
+
+    /// Reads the project's retained `state/{key}` through this session's
+    /// own connection (ruling R68): subscribes, takes the retained message,
+    /// and unsubscribes again. Returns the payload as JSON, or `None` when
+    /// the broker holds no retained message there (it waits 3 s after the
+    /// SUBACK for one). Unlike [`crate::read_state`] it opens no `<id>-cli`
+    /// connection, so it never makes the broker drop a one-shot command of
+    /// the same identity. Reads on one session run one at a time.
+    ///
+    /// ```no_run
+    /// # async fn example(session: agmen_client::Session) -> Result<(), Box<dyn std::error::Error>> {
+    /// let roster = session.read_state("roster").await?.unwrap_or_default();
+    /// match agmen_client::resolve_handle(&roster, "adam/coord")? {
+    ///     Some(id) => println!("adam/coord is {id}"),
+    ///     None => println!("no adam/coord in this project"),
+    /// }
+    /// # Ok(()) }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`ClientError::StateKey`] when `key` is not one topic level,
+    /// [`ClientError::BadState`] when the payload is not JSON,
+    /// [`ClientError::Subscribe`] when the broker refuses the subscription,
+    /// [`ClientError::Timeout`] when it does not answer it within 10 s,
+    /// [`ClientError::StateRead`] when the connection went before it did,
+    /// and [`ClientError::Closed`] when the session has stopped.
+    pub async fn read_state(&self, key: &str) -> Result<Option<Value>, ClientError> {
+        self.state_reads.read(&self.client, key).await
     }
 
     /// The identity's outbox.

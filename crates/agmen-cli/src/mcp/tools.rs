@@ -7,7 +7,6 @@
 
 use std::sync::Arc;
 
-use agmen_client::read_state;
 use agmen_proto::{ItemKey, LaneName, MessageId, Payload, Severity};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Implementation, ServerCapabilities, ServerConfig};
@@ -181,7 +180,7 @@ impl Server {
     async fn ask(&self, Parameters(params): Parameters<AskParams>) -> CallToolResult {
         self.respond(move |live: Arc<Live>| async move {
             let of = match params.of {
-                Some(of) => live.agent.resolve(&[of]).await?.pop(),
+                Some(of) => live.agent.resolve(live.via(), &[of]).await?.pop(),
                 None => None,
             };
             let out = Outgoing {
@@ -246,7 +245,9 @@ impl Server {
     async fn state(&self, Parameters(params): Parameters<StateParams>) -> CallToolResult {
         self.respond(move |live: Arc<Live>| async move {
             let key = params.key.unwrap_or_else(|| "head".to_owned());
-            let value = read_state(&live.agent.identity, &live.agent.hub, &key)
+            let value = live
+                .agent
+                .read_state(live.via(), &key)
                 .await
                 .map_err(|err| client_error(err, "reading the project's state failed"))?;
             let shown = value.map_or_else(|| "nothing retained".to_owned(), |v| v.to_string());

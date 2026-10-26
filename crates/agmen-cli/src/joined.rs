@@ -1,9 +1,9 @@
 //! The identity this worktree acts as: its trusted identity file (rulings
 //! R42 to R42b, through agmen-client's `find_identity`), its token, and
-//! what every command that speaks for it shares: handle lookup (ruling
-//! R60), envelopes, and publishing that waits for the hub's answer, through
-//! a one-shot `<id>-cli` session (the CLI) or a session the caller holds
-//! open (`agmen mcp`).
+//! what every command that speaks for it shares: retained state and handle
+//! lookup (rulings R60 and R68), envelopes, and publishing that waits for
+//! the hub's answer, through a one-shot `<id>-cli` session (the CLI) or a
+//! session the caller holds open (`agmen mcp`).
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -17,6 +17,7 @@ use agmen_proto::{
     Timestamp, Topics,
 };
 use anyhow::{Context as _, Result};
+use serde_json::Value;
 use tokio::sync::Notify;
 use tokio::time::Instant;
 
@@ -134,18 +135,39 @@ impl Agent {
         Api::new(self.identity.hub_url.clone(), self.token.clone())
     }
 
+    /// The project's retained `state/{key}`, read the way `via` says: a
+    /// one-shot `<id>-cli` connection for the CLI, the held session for
+    /// `agmen mcp` (ruling R68), which must not take `<id>-cli` from a
+    /// concurrent command or hook of the same identity.
+    ///
+    /// # Errors
+    ///
+    /// The client's error for a bad key, a payload that is not JSON, or a
+    /// failed read.
+    pub(crate) async fn read_state(
+        &self,
+        via: Via<'_>,
+        key: &str,
+    ) -> Result<Option<Value>, agmen_client::ClientError> {
+        match via {
+            Via::OneShot(_) => read_state(&self.identity, &self.hub, key).await,
+            Via::Held { session, .. } => session.read_state(key).await,
+        }
+    }
+
     /// The ids of `names`, each a handle (`adam/coord`) or an id, looked up
-    /// in the retained roster (ruling R60). A name no roster entry has is
-    /// used as an id when it is one.
+    /// in the retained roster (ruling R60), which is read the way `via`
+    /// says. A name no roster entry has is used as an id when it is one.
     ///
     /// # Errors
     ///
     /// A usage failure naming the first name that is neither.
-    pub(crate) async fn resolve(&self, names: &[String]) -> Result<Vec<IdentityId>> {
+    pub(crate) async fn resolve(&self, via: Via<'_>, names: &[String]) -> Result<Vec<IdentityId>> {
         if names.is_empty() {
             return Ok(Vec::new());
         }
-        let roster = read_state(&self.identity, &self.hub, "roster")
+        let roster = self
+            .read_state(via, "roster")
             .await
             .map_err(|err| client_error(err, "reading the project's roster failed"))?;
         names
@@ -166,8 +188,8 @@ impl Agent {
 
     /// `mentions` as the wire takes them: `all`, `agents`, `humans`, lanes
     /// and `role:<name>` as they are, handles and ids through
-    /// [`Agent::resolve`].
-    pub(crate) async fn mentions(&self, mentions: &[String]) -> Result<Vec<Mention>> {
+    /// [`Agent::resolve`] with `via`.
+    pub(crate) async fn mentions(&self, via: Via<'_>, mentions: &[String]) -> Result<Vec<Mention>> {
         let mut out = Vec::with_capacity(mentions.len());
         let mut names = Vec::new();
         for mention in mentions {
@@ -178,7 +200,7 @@ impl Agent {
             }
         }
         out.extend(
-            self.resolve(&names)
+            self.resolve(via, &names)
                 .await?
                 .into_iter()
                 .map(Mention::Identity),

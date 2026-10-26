@@ -286,6 +286,53 @@ pub async fn disconnected(client_id: &str) {
     }
 }
 
+/// The topics EMQX lists `client_id` as subscribed to, each with its QoS,
+/// sorted.
+pub async fn subscriptions(client_id: &str) -> Vec<(String, u64)> {
+    let resp = reqwest::Client::new()
+        .get(emqx_api(&["clients", client_id, "subscriptions"]))
+        .basic_auth(
+            env("AGMEN_IT_EMQX_API_KEY"),
+            Some(env("AGMEN_IT_EMQX_API_SECRET")),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_success(),
+        "subscriptions of {client_id}: {}",
+        resp.status()
+    );
+    let listed: Vec<serde_json::Value> = resp.json().await.unwrap();
+    let mut topics: Vec<(String, u64)> = listed
+        .iter()
+        .map(|sub| {
+            let topic = sub["topic"].as_str().unwrap().to_owned();
+            (topic, sub["qos"].as_u64().unwrap())
+        })
+        .collect();
+    topics.sort();
+    topics
+}
+
+/// Waits up to 5 s until EMQX lists `client_id` as subscribed to exactly
+/// `topics` (sorted), each at QoS 1, checking every 100 ms.
+pub async fn subscribed_to(client_id: &str, topics: &[String]) {
+    let want: Vec<(String, u64)> = topics.iter().map(|topic| (topic.clone(), 1)).collect();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let got = subscriptions(client_id).await;
+        if got == want {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{client_id} subscribes to {got:?}, not {want:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 /// Deletes the retained message on each of `topics` through the EMQX REST
 /// API. One that is already gone (404) is fine.
 pub async fn clear_retained(topics: &[String]) {
