@@ -5,6 +5,7 @@ members = [
     "crates/agmen-client",
     "crates/agmen-cli",
     "crates/agmen-hub",
+    "crates/agmen-desktop",
     "spikes/s1-emqx",
     "spikes/s2-rumqttc",
     "spikes/s4-fake-watch",

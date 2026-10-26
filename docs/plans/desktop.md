@@ -49,7 +49,7 @@
 
 ### Task 1: Crate, pinned gpui, and Zed's window layout
 
-- [ ] Done
+- [x] Done. gpui and gpui_macos at zed `08cbb88a` (ADR-0010); deny.toml changes and the agmen-proto drift test change approved by Andy.
 
 **Files:**
 - Create: `crates/agmen-desktop/Cargo.toml`, `src/main.rs`, `src/ui/mod.rs`, `src/ui/workspace.rs`, `src/ui/dock.rs`, `docs/adr/0010-desktop-gpui-spike.md`
@@ -369,4 +369,5 @@ Screens: `desktop-plan`, `desktop-spec`, `desktop-plan-ready`, `desktop-kick-off
 Things this plan needs from paths it may not edit, or decisions that are Andy's:
 
 - design.md section 4.3 lists the desktop app at `apps/desktop`; this plan builds `crates/agmen-desktop` per the brief. design.md should follow when someone owns it.
-- (Task 1 adds: whether `deny.toml` needs a gpui git source or new licenses.)
+- Task 1 (approved 2026-10-25): `deny.toml` allows git sources `zed-industries/zed` and `zed-industries/font-kit` and ignores RUSTSEC-2024-0436, RUSTSEC-2026-0206 and RUSTSEC-2026-0192; `crates/agmen-proto/tests/schema_drift.rs` compares schema JSON as values, because gpui turns on `serde_json/preserve_order` in workspace builds.
+- AeroSpace tiles the app window. `scripts/shot.sh` floats only the agmen window for comparison shots; a permanent float rule would be a change to Andy's AeroSpace config, which is Andy's call.
