@@ -11,6 +11,7 @@ use gpui::{
 };
 
 use super::components::{Button, ButtonStyle, Card, ChangeHandler, Color, Label, LabelSize};
+use super::tagged;
 use super::tokens::{
     CHANGE_CARD_WIDTH, CHANGE_SETTING_WIDTH, CHANGE_VALUE_MIN_WIDTH, SPACE_6, SPACE_8,
     TINT_PENDING, tint,
@@ -167,11 +168,6 @@ pub(super) fn part_selectors(card: &backend::ChangeCard) -> Vec<String> {
     };
     parts.extend(buttons.iter().map(|name| part(&card.id, name)));
     parts
-}
-
-/// `child` in a box tests find as `selector`.
-fn tagged(selector: String, child: impl IntoElement) -> gpui::Div {
-    div().debug_selector(|| selector).child(child)
 }
 
 fn row(card: &backend::ChangeCard, i: usize, row: &ChangeRow, target: Color) -> impl IntoElement {

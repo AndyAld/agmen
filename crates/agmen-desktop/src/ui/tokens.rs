@@ -22,7 +22,8 @@ pub(crate) const MOCKUP_REM: Pixels = px(15.);
 // Zed's UI text scale (`TextSize` in Zed's ui crate), the only sizes UI text
 // uses. At a 15 px rem: Large 15, Default 13.125, Small 11.25, XSmall 9.375.
 // The mockup's 13 px text is Default, its 11 and 12 px text is Small, and
-// its 10 px glyphs are XSmall. Code text uses the code font's own size.
+// its 10 px glyphs are XSmall. Code text at Default uses the code font's own
+// size; code text at another step takes that step (V93).
 /// A page title, such as Settings' "Appearance" (node 8091): 18 px at a
 /// 15 px rem. Zed's `TextSize` stops at Large; its `HeadlineSize` steps
 /// (rems 1.125 and 1.27) give 16.875 and 19.05 px there, so this is a step
@@ -36,6 +37,13 @@ pub(crate) const TEXT_XSMALL: Rems = rems_from_px(10.);
 /// Line height for chrome text, as a multiple of its size (the mockup's
 /// wrapped values advance 14 px at 12 px).
 pub(crate) const LINE_HEIGHT: f32 = 1.2;
+
+// console.py's auto line heights between an agent's tool cards (V108,
+// V113): 14 px for an output row's 12 px code, 16 px for the 13 px Say
+// text, 13 px for the 11 px cost line.
+pub(crate) const AGENT_OUT_LINE: Pixels = px(14.);
+pub(crate) const AGENT_SAY_LINE: Pixels = px(16.);
+pub(crate) const AGENT_COST_LINE: Pixels = px(13.);
 
 // Bars and docks.
 pub(crate) const TITLE_BAR_HEIGHT: Pixels = px(38.);

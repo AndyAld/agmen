@@ -221,6 +221,17 @@ fn section_counts_are_mono_placeholder() {
     // accepted difference covers only the pill's fill.
     assert_eq!(
         count_badge("2"),
-        Badge::new("2", Color::Placeholder).code_small().neutral()
+        Badge::new("2", Color::Placeholder).count()
     );
+}
+
+#[gpui::test]
+fn section_counts_draw_as_count_chips(cx: &mut TestAppContext) {
+    // V114: node 5113 is 13 px tall, mono 11 padded 0/6; at the 15 px rem
+    // the chip is Small's 11.25 px times 1.2, not a 16 px pill.
+    let (_, cx) = panel(cx);
+    cx.update(|window, _| window.set_rem_size(crate::ui::tokens::MOCKUP_REM));
+    redraw(cx);
+    let count = at(cx, "git-count:changes");
+    assert_eq!(count.size.height, gpui::px(13.5), "{count:?}");
 }

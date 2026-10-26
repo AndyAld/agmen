@@ -184,6 +184,36 @@ mod tests {
         assert_eq!(side_padding(cx, true), SPACE_12);
     }
 
+    /// The drawn height of the last option's label.
+    fn label_height(cx: &mut TestAppContext, code: bool) -> (Pixels, Pixels) {
+        let cx = open(cx, move || {
+            let effort = Segmented::new("effort", ["low", "high"], 0);
+            if code { effort.code() } else { effort }.into_any_element()
+        });
+        let code_size = cx.update(|_, cx| cx.global::<Appearance>().fonts.code_size);
+        let label = cx
+            .debug_bounds("effort:1:label")
+            .expect("label")
+            .size
+            .height;
+        (label, code_size)
+    }
+
+    #[gpui::test]
+    fn code_options_keep_the_code_size(cx: &mut TestAppContext) {
+        // C242: Task 15's effort row (node 3397) draws mono 13, the code
+        // font's own size, not the UI scale's Small step.
+        let (label, code_size) = label_height(cx, true);
+        assert_eq!(label, code_size * crate::ui::tokens::LINE_HEIGHT);
+    }
+
+    #[gpui::test]
+    fn ui_options_take_the_small_step(cx: &mut TestAppContext) {
+        // Small is 11.25 px at the mockup's 15 px rem; 1.2 times that.
+        let (label, _) = label_height(cx, false);
+        assert_eq!(label, gpui::px(13.5));
+    }
+
     #[test]
     fn selected_option_fills_the_accent_at_0x33() {
         // Both looks draw #72b9a9 (`text_accent`) at 0x33: nodes 8116, 8183

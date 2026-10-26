@@ -75,28 +75,10 @@ fn rows_between_cards_take_the_mockups_line_heights(cx: &mut TestAppContext) {
     init(cx);
     let (_, cx) = open_fx1(cx);
     redraw(cx);
-    let (code, rem) = cx.update(|window, cx| {
-        (
-            cx.global::<crate::appearance::Appearance>().fonts.code_size,
-            window.rem_size(),
-        )
-    });
     let mut height = |sel: &'static str| cx.debug_bounds(sel).unwrap().size.height;
-    let near = |got: gpui::Pixels, want: gpui::Pixels| (got - want).abs() <= gpui::px(0.25);
-    let out = height("session:2:out");
-    assert!(near(out, code * (14. / 12.)), "{out:?} for code {code:?}");
-    let say = height("session:3:say");
-    let say_size = crate::ui::tokens::TEXT_DEFAULT.to_pixels(rem);
-    assert!(
-        near(say, say_size * (16. / 13.)),
-        "{say:?} for {say_size:?}"
-    );
-    let cost = height("session:9:cost");
-    let cost_size = crate::ui::tokens::TEXT_SMALL.to_pixels(rem);
-    assert!(
-        near(cost, cost_size * (13. / 11.)),
-        "{cost:?} for {cost_size:?}"
-    );
+    assert_eq!(height("session:2:out"), gpui::px(14.));
+    assert_eq!(height("session:3:say"), gpui::px(16.));
+    assert_eq!(height("session:9:cost"), gpui::px(13.));
 }
 
 #[gpui::test]

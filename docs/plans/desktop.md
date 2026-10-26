@@ -272,7 +272,7 @@ Screens: `desktop-project`, `desktop-project-tests-open`.
 
 ### Task 12: Git panel and diff view
 
-- [ ] Done except Step 1b. A subagent built the panel and diff view (1a97324, merged at adb9081, with the scope chip from Task 11 switching which worktree Changes and Commits show). As built: `GitPanel::new(worktrees, branches, Vec<ScopeOption>, cx)` emits `OpenDiff { worktree, path }`; `DiffView::new(hunks, language)` (the plan had one argument); `WorktreeHead { Branch, Detached { at, item } }` (C183) and `CommitInfo.at: Timestamp`, shown in local time (C181); hunks live on `FileChange.hunks`; the 14 branches are one const that `git_facts()` also reads. Differences kept: count badges use `Badge`, not the mockup's surface fill; section titles have no letter spacing; long branch names clip; in the diff, Rust functions and constructors take Andy's theme green (#82be78), where console.py draws them in text (V109). Step 1b (OpenRef routing) waits for agmen-c7's workspace.
+- [ ] Done except Step 1b. A subagent built the panel and diff view (1a97324, merged at adb9081, with the scope chip from Task 11 switching which worktree Changes and Commits show). As built: `GitPanel::new(worktrees, branches, Vec<ScopeOption>, cx)` emits `OpenDiff { worktree, path }`; `DiffView::new(hunks, language)` (the plan had one argument); `WorktreeHead { Branch, Detached { at, item } }` (C183) and `CommitInfo.at: Timestamp`, shown in local time (C181); hunks live on `FileChange.hunks`; the 14 branches are one const that `git_facts()` also reads. Differences kept: conflict marker lines draw in the text color, "HEAD" included, where console.py's put_rust colors HEAD in warning because it colors every capitalized word (V115); section titles have no letter spacing; long branch names clip; in the diff, Rust functions and constructors take Andy's theme green (#82be78), where console.py draws them in text (V109). Step 1b (OpenRef routing) waits for agmen-c7's workspace.
 
 Screens: `desktop-git`, `desktop-git-collapsed`.
 
@@ -305,7 +305,7 @@ Screens: `desktop-needs-you`, `desktop-needs-you-answered`.
 ### Task 14: Take-over terminal in the chat, switching and adding agents
 
 - [ ] Done
-- Differences kept (V112): the switch menu (1802) opens above the terminal head at 1280 and 1440 wide, since below would cover the input box; the add agent title (2420) is 15 px, not 17 (no larger step on Zed's scale); the agent prompt (2430) ends "tell me both outputs" as console.py:2078 does, where spec 5.2 ends with the commands.
+- Differences kept (V112): the switch menu (1802) opens above the terminal head at 1280 and 1440 wide, since below would cover the input box; the add agent title (2420) is `LabelSize::Title`, 18 px against the mockup's 17 (C247); the agent prompt (2430) ends "tell me both outputs" as console.py:2078 does, where spec 5.2 ends with the commands.
 
 Screens: `desktop-chat-terminal`, `desktop-chat-codex`, `desktop-switch-agent`, `desktop-add-agent`.
 
@@ -384,7 +384,7 @@ Screens: `desktop-palette`.
 ### Task 19: Planning room, spec review and kick-off
 
 - [ ] Done
-- Differences kept (V112): Request changes (9189) and Pause all (10953) are disabled (no backend action yet); spec headings are not bold (syntax colors carry no weight, 9193); the right dock keeps its collapse button (8936) and the breadcrumb keeps Show ledger (8729); the plan room composer placeholder keeps "their keys", has no "⏎ send" and clips at 1280 (8927); shares are approved before kick-off and the client cannot know R-1 to R-12 (10296, 10310); the kick-off title stays 15 px (10291); Kick off padding is 7/12 (9046); dialog buttons are 30 px with 12 px padding like the add agent dialog (10318, 10320).
+- Differences kept (V112): Request changes (9189) and Pause all (10953) are disabled (no backend action yet); spec headings are not bold (syntax colors carry no weight, 9193); the right dock keeps its collapse button (8936) and the breadcrumb keeps Show ledger (8729); the plan room composer placeholder keeps "their keys", has no "⏎ send" and clips at 1280 (8927); shares are approved before kick-off and the client cannot know R-1 to R-12 (10296, 10310); the kick-off title is `LabelSize::Title`, 18 px against the mockup's 17 (10291, C247); Kick off padding is 7/12 (9046); dialog buttons are 30 px with 12 px padding like the add agent dialog (10318, 10320).
 
 Screens: `desktop-plan`, `desktop-spec`, `desktop-plan-ready`, `desktop-kick-off`, `desktop-running`.
 

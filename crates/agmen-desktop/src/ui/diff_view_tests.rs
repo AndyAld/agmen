@@ -2,7 +2,7 @@ use gpui::TestAppContext;
 
 use super::*;
 use crate::backend::{DiffLine, chat_snapshot};
-use crate::ui::test_support::{PlainButtonHost, init, redraw};
+use crate::ui::test_support::{PlainButtonHost, fx1_worktree, init, redraw};
 
 fn main_rs_hunks() -> Vec<Hunk> {
     chat_snapshot()
@@ -199,20 +199,18 @@ fn conflict_markers_are_seven_marks_alone_or_before_a_space() {
         "a <<<<<<< b",
         "=======x",
         "<<= 2",
+        // C246: a banner line is code, not the base and worktree divider.
+        "======= Results =======",
     ] {
         assert!(!is_conflict_marker(code), "{code}");
     }
-}
-
-fn fx1() -> crate::backend::WorktreeInfo {
-    chat_snapshot().worktrees.into_iter().next().unwrap()
 }
 
 #[gpui::test]
 fn diff_tab_holds_its_breadcrumb_open_file_and_diff(cx: &mut TestAppContext) {
     // V95: one view the workspace can host, as FileView is for a file.
     init(cx);
-    let wt = fx1();
+    let wt = fx1_worktree();
     let (tab, cx) = cx.add_window_view(|_, cx| DiffTab::new(&wt, "src/main.rs", cx));
     redraw(cx);
     tab.read_with(cx, |tab, _| {
@@ -229,7 +227,7 @@ fn diff_tab_holds_its_breadcrumb_open_file_and_diff(cx: &mut TestAppContext) {
 #[gpui::test]
 fn diff_tab_without_the_change_says_so(cx: &mut TestAppContext) {
     init(cx);
-    let wt = fx1();
+    let wt = fx1_worktree();
     let (_, cx) = cx.add_window_view(|_, cx| DiffTab::new(&wt, "README.md", cx));
     redraw(cx);
     assert!(cx.debug_bounds("diff-empty").is_some());
@@ -240,7 +238,7 @@ fn diff_tab_open_file_button_is_plain(cx: &mut TestAppContext) {
     // V92: console.py 1729 draws Open file "plain": elevated surface,
     // padding 3/9, radius 5, 20 px tall.
     init(cx);
-    let wt = fx1();
+    let wt = fx1_worktree();
     let (_, cx) = cx.add_window_view(|_, cx| {
         let tab = cx.new(|cx| DiffTab::new(&wt, "src/main.rs", cx));
         PlainButtonHost::new(tab, "Open file")

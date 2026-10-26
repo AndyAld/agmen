@@ -213,7 +213,7 @@ impl RenderOnce for KickoffDialog {
                     })
                     .child(
                         Label::new(title)
-                            .size(LabelSize::Large)
+                            .size(LabelSize::Title)
                             .weight(FontWeight::SEMIBOLD)
                             .color(Color::TextMuted),
                     )

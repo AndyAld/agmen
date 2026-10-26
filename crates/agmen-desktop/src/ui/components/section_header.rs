@@ -80,7 +80,7 @@ impl RenderOnce for SectionHeader {
             row = row.child(
                 gpui::div()
                     .debug_selector(|| count_selector)
-                    .child(Badge::new(count, Color::Placeholder).code().neutral()),
+                    .child(Badge::new(count, Color::Placeholder).count()),
             );
         }
         match self.on_click {

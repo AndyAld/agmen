@@ -21,6 +21,15 @@ pub(crate) fn init(cx: &mut TestAppContext) {
     });
 }
 
+/// The chat fixture's andy/fx1 worktree.
+pub(crate) fn fx1_worktree() -> crate::backend::WorktreeInfo {
+    crate::backend::chat_snapshot()
+        .worktrees
+        .into_iter()
+        .find(|wt| wt.handle == "andy/fx1")
+        .expect("the chat fixture has andy/fx1")
+}
+
 /// A view that renders one component, wrapped in a box sized to it.
 struct Harness(Box<dyn Fn() -> AnyElement>);
 

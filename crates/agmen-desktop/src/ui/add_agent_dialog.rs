@@ -365,7 +365,7 @@ impl RenderOnce for AddAgentDialog {
                     .gap(SPACE_10)
                     .child(
                         Label::new(title(&self.dialog, agent))
-                            .size(LabelSize::Large)
+                            .size(LabelSize::Title)
                             .weight(FontWeight::SEMIBOLD)
                             .color(Color::TextMuted),
                     )

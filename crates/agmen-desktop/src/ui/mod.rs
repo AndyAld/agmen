@@ -86,6 +86,12 @@ pub(crate) mod text_input_actions {
     };
 }
 
+/// `child` in a box tests find as `selector`.
+fn tagged(selector: String, child: impl gpui::IntoElement) -> gpui::Div {
+    use gpui::{InteractiveElement as _, ParentElement as _};
+    gpui::div().debug_selector(|| selector).child(child)
+}
+
 /// The color of the rules between chrome regions (mockup BORDER2).
 fn rule_color(cx: &App) -> gpui::Hsla {
     cx.global::<crate::appearance::Appearance>()
