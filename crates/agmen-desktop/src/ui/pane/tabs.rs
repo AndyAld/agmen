@@ -209,7 +209,7 @@ impl Pane {
 }
 
 impl Render for Pane {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let tabs: Vec<Tab> = self
             .tabs
             .iter()
@@ -219,7 +219,7 @@ impl Render for Pane {
         let active = self.active_item().cloned();
         let view = active
             .as_ref()
-            .and_then(|item| self.views.view(item, &self.tabs, cx));
+            .and_then(|item| self.views.view(item, &self.tabs, window, cx));
         let selector = format!("pane-{}", self.number);
         div()
             .debug_selector(|| selector)

@@ -147,6 +147,9 @@ fn agent_screen_shows_fx1s_tab_and_panel(cx: &mut TestAppContext) {
     workspace.read_with(cx, |w, cx| {
         assert_eq!(w.agents_panel.read(cx).selected(), Some(&id));
     });
+    // The tab hosts fx1's session view (frame 479), not a placeholder.
+    assert!(cx.debug_bounds("agent-view").is_some());
+    assert!(cx.debug_bounds("session:0:tool").is_some());
 }
 
 #[gpui::test]

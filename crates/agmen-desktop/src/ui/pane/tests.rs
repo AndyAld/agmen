@@ -463,3 +463,25 @@ fn tab_labels_follow_the_mockup() {
         vec!["pr-3331".to_owned(), "chat".to_owned()]
     );
 }
+
+// agmen-c7 fix-hosting: agent tabs host the agent view.
+#[gpui::test]
+fn agent_tab_hosts_the_agent_view_when_the_agent_has_a_session(cx: &mut TestAppContext) {
+    let (group, cx) = open_center(cx);
+    let pane = first_pane(&group, cx);
+    pane.update(cx, |pane, cx| pane.open(fx1(), cx));
+    redraw(cx);
+    assert!(cx.debug_bounds("agent-view").is_some());
+    assert!(cx.debug_bounds("agent-open-terminal").is_some());
+    // An agent with no session on this machine keeps the placeholder.
+    let sean = chat_snapshot()
+        .roster
+        .iter()
+        .flat_map(|g| &g.agents)
+        .find(|a| a.handle.starts_with("sean/"))
+        .map(|a| TabItem::Agent(a.id.clone()))
+        .unwrap();
+    pane.update(cx, |pane, cx| pane.open(sean, cx));
+    redraw(cx);
+    assert!(cx.debug_bounds("agent-view").is_none());
+}
