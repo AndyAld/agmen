@@ -87,7 +87,7 @@ impl SpecView {
 
     fn code_view(path: &str, text: &str, cx: &mut Context<Self>) -> Entity<CodeView> {
         let language = Language::for_path(Path::new(path));
-        cx.new(|_| CodeView::new(text, language, Vec::new()))
+        cx.new(|_| CodeView::new(text, language, Vec::new()).without_marks())
     }
 
     /// Approve, or "Approved ✓" once I approved, then Request changes;

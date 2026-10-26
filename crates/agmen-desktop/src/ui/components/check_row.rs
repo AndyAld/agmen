@@ -3,11 +3,12 @@
 //! "Before kick-off", nodes 9031 to 9043).
 
 use gpui::{
-    App, IntoElement, ParentElement as _, RenderOnce, SharedString, Styled as _, Window, div,
+    App, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce, SharedString,
+    Styled as _, Window, div,
 };
 
 use super::{Color, Label, LabelSize};
-use crate::ui::tokens::SPACE_8;
+use crate::ui::tokens::{ICON_SM, SPACE_8};
 
 /// Whether a check passed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -55,11 +56,22 @@ impl RenderOnce for CheckRow {
             .flex()
             .items_center()
             .gap(SPACE_8)
-            .child(Label::new(glyph).size(LabelSize::Small).color(glyph_color))
             .child(
-                Label::new(self.label)
-                    .size(LabelSize::Small)
-                    .color(label_color),
+                // A minimum box, as the mockup's 12 px "○" (node 9038), so the
+                // narrower glyphs of the UI font keep every label at one x.
+                div()
+                    .debug_selector(|| "check:glyph".into())
+                    .flex()
+                    .flex_none()
+                    .min_w(ICON_SM)
+                    .child(Label::new(glyph).size(LabelSize::Small).color(glyph_color)),
+            )
+            .child(
+                div().debug_selector(|| "check:label".into()).child(
+                    Label::new(self.label)
+                        .size(LabelSize::Small)
+                        .color(label_color),
+                ),
             )
     }
 }
@@ -67,7 +79,7 @@ impl RenderOnce for CheckRow {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::test_support::rendered_size;
+    use crate::ui::test_support::{draw, rendered_size};
     use gpui::{TestAppContext, px};
 
     #[test]
@@ -88,5 +100,25 @@ mod tests {
             CheckRow::new("Lanes don't overlap", true).into_any_element()
         });
         assert!(size.width > px(40.));
+    }
+
+    /// Where the label of a row in `state` starts, from the row's left.
+    fn label_start(cx: &mut TestAppContext, state: CheckState) -> gpui::Pixels {
+        let cx = draw(cx, move || {
+            CheckRow::new("Lanes don't overlap", state).into_any_element()
+        });
+        let row = cx.debug_bounds("smoke").unwrap();
+        let label = cx.debug_bounds("check:label").unwrap();
+        label.left() - row.left()
+    }
+
+    #[gpui::test]
+    fn labels_start_at_one_x_whatever_the_glyph(cx: &mut TestAppContext) {
+        // Shot diff (plan, nodes 9037 and 9043): the narrower open glyph
+        // pulled its label 5 px left of the done rows' labels. The glyph
+        // sits in a 12 px box (node 9038), then the 8 px gap.
+        let want = ICON_SM + SPACE_8;
+        assert_eq!(label_start(cx, CheckState::Done), want);
+        assert_eq!(label_start(cx, CheckState::Open), want);
     }
 }

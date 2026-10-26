@@ -214,3 +214,31 @@ fn spec_markdown_takes_the_mockup_colors() {
     );
     assert_eq!(color_over(&lines[6], "Plain text.", &theme), None);
 }
+
+// Shot diff (spec, nodes 9228 to 9232): console.py draws a table row's "|"
+// in the line number color and its cells in text, whether or not the
+// table has a delimiter row (the spec's has none).
+#[test]
+fn spec_table_pipes_take_the_line_number_color() {
+    let theme = Appearance::builtin().theme;
+    let text = "## 4. Lanes\n| Lane    | Paths    |\n| L-CORE  | core/**  |\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\n```\n| code |\n```\n";
+    let lines = layout_lines(text, Language::Markdown);
+    for ix in [1, 2, 4, 5, 6] {
+        let line = &lines[ix];
+        let pipes: Vec<usize> = line.text.match_indices('|').map(|(at, _)| at).collect();
+        assert!(!pipes.is_empty(), "line {ix}");
+        for at in pipes {
+            let color = line
+                .highlights
+                .iter()
+                .find(|(r, _)| r.start <= at && at < r.end)
+                .and_then(|(_, name)| syntax_color(&theme, name));
+            assert_eq!(color, Some(theme.line_number), "line {ix} at {at}");
+        }
+    }
+    assert_eq!(color_over(&lines[1], "Lane", &theme), None);
+    assert_eq!(color_over(&lines[2], "core/**", &theme), None);
+    // A pipe inside a code block keeps the code block's color.
+    let names: Vec<&str> = lines[9].highlights.iter().map(|(_, name)| *name).collect();
+    assert_eq!(names, ["text.literal"]);
+}

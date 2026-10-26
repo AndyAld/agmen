@@ -1,11 +1,12 @@
 //! Read-only code with line numbers and change marks in the gutter: files
-//! in the Project panel (Task 11), role files (Task 10) and the lines of a
-//! diff (Task 12, through [`layout_lines`] and [`styled_line`]). Highlights
-//! are computed once, when the view is made.
+//! in the Project panel (Task 11), role files (Task 10), specs (Task 19)
+//! and the lines of a diff (Task 12, through [`layout_lines`] and
+//! [`styled_line`]). Highlights are computed once, when the view is made.
 
 use std::ops::Range;
 use std::rc::Rc;
 
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, Context, HighlightStyle, Hsla, InteractiveElement as _, IntoElement, ParentElement as _,
     Pixels, Render, SharedString, Styled as _, StyledText, Window, div, uniform_list,
@@ -85,8 +86,12 @@ pub(super) fn layout_lines(text: &str, language: Language) -> Vec<Line> {
 }
 
 /// The theme's color for a Zed syntax name, or the nearest parent name's
-/// (`keyword.function` falls back to `keyword`).
+/// (`keyword.function` falls back to `keyword`); the line number color for
+/// agmen's [`syntax::LINE_NUMBER`].
 fn syntax_color(theme: &Theme, name: &str) -> Option<Hsla> {
+    if name == syntax::LINE_NUMBER {
+        return Some(theme.line_number);
+    }
     let mut name = name;
     loop {
         if let Some(color) = theme.syntax.get(name) {
@@ -116,10 +121,22 @@ pub(super) fn styled_line(line: &Line, theme: &Theme) -> StyledText {
     StyledText::new(line.text.clone()).with_highlights(highlights)
 }
 
+/// Whether lines have a change mark column between number and text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Gutter {
+    /// Numbers end at cell 4, the mark is cell 5 and text starts at cell 7
+    /// (the file view's mockup).
+    Marks,
+    /// Numbers end at cell 4 and text starts at cell 6 (the spec's mockup,
+    /// node 9193).
+    NumbersOnly,
+}
+
 /// A read-only file view.
 pub(crate) struct CodeView {
     lines: Rc<Vec<Line>>,
     marks: Rc<Vec<GutterMark>>,
+    gutter: Gutter,
 }
 
 impl CodeView {
@@ -127,7 +144,16 @@ impl CodeView {
         Self {
             lines: Rc::new(layout_lines(text, language)),
             marks: Rc::new(marks),
+            gutter: Gutter::Marks,
         }
+    }
+
+    /// Drops the change mark column, for text that never has marks (a
+    /// spec), so text starts one cell nearer the numbers.
+    #[must_use]
+    pub(crate) fn without_marks(mut self) -> Self {
+        self.gutter = Gutter::NumbersOnly;
+        self
     }
 }
 
@@ -162,6 +188,7 @@ fn render_line(
     ix: usize,
     line: &Line,
     marks: &[GutterMark],
+    gutter_kind: Gutter,
     number_width: Pixels,
     cell: Pixels,
     cx: &App,
@@ -191,18 +218,22 @@ fn render_line(
         if top { edge.top_0() } else { edge.bottom_0() }
     });
     // The mark column is one cell wide; its bar is Zed's narrow git bar.
-    let gutter = div()
-        .debug_selector(move || format!("line:{number}:mark"))
-        .w(cell)
-        .h_full()
-        .child(
-            div()
-                .relative()
-                .w(GUTTER_MARK_WIDTH)
-                .h_full()
-                .children(fill)
-                .children(deleted),
-        );
+    // Without it, text keeps the same two cells after the numbers.
+    let gutter = (gutter_kind == Gutter::Marks).then(|| {
+        div()
+            .debug_selector(move || format!("line:{number}:mark"))
+            .w(cell)
+            .h_full()
+            .child(
+                div()
+                    .relative()
+                    .w(GUTTER_MARK_WIDTH)
+                    .h_full()
+                    .children(fill)
+                    .children(deleted),
+            )
+            .flex_none()
+    });
     div()
         .debug_selector(move || format!("line:{number}"))
         .h(MONO_CELL_HEIGHT)
@@ -222,12 +253,13 @@ fn render_line(
                 .text_color(theme.line_number)
                 .child(number.to_string()),
         )
-        .child(gutter.flex_none())
+        .children(gutter)
         .child(
             // shortcut: long lines are clipped; sideways scroll when the file
             // and diff views need to show them whole.
             div()
                 .debug_selector(move || format!("line:{number}:text"))
+                .when(gutter_kind == Gutter::NumbersOnly, |text| text.ml(cell))
                 .flex_1()
                 .min_w_0()
                 .overflow_hidden()
@@ -260,7 +292,7 @@ impl Render for CodeView {
             reason = "a line count's digit count is tiny"
         )]
         let number_width = cell * cells as f32;
-        let (lines, marks) = (self.lines.clone(), self.marks.clone());
+        let (lines, marks, gutter) = (self.lines.clone(), self.marks.clone(), self.gutter);
         div()
             .size_full()
             .flex()
@@ -276,9 +308,9 @@ impl Render for CodeView {
                 uniform_list("code-lines", lines.len(), move |range, _window, cx| {
                     range
                         .filter_map(|ix| {
-                            lines
-                                .get(ix)
-                                .map(|line| render_line(ix, line, &marks, number_width, cell, cx))
+                            lines.get(ix).map(|line| {
+                                render_line(ix, line, &marks, gutter, number_width, cell, cx)
+                            })
                         })
                         .collect::<Vec<_>>()
                 })
