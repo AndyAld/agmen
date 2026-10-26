@@ -1,0 +1,46 @@
+# One way to deploy: ArgoCD in agmen's own cluster syncs the agmen-env
+# kustomization into namespace agmen. Apply this file by hand once
+# (kubectl apply -f examples/argocd/application.yaml). repoURL is a
+# placeholder until agmen's git home is settled. The components list adds
+# the secret filler and the ingress controller settings to the default
+# set; change it to match the cluster (ArgoCD 2.8 or later reads
+# kustomize.components).
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: agmen
+  namespace: argocd
+spec:
+  description: agmen hub, broker and database
+  sourceRepos:
+    - https://git.agmen.example/agmen/agmen.git
+  destinations:
+    - namespace: agmen
+      server: https://kubernetes.default.svc
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: agmen
+  namespace: argocd
+spec:
+  project: agmen
+  source:
+    repoURL: https://git.agmen.example/agmen/agmen.git
+    targetRevision: main
+    path: deploy/k8s/agmen-env
+    kustomize:
+      components:
+        - examples/vso
+        - examples/haproxy-ingress
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: agmen
+  syncPolicy:
+    automated:
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

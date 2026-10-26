@@ -1,0 +1,12 @@
+# One way to fill the secrets the pods read (README.md, "Secrets"): from
+# Vault or OpenBao through the Vault Secrets Operator. Needs the VSO CRDs
+# in the cluster. Add it to a kustomization as
+#   components:
+#     - <path to agmen-env>/examples/vso
+# The Vault address, auth mount and role in vso-secrets.yaml are
+# placeholders until agmen's Vault exists.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+resources:
+  - vso-secrets.yaml

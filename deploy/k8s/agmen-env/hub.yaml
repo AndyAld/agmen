@@ -1,0 +1,131 @@
+# The agmen hub. Its env vars are read in crates/agmen-hub/src/config.rs.
+# The image and the host in AGMEN_PUBLIC_URL come from placeholders.yaml
+# (hub-image, api-host); the values here are overwritten. Jenkins pushes
+# <AGMEN_REGISTRY>/agmen-hub:build-<N> from main, and build-0 is a tag no
+# build produces, so the pod waits in ImagePullBackOff until hub-image
+# names a real build (README.md).
+apiVersion: v1
+kind: Service
+metadata:
+  name: agmen-hub
+  namespace: agmen
+  labels:
+    app.kubernetes.io/name: agmen-hub
+    app.kubernetes.io/part-of: agmen
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: agmen-hub
+    app.kubernetes.io/part-of: agmen
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agmen-hub
+  namespace: agmen
+  labels:
+    app.kubernetes.io/name: agmen-hub
+    app.kubernetes.io/part-of: agmen
+spec:
+  replicas: 1
+  # The broker client id is agmen-hub-<AGMEN_HUB_INSTANCE>. Two pods with
+  # the same instance would take the session from each other, so the old
+  # pod stops before the new one starts.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agmen-hub
+      app.kubernetes.io/part-of: agmen
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agmen-hub
+        app.kubernetes.io/part-of: agmen
+    spec:
+      automountServiceAccountToken: false
+      imagePullSecrets:
+        - name: regcred
+      securityContext:
+        # distroless nonroot.
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: hub
+          image: registry.agmen.example/agmen-hub:build-0
+          args: ["serve"]
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - secretRef:
+                name: agmen-hub-database
+            - secretRef:
+                name: agmen-hub-github
+            - secretRef:
+                name: agmen-hub-emqx-api
+          env:
+            - name: AGMEN_LISTEN
+              value: 0.0.0.0:8080
+            - name: AGMEN_PUBLIC_URL
+              value: https://api.agmen.example
+            - name: AGMEN_EMQX_API_URL
+              value: http://agmen-emqx:18083/api/v5
+            - name: AGMEN_MQTT_URL
+              value: mqtt://agmen-emqx:1883
+            - name: AGMEN_HUB_INSTANCE
+              value: main
+            # The key id is the file name without .pem. To rotate, add the
+            # next key to Vault, list it here at least 60 s before it signs
+            # (EMQX refreshes the JWKS every 60 s), then swap the two.
+            - name: AGMEN_JWT_SIGNING_KEY
+              value: /keys/agmen-1.pem
+            - name: AGMEN_JWT_EXTRA_KEYS
+              value: ""
+            - name: RUST_LOG
+              value: info
+          # Ready once the database answers; live while the process answers.
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 2
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            timeoutSeconds: 2
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: jwt-keys
+              mountPath: /keys
+              readOnly: true
+      volumes:
+        - name: jwt-keys
+          secret:
+            secretName: agmen-jwt-keys
+            defaultMode: 0440
