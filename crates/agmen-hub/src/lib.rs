@@ -7,7 +7,9 @@
 //! (`docs/adr/0002-broker-emqx.md`). [`Hub::start_messaging`] connects to
 //! the broker, ingests every client publish ([`Hub::ingest`]) and runs the
 //! sweeper that publishes what ingest stored; [`Hub::post_as_hub`] posts the
-//! hub's own messages. [`Bootstrap`] makes a tenant, a project and its first
+//! hub's own messages. The hub also serves replay of every stream, keeps
+//! each project's retained `state/roster` from presence, and answers
+//! ROLLCALL. [`Bootstrap`] makes a tenant, a project and its first
 //! admin for the `agmen-hub bootstrap` command.
 
 #![warn(missing_docs)]
@@ -24,6 +26,9 @@ mod ingest;
 mod invites;
 mod mqtt;
 mod numbering;
+mod presence;
+mod replay;
+mod rollcall;
 mod secrets_scan;
 mod sweeper;
 

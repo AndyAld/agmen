@@ -196,11 +196,16 @@ fn identity_acl(topics: &Topics, id: &IdentityId) -> Vec<AclRule> {
     ]
 }
 
-/// The hub's rules: read every `up/`, publish anywhere else under
-/// `agmen/v1/`.
+/// The hub's rules: read every `up/` and every `presence/`, publish
+/// anywhere else under `agmen/v1/`.
 fn hub_acl() -> Vec<AclRule> {
     vec![
         AclRule::new("allow", "subscribe", "eq agmen/v1/+/+/up/+".to_owned()),
+        AclRule::new(
+            "allow",
+            "subscribe",
+            "eq agmen/v1/+/+/presence/+".to_owned(),
+        ),
         AclRule::new("deny", "publish", "agmen/v1/+/+/up/#".to_owned()),
         AclRule::new("allow", "publish", "agmen/v1/#".to_owned()),
         AclRule::deny_all(),
@@ -337,11 +342,17 @@ mod tests {
     }
 
     #[test]
-    fn hub_acl_ends_with_deny_all() {
+    fn hub_acl_matches_adr_0002() {
         let acl = serde_json::to_value(hub_acl()).unwrap();
         assert_eq!(
-            acl.as_array().unwrap().last().unwrap(),
-            &serde_json::json!({ "permission": "deny", "action": "all", "topic": "#" })
+            acl,
+            serde_json::json!([
+                { "permission": "allow", "action": "subscribe", "topic": "eq agmen/v1/+/+/up/+" },
+                { "permission": "allow", "action": "subscribe", "topic": "eq agmen/v1/+/+/presence/+" },
+                { "permission": "deny",  "action": "publish",   "topic": "agmen/v1/+/+/up/#" },
+                { "permission": "allow", "action": "publish",   "topic": "agmen/v1/#" },
+                { "permission": "deny",  "action": "all",       "topic": "#" }
+            ])
         );
     }
 

@@ -46,10 +46,10 @@ const MAX_TRACKED: usize = 10_000;
 /// What a `hub_busy` NACK tells the client to wait.
 const BUSY_RETRY_MS: u64 = 1_000;
 
-/// The verbs the hub sends itself (ruling R34). ACK and NACK are delivery
-/// replies, not stored messages.
-const HUB_VERBS: [Verb; 7] = [
-    Verb::State,
+/// The verbs the hub posts as numbered messages (ruling R34). ACK and NACK
+/// are delivery replies, and STATE goes to retained `state/` topics
+/// (protocol section 4), so none of them is stored.
+const HUB_VERBS: [Verb; 6] = [
     Verb::Grant,
     Verb::Deny,
     Verb::Item,
@@ -97,8 +97,8 @@ pub enum PostError {
 /// client's message, without the rate limit (ruling R34).
 #[derive(Debug, Clone, PartialEq)]
 pub struct HubPost {
-    /// The verb and its data; one of STATE, GRANT, DENY, ITEM, ALERT,
-    /// RELEASE and STATUS.
+    /// The verb and its data; one of GRANT, DENY, ITEM, ALERT, RELEASE
+    /// and STATUS.
     pub payload: Payload,
     /// The text.
     pub body: Body,
@@ -276,6 +276,8 @@ impl Hub {
         match store(pool, draft).await {
             Ok(recorded) => {
                 self.ingest_state().outbox_ready().notify_one();
+                self.on_recorded(topics, verb, &sender.id, sender.kind, &id)
+                    .await;
                 let (stream, seq) = recorded.ack;
                 Ok(Handled {
                     reply: DeliveryReply::Ack { id, stream, seq },
@@ -566,7 +568,7 @@ fn parse_id(id: &str) -> Result<IdentityId, StoreError> {
 /// Whether `topics` names one of this hub's projects. Checked before any
 /// reply, so hubs that share a broker (tests run many) answer only for
 /// their own projects.
-async fn project_exists(pool: &PgPool, topics: &Topics) -> Result<bool, sqlx::Error> {
+pub(crate) async fn project_exists(pool: &PgPool, topics: &Topics) -> Result<bool, sqlx::Error> {
     sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM projects WHERE id = $1 AND tenant_id = $2)")
         .bind(topics.project().as_str())
         .bind(topics.tenant().as_str())

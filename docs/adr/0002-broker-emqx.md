@@ -67,6 +67,7 @@ The hub connects with username `agmen-hub` and client id `agmen-hub-<instance>` 
   "sub": "agmen-hub", "username": "agmen-hub", "exp": <now + 3600>,
   "acl": [
     { "permission": "allow", "action": "subscribe", "topic": "eq agmen/v1/+/+/up/+" },
+    { "permission": "allow", "action": "subscribe", "topic": "eq agmen/v1/+/+/presence/+" },
     { "permission": "deny",  "action": "publish",   "topic": "agmen/v1/+/+/up/#" },
     { "permission": "allow", "action": "publish",   "topic": "agmen/v1/#" },
     { "permission": "deny",  "action": "all",       "topic": "#" }
@@ -74,7 +75,9 @@ The hub connects with username `agmen-hub` and client id `agmen-hub-<instance>` 
 }
 ```
 
-The hub subscribes with `$share/hub/agmen/v1/+/+/up/+`. EMQX authorizes a shared subscription against the topic filter without the `$share/<group>/` prefix (from source: `do_check_sub_authzs2` in `emqx_channel.erl`), so the rule above allows any group name and a plain subscription too; the ACL cannot pin the group. The tests use one group per test so parallel tests do not split each other's messages. The hub may publish anywhere under `agmen/v1/` except `up/`, and nowhere else (`it_hub_token_scope`). Task 9 adds a rule if the hub needs to subscribe to `presence/+`.
+The hub subscribes with `$share/hub/agmen/v1/+/+/up/+`. EMQX authorizes a shared subscription against the topic filter without the `$share/<group>/` prefix (from source: `do_check_sub_authzs2` in `emqx_channel.erl`), so the rule above allows any group name and a plain subscription too; the ACL cannot pin the group. The tests use one group per test so parallel tests do not split each other's messages. The hub may publish anywhere under `agmen/v1/` except `up/`, and nowhere else (`it_hub_token_scope`).
+
+MVP Task 9 added the `presence/+` rule. The hub builds each project's retained `state/roster` from presence, so it subscribes to `agmen/v1/+/+/presence/+` in the same SUBSCRIBE packet as `up/`, as a plain subscription: every hub replica must see every presence change, and the broker sends a plain subscriber every retained presence after each connect. The hub reads nothing else; `state/`, `feed`, `inbox/` and `ack/` stay closed to it. `hub_acl_matches_adr_0002` in `broker_tokens.rs` checks the claim above rule for rule, and the presence tests in `crates/agmen-hub/tests/it_replay.rs` connect a hub with it.
 
 ### EMQX config
 

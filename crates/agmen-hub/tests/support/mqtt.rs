@@ -143,6 +143,28 @@ impl Client {
         }
     }
 
+    /// Publishes a retained message at QoS 1 and returns the PUBACK reason.
+    pub async fn publish_retained(&mut self, topic: &str, payload: &[u8]) -> PubAckReason {
+        self.client
+            .publish(topic, QoS::AtLeastOnce, true, payload.to_vec())
+            .await
+            .unwrap();
+        loop {
+            if let Packet::PubAck(ack) = self.next_control().await {
+                return ack.reason;
+            }
+        }
+    }
+
+    /// Sends DISCONNECT (normal), so the broker drops the last will, and
+    /// waits until the connection has closed.
+    pub async fn disconnect(mut self) {
+        self.client.disconnect().await.unwrap();
+        self.closed_within(ACK_WAIT)
+            .await
+            .expect("the connection closed after DISCONNECT");
+    }
+
     /// Subscribes at QoS 1 and returns the SUBACK reason.
     pub async fn subscribe(&mut self, filter: &str) -> SubscribeReasonCode {
         self.client

@@ -1,8 +1,10 @@
 //! The hub's broker connection (ADR-0002): one MQTT 5 client, username
 //! `agmen-hub` and client id `agmen-hub-<instance>`, with the hub's own
 //! broker token. It reads every project's `up/` topics through a shared
-//! subscription and hands each publish to ingest; the sweeper publishes
-//! through the same connection.
+//! subscription and hands each publish to ingest, and reads every
+//! project's `presence/` topics through a plain one and hands those to the
+//! presence task; the sweeper and the presence task publish through the
+//! same connection.
 //!
 //! The session is a clean one: while the hub is away nothing queues for
 //! it, so a client's publish in that gap gets no ACK and its outbox
@@ -15,7 +17,7 @@ use std::time::Duration;
 use agmen_proto::{Topics, parse_up};
 use rumqttc_next::{
     AckMode, AsyncClient, ConnectionError, Event, EventLoop, MqttOptions, Packet, Publish,
-    PublishOptions, QoS, SubscribeReasonCode,
+    PublishOptions, QoS, SubscribeFilter, SubscribeReasonCode,
 };
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
@@ -24,6 +26,7 @@ use crate::broker_tokens::{HUB_USERNAME, TokenError};
 use crate::config::MqttConfig;
 use crate::http::Hub;
 use crate::ingest::{IngestError, ReplyRoute};
+use crate::presence::{self, PRESENCE_FILTER};
 
 /// How long each of the hub's broker tokens lasts (ADR-0002). EMQX
 /// disconnects the hub at expiry and it reconnects with a fresh one.
@@ -60,10 +63,10 @@ pub enum MessagingError {
     /// The first CONNACK or SUBACK did not come in time.
     #[error("the broker did not answer within {CONNECT_WAIT:?}")]
     Timeout,
-    /// The broker refused the `up/` subscription.
+    /// The broker refused the `up/` or the `presence/` subscription.
     #[error("the broker refused the subscription to {filter}: {reason}")]
     Subscribe {
-        /// The filter.
+        /// The filters.
         filter: String,
         /// The SUBACK reason.
         reason: String,
@@ -88,8 +91,8 @@ pub enum MessagingError {
     Panicked(#[source] tokio::task::JoinError),
 }
 
-/// The running broker connection, ingest worker and sweeper. Dropping it
-/// stops all three.
+/// The running broker connection, ingest worker, presence task and
+/// sweeper. Dropping it stops them all.
 #[derive(Debug)]
 pub struct Messaging {
     tasks: JoinSet<Result<(), MessagingError>>,
@@ -109,9 +112,10 @@ impl Messaging {
 
 impl Hub {
     /// Connects to the broker as `agmen-hub-<instance>`, subscribes to
-    /// `$share/<group>/agmen/v1/+/+/up/+`, and starts ingest and the
-    /// sweeper. It returns once the subscription is granted, so nothing
-    /// published to `up/` afterwards is missed.
+    /// `$share/<group>/agmen/v1/+/+/up/+` and `agmen/v1/+/+/presence/+`,
+    /// and starts ingest, the presence task and the sweeper. It returns
+    /// once both subscriptions are granted, so nothing published to `up/`
+    /// afterwards is missed.
     ///
     /// # Errors
     ///
@@ -144,67 +148,96 @@ impl Hub {
             .capacity(QUEUE)
             .try_build()
             .map_err(MessagingError::Client)?;
-        let filter = config.up_filter();
+        let filters = [config.up_filter(), PRESENCE_FILTER.to_owned()];
         tokio::time::timeout(
             CONNECT_WAIT,
-            first_connect(&client, &mut eventloop, &filter),
+            first_connect(&client, &mut eventloop, &filters),
         )
         .await
         .map_err(|_| MessagingError::Timeout)??;
-        tracing::info!(client_id = %config.client_id(), %filter, "subscribed to up/");
+        tracing::info!(client_id = %config.client_id(), ?filters, "subscribed to up/ and presence/");
+        // What an earlier connection of this hub read no longer holds.
+        self.presence().clear();
         let (tx, rx) = mpsc::channel(QUEUE);
+        let (presence_tx, presence_rx) = mpsc::channel(QUEUE);
         let mut tasks = JoinSet::new();
         tasks.spawn(run_connection(
             eventloop,
             client.clone(),
             self.clone(),
-            filter,
-            tx,
+            filters,
+            Routes {
+                ingest: tx,
+                presence: presence_tx,
+            },
         ));
         tasks.spawn(run_ingest(self.clone(), client.clone(), rx));
+        tasks.spawn(presence::run(self.clone(), client.clone(), presence_rx));
         tasks.spawn(crate::sweeper::run(self.clone(), client));
         Ok(Messaging { tasks })
     }
+}
+
+/// The hub's two subscriptions, in one SUBSCRIBE packet: `up/` (shared)
+/// and `presence/` (plain).
+type Filters = [String; 2];
+
+fn subscribe_filters(filters: &Filters) -> impl Iterator<Item = SubscribeFilter> + use<'_> {
+    filters
+        .iter()
+        .map(|filter| SubscribeFilter::new(filter.as_str(), QoS::AtLeastOnce))
 }
 
 /// Polls until CONNACK, subscribes, and polls until the SUBACK.
 async fn first_connect(
     client: &AsyncClient,
     eventloop: &mut EventLoop,
-    filter: &str,
+    filters: &Filters,
 ) -> Result<(), MessagingError> {
     let mut subscribed = false;
     loop {
         match eventloop.poll().await.map_err(MessagingError::Connect)? {
             Event::Incoming(Packet::ConnAck(_)) if !subscribed => {
-                subscribe(client, filter)?;
+                subscribe(client, filters)?;
                 subscribed = true;
             }
-            Event::Incoming(Packet::SubAck(ack)) => return check_suback(filter, &ack.return_codes),
+            Event::Incoming(Packet::SubAck(ack)) => {
+                return check_suback(filters, &ack.return_codes);
+            }
             _ => {}
         }
     }
 }
 
-/// Queues the first `up/` subscription. Called from the polling task, so it
+/// Queues the first subscriptions. Called from the polling task, so it
 /// must not wait on the request queue, which is empty at that point.
-fn subscribe(client: &AsyncClient, filter: &str) -> Result<(), MessagingError> {
+fn subscribe(client: &AsyncClient, filters: &Filters) -> Result<(), MessagingError> {
     client
-        .try_subscribe(filter, QoS::AtLeastOnce)
+        .try_subscribe_many(subscribe_filters(filters))
         .map_err(|err| MessagingError::Subscribe {
-            filter: filter.to_owned(),
+            filter: filters.join(", "),
             reason: err.to_string(),
         })
 }
 
-fn check_suback(filter: &str, codes: &[SubscribeReasonCode]) -> Result<(), MessagingError> {
+fn check_suback(filters: &Filters, codes: &[SubscribeReasonCode]) -> Result<(), MessagingError> {
     match codes {
-        [SubscribeReasonCode::Success(_)] => Ok(()),
+        [
+            SubscribeReasonCode::Success(_),
+            SubscribeReasonCode::Success(_),
+        ] => Ok(()),
         other => Err(MessagingError::Subscribe {
-            filter: filter.to_owned(),
+            filter: filters.join(", "),
             reason: format!("{other:?}"),
         }),
     }
+}
+
+/// Where the connection task sends each publish it receives.
+#[derive(Debug)]
+struct Routes {
+    ingest: mpsc::Sender<Publish>,
+    presence: mpsc::Sender<Publish>,
 }
 
 /// The delay before reconnect attempt `failures` (1 for the first).
@@ -215,15 +248,16 @@ fn retry_delay(failures: u32) -> Duration {
         .min(MAX_RETRY_DELAY)
 }
 
-/// Polls the connection: hands publishes to ingest, resubscribes after
-/// each reconnect (the session is clean), and reconnects with a fresh
-/// token after a failure, giving up after [`MAX_FAILURES`] in a row.
+/// Polls the connection: hands presence publishes to the presence task and
+/// every other publish to ingest, resubscribes after each reconnect (the
+/// session is clean), and reconnects with a fresh token after a failure,
+/// giving up after [`MAX_FAILURES`] in a row.
 async fn run_connection(
     mut eventloop: EventLoop,
     client: AsyncClient,
     hub: Hub,
-    filter: String,
-    tx: mpsc::Sender<Publish>,
+    filters: Filters,
+    routes: Routes,
 ) -> Result<(), MessagingError> {
     let mut failures = 0_u32;
     // Dropped with this task, which aborts a resubscribe still waiting.
@@ -232,24 +266,35 @@ async fn run_connection(
         while resubscribe.try_join_next().is_some() {}
         match eventloop.poll().await {
             Ok(Event::Incoming(Packet::Publish(publish))) => {
-                if tx.send(publish).await.is_err() {
-                    return Err(MessagingError::Stopped("ingest"));
+                let (route, task) =
+                    if presence::is_presence_topic(&String::from_utf8_lossy(&publish.topic)) {
+                        (&routes.presence, "presence")
+                    } else {
+                        (&routes.ingest, "ingest")
+                    };
+                if route.send(publish).await.is_err() {
+                    return Err(MessagingError::Stopped(task));
                 }
             }
             Ok(Event::Incoming(Packet::ConnAck(_))) => {
                 failures = 0;
                 tracing::info!("reconnected to the broker");
+                // The broker sends every retained presence again for the
+                // new subscription.
+                hub.presence().clear();
                 // The sweeper may have filled the request queue while the
                 // link was down, so wait for room on another task; this one
                 // must keep polling to drain the queue.
-                let (client, filter) = (client.clone(), filter.clone());
+                let (client, filters) = (client.clone(), filters.clone());
                 resubscribe.spawn(async move {
-                    if let Err(err) = client.subscribe(filter, QoS::AtLeastOnce).await {
+                    if let Err(err) = client.subscribe_many(subscribe_filters(&filters)).await {
                         tracing::warn!(error = %err, "queueing the resubscribe failed");
                     }
                 });
             }
-            Ok(Event::Incoming(Packet::SubAck(ack))) => check_suback(&filter, &ack.return_codes)?,
+            Ok(Event::Incoming(Packet::SubAck(ack))) => {
+                check_suback(&filters, &ack.return_codes)?;
+            }
             Ok(_) => {}
             Err(err) => {
                 failures += 1;

@@ -18,7 +18,8 @@ use crate::broker_tokens::{BrokerTokens, SigningKey, TokenError};
 use crate::config::Config;
 use crate::emqx::{EmqxAdmin, EmqxError};
 use crate::ingest::IngestState;
-use crate::{db, identities, invites};
+use crate::presence::PresenceState;
+use crate::{db, identities, invites, replay};
 
 /// How long the hub waits for GitHub or EMQX to answer.
 const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(10);
@@ -58,6 +59,7 @@ struct Inner {
     github: GithubOAuth,
     public_url: Url,
     ingest: IngestState,
+    presence: PresenceState,
 }
 
 impl Hub {
@@ -102,6 +104,7 @@ impl Hub {
                 github,
                 public_url: config.public_url.clone(),
                 ingest: IngestState::default(),
+                presence: PresenceState::default(),
             }),
         })
     }
@@ -119,6 +122,7 @@ impl Hub {
             )
             .route("/v1/invites", post(invites::create))
             .route("/v1/invites/{code}/accept", post(invites::accept))
+            .route("/v1/projects/{p}/streams/{s}", get(replay::stream))
             .layer(axum::middleware::map_response(refuse_framing))
             .with_state(self.clone())
     }
@@ -141,6 +145,10 @@ impl Hub {
 
     pub(crate) fn ingest_state(&self) -> &IngestState {
         &self.inner.ingest
+    }
+
+    pub(crate) fn presence(&self) -> &PresenceState {
+        &self.inner.presence
     }
 
     /// `path` (such as `v1/auth/device`) under the public URL, keeping any
