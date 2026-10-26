@@ -25,7 +25,7 @@ The hub signs one ES256 JWT per identity. Header: `{"alg": "ES256", "typ": "JWT"
   "sub": "<identity_id>", "username": "<identity_id>", "exp": <unix seconds, now + 3600>,
   "acl": [
     { "permission": "allow", "action": "publish",   "topic": "eq agmen/v1/<t>/<p>/up/<identity_id>", "qos": [1] },
-    { "permission": "allow", "action": "publish",   "topic": "eq agmen/v1/<t>/<p>/presence/<identity_id>", "retain": true },
+    { "permission": "allow", "action": "publish",   "topic": "eq agmen/v1/<t>/<p>/presence/<identity_id>", "qos": [1], "retain": true },
     { "permission": "allow", "action": "subscribe", "topic": "eq agmen/v1/<t>/<p>/feed" },
     { "permission": "allow", "action": "subscribe", "topic": "eq agmen/v1/<t>/<p>/inbox/<identity_id>" },
     { "permission": "allow", "action": "subscribe", "topic": "eq agmen/v1/<t>/<p>/ack/<identity_id>" },
@@ -41,7 +41,7 @@ The client connects with username = identity id and password = the token. Rules 
 - **Always set `exp`.** EMQX checks `exp` only when the claim is present; a token without it never expires and is never disconnected (from source).
 - **Never mint `is_superuser`, `clientid_override` or `client_attrs`.** EMQX honors all three from a verified token (from source): `is_superuser: true` skips the ACL, and `clientid_override` replaces the client id the kick relies on.
 - **End every `acl` with the deny-all rule**, even though `no_match = deny` also denies. A token missing the claim gets nothing (`it_no_acl_claim_is_denied`).
-- `"qos": [1]` on `up/` means a QoS 0 publish there is denied; `"retain": true` on `presence/` means only retained publishes are allowed there (from source, `emqx_authz_rule_raw.erl`; the default for both is "any").
+- `"qos": [1]` on `up/` and `presence/` means a QoS 0 publish there is denied; `"retain": true` on `presence/` means only retained publishes are allowed there (from source, `emqx_authz_rule_raw.erl`; the default for both is "any"). QoS 1 only on `presence/` lets the broker's inflight window bound the presence the hub has not acked yet, as it does for `up/`; a QoS 0 flood there could otherwise outrun the hub.
 
 ### Client ids: three per identity, one token
 

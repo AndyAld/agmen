@@ -183,7 +183,10 @@ fn identity_acl(topics: &Topics, id: &IdentityId) -> Vec<AclRule> {
             qos: Some([1]),
             ..AclRule::new("allow", "publish", eq(topics.up(id)))
         },
+        // QoS 1 only, so the broker's inflight window bounds the presence
+        // the hub has not acked yet, as it does for `up/`.
         AclRule {
+            qos: Some([1]),
             retain: Some(true),
             ..AclRule::new("allow", "publish", eq(topics.presence(id)))
         },
@@ -330,7 +333,7 @@ mod tests {
             acl,
             serde_json::json!([
                 { "permission": "allow", "action": "publish",   "topic": format!("eq {b}/up/abcdefgh"), "qos": [1] },
-                { "permission": "allow", "action": "publish",   "topic": format!("eq {b}/presence/abcdefgh"), "retain": true },
+                { "permission": "allow", "action": "publish",   "topic": format!("eq {b}/presence/abcdefgh"), "qos": [1], "retain": true },
                 { "permission": "allow", "action": "subscribe", "topic": format!("eq {b}/feed") },
                 { "permission": "allow", "action": "subscribe", "topic": format!("eq {b}/inbox/abcdefgh") },
                 { "permission": "allow", "action": "subscribe", "topic": format!("eq {b}/ack/abcdefgh") },

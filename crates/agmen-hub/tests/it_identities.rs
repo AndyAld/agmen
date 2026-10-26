@@ -280,7 +280,7 @@ async fn it_broker_token_claims_are_the_adr_0002_set() {
             claims["acl"],
             json!([
                 { "permission": "allow", "action": "publish",   "topic": format!("eq {b}/up/{id}"), "qos": [1] },
-                { "permission": "allow", "action": "publish",   "topic": format!("eq {b}/presence/{id}"), "retain": true },
+                { "permission": "allow", "action": "publish",   "topic": format!("eq {b}/presence/{id}"), "qos": [1], "retain": true },
                 { "permission": "allow", "action": "subscribe", "topic": format!("eq {b}/feed") },
                 { "permission": "allow", "action": "subscribe", "topic": format!("eq {b}/inbox/{id}") },
                 { "permission": "allow", "action": "subscribe", "topic": format!("eq {b}/ack/{id}") },
