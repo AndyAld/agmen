@@ -124,11 +124,42 @@ fn the_generic_dialog_has_no_prompt(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("add-agent:check").is_some());
 }
 
+#[test]
+fn prompt_lines_keep_each_command_whole() {
+    // Shot diff (nodes 2432 and 2433): the prompt breaks only at spaces
+    // outside its code spans, so `grok --version` ends line 4 whole instead
+    // of leaving its closing backtick to start line 5.
+    let asked = prompt(&AgentDialog::Add("grok".into()), Some(&agent("grok"))).unwrap();
+    let lines = prompt_lines(&asked, crate::ui::tokens::PROMPT_COLUMNS);
+    assert_eq!(
+        lines,
+        [
+            "Install xAI's Grok Build CLI (the `grok` command) on this machine",
+            "from xAI's official instructions at github.com/xai-org/grok-build. Do",
+            "not use the community npm package @vibe-kit/grok-cli; it also",
+            "installs a `grok` command. When it is installed, run `grok --version`",
+            "and `agmen agents scan`, and tell me both outputs.",
+        ]
+    );
+    // The clipboard text is the prompt itself; the lines only set it.
+    assert_eq!(lines.join(" "), asked);
+}
+
+#[test]
+fn prompt_lines_move_a_code_span_to_the_next_line_whole() {
+    assert_eq!(
+        prompt_lines("run `agmen agents scan` now", 12),
+        ["run", "`agmen agents scan`", "now"]
+    );
+    assert_eq!(prompt_lines("a `b c` d", 9), ["a `b c` d"]);
+    assert_eq!(prompt_lines("a `b c` d", 6), ["a", "`b c`", "d"]);
+    assert!(prompt_lines("", 10).is_empty());
+}
+
 #[gpui::test]
-fn prompt_wraps_at_the_mockups_measure(cx: &mut TestAppContext) {
-    // Node 2428: the prompt's set lines are at most 69 characters (node
-    // 2432), well inside the 680 px dialog, so the box wraps it in five
-    // lines there rather than at its own edge.
+fn prompt_draws_its_lines_at_the_mockups_measure(cx: &mut TestAppContext) {
+    // Node 2428: five set lines, the widest 69 characters (node 2432),
+    // well inside the 680 px dialog.
     let cx = draw(cx, || {
         div()
             .w(crate::ui::tokens::DIALOG_WIDTH)
@@ -147,46 +178,7 @@ fn prompt_wraps_at_the_mockups_measure(cx: &mut TestAppContext) {
     });
     let text = cx.debug_bounds("add-agent:prompt-text").unwrap();
     let columns = text.size.width / cell;
-    assert!((69.5..=70.5).contains(&columns), "{columns} cells");
+    assert!((68.5..=69.5).contains(&columns), "{columns} cells");
     let lines = text.size.height / line;
     assert!((lines - 5.).abs() < 0.2, "{lines} lines");
-    // Three of the mockup's five breaks. No measure gives all five: the
-    // one that fits node 2432's 69 characters also fits "Do" at the end of
-    // node 2430's 66.
-    let asked = prompt(&AgentDialog::Add("grok".into()), Some(&agent("grok"))).unwrap();
-    let rows = cx.update(|window, cx| {
-        let fonts = &cx.global::<Appearance>().fonts;
-        let mut style = window.text_style();
-        style.font_family = fonts.code_family.clone();
-        let run = style.to_run(asked.len());
-        let shaped = window
-            .text_system()
-            .shape_text(
-                asked.clone().into(),
-                fonts.code_size,
-                &[run],
-                Some(text.size.width),
-                None,
-            )
-            .unwrap();
-        let mut rows = Vec::new();
-        let mut start = 0;
-        for line in shaped.iter() {
-            for boundary in &line.wrap_boundaries {
-                let run = &line.unwrapped_layout.runs[boundary.run_ix];
-                let end = run.glyphs[boundary.glyph_ix].index;
-                rows.push(asked[start..end].trim().to_owned());
-                start = end;
-            }
-        }
-        rows.push(asked[start..].trim().to_owned());
-        rows
-    });
-    assert_eq!(rows.len(), 5, "{rows:#?}");
-    assert!(rows[0].ends_with("on this machine"), "{rows:#?}");
-    assert!(rows[3].ends_with("run `grok --version`"), "{rows:#?}");
-    assert_eq!(
-        rows[4],
-        "and `agmen agents scan`, and tell me both outputs."
-    );
 }

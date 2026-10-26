@@ -12,7 +12,6 @@ use gpui::{
     RenderOnce, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
 };
 
-use super::code_view::cell_width;
 use super::components::{
     Button, ButtonSize, ButtonStyle, CodeText, Color, Icon, IconSize, Label, LabelSize,
     SectionHeading,
@@ -133,6 +132,51 @@ pub(crate) fn prompt(dialog: &AgentDialog, agent: Option<&InstalledAgent>) -> Op
         "{first}{warning} When it is {done}, run `{name} --version` and `agmen agents scan`, \
          and tell me both outputs."
     ))
+}
+
+/// `prompt` set in lines of at most `columns` characters (node 2428),
+/// broken only at spaces outside its code spans, so a command such as
+/// `grok --version` never splits. A word or code span wider than `columns`
+/// takes a line of its own. The lines joined by single spaces give back a
+/// prompt whose words are single spaced.
+#[must_use]
+pub(crate) fn prompt_lines(prompt: &str, columns: usize) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut in_code = false;
+    for c in prompt.chars() {
+        match c {
+            ' ' if !in_code => {
+                if !word.is_empty() {
+                    words.push(std::mem::take(&mut word));
+                }
+            }
+            _ => {
+                in_code ^= c == '`';
+                word.push(c);
+            }
+        }
+    }
+    if !word.is_empty() {
+        words.push(word);
+    }
+    let mut lines: Vec<String> = Vec::new();
+    let mut width = 0;
+    for word in words {
+        let len = word.chars().count();
+        match lines.last_mut() {
+            Some(line) if width + 1 + len <= columns => {
+                line.push(' ');
+                line.push_str(&word);
+                width += 1 + len;
+            }
+            _ => {
+                lines.push(word);
+                width = len;
+            }
+        }
+    }
+    lines
 }
 
 /// What Check again does after the scan: the line under the buttons.
@@ -322,11 +366,11 @@ impl AddAgentDialog {
 struct PromptBox(String);
 
 impl RenderOnce for PromptBox {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let appearance = cx.global::<Appearance>();
-        let theme = &appearance.theme;
-        // The mockup sets the prompt in lines narrower than the box.
-        let measure = cell_width(window, &appearance.fonts) * PROMPT_COLUMNS;
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let theme = &cx.global::<Appearance>().theme;
+        // The mockup sets the prompt in lines narrower than the box, and
+        // never breaks a command across two of them.
+        let lines = prompt_lines(&self.0, PROMPT_COLUMNS);
         div()
             .debug_selector(|| "add-agent:prompt".into())
             .w_full()
@@ -340,9 +384,9 @@ impl RenderOnce for PromptBox {
             .child(
                 div()
                     .debug_selector(|| "add-agent:prompt-text".into())
-                    .max_w(measure)
-                    .min_w_0()
-                    .child(Label::new(self.0).code().wrap()),
+                    .flex()
+                    .flex_col()
+                    .children(lines.into_iter().map(|line| Label::new(line).code())),
             )
     }
 }
