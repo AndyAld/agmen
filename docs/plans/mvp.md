@@ -108,7 +108,7 @@ Topics are written in full with `eq` (no `${username}` placeholders), so an id c
 
 ### Task 3: Spike S2, rumqttc v5 against EMQX
 
-As [m0-m1 Task 3](m0-m1.md#task-3-spike-s2-rumqttc-v5-client-behavior), against EMQX. S1 found that rumqttc 0.25.1's TLS features pull `rustls-webpki` 0.102.8 with five advisories and the unmaintained `rustls-pemfile`, and that it has had no release since 2025-11-21 (ADR-0002). Evaluate `rumqttc-next` 0.34.0 and `mqtt5` 0.48.2 alongside it; the chosen client must pass `cargo deny check` with its TLS and WebSocket features on and no advisory ignores (ADR-0003). Plus one test:
+As [m0-m1 Task 3](m0-m1.md#task-3-spike-s2-rumqttc-v5-client-behavior), against EMQX. S1 found that rumqttc 0.25.1's TLS features pull `rustls-webpki` 0.102.8 with five advisories and the unmaintained `rustls-pemfile`, and that 0.25.1, released 2025-11-21, was still its newest release (ADR-0002, ADR-0003). If a test cannot pass with rumqttc, try `rumqttc-next` 0.34.0, then `mqtt5` 0.48.2 (m0-m1 Task 3 Step 4); the chosen client must pass `cargo deny check` with its TLS and WebSocket features on and no advisory ignores (ADR-0003). Plus one test:
 
 ```rust
 #[tokio::test] async fn it_token_refresh_reconnect()  // connect with a token expiring in 5 s; client fetches a new token and reconnects with clean_start=false; session_present == true
