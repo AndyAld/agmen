@@ -18,7 +18,7 @@ fn span(range: std::ops::Range<usize>, target: RefTarget) -> Span {
 }
 
 fn commit() -> RefTarget {
-    RefTarget::Commit("4d9fdc8".into())
+    RefTarget::Commit("4d9fdc8".parse().unwrap())
 }
 
 #[test]
@@ -58,7 +58,7 @@ fn a_tail_stops_at_the_next_chip() {
     let body = "4d9fdc8,016f235";
     let spans = [
         span(0..7, commit()),
-        span(8..15, RefTarget::Commit("016f235".into())),
+        span(8..15, RefTarget::Commit("016f235".parse().unwrap())),
     ];
     assert_eq!(
         pieces(body, &spans),
@@ -604,44 +604,80 @@ fn chips_in_a_flow_keep_their_size(cx: &mut TestAppContext) {
 type Heard = Rc<std::cell::RefCell<Vec<RefEvent>>>;
 
 /// The fixture ALERT body with a handler that records chip events.
-fn listening_body(cx: &mut TestAppContext) -> (Heard, RefTarget, &mut VisualTestContext) {
+/// Message `index`'s body with a handler that records chip events, and
+/// the message's spans and sender.
+fn listening_message(
+    cx: &mut TestAppContext,
+    index: usize,
+) -> (Heard, Vec<Span>, IdentityId, &mut VisualTestContext) {
     let heard: Heard = Rc::default();
     let sink = heard.clone();
     let snapshot = chat_snapshot();
-    let m = snapshot.messages[1].clone();
+    let m = snapshot.messages[index].clone();
     let context = Rc::new(ChatContext::new(Rc::new(snapshot)));
     let text = Rc::new(context.body_text(m.client.body.as_str(), &m.refs));
-    let target = text.spans[2].target.clone();
+    let spans = text.spans.clone();
+    let from = m.from.clone();
+    let sender = from.clone();
     let cx = host(cx, px(700.), move || {
         let sink = sink.clone();
         let handler: ChangeHandler<RefEvent> =
             Rc::new(move |event, _, _| sink.borrow_mut().push(event));
         RichText::new("m", text.clone(), context.clone())
-            .on_ref(handler)
+            .on_ref(sender.clone(), handler)
             .into_any_element()
     });
-    (heard, target, cx)
+    (heard, spans, from, cx)
+}
+
+/// The fixture ALERT body with a handler that records chip events, and
+/// its file chip, `src/main.rs:2-8` (its `@sean/a1` has no session here,
+/// so it takes no click).
+fn listening_body(
+    cx: &mut TestAppContext,
+) -> (Heard, RefTarget, IdentityId, &mut VisualTestContext) {
+    let (heard, spans, from, cx) = listening_message(cx, 1);
+    (heard, spans[1].target.clone(), from, cx)
 }
 
 #[gpui::test]
 fn click_through_flow_opens_ref(cx: &mut TestAppContext) {
-    let (heard, target, cx) = listening_body(cx);
-    click(cx, "m:ref:2");
-    assert_eq!(*heard.borrow(), [RefEvent::OpenRef(target)]);
+    let (heard, target, from, cx) = listening_body(cx);
+    click(cx, "m:ref:1");
+    assert_eq!(*heard.borrow(), [RefEvent::OpenRef { target, from }]);
 }
 
 #[gpui::test]
 fn cmd_click_through_flow_opens_ref_in_split(cx: &mut TestAppContext) {
-    let (heard, target, cx) = listening_body(cx);
-    let center = cx.debug_bounds("m:ref:2").unwrap().center();
+    let (heard, target, from, cx) = listening_body(cx);
+    let center = cx.debug_bounds("m:ref:1").unwrap().center();
     let secondary = cx.update(|_, cx| Modifiers::secondary_key(cx));
     cx.simulate_click(center, secondary);
-    assert_eq!(*heard.borrow(), [RefEvent::OpenRefInSplit(target)]);
+    assert_eq!(*heard.borrow(), [RefEvent::OpenRefInSplit { target, from }]);
+}
+
+#[gpui::test]
+fn hover_only_chips_report_no_click(cx: &mut TestAppContext) {
+    // C295 (V128): andy/a1's DONE names an item and a PR, which open
+    // nothing, so their chips take no click; its branch chip still does.
+    let (heard, spans, _, cx) = listening_message(cx, 0);
+    let at = |pick: fn(&RefTarget) -> bool| -> &'static str {
+        let ix = spans.iter().position(|s| pick(&s.target)).unwrap();
+        Box::leak(format!("m:ref:{ix}").into_boxed_str())
+    };
+    let item = at(|t| matches!(t, RefTarget::Item(_)));
+    let pr = at(|t| matches!(t, RefTarget::Pr(_)));
+    let branch = at(|t| matches!(t, RefTarget::Branch { .. }));
+    click(cx, item);
+    click(cx, pr);
+    assert!(heard.borrow().is_empty(), "{:?}", heard.borrow());
+    click(cx, branch);
+    assert_eq!(heard.borrow().len(), 1, "the branch chip opens its panel");
 }
 
 #[gpui::test]
 fn hover_through_flow_shows_the_card(cx: &mut TestAppContext) {
-    let (_, _, cx) = listening_body(cx);
+    let (_, _, _, cx) = listening_body(cx);
     assert!(cx.debug_bounds(REF_CARD_SELECTOR).is_none());
     let center = cx.debug_bounds("m:ref:2").unwrap().center();
     cx.simulate_mouse_move(center, None, Modifiers::none());

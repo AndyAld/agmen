@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::sync::LazyLock;
 
-use agmen_proto::{IdentityId, Payload, Ref, RefKind};
+use agmen_proto::{GitSha, IdentityId, Payload, Ref, RefKind};
 use regex::Regex;
 
 use crate::backend::Snapshot;
@@ -26,9 +26,11 @@ pub(crate) enum RefTarget {
     /// A branch, and the commit after `@` when the text names one.
     Branch {
         name: String,
-        at: Option<String>,
+        at: Option<GitSha>,
     },
-    Commit(String),
+    /// A commit, parsed, so a route never sees an empty or one-digit sha
+    /// (review C293).
+    Commit(GitSha),
     /// A file's path in the worktree, and the lines `:2-8` name.
     File {
         path: String,
@@ -223,7 +225,9 @@ fn git_target(
         }
         // Only a sha git knows joins the chip (review C136); the caller
         // trims the range to the name otherwise.
-        let at = at.filter(|sha| known.commit_known(sha)).map(str::to_owned);
+        let at = at
+            .filter(|sha| known.commit_known(sha))
+            .and_then(|sha| sha.parse().ok());
         return Some(RefTarget::Branch {
             name: name.to_owned(),
             at,
@@ -245,7 +249,7 @@ fn git_target(
         return Some(RefTarget::File { path, lines });
     }
     if caps.name("commit").is_some() && known.commit_known(text) {
-        return Some(RefTarget::Commit(text.to_owned()));
+        return text.parse().ok().map(RefTarget::Commit);
     }
     None
 }

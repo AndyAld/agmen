@@ -487,7 +487,9 @@ impl RenderOnce for MessageRow {
         let avatar = Self::avatar(env, &who, &id);
         let head = self.head(env, &who, &id);
         let body = RichText::new(id.clone(), context.body_of(env), context.clone())
-            .when_some(self.on_ref.clone(), RichText::on_ref);
+            .when_some(self.on_ref.clone(), |body, handler| {
+                body.on_ref(env.from.clone(), handler)
+            });
         let card = context.change_card(env).map(|card| {
             ChangeCard::new(card.clone(), &context.snapshot().roster).when_some(
                 self.on_action.clone(),

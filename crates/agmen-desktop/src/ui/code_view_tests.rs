@@ -243,6 +243,16 @@ fn spec_table_pipes_take_the_line_number_color() {
     assert_eq!(names, ["text.literal"]);
 }
 
+/// Whether line `n` is drawn, and whether it is highlighted.
+fn line_state(cx: &mut gpui::VisualTestContext, n: u32) -> (bool, bool) {
+    let line: &'static str = Box::leak(format!("line:{n}").into_boxed_str());
+    let lit: &'static str = Box::leak(format!("line:{n}:highlight").into_boxed_str());
+    (
+        cx.debug_bounds(line).is_some(),
+        cx.debug_bounds(lit).is_some(),
+    )
+}
+
 #[gpui::test]
 fn code_view_scrolls_to_line(cx: &mut TestAppContext) {
     init(cx);
@@ -251,16 +261,22 @@ fn code_view_scrolls_to_line(cx: &mut TestAppContext) {
     redraw(cx);
     assert!(cx.debug_bounds("line:1").is_some());
     assert!(cx.debug_bounds("line:150").is_none(), "off screen at first");
-    view.update(cx, |code, cx| code.scroll_to_line(150, cx));
+    view.update(cx, |code, cx| code.show_lines(150..=152, cx));
     redraw(cx);
     redraw(cx);
-    assert!(cx.debug_bounds("line:150").is_some(), "line 150 is drawn");
-    assert!(
-        cx.debug_bounds("line:149").is_none(),
-        "line 150 is the top line"
-    );
+    // C295: line 150 sits in the middle, as Zed's go-to-line centers it,
+    // and the named lines are highlighted.
+    let above = (1..150).filter(|&n| line_state(cx, n).0).count();
+    let below = (151..=300).filter(|&n| line_state(cx, n).0).count();
+    assert!(above > 1, "line 150 is not the top line");
+    assert!(above.abs_diff(below) <= 1, "{above} above, {below} below");
+    assert_eq!(line_state(cx, 149), (true, false));
+    for n in 150..=152 {
+        assert_eq!(line_state(cx, n), (true, true), "line {n}");
+    }
+    assert_eq!(line_state(cx, 153), (true, false));
     // A line past the end scrolls to the last line.
-    view.update(cx, |code, cx| code.scroll_to_line(9_999, cx));
+    view.update(cx, |code, cx| code.show_lines(9_999..=9_999, cx));
     redraw(cx);
     redraw(cx);
     assert!(

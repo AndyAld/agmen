@@ -41,8 +41,9 @@ pub(crate) enum TabItem {
     Settings(SettingsPage),
     /// The settings file Settings writes, shown read only.
     SettingsFile(PathBuf),
-    // shortcut: a placeholder tab the status bar's search button opens;
-    // Task 18 builds search (cmd-shift-f) and its view.
+    // shortcut: a placeholder tab the status bar's search button and
+    // cmd-shift-f open; no task in the desktop plan builds search. Revisit
+    // when a plan names project search and its view.
     Search,
 }
 

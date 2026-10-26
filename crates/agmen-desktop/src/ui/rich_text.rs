@@ -13,6 +13,7 @@
 
 use std::rc::Rc;
 
+use agmen_proto::IdentityId;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, RenderOnce,
@@ -24,6 +25,7 @@ use super::components::ChangeHandler;
 use super::inline_flow::{FlowItem, InlineFlow};
 use super::ref_chip::{RefChip, RefEvent};
 use super::tokens::{LINE_HEIGHT, SPACE_3, TEXT_DEFAULT};
+use super::workspace::{RefRoute, route};
 use crate::appearance::Appearance;
 use crate::refs::Span;
 
@@ -206,7 +208,7 @@ pub(crate) struct RichText {
     id: SharedString,
     text: Rc<BodyText>,
     context: Rc<ChatContext>,
-    on_ref: Option<ChangeHandler<RefEvent>>,
+    on_ref: Option<(IdentityId, ChangeHandler<RefEvent>)>,
 }
 
 impl std::fmt::Debug for RichText {
@@ -235,10 +237,13 @@ impl RichText {
         }
     }
 
-    /// Called when a chip is clicked or ⌘-clicked.
+    /// Called when a chip is clicked or ⌘-clicked, naming `from`, the
+    /// message's hub-stamped sender. A chip that would open nothing (its
+    /// route is hover only) gets no handler and no pointer cursor (review
+    /// C295).
     #[must_use]
-    pub(crate) fn on_ref(mut self, handler: ChangeHandler<RefEvent>) -> Self {
-        self.on_ref = Some(handler);
+    pub(crate) fn on_ref(mut self, from: IdentityId, handler: ChangeHandler<RefEvent>) -> Self {
+        self.on_ref = Some((from, handler));
         self
     }
 
@@ -246,13 +251,19 @@ impl RichText {
         let target = self.text.spans.get(span)?.target.clone();
         let color = self.context.chip_color(&target);
         let id = SharedString::from(format!("{}:ref:{span}", self.id));
-        let handler = self.on_ref.clone();
+        // A chip whose route opens nothing takes no click (V128).
+        let handler = self.on_ref.clone().filter(|(from, _)| {
+            !matches!(
+                route(self.context.snapshot(), &target, from),
+                RefRoute::HoverOnly
+            )
+        });
         let chip = RefChip::new(id, text.to_owned(), target, color)
             .card(self.context.clone())
             .when(!lead.is_empty(), RefChip::flush_start)
             .when(!tail.is_empty(), RefChip::flush_end)
-            .when_some(handler, |chip, handler| {
-                chip.on_ref(move |event, window, cx| handler(event, window, cx))
+            .when_some(handler, |chip, (from, handler)| {
+                chip.on_ref(from, move |event, window, cx| handler(event, window, cx))
             });
         // The flow lays this out as a root, at the column's width when it
         // is wider: max_w_full caps it there, and min_w_0 lets the chip

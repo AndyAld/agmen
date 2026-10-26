@@ -38,29 +38,27 @@ impl Workspace {
             .update(cx, |group, cx| group.open(TabItem::Chat, cx));
     }
 
-    /// Takes the chat's agents, take-overs and roster, which the Agent
-    /// panel and the left dock's Agents tab show (a live switch moves an
-    /// agent's harness): the chat hears the backend's updates; the
-    /// workspace does not.
+    /// Takes the chat's snapshot whole: the chat hears the backend's
+    /// updates and the workspace does not. The Agent panel shows its agents
+    /// and take-overs (a live switch moves an agent's harness), the Agents
+    /// tab its roster, and reference chips route against its worktrees and
+    /// roles, so a new worktree's chips open and a removed one's do not
+    /// (review C294).
+    // shortcut: the Git and Project panels keep the worktrees they were
+    // built with; they follow too once the live backend (ADR-0011) sends
+    // worktree changes.
     pub(super) fn follow_chat(&mut self, cx: &mut Context<Self>) {
-        let chat = self.chat.read(cx).snapshot();
-        let roster = (chat.roster != self.snapshot.roster).then(|| chat.roster.clone());
-        let panel = (chat.take_overs != self.snapshot.take_overs
-            || chat.agents != self.snapshot.agents)
-            .then(|| (chat.take_overs.clone(), chat.agents.clone()));
-        if let Some(roster) = roster {
-            // The workspace's own copy: make_mut clones it while shared.
-            Rc::make_mut(&mut self.snapshot).roster.clone_from(&roster);
+        let chat = Rc::clone(self.chat.read(cx).snapshot());
+        if Rc::ptr_eq(&chat, &self.snapshot) {
+            return;
+        }
+        if chat.roster != self.snapshot.roster {
+            let roster = chat.roster.clone();
             self.agents_panel
                 .update(cx, |panel, cx| panel.set_roster(roster, cx));
-            cx.notify();
         }
-        if let Some((take_overs, agents)) = panel {
-            let snapshot = Rc::make_mut(&mut self.snapshot);
-            snapshot.take_overs = take_overs;
-            snapshot.agents = agents;
-            cx.notify();
-        }
+        self.snapshot = chat;
+        cx.notify();
     }
 
     /// Opens the take-over terminal's menu or dialog, as a screen's frame

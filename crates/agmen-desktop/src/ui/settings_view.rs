@@ -196,6 +196,11 @@ pub(crate) struct SettingsView {
 
 impl EventEmitter<SettingsEvent> for SettingsView {}
 
+/// The Theme row's hint, as the mockup words it (console.py's
+/// `build_d_settings`).
+pub(super) const THEME_HINT: &str =
+    "Any Zed theme: yours from ~/.config/zed/themes, or one from Zed's theme extensions.";
+
 impl SettingsView {
     /// Settings on Appearance, reading `sources`. The `Appearance` global
     /// must already be set.
@@ -648,55 +653,51 @@ impl SettingsView {
             Mode::System => 2,
         };
         let theme_names = themes.clone();
-        setting(
-            "Theme",
-            // V131: gpui breaks a line at any non-letter, so a path in the hint
-            // could start a line with "/"; the dropdown lists the themes anyway.
-            "Any Zed theme: yours from Zed's themes folder, or one from Zed's theme extensions.",
-            cx,
-        )
-        .child(
-            controls()
-                .child(
-                    row()
-                        .child(
-                            Dropdown::new("theme", themes, theme_ix)
-                                .open(self.menu == Some(Menu::Theme))
-                                .on_toggle(Self::handler(cx, |this, open, cx| {
-                                    this.set_menu(Menu::Theme, open, cx);
-                                }))
-                                .on_change(Self::handler(cx, move |this, ix: usize, cx| {
-                                    if let Some(name) = theme_names.get(ix).cloned() {
-                                        this.change(cx, |s| s.theme = Some(name));
-                                    }
-                                })),
-                        )
-                        .child(
-                            Segmented::new("theme-mode", ["Light", "Dark", "System"], mode_ix)
-                                .on_change(Self::handler(cx, |this, ix, cx| {
-                                    let mode = match ix {
-                                        0 => Mode::Light,
-                                        1 => Mode::Dark,
-                                        _ => Mode::System,
-                                    };
-                                    this.change_own(cx, |s| s.mode = mode);
-                                })),
-                        ),
-                )
-                .child(
-                    Link::new(
-                        "browse-themes",
-                        if self.browse.is_some() {
-                            "Close Zed themes"
-                        } else {
-                            "Browse Zed themes\u{2026}"
-                        },
+        setting("Theme", THEME_HINT, cx)
+            .child(
+                controls()
+                    .child(
+                        row()
+                            .child(
+                                Dropdown::new("theme", themes, theme_ix)
+                                    .open(self.menu == Some(Menu::Theme))
+                                    .on_toggle(Self::handler(cx, |this, open, cx| {
+                                        this.set_menu(Menu::Theme, open, cx);
+                                    }))
+                                    .on_change(Self::handler(cx, move |this, ix: usize, cx| {
+                                        if let Some(name) = theme_names.get(ix).cloned() {
+                                            this.change(cx, |s| s.theme = Some(name));
+                                        }
+                                    })),
+                            )
+                            .child(
+                                Segmented::new("theme-mode", ["Light", "Dark", "System"], mode_ix)
+                                    .on_change(Self::handler(cx, |this, ix, cx| {
+                                        let mode = match ix {
+                                            0 => Mode::Light,
+                                            1 => Mode::Dark,
+                                            _ => Mode::System,
+                                        };
+                                        this.change_own(cx, |s| s.mode = mode);
+                                    })),
+                            ),
                     )
-                    .on_click(cx.listener(|this, _, window, cx| this.toggle_browse(window, cx))),
-                )
-                .children(self.browse_panel(cx)),
-        )
-        .into_any_element()
+                    .child(
+                        Link::new(
+                            "browse-themes",
+                            if self.browse.is_some() {
+                                "Close Zed themes"
+                            } else {
+                                "Browse Zed themes\u{2026}"
+                            },
+                        )
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.toggle_browse(window, cx)),
+                        ),
+                    )
+                    .children(self.browse_panel(cx)),
+            )
+            .into_any_element()
     }
 
     fn icon_row(&self, appearance: &Appearance, cx: &mut Context<Self>) -> AnyElement {

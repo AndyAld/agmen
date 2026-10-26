@@ -1,5 +1,6 @@
 //! One pane: its tab bar, the active tab's breadcrumb and its content.
 
+use std::ops::RangeInclusive;
 use std::path::Path;
 use std::rc::Rc;
 
@@ -124,12 +125,12 @@ impl Pane {
         cx.notify();
     }
 
-    /// Scrolls the active tab so `line` (1-based) is its top line, when it
-    /// is a file; its view may not exist yet, so the views keep the line
-    /// until they draw it.
-    pub(crate) fn scroll_active_to_line(&mut self, line: u32, cx: &mut Context<Self>) {
+    /// Scrolls the active tab to `lines` (1-based) and highlights them,
+    /// when it is a file; its view may not exist yet, so the views keep the
+    /// lines until they draw them.
+    pub(crate) fn show_active_lines(&mut self, lines: RangeInclusive<u32>, cx: &mut Context<Self>) {
         if let Some(item) = self.tabs.get(self.active) {
-            self.views.scroll_to_line(item.clone(), line);
+            self.views.show_lines(item.clone(), lines);
             cx.notify();
         }
     }
@@ -285,10 +286,11 @@ impl Render for Pane {
                         .flex()
                         .child(chat.clone())
                         .into_any_element(),
-                    // shortcut: every other item shows its name until its
-                    // view is built (agent and role file in Task 10, file
-                    // and diff in Tasks 11 and 12, settings in 17, plan and
-                    // spec in 19).
+                    // shortcut: an item with no view shows its name: Search
+                    // (no task builds it), Plan (no code opens one) and an
+                    // agent with no session here (the Agents panel opens
+                    // one; spec 9.3's remote agent view is a non-goal).
+                    // Revisit when a plan builds search or that view.
                     _ => div()
                         .flex_1()
                         .flex()

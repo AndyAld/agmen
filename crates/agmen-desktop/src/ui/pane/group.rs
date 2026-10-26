@@ -1,5 +1,6 @@
 //! The center's panes, side by side or stacked.
 
+use std::ops::RangeInclusive;
 use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder as _;
@@ -166,13 +167,13 @@ impl PaneGroup {
         }
     }
 
-    /// Scrolls the active pane's active tab so `line` (1-based) is its top
-    /// line, when that tab is a file.
-    pub(crate) fn scroll_active_to_line(&mut self, line: u32, cx: &mut Context<Self>) {
+    /// Scrolls the active pane's active tab to `lines` (1-based) and
+    /// highlights them, when that tab is a file.
+    pub(crate) fn show_active_lines(&mut self, lines: RangeInclusive<u32>, cx: &mut Context<Self>) {
         if let Some(member) = self.members.get(self.active) {
             member
                 .pane
-                .update(cx, |pane, cx| pane.scroll_active_to_line(line, cx));
+                .update(cx, |pane, cx| pane.show_active_lines(lines, cx));
         }
     }
 

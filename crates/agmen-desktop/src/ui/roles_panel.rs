@@ -264,8 +264,9 @@ impl RoleFileView {
 impl Render for RoleFileView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = &cx.global::<Appearance>().theme;
-        // shortcut: Duplicate does nothing until the backend writes role
-        // files (Task 14).
+        // shortcut: Duplicate does nothing until agmend writes role files;
+        // no task in the desktop plan does. Revisit with the live backend
+        // (ADR-0011).
         let duplicate = self.built_in.then(|| {
             Button::new("role-duplicate", "Duplicate to .agmen/roles").style(ButtonStyle::Tinted)
         });

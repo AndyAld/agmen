@@ -3,6 +3,7 @@
 //! child of `chat`, so it reaches the chat's own state.
 
 use std::collections::BTreeSet;
+use std::rc::Rc;
 
 use agmen_proto::{IdentityId, Payload};
 use gpui::{
@@ -107,7 +108,7 @@ impl ChatView {
     }
 
     /// What the chat shows now, after the backend's latest update.
-    pub(crate) fn snapshot(&self) -> &Snapshot {
+    pub(crate) const fn snapshot(&self) -> &Rc<Snapshot> {
         &self.snapshot
     }
 

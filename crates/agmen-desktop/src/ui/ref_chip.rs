@@ -7,6 +7,7 @@
 
 use std::rc::Rc;
 
+use agmen_proto::IdentityId;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AppContext as _, Context, ElementId, InteractiveElement as _, IntoElement, ParentElement as _,
@@ -22,13 +23,15 @@ use crate::refs::RefTarget;
 #[cfg(test)]
 pub(crate) const REF_CARD_SELECTOR: &str = "ref-card";
 
-/// What a reference chip asks its caller to do.
+/// What a reference chip asks its caller to do. `from` is the hub-stamped
+/// sender of the message the chip is in (`StampedEnvelope.from`), so a
+/// file opens in that agent's worktree (spec 9.3, review C288).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RefEvent {
     /// Open the reference in a tab (a click).
-    OpenRef(RefTarget),
+    OpenRef { target: RefTarget, from: IdentityId },
     /// Open the reference in a split beside the current pane (a ⌘-click).
-    OpenRefInSplit(RefTarget),
+    OpenRefInSplit { target: RefTarget, from: IdentityId },
 }
 
 /// Whether the chip has a tinted fill (agents, people, roles, branches,
@@ -88,7 +91,7 @@ pub(crate) struct RefChip {
     flush_start: bool,
     flush_end: bool,
     context: Option<Rc<ChatContext>>,
-    on_ref: Option<ChangeHandler<RefEvent>>,
+    on_ref: Option<(IdentityId, ChangeHandler<RefEvent>)>,
 }
 
 impl std::fmt::Debug for RefChip {
@@ -148,13 +151,16 @@ impl RefChip {
     }
 
     /// Called with [`RefEvent::OpenRef`] on a click and
-    /// [`RefEvent::OpenRefInSplit`] on a ⌘-click (Ctrl elsewhere).
+    /// [`RefEvent::OpenRefInSplit`] on a ⌘-click (Ctrl elsewhere), naming
+    /// `from`, the sender of the message the chip is in. A chip without a
+    /// handler has no pointer cursor: its hover card is all it shows.
     #[must_use]
     pub(crate) fn on_ref(
         mut self,
+        from: IdentityId,
         handler: impl Fn(RefEvent, &mut Window, &mut gpui::App) + 'static,
     ) -> Self {
-        self.on_ref = Some(Rc::new(handler));
+        self.on_ref = Some((from, Rc::new(handler)));
         self
     }
 }
@@ -179,13 +185,13 @@ impl RenderOnce for RefChip {
             .debug_selector(|| selector)
             .flex()
             .min_w_0()
-            .when_some(self.on_ref, |this, handler| {
+            .when_some(self.on_ref, |this, (from, handler)| {
                 this.cursor_pointer().on_click(move |event, window, cx| {
-                    let target = target.clone();
+                    let (target, from) = (target.clone(), from.clone());
                     let event = if event.modifiers().secondary(cx) {
-                        RefEvent::OpenRefInSplit(target)
+                        RefEvent::OpenRefInSplit { target, from }
                     } else {
-                        RefEvent::OpenRef(target)
+                        RefEvent::OpenRef { target, from }
                     };
                     handler(event, window, cx);
                 })

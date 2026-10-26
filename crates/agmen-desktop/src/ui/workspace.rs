@@ -45,6 +45,7 @@ mod plan_wiring;
 // Task 12 Step 1b: where a reference chip opens.
 #[path = "workspace_refs.rs"]
 mod ref_routes;
+pub(super) use ref_routes::{RefRoute, route};
 
 // Task 18: the actions moved to src/keymap.rs with their bindings.
 pub(crate) use crate::keymap::{Quit, ToggleLeftDock, ToggleRightDock};

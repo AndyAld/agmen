@@ -53,7 +53,7 @@ fn refs_find_every_kind_in_chat_fixture() {
         all[0][1].1,
         RefTarget::Branch {
             name: "feat/c014-release-matrix".into(),
-            at: Some("7c8835e".into())
+            at: Some("7c8835e".parse().unwrap())
         }
     );
     assert_eq!(all[0][2].1, RefTarget::Pr(9));
@@ -64,7 +64,7 @@ fn refs_find_every_kind_in_chat_fixture() {
             lines: None
         }
     );
-    assert_eq!(all[1][0].1, RefTarget::Commit("4d9fdc8".into()));
+    assert_eq!(all[1][0].1, RefTarget::Commit("4d9fdc8".parse().unwrap()));
     assert_eq!(
         all[1][1].1,
         RefTarget::File {

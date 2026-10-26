@@ -32,6 +32,9 @@ pub(crate) struct Theme {
     pub(crate) icon_muted: Hsla,
     pub(crate) editor_background: Hsla,
     pub(crate) line_number: Hsla,
+    /// A row a go-to-line or a reference chip points at
+    /// (`editor.highlighted_line.background`).
+    pub(crate) highlighted_line: Hsla,
     pub(crate) error: Hsla,
     pub(crate) warning: Hsla,
     pub(crate) success: Hsla,
@@ -176,6 +179,10 @@ impl Theme {
             icon_muted: pick(&["icon.muted"], base.icon_muted),
             editor_background: pick(&["editor.background"], base.editor_background),
             line_number: pick(&["editor.line_number"], base.line_number),
+            highlighted_line: pick(
+                &["editor.highlighted_line.background"],
+                base.highlighted_line,
+            ),
             error: pick(&["error"], base.error),
             warning: pick(&["warning"], base.warning),
             success: pick(&["success"], base.success),

@@ -2,6 +2,7 @@
 //! (`desktop-project.webp`, `desktop-project-tests-open.webp`).
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::ops::RangeInclusive;
 use std::path::Path;
 
 use agmen_proto::IdentityId;
@@ -409,10 +410,9 @@ impl FileView {
         Self { parts, code }
     }
 
-    /// Scrolls so `line` (1-based) is the top line.
-    pub(crate) fn scroll_to_line(&mut self, line: u32, cx: &mut Context<Self>) {
-        self.code
-            .update(cx, |code, cx| code.scroll_to_line(line, cx));
+    /// Scrolls to `lines` (1-based) and highlights them.
+    pub(crate) fn show_lines(&mut self, lines: RangeInclusive<u32>, cx: &mut Context<Self>) {
+        self.code.update(cx, |code, cx| code.show_lines(lines, cx));
     }
 
     #[cfg(test)]
@@ -424,8 +424,10 @@ impl FileView {
 impl Render for FileView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = &cx.global::<Appearance>().theme;
-        // shortcut: Diff does nothing until Task 12's diff view can open
-        // from here.
+        // shortcut: Diff does nothing: the file view sends the workspace no
+        // events, and no task in the desktop plan wires one. Revisit when a
+        // file view event opens TabItem::Diff, as GitPanelEvent::OpenDiff
+        // does from the Git panel.
         let crumb = Breadcrumb::new(self.parts.clone())
             .end(Button::new("file-diff", "Diff").style(ButtonStyle::Plain));
         div()

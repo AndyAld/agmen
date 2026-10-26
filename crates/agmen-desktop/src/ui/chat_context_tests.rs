@@ -12,7 +12,7 @@ fn ctx() -> Rc<ChatContext> {
 fn branch(name: &str, at: Option<&str>) -> RefTarget {
     RefTarget::Branch {
         name: name.into(),
-        at: at.map(Into::into),
+        at: at.map(|sha| sha.parse().unwrap()),
     }
 }
 
@@ -84,12 +84,12 @@ fn hover_card_shows_item_claim_done_and_review() {
 #[test]
 fn hover_card_for_the_other_kinds() {
     let c = ctx();
-    let commit = c.card(&RefTarget::Commit("9e2a71c".into()));
+    let commit = c.card(&RefTarget::Commit("9e2a71c".parse().unwrap()));
     assert_eq!(
         row(&commit, "In DONE"),
         Some("andy/fx1 · fix/c015-main-conflict")
     );
-    let base = c.card(&RefTarget::Commit("4d9fdc8".into()));
+    let base = c.card(&RefTarget::Commit("4d9fdc8".parse().unwrap()));
     assert_eq!(
         row(&base, "Base of"),
         Some("andy/a1 · feat/c014-release-matrix, andy/fx1 · fix/c015-main-conflict")
@@ -156,7 +156,7 @@ fn repeated_entries_show_once() {
     let again = snapshot.messages[6].clone();
     snapshot.messages.push(again);
     let c = ChatContext::new(Rc::new(snapshot));
-    let card = c.card(&RefTarget::Commit("9e2a71c".into()));
+    let card = c.card(&RefTarget::Commit("9e2a71c".parse().unwrap()));
     assert_eq!(
         row(&card, "In DONE"),
         Some("andy/fx1 · fix/c015-main-conflict")
