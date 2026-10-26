@@ -399,7 +399,10 @@ impl Composer {
                 .id("composer-model")
                 .debug_selector(|| "composer:model".into())
                 .relative()
-                .flex_none()
+                // A narrow box clips the chip rather than letting it run
+                // past its edge; the picker is deferred, so not clipped.
+                .min_w_0()
+                .overflow_hidden()
                 .cursor_pointer()
                 // C81: while open, mouse down outside the picker closes it;
                 // a click here too would reopen it on mouse up.
@@ -440,7 +443,8 @@ impl Render for Composer {
         let to = (self.addressing == Addressing::Chip).then(|| {
             div()
                 .debug_selector(|| "composer:to".into())
-                .flex_none()
+                .min_w_0()
+                .overflow_hidden()
                 .child(
                     Chip::new(self.target(cx).handle.clone())
                         .compact()
@@ -490,6 +494,9 @@ impl Render for Composer {
                 div()
                     .debug_selector(|| "composer:box".into())
                     .w_full()
+                    // Node 375 clips: a box too narrow for its chips cuts
+                    // them at its edge.
+                    .overflow_hidden()
                     .flex()
                     .items_center()
                     .gap(SPACE_8)
@@ -511,7 +518,12 @@ impl Render for Composer {
                             .child(self.input.clone()),
                     )
                     // The UI font at body size, as node 385 draws it.
-                    .child(Label::new("⏎").color(Color::Muted)),
+                    .child(
+                        div()
+                            .debug_selector(|| "composer:send-hint".into())
+                            .flex_none()
+                            .child(Label::new("⏎").color(Color::Muted)),
+                    ),
             )
     }
 }

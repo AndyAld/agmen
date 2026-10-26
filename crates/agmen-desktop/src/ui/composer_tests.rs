@@ -477,3 +477,27 @@ fn planning_composer_targets_the_planner(cx: &mut TestAppContext) {
         );
     });
 }
+
+#[gpui::test]
+fn a_narrow_composer_keeps_its_chips_and_hint_in_the_box(cx: &mut TestAppContext) {
+    // Node 375 clips its content. In a narrow window the chips and the ⏎
+    // drew past the box's right edge, over the right dock.
+    let (_, _, cx) = open_composer(cx);
+    cx.simulate_resize(gpui::size(gpui::px(200.), gpui::px(120.)));
+    redraw(cx);
+    let frame = cx.debug_bounds("composer:box").unwrap();
+    for part in [
+        "composer:to",
+        "composer:model",
+        "composer:input",
+        "composer:send-hint",
+    ] {
+        let bounds = cx
+            .debug_bounds(part)
+            .unwrap_or_else(|| panic!("{part} is not drawn"));
+        assert!(
+            bounds.right() <= frame.right(),
+            "{part} {bounds:?} past {frame:?}"
+        );
+    }
+}
