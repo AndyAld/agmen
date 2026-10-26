@@ -11,8 +11,8 @@ use gpui::{
 use super::{ClickHandler, Color, Label, LabelSize};
 use crate::appearance::Appearance;
 use crate::ui::tokens::{
-    BORDER_WIDTH, BUTTON_HOVER_OPACITY, RADIUS_MD, RADIUS_SM, SPACE_1, SPACE_3, SPACE_5, SPACE_7,
-    SPACE_9, SPACE_10,
+    BADGE_TINT, BORDER_WIDTH, BUTTON_HOVER_OPACITY, RADIUS_MD, RADIUS_SM, SPACE_1, SPACE_3,
+    SPACE_5, SPACE_7, SPACE_9, SPACE_10,
 };
 
 /// How the button is drawn.
@@ -31,6 +31,8 @@ pub(crate) enum ButtonStyle {
         expect(dead_code, reason = "the change card is hosted by the Task 9 chat")
     )]
     Secondary,
+    /// Surface fill, as the breadcrumb's "Show ledger" (node 135).
+    Subtle,
 }
 
 #[derive(IntoElement)]
@@ -38,6 +40,7 @@ pub(crate) struct Button {
     id: ElementId,
     label: SharedString,
     style: ButtonStyle,
+    selected: bool,
     leading: Option<AnyElement>,
     on_click: Option<ClickHandler>,
 }
@@ -58,6 +61,7 @@ impl Button {
             id: id.into(),
             label: label.into(),
             style: ButtonStyle::Outlined,
+            selected: false,
             leading: None,
             on_click: None,
         }
@@ -66,6 +70,14 @@ impl Button {
     #[must_use]
     pub(crate) const fn style(mut self, style: ButtonStyle) -> Self {
         self.style = style;
+        self
+    }
+
+    /// Draws a toggle button's on state: an accent tint and accent text.
+    /// The mockup draws only the off state (reference sheet mismatch 12).
+    #[must_use]
+    pub(crate) const fn selected(mut self, selected: bool) -> Self {
+        self.selected = selected;
         self
     }
 
@@ -99,6 +111,7 @@ impl RenderOnce for Button {
             .items_center()
             .gap(SPACE_5);
         let primary = self.style == ButtonStyle::Primary;
+        let selected = self.selected && !primary;
         let styled = match self.style {
             ButtonStyle::Outlined => base
                 .bg(theme.elevated_surface)
@@ -126,6 +139,17 @@ impl RenderOnce for Button {
                 .py(SPACE_3)
                 .px(SPACE_9)
                 .hover(|style| style.opacity(BUTTON_HOVER_OPACITY)),
+            ButtonStyle::Subtle => base
+                .bg(theme.elevated_surface)
+                .rounded(RADIUS_MD)
+                .py(SPACE_3)
+                .px(SPACE_9)
+                .hover(move |style| style.bg(hover)),
+        };
+        let styled = if selected {
+            styled.bg(theme.text_accent.opacity(BADGE_TINT))
+        } else {
+            styled
         };
         let label = Label::new(self.label).size(LabelSize::Small);
         styled
@@ -135,6 +159,8 @@ impl RenderOnce for Button {
             .children(self.leading)
             .child(if primary {
                 label.weight(FontWeight::SEMIBOLD).color(Color::Background)
+            } else if selected {
+                label.color(Color::Accent)
             } else {
                 label.color(Color::Default)
             })
@@ -178,6 +204,23 @@ mod tests {
         });
         // Outlined pads 5 px and draws a 1 px border; secondary pads 3 px.
         assert_eq!(outlined.height - secondary.height, px(6.));
+    }
+
+    #[gpui::test]
+    fn subtle_button_keeps_its_size_when_selected(cx: &mut TestAppContext) {
+        let off = rendered_size(cx, || {
+            Button::new("a", "Show ledger")
+                .style(ButtonStyle::Subtle)
+                .into_any_element()
+        });
+        let mut cx2 = TestAppContext::single();
+        let on = rendered_size(&mut cx2, || {
+            Button::new("b", "Show ledger")
+                .style(ButtonStyle::Subtle)
+                .selected(true)
+                .into_any_element()
+        });
+        assert_eq!(off, on);
     }
 
     #[gpui::test]

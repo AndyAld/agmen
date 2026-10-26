@@ -107,6 +107,8 @@ pub(crate) const RADIUS_XS: Pixels = px(2.);
 pub(crate) const RADIUS_REF: Pixels = px(3.);
 pub(crate) const RADIUS_SM: Pixels = px(4.);
 pub(crate) const RADIUS_MD: Pixels = px(5.);
+/// The composer's box (node 375).
+pub(crate) const RADIUS_INPUT: Pixels = px(6.);
 /// Menus and cards: the switch menu (node 1802) and the model picker (node 3355).
 pub(crate) const RADIUS_LG: Pixels = px(8.);
 
@@ -145,6 +147,9 @@ pub(crate) const DOCK_BUTTON: gpui::Size<Pixels> = gpui::Size {
 /// The leading slot of an Agents row: the status glyph's box (V62).
 pub(crate) const LEADING_SLOT: Pixels = px(10.);
 pub(crate) const ICON_MD: Pixels = px(14.);
+/// A center tab's close button slot, reserved on every tab so tabs keep
+/// their width when one becomes active (mockup fix 40).
+pub(crate) const TAB_CLOSE_SLOT: Pixels = px(14.);
 pub(crate) const AVATAR_SIZE: Pixels = px(22.);
 /// A chat message's avatar (node 139).
 pub(crate) const MESSAGE_AVATAR_SIZE: Pixels = px(24.);
@@ -180,6 +185,9 @@ pub(crate) fn tint(color: Hsla, alpha: f32) -> Hsla {
 
 /// How strongly a tinted badge's fill shows its color.
 pub(crate) const BADGE_TINT: f32 = 0.18;
+/// How strongly an outlined chip's border shows its color: the composer's
+/// model chip draws `text.accent` at alpha 0x55 (node 380).
+pub(crate) const OUTLINE_TINT: f32 = 0.33;
 /// How strongly a waiting change card's border shows `warning` (node 7101
 /// draws it at alpha 0x88).
 #[cfg_attr(

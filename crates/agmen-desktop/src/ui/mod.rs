@@ -5,12 +5,22 @@ mod agents_panel;
 #[cfg_attr(not(test), expect(dead_code, reason = "hosted by the Task 9 chat"))]
 mod change_card;
 mod components;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the integrator hosts it in workspace.rs")
+)]
+mod composer;
 mod dock;
 mod format;
 mod listener_panel;
 #[cfg_attr(not(test), expect(dead_code, reason = "hosted by the Task 9 chat"))]
 mod message;
 mod palette_filter;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the integrator hosts it in workspace.rs")
+)]
+mod pane;
 #[cfg_attr(not(test), expect(dead_code, reason = "hosted by the Task 9 chat"))]
 mod ref_chip;
 #[cfg_attr(not(test), expect(dead_code, reason = "hosted by the Task 9 chat"))]
