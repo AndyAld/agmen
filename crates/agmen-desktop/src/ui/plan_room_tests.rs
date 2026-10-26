@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use agmen_proto::IdentityId;
-use gpui::{Entity, TestAppContext, VisualTestContext};
+use gpui::{Entity, TestAppContext, VisualTestContext, px};
 
 use super::*;
 use crate::backend::{Backend as _, FixtureBackend, Screen};
@@ -114,6 +114,33 @@ fn running_team_groups_agents_by_owner(cx: &mut TestAppContext) {
         cx.debug_bounds("team:person:andy").unwrap().size.height,
         crate::ui::tokens::AGENT_ROW_HEIGHT
     );
+}
+
+#[gpui::test]
+fn team_person_rows_set_the_chevron_and_name_as_node_10400(cx: &mut TestAppContext) {
+    // Nodes 10400 to 10403: padding 24, the 12 px chevron at x 24 to 36,
+    // then a 6 px gap to the name at x 42. The Agents tree's group row (12
+    // px chevron, 6 px gap), one tree step in.
+    let (_, _, cx) = open(cx, Screen::Running);
+    for (row, leading, name) in [
+        (
+            "team:person:andy",
+            "team:person:andy:leading",
+            "team:person:andy:name",
+        ),
+        (
+            "team:person:sean",
+            "team:person:sean:leading",
+            "team:person:sean:name",
+        ),
+    ] {
+        let row = cx.debug_bounds(row).expect("the person row");
+        let chevron = cx.debug_bounds(leading).expect("the chevron");
+        let name = cx.debug_bounds(name).expect("the name");
+        assert_eq!(chevron.left() - row.left(), px(24.), "{leading}");
+        assert_eq!(chevron.right() - row.left(), px(36.), "{leading}");
+        assert_eq!(name.left() - row.left(), px(42.), "{leading}");
+    }
 }
 
 #[gpui::test]

@@ -157,10 +157,18 @@ impl PlanRoom {
                 UiIcon::ChevronDown
             };
             let name = owner.to_owned();
+            let id = format!("team:person:{owner}");
+            let name_selector = format!("{id}:name");
+            // The Agents tree's group row (12 px chevron, 6 px gap) one tree
+            // step in: chevron at x 24, name at 42 (nodes 10401 and 10403).
             rows.push(
-                ListItem::new(format!("team:person:{owner}"), Indent::Depth(0))
+                ListItem::new(id, Indent::Tree(1))
                     .leading(Icon::new(chevron).size(IconSize::Small).color(Color::Muted))
-                    .child(Label::new(owner.to_owned()).weight(FontWeight::MEDIUM))
+                    .child(
+                        div()
+                            .debug_selector(|| name_selector)
+                            .child(Label::new(owner.to_owned()).weight(FontWeight::MEDIUM)),
+                    )
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if !this.folded.remove(&name) {
                             this.folded.insert(name.clone());
