@@ -22,7 +22,7 @@ use crate::icons::{FileIcons, UiIcon};
 use crate::refs::RefTarget;
 
 /// The most tabs one pane holds; opening another closes the leftmost
-/// inactive tab.
+/// inactive tab other than the chat's.
 const MAX_TABS: usize = 32;
 
 /// The most panes the center splits into.
@@ -292,7 +292,12 @@ impl Pane {
         }
         if self.tabs.len() >= MAX_TABS {
             let active = self.active;
-            if let Some(oldest) = (0..self.tabs.len()).find(|i| *i != active) {
+            let oldest = self
+                .tabs
+                .iter()
+                .enumerate()
+                .position(|(i, tab)| i != active && *tab != TabItem::Chat);
+            if let Some(oldest) = oldest {
                 self.tabs.remove(oldest);
                 if oldest < self.active {
                     self.active -= 1;
@@ -318,9 +323,10 @@ impl Pane {
     }
 
     /// Closes the tab at `index`; the tab to its right (or left, at the end)
-    /// becomes active when it was.
+    /// becomes active when it was. The chat's tab does not close, so the
+    /// chat always has a pane.
     pub(crate) fn close(&mut self, index: usize, cx: &mut Context<Self>) {
-        if index >= self.tabs.len() {
+        if self.tabs.get(index).is_none_or(|tab| *tab == TabItem::Chat) {
             return;
         }
         self.tabs.remove(index);
@@ -343,8 +349,14 @@ impl Pane {
         .pane()
         .icon_color(icon_color)
         .selected(index == self.active)
-        .on_click(cx.listener(move |this, _, _, cx| this.activate(index, cx)))
-        .on_close(cx.listener(move |this, _, _, cx| this.close(index, cx)));
+        .on_click(cx.listener(move |this, _, _, cx| this.activate(index, cx)));
+        // The chat's tab draws no close button; its slot stays, so tabs keep
+        // their width (mockup fix 40).
+        let tab = if *item == TabItem::Chat {
+            tab
+        } else {
+            tab.on_close(cx.listener(move |this, _, _, cx| this.close(index, cx)))
+        };
         let tab = match (item, &self.chat) {
             (TabItem::Chat, Some(chat)) => tab.badge(chat.read(cx).badge()),
             (TabItem::RoleFile(_), _) => match cx.try_global::<FileIcons>() {
@@ -642,23 +654,33 @@ impl PaneGroup {
         };
         match *event {
             PaneEvent::Focused => self.active = index,
-            PaneEvent::Emptied if self.members.len() > 1 => {
-                self.members.remove(index);
-                if index < self.active || self.active >= self.members.len() {
-                    self.active = self.active.saturating_sub(1);
+            PaneEvent::Emptied => {
+                // The last pane stays.
+                if self.members.len() > 1 {
+                    self.members.remove(index);
+                    if index < self.active || self.active >= self.members.len() {
+                        self.active = self.active.saturating_sub(1);
+                    }
+                    if self.members.len() == 1 {
+                        self.direction = None;
+                    }
                 }
-                if self.members.len() == 1 {
-                    self.direction = None;
-                }
+                self.keep_chat_open(cx);
                 cx.notify();
             }
-            // The last pane stays and falls back to the chat, so the center
-            // is never blank with nothing to reopen it.
-            PaneEvent::Emptied => {
-                if self.chat.is_some() {
-                    pane.update(cx, |pane, cx| pane.open(TabItem::Chat, cx));
-                }
-            }
+        }
+    }
+
+    /// Opens the chat in the active pane when no pane has it, so the center
+    /// is never left with nothing to reopen it. The chat's tab does not
+    /// close, so this only acts if a pane that had it went away.
+    fn keep_chat_open(&mut self, cx: &mut Context<Self>) {
+        if self.chat_pane(cx).is_none()
+            && let Some(member) = self.members.get(self.active)
+        {
+            member
+                .pane
+                .update(cx, |pane, cx| pane.open(TabItem::Chat, cx));
         }
     }
 }

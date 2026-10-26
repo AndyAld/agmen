@@ -111,19 +111,132 @@ fn close_removes_the_tab_and_activates_a_neighbor(cx: &mut TestAppContext) {
     pane.update(cx, |pane, cx| {
         pane.open(fx1(), cx);
         pane.open(TabItem::Plan, cx);
-        pane.activate(1, cx);
+        pane.open(TabItem::Spec("docs/spec.md".into()), cx);
+        pane.activate(2, cx);
     });
-    click(cx, "pane-0:tab-1:close-button");
+    let spec = TabItem::Spec("docs/spec.md".into());
+    click(cx, "pane-0:tab-2:close-button");
     pane.read_with(cx, |pane, _| {
-        assert_eq!(pane.tabs(), &[TabItem::Chat, TabItem::Plan]);
-        assert_eq!(pane.active_item(), Some(&TabItem::Plan));
+        assert_eq!(pane.tabs(), &[TabItem::Chat, fx1(), spec.clone()]);
+        assert_eq!(pane.active_item(), Some(&spec));
     });
     // Closing a tab left of the active one keeps the same tab active.
+    pane.update(cx, |pane, cx| pane.close(1, cx));
+    pane.read_with(cx, |pane, _| {
+        assert_eq!(pane.tabs(), &[TabItem::Chat, spec.clone()]);
+        assert_eq!(pane.active_item(), Some(&spec));
+    });
+}
+
+#[gpui::test]
+fn chat_tab_has_no_close_button_and_keeps_its_slot(cx: &mut TestAppContext) {
+    let (group, _chat, cx) = open_center_with_chat(cx, vec![fx1()]);
+    let pane = first_pane(&group, cx);
+    redraw(cx);
+    assert!(cx.debug_bounds("pane-0:tab-0:close-button").is_none());
+    let slot = cx
+        .debug_bounds("pane-0:tab-0:close")
+        .expect("the chat tab's slot");
+    assert_eq!(slot.size.width, TAB_CLOSE_SLOT);
+    pane.update(cx, |pane, cx| pane.activate(1, cx));
+    redraw(cx);
+    assert!(cx.debug_bounds("pane-0:tab-0:close-button").is_none());
+    assert!(cx.debug_bounds("pane-0:tab-1:close-button").is_some());
+    // Closing the chat's tab in code is refused too.
     pane.update(cx, |pane, cx| pane.close(0, cx));
     pane.read_with(cx, |pane, _| {
-        assert_eq!(pane.tabs(), &[TabItem::Plan]);
-        assert_eq!(pane.active_item(), Some(&TabItem::Plan));
+        assert_eq!(pane.tabs(), &[TabItem::Chat, fx1()])
     });
+}
+
+/// Whether some pane in `group` has the chat's tab.
+fn chat_is_open(group: &Entity<PaneGroup>, cx: &VisualTestContext) -> bool {
+    group.read_with(cx, |group, cx| {
+        group
+            .panes()
+            .iter()
+            .any(|pane| pane.read(cx).tabs().contains(&TabItem::Chat))
+    })
+}
+
+#[gpui::test]
+fn chat_stays_reachable_through_any_closes(cx: &mut TestAppContext) {
+    let (group, chat, cx) = open_center_with_chat(cx, Vec::new());
+    let weak = chat.downgrade();
+    drop(chat);
+    // A fixed linear congruential sequence, so a failure replays.
+    let mut seed: u64 = 0x5eed;
+    let mut next = |bound: usize| {
+        seed = seed
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        usize::try_from(seed >> 33).unwrap() % bound
+    };
+    let (mut splits, mut pane_closes) = (0, 0);
+    for step in 0..120 {
+        let panes = group.read_with(cx, |group, _| group.panes());
+        let pane = panes[next(panes.len())].clone();
+        match next(8) {
+            0 => {
+                let item = TabItem::Spec(format!("docs/{step}.md"));
+                pane.update(cx, |pane, cx| pane.open(item, cx));
+            }
+            1 => {
+                let item = TabItem::Spec(format!("docs/{step}.md"));
+                group.update(cx, |group, cx| {
+                    // A full center refuses; the sequence goes on.
+                    if let Err(refused) = group.split(SplitDirection::Right, item, cx) {
+                        assert_eq!(refused, SplitError::Full);
+                    }
+                });
+            }
+            2..=4 => {
+                let len = pane.read_with(cx, |pane, _| pane.tabs().len());
+                let index = next(len + 1);
+                pane.update(cx, |pane, cx| pane.close(index, cx));
+            }
+            5 => {
+                // The close button a person sees on the active tab, if any.
+                let (number, len) = pane.read_with(cx, |pane, _| (pane.number, pane.tabs().len()));
+                let index = next(len.max(1));
+                pane.update(cx, |pane, cx| pane.activate(index, cx));
+                let selector: &'static str =
+                    Box::leak(format!("pane-{number}:tab-{index}:close-button").into_boxed_str());
+                redraw(cx);
+                if cx.debug_bounds(selector).is_some() {
+                    click(cx, selector);
+                }
+            }
+            6 => {
+                let len = pane.read_with(cx, |pane, _| pane.tabs().len());
+                let index = next(len.max(1));
+                pane.update(cx, |pane, cx| pane.activate(index, cx));
+            }
+            _ => group.update(cx, |group, cx| group.open(TabItem::Plan, cx)),
+        }
+        let after = group.read_with(cx, |group, _| group.panes().len());
+        match after.cmp(&panes.len()) {
+            std::cmp::Ordering::Greater => splits += 1,
+            std::cmp::Ordering::Less => pane_closes += 1,
+            std::cmp::Ordering::Equal => {}
+        }
+        assert!(
+            chat_is_open(&group, cx),
+            "no pane has the chat after step {step}"
+        );
+        assert!(
+            weak.upgrade().is_some(),
+            "the chat was dropped at step {step}"
+        );
+    }
+    // The sequence did split and close panes, not just tabs.
+    assert!(
+        splits > 3 && pane_closes > 3,
+        "{splits} splits, {pane_closes} closes"
+    );
+    group.update(cx, |group, cx| group.open(TabItem::Chat, cx));
+    redraw(cx);
+    assert!(cx.debug_bounds("chat").is_some());
 }
 
 #[gpui::test]
@@ -175,7 +288,7 @@ fn starting_tabs_open_behind_the_chat(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn closed_chat_in_a_split_reopens_with_its_state(cx: &mut TestAppContext) {
+fn closing_a_split_keeps_the_chat_in_a_remaining_pane(cx: &mut TestAppContext) {
     let (group, chat, cx) = open_center_with_chat(cx, Vec::new());
     let weak = chat.downgrade();
     drop(chat);
@@ -184,27 +297,14 @@ fn closed_chat_in_a_split_reopens_with_its_state(cx: &mut TestAppContext) {
             group.split(SplitDirection::Right, fx1(), cx)
         })
         .expect("room to split");
-    click(cx, "pane-0:tab-0:close-button");
+    click(cx, "pane-1:tab-0:close-button");
     group.read_with(cx, |group, _| assert_eq!(group.panes().len(), 1));
-    assert!(cx.debug_bounds("chat").is_none());
-    assert!(weak.upgrade().is_some(), "the group keeps the chat");
-
-    group.update(cx, |group, cx| group.open(TabItem::Chat, cx));
-    redraw(cx);
     let pane = first_pane(&group, cx);
     pane.read_with(cx, |pane, _| {
-        assert_eq!(pane.active_item(), Some(&TabItem::Chat));
+        assert_eq!(pane.tabs(), &[TabItem::Chat]);
         assert_eq!(pane.chat().map(Entity::downgrade), Some(weak.clone()));
     });
-    assert!(cx.debug_bounds("chat").is_some());
-}
-
-#[gpui::test]
-fn closing_the_last_tab_falls_back_to_the_chat(cx: &mut TestAppContext) {
-    let (group, _chat, cx) = open_center_with_chat(cx, Vec::new());
-    click(cx, "pane-0:tab-0:close-button");
-    let pane = first_pane(&group, cx);
-    pane.read_with(cx, |pane, _| assert_eq!(pane.tabs(), &[TabItem::Chat]));
+    assert!(weak.upgrade().is_some(), "the group keeps the chat");
     assert!(cx.debug_bounds("chat").is_some());
 }
 
@@ -311,6 +411,8 @@ fn tabs_are_bounded(cx: &mut TestAppContext) {
         assert_eq!(pane.tabs().len(), MAX_TABS);
         let last = format!("docs/specs/{}.md", MAX_TABS + 4);
         assert_eq!(pane.active_item(), Some(&TabItem::Spec(last)));
+        // The oldest tabs go first, but never the chat's.
+        assert_eq!(pane.tabs().first(), Some(&TabItem::Chat));
     });
 }
 
