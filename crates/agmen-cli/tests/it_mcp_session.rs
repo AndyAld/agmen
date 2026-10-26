@@ -22,39 +22,11 @@ use agmen_hub::Role;
 use agmen_proto::{Payload, Stream};
 use serde_json::{Value, json};
 use support::mcp::{Mcp, text_of};
-use support::{Ingest, Member, WAIT, env, run};
+use support::{Ingest, Member, WAIT, emqx_client, kick, run};
 
 /// Options for `who`'s worktree, home and state.
 fn options(who: &Member) -> McpOptions {
     McpOptions::new(who.wt.path(), who.home.tokens(), who.home.state_base())
-}
-
-/// The EMQX REST API URL for `segments` under `AGMEN_IT_EMQX_API`.
-fn emqx_api(segments: &[&str]) -> url::Url {
-    let mut url = url::Url::parse(&env("AGMEN_IT_EMQX_API")).unwrap();
-    url.path_segments_mut()
-        .unwrap()
-        .pop_if_empty()
-        .extend(segments);
-    url
-}
-
-/// What EMQX lists for `client_id`: `None` when it lists nothing.
-async fn emqx_client(client_id: &str) -> Option<Value> {
-    let resp = reqwest::Client::new()
-        .get(emqx_api(&["clients", client_id]))
-        .basic_auth(
-            env("AGMEN_IT_EMQX_API_KEY"),
-            Some(env("AGMEN_IT_EMQX_API_SECRET")),
-        )
-        .send()
-        .await
-        .unwrap();
-    if resp.status() == reqwest::StatusCode::NOT_FOUND {
-        return None;
-    }
-    assert!(resp.status().is_success(), "{client_id}: {}", resp.status());
-    Some(resp.json().await.unwrap())
 }
 
 /// Waits up to [`WAIT`] until `ready` accepts what EMQX lists for
@@ -69,24 +41,6 @@ async fn wait_for_client(client_id: &str, what: &str, ready: impl Fn(Option<&Val
         assert!(Instant::now() < deadline, "{client_id} {what}: {client:?}");
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-}
-
-/// Has EMQX drop `client_id`'s connection, as the hub's kick does.
-async fn kick(client_id: &str) {
-    let resp = reqwest::Client::new()
-        .delete(emqx_api(&["clients", client_id]))
-        .basic_auth(
-            env("AGMEN_IT_EMQX_API_KEY"),
-            Some(env("AGMEN_IT_EMQX_API_SECRET")),
-        )
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(
-        resp.status(),
-        reqwest::StatusCode::NO_CONTENT,
-        "kicking {client_id}"
-    );
 }
 
 /// Stops `who`'s running `-mcp` session on its own (see the module docs).

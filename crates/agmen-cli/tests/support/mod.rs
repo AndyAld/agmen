@@ -250,27 +250,32 @@ fn emqx_api(segments: &[&str]) -> Url {
     url
 }
 
+/// What EMQX lists for `client_id`: `None` when it lists nothing.
+pub async fn emqx_client(client_id: &str) -> Option<serde_json::Value> {
+    let resp = reqwest::Client::new()
+        .get(emqx_api(&["clients", client_id]))
+        .basic_auth(
+            env("AGMEN_IT_EMQX_API_KEY"),
+            Some(env("AGMEN_IT_EMQX_API_SECRET")),
+        )
+        .send()
+        .await
+        .unwrap();
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        return None;
+    }
+    assert!(resp.status().is_success(), "{client_id}: {}", resp.status());
+    Some(resp.json().await.unwrap())
+}
+
 /// Waits up to 10 s until EMQX lists `client_id` as not connected (or not
 /// at all), checking every 100 ms.
 async fn disconnected(client_id: &str) {
-    let http = reqwest::Client::new();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
-        let resp = http
-            .get(emqx_api(&["clients", client_id]))
-            .basic_auth(
-                env("AGMEN_IT_EMQX_API_KEY"),
-                Some(env("AGMEN_IT_EMQX_API_SECRET")),
-            )
-            .send()
-            .await
-            .unwrap();
-        if resp.status() == reqwest::StatusCode::NOT_FOUND {
-            return;
-        }
-        let client: serde_json::Value = resp.json().await.unwrap();
-        if client["connected"] == false {
-            return;
+        match emqx_client(client_id).await {
+            Some(client) if client["connected"] != false => {}
+            _ => return,
         }
         assert!(
             tokio::time::Instant::now() < deadline,
@@ -278,6 +283,24 @@ async fn disconnected(client_id: &str) {
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+/// Has EMQX drop `client_id`'s connection, as the hub's kick does.
+pub async fn kick(client_id: &str) {
+    let resp = reqwest::Client::new()
+        .delete(emqx_api(&["clients", client_id]))
+        .basic_auth(
+            env("AGMEN_IT_EMQX_API_KEY"),
+            Some(env("AGMEN_IT_EMQX_API_SECRET")),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::NO_CONTENT,
+        "kicking {client_id}"
+    );
 }
 
 /// `DELETE` on the EMQX REST API at `segments`. Nothing there (404) is
