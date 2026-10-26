@@ -116,6 +116,19 @@ impl PaneGroup {
         cx.notify();
     }
 
+    /// Activates `item`'s tab in the active pane, opening one after the
+    /// pane's last tab when there is none: where a mockup screen shows the
+    /// tab it opened.
+    pub(crate) fn open_last(&mut self, item: TabItem, cx: &mut Context<Self>) {
+        if let Some(member) = self.members.get(self.active) {
+            member.pane.update(cx, |pane, cx| {
+                pane.activate(pane.tabs().len().saturating_sub(1), cx);
+                pane.open(item, cx);
+            });
+        }
+        cx.notify();
+    }
+
     /// Opens a reference chip's target: in the active pane on a click, in
     /// a split to the right on a ⌘-click (Zed's split). A center that
     /// cannot split further opens it in the active pane.

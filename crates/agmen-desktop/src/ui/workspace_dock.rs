@@ -25,9 +25,9 @@ use crate::ui::scope_chip::ScopeOption;
 /// The left dock's tab and the panels it hosts beside the Agents panel.
 pub(crate) struct LeftDockState {
     pub(super) tab: LeftDockTab,
-    project: Entity<ProjectPanel>,
-    git: Entity<GitPanel>,
-    roles: Entity<RolesPanel>,
+    pub(super) project: Entity<ProjectPanel>,
+    pub(super) git: Entity<GitPanel>,
+    pub(super) roles: Entity<RolesPanel>,
     /// The role whose panel the right dock shows, set by a Roles click and
     /// cleared when the selection changes.
     pub(super) shown_role: Option<RoleFile>,
@@ -117,7 +117,7 @@ impl Workspace {
 
     /// Opens a role's file in a center tab and its Role panel in the right
     /// dock; base has no Role panel, so the dock shows none.
-    fn open_role(&mut self, name: &str, cx: &mut Context<Self>) {
+    pub(super) fn open_role(&mut self, name: &str, cx: &mut Context<Self>) {
         let Some(role) = self.snapshot.roles.iter().find(|r| r.name == name).cloned() else {
             return;
         };
