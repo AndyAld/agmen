@@ -10,20 +10,15 @@ use std::rc::Rc;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     Anchor, App, Bounds, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
-    Pixels, Point, RenderOnce, SharedString, Size, StatefulInteractiveElement as _, Styled as _,
-    Window, div, point,
+    Pixels, Point, RenderOnce, SharedString, Size, Styled as _, Window, div, point,
 };
 
 use super::add_agent_dialog::AgentDialog;
 use super::components::{
-    Button, ButtonSize, ButtonStyle, Card, ChangeHandler, Color, Label, LabelSize, MenuRow,
+    Button, ButtonSize, ButtonStyle, ChangeHandler, Color, Label, LabelSize, Menu, MenuRow,
     SectionHeading,
 };
-use super::tokens::{
-    BORDER_WIDTH, POPOVER_SHADOW_BLUR, POPOVER_SHADOW_OFFSET, SPACE_4, SPACE_8, SPACE_10, SPACE_12,
-    SWITCH_MENU_WIDTH, drop_shadow,
-};
-use crate::appearance::Appearance;
+use super::tokens::{SPACE_8, SWITCH_MENU_WIDTH};
 use crate::backend::{AgentFound, InstalledAgent};
 
 /// The button at the end of an agent's row.
@@ -100,7 +95,8 @@ pub(crate) fn place_menu(
     }
 }
 
-/// The menu. Tests find it as `"switch-menu"`, a row as
+/// The menu, drawn in the shared [`Menu`] frame; a caller that places it
+/// converts it with `Menu::from`. Tests find it as `"switch-menu"`, a row as
 /// `"switch-menu:{agent}"` with `":check"`, `":version"`, `":current"`,
 /// `":note"`, `":update"` and `":add"`, and the last row as
 /// `"switch-menu:add-other"`.
@@ -111,7 +107,6 @@ pub(crate) struct SwitchMenu {
     handle: SharedString,
     on_switch: Option<ChangeHandler<String>>,
     on_dialog: Option<ChangeHandler<AgentDialog>>,
-    max_height: Option<Pixels>,
 }
 
 impl std::fmt::Debug for SwitchMenu {
@@ -137,16 +132,7 @@ impl SwitchMenu {
             handle: handle.into(),
             on_switch: None,
             on_dialog: None,
-            max_height: None,
         }
-    }
-
-    /// Cuts the menu to `height`; its list of agents scrolls in what is
-    /// left between the heading and the foot.
-    #[must_use]
-    pub(crate) const fn max_height(mut self, height: Pixels) -> Self {
-        self.max_height = Some(height);
-        self
     }
 
     /// Called with the agent of a row clicked to switch to; never the
@@ -271,24 +257,9 @@ fn version_of(agent: &InstalledAgent) -> Option<&str> {
     }
 }
 
-/// The menu's card (node 1802): its rows run edge to edge, and it casts
-/// the popover's drop shadow.
-fn menu_card() -> Card {
-    Card::new()
-        .w(SWITCH_MENU_WIDTH)
-        .p_0()
-        .gap_0()
-        .overflow_hidden()
-        .shadow(vec![drop_shadow(
-            POPOVER_SHADOW_OFFSET,
-            POPOVER_SHADOW_BLUR,
-        )])
-}
-
-impl RenderOnce for SwitchMenu {
-    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let border = cx.global::<Appearance>().theme.border;
-        let rows: Vec<MenuRow> = self.agents.iter().map(|agent| self.row(agent)).collect();
+impl From<SwitchMenu> for Menu {
+    fn from(menu: SwitchMenu) -> Self {
+        let rows: Vec<MenuRow> = menu.agents.iter().map(|agent| menu.row(agent)).collect();
         let add_other = MenuRow::new("switch-menu:add-other")
             .leading(Label::new("+").color(Color::Accent))
             .child(Label::new("Add a terminal agent…").color(Color::Accent))
@@ -297,57 +268,32 @@ impl RenderOnce for SwitchMenu {
                     .size(LabelSize::Small)
                     .color(Color::Placeholder),
             )
-            .when_some(self.on_dialog.clone(), |row, handler| {
+            .when_some(menu.on_dialog.clone(), |row, handler| {
                 row.on_click(move |_, window, cx| handler(AgentDialog::Other, window, cx))
             });
         let foot = format!(
             "Switching starts a new session of that agent in the same worktree, as {}, with a \
              handoff brief. The current session stays resumable. Found by checking PATH and \
              each tool's --version.",
-            self.handle
+            menu.handle
         );
-        let card = menu_card()
-            .when_some(self.max_height, gpui::Styled::max_h)
-            .child(
-                div()
-                    .w_full()
-                    .flex_none()
-                    .py(SPACE_8)
-                    .px(SPACE_12)
-                    .border_b(BORDER_WIDTH)
-                    .border_color(border)
-                    .child(SectionHeading::new("Terminal agents on this machine")),
+        Self::new("switch-menu")
+            .width(SWITCH_MENU_WIDTH)
+            .header(SectionHeading::new("Terminal agents on this machine"))
+            .children(rows)
+            .child(add_other)
+            .footer(
+                Label::new(foot)
+                    .size(LabelSize::Small)
+                    .color(Color::Placeholder)
+                    .wrap(),
             )
-            .child(
-                div()
-                    .id("switch-menu:list")
-                    .w_full()
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .flex()
-                    .flex_col()
-                    .p(SPACE_4)
-                    .children(rows)
-                    .child(add_other),
-            )
-            .child(
-                div()
-                    .w_full()
-                    .flex_none()
-                    .pt(SPACE_8)
-                    .px(SPACE_12)
-                    .pb(SPACE_10)
-                    .border_t(BORDER_WIDTH)
-                    .border_color(border)
-                    .child(
-                        Label::new(foot)
-                            .size(LabelSize::Small)
-                            .color(Color::Placeholder)
-                            .wrap(),
-                    ),
-            );
-        div().debug_selector(|| "switch-menu".into()).child(card)
+    }
+}
+
+impl RenderOnce for SwitchMenu {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        Menu::from(self)
     }
 }
 

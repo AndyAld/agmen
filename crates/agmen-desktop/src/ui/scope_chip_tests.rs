@@ -95,3 +95,15 @@ fn the_open_menu_stops_at_its_height_cap(cx: &mut TestAppContext) {
         "{menu:?}"
     );
 }
+
+#[gpui::test]
+fn the_open_menu_uses_the_menu_frame(cx: &mut TestAppContext) {
+    // V118: node 1802's border, fill and 4 px list padding.
+    init(cx);
+    let s = chat_snapshot();
+    let options = ScopeOption::for_worktrees(&s.worktrees, &s.agents);
+    let (_, cx) = cx.add_window_view(|_, _| ScopeChip::new(options));
+    redraw(cx);
+    click(cx, "scope-chip");
+    crate::ui::test_support::assert_menu_frame(cx, "scope-chip:menu", "scope-chip:0");
+}

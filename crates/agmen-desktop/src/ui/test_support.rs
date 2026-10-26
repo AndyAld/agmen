@@ -162,6 +162,35 @@ pub(crate) fn painted_at(cx: &mut VisualTestContext, selector: &'static str) -> 
     })
 }
 
+/// Asserts the open menu drawn as `frame` is the shared menu frame (node
+/// 1802): the theme's `border` around `elevated_surface`, and its first
+/// row `row` 4 px inside the 1 px border.
+pub(crate) fn assert_menu_frame(
+    cx: &mut VisualTestContext,
+    frame: &'static str,
+    row: &'static str,
+) {
+    let theme = cx.update(|_, cx| cx.global::<Appearance>().theme.clone());
+    let quads = painted_at(cx, frame);
+    // gpui paints the fill and the border as separate quads.
+    assert!(
+        quads
+            .iter()
+            .any(|quad| quad.border_color == theme.border && quad.border_widths.left.0 > 0.),
+        "{frame} has no border in the theme's border: {quads:?}"
+    );
+    assert!(
+        fills_at(cx, frame).contains(&theme.elevated_surface),
+        "{frame} is not filled with elevated_surface"
+    );
+    let (frame_at, row_at) = (
+        cx.debug_bounds(frame).expect("the frame"),
+        cx.debug_bounds(row).expect("the first row"),
+    );
+    let inset = super::tokens::BORDER_WIDTH + super::tokens::SPACE_4;
+    assert_eq!(row_at.left() - frame_at.left(), inset, "{row} in {frame}");
+}
+
 /// The solid fills among [`painted_at`]'s quads.
 pub(crate) fn fills_at(cx: &mut VisualTestContext, selector: &'static str) -> Vec<gpui::Hsla> {
     painted_at(cx, selector)

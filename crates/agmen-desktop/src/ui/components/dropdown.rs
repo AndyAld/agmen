@@ -9,7 +9,7 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _, Window, div,
 };
 
-use super::{ChangeHandler, Color, Icon, IconSize, Label};
+use super::{ChangeHandler, Color, Icon, IconSize, Label, Menu};
 use crate::appearance::Appearance;
 use crate::icons::UiIcon;
 use crate::ui::tokens::{
@@ -209,16 +209,14 @@ impl RenderOnce for Dropdown {
                     .into_any_element()
             });
             let close = on_toggle.clone();
-            super::menu::menu(
-                SharedString::from(format!("{}:menu", self.id)),
-                Some(DROPDOWN_WIDTH),
-                rows,
-                move |window, cx| {
+            Menu::new(format!("{}:menu", self.id))
+                .width(DROPDOWN_WIDTH)
+                .children(rows)
+                .on_close(move |window, cx| {
                     if let Some(handler) = &close {
                         handler(false, window, cx);
                     }
-                },
-            )
+                })
         });
         div()
             .relative()
@@ -264,6 +262,17 @@ mod tests {
         let row = cx.debug_bounds("code-font:0").expect("menu row");
         let field = cx.debug_bounds("code-font").expect("box");
         assert!(row.top() >= field.bottom());
+    }
+
+    #[gpui::test]
+    fn open_dropdown_uses_the_menu_frame(cx: &mut TestAppContext) {
+        // V118: node 1802's border, fill and 4 px list padding.
+        let cx = open(cx, || {
+            Dropdown::new("theme", THEMES, 0)
+                .open(true)
+                .into_any_element()
+        });
+        crate::ui::test_support::assert_menu_frame(cx, "theme:menu", "theme:0");
     }
 
     #[gpui::test]

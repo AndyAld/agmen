@@ -129,7 +129,7 @@ pub(crate) const TOGGLE_HEIGHT: Pixels = px(18.);
 pub(crate) const TOGGLE_KNOB: Pixels = px(14.);
 /// The theme dropdown (node 8107), console.py's `dropdown` default.
 pub(crate) const DROPDOWN_WIDTH: Pixels = px(300.);
-/// An open dropdown scrolls past this height (a font list is long).
+/// An open menu scrolls past this height (a font list is long).
 pub(crate) const DROPDOWN_MENU_MAX_HEIGHT: Pixels = px(320.);
 /// Settings' page list (node 7911, `categories`).
 pub(crate) const SETTINGS_PAGES_WIDTH: Pixels = px(190.);
@@ -264,8 +264,8 @@ pub(crate) const MODEL_PICKER_OFFSET: Point<Pixels> = Point {
 };
 /// A model row (node 3361): `MenuRow::picker`.
 pub(crate) const PICKER_ROW_HEIGHT: Pixels = px(26.);
-/// The model picker's, the toast's and the switch menu's drop shadow
-/// (nodes 3355, 6004 and 1802): 8 px down, a 24 px blur, through
+/// The model picker's, the toast's and every menu's drop shadow (nodes
+/// 3355, 6004 and 1802): 8 px down, a 24 px blur, through
 /// [`drop_shadow`].
 pub(crate) const POPOVER_SHADOW_OFFSET: Pixels = px(8.);
 pub(crate) const POPOVER_SHADOW_BLUR: Pixels = px(24.);

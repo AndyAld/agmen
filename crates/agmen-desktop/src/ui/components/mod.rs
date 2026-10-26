@@ -65,7 +65,7 @@ pub(crate) use kv::{KvRow, KvSection};
 pub(crate) use label::{Label, LabelSize};
 pub(crate) use link::Link;
 pub(crate) use list_item::{Indent, ListItem};
-pub(crate) use menu::menu;
+pub(crate) use menu::Menu;
 pub(crate) use progress::ProgressBar;
 pub(crate) use status_dot::StatusDot;
 pub(crate) use tab::Tab;

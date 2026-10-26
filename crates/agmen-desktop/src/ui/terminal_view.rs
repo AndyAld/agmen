@@ -19,7 +19,7 @@ use gpui::{
 
 use super::add_agent_dialog::{AddAgentDialog, AgentDialog};
 use super::components::{
-    Button, ButtonSize, ButtonStyle, Chip, Color, Icon, Label, LabelSize, Modal,
+    Button, ButtonSize, ButtonStyle, Chip, Color, Icon, Label, LabelSize, Menu, Modal,
 };
 use super::switch_menu::{SwitchMenu, place_menu};
 use super::tokens::{
@@ -562,13 +562,16 @@ impl TerminalView {
         );
         let worker = self.worker.clone();
         let view = cx.entity().downgrade();
+        let close_view = view.clone();
         let dialog_view = view.clone();
+        let probe = self.anchors.clone();
+        let max_height = place.max_height;
+        let dialog_open = self.dialog.is_some();
         let menu = SwitchMenu::new(
             self.agents.clone(),
             self.take_over.harness.clone(),
             self.handle.clone(),
         )
-        .max_height(place.max_height)
         .on_switch(move |agent, _, cx| {
             let action = Action::SwitchAgent {
                 worker: worker.clone(),
@@ -582,11 +585,31 @@ impl TerminalView {
         .on_dialog(move |dialog, _, cx| {
             with_view(&dialog_view, cx, |this, cx| this.open_dialog(dialog, cx));
         });
-        let probe = self.anchors.clone();
-        let max_height = place.max_height;
-        let close =
-            cx.listener(|this, _: &gpui::MouseDownEvent, _, cx| this.set_menu_open(false, cx));
-        let dialog_open = self.dialog.is_some();
+        let menu = Menu::from(menu)
+            .place(place.anchor, offset)
+            .max_height(max_height)
+            .track_focus(&self.menu_focus)
+            // Escape closes it; src/keymap.rs binds it.
+            .key_context(SWITCH_MENU_CONTEXT)
+            .on_action(cx.listener(|this, _: &Cancel, _, cx| {
+                this.set_menu_open(false, cx);
+            }))
+            // The dialog over the menu takes the clicks.
+            .when(!dialog_open, |menu| {
+                menu.on_close(move |_, cx| {
+                    with_view(&close_view, cx, |this, cx| this.set_menu_open(false, cx));
+                })
+            })
+            .on_bounds(move |bounds| {
+                // A menu cut to its room is not its own height; keep the
+                // last whole one, or it would stay on a side too short.
+                if bounds.size.height < max_height {
+                    probe.set(Anchors {
+                        menu: Some(bounds.size.height),
+                        ..probe.get()
+                    });
+                }
+            });
         // The head centers its children; at the head's top left, the
         // offset counts from there.
         Some(
@@ -594,37 +617,7 @@ impl TerminalView {
                 .absolute()
                 .top_0()
                 .left_0()
-                .child(deferred(
-                    anchored()
-                        .offset(offset)
-                        .anchor(place.anchor)
-                        .snap_to_window()
-                        .child(
-                            div()
-                                .occlude()
-                                .relative()
-                                .track_focus(&self.menu_focus)
-                                // Escape closes it; src/keymap.rs binds it.
-                                .key_context(SWITCH_MENU_CONTEXT)
-                                .on_action(cx.listener(|this, _: &Cancel, _, cx| {
-                                    this.set_menu_open(false, cx);
-                                }))
-                                // The dialog over the menu takes the clicks.
-                                .when(!dialog_open, |this| this.on_mouse_down_out(close))
-                                .child(menu)
-                                .child(bounds_probe(move |bounds| {
-                                    // A menu cut to its room is not its own
-                                    // height; keep the last whole one, or
-                                    // it would stay on a side too short.
-                                    if bounds.size.height < max_height {
-                                        probe.set(Anchors {
-                                            menu: Some(bounds.size.height),
-                                            ..probe.get()
-                                        });
-                                    }
-                                })),
-                        ),
-                ))
+                .child(menu)
                 .into_any_element(),
         )
     }

@@ -10,7 +10,7 @@ use gpui::{
     SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
 };
 
-use super::components::{Chip, Color, Dot, Icon, IconSize, Label, menu};
+use super::components::{Chip, Color, Dot, Icon, IconSize, Label, Menu};
 use super::tokens::{RADIUS_MD, SPACE_2, SPACE_3, SPACE_6, SPACE_8, SPACE_10};
 use crate::appearance::Appearance;
 use crate::backend::{AgentInfo, WorktreeInfo};
@@ -176,15 +176,17 @@ impl Render for ScopeChip {
                 .options
                 .iter()
                 .enumerate()
-                .map(|(index, option)| self.menu_row(index, option, cx).into_any_element())
+                .map(|(index, option)| self.menu_row(index, option, cx))
                 .collect();
             let this = cx.entity().downgrade();
-            menu("scope-chip:menu".into(), None, rows, move |_, cx| {
-                // Gone only while the window closes; nothing to close.
-                if let Some(this) = this.upgrade() {
-                    this.update(cx, |this, cx| this.close(cx));
-                }
-            })
+            Menu::new("scope-chip:menu")
+                .children(rows)
+                .on_close(move |_, cx| {
+                    // Gone only while the window closes; nothing to close.
+                    if let Some(this) = this.upgrade() {
+                        this.update(cx, |this, cx| this.close(cx));
+                    }
+                })
         });
         div()
             .relative()
