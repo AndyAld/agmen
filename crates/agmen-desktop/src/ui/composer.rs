@@ -18,8 +18,8 @@ use super::components::{Chip, Color, IconButton, IconSize, Label, LabelSize};
 use super::model_picker::{ModelMenu, PickerEvent};
 use super::text_input::{TextInput, TextInputEvent};
 use super::tokens::{
-    AUTO_LINE_13, BORDER_WIDTH, COMPOSER_INPUT_MIN_WIDTH, ICON_SM, MODEL_PICKER_OFFSET,
-    RADIUS_INPUT, SPACE_8, SPACE_10, SPACE_12, SPACE_14, TEXT_DEFAULT,
+    AUTO_LINE_12, AUTO_LINE_13, BORDER_WIDTH, COMPOSER_INPUT_MIN_WIDTH, ICON_SM,
+    MODEL_PICKER_OFFSET, RADIUS_INPUT, SPACE_8, SPACE_10, SPACE_12, SPACE_14, TEXT_DEFAULT,
 };
 use crate::appearance::{Appearance, Fonts};
 use crate::backend::{BackendError, Draft, Snapshot};
@@ -445,6 +445,8 @@ impl Composer {
                     Chip::new(models.current().label())
                         .compact()
                         .code()
+                        // Node 382: 12 px mono on its 14 px line.
+                        .line_height(AUTO_LINE_12)
                         .truncate()
                         .color(Color::Default)
                         .outline(Color::Accent)
@@ -510,6 +512,8 @@ impl Render for Composer {
                     Chip::new(self.target(cx).handle.clone())
                         .compact()
                         .code()
+                        // Node 378: 12 px mono on its 14 px line.
+                        .line_height(AUTO_LINE_12)
                         .truncate()
                         .color(Color::Accent)
                         .leading(

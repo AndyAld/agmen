@@ -7,7 +7,9 @@ use super::*;
 use crate::backend::{BackendError, chat_snapshot};
 use crate::ui::test_support::{click, clip_right, init, redraw};
 use crate::ui::text_input::bind_keys;
-use crate::ui::tokens::{AUTO_LINE_13, COMPOSER_INPUT_MIN_WIDTH, MOCKUP_REM};
+use crate::ui::tokens::{
+    AUTO_LINE_12, AUTO_LINE_13, COMPOSER_INPUT_MIN_WIDTH, MOCKUP_REM, SPACE_2,
+};
 
 type Sent = Rc<RefCell<Vec<Draft>>>;
 
@@ -875,4 +877,23 @@ fn a_hidden_model_chip_closes_its_picker_so_escape_cancels_the_reply(cx: &mut Te
     cx.simulate_input("hi");
     cx.simulate_keystrokes("enter");
     assert_eq!(*sent.borrow(), vec![plain_hi()]);
+}
+
+#[gpui::test]
+fn the_chips_are_the_mockups_12_px_mono_lines(cx: &mut TestAppContext) {
+    // Nodes 376 and 380: 12 px mono on its 14 px auto line, 2 px padding,
+    // and the model chip's 1 px border, so 18 and 20 px; the box (node
+    // 375) is 38. On the code size's own line they were 20 and 22, and
+    // the box 40.
+    let (_, _, cx) = open_composer(cx);
+    redraw(cx);
+    let to = cx.debug_bounds("composer:to").unwrap();
+    assert_eq!(to.size.height, AUTO_LINE_12 + SPACE_2 * 2.);
+    let model = cx.debug_bounds("composer:model").unwrap();
+    assert_eq!(
+        model.size.height,
+        AUTO_LINE_12 + SPACE_2 * 2. + BORDER_WIDTH * 2.
+    );
+    let frame = cx.debug_bounds("composer:box").unwrap();
+    assert_eq!(frame.size.height, gpui::px(38.));
 }
