@@ -8,13 +8,28 @@
 mod fixture;
 mod fixture_data;
 mod screen;
+mod worktree;
 
 use std::collections::BTreeMap;
 
 use agmen_proto::{GitSha, IdentityId, MessageId, StampedEnvelope};
 use futures::channel::mpsc::UnboundedReceiver;
+use gpui::SharedString;
+
+use crate::roles::{Edits, RoleKind, Tier};
 
 pub(crate) use fixture::FixtureBackend;
+pub(crate) use fixture_data::REVIEWER_XML;
+pub(crate) use worktree::{
+    ChangeKind, CommitInfo, DiffLine, DiffLineKind, FileChange, Hunk, WorktreeHead, WorktreeInfo,
+    WorktreeState,
+};
+
+/// The identity id the fixture gives a mockup handle, for tests.
+#[cfg(test)]
+pub(crate) fn fixture_id(handle: &str) -> IdentityId {
+    fixture_data::id(handle).unwrap_or_else(|err| panic!("{err}"))
+}
 #[cfg(test)]
 pub(crate) use fixture::chat_snapshot;
 pub(crate) use screen::Screen;
@@ -201,6 +216,17 @@ pub(crate) enum AgentStatus {
     Reading,
 }
 
+impl AgentStatus {
+    /// The word for it in notes such as "opencode · reading".
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Working => "working",
+            Self::Idle => "idle",
+            Self::Reading => "reading",
+        }
+    }
+}
+
 /// One agent in the Agents dock.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AgentRow {
@@ -216,11 +242,14 @@ pub(crate) struct AgentRow {
     pub(crate) status: AgentStatus,
     /// How far the row is nested under the agent that delegated to it.
     pub(crate) depth: u8,
+    /// The item it works on or reads, as the hub's roster reports it.
+    pub(crate) item: Option<String>,
 }
 
 /// One person and their agents.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PersonGroup {
+    pub(crate) id: IdentityId,
     pub(crate) person: String,
     /// The person running this app, shown as "andy (you)".
     pub(crate) you: bool,
@@ -331,6 +360,88 @@ pub(crate) struct Snapshot {
     /// What local git knows, so the client can confirm the branches,
     /// commits and files message text names (spec 9.3).
     pub(crate) git: GitFacts,
+    /// Live sessions of agents on this machine, by identity.
+    pub(crate) sessions: BTreeMap<IdentityId, AgentSession>,
+    /// Role files from every layer (spec 3.5).
+    pub(crate) roles: Vec<RoleFile>,
+    /// The worktrees on this machine, the person's own first.
+    pub(crate) worktrees: Vec<WorktreeInfo>,
+}
+
+/// One row of an agent's session, as the agent view shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SessionRow {
+    /// A tool call: its name and argument.
+    Tool { name: String, arg: String },
+    /// What a tool printed.
+    Out { text: String, tone: Tone },
+    /// What the agent said.
+    Say(String),
+    /// A turn's cost line.
+    Cost(String),
+}
+
+/// How a line of tool output reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Tone {
+    Plain,
+    Success,
+    Accent,
+}
+
+/// An agent's live session: what it is on, and what it did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AgentSession {
+    pub(crate) item: String,
+    pub(crate) branch: String,
+    pub(crate) rows: Vec<SessionRow>,
+}
+
+/// Where a role file lives (spec 3.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum RoleLayer {
+    BuiltIn,
+    /// `.agmen/roles/` in the project's repo.
+    Project,
+    /// `~/.config/agmen/roles/`.
+    Personal,
+}
+
+/// One role file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RoleFile {
+    pub(crate) name: String,
+    pub(crate) layer: RoleLayer,
+    /// The XML; built-in roles borrow the text compiled into the binary.
+    pub(crate) text: SharedString,
+    /// What agmen enforces for it; `None` for base, which has no kind, and
+    /// for a file that does not parse.
+    pub(crate) info: Option<RoleInfo>,
+    /// The built-in role whose color its dot takes (itself, or the nearest
+    /// built-in it extends); `None` for base.
+    pub(crate) palette_role: Option<String>,
+}
+
+/// A resolved role, as the Role panel shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RoleInfo {
+    pub(crate) kind: RoleKind,
+    pub(crate) tier: Tier,
+    /// Tool classes, the same for every agent (spec 3.2).
+    pub(crate) tools: Vec<String>,
+    /// A limit agmen states but cannot enforce, such as Bash read-only.
+    pub(crate) bash_note: Option<String>,
+    pub(crate) edits: Edits,
+    /// The role's own verbs, then base's.
+    pub(crate) verbs: Vec<String>,
+    /// Verbs the role's kind could send that the role file withholds (D12).
+    pub(crate) refused: Vec<String>,
+    /// Who holds it, and a short note on each.
+    pub(crate) used_by: Vec<(String, String)>,
+    /// The roles that extend it.
+    pub(crate) extended_by: Vec<String>,
+    /// The role mention and what it expands to.
+    pub(crate) mention: (String, String),
 }
 
 /// Branches, commits and files in the person's local worktrees.

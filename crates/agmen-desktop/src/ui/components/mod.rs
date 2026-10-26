@@ -15,10 +15,6 @@ mod chip;
 mod color;
 #[cfg(test)]
 mod control_harness;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by the Task 17 settings view")
-)]
 mod dropdown;
 mod icon;
 mod icon_button;
@@ -27,22 +23,10 @@ mod kv;
 mod label;
 mod list_item;
 mod progress;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by the Task 17 settings view")
-)]
 mod segmented;
 mod status_dot;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by the Task 17 settings view")
-)]
 mod stepper;
 mod tab;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by the Task 17 settings view")
-)]
 mod toggle;
 
 pub(crate) use avatar::Avatar;
@@ -61,7 +45,6 @@ pub(crate) use list_item::{Indent, ListItem};
 pub(crate) use progress::ProgressBar;
 pub(crate) use status_dot::StatusDot;
 pub(crate) use tab::Tab;
-#[expect(unused_imports, reason = "used by the Task 17 settings view")]
 pub(crate) use {dropdown::Dropdown, segmented::Segmented, stepper::Stepper, toggle::Toggle};
 
 /// What a control reports when its value changes: the new value. An `Rc`, not

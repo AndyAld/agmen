@@ -18,6 +18,7 @@ mod notify;
 )]
 mod plan;
 mod refs;
+mod roles;
 mod spike;
 mod ui;
 
@@ -31,9 +32,30 @@ use gpui::{
 
 use appearance::{Appearance, SystemMode};
 
-use ui::{Quit, ToggleLeftDock, ToggleRightDock, Workspace};
+use ui::{Quit, Workspace};
 
-const USAGE: &str = "usage: agmen-desktop [--screen <name> | --list-screens | --spike list [--autoscroll] | --spike notify]";
+const USAGE: &str = "usage: agmen-desktop [--screen <name> | --list-screens | --view <name> | --spike list [--autoscroll] | --spike notify]";
+
+/// The views `--view` can show alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DevView {
+    /// The code view on `roles/reviewer.xml`.
+    Code,
+    /// andy/fx1's session in the agent view.
+    Agent,
+    /// The Roles tab with reviewer.xml open.
+    Roles,
+    /// The Project tab with fx1's main.rs open.
+    Project,
+    /// The same with the tests folder open.
+    ProjectTestsOpen,
+    /// The Git tab with src/main.rs's diff open.
+    Git,
+    /// The same with the Changes section folded.
+    GitCollapsed,
+    /// Settings on Appearance.
+    Settings,
+}
 
 /// What the command line asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,6 +70,8 @@ enum Launch {
     Screen(backend::Screen),
     /// Prints every screen name, one per line, for `scripts/shot.sh all`.
     ListScreens,
+    /// One view alone in the window, to check it before a pane hosts it.
+    View(DevView),
 }
 
 impl Launch {
@@ -68,6 +92,19 @@ impl Launch {
             },
             [flag, name] if flag == "--spike" && name == "notify" => Ok(Self::NotifySpike),
             [flag] if flag == "--list-screens" => Ok(Self::ListScreens),
+            [flag, name] if flag == "--view" => match name.as_str() {
+                "code" => Ok(Self::View(DevView::Code)),
+                "agent" => Ok(Self::View(DevView::Agent)),
+                "roles" => Ok(Self::View(DevView::Roles)),
+                "project" => Ok(Self::View(DevView::Project)),
+                "project-tests-open" => Ok(Self::View(DevView::ProjectTestsOpen)),
+                "git" => Ok(Self::View(DevView::Git)),
+                "git-collapsed" => Ok(Self::View(DevView::GitCollapsed)),
+                "settings" => Ok(Self::View(DevView::Settings)),
+                _ => anyhow::bail!(
+                    "views: code, agent, roles, project, project-tests-open, git, git-collapsed, settings"
+                ),
+            },
             [flag, name] if flag == "--screen" => name
                 .parse()
                 .map(Self::Screen)
@@ -188,12 +225,93 @@ fn window_options(cx: &App) -> WindowOptions {
     }
 }
 
+/// Opens one view alone under the title bar, for `--view`.
+fn open_dev_view(
+    view: DevView,
+    options: WindowOptions,
+    cx: &mut App,
+) -> Result<gpui::AnyWindowHandle> {
+    use backend::Backend as _;
+    let mut snapshot = backend::FixtureBackend::for_screen(backend::Screen::Chat)
+        .context("building the fixture data")?
+        .snapshot();
+    let title = ui::TitleBar::new(&snapshot);
+    let window = match view {
+        DevView::Code => cx.open_window(options, |_, cx| {
+            let code = cx.new(|_| {
+                ui::CodeView::new(
+                    backend::REVIEWER_XML,
+                    ui::Language::for_path(std::path::Path::new("roles/reviewer.xml")),
+                    vec![ui::GutterMark::Modified(11..12)],
+                )
+            });
+            cx.new(|_| ui::DevFrame::new(title, code))
+        }),
+        DevView::Agent => {
+            let (id, session) = snapshot
+                .sessions
+                .pop_first()
+                .context("the fixture has no agent session")?;
+            let handle = snapshot
+                .agents
+                .remove(&id)
+                .map_or_else(|| id.to_string(), |agent| agent.handle);
+            cx.open_window(options, |_, cx| {
+                let agent = cx.new(|cx| ui::AgentView::new(handle, session, cx));
+                cx.new(|_| ui::DevFrame::new(title, agent))
+            })
+        }
+        DevView::Roles => {
+            let roles = snapshot.roles;
+            let reviewer = roles
+                .iter()
+                .find(|role| role.name == "reviewer")
+                .context("the fixture has no reviewer role")?
+                .clone();
+            cx.open_window(options, |_, cx| {
+                let view = cx.new(|cx| ui::RolesDev::new(roles, reviewer, cx));
+                cx.new(|_| ui::DevFrame::new(title, view))
+            })
+        }
+        DevView::Project | DevView::ProjectTestsOpen => {
+            let tests = if view == DevView::Project {
+                ui::ProjectTests::Folded
+            } else {
+                ui::ProjectTests::Open
+            };
+            cx.open_window(options, |_, cx| {
+                let view = cx.new(|cx| ui::ProjectDev::new(snapshot, tests, cx));
+                cx.new(|_| ui::DevFrame::new(title, view))
+            })
+        }
+        DevView::Git | DevView::GitCollapsed => {
+            let layout = if view == DevView::Git {
+                ui::GitDevLayout::Open
+            } else {
+                ui::GitDevLayout::ChangesFolded
+            };
+            let scopes = ui::ScopeOption::for_worktrees(&snapshot.worktrees, &snapshot.agents);
+            let (worktrees, branches) = (snapshot.worktrees, snapshot.git.branches);
+            cx.open_window(options, |_, cx| {
+                let view = cx.new(|cx| ui::GitDev::new(worktrees, branches, scopes, layout, cx));
+                cx.new(|_| ui::DevFrame::new(title, view))
+            })
+        }
+        DevView::Settings => {
+            let home = std::env::home_dir().context("no home folder")?;
+            let sources = ui::SettingsSources::for_home(&home);
+            cx.open_window(options, |_, cx| {
+                let view = cx.new(|cx| ui::SettingsView::new(sources, cx));
+                cx.new(|_| ui::DevFrame::new(title, view))
+            })
+        }
+    };
+    Ok(window.context("opening the view window")?.into())
+}
+
 fn open_main_window(launch: &Launch, cx: &mut App) -> Result<()> {
-    cx.bind_keys([
-        KeyBinding::new("cmd-b", ToggleLeftDock, None),
-        KeyBinding::new("cmd-r", ToggleRightDock, None),
-        KeyBinding::new("cmd-q", Quit, None),
-    ]);
+    cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
+    ui::bind_workspace_keys(cx);
     cx.on_action(|_: &Quit, cx| cx.quit());
     assets::load_fonts(cx).context("loading the bundled fonts")?;
     let mut appearance = load_appearance(cx.window_appearance());
@@ -238,6 +356,7 @@ fn open_main_window(launch: &Launch, cx: &mut App) -> Result<()> {
             .map(Into::into)
         }
         Launch::NotifySpike | Launch::ListScreens => return Ok(()),
+        Launch::View(view) => Ok(open_dev_view(*view, options, cx)?),
         Launch::ListSpike { autoscroll } => {
             let autoscroll = *autoscroll;
             cx.open_window(options, |_, cx| {
@@ -283,6 +402,23 @@ mod tests {
             Launch::Screen(backend::Screen::NeedsYou)
         );
         assert!(Launch::parse(&args(&["--screen", "nope"])).is_err());
+        for (name, view) in [
+            ("code", DevView::Code),
+            ("agent", DevView::Agent),
+            ("roles", DevView::Roles),
+            ("project", DevView::Project),
+            ("project-tests-open", DevView::ProjectTestsOpen),
+            ("git", DevView::Git),
+            ("git-collapsed", DevView::GitCollapsed),
+            ("settings", DevView::Settings),
+        ] {
+            assert_eq!(
+                Launch::parse(&args(&["--view", name])).unwrap(),
+                Launch::View(view)
+            );
+        }
+        assert!(Launch::parse(&args(&["--view", "nope"])).is_err());
+        assert!(USAGE.contains("--view <name>"));
         assert_eq!(
             Launch::parse(&args(&["--list-screens"])).unwrap(),
             Launch::ListScreens

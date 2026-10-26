@@ -217,6 +217,10 @@ pub(crate) enum UiIcon {
     Check,
     Plus,
     Minus,
+    /// Maximize, in the Windows and Linux title bar.
+    Square,
+    /// Restore a maximized window.
+    Copy,
     Enter,
     Alert,
     PanelRight,
@@ -227,7 +231,7 @@ pub(crate) enum UiIcon {
 
 impl UiIcon {
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 25] = [
+    pub(crate) const ALL: [Self; 27] = [
         Self::Agents,
         Self::Project,
         Self::Git,
@@ -247,6 +251,8 @@ impl UiIcon {
         Self::Check,
         Self::Plus,
         Self::Minus,
+        Self::Square,
+        Self::Copy,
         Self::Enter,
         Self::Alert,
         Self::PanelRight,
@@ -277,6 +283,8 @@ impl UiIcon {
             Self::Check => "icons/lucide/check.svg",
             Self::Plus => "icons/lucide/plus.svg",
             Self::Minus => "icons/lucide/minus.svg",
+            Self::Square => "icons/lucide/square.svg",
+            Self::Copy => "icons/lucide/copy.svg",
             Self::Enter => "icons/lucide/corner-down-left.svg",
             Self::Alert => "icons/lucide/circle-alert.svg",
             Self::PanelRight => "icons/lucide/panel-right.svg",
@@ -329,6 +337,8 @@ mod tests {
                 | UiIcon::Check
                 | UiIcon::Plus
                 | UiIcon::Minus
+                | UiIcon::Square
+                | UiIcon::Copy
                 | UiIcon::Enter
                 | UiIcon::Alert
                 | UiIcon::PanelRight

@@ -80,6 +80,7 @@ impl PaneNames {
             TabItem::Plan => "plan".into(),
             TabItem::Spec(path) => file_name(path).into(),
             TabItem::Settings(_) => "settings".into(),
+            TabItem::Search => "Search".into(),
             TabItem::Ref(target) => ref_label(target),
         }
     }
@@ -93,7 +94,11 @@ impl PaneNames {
             TabItem::RoleFile(_) => vec!["roles".into(), self.tab_label(item)],
             TabItem::Settings(page) => vec!["settings".into(), page.label().into()],
             TabItem::Spec(path) => vec![self.project.clone(), path.clone()],
-            TabItem::Chat | TabItem::Agent(_) | TabItem::Plan | TabItem::Ref(_) => {
+            TabItem::Chat
+            | TabItem::Agent(_)
+            | TabItem::Plan
+            | TabItem::Search
+            | TabItem::Ref(_) => {
                 vec![self.project.clone(), self.tab_label(item)]
             }
         }
@@ -118,6 +123,7 @@ impl PaneNames {
             TabItem::RoleFile(_) => (UiIcon::File, Color::Muted),
             TabItem::Spec(_) => (UiIcon::File, Color::Warning),
             TabItem::Settings(_) => (UiIcon::Settings, Color::Placeholder),
+            TabItem::Search => (UiIcon::Search, Color::Placeholder),
             TabItem::Ref(RefTarget::File { .. }) => (UiIcon::File, Color::Accent),
             TabItem::Ref(RefTarget::Commit(_) | RefTarget::Branch { .. }) => {
                 (UiIcon::Git, Color::Success)
@@ -149,5 +155,8 @@ fn ref_label(target: &RefTarget) -> String {
 
 /// Labels in the UI font; the rest are names people type, in the code font.
 pub(super) const fn label_is_code(item: &TabItem) -> bool {
-    !matches!(item, TabItem::Chat | TabItem::Plan | TabItem::Settings(_))
+    !matches!(
+        item,
+        TabItem::Chat | TabItem::Plan | TabItem::Settings(_) | TabItem::Search
+    )
 }

@@ -53,6 +53,10 @@ impl Segmented {
     }
 
     /// Sets the options in the code font with wider padding, as the effort row.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the model picker's effort row uses it in Task 15")
+    )]
     #[must_use]
     pub(crate) const fn code(mut self) -> Self {
         self.code = true;

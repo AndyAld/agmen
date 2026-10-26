@@ -1,6 +1,6 @@
 //! A small rounded label: the title bar's listener chip, the composer's
-//! target and model chips, a message's "Open in terminal" chip and the
-//! reference chips in message text.
+//! target and model chips, a message's "Open in terminal" chip, the
+//! reference chips in message text and the panels' worktree chip.
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -45,6 +45,7 @@ pub(crate) struct Chip {
     flush_end: bool,
     underline: bool,
     shrink: bool,
+    full_width: bool,
 }
 
 impl std::fmt::Debug for Chip {
@@ -74,6 +75,7 @@ impl Chip {
             flush_end: false,
             underline: false,
             shrink: false,
+            full_width: false,
         }
     }
 
@@ -180,6 +182,13 @@ impl Chip {
         self.shrink = true;
         self
     }
+
+    /// Fills its row, with the trailing element at the far end.
+    #[must_use]
+    pub(crate) const fn full_width(mut self) -> Self {
+        self.full_width = true;
+        self
+    }
 }
 
 impl RenderOnce for Chip {
@@ -240,7 +249,16 @@ impl RenderOnce for Chip {
                 )
             })
             .children(self.leading)
-            .child(label)
+            .map(|this| {
+                if self.full_width {
+                    // The label takes the room left and clips, so the
+                    // trailing element stays at the far end.
+                    this.w_full()
+                        .child(div().flex_1().min_w_0().overflow_hidden().child(label))
+                } else {
+                    this.child(label)
+                }
+            })
             .children(self.trailing)
     }
 }

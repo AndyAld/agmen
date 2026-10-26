@@ -15,6 +15,7 @@ use super::names::{PaneNames, label_is_code};
 use crate::icons::FileIcons;
 use crate::ui::chat::ChatView;
 use crate::ui::components::{Breadcrumb, Button, ButtonStyle, Color, Label, Tab};
+use crate::ui::tab_views::TabViews;
 use crate::ui::tokens::{BORDER_WIDTH, TAB_BAR_HEIGHT};
 
 /// The most tabs one pane holds; opening another closes the leftmost
@@ -39,18 +40,20 @@ pub(crate) struct Pane {
     number: usize,
     names: Rc<PaneNames>,
     tabs: Vec<TabItem>,
-    active: usize,
+    pub(super) active: usize,
     /// The center's chat, which this pane shows on a Chat tab. The group
     /// owns it too, so it outlives any one pane.
     chat: Option<Entity<ChatView>>,
     /// Redraws the tab bar when the chat's badge changes.
     _chat_changes: Option<Subscription>,
+    /// The views of the tabs whose view is built.
+    views: TabViews,
 }
 
 impl EventEmitter<PaneEvent> for Pane {}
 
 impl Pane {
-    pub(super) fn new(number: usize, names: Rc<PaneNames>) -> Self {
+    pub(super) fn new(number: usize, names: Rc<PaneNames>, views: TabViews) -> Self {
         Self {
             number,
             names,
@@ -58,6 +61,7 @@ impl Pane {
             active: 0,
             chat: None,
             _chat_changes: None,
+            views,
         }
     }
 
@@ -211,6 +215,9 @@ impl Render for Pane {
             .map(|(index, item)| self.render_tab(index, item, cx))
             .collect();
         let active = self.active_item().cloned();
+        let view = active
+            .as_ref()
+            .and_then(|item| self.views.view(item, &self.tabs, cx));
         let selector = format!("pane-{}", self.number);
         div()
             .debug_selector(|| selector)
@@ -236,6 +243,14 @@ impl Render for Pane {
                     .children(tabs),
             )
             .when_some(active, |this, item| {
+                if let Some(view) = view {
+                    let this = if TabViews::draws_breadcrumb(&item) {
+                        this
+                    } else {
+                        this.child(self.render_breadcrumb(&item, cx))
+                    };
+                    return this.child(div().flex_1().min_h_0().flex().child(view));
+                }
                 let content = match (&item, &self.chat) {
                     (TabItem::Chat, Some(chat)) => div()
                         .flex_1()

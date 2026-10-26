@@ -123,6 +123,17 @@ pub(crate) fn title_case(name: &str) -> String {
     })
 }
 
+/// A time of day as `15:31`, in `tz`; views pass
+/// `jiff::tz::TimeZone::system()`, which is UTC when the system zone cannot
+/// be read.
+#[must_use]
+// shortcut: two clocks, this one for the Git panel and `clock` at a fixed
+// offset for the chat; fold the chat onto this one when its `UtcOffset`
+// shortcut (local_time.rs) is taken up.
+pub(crate) fn clock_in_zone(at: agmen_proto::Timestamp, tz: &jiff::tz::TimeZone) -> String {
+    at.to_zoned(tz.clone()).strftime("%H:%M").to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,6 +203,16 @@ mod tests {
     #[test]
     fn listener_label_has_colon() {
         assert_eq!(listener_label("codex", "idle"), "listener: codex · idle");
+    }
+
+    #[test]
+    fn clock_shows_hours_and_minutes_in_the_zone() {
+        let at: agmen_proto::Timestamp = "2026-10-25T21:31:00Z".parse().unwrap();
+        let denver = jiff::tz::TimeZone::get("America/Denver").unwrap();
+        assert_eq!(clock_in_zone(at, &denver), "15:31");
+        assert_eq!(clock_in_zone(at, &jiff::tz::TimeZone::UTC), "21:31");
+        let morning: agmen_proto::Timestamp = "2026-10-25T07:05:00Z".parse().unwrap();
+        assert_eq!(clock_in_zone(morning, &jiff::tz::TimeZone::UTC), "07:05");
     }
 
     #[test]

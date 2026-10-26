@@ -368,3 +368,135 @@ fn undoing_a_narrowing_change_ends_undone() {
     let card = backend.snapshot().changes.values().next().unwrap().clone();
     assert_eq!(card.state, ChangeState::Undone);
 }
+
+#[test]
+fn fx1_session_matches_console_py() {
+    // SESSION in console.py, with mockup fix 41 (the edit is +2 -5).
+    use crate::backend::SessionRow;
+    let s = chat();
+    let fx1 = s
+        .sessions
+        .get(&crate::backend::fixture_id("andy/fx1"))
+        .unwrap();
+    assert_eq!(fx1.item, "C015");
+    assert_eq!(fx1.branch, "fix/c015-main-conflict");
+    assert_eq!(fx1.rows.len(), 12);
+    let tools: Vec<(&str, &str)> = fx1
+        .rows
+        .iter()
+        .filter_map(|r| match r {
+            SessionRow::Tool { name, arg } => Some((name.as_str(), arg.as_str())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(tools[0], ("Read", "src/main.rs"));
+    assert_eq!(tools[2], ("Edit", "src/main.rs  +2 -5"));
+    assert_eq!(tools.len(), 6);
+    assert!(matches!(&fx1.rows[9], SessionRow::Cost(t) if t == "turn 4 · $0.31 · 44 s"));
+}
+
+#[test]
+fn role_files_cover_three_layers() {
+    use crate::backend::RoleLayer;
+    let s = chat();
+    let count = |layer| s.roles.iter().filter(|r| r.layer == layer).count();
+    assert_eq!(count(RoleLayer::BuiltIn), 8);
+    assert_eq!(count(RoleLayer::Project), 1);
+    assert_eq!(count(RoleLayer::Personal), 1);
+    let reviewer = s.roles.iter().find(|r| r.name == "reviewer").unwrap();
+    assert!(reviewer.text.contains("<role name=\"reviewer\""));
+    let info = reviewer.info.as_ref().unwrap();
+    assert_eq!(info.tier, crate::roles::Tier::Deep);
+    // Mockup fix 51: no adam/sec. Used by comes from the roster, and the
+    // roles that extend this one.
+    assert!(info.used_by.iter().all(|(who, _)| who != "adam/sec"));
+    // Mockup fix 51 (C179): rv2 is reading C015.
+    assert_eq!(
+        info.used_by,
+        [("andy/rv2".to_owned(), "opencode · reading C015".to_owned())]
+    );
+    // The roles that extend it are their own list, drawn dimmer.
+    assert_eq!(info.extended_by, ["security-reviewer".to_owned()]);
+}
+
+#[test]
+fn role_panels_come_from_the_role_files() {
+    // Reviews C163 and C164: every role but base has kind and tier, and the
+    // reviewer's verbs and tools are what reviewer.xml says.
+    let s = chat();
+    for role in &s.roles {
+        assert_eq!(role.info.is_some(), role.name != "base", "{}", role.name);
+    }
+    let info = s
+        .roles
+        .iter()
+        .find(|r| r.name == "reviewer")
+        .and_then(|r| r.info.clone())
+        .unwrap();
+    assert_eq!(info.tools, ["read", "search", "shell"]);
+    assert_eq!(info.verbs[0], "REVIEW");
+    assert!(info.verbs.iter().any(|v| v == "HELLO"));
+    assert!(info.refused.iter().any(|v| v == "CLAIM"));
+    assert!(info.refused.iter().all(|v| !info.verbs.contains(v)));
+    assert!(
+        info.bash_note.is_some(),
+        "shell with no edits is read-only by rule"
+    );
+    assert_eq!(info.mention.0, "@reviewers");
+    let engineer = s.roles.iter().find(|r| r.name == "engineer").unwrap();
+    assert!(engineer.info.as_ref().unwrap().bash_note.is_none());
+}
+
+#[test]
+fn status_labels_are_words() {
+    // Review C180: the label is spelled out, not taken from Debug.
+    use crate::backend::AgentStatus;
+    assert_eq!(AgentStatus::Working.label(), "working");
+    assert_eq!(AgentStatus::Idle.label(), "idle");
+    assert_eq!(AgentStatus::Reading.label(), "reading");
+}
+
+#[test]
+fn role_dots_take_their_built_in_ancestors_color() {
+    // Mockup check: security-reviewer is drawn as a reviewer and docs-writer
+    // as an engineer; base has no role color.
+    let s = chat();
+    let palette = |name: &str| {
+        s.roles
+            .iter()
+            .find(|r| r.name == name)
+            .unwrap()
+            .palette_role
+            .clone()
+    };
+    assert_eq!(palette("security-reviewer").as_deref(), Some("reviewer"));
+    assert_eq!(palette("docs-writer").as_deref(), Some("engineer"));
+    assert_eq!(palette("tester").as_deref(), Some("tester"));
+    assert_eq!(palette("base"), None);
+}
+
+#[test]
+fn refused_is_what_the_kind_could_send_but_the_role_cannot() {
+    // Ruling D12: Refused is the verbs the hub lets an agent send (its kind
+    // cap) minus the role's own; verbs the kind cap blocks drop out.
+    let s = chat();
+    let info = s
+        .roles
+        .iter()
+        .find(|r| r.name == "reviewer")
+        .and_then(|r| r.info.clone())
+        .unwrap();
+    assert_eq!(
+        info.refused,
+        // In agmen_proto::Verb::ALL's order.
+        [
+            "CLAIM",
+            "HEARTBEAT",
+            "RELEASE",
+            "LEND",
+            "DONE",
+            "PROPOSAL",
+            "PUSH_REQUEST"
+        ]
+    );
+}

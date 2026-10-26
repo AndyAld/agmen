@@ -99,3 +99,12 @@ fn icon_theme_parse_failures_are_named() {
         "the parse message is kept: {err}"
     );
 }
+
+#[test]
+fn stray_files_beside_extensions_are_skipped() {
+    // Review C119: a .DS_Store among the extension folders is not an error.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join(".DS_Store"), b"junk").unwrap();
+    let err = IconTheme::load(dir.path(), "Anything").unwrap_err();
+    assert!(!err.to_string().contains(".DS_Store"), "{err}");
+}

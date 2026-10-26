@@ -382,7 +382,8 @@ struct LayoutKey {
     text: String,
     empty: bool,
     width: Option<Pixels>,
-    pub(super) font: Font,
+    font: Font,
+    /// The color drawn: the text's, or the placeholder's while empty.
     color: Hsla,
     font_size: Pixels,
     line_height: Pixels,
@@ -428,13 +429,14 @@ impl TextInput {
         // The placeholder stays on one line and is clipped at the edge, as
         // Zed's; only typed text wraps.
         let width = if empty { None } else { width };
+        let drawn = drawn_color(self, cx, shaping.color);
         let marked = self.buffer.marked();
         if let Some(key) = self.cache.iter().find(|key| {
             key.text == self.buffer.text()
                 && key.empty == empty
                 && key.width == width
                 && key.font == shaping.font
-                && key.color == shaping.color
+                && key.color == drawn
                 && key.font_size == font_size
                 && key.line_height == line_height
                 && key.marked == marked
@@ -463,7 +465,7 @@ impl TextInput {
             empty,
             width,
             font: shaping.font.clone(),
-            color: shaping.color,
+            color: drawn,
             font_size,
             line_height,
             marked,
@@ -787,11 +789,21 @@ struct AreaPaint {
 
 /// The text to shape and its color: the placeholder while empty.
 fn display(input: &TextInput, cx: &App, color: Hsla) -> (SharedString, Hsla) {
-    let theme = &cx.global::<Appearance>().theme;
+    let drawn = drawn_color(input, cx, color);
     if input.buffer.text().is_empty() {
-        (input.placeholder.clone(), theme.text_placeholder)
+        (input.placeholder.clone(), drawn)
     } else {
-        (input.buffer.text().to_owned().into(), color)
+        (input.buffer.text().to_owned().into(), drawn)
+    }
+}
+
+/// The color the input draws its text in: the placeholder's while empty.
+/// The layout cache keys on this, so the two never drift apart (C141).
+fn drawn_color(input: &TextInput, cx: &App, color: Hsla) -> Hsla {
+    if input.buffer.text().is_empty() {
+        cx.global::<Appearance>().theme.text_placeholder
+    } else {
+        color
     }
 }
 

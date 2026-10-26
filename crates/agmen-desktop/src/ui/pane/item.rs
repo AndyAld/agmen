@@ -39,6 +39,9 @@ pub(crate) enum TabItem {
     /// A spec file, by path.
     Spec(String),
     Settings(SettingsPage),
+    // shortcut: a placeholder tab the status bar's search button opens;
+    // Task 18 builds search (cmd-shift-f) and its view.
+    Search,
     /// A reference chip's target whose view does not exist yet.
     // shortcut: a placeholder tab; Task 12 routes each kind to its home
     // (spec 9.3) and removes this variant.

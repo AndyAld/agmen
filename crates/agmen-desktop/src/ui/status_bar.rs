@@ -9,6 +9,7 @@ use gpui::{
 
 use super::components::{Badge, Button, ButtonStyle, Color, IconButton, KeyHint, Label, LabelSize};
 use super::format::{counted, listener_label, spend_today};
+use super::left_dock::PanelButtons;
 use super::tokens::{BORDER_WIDTH, SPACE_5, SPACE_10, SPACE_14, STATUS_BAR_HEIGHT};
 use super::workspace::ToggleRightDock;
 use crate::backend::{Snapshot, StatusSummary};
@@ -19,6 +20,7 @@ pub(crate) struct StatusBar {
     status: StatusSummary,
     listener: SharedString,
     right_dock_open: bool,
+    panels: PanelButtons,
 }
 
 impl StatusBar {
@@ -28,7 +30,15 @@ impl StatusBar {
             status: snapshot.status.clone(),
             listener: listener_label(&snapshot.listener.agent, &snapshot.listener.state).into(),
             right_dock_open,
+            panels: PanelButtons::default(),
         }
+    }
+
+    /// The files, git and search buttons and what they show as active.
+    #[must_use]
+    pub(crate) const fn panels(mut self, panels: PanelButtons) -> Self {
+        self.panels = panels;
+        self
     }
 }
 
@@ -70,11 +80,7 @@ impl RenderOnce for StatusBar {
             .items_center()
             .gap(SPACE_14)
             .px(SPACE_10)
-            .child(buttons(&[
-                ("status-project", UiIcon::Project),
-                ("status-git", UiIcon::Git),
-                ("status-search", UiIcon::Search),
-            ]))
+            .child(self.panels)
             .when(s.needs_you > 0, |this| {
                 this.child(
                     div().debug_selector(|| "needs-you-pill".into()).child(

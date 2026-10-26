@@ -17,13 +17,6 @@ pub(crate) enum LabelSize {
     Small,
     #[default]
     Default,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "headings in later tasks of the desktop plan use it"
-        )
-    )]
     Large,
 }
 

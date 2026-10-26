@@ -3,6 +3,7 @@
 #
 #   scripts/shot.sh <screen>...   one or more names, such as chat needs-you
 #   scripts/shot.sh all           every screen
+#   scripts/shot.sh view:code     one view alone (agmen-desktop --view code)
 #
 # Shots land in target/shots/<screen>.png at the workspace root. Only the app's
 # own window is captured (by window id), never the rest of the screen. Needs
@@ -25,11 +26,13 @@ fi
 screens=("$@")
 if [[ $1 == all ]]; then
 	# The app's own list, so this script never drifts from Screen::ALL.
-	# bash 3.2 (macOS) has no mapfile.
+	# Read the list first, so a failing binary stops the script (set -e)
+	# instead of yielding no screens; bash 3.2 (macOS) has no mapfile.
+	list="$("$app" --list-screens)"
 	screens=()
 	while IFS= read -r name; do
 		screens+=("$name")
-	done < <("$app" --list-screens)
+	done <<<"$list"
 fi
 mkdir -p "$out"
 work="$(mktemp -d)"
@@ -45,7 +48,12 @@ trap cleanup EXIT
 swiftc -O -o "$work/window-id" "$here/window-id.swift"
 
 for screen in "${screens[@]}"; do
-	"$app" --screen "$screen" >"$out/$screen.log" 2>&1 &
+	# "view:<name>" shows one view alone (agmen-desktop --view <name>).
+	if [[ $screen == view:* ]]; then
+		"$app" --view "${screen#view:}" >"$out/$screen.log" 2>&1 &
+	else
+		"$app" --screen "$screen" >"$out/$screen.log" 2>&1 &
+	fi
 	pid=$!
 	id=""
 	for ((i = 0; i < tries; i++)); do

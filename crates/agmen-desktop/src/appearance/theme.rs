@@ -181,15 +181,32 @@ fn parse_color(value: &Value) -> Option<Hsla> {
 }
 
 #[derive(Deserialize)]
-struct Family {
-    themes: Vec<FamilyTheme>,
+pub(super) struct Family {
+    #[serde(default)]
+    pub(super) author: Option<String>,
+    pub(super) themes: Vec<FamilyTheme>,
 }
 
 #[derive(Deserialize)]
-struct FamilyTheme {
-    name: String,
+pub(super) struct FamilyTheme {
+    pub(super) name: String,
+    /// `"light"` or `"dark"`.
     #[serde(default)]
-    style: Map<String, Value>,
+    pub(super) appearance: Option<String>,
+    #[serde(default)]
+    pub(super) style: Map<String, Value>,
+}
+
+/// The folders theme files are searched in, in order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ThemeDirs {
+    /// `~/.config/zed`: themes in its `themes/` folder.
+    pub(crate) zed: PathBuf,
+    /// Zed's `extensions/installed`: `*/themes/*.json`, and the index
+    /// beside it.
+    pub(crate) extensions: PathBuf,
+    /// agmen's own installs, `~/.config/agmen/themes`: `*/themes/*.json`.
+    pub(crate) agmen: PathBuf,
 }
 
 /// Loads the theme named `name` from `zed_dir/themes/*.json`, then from
@@ -205,25 +222,37 @@ pub(crate) fn load_theme(
     extensions_dir: &Path,
     name: &str,
 ) -> Result<Theme, AppearanceError> {
-    load_theme_with(zed_dir, extensions_dir, name, &Map::new())
+    let dirs = ThemeDirs {
+        zed: zed_dir.to_owned(),
+        extensions: extensions_dir.to_owned(),
+        agmen: zed_dir.join("no-agmen-themes"),
+    };
+    load_theme_with(&dirs, name, &Map::new(), &mut Vec::new())
 }
 
 /// Loads the theme named `name`, as `load_theme` does, with Zed's `theme_overrides` merged over the theme's own
-/// style keys first. Marked's built-in palette answers to its own name.
+/// style keys first, searching `dirs` in order (agmen's own installs last).
+/// The built-in themes, Marked's palette and the Gruvbox fallback, answer to
+/// their own names.
 ///
 /// # Errors
 ///
 /// When no readable theme file defines `name`.
 pub(crate) fn load_theme_with(
-    zed_dir: &Path,
-    extensions_dir: &Path,
+    dirs: &ThemeDirs,
     name: &str,
     overrides: &Map<String, Value>,
+    warnings: &mut Vec<String>,
 ) -> Result<Theme, AppearanceError> {
     if name == super::marked::MARKED_THEME {
-        return Ok(super::marked::with_wallpaper());
+        let marked = super::marked::with_wallpaper(warnings);
+        // Overrides apply to the built-in theme too (review C125).
+        return Ok(Theme::from_style(overrides, marked));
     }
-    let (files, mut unreadable) = theme_files(zed_dir, extensions_dir);
+    if name == super::fallback::BUILTIN_THEME {
+        return Ok(Theme::from_style(overrides, gruvbox_material_dark_hard()));
+    }
+    let (files, mut unreadable) = theme_files(dirs);
     for path in files {
         // A file that does not parse is skipped, and named if nothing matches.
         let family = match read_jsonc::<Family>(&path) {
@@ -235,7 +264,7 @@ pub(crate) fn load_theme_with(
         };
         if let Some(theme) = family.themes.into_iter().find(|t| t.name == name) {
             let mut style = theme.style;
-            style.extend(overrides.clone());
+            merge_style(&mut style, overrides);
             return Ok(Theme::from_style(&style, gruvbox_material_dark_hard()));
         }
     }
@@ -251,50 +280,106 @@ pub(crate) fn load_theme_with(
 
 /// Theme files to search, and the folders that could not be read. A
 /// missing folder is normal (most people have no `themes/` folder) and not
-/// reported.
-fn theme_files(zed_dir: &Path, extensions_dir: &Path) -> (Vec<PathBuf>, Vec<Skipped>) {
+/// reported. Zed's `extensions/index.json` adds theme files an extension
+/// keeps outside its `themes/` folder.
+pub(super) fn theme_files(dirs: &ThemeDirs) -> (Vec<PathBuf>, Vec<Skipped>) {
     let mut skipped = Vec::new();
-    let list = |dir: &Path, skipped: &mut Vec<Skipped>| -> Vec<PathBuf> {
-        match fs::read_dir(dir) {
-            Ok(entries) => {
-                let mut out = Vec::new();
-                for entry in entries {
-                    match entry {
-                        Ok(entry) => out.push(entry.path()),
-                        Err(err) => skipped.push(Skipped::new(dir, err)),
-                    }
-                }
-                out.sort();
-                out
-            }
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-            Err(err) => {
-                skipped.push(Skipped::new(dir, err));
-                Vec::new()
-            }
-        }
-    };
-    let mut dirs = vec![zed_dir.join("themes")];
+    let mut theme_dirs = vec![dirs.zed.join("themes")];
     // Only folders are extensions; a .DS_Store beside them is not (C109).
-    dirs.extend(
-        list(extensions_dir, &mut skipped)
-            .into_iter()
-            .filter(|ext| ext.is_dir())
-            .map(|ext| ext.join("themes")),
-    );
+    for root in [&dirs.extensions, &dirs.agmen] {
+        theme_dirs.extend(
+            list_dir(root, &mut skipped)
+                .into_iter()
+                .filter(|ext| ext.is_dir())
+                .map(|ext| ext.join("themes")),
+        );
+    }
     let mut files = Vec::new();
-    for dir in dirs {
+    for (ix, dir) in theme_dirs.iter().enumerate() {
         files.extend(
-            list(&dir, &mut skipped)
+            list_dir(dir, &mut skipped)
                 .into_iter()
                 .filter(|p| p.extension().is_some_and(|ext| ext == "json")),
         );
+        // The index's extra files go after Zed's own scan, before agmen's.
+        if ix == 0 {
+            files.extend(indexed_theme_files(&dirs.extensions));
+        }
         if files.len() >= MAX_THEME_FILES {
             files.truncate(MAX_THEME_FILES);
             break;
         }
     }
+    // The index lists files the folder scan finds again; the first wins.
+    let mut seen = std::collections::HashSet::new();
+    files.retain(|path| seen.insert(path.clone()));
     (files, skipped)
+}
+
+/// The sorted paths in `dir`; a missing folder is empty, and an unreadable
+/// one is recorded in `skipped`.
+fn list_dir(dir: &Path, skipped: &mut Vec<Skipped>) -> Vec<PathBuf> {
+    match fs::read_dir(dir) {
+        Ok(entries) => {
+            let mut out = Vec::new();
+            for entry in entries {
+                match entry {
+                    Ok(entry) => out.push(entry.path()),
+                    Err(err) => skipped.push(Skipped::new(dir, err)),
+                }
+            }
+            out.sort();
+            out
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(err) => {
+            skipped.push(Skipped::new(dir, err));
+            Vec::new()
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct ExtensionIndex {
+    #[serde(default)]
+    themes: BTreeMap<String, IndexedTheme>,
+}
+
+#[derive(Deserialize)]
+struct IndexedTheme {
+    extension: String,
+    path: PathBuf,
+}
+
+/// Theme files that Zed's `extensions/index.json` (beside `installed/`)
+/// lists, as Zed resolves them: `installed/{extension}/{path}`. A missing
+/// or unreadable index gives none; the folder scan still finds the rest.
+fn indexed_theme_files(extensions: &Path) -> Vec<PathBuf> {
+    let Some(index) = extensions.parent().map(|dir| dir.join("index.json")) else {
+        return Vec::new();
+    };
+    let Ok(index) = read_jsonc::<ExtensionIndex>(&index) else {
+        return Vec::new();
+    };
+    let mut out: Vec<PathBuf> = index
+        .themes
+        .into_values()
+        .filter(|entry| safe_relative(Path::new(&entry.extension)) && safe_relative(&entry.path))
+        .map(|entry| extensions.join(entry.extension).join(entry.path))
+        .filter(|path| path.is_file())
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Whether `path` stays inside the folder it is joined to: relative, with
+/// no `..`, so an index entry cannot point outside Zed's extensions.
+pub(super) fn safe_relative(path: &Path) -> bool {
+    !path.as_os_str().is_empty()
+        && path
+            .components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)))
 }
 
 /// How the window paints behind the theme: blurred when the theme's
@@ -305,5 +390,68 @@ pub(crate) fn window_background(theme: &Theme) -> gpui::WindowBackgroundAppearan
         gpui::WindowBackgroundAppearance::Blurred
     } else {
         gpui::WindowBackgroundAppearance::Opaque
+    }
+}
+
+/// Merges `overrides` into a theme `style` the way Zed's `modify_theme`
+/// does: `syntax` per highlight name (and per field within one), `players`
+/// per index (and per field within one), every other key replaced.
+pub(crate) fn merge_style(style: &mut Map<String, Value>, overrides: &Map<String, Value>) {
+    fn merge_fields(into: &mut Value, from: &Value) {
+        match (into.as_object_mut(), from.as_object()) {
+            (Some(into), Some(from)) => {
+                for (k, v) in from {
+                    if !unusable(k, into.get(k), v) {
+                        into.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+            _ => *into = from.clone(),
+        }
+    }
+    for (key, value) in overrides {
+        match (key.as_str(), style.get_mut(key)) {
+            ("syntax", Some(Value::Object(names))) => {
+                if let Some(over) = value.as_object() {
+                    for (name, entry) in over {
+                        match names.get_mut(name) {
+                            Some(existing) => merge_fields(existing, entry),
+                            None => {
+                                names.insert(name.clone(), entry.clone());
+                            }
+                        }
+                    }
+                }
+            }
+            ("players", Some(Value::Array(players))) => {
+                if let Some(over) = value.as_array() {
+                    for (i, player) in over.iter().enumerate() {
+                        match players.get_mut(i) {
+                            Some(existing) => merge_fields(existing, player),
+                            None => players.push(player.clone()),
+                        }
+                    }
+                }
+            }
+            _ => {
+                if !unusable(key, style.get(key), value) {
+                    style.insert(key.clone(), value.clone());
+                }
+            }
+        }
+    }
+}
+
+/// Whether an override for `key` keeps the theme's `existing` value: Zed
+/// does so for a null, for a string that is not a color where the theme has
+/// a color, and for an empty accents list (C142, C148).
+fn unusable(key: &str, existing: Option<&Value>, value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::String(_) => {
+            existing.and_then(parse_color).is_some() && parse_color(value).is_none()
+        }
+        Value::Array(list) => key == "accents" && list.is_empty(),
+        _ => false,
     }
 }

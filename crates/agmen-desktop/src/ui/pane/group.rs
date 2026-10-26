@@ -14,6 +14,7 @@ use super::tabs::{Pane, PaneEvent};
 use crate::backend::Snapshot;
 use crate::ui::chat::ChatView;
 use crate::ui::ref_chip::RefEvent;
+use crate::ui::tab_views::{TabSources, TabViews};
 use crate::ui::tokens::BORDER_WIDTH;
 
 /// The most panes the center splits into.
@@ -57,6 +58,8 @@ pub(crate) struct PaneGroup {
     /// any pane can open it again.
     chat: Option<Entity<ChatView>>,
     _chat_refs: Option<Subscription>,
+    /// What the tabs' views read.
+    sources: Rc<TabSources>,
 }
 
 impl PaneGroup {
@@ -80,6 +83,7 @@ impl PaneGroup {
             next_number: 0,
             chat,
             _chat_refs: chat_refs,
+            sources: Rc::new(TabSources::from_snapshot(snapshot)),
         };
         let pane = group.add_pane(TabItem::Chat, cx);
         pane.update(cx, |pane, cx| {
@@ -185,8 +189,9 @@ impl PaneGroup {
         self.next_number += 1;
         let names = self.names.clone();
         let chat = self.chat.clone();
+        let views = TabViews::new(self.sources.clone());
         let pane = cx.new(|cx| {
-            let mut pane = Pane::new(number, names);
+            let mut pane = Pane::new(number, names, views);
             if let Some(chat) = chat {
                 pane.set_chat(chat, cx);
             }
@@ -246,6 +251,9 @@ impl PaneGroup {
         }
     }
 }
+
+#[path = "actions.rs"]
+mod actions;
 
 impl Render for PaneGroup {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {

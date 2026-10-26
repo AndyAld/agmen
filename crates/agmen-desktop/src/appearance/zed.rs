@@ -67,7 +67,9 @@ impl ZedSettings {
             .get(theme)
             .and_then(serde_json::Value::as_object)
         {
-            out.extend(own.clone());
+            // The per-theme layer goes over the global one the same way the
+            // whole merge goes over the theme (Zed's order).
+            super::theme::merge_style(&mut out, own);
         }
         out
     }
@@ -137,8 +139,16 @@ pub(crate) fn read_jsonc<T: serde::de::DeserializeOwned>(
         });
     }
     let text = fs::read_to_string(path).map_err(io)?;
+    parse_jsonc(&text, path)
+}
+
+/// Parses JSONC `text`; `path` names where it came from in errors.
+pub(crate) fn parse_jsonc<T: serde::de::DeserializeOwned>(
+    text: &str,
+    path: &Path,
+) -> Result<T, AppearanceError> {
     let value: serde_json::Value =
-        jsonc_parser::parse_to_serde_value(&text, &jsonc_parser::ParseOptions::default()).map_err(
+        jsonc_parser::parse_to_serde_value(text, &jsonc_parser::ParseOptions::default()).map_err(
             |err| AppearanceError::Parse {
                 path: path.to_owned(),
                 message: err.to_string(),
