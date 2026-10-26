@@ -132,6 +132,20 @@ Authorization: Basic base64(<api key>:<api secret>)
 
 204 when the client was connected; it gets DISCONNECT 0x98 (administrative action) at once, and `GET /api/v5/clients/{clientid}` returns 404 afterwards. 404 when the client is not connected, which the hub treats as success. Client ids are `[a-z0-9-]`, so they need no URL encoding. Revocation kicks all three client ids: `<id>-mcp`, `<id>-watch` and `<id>-cli`. The API key comes from `api_key.bootstrap_file` (`deploy/dev/.secrets/api-keys.txt`, key name `agmen-hub`, role administrator).
 
+### REST ban
+
+A kick alone does not cut a revoked identity off: EMQX checks only the token's signature and `exp`, so the kicked client can reconnect with its unexpired broker token and read again. Revocation therefore also bans the identity's username (ruling R36, `EmqxAdmin::ban_username`):
+
+```
+POST /api/v5/banned
+Authorization: Basic base64(<api key>:<api secret>)
+{"as": "username", "who": "<id>", "by": "agmen-hub", "reason": "identity revoked", "until": "<RFC 3339>"}
+```
+
+`until` is the stored revocation time plus the broker token TTL (1 hour) plus 5 minutes, so the ban outlasts every token minted before the revocation. A banned username gets CONNACK 0x8A (banned) on CONNECT, whatever its token. 200 is success; 400 with code `ALREADY_EXISTS` also counts as success, so a repeated revocation reuses the first ban.
+
+Order: the hub commits `revoked_at` first, so the identity can get no fresh broker token; then it bans the username; then it kicks the three client ids. Banning before kicking means a kicked client that reconnects at once is already refused. If the ban fails, the kicks still run and the revocation call answers 502, so a retry bans again. Once `until` has passed, every old token has expired, so a late retry skips the ban and only kicks. Task 7's `it_revoke_kicks_and_refuses_refresh` checks this against EMQX 6.3.2: after revocation, reconnecting each of the three client ids with the old token gets 0x8A, and another identity of the same owner still connects. Spike S1 did not test the ban.
+
 ### Observed broker behavior
 
 - Expiry: at `exp`, EMQX sends DISCONNECT 0x87 (not authorized) and closes.
@@ -176,7 +190,7 @@ Every test mints its own identity ids (`id` plus 8 random `[a-z0-9]`), client id
 
 ## Consequences
 
-- Task 7 mints the two token shapes above, serves `/v1/jwks` with the rotation rule above, and kicks three client ids on revocation, not two. Task 8 connects as `agmen-hub-<instance>` with the hub claims.
+- Task 7 mints the two token shapes above, serves `/v1/jwks` with the rotation rule above, and on revocation bans the identity's username, then kicks three client ids, not two (see "REST ban"). Task 8 connects as `agmen-hub-<instance>` with the hub claims.
 - The authentication chain has two authenticators, and both must stay in read-only config. Removing cinfo lets any client id use a valid token; removing both lets anonymous clients in (ADR-0001).
 - Durable sessions keep sessions and messages on disk under `/opt/emqx/data/ds` (`sessions/`, `messages/`); the cluster StatefulSet must keep `/opt/emqx/data` on its persistent volume, as dev does with `emqx-data`.
 - rumqttc's TLS features fail `cargo deny` today (see WSS above); Task 3 decides how agmen-client gets WSS.
