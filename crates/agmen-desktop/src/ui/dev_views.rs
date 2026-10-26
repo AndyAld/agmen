@@ -220,9 +220,11 @@ impl GitDev {
             if let Some((_, path)) = &first {
                 panel.set_selected(path);
             }
-            if layout == GitDevLayout::ChangesFolded {
-                panel.toggle_section(GitSection::Changes, cx);
-            }
+            panel.set_folded(
+                GitSection::Changes,
+                layout == GitDevLayout::ChangesFolded,
+                cx,
+            );
         });
         cx.subscribe(&panel, |this, _, event: &GitPanelEvent, cx| {
             let GitPanelEvent::OpenDiff { worktree, path } = event;

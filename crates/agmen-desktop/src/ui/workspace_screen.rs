@@ -85,10 +85,11 @@ pub(super) enum Popup {
 /// missing.
 const MOCKUP_MISSING_AGENT: &str = "grok";
 
-/// What a screen shows beyond its fixture data; `None` is a closed dock.
+/// What a screen shows beyond its fixture data. Every screen opens the
+/// left dock; a `right` of `None` is a closed right dock.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct WorkspaceState {
-    left: Option<LeftDock>,
+    left: LeftDock,
     center: CenterTab,
     right: Option<RightDock>,
     /// Task 18: the query the command palette opens on, when open.
@@ -133,7 +134,7 @@ impl WorkspaceState {
             // Task 18: the palette opens over the chat with "spawn" typed.
             Screen::Palette => {
                 return Self {
-                    left: Some(LeftDock::Agents),
+                    left: LeftDock::Agents,
                     center: CenterTab::Chat,
                     right: Some(RightDock::Listener),
                     palette: Some("spawn"),
@@ -167,7 +168,7 @@ impl WorkspaceState {
             _ => None,
         };
         Self {
-            left: Some(left),
+            left,
             center,
             right,
             palette: None,
@@ -222,11 +223,7 @@ impl Workspace {
         cx.notify();
     }
 
-    fn show_left(&mut self, left: Option<LeftDock>, cx: &mut Context<Self>) {
-        let Some(left) = left else {
-            self.left_dock.close();
-            return;
-        };
+    fn show_left(&mut self, left: LeftDock, cx: &mut Context<Self>) {
         self.left.tab = left.tab();
         self.left_dock.open();
         match left {
@@ -244,9 +241,8 @@ impl Workspace {
             LeftDock::Git | LeftDock::GitChangesFolded => {
                 self.left.git.update(cx, |panel, cx| {
                     panel.set_selected(MAIN_RS);
-                    if left == LeftDock::GitChangesFolded {
-                        panel.toggle_section(GitSection::Changes, cx);
-                    }
+                    let folded = left == LeftDock::GitChangesFolded;
+                    panel.set_folded(GitSection::Changes, folded, cx);
                     cx.notify();
                 });
             }
