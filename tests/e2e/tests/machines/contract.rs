@@ -5,7 +5,8 @@
 //! The wiring: `it_plugin_contract_matches_the_cli` captures real output
 //! from the CLI against a real hub and broker, with this run's worktree
 //! path, ids and handles replaced by fixed ones, and compares its shape
-//! (each line's fields, value types and id formats) with the output the
+//! (each line's fields, value types, id formats, and the literal values
+//! the plugin switches on) with the output the
 //! fixture file [`FIXTURE`] holds. The plugin's own test
 //! (register.test.tsx, `parses_real_cli_output`) feeds the fixture's lines
 //! through the plugin. So a CLI change that alters the output fails here
@@ -114,8 +115,16 @@ fn shapes(output: &CliOutput) -> BTreeSet<String> {
         .collect()
 }
 
-/// `value` with each string replaced by the format it has, each number by
-/// `number`, and each array by the distinct shapes of its entries.
+/// Fields whose string values the plugin switches on or matches as text
+/// (register.tsx: the line `kind`, the message `verb`, a delivery's
+/// `state.state`, the sender's `from_kind`, DENY's `data.reason` and
+/// check-path's `reason`). [`shape`] keeps their values as they are, so a
+/// renamed value fails the comparison instead of passing as the same format.
+const LITERAL: [&str; 5] = ["kind", "verb", "state", "from_kind", "reason"];
+
+/// `value` with each string replaced by the format it has (except in
+/// [`LITERAL`] fields), each number by `number`, and each array by the
+/// distinct shapes of its entries.
 fn shape(value: &Value) -> Value {
     match value {
         Value::Null => Value::from("null"),
@@ -129,7 +138,13 @@ fn shape(value: &Value) -> Value {
         Value::Object(fields) => Value::Object(
             fields
                 .iter()
-                .map(|(name, field)| (name.clone(), shape(field)))
+                .map(|(name, field)| {
+                    let kept = field.is_string() && LITERAL.contains(&name.as_str());
+                    (
+                        name.clone(),
+                        if kept { field.clone() } else { shape(field) },
+                    )
+                })
                 .collect(),
         ),
     }

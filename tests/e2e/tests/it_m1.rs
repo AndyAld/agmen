@@ -198,11 +198,10 @@ async fn it_network_kill_during_done() {
         tokio::time::sleep_until((cut_at + Duration::from_secs(20)).into()).await;
         set_proxy(true).await;
         let (mcp, answers) = posting.await.unwrap();
+        // `agmen mcp` answers after 5 s (ANSWER_WAIT) and the link is off
+        // for 20 s, so a report the hub recorded did not go through the cut.
         for (text, _) in [answers.0, answers.1, answers.2, answers.3, answers.4] {
-            assert!(
-                text.starts_with("queued id=") || text.starts_with("recorded #"),
-                "{text}"
-            );
+            assert!(text.starts_with("queued id="), "{text}");
         }
 
         // coord sees each report once, and nothing more after them.
