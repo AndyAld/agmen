@@ -483,6 +483,39 @@ struct TextLayout {
     tops: Vec<Pixels>,
     height: Pixels,
     line_height: Pixels,
+    /// How far the glyphs reach above the first line box and below the
+    /// last, where a font taller than the line overflows it (C264a).
+    bleed: Bleed,
+}
+
+/// How far painted glyphs reach past their line boxes.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+struct Bleed {
+    above: Pixels,
+    below: Pixels,
+}
+
+impl Bleed {
+    /// The overflow of a line shaped with `ascent` and `descent` in a
+    /// `line_height` box: ascent plus |descent| minus the line height,
+    /// split where gpui's paint puts the baseline (half the spare height
+    /// plus the ascent, as kv.rs's painted_baseline reads it). Zero on a
+    /// side the glyphs do not reach past.
+    fn of(ascent: Pixels, descent: Pixels, line_height: Pixels) -> Self {
+        let baseline = (line_height - ascent - descent) / 2. + ascent;
+        Self {
+            above: (ascent - baseline).max(px(0.)),
+            below: (baseline + descent.abs() - line_height).max(px(0.)),
+        }
+    }
+
+    /// `bounds` grown by the bleed above and below.
+    fn around(self, bounds: Bounds<Pixels>) -> Bounds<Pixels> {
+        Bounds::from_corners(
+            point(bounds.left(), bounds.top() - self.above),
+            point(bounds.right(), bounds.bottom() + self.below),
+        )
+    }
 }
 
 impl TextLayout {
@@ -502,9 +535,13 @@ impl TextLayout {
         starts.extend(text.match_indices('\n').map(|(i, _)| i + 1));
         let mut tops = Vec::with_capacity(lines.len());
         let mut height = px(0.);
+        let mut bleed = Bleed::default();
         for line in &lines {
             tops.push(height);
             height += line.size(line_height).height.max(line_height);
+            let this = Bleed::of(line.ascent(), line.descent(), line_height);
+            bleed.above = bleed.above.max(this.above);
+            bleed.below = bleed.below.max(this.below);
         }
         Some(Self {
             lines: lines.into_vec(),
@@ -512,6 +549,7 @@ impl TextLayout {
             tops,
             height: height.max(line_height),
             line_height,
+            bleed,
         })
     }
 
@@ -970,7 +1008,10 @@ impl Element for TextArea {
         };
         let scroll = self.input.read(cx).scroll;
         let mut failed = false;
-        window.with_content_mask(Some(ContentMask { bounds }), |window| {
+        // C264a: a font taller than the line paints past the line box; the
+        // mask grows by that much so it never cuts descenders.
+        let mask = paint.layout.bleed.around(bounds);
+        window.with_content_mask(Some(ContentMask { bounds: mask }), |window| {
             for quad in paint.selection {
                 window.paint_quad(quad);
             }

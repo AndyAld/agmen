@@ -283,3 +283,100 @@ fn a_new_placeholder_color_reshapes(cx: &mut TestAppContext) {
     cx.run_until_parked();
     input.read_with(cx, |input, _| assert!(input.shapes > before));
 }
+
+/// A composer-like input at a 20 px UI font: the UI family at
+/// `TEXT_DEFAULT` with the composer's [`AUTO_LINE_13`] line.
+#[cfg(target_os = "macos")]
+struct LargeUiHost(gpui::Entity<TextInput>);
+
+#[cfg(target_os = "macos")]
+impl gpui::Render for LargeUiHost {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        window.set_rem_size(px(20.));
+        let family = cx.global::<Appearance>().fonts.ui_family.clone();
+        div()
+            .p(px(40.))
+            .w(px(400.))
+            .font_family(family)
+            .text_size(crate::ui::tokens::TEXT_DEFAULT)
+            .child(self.0.clone())
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn the_paint_mask_keeps_descenders_at_a_large_ui_font() {
+    // C264a: at a 20 px UI font the text outgrows the 16 px line, which
+    // keeps its pitch, and a mask cut to the line box clipped g, j, p, q
+    // and y.
+    use crate::ui::tokens::AUTO_LINE_13;
+    let mut app = crate::ui::test_support::core_text_app();
+    crate::ui::test_support::init(&mut app);
+    app.update(|cx| {
+        crate::assets::load_fonts(cx).unwrap();
+        bind_keys(cx);
+    });
+    let text = "gjpqy jumpy query";
+    let (host, cx) = app.add_window_view(|_, cx| {
+        LargeUiHost(cx.new(|cx| TextInput::new(cx).line_height(AUTO_LINE_13)))
+    });
+    let input = host.read_with(cx, |host, _| host.0.clone());
+    input.update_in(cx, |input, window, cx| {
+        input.focus_handle(cx).focus(window, cx);
+        input.set_text(text, window, cx);
+    });
+    cx.run_until_parked();
+    crate::ui::test_support::redraw(cx);
+    let (area, caret) = input.read_with(cx, |input, _| {
+        (input.last_bounds.unwrap(), input.last_cursor.unwrap())
+    });
+    assert_eq!(area.size.height, AUTO_LINE_13, "the line keeps its pitch");
+    let (line, mask) = cx.update(|window, cx| {
+        let font_size = crate::ui::tokens::TEXT_DEFAULT.to_pixels(window.rem_size());
+        let family = cx.global::<Appearance>().fonts.ui_family.clone();
+        let run = gpui::TextRun {
+            len: text.len(),
+            font: gpui::font(family),
+            color: Hsla::default(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        let line = window
+            .text_system()
+            .shape_line(text.into(), font_size, &[run], None);
+        let scale = window.scale_factor();
+        // The caret is painted under the same mask as the text.
+        let mask = window
+            .painted_quads()
+            .into_iter()
+            .find(|quad| {
+                (quad.bounds.origin.y.0 / scale - f32::from(caret.top())).abs() < 0.5
+                    && (quad.bounds.size.width.0 / scale - f32::from(caret.size.width)).abs() < 0.5
+            })
+            .map(|quad| quad.content_mask.bounds)
+            .unwrap();
+        let mask = Bounds::new(
+            point(px(mask.origin.x.0 / scale), px(mask.origin.y.0 / scale)),
+            size(
+                px(mask.size.width.0 / scale),
+                px(mask.size.height.0 / scale),
+            ),
+        );
+        (line, mask)
+    });
+    let descent = line.descent.abs();
+    assert!(
+        line.ascent + descent > AUTO_LINE_13,
+        "the text {:?} + {descent:?} fits the line, so nothing to show",
+        line.ascent
+    );
+    // Where gpui's paint puts the baseline: half the spare height plus the
+    // ascent, as kv.rs's painted_baseline reads it.
+    let baseline = area.top() + (area.size.height - line.ascent - line.descent) / 2. + line.ascent;
+    let (top, bottom) = (baseline - line.ascent, baseline + descent);
+    assert!(
+        mask.top() <= top + px(0.01) && mask.bottom() >= bottom - px(0.01),
+        "the mask {mask:?} cuts the glyphs from {top:?} to {bottom:?}"
+    );
+}
