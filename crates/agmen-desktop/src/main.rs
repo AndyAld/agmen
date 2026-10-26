@@ -252,12 +252,8 @@ fn open_dev_view(
                 .sessions
                 .pop_first()
                 .context("the fixture has no agent session")?;
-            let handle = snapshot
-                .agents
-                .remove(&id)
-                .map_or_else(|| id.to_string(), |agent| agent.handle);
-            cx.open_window(options, |_, cx| {
-                let agent = cx.new(|cx| ui::AgentView::new(handle, session, cx));
+            cx.open_window(options, |window, cx| {
+                let agent = cx.new(|cx| ui::AgentView::new(&snapshot, &id, session, window, cx));
                 cx.new(|_| ui::DevFrame::new(title, agent))
             })
         }

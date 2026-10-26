@@ -1,22 +1,18 @@
 //! An agent's live session in a center tab (`desktop-agent.webp`): the
 //! breadcrumb with Open in terminal and Stop, the turn's tool calls and
-//! output, and a DM composer.
+//! output, and the chat's composer as a DM to the agent.
 
+use agmen_proto::IdentityId;
 use gpui::{
     AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
     Render, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
 };
 
-use super::components::{
-    Breadcrumb, Button, ButtonStyle, Color, Icon, IconSize, Label, LabelSize, ToolCard,
-};
-use super::text_input::TextInput;
-use super::tokens::{
-    BORDER_WIDTH, RADIUS_CARD, SPACE_6, SPACE_8, SPACE_10, SPACE_12, SPACE_14, SPACE_18,
-};
+use super::components::{Breadcrumb, Button, ButtonStyle, Color, Label, LabelSize, ToolCard};
+use super::composer::{Composer, Target};
+use super::tokens::{SPACE_6, SPACE_8, SPACE_10, SPACE_14, SPACE_18};
 use crate::appearance::Appearance;
-use crate::backend::{AgentSession, SessionRow, Tone};
-use crate::icons::UiIcon;
+use crate::backend::{AgentSession, BackendError, BackendHandle, SessionRow, Snapshot, Tone};
 
 /// Tests find row `ix` as `"session:{ix}:{kind}"`, where kind is `tool`,
 /// `out`, `say` or `cost`, and the buttons as `agent-open-terminal` and
@@ -24,20 +20,45 @@ use crate::icons::UiIcon;
 pub(crate) struct AgentView {
     handle: SharedString,
     session: AgentSession,
-    composer: Entity<TextInput>,
+    composer: Entity<Composer>,
 }
 
 impl AgentView {
+    /// Agent `id`'s session, with a composer that DMs it through the
+    /// [`BackendHandle`] global. An agent the roster does not have shows
+    /// its id as its handle.
     pub(crate) fn new(
-        handle: impl Into<SharedString>,
+        snapshot: &Snapshot,
+        id: &IdentityId,
         session: AgentSession,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let handle = handle.into();
-        let placeholder = format!("Message {handle} · sent as a DM, recorded by the hub");
-        let composer = cx.new(|cx| TextInput::new(cx).placeholder(placeholder));
+        let handle = snapshot
+            .roster
+            .iter()
+            .flat_map(|group| &group.agents)
+            .find(|agent| agent.id == *id)
+            .map_or_else(|| id.to_string(), |agent| agent.handle.clone());
+        let agent = Target {
+            id: id.clone(),
+            handle: handle.clone(),
+        };
+        // A refused DM comes back into the input.
+        let composer = cx.new(|cx| {
+            Composer::direct(
+                snapshot,
+                agent,
+                |draft, _, cx| match cx.try_global::<BackendHandle>() {
+                    Some(backend) => backend.0.send(draft),
+                    None => Err(BackendError::Unsupported("sending without a backend")),
+                },
+                window,
+                cx,
+            )
+        });
         Self {
-            handle,
+            handle: handle.into(),
             session,
             composer,
         }
@@ -140,28 +161,7 @@ impl Render for AgentView {
                     .pb(SPACE_10)
                     .children(rows),
             )
-            .child(
-                // shortcut: a box of its own until Task 9's Composer component
-                // can host a DM composer.
-                div().pt(SPACE_8).px(SPACE_14).pb(SPACE_12).child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(SPACE_8)
-                        .py(SPACE_8)
-                        .px(SPACE_10)
-                        .rounded(RADIUS_CARD)
-                        .border(BORDER_WIDTH)
-                        .border_color(theme.border)
-                        .bg(theme.elevated_surface)
-                        .child(div().flex_1().min_w_0().child(self.composer.clone()))
-                        .child(
-                            Icon::new(UiIcon::Enter)
-                                .size(IconSize::Small)
-                                .color(Color::Muted),
-                        ),
-                ),
-            )
+            .child(self.composer.clone())
     }
 }
 

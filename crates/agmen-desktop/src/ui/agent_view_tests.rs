@@ -4,13 +4,18 @@ use super::*;
 use crate::backend::chat_snapshot;
 use crate::ui::test_support::{assert_breadcrumb_glyphs, init, redraw};
 
-#[gpui::test]
-fn agent_view_lists_tool_calls(cx: &mut TestAppContext) {
-    init(cx);
+/// andy/fx1's session view over the chat fixture.
+fn open_fx1(cx: &mut TestAppContext) -> (Entity<AgentView>, &mut gpui::VisualTestContext) {
     let snapshot = chat_snapshot();
     let id = crate::backend::fixture_id("andy/fx1");
     let session = snapshot.sessions.get(&id).unwrap().clone();
-    let (_, cx) = cx.add_window_view(|_, cx| AgentView::new("andy/fx1", session, cx));
+    cx.add_window_view(|window, cx| AgentView::new(&snapshot, &id, session, window, cx))
+}
+
+#[gpui::test]
+fn agent_view_lists_tool_calls(cx: &mut TestAppContext) {
+    init(cx);
+    let (_, cx) = open_fx1(cx);
     redraw(cx);
     // Review C166: every row, in console.py's order.
     let kinds = [
@@ -48,10 +53,25 @@ fn output_glyph_takes_the_line_color() {
 #[gpui::test]
 fn breadcrumb_splits_handle_item_and_branch_with_a_glyph(cx: &mut TestAppContext) {
     init(cx);
-    let snapshot = chat_snapshot();
-    let id = crate::backend::fixture_id("andy/fx1");
-    let session = snapshot.sessions.get(&id).unwrap().clone();
-    let (_, cx) = cx.add_window_view(|_, cx| AgentView::new("andy/fx1", session, cx));
+    let (_, cx) = open_fx1(cx);
     redraw(cx);
     assert_breadcrumb_glyphs(cx, 3);
+}
+
+#[gpui::test]
+fn composer_is_the_chat_composer_addressed_to_the_agent(cx: &mut TestAppContext) {
+    // V78: Task 9's Composer, its "to" chip on the agent, not a box of its
+    // own.
+    init(cx);
+    let (view, cx) = open_fx1(cx);
+    redraw(cx);
+    view.read_with(cx, |view, cx| {
+        let target = view.composer.read(cx).target(cx);
+        assert_eq!(target.handle, "andy/fx1");
+        assert_eq!(target.id, crate::backend::fixture_id("andy/fx1"));
+    });
+    assert!(cx.debug_bounds("composer:to").is_some());
+    // The agent runs its own model, so the listener's model chip is not
+    // drawn (console.py `build_d_agent`).
+    assert!(cx.debug_bounds("composer:model").is_none());
 }

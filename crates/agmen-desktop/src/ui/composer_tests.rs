@@ -176,3 +176,46 @@ fn mention_handle_reads_the_leading_token() {
     assert_eq!(mention_handle("@ hi"), None);
     assert_eq!(mention_handle(""), None);
 }
+
+#[gpui::test]
+fn direct_composer_sends_to_its_agent(cx: &mut TestAppContext) {
+    init(cx);
+    cx.update(bind_keys);
+    let sent = Sent::default();
+    let sink = sent.clone();
+    let snapshot = chat_snapshot();
+    let fx1 = Target {
+        id: agent_id("andy/fx1"),
+        handle: "andy/fx1".into(),
+    };
+    let (composer, cx) = cx.add_window_view(|window, cx| {
+        window.set_rem_size(MOCKUP_REM);
+        Composer::direct(
+            &snapshot,
+            fx1,
+            move |draft, _, _| {
+                sink.borrow_mut().push(draft);
+                Ok(())
+            },
+            window,
+            cx,
+        )
+    });
+    composer.update_in(cx, |composer, window, cx| {
+        composer.input.focus_handle(cx).focus(window, cx);
+    });
+    cx.run_until_parked();
+    composer.read_with(cx, |composer, cx| {
+        assert_eq!(composer.target(cx).handle, "andy/fx1");
+    });
+    cx.simulate_input("rebase first");
+    cx.simulate_keystrokes("enter");
+    assert_eq!(
+        *sent.borrow(),
+        vec![Draft {
+            to: vec![agent_id("andy/fx1")],
+            body: "rebase first".into(),
+            reply_to: None,
+        }]
+    );
+}

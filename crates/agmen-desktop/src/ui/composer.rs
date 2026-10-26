@@ -1,5 +1,6 @@
 //! The chat's composer (frame "Desktop · chat", node 374): the "to" chip,
-//! the model chip, the input and the ⏎ hint.
+//! the model chip, the input and the ⏎ hint. An agent's view uses it for a
+//! DM, without the model chip.
 
 use std::rc::Rc;
 
@@ -58,10 +59,13 @@ fn mention_handle(text: &str) -> Option<&str> {
 
 pub(crate) struct Composer {
     input: Entity<TextInput>,
-    listener: Target,
+    /// Who a message without an `@mention` goes to: the listener, or the
+    /// agent a DM composer is for.
+    recipient: Target,
     /// Every agent in the roster, which an `@mention` can address.
     agents: Vec<Target>,
-    model: SharedString,
+    /// The model chip's label; `None` draws no chip.
+    model: Option<SharedString>,
     on_send: SendHandler,
     _subscriptions: [Subscription; 2],
 }
@@ -69,7 +73,7 @@ pub(crate) struct Composer {
 impl std::fmt::Debug for Composer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Composer")
-            .field("listener", &self.listener)
+            .field("recipient", &self.recipient)
             .field("model", &self.model)
             .finish_non_exhaustive()
     }
@@ -86,15 +90,7 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let agents: Vec<Target> = snapshot
-            .roster
-            .iter()
-            .flat_map(|group| &group.agents)
-            .map(|agent| Target {
-                id: agent.id.clone(),
-                handle: agent.handle.clone(),
-            })
-            .collect();
+        let agents = roster_targets(snapshot);
         let listener = agents
             .iter()
             .find(|agent| agent.id == snapshot.listener_id)
@@ -103,9 +99,57 @@ impl Composer {
                 id: snapshot.listener_id.clone(),
                 handle: snapshot.listener.handle.clone(),
             });
+        // shortcut: the listener's harness with its configured model;
+        // Task 15 adds models to the snapshot and the picker.
+        let model = format!("{} · default", snapshot.listener.agent).into();
+        Self::build(
+            agents,
+            listener,
+            PLACEHOLDER.into(),
+            Some(model),
+            Rc::new(on_send),
+            window,
+            cx,
+        )
+    }
+
+    /// A DM composer for `agent`'s view (`desktop-agent.webp`): its "to"
+    /// chip names the agent and it draws no model chip, since the agent
+    /// runs its own model. An `@mention` still addresses another agent.
+    pub(crate) fn direct(
+        snapshot: &Snapshot,
+        agent: Target,
+        on_send: impl Fn(Draft, &mut Window, &mut App) -> Result<(), BackendError> + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let placeholder = format!(
+            "Message {} · sent as a DM, recorded by the hub",
+            agent.handle
+        );
+        Self::build(
+            roster_targets(snapshot),
+            agent,
+            placeholder.into(),
+            None,
+            Rc::new(on_send),
+            window,
+            cx,
+        )
+    }
+
+    fn build(
+        agents: Vec<Target>,
+        recipient: Target,
+        placeholder: SharedString,
+        model: Option<SharedString>,
+        on_send: SendHandler,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let input = cx.new(|cx| {
             TextInput::new(cx)
-                .placeholder(PLACEHOLDER)
+                .placeholder(placeholder)
                 .multiline(MAX_INPUT_LINES)
         });
         let submits = cx.subscribe_in(&input, window, |this, _, event, window, cx| {
@@ -116,27 +160,26 @@ impl Composer {
         let edits = cx.observe(&input, |_, _, cx| cx.notify());
         Self {
             input,
-            listener,
+            recipient,
             agents,
-            // shortcut: the listener's harness with its configured model;
-            // Task 15 adds models to the snapshot and the picker.
-            model: format!("{} · default", snapshot.listener.agent).into(),
-            on_send: Rc::new(on_send),
+            model,
+            on_send,
             _subscriptions: [submits, edits],
         }
     }
 
     /// Who the text typed so far goes to: the agent an `@mention` at its
-    /// start names, or the listener.
+    /// start names, or the recipient.
     pub(crate) fn target(&self, cx: &App) -> &Target {
         self.target_for(self.input.read(cx).text())
     }
 
-    /// Unknown handles stay plain text, and the message goes to the listener.
+    /// Unknown handles stay plain text, and the message goes to the
+    /// recipient.
     fn target_for(&self, text: &str) -> &Target {
         mention_handle(text)
             .and_then(|handle| self.agents.iter().find(|agent| agent.handle == handle))
-            .unwrap_or(&self.listener)
+            .unwrap_or(&self.recipient)
     }
 
     fn send(&self, body: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -171,31 +214,38 @@ impl Focusable for Composer {
 impl Render for Composer {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = &cx.global::<Appearance>().theme;
-        let to = Chip::new(self.target(cx).handle.clone())
-            .compact()
-            .code()
-            .color(Color::Accent)
-            .leading(
-                Label::new("to")
-                    .size(LabelSize::Small)
-                    .color(Color::Placeholder),
-            )
-            .trailing(caret());
-        let model = div()
-            .id("composer-model")
-            .debug_selector(|| "composer:model".into())
+        let to = div()
+            .debug_selector(|| "composer:to".into())
             .flex_none()
-            .cursor_pointer()
-            .on_click(cx.listener(|_, _, _, cx| cx.emit(ComposerEvent::PickModel)))
             .child(
-                Chip::new(self.model.clone())
+                Chip::new(self.target(cx).handle.clone())
                     .compact()
                     .code()
-                    .color(Color::Default)
-                    .outline(Color::Accent)
-                    .leading(Label::new("◆").size(LabelSize::XSmall).color(Color::Accent))
+                    .color(Color::Accent)
+                    .leading(
+                        Label::new("to")
+                            .size(LabelSize::Small)
+                            .color(Color::Placeholder),
+                    )
                     .trailing(caret()),
             );
+        let model = self.model.clone().map(|model| {
+            div()
+                .id("composer-model")
+                .debug_selector(|| "composer:model".into())
+                .flex_none()
+                .cursor_pointer()
+                .on_click(cx.listener(|_, _, _, cx| cx.emit(ComposerEvent::PickModel)))
+                .child(
+                    Chip::new(model)
+                        .compact()
+                        .code()
+                        .color(Color::Default)
+                        .outline(Color::Accent)
+                        .leading(Label::new("◆").size(LabelSize::XSmall).color(Color::Accent))
+                        .trailing(caret()),
+                )
+        });
         div()
             .w_full()
             .flex_none()
@@ -215,7 +265,7 @@ impl Render for Composer {
                     .border_color(theme.border)
                     .bg(theme.elevated_surface)
                     .child(to)
-                    .child(model)
+                    .children(model)
                     .child(
                         div()
                             .flex_1()
@@ -228,6 +278,19 @@ impl Render for Composer {
                     .child(Label::new("⏎").color(Color::Muted)),
             )
     }
+}
+
+/// Every agent in the snapshot's roster, as an `@mention` can address it.
+fn roster_targets(snapshot: &Snapshot) -> Vec<Target> {
+    snapshot
+        .roster
+        .iter()
+        .flat_map(|group| &group.agents)
+        .map(|agent| Target {
+            id: agent.id.clone(),
+            handle: agent.handle.clone(),
+        })
+        .collect()
 }
 
 /// The ▾ after a chip's label.
