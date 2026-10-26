@@ -708,3 +708,146 @@ fn a_cut_model_chip_keeps_its_caret(cx: &mut TestAppContext) {
         "the ▾ {cut:?} is cut by the chip {chip:?}"
     );
 }
+
+/// The window width at which the composer's parts all sit at their floors:
+/// the "to" chip, the model chip, the input and the ⏎, with the gaps
+/// between them, plus the composer's padding, border and box padding,
+/// measured from a wide window.
+fn threshold(composer: &Entity<Composer>, cx: &mut VisualTestContext) -> (f32, Floors) {
+    resize(cx, 900.);
+    let replying = composer.read_with(cx, |composer, cx| {
+        composer.reply_for(composer.input.read(cx).text()).is_some()
+    });
+    let lead = if replying { "reply to" } else { "to" };
+    let floors = cx.update(|window, cx| {
+        let fonts = cx.global::<Appearance>().fonts.clone();
+        Floors::measure(lead, replying, &fonts, window)
+    });
+    let to = cx.debug_bounds("composer:to").unwrap();
+    let hint = cx.debug_bounds("composer:send-hint").unwrap();
+    let chrome = gpui::px(900.) - (hint.right() - to.left());
+    let parts = floors.to
+        + SPACE_8
+        + floors.model
+        + SPACE_8
+        + COMPOSER_INPUT_MIN_WIDTH
+        + SPACE_8
+        + floors.hint;
+    (f32::from(chrome + parts), floors)
+}
+
+#[gpui::test]
+fn the_model_chip_shows_from_the_width_its_floor_fits(cx: &mut TestAppContext) {
+    // C281: the box probe measures inside the border and model_fits took
+    // the border off again, so the chip hid 2 px early. At the width where
+    // every part fits at its floor the chip shows, at its floor; 1 px
+    // narrower it hides.
+    let (composer, _, cx, coord) = replying(cx);
+    for reply in [false, true] {
+        if reply {
+            composer.update_in(cx, |composer, window, cx| {
+                composer.reply(coord.clone(), alert(), window, cx);
+            });
+        } else {
+            composer.update(cx, |composer, cx| composer.cancel_reply(cx));
+        }
+        let (exact, floors) = threshold(&composer, cx);
+        let at = if reply { "replying" } else { "not replying" };
+        resize(cx, exact.ceil());
+        let close = |a: gpui::Pixels, b: gpui::Pixels| (a - b).abs() < gpui::px(1.);
+        let model = cx
+            .debug_bounds("composer:model")
+            .unwrap_or_else(|| panic!("{at}: no model chip at {exact} px"));
+        let to = cx.debug_bounds("composer:to").unwrap();
+        assert!(close(model.size.width, floors.model), "{at}: {model:?}");
+        assert!(close(to.size.width, floors.to), "{at}: {to:?}");
+        // The first frame after a narrowing still lays the row out for the
+        // box width the last frame measured, so it can draw the chip in
+        // less room than its floor; the floor keeps it whole and the box
+        // clips the ⏎. The probe's next frame hides the chip within the
+        // same update, so this reads that first frame's paint.
+        let fill = chip_fills(cx, model)
+            .first()
+            .map(|(fill, _)| *fill)
+            .unwrap();
+        resize(cx, exact.ceil() - 3.);
+        let shown = cx.update(|window, cx| {
+            composer.update(cx, |composer, _| {
+                composer.box_width.set(Some(gpui::px(900.)));
+            });
+            window.refresh();
+            drop(window.draw(cx));
+            visible_widths(window, fill)
+        });
+        assert_eq!(shown.len(), 2, "{at}: the to and model chips {shown:?}");
+        assert!(
+            shown[1] >= floors.model - gpui::px(0.25),
+            "{at}: the stale model chip shows {:?} of its {:?} floor",
+            shown[1],
+            floors.model
+        );
+        resize(cx, exact.ceil() - 1.);
+        assert!(
+            cx.debug_bounds("composer:model").is_none(),
+            "{at}: the model chip shows below {exact} px"
+        );
+    }
+}
+
+#[gpui::test]
+fn a_resize_lays_the_row_out_for_the_new_width_without_a_refresh(cx: &mut TestAppContext) {
+    // C281: the box probe learns the box's width while painting, after
+    // the row was laid out for the old one, and asks for one more frame.
+    // Without that frame a narrowed composer kept a model chip it no
+    // longer has room for.
+    let (_, _, cx) = open_composer(cx);
+    resize(cx, 600.);
+    assert!(cx.debug_bounds("composer:model").is_some());
+    cx.simulate_resize(gpui::size(gpui::px(200.), gpui::px(120.)));
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("composer:model").is_none(),
+        "the row kept the model chip it laid out for 600 px"
+    );
+}
+
+/// The fills painted inside `bounds`, with the visible width of each.
+fn chip_fills(
+    cx: &mut VisualTestContext,
+    bounds: gpui::Bounds<gpui::Pixels>,
+) -> Vec<(gpui::Hsla, gpui::Pixels)> {
+    cx.update(|window, _| {
+        let scale = window.scale_factor();
+        window
+            .painted_quads()
+            .into_iter()
+            .filter(|quad| {
+                let x = gpui::px(quad.bounds.origin.x.0 / scale);
+                x >= bounds.left() - gpui::px(0.5) && x < bounds.right()
+            })
+            .filter_map(|quad| {
+                let fill = quad.background.as_solid()?;
+                let shown = quad.bounds.intersect(&quad.content_mask.bounds);
+                Some((fill, gpui::px(shown.size.width.0 / scale)))
+            })
+            .collect()
+    })
+}
+
+/// The visible widths of the quads filled with `fill`, left to right.
+fn visible_widths(window: &mut gpui::Window, fill: gpui::Hsla) -> Vec<gpui::Pixels> {
+    let scale = window.scale_factor();
+    let mut quads: Vec<_> = window
+        .painted_quads()
+        .into_iter()
+        .filter(|quad| quad.background.as_solid() == Some(fill))
+        .collect();
+    quads.sort_by(|a, b| a.bounds.origin.x.0.total_cmp(&b.bounds.origin.x.0));
+    quads
+        .iter()
+        .map(|quad| {
+            let shown = quad.bounds.intersect(&quad.content_mask.bounds);
+            gpui::px(shown.size.width.0 / scale)
+        })
+        .collect()
+}

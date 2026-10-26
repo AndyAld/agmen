@@ -650,7 +650,8 @@ impl Floors {
         }
     }
 
-    /// Whether the model chip fits a box `box_width` wide at its floor,
+    /// Whether the model chip fits a box whose padding box is `box_width`
+    /// wide (what `box_probe` measures) at its floor,
     /// beside the "to" chip (when `with_to`), the input and the ⏎ at
     /// theirs (C278). Below that it hides rather than show a sliver with
     /// neither ◆ nor ▾. A box not laid out yet shows it.
@@ -659,9 +660,9 @@ impl Floors {
             return true;
         };
         let to = if with_to { self.to + SPACE_8 } else { px(0.) };
-        // The box's border and padding, then the parts and the gaps
-        // between them.
-        let needed = (BORDER_WIDTH + SPACE_10) * 2.
+        // The box probe measures inside the border (C281), so the box's
+        // padding, then the parts and the gaps between them.
+        let needed = SPACE_10 * 2.
             + to
             + self.model
             + SPACE_8
