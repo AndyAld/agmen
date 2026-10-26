@@ -972,12 +972,14 @@ fn the_composer_chips_show_tall_and_deep_glyphs_inside_the_box() {
         for chip in ["composer:to", "composer:model"] {
             let at = format!("{chip} at a {size} px code font");
             let (mask, ink) = chip_fill_and_ink(cx, chip, &at);
+            // C299: the font's whole ascent and descent, not just this
+            // text's glyphs.
             let near = gpui::px(0.01);
             assert!(
-                mask.top() <= ink.glyphs.0 + near && mask.bottom() >= ink.glyphs.1 - near,
-                "{at}: the mask {mask:?} cuts the glyphs from {:?} to {:?}",
-                ink.glyphs.0,
-                ink.glyphs.1
+                mask.top() <= ink.font.0 + near && mask.bottom() >= ink.font.1 - near,
+                "{at}: the mask {mask:?} cuts the font from {:?} to {:?}",
+                ink.font.0,
+                ink.font.1
             );
             // The label's glyphs stay inside the box's border.
             assert!(

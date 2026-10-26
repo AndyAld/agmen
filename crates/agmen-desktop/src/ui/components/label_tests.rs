@@ -273,11 +273,13 @@ fn a_truncated_label_shows_its_tallest_and_deepest_glyphs() {
         });
         // A content mask snaps to device pixels.
         let near = gpui::px(0.01);
+        // C299: the font's whole ascent and descent, not just this text's
+        // glyphs.
         assert!(
-            mask.top() <= ink.glyphs.0 + near && mask.bottom() >= ink.glyphs.1 - near,
-            "{at}: the mask {mask:?} cuts the glyphs from {:?} to {:?}",
-            ink.glyphs.0,
-            ink.glyphs.1
+            mask.top() <= ink.font.0 + near && mask.bottom() >= ink.font.1 - near,
+            "{at}: the mask {mask:?} cuts the font from {:?} to {:?}",
+            ink.font.0,
+            ink.font.1
         );
         // As C264a and C273 grow TextInput's: by the font's overflow of the
         // line and no further, and not at all sideways.

@@ -310,8 +310,11 @@ pub(crate) fn assert_lines(height: Pixels, padding: Pixels, line: Pixels) {
     );
 }
 
-/// Text with the tallest and deepest glyphs a label shows: Ë's dots, the
-/// descenders of g, j, p, q and y, and the bar (C287).
+/// Text with tall and deep glyphs: Ë's dots, the descenders of g, j, p, q
+/// and y, and the bar (C287). Tests check against the font's ascent and
+/// descent, not these glyphs: in .ZedMono Å is taller than Ë and Ģ deeper
+/// than g, and at 20 px the 20.5 px ascent and 5.5 px descent clear Å's
+/// 19.52 and Ģ's 5.02 (C299).
 #[cfg(target_os = "macos")]
 pub(crate) const TALL_AND_DEEP: &str = "Ëgjpqy|";
 
@@ -323,13 +326,11 @@ pub(crate) struct Ink {
     /// The top and bottom of the font: its ascent above the baseline and
     /// its descent below.
     pub(crate) font: (Pixels, Pixels),
-    /// The top and bottom of the glyphs themselves.
-    pub(crate) glyphs: (Pixels, Pixels),
 }
 
 #[cfg(target_os = "macos")]
 impl Ink {
-    /// Shapes `text` and reads each glyph's bounds from the text system.
+    /// Shapes `text` and reads the line's ascent and descent.
     pub(crate) fn of(
         window: &Window,
         text: &'static str,
@@ -349,22 +350,10 @@ impl Ink {
         let line = window
             .text_system()
             .shape_line(text.into(), size, &[run], None);
-        let id = window.text_system().resolve_font(font);
-        let (mut above, mut below) = (gpui::px(0.), gpui::px(0.));
-        for ch in text.chars() {
-            // The bounds are y up from the baseline.
-            let glyph = window
-                .text_system()
-                .typographic_bounds(id, size, ch)
-                .unwrap_or_else(|err| panic!("no bounds for {ch:?}: {err}"));
-            above = above.max(glyph.origin.y + glyph.size.height);
-            below = below.max(-glyph.origin.y);
-        }
         // gpui's paint: half the spare height, then the ascent.
         let baseline = top + (line_height - line.ascent - line.descent) / 2. + line.ascent;
         Self {
             font: (baseline - line.ascent, baseline + line.descent),
-            glyphs: (baseline - above, baseline + below),
         }
     }
 }
