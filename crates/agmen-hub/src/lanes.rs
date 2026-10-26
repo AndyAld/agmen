@@ -47,6 +47,10 @@ const MAX_GLOB_BYTES: usize = 256;
 const MAX_CHECK_PATHS: usize = 500;
 /// The size limit for each glob's DFA and its construction, in bytes.
 const DFA_LIMIT: usize = 1 << 20;
+/// The most memory the DFAs of one lane set's overlap check may use
+/// together, in bytes (ruling R50). Typical globs take 1 to 3 KiB each, so
+/// [`MAX_GLOBS`] of them stay far below it.
+const DFA_MEMORY_BUDGET: usize = 16 << 20;
 /// The most DFA transitions the overlap check of one lane set may take.
 const OVERLAP_BUDGET: u64 = 20_000_000;
 /// The most out-of-lane paths an ALERT lists by name (ruling R35).
@@ -183,6 +187,11 @@ enum OverlapError {
     TooComplex(String),
     #[error("the lane globs are too many or too complex to check for overlaps")]
     OverBudget,
+    #[error(
+        "the lane globs are too complex to check for overlaps: their DFAs need more than {} MiB together",
+        DFA_MEMORY_BUDGET >> 20
+    )]
+    OverMemory,
 }
 
 /// Builds the DFA for `globs`, the compiled form of `source`, from the
@@ -246,13 +255,21 @@ struct Overlap {
 }
 
 /// The first pair of globs from different lanes in `lanes` that match a
-/// common path, or `None` when the lanes are disjoint.
+/// common path, or `None` when the lanes are disjoint. Stops with
+/// [`OverlapError::OverMemory`] as soon as the DFAs built so far pass
+/// [`DFA_MEMORY_BUDGET`].
 fn find_overlap(lanes: &[LaneSpec]) -> Result<Option<Overlap>, OverlapError> {
     let mut dfas = Vec::new();
+    let mut memory = 0_usize;
     for (index, lane) in lanes.iter().enumerate() {
         for glob in &lane.globs {
             let compiled = compile(glob).map_err(|_| OverlapError::TooComplex(glob.clone()))?;
-            dfas.push((index, glob, glob_dfa(glob, &compiled)?));
+            let dfa = glob_dfa(glob, &compiled)?;
+            memory = memory.saturating_add(dfa.memory_usage());
+            if memory > DFA_MEMORY_BUDGET {
+                return Err(OverlapError::OverMemory);
+            }
+            dfas.push((index, glob, dfa));
         }
     }
     let mut budget = OVERLAP_BUDGET;

@@ -278,3 +278,44 @@ fn lane_specs_are_checked() {
     assert!(check_lane_specs(&[spec("L-A", &many)]).is_err());
     assert!(check_lane_specs(&[spec("L-A", &["ui/**"]), spec("L-B", &["api/**"])]).is_ok());
 }
+
+/// A distinct anchored literal glob of nearly [`MAX_GLOB_BYTES`] bytes. Its
+/// many distinct bytes give it a DFA of about 260 KiB, under the per-glob
+/// limit.
+fn wide_glob(seed: usize) -> String {
+    let chars: Vec<char> = ('0'..='9')
+        .chain('a'..='z')
+        .chain('A'..='Z')
+        .chain('\u{a1}'..='\u{ff}')
+        .collect();
+    let mut glob = String::from("/");
+    for i in seed.. {
+        let next = chars[i % chars.len()];
+        if glob.len() + next.len_utf8() > MAX_GLOB_BYTES {
+            break;
+        }
+        glob.push(next);
+    }
+    glob
+}
+
+#[test]
+fn overlap_check_has_a_combined_memory_budget() {
+    let one = wide_glob(0);
+    let size = glob_dfa(&one, &compile(&one).unwrap())
+        .unwrap()
+        .memory_usage();
+    assert!(size <= DFA_LIMIT && size * 2 * MAX_GLOBS_PER_LANE > DFA_MEMORY_BUDGET);
+    let globs: Vec<String> = (0..2 * MAX_GLOBS_PER_LANE).map(wide_glob).collect();
+    let (a, b) = globs.split_at(MAX_GLOBS_PER_LANE);
+    let lane = |name: &str, globs: &[String]| LaneSpec {
+        name: name.parse().unwrap(),
+        globs: globs.to_vec(),
+        owner: None,
+    };
+    let lanes = [lane("L-A", a), lane("L-B", b)];
+    assert!(check_lane_specs(&lanes).is_ok());
+    let err = find_overlap(&lanes).unwrap_err();
+    assert_eq!(err, OverlapError::OverMemory);
+    assert!(err.to_string().contains("16 MiB"), "{err}");
+}

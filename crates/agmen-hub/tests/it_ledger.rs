@@ -523,6 +523,67 @@ async fn it_overlapping_lanes_rejected() {
     .await;
 }
 
+/// A distinct anchored literal glob of nearly 256 bytes. Its many distinct
+/// bytes give it a DFA of about 260 KiB, under the 1 MiB per-glob limit.
+fn wide_glob(seed: usize) -> String {
+    let chars: Vec<char> = ('0'..='9')
+        .chain('a'..='z')
+        .chain('A'..='Z')
+        .chain('\u{a1}'..='\u{ff}')
+        .collect();
+    let mut glob = String::from("/");
+    for i in seed.. {
+        let next = chars[i % chars.len()];
+        if glob.len() + next.len_utf8() > 256 {
+            break;
+        }
+        glob.push(next);
+    }
+    glob
+}
+
+#[tokio::test]
+async fn it_lanes_over_dfa_budget_rejected() {
+    run(|ctx| async move {
+        let room = room(&ctx).await;
+        ui_and_api_lanes(&ctx, &room).await;
+
+        // Within the lane, glob and per-glob DFA limits, but 96 DFAs of about
+        // 260 KiB each pass the 16 MiB budget for one request.
+        let lanes: Vec<Value> = (0..3)
+            .map(|lane| {
+                let globs: Vec<String> = (lane * 32..(lane + 1) * 32).map(wide_glob).collect();
+                json!({ "name": format!("L-W{lane}"), "globs": globs })
+            })
+            .collect();
+        let (status, body) = put_lanes(
+            &ctx,
+            &room.project,
+            &room.andy_token,
+            "application/json",
+            json!({ "lanes": lanes }).to_string(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert_eq!(body["error"], "lanes_too_complex", "{body}");
+        let description = body["error_description"].as_str().unwrap();
+        assert!(description.contains("16 MiB"), "{description}");
+
+        // The refused set stored nothing.
+        let (status, stored) = get(&ctx, &room.project, &room.sol.token, "lanes").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(stored["v"], 1, "{stored}");
+        let names: Vec<&str> = stored["lanes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|lane| lane["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["L-API", "L-UI"]);
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn it_check_path() {
     run(|ctx| async move {
