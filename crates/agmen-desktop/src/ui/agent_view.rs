@@ -7,8 +7,9 @@ use gpui::{
     Render, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
 };
 
-use super::breadcrumb::Breadcrumb;
-use super::components::{Button, ButtonStyle, Color, Icon, IconSize, Label, LabelSize, ToolCard};
+use super::components::{
+    Breadcrumb, Button, ButtonStyle, Color, Icon, IconSize, Label, LabelSize, ToolCard,
+};
 use super::text_input::TextInput;
 use super::tokens::{
     BORDER_WIDTH, RADIUS_CARD, SPACE_6, SPACE_8, SPACE_10, SPACE_12, SPACE_14, SPACE_18,

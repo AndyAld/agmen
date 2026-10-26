@@ -8,11 +8,10 @@ use gpui::{
     IntoElement, ParentElement as _, Render, RenderOnce, SharedString, Styled as _, Window, div,
 };
 
-use super::breadcrumb::Breadcrumb;
 use super::code_view::CodeView;
 use super::components::{
-    Button, ButtonStyle, Color, Dot, Icon, IconSize, Indent, KvRow, KvSection, Label, LabelSize,
-    ListItem,
+    Breadcrumb, Button, ButtonStyle, Color, Dot, Icon, IconSize, Indent, KvRow, KvSection, Label,
+    LabelSize, ListItem,
 };
 use super::dock::RightDockHeader;
 use super::syntax::Language;

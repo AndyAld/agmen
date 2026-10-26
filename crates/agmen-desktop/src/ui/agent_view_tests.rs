@@ -2,7 +2,7 @@ use gpui::TestAppContext;
 
 use super::*;
 use crate::backend::chat_snapshot;
-use crate::ui::test_support::{init, redraw};
+use crate::ui::test_support::{assert_breadcrumb_glyphs, init, redraw};
 
 #[gpui::test]
 fn agent_view_lists_tool_calls(cx: &mut TestAppContext) {
@@ -43,4 +43,15 @@ fn output_glyph_takes_the_line_color() {
     for tone in [Tone::Plain, Tone::Success, Tone::Accent] {
         assert_eq!(out_colors(tone), (tone_color(tone), tone_color(tone)));
     }
+}
+
+#[gpui::test]
+fn breadcrumb_splits_handle_item_and_branch_with_a_glyph(cx: &mut TestAppContext) {
+    init(cx);
+    let snapshot = chat_snapshot();
+    let id = crate::backend::fixture_id("andy/fx1");
+    let session = snapshot.sessions.get(&id).unwrap().clone();
+    let (_, cx) = cx.add_window_view(|_, cx| AgentView::new("andy/fx1", session, cx));
+    redraw(cx);
+    assert_breadcrumb_glyphs(cx, 3);
 }

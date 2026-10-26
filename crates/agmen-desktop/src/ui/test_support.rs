@@ -66,6 +66,29 @@ pub(crate) fn redraw(cx: &mut VisualTestContext) {
     });
 }
 
+/// Asserts the drawn breadcrumb splits its `parts` parts with the "›"
+/// glyph (V80: console.py's 12 px "›" in icon.muted, nodes 609 and 11630):
+/// one separator before each part after the first, each narrower than a
+/// 12 px icon, so not a chevron icon.
+pub(crate) fn assert_breadcrumb_glyphs(cx: &mut VisualTestContext, parts: usize) {
+    let selector =
+        |ix: usize| -> &'static str { Box::leak(format!("breadcrumb:sep:{ix}").into_boxed_str()) };
+    for ix in 1..parts {
+        let sel = selector(ix);
+        let sep = cx
+            .debug_bounds(sel)
+            .unwrap_or_else(|| panic!("no separator drawn as {sel}"));
+        assert!(
+            sep.size.width < crate::ui::tokens::ICON_SM,
+            "{sel} is {sep:?}, wider than a glyph"
+        );
+    }
+    assert!(
+        cx.debug_bounds(selector(parts)).is_none(),
+        "a separator too many"
+    );
+}
+
 /// Clicks the middle of the element with debug selector `selector`.
 pub(crate) fn click(cx: &mut VisualTestContext, selector: &'static str) {
     redraw(cx);

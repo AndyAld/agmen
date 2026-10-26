@@ -6,8 +6,7 @@ use gpui::{
     Styled as _, Window, div,
 };
 
-use super::breadcrumb::Breadcrumb;
-use super::components::{Button, ButtonStyle};
+use super::components::{Breadcrumb, Button, ButtonStyle};
 use super::diff_view::DiffView;
 use super::git_panel::{GitPanel, GitPanelEvent, GitSection};
 use super::project_panel::{FileView, ProjectPanel, ProjectPanelEvent};

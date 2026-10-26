@@ -3,7 +3,6 @@
 mod agent_panel;
 mod agent_view;
 mod agents_panel;
-mod breadcrumb;
 mod change_card;
 mod chat;
 mod chat_context;

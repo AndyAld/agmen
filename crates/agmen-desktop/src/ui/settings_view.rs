@@ -13,9 +13,9 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _, Subscription, Window, WindowAppearance, div,
 };
 
-use super::breadcrumb::Breadcrumb;
 use super::components::{
-    Button, Color, Dropdown, Icon, IconSize, Label, LabelSize, Segmented, Stepper, Toggle,
+    Breadcrumb, Button, Color, Dropdown, Icon, IconSize, Label, LabelSize, Segmented, Stepper,
+    Toggle,
 };
 use super::text_input::{TextInput, TextInputEvent};
 use super::tokens::{
