@@ -502,37 +502,8 @@ fn assert_input_keeps_its_caret(composer: &Entity<Composer>, cx: &mut VisualTest
     assert!(painted, "the caret at {caret:?} is not painted");
 }
 
-#[gpui::test]
-fn a_narrow_reply_keeps_the_input_and_the_close_mark(cx: &mut TestAppContext) {
-    // C260: at a 420 px window the chips took the whole row, so the input
-    // was 0 px wide with no caret or text, and the box cut the reply chip's
-    // close mark, leaving Escape as the only way out of a reply.
-    let (composer, sent, cx, _) = replying(cx);
-    let whole = cx.debug_bounds("composer:cancel-reply").unwrap();
-    cx.simulate_resize(gpui::size(gpui::px(420.), gpui::px(120.)));
-    redraw(cx);
-    assert_input_keeps_its_caret(&composer, cx);
-    let close = cx.debug_bounds("composer:cancel-reply").unwrap();
-    let chip = cx.debug_bounds("composer:to").unwrap();
-    assert_eq!(close.size, whole.size, "{close:?}");
-    assert!(
-        close.left() >= chip.left() && close.right() <= chip.right(),
-        "{close:?} cut by {chip:?}"
-    );
-    click(cx, "composer:cancel-reply");
-    cx.simulate_input("hi");
-    cx.simulate_keystrokes("enter");
-    assert_eq!(*sent.borrow(), vec![plain_hi()]);
-}
-
-#[gpui::test]
-fn a_narrow_composer_keeps_its_chips_and_hint_in_the_box(cx: &mut TestAppContext) {
-    // Node 375 clips its content. In a narrow window the chips and the ⏎
-    // drew past the box's right edge, over the right dock.
-    let (composer, _, cx) = open_composer(cx);
-    cx.simulate_resize(gpui::size(gpui::px(200.), gpui::px(120.)));
-    redraw(cx);
-    assert_input_keeps_its_caret(&composer, cx);
+/// Asserts every part of the composer's row ends inside its box.
+fn assert_parts_in_the_box(cx: &mut VisualTestContext) {
     let frame = cx.debug_bounds("composer:box").unwrap();
     for part in [
         "composer:to",
@@ -548,6 +519,58 @@ fn a_narrow_composer_keeps_its_chips_and_hint_in_the_box(cx: &mut TestAppContext
             "{part} {bounds:?} past {frame:?}"
         );
     }
+}
+
+#[gpui::test]
+fn a_narrow_reply_keeps_the_input_and_the_close_mark(cx: &mut TestAppContext) {
+    // C260: at a 420 px window the chips took the whole row, so the input
+    // was 0 px wide with no caret or text, and the box cut the reply chip's
+    // close mark, leaving Escape as the only way out of a reply. At 320 px
+    // the reply chip still cut 2.5 px off its close mark while the model
+    // chip kept its width.
+    let (composer, sent, cx, coord) = replying(cx);
+    let whole = cx.debug_bounds("composer:cancel-reply").unwrap();
+    for width in [320., 420., 500.] {
+        cx.simulate_resize(gpui::size(gpui::px(width), gpui::px(120.)));
+        composer.update(cx, |composer, cx| composer.cancel_reply(cx));
+        redraw(cx);
+        assert!(cx.debug_bounds("composer:cancel-reply").is_none());
+        assert_input_keeps_its_caret(&composer, cx);
+        assert_parts_in_the_box(cx);
+        composer.update_in(cx, |composer, window, cx| {
+            composer.reply(coord.clone(), alert(), window, cx);
+        });
+        redraw(cx);
+        assert_input_keeps_its_caret(&composer, cx);
+        assert_parts_in_the_box(cx);
+        let close = cx.debug_bounds("composer:cancel-reply").unwrap();
+        let chip = cx.debug_bounds("composer:to").unwrap();
+        let frame = cx.debug_bounds("composer:box").unwrap();
+        assert_eq!(close.size, whole.size, "{width} px: {close:?}");
+        assert!(
+            close.left() >= chip.left() && close.right() <= chip.right(),
+            "{width} px: {close:?} cut by {chip:?}"
+        );
+        assert!(
+            close.left() >= frame.left() && close.right() <= frame.right(),
+            "{width} px: {close:?} cut by {frame:?}"
+        );
+    }
+    click(cx, "composer:cancel-reply");
+    cx.simulate_input("hi");
+    cx.simulate_keystrokes("enter");
+    assert_eq!(*sent.borrow(), vec![plain_hi()]);
+}
+
+#[gpui::test]
+fn a_narrow_composer_keeps_its_chips_and_hint_in_the_box(cx: &mut TestAppContext) {
+    // Node 375 clips its content. In a narrow window the chips and the ⏎
+    // drew past the box's right edge, over the right dock.
+    let (composer, _, cx) = open_composer(cx);
+    cx.simulate_resize(gpui::size(gpui::px(200.), gpui::px(120.)));
+    redraw(cx);
+    assert_input_keeps_its_caret(&composer, cx);
+    assert_parts_in_the_box(cx);
     // The wrappers above report their shrunken boxes, so each chip must
     // also be clipped there: its label and caret show no further than the
     // next part's left edge.

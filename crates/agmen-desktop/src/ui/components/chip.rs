@@ -35,6 +35,22 @@ enum ChipShape {
     Picker,
 }
 
+impl ChipShape {
+    /// The vertical padding, the side padding, the radius and the gap
+    /// between parts. A reference sits in a line of text, so it pads only
+    /// its sides.
+    const fn metrics(self) -> (Option<Pixels>, Pixels, Pixels, Pixels) {
+        match self {
+            Self::Default => (Some(SPACE_3), SPACE_8, RADIUS_MD, SPACE_6),
+            Self::Compact => (Some(SPACE_2), SPACE_7, RADIUS_SM, SPACE_5),
+            Self::Inline => (Some(SPACE_1), SPACE_7, RADIUS_SM, SPACE_5),
+            Self::Note => (Some(SPACE_1), SPACE_7, RADIUS_SM, SPACE_4),
+            Self::Reference => (None, SPACE_4, RADIUS_REF, SPACE_4),
+            Self::Picker => (Some(SPACE_2), SPACE_8, RADIUS_SM, SPACE_6),
+        }
+    }
+}
+
 /// What a chip does in a space narrower than itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Narrow {
@@ -237,6 +253,17 @@ impl Chip {
         self
     }
 
+    /// How wide a [`Chip::compact`] chip with a [`Chip::truncate`] label
+    /// is once the label is cut to nothing: its padding, the gaps on both
+    /// sides of the label, and its `leading` and `trailing` parts. A
+    /// wrapper that clips the chip keeps at least this, so the trailing
+    /// part stays whole (C260).
+    #[must_use]
+    pub(crate) fn compact_floor(leading: Pixels, trailing: Pixels) -> Pixels {
+        let (_, side, _, gap) = ChipShape::Compact.metrics();
+        side * 2. + gap * 2. + leading + trailing
+    }
+
     /// The label's line height, so a chip in a line of prose is no taller
     /// than the line (node 2440).
     #[must_use]
@@ -280,15 +307,7 @@ impl RenderOnce for Chip {
             Some(height) => label.line_height(height),
             None => label,
         };
-        // A reference sits in a line of text, so it pads only its sides.
-        let (py, px, radius, gap) = match self.shape {
-            ChipShape::Default => (Some(SPACE_3), SPACE_8, RADIUS_MD, SPACE_6),
-            ChipShape::Compact => (Some(SPACE_2), SPACE_7, RADIUS_SM, SPACE_5),
-            ChipShape::Inline => (Some(SPACE_1), SPACE_7, RADIUS_SM, SPACE_5),
-            ChipShape::Note => (Some(SPACE_1), SPACE_7, RADIUS_SM, SPACE_4),
-            ChipShape::Reference => (None, SPACE_4, RADIUS_REF, SPACE_4),
-            ChipShape::Picker => (Some(SPACE_2), SPACE_8, RADIUS_SM, SPACE_6),
-        };
+        let (py, px, radius, gap) = self.shape.metrics();
         let fill = match (&self.tint, self.shape) {
             (Some(color), _) => Some(tint(color.hsla(theme), TINT_FILL)),
             (None, ChipShape::Default) => Some(theme.elevated_surface),

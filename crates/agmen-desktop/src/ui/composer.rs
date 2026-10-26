@@ -7,19 +7,20 @@ use std::rc::Rc;
 use agmen_proto::{IdentityId, MessageId};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Anchor, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Window, anchored, deferred, div,
+    Anchor, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable, Hsla,
+    InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, TextRun, Window, anchored,
+    deferred, div,
 };
 
 use super::components::{Chip, Color, IconButton, IconSize, Label, LabelSize};
 use super::model_picker::{ModelMenu, PickerEvent};
 use super::text_input::{TextInput, TextInputEvent};
 use super::tokens::{
-    AUTO_LINE_13, BORDER_WIDTH, COMPOSER_INPUT_MIN_WIDTH, MODEL_PICKER_OFFSET, RADIUS_INPUT,
-    SPACE_8, SPACE_10, SPACE_12, SPACE_14, TEXT_DEFAULT,
+    AUTO_LINE_13, BORDER_WIDTH, COMPOSER_INPUT_MIN_WIDTH, ICON_SM, MODEL_PICKER_OFFSET,
+    RADIUS_INPUT, SPACE_8, SPACE_10, SPACE_12, SPACE_14, TEXT_DEFAULT,
 };
-use crate::appearance::Appearance;
+use crate::appearance::{Appearance, Fonts};
 use crate::backend::{BackendError, Draft, Snapshot};
 use crate::icons::UiIcon;
 use crate::keymap::Dismiss;
@@ -415,6 +416,7 @@ impl Composer {
                     Chip::new(models.current().label())
                         .compact()
                         .code()
+                        .truncate()
                         .color(Color::Default)
                         .outline(Color::Accent)
                         .leading(Label::new("◆").size(LabelSize::XSmall).color(Color::Accent))
@@ -434,17 +436,30 @@ impl Focusable for Composer {
 }
 
 impl Render for Composer {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let model = self.model_chip(cx);
-        let theme = &cx.global::<Appearance>().theme;
+        let appearance = cx.global::<Appearance>();
+        let theme = &appearance.theme;
+        let fonts = appearance.fonts.clone();
         // Task 13: a pending reply says so and offers a way out. An
         // @mention of another agent drops it, and the chip says "to".
         let replying = self.reply_for(self.input.read(cx).text()).is_some();
+        let lead = if replying { "reply to" } else { "to" };
         let to = (self.addressing == Addressing::Chip).then(|| {
             div()
                 .debug_selector(|| "composer:to".into())
-                .min_w_0()
                 .overflow_hidden()
+                .map(|this| {
+                    if replying {
+                        // C260: the handle gives way first, then the model
+                        // chip; "reply to" and the close mark keep their
+                        // width, so the way out of a reply stays whole.
+                        this.min_w(reply_chip_floor(lead, &fonts, window))
+                            .flex_shrink(REPLY_CHIP_SHRINK)
+                    } else {
+                        this.min_w_0()
+                    }
+                })
                 .child(
                     // C260: a narrow box cuts the handle, not the close
                     // mark or the caret after it.
@@ -454,7 +469,7 @@ impl Render for Composer {
                         .truncate()
                         .color(Color::Accent)
                         .leading(
-                            Label::new(if replying { "reply to" } else { "to" })
+                            Label::new(lead)
                                 .size(LabelSize::Small)
                                 .color(Color::Placeholder),
                         )
@@ -477,6 +492,8 @@ impl Render for Composer {
         div()
             .w_full()
             .flex_none()
+            // The font reply_chip_floor measures "reply to" in.
+            .font_family(fonts.ui_family.clone())
             // Task 13 and Task 15: Escape closes the open model picker and
             // goes no further (C87, C113), else ends a reply; src/keymap.rs
             // binds it.
@@ -545,6 +562,32 @@ fn roster_targets(snapshot: &Snapshot) -> Vec<Target> {
             handle: agent.handle.clone(),
         })
         .collect()
+}
+
+/// How much harder the reply chip shrinks than the model chip: enough that
+/// its handle is cut to nothing before the model chip gives up any width.
+const REPLY_CHIP_SHRINK: f32 = 1000.;
+
+/// The narrowest the reply chip gets: its padding, gaps, `lead` label and
+/// close mark, with the handle cut to nothing (C260). `lead` is measured in
+/// the UI font the composer sets on itself, at the label's Small size.
+fn reply_chip_floor(lead: &str, fonts: &Fonts, window: &Window) -> Pixels {
+    let run = TextRun {
+        len: lead.len(),
+        font: gpui::font(fonts.ui_family.clone()),
+        color: Hsla::default(),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    let size = LabelSize::Small.rems().to_pixels(window.rem_size());
+    // Ceiled as gpui's Text measures its width.
+    let lead = window
+        .text_system()
+        .shape_line(lead.to_owned().into(), size, &[run], None)
+        .width()
+        .ceil();
+    Chip::compact_floor(lead, ICON_SM)
 }
 
 /// The ▾ after a chip's label.
