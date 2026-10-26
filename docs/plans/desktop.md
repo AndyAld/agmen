@@ -216,7 +216,7 @@ Differences: the ● ○ ◐ glyphs draw smaller in .ZedSans than in the mockup'
 
 ### Task 8: Clickable references
 
-- [ ] Done. `src/refs.rs` is in (as built: identities, items, lanes, roles and PRs come only from hub `refs`, which the fixture stamps as the hub would; branches, commits and files come from a client regex confirmed by the new `Snapshot.git` and DONE fields; `RefTarget::Agent` and `Person` carry handles; `Pr` from the hub's number). `ref_chip.rs` (RefChip and its hover card) is agmen-c7's, with Task 9.
+- [x] Done. Chips in chat came with agmen-c7's Task 9: `rich_text.rs` builds a RefChip per span from `find_refs`, a click emits OpenRef (cmd-click OpenRefInSplit), and the hover card is wired. Earlier notes: `src/refs.rs` is in (as built: identities, items, lanes, roles and PRs come only from hub `refs`, which the fixture stamps as the hub would; branches, commits and files come from a client regex confirmed by the new `Snapshot.git` and DONE fields; `RefTarget::Agent` and `Person` carry handles; `Pr` from the hub's number). `ref_chip.rs` (RefChip and its hover card) is agmen-c7's, with Task 9.
 
 **Files:** Create `src/refs.rs`, `src/refs_tests.rs`, `src/ui/ref_chip.rs` (chip and hover card, built on `ui/components/` `Chip`).
 
@@ -228,7 +228,7 @@ Differences: the ● ○ ◐ glyphs draw smaller in .ZedSans than in the mockup'
 
 ### Task 9: Chat pane, messages and composer
 
-- [ ] Done
+- [x] Done by agmen-c7 (589d221 on desktop/c7, final b61cba2, merged into desktop/gpui at 869e80b). Pane::close refuses the chat tab, which the tab limit never evicts. Ledger rows draw plain text with no chips; the settings reply shows a SETTINGS label. Text runs between chips draw as one element each, and a run too wide starts a new line (still open). The body cache key is (stream, seq, client id). Unverified: Windows and Linux builds, IME in the composer, real mouse hover.
 - Differences kept (V112, agmen-c7's fixers on desktop/c7 67d69d3): the chat tab has no × (Pane::close refuses the chat; its close slot follows fix 40, so the tab is 4 px wider than node 116); the change card subline says "widens lanes and budget", built from the rows' settings, where node 7104 says "access and budget". Narrow chips are cut, not wrapped.
 
 Screens: `desktop-chat`.
@@ -286,7 +286,7 @@ Screens: `desktop-git`, `desktop-git-collapsed`.
 
 ### Task 13: Needs you: urgent alerts, banner, notification and chime
 
-- [ ] Done
+- [x] Done by agmen-c7 (logic 16fa0cd; UI 75bfbc5, 429eefc, c316b2d; fixes 2970f57; merged at 869e80b). `alerts::on_message` takes `Me { id, handle }`; `AlertPrefs` is a shortcut until AgmenSettings holds them. An urgent ALERT needs you only if you own its sender or are mentioned; coordinators keep only the quiet-hours sound; remembered ids cap at 1024. Unverified: screens not compared (shots failed), Windows and Linux.
 - Differences kept (V112): the banner (node 5708) shows the alert body with leading mentions dropped, not the mockup's edited summary; the toast (6012) shows the full body clamped to 2 lines and drops "also sent to your phone" (6013), since phone push is outside the desktop plan; the status bar's files and git buttons keep an active state while their panel is open, as Zed does; alert buttons match the mockup at 20 px with no border. The last two are Andy's rulings of 2026-10-26 as agmen-c7 reported them.
 
 Notes from the alerts review (V70): the MVP has no rate-limit display (C102); the needs-me rule as built in `src/alerts.rs` is: an urgent ALERT needs me when I own its sender or the hub put me in `mentioned`; coordinators only keep the quiet-hours sound; remembered alert ids are capped at 1024, so a redelivery never reopens one (C106). The `ApproveSpec` sha dispatch test (C88) lands with Task 19's spec view.
@@ -304,7 +304,7 @@ Screens: `desktop-needs-you`, `desktop-needs-you-answered`.
 
 ### Task 14: Take-over terminal in the chat, switching and adding agents
 
-- [ ] Done
+- [x] Done by agmen-c7 (a1310bc, 675ad74, b4df5ca; fixes 9207c66; merged at 869e80b). Built `backend/take_over.rs`, `ui/terminal_view.rs`, `switch_menu.rs`, `add_agent_dialog.rs`, `chat_take_over.rs` and `workspace_take_over.rs`; fixture code is in `backend/fixture_take_over.rs`. Open as tab does nothing (no Terminal tab item yet); ctrl-` hides without handing back; alt-o takes over the newest DONE that shows the chip. Unverified: screens not compared, Windows, Linux, real mouse.
 - Differences kept (V112): the switch menu (1802) opens above the terminal head at 1280 and 1440 wide, since below would cover the input box; the add agent title (2420) is 18 px (LabelSize::Title) where the mockup has 17; the agent prompt (2430) ends "tell me both outputs" as console.py:2078 does, where spec 5.2 ends with the commands. The add agent prompt matches 3 of the mockup's 5 line breaks; no single width gives all 5.
 
 Screens: `desktop-chat-terminal`, `desktop-chat-codex`, `desktop-switch-agent`, `desktop-add-agent`.
@@ -319,7 +319,7 @@ Screens: `desktop-chat-terminal`, `desktop-chat-codex`, `desktop-switch-agent`, 
 
 ### Task 15: Model picker and ASK
 
-- [ ] Done
+- [x] Done by agmen-c7 (f2236e3; fixes 55141f5; merged at 869e80b). Built `backend/models.rs`, `ui/model_picker.rs` and `ui/ask_card.rs`; `Draft` gains `model`. ASK carries no options on the wire, so cards offer Yes and No; the sticky model choice lasts for the session. Unverified: screens not compared, Windows, Linux, real mouse.
 - Differences kept (V112): the opencode and agy groups (3379, 3389) show a faint "configured model" row, since the fixture does not run opencode models or agy models.
 
 The effort row uses `Segmented::code()` (mono text, 12 px padding, model picker node 2971; V71).
@@ -371,7 +371,7 @@ Screens: `desktop-settings`.
 
 ### Task 18: Command palette and key bindings
 
-- [ ] Done. The fuzzy filter `ui/palette_filter.rs` is in, by agmen-c7 (merged at f658bc9); the palette view and keymap remain here.
+- [x] Done by agmen-c7 (filter 157bf5a; palette f48a2ff; fixes 7f4d9e5; merged at 869e80b). Built `keymap.rs` (every binding's one home), `ui/palette.rs`, `workspace_palette.rs` and `backend/installed.rs`; `ui/keys.rs` is gone. cmd-N is Spawn worker; there are no set-listener or prune-merged rows. Spawn plays a fixture DELEGATED exchange Andy has not signed off. Unverified: palette not shot, Windows, Linux, real mouse.
 
 Screens: `desktop-palette`.
 
@@ -384,7 +384,7 @@ Screens: `desktop-palette`.
 
 ### Task 19: Planning room, spec review and kick-off
 
-- [ ] Done
+- [x] Done by agmen-c7 (logic 513406c; UI 08f0ce2; fixes 1226620; merged at 869e80b). Built `plan_panel`, `spec_view`, `kickoff_dialog`, `plan_room`, `review_panel` and `workspace_plan`; `SpecReview` carries its sha, which Approve sends. Draft specs neither block kick-off nor name anyone; a running plan cannot be kicked off; the plan tab is the chat tab named plan. Unverified: plan, spec, plan-ready, kick-off and running screens not captured.
 - Differences kept (V112): Request changes (9189) and Pause all (10953) are disabled (no backend action yet); spec headings are not bold (syntax colors carry no weight, 9193); the right dock keeps its collapse button (8936) and the breadcrumb keeps Show ledger (8729); the plan room composer placeholder keeps "their keys", has no "⏎ send" and clips at 1280 (8927); shares are approved before kick-off and the client cannot know R-1 to R-12 (10296, 10310); the kick-off title is 18 px (LabelSize::Title) where the mockup has 17 (10291); Kick off padding is 7/12 (9046); dialog buttons are 30 px with 12 px padding like the add agent dialog (10318, 10320). The done check labels sit at x 1005 against the mockup's 1004, since their glyph boxes differ by 1 px.
 
 Screens: `desktop-plan`, `desktop-spec`, `desktop-plan-ready`, `desktop-kick-off`, `desktop-running`.
