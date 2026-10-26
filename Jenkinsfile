@@ -25,7 +25,7 @@ pipeline {
     CLAUDE_CODE_VERSION = '2.1.310'
     // agmen's image registry is AGMEN_REGISTRY, a global environment
     // variable set in Jenkins (Manage Jenkins, System). The Image stage is
-    // skipped while it is unset (deploy/k8s/agmen-env/README.md).
+    // skipped while it is unset (agmen-env/README.md in the agmen-kubernetes repository).
   }
 
   stages {

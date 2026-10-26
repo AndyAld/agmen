@@ -96,7 +96,7 @@ On 2026-10-24 about 17 agents and 2 humans coordinated Integrally PR #3331 over 
 
 - **Transport is MQTT** (Andy's call; ntfy is out).
 - **Broker is EMQX** (Adam's call, 2026-10-25), single node under its BSL 1.1 community terms, which allow free production use on one node as long as EMQX is not offered to third parties as a service. That covers the internal MVP and dogfood; outside teams (M6) or clustering need a commercial license or a broker change.
-- **Hosted on the GroupDrive RKE2 cluster** `rke-metal`, which already runs ArgoCD GitOps from `groupdrive/Kubernetes`, Jenkins builds into Nexus (`docker.groupdrive.xyz`), Vault Secrets Operator, HAProxy ingress with cert-manager and Let's Encrypt, and Ceph RBD storage (source: `groupdrive/Kubernetes` README and `docs/context/infrastructure.md`). Changes there need its owners' review.
+- **Hosted on agmen's own stack**: its own Kubernetes cluster, database, broker, secret store, image registry and domain, nothing shared with GroupDrive's runtime (Andy, 2026-10-25). The source repositories and Jenkins CI stay on GroupDrive's GitLab and Jenkins. The cluster manifests live in `groupdrive/agmen-kubernetes` (Andy, 2026-10-26), mirrored to private GitHub, and ArgoCD in agmen's cluster syncs them.
 - **Source on `https://git.groupdrive.xyz/groupdrive/agmen`, private visibility.** Andy asked for internal, but the `groupdrive` group is private and GitLab does not allow a project more visible than its group.
 - **Human UI is GPUI, the Claude Code mod, a web service, or a terminal UI** (Andy, 2026-10-25: "Make sure this is on GPUI, or using claude mods, or a web service in the plans", then chose all three; then "can you add a TUI version as well? Ensure we can click and view into the different agents and message them like how we can like with claude"). No Tauri or other webview shell.
 - **The terminal UI works like vim and the desktop app looks like Zed** (Andy, 2026-10-25: "use this like vim (launch in the terminal) and look like Zed for the desktop app"). Zed's own icon SVGs are not shipped: they carry no license of their own in a GPL-3.0-or-later repo, so agmen ships Lucide and reads file icons from the person's installed Zed icon theme (section 6.8).
@@ -305,7 +305,7 @@ What the listener may do (Andy, 2026-10-25: "I like that rec"):
 | `apps/desktop` | GPUI desktop app (Rust, workspace member, bin `agmen-desktop`) |
 | `apps/web` | Web console (TypeScript, React, Vite); its build is embedded in the hub image |
 | `mods/agmen-claude` | Claude Code mod and `.claude-plugin/marketplace.json` |
-| `deploy/` | docker compose for local dev (EMQX, Postgres, Toxiproxy); manifests to copy into `groupdrive/Kubernetes` |
+| `deploy/` | docker compose for local dev (EMQX, Postgres, Toxiproxy); the cluster manifests live in `agmen-kubernetes` (section 6.9) |
 | `docs/` | This file, `protocol.md`, `adr/`, `plans/`, `specs/`, `mockups/` (FigCraft prototypes with previews) |
 
 ### 6.2 Stack (versions checked 2026-10-25)
@@ -444,9 +444,9 @@ Develop with `claude --plugin-dir mods/agmen-claude`; check with `claude plugin 
 
 ### 6.9 Hosting
 
-- New `agmen-env/` in `groupdrive/Kubernetes`: ArgoCD Application, namespace `agmen`, Vault Secrets Operator secrets, hub Deployment, EMQX StatefulSet (one replica) and Postgres 16 StatefulSet on Ceph RBD with pinned image tags, nightly `pg_dump` CronJob to Ceph RGW S3.
-- HAProxy ingress with cert-manager Let's Encrypt for `api.`, `app.` and `mqtt-ws.` hosts (WSS on 443, the pattern of `mqtt-ws.dev.groupdrive.xyz`). The ingress must not buffer server-sent events.
-- Jenkins builds the web console and the hub image into Nexus; ArgoCD syncs it.
+- `agmen-env/` in agmen's GitOps repository `groupdrive/agmen-kubernetes`: ArgoCD Application, namespace `agmen`, Kubernetes Secrets that any secret store fills (a Vault Secrets Operator example is included), hub Deployment, EMQX StatefulSet (one replica) and Postgres 16 StatefulSet with pinned image tags, nightly `pg_dump` CronJob to S3 compatible storage.
+- HAProxy ingress with cert-manager Let's Encrypt for `api.`, `app.` and `mqtt-ws.` hosts (WSS on 443) on agmen's own domain. The ingress must not buffer server-sent events.
+- Jenkins builds the web console and the hub image into agmen's registry; ArgoCD syncs `agmen-kubernetes`.
 - The GitHub App's webhooks arrive at `api.` (section 6.15).
 - Observability: `tracing` plus OpenTelemetry; audit log of settings changes, push answers, rulings and identity minting; per-tenant rate and size limits; usage metering (messages, storage, active agents, launcher spend).
 
