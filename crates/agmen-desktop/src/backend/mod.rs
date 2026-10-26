@@ -8,6 +8,14 @@
 mod fixture;
 mod fixture_data;
 mod screen;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the Project and Git panels read it in Tasks 11 and 12"
+    )
+)]
+mod worktree;
 
 use std::collections::BTreeMap;
 
@@ -19,6 +27,7 @@ use crate::roles::{Edits, RoleKind, Tier};
 
 pub(crate) use fixture::FixtureBackend;
 pub(crate) use fixture_data::REVIEWER_XML;
+pub(crate) use worktree::{WorktreeInfo, WorktreeState};
 
 /// The identity id the fixture gives a mockup handle, for tests.
 #[cfg(test)]
@@ -355,6 +364,8 @@ pub(crate) struct Snapshot {
     pub(crate) sessions: BTreeMap<IdentityId, AgentSession>,
     /// Role files from every layer (spec 3.5).
     pub(crate) roles: Vec<RoleFile>,
+    /// The worktrees on this machine, the person's own first.
+    pub(crate) worktrees: Vec<WorktreeInfo>,
 }
 
 /// One row of an agent's session, as the agent view shows it.

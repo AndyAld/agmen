@@ -18,7 +18,8 @@ use crate::roles;
 use super::{
     AgentInfo, AgentRow, AgentSession, AgentStatus, Approval, BackendError, ChangeCard, ChangeId,
     ChangeRow, ChangeState, GitFacts, LaneInfo, ListenerInfo, PersonGroup, PlanInfo, RecentAction,
-    RecentKind, RoleFile, RoleInfo, RoleLayer, SessionRow, SpecState, TeamRow, Tone,
+    RecentKind, RoleFile, RoleInfo, RoleLayer, SessionRow, SpecState, TeamRow, Tone, WorktreeInfo,
+    WorktreeState,
 };
 
 use crate::roles::words;
@@ -825,4 +826,33 @@ pub(super) fn role_files(roster: &[PersonGroup]) -> Vec<RoleFile> {
             info: info(name),
         })
         .collect()
+}
+
+/// The worktrees on Andy's machine. fx1's files are `PROJECT` and `TESTS`
+/// in console.py; Task 11 adds its changes and Task 12 the commits and the
+/// other worktrees.
+pub(super) fn worktrees() -> Result<Vec<WorktreeInfo>, BackendError> {
+    let files = [
+        ".github/workflows/release.yml",
+        "Cargo.lock",
+        "Cargo.toml",
+        "README.md",
+        "src/cylinder.rs",
+        "src/document.rs",
+        "src/main.rs",
+        "src/minimap.rs",
+        "src/ui/mod.rs",
+        "src/ui/tabs.rs",
+        "tests/it_main.rs",
+        "tests/it_tabs.rs",
+    ];
+    Ok(vec![WorktreeInfo {
+        owner: id("andy/fx1")?,
+        handle: "andy/fx1".into(),
+        branch: "fix/c015-main-conflict".into(),
+        files: files.iter().map(|f| (*f).to_owned()).collect(),
+        changes: Vec::new(),
+        commits: Vec::new(),
+        state: WorktreeState::Pushed,
+    }])
 }
