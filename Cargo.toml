@@ -5,6 +5,7 @@ members = [
     "crates/agmen-client",
     "crates/agmen-cli",
     "crates/agmen-hub",
+    "spikes/s4-fake-watch",
 ]
 
 [workspace.package]
