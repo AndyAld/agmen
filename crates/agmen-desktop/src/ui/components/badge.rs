@@ -32,12 +32,13 @@ enum BadgeShape {
     State,
 }
 
-#[derive(Debug, IntoElement)]
+#[derive(Debug, PartialEq, IntoElement)]
 pub(crate) struct Badge {
     label: SharedString,
     color: Color,
     shape: BadgeShape,
-    code: bool,
+    /// The code font at this size, or `None` for the UI font.
+    code: Option<LabelSize>,
     leading: Option<SharedString>,
 }
 
@@ -49,16 +50,16 @@ impl Badge {
             label: label.into(),
             color,
             shape: BadgeShape::Tinted,
-            code: false,
+            code: None,
             leading: None,
         }
     }
 
-    /// Sets the label in the code font at regular weight, as a message's
-    /// verb (node 145).
+    /// Sets the label in the code font at its own size and regular weight,
+    /// as a message's verb (node 145).
     #[must_use]
     pub(crate) const fn code(mut self) -> Self {
-        self.code = true;
+        self.code = Some(LabelSize::Default);
         self
     }
 
@@ -102,6 +103,14 @@ impl Badge {
         self
     }
 
+    /// Sets the label in the code font at [`LabelSize::Small`] and regular
+    /// weight, as a count chip (mono 11, nodes 5113 and 8688).
+    #[must_use]
+    pub(crate) const fn code_small(mut self) -> Self {
+        self.code = Some(LabelSize::Small);
+        self
+    }
+
     /// A bold glyph before the label, as the "!" of "! 1 needs you".
     #[must_use]
     pub(crate) fn leading(mut self, glyph: impl Into<SharedString>) -> Self {
@@ -126,12 +135,10 @@ impl RenderOnce for Badge {
                 label.size(LabelSize::XSmall).weight(FontWeight::BOLD)
             }
             BadgeShape::State => label.size(LabelSize::Small),
-            BadgeShape::Tinted | BadgeShape::Solid | BadgeShape::Neutral if self.code => {
-                label.code()
-            }
-            BadgeShape::Tinted | BadgeShape::Solid | BadgeShape::Neutral => {
-                label.size(LabelSize::Small).weight(FontWeight::SEMIBOLD)
-            }
+            BadgeShape::Tinted | BadgeShape::Solid | BadgeShape::Neutral => match self.code {
+                Some(size) => label.code().size(size),
+                None => label.size(LabelSize::Small).weight(FontWeight::SEMIBOLD),
+            },
         };
         let base = div().flex().flex_none().items_center().gap(SPACE_5).bg(bg);
         let shaped = match self.shape {
@@ -256,6 +263,30 @@ mod tests {
                 .into_any_element()
         });
         assert_eq!(both, marker);
+    }
+
+    #[gpui::test]
+    fn count_badge_is_mono_small_on_the_elevated_surface(cx: &mut TestAppContext) {
+        // Nodes 5113 and 8688: a count is mono 11 on #282828, padded 0/6,
+        // 13 px tall. code_small takes Small (11.25 px at agmen's 15 px rem).
+        let badge = rendered_size(cx, || {
+            Badge::new("14", Color::Placeholder)
+                .code_small()
+                .neutral()
+                .into_any_element()
+        });
+        let mut cx2 = TestAppContext::single();
+        let label = rendered_size(&mut cx2, || {
+            Label::new("14")
+                .code()
+                .size(LabelSize::Small)
+                .into_any_element()
+        });
+        assert_eq!(badge.width, label.width + SPACE_6 * 2.);
+        assert_eq!(badge.height, label.height);
+        let mut cx3 = TestAppContext::single();
+        let verb = rendered_size(&mut cx3, || Label::new("14").code().into_any_element());
+        assert!(badge.height < verb.height, "{badge:?} {verb:?}");
     }
 
     #[gpui::test]

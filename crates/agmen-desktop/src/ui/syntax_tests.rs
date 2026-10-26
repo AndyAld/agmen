@@ -147,3 +147,55 @@ fn xml_highlights_follow_the_mockup() {
     assert_eq!(name(at("</rule")), Some("tag"), "</");
     assert_eq!(name(at("x</rule")), None, "character data stays plain");
 }
+
+#[test]
+fn rust_function_names_are_functions_not_types() {
+    // V103: a definition, a path call and a plain call all get `function`,
+    // which Andy's theme colors green, while `Tabs` stays a type.
+    let text = "fn main() { Tabs::default(); app::run(tabs) }\n";
+    let at = |needle: &str| text.find(needle).unwrap();
+    let name = |offset: usize| name_at(text, Language::Rust, offset);
+    assert_eq!(
+        name(at("main")),
+        Some("function"),
+        "{:?}",
+        names_of(text, Language::Rust)
+    );
+    assert_eq!(name(at("default")), Some("function"));
+    assert_eq!(name(at("run")), Some("function"));
+    assert_eq!(name(at("Tabs")), Some("type"));
+}
+
+#[test]
+fn capitalized_path_names_are_types() {
+    // V96: the stock query calls `Tabs` a constructor; the mockups draw a
+    // capitalized name in a path or `use` in the type color.
+    let found = names_of(
+        "use ui::tabs::Tabs;\nfn main() {\n    let t = Tabs::default();\n}\n",
+        Language::Rust,
+    );
+    let tabs: Vec<_> = found.iter().filter(|(text, _)| *text == "Tabs").collect();
+    assert_eq!(tabs.len(), 2, "{found:?}");
+    assert!(tabs.iter().all(|(_, name)| *name == "type"), "{found:?}");
+    assert!(has(&found, "default", "function"), "{found:?}");
+    assert!(has(&found, "main", "function"), "{found:?}");
+}
+
+#[test]
+fn all_caps_names_are_constants() {
+    // tree-sitter-rust 0.24.2's constant pattern ends in a stray quote and
+    // never matches; agmen's query restores it.
+    let found = names_of(
+        "const MAX_LEN: usize = 4;\nfn f() -> usize { MAX_LEN }\n",
+        Language::Rust,
+    );
+    let caps: Vec<_> = found
+        .iter()
+        .filter(|(text, _)| *text == "MAX_LEN")
+        .collect();
+    assert_eq!(caps.len(), 2, "{found:?}");
+    assert!(
+        caps.iter().all(|(_, name)| *name == "constant"),
+        "{found:?}"
+    );
+}

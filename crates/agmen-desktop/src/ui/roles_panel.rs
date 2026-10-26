@@ -92,7 +92,12 @@ impl RolesPanel {
         ListItem::new(format!("role:{}", role.name), Indent::Depth(0))
             .selected(self.selected.as_deref() == Some(role.name.as_str()))
             .leading(icon)
-            .child(Label::new(file).code())
+            .child({
+                let selector = format!("role:{}:name", role.name);
+                div()
+                    .debug_selector(|| selector)
+                    .child(Label::new(file).code())
+            })
             .end(role_dot(&role.name, role.palette_role.as_deref()))
             .on_click(cx.listener(move |this, _, _, cx| this.clicked(&name, cx)))
     }

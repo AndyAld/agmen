@@ -147,6 +147,21 @@ fn path_layer_headers_use_the_code_font(cx: &mut TestAppContext) {
     }
 }
 
+#[gpui::test]
+fn role_rows_put_a_16_px_icon_at_26_and_the_name_at_49(cx: &mut TestAppContext) {
+    // V83 and C216: console.py draws a role file's 16 px icon at x 26 and
+    // its name at x 49 (padding 26, gap 7).
+    init(cx);
+    let roles = chat_snapshot().roles;
+    let (_, cx) = cx.add_window_view(|_, _| RolesPanel::new(roles));
+    redraw(cx);
+    let icon = cx.debug_bounds("role:reviewer:leading").unwrap();
+    assert_eq!(icon.left(), gpui::px(26.), "{icon:?}");
+    assert_eq!(icon.size.width, gpui::px(16.), "{icon:?}");
+    let name = cx.debug_bounds("role:reviewer:name").unwrap();
+    assert_eq!(name.left(), gpui::px(49.), "{name:?}");
+}
+
 #[test]
 fn role_dots_take_the_palette_role_color() {
     // V85: the dot is a Dot in the role's palette color, icon.muted without one.

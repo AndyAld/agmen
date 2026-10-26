@@ -1,11 +1,12 @@
 //! Helpers for GPUI view tests.
 
 use gpui::{
-    AnyElement, Context, IntoElement, ParentElement as _, Pixels, Render, Size, Styled as _,
-    TestAppContext, VisualTestContext, Window, div,
+    AnyElement, AnyView, Context, IntoElement, ParentElement as _, Pixels, Render, Size,
+    Styled as _, TestAppContext, VisualTestContext, Window, div,
 };
 use gpui::{InteractiveElement as _, Modifiers};
 
+use super::components::{Button, ButtonStyle};
 use super::tokens::MOCKUP_REM;
 use crate::appearance::{Appearance, IconThemeChoice};
 use crate::icons::FileIcons;
@@ -97,4 +98,32 @@ pub(crate) fn click(cx: &mut VisualTestContext, selector: &'static str) {
         .unwrap_or_else(|| panic!("nothing is drawn with selector {selector}"));
     cx.simulate_click(bounds.center(), Modifiers::none());
     redraw(cx);
+}
+
+/// A view under a reference [`ButtonStyle::Plain`] button, found as
+/// `want-plain`, to compare a view's button with.
+pub(crate) struct PlainButtonHost {
+    view: AnyView,
+    label: &'static str,
+}
+
+impl PlainButtonHost {
+    pub(crate) fn new(view: impl Into<AnyView>, label: &'static str) -> Self {
+        Self {
+            view: view.into(),
+            label,
+        }
+    }
+}
+
+impl Render for PlainButtonHost {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .items_start()
+            .child(Button::new("want-plain", self.label).style(ButtonStyle::Plain))
+            .child(div().w_full().flex_1().child(self.view.clone()))
+    }
 }

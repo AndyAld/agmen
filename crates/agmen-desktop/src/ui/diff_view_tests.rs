@@ -2,7 +2,7 @@ use gpui::TestAppContext;
 
 use super::*;
 use crate::backend::{DiffLine, chat_snapshot};
-use crate::ui::test_support::{init, redraw};
+use crate::ui::test_support::{PlainButtonHost, init, redraw};
 
 fn main_rs_hunks() -> Vec<Hunk> {
     chat_snapshot()
@@ -132,11 +132,121 @@ fn conflict_markers_do_not_bend_the_code_around_them() {
 }
 
 #[test]
-fn conflict_markers_are_recognized() {
-    for marker in ["<<<<<<< HEAD", "=======", ">>>>>>> 4d9fdc8", "||||||| base"] {
+fn diff_code_keeps_function_colors_past_conflict_markers() {
+    // V103: the base side's conflict markers made tree-sitter read the rest
+    // of the hunk as types, so `main`, `default` and `run` drew in the type
+    // color. Each side is highlighted on its own, as Zed does.
+    let rows = layout_rows(&main_rs_hunks(), Language::Rust);
+    let name_of = |needle: &str| {
+        rows.iter()
+            .find_map(|row| match row {
+                Row::Line { line, .. } => line.text.find(needle).map(|at| {
+                    line.highlights()
+                        .iter()
+                        .find(|(range, _)| range.contains(&at))
+                        .map(|(_, name)| *name)
+                }),
+                Row::Header(_) => None,
+            })
+            .flatten()
+    };
+    assert_eq!(name_of("main"), Some("function"));
+    assert_eq!(name_of("default"), Some("function"));
+    assert_eq!(name_of("run"), Some("function"));
+    assert_eq!(name_of("Result"), Some("type"));
+}
+
+#[test]
+fn conflict_marker_lines_are_not_highlighted() {
+    // V111: parsing the base side alone read ">>>>>>> 4d9fdc8" as a number
+    // and a name, so its "4" drew in the number color. A conflict marker
+    // is not code; console.py draws its sha in text.
+    let rows = layout_rows(&main_rs_hunks(), Language::Rust);
+    let marked: Vec<_> = rows
+        .iter()
+        .filter_map(|row| match row {
+            Row::Line { line, .. } if is_conflict_marker(&line.text) => Some(line),
+            _ => None,
+        })
+        .collect();
+    let texts: Vec<&str> = marked.iter().map(|line| line.text.as_ref()).collect();
+    assert_eq!(texts, ["<<<<<<< HEAD", "=======", ">>>>>>> 4d9fdc8"]);
+    for line in marked {
+        assert_eq!(line.highlights(), [], "{:?}", line.text);
+    }
+    // Code lines next to them keep their colors.
+    let Some(Row::Line { line, .. }) = rows.get(7) else {
+        panic!("row 7 is a line");
+    };
+    assert_eq!(line.text.as_ref(), "mod tabs;");
+    assert!(!line.highlights().is_empty());
+}
+
+#[test]
+fn conflict_markers_are_seven_marks_alone_or_before_a_space() {
+    for marker in [
+        "<<<<<<< HEAD",
+        "=======",
+        ">>>>>>> 4d9fdc8",
+        "||||||| base",
+        ">>>>>>>",
+    ] {
         assert!(is_conflict_marker(marker), "{marker}");
     }
-    for code in ["========", "a <<<<<<< b", "<<<<<<<<", "== x"] {
+    for code in [
+        "== x",
+        "<<<<<<<< too many",
+        "a <<<<<<< b",
+        "=======x",
+        "<<= 2",
+    ] {
         assert!(!is_conflict_marker(code), "{code}");
     }
+}
+
+fn fx1() -> crate::backend::WorktreeInfo {
+    chat_snapshot().worktrees.into_iter().next().unwrap()
+}
+
+#[gpui::test]
+fn diff_tab_holds_its_breadcrumb_open_file_and_diff(cx: &mut TestAppContext) {
+    // V95: one view the workspace can host, as FileView is for a file.
+    init(cx);
+    let wt = fx1();
+    let (tab, cx) = cx.add_window_view(|_, cx| DiffTab::new(&wt, "src/main.rs", cx));
+    redraw(cx);
+    tab.read_with(cx, |tab, _| {
+        assert_eq!(tab.parts(), ["andy/fx1", "changes", "src/main.rs"]);
+    });
+    for selector in ["diff-tab", "breadcrumb", "diff-open-file", "diff-hunk:0"] {
+        assert!(cx.debug_bounds(selector).is_some(), "{selector}");
+    }
+    let crumb = cx.debug_bounds("breadcrumb").unwrap();
+    let hunk = cx.debug_bounds("diff-hunk:0").unwrap();
+    assert!(hunk.top() > crumb.bottom(), "{hunk:?} {crumb:?}");
+}
+
+#[gpui::test]
+fn diff_tab_without_the_change_says_so(cx: &mut TestAppContext) {
+    init(cx);
+    let wt = fx1();
+    let (_, cx) = cx.add_window_view(|_, cx| DiffTab::new(&wt, "README.md", cx));
+    redraw(cx);
+    assert!(cx.debug_bounds("diff-empty").is_some());
+}
+
+#[gpui::test]
+fn diff_tab_open_file_button_is_plain(cx: &mut TestAppContext) {
+    // V92: console.py 1729 draws Open file "plain": elevated surface,
+    // padding 3/9, radius 5, 20 px tall.
+    init(cx);
+    let wt = fx1();
+    let (_, cx) = cx.add_window_view(|_, cx| {
+        let tab = cx.new(|cx| DiffTab::new(&wt, "src/main.rs", cx));
+        PlainButtonHost::new(tab, "Open file")
+    });
+    redraw(cx);
+    let want = cx.debug_bounds("want-plain").unwrap();
+    let open = cx.debug_bounds("diff-open-file").unwrap();
+    assert_eq!(open.size, want.size, "{open:?} {want:?}");
 }

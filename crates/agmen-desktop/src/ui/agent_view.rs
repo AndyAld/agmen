@@ -13,7 +13,7 @@ use super::chat::refusal;
 use super::code_view::cell_width;
 use super::components::{Breadcrumb, Button, ButtonStyle, Color, Label, LabelSize, ToolCard};
 use super::composer::{Composer, Target};
-use super::tokens::{SPACE_6, SPACE_8, SPACE_10, SPACE_14, SPACE_18};
+use super::tokens::{SPACE_8, SPACE_10, SPACE_14, SPACE_18};
 use crate::appearance::Appearance;
 use crate::backend::{
     AgentSession, BackendError, BackendHandle, Draft, SessionRow, Snapshot, Tone,
@@ -114,6 +114,13 @@ const fn out_colors(tone: Tone) -> (Color, Color) {
     (tone_color(tone), tone_color(tone))
 }
 
+/// console.py's auto line heights between tool cards (V108): 14 px for the
+/// 12 px code of an output row, 16 px for the 13 px Say text, 13 px for the
+/// 11 px cost line.
+const OUT_LINE: f32 = 14. / 12.;
+const SAY_LINE: f32 = 16. / 13.;
+const COST_LINE: f32 = 13. / 11.;
+
 /// Row `ix`; `cell` is the code font's cell, which output lines indent by.
 fn session_row(ix: usize, row: &SessionRow, cell: Pixels) -> gpui::AnyElement {
     match row {
@@ -130,19 +137,26 @@ fn session_row(ix: usize, row: &SessionRow, cell: Pixels) -> gpui::AnyElement {
                 .child(
                     div()
                         .debug_selector(move || format!("session:{ix}:glyph"))
-                        .child(Label::new("⎿").code().color(glyph)),
+                        .child(Label::new("⎿").code().color(glyph).line_height(OUT_LINE)),
                 )
-                .child(Label::new(text.clone()).code().color(text_color).wrap())
+                .child(
+                    Label::new(text.clone())
+                        .code()
+                        .color(text_color)
+                        .line_height(OUT_LINE)
+                        .wrap(),
+                )
                 .into_any_element()
         }
         SessionRow::Say(text) => div()
-            .child(Label::new(text.clone()).wrap())
+            .child(Label::new(text.clone()).line_height(SAY_LINE).wrap())
             .into_any_element(),
         SessionRow::Cost(text) => div()
             .child(
                 Label::new(text.clone())
                     .size(LabelSize::Small)
-                    .color(Color::Muted),
+                    .color(Color::Muted)
+                    .line_height(COST_LINE),
             )
             .into_any_element(),
     }
@@ -162,7 +176,7 @@ impl Render for AgentView {
         let buttons = div()
             .flex()
             .items_center()
-            .gap(SPACE_6)
+            .gap(SPACE_8)
             // Task 14: the terminal opens in the chat (spec 5.4).
             .child({
                 let id = self.id.clone();

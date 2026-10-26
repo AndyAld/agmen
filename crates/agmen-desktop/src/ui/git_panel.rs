@@ -11,10 +11,12 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _, Window, div,
 };
 
-use super::components::{Badge, Color, Icon, IconSize, Indent, Label, LabelSize, ListItem};
+use super::components::{
+    Badge, Color, Dot, Icon, IconSize, Indent, Label, LabelSize, ListItem, Tooltip,
+};
 use super::format::clock;
 use super::scope_chip::{ScopeChip, ScopeChipEvent, ScopeOption};
-use super::tokens::{BORDER_WIDTH, ICON_MD, PROJECT_ROW_HEIGHT, RADIUS_MD, SPACE_2, SPACE_6};
+use super::tokens::{ICON_LG, PROJECT_ROW_HEIGHT, SPACE_6};
 use crate::appearance::Appearance;
 use crate::backend::{
     ChangeKind, CommitInfo, FileChange, WorktreeHead, WorktreeInfo, WorktreeState,
@@ -68,7 +70,9 @@ impl GitSection {
 /// Tests find each section header as `"git-section:{slug}"` and its count
 /// as `"git-count:{slug}"`; rows as `"git-change:{path}"`,
 /// `"git-commit:{sha}"`, `"git-person:{name}"`, `"git-worktree:{handle}"`
-/// and `"git-branch:{name}"`; the scope row as `git-scope`.
+/// and `"git-branch:{name}"`; the scope row as `git-scope`. Row parts add a
+/// suffix: a change's `:status`, `:icon` and `:path`, a commit's `:sha`, a
+/// person's `:name`, a worktree's `:dot` and `:head`.
 pub(crate) struct GitPanel {
     /// The person's own first; the first is the scoped one.
     worktrees: Vec<WorktreeInfo>,
@@ -128,6 +132,39 @@ fn branch_item(branch: &str) -> &str {
     }
     let end = kind.len() + 1 + letters + dash + digits;
     branch.get(..end).unwrap_or(branch)
+}
+
+/// A section's count: mono 11 in text.placeholder on the elevated surface,
+/// padded 0/6 (V94, node 5113).
+fn count_badge(text: impl Into<SharedString>) -> Badge {
+    Badge::new(text, Color::Placeholder).code_small().neutral()
+}
+
+/// A row's trailing detail, such as `+2 −5` or an author: console.py's mono
+/// 11 in text.placeholder (V93).
+fn meta(text: impl Into<SharedString>) -> Label {
+    Label::new(text)
+        .code()
+        .size(LabelSize::Small)
+        .color(Color::Placeholder)
+}
+
+/// A change's status letter: mono 12 Bold in its kind's color (node 5116).
+fn status_letter(kind: ChangeKind) -> Label {
+    let (letter, color) = match kind {
+        ChangeKind::Added => ("A", Color::Success),
+        ChangeKind::Modified => ("M", Color::Warning),
+        ChangeKind::Deleted => ("D", Color::Error),
+    };
+    Label::new(letter)
+        .code()
+        .weight(FontWeight::BOLD)
+        .color(color)
+}
+
+/// `child` in a box tests find as `selector`.
+fn tagged(selector: String, child: impl IntoElement) -> gpui::Div {
+    div().flex_none().debug_selector(|| selector).child(child)
 }
 
 impl GitPanel {
@@ -244,7 +281,7 @@ impl GitPanel {
         let slug = section.slug();
         let count = div()
             .debug_selector(move || format!("git-count:{slug}"))
-            .child(Badge::new(self.badge(section), Color::Muted));
+            .child(count_badge(self.badge(section)));
         ListItem::new(format!("git-section:{slug}"), Indent::Group)
             .leading(Icon::new(chevron).size(IconSize::Small).color(Color::Muted))
             .child(
@@ -261,64 +298,54 @@ impl GitPanel {
         let theme = &cx.global::<Appearance>().theme;
         let icon_color = theme.icon_muted;
         let name = change.path.rsplit('/').next().unwrap_or(&change.path);
+        // The Project panel's 16 px file icon (V91).
         let icon = cx.try_global::<FileIcons>().map_or_else(
-            || {
-                Icon::new(UiIcon::File)
-                    .size(IconSize::Small)
-                    .into_any_element()
-            },
+            || Icon::new(UiIcon::File).into_any_element(),
             |icons| {
                 icons
                     .icon(Path::new(name), false, false)
-                    .render(icon_color, ICON_MD)
+                    .render(icon_color, ICON_LG)
             },
         );
-        let (letter, color) = match change.kind {
-            ChangeKind::Added => ("A", Color::Success),
-            ChangeKind::Modified => ("M", Color::Warning),
-            ChangeKind::Deleted => ("D", Color::Error),
-        };
         let path = change.path.clone();
-        ListItem::new(format!("git-change:{}", change.path), Indent::Depth(0))
+        let id = format!("git-change:{}", change.path);
+        // Rows sit on the Project panel's tree indent, console.py's
+        // tree_row (V91): no leading slot, 6 px gaps.
+        ListItem::new(id.clone(), Indent::Tree(1))
             .height(PROJECT_ROW_HEIGHT)
             .selected(self.selected.as_deref() == Some(change.path.as_str()))
-            .leading(
-                Label::new(letter)
-                    .size(LabelSize::Small)
-                    .color(color)
-                    .weight(FontWeight::BOLD),
-            )
-            .child(icon)
-            .child(Label::new(change.path.clone()).code())
-            .end(
-                Label::new(format!("+{} \u{2212}{}", change.added, change.removed))
-                    .size(LabelSize::Small)
-                    .color(Color::Placeholder),
-            )
+            .child(tagged(format!("{id}:status"), status_letter(change.kind)))
+            .child(tagged(format!("{id}:icon"), icon))
+            .child(tagged(
+                format!("{id}:path"),
+                Label::new(change.path.clone()).code(),
+            ))
+            .end(meta(format!(
+                "+{} \u{2212}{}",
+                change.added, change.removed
+            )))
             .on_click(cx.listener(move |this, _, _, cx| this.change_clicked(&path, cx)))
     }
 
     fn commit_row(commit: &CommitInfo, owner: &str) -> AnyElement {
         let tip: SharedString = commit_tooltip(commit, &jiff::tz::TimeZone::system()).into();
-        let row = ListItem::new(format!("git-commit:{}", commit.sha), Indent::Depth(0))
+        let id = format!("git-commit:{}", commit.sha);
+        let row = ListItem::new(id.clone(), Indent::Tree(1))
             .height(PROJECT_ROW_HEIGHT)
-            .child(
+            .child(tagged(
+                format!("{id}:sha"),
                 Label::new(commit.sha.to_string())
                     .code()
                     .color(Color::Accent),
-            )
+            ))
             .child(Label::new(commit.subject.clone()).size(LabelSize::Small))
-            .end(
-                Label::new(commit_author(&commit.author, owner).to_owned())
-                    .size(LabelSize::Small)
-                    .color(Color::Placeholder),
-            );
+            .end(meta(commit_author(&commit.author, owner).to_owned()));
         div()
             .id(SharedString::from(format!("git-commit-tip:{}", commit.sha)))
             .w_full()
             .tooltip(move |_, cx| {
                 let text = tip.clone();
-                cx.new(|_| Tooltip(text)).into()
+                cx.new(|_| Tooltip::new(text)).into()
             })
             .child(row)
             .into_any_element()
@@ -332,16 +359,16 @@ impl GitPanel {
             UiIcon::ChevronDown
         };
         let owned = name.to_owned();
-        let mut row = ListItem::new(format!("git-person:{name}"), Indent::Depth(0))
+        let id = format!("git-person:{name}");
+        let mut row = ListItem::new(id.clone(), Indent::Tree(1))
             .height(PROJECT_ROW_HEIGHT)
             .leading(Icon::new(chevron).size(IconSize::Small).color(Color::Muted))
-            .child(Label::new(name.to_owned()).weight(FontWeight::MEDIUM));
+            .child(tagged(
+                format!("{id}:name"),
+                Label::new(name.to_owned()).weight(FontWeight::MEDIUM),
+            ));
         if folded {
-            row = row.child(
-                Label::new(count.to_string())
-                    .size(LabelSize::Small)
-                    .color(Color::Placeholder),
-            );
+            row = row.child(meta(count.to_string()));
         }
         row.on_click(cx.listener(move |this, _, _, cx| this.toggle_person(&owned, cx)))
     }
@@ -352,27 +379,22 @@ impl GitPanel {
             WorktreeState::LocalOnly => Color::Warning,
             WorktreeState::Reading => Color::Accent,
         };
-        let mut row = ListItem::new(
-            format!("git-worktree:{}", worktree.handle),
-            Indent::Depth(1),
-        )
-        .height(PROJECT_ROW_HEIGHT)
-        .leading(Label::new("●").size(LabelSize::XSmall).color(color))
-        // A long head clips here so the agent's name stays in view.
-        .child(
-            div()
-                .min_w_0()
-                .overflow_hidden()
-                .child(Label::new(worktree.head.label()).code()),
-        );
+        let id = format!("git-worktree:{}", worktree.handle);
+        let mut row = ListItem::new(id.clone(), Indent::Tree(2))
+            .height(PROJECT_ROW_HEIGHT)
+            .child(tagged(format!("{id}:dot"), Dot::new(color)))
+            // A long head clips here so the agent's name stays in view.
+            .child(
+                div()
+                    .debug_selector(move || format!("{id}:head"))
+                    .min_w_0()
+                    .overflow_hidden()
+                    .child(Label::new(worktree.head.label()).code()),
+            );
         if let WorktreeHead::Detached { item, .. } = &worktree.head {
             row = row.child(Label::new(item.clone()).code().color(Color::Placeholder));
         }
-        row.end(
-            Label::new(agent_name(&worktree.handle).to_owned())
-                .size(LabelSize::Small)
-                .color(Color::Placeholder),
-        )
+        row.end(meta(agent_name(&worktree.handle).to_owned()))
     }
 
     fn worktree_rows(&self, rows: &mut Vec<AnyElement>, cx: &mut Context<Self>) {
@@ -432,7 +454,7 @@ impl Render for GitPanel {
                 }
                 GitSection::Worktrees => self.worktree_rows(&mut rows, cx),
                 GitSection::Branches => rows.extend(self.branches.iter().map(|name| {
-                    ListItem::new(format!("git-branch:{name}"), Indent::Depth(0))
+                    ListItem::new(format!("git-branch:{name}"), Indent::Tree(1))
                         .height(PROJECT_ROW_HEIGHT)
                         .leading(
                             Icon::new(UiIcon::Git)
@@ -451,23 +473,6 @@ impl Render for GitPanel {
             .py(SPACE_6)
             .child(self.scope_row())
             .children(rows)
-    }
-}
-
-/// A one-line tooltip on the elevated surface.
-struct Tooltip(SharedString);
-
-impl Render for Tooltip {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = &cx.global::<Appearance>().theme;
-        div()
-            .py(SPACE_2)
-            .px(SPACE_6)
-            .rounded(RADIUS_MD)
-            .border(BORDER_WIDTH)
-            .border_color(theme.border)
-            .bg(theme.elevated_surface)
-            .child(Label::new(self.0.clone()).size(LabelSize::Small))
     }
 }
 

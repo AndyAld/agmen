@@ -44,11 +44,13 @@ fn is_conflict_marker(text: &str) -> bool {
     }
 }
 
-/// Every hunk's header and lines, highlighted as `language`. Each hunk's
-/// code is highlighted as one text, so a construct that spans lines keeps
-/// its colors; the base and the worktree side are mixed, as a unified diff
-/// is. Conflict markers are left out of that text and drawn plain, so the
-/// parser does not miscolor the code next to them (node 5215).
+/// Every hunk's header and lines, highlighted as `language`. Each side of a
+/// hunk is highlighted as one text, as Zed highlights the old and the new
+/// buffer: context and added lines from the worktree side, removed lines
+/// from the base side, so a construct that spans lines keeps its colors and
+/// one side's code does not bend the other's (V103). Conflict markers are
+/// left out of both texts and drawn plain, so the parser does not miscolor
+/// the code next to them (node 5215, V111).
 fn layout_rows(hunks: &[Hunk], language: Language) -> Vec<Row> {
     let mut rows = Vec::new();
     for hunk in hunks {
@@ -59,25 +61,37 @@ fn layout_rows(hunks: &[Hunk], language: Language) -> Vec<Row> {
                 .filter(|line| !is_conflict_marker(&line.text))
         };
         // One newline after every line, so an empty last line keeps its row.
-        let text: String = code().flat_map(|line| [line.text.as_str(), "\n"]).collect();
-        let laid = layout_lines(&text, language);
-        debug_assert_eq!(
-            laid.len(),
-            code().count(),
-            "one laid out line per code line"
-        );
-        let mut laid = laid.into_iter();
+        let side = |skip: DiffLineKind| -> String {
+            code()
+                .filter(|line| line.kind != skip)
+                .flat_map(|line| [line.text.as_str(), "\n"])
+                .collect()
+        };
+        let mut new = layout_lines(&side(DiffLineKind::Removed), language).into_iter();
+        let mut old = layout_lines(&side(DiffLineKind::Added), language).into_iter();
         rows.extend(hunk.lines.iter().map(|diff| {
             let line = if is_conflict_marker(&diff.text) {
                 None
             } else {
-                laid.next()
+                match diff.kind {
+                    DiffLineKind::Context => {
+                        old.next();
+                        new.next()
+                    }
+                    DiffLineKind::Added => new.next(),
+                    DiffLineKind::Removed => old.next(),
+                }
             };
             Row::Line {
                 kind: diff.kind,
                 line: line.unwrap_or_else(|| Line::plain(&diff.text)),
             }
         }));
+        debug_assert_eq!(
+            (old.next(), new.next()),
+            (None, None),
+            "one laid out line per code line on each side"
+        );
     }
     rows
 }
@@ -257,6 +271,11 @@ impl DiffTab {
             diff: cx.new(|_| DiffView::new(hunks, language)),
         }
     }
+
+    /// The breadcrumb's parts: the worktree, `changes` and the path.
+    fn parts(&self) -> [SharedString; 3] {
+        [self.worktree.clone(), "changes".into(), self.path.clone()]
+    }
 }
 
 impl Render for DiffTab {
@@ -271,8 +290,7 @@ impl Render for DiffTab {
                     path: this.path.to_string(),
                 });
             }));
-        let crumb =
-            Breadcrumb::new([self.worktree.clone(), "changes".into(), self.path.clone()]).end(open);
+        let crumb = Breadcrumb::new(self.parts()).end(open);
         div()
             .debug_selector(|| "diff-tab".into())
             .size_full()

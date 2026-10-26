@@ -15,13 +15,16 @@ mod chip;
 mod color;
 #[cfg(test)]
 mod control_harness;
+mod detail_row;
 mod dot;
 mod dropdown;
 mod icon;
 mod icon_button;
+mod input_frame;
 mod key_hint;
 mod kv;
 mod label;
+mod link;
 mod list_item;
 mod progress;
 mod segmented;
@@ -30,6 +33,7 @@ mod stepper;
 mod tab;
 mod toggle;
 mod tool_card;
+mod tooltip;
 // Task 18: the command palette's row label.
 mod highlighted_label;
 pub(crate) use highlighted_label::HighlightedLabel;
@@ -50,17 +54,21 @@ pub(crate) use button::{Button, ButtonSize, ButtonStyle};
 pub(crate) use card::Card;
 pub(crate) use chip::Chip;
 pub(crate) use color::Color;
+pub(crate) use detail_row::DetailRow;
 pub(crate) use dot::Dot;
 pub(crate) use icon::{Icon, IconSize};
 pub(crate) use icon_button::{ClickHandler, IconButton, IconButtonStyle};
+pub(crate) use input_frame::InputFrame;
 pub(crate) use key_hint::KeyHint;
 pub(crate) use kv::{KvRow, KvSection};
 pub(crate) use label::{Label, LabelSize};
+pub(crate) use link::Link;
 pub(crate) use list_item::{Indent, ListItem};
 pub(crate) use progress::ProgressBar;
 pub(crate) use status_dot::StatusDot;
 pub(crate) use tab::Tab;
 pub(crate) use tool_card::ToolCard;
+pub(crate) use tooltip::Tooltip;
 // Task 19.
 pub(crate) use {
     check_row::CheckRow, modal::Modal, section_header::SectionHeader, table_card::TableCard,

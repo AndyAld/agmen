@@ -27,12 +27,20 @@ pub(super) struct Line {
 }
 
 impl Line {
-    /// `text` with no syntax colors.
+    /// `text` with no syntax colors, drawn in the text color.
     pub(super) fn plain(text: &str) -> Self {
         Self {
             text: SharedString::from(text.to_owned()),
             highlights: Vec::new(),
         }
+    }
+}
+
+#[cfg(test)]
+impl Line {
+    /// The line's highlights, as byte ranges within it and syntax names.
+    pub(super) fn highlights(&self) -> &[(Range<usize>, &'static str)] {
+        &self.highlights
     }
 }
 

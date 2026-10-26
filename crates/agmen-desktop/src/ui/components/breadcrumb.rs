@@ -44,13 +44,18 @@ impl Breadcrumb {
     }
 }
 
+/// The separator's glyph: console.py's small "›" in icon.muted (V80).
+fn separator_glyph() -> Label {
+    Label::new("›").size(LabelSize::Small).color(Color::Muted)
+}
+
 /// The "›" before part `ix`.
 fn separator(ix: usize) -> Div {
     let selector = format!("breadcrumb:sep:{ix}");
     div()
         .debug_selector(|| selector)
         .flex_none()
-        .child(Label::new("›").size(LabelSize::Small).color(Color::Muted))
+        .child(separator_glyph())
 }
 
 /// Part `ix` in `color`, cut with an ellipsis when its box is narrower than
@@ -151,6 +156,15 @@ mod tests {
         let (_, cx) = cx.add_window_view(|_, _| Host);
         redraw(cx);
         assert_breadcrumb_glyphs(cx, 3);
+        // C220: the glyph, its size and its color, as literals.
+        assert_eq!(
+            separator_glyph(),
+            Label::new("\u{203a}")
+                .size(LabelSize::Small)
+                .color(Color::Muted)
+        );
+        let theme = crate::appearance::Appearance::builtin().theme;
+        assert_eq!(Color::Muted.hsla(&theme), gpui::rgb(0x7c6f64).into());
     }
 
     /// The most source files the walk below reads before it gives up.

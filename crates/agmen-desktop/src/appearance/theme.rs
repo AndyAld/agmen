@@ -314,12 +314,19 @@ pub(crate) fn load_theme_with(
 pub(super) fn theme_files(dirs: &ThemeDirs) -> (Vec<PathBuf>, Vec<Skipped>) {
     let mut skipped = Vec::new();
     let mut theme_dirs = vec![dirs.zed.join("themes")];
-    // Only folders are extensions; a .DS_Store beside them is not (C109).
+    // Only folders are extensions; a .DS_Store beside them is not (C109),
+    // and neither is a hidden folder such as an install's `.{id}.partial`
+    // staging folder (C204). Extension ids never start with a dot.
     for root in [&dirs.extensions, &dirs.agmen] {
         theme_dirs.extend(
             list_dir(root, &mut skipped)
                 .into_iter()
-                .filter(|ext| ext.is_dir())
+                .filter(|ext| {
+                    ext.is_dir()
+                        && !ext
+                            .file_name()
+                            .is_some_and(|name| name.to_string_lossy().starts_with('.'))
+                })
                 .map(|ext| ext.join("themes")),
         );
     }

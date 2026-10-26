@@ -229,6 +229,7 @@ Differences: the ● ○ ◐ glyphs draw smaller in .ZedSans than in the mockup'
 ### Task 9: Chat pane, messages and composer
 
 - [ ] Done
+- Differences kept (V112, agmen-c7's fixers on desktop/c7 67d69d3): the chat tab has no × (Pane::close refuses the chat; its close slot follows fix 40, so the tab is 4 px wider than node 116); the change card subline says "widens lanes and budget", built from the rows' settings, where node 7104 says "access and budget".
 
 Screens: `desktop-chat`.
 
@@ -243,7 +244,7 @@ Screens: `desktop-chat`.
 
 ### Task 10: Center tabs: agent view and role file
 
-- [x] Done. Syntax and the code view in 76699c6; the agent view, the Roles tab, the role file tab (Duplicate to .agmen/roles on built-ins only) and the Role panel after it. Checked alone with `--view agent` and `--view roles` until Task 9's tabs host them. Fix 55 is in (a role-colored dot ends each Roles row). Fix 50's deletion marks wait for the main.rs file view in Task 11, the file the +2 -5 edit touched. Open in terminal and Stop do nothing until Task 14. As built against node 11725 (ruling D12): the Role panel shows what the role file grants, not the mockup's sample values. Tools are the role's tool classes (`read search shell`); Verbs are the role's own plus base's; Refused is what the identity kind could send (the hub's kind cap, `may_send` in agmen-hub `ingest.rs`) minus the role's verbs; one line says these come from the role file. The code view has no active line or cursor (the mockup's line 11): it is read-only, and no task adds a cursor yet. The deleted mark is a 3 px bar on the edge between lines, as Zed draws it, not the mockup's "▾"; the added and modified bar stays Zed's 4 px, not the mockup's full mark cell. Visual pass (V65 to V89, merged at 5226ea8 and 597af9a): XML attribute names and "=" use the theme's `type` color, the only warning-colored syntax name both themes have; role file text starts at code cell 7, as the file view's mockup has (the role file mockup has 6); files over 999 lines widen the number column a cell per digit.
+- [x] Done. Syntax and the code view in 76699c6; the agent view, the Roles tab, the role file tab (Duplicate to .agmen/roles on built-ins only) and the Role panel after it. Checked alone with `--view agent` and `--view roles` until Task 9's tabs host them. Fix 55 is in (a role-colored dot ends each Roles row). Fix 50's deletion marks wait for the main.rs file view in Task 11, the file the +2 -5 edit touched. Open in terminal and Stop do nothing until Task 14. The Role panel closes with its role file tab (Andy's ruling of 2026-10-26, as agmen-c7 reported it). As built against node 11725 (ruling D12): the Role panel shows what the role file grants, not the mockup's sample values. Tools are the role's tool classes (`read search shell`); Verbs are the role's own plus base's; Refused is what the identity kind could send (the hub's kind cap, `may_send` in agmen-hub `ingest.rs`) minus the role's verbs; one line says these come from the role file. The code view has no active line or cursor (the mockup's line 11): it is read-only, and no task adds a cursor yet. The deleted mark is a 3 px bar on the edge between lines, as Zed draws it, not the mockup's "▾"; the added and modified bar stays Zed's 4 px, not the mockup's full mark cell. Visual pass (V65, V73, V74, V76, V77, V79 to V85 and V89, merged at 5226ea8 and 597af9a; V103 to V105 and V83's 16 px icon after review; V87 and V88 in 0a1e1ea; V75 was fixed by Task 12; V66 and V78 wait for agmen-c7's Tasks 14 and 9; V86 is Task 18's keymap): XML attribute names and "=" use the theme's `type` color, the only warning-colored syntax name both themes have; role file text starts at code cell 7, as the file view's mockup has (the role file mockup has 6); files over 999 lines widen the number column a cell per digit.
 
 Screens: `desktop-agent`, `desktop-role-file`.
 
@@ -257,7 +258,7 @@ Screens: `desktop-agent`, `desktop-role-file`.
 
 ### Task 11: Project panel and file view
 
-- [x] Done by a subagent (24c1acc, merged at 2c2db0b). As built: `ProjectPanel::new(worktrees, Vec<ScopeOption>, cx)` emits `OpenFile { worktree, path }`; `FileView::new(&WorktreeInfo, path, cx)` is the file tab (breadcrumb, CodeView, a Diff button that does nothing yet). `ScopeChip` (`ui/scope_chip.rs`) is shared with the Git panel; `scope_chip::branch_label` is the one reader of a worktree's head. Fix 50 is in (app.rs; main.rs's deletion marks after lines 1, 3 and 4). Differences kept: the tree sorts folders first and then names without case, as Zed does, not console.py's hand order; the chip text clips at 252 px with the 13 px code font; files other than main.rs show placeholder text until the backend reads files. The code view's line numbers now measure the code font's digits (they clipped at 15 px).
+- [x] Done by a subagent (24c1acc, merged at 2c2db0b). As built: `ProjectPanel::new(worktrees, Vec<ScopeOption>, cx)` emits `OpenFile { worktree, path }`; `FileView::new(&WorktreeInfo, path, cx)` is the file tab (breadcrumb, CodeView, a Diff button that does nothing yet). `ScopeChip` (`ui/scope_chip.rs`) is shared with the Git panel; `scope_chip::branch_label` is the one reader of a worktree's head. Fix 50 is in (app.rs; main.rs's deletion marks after lines 1, 3 and 4). Differences kept: the tree sorts folders first and then names without case, as Zed does, not console.py's hand order; the chip text clips at 252 px with the 13 px code font; files other than main.rs show placeholder text until the backend reads files; Rust functions and constructors take Andy's theme green (#82be78), as Zed shows them, where console.py's put_rust draws them in text (V109). The code view's line numbers now measure the code font's digits (they clipped at 15 px).
 
 Screens: `desktop-project`, `desktop-project-tests-open`.
 
@@ -271,7 +272,7 @@ Screens: `desktop-project`, `desktop-project-tests-open`.
 
 ### Task 12: Git panel and diff view
 
-- [ ] Done except Step 1b. A subagent built the panel and diff view (1a97324, merged at adb9081, with the scope chip from Task 11 switching which worktree Changes and Commits show). As built: `GitPanel::new(worktrees, branches, Vec<ScopeOption>, cx)` emits `OpenDiff { worktree, path }`; `DiffView::new(hunks, language)` (the plan had one argument); `WorktreeHead { Branch, Detached { at, item } }` (C183) and `CommitInfo.at: Timestamp`, shown in local time (C181); hunks live on `FileChange.hunks`; the 14 branches are one const that `git_facts()` also reads. Differences kept: count badges use `Badge`, not the mockup's surface fill; section titles have no letter spacing; long branch names clip. Step 1b (OpenRef routing) waits for agmen-c7's workspace.
+- [ ] Done except Step 1b. A subagent built the panel and diff view (1a97324, merged at adb9081, with the scope chip from Task 11 switching which worktree Changes and Commits show). As built: `GitPanel::new(worktrees, branches, Vec<ScopeOption>, cx)` emits `OpenDiff { worktree, path }`; `DiffView::new(hunks, language)` (the plan had one argument); `WorktreeHead { Branch, Detached { at, item } }` (C183) and `CommitInfo.at: Timestamp`, shown in local time (C181); hunks live on `FileChange.hunks`; the 14 branches are one const that `git_facts()` also reads. Differences kept: count badges use `Badge`, not the mockup's surface fill; section titles have no letter spacing; long branch names clip; in the diff, Rust functions and constructors take Andy's theme green (#82be78), where console.py draws them in text (V109). Step 1b (OpenRef routing) waits for agmen-c7's workspace.
 
 Screens: `desktop-git`, `desktop-git-collapsed`.
 
@@ -286,6 +287,7 @@ Screens: `desktop-git`, `desktop-git-collapsed`.
 ### Task 13: Needs you: urgent alerts, banner, notification and chime
 
 - [ ] Done
+- Differences kept (V112): the banner (node 5708) shows the alert body with leading mentions dropped, not the mockup's edited summary; the toast (6012) shows the full body clamped to 2 lines and drops "also sent to your phone" (6013), since phone push is outside the desktop plan; the status bar's files and git buttons keep an active state while their panel is open, as Zed does; alert buttons match the mockup at 20 px with no border. The last two are Andy's rulings of 2026-10-26 as agmen-c7 reported them.
 
 Notes from the alerts review (V70): the MVP has no rate-limit display (C102); the needs-me rule as built in `src/alerts.rs` is: an urgent ALERT needs me when I own its sender or the hub put me in `mentioned`; coordinators only keep the quiet-hours sound; remembered alert ids are capped at 1024, so a redelivery never reopens one (C106). The `ApproveSpec` sha dispatch test (C88) lands with Task 19's spec view.
 
@@ -303,6 +305,7 @@ Screens: `desktop-needs-you`, `desktop-needs-you-answered`.
 ### Task 14: Take-over terminal in the chat, switching and adding agents
 
 - [ ] Done
+- Differences kept (V112): the switch menu (1802) opens above the terminal head at 1280 and 1440 wide, since below would cover the input box; the add agent title (2420) is 15 px, not 17 (no larger step on Zed's scale); the agent prompt (2430) ends "tell me both outputs" as console.py:2078 does, where spec 5.2 ends with the commands.
 
 Screens: `desktop-chat-terminal`, `desktop-chat-codex`, `desktop-switch-agent`, `desktop-add-agent`.
 
@@ -317,6 +320,7 @@ Screens: `desktop-chat-terminal`, `desktop-chat-codex`, `desktop-switch-agent`, 
 ### Task 15: Model picker and ASK
 
 - [ ] Done
+- Differences kept (V112): the opencode and agy groups (3379, 3389) show a faint "configured model" row, since the fixture does not run opencode models or agy models.
 
 The effort row uses `Segmented::code()` (mono text, 12 px padding, model picker node 2971; V71).
 
@@ -380,6 +384,7 @@ Screens: `desktop-palette`.
 ### Task 19: Planning room, spec review and kick-off
 
 - [ ] Done
+- Differences kept (V112): Request changes (9189) and Pause all (10953) are disabled (no backend action yet); spec headings are not bold (syntax colors carry no weight, 9193); the right dock keeps its collapse button (8936) and the breadcrumb keeps Show ledger (8729); the plan room composer placeholder keeps "their keys", has no "⏎ send" and clips at 1280 (8927); shares are approved before kick-off and the client cannot know R-1 to R-12 (10296, 10310); the kick-off title stays 15 px (10291); Kick off padding is 7/12 (9046); dialog buttons are 30 px with 12 px padding like the add agent dialog (10318, 10320).
 
 Screens: `desktop-plan`, `desktop-spec`, `desktop-plan-ready`, `desktop-kick-off`, `desktop-running`.
 

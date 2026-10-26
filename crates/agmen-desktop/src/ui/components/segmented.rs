@@ -103,13 +103,16 @@ impl RenderOnce for Segmented {
             let selected = index == self.selected;
             let selector = format!("{}:{index}", self.id);
             let label_selector = format!("{selector}:label");
-            let label = Label::new(option)
-                .size(LabelSize::Small)
-                .color(if selected {
-                    Color::Accent
-                } else {
-                    Color::Placeholder
-                });
+            let label = Label::new(option).color(if selected {
+                Color::Accent
+            } else {
+                Color::Placeholder
+            });
+            // A code label keeps the code font's own size.
+            let label = match self.look {
+                Look::Ui => label.size(LabelSize::Small),
+                Look::Code => label.code(),
+            };
             div()
                 .id(SharedString::from(selector.clone()))
                 .debug_selector(|| selector)
@@ -138,14 +141,7 @@ impl RenderOnce for Segmented {
                         )
                     }
                 })
-                .child(
-                    div()
-                        .debug_selector(|| label_selector)
-                        .child(match self.look {
-                            Look::Ui => label,
-                            Look::Code => label.code(),
-                        }),
-                )
+                .child(div().debug_selector(|| label_selector).child(label))
         });
         div()
             .debug_selector(|| root_selector)

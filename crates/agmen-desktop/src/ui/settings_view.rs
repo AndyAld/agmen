@@ -8,27 +8,28 @@ use std::time::Instant;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Div, Entity, EventEmitter, Focusable as _,
-    FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
+    AnyElement, App, AppContext as _, Context, Entity, EventEmitter, Focusable as _, FontWeight,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
     StatefulInteractiveElement as _, Styled as _, Subscription, Window, WindowAppearance, div,
 };
 
+use self::rows::{
+    browse_row, controls, density_row, font_label, icon_preview, row, setting, size_stepper, tilde,
+};
 use super::components::{
-    Breadcrumb, Button, Color, Dropdown, Icon, IconSize, Label, LabelSize, Segmented, Stepper,
-    Toggle,
+    Breadcrumb, Button, ButtonStyle, Color, Dropdown, Icon, IconSize, Indent, InputFrame, Label,
+    LabelSize, Link, ListItem, Segmented, Toggle,
 };
 use super::text_input::{TextInput, TextInputEvent};
 use super::tokens::{
-    BORDER_WIDTH, ICON_PREVIEW, RADIUS_MD, SETTING_LABEL_WIDTH, SETTINGS_PAGES_WIDTH, SPACE_2,
-    SPACE_3, SPACE_6, SPACE_8, SPACE_10, SPACE_12, SPACE_16, SPACE_24,
-};
-use crate::appearance::marketplace::{
-    API_BASE, EXTENSIONS_PAGE, MarketError, Marketplace, ThemeExtension,
+    BORDER_WIDTH, RADIUS_MD, SETTINGS_PAGE_ROW_HEIGHT, SETTINGS_PAGES_WIDTH, SPACE_2, SPACE_3,
+    SPACE_6, SPACE_8, SPACE_12, SPACE_24,
 };
 use crate::appearance::{
-    AgmenSettings, Appearance, AppearanceSource, Density, FontPrefs, Fonts, IconThemeChoice, Mode,
-    PickerEntry, SystemMode, ThemeEntry, ThemeOrigin, agmen_settings_path, installed_themes,
-    picker_entries, resolve_paths, theme_dirs, zed_extensions_dir,
+    API_BASE, AgmenSettings, Appearance, AppearanceSource, EXTENSIONS_PAGE, FontPrefs, Fonts,
+    IconThemeChoice, InstalledTheme, MarketError, Marketplace, Mode, SystemMode, ThemeEntry,
+    ThemeExtension, ThemeOrigin, agmen_settings_path, installed_themes, picker_entries,
+    resolve_paths, theme_dirs, theme_names, zed_extensions_dir,
 };
 use crate::icons::{FileIcons, IconTheme, UiIcon};
 
@@ -153,6 +154,8 @@ enum BrowseStatus {
     Loading,
     Ready,
     Installing(String),
+    /// Installed, with a note: some or all of its theme names were taken.
+    Installed(String),
     Failed(String),
 }
 
@@ -182,6 +185,10 @@ pub(crate) struct SettingsView {
     error: Option<String>,
     market: Option<Arc<Mutex<Marketplace>>>,
     browse: Option<Browse>,
+    /// Counts searches, so only the newest one's answer is shown (C209).
+    /// Kept here, not in `Browse`, so a search from before the panel was
+    /// closed and opened again is still older.
+    search_generation: u64,
 }
 
 impl EventEmitter<SettingsEvent> for SettingsView {}
@@ -221,6 +228,7 @@ impl SettingsView {
             error,
             market: None,
             browse: None,
+            search_generation: 0,
         };
         view.rescan();
         view
@@ -323,10 +331,11 @@ impl SettingsView {
         self.commit(cx);
     }
 
-    /// The mode only picks which themes the list shows, so it does not turn
-    /// Follow Zed off.
-    fn set_mode(&mut self, mode: Mode, cx: &mut Context<Self>) {
-        self.settings.mode = mode;
+    /// Changes one of agmen's own settings, which Zed has no say in (the
+    /// light or dark mode, chat density), so Follow Zed stays as it is
+    /// (ruling D14).
+    fn change_own(&mut self, cx: &mut Context<Self>, edit: impl FnOnce(&mut AgmenSettings)) {
+        edit(&mut self.settings);
         self.commit(cx);
     }
 
@@ -393,6 +402,8 @@ impl SettingsView {
             Ok(market) => market,
             Err(err) => return self.set_status(BrowseStatus::Failed(err.to_string()), cx),
         };
+        self.search_generation = self.search_generation.wrapping_add(1);
+        let generation = self.search_generation;
         if let Some(browse) = &mut self.browse {
             browse.query.clone_from(&query);
         }
@@ -406,19 +417,33 @@ impl SettingsView {
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
-            this.update(cx, |this, cx| match result {
-                Ok(results) => {
-                    if let Some(browse) = &mut this.browse {
-                        browse.results = results;
-                    }
-                    this.set_status(BrowseStatus::Ready, cx);
-                }
-                Err(err) => this.set_status(BrowseStatus::Failed(err), cx),
-            })
-            // An error means Settings closed meanwhile: nothing to show.
-            .unwrap_or(());
+            this.update(cx, |this, cx| this.searched(generation, result, cx))
+                // An error means Settings closed meanwhile: nothing to show.
+                .unwrap_or(());
         })
         .detach();
+    }
+
+    /// Shows the answer to search number `generation`.
+    fn searched(
+        &mut self,
+        generation: u64,
+        result: Result<Vec<ThemeExtension>, String>,
+        cx: &mut Context<Self>,
+    ) {
+        if generation != self.search_generation {
+            // An older search, or the panel closed: a newer answer counts.
+            return;
+        }
+        match result {
+            Ok(results) => {
+                if let Some(browse) = &mut self.browse {
+                    browse.results = results;
+                }
+                self.set_status(BrowseStatus::Ready, cx);
+            }
+            Err(err) => self.set_status(BrowseStatus::Failed(err), cx),
+        }
     }
 
     /// Installs `ext` into agmen's themes folder, then switches to its first
@@ -435,30 +460,68 @@ impl SettingsView {
                 .lock()
                 .map_err(|_| "the theme list is unavailable after an earlier crash".to_owned())?
                 .install(&ext, &dir, Instant::now())
+                .map(|installed| {
+                    let names = theme_names(&dir.join(&installed.id));
+                    (installed, names)
+                })
                 .map_err(|err| err.to_string())
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             this.update(cx, |this, cx| match result {
-                Ok(installed) => {
-                    this.rescan();
-                    let first = this.themes.iter().find_map(|t| match &t.origin {
-                        ThemeOrigin::Agmen(theme) if theme.id == installed.id => {
-                            Some(t.name.clone())
-                        }
-                        _ => None,
-                    });
-                    this.set_status(BrowseStatus::Ready, cx);
-                    if let Some(name) = first {
-                        this.change(cx, |s| s.theme = Some(name));
-                    }
-                }
+                Ok((installed, names)) => this.installed(&installed, &names, cx),
                 Err(err) => this.set_status(BrowseStatus::Failed(err), cx),
             })
             // An error means Settings closed meanwhile: nothing to show.
             .unwrap_or(());
         })
         .detach();
+    }
+
+    /// Lists a fresh install, whose theme files name `names`, and switches
+    /// to its first listed theme.
+    fn installed(&mut self, installed: &InstalledTheme, names: &[String], cx: &mut Context<Self>) {
+        self.rescan();
+        let (first, status) = Self::install_outcome(installed, names, &self.themes);
+        self.set_status(status, cx);
+        if let Some(name) = first {
+            self.change(cx, |s| s.theme = Some(name));
+        }
+    }
+
+    /// What an install shows once `themes` is rescanned: its first listed
+    /// theme, if any, and the status. A name another theme already has is
+    /// not listed for the install, so the note names those (C210, C236).
+    fn install_outcome(
+        installed: &InstalledTheme,
+        names: &[String],
+        themes: &[ThemeEntry],
+    ) -> (Option<String>, BrowseStatus) {
+        let ours = |t: &ThemeEntry| matches!(&t.origin, ThemeOrigin::Agmen(theme) if theme.id == installed.id);
+        let first = themes.iter().find(|t| ours(t)).map(|t| t.name.clone());
+        let taken: Vec<&ThemeEntry> = names
+            .iter()
+            .filter_map(|name| themes.iter().find(|t| &t.name == name && !ours(t)))
+            .collect();
+        let title = installed.name.as_deref().unwrap_or(&installed.id);
+        let listed = taken
+            .iter()
+            .map(|t| format!("\u{201c}{}\u{201d} ({})", t.name, rows::installed_detail(t)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let status = match (&first, taken.is_empty()) {
+            (Some(_), true) => BrowseStatus::Ready,
+            (Some(_), false) => BrowseStatus::Installed(format!(
+                "Installed {title}; agmen keeps using the themes already named {listed}"
+            )),
+            (None, false) => BrowseStatus::Installed(format!(
+                "Installed {title}, but every theme in it already names a theme agmen keeps using: {listed}"
+            )),
+            (None, true) => BrowseStatus::Failed(format!(
+                "Installed {title}, but none of its themes could be read"
+            )),
+        };
+        (first, status)
     }
 
     /// A handler for a component's `on_change` that calls `f` on this view.
@@ -475,46 +538,32 @@ impl SettingsView {
         }
     }
 
+    /// The rule right of the page list (node 8049), as the other chrome
+    /// rules.
+    fn page_list_rule(cx: &App) -> gpui::Hsla {
+        super::rule_color(cx)
+    }
+
     fn page_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = &cx.global::<Appearance>().theme;
-        let (selected, hover, rule) = (theme.element_selected, theme.element_hover, theme.border);
         let rows = PAGES.iter().map(|&(page, title, slug, icon)| {
             let on = page == self.page;
-            let selector = format!("settings-page:{slug}");
-            div()
-                .id(SharedString::from(selector.clone()))
-                .debug_selector(|| selector)
-                .flex()
-                .items_center()
-                .gap(SPACE_8)
-                .py(SPACE_6)
-                .px(SPACE_10)
-                .rounded(RADIUS_MD)
-                .cursor_pointer()
-                .map(|this| {
-                    if on {
-                        this.bg(selected)
-                    } else {
-                        this.hover(move |style| style.bg(hover))
-                    }
-                })
+            let color = if on {
+                Color::Default
+            } else {
+                Color::Placeholder
+            };
+            ListItem::new(format!("settings-page:{slug}"), Indent::Page)
+                .height(SETTINGS_PAGE_ROW_HEIGHT)
+                .selected(on)
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.page = page;
                     this.menu = None;
                     cx.notify();
                 }))
-                .child(Icon::new(icon).size(IconSize::Medium).color(if on {
-                    Color::Default
-                } else {
-                    Color::Placeholder
-                }))
+                .leading(Icon::new(icon).size(IconSize::Medium).color(color.clone()))
                 .child(
                     Label::new(title)
-                        .color(if on {
-                            Color::Default
-                        } else {
-                            Color::Placeholder
-                        })
+                        .color(color)
                         .when(on, |label| label.weight(FontWeight::MEDIUM)),
                 )
         });
@@ -528,7 +577,7 @@ impl SettingsView {
             .py(SPACE_12)
             .px(SPACE_8)
             .border_r(BORDER_WIDTH)
-            .border_color(rule)
+            .border_color(Self::page_list_rule(cx))
             .children(rows)
     }
 
@@ -626,25 +675,20 @@ impl SettingsView {
                                         1 => Mode::Dark,
                                         _ => Mode::System,
                                     };
-                                    this.set_mode(mode, cx);
+                                    this.change_own(cx, |s| s.mode = mode);
                                 })),
                         ),
                 )
                 .child(
-                    div()
-                        .id("browse-themes")
-                        .debug_selector(|| "browse-themes".into())
-                        .cursor_pointer()
-                        .on_click(cx.listener(|this, _, window, cx| this.toggle_browse(window, cx)))
-                        .child(
-                            Label::new(if self.browse.is_some() {
-                                "Close Zed themes"
-                            } else {
-                                "Browse Zed themes\u{2026}"
-                            })
-                            .size(LabelSize::Small)
-                            .color(Color::Accent),
-                        ),
+                    Link::new(
+                        "browse-themes",
+                        if self.browse.is_some() {
+                            "Close Zed themes"
+                        } else {
+                            "Browse Zed themes\u{2026}"
+                        },
+                    )
+                    .on_click(cx.listener(|this, _, window, cx| this.toggle_browse(window, cx))),
                 )
                 .children(self.browse_panel(cx)),
         )
@@ -815,8 +859,9 @@ impl SettingsView {
             "Saved to {}. The terminal UI reads the same file; there, :set theme=\u{2026} and :set icons=nerd|none change it, and the font is your terminal's.",
             tilde(&self.sources.settings_path(), self.sources.config.parent())
         );
+        // Right under the last rule, as node 8214 (V102).
         div()
-            .py(SPACE_6)
+            .debug_selector(|| "settings-footer-text".into())
             .child(
                 Label::new(saved_to)
                     .size(LabelSize::Small)
@@ -854,7 +899,7 @@ impl SettingsView {
     fn browse_panel(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
         let browse = self.browse.as_ref()?;
         let theme = &cx.global::<Appearance>().theme;
-        let (border, hover) = (theme.border, theme.element_hover);
+        let border = theme.border;
         let status = match &browse.status {
             BrowseStatus::Loading => {
                 Some(Label::new("Asking Zed's extension list\u{2026}").color(Color::Placeholder))
@@ -862,7 +907,9 @@ impl SettingsView {
             BrowseStatus::Installing(name) => {
                 Some(Label::new(format!("Installing {name}\u{2026}")).color(Color::Placeholder))
             }
-            BrowseStatus::Failed(err) => Some(Label::new(err.clone()).color(Color::Warning).wrap()),
+            BrowseStatus::Installed(note) | BrowseStatus::Failed(note) => {
+                Some(Label::new(note.clone()).color(Color::Warning).wrap())
+            }
             BrowseStatus::Ready => None,
         };
         let entries = picker_entries(&self.themes, &browse.results);
@@ -871,7 +918,7 @@ impl SettingsView {
             .into_iter()
             .take(MAX_BROWSE_ROWS)
             .enumerate()
-            .map(|(ix, entry)| browse_row(ix, entry, hover, cx));
+            .map(|(ix, entry)| browse_row(ix, entry, cx));
         Some(
             div()
                 .debug_selector(|| "browse-panel".into())
@@ -884,22 +931,30 @@ impl SettingsView {
                 .border(BORDER_WIDTH)
                 .border_color(border)
                 .child(
-                    Label::new(format!(
-                        "Themes from Zed extensions ({EXTENSIONS_PAGE}). Each keeps its author and license; one without a license file is not installed."
-                    ))
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap(SPACE_3)
+                        .child(
+                            Label::new("Themes from Zed extensions at")
+                                .size(LabelSize::Small)
+                                .color(Color::Placeholder),
+                        )
+                        .child(
+                            Link::new("zed-extensions-link", EXTENSIONS_PAGE)
+                                .on_click(|_, _, cx| cx.open_url(EXTENSIONS_PAGE)),
+                        ),
+                )
+                .child(
+                    Label::new(
+                        "Each keeps its author and license; one without a license file is not installed.",
+                    )
                     .size(LabelSize::Small)
                     .color(Color::Placeholder)
                     .wrap(),
                 )
-                .child(
-                    div()
-                        .py(SPACE_3)
-                        .px(SPACE_8)
-                        .rounded(RADIUS_MD)
-                        .border(BORDER_WIDTH)
-                        .border_color(border)
-                        .child(browse.search.clone()),
-                )
+                .child(InputFrame::new().child(browse.search.clone()))
                 .when(!browse.query.is_empty(), |this| {
                     this.child(
                         Label::new(format!("Matching \u{201c}{}\u{201d}", browse.query))
@@ -978,205 +1033,6 @@ pub(crate) fn apply(sources: &SettingsSources, cx: &mut App) {
     cx.refresh_windows();
 }
 
-/// A font family as the list shows it: Zed's dotted names by their fonts.
-fn font_label(family: &str) -> String {
-    match family {
-        ".ZedSans" => "Zed Sans (IBM Plex Sans)".to_owned(),
-        ".ZedMono" => "Zed Mono (Lilex)".to_owned(),
-        other => other.to_owned(),
-    }
-}
-
-/// `path` with the home folder written as `~`.
-fn tilde(path: &Path, home: Option<&Path>) -> String {
-    match home.and_then(|home| path.strip_prefix(home).ok()) {
-        Some(rest) => format!("~/{}", rest.display()),
-        None => path.display().to_string(),
-    }
-}
-
-/// The credit line of an installed theme: who made it and where it is from.
-fn installed_detail(theme: &ThemeEntry) -> String {
-    let by = theme
-        .author
-        .as_ref()
-        .map(|a| format!("by {a} \u{b7} "))
-        .unwrap_or_default();
-    let from = match &theme.origin {
-        ThemeOrigin::BuiltIn => "built into agmen".to_owned(),
-        ThemeOrigin::ZedUser => "your Zed themes folder".to_owned(),
-        ThemeOrigin::ZedExtension(id) => format!("installed in Zed ({id})"),
-        ThemeOrigin::Agmen(t) => {
-            let license = t.license.as_deref().unwrap_or("no license file");
-            let repo = t
-                .repository
-                .as_ref()
-                .map(|r| format!(" \u{b7} {r}"))
-                .unwrap_or_default();
-            format!("installed by agmen \u{b7} {license}{repo}")
-        }
-    };
-    format!("{by}{from}")
-}
-
-/// The credit line of an offered theme; its license is checked on install.
-fn offered_detail(ext: &ThemeExtension) -> String {
-    let by = if ext.authors.is_empty() {
-        String::new()
-    } else {
-        format!("by {} \u{b7} ", ext.authors.join(", "))
-    };
-    let repo = ext.repository.as_deref().unwrap_or("no repository");
-    format!("{by}{repo} \u{b7} license checked on install")
-}
-
-fn density_row(density: Density, cx: &mut Context<SettingsView>) -> AnyElement {
-    let density_ix = usize::from(density == Density::Compact);
-    setting("Chat density", "Spacing between messages.", cx)
-        .child(controls().child(
-            Segmented::new("density", ["Comfortable", "Compact"], density_ix).on_change(
-                SettingsView::handler(cx, |this, ix: usize, cx| {
-                    let density = if ix == 0 {
-                        Density::Comfortable
-                    } else {
-                        Density::Compact
-                    };
-                    this.change(cx, |s| s.density = density);
-                }),
-            ),
-        ))
-        .into_any_element()
-}
-
-/// One row of the browse list: name, credit line, and Use or Install.
-fn browse_row(
-    ix: usize,
-    entry: PickerEntry,
-    hover: gpui::Hsla,
-    cx: &mut Context<SettingsView>,
-) -> impl IntoElement + use<> {
-    let selector = format!("browse:{ix}");
-    let (name, detail, action): (String, String, AnyElement) = match entry {
-        PickerEntry::Installed(t) => {
-            let detail = installed_detail(&t);
-            let name = t.name.clone();
-            let pick = Button::new(SharedString::from(format!("browse:{ix}:use")), "Use").on_click(
-                cx.listener(move |this, _, _, cx| {
-                    let name = name.clone();
-                    this.change(cx, |s| s.theme = Some(name));
-                }),
-            );
-            (t.name, detail, pick.into_any_element())
-        }
-        PickerEntry::Marketplace(ext) => {
-            let detail = offered_detail(&ext);
-            let name = ext.name.clone();
-            let install = Button::new(
-                SharedString::from(format!("browse:{ix}:install")),
-                "Install",
-            )
-            .on_click(cx.listener(move |this, _, _, cx| this.install(ext.clone(), cx)));
-            (name, detail, install.into_any_element())
-        }
-    };
-    div()
-        .id(SharedString::from(selector.clone()))
-        .debug_selector(|| selector)
-        .flex()
-        .items_center()
-        .gap(SPACE_10)
-        .py(SPACE_3)
-        .px(SPACE_8)
-        .rounded(RADIUS_MD)
-        .hover(move |style| style.bg(hover))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .child(Label::new(name))
-                .child(
-                    Label::new(detail)
-                        .size(LabelSize::Small)
-                        .color(Color::Placeholder)
-                        .wrap(),
-                ),
-        )
-        .child(action)
-}
-
-/// One setting: its label and hint on the left; the caller adds controls.
-fn setting(label: &'static str, hint: &'static str, cx: &App) -> Div {
-    div()
-        .w_full()
-        .flex()
-        .items_start()
-        .gap(SPACE_16)
-        .py(SPACE_12)
-        .border_b(BORDER_WIDTH)
-        .border_color(super::rule_color(cx))
-        .child(
-            div()
-                .w(SETTING_LABEL_WIDTH)
-                .flex_none()
-                .flex()
-                .flex_col()
-                .gap(SPACE_3)
-                .child(
-                    Label::new(label)
-                        .weight(FontWeight::MEDIUM)
-                        .color(Color::TextMuted),
-                )
-                .child(
-                    Label::new(hint)
-                        .size(LabelSize::Small)
-                        .color(Color::Placeholder)
-                        .wrap(),
-                ),
-        )
-}
-
-/// The control column of a setting.
-fn controls() -> Div {
-    // Start-aligned, so a segmented control keeps its own width.
-    div()
-        .flex_1()
-        .min_w_0()
-        .flex()
-        .flex_col()
-        .items_start()
-        .gap(SPACE_8)
-}
-
-/// Controls side by side.
-fn row() -> Div {
-    div().flex().items_center().gap(SPACE_10)
-}
-
-/// A font size stepper whose value `set` stores.
-fn size_stepper(
-    id: &'static str,
-    size: gpui::Pixels,
-    cx: &Context<SettingsView>,
-    set: fn(&mut AgmenSettings, f32),
-) -> Stepper {
-    // Sizes are whole pixels in the stepper; a fractional size from Zed's
-    // settings shows rounded and steps from there.
-    let value = size.as_f32().round().clamp(0., 1000.);
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "rounded and clamped to 0 to 1000 just above"
-    )]
-    let value = value as u32;
-    Stepper::new(id, value).on_change(SettingsView::handler(cx, move |this, v: u32, cx| {
-        #[expect(clippy::cast_precision_loss, reason = "6 to 72 is exact in f32")]
-        let v = v as f32;
-        this.change(cx, |s| set(s, v));
-    }))
-}
-
 /// The icon theme preview's files and folders: the mockup's eight.
 pub(super) const ICON_PREVIEW_NAMES: [(&str, bool); 8] = [
     ("src", true),
@@ -1188,33 +1044,6 @@ pub(super) const ICON_PREVIEW_NAMES: [(&str, bool); 8] = [
     ("reviewer.xml", false),
     ("release.yml", false),
 ];
-
-/// The icon theme preview: [`ICON_PREVIEW_NAMES`].
-fn icon_preview(cx: &mut App) -> impl IntoElement + use<> {
-    let theme = &cx.global::<Appearance>().theme;
-    let (bg, tint) = (theme.background, theme.icon_muted);
-    let icons: Vec<AnyElement> = cx.try_global::<FileIcons>().map_or_else(Vec::new, |icons| {
-        ICON_PREVIEW_NAMES
-            .iter()
-            .map(|(name, is_dir)| {
-                icons
-                    .icon(Path::new(name), *is_dir, false)
-                    .render(tint, ICON_PREVIEW)
-            })
-            .collect()
-    });
-    cx.defer(FileIcons::fetch_wanted);
-    div()
-        .debug_selector(|| "icon-preview".into())
-        .flex()
-        .items_center()
-        .gap(SPACE_10)
-        .py(SPACE_6)
-        .px(SPACE_10)
-        .rounded(RADIUS_MD)
-        .bg(bg)
-        .children(icons)
-}
 
 impl Render for SettingsView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1236,9 +1065,11 @@ impl Render for SettingsView {
             ],
         };
         let path = self.sources.settings_path();
-        let open_file = Button::new("open-settings-toml", "Open settings.toml").on_click(
-            cx.listener(move |_, _, _, cx| cx.emit(SettingsEvent::OpenFile(path.clone()))),
-        );
+        let open_file = Button::new("open-settings-toml", "Open settings.toml")
+            .style(ButtonStyle::Plain)
+            .on_click(
+                cx.listener(move |_, _, _, cx| cx.emit(SettingsEvent::OpenFile(path.clone()))),
+            );
         let error = self.error.clone().map(|err| {
             Label::new(err)
                 .size(LabelSize::Small)
@@ -1275,10 +1106,12 @@ impl Render for SettingsView {
                             .py(SPACE_8)
                             .px(SPACE_24)
                             .child(
-                                Label::new(title)
-                                    .size(LabelSize::Large)
-                                    .weight(FontWeight::SEMIBOLD)
-                                    .color(Color::TextMuted),
+                                div().debug_selector(|| "settings-title".into()).child(
+                                    Label::new(title)
+                                        .size(LabelSize::Title)
+                                        .weight(FontWeight::SEMIBOLD)
+                                        .color(Color::TextMuted),
+                                ),
                             )
                             .children(body)
                             .children(error),
@@ -1286,6 +1119,9 @@ impl Render for SettingsView {
             )
     }
 }
+
+#[path = "settings_rows.rs"]
+mod rows;
 
 #[cfg(test)]
 #[path = "settings_view_tests.rs"]

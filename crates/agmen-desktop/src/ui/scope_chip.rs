@@ -10,9 +10,9 @@ use gpui::{
     SharedString, StatefulInteractiveElement as _, Styled as _, Window, anchored, deferred, div,
 };
 
-use super::components::{Chip, Color, Icon, IconSize, Label};
+use super::components::{Chip, Color, Dot, Icon, IconSize, Label};
 use super::tokens::{
-    BORDER_WIDTH, DOT_SIZE, RADIUS_LG, RADIUS_MD, SPACE_2, SPACE_3, SPACE_6, SPACE_8, SPACE_10,
+    BORDER_WIDTH, RADIUS_LG, RADIUS_MD, SPACE_2, SPACE_3, SPACE_6, SPACE_8, SPACE_10,
 };
 use crate::appearance::Appearance;
 use crate::backend::{AgentInfo, WorktreeInfo};
@@ -119,7 +119,6 @@ impl ScopeChip {
     ) -> gpui::Stateful<gpui::Div> {
         let theme = &cx.global::<Appearance>().theme;
         let hover = theme.element_hover;
-        let dot = Color::Role(option.role.clone()).hsla(theme);
         let selector = format!("scope-chip:{index}");
         div()
             .id(SharedString::from(selector.clone()))
@@ -136,9 +135,24 @@ impl ScopeChip {
             })
             .hover(move |style| style.bg(hover))
             .on_click(cx.listener(move |this, _, _, cx| this.pick(index, cx)))
-            .child(div().size(DOT_SIZE).flex_none().rounded_full().bg(dot))
+            .child(Dot::new(Color::Role(option.role.clone())))
             .child(Label::new(option.label.clone()).code())
     }
+}
+
+/// The closed chip: the role dot, the label in the code font and the text
+/// color (node 4553, V90), and a chevron at the far end.
+fn chip(label: SharedString, role: SharedString) -> Chip {
+    Chip::new(label)
+        .color(Color::Default)
+        .dot(Color::Role(role))
+        .code()
+        .full_width()
+        .trailing(
+            Icon::new(UiIcon::ChevronDown)
+                .size(IconSize::Small)
+                .color(Color::Placeholder),
+        )
 }
 
 impl Render for ScopeChip {
@@ -158,17 +172,7 @@ impl Render for ScopeChip {
             .when(!self.open, |chip| {
                 chip.on_click(cx.listener(|this, _, _, cx| this.toggle(cx)))
             })
-            .child(
-                Chip::new(label)
-                    .dot(Color::Role(role))
-                    .code()
-                    .full_width()
-                    .trailing(
-                        Icon::new(UiIcon::ChevronDown)
-                            .size(IconSize::Small)
-                            .color(Color::Placeholder),
-                    ),
-            );
+            .child(chip(label, role));
         let menu = self.open.then(|| {
             let rows: Vec<_> = self
                 .options
