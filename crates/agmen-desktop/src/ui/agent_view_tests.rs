@@ -120,3 +120,33 @@ fn alt_o_in_the_agent_view_takes_over_its_own_agent(cx: &mut TestAppContext) {
     let seen = recorder.read_with(cx, |r, _| r.seen.clone());
     assert_eq!(seen, [format!("take-over {id}")]);
 }
+
+#[gpui::test]
+fn refused_dm_shows_why_until_the_next_send(cx: &mut TestAppContext) {
+    // C234: a DM the backend refuses says why, as the chat does, and the
+    // text comes back so Enter can send it again.
+    init(cx);
+    cx.update(crate::ui::text_input::bind_keys);
+    let (view, cx) = open_fx1(cx);
+    let composer = view.read_with(cx, |v, _| v.composer.clone());
+    cx.update(|window, cx| window.focus(&composer.focus_handle(cx), cx));
+    cx.simulate_input("status?");
+    cx.simulate_keystrokes("enter");
+    redraw(cx);
+    assert!(cx.debug_bounds("agent:error").is_some());
+    view.read_with(cx, |view, cx| {
+        assert_eq!(view.composer.read(cx).text(cx), "status?");
+    });
+
+    let backend = std::rc::Rc::new(
+        crate::backend::FixtureBackend::for_screen(crate::backend::Screen::Chat).unwrap(),
+    );
+    let handle: std::rc::Rc<dyn crate::backend::Backend> = backend;
+    cx.update(|_, cx| cx.set_global(BackendHandle(handle)));
+    cx.simulate_keystrokes("enter");
+    redraw(cx);
+    assert!(cx.debug_bounds("agent:error").is_none());
+    view.read_with(cx, |view, cx| {
+        assert_eq!(view.composer.read(cx).text(cx), "")
+    });
+}

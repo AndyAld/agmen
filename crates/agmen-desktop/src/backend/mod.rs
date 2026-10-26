@@ -80,6 +80,20 @@ pub(crate) struct BackendHandle(pub(crate) std::rc::Rc<dyn Backend>);
 
 impl gpui::Global for BackendHandle {}
 
+impl BackendHandle {
+    /// Sends `draft` through the app's backend: the one way a view sends.
+    ///
+    /// # Errors
+    ///
+    /// When the backend refuses the draft, or the app has no backend.
+    pub(crate) fn send(draft: Draft, cx: &gpui::App) -> Result<(), BackendError> {
+        match cx.try_global::<Self>() {
+            Some(backend) => backend.0.send(draft),
+            None => Err(BackendError::Unsupported("sending without a backend")),
+        }
+    }
+}
+
 /// A chat message the person writes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Draft {

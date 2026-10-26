@@ -3,27 +3,33 @@
 //! output, and the chat's composer as a DM to the agent.
 
 use agmen_proto::IdentityId;
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
     Render, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
 };
 
+use super::chat::refusal;
 use super::components::{Breadcrumb, Button, ButtonStyle, Color, Label, LabelSize, ToolCard};
 use super::composer::{Composer, Target};
 use super::tokens::{SPACE_6, SPACE_8, SPACE_10, SPACE_14, SPACE_18};
 use crate::appearance::Appearance;
-use crate::backend::{AgentSession, BackendError, BackendHandle, SessionRow, Snapshot, Tone};
+use crate::backend::{
+    AgentSession, BackendError, BackendHandle, Draft, SessionRow, Snapshot, Tone,
+};
 use crate::keymap::{OpenInTerminal, TakeOverAgent};
 
 /// Tests find row `ix` as `"session:{ix}:{kind}"`, where kind is `tool`,
-/// `out`, `say` or `cost`, and the buttons as `agent-open-terminal` and
-/// `agent-stop`.
+/// `out`, `say` or `cost`, the buttons as `agent-open-terminal` and
+/// `agent-stop`, and a refused DM as `"agent:error"`.
 pub(crate) struct AgentView {
     /// Task 14: the agent Open in terminal takes over.
     id: IdentityId,
     handle: SharedString,
     session: AgentSession,
     composer: Entity<Composer>,
+    /// Why the last DM was refused, until the next one is sent (C234).
+    error: Option<SharedString>,
 }
 
 impl AgentView {
@@ -47,14 +53,19 @@ impl AgentView {
             id: id.clone(),
             handle: handle.clone(),
         };
-        // A refused DM comes back into the input.
+        // A refused DM comes back into the input and says why above it.
+        let view = cx.entity().downgrade();
         let composer = cx.new(|cx| {
             Composer::direct(
                 snapshot,
                 agent,
-                |draft, _, cx| match cx.try_global::<BackendHandle>() {
-                    Some(backend) => backend.0.send(draft),
-                    None => Err(BackendError::Unsupported("sending without a backend")),
+                move |draft, _, cx| {
+                    view.update(cx, |view, cx| view.send(draft, cx))
+                        // The view closes with its window before its
+                        // composer; a draft sent in between is refused.
+                        .unwrap_or(Err(BackendError::Unsupported(
+                            "sending after the agent view closed",
+                        )))
                 },
                 window,
                 cx,
@@ -65,7 +76,17 @@ impl AgentView {
             handle: handle.into(),
             session,
             composer,
+            error: None,
         }
+    }
+
+    /// Sends a DM through the backend; a refusal shows above the composer
+    /// until the next send succeeds.
+    fn send(&mut self, draft: Draft, cx: &mut Context<Self>) -> Result<(), BackendError> {
+        let result = BackendHandle::send(draft, cx);
+        self.error = result.as_ref().err().map(|err| err.to_string().into());
+        cx.notify();
+        result
     }
 }
 
@@ -182,6 +203,9 @@ impl Render for AgentView {
                     .pb(SPACE_10)
                     .children(rows),
             )
+            .when_some(self.error.clone(), |this, error| {
+                this.child(refusal("agent:error", error))
+            })
             .child(self.composer.clone())
     }
 }

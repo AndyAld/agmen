@@ -309,10 +309,7 @@ impl ChatView {
         draft: Draft,
         cx: &mut Context<Self>,
     ) -> Result<(), BackendError> {
-        let result = match cx.try_global::<BackendHandle>() {
-            Some(backend) => backend.0.send(draft),
-            None => Err(BackendError::Unsupported("sending without a backend")),
-        };
+        let result = BackendHandle::send(draft, cx);
         self.error = result.as_ref().err().map(|err| err.to_string().into());
         if result.is_ok() {
             self.show_newest(cx);
@@ -437,15 +434,19 @@ impl Render for ChatView {
             )
             .children(self.shown_terminal())
             .when_some(self.error.clone(), |this, error| {
-                this.child(
-                    div()
-                        .debug_selector(|| "chat:error".into())
-                        .px(SPACE_14)
-                        .child(Label::new(error).size(LabelSize::Small).color(Color::Error)),
-                )
+                this.child(refusal("chat:error", error))
             })
             .child(self.composer.clone())
     }
+}
+
+/// Why the backend refused a send or an action, above a composer; tests
+/// find it as `selector`.
+pub(super) fn refusal(selector: &'static str, error: SharedString) -> impl IntoElement {
+    div()
+        .debug_selector(|| selector.into())
+        .px(SPACE_14)
+        .child(Label::new(error).size(LabelSize::Small).color(Color::Error))
 }
 
 #[cfg(test)]
