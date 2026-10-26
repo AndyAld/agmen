@@ -199,3 +199,32 @@ fn body_cache_is_keyed_by_hub_position_not_client_id() {
     );
     assert_eq!(ctx.body_of(&spoof).body.as_ref(), "a different body");
 }
+
+#[test]
+fn change_card_needs_the_listener_as_sender_at_its_position() {
+    // A row from another sender at the listener message's exact hub
+    // position and client id gets no card (defense in depth after C222).
+    use crate::backend::{Backend as _, FixtureBackend, Screen};
+    let snapshot = FixtureBackend::for_screen(Screen::SettingsFromChat)
+        .unwrap()
+        .snapshot();
+    let id = snapshot.changes.keys().next().unwrap().clone();
+    let real = snapshot
+        .messages
+        .iter()
+        .find(|m| m.client.id == id && m.from == snapshot.listener_id)
+        .unwrap()
+        .clone();
+    let other = snapshot
+        .messages
+        .iter()
+        .find(|m| m.from != snapshot.listener_id)
+        .unwrap()
+        .from
+        .clone();
+    let mut spoof = real.clone();
+    spoof.from = other;
+    let ctx = ChatContext::new(Rc::new(snapshot));
+    assert!(ctx.change_card(&real).is_some());
+    assert!(ctx.change_card(&spoof).is_none());
+}

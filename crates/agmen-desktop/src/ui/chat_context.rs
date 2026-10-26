@@ -143,11 +143,13 @@ impl ChatContext {
     }
 
     /// The change card `env` carries, if it is the listener message the
-    /// card belongs to.
+    /// card belongs to. The sender is checked too: `card_rows` holds only
+    /// listener messages, but a row built elsewhere could carry a listener
+    /// message's position and id under another sender.
     #[must_use]
     pub(crate) fn change_card(&self, env: &StampedEnvelope) -> Option<&ChangeCard> {
         let key = (env.stream.clone(), env.seq, env.client.id.clone());
-        if self.card_rows.contains(&key) {
+        if env.from == self.snapshot.listener_id && self.card_rows.contains(&key) {
             self.snapshot.changes.get(&env.client.id)
         } else {
             None
