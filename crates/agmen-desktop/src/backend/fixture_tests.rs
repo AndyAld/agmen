@@ -669,6 +669,24 @@ fn spawn_worker_plays_the_delegated_exchange() {
     );
 }
 
+#[test]
+fn spawn_worker_skips_workers_the_screen_already_has() {
+    // The plan screens have andy/fx1 in the sessions and the roster but no
+    // DELEGATED for it, so counting DELEGATED messages would mint fx1 again.
+    let backend = FixtureBackend::for_screen(Screen::Plan).unwrap();
+    backend
+        .act(Action::SpawnWorker {
+            agent: "codex".into(),
+        })
+        .unwrap();
+    let last = backend.snapshot().messages.pop().unwrap();
+    let Payload::Delegated { worker, .. } = &last.client.payload else {
+        panic!("not a DELEGATED: {:?}", last.client.payload);
+    };
+    assert_eq!(worker.as_str(), "andyfx20");
+    assert!(last.client.body.as_str().starts_with("andy/fx2 · "));
+}
+
 // Task 19: the planning room's actions change the fixture's plan.
 fn plan_of(backend: &FixtureBackend) -> crate::backend::PlanInfo {
     backend.snapshot().plan.unwrap()

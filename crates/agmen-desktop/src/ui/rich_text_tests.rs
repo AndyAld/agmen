@@ -388,15 +388,22 @@ fn a_run_after_a_chip_fills_the_rest_of_the_line(cx: &mut TestAppContext) {
     // words fill the chip's line and wrap once, two lines in all. The bug
     // drew the chip alone, then the words below it in two more lines.
     let words = "the quick brown fox jumps over the lazy dog and runs on far away";
-    let (plain, _) = heights(cx, 300., words);
+    let (line, _) = heights(cx, 300., "the");
+    let (plain, _) = heights(&mut TestAppContext::single(), 300., words);
     let (flowed, chip) = heights(
         &mut TestAppContext::single(),
         300.,
         &format!("4d9fdc8 {words}"),
     );
-    let line = (plain - SPACE_3) / 2.;
-    assert!(plain > line * 1.5, "the words alone wrap once: {plain:?}");
-    let two_lines = chip.max(line) * 2. + SPACE_3 + px(0.5);
+    // The bound below separates the bug from the fix only if the words
+    // alone take exactly two lines. Without a chip they are one text, which
+    // wraps with no gap between its lines.
+    assert!(
+        (plain - line * 2.).abs() < px(0.5),
+        "the words alone wrap once: {plain:?}, one line is {line:?}"
+    );
+    // The chip's line, then one more, SPACE_3 apart; the bug drew three.
+    let two_lines = chip.max(line) + line + SPACE_3 + px(0.5);
     assert!(flowed <= two_lines, "{flowed:?} over {two_lines:?}");
 }
 
@@ -531,7 +538,8 @@ fn chip_height_estimate_matches_its_layout(_cx: &mut TestAppContext) {
     ];
     let mut estimates = Vec::new();
     take_estimates();
-    for width in [90., 120., 150., 200., 260.] {
+    // 12 px leaves the label no room once padding and glue are taken.
+    for width in [12., 90., 120., 150., 200., 260.] {
         for body in &bodies {
             let context = Rc::new(ChatContext::new(Rc::new(snapshot.clone())));
             let text = Rc::new(context.body_text(body, &[]));
@@ -688,16 +696,16 @@ fn a_32_kib_body_draws_quickly(cx: &mut TestAppContext) {
             frame_time(&mut TestAppContext::single(), &chips_every(200)),
             bound(120, quarter),
         ),
-        // A chip every 32 bytes, 1,000 in all, is over the frame budget:
+        // A chip every 32 bytes, 1,000 in all, is over a quarter frame:
         // each chip is its own element tree, laid out at about 7 us in
         // release. Measured 13 to 15 ms in release and 130 to 137 ms in
         // debug; the flex row this replaced took 21 to 31 ms in release.
         // Rows are cached, so it costs only when the stream redraws. The
-        // bound guards against it getting worse.
+        // bound holds it inside one frame.
         (
             "a chip per 32 bytes",
             frame_time(&mut TestAppContext::single(), &chips_every(32)),
-            bound(550, FRAME_BUDGET * 2),
+            bound(550, FRAME_BUDGET),
         ),
     ];
     for (shape, per_frame, bound) in shapes {

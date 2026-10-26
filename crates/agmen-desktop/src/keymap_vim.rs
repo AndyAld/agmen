@@ -25,13 +25,20 @@ pub(crate) enum VimMode {
 ///
 /// # Errors
 ///
-/// When the file cannot be read, parsed or written; a file that does not
-/// parse is left alone.
+/// When the file cannot be read, parsed or written, or its `keys` is not a
+/// table; a file that does not parse is left alone.
 pub(crate) fn toggle_vim_mode(path: &Path) -> Result<VimMode, AppearanceError> {
     let mut table = read_settings_table(path)?.unwrap_or_default();
     let mut keys = match table.remove(TABLE) {
         Some(toml::Value::Table(keys)) => keys,
-        _ => toml::Table::new(),
+        None => toml::Table::new(),
+        // Replacing it would lose the person's value without a word.
+        Some(other) => {
+            return Err(AppearanceError::Parse {
+                path: path.to_owned(),
+                message: format!("`{TABLE}` is a {}, not a table", other.type_str()),
+            });
+        }
     };
     let on = !matches!(keys.get(KEY), Some(toml::Value::Boolean(true)));
     keys.insert(KEY.to_owned(), toml::Value::Boolean(on));
@@ -73,5 +80,17 @@ mod tests {
             Err(AppearanceError::Parse { .. })
         ));
         assert_eq!(fs::read_to_string(&path).unwrap(), "not = [toml");
+    }
+
+    #[test]
+    fn vim_mode_refuses_a_keys_value_that_is_not_a_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.toml");
+        fs::write(&path, "keys = \"x\"\n").unwrap();
+        assert!(matches!(
+            toggle_vim_mode(&path),
+            Err(AppearanceError::Parse { .. })
+        ));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "keys = \"x\"\n");
     }
 }

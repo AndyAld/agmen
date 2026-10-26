@@ -112,6 +112,21 @@ fn palette_runs_the_action_and_closes(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn clicking_a_row_runs_it_and_puts_the_focus_back(cx: &mut TestAppContext) {
+    let (workspace, cx) = open(cx);
+    cx.simulate_keystrokes("cmd-shift-p");
+    cx.simulate_input("toggle left dock");
+    redraw(cx);
+    click(cx, "palette-row:0");
+    assert!(shown(&workspace, cx).is_none());
+    workspace.read_with(cx, |w, _| assert!(!w.is_dock_open(DockSide::Left)));
+    // The click landed in the palette, so the focus went back to the
+    // workspace and its keys work again.
+    cx.simulate_keystrokes("cmd-b");
+    workspace.read_with(cx, |w, _| assert!(w.is_dock_open(DockSide::Left)));
+}
+
+#[gpui::test]
 fn escape_closes_the_palette(cx: &mut TestAppContext) {
     let (workspace, cx) = open(cx);
     cx.simulate_keystrokes("cmd-shift-p");

@@ -95,6 +95,7 @@ dependencies = [
  "flate2",
  "futures",
  "gpui",
+ "gpui_apple",
  "gpui_macos",
  "jiff",
  "jsonc-parser",
