@@ -535,12 +535,6 @@ impl SettingsView {
         }
     }
 
-    /// The rule right of the page list (node 8049), as the other chrome
-    /// rules.
-    fn page_list_rule(cx: &App) -> gpui::Hsla {
-        super::rule_color(cx)
-    }
-
     fn page_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let rows = PAGES.iter().map(|&(page, title, slug, icon)| {
             let on = page == self.page;
@@ -574,7 +568,8 @@ impl SettingsView {
             .py(SPACE_12)
             .px(SPACE_8)
             .border_r(BORDER_WIDTH)
-            .border_color(Self::page_list_rule(cx))
+            // Node 8049: the page list's rule is a chrome rule (V99).
+            .border_color(super::rule_color(cx))
             .children(rows)
     }
 

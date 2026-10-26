@@ -122,10 +122,15 @@ impl ParentElement for ListItem {
     }
 }
 
+/// The fill a row takes on hover: none on a selected row, which keeps its
+/// selected fill.
+fn hover_fill(selected: bool, theme: &crate::appearance::Theme) -> Option<gpui::Hsla> {
+    (!selected).then_some(theme.element_hover)
+}
+
 impl RenderOnce for ListItem {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = &cx.global::<Appearance>().theme;
-        let hover = theme.element_hover;
         let row_selector = self.id.to_string();
         let leading_selector = format!("{}:leading", self.id);
         div()
@@ -145,7 +150,9 @@ impl RenderOnce for ListItem {
             .pl(self.indent.padding())
             .pr(SPACE_10)
             .when(self.selected, |this| this.bg(theme.element_selected))
-            .hover(move |style| style.bg(hover))
+            .when_some(hover_fill(self.selected, theme), |this, fill| {
+                this.hover(move |style| style.bg(fill))
+            })
             .when_some(self.on_click, |this, handler| {
                 this.cursor_pointer().on_click(handler)
             })
@@ -185,6 +192,15 @@ mod tests {
         assert_eq!(Indent::Tree(0).padding(), px(10.));
         assert_eq!(Indent::Page.padding(), px(10.));
         assert_eq!(Indent::Tree(3).padding(), px(10. + 14. * 3.));
+    }
+
+    #[test]
+    fn selected_rows_keep_their_fill_on_hover() {
+        // V117 (C245): hovering a selected row must not swap the selected
+        // fill for the hover one, as Zed's lists keep it.
+        let theme = crate::appearance::Appearance::builtin().theme;
+        assert_eq!(hover_fill(false, &theme), Some(theme.element_hover));
+        assert_eq!(hover_fill(true, &theme), None);
     }
 
     #[gpui::test]

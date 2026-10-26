@@ -10,7 +10,10 @@ use gpui::{
 use super::breadcrumb::Breadcrumb;
 use super::components::{Button, ButtonStyle, Color, Icon, IconSize, Label, LabelSize, ToolCard};
 use super::text_input::TextInput;
-use super::tokens::{BORDER_WIDTH, RADIUS_CARD, SPACE_8, SPACE_10, SPACE_12, SPACE_14, SPACE_18};
+use super::tokens::{
+    BORDER_WIDTH, RADIUS_CARD, SESSION_COST_LINE, SESSION_OUT_LINE, SESSION_SAY_LINE, SPACE_8,
+    SPACE_10, SPACE_12, SPACE_14, SPACE_18,
+};
 use crate::appearance::Appearance;
 use crate::backend::{AgentSession, SessionRow, Tone};
 use crate::icons::UiIcon;
@@ -64,13 +67,6 @@ const fn out_colors(tone: Tone) -> (Color, Color) {
     (tone_color(tone), tone_color(tone))
 }
 
-/// console.py's auto line heights between tool cards (V108): 14 px for the
-/// 12 px code of an output row, 16 px for the 13 px Say text, 13 px for the
-/// 11 px cost line.
-const OUT_LINE: f32 = 14. / 12.;
-const SAY_LINE: f32 = 16. / 13.;
-const COST_LINE: f32 = 13. / 11.;
-
 fn session_row(row: &SessionRow) -> gpui::AnyElement {
     match row {
         SessionRow::Tool { name, arg } => {
@@ -82,25 +78,34 @@ fn session_row(row: &SessionRow) -> gpui::AnyElement {
                 .flex()
                 .gap(SPACE_8)
                 .pl(SPACE_14)
-                .child(Label::new("⎿").code().color(glyph).line_height(OUT_LINE))
+                .child(
+                    Label::new("⎿")
+                        .code()
+                        .color(glyph)
+                        .line_height(SESSION_OUT_LINE),
+                )
                 .child(
                     Label::new(text.clone())
                         .code()
                         .color(text_color)
-                        .line_height(OUT_LINE)
+                        .line_height(SESSION_OUT_LINE)
                         .wrap(),
                 )
                 .into_any_element()
         }
         SessionRow::Say(text) => div()
-            .child(Label::new(text.clone()).line_height(SAY_LINE).wrap())
+            .child(
+                Label::new(text.clone())
+                    .line_height(SESSION_SAY_LINE)
+                    .wrap(),
+            )
             .into_any_element(),
         SessionRow::Cost(text) => div()
             .child(
                 Label::new(text.clone())
                     .size(LabelSize::Small)
                     .color(Color::Muted)
-                    .line_height(COST_LINE),
+                    .line_height(SESSION_COST_LINE),
             )
             .into_any_element(),
     }

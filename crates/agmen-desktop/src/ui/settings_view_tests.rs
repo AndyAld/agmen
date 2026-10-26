@@ -504,19 +504,6 @@ fn open_settings_toml_is_a_plain_button(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn page_list_rule_is_the_chrome_rule(cx: &mut TestAppContext) {
-    // V99: node 8049 draws border.variant, as the other chrome rules.
-    init(cx);
-    cx.update(|cx| {
-        let mut appearance = Appearance::builtin();
-        appearance.theme.border = hex("#ff0000");
-        appearance.theme.border_variant = hex("#00ff00");
-        cx.set_global(appearance);
-        assert_eq!(SettingsView::page_list_rule(cx), hex("#00ff00"));
-    });
-}
-
-#[gpui::test]
 fn page_rows_are_28_px_list_items(cx: &mut TestAppContext) {
     // V100, V102: nodes 8050 are 28 px rows with the icon in a leading slot.
     let home = Home::new();

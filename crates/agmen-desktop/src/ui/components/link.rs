@@ -9,7 +9,8 @@ use gpui::{
 
 use super::{ClickHandler, Color, Label, LabelSize};
 
-/// Small accent text, underlined on hover.
+/// Small accent text, underlined on hover and keyboard focus when it has
+/// a click handler.
 #[derive(IntoElement)]
 pub(crate) struct Link {
     id: ElementId,
@@ -50,13 +51,18 @@ impl Link {
 impl RenderOnce for Link {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
         let selector = self.id.to_string();
+        // Only a link that does something takes focus and underlines, as
+        // Dropdown, Toggle, Segmented and Stepper do (C250).
         div()
             .id(self.id)
             .debug_selector(|| selector)
             .flex_none()
-            .hover(gpui::StyleRefinement::underline)
             .when_some(self.on_click, |this, handler| {
-                this.cursor_pointer().on_click(handler)
+                this.tab_index(0)
+                    .cursor_pointer()
+                    .hover(gpui::StyleRefinement::underline)
+                    .focus_visible(gpui::StyleRefinement::underline)
+                    .on_click(handler)
             })
             .child(
                 Label::new(self.text)
@@ -71,7 +77,7 @@ mod tests {
     use std::cell::Cell;
     use std::rc::Rc;
 
-    use gpui::{Modifiers, TestAppContext};
+    use gpui::{InputEvent as _, Modifiers, TestAppContext};
 
     use super::*;
     use crate::ui::components::control_harness::open;
@@ -83,6 +89,46 @@ mod tests {
         let size = rendered_size(cx, || Link::new("l", "Browse").into_any_element());
         let line = TEXT_SMALL.to_pixels(MOCKUP_REM) * LINE_HEIGHT;
         assert!((size.height - line).abs() < gpui::px(0.25), "{size:?}");
+    }
+
+    #[gpui::test]
+    fn focus_then_enter_opens_a_link(cx: &mut TestAppContext) {
+        // C250: a link takes keyboard focus like the other controls.
+        let clicks = Rc::new(Cell::new(0));
+        let seen = clicks.clone();
+        let cx = open(cx, move || {
+            let seen = seen.clone();
+            Link::new("link", "Browse")
+                .on_click(move |_, _, _| seen.set(seen.get() + 1))
+                .into_any_element()
+        });
+        // A click focuses a tab stop, as Tab will once Task 18 binds it;
+        // Enter on the focused link then clicks it again.
+        let bounds = cx.debug_bounds("link").unwrap();
+        cx.simulate_click(bounds.center(), Modifiers::none());
+        redraw(cx);
+        let focused = cx.update(|window, cx| window.focused(cx).is_some());
+        assert!(focused, "the click did not focus the link");
+        // gpui clicks a focused element on Enter's key up (div.rs, keyboard
+        // activation), so send the down and the up.
+        let enter = gpui::Keystroke::parse("enter").unwrap();
+        cx.update(|window, cx| {
+            window.dispatch_event(
+                gpui::KeyDownEvent {
+                    keystroke: enter.clone(),
+                    is_held: false,
+                    prefer_character_input: false,
+                }
+                .to_platform_input(),
+                cx,
+            );
+            window.dispatch_event(
+                gpui::KeyUpEvent { keystroke: enter }.to_platform_input(),
+                cx,
+            );
+        });
+        redraw(cx);
+        assert_eq!(clicks.get(), 2);
     }
 
     #[gpui::test]
