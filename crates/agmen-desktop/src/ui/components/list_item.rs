@@ -165,16 +165,8 @@ impl RenderOnce for ListItem {
 mod tests {
     use super::*;
     use crate::ui::components::Label;
-    use crate::ui::test_support::{init, redraw, rendered_size};
-    use gpui::{Context, Render, TestAppContext, px};
-
-    struct Rows(fn() -> AnyElement);
-
-    impl Render for Rows {
-        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-            (self.0)()
-        }
-    }
+    use crate::ui::test_support::{draw, rendered_size};
+    use gpui::{TestAppContext, px};
 
     #[test]
     fn indent_padding_steps_by_depth() {
@@ -204,25 +196,21 @@ mod tests {
     fn leading_slot_fits_wider_content(cx: &mut TestAppContext) {
         // V74 and V83: a 12 px chevron or a 16 px file icon keeps its width,
         // while a narrow glyph still gets the fixed slot (V62).
-        init(cx);
-        let (_, cx) = cx.add_window_view(|_, _| {
-            Rows(|| {
-                div()
-                    .w(px(300.))
-                    .child(
-                        ListItem::new("wide", Indent::Group)
-                            .leading(div().w(px(16.)).h(px(12.)))
-                            .child(Label::new("andy")),
-                    )
-                    .child(
-                        ListItem::new("narrow", Indent::Depth(0))
-                            .leading(div().w(px(6.)).h(px(6.)))
-                            .child(Label::new("fx1")),
-                    )
-                    .into_any_element()
-            })
+        let cx = draw(cx, || {
+            div()
+                .w(px(300.))
+                .child(
+                    ListItem::new("wide", Indent::Group)
+                        .leading(div().w(px(16.)).h(px(12.)))
+                        .child(Label::new("andy")),
+                )
+                .child(
+                    ListItem::new("narrow", Indent::Depth(0))
+                        .leading(div().w(px(6.)).h(px(6.)))
+                        .child(Label::new("fx1")),
+                )
+                .into_any_element()
         });
-        redraw(cx);
         assert_eq!(cx.debug_bounds("wide:leading").unwrap().size.width, px(16.));
         assert_eq!(
             cx.debug_bounds("narrow:leading").unwrap().size.width,

@@ -118,18 +118,9 @@ impl RenderOnce for KvSection {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::test_support::{init, redraw, rendered_size};
+    use crate::ui::test_support::{draw, rendered_size};
     use crate::ui::tokens::{RIGHT_DOCK_WIDTH, SPACE_14};
-    use gpui::{AnyElement, Context, Render, TestAppContext, px};
-
-    struct Wrapper(fn() -> AnyElement);
-
-    impl Render for Wrapper {
-        fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-            window.set_rem_size(crate::ui::tokens::MOCKUP_REM);
-            (self.0)()
-        }
-    }
+    use gpui::{TestAppContext, px};
 
     #[test]
     fn section_title_is_uppercase() {
@@ -140,19 +131,15 @@ mod tests {
     fn kv_values_wrap_between_words(cx: &mut TestAppContext) {
         // V77: frame 6674 breaks "waiting for Apply: andy/fx1 lanes and
         // budget" at a space, never inside the handle.
-        init(cx);
-        let (_, cx) = cx.add_window_view(|_, _| {
-            Wrapper(|| {
-                div()
-                    .w(RIGHT_DOCK_WIDTH - SPACE_14 * 2.)
-                    .child(KvRow::new(
-                        "Recent",
-                        "waiting for Apply: andy/fx1 lanes and budget",
-                    ))
-                    .into_any_element()
-            })
+        let cx = draw(cx, || {
+            div()
+                .w(RIGHT_DOCK_WIDTH - SPACE_14 * 2.)
+                .child(KvRow::new(
+                    "Recent",
+                    "waiting for Apply: andy/fx1 lanes and budget",
+                ))
+                .into_any_element()
         });
-        redraw(cx);
         let mut word = |i: usize| {
             cx.debug_bounds(Box::leak(format!("kv-word:Recent:{i}").into_boxed_str()))
                 .unwrap_or_else(|| panic!("word {i} is not drawn on its own"))
