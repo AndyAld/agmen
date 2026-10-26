@@ -6,7 +6,7 @@ use gpui::{
 };
 
 use super::*;
-use crate::backend::chat_snapshot;
+use crate::backend::{chat_snapshot, fixture_id};
 use crate::ui::chat_context::ChatContext;
 use crate::ui::test_support::{click, init, redraw, rendered_size};
 use crate::ui::tokens::MOCKUP_REM;
@@ -18,7 +18,7 @@ fn ctx() -> Rc<ChatContext> {
 fn branch(name: &str, at: Option<&str>) -> RefTarget {
     RefTarget::Branch {
         name: name.into(),
-        at: at.map(Into::into),
+        at: at.map(|sha| sha.parse().unwrap()),
     }
 }
 
@@ -94,7 +94,7 @@ fn branch_chip_is_green_and_filled(cx: &mut TestAppContext) {
 fn commit_chip_is_plain_accent(cx: &mut TestAppContext) {
     check(
         cx,
-        RefTarget::Commit("4d9fdc8".into()),
+        RefTarget::Commit("4d9fdc8".parse().unwrap()),
         Color::Accent,
         false,
     );
@@ -155,7 +155,9 @@ fn listening_chip(cx: &mut TestAppContext) -> (Heard, &mut VisualTestContext) {
             Color::Role("engineer".into()),
         )
         .card(context.clone())
-        .on_ref(move |event, _, _| sink.borrow_mut().push(event))
+        .on_ref(fixture_id("andy/listen"), move |event, _, _| {
+            sink.borrow_mut().push(event);
+        })
         .into_any_element()
     });
     (heard, cx)
@@ -167,7 +169,10 @@ fn click_opens_ref(cx: &mut TestAppContext) {
     click(cx, "m1:ref:0");
     assert_eq!(
         *heard.borrow(),
-        [RefEvent::OpenRef(RefTarget::Agent("andy/fx1".into()))]
+        [RefEvent::OpenRef {
+            target: RefTarget::Agent("andy/fx1".into()),
+            from: fixture_id("andy/listen"),
+        }]
     );
 }
 
@@ -179,9 +184,10 @@ fn cmd_click_opens_ref_in_split(cx: &mut TestAppContext) {
     cx.simulate_click(center, secondary);
     assert_eq!(
         *heard.borrow(),
-        [RefEvent::OpenRefInSplit(RefTarget::Agent(
-            "andy/fx1".into()
-        ))]
+        [RefEvent::OpenRefInSplit {
+            target: RefTarget::Agent("andy/fx1".into()),
+            from: fixture_id("andy/listen"),
+        }]
     );
 }
 
@@ -206,7 +212,7 @@ fn flush_side_drops_its_padding(cx: &mut TestAppContext) {
             let chip = RefChip::new(
                 "chip",
                 "4d9fdc8",
-                RefTarget::Commit("4d9fdc8".into()),
+                RefTarget::Commit("4d9fdc8".parse().unwrap()),
                 Color::Accent,
             );
             if flush { chip.flush_end() } else { chip }.into_any_element()

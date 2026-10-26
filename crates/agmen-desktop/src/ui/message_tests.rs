@@ -322,9 +322,14 @@ fn chip_in_a_row_reports_open_ref(cx: &mut TestAppContext) {
     let (messages, c) = chat();
     let o = open(cx, px(800.), (0..messages.len()).collect(), c);
     click(o.cx, sel(&messages[4], "ref:0"));
+    // C288: the event names the message's hub-stamped sender.
+    assert_eq!(messages[4].from_handle, "andy/listen");
     assert_eq!(
         *o.refs.borrow(),
-        [RefEvent::OpenRef(RefTarget::Agent("andy/fx1".into()))]
+        [RefEvent::OpenRef {
+            target: RefTarget::Agent("andy/fx1".into()),
+            from: messages[4].from.clone(),
+        }]
     );
 }
 

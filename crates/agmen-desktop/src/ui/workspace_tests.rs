@@ -1,8 +1,10 @@
 use super::*;
-use crate::backend::chat_snapshot;
+use crate::backend::{chat_snapshot, fixture_id};
+use crate::ui::left_dock::LeftDockTab;
 use crate::ui::pane::SplitDirection;
 use crate::ui::test_support::{click, init, redraw};
 use crate::ui::tokens::{STATUS_BAR_HEIGHT, TAB_BAR_HEIGHT, TITLE_BAR_HEIGHT};
+use agmen_proto::GitSha;
 use gpui::TestAppContext;
 
 fn open(cx: &mut TestAppContext) -> (Entity<Workspace>, &mut gpui::VisualTestContext) {
@@ -214,21 +216,37 @@ fn cmd_click_ref_opens_split(cx: &mut TestAppContext) {
 #[gpui::test]
 fn click_on_a_ref_opens_a_tab_in_the_pane(cx: &mut TestAppContext) {
     let (workspace, cx) = open(cx);
-    // Message 2 is andy/a1's ALERT; its first chip is the commit 4d9fdc8.
-    click(cx, message_sel(1, "ref:0"));
+    // Message 2 is andy/a1's ALERT; its second chip is src/main.rs:2-8.
+    // andy/a1 has no worktree here, so it opens the reader's own copy.
+    click(cx, message_sel(1, "ref:1"));
     let group = workspace.read_with(cx, |w, _| w.pane_group.clone());
     let panes = group.read_with(cx, |g, _| g.panes());
     assert_eq!(panes.len(), 1);
-    // Task 12 Step 1b: fx1's commit opens fx1's first change's diff.
-    let commit = TabItem::Diff {
+    let file = TabItem::File {
         worktree: "andy/fx1".into(),
         path: "src/main.rs".into(),
     };
     panes[0].read_with(cx, |pane, _| {
         let mut tabs = starting_center(fx1_id());
-        tabs.insert(1, commit.clone());
+        tabs.insert(1, file.clone());
         assert_eq!(pane.tabs(), tabs);
-        assert_eq!(pane.active_item(), Some(&commit));
+        assert_eq!(pane.active_item(), Some(&file));
+    });
+}
+
+#[gpui::test]
+fn click_on_a_commit_ref_selects_it_in_the_git_panel(cx: &mut TestAppContext) {
+    let (workspace, cx) = open(cx);
+    // Message 2's first chip is the commit 4d9fdc8, which fx1 holds.
+    // Ruling (a): it shows in fx1's Commits, not as fx1's whole change.
+    click(cx, message_sel(1, "ref:0"));
+    workspace.read_with(cx, |w, cx| {
+        assert_eq!(w.shown_left_tab(), Some(LeftDockTab::Git));
+        let panel = w.left.git.read(cx);
+        assert_eq!(panel.scoped_owner(), Some(&fixture_id("andy/fx1")));
+        assert_eq!(panel.selected_commit().map(GitSha::as_str), Some("4d9fdc8"));
+        let group = w.pane_group.read(cx);
+        assert_eq!(group.panes()[0].read(cx).tabs(), starting_center(fx1_id()));
     });
 }
 
@@ -337,7 +355,7 @@ fn the_chat_and_the_center_share_the_workspaces_snapshot(cx: &mut TestAppContext
     let (workspace, cx) = open(cx);
     workspace.read_with(cx, |workspace, cx| {
         let chat = workspace.chat.read(cx).snapshot();
-        assert!(std::ptr::eq(&*workspace.snapshot, chat), "chat");
+        assert!(std::rc::Rc::ptr_eq(&workspace.snapshot, chat), "chat");
         let center = workspace.pane_group.read(cx).sources().snapshot();
         assert!(std::rc::Rc::ptr_eq(&workspace.snapshot, center), "center");
     });

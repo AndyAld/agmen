@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use agmen_proto::{
-    IdentityId, MessageId, Payload, Ref, Seq, StampedEnvelope, Stream, Timestamp, Verdict,
+    GitSha, IdentityId, MessageId, Payload, Ref, Seq, StampedEnvelope, Stream, Timestamp, Verdict,
 };
 use gpui::SharedString;
 use jiff::tz::TimeZone;
@@ -249,9 +249,9 @@ impl ChatContext {
             RefTarget::Branch { name, at } => (
                 "Branch",
                 name.clone(),
-                self.branch_rows(name, at.as_deref()),
+                self.branch_rows(name, at.as_ref().map(GitSha::as_str)),
             ),
-            RefTarget::Commit(sha) => ("Commit", sha.clone(), self.commit_rows(sha)),
+            RefTarget::Commit(sha) => ("Commit", sha.to_string(), self.commit_rows(sha.as_str())),
             RefTarget::File { path, lines } => {
                 let mut rows = Vec::new();
                 if let Some((from, to)) = lines {
@@ -360,8 +360,9 @@ impl ChatContext {
         if let Some(sha) = at {
             rows.push(("At", sha.to_owned()));
         }
-        // shortcut: ahead and behind counts need the worktree data Task 12
-        // adds; until then the card shows the worktree's own state line.
+        // shortcut: ahead and behind counts need per-branch counts that
+        // WorktreeInfo does not hold; until the live backend (ADR-0011)
+        // reads them from git, the card shows the worktree's state line.
         match self.snapshot.agents.values().find(|a| a.branch == name) {
             Some(info) => {
                 rows.push((

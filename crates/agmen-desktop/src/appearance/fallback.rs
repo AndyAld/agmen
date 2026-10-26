@@ -39,6 +39,8 @@ pub(crate) fn gruvbox_material_dark_hard() -> Theme {
         icon_muted: hex(dim),
         editor_background: hex(bg),
         line_number: hex(line),
+        // Andy's Gruvbox Material Dark Hard sets #282828.
+        highlighted_line: hex(surf),
         error: hex(err),
         warning: hex(warn),
         success: hex(ok),

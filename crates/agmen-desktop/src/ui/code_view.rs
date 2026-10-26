@@ -3,7 +3,7 @@
 //! and the lines of a diff (Task 12, through [`layout_lines`] and
 //! [`styled_line`]). Highlights are computed once, when the view is made.
 
-use std::ops::Range;
+use std::ops::{Range, RangeInclusive};
 use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder as _;
@@ -139,6 +139,8 @@ pub(crate) struct CodeView {
     marks: Rc<Vec<GutterMark>>,
     gutter: Gutter,
     scroll: UniformListScrollHandle,
+    /// Lines (1-based) a reference points at, drawn highlighted.
+    highlighted: Option<RangeInclusive<u32>>,
 }
 
 impl CodeView {
@@ -148,15 +150,19 @@ impl CodeView {
             marks: Rc::new(marks),
             gutter: Gutter::Marks,
             scroll: UniformListScrollHandle::new(),
+            highlighted: None,
         }
     }
 
-    /// Scrolls so `line` (1-based) is the top line; a line past the end
-    /// scrolls to the last.
-    pub(crate) fn scroll_to_line(&mut self, line: u32, cx: &mut Context<Self>) {
+    /// Scrolls so `lines`' first line (1-based) sits in the middle and
+    /// highlights `lines`, as Zed's go-to-line does (go_to_line.rs at
+    /// 08cbb88, :198 to 207); a line past the end scrolls to the last.
+    pub(crate) fn show_lines(&mut self, lines: RangeInclusive<u32>, cx: &mut Context<Self>) {
+        let line = *lines.start();
         let last = self.lines.len().saturating_sub(1);
         let ix = usize::try_from(line.saturating_sub(1)).map_or(last, |ix| ix.min(last));
-        self.scroll.scroll_to_item(ix, ScrollStrategy::Top);
+        self.scroll.scroll_to_item(ix, ScrollStrategy::Center);
+        self.highlighted = Some(lines);
         cx.notify();
     }
 
@@ -196,9 +202,14 @@ fn deleted_marks(marks: &[GutterMark], line: u32) -> impl Iterator<Item = (u32, 
     })
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one row's parts, each from the view's render"
+)]
 fn render_line(
     ix: usize,
     line: &Line,
+    highlighted: Option<&RangeInclusive<u32>>,
     marks: &[GutterMark],
     gutter_kind: Gutter,
     number_width: Pixels,
@@ -208,6 +219,16 @@ fn render_line(
     let appearance = cx.global::<Appearance>();
     let theme = &appearance.theme;
     let number = u32::try_from(ix + 1).unwrap_or(u32::MAX);
+    // Behind the row's text: an absolute child takes no part in its flex.
+    let highlight = highlighted
+        .filter(|lines| lines.contains(&number))
+        .map(|_| {
+            div()
+                .debug_selector(move || format!("line:{number}:highlight"))
+                .absolute()
+                .inset_0()
+                .bg(theme.highlighted_line)
+        });
     let fill = fill_mark(marks, number).map(|fill| {
         let (kind, color) = match fill {
             Fill::Added => ("added", theme.created),
@@ -248,6 +269,7 @@ fn render_line(
     });
     div()
         .debug_selector(move || format!("line:{number}"))
+        .relative()
         .h(MONO_CELL_HEIGHT)
         .line_height(MONO_CELL_HEIGHT)
         .w_full()
@@ -255,6 +277,7 @@ fn render_line(
         .flex()
         .items_center()
         .gap(cell)
+        .children(highlight)
         .child(
             div()
                 .debug_selector(move || format!("line:{number}:number"))
@@ -305,6 +328,7 @@ impl Render for CodeView {
         )]
         let number_width = cell * cells as f32;
         let (lines, marks, gutter) = (self.lines.clone(), self.marks.clone(), self.gutter);
+        let highlighted = self.highlighted.clone();
         div()
             .size_full()
             .flex()
@@ -321,7 +345,16 @@ impl Render for CodeView {
                     range
                         .filter_map(|ix| {
                             lines.get(ix).map(|line| {
-                                render_line(ix, line, &marks, gutter, number_width, cell, cx)
+                                render_line(
+                                    ix,
+                                    line,
+                                    highlighted.as_ref(),
+                                    &marks,
+                                    gutter,
+                                    number_width,
+                                    cell,
+                                    cx,
+                                )
                             })
                         })
                         .collect::<Vec<_>>()

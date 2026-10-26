@@ -3,6 +3,7 @@
 //! change's diff (Task 12), and Settings and its file (Task 17).
 
 use std::collections::HashMap;
+use std::ops::RangeInclusive;
 use std::path::Path;
 use std::rc::Rc;
 
@@ -50,8 +51,9 @@ struct TabView {
 pub(crate) struct TabViews {
     sources: Rc<TabSources>,
     views: HashMap<TabItem, TabView>,
-    /// File tabs to scroll to a line (1-based) the next time they draw.
-    lines: HashMap<TabItem, u32>,
+    /// File tabs to scroll to and highlight these lines (1-based) the next
+    /// time they draw.
+    lines: HashMap<TabItem, RangeInclusive<u32>>,
 }
 
 impl std::fmt::Debug for TabViews {
@@ -71,11 +73,11 @@ impl TabViews {
         }
     }
 
-    /// Scrolls `item`'s file view so `line` (1-based) is on top, when it
-    /// next draws; other items ignore it.
-    pub(crate) fn scroll_to_line(&mut self, item: TabItem, line: u32) {
+    /// Scrolls `item`'s file view to `lines` (1-based) and highlights them,
+    /// when it next draws; other items ignore it.
+    pub(crate) fn show_lines(&mut self, item: TabItem, lines: RangeInclusive<u32>) {
         if matches!(item, TabItem::File { .. }) {
-            self.lines.insert(item, line);
+            self.lines.insert(item, lines);
         }
     }
 
@@ -106,10 +108,10 @@ impl TabViews {
         self.views.retain(|key, _| open.contains(key));
         self.lines.retain(|key, _| open.contains(key));
         let view = self.built(item, window, cx)?;
-        if let Some(line) = self.lines.remove(item)
+        if let Some(lines) = self.lines.remove(item)
             && let Ok(file) = view.clone().downcast::<FileView>()
         {
-            file.update(cx, |file, cx| file.scroll_to_line(line, cx));
+            file.update(cx, |file, cx| file.show_lines(lines, cx));
         }
         Some(view)
     }

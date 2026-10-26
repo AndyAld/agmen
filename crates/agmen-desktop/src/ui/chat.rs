@@ -364,7 +364,7 @@ impl ChatView {
         cx.notify();
     }
 
-    fn apply(&mut self, update: Update, cx: &mut Context<Self>) {
+    pub(super) fn apply(&mut self, update: Update, cx: &mut Context<Self>) {
         // Task 13: what live messages ask of the window, signalled once the
         // chat has them.
         let mut signals = Vec::new();

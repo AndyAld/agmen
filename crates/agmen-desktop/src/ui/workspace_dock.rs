@@ -118,15 +118,24 @@ impl Workspace {
     /// Opens a role's file in a center tab and its Role panel in the right
     /// dock; base has no Role panel, so the dock shows none.
     pub(super) fn open_role(&mut self, name: &str, cx: &mut Context<Self>) {
-        let Some(role) = self.snapshot.roles.iter().find(|r| r.name == name).cloned() else {
+        if !self.show_role(name, cx) {
             return;
+        }
+        let item = TabItem::RoleFile(name.to_owned());
+        self.pane_group.update(cx, |group, cx| group.open(item, cx));
+    }
+
+    /// Shows a role's Role panel in the right dock, opening it; `false`
+    /// when no role has that name.
+    pub(super) fn show_role(&mut self, name: &str, cx: &mut Context<Self>) -> bool {
+        let Some(role) = self.snapshot.roles.iter().find(|r| r.name == name).cloned() else {
+            return false;
         };
         self.set_selection(None, cx);
         self.left.shown_role = Some(role);
         self.right_dock.open();
-        let item = TabItem::RoleFile(name.to_owned());
-        self.pane_group.update(cx, |group, cx| group.open(item, cx));
         cx.notify();
+        true
     }
 
     /// Andy, 2026-10-26: the Role panel closes with its role file's tab.

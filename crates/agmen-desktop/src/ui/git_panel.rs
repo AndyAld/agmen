@@ -5,6 +5,7 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
+use agmen_proto::GitSha;
 use gpui::{
     AnyElement, AppContext as _, Context, Entity, EventEmitter, FontWeight,
     InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
@@ -82,6 +83,9 @@ pub(crate) struct GitPanel {
     folded_people: BTreeSet<String>,
     /// The selected change's path in the scoped worktree.
     selected: Option<String>,
+    /// The selected commit in the scoped worktree: a commit reference's
+    /// (Task 12 Step 1b, ruling a).
+    selected_commit: Option<GitSha>,
     /// Which worktree Changes and Commits show; the scope chip sets it.
     scoped: usize,
     scope: Entity<ScopeChip>,
@@ -191,6 +195,7 @@ impl GitPanel {
             folded: BTreeSet::from([GitSection::Branches]),
             folded_people,
             selected: None,
+            selected_commit: None,
             scoped: 0,
             scope,
         }
@@ -206,6 +211,7 @@ impl GitPanel {
         if let Some(index) = self.worktrees.iter().position(|w| &w.owner == owner) {
             self.scoped = index;
             self.selected = None;
+            self.selected_commit = None;
             self.scope.update(cx, |chip, cx| chip.select(owner, cx));
             cx.notify();
         }
@@ -263,6 +269,24 @@ impl GitPanel {
     #[cfg(test)]
     pub(crate) fn selected(&self) -> Option<&str> {
         self.selected.as_deref()
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn selected_commit(&self) -> Option<&GitSha> {
+        self.selected_commit.as_ref()
+    }
+
+    /// Highlights the scoped worktree's commit `sha` in Commits, unfolding
+    /// it; a sha the worktree does not hold selects nothing.
+    pub(crate) fn select_commit(&mut self, sha: &GitSha, cx: &mut Context<Self>) {
+        let held = self
+            .scoped()
+            .is_some_and(|w| w.commits.iter().any(|c| c.sha == *sha));
+        self.selected_commit = held.then(|| sha.clone());
+        if held {
+            self.set_folded(GitSection::Commits, false, cx);
+        }
+        cx.notify();
     }
 
     /// Highlights `path`'s change row without telling the workspace.
@@ -334,11 +358,12 @@ impl GitPanel {
             .on_click(cx.listener(move |this, _, _, cx| this.change_clicked(&path, cx)))
     }
 
-    fn commit_row(commit: &CommitInfo, owner: &str) -> AnyElement {
+    fn commit_row(commit: &CommitInfo, owner: &str, selected: bool) -> AnyElement {
         let tip: SharedString = commit_tooltip(commit, &jiff::tz::TimeZone::system()).into();
         let id = format!("git-commit:{}", commit.sha);
         let row = ListItem::new(id.clone(), Indent::Tree(1))
             .height(PROJECT_ROW_HEIGHT)
+            .selected(selected)
             .child(
                 tagged(
                     format!("{id}:sha"),
@@ -462,7 +487,12 @@ impl Render for GitPanel {
                 }
                 GitSection::Commits => {
                     if let Some(w) = self.scoped() {
-                        rows.extend(w.commits.iter().map(|c| Self::commit_row(c, &w.handle)));
+                        let selected = self.selected_commit.as_ref();
+                        rows.extend(
+                            w.commits
+                                .iter()
+                                .map(|c| Self::commit_row(c, &w.handle, selected == Some(&c.sha))),
+                        );
                     }
                 }
                 GitSection::Worktrees => self.worktree_rows(&mut rows, cx),
