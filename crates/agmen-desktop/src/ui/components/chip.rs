@@ -1,21 +1,38 @@
 //! A small rounded label on a surface fill: the title bar's listener chip and
-//! the composer's target chip.
+//! the composer's target and model chips.
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, IntoElement, ParentElement as _, RenderOnce, SharedString, Styled as _, Window, div,
+    AnyElement, App, IntoElement, ParentElement as _, RenderOnce, SharedString, Styled as _,
+    Window, div,
 };
 
 use super::{Color, Label, LabelSize};
 use crate::appearance::Appearance;
-use crate::ui::tokens::{DOT_SIZE, RADIUS_MD, SPACE_3, SPACE_6, SPACE_8};
+use crate::ui::tokens::{
+    BORDER_WIDTH, DOT_SIZE, OUTLINE_TINT, RADIUS_MD, RADIUS_SM, SPACE_2, SPACE_3, SPACE_5, SPACE_6,
+    SPACE_7, SPACE_8,
+};
 
-#[derive(Debug, IntoElement)]
+#[derive(IntoElement)]
 pub(crate) struct Chip {
     label: SharedString,
     color: Color,
     dot: Option<Color>,
     code: bool,
+    compact: bool,
+    outline: Option<Color>,
+    leading: Option<AnyElement>,
+    trailing: Option<AnyElement>,
+}
+
+impl std::fmt::Debug for Chip {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Chip")
+            .field("label", &self.label)
+            .field("color", &self.color)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Chip {
@@ -26,7 +43,40 @@ impl Chip {
             color: Color::Placeholder,
             dot: None,
             code: false,
+            compact: false,
+            outline: None,
+            leading: None,
+            trailing: None,
         }
+    }
+
+    /// The composer's chips (nodes 376 and 380): a selected fill, tighter
+    /// padding and a smaller radius.
+    #[must_use]
+    pub(crate) const fn compact(mut self) -> Self {
+        self.compact = true;
+        self
+    }
+
+    /// A border in `color`, tinted, as the model chip's accent outline.
+    #[must_use]
+    pub(crate) fn outline(mut self, color: Color) -> Self {
+        self.outline = Some(color);
+        self
+    }
+
+    /// Something drawn before the label, such as "to" or a glyph.
+    #[must_use]
+    pub(crate) fn leading(mut self, leading: impl IntoElement) -> Self {
+        self.leading = Some(leading.into_any_element());
+        self
+    }
+
+    /// Something drawn after the label, such as a ▾.
+    #[must_use]
+    pub(crate) fn trailing(mut self, trailing: impl IntoElement) -> Self {
+        self.trailing = Some(trailing.into_any_element());
+        self
     }
 
     #[cfg_attr(
@@ -63,15 +113,25 @@ impl RenderOnce for Chip {
         let label = Label::new(self.label)
             .size(LabelSize::Small)
             .color(self.color);
-        div()
-            .flex()
-            .flex_none()
-            .items_center()
-            .gap(SPACE_6)
-            .py(SPACE_3)
-            .px(SPACE_8)
-            .rounded(RADIUS_MD)
-            .bg(theme.elevated_surface)
+        let base = div().flex().flex_none().items_center();
+        let styled = if self.compact {
+            base.gap(SPACE_5)
+                .py(SPACE_2)
+                .px(SPACE_7)
+                .rounded(RADIUS_SM)
+                .bg(theme.element_selected)
+        } else {
+            base.gap(SPACE_6)
+                .py(SPACE_3)
+                .px(SPACE_8)
+                .rounded(RADIUS_MD)
+                .bg(theme.elevated_surface)
+        };
+        styled
+            .when_some(self.outline, |this, outline| {
+                this.border(BORDER_WIDTH)
+                    .border_color(outline.hsla(theme).opacity(OUTLINE_TINT))
+            })
             .when_some(self.dot, |this, dot| {
                 this.child(
                     div()
@@ -81,7 +141,9 @@ impl RenderOnce for Chip {
                         .bg(dot.hsla(theme)),
                 )
             })
+            .children(self.leading)
             .child(if self.code { label.code() } else { label })
+            .children(self.trailing)
     }
 }
 
@@ -110,5 +172,23 @@ mod tests {
                 .into_any_element()
         });
         assert!(size.width > px(16.));
+    }
+
+    #[gpui::test]
+    fn compact_chip_is_shorter(cx: &mut TestAppContext) {
+        let plain = rendered_size(cx, || Chip::new("default").into_any_element());
+        let mut cx2 = TestAppContext::single();
+        let compact = rendered_size(&mut cx2, || {
+            Chip::new("default")
+                .compact()
+                .outline(Color::Accent)
+                .leading(Label::new("◆").size(LabelSize::XSmall))
+                .trailing(Label::new("▾").size(LabelSize::XSmall))
+                .into_any_element()
+        });
+        // Compact pads 2 px where the plain chip pads 3, and the outline
+        // adds 1 px on each side.
+        assert_eq!(compact.height, plain.height);
+        assert!(compact.width > plain.width);
     }
 }
