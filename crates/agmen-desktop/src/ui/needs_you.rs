@@ -6,7 +6,9 @@
 //! notifies, toasts or shows the Answered banner. A message that arrives
 //! while the chat is open signals as `alerts.rs` decides: an urgent alert
 //! that needs me chimes, notifies and toasts; one hushed by quiet hours only
-//! highlights; a normal alert only notifies. "chime played" shows only once
+//! highlights; a normal alert only notifies. A reconnect's catch-up
+//! signals once, for its newest alert ([`Signals::catch_up`]). "chime
+//! played" shows only once
 //! the alarm says the chime sounds. A live answer to the last alert that
 //! needed me shows the Answered banner for [`ANSWERED_FOR`] or until it is
 //! clicked.
@@ -75,6 +77,32 @@ pub(crate) struct Signals {
     pub(crate) toast: bool,
     /// A new Answered banner replaced the last one.
     pub(crate) answered: bool,
+}
+
+impl Signals {
+    /// The signals of a catch-up, a reconnect snapshot's missed messages
+    /// (oldest first), as one: the newest urgent alert's chime and
+    /// notification, or else the newest notification. One chime and one
+    /// notification say "something needs you" as well as a burst would, and
+    /// the toast and banner already show the newest alert.
+    #[must_use]
+    pub(crate) fn catch_up(all: impl IntoIterator<Item = Self>) -> Self {
+        all.into_iter().fold(Self::default(), |so_far, next| {
+            let (chime, notice) = if next.chime.is_some() {
+                (next.chime, next.notice)
+            } else if so_far.chime.is_none() && next.notice.is_some() {
+                (None, next.notice)
+            } else {
+                (so_far.chime, so_far.notice)
+            };
+            Self {
+                chime,
+                notice,
+                toast: so_far.toast || next.toast,
+                answered: so_far.answered || next.answered,
+            }
+        })
+    }
 }
 
 /// The in-app toast (node 6004).

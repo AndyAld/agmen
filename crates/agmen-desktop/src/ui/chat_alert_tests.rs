@@ -386,3 +386,59 @@ fn show_arrival_draws_the_toast_and_chime_chip_silently(cx: &mut TestAppContext)
     assert_eq!(o.alarm.chimes.get(), 0);
     assert!(o.alarm.notices.borrow().is_empty());
 }
+
+#[gpui::test]
+fn answering_a_snoozed_alert_ends_its_timer(cx: &mut TestAppContext) {
+    // Review: a stale timer counts against the cap, so the cap could cancel
+    // the timer of an alert that is still snoozed.
+    let o = open(cx, Screen::NeedsYou);
+    let alert = urgent_alert(&o.backend);
+    click(o.cx, sel(&alert, "alert:snooze"));
+    settle(o.cx);
+    assert_eq!(
+        o.chat.read_with(o.cx, |chat, _| chat.snooze_timer_count()),
+        1
+    );
+    let adams = FixtureBackend::for_screen(Screen::NeedsYouAnswered)
+        .unwrap()
+        .snapshot()
+        .messages
+        .pop()
+        .unwrap();
+    assert_eq!(adams.client.reply_to.as_ref(), Some(&alert.client.id));
+    o.chat.update(o.cx, |chat, cx| {
+        chat.apply(Update::Message(Box::new(adams)), cx);
+    });
+    assert!(
+        !o.chat
+            .read_with(o.cx, |chat, _| chat.alerts.is_snoozed(&alert.client.id))
+    );
+    assert_eq!(
+        o.chat.read_with(o.cx, |chat, _| chat.snooze_timer_count()),
+        0
+    );
+}
+
+#[gpui::test]
+fn a_snapshot_catch_up_signals_once_for_the_newest_alert(cx: &mut TestAppContext) {
+    // Review: after a reconnect, each missed urgent alert posted its own
+    // notification. A catch-up chimes and notifies once, for the newest.
+    let alert = urgent_alert(&FixtureBackend::for_screen(Screen::NeedsYou).unwrap());
+    let o = open(cx, Screen::Chat);
+    let mut later = o.backend.snapshot();
+    let mut newer = alert.clone();
+    newer.client.id = "01JE0000000000000000000NEW".parse().unwrap();
+    newer.seq = agmen_proto::Seq(alert.seq.0 + 1000);
+    later.messages.push(alert);
+    later.messages.push(newer.clone());
+    o.chat.update(o.cx, |chat, cx| {
+        chat.apply(Update::Snapshot(Box::new(later)), cx);
+    });
+    assert_eq!(o.chat.read_with(o.cx, |chat, _| chat.badge()), 2);
+    assert_eq!(o.alarm.chimes.get(), 1);
+    let notices = o.alarm.notices.borrow();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert_eq!(notices[0].tag, format!("alert-{}", newer.client.id));
+    let toast = o.chat.read_with(o.cx, |chat, _| chat.toast().cloned());
+    assert_eq!(toast.map(|toast| toast.alert), Some(newer.client.id));
+}

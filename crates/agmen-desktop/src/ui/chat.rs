@@ -30,7 +30,7 @@ use crate::local_time::LocalZone;
 // Task 13: the banner, toast, chime and notification for alerts.
 #[path = "chat_alerts.rs"]
 mod alert_wiring;
-use super::needs_you::AlertLook;
+use super::needs_you::{AlertLook, Signals};
 pub(crate) use alert_wiring::AlertCounts;
 
 // Task 14: the take-over terminal between the messages and the composer.
@@ -378,11 +378,12 @@ impl ChatView {
                 let old = self.snapshot.clone();
                 let seen: BTreeSet<(&Stream, Seq, &MessageId)> =
                     old.messages.iter().map(position).collect();
-                for env in &snapshot.messages {
-                    if !seen.contains(&position(env)) {
-                        signals.push(self.hear(env, &snapshot.messages));
-                    }
-                }
+                let missed = snapshot
+                    .messages
+                    .iter()
+                    .filter(|env| !seen.contains(&position(env)))
+                    .map(|env| self.hear(env, &snapshot.messages));
+                signals.push(Signals::catch_up(missed));
                 // Task 15: the model chip follows the new agents and listener.
                 self.composer
                     .update(cx, |composer, cx| composer.set_snapshot(&snapshot, cx));
