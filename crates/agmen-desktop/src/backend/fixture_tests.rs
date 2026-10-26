@@ -214,6 +214,37 @@ fn settings_applied_screen_starts_applied() {
 }
 
 #[test]
+fn settings_screens_lead_recent_with_their_change() {
+    // V65: console.py 1504 to 1508 (frames 6674 and 7290).
+    let first = |screen| {
+        FixtureBackend::for_screen(screen)
+            .unwrap()
+            .snapshot()
+            .listener
+            .recent
+            .remove(0)
+    };
+    let pending = first(Screen::SettingsFromChat);
+    assert_eq!(
+        (pending.time.as_str(), pending.text.as_str(), pending.kind),
+        (
+            "15:50",
+            "waiting for Apply: andy/fx1 lanes and budget",
+            RecentKind::Waiting
+        )
+    );
+    let applied = first(Screen::SettingsApplied);
+    assert_eq!(
+        (applied.time.as_str(), applied.text.as_str(), applied.kind),
+        (
+            "15:50",
+            "changed andy/fx1 lanes and budget (Undo)",
+            RecentKind::Applied
+        )
+    );
+}
+
+#[test]
 fn plan_fixture_team_and_shares() {
     let plan = FixtureBackend::for_screen(Screen::Plan)
         .unwrap()
