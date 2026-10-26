@@ -71,13 +71,33 @@ fn preload_stops_at_its_limit(cx: &mut TestAppContext) {
     assert_eq!(rendered, 1);
 }
 
+// agmen-c7 fix-hosting-review minor 2: the limit is per call, so a later
+// workspace still gets its icons once an earlier one filled the cache.
+#[gpui::test]
+fn the_limit_counts_each_call_on_its_own(cx: &mut TestAppContext) {
+    let icons = material_icons();
+    let renderer = cx.update(|cx| cx.svg_renderer());
+    icons.preload_up_to([("main.rs", false)], &renderer, 1);
+    icons.preload_up_to([("Cargo.lock", false)], &renderer, 1);
+    for name in ["main.rs", "Cargo.lock"] {
+        let icon = icons.icon(Path::new(name), false, false);
+        assert!(matches!(icon, FileIcon::Rendered(_)), "{name}: {icon:?}");
+    }
+}
+
 #[test]
 fn lucide_and_system_choices_preload_nothing() {
-    let (icons, _) = FileIcons::new(&IconThemeChoice::Lucide, Path::new(""));
     let renderer = gpui::SvgRenderer::new(std::sync::Arc::new(crate::assets::Assets));
-    icons.preload([("main.rs", false)], &renderer);
-    assert!(matches!(
-        icons.icon(Path::new("main.rs"), false, false),
-        FileIcon::Ui(UiIcon::File)
-    ));
+    for choice in [IconThemeChoice::Lucide, IconThemeChoice::System] {
+        let (icons, _) = FileIcons::new(&choice, Path::new(""));
+        icons.preload([("main.rs", false)], &renderer);
+        let icon = icons.icon(Path::new("main.rs"), false, false);
+        assert!(
+            !matches!(icon, FileIcon::Rendered(_)),
+            "{choice:?}: {icon:?}"
+        );
+        if choice == IconThemeChoice::Lucide {
+            assert!(matches!(icon, FileIcon::Ui(UiIcon::File)), "{icon:?}");
+        }
+    }
 }

@@ -85,3 +85,19 @@ fn snapshot_entries_cover_trees_tabs_and_the_preview() {
     unique.dedup();
     assert_eq!(unique.len(), entries.len(), "each name once");
 }
+
+// agmen-c7 fix-hosting-review minor 2: past the preload limit, the names
+// left out are the deepest, not the last in alphabetical order.
+#[test]
+fn shallow_names_come_before_deeper_ones() {
+    let entries = snapshot_entries(&chat_snapshot());
+    let at = |name: &str, is_dir: bool| {
+        entries
+            .iter()
+            .position(|(n, d)| n == name && *d == is_dir)
+            .unwrap_or_else(|| panic!("{name} {is_dir}"))
+    };
+    assert!(at("settings.toml", false) < at("src", true));
+    assert!(at("src", true) < at("main.rs", false));
+    assert!(at("tests", true) < at("tabs.rs", false));
+}
