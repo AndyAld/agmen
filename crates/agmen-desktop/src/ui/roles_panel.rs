@@ -16,7 +16,7 @@ use super::components::{
 };
 use super::dock::RightDockHeader;
 use super::syntax::Language;
-use super::tokens::{ICON_MD, SPACE_6, SPACE_14, SPACE_16};
+use super::tokens::{ICON_LG, SPACE_6, SPACE_14, SPACE_16};
 use crate::appearance::Appearance;
 use crate::backend::{RoleFile, RoleInfo, RoleLayer};
 use crate::icons::{FileIcons, UiIcon};
@@ -73,16 +73,13 @@ impl RolesPanel {
         let file = format!("{}.xml", role.name);
         let theme = &cx.global::<Appearance>().theme;
         let icon_color = theme.icon_muted;
+        // console.py draws role file icons at 16 px (V83, C216).
         let icon = cx.try_global::<FileIcons>().map_or_else(
-            || {
-                Icon::new(UiIcon::File)
-                    .size(IconSize::Small)
-                    .into_any_element()
-            },
+            || UiIcon::File.render(icon_color, ICON_LG).into_any_element(),
             |icons| {
                 icons
                     .icon(Path::new(&file), false, false)
-                    .render(icon_color, ICON_MD)
+                    .render(icon_color, ICON_LG)
             },
         );
         let name = role.name.clone();
@@ -90,7 +87,12 @@ impl RolesPanel {
         ListItem::new(format!("role:{}", role.name), Indent::Depth(0))
             .selected(self.selected.as_deref() == Some(role.name.as_str()))
             .leading(icon)
-            .child(Label::new(file).code())
+            .child({
+                let selector = format!("role:{}:name", role.name);
+                div()
+                    .debug_selector(|| selector)
+                    .child(Label::new(file).code())
+            })
             .end(role_dot(&role.name, role.palette_role.as_deref()))
             .on_click(cx.listener(move |this, _, _, cx| this.clicked(&name, cx)))
     }

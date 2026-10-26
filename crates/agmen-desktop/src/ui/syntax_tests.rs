@@ -144,3 +144,21 @@ fn xml_highlights_follow_the_mockup() {
     assert_eq!(name(at("</rule")), Some("tag"), "</");
     assert_eq!(name(at("x</rule")), None, "character data stays plain");
 }
+
+#[test]
+fn rust_function_names_are_functions_not_types() {
+    // V103: a definition, a path call and a plain call all get `function`,
+    // which Andy's theme colors green, while `Tabs` stays a type.
+    let text = "fn main() { Tabs::default(); app::run(tabs) }\n";
+    let at = |needle: &str| text.find(needle).unwrap();
+    let name = |offset: usize| name_at(text, Language::Rust, offset);
+    assert_eq!(
+        name(at("main")),
+        Some("function"),
+        "{:?}",
+        names_of(text, Language::Rust)
+    );
+    assert_eq!(name(at("default")), Some("function"));
+    assert_eq!(name(at("run")), Some("function"));
+    assert_eq!(name(at("Tabs")), Some("type"));
+}

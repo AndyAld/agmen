@@ -26,6 +26,14 @@ pub(super) struct Line {
     highlights: Vec<(Range<usize>, &'static str)>,
 }
 
+#[cfg(test)]
+impl Line {
+    /// The line's highlights, as byte ranges within it and syntax names.
+    pub(super) fn highlights(&self) -> &[(Range<usize>, &'static str)] {
+        &self.highlights
+    }
+}
+
 /// Splits `text` into lines and clips each highlight to the lines it covers.
 /// A final newline does not make an extra empty line, and a CRLF ending
 /// counts as one line break.

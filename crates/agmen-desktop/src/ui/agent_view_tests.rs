@@ -40,7 +40,28 @@ fn plain_output_is_dim() {
 fn output_glyph_takes_the_line_color() {
     // V79: "⎿ ok" is all success, "⎿ recorded" all accent, "⎿ 2 files" all
     // text.placeholder.
-    for tone in [Tone::Plain, Tone::Success, Tone::Accent] {
-        assert_eq!(out_colors(tone), (tone_color(tone), tone_color(tone)));
-    }
+    assert_eq!(
+        out_colors(Tone::Plain),
+        (Color::Placeholder, Color::Placeholder)
+    );
+    assert_eq!(out_colors(Tone::Success), (Color::Success, Color::Success));
+    assert_eq!(out_colors(Tone::Accent), (Color::Accent, Color::Accent));
+}
+
+#[gpui::test]
+fn breadcrumb_buttons_are_8_px_apart(cx: &mut TestAppContext) {
+    // V105: node 607 spaces "Open in terminal" and "Stop" 8 px apart.
+    init(cx);
+    let snapshot = chat_snapshot();
+    let id = crate::backend::fixture_id("andy/fx1");
+    let session = snapshot.sessions.get(&id).unwrap().clone();
+    let (_, cx) = cx.add_window_view(|_, cx| AgentView::new("andy/fx1", session, cx));
+    redraw(cx);
+    let open = cx.debug_bounds("agent-open-terminal").unwrap();
+    let stop = cx.debug_bounds("agent-stop").unwrap();
+    assert_eq!(
+        stop.left() - open.right(),
+        gpui::px(8.),
+        "{open:?} {stop:?}"
+    );
 }

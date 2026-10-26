@@ -29,29 +29,45 @@ enum Row {
     },
 }
 
-/// Every hunk's header and lines, highlighted as `language`. Each hunk is
-/// highlighted as one text, so a construct that spans lines keeps its
-/// colors; the base and the worktree side are mixed, as a unified diff is.
+/// Every hunk's header and lines, highlighted as `language`. Each side of a
+/// hunk is highlighted as one text, as Zed highlights the old and the new
+/// buffer: context and added lines from the worktree side, removed lines
+/// from the base side. Mixing the two would make one side's conflict
+/// markers turn the rest of the hunk into types (V103).
 fn layout_rows(hunks: &[Hunk], language: Language) -> Vec<Row> {
     let mut rows = Vec::new();
     for hunk in hunks {
         rows.push(Row::Header(hunk.header().into()));
         // One newline after every line, so an empty last line keeps its row.
-        let text: String = hunk
-            .lines
-            .iter()
-            .flat_map(|line| [line.text.as_str(), "\n"])
-            .collect();
-        let laid = layout_lines(&text, language);
+        let side = |skip: DiffLineKind| -> String {
+            hunk.lines
+                .iter()
+                .filter(|line| line.kind != skip)
+                .flat_map(|line| [line.text.as_str(), "\n"])
+                .collect()
+        };
+        let mut new = layout_lines(&side(DiffLineKind::Removed), language).into_iter();
+        let mut old = layout_lines(&side(DiffLineKind::Added), language).into_iter();
+        let before = rows.len();
+        rows.extend(hunk.lines.iter().filter_map(|diff| {
+            let line = match diff.kind {
+                DiffLineKind::Context => {
+                    old.next();
+                    new.next()
+                }
+                DiffLineKind::Added => new.next(),
+                DiffLineKind::Removed => old.next(),
+            }?;
+            Some(Row::Line {
+                kind: diff.kind,
+                line,
+            })
+        }));
         debug_assert_eq!(
-            laid.len(),
+            rows.len() - before,
             hunk.lines.len(),
             "one laid out line per diff line"
         );
-        rows.extend(hunk.lines.iter().zip(laid).map(|(diff, line)| Row::Line {
-            kind: diff.kind,
-            line,
-        }));
     }
     rows
 }
