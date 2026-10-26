@@ -67,7 +67,9 @@ impl ZedSettings {
             .get(theme)
             .and_then(serde_json::Value::as_object)
         {
-            out.extend(own.clone());
+            // The per-theme layer goes over the global one the same way the
+            // whole merge goes over the theme (Zed's order).
+            super::theme::merge_style(&mut out, own);
         }
         out
     }

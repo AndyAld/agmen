@@ -1,5 +1,5 @@
-//! A small rounded label on a surface fill: the title bar's listener chip and
-//! the composer's target and model chips.
+//! A small rounded label on a surface fill: the title bar's listener chip,
+//! the composer's target and model chips and the panels' worktree chip.
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -24,6 +24,7 @@ pub(crate) struct Chip {
     outline: Option<Color>,
     leading: Option<AnyElement>,
     trailing: Option<AnyElement>,
+    full_width: bool,
 }
 
 impl std::fmt::Debug for Chip {
@@ -47,6 +48,7 @@ impl Chip {
             outline: None,
             leading: None,
             trailing: None,
+            full_width: false,
         }
     }
 
@@ -97,6 +99,13 @@ impl Chip {
         self.code = true;
         self
     }
+
+    /// Fills its row, with the trailing element at the far end.
+    #[must_use]
+    pub(crate) const fn full_width(mut self) -> Self {
+        self.full_width = true;
+        self
+    }
 }
 
 impl RenderOnce for Chip {
@@ -134,7 +143,17 @@ impl RenderOnce for Chip {
                 )
             })
             .children(self.leading)
-            .child(if self.code { label.code() } else { label })
+            .map(|this| {
+                let label = if self.code { label.code() } else { label };
+                if self.full_width {
+                    // The label takes the room left and clips, so the
+                    // trailing element stays at the far end.
+                    this.w_full()
+                        .child(div().flex_1().min_w_0().overflow_hidden().child(label))
+                } else {
+                    this.child(label)
+                }
+            })
             .children(self.trailing)
     }
 }

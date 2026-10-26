@@ -27,9 +27,21 @@ fn wallpaper_adaptive_matches_marked() {
     assert!(t.background.a < 1.0, "Marked's background is translucent");
     assert_eq!(t.accents.len(), 7);
     // Marked's syntax JSON: keyword is ramp slot 5, string slot 2, number slot 0.
-    assert!(close(t.syntax["keyword"], hex("#d99db3")));
-    assert!(close(t.syntax["string"], hex("#b5bd88")));
-    assert!(close(t.syntax["number"], hex("#aea1db")));
+    // Every ramp slot lands where Marked's syntax JSON puts it (C123).
+    for (key, want) in [
+        ("number", "#aea1db"),
+        ("type", "#e0a29c"),
+        ("string", "#b5bd88"),
+        ("operator", "#97abb7"),
+        ("function", "#63bec9"),
+        ("keyword", "#d99db3"),
+        ("string.special", "#89a4de"),
+        ("punctuation.list_marker", "#97abb7"),
+        ("text.code.span", "#b5bd88"),
+    ] {
+        assert!(close(t.syntax[key], hex(want)), "{key}");
+    }
+    // The eighth slot (#c5ab72) has no syntax name in Marked's JSON.
     assert!(close(t.syntax["comment"], hex("#71717a")));
     assert!(close(t.created, hex("#62b193")));
     assert!(close(t.error, hex("#d590aa")), "destructive is error");
@@ -71,4 +83,17 @@ fn translucent_theme_requests_blur() {
         window_background(&gruvbox_material_dark_hard()),
         WindowBackgroundAppearance::Opaque
     );
+}
+
+#[test]
+fn broken_state_json_warns() {
+    // Review C126 and C139: the defaults stay, and a warning says why.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("state.json");
+    fs::write(&path, "{ not json").unwrap();
+    let mut warnings = Vec::new();
+    let t = with_wallpaper_at(Some(path), &mut warnings);
+    assert_eq!(t, wallpaper_adaptive());
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].contains("state.json"), "{warnings:?}");
 }

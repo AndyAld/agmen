@@ -43,6 +43,8 @@ fn syntax_from_ramp(
         ("operator", at(3)),
         ("punctuation", muted),
         ("punctuation.special", accent),
+        ("punctuation.list_marker", at(3)),
+        ("text.code.span", at(2)),
         ("comment", gray(0x71, 0x71, 0x7a)),
         ("comment.doc", gray(0x71, 0x71, 0x7a)),
         ("link_text", accent),
@@ -122,13 +124,24 @@ fn state_path() -> Option<PathBuf> {
         .map(|dir| PathBuf::from(dir).join("ZedWallpaperThemeButton/state.json"))
 }
 
-/// Marked's palette with the wallpaper utility's current colors over it.
-pub(crate) fn with_wallpaper() -> Theme {
+/// Marked's palette with the wallpaper utility's current colors over it. A
+/// palette file that cannot be read leaves the defaults and a warning.
+pub(crate) fn with_wallpaper(warnings: &mut Vec<String>) -> Theme {
+    with_wallpaper_at(state_path(), warnings)
+}
+
+/// [`with_wallpaper`] with the state file's path given.
+pub(crate) fn with_wallpaper_at(path: Option<PathBuf>, warnings: &mut Vec<String>) -> Theme {
     let base = wallpaper_adaptive();
-    match state_path() {
-        // A palette that cannot be read leaves the defaults.
-        Some(path) => load_wallpaper_palette(&path, base.clone()).unwrap_or(base),
-        None => base,
+    let Some(path) = path else {
+        return base;
+    };
+    match load_wallpaper_palette(&path, base.clone()) {
+        Ok(theme) => theme,
+        Err(err) => {
+            warnings.push(format!("{err}; using Marked's default palette"));
+            base
+        }
     }
 }
 

@@ -553,3 +553,115 @@ fn owned_font_keys_match_the_struct() {
     owned.sort();
     assert_eq!(keys, owned);
 }
+
+#[test]
+fn overrides_merge_like_zed() {
+    // Review C121 and C127: Zed applies experimental overrides, then the
+    // per-theme ones; syntax merges per highlight name and players per index.
+    let dir = tempfile::tempdir().unwrap();
+    let zed = dir.path().join("zed");
+    fs::create_dir_all(zed.join("themes")).unwrap();
+    fs::copy(
+        zed_dir().join("themes/gruvbox-sample.json"),
+        zed.join("themes/g.json"),
+    )
+    .unwrap();
+    fs::write(
+        zed.join("settings.json"),
+        r##"{
+            "theme": "Gruvbox Material Dark Hard",
+            "experimental.theme_overrides": {
+                "border": "#111111",
+                "syntax": { "string": { "color": "#010101" } }
+            },
+            "theme_overrides": {
+                "Gruvbox Material Dark Hard": {
+                    "border": "#222222",
+                    "players": [{}, { "cursor": "#020202" }]
+                }
+            }
+        }"##,
+    )
+    .unwrap();
+    let a = resolve_paths(dir.path(), &ext_dir(), SystemMode::Dark);
+    assert!(
+        close(a.theme.border, hex("#222222")),
+        "per-theme beats global on one key"
+    );
+    assert!(
+        close(a.theme.syntax["string"], hex("#010101")),
+        "the overridden name"
+    );
+    assert!(
+        close(a.theme.syntax["keyword"], hex("#ed675f")),
+        "other names stay the theme's"
+    );
+    assert!(
+        close(a.theme.syntax["type"], hex("#123123")),
+        "not the fallback's #dda752"
+    );
+    assert!(
+        close(a.theme.players[0], hex("#72b9a9")),
+        "an empty player keeps its colors"
+    );
+    assert!(
+        close(a.theme.players[1], hex("#020202")),
+        "one field of one player"
+    );
+}
+
+#[test]
+fn overrides_apply_to_the_marked_theme() {
+    // Review C125.
+    let mut overrides = serde_json::Map::new();
+    overrides.insert("border".into(), serde_json::json!("#333333"));
+    let mut warnings = Vec::new();
+    let t = super::theme::load_theme_with(
+        &zed_dir(),
+        &ext_dir(),
+        super::marked::MARKED_THEME,
+        &overrides,
+        &mut warnings,
+    )
+    .unwrap();
+    assert!(close(t.border, hex("#333333")));
+}
+
+#[test]
+fn bad_override_values_keep_the_themes_own() {
+    // Review C142: Zed keeps the theme's value for an unparsable override
+    // and treats "accents": [] as no change.
+    let mut style: serde_json::Map<String, serde_json::Value> = serde_json::from_str(
+        r##"{"border": "#123456", "text": "#654321", "accents": ["#abcdef"]}"##,
+    )
+    .unwrap();
+    let overrides = serde_json::from_str(
+        r##"{"border": "not a color", "text": null, "accents": [], "background": "#010101"}"##,
+    )
+    .unwrap();
+    super::theme::merge_style(&mut style, &overrides);
+    assert_eq!(style["border"], "#123456");
+    assert_eq!(style["text"], "#654321");
+    assert_eq!(style["accents"][0], "#abcdef");
+    assert_eq!(style["background"], "#010101", "good values still apply");
+}
+
+#[test]
+fn bad_nested_override_values_keep_the_themes_own() {
+    // Review C148: the C142 rule holds inside syntax entries and players.
+    let mut style: serde_json::Map<String, serde_json::Value> = serde_json::from_str(
+        r##"{"syntax": {"comment": {"color": "#111111", "font_style": "italic"}},
+             "players": [{"cursor": "#222222", "selection": "#333333"}]}"##,
+    )
+    .unwrap();
+    let overrides = serde_json::from_str(
+        r##"{"syntax": {"comment": {"color": null, "font_style": "normal"}},
+             "players": [{"cursor": "not a color", "selection": "#444444"}]}"##,
+    )
+    .unwrap();
+    super::theme::merge_style(&mut style, &overrides);
+    assert_eq!(style["syntax"]["comment"]["color"], "#111111");
+    assert_eq!(style["syntax"]["comment"]["font_style"], "normal");
+    assert_eq!(style["players"][0]["cursor"], "#222222");
+    assert_eq!(style["players"][0]["selection"], "#444444");
+}

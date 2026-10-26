@@ -11,15 +11,18 @@ use std::collections::BTreeMap;
 use agmen_proto::{GitSha, IdentityId, StampedEnvelope};
 use serde_json::{Value, json};
 
+use gpui::SharedString;
+
+use crate::roles;
+
 use super::{
-    AgentInfo, AgentRow, AgentStatus, Approval, BackendError, ChangeCard, ChangeId, ChangeRow,
-    ChangeState, GitFacts, LaneInfo, ListenerInfo, PersonGroup, PlanInfo, RecentAction, RecentKind,
-    SpecState, TeamRow,
+    AgentInfo, AgentRow, AgentSession, AgentStatus, Approval, BackendError, ChangeCard, ChangeId,
+    ChangeRow, ChangeState, GitFacts, LaneInfo, ListenerInfo, PersonGroup, PlanInfo, RecentAction,
+    RecentKind, RoleFile, RoleInfo, RoleLayer, SessionRow, SpecState, TeamRow, Tone, WorktreeInfo,
+    WorktreeState,
 };
 
-fn words(list: &str) -> Vec<String> {
-    list.split_whitespace().map(str::to_owned).collect()
-}
+use crate::roles::words;
 
 fn agent(
     person: &str,
@@ -38,6 +41,7 @@ fn agent(
         harness: harness.to_owned(),
         status,
         depth,
+        item: None,
     })
 }
 
@@ -45,6 +49,7 @@ pub(super) fn roster() -> Result<Vec<PersonGroup>, BackendError> {
     use AgentStatus::{Idle, Reading, Working};
     Ok(vec![
         PersonGroup {
+            id: id("andy")?,
             person: "andy".into(),
             you: true,
             agents: vec![
@@ -52,11 +57,16 @@ pub(super) fn roster() -> Result<Vec<PersonGroup>, BackendError> {
                 agent("andy", 1, "fx1", "engineer", "claude", Working)?,
                 agent("andy", 1, "t7k", "tester", "opencode", Working)?,
                 // Mockup fix 28: rv2 runs on a harness installed on this machine.
-                agent("andy", 2, "rv2", "reviewer", "opencode", Reading)?,
+                AgentRow {
+                    // Mockup fix 51: rv2 is reading C015's DONE.
+                    item: Some("C015".into()),
+                    ..agent("andy", 2, "rv2", "reviewer", "opencode", Reading)?
+                },
                 agent("andy", 0, "a1", "engineer", "claude", Idle)?,
             ],
         },
         PersonGroup {
+            id: id("sean")?,
             person: "sean".into(),
             you: false,
             agents: vec![
@@ -65,6 +75,7 @@ pub(super) fn roster() -> Result<Vec<PersonGroup>, BackendError> {
             ],
         },
         PersonGroup {
+            id: id("adam")?,
             person: "adam".into(),
             you: false,
             agents: vec![
@@ -236,11 +247,14 @@ const ROSTER: &[&str] = &[
 /// What the hub stamps as `refs` for a body: identities it has in its
 /// roster, items, lanes and PRs (protocol section 3). Git names are left to
 /// the client.
+// shortcut: a stand-in for the hub's own stamp_refs; once the fixture is replaced by agmend, the hub's refs arrive on the wire and this goes.
 fn hub_refs(body: &str) -> Vec<Value> {
     static WORDS: std::sync::LazyLock<Option<regex::Regex>> = std::sync::LazyLock::new(|| {
         regex::Regex::new(
             r"(?P<who>@?\b[a-z]+(?:/[a-z0-9]+)?\b)|(?P<item>\b[A-Z](?:-\d{1,6}|\d{3})\b)|(?P<lane>\bL-[A-Z]+\b)|(?P<pr>#\d+)",
         )
+        // A pattern that failed to compile would stamp no refs rather than
+        // panic; refs_find_every_kind_in_chat_fixture proves it compiles.
         .ok()
     });
     let Some(re) = WORDS.as_ref() else {
@@ -640,19 +654,247 @@ pub(super) fn plan_roster() -> Result<Vec<PersonGroup>, BackendError> {
             harness: harness.into(),
             status,
             depth: 0,
+            item: None,
         })
     };
     Ok(vec![
         // Mockup fix 52: sean/plan keeps its pr-3331 harness, gemini.
         PersonGroup {
+            id: id("andy")?,
             person: "andy".into(),
             you: true,
             agents: vec![row("andy/listen", "listener", "codex", Idle)?],
         },
         PersonGroup {
+            id: id("sean")?,
             person: "sean".into(),
             you: false,
             agents: vec![row("sean/plan", "planner", "gemini", Working)?],
         },
     ])
+}
+
+/// `SESSION` in console.py: andy/fx1's turn, with mockup fix 41 (+2 -5).
+pub(super) fn fx1_session() -> AgentSession {
+    let tool = |name: &str, arg: &str| SessionRow::Tool {
+        name: name.into(),
+        arg: arg.into(),
+    };
+    let out = |text: &str, tone| SessionRow::Out {
+        text: text.into(),
+        tone,
+    };
+    AgentSession {
+        item: "C015".into(),
+        branch: "fix/c015-main-conflict".into(),
+        rows: vec![
+            tool("Read", "src/main.rs"),
+            tool("Bash", "git show 4d9fdc8 --stat"),
+            out("2 files changed, 14 insertions(+), 3 deletions(-)", Tone::Plain),
+            SessionRow::Say(
+                "Both sides add modules. Keeping cylinder, document, minimap and tabs; dropping the conflict markers.".into(),
+            ),
+            tool("Edit", "src/main.rs  +2 -5"),
+            tool("Bash", "cargo test"),
+            out("test result: ok. 71 passed; 0 failed", Tone::Success),
+            tool("Bash", "git push -u origin fix/c015-main-conflict"),
+            out("ok", Tone::Plain),
+            SessionRow::Cost("turn 4 · $0.31 · 44 s".into()),
+            tool("agmen", "done C015"),
+            out("recorded #1866 (feed)", Tone::Accent),
+        ],
+    }
+}
+
+/// The built-in role whose color a role's dot takes: itself, or the
+/// nearest built-in it extends. Base has no role color.
+fn palette_role(
+    name: &str,
+    files: &[(&str, RoleLayer, &'static str)],
+    specs: &[roles::RoleSpec],
+) -> Option<String> {
+    let mut current = name;
+    // Bounded like resolve: a chain longer than the files is a loop.
+    for _ in 0..=files.len() {
+        if current == "base" {
+            return None;
+        }
+        if files
+            .iter()
+            .any(|(n, layer, _)| *n == current && *layer == RoleLayer::BuiltIn)
+        {
+            return Some(current.to_owned());
+        }
+        current = specs
+            .iter()
+            .find(|s| s.name == current)?
+            .extends
+            .as_deref()?;
+    }
+    None
+}
+
+/// The built-in reviewer role, which the code view's dev window also shows.
+pub(crate) const REVIEWER_XML: &str = include_str!("../../../../roles/reviewer.xml");
+
+/// The built-in roles ship in the binary from the repo's `roles/` folder
+/// (spec 3.2); the project and personal ones are the mockup's examples.
+/// Each role's panel is resolved from the files, the way agmend will.
+pub(super) fn role_files(roster: &[PersonGroup]) -> Vec<RoleFile> {
+    let files: [(&str, RoleLayer, &'static str); 10] = [
+        (
+            "base",
+            RoleLayer::BuiltIn,
+            include_str!("../../../../roles/base.xml"),
+        ),
+        (
+            "listener",
+            RoleLayer::BuiltIn,
+            include_str!("../../../../roles/listener.xml"),
+        ),
+        (
+            "coordinator",
+            RoleLayer::BuiltIn,
+            include_str!("../../../../roles/coordinator.xml"),
+        ),
+        (
+            "planner",
+            RoleLayer::BuiltIn,
+            include_str!("../../../../roles/planner.xml"),
+        ),
+        (
+            "researcher",
+            RoleLayer::BuiltIn,
+            include_str!("../../../../roles/researcher.xml"),
+        ),
+        (
+            "engineer",
+            RoleLayer::BuiltIn,
+            include_str!("../../../../roles/engineer.xml"),
+        ),
+        (
+            "tester",
+            RoleLayer::BuiltIn,
+            include_str!("../../../../roles/tester.xml"),
+        ),
+        ("reviewer", RoleLayer::BuiltIn, REVIEWER_XML),
+        (
+            "security-reviewer",
+            RoleLayer::Project,
+            "<role name=\"security-reviewer\" extends=\"reviewer\" kind=\"agent\" tier=\"deep\" version=\"1\">\n  <summary>Reviews a DONE for security only.</summary>\n</role>\n",
+        ),
+        (
+            "docs-writer",
+            RoleLayer::Personal,
+            "<role name=\"docs-writer\" extends=\"engineer\" kind=\"agent\" tier=\"standard\" version=\"1\">\n  <summary>Writes docs in docs/**.</summary>\n  <edits scope=\"paths\" globs=\"docs/**\" />\n</role>\n",
+        ),
+    ];
+    let specs: Vec<roles::RoleSpec> = files
+        .iter()
+        .filter_map(|(_, _, text)| roles::parse(text).ok())
+        .collect();
+    let info = |name: &str| -> Option<RoleInfo> {
+        // A role that does not resolve shows its file with no panel.
+        let resolved = roles::resolve(name, &specs).ok()?;
+        // Ruling D12: what the kind could send but this role cannot.
+        let refused = agmen_proto::Verb::ALL
+            .iter()
+            .filter(|v| roles::kind_may_send(resolved.kind, **v))
+            .map(|v| v.as_str())
+            .filter(|v| !resolved.verbs.iter().any(|own| own == v))
+            .map(str::to_owned)
+            .collect();
+        let used_by: Vec<(String, String)> = roster
+            .iter()
+            .flat_map(|group| &group.agents)
+            .filter(|agent| agent.role == name)
+            .map(|agent| {
+                let mut note = format!("{} · {}", agent.harness, agent.status.label());
+                if let Some(item) = &agent.item {
+                    note = format!("{note} {item}");
+                }
+                (agent.handle.clone(), note)
+            })
+            .collect();
+        let extended_by = specs
+            .iter()
+            .filter(|s| s.extends.as_deref() == Some(name))
+            .map(|s| s.name.clone())
+            .collect();
+        // Spec 3.4: no agent can limit which commands a shell runs.
+        let read_only_shell =
+            resolved.tools.iter().any(|t| t == "shell") && resolved.edits == roles::Edits::None;
+        Some(RoleInfo {
+            kind: resolved.kind,
+            tier: resolved.tier,
+            tools: resolved.tools,
+            bash_note: read_only_shell
+                .then(|| "read-only by rule only; not enforceable".to_owned()),
+            edits: resolved.edits,
+            verbs: resolved.verbs,
+            refused,
+            used_by,
+            extended_by,
+            mention: (
+                format!("@{name}s"),
+                format!("role:{name} on the wire · humans and coordinators"),
+            ),
+        })
+    };
+    files
+        .iter()
+        .map(|(name, layer, text)| RoleFile {
+            name: (*name).to_owned(),
+            layer: *layer,
+            text: SharedString::new_static(text),
+            info: info(name),
+            palette_role: palette_role(name, &files, &specs),
+        })
+        .collect()
+}
+
+/// The worktrees on Andy's machine. fx1's files are `PROJECT` and `TESTS`
+/// in console.py; Task 11 adds its changes and Task 12 the commits and the
+/// other worktrees.
+pub(super) fn worktrees() -> Result<Vec<WorktreeInfo>, BackendError> {
+    use super::{ChangeKind, FileChange};
+    let files = [
+        ".github/workflows/release.yml",
+        "Cargo.lock",
+        "Cargo.toml",
+        "README.md",
+        // Mockup fix 50: main.rs declares `mod app;`.
+        "src/app.rs",
+        "src/cylinder.rs",
+        "src/document.rs",
+        "src/main.rs",
+        "src/minimap.rs",
+        "src/ui/mod.rs",
+        "src/ui/tabs.rs",
+        "tests/it_main.rs",
+        "tests/it_tabs.rs",
+    ];
+    Ok(vec![WorktreeInfo {
+        owner: id("andy/fx1")?,
+        handle: "andy/fx1".into(),
+        branch: "fix/c015-main-conflict".into(),
+        files: files.iter().map(|f| (*f).to_owned()).collect(),
+        // Mockup fix 41: the fix's edit to main.rs is +2 -5.
+        changes: vec![
+            FileChange {
+                path: "src/main.rs".into(),
+                kind: ChangeKind::Modified,
+                added: 2,
+                removed: 5,
+            },
+            FileChange {
+                path: "Cargo.lock".into(),
+                kind: ChangeKind::Modified,
+                added: 1,
+                removed: 1,
+            },
+        ],
+        commits: Vec::new(),
+        state: WorktreeState::Pushed,
+    }])
 }

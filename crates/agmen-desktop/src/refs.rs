@@ -67,6 +67,8 @@ impl Known {
             .handles
             .insert(snapshot.me_id.clone(), snapshot.me.clone());
         for group in &snapshot.roster {
+            // People count whether or not they have posted (review C131).
+            known.handles.insert(group.id.clone(), group.person.clone());
             for agent in &group.agents {
                 known.handles.insert(agent.id.clone(), agent.handle.clone());
             }
@@ -117,10 +119,14 @@ impl Known {
 /// Files, branches and commits, in that order of precedence at one start:
 /// `src/main.rs` is a file, not a branch, and a branch's `@sha` belongs to
 /// the branch, not to a separate commit.
+// A branch name ends on a letter or digit, so "fix/x." keeps its period
+// as text (review C129).
 static GIT_REF: LazyLock<Option<Regex>> = LazyLock::new(|| {
     Regex::new(
-        r"(?P<file>[\w./-]+\.(?:rs|ts|tsx|js|md|yml|yaml|toml|lock|xml|json|py|go|sh)(?::(?P<from>\d+)(?:-(?P<to>\d+))?)?)|(?P<branch>\b[a-z][a-z0-9-]*/[a-z0-9][a-z0-9._-]*(?:@[0-9a-f]{7,40})?)|(?P<commit>\b[0-9a-f]{7,40}\b)",
+        r"(?P<file>[\w./-]+\.(?:rs|ts|tsx|js|md|yml|yaml|toml|lock|xml|json|py|go|sh)(?::(?P<from>\d+)(?:-(?P<to>\d+))?)?)|(?P<branch>\b[a-z][a-z0-9-]*/[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?(?:@[0-9a-f]{7,40})?)|(?P<commit>\b[0-9a-f]{7,40}\b)",
     )
+    // A pattern that failed to compile would leave git names plain rather
+    // than panic; refs_find_every_kind_in_chat_fixture proves it compiles.
     .ok()
 });
 
@@ -147,6 +153,11 @@ pub(crate) fn find_refs(body: &str, hub_refs: &[Ref], known: &Known) -> Vec<Span
                 continue;
             }
             if let Some(target) = git_target(&caps, body, &range, known) {
+                // A branch chip without its sha covers the name only.
+                let range = match &target {
+                    RefTarget::Branch { name, at: None } => range.start..range.start + name.len(),
+                    _ => range,
+                };
                 spans.push(Span { range, target });
             }
         }
@@ -196,10 +207,16 @@ fn git_target(
     let text = &body[range.clone()];
     if caps.name("branch").is_some() {
         let (name, at) = match text.split_once('@') {
-            Some((name, sha)) => (name, Some(sha.to_owned())),
+            Some((name, sha)) => (name, Some(sha)),
             None => (text, None),
         };
-        return known.branches.contains(name).then(|| RefTarget::Branch {
+        if !known.branches.contains(name) {
+            return None;
+        }
+        // Only a sha git knows joins the chip (review C136); the caller
+        // trims the range to the name otherwise.
+        let at = at.filter(|sha| known.commit_known(sha)).map(str::to_owned);
+        return Some(RefTarget::Branch {
             name: name.to_owned(),
             at,
         });
@@ -213,7 +230,10 @@ fn git_target(
         let path_text = text.split(':').next().unwrap_or(text);
         let path = known.file(path_text)?.clone();
         let num = |name: &str| caps.name(name).and_then(|m| m.as_str().parse::<u32>().ok());
-        let lines = num("from").map(|from| (from, num("to").unwrap_or(from)));
+        let lines = num("from").map(|from| {
+            let to = num("to").unwrap_or(from);
+            (from.min(to), from.max(to))
+        });
         return Some(RefTarget::File { path, lines });
     }
     if caps.name("commit").is_some() && known.commit_known(text) {

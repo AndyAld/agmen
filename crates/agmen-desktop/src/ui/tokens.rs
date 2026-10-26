@@ -40,16 +40,18 @@ pub(crate) const BREADCRUMB_HEIGHT: Pixels = px(32.);
 /// Where the title bar's text starts, past the traffic lights at x 12 to 68
 /// and the mockup's spacer.
 pub(crate) const TRAFFIC_LIGHTS_INSET: Pixels = px(96.);
+/// A Windows or Linux caption button's width, as Zed's.
+pub(crate) const WINDOW_BUTTON_WIDTH: Pixels = px(36.);
+/// The close button's hover fill, Windows' own red (#e81123), as Zed's.
+pub(crate) const WINDOWS_CLOSE_HOVER: gpui::Rgba = gpui::Rgba {
+    r: 232. / 255.,
+    g: 17. / 255.,
+    b: 32. / 255.,
+    a: 1.,
+};
 
 // Rows.
 pub(crate) const AGENT_ROW_HEIGHT: Pixels = px(26.);
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the Project panel uses it in Task 11 of the desktop plan"
-    )
-)]
 pub(crate) const PROJECT_ROW_HEIGHT: Pixels = px(24.);
 /// A tree row's left padding at depth 0, past the group row's chevron.
 pub(crate) const TREE_INDENT_BASE: Pixels = px(26.);
@@ -59,22 +61,12 @@ pub(crate) const TREE_INDENT_STEP: Pixels = px(14.);
 pub(crate) const KV_LABEL_WIDTH: Pixels = px(96.);
 
 // The code font's cell at 13 px.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the terminal view uses it in Task 14 of the desktop plan"
-    )
-)]
 pub(crate) const MONO_CELL_WIDTH: Pixels = px(7.62);
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the terminal view uses it in Task 14 of the desktop plan"
-    )
-)]
 pub(crate) const MONO_CELL_HEIGHT: Pixels = px(18.);
+/// The code view's change bar beside a line number, as Zed's git gutter.
+pub(crate) const GUTTER_MARK_WIDTH: Pixels = px(4.);
+/// A deletion mark: a short bar on the edge between two lines.
+pub(crate) const DELETED_MARK_HEIGHT: Pixels = px(3.);
 
 // Spacing: the mockup's gaps and padding, named by their pixels.
 pub(crate) const SPACE_1: Pixels = px(1.);
@@ -93,6 +85,7 @@ pub(crate) const SPACE_10: Pixels = px(10.);
 pub(crate) const SPACE_12: Pixels = px(12.);
 pub(crate) const SPACE_14: Pixels = px(14.);
 pub(crate) const SPACE_16: Pixels = px(16.);
+pub(crate) const SPACE_18: Pixels = px(18.);
 
 // Radii.
 pub(crate) const RADIUS_XS: Pixels = px(2.);
@@ -102,6 +95,8 @@ pub(crate) const RADIUS_SM: Pixels = px(4.);
 pub(crate) const RADIUS_MD: Pixels = px(5.);
 /// The composer's box (node 375).
 pub(crate) const RADIUS_INPUT: Pixels = px(6.);
+/// Tool cards and the composer box (console.py radius 6).
+pub(crate) const RADIUS_CARD: Pixels = px(6.);
 /// Menus and cards: the switch menu (node 1802) and the model picker (node 3355).
 pub(crate) const RADIUS_LG: Pixels = px(8.);
 
@@ -135,6 +130,8 @@ pub(crate) const ICON_MD: Pixels = px(14.);
 /// A center tab's close button slot, reserved on every tab so tabs keep
 /// their width when one becomes active (mockup fix 40).
 pub(crate) const TAB_CLOSE_SLOT: Pixels = px(14.);
+/// A file or folder icon in the Project panel (console.py `ficon`).
+pub(crate) const ICON_LG: Pixels = px(16.);
 pub(crate) const AVATAR_SIZE: Pixels = px(22.);
 /// How far past the visible rows a virtualized list measures, so rows do
 /// not pop in while scrolling.
@@ -174,6 +171,8 @@ pub(crate) fn tint(color: Hsla, alpha: f32) -> Hsla {
 
 /// How strongly a tinted badge's fill shows its color.
 pub(crate) const BADGE_TINT: f32 = 0.18;
+/// An accent-tinted button's fill (console.py "primary", #72b9a926).
+pub(crate) const BUTTON_TINT: f32 = 0.15;
 /// How strongly a waiting change card's border shows `warning` (node 7101
 /// draws it at alpha 0x88).
 pub(crate) const PENDING_BORDER_TINT: f32 = 0.53;

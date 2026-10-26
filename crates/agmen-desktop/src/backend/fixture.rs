@@ -9,8 +9,9 @@ use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use serde_json::json;
 
 use super::fixture_data::{
-    Msg, alert_answer, ask_messages, chat_messages, fx1, git_facts, id, listener, plan,
-    plan_messages, plan_roster, roster, settings_card, settings_messages, stamp, urgent_alert,
+    Msg, alert_answer, ask_messages, chat_messages, fx1, fx1_session, git_facts, id, listener,
+    plan, plan_messages, plan_roster, role_files, roster, settings_card, settings_messages, stamp,
+    urgent_alert, worktrees,
 };
 use super::{
     Action, Backend, BackendError, ChangeState, Draft, RecentAction, RecentKind, Screen, Snapshot,
@@ -44,6 +45,8 @@ fn recent(time: &str, text: &str, kind: RecentKind) -> RecentAction {
 
 fn base(project: &str) -> Result<Snapshot, BackendError> {
     let fx1 = fx1()?;
+    let roster = roster()?;
+    let roles = role_files(&roster);
     let listener = listener();
     let spend = listener.workers_today_usd + listener.listener_today_usd;
     Ok(Snapshot {
@@ -51,7 +54,7 @@ fn base(project: &str) -> Result<Snapshot, BackendError> {
         me: "andy".into(),
         me_id: id("andy")?,
         listener_id: id("andy/listen")?,
-        roster: roster()?,
+        roster,
         listener,
         agents: BTreeMap::from([(fx1.id.clone(), fx1)]),
         status: StatusSummary {
@@ -67,6 +70,9 @@ fn base(project: &str) -> Result<Snapshot, BackendError> {
         changes: BTreeMap::new(),
         plan: None,
         git: git_facts(),
+        sessions: BTreeMap::from([(id("andy/fx1")?, fx1_session())]),
+        roles,
+        worktrees: worktrees()?,
     })
 }
 
