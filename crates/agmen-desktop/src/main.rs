@@ -1,19 +1,8 @@
 //! The agmen desktop app: a GPUI console with Zed's layout.
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the needs-you views use it from Task 13 of the desktop plan"
-    )
-)]
 mod alerts;
 mod appearance;
 mod assets;
-#[expect(
-    dead_code,
-    reason = "views send and act through Backend from Task 9 (chat composer) of the desktop plan"
-)]
 mod backend;
 #[expect(
     dead_code,
@@ -22,6 +11,7 @@ mod backend;
 mod icons;
 #[cfg(unix)]
 mod instance;
+mod local_time;
 mod notify;
 #[cfg_attr(
     not(test),
@@ -31,13 +21,6 @@ mod notify;
     )
 )]
 mod plan;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the chat's reference chips use it from Task 9 of the desktop plan"
-    )
-)]
 mod refs;
 mod spike;
 mod ui;
@@ -228,6 +211,7 @@ fn open_main_window(launch: &Launch, cx: &mut App) -> Result<()> {
     }
     cx.set_global(appearance);
     cx.set_global(file_icons);
+    cx.set_global(local_time::UtcOffset::system());
     ui::bind_keys(cx);
 
     let options = window_options(cx);

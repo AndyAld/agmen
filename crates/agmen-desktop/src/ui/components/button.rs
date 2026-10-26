@@ -26,10 +26,6 @@ pub(crate) enum ButtonStyle {
     /// Accent fill with semibold text, as a change card's Apply (node 7118).
     Primary,
     /// Selected fill, as a change card's Cancel and Undo (nodes 7120, 7736).
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the change card is hosted by the Task 9 chat")
-    )]
     Secondary,
     /// Surface fill, as the breadcrumb's "Show ledger" (node 135).
     Subtle,

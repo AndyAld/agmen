@@ -7,9 +7,12 @@ use gpui::{
 
 use super::agent_panel::AgentPanel;
 use super::agents_panel::{AgentsPanel, AgentsPanelEvent};
-use super::components::{Color, Label};
+use super::chat::ChatView;
 use super::dock::{Dock, DockSide, LeftDockTabs};
 use super::listener_panel::ListenerPanel;
+use super::pane::PaneGroup;
+#[cfg(test)]
+use super::pane::{SplitDirection, TabItem};
 use super::status_bar::StatusBar;
 use super::title_bar::TitleBar;
 use super::tokens::{BORDER_WIDTH, LEFT_DOCK_WIDTH, RIGHT_DOCK_WIDTH};
@@ -28,20 +31,25 @@ pub(crate) struct Workspace {
     left_dock: Dock,
     right_dock: Dock,
     agents_panel: Entity<AgentsPanel>,
+    /// The center: the chat, and the tabs and splits its chips open.
+    pane_group: Entity<PaneGroup>,
     /// The agent the right dock shows; `None` shows the Listener panel.
     selected_agent: Option<IdentityId>,
     _agents_events: Subscription,
 }
 
 impl Workspace {
-    pub(crate) fn new(snapshot: Snapshot, _window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(snapshot: Snapshot, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let agents_panel = cx.new(|_| AgentsPanel::new(snapshot.roster.clone()));
         let agents_events = cx.subscribe(&agents_panel, |this, _, event, cx| match event {
             AgentsPanelEvent::Selected(id) => this.select_agent(id, cx),
         });
+        let chat = cx.new(|cx| ChatView::new(snapshot.clone(), window, cx));
+        let pane_group = cx.new(|cx| PaneGroup::new(&snapshot, Some(chat), cx));
         Self {
             focus_handle: cx.focus_handle(),
             snapshot,
+            pane_group,
             left_dock: Dock::new(LEFT_DOCK_WIDTH),
             right_dock: Dock::new(RIGHT_DOCK_WIDTH),
             agents_panel,
@@ -141,11 +149,10 @@ impl Render for Workspace {
         body = body.child(
             div()
                 .flex_1()
+                .min_w_0()
                 .h_full()
                 .flex()
-                .items_center()
-                .justify_center()
-                .child(Label::new("Center").color(Color::Placeholder)),
+                .child(self.pane_group.clone()),
         );
         if self.is_dock_open(DockSide::Right) {
             let panel = match self.shown_agent() {

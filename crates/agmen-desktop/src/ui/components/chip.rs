@@ -10,8 +10,8 @@ use gpui::{
 use super::{Color, Label, LabelSize};
 use crate::appearance::Appearance;
 use crate::ui::tokens::{
-    BORDER_WIDTH, DOT_SIZE, OUTLINE_TINT, RADIUS_MD, RADIUS_SM, SPACE_2, SPACE_3, SPACE_5, SPACE_6,
-    SPACE_7, SPACE_8,
+    BORDER_WIDTH, DOT_SIZE, RADIUS_MD, RADIUS_SM, SPACE_2, SPACE_3, SPACE_5, SPACE_6, SPACE_7,
+    SPACE_8, TINT_BORDER, tint,
 };
 
 #[derive(IntoElement)]
@@ -79,10 +79,6 @@ impl Chip {
         self
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the composer's target chip uses it in Task 9")
-    )]
     #[must_use]
     pub(crate) fn color(mut self, color: Color) -> Self {
         self.color = color;
@@ -96,10 +92,6 @@ impl Chip {
         self
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the composer's target chip uses it in Task 9")
-    )]
     #[must_use]
     pub(crate) const fn code(mut self) -> Self {
         self.code = true;
@@ -130,7 +122,7 @@ impl RenderOnce for Chip {
         styled
             .when_some(self.outline, |this, outline| {
                 this.border(BORDER_WIDTH)
-                    .border_color(outline.hsla(theme).opacity(OUTLINE_TINT))
+                    .border_color(tint(outline.hsla(theme), TINT_BORDER))
             })
             .when_some(self.dot, |this, dot| {
                 this.child(

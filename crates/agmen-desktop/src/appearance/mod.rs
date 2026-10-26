@@ -148,7 +148,7 @@ pub(crate) struct Appearance {
     pub(crate) icon_theme: IconThemeChoice,
     #[expect(
         dead_code,
-        reason = "chat spacing reads it in Task 9 of the desktop plan"
+        reason = "the chat reads it once Settings offers chat density (Task 17); the mockup draws only comfortable rows"
     )]
     pub(crate) density: Density,
     #[cfg_attr(

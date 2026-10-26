@@ -89,10 +89,6 @@ impl Label {
     }
 
     /// Draws a line through the text, as a change card's old value.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the change card is hosted by the Task 9 chat")
-    )]
     #[must_use]
     pub(crate) const fn strikethrough(mut self) -> Self {
         self.strikethrough = true;

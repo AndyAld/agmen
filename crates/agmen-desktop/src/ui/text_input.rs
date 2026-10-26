@@ -145,13 +145,6 @@ impl TextInput {
     /// Lets the text wrap and grow to `max_lines` before it scrolls, with
     /// Shift-Enter for a newline.
     #[must_use]
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the composer uses it in Task 9 of the desktop plan"
-        )
-    )]
     pub(crate) fn multiline(mut self, max_lines: usize) -> Self {
         self.max_lines = max_lines.max(1);
         self
@@ -161,25 +154,11 @@ impl TextInput {
         self.max_lines > 1
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the composer reads it in Task 9 of the desktop plan"
-        )
-    )]
     pub(crate) fn text(&self) -> &str {
         self.buffer.text()
     }
 
     /// Replaces all the text and puts the cursor at the end.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the composer and palette use it from Task 9 of the desktop plan"
-        )
-    )]
     pub(crate) fn set_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         let mut text = self.normalize(text);
         let mut end = text.len().min(MAX_TEXT_BYTES);

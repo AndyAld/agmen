@@ -8,7 +8,7 @@ use gpui::{
     Window, div,
 };
 
-use super::{ClickHandler, Color, Icon, IconButton, IconSize, Label, LabelSize};
+use super::{Badge, ClickHandler, Color, Icon, IconButton, IconSize, Label, LabelSize};
 use crate::appearance::Appearance;
 use crate::icons::UiIcon;
 use crate::ui::tokens::{BORDER_WIDTH, SPACE_5, SPACE_8, SPACE_14, TAB_CLOSE_SLOT};
@@ -32,6 +32,7 @@ pub(crate) struct Tab {
     selected: bool,
     style: TabStyle,
     code: bool,
+    badge: Option<SharedString>,
     on_click: Option<ClickHandler>,
     on_close: Option<ClickHandler>,
 }
@@ -60,6 +61,7 @@ impl Tab {
             selected: false,
             style: TabStyle::Dock,
             code: false,
+            badge: None,
             on_click: None,
             on_close: None,
         }
@@ -92,6 +94,15 @@ impl Tab {
     #[must_use]
     pub(crate) const fn code(mut self) -> Self {
         self.code = true;
+        self
+    }
+
+    /// A red count after a pane tab's close slot, as the chat tab's alerts
+    /// that need the person (console.py `tab_bar`); nothing at zero. Tests
+    /// find it as `"{id}:badge"`.
+    #[must_use]
+    pub(crate) fn badge(mut self, count: usize) -> Self {
+        self.badge = (count > 0).then(|| count.to_string().into());
         self
     }
 
@@ -151,6 +162,7 @@ impl Tab {
         let selector = self.id.to_string();
         let group: SharedString = format!("{selector}:group").into();
         let slot_selector = format!("{selector}:close");
+        let badge_selector = format!("{selector}:badge");
         let label = Label::new(self.label).color(color.clone());
         let close = self.on_close.map(|handler| {
             IconButton::new(format!("{selector}:close-button"), UiIcon::Close)
@@ -193,6 +205,13 @@ impl Tab {
                     })
                     .children(close),
             )
+            .when_some(self.badge, |this, count| {
+                this.child(
+                    div()
+                        .debug_selector(|| badge_selector)
+                        .child(Badge::new(count, Color::Error).solid()),
+                )
+            })
     }
 }
 
@@ -239,5 +258,21 @@ mod tests {
         let inactive = rendered_size(&mut cx2, make(false));
         assert_eq!(active.width, inactive.width);
         assert!(active.width > TAB_CLOSE_SLOT + SPACE_14 * 2.);
+    }
+
+    #[gpui::test]
+    fn pane_tab_badge_shows_only_above_zero(cx: &mut TestAppContext) {
+        let make = |count: usize| {
+            move || {
+                Tab::new("chat", UiIcon::Chat, "chat")
+                    .pane()
+                    .badge(count)
+                    .into_any_element()
+            }
+        };
+        let plain = rendered_size(cx, make(0));
+        let mut cx2 = TestAppContext::single();
+        let counted = rendered_size(&mut cx2, make(1));
+        assert!(counted.width > plain.width);
     }
 }

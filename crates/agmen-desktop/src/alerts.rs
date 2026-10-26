@@ -207,6 +207,10 @@ impl AlertState {
 
     /// The urgent alerts that need me, oldest first.
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the needs-you banner lists them in Task 13")
+    )]
     pub(crate) fn needing_me(&self) -> &[MessageId] {
         &self.needing_me
     }
@@ -229,6 +233,10 @@ impl AlertState {
     /// Snooze 15 min: the alert dims and stops needing me.
     // shortcut: snoozing clears it for good; the view's Snooze timer (Task 13 UI)
     // decides whether it comes back after 15 minutes.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the alert's Snooze button calls it in Task 13")
+    )]
     pub(crate) fn snooze(&mut self, alert: &MessageId) -> bool {
         self.clear(alert)
     }
@@ -242,6 +250,13 @@ impl AlertState {
 /// The status bar's alert count: ALERTs in `messages` (oldest first) that
 /// are still open for me, by the same clearing rule as [`AlertState`].
 #[must_use]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the status bar derives its alert count from it in Task 13"
+    )
+)]
 pub(crate) fn alert_count(messages: &[StampedEnvelope], me: &Me) -> u32 {
     let mut open: BTreeMap<&MessageId, ClearedBy> = BTreeMap::new();
     // Alerts already answered, so a later copy does not reopen them; bounded

@@ -36,13 +36,6 @@ pub(crate) const STATUS_BAR_HEIGHT: Pixels = px(28.);
 pub(crate) const LEFT_DOCK_WIDTH: Pixels = px(272.);
 pub(crate) const RIGHT_DOCK_WIDTH: Pixels = px(340.);
 pub(crate) const TAB_BAR_HEIGHT: Pixels = px(34.);
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the chat pane uses it in Task 9 of the desktop plan"
-    )
-)]
 pub(crate) const BREADCRUMB_HEIGHT: Pixels = px(32.);
 /// Where the title bar's text starts, past the traffic lights at x 12 to 68
 /// and the mockup's spacer.
@@ -123,16 +116,8 @@ pub(crate) const DROPDOWN_WIDTH: Pixels = px(300.);
 
 // Change cards in "Desktop · settings from chat" (node 6674).
 /// The card (nodes 7101 and 7719).
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the change card is hosted by the Task 9 chat")
-)]
 pub(crate) const CHANGE_CARD_WIDTH: Pixels = px(560.);
 /// A change row's setting name column (node 7107).
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the change card is hosted by the Task 9 chat")
-)]
 pub(crate) const CHANGE_SETTING_WIDTH: Pixels = px(52.);
 
 // Icons and marks.
@@ -151,6 +136,9 @@ pub(crate) const ICON_MD: Pixels = px(14.);
 /// their width when one becomes active (mockup fix 40).
 pub(crate) const TAB_CLOSE_SLOT: Pixels = px(14.);
 pub(crate) const AVATAR_SIZE: Pixels = px(22.);
+/// How far past the visible rows a virtualized list measures, so rows do
+/// not pop in while scrolling.
+pub(crate) const LIST_OVERDRAW: Pixels = px(400.);
 /// A chat message's avatar (node 139).
 pub(crate) const MESSAGE_AVATAR_SIZE: Pixels = px(24.);
 /// How far a reply sits right of its parent: the avatar and the gap after
@@ -173,7 +161,8 @@ pub(crate) const TINT_FILL: f32 = 34. / 255.;
 pub(crate) const TINT_AVATAR: f32 = 51. / 255.;
 /// A message that mentions me (0x14).
 pub(crate) const TINT_MENTION: f32 = 20. / 255.;
-/// The take-over chip's border (0x55).
+/// The take-over chip's border and the composer's model chip outline
+/// (0x55, node 380).
 pub(crate) const TINT_BORDER: f32 = 85. / 255.;
 
 /// `color` at `alpha` of its own opacity: the one way views derive a fill
@@ -185,15 +174,8 @@ pub(crate) fn tint(color: Hsla, alpha: f32) -> Hsla {
 
 /// How strongly a tinted badge's fill shows its color.
 pub(crate) const BADGE_TINT: f32 = 0.18;
-/// How strongly an outlined chip's border shows its color: the composer's
-/// model chip draws `text.accent` at alpha 0x55 (node 380).
-pub(crate) const OUTLINE_TINT: f32 = 0.33;
 /// How strongly a waiting change card's border shows `warning` (node 7101
 /// draws it at alpha 0x88).
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the change card is hosted by the Task 9 chat")
-)]
 pub(crate) const PENDING_BORDER_TINT: f32 = 0.53;
 /// How far a button on a card fades on hover. Hover is not drawn (nodes 7118,
 /// 7120); a fill change would vanish on the card's `elevated_surface`, which

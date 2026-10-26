@@ -5,9 +5,9 @@ use std::rc::Rc;
 
 use agmen_proto::IdentityId;
 use gpui::{
-    App, AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Window, div,
+    App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div,
 };
 
 use super::components::{Chip, Color, KeyHint, Label, LabelSize};
@@ -16,7 +16,7 @@ use super::tokens::{
     BORDER_WIDTH, RADIUS_INPUT, SPACE_8, SPACE_10, SPACE_12, SPACE_14, TEXT_DEFAULT,
 };
 use crate::appearance::Appearance;
-use crate::backend::{Draft, Snapshot};
+use crate::backend::{BackendError, Draft, Snapshot};
 
 /// The input's placeholder (node 384). The ⏎ hint after the input already
 /// says how to send, so the placeholder does not repeat it.
@@ -40,8 +40,8 @@ pub(crate) struct Target {
 }
 
 /// What the composer does with a message: the caller passes it to
-/// `Backend::send`.
-pub(crate) type SendHandler = Rc<dyn Fn(Draft, &mut Window, &mut App)>;
+/// `Backend::send`. A refused draft comes back into the input.
+pub(crate) type SendHandler = Rc<dyn Fn(Draft, &mut Window, &mut App) -> Result<(), BackendError>>;
 
 /// The handle an `@mention` at the start of `text` names, without trailing
 /// punctuation: `@andy/fx1, go` names `andy/fx1`.
@@ -79,10 +79,10 @@ impl EventEmitter<ComposerEvent> for Composer {}
 
 impl Composer {
     /// A composer addressed to the snapshot's listener. Enter calls
-    /// `on_send` with the draft.
+    /// `on_send` with the draft; when it fails, the text comes back.
     pub(crate) fn new(
         snapshot: &Snapshot,
-        on_send: impl Fn(Draft, &mut Window, &mut App) + 'static,
+        on_send: impl Fn(Draft, &mut Window, &mut App) -> Result<(), BackendError> + 'static,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -146,7 +146,18 @@ impl Composer {
             // shortcut: no reply target yet; Task 13's Reply button sets one.
             reply_to: None,
         };
-        (self.on_send)(draft, window, cx);
+        // The input cleared itself on Enter; a refused draft is not lost.
+        // The caller shows why it was refused.
+        if (self.on_send)(draft, window, cx).is_err() {
+            self.input
+                .update(cx, |input, cx| input.set_text(body, window, cx));
+        }
+    }
+}
+
+impl Focusable for Composer {
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.input.focus_handle(cx)
     }
 }
 

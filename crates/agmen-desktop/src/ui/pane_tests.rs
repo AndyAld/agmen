@@ -21,7 +21,7 @@ impl Render for Host {
 fn open_center(cx: &mut TestAppContext) -> (Entity<PaneGroup>, &mut VisualTestContext) {
     init(cx);
     let snapshot = chat_snapshot();
-    let group = cx.new(|cx| PaneGroup::new(&snapshot, cx));
+    let group = cx.new(|cx| PaneGroup::new(&snapshot, None, cx));
     let host = group.clone();
     let (_, cx) = cx.add_window_view(|_, _| Host(host));
     redraw(cx);

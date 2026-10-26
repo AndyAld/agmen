@@ -1,10 +1,10 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use gpui::{Focusable as _, TestAppContext, VisualTestContext};
+use gpui::{TestAppContext, VisualTestContext};
 
 use super::*;
-use crate::backend::chat_snapshot;
+use crate::backend::{BackendError, chat_snapshot};
 use crate::ui::test_support::{click, init};
 use crate::ui::text_input::bind_keys;
 use crate::ui::tokens::MOCKUP_REM;
@@ -33,7 +33,10 @@ fn open_composer(cx: &mut TestAppContext) -> (Entity<Composer>, Sent, &mut Visua
         window.set_rem_size(MOCKUP_REM);
         Composer::new(
             &snapshot,
-            move |draft, _, _| sink.borrow_mut().push(draft),
+            move |draft, _, _| {
+                sink.borrow_mut().push(draft);
+                Ok(())
+            },
             window,
             cx,
         )
@@ -61,6 +64,31 @@ fn composer_sends_to_listener_by_default(cx: &mut TestAppContext) {
             reply_to: None,
         }]
     );
+}
+
+#[gpui::test]
+fn refused_draft_comes_back_into_the_input(cx: &mut TestAppContext) {
+    init(cx);
+    cx.update(bind_keys);
+    let snapshot = chat_snapshot();
+    let (composer, cx) = cx.add_window_view(|window, cx| {
+        window.set_rem_size(MOCKUP_REM);
+        Composer::new(
+            &snapshot,
+            |_, _, _| Err(BackendError::Unsupported("sending in this test")),
+            window,
+            cx,
+        )
+    });
+    composer.update_in(cx, |composer, window, cx| {
+        composer.input.focus_handle(cx).focus(window, cx);
+    });
+    cx.simulate_input("hi there");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    composer.read_with(cx, |composer, cx| {
+        assert_eq!(composer.input.read(cx).text(), "hi there");
+    });
 }
 
 #[gpui::test]

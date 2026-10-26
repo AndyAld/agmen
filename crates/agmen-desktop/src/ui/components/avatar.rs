@@ -40,13 +40,6 @@ impl Avatar {
     }
 
     /// The letter's color, such as the agent's role color.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "chat messages use it in Task 9 of the desktop plan"
-        )
-    )]
     #[must_use]
     pub(crate) fn color(mut self, color: Color) -> Self {
         self.color = color;

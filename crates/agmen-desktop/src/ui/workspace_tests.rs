@@ -155,3 +155,111 @@ fn bars_include_their_rules(cx: &mut TestAppContext) {
         "the body starts right under the title bar"
     );
 }
+
+/// The chat the first pane hosts.
+fn chat_of(workspace: &Entity<Workspace>, cx: &gpui::VisualTestContext) -> Entity<ChatView> {
+    workspace.read_with(cx, |w, cx| {
+        w.pane_group.read(cx).panes()[0]
+            .read(cx)
+            .chat()
+            .cloned()
+            .expect("the first pane hosts the chat")
+    })
+}
+
+/// The selector of part `part` of the chat fixture's message `ix`.
+fn message_sel(ix: usize, part: &str) -> &'static str {
+    let id = chat_snapshot().messages[ix].client.id.clone();
+    Box::leak(format!("{}:{part}", id.as_str()).into_boxed_str())
+}
+
+#[gpui::test]
+fn center_hosts_the_chat_with_its_composer(cx: &mut TestAppContext) {
+    let (_workspace, cx) = open(cx);
+    assert!(cx.debug_bounds("pane-0:tab-0").is_some());
+    assert!(cx.debug_bounds("chat").is_some());
+    assert!(cx.debug_bounds("composer:model").is_some());
+    assert!(cx.debug_bounds(message_sel(0, "row")).is_some());
+}
+
+#[gpui::test]
+fn cmd_click_ref_opens_split(cx: &mut TestAppContext) {
+    let (workspace, cx) = open(cx);
+    // Message 5 is andy/listen's DELEGATED; its first chip is andy/fx1.
+    let chip = message_sel(4, "ref:0");
+    redraw(cx);
+    let center = cx.debug_bounds(chip).unwrap().center();
+    let secondary = cx.update(|_, cx| gpui::Modifiers::secondary_key(cx));
+    cx.simulate_click(center, secondary);
+    redraw(cx);
+    let group = workspace.read_with(cx, |w, _| w.pane_group.clone());
+    let (panes, direction) = group.read_with(cx, |g, _| (g.panes(), g.direction()));
+    assert_eq!(panes.len(), 2, "the center split in two");
+    assert_eq!(direction, Some(SplitDirection::Right), "side by side");
+    let fx1 = chat_snapshot()
+        .roster
+        .iter()
+        .flat_map(|g| &g.agents)
+        .find(|a| a.handle == "andy/fx1")
+        .map(|a| a.id.clone())
+        .unwrap();
+    panes[1].read_with(cx, |pane, _| {
+        assert_eq!(pane.active_item(), Some(&TabItem::Agent(fx1)));
+    });
+    panes[0].read_with(cx, |pane, _| assert_eq!(pane.tabs(), &[TabItem::Chat]));
+    assert!(cx.debug_bounds("pane-1").is_some());
+}
+
+#[gpui::test]
+fn click_on_a_ref_opens_a_tab_in_the_pane(cx: &mut TestAppContext) {
+    let (workspace, cx) = open(cx);
+    // Message 2 is andy/a1's ALERT; its first chip is the commit 4d9fdc8.
+    click(cx, message_sel(1, "ref:0"));
+    let group = workspace.read_with(cx, |w, _| w.pane_group.clone());
+    let panes = group.read_with(cx, |g, _| g.panes());
+    assert_eq!(panes.len(), 1);
+    panes[0].read_with(cx, |pane, _| {
+        assert_eq!(
+            pane.tabs(),
+            &[
+                TabItem::Chat,
+                TabItem::Ref(crate::refs::RefTarget::Commit("4d9fdc8".into()))
+            ]
+        );
+    });
+}
+
+#[gpui::test]
+fn show_ledger_button_reveals_presence_lines(cx: &mut TestAppContext) {
+    let (workspace, cx) = open(cx);
+    let chat = chat_of(&workspace, cx);
+    assert!(!chat.read_with(cx, |chat, _| chat.show_ledger()));
+    click(cx, "pane-0:show-ledger");
+    assert!(chat.read_with(cx, |chat, _| chat.show_ledger()));
+}
+
+#[gpui::test]
+fn chat_tab_badge_matches_needs_you(cx: &mut TestAppContext) {
+    use crate::backend::{Backend as _, FixtureBackend, Screen};
+    init(cx);
+    for screen in [Screen::Chat, Screen::NeedsYou, Screen::NeedsYouAnswered] {
+        let mut app = TestAppContext::single();
+        init(&mut app);
+        let snapshot = FixtureBackend::for_screen(screen).unwrap().snapshot();
+        let needs_you = snapshot.status.needs_you as usize;
+        let (workspace, app) =
+            app.add_window_view(|window, cx| Workspace::new(snapshot, window, cx));
+        redraw(app);
+        let chat = chat_of(&workspace, app);
+        assert_eq!(
+            chat.read_with(app, |c, _| c.badge()),
+            needs_you,
+            "{screen:?}"
+        );
+        assert_eq!(
+            app.debug_bounds("pane-0:tab-0:badge").is_some(),
+            needs_you > 0,
+            "{screen:?}"
+        );
+    }
+}
