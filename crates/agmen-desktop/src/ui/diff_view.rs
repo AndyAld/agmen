@@ -162,20 +162,14 @@ fn render_row(ix: usize, header_ix: usize, row: &Row, cell: Pixels, cx: &App) ->
                 DiffLineKind::Removed => ("-", theme.deleted, Some(theme.deleted)),
             };
             let slug = kind_slug(*kind);
-            base.debug_selector(move || format!("diff-row:{number}:{slug}"))
-                .when_some(tint, |this, color| {
-                    this.child(
-                        div()
-                            .debug_selector(move || format!("diff-row:{number}:tint"))
-                            .absolute()
-                            .top_0()
-                            .bottom_0()
-                            .left_0()
-                            .w(cell * DIFF_TINT_COLUMNS)
-                            .max_w_full()
-                            .bg(color.opacity(DIFF_TINT)),
-                    )
-                })
+            // The line is at least the grid's 150 columns wide and grows
+            // with its code (C285); its holder shrinks to the row, so the
+            // tint, which fills the holder, spans
+            // min(pane, max(grid, line)).
+            let code = div()
+                .flex()
+                .items_center()
+                .min_w(cell * DIFF_TINT_COLUMNS)
                 .child(
                     div()
                         .debug_selector(move || format!("diff-row:{number}:sign"))
@@ -195,6 +189,26 @@ fn render_row(ix: usize, header_ix: usize, row: &Row, cell: Pixels, cx: &App) ->
                         .min_w_0()
                         .overflow_hidden()
                         .child(styled_line(line, theme)),
+                );
+            base.debug_selector(move || format!("diff-row:{number}:{slug}"))
+                .child(
+                    div()
+                        .relative()
+                        .flex()
+                        .flex_col()
+                        .justify_center()
+                        .h_full()
+                        .min_w_0()
+                        .when_some(tint, |this, color| {
+                            this.child(
+                                div()
+                                    .debug_selector(move || format!("diff-row:{number}:tint"))
+                                    .absolute()
+                                    .inset_0()
+                                    .bg(color.opacity(DIFF_TINT)),
+                            )
+                        })
+                        .child(code),
                 )
                 .into_any_element()
         }

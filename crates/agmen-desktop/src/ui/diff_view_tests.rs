@@ -277,3 +277,41 @@ fn change_tints_span_the_mockups_grid_clipped_to_the_pane(cx: &mut TestAppContex
         );
     }
 }
+
+#[gpui::test]
+fn a_changed_line_past_the_grid_is_tinted_to_its_end(cx: &mut TestAppContext) {
+    // C285: a changed line longer than the 150 column grid keeps its tint
+    // to its last character (code from column 4), still clipped to the pane.
+    init(cx);
+    let hunk = Hunk {
+        old_start: 1,
+        new_start: 1,
+        lines: vec![DiffLine {
+            kind: DiffLineKind::Added,
+            text: "x".repeat(200),
+        }],
+    };
+    let (_, cx) = cx.add_window_view(|_, _| DiffView::new(vec![hunk], Language::Plain));
+    let cell = cx.update(|window, cx| {
+        cell_width(window, &cx.global::<crate::appearance::Appearance>().fonts)
+    });
+    let close = |a: gpui::Pixels, b: gpui::Pixels| (a - b).abs() < gpui::px(0.5);
+    for (width, line_fits) in [(cell * 250., true), (cell * 180., false)] {
+        cx.simulate_resize(gpui::size(width, gpui::px(600.)));
+        redraw(cx);
+        let row = cx.debug_bounds("diff-row:2:added").unwrap();
+        let tint = cx.debug_bounds("diff-row:2:tint").unwrap();
+        assert!(close(tint.left(), row.left()), "{tint:?} {row:?}");
+        assert!(close(tint.top(), row.top()), "{tint:?} {row:?}");
+        assert!(close(tint.size.height, row.size.height), "{tint:?} {row:?}");
+        let expected = if line_fits {
+            cell * 204.
+        } else {
+            row.size.width
+        };
+        assert!(
+            close(tint.size.width, expected),
+            "{width:?}: {tint:?} against {expected:?}"
+        );
+    }
+}
