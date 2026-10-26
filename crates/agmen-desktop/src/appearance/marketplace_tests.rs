@@ -6,11 +6,27 @@ use std::sync::{Arc, Mutex};
 use super::*;
 use crate::appearance::{PickerEntry, ThemeOrigin, installed_themes, picker_entries, theme_dirs};
 
-/// One request the fixture saw: its request line and User-Agent.
+impl Marketplace {
+    /// Downloads, fetches the license and writes in one call, as
+    /// [`install_shared`] does without a lock to share.
+    fn install(
+        &mut self,
+        ext: &ThemeExtension,
+        agmen_themes: &Path,
+        now: Instant,
+    ) -> Result<InstalledTheme, MarketError> {
+        let mut download = self.download(ext, now)?;
+        download.fetch_license();
+        download.write(agmen_themes)
+    }
+}
+
+/// One request the fixture saw: its request line, User-Agent and Referer.
 #[derive(Debug, Clone)]
 struct Seen {
     line: String,
     user_agent: Option<String>,
+    referer: Option<String>,
 }
 
 /// How long the fixture waits for its requests, and for each read or write.
@@ -19,7 +35,8 @@ const FIXTURE_TIMEOUT: Duration = Duration::from_secs(10);
 type Routes = Vec<(&'static str, u16, Vec<u8>)>;
 
 /// A local HTTP server that answers each path prefix with a fixed status and
-/// body and records every request. It never reaches the real API. It
+/// body (for a 3xx status, the body is the Location) and records every
+/// request. It never reaches the real API. It
 /// answers exactly `requests` requests, then stops listening, so an extra
 /// request fails at once; it gives up after [`FIXTURE_TIMEOUT`]. Errors in
 /// its thread come back over a channel, and they and any request that never
@@ -106,6 +123,7 @@ fn answer(stream: TcpStream, routes: &Routes, log: &Mutex<Vec<Seen>>) -> std::io
     let mut line = String::new();
     reader.read_line(&mut line)?;
     let mut user_agent = None;
+    let mut referer = None;
     // A request has a few headers; 100 is far more than reqwest sends.
     for _ in 0..100 {
         let mut header = String::new();
@@ -113,16 +131,19 @@ fn answer(stream: TcpStream, routes: &Routes, log: &Mutex<Vec<Seen>>) -> std::io
         if header.trim().is_empty() {
             break;
         }
-        if let Some((name, value)) = header.split_once(':')
-            && name.eq_ignore_ascii_case("user-agent")
-        {
-            user_agent = Some(value.trim().to_owned());
+        if let Some((name, value)) = header.split_once(':') {
+            if name.eq_ignore_ascii_case("user-agent") {
+                user_agent = Some(value.trim().to_owned());
+            } else if name.eq_ignore_ascii_case("referer") {
+                referer = Some(value.trim().to_owned());
+            }
         }
     }
     let path = line.split_whitespace().nth(1).unwrap_or("").to_owned();
     log.lock().unwrap().push(Seen {
         line: line.trim().to_owned(),
         user_agent,
+        referer,
     });
     let (status, body) = routes
         .iter()
@@ -130,8 +151,14 @@ fn answer(stream: TcpStream, routes: &Routes, log: &Mutex<Vec<Seen>>) -> std::io
         .map_or((404, Vec::new()), |(_, status, body)| {
             (*status, body.clone())
         });
+    let (location, body) = if (300..400).contains(&status) {
+        let to = String::from_utf8(body).unwrap_or_default();
+        (format!("Location: {to}\r\n"), Vec::new())
+    } else {
+        (String::new(), body)
+    };
     let head = format!(
-        "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {status} X\r\n{location}Content-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
     let mut stream = stream;
@@ -284,6 +311,48 @@ fn marketplace_backs_off_after_errors() {
 }
 
 #[test]
+fn search_gives_up_after_its_timeout_while_the_body_drips() {
+    // C308: the client's timeout bounds each read; the request's own
+    // timeout bounds the whole answer. The stub sends its headers, then one
+    // byte every 100 ms, for at most 6 s.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let stub = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        stream.set_write_timeout(Some(FIXTURE_TIMEOUT)).unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        for _ in 0..100 {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            if line.trim().is_empty() {
+                break;
+            }
+        }
+        let mut stream = stream;
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\n")
+            .unwrap();
+        for _ in 0..60 {
+            if stream.write_all(b" ").is_err() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    });
+    let mut market = Marketplace::new(&base, &base).unwrap();
+    market.timeout = Duration::from_millis(500);
+
+    let started = Instant::now();
+    assert!(market.search("", Instant::now()).is_err());
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        started.elapsed()
+    );
+    stub.join().unwrap();
+}
+
+#[test]
 fn unparsable_list_backs_off() {
     // Review C208: an HTML error page sent with status 200.
     let server = Fixture::serve(1, vec![("/extensions", 200, b"<html>busy</html>".to_vec())]);
@@ -310,29 +379,62 @@ fn license_less_archive(manifest: &str) -> Vec<u8> {
     ])
 }
 
-/// GitHub's answer to `/repos/{owner}/{repo}/license` for `text`, with the
-/// content wrapped at 60 characters as GitHub sends it.
-fn license_json(text: &[u8]) -> Vec<u8> {
+/// `text` in base64, wrapped at 60 characters with a newline after each
+/// line, as GitHub sends a file's content.
+fn github_base64(text: &[u8]) -> String {
     use base64::Engine as _;
     let encoded = base64::engine::general_purpose::STANDARD.encode(text);
-    let wrapped = encoded
+    encoded
         .as_bytes()
         .chunks(60)
-        .map(|chunk| std::str::from_utf8(chunk).unwrap())
-        .collect::<Vec<_>>()
-        .join("\n");
+        .map(|chunk| format!("{}\n", std::str::from_utf8(chunk).unwrap()))
+        .collect()
+}
+
+/// GitHub's answer to `/repos/{owner}/{repo}/license` for `text`, with
+/// `license` as its detected license.
+fn license_json_with(text: &[u8], license: &serde_json::Value) -> Vec<u8> {
     serde_json::json!({
         "name": "LICENSE",
         "path": "LICENSE",
         "encoding": "base64",
-        "content": wrapped,
-        "license": {"key": "mit", "name": "MIT License", "spdx_id": "MIT"},
+        "content": github_base64(text),
+        "license": license,
     })
     .to_string()
     .into_bytes()
 }
 
-const MIT: &str = "MIT License\n\nCopyright (c) Catppuccin\n";
+/// GitHub's answer for `text`, detected as MIT.
+fn license_json(text: &[u8]) -> Vec<u8> {
+    license_json_with(
+        text,
+        &serde_json::json!({"key": "mit", "name": "MIT License", "spdx_id": "MIT"}),
+    )
+}
+
+/// A real-length MIT text, so its base64 wraps (C300), starting with its
+/// copyright line as most do (V133).
+const MIT: &str = "Copyright (c) 2023 Catppuccin\n\n\
+Permission is hereby granted, free of charge, to any person obtaining a copy \
+of this software and associated documentation files (the \"Software\"), to deal \
+in the Software without restriction.\n";
+
+/// A fixture serving the license-less archive and then `license` for
+/// `/repos/`.
+fn license_fixture(status: u16, license: Vec<u8>) -> Fixture {
+    Fixture::serve(
+        2,
+        vec![
+            (
+                "/extensions/catppuccin/",
+                200,
+                license_less_archive(MANIFEST_TOML),
+            ),
+            ("/repos/", status, license),
+        ],
+    )
+}
 
 #[test]
 fn install_saves_the_repository_license_when_the_archive_has_none() {
@@ -356,13 +458,21 @@ fn install_saves_the_repository_license_when_the_archive_has_none() {
     let home = tempfile::tempdir().unwrap();
     let themes = home.path().join("agmen/themes");
 
+    // C300: GitHub's base64 comes in lines, and the fixture's does too.
+    assert!(github_base64(MIT.as_bytes()).trim_end().contains('\n'));
+
     let installed = market
         .install(&catppuccin(), &themes, Instant::now())
         .unwrap();
     let root = themes.join("catppuccin");
     assert_eq!(installed.licenses, [root.join("LICENSE")]);
-    assert_eq!(installed.license.as_deref(), Some("MIT License"));
+    // V133, C303: labeled by GitHub's SPDX id, not the copyright line.
+    assert_eq!(installed.license.as_deref(), Some("MIT"));
     assert_eq!(fs::read_to_string(root.join("LICENSE")).unwrap(), MIT);
+    // The label is kept in the manifest, so it reads back after a restart.
+    let manifest = fs::read_to_string(root.join(MANIFEST)).unwrap();
+    assert!(manifest.contains("license = \"MIT\""), "{manifest}");
+    assert_eq!(read_installed(&root).unwrap(), installed);
     assert!(root.join("themes/catppuccin-mocha.json").is_file());
     let seen = server.requests();
     assert_eq!(
@@ -522,6 +632,270 @@ fn oversized_repo_license_is_not_saved() {
     assert!(!home.path().join("catppuccin/LICENSE").exists());
 }
 
+/// Installs catppuccin from `server` into a fresh folder.
+fn install_from(server: &Fixture) -> (tempfile::TempDir, InstalledTheme) {
+    let mut market = Marketplace::new(&server.base, &server.base).unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let installed = market
+        .install(&catppuccin(), home.path(), Instant::now())
+        .unwrap();
+    (home, installed)
+}
+
+#[test]
+fn license_without_spdx_id_is_labeled_by_its_name() {
+    // C303: GitHub's spdx_id is NOASSERTION for a license it cannot name
+    // with one; its name is the next best label.
+    let server = license_fixture(
+        200,
+        license_json_with(
+            MIT.as_bytes(),
+            &serde_json::json!({"key": "other", "name": "Other", "spdx_id": "NOASSERTION"}),
+        ),
+    );
+    let (_home, installed) = install_from(&server);
+    assert_eq!(installed.license.as_deref(), Some("Other"));
+}
+
+#[test]
+fn undetected_license_shows_its_first_line_cleaned() {
+    // C303: with no license detected, the first line is shown, without an
+    // escape or a bidi override, and cut to MAX_LICENSE_LABEL_CHARS.
+    let text = format!(
+        "\n  \u{202e}Some\u{1b}[31m {}\nsecond line\n",
+        "x".repeat(200)
+    );
+    let server = license_fixture(
+        200,
+        license_json_with(text.as_bytes(), &serde_json::Value::Null),
+    );
+    let (_home, installed) = install_from(&server);
+    let label = installed.license.unwrap();
+    assert!(label.starts_with("Some[31m xxx"), "{label:?}");
+    assert!(label.ends_with('\u{2026}'), "{label:?}");
+    assert_eq!(label.chars().count(), MAX_LICENSE_LABEL_CHARS);
+    assert!(!label.chars().any(|c| c.is_control() || c == '\u{202e}'));
+}
+
+#[test]
+fn license_label_drops_controls_and_bidi_marks() {
+    assert_eq!(
+        license_label("  MIT License \r"),
+        Some("MIT License".into())
+    );
+    assert_eq!(
+        license_label("\u{200e}\u{200f}\u{202a}\u{2066}\u{2069}\u{61c}A\u{7}B"),
+        Some("AB".into())
+    );
+    assert_eq!(license_label(" \t\u{202e} "), None);
+    let exact = "y".repeat(MAX_LICENSE_LABEL_CHARS);
+    assert_eq!(license_label(&exact), Some(exact.clone()));
+}
+
+#[test]
+fn saved_license_that_is_not_text_still_counts_as_kept() {
+    // C303: a LICENSE that is not UTF-8, or is blank, is still a license
+    // file; it reads with no label, and the row says the file is kept.
+    for bytes in [b"MIT\nJos\xe9 \xff".as_slice(), b"\n   \n\t\n"] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("catppuccin");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join(MANIFEST), MANIFEST_TOML).unwrap();
+        fs::write(root.join("LICENSE"), bytes).unwrap();
+        let read = read_installed(&root).unwrap();
+        assert_eq!(read.licenses, [root.join("LICENSE")]);
+        assert_eq!(read.license, None, "{bytes:?}");
+    }
+}
+
+#[test]
+fn license_answer_over_cap_is_not_found() {
+    // C301: a small license padded past MAX_LICENSE_ANSWER_BYTES.
+    let mut answer: serde_json::Value =
+        serde_json::from_slice(&license_json(MIT.as_bytes())).unwrap();
+    answer["padding"] = serde_json::Value::String("p".repeat(600 * 1024));
+    let server = license_fixture(200, answer.to_string().into_bytes());
+    let (home, installed) = install_from(&server);
+    assert!(installed.licenses.is_empty(), "{installed:?}");
+    assert!(!home.path().join("catppuccin/LICENSE").exists());
+}
+
+#[test]
+fn license_in_another_encoding_is_not_saved() {
+    // C301: the content is valid base64, so only the encoding check stops it.
+    let mut answer: serde_json::Value =
+        serde_json::from_slice(&license_json(MIT.as_bytes())).unwrap();
+    answer["encoding"] = "none".into();
+    let server = license_fixture(200, answer.to_string().into_bytes());
+    let (_home, installed) = install_from(&server);
+    assert!(installed.licenses.is_empty(), "{installed:?}");
+}
+
+#[test]
+fn license_request_gives_up_after_its_timeout() {
+    // C301: GitHub accepts the connection and never answers.
+    let server = Fixture::serve(
+        1,
+        vec![(
+            "/extensions/catppuccin/",
+            200,
+            license_less_archive(MANIFEST_TOML),
+        )],
+    );
+    let github = TcpListener::bind("127.0.0.1:0").unwrap();
+    let github_base = format!("http://{}", github.local_addr().unwrap());
+    let mut market = Marketplace::new(&server.base, github_base).unwrap();
+    market.license_timeout = Duration::from_millis(300);
+    let home = tempfile::tempdir().unwrap();
+
+    let started = Instant::now();
+    let installed = market
+        .install(&catppuccin(), home.path(), Instant::now())
+        .unwrap();
+    assert!(installed.licenses.is_empty(), "{installed:?}");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    drop(github);
+}
+
+#[test]
+fn license_redirect_on_the_same_host_is_followed_without_referer() {
+    // C304: GitHub answers a renamed repository with a 301 on its own host.
+    let server = Fixture::serve(
+        3,
+        vec![
+            (
+                "/extensions/catppuccin/",
+                200,
+                license_less_archive(MANIFEST_TOML),
+            ),
+            ("/repos/", 301, b"/repositories/1/license".to_vec()),
+            ("/repositories/1/license", 200, license_json(MIT.as_bytes())),
+        ],
+    );
+    let (_home, installed) = install_from(&server);
+    assert_eq!(installed.license.as_deref(), Some("MIT"));
+    let seen = server.requests();
+    assert_eq!(seen[2].line, "GET /repositories/1/license HTTP/1.1");
+    assert_eq!(seen[2].referer, None, "{:?}", seen[2]);
+}
+
+#[test]
+fn license_redirect_to_another_host_is_not_followed() {
+    // C304: a listener nobody accepts on stands for the other host.
+    let other = TcpListener::bind("127.0.0.1:0").unwrap();
+    other.set_nonblocking(true).unwrap();
+    let to = format!(
+        "http://localhost:{}/license",
+        other.local_addr().unwrap().port()
+    );
+    let server = license_fixture(302, to.into_bytes());
+    let (home, installed) = install_from(&server);
+    assert!(installed.licenses.is_empty(), "{installed:?}");
+    assert!(!home.path().join("catppuccin/LICENSE").exists());
+    assert!(matches!(
+        other.accept(),
+        Err(ref err) if err.kind() == std::io::ErrorKind::WouldBlock
+    ));
+}
+
+#[test]
+fn license_redirects_stay_on_the_first_origin() {
+    // C304: same scheme, host and port as the first request, and a few hops.
+    let url = |s: &str| reqwest::Url::parse(s).unwrap();
+    let first = url("https://api.github.com/repos/a/b/license");
+    let moved = url("https://api.github.com/repositories/1/license");
+    assert!(follows_license_redirect(
+        &moved,
+        std::slice::from_ref(&first)
+    ));
+    for other in [
+        "http://api.github.com/repositories/1/license",
+        "https://api.github.com:8443/repositories/1/license",
+        "https://evil.example/repositories/1/license",
+        "https://api.github.com.evil.example/x",
+    ] {
+        assert!(
+            !follows_license_redirect(&url(other), std::slice::from_ref(&first)),
+            "{other}"
+        );
+    }
+    let mut chain = vec![first.clone()];
+    chain.extend(std::iter::repeat_n(
+        moved.clone(),
+        MAX_LICENSE_REDIRECTS - 1,
+    ));
+    assert!(follows_license_redirect(&moved, &chain));
+    chain.push(moved.clone());
+    assert!(!follows_license_redirect(&moved, &chain));
+    assert!(!follows_license_redirect(&moved, &[]));
+}
+
+#[test]
+fn archive_without_themes_fails_before_asking_github() {
+    // C305: a failed install spends none of GitHub's 60 requests an hour.
+    let bytes = archive(&[("extension.toml", MANIFEST_TOML)]);
+    let server = Fixture::serve(1, vec![("/extensions/catppuccin/", 200, bytes)]);
+    let github = TcpListener::bind("127.0.0.1:0").unwrap();
+    github.set_nonblocking(true).unwrap();
+    let github_base = format!("http://{}", github.local_addr().unwrap());
+    let mut market = Marketplace::new(&server.base, github_base).unwrap();
+    let home = tempfile::tempdir().unwrap();
+
+    let err = market
+        .install(&catppuccin(), home.path(), Instant::now())
+        .unwrap_err();
+    assert!(matches!(err, MarketError::NoThemes { .. }), "{err}");
+    assert!(matches!(
+        github.accept(),
+        Err(ref err) if err.kind() == std::io::ErrorKind::WouldBlock
+    ));
+}
+
+#[test]
+fn shared_install_releases_the_lock_while_asking_github() {
+    // C305: searches and other installs do not wait on GitHub.
+    let server = Fixture::serve(
+        1,
+        vec![(
+            "/extensions/catppuccin/",
+            200,
+            license_less_archive(MANIFEST_TOML),
+        )],
+    );
+    let github = TcpListener::bind("127.0.0.1:0").unwrap();
+    let github_base = format!("http://{}", github.local_addr().unwrap());
+    let market = Arc::new(Mutex::new(
+        Marketplace::new(&server.base, github_base).unwrap(),
+    ));
+    let home = tempfile::tempdir().unwrap();
+    let dir = home.path().to_owned();
+
+    let shared = market.clone();
+    let install =
+        std::thread::spawn(move || install_shared(&shared, &catppuccin(), &dir, Instant::now()));
+    // GitHub has the request and holds it: the lock is free meanwhile.
+    github.set_nonblocking(true).unwrap();
+    let deadline = Instant::now() + FIXTURE_TIMEOUT;
+    let held = loop {
+        match github.accept() {
+            Ok((held, _)) => break held,
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                assert!(Instant::now() < deadline, "GitHub was never asked");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(err) => panic!("{err}"),
+        }
+    };
+    assert!(market.try_lock().is_ok());
+    drop(held);
+    let installed = install.join().unwrap().unwrap();
+    assert!(installed.licenses.is_empty(), "{installed:?}");
+}
+
 #[test]
 fn github_repo_accepts_only_plain_github_urls() {
     let parsed = |url: &str| github_repo(url).map(|r| (r.owner, r.repo));
@@ -534,6 +908,31 @@ fn github_repo_accepts_only_plain_github_urls() {
         parsed("https://github.com/a-b/c.d_e.git"),
         pair("a-b", "c.d_e")
     );
+    // C302: one trailing slash, and a folder on a branch, as in the listing.
+    assert_eq!(
+        parsed("https://github.com/catppuccin/zed/"),
+        pair("catppuccin", "zed")
+    );
+    assert_eq!(
+        parsed("https://github.com/kepano/flexoki/tree/main/zed"),
+        pair("kepano", "flexoki")
+    );
+    assert_eq!(
+        parsed("https://github.com/kepano/flexoki/tree/main"),
+        pair("kepano", "flexoki")
+    );
+    // C301: GitHub's longest names pass.
+    let (owner, repo) = ("o".repeat(39), "r".repeat(100));
+    assert_eq!(
+        parsed(&format!("https://github.com/{owner}/{repo}")),
+        pair(&owner, &repo)
+    );
+    for bad in [
+        format!("https://github.com/{}/zed", "o".repeat(40)),
+        format!("https://github.com/catppuccin/{}", "r".repeat(101)),
+    ] {
+        assert_eq!(parsed(&bad), None, "{bad}");
+    }
     for bad in [
         "http://github.com/catppuccin/zed",
         "https://gitlab.com/catppuccin/zed",
@@ -541,8 +940,12 @@ fn github_repo_accepts_only_plain_github_urls() {
         "https://GitHub.com/catppuccin/zed",
         "https://github.com/catppuccin",
         "https://github.com/catppuccin/",
-        "https://github.com/catppuccin/zed/",
-        "https://github.com/catppuccin/zed/tree/main",
+        "https://github.com//zed",
+        "https://github.com/catppuccin/zed//",
+        "https://github.com/catppuccin/zed/tree/",
+        "https://github.com/catppuccin/zed/tree//x",
+        "https://github.com/catppuccin/zed/blob/main/LICENSE",
+        "https://github.com/catppuccin//",
         "https://github.com/catppuccin/zed?x=1",
         "https://github.com/catppuccin/zed#readme",
         "https://github.com/../zed",

@@ -28,8 +28,8 @@ use super::tokens::{
 use crate::appearance::{
     API_BASE, AgmenSettings, Appearance, AppearanceSource, EXTENSIONS_PAGE, FontPrefs, Fonts,
     GITHUB_API, IconThemeChoice, InstalledTheme, MarketError, Marketplace, Mode, SystemMode,
-    ThemeEntry, ThemeExtension, ThemeOrigin, agmen_settings_path, installed_themes, picker_entries,
-    resolve_paths, theme_dirs, theme_names, zed_extensions_dir,
+    ThemeEntry, ThemeExtension, ThemeOrigin, agmen_settings_path, install_shared, installed_themes,
+    picker_entries, resolve_paths, theme_dirs, theme_names, zed_extensions_dir,
 };
 use crate::icons::{FileIcons, IconTheme, UiIcon};
 
@@ -422,7 +422,7 @@ impl SettingsView {
         let task = cx.background_executor().spawn(async move {
             market
                 .lock()
-                .map_err(|_| "the theme list is unavailable after an earlier crash".to_owned())?
+                .map_err(|_| MarketError::Poisoned.to_string())?
                 .search(&query, Instant::now())
                 .map_err(|err| err.to_string())
         });
@@ -467,10 +467,8 @@ impl SettingsView {
         self.set_status(BrowseStatus::Installing(ext.name.clone()), cx);
         let dir = theme_dirs(&self.sources.config, &self.sources.extensions).agmen;
         let task = cx.background_executor().spawn(async move {
-            market
-                .lock()
-                .map_err(|_| "the theme list is unavailable after an earlier crash".to_owned())?
-                .install(&ext, &dir, Instant::now())
+            // C305: the lock is released while GitHub is asked.
+            install_shared(&market, &ext, &dir, Instant::now())
                 .map(|installed| {
                     let names = theme_names(&dir.join(&installed.id));
                     (installed, names)

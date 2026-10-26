@@ -567,7 +567,8 @@ fn zed_installed_theme_without_license_says_zed_keeps_it() {
     );
     let detail = rows::installed_detail(&zed);
     assert!(detail.contains("license kept by Zed"), "{detail}");
-    assert!(!detail.contains("no license file"), "{detail}");
+    // C306: the agmen install's phrase must not reach a Zed install.
+    assert!(!detail.contains("license not found"), "{detail}");
 
     let ours = entry(
         "Nord",
@@ -614,6 +615,31 @@ fn agmen_install_without_license_says_license_not_found() {
         detail.contains("https://github.com/catppuccin/zed"),
         "{detail}"
     );
+}
+
+#[test]
+fn unlabeled_license_file_says_it_is_kept() {
+    // C303: a LICENSE that has no readable first line is still kept.
+    for origin in [ThemeOrigin::Agmen, ThemeOrigin::ZedExtension] {
+        let theme = entry(
+            "Nord",
+            origin(InstalledTheme {
+                id: "nord".into(),
+                licenses: vec!["/x/nord/LICENSE".into()],
+                ..InstalledTheme::default()
+            }),
+        );
+        let detail = rows::installed_detail(&theme);
+        assert!(detail.contains("license file kept"), "{detail}");
+        assert!(!detail.contains("license not found"), "{detail}");
+    }
+}
+
+#[test]
+fn offered_theme_says_its_license_is_fetched_on_install() {
+    // C307, V134: the license is fetched at install and never blocks it.
+    let detail = rows::offered_detail(&offered("nord"));
+    assert!(detail.ends_with("license fetched on install"), "{detail}");
 }
 
 #[gpui::test]
