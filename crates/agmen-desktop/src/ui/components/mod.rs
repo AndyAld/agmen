@@ -13,6 +13,7 @@ mod chip;
 mod color;
 #[cfg(test)]
 mod control_harness;
+mod dot;
 mod dropdown;
 mod icon;
 mod icon_button;
@@ -26,12 +27,14 @@ mod status_dot;
 mod stepper;
 mod tab;
 mod toggle;
+mod tool_card;
 
 pub(crate) use avatar::Avatar;
 pub(crate) use badge::Badge;
 pub(crate) use button::{Button, ButtonStyle};
 pub(crate) use chip::Chip;
 pub(crate) use color::Color;
+pub(crate) use dot::Dot;
 pub(crate) use icon::{Icon, IconSize};
 pub(crate) use icon_button::{ClickHandler, IconButton, IconButtonStyle};
 pub(crate) use key_hint::KeyHint;
@@ -41,6 +44,7 @@ pub(crate) use list_item::{Indent, ListItem};
 pub(crate) use progress::ProgressBar;
 pub(crate) use status_dot::StatusDot;
 pub(crate) use tab::Tab;
+pub(crate) use tool_card::ToolCard;
 pub(crate) use {dropdown::Dropdown, segmented::Segmented, stepper::Stepper, toggle::Toggle};
 
 /// What a control reports when its value changes: the new value. An `Rc`, not

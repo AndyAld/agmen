@@ -13,8 +13,7 @@ use gpui::{
 
 use super::syntax::{self, Language};
 use super::tokens::{
-    DELETED_MARK_HEIGHT, GUTTER_MARK_WIDTH, MONO_CELL_HEIGHT, MONO_CELL_WIDTH, SPACE_10, SPACE_12,
-    SPACE_16,
+    DELETED_MARK_HEIGHT, GUTTER_MARK_WIDTH, MONO_CELL_HEIGHT, MONO_CELL_WIDTH, SPACE_8,
 };
 use crate::appearance::{Appearance, Theme};
 
@@ -146,6 +145,7 @@ fn render_line(
     line: &Line,
     marks: &[GutterMark],
     number_width: Pixels,
+    cell: Pixels,
     cx: &App,
 ) -> gpui::AnyElement {
     let appearance = cx.global::<Appearance>();
@@ -172,12 +172,19 @@ fn render_line(
             .bg(theme.deleted);
         if top { edge.top_0() } else { edge.bottom_0() }
     });
+    // The mark column is one cell wide; its bar is Zed's narrow git bar.
     let gutter = div()
-        .relative()
-        .w(GUTTER_MARK_WIDTH)
+        .debug_selector(move || format!("line:{number}:mark"))
+        .w(cell)
         .h_full()
-        .children(fill)
-        .children(deleted);
+        .child(
+            div()
+                .relative()
+                .w(GUTTER_MARK_WIDTH)
+                .h_full()
+                .children(fill)
+                .children(deleted),
+        );
     div()
         .debug_selector(move || format!("line:{number}"))
         .h(MONO_CELL_HEIGHT)
@@ -186,7 +193,7 @@ fn render_line(
         .overflow_hidden()
         .flex()
         .items_center()
-        .gap(SPACE_10)
+        .gap(cell)
         .child(
             div()
                 .debug_selector(move || format!("line:{number}:number"))
@@ -212,9 +219,10 @@ fn render_line(
         .into_any_element()
 }
 
-/// The code font's digit width, so line numbers fit at any size; the
-/// mockup's 7.62 px cell when the font cannot be measured.
-fn digit_width(window: &Window, fonts: &crate::appearance::Fonts) -> Pixels {
+/// The code font's cell, its digit width, so line numbers fit at any size;
+/// the mockup's 7.62 px cell when the font cannot be measured. The code and
+/// diff views lay out their columns in these cells, as console.py's grid.
+pub(super) fn cell_width(window: &Window, fonts: &crate::appearance::Fonts) -> Pixels {
     let text = window.text_system();
     let font_id = text.resolve_font(&gpui::font(fonts.code_family.clone()));
     text.advance(font_id, fonts.code_size, '0')
@@ -225,19 +233,23 @@ impl Render for CodeView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let appearance = cx.global::<Appearance>();
         let fonts = &appearance.fonts;
-        let digits = self.lines.len().max(1).to_string().len().max(2);
+        // console.py's numbers end at column 4 with the mark at 5 and text
+        // at 7; longer numbers widen the column and keep one cell of margin.
+        let cells = (self.lines.len().max(1).to_string().len() + 1).max(4);
+        let cell = cell_width(window, fonts);
         #[expect(
             clippy::cast_precision_loss,
             reason = "a line count's digit count is tiny"
         )]
-        let number_width = digit_width(window, fonts) * digits as f32;
+        let number_width = cell * cells as f32;
         let (lines, marks) = (self.lines.clone(), self.marks.clone());
         div()
             .size_full()
             .flex()
             .flex_col()
-            .pt(SPACE_16)
-            .pl(SPACE_12)
+            // console.py draws the grid 8 px down from row 1, so line 1
+            // sits one row and 8 px below the breadcrumb.
+            .pt(MONO_CELL_HEIGHT + SPACE_8)
             .bg(appearance.theme.editor_background)
             .text_color(appearance.theme.text)
             .font_family(fonts.code_family.clone())
@@ -248,7 +260,7 @@ impl Render for CodeView {
                         .filter_map(|ix| {
                             lines
                                 .get(ix)
-                                .map(|line| render_line(ix, line, &marks, number_width, cx))
+                                .map(|line| render_line(ix, line, &marks, number_width, cell, cx))
                         })
                         .collect::<Vec<_>>()
                 })

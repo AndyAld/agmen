@@ -3,13 +3,12 @@
 //! output, and a DM composer.
 
 use gpui::{
-    App, AppContext as _, Context, Entity, FontWeight, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
-    div,
+    AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
+    Render, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
 };
 
 use super::breadcrumb::Breadcrumb;
-use super::components::{Button, ButtonStyle, Color, Icon, IconSize, Label, LabelSize};
+use super::components::{Button, ButtonStyle, Color, Icon, IconSize, Label, LabelSize, ToolCard};
 use super::text_input::TextInput;
 use super::tokens::{
     BORDER_WIDTH, RADIUS_CARD, SPACE_6, SPACE_8, SPACE_10, SPACE_12, SPACE_14, SPACE_18,
@@ -61,45 +60,27 @@ const fn tone_color(tone: Tone) -> Color {
     }
 }
 
-fn session_row(row: &SessionRow, cx: &App) -> gpui::AnyElement {
-    let theme = &cx.global::<Appearance>().theme;
+/// An output line's "⎿" and text colors: both the line's tone, as
+/// console.py draws `"   ⎿ " + text` as one text (rows 637 and 648).
+const fn out_colors(tone: Tone) -> (Color, Color) {
+    (tone_color(tone), tone_color(tone))
+}
+
+fn session_row(row: &SessionRow) -> gpui::AnyElement {
     match row {
-        // A folded tool call: chevron, tool name, argument.
-        SessionRow::Tool { name, arg } => div()
-            .flex()
-            .items_center()
-            .gap(SPACE_8)
-            .py(SPACE_6)
-            .px(SPACE_10)
-            .rounded(RADIUS_CARD)
-            .border(BORDER_WIDTH)
-            .border_color(theme.border)
-            .bg(theme.elevated_surface)
-            .child(
-                Icon::new(UiIcon::ChevronRight)
-                    .size(IconSize::Small)
-                    .color(Color::Muted),
-            )
-            .child(
-                Label::new(name.clone())
-                    .code()
-                    .weight(FontWeight::BOLD)
-                    .color(Color::Accent),
-            )
-            .child(Label::new(arg.clone()).code().color(Color::Placeholder))
-            .into_any_element(),
-        SessionRow::Out { text, tone } => div()
-            .flex()
-            .gap(SPACE_8)
-            .pl(SPACE_14)
-            .child(Label::new("⎿").code().color(Color::Muted))
-            .child(
-                Label::new(text.clone())
-                    .code()
-                    .color(tone_color(*tone))
-                    .wrap(),
-            )
-            .into_any_element(),
+        SessionRow::Tool { name, arg } => {
+            ToolCard::new(name.clone(), arg.clone()).into_any_element()
+        }
+        SessionRow::Out { text, tone } => {
+            let (glyph, text_color) = out_colors(*tone);
+            div()
+                .flex()
+                .gap(SPACE_8)
+                .pl(SPACE_14)
+                .child(Label::new("⎿").code().color(glyph))
+                .child(Label::new(text.clone()).code().color(text_color).wrap())
+                .into_any_element()
+        }
         SessionRow::Say(text) => div()
             .child(Label::new(text.clone()).wrap())
             .into_any_element(),
@@ -118,9 +99,7 @@ impl Render for AgentView {
         let theme = &cx.global::<Appearance>().theme;
         let rows = self.session.rows.iter().enumerate().map(|(ix, row)| {
             let selector = format!("session:{ix}:{}", kind(row));
-            div()
-                .debug_selector(|| selector)
-                .child(session_row(row, cx))
+            div().debug_selector(|| selector).child(session_row(row))
         });
         let buttons = div()
             .flex()

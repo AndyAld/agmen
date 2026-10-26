@@ -1,4 +1,4 @@
-//! The bar above a center tab's content: path parts split by chevrons, the
+//! The bar above a center tab's content: path parts split by "›", the
 //! last one bright, with buttons at the right edge.
 
 use gpui::{
@@ -6,11 +6,11 @@ use gpui::{
     SharedString, Styled as _, Window, div,
 };
 
-use super::components::{Color, Icon, IconSize, Label};
+use super::components::{Color, Label, LabelSize};
 use super::tokens::{BORDER_WIDTH, BREADCRUMB_HEIGHT, SPACE_8, SPACE_14};
-use crate::icons::UiIcon;
 
-/// Tests find it as `breadcrumb`.
+/// Tests find it as `breadcrumb`, and the separator before part `ix` as
+/// `"breadcrumb:sep:{ix}"`.
 #[derive(IntoElement)]
 pub(crate) struct Breadcrumb {
     parts: Vec<SharedString>,
@@ -48,10 +48,11 @@ impl RenderOnce for Breadcrumb {
         let mut row = div().flex().items_center().gap(SPACE_8);
         for (ix, part) in self.parts.into_iter().enumerate() {
             if ix > 0 {
+                let selector = format!("breadcrumb:sep:{ix}");
                 row = row.child(
-                    Icon::new(UiIcon::ChevronRight)
-                        .size(IconSize::Small)
-                        .color(Color::Muted),
+                    div()
+                        .debug_selector(|| selector)
+                        .child(Label::new("›").size(LabelSize::Small).color(Color::Muted)),
                 );
             }
             let color = if ix == last {
@@ -74,5 +75,37 @@ impl RenderOnce for Breadcrumb {
             .child(row)
             .child(div().flex_1())
             .children(self.end)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::{Context, Render, TestAppContext};
+
+    use super::*;
+    use crate::ui::test_support::{init, redraw};
+    use crate::ui::tokens::ICON_SM;
+
+    struct Host;
+
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            Breadcrumb::new(["andy/fx1".into(), "C015".into(), "main".into()])
+        }
+    }
+
+    #[gpui::test]
+    fn separators_are_a_text_glyph(cx: &mut TestAppContext) {
+        // V80: console.py's breadcrumb splits parts with a 12 px "›" in
+        // icon.muted (nodes 609, 11630), not a 12 px chevron icon.
+        init(cx);
+        let (_, cx) = cx.add_window_view(|_, _| Host);
+        redraw(cx);
+        for ix in [1, 2] {
+            let sel: &'static str = Box::leak(format!("breadcrumb:sep:{ix}").into_boxed_str());
+            let sep = cx.debug_bounds(sel).unwrap_or_else(|| panic!("{sel}"));
+            assert!(sep.size.width < ICON_SM, "{sel}: {sep:?}");
+        }
+        assert!(cx.debug_bounds("breadcrumb:sep:3").is_none());
     }
 }

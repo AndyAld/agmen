@@ -159,3 +159,26 @@ fn line_numbers_fit_the_code_font(cx: &mut TestAppContext) {
     let large = number_column_width(cx, 30.);
     assert!(large > small * 2., "{small:?} {large:?}");
 }
+
+#[gpui::test]
+fn columns_follow_the_mockup_grid(cx: &mut TestAppContext) {
+    // V84: console.py renders the grid 8 px into the editor and starts at
+    // row 1, so line 1 sits 26 px below the breadcrumb; numbers end at
+    // column 4, the mark is column 5 and text starts at column 7, in code
+    // font cells.
+    init(cx);
+    let (_, cx) = cx.add_window_view(|_, _| CodeView::new(MAIN_RS, Language::Rust, Vec::new()));
+    redraw(cx);
+    let cell = cx.update(|window, cx| {
+        cell_width(window, &cx.global::<crate::appearance::Appearance>().fonts)
+    });
+    let line = cx.debug_bounds("line:1").unwrap();
+    assert_eq!(line.top(), gpui::px(26.), "{line:?}");
+    let close = |a: gpui::Pixels, b: gpui::Pixels| (a - b).abs() < gpui::px(0.5);
+    let number = cx.debug_bounds("line:10:number").unwrap();
+    assert!(close(number.right(), cell * 4.), "{number:?} {cell:?}");
+    let mark = cx.debug_bounds("line:1:mark").unwrap();
+    assert!(close(mark.left(), cell * 5.), "{mark:?} {cell:?}");
+    let text = cx.debug_bounds("line:1:text").unwrap();
+    assert!(close(text.left(), cell * 7.), "{text:?} {cell:?}");
+}

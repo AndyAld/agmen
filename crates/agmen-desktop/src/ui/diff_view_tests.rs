@@ -84,3 +84,25 @@ fn diff_view_without_hunks_says_so(cx: &mut TestAppContext) {
     redraw(cx);
     assert!(cx.debug_bounds("diff-empty").is_some());
 }
+
+#[gpui::test]
+fn diff_columns_use_the_code_font_cell(cx: &mut TestAppContext) {
+    // V84: console.py puts the sign at column 2 and code at column 4, in
+    // code font cells, so the columns follow the person's code font size.
+    init(cx);
+    cx.update(|cx| {
+        let mut appearance = cx.global::<crate::appearance::Appearance>().clone();
+        appearance.fonts.code_size = gpui::px(26.);
+        cx.set_global(appearance);
+    });
+    let (_, cx) = cx.add_window_view(|_, _| DiffView::new(main_rs_hunks(), Language::Rust));
+    redraw(cx);
+    let cell = cx.update(|window, cx| {
+        cell_width(window, &cx.global::<crate::appearance::Appearance>().fonts)
+    });
+    let close = |a: gpui::Pixels, b: gpui::Pixels| (a - b).abs() < gpui::px(0.5);
+    let sign = cx.debug_bounds("diff-row:3:sign").unwrap();
+    assert!(close(sign.left(), cell * 2.), "{sign:?} {cell:?}");
+    let text = cx.debug_bounds("diff-row:3:text").unwrap();
+    assert!(close(text.left(), cell * 4.), "{text:?} {cell:?}");
+}
