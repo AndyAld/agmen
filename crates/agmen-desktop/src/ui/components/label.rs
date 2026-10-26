@@ -30,6 +30,8 @@ pub(crate) struct Label {
     code: bool,
     wrap: bool,
     strikethrough: bool,
+    /// Line height as a multiple of the size; `None` is [`LINE_HEIGHT`].
+    line_height: Option<f32>,
 }
 
 impl Label {
@@ -43,7 +45,16 @@ impl Label {
             code: false,
             wrap: false,
             strikethrough: false,
+            line_height: None,
         }
+    }
+
+    /// Sets the line height as a multiple of the text size, for text the
+    /// mockups draw at a font's own line height rather than 1.2.
+    #[must_use]
+    pub(crate) const fn line_height(mut self, ratio: f32) -> Self {
+        self.line_height = Some(ratio);
+        self
     }
 
     #[must_use]
@@ -95,7 +106,9 @@ impl RenderOnce for Label {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let appearance = cx.global::<Appearance>();
         let color = self.color.hsla(&appearance.theme);
-        let base = div().text_color(color).line_height(relative(LINE_HEIGHT));
+        let base = div()
+            .text_color(color)
+            .line_height(relative(self.line_height.unwrap_or(LINE_HEIGHT)));
         let sized = if self.code {
             base.font_family(appearance.fonts.code_family.clone())
                 .text_size(appearance.fonts.code_size)

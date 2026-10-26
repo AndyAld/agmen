@@ -65,3 +65,37 @@ fn agent_header_buttons_are_8_px_apart(cx: &mut TestAppContext) {
         "{open:?} {stop:?}"
     );
 }
+
+#[gpui::test]
+fn rows_between_cards_take_the_mockups_line_heights(cx: &mut TestAppContext) {
+    // V108: console.py's auto line heights are 14 px for 12 px code (the ⎿
+    // rows), 16 px for 13 px text (Say) and 13 px for 11 px text (cost).
+    init(cx);
+    let snapshot = chat_snapshot();
+    let id = crate::backend::fixture_id("andy/fx1");
+    let session = snapshot.sessions.get(&id).unwrap().clone();
+    let (_, cx) = cx.add_window_view(|_, cx| AgentView::new("andy/fx1", session, cx));
+    redraw(cx);
+    let (code, rem) = cx.update(|window, cx| {
+        (
+            cx.global::<crate::appearance::Appearance>().fonts.code_size,
+            window.rem_size(),
+        )
+    });
+    let mut height = |sel: &'static str| cx.debug_bounds(sel).unwrap().size.height;
+    let near = |got: gpui::Pixels, want: gpui::Pixels| (got - want).abs() <= gpui::px(0.25);
+    let out = height("session:2:out");
+    assert!(near(out, code * (14. / 12.)), "{out:?} for code {code:?}");
+    let say = height("session:3:say");
+    let say_size = crate::ui::tokens::TEXT_DEFAULT.to_pixels(rem);
+    assert!(
+        near(say, say_size * (16. / 13.)),
+        "{say:?} for {say_size:?}"
+    );
+    let cost = height("session:9:cost");
+    let cost_size = crate::ui::tokens::TEXT_SMALL.to_pixels(rem);
+    assert!(
+        near(cost, cost_size * (13. / 11.)),
+        "{cost:?} for {cost_size:?}"
+    );
+}
