@@ -66,21 +66,7 @@ pub(crate) const TREE_INDENT_STEP: Pixels = px(14.);
 pub(crate) const KV_LABEL_WIDTH: Pixels = px(96.);
 
 // The code font's cell at 13 px.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the terminal view uses it in Task 14 of the desktop plan"
-    )
-)]
 pub(crate) const MONO_CELL_WIDTH: Pixels = px(7.62);
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the terminal view uses it in Task 14 of the desktop plan"
-    )
-)]
 pub(crate) const MONO_CELL_HEIGHT: Pixels = px(18.);
 
 // Spacing: the mockup's gaps and padding, named by their pixels.

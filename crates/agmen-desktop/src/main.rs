@@ -53,6 +53,16 @@ use ui::{Quit, ToggleLeftDock, ToggleRightDock, Workspace};
 
 const USAGE: &str = "usage: agmen-desktop [--screen <name> | --list-screens | --spike list [--autoscroll] | --spike notify]";
 
+/// The views `--view` can show alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DevView {
+    /// The code view on `roles/reviewer.xml`.
+    Code,
+}
+
+/// The role file the code view shows: a built-in role, from the repo.
+const REVIEWER_XML: &str = include_str!("../../../roles/reviewer.xml");
+
 /// What the command line asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Launch {
@@ -66,6 +76,8 @@ enum Launch {
     Screen(backend::Screen),
     /// Prints every screen name, one per line, for `scripts/shot.sh all`.
     ListScreens,
+    /// One view alone in the window, to check it before a pane hosts it.
+    View(DevView),
 }
 
 impl Launch {
@@ -86,6 +98,10 @@ impl Launch {
             },
             [flag, name] if flag == "--spike" && name == "notify" => Ok(Self::NotifySpike),
             [flag] if flag == "--list-screens" => Ok(Self::ListScreens),
+            [flag, name] if flag == "--view" => match name.as_str() {
+                "code" => Ok(Self::View(DevView::Code)),
+                _ => anyhow::bail!("views: code"),
+            },
             [flag, name] if flag == "--screen" => name
                 .parse()
                 .map(Self::Screen)
@@ -255,6 +271,18 @@ fn open_main_window(launch: &Launch, cx: &mut App) -> Result<()> {
             .map(Into::into)
         }
         Launch::NotifySpike | Launch::ListScreens => return Ok(()),
+        Launch::View(DevView::Code) => cx
+            .open_window(options, |_, cx| {
+                cx.new(|cx| {
+                    ui::CodeView::new(
+                        REVIEWER_XML,
+                        ui::Language::for_path(std::path::Path::new("roles/reviewer.xml")),
+                        vec![ui::GutterMark::Modified(11..12)],
+                        cx,
+                    )
+                })
+            })
+            .map(Into::into),
         Launch::ListSpike { autoscroll } => {
             let autoscroll = *autoscroll;
             cx.open_window(options, |_, cx| {
