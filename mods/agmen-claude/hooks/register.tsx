@@ -8,10 +8,11 @@ import type { StampedEnvelope } from '../../../schema/ts/StampedEnvelope'
 //   becomes a meta row ($.session.append) that the model reads as data.
 // - Wake-up: such a message wakes an idle session with $.prompt.submit (never
 //   asUser), at most once per WAKE_INTERVAL_MS, naming what arrived.
-// - Lane guard: in this repository's worktrees, Edit, Write and NotebookEdit
-//   run only where `agmen check-path` allows; every error or timeout denies.
-//   A path outside every worktree is not agmen's to judge. After a Bash call,
-//   changes outside the lanes are reported in a meta row.
+// - Lane guard: in this session's worktree, Edit, Write and NotebookEdit run
+//   only where `agmen check-path` allows; every error or timeout denies. A
+//   path git places in another repository, or in none, is not agmen's to
+//   judge; one in another worktree of this repository is denied (R72). After
+//   a Bash call, changes outside the lanes are reported in a meta row.
 // - Command: /agmen runs a few `agmen` subcommands and shows the result.
 // All of it waits for `.agmen/identity.json` at the session's git worktree
 // root, trusted only on a positive test that git does not track it (R42a).
@@ -87,8 +88,16 @@ const MIN_AGMEN_VERSION = [0, 1, 0] as const
 const WAKE_INTERVAL_MS = 30_000
 /** How long the lane guard waits for `agmen check-path` before it denies. */
 const CHECK_PATH_TIMEOUT_MS = 2_000
-/** How long a git call (worktree root, ignore check, `git status`) may run. */
+/** How long a git call (worktree root, common dir, ignore check, `git status`) may run. */
 const GIT_TIMEOUT_MS = 5_000
+/** git's messages untranslated, so the guard can tell `not a git repository` from a failure. */
+const GIT_ENV = { LC_ALL: 'C', LANGUAGE: '' } as const
+/**
+ * The two ways git's repository discovery ends with no repository (setup.c):
+ * no `.git` up to the root, or none up to a mount point. Any other failure,
+ * such as a broken `.git` file or a `safe.directory` refusal, is not an answer.
+ */
+const NO_REPOSITORY = /^fatal: not a git repository \(or any (?:of the parent directories|parent up to mount point )/m
 /** A partial watch line longer than this is dropped: four times the 64 KiB envelope limit. */
 const PARTIAL_LINE_MAX = 262_144
 /** Messages one wake-up names; more are counted, not named. */
@@ -170,24 +179,29 @@ type Joined =
   | { readonly kind: 'refused'; readonly why: string }
 
 /**
- * Where the repository's worktrees land, read once at start: this session's
- * root and the others `git worktree list` names, every link followed.
- * `others` is undefined when git could not list them.
+ * This session's repository, read at start, every link followed: its
+ * worktree root, and the common dir all its worktrees share (R72).
  */
-type Worktrees = {
+type Repository = {
   readonly root: string
-  readonly others: readonly string[] | undefined
+  readonly commonDir: string
 }
 
-/** Where a placed path lies against the repository's worktrees. */
-type Location = 'root' | 'other' | 'alias' | 'outside' | 'unknown'
+/** Where a placed path lies against this session's worktree. */
+type Location = 'root' | 'alias' | 'elsewhere'
+
+/** git's answer for a folder: the common dir of its repository, no repository, or no answer. */
+type CommonDir =
+  | { readonly kind: 'dir'; readonly path: string }
+  | { readonly kind: 'none' }
+  | { readonly kind: 'failed'; readonly why: string }
 
 /** What the hooks share for one load of the module. */
 type State = {
   /** The worktree holding `.agmen/identity.json`, once the CLI checked out; undefined while inert. */
   root: string | undefined
-  /** Read with `root`; undefined while inert. */
-  worktrees: Worktrees | undefined
+  /** Read with `root`; undefined while inert, or when git could not name it (every edit is then denied). */
+  repository: Repository | undefined
   /** A start is under way (session.start and /agmen join can overlap). */
   isStarting: boolean
   self: Self | undefined
@@ -554,8 +568,8 @@ const isUnplaceableName = (name: string): boolean => name === '' || name === '.'
 const realPathOf = async ($: EngineInterface, path: string): Promise<string | undefined> =>
   (await $.fs.stat(path, { resolve: true }).catch(() => undefined))?.realPath
 
-/** A placed path: where its existing part lands, and the names below it not there yet. */
-type Placed = { readonly head: string; readonly tail: readonly string[] }
+/** A placed path: where its existing part lands, whether that is a folder, and the names below it not there yet. */
+type Placed = { readonly head: string; readonly isFolder: boolean; readonly tail: readonly string[] }
 
 /**
  * Where `path` lands, every link followed, or undefined to deny (R43).
@@ -569,7 +583,9 @@ async function placed($: EngineInterface, path: string): Promise<Placed | undefi
   const tail: string[] = []
   for (let depth = 0; depth < WALK_MAX; depth += 1) {
     const stat = await $.fs.stat(head, { resolve: true }).catch(() => undefined)
-    if (stat !== undefined) return stat.realPath === undefined ? undefined : { head: stat.realPath, tail }
+    if (stat !== undefined) {
+      return stat.realPath === undefined ? undefined : { head: stat.realPath, isFolder: stat.kind === 'dir', tail }
+    }
     const split = splitPath(head)
     if (split === undefined || isUnplaceableName(split.name)) return undefined
     tail.unshift(split.name)
@@ -592,17 +608,47 @@ const isWithin = (path: string, folder: string): boolean =>
 
 /**
  * Where `real` lies: in this session's worktree under its exact spelling,
- * in another worktree of the repository, in one of them under another
- * spelling (a case or Unicode alias), outside them all, or `unknown` when
- * git could not list the other worktrees.
+ * in it under another spelling (a case or Unicode alias), or elsewhere, which
+ * git judges (`commonDirOf`).
  */
-function locate(worktrees: Worktrees, real: string): Location {
-  if (isWithin(real, worktrees.root)) return 'root'
-  const fold = folded(real)
-  if (isWithin(fold, folded(worktrees.root))) return 'alias'
-  if (worktrees.others === undefined) return 'unknown'
+function locate(root: string, real: string): Location {
+  if (isWithin(real, root)) return 'root'
 
-  return worktrees.others.some(other => isWithin(fold, folded(other))) ? 'other' : 'outside'
+  return isWithin(folded(real), folded(root)) ? 'alias' : 'elsewhere'
+}
+
+/** Whether `path` is absolute: `/x`, `\\x` or `C:/x`. */
+const isAbsolute = (path: string): boolean => /^(?:[\\/]|[A-Za-z]:[\\/])/.test(path)
+
+/**
+ * The common dir of the repository that holds `folder`, every link followed,
+ * asked of git each time (`git rev-parse --git-common-dir`, R72): a worktree
+ * added after the session started counts as soon as git knows it. `none` only
+ * on git's own "not a git repository" answer; anything else is `failed`.
+ */
+async function commonDirOf($: EngineInterface, folder: string): Promise<CommonDir> {
+  let ran: ProcessRunResult
+  try {
+    ran = await $.process.run(['git', 'rev-parse', '--git-common-dir'], { cwd: folder, env: GIT_ENV, timeoutMs: GIT_TIMEOUT_MS })
+  } catch (error: unknown) {
+    debug($, `git rev-parse --git-common-dir in ${folder} could not run: ${String(error)}`)
+    return { kind: 'failed', why: `git could not run or did not answer within ${GIT_TIMEOUT_MS / 1_000} s` }
+  }
+  if (ran.exitCode === 128 && NO_REPOSITORY.test(ran.stderr)) return { kind: 'none' }
+  if (ran.exitCode !== 0) {
+    debug($, `git rev-parse --git-common-dir in ${folder} exited ${ran.exitCode}: ${quote(ran.stderr)}`)
+    return { kind: 'failed', why: `git rev-parse exited ${ran.exitCode}` }
+  }
+  // One line, relative to `folder` or absolute. A name holding a line break is not placed.
+  const lines = ran.stdout.split('\n')
+  const [named, end] = lines
+  if (lines.length !== 2 || named === undefined || named === '' || end !== '') {
+    debug($, `git rev-parse --git-common-dir in ${folder} printed: ${quote(ran.stdout)}`)
+    return { kind: 'failed', why: 'git printed a common dir the guard cannot read' }
+  }
+  const real = await realPathOf($, isAbsolute(named) ? named : joinPath(folder, [named]))
+
+  return real === undefined ? { kind: 'failed', why: 'the common dir git named cannot be placed' } : { kind: 'dir', path: real }
 }
 
 /**
@@ -794,32 +840,46 @@ async function checkPaths($: EngineInterface, root: string, paths: readonly stri
 }
 
 /**
- * Judges an edit of `path`: the deny reason, or undefined to let it run. A
- * path outside every worktree of the repository (a scratch file, Claude
- * Code's memory) is not agmen's to judge and runs; one in another worktree
- * is denied.
+ * Judges an edit of a path outside this session's worktree (R72): undefined
+ * to let it run when git places it in another repository or in none (a
+ * scratch file, Claude Code's memory), else the deny reason: in another
+ * worktree of this repository or its git dir, or git gave no clear answer.
  */
-async function judgeEdit($: EngineInterface, root: string, worktrees: Worktrees, path: string): Promise<string | undefined> {
+async function judgeElsewhere($: EngineInterface, repository: Repository, path: string, place: Placed): Promise<string | undefined> {
+  // git runs in the nearest existing folder: the head itself, or the folder holding it.
+  const folder = place.isFolder ? place.head : splitPath(place.head)?.folder
+  if (folder === undefined) return `agmen: cannot tell where ${path} lands, so the edit is denied.`
+  const common = await commonDirOf($, folder)
+  switch (common.kind) {
+    case 'none':
+      return undefined
+    case 'failed':
+      return `agmen: git cannot tell whether ${path} is in this repository (${common.why}), so the edit is denied.`
+    case 'dir':
+      // Compared folded: over-matching denies.
+      if (folded(common.path) !== folded(repository.commonDir)) return undefined
+
+      return `agmen: ${path} is in another worktree of this repository, so the edit is denied. Edit it from a session in that worktree.`
+  }
+}
+
+/** Judges an edit of `path`: the deny reason, or undefined to let it run. */
+async function judgeEdit($: EngineInterface, root: string, repository: Repository, path: string): Promise<string | undefined> {
   const place = await placed($, path)
   if (place === undefined) return `agmen: cannot tell where ${path} lands, so the edit is denied.`
   const real = joinPath(place.head, place.tail)
-  switch (locate(worktrees, real)) {
-    case 'outside':
-      return undefined
-    case 'other':
-      return `agmen: ${path} is in another worktree of this repository, so the edit is denied. Edit it from a session in that worktree.`
+  switch (locate(repository.root, real)) {
+    case 'elsewhere':
+      return judgeElsewhere($, repository, path, place)
     case 'alias':
       return `agmen: ${path} reaches this worktree through another spelling (a case or Unicode alias), so the edit is denied. Use the path as it is stored.`
     case 'root': {
-      const why = await aliasedBecause($, worktrees.root, place.head)
+      const why = await aliasedBecause($, repository.root, place.head)
       if (why !== undefined) {
         debug($, `edit of ${path} denied: ${why}`)
         return `agmen: ${path} is not spelled as the file system stores it (a case or Unicode alias), so the edit is denied. Use the path as it is stored.`
       }
-      break
     }
-    case 'unknown':
-      break
   }
   const checked = await checkPaths($, root, [real])
   if (!checked.isOk) return `agmen: ${checked.why}, so the edit is denied.`
@@ -967,33 +1027,23 @@ async function cliProblem($: EngineInterface, root: string): Promise<string | un
 }
 
 /**
- * The worktrees of `root`'s repository: `root`, and the others `git
- * worktree list --porcelain` names, each where it lands. Undefined when
- * `root` cannot be placed; `others` undefined when git cannot list them.
+ * `root`'s repository: where `root` lands and git's common dir for it.
+ * Undefined, with the reason in the debug log, when either cannot be read;
+ * the guard then denies every edit.
  */
-async function readWorktrees($: EngineInterface, root: string): Promise<Worktrees | undefined> {
+async function readRepository($: EngineInterface, root: string): Promise<Repository | undefined> {
   const realRoot = await realPathOf($, root)
-  if (realRoot === undefined) return undefined
-  const ran = await $.process
-    .run(['git', 'worktree', 'list', '--porcelain'], { cwd: root, timeoutMs: GIT_TIMEOUT_MS })
-    .catch(() => undefined)
-  if (ran === undefined || ran.exitCode !== 0) {
-    debug($, `git worktree list failed: ${ran === undefined ? 'no answer' : quote(ran.stderr)}`)
-    return { root: realRoot, others: undefined }
+  if (realRoot === undefined) {
+    debug($, `cannot place the worktree root ${root}`)
+    return undefined
   }
-  const listed = ran.stdout
-    .split('\n')
-    .filter(text => text.startsWith('worktree '))
-    .map(text => text.slice('worktree '.length))
-    .slice(0, WALK_MAX)
-  const others: string[] = []
-  for (const path of listed) {
-    // A worktree whose folder is gone (prunable) still counts, as named.
-    const real = (await realPathOf($, path)) ?? path
-    if (real !== realRoot) others.push(real)
+  const common = await commonDirOf($, realRoot)
+  if (common.kind !== 'dir') {
+    debug($, `git named no common dir for ${realRoot}: ${common.kind === 'failed' ? common.why : 'not a git repository'}`)
+    return undefined
   }
 
-  return { root: realRoot, others: listed.length === 0 ? undefined : others }
+  return { root: realRoot, commonDir: common.path }
 }
 
 /** Shows one notification; where no channel sends it (desktop, -p), a toast instead. */
@@ -1026,7 +1076,7 @@ async function begin($: EngineInterface, state: State, cwd: string): Promise<voi
     state.isStarting = false
   }
   if (root === undefined) return
-  state.worktrees = await readWorktrees($, root)
+  state.repository = await readRepository($, root)
   state.root = root
   void watch($, state, root).catch((error: unknown) => {
     $.ui.log(`agmen: agmen watch failed: ${quote(String(error))}; messages do not reach this session.`)
@@ -1100,7 +1150,7 @@ function commandOutput(name: string, stdout: string): string {
 export const register: Register = on => {
   const state: State = {
     root: undefined,
-    worktrees: undefined,
+    repository: undefined,
     isStarting: false,
     self: undefined,
     ownIds: new Set(),
@@ -1151,9 +1201,9 @@ export const register: Register = on => {
     if (state.root === undefined) return next(e)
     const path = e.tool === 'NotebookEdit' ? e.notebook_path : e.file_path
     const deny =
-      state.worktrees === undefined
-        ? 'agmen: cannot tell where this worktree lands, so the edit is denied.'
-        : await judgeEdit($, state.root, state.worktrees, path)
+      state.repository === undefined
+        ? 'agmen: git could not place this worktree when the session started, so the edit is denied. Restart the session.'
+        : await judgeEdit($, state.root, state.repository, path)
 
     return deny === undefined ? next(e) : { deny }
   }).catch(($, e, next) => (next.called ? next(e) : { deny: 'agmen: the lane guard failed, so the edit is denied.' }))

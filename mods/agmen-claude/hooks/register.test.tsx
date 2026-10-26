@@ -93,10 +93,13 @@ type Script = {
   /** check-ignore gets no answer: the engine rejects the call, as it does past `timeoutMs`. */
   readonly isCheckIgnoreHung?: boolean
   readonly command?: (argv: readonly string[]) => Partial<ProcessRunResult>
-  /** The repository's worktrees `git worktree list` names; undefined means /work alone. */
+  /**
+   * The repository's worktrees, read on every git call, so a test can add one
+   * after the session started; undefined means /work alone.
+   */
   readonly worktrees?: readonly string[]
-  /** `git worktree list` exits 128. */
-  readonly isWorktreeListBroken?: boolean
+  /** `git rev-parse --git-common-dir` in a folder: an answer of its own, `rejects` for no answer, or undefined for git's. */
+  readonly commonDir?: (cwd: string) => Partial<ProcessRunResult> | 'rejects' | undefined
 }
 
 /** How the identity file sits on disk under /work. */
@@ -148,6 +151,7 @@ const STAT: FsStat = { kind: 'file', size: 1, mtimeMs: 0, isLink: false }
 /** Files in /work: a spelling and where it lands. */
 const FILES: Readonly<Record<string, string>> = {
   [ROOT]: ROOT,
+  '/work/.git': '/work/.git',
   '/work/src': '/work/src',
   '/work/src/ok.ts': '/work/src/ok.ts',
   '/work/ui': '/work/ui',
@@ -196,11 +200,32 @@ function checkPathArgs(args: readonly string[]): readonly string[] | undefined {
 
 /** Stands for the engine, the file system and a scripted `agmen` on PATH. */
 function world(on: On, script: Script = {}): World {
-  /** The fake git: `rev-parse --show-toplevel --show-prefix`, `check-ignore -q` and `status`. */
-  const git = (args: readonly string[], cwd: string): Partial<ProcessRunResult> => {
+  /**
+   * The fake `git rev-parse --git-common-dir`: `.git` at /work, the absolute
+   * /work/.git anywhere in a worktree (folded, as a case-insensitive file
+   * system opens them), else no repository. git's messages are translated
+   * unless LC_ALL is C, so only a guard that sets it can read them.
+   */
+  const commonDir = (cwd: string, env: Readonly<Record<string, string>> | undefined): Partial<ProcessRunResult> => {
+    const own = script.commonDir?.(cwd)
+    if (own === 'rejects') throw new Error('timed out')
+    if (own !== undefined) return own
+    if (cwd === ROOT) return { stdout: '.git\n' }
+    const fold = cwd.toLowerCase()
+    if ([ROOT, ...(script.worktrees ?? [])].some(tree => fold === tree.toLowerCase() || fold.startsWith(`${tree.toLowerCase()}/`))) {
+      return { stdout: `${ROOT}/.git\n` }
+    }
+    const message = env?.['LC_ALL'] === 'C' ? 'not a git repository (or any of the parent directories): .git' : 'Kein Git-Repository'
+
+    return { exitCode: 128, stderr: `fatal: ${message}\n` }
+  }
+
+  /** The fake git: `rev-parse --show-toplevel --show-prefix` or `--git-common-dir`, `check-ignore -q` and `status`. */
+  const git = (args: readonly string[], cwd: string, env: Readonly<Record<string, string>> | undefined): Partial<ProcessRunResult> => {
     const top = script.gitTop ?? ROOT
     switch (args[0]) {
       case 'rev-parse': {
+        if (args[1] === '--git-common-dir') return commonDir(cwd, env)
         if (script.isGitRepo === false || (cwd !== top && !cwd.startsWith(`${top}/`))) {
           return { exitCode: 128, stderr: 'fatal: not a git repository' }
         }
@@ -209,10 +234,6 @@ function world(on: On, script: Script = {}): World {
       }
       case 'check-ignore':
         return { exitCode: script.checkIgnoreExit ?? 0 }
-      case 'worktree':
-        if (script.isWorktreeListBroken === true) return { exitCode: 128, stderr: 'fatal: broken' }
-
-        return { stdout: (script.worktrees ?? [ROOT]).map(path => `worktree ${path}\nHEAD ${'a'.repeat(40)}\nbranch refs/heads/main\n\n`).join('') }
       default:
         return { exitCode: script.gitStatusExitCode ?? 0, stdout: script.gitStatus ?? '', stderr: script.gitStatusStderr ?? '' }
     }
@@ -336,7 +357,7 @@ function world(on: On, script: Script = {}): World {
       const cwd = e.init?.cwd ?? ROOT
       w.gitCwds.push([argv[1] ?? '', cwd])
 
-      return { value: { ...OK_RUN, ...git(argv.slice(1), cwd) } }
+      return { value: { ...OK_RUN, ...git(argv.slice(1), cwd, e.init?.env) } }
     }
 
     return { value: { ...OK_RUN, ...script.command?.(argv) } }
@@ -369,7 +390,7 @@ const edit = (file_path: string) => ({ tool: 'Edit', file_path, old_string: 'a',
 
 const REV_PARSE = ['git', 'rev-parse', '--show-toplevel', '--show-prefix']
 const CHECK_IGNORE = ['git', 'check-ignore', '-q', '--', '.agmen/identity.json']
-const WORKTREE_LIST = ['git', 'worktree', 'list', '--porcelain']
+const COMMON_DIR = ['git', 'rev-parse', '--git-common-dir']
 
 for (const surface of SURFACES) {
   describe(surface, () => {
@@ -420,7 +441,7 @@ for (const surface of SURFACES) {
       await start($, w, surface, '/work/src')
 
       expect(w.asked).toEqual(['/work/src/.agmen/identity.json', IDENTITY_FILE])
-      expect(w.runs).toEqual([REV_PARSE, CHECK_IGNORE, ['agmen', '--version'], WORKTREE_LIST])
+      expect(w.runs).toEqual([REV_PARSE, CHECK_IGNORE, ['agmen', '--version'], COMMON_DIR])
       expect(w.spawns).toEqual([['agmen', 'watch', '--json']])
       expect(w.notified).toEqual([])
     })
@@ -430,7 +451,7 @@ for (const surface of SURFACES) {
 
       await start($, w, surface)
 
-      expect(w.runs).toEqual([REV_PARSE, CHECK_IGNORE, ['agmen', '--version'], WORKTREE_LIST])
+      expect(w.runs).toEqual([REV_PARSE, CHECK_IGNORE, ['agmen', '--version'], COMMON_DIR])
       expect(w.gitCwds).toContainEqual(['check-ignore', ROOT])
       expect(w.spawns).toEqual([['agmen', 'watch', '--json']])
       expect(w.notified).toEqual([])
@@ -1040,17 +1061,68 @@ for (const surface of SURFACES) {
       expect(w.runs.filter(argv => argv[1] === 'check-path')).toEqual([])
     })
 
-    test('guard_sends_outside_paths_to_check_path_when_git_cannot_list_worktrees', async ($, on) => {
+    test('guard_denies_worktrees_added_after_the_session_started', async ($, on) => {
+      // Read on every git call: `git worktree add` from Bash after the start.
+      const worktrees = [ROOT]
+      const w = world(on, { worktrees, checkPath: path => allowedEntry(path, true, null) })
+
+      await start($, w, surface)
+      worktrees.push('/work-c')
+      // More worktrees than the old start-up list kept (64).
+      for (let n = 0; n < 70; n += 1) worktrees.push(`/trees/t${n}`)
+      const added = await $.tool.call({ tool: 'Write', file_path: '/work-c/ui/a.ts', content: 'x' })
+      const seventieth = await $.tool.call(edit('/trees/t69/src/ok.ts'))
+      const outside = await $.tool.call({ tool: 'Write', file_path: '/trees/notes.md', content: 'x' })
+
+      expect(added.deny).toContain('another worktree of this repository')
+      expect(seventieth.deny).toContain('another worktree of this repository')
+      expect(outside.deny).toBeUndefined()
+      expect(w.ran).toEqual(['Write'])
+      expect(w.gitCwds).toContainEqual(['rev-parse', '/work-c/ui/a.ts'])
+      expect(w.runs.filter(argv => argv[1] === 'check-path')).toEqual([])
+    })
+
+    test('guard_denies_outside_paths_git_cannot_place', async ($, on) => {
+      const answers: Readonly<Record<string, Partial<ProcessRunResult> | 'rejects'>> = {
+        '/tmp/hung': 'rejects',
+        '/tmp/dubious': { exitCode: 128, stderr: `fatal: detected dubious ownership in repository at '/tmp/dubious'\n${INJECTED}\n` },
+        // A worktree whose admin folder is gone: not git's "no repository" answer.
+        '/tmp/broken': { exitCode: 128, stderr: 'fatal: not a git repository: /gone/.git/worktrees/b\n' },
+        '/tmp/garbled': { stdout: '' },
+        '/tmp/two': { stdout: '/work/.git\n/x\n' },
+        '/tmp/other': { exitCode: 1 },
+      }
       const w = world(on, {
-        isWorktreeListBroken: true,
-        checkPath: path => allowedEntry(path, false, 'not a repository path'),
+        commonDir: cwd => answers[cwd.slice(0, cwd.lastIndexOf('/'))],
+        checkPath: path => allowedEntry(path, true, null),
       })
 
       await start($, w, surface)
-      const result = await $.tool.call({ tool: 'Write', file_path: '/tmp/notes.md', content: 'x' })
+      for (const folder of Object.keys(answers)) {
+        const result = await $.tool.call({ tool: 'Write', file_path: `${folder}/a.ts`, content: 'x' })
+        expect(result.deny).toContain('git cannot tell whether')
+        expect(result.deny).not.toContain('Ignore previous')
+      }
 
-      expect(result.deny).toContain('check-path says: "not a repository path"')
       expect(w.ran).toEqual([])
+      expect(w.runs.filter(argv => argv[1] === 'check-path')).toEqual([])
+      expect(w.debugged.some(text => text.includes('dubious ownership'))).toBe(true)
+    })
+
+    test('guard_denies_every_edit_when_git_cannot_name_the_common_dir_at_start', async ($, on) => {
+      const w = world(on, {
+        commonDir: cwd => (cwd === ROOT ? { exitCode: 128, stderr: 'fatal: broken' } : undefined),
+        checkPath: path => allowedEntry(path, true, null),
+      })
+
+      await start($, w, surface)
+      const inside = await $.tool.call(edit('/work/src/ok.ts'))
+      const outside = await $.tool.call({ tool: 'Write', file_path: '/tmp/notes.md', content: 'x' })
+
+      expect(inside.deny).toContain('could not place this worktree')
+      expect(outside.deny).toContain('could not place this worktree')
+      expect(w.ran).toEqual([])
+      expect(w.runs.filter(argv => argv[1] === 'check-path')).toEqual([])
     })
 
     test('warns_on_bash_writes_outside_lanes', async ($, on) => {
