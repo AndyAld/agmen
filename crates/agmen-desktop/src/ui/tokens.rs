@@ -86,6 +86,8 @@ pub(crate) const SPACE_12: Pixels = px(12.);
 pub(crate) const SPACE_14: Pixels = px(14.);
 pub(crate) const SPACE_16: Pixels = px(16.);
 pub(crate) const SPACE_18: Pixels = px(18.);
+/// Settings' form padding (console.py `form`, padding 24 at the sides).
+pub(crate) const SPACE_24: Pixels = px(24.);
 
 // Radii.
 pub(crate) const RADIUS_XS: Pixels = px(2.);
@@ -108,6 +110,14 @@ pub(crate) const TOGGLE_HEIGHT: Pixels = px(18.);
 pub(crate) const TOGGLE_KNOB: Pixels = px(14.);
 /// The theme dropdown (node 8107), console.py's `dropdown` default.
 pub(crate) const DROPDOWN_WIDTH: Pixels = px(300.);
+/// An open dropdown scrolls past this height (a font list is long).
+pub(crate) const DROPDOWN_MENU_MAX_HEIGHT: Pixels = px(320.);
+/// Settings' page list (node 7911, `categories`).
+pub(crate) const SETTINGS_PAGES_WIDTH: Pixels = px(190.);
+/// A setting's label and hint column (console.py `setting`).
+pub(crate) const SETTING_LABEL_WIDTH: Pixels = px(230.);
+/// The icon theme preview's file icons (console.py `ficon(..., size=18)`).
+pub(crate) const ICON_PREVIEW: Pixels = px(18.);
 
 // Change cards in "Desktop · settings from chat" (node 6674).
 /// The card (nodes 7101 and 7719).

@@ -57,50 +57,24 @@ impl IconTheme {
     /// and files that could not be read on the way.
     pub(crate) fn load(extensions_dir: &Path, name: &str) -> Result<Self, AppearanceError> {
         let mut unreadable = Vec::new();
-        let mut roots = match fs::read_dir(extensions_dir) {
-            Ok(dir) => entries(dir, extensions_dir, &mut unreadable),
-            Err(err) => {
-                return Err(AppearanceError::Io {
-                    path: extensions_dir.to_owned(),
-                    source: err,
-                });
+        let mut found = None;
+        walk(extensions_dir, &mut unreadable, |root, family| match family
+            .themes
+            .into_iter()
+            .find(|t| t.name == name)
+        {
+            Some(theme) => {
+                found = Some((root.to_owned(), theme));
+                false
             }
-        };
-        // Only folders are extensions; a .DS_Store beside them is not.
-        roots.retain(|root| root.is_dir());
-        roots.sort();
-        for root in roots {
-            let themes_dir = root.join("icon_themes");
-            let dir = match fs::read_dir(&themes_dir) {
-                Ok(dir) => dir,
-                // Most extensions ship no icon themes; that is not an error.
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(err) => {
-                    unreadable.push(Skipped::new(&themes_dir, err));
-                    continue;
-                }
-            };
-            let mut files = entries(dir, &themes_dir, &mut unreadable);
-            files.sort();
-            for file in files
-                .iter()
-                .filter(|p| p.extension().is_some_and(|e| e == "json"))
-            {
-                let family = match read_jsonc::<Family>(file) {
-                    Ok(family) => family,
-                    Err(err) => {
-                        unreadable.push(Skipped::new(file, err));
-                        continue;
-                    }
-                };
-                if let Some(theme) = family.themes.into_iter().find(|t| t.name == name) {
-                    let root = root.canonicalize().map_err(|source| AppearanceError::Io {
-                        path: root.clone(),
-                        source,
-                    })?;
-                    return Ok(Self { root, theme });
-                }
-            }
+            None => true,
+        })?;
+        if let Some((root, theme)) = found {
+            let root = root.canonicalize().map_err(|source| AppearanceError::Io {
+                path: root.clone(),
+                source,
+            })?;
+            return Ok(Self { root, theme });
         }
         if unreadable.is_empty() {
             Err(AppearanceError::ThemeNotFound(name.to_owned()))
@@ -110,6 +84,25 @@ impl IconTheme {
                 skipped: unreadable,
             })
         }
+    }
+
+    /// The names of every icon theme installed in Zed, in search order, each
+    /// once. A missing extensions folder gives none.
+    pub(crate) fn installed(extensions_dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = Vec::new();
+        // Errors only say the folder is missing or unreadable: no themes.
+        let walked = walk(extensions_dir, &mut Vec::new(), |_, family| {
+            for theme in family.themes {
+                if !names.contains(&theme.name) {
+                    names.push(theme.name);
+                }
+            }
+            true
+        });
+        if walked.is_err() {
+            return Vec::new();
+        }
+        names
     }
 
     /// The icon for a file named `name`, in Zed's order: the whole name, then
@@ -170,6 +163,56 @@ impl IconTheme {
             .ok()?;
         (path.starts_with(&root) && path.is_file()).then_some(path)
     }
+}
+
+/// Calls `visit` with each extension root and icon theme family in
+/// `extensions_dir/*/icon_themes/*.json`, in sorted order, until it returns
+/// `false`. Files and folders that cannot be read go in `unreadable`.
+fn walk(
+    extensions_dir: &Path,
+    unreadable: &mut Vec<Skipped>,
+    mut visit: impl FnMut(&Path, Family) -> bool,
+) -> Result<(), AppearanceError> {
+    let mut roots = match fs::read_dir(extensions_dir) {
+        Ok(dir) => entries(dir, extensions_dir, unreadable),
+        Err(err) => {
+            return Err(AppearanceError::Io {
+                path: extensions_dir.to_owned(),
+                source: err,
+            });
+        }
+    };
+    // Only folders are extensions; a .DS_Store beside them is not.
+    roots.retain(|root| root.is_dir());
+    roots.sort();
+    for root in roots {
+        let themes_dir = root.join("icon_themes");
+        let dir = match fs::read_dir(&themes_dir) {
+            Ok(dir) => dir,
+            // Most extensions ship no icon themes; that is not an error.
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => {
+                unreadable.push(Skipped::new(&themes_dir, err));
+                continue;
+            }
+        };
+        let mut files = entries(dir, &themes_dir, unreadable);
+        files.sort();
+        for file in files
+            .iter()
+            .filter(|p| p.extension().is_some_and(|e| e == "json"))
+        {
+            match read_jsonc::<Family>(file) {
+                Ok(family) => {
+                    if !visit(&root, family) {
+                        return Ok(());
+                    }
+                }
+                Err(err) => unreadable.push(Skipped::new(file, err)),
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The paths in `dir`, recording entries that cannot be read under `at`.

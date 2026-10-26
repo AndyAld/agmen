@@ -75,11 +75,11 @@ pub(crate) fn load_fonts(cx: &gpui::App) -> gpui::Result<()> {
 }
 
 /// Lucide's ISC license, which must ship with the icons (shown in About).
-#[expect(
-    dead_code,
-    reason = "Settings About shows it in Task 17 of the desktop plan"
-)]
 pub(crate) const LUCIDE_LICENSE: &str = include_str!("../assets/icons/LICENSE-lucide.txt");
+/// IBM Plex Sans's SIL Open Font License (shown in About).
+pub(crate) const IBM_PLEX_LICENSE: &str = include_str!("../assets/fonts/ibm-plex-sans/license.txt");
+/// Lilex's SIL Open Font License (shown in About).
+pub(crate) const LILEX_LICENSE: &str = include_str!("../assets/fonts/lilex/OFL.txt");
 
 /// The built-in assets, for GPUI's `svg()` paths.
 #[derive(Debug, Clone, Copy, Default)]

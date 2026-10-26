@@ -25,6 +25,7 @@ mod ref_chip;
 mod rich_text;
 mod roles_panel;
 mod scope_chip;
+mod settings_view;
 mod status_bar;
 mod syntax;
 mod tab_views;
@@ -42,6 +43,7 @@ pub(crate) use dev_views::{DevFrame, GitDev, GitDevLayout, ProjectDev, ProjectTe
 pub(crate) use dock::DockSide;
 pub(crate) use keys::bind_workspace_keys;
 pub(crate) use scope_chip::ScopeOption;
+pub(crate) use settings_view::{SettingsSources, SettingsView};
 pub(crate) use syntax::Language;
 pub(crate) use text_input::{TextInput, bind_keys};
 pub(crate) use title_bar::TitleBar;

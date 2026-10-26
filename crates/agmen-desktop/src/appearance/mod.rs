@@ -1,7 +1,9 @@
 //! Theme, fonts and icon theme: read from Zed, or from agmen settings.
 
+mod catalog;
 mod fallback;
 mod marked;
+pub(crate) mod marketplace;
 mod settings;
 mod theme;
 mod zed;
@@ -11,9 +13,11 @@ use std::path::{Path, PathBuf};
 use gpui::{Global, Pixels, SharedString, px};
 use serde::{Deserialize, Serialize};
 
+pub(crate) use catalog::{PickerEntry, ThemeEntry, ThemeOrigin, installed_themes, picker_entries};
+pub(crate) use fallback::BUILTIN_THEME;
 pub(crate) use settings::{AgmenSettings, Density, IconThemeChoice};
-pub(crate) use theme::{Theme, window_background};
-pub(crate) use zed::read_jsonc;
+pub(crate) use theme::{Theme, ThemeDirs, window_background};
+pub(crate) use zed::{Mode, read_jsonc};
 
 /// What can go wrong reading appearance files.
 #[derive(Debug, thiserror::Error)]
@@ -85,6 +89,21 @@ pub(crate) struct FontPrefs {
 /// Font sizes outside this range are clamped.
 const FONT_SIZES: std::ops::RangeInclusive<f32> = 6.0..=72.0;
 
+impl From<&Fonts> for FontPrefs {
+    /// Every key set, so agmen's settings keep exactly what is on screen.
+    fn from(fonts: &Fonts) -> Self {
+        Self {
+            ui_family: Some(fonts.ui_family.to_string()),
+            ui_size: Some(fonts.ui_size.as_f32()),
+            code_family: Some(fonts.code_family.to_string()),
+            code_size: Some(fonts.code_size.as_f32()),
+            code_ligatures: Some(fonts.code_ligatures),
+            terminal_family: fonts.terminal_family.as_ref().map(ToString::to_string),
+            terminal_size: Some(fonts.terminal_size.as_f32()),
+        }
+    }
+}
+
 /// The fonts agmen paints with.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Fonts {
@@ -144,17 +163,11 @@ pub(crate) enum AppearanceSource {
 #[derive(Debug, Clone)]
 pub(crate) struct Appearance {
     pub(crate) theme: Theme,
+    /// The name of the theme in use, as the picker lists it.
+    pub(crate) theme_name: String,
     pub(crate) fonts: Fonts,
     pub(crate) icon_theme: IconThemeChoice,
-    #[expect(
-        dead_code,
-        reason = "the chat reads it once Settings offers chat density (Task 17); the mockup draws only comfortable rows"
-    )]
     pub(crate) density: Density,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Settings shows it in Task 17 of the desktop plan")
-    )]
     pub(crate) source: AppearanceSource,
     /// Why something fell back, in words for the Settings view.
     pub(crate) warnings: Vec<String>,
@@ -168,6 +181,7 @@ impl Appearance {
     pub(crate) fn builtin() -> Self {
         Self {
             theme: fallback::gruvbox_material_dark_hard(),
+            theme_name: BUILTIN_THEME.to_owned(),
             fonts: Fonts::from_prefs(&FontPrefs::default()),
             icon_theme: IconThemeChoice::System,
             density: Density::Comfortable,
@@ -182,6 +196,20 @@ pub(crate) fn zed_extensions_dir(home: &Path) -> PathBuf {
     home.join("Library/Application Support/Zed/extensions/installed")
 }
 
+/// agmen's settings file under the config folder (`~/.config`).
+pub(crate) fn agmen_settings_path(config: &Path) -> PathBuf {
+    config.join("agmen/settings.toml")
+}
+
+/// The theme folders under the config folder and Zed's extensions folder.
+pub(crate) fn theme_dirs(config: &Path, extensions: &Path) -> ThemeDirs {
+    ThemeDirs {
+        zed: config.join("zed"),
+        extensions: extensions.to_owned(),
+        agmen: config.join("agmen/themes"),
+    }
+}
+
 /// Resolves the appearance for a person whose home folder is `home`.
 #[must_use]
 pub(crate) fn resolve(home: &Path, system: SystemMode) -> Appearance {
@@ -192,8 +220,9 @@ pub(crate) fn resolve(home: &Path, system: SystemMode) -> Appearance {
 /// Never fails: each fallback adds a warning instead.
 #[must_use]
 pub(crate) fn resolve_paths(config: &Path, extensions: &Path, system: SystemMode) -> Appearance {
-    let zed_dir = config.join("zed");
-    let agmen_path = config.join("agmen/settings.toml");
+    let dirs = theme_dirs(config, extensions);
+    let zed_dir = dirs.zed.clone();
+    let agmen_path = agmen_settings_path(config);
     let mut warnings = Vec::new();
 
     let agmen = AgmenSettings::load(&agmen_path).unwrap_or_else(|err| {
@@ -240,21 +269,21 @@ pub(crate) fn resolve_paths(config: &Path, extensions: &Path, system: SystemMode
         ),
     };
 
-    let (theme, source) = match theme_name {
+    let (theme, theme_name, source) = match theme_name {
         Some(name) => match theme::load_theme_with(
-            &zed_dir,
-            extensions,
+            &dirs,
             &name,
             &zed.as_ref()
                 .map(|z| z.overrides_for(&name))
                 .unwrap_or_default(),
             &mut warnings,
         ) {
-            Ok(theme) => (theme, wanted),
+            Ok(theme) => (theme, name, wanted),
             Err(err) => {
                 warnings.push(format!("{err}; using the built-in Gruvbox theme"));
                 (
                     fallback::gruvbox_material_dark_hard(),
+                    BUILTIN_THEME.to_owned(),
                     AppearanceSource::Builtin,
                 )
             }
@@ -270,6 +299,7 @@ pub(crate) fn resolve_paths(config: &Path, extensions: &Path, system: SystemMode
             ));
             (
                 fallback::gruvbox_material_dark_hard(),
+                BUILTIN_THEME.to_owned(),
                 AppearanceSource::Builtin,
             )
         }
@@ -277,6 +307,7 @@ pub(crate) fn resolve_paths(config: &Path, extensions: &Path, system: SystemMode
 
     Appearance {
         theme,
+        theme_name,
         fonts: Fonts::from_prefs(&prefs),
         icon_theme,
         density: agmen.density,

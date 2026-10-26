@@ -617,8 +617,7 @@ fn overrides_apply_to_the_marked_theme() {
     overrides.insert("border".into(), serde_json::json!("#333333"));
     let mut warnings = Vec::new();
     let t = super::theme::load_theme_with(
-        &zed_dir(),
-        &ext_dir(),
+        &super::theme_dirs(&fixtures(), &ext_dir()),
         super::marked::MARKED_THEME,
         &overrides,
         &mut warnings,
