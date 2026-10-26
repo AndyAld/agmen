@@ -15,8 +15,8 @@ use super::components::{Card, Color, HighlightedLabel, Icon, Indent, KeyHint, La
 use super::palette_filter::{Match, filter};
 use super::text_input::TextInput;
 use super::tokens::{
-    BORDER_WIDTH, PALETTE_INPUT_HEIGHT, PALETTE_INPUT_LINE, PALETTE_MAX_HEIGHT, PALETTE_ROW_HEIGHT,
-    PALETTE_WIDTH, RADIUS_MD, SPACE_4, SPACE_8, SPACE_14, TEXT_DEFAULT,
+    BORDER_WIDTH, PALETTE_INPUT_HEIGHT, PALETTE_INPUT_LINE, PALETTE_MAX_HEIGHT, PALETTE_QUERY_TEXT,
+    PALETTE_ROW_HEIGHT, PALETTE_WIDTH, RADIUS_MD, SPACE_4, SPACE_8, SPACE_14,
 };
 use crate::appearance::Appearance;
 use crate::icons::UiIcon;
@@ -285,7 +285,7 @@ impl Render for CommandPalette {
             .border_b(BORDER_WIDTH)
             .border_color(border)
             // The input shapes text at the inherited size (critic 9, V78).
-            .text_size(TEXT_DEFAULT)
+            .text_size(PALETTE_QUERY_TEXT)
             .child(Icon::new(UiIcon::Search).color(Color::Placeholder))
             .child(div().flex_1().min_w_0().child(self.input.clone()));
         div()

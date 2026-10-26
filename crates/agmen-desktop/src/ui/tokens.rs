@@ -293,6 +293,10 @@ pub(crate) const PALETTE_WIDTH: Pixels = px(600.);
 pub(crate) const PALETTE_TOP: Pixels = px(64.);
 /// The query row, with its 1 px rule (node 11474).
 pub(crate) const PALETTE_INPUT_HEIGHT: Pixels = px(39.);
+/// The query's text: 14 px at a 15 px rem (node 11480), one size above
+/// the 13 px rows. Zed's `TextSize` has no step there (Default is 13.125
+/// and Large 15), so this is a step of agmen's own, as `TEXT_TITLE` is.
+pub(crate) const PALETTE_QUERY_TEXT: Rems = rems_from_px(14. * 16. / 15.);
 /// The query's line, which its caret fills: 18 px (node 11481), a little
 /// taller than the 17 px box of the 14 px text beside it.
 pub(crate) const PALETTE_INPUT_LINE: Pixels = px(18.);
