@@ -85,14 +85,7 @@ impl Hub {
             .collect::<Result<Vec<_>, _>>()
             .map_err(HubError::Keys)?;
         let tokens = BrokerTokens::new(signing, extra).map_err(HubError::Keys)?;
-        // No redirects: OAuth token exchanges must not follow them, and
-        // EMQX never sends them.
-        let http = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(UPSTREAM_TIMEOUT)
-            .user_agent(concat!("agmen-hub/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .map_err(HubError::HttpClient)?;
+        let http = upstream_client().map_err(HubError::HttpClient)?;
         let emqx = EmqxAdmin::new(&config.emqx, http.clone()).map_err(HubError::Emqx)?;
         let github =
             GithubOAuth::new(&config.github, &config.public_url, http).map_err(HubError::Github)?;
@@ -123,6 +116,7 @@ impl Hub {
             )
             .route("/v1/invites", post(invites::create))
             .route("/v1/invites/{code}/accept", post(invites::accept))
+            .layer(axum::middleware::map_response(refuse_framing))
             .with_state(self.clone())
     }
 
@@ -149,6 +143,17 @@ impl Hub {
     }
 }
 
+/// The HTTP client for GitHub and EMQX. No redirects: OAuth token exchanges
+/// must not follow them, and EMQX never sends them. GitHub's API refuses
+/// requests without a User-Agent.
+pub(crate) fn upstream_client() -> Result<reqwest::Client, reqwest::Error> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(UPSTREAM_TIMEOUT)
+        .user_agent(concat!("agmen-hub/", env!("CARGO_PKG_VERSION")))
+        .build()
+}
+
 /// `path` appended to `base`'s path.
 pub(crate) fn public_link(base: &Url, path: &str) -> Url {
     let mut url = base.clone();
@@ -156,6 +161,19 @@ pub(crate) fn public_link(base: &Url, path: &str) -> Url {
         segments.pop_if_empty().extend(path.split('/'));
     }
     url
+}
+
+/// Forbids every browser from showing a hub response inside a frame, so no
+/// other site can overlay the approve button and trick a click (ruling
+/// R38). Set on every response, so a page added later cannot miss it.
+async fn refuse_framing(mut response: Response) -> Response {
+    let headers = response.headers_mut();
+    headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static("frame-ancestors 'none'"),
+    );
+    response
 }
 
 /// `GET /v1/jwks`: the public keys EMQX verifies broker tokens with.

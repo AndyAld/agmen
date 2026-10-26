@@ -45,16 +45,20 @@ CREATE TABLE memberships (
 );
 
 -- A project's first admin, named by `agmen-hub bootstrap` before they have
--- signed in. The first sign-in with that GitHub login (lowercased) claims
--- the row and becomes an admin member. A claimed row stays, so running
--- bootstrap again never hands the role to a later holder of the login.
+-- signed in. The row holds the GitHub account id (humans.provider_sub's
+-- form), not the login: a login can be renamed and then taken by another
+-- account, an id never changes (ruling R39). The first sign-in of that
+-- account claims the row and becomes an admin member. github_login is for
+-- display only and is NULL when bootstrap was given the id. A claimed row
+-- stays, so running bootstrap again changes nothing.
 CREATE TABLE bootstrap_admins (
     project_id text NOT NULL REFERENCES projects (id),
-    github_login text NOT NULL CHECK (github_login ~ '^[a-z0-9][a-z0-9-]{0,38}$'),
+    github_id text NOT NULL CHECK (github_id ~ '^[1-9][0-9]{0,19}$'),
+    github_login text CHECK (github_login ~ '^[a-z0-9][a-z0-9-]{0,38}$'),
     created_at timestamptz NOT NULL DEFAULT now(),
     claimed_by text REFERENCES humans (id),
     claimed_at timestamptz,
-    PRIMARY KEY (project_id, github_login),
+    PRIMARY KEY (project_id, github_id),
     CHECK ((claimed_by IS NULL) = (claimed_at IS NULL))
 );
 

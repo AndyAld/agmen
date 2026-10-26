@@ -384,6 +384,60 @@ async fn it_jwks_rotation() {
 }
 
 #[tokio::test]
+async fn it_revoked_identity_token_refused_on_every_route() {
+    run(|ctx| async move {
+        let (project, token) = andy(&ctx).await;
+        let a = mint_ok(&ctx, &token, "andy/a", &project).await;
+        let b = mint_ok(&ctx, &token, "andy/b", &project).await;
+        // Revoked in the database directly: this test is about the hub
+        // token check (ruling R40), not about EMQX.
+        sqlx::query("UPDATE identities SET revoked_at = now() WHERE id = $1")
+            .bind(&a.id)
+            .execute(&ctx.pool)
+            .await
+            .unwrap();
+        // Every route that takes a bearer token.
+        let routes = [
+            ("GET", format!("/v1/identities/{}/broker-token", a.id), None),
+            ("GET", format!("/v1/identities/{}/broker-token", b.id), None),
+            (
+                "POST",
+                "/v1/identities".to_owned(),
+                Some(json!({ "handle": "andy/c", "project": project.project })),
+            ),
+            ("DELETE", format!("/v1/identities/{}", a.id), None),
+            ("DELETE", format!("/v1/identities/{}", b.id), None),
+            (
+                "POST",
+                "/v1/invites".to_owned(),
+                Some(json!({ "project": project.project, "role": "member" })),
+            ),
+            // The token is checked before the code is looked up.
+            ("POST", "/v1/invites/anycode/accept".to_owned(), None),
+        ];
+        for (method, path, body) in &routes {
+            let mut req = ctx
+                .http
+                .request(method.parse().unwrap(), ctx.hub.url(path))
+                .bearer_auth(&a.token);
+            if let Some(body) = body {
+                req = req.json(body);
+            }
+            let resp = req.send().await.unwrap();
+            let status = resp.status();
+            let answer: Value = resp.json().await.unwrap_or(Value::Null);
+            assert_eq!(status, StatusCode::FORBIDDEN, "{method} {path}: {answer}");
+            assert_eq!(answer["error"], "identity_revoked", "{method} {path}");
+        }
+
+        // The owner's other identity is untouched.
+        let (status, body) = broker_token(&ctx.http, &ctx.hub, &b.id, &b.token).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn it_revoke_kicks_and_refuses_refresh() {
     run(|ctx| async move {
         let (project, token) = andy(&ctx).await;

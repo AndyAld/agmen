@@ -267,7 +267,8 @@ pub(crate) struct BrokerToken {
 }
 
 /// `GET /v1/identities/{id}/broker-token` (that identity's token): a
-/// broker token valid for [`BROKER_TOKEN_TTL`]. Refused once revoked.
+/// broker token valid for [`BROKER_TOKEN_TTL`]. Once the identity is
+/// revoked, [`Caller`] refuses its token with 403 `identity_revoked`.
 pub(crate) async fn broker_token(
     State(hub): State<Hub>,
     Path(id): Path<String>,
@@ -278,12 +279,6 @@ pub(crate) async fn broker_token(
         return Err(ApiError::forbidden(
             "not_this_identity",
             "an identity token gets broker tokens only for its own identity",
-        ));
-    }
-    if identity.revoked_at.is_some() {
-        return Err(ApiError::forbidden(
-            "identity_revoked",
-            "the identity was revoked",
         ));
     }
     // Read the clock before minting and round down, so the reported expiry

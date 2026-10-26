@@ -1,10 +1,11 @@
-//! A fake GitHub for the OAuth web flow: `/login/oauth/authorize`,
-//! `/login/oauth/access_token` and `/user`, on an ephemeral port.
+//! A fake GitHub for the OAuth web flow (`/login/oauth/authorize`,
+//! `/login/oauth/access_token` and `/user`) and the users API
+//! (`/users/{login}`), on an ephemeral port.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use axum::extract::{Form, Query, State};
+use axum::extract::{Form, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
@@ -32,6 +33,8 @@ struct Accounts {
     current: Option<Account>,
     codes: HashMap<String, Account>,
     tokens: HashMap<String, Account>,
+    /// Accounts by login, lowercased: who holds each login now.
+    users: HashMap<String, Account>,
 }
 
 type Shared = Arc<Mutex<Accounts>>;
@@ -56,6 +59,7 @@ impl FakeGithub {
             .route("/login/oauth/authorize", get(authorize))
             .route("/login/oauth/access_token", post(access_token))
             .route("/user", get(user))
+            .route("/users/{login}", get(user_by_login))
             .with_state(accounts.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
@@ -69,9 +73,21 @@ impl FakeGithub {
         }
     }
 
-    /// The account the next sign-in uses.
+    /// The account the next sign-in uses. It also holds `login` from now
+    /// on, as far as `/users/{login}` is concerned.
     pub fn sign_in_as(&self, id: u64, login: &str) {
+        self.register(id, login);
         self.accounts.lock().unwrap().current = Some((id, login.to_owned()));
+    }
+
+    /// Account `id` holds `login` from now on (a new account, or a login
+    /// that changed hands).
+    pub fn register(&self, id: u64, login: &str) {
+        self.accounts
+            .lock()
+            .unwrap()
+            .users
+            .insert(login.to_ascii_lowercase(), (id, login.to_owned()));
     }
 }
 
@@ -131,5 +147,29 @@ async fn user(State(accounts): State<Shared>, headers: HeaderMap) -> Response {
     match accounts.lock().unwrap().tokens.get(token) {
         Some((id, login)) => Json(json!({ "id": id, "login": login })).into_response(),
         None => (StatusCode::UNAUTHORIZED, "bad token").into_response(),
+    }
+}
+
+/// `GET /users/{login}`: GitHub matches the login in any case.
+async fn user_by_login(
+    State(accounts): State<Shared>,
+    Path(login): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if headers.get(header::USER_AGENT).is_none() {
+        return (StatusCode::FORBIDDEN, "User-Agent required").into_response();
+    }
+    match accounts
+        .lock()
+        .unwrap()
+        .users
+        .get(&login.to_ascii_lowercase())
+    {
+        Some((id, login)) => Json(json!({ "id": id, "login": login })).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "message": "Not Found" })),
+        )
+            .into_response(),
     }
 }

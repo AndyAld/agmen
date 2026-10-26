@@ -10,8 +10,8 @@
 mod device;
 mod oauth;
 
-pub use oauth::GithubError;
-pub(crate) use oauth::{GithubOAuth, is_human_handle};
+pub use oauth::{GithubError, GithubId};
+pub(crate) use oauth::{GithubOAuth, account_by_login, is_human_handle};
 
 use axum::extract::{Form, FromRequestParts, State};
 use axum::http::request::Parts;
@@ -48,7 +48,8 @@ pub(crate) fn routes() -> Router<Hub> {
 pub(crate) enum Caller {
     /// A human's access token: everything that human may do.
     Human(HumanId),
-    /// An identity token: that identity only.
+    /// An identity token: that identity only. Never a revoked one: the
+    /// extractor refuses those on every route (ruling R40).
     Identity(Identity),
 }
 
@@ -101,10 +102,14 @@ impl FromRequestParts<Hub> for Caller {
         match row {
             None => Err(ApiError::unauthorized()),
             Some((human, None)) => Ok(Self::Human(HumanId::from_stored(human))),
-            Some((_, Some(identity))) => Identity::load(hub.pool(), &identity)
-                .await?
-                .map(Self::Identity)
-                .ok_or_else(ApiError::unauthorized),
+            Some((_, Some(identity))) => match Identity::load(hub.pool(), &identity).await? {
+                None => Err(ApiError::unauthorized()),
+                Some(identity) if identity.revoked_at.is_some() => Err(ApiError::forbidden(
+                    "identity_revoked",
+                    "the identity was revoked",
+                )),
+                Some(identity) => Ok(Self::Identity(identity)),
+            },
         }
     }
 }

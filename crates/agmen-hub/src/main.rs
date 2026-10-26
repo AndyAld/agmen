@@ -6,16 +6,20 @@
 //!
 //! `agmen-hub bootstrap --tenant <name> --project <name> --admin-github
 //! <login>` makes a tenant, a project and its first admin, reusing what an
-//! earlier run with the same names made, and prints their ids as JSON. It
-//! needs only `AGMEN_DATABASE_URL`.
+//! earlier run with the same names made, and prints their ids as JSON. The
+//! login is resolved once to its GitHub account id, which is what the admin
+//! is bound to; `--admin-github-id <id>` names the account id directly and
+//! skips the lookup. It reads `AGMEN_DATABASE_URL` and, for the lookup,
+//! `AGMEN_GITHUB_API_URL` (default `https://api.github.com`).
 
 use std::ffi::OsString;
 
+use agmen_hub::{AdminGithub, GithubConfig};
 use anyhow::{Context as _, bail};
 use tracing_subscriber::EnvFilter;
 
 const USAGE: &str = "usage: agmen-hub [serve]
-       agmen-hub bootstrap --tenant <name> --project <name> --admin-github <login>";
+       agmen-hub bootstrap --tenant <name> --project <name> (--admin-github <login> | --admin-github-id <id>)";
 
 /// What the command line asks for.
 #[derive(Debug, PartialEq, Eq)]
@@ -24,7 +28,7 @@ enum Command {
     Bootstrap {
         tenant: String,
         project: String,
-        admin_github: String,
+        admin: AdminGithub,
     },
     Help,
 }
@@ -42,8 +46,8 @@ async fn main() -> anyhow::Result<()> {
         Command::Bootstrap {
             tenant,
             project,
-            admin_github,
-        } => bootstrap(tenant, project, &admin_github).await,
+            admin,
+        } => bootstrap(tenant, project, admin).await,
         Command::Help => {
             println!("{USAGE}");
             Ok(())
@@ -64,12 +68,13 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> anyhow::Result<Comman
         None | Some("serve") => Command::Serve,
         Some("-h" | "--help" | "help") => return Ok(Command::Help),
         Some("bootstrap") => {
-            let (mut tenant, mut project, mut admin_github) = (None, None, None);
+            let (mut tenant, mut project, mut login, mut id) = (None, None, None, None);
             while let Some(flag) = args.next() {
                 let slot = match flag.as_str() {
                     "--tenant" => &mut tenant,
                     "--project" => &mut project,
-                    "--admin-github" => &mut admin_github,
+                    "--admin-github" => &mut login,
+                    "--admin-github-id" => &mut id,
                     _ => bail!("unknown option {flag:?}\n{USAGE}"),
                 };
                 let value = args
@@ -80,10 +85,20 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> anyhow::Result<Comman
                 }
             }
             let missing = |flag: &str| format!("bootstrap needs {flag}\n{USAGE}");
+            let admin = match (login, id) {
+                (Some(login), None) => AdminGithub::Login(login),
+                (None, Some(id)) => AdminGithub::Id(id.parse().with_context(|| {
+                    format!("--admin-github-id {id:?} is not a GitHub account id")
+                })?),
+                (None, None) => bail!(missing("--admin-github or --admin-github-id")),
+                (Some(_), Some(_)) => {
+                    bail!("give --admin-github or --admin-github-id, not both\n{USAGE}")
+                }
+            };
             return Ok(Command::Bootstrap {
                 tenant: tenant.with_context(|| missing("--tenant"))?,
                 project: project.with_context(|| missing("--project"))?,
-                admin_github: admin_github.with_context(|| missing("--admin-github"))?,
+                admin,
             });
         }
         Some(other) => bail!("unknown command {other:?}\n{USAGE}"),
@@ -113,20 +128,22 @@ async fn serve() -> anyhow::Result<()> {
         .context("serving HTTP")
 }
 
-async fn bootstrap(tenant: String, project: String, admin_github: &str) -> anyhow::Result<()> {
-    let request = agmen_hub::Bootstrap::new(tenant, project, admin_github)?;
+async fn bootstrap(tenant: String, project: String, admin: AdminGithub) -> anyhow::Result<()> {
+    let request = agmen_hub::Bootstrap::new(tenant, project, admin)?;
     let database_url = std::env::var("AGMEN_DATABASE_URL")
         .ok()
         .filter(|url| !url.is_empty())
         .context("AGMEN_DATABASE_URL is not set")?;
+    let github_api_url = GithubConfig::api_url_from_env()?;
     let made = request
-        .run(&database_url)
+        .run(&database_url, &github_api_url)
         .await
         .context("bootstrapping the project")?;
     tracing::info!(
         tenant = %made.tenant,
         project = %made.project,
-        admin_github = %made.admin_github,
+        admin_github_id = %made.admin_github_id,
+        admin_github = made.admin_github.as_deref(),
         "bootstrapped"
     );
     println!(
@@ -192,7 +209,24 @@ mod tests {
             Command::Bootstrap {
                 tenant: "Acme Co".to_owned(),
                 project: "agmen".to_owned(),
-                admin_github: "Andy".to_owned(),
+                admin: AdminGithub::Login("Andy".to_owned()),
+            }
+        );
+        assert_eq!(
+            parse(&[
+                "bootstrap",
+                "--tenant",
+                "t",
+                "--admin-github-id",
+                "583231",
+                "--project",
+                "p",
+            ])
+            .unwrap(),
+            Command::Bootstrap {
+                tenant: "t".to_owned(),
+                project: "p".to_owned(),
+                admin: AdminGithub::Id("583231".parse().unwrap()),
             }
         );
     }
@@ -231,6 +265,35 @@ mod tests {
                 "--admin-github",
                 "a",
                 "--x",
+            ],
+            &[
+                "bootstrap",
+                "--tenant",
+                "t",
+                "--project",
+                "p",
+                "--admin-github",
+                "a",
+                "--admin-github-id",
+                "1",
+            ],
+            &[
+                "bootstrap",
+                "--tenant",
+                "t",
+                "--project",
+                "p",
+                "--admin-github-id",
+                "0",
+            ],
+            &[
+                "bootstrap",
+                "--tenant",
+                "t",
+                "--project",
+                "p",
+                "--admin-github-id",
+                "andy",
             ],
         ] {
             assert!(parse(args).is_err(), "{args:?}");

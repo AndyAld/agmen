@@ -46,6 +46,52 @@ pub struct GithubConfig {
     pub api_url: Url,
 }
 
+/// `AGMEN_GITHUB_API_URL`'s default.
+const DEFAULT_GITHUB_API_URL: &str = "https://api.github.com";
+
+impl GithubConfig {
+    /// Reads only `AGMEN_GITHUB_API_URL` (default `https://api.github.com`)
+    /// from the process environment, for `agmen-hub bootstrap`, which needs
+    /// GitHub's users API and nothing else of GitHub.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::Invalid`] when the value is not an http or https URL.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # fn main() -> Result<(), agmen_hub::ConfigError> {
+    /// let api = agmen_hub::GithubConfig::api_url_from_env()?;
+    /// println!("{api}");
+    /// # Ok(()) }
+    /// ```
+    pub fn api_url_from_env() -> Result<Url, ConfigError> {
+        github_api_url(std::env::var("AGMEN_GITHUB_API_URL").ok())
+    }
+}
+
+/// `value` as an http or https URL, or [`ConfigError::Invalid`] naming
+/// variable `name`.
+fn http_url(name: &'static str, value: &str) -> Result<Url, ConfigError> {
+    Url::parse(value)
+        .ok()
+        .filter(|url| matches!(url.scheme(), "http" | "https"))
+        .ok_or(ConfigError::Invalid {
+            name,
+            what: "http or https URL",
+        })
+}
+
+/// `AGMEN_GITHUB_API_URL`'s value (unset or empty means the default).
+fn github_api_url(value: Option<String>) -> Result<Url, ConfigError> {
+    let value = value.filter(|value| !value.is_empty());
+    http_url(
+        "AGMEN_GITHUB_API_URL",
+        value.as_deref().unwrap_or(DEFAULT_GITHUB_API_URL),
+    )
+}
+
 /// The EMQX REST API the hub kicks clients through (ADR-0002).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmqxConfig {
@@ -140,15 +186,7 @@ impl Config {
     pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Self, ConfigError> {
         let get = |name: &'static str| lookup(name).filter(|value| !value.is_empty());
         let required = |name: &'static str| get(name).ok_or(ConfigError::Missing(name));
-        let url = |name: &'static str, value: String| {
-            Url::parse(&value)
-                .ok()
-                .filter(|url| matches!(url.scheme(), "http" | "https"))
-                .ok_or(ConfigError::Invalid {
-                    name,
-                    what: "http or https URL",
-                })
-        };
+        let url = |name: &'static str, value: String| http_url(name, &value);
         let listen = match get("AGMEN_LISTEN") {
             Some(value) => value.parse().map_err(|_| ConfigError::Invalid {
                 name: "AGMEN_LISTEN",
@@ -167,11 +205,7 @@ impl Config {
                     "AGMEN_GITHUB_URL",
                     get("AGMEN_GITHUB_URL").unwrap_or_else(|| "https://github.com".to_owned()),
                 )?,
-                api_url: url(
-                    "AGMEN_GITHUB_API_URL",
-                    get("AGMEN_GITHUB_API_URL")
-                        .unwrap_or_else(|| "https://api.github.com".to_owned()),
-                )?,
+                api_url: github_api_url(get("AGMEN_GITHUB_API_URL"))?,
             },
             emqx: EmqxConfig {
                 api_url: url("AGMEN_EMQX_API_URL", required("AGMEN_EMQX_API_URL")?)?,

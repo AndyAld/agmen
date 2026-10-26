@@ -4,8 +4,8 @@
 
 use axum::Json;
 use axum::extract::{Form, State};
-use axum::http::StatusCode;
-use axum::response::Html;
+use axum::http::{HeaderValue, StatusCode, header};
+use axum::response::{Html, IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 
 use super::{TokenResponse, issue_human_tokens};
@@ -133,7 +133,7 @@ pub(super) struct ApproveForm {
 pub(super) async fn approve(
     State(hub): State<Hub>,
     Form(form): Form<ApproveForm>,
-) -> Result<Html<String>, ApiError> {
+) -> Result<Response, ApiError> {
     let approved = sqlx::query(
         "UPDATE device_authorizations SET approved_at = now(), approval_hash = NULL
          WHERE approval_hash = $1 AND expires_at > now() AND approved_at IS NULL",
@@ -149,10 +149,10 @@ pub(super) async fn approve(
             "this sign-in has expired or was already approved; run agmen login again",
         ));
     }
-    Ok(page(
+    Ok(no_store(page(
         "Signed in",
         "<p>You can close this tab and return to your terminal.</p>",
-    ))
+    )))
 }
 
 /// The device code grant: tokens once the login is approved, otherwise the
@@ -209,6 +209,17 @@ pub(super) fn page(title: &str, body: &str) -> Html<String> {
          <h1>{title}</h1>{body}</body></html>",
         title = escape(title)
     ))
+}
+
+/// `page` with `Cache-Control: no-store`, for the confirm and approve pages:
+/// the confirm page carries a one-use approve secret, and neither belongs
+/// in a shared or back-button cache (ruling R38).
+pub(super) fn no_store(page: Html<String>) -> Response {
+    let mut response = page.into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
 }
 
 /// Escapes text for HTML content and quoted attribute values.

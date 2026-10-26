@@ -322,6 +322,15 @@ fn location(resp: &reqwest::Response) -> Url {
 /// in at the fake GitHub as its current user, and approve on the confirm
 /// page. Returns the confirm page's HTML.
 pub async fn approve_in_browser(ctx: &Ctx, start: &DeviceStart) -> String {
+    let page = open_confirm_page(ctx, start).await.text().await.unwrap();
+    let approved = post_approve(ctx, &page).await;
+    assert_eq!(approved.status(), StatusCode::OK);
+    page
+}
+
+/// Opens the verification link and signs in at the fake GitHub as its
+/// current user. Returns the hub's confirm page response (200).
+pub async fn open_confirm_page(ctx: &Ctx, start: &DeviceStart) -> reqwest::Response {
     let to_github = ctx
         .http
         .get(&start.verification_uri_complete)
@@ -337,17 +346,18 @@ pub async fn approve_in_browser(ctx: &Ctx, start: &DeviceStart) -> String {
     assert!(back_to_hub.status().is_redirection());
     let confirm = ctx.http.get(location(&back_to_hub)).send().await.unwrap();
     assert_eq!(confirm.status(), StatusCode::OK);
-    let page = confirm.text().await.unwrap();
-    let approve = hidden_input(&page, "approve");
-    let approved = ctx
-        .http
+    confirm
+}
+
+/// Presses the confirm page's Approve button.
+pub async fn post_approve(ctx: &Ctx, confirm_page: &str) -> reqwest::Response {
+    let approve = hidden_input(confirm_page, "approve");
+    ctx.http
         .post(ctx.hub.url("/v1/auth/device/approve"))
         .form(&[("approve", approve.as_str())])
         .send()
         .await
-        .unwrap();
-    assert_eq!(approved.status(), StatusCode::OK);
-    page
+        .unwrap()
 }
 
 /// The value of `<input type="hidden" name="{name}" value="...">`.

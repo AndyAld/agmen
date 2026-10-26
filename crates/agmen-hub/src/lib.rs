@@ -20,8 +20,8 @@ mod identities;
 mod invites;
 mod numbering;
 
-pub use auth::GithubError;
-pub use bootstrap::{Bootstrap, BootstrapError, Bootstrapped};
+pub use auth::{GithubError, GithubId};
+pub use bootstrap::{AdminGithub, Bootstrap, BootstrapError, Bootstrapped};
 pub use broker_tokens::{BrokerTokens, SigningKey, TokenError};
 pub use config::{Config, ConfigError, EmqxConfig, GithubConfig, Secret};
 pub use emqx::{EmqxAdmin, EmqxError};

@@ -1,21 +1,25 @@
 //! GitHub sign-in for the device flow's browser step (OAuth web flow, with
-//! the `oauth2` crate). The hub only reads the account id and login.
+//! the `oauth2` crate), and the users API lookup `agmen-hub bootstrap`
+//! resolves a login with. The hub only reads the account id and login.
 
+use std::fmt;
 use std::future::Future;
+use std::num::{NonZeroU64, ParseIntError};
 use std::pin::Pin;
+use std::str::FromStr;
 
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
-use axum::response::{Html, Redirect};
+use axum::response::{Redirect, Response};
 use oauth2::basic::BasicClient;
 use oauth2::{
     AsyncHttpClient, AuthType, AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken,
     EndpointNotSet, EndpointSet, HttpRequest, HttpResponse, RedirectUrl, TokenResponse, TokenUrl,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use url::Url;
 
-use super::device::{display_user_code, escape, normalize_user_code, page};
+use super::device::{display_user_code, escape, no_store, normalize_user_code, page};
 use crate::config::GithubConfig;
 use crate::db::{hash_secret, is_unique_violation, new_id, new_secret};
 use crate::http::{ApiError, Hub, public_link};
@@ -30,9 +34,49 @@ pub enum GithubError {
     /// Exchanging the authorization code failed.
     #[error("exchanging the GitHub authorization code failed")]
     Exchange(#[source] Box<dyn std::error::Error + Send + Sync>),
-    /// Reading the signed-in account failed.
+    /// Reading a GitHub account failed.
     #[error("reading the GitHub account failed")]
     User(#[source] reqwest::Error),
+}
+
+/// A GitHub account's numeric id. Unlike the login, it never changes and
+/// never passes to another account, so the hub binds people to it.
+///
+/// # Examples
+///
+/// ```
+/// # fn main() -> Result<(), std::num::ParseIntError> {
+/// let id: agmen_hub::GithubId = "583231".parse()?;
+/// assert_eq!(id.get(), 583_231);
+/// assert!("0".parse::<agmen_hub::GithubId>().is_err());
+/// # Ok(()) }
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct GithubId(NonZeroU64);
+
+impl GithubId {
+    /// The id as a number.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0.get()
+    }
+}
+
+impl FromStr for GithubId {
+    type Err = ParseIntError;
+
+    /// A decimal id; zero is refused.
+    fn from_str(text: &str) -> Result<Self, ParseIntError> {
+        text.parse().map(Self)
+    }
+}
+
+impl fmt::Display for GithubId {
+    /// Decimal, the form `humans.provider_sub` stores.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
 }
 
 type GithubClient =
@@ -46,11 +90,11 @@ pub(crate) struct GithubOAuth {
     user_url: Url,
 }
 
-/// A GitHub account as `GET /user` describes it.
+/// A GitHub account as `GET /user` and `GET /users/{login}` describe it.
 #[derive(Debug, Deserialize)]
-struct GithubUser {
-    id: u64,
-    login: String,
+pub(crate) struct GithubUser {
+    pub(crate) id: GithubId,
+    pub(crate) login: String,
 }
 
 /// Endpoint `path` under `base`, keeping any path prefix (GitHub
@@ -111,6 +155,33 @@ impl GithubOAuth {
             .await
             .map_err(GithubError::User)
     }
+}
+
+/// The account that holds `login` now (`GET {api_url}/users/{login}`), or
+/// `None` when GitHub knows no such login. `login` must already pass
+/// [`is_human_handle`], so it is a single path segment.
+pub(crate) async fn account_by_login(
+    http: &reqwest::Client,
+    api_url: &Url,
+    login: &str,
+) -> Result<Option<GithubUser>, GithubError> {
+    debug_assert!(is_human_handle(&login.to_ascii_lowercase()), "{login:?}");
+    let response = http
+        .get(public_link(api_url, &format!("users/{login}")))
+        .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(GithubError::User)?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    response
+        .error_for_status()
+        .map_err(GithubError::User)?
+        .json()
+        .await
+        .map(Some)
+        .map_err(GithubError::User)
 }
 
 /// Lets `oauth2` send its requests through the hub's reqwest client.
@@ -180,7 +251,7 @@ pub(super) struct CallbackQuery {
 pub(super) async fn callback(
     State(hub): State<Hub>,
     Query(query): Query<CallbackQuery>,
-) -> Result<Html<String>, ApiError> {
+) -> Result<Response, ApiError> {
     let state_hash = hash_secret(&query.state);
     let pending: Option<String> = sqlx::query_scalar(
         "SELECT user_code FROM device_authorizations
@@ -231,7 +302,7 @@ pub(super) async fn callback(
         )
     })?;
     let action = hub.public_link("v1/auth/device/approve");
-    Ok(page(
+    Ok(no_store(page(
         "Approve agmen login",
         &format!(
             "<p>Signed in with GitHub as <strong>{handle}</strong>.</p>\
@@ -243,12 +314,12 @@ pub(super) async fn callback(
             code = escape(&display_user_code(&user_code)),
             action = escape(action.as_str()),
         ),
-    ))
+    )))
 }
 
 /// The human for a GitHub account, made at first sign-in with the login,
 /// lowercased, as handle. Also claims any first-admin rows that `agmen-hub
-/// bootstrap` left for the login. Returns the id and handle.
+/// bootstrap` left for the account id. Returns the id and handle.
 async fn upsert_human(hub: &Hub, account: &GithubUser) -> Result<(String, String), ApiError> {
     let handle = account.login.to_ascii_lowercase();
     if !is_human_handle(&handle) {
@@ -261,13 +332,14 @@ async fn upsert_human(hub: &Hub, account: &GithubUser) -> Result<(String, String
             ),
         ));
     }
+    let github_id = account.id.to_string();
     let row: Result<(String, String), sqlx::Error> = sqlx::query_as(
         "INSERT INTO humans (id, provider, provider_sub, handle) VALUES ($1, 'github', $2, $3)
          ON CONFLICT (provider, provider_sub) DO UPDATE SET provider_sub = EXCLUDED.provider_sub
          RETURNING id, handle",
     )
     .bind(new_id()?)
-    .bind(account.id.to_string())
+    .bind(&github_id)
     .bind(&handle)
     .fetch_one(hub.pool())
     .await;
@@ -282,18 +354,19 @@ async fn upsert_human(hub: &Hub, account: &GithubUser) -> Result<(String, String
         }
         Err(err) => return Err(err.into()),
     };
-    claim_bootstrap_admin(hub, &id, &handle).await?;
+    claim_bootstrap_admin(hub, &id, &github_id).await?;
     Ok((id, stored_handle))
 }
 
 /// Makes `human` an admin of every project whose unclaimed first admin is
-/// `login` (the GitHub login as it is now, lowercased), and marks those rows
-/// claimed. One statement, so a row is claimed only with its membership.
-async fn claim_bootstrap_admin(hub: &Hub, human: &str, login: &str) -> Result<(), ApiError> {
+/// GitHub account `github_id`, and marks those rows claimed. Matching the id
+/// and never the login keeps a later holder of a renamed login out (ruling
+/// R39). One statement, so a row is claimed only with its membership.
+async fn claim_bootstrap_admin(hub: &Hub, human: &str, github_id: &str) -> Result<(), ApiError> {
     let claimed = sqlx::query(
         "WITH claimed AS (
              UPDATE bootstrap_admins SET claimed_by = $1, claimed_at = now()
-             WHERE github_login = $2 AND claimed_by IS NULL
+             WHERE github_id = $2 AND claimed_by IS NULL
              RETURNING project_id
          )
          INSERT INTO memberships (human_id, project_id, role)
@@ -301,12 +374,12 @@ async fn claim_bootstrap_admin(hub: &Hub, human: &str, login: &str) -> Result<()
          ON CONFLICT (human_id, project_id) DO UPDATE SET role = 'admin'",
     )
     .bind(human)
-    .bind(login)
+    .bind(github_id)
     .execute(hub.pool())
     .await?
     .rows_affected();
     if claimed > 0 {
-        tracing::info!(human, login, projects = claimed, "claimed first admin");
+        tracing::info!(human, github_id, projects = claimed, "claimed first admin");
     }
     Ok(())
 }
@@ -332,6 +405,14 @@ mod tests {
         }
         for bad in ["", "-andy", "andy/sol", "Andy", "a".repeat(40).as_str()] {
             assert!(!is_human_handle(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn github_ids_are_positive_decimals() {
+        assert_eq!("583231".parse::<GithubId>().unwrap().to_string(), "583231");
+        for bad in ["0", "-1", "", "1e3", "18446744073709551616"] {
+            assert!(bad.parse::<GithubId>().is_err(), "{bad:?}");
         }
     }
 }
