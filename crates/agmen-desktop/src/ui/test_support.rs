@@ -21,6 +21,17 @@ pub(crate) fn init(cx: &mut TestAppContext) {
     });
 }
 
+/// A test app that shapes and measures with CoreText, as the app does on
+/// macOS, where gpui's test text system gives every font one set of metrics.
+#[cfg(target_os = "macos")]
+pub(crate) fn core_text_app() -> TestAppContext {
+    TestAppContext::build_with_text_system(
+        gpui::TestDispatcher::new(0),
+        None,
+        std::sync::Arc::new(gpui_apple::AppleTextSystem::new()),
+    )
+}
+
 /// The chat fixture's andy/fx1 worktree.
 pub(crate) fn fx1_worktree() -> crate::backend::WorktreeInfo {
     crate::backend::chat_snapshot()

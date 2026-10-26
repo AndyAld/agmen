@@ -1,8 +1,8 @@
 //! Label and value rows under an uppercase heading, as in the right dock.
 
 use gpui::{
-    App, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, RenderOnce,
-    SharedString, Styled as _, Window, div, px,
+    App, Font, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, RenderOnce,
+    SharedString, Styled as _, TextRun, Window, div, px,
 };
 
 use super::{Color, Label, LabelSize, SectionHeading};
@@ -52,7 +52,8 @@ impl RenderOnce for KvRow {
         // Both columns draw 14 px lines, as the mockup's 12 px text boxes
         // (nodes 397 and 398), and the higher baseline moves down to the
         // other, so label and value share one at any font.
-        let shift = baseline_shift(window, fonts);
+        let first = self.value.split_whitespace().next().unwrap_or_default();
+        let shift = baseline_shift(window, fonts, &self.label, first);
         let label = self.label.clone();
         let label_selector = format!("kv-label:{label}:{}", self.row);
         // Runs of spaces and edge spaces draw no empty words; tabs and
@@ -98,15 +99,35 @@ impl RenderOnce for KvRow {
 }
 
 /// How far the value's first baseline sits below the label's, both in
-/// [`AUTO_LINE_12`] lines: the label is the UI font at Small and the value
-/// the code font at its own size. Negative when the label's is lower.
-fn baseline_shift(window: &Window, fonts: &Fonts) -> Pixels {
-    let text = window.text_system();
-    let ui = text.resolve_font(&window.text_style().font());
-    let code = text.resolve_font(&gpui::font(fonts.code_family.clone()));
+/// [`AUTO_LINE_12`] lines: `label` is the UI font at Small and `word`, the
+/// value's first word, the code font at its own size. Negative when the
+/// label's is lower.
+fn baseline_shift(window: &Window, fonts: &Fonts, label: &str, word: &str) -> Pixels {
+    if label.is_empty() || word.is_empty() {
+        return px(0.);
+    }
     let small = TEXT_SMALL.to_pixels(window.rem_size());
-    text.baseline_offset(code, fonts.code_size, AUTO_LINE_12)
-        - text.baseline_offset(ui, small, AUTO_LINE_12)
+    let code = gpui::font(fonts.code_family.clone());
+    painted_baseline(window, word, code, fonts.code_size)
+        - painted_baseline(window, label, window.text_style().font(), small)
+}
+
+/// Where gpui paints the baseline of `text` in an [`AUTO_LINE_12`] line:
+/// half the line's spare height plus the shaped line's ascent, as gpui's
+/// line.rs paints it. `TextSystem::baseline_offset` reads the font's
+/// descent instead, which CoreText gives as negative, so it put a label
+/// 1.2 to 1.6 px below its value (C259).
+fn painted_baseline(window: &Window, text: &str, font: Font, size: Pixels) -> Pixels {
+    let run = TextRun {
+        len: text.len(),
+        font,
+        color: Hsla::default(),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    let line = window.text_system().layout_line(text, size, &[run], None);
+    (AUTO_LINE_12 - line.ascent - line.descent) / 2. + line.ascent
 }
 
 /// A heading and its rows.
@@ -249,17 +270,32 @@ mod tests {
         assert!(cx.debug_bounds("kv-word:State:0:1").is_none());
     }
 
-    /// Where the text inside `bounds` puts its first baseline, for a line
-    /// of `font` at `size` as tall as `line`.
+    /// Where gpui paints the baseline of `text` in `font` at `size` inside
+    /// `bounds`: its line's padding plus the shaped line's ascent, as
+    /// gpui's line.rs paints it, so the check does not go through
+    /// `TextSystem::baseline_offset`.
     fn baseline(
         cx: &mut gpui::VisualTestContext,
         bounds: gpui::Bounds<gpui::Pixels>,
-        font: &gpui::Font,
+        text: &str,
+        font: gpui::Font,
         size: gpui::Pixels,
-        line: gpui::Pixels,
     ) -> gpui::Pixels {
-        let text = cx.update(|window, _| window.text_system().clone());
-        bounds.top() + text.baseline_offset(text.resolve_font(font), size, line)
+        let run = gpui::TextRun {
+            len: text.len(),
+            font,
+            color: gpui::Hsla::default(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        let line = cx.update(|window, _| {
+            window
+                .text_system()
+                .shape_line(text.to_owned().into(), size, &[run], None)
+        });
+        let padding = (bounds.size.height - line.ascent - line.descent) / 2.;
+        bounds.top() + padding + line.ascent
     }
 
     /// The label's and the first value word's baselines, and the word
@@ -283,11 +319,25 @@ mod tests {
         let (ui, rem) = cx.update(|window, _| (window.text_style().font(), window.rem_size()));
         let fonts = cx.update(|_, cx| cx.global::<crate::appearance::Appearance>().fonts.clone());
         let code = gpui::font(fonts.code_family.clone());
-        let label_line = label.size.height;
-        let first = words[0];
-        let label_at = baseline(cx, label, &ui, TEXT_SMALL.to_pixels(rem), label_line);
-        let value_at = baseline(cx, first, &code, fonts.code_size, first.size.height);
+        let first = value.split_whitespace().next().unwrap();
+        let label_at = baseline(cx, label, "Harness", ui, TEXT_SMALL.to_pixels(rem));
+        let value_at = baseline(cx, words[0], first, code, fonts.code_size);
         (label_at, value_at, words)
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn kv_label_and_value_share_a_baseline_with_core_text() {
+        // C259: CoreText gives a font's descent as negative, which
+        // TextSystem::baseline_offset adds where gpui's paint subtracts the
+        // shaped line's positive one, so the label sat 1.6 px low here.
+        let mut app = crate::ui::test_support::core_text_app();
+        crate::ui::test_support::init(&mut app);
+        app.update(|cx| crate::assets::load_fonts(cx).unwrap());
+        let (label, value, _) = kv_baselines(&mut app, "Codex 0.164.0 over ACP");
+        // gpui rounds the label's margin to device pixels (2 per px in a
+        // test window), and real fonts give fractional baselines.
+        assert!((label - value).abs() <= px(0.25), "{label:?} {value:?}");
     }
 
     #[gpui::test]
