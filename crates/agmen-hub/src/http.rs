@@ -19,7 +19,7 @@ use crate::config::Config;
 use crate::emqx::{EmqxAdmin, EmqxError};
 use crate::ingest::IngestState;
 use crate::presence::PresenceState;
-use crate::{db, identities, invites, items, lanes, replay};
+use crate::{db, identities, invites, items, lanes, me, replay};
 
 /// How long the hub waits for GitHub or EMQX to answer.
 const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(10);
@@ -58,6 +58,7 @@ struct Inner {
     emqx: EmqxAdmin,
     github: GithubOAuth,
     public_url: Url,
+    public_mqtt_url: Url,
     ingest: IngestState,
     presence: PresenceState,
     claim_lease: Duration,
@@ -104,6 +105,7 @@ impl Hub {
                 emqx,
                 github,
                 public_url: config.public_url.clone(),
+                public_mqtt_url: config.public_mqtt_url.clone(),
                 ingest: IngestState::default(),
                 presence: PresenceState::default(),
                 claim_lease: config.claim_lease,
@@ -116,6 +118,7 @@ impl Hub {
         Router::new()
             .route("/v1/jwks", get(jwks))
             .merge(auth::routes())
+            .route("/v1/me", get(me::me))
             .route("/v1/identities", post(identities::mint))
             .route("/v1/identities/{id}", delete(identities::revoke))
             .route(
@@ -162,6 +165,11 @@ impl Hub {
     /// How long a granted claim lasts without a HEARTBEAT.
     pub(crate) fn claim_lease(&self) -> Duration {
         self.inner.claim_lease
+    }
+
+    /// The broker address clients connect to (`AGMEN_PUBLIC_MQTT_URL`).
+    pub(crate) fn public_mqtt_url(&self) -> &Url {
+        &self.inner.public_mqtt_url
     }
 
     /// `path` (such as `v1/auth/device`) under the public URL, keeping any

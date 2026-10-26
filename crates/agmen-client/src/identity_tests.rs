@@ -8,7 +8,7 @@ use super::*;
 
 const JSON: &str = r#"{"tenant":"tenant01","project":"project1","identity_id":"idn7k2q9",
   "handle":"andy/sol","owner_id":"andyandy","hub_url":"https://hub.example.com",
-  "role":"engineer"}"#;
+  "broker_url":"wss://agmen.example.com/mqtt","role":"engineer"}"#;
 
 fn run_git(dir: &Path, args: &[&str]) {
     let status = Command::new("git")
@@ -57,6 +57,10 @@ fn trusts_an_excluded_file_at_the_root() {
         assert_eq!(joined.root, root);
         assert_eq!(joined.identity.identity_id.as_str(), "idn7k2q9");
         assert_eq!(joined.identity.hub_url.as_str(), "https://hub.example.com/");
+        assert_eq!(
+            joined.identity.broker_url.to_string(),
+            "wss://agmen.example.com/mqtt"
+        );
         assert_eq!(joined.identity.me().owner_id.as_str(), "andyandy");
     }
 }
@@ -135,4 +139,48 @@ fn reports_a_malformed_file() {
         find_identity(&root),
         Err(IdentityError::Parse { .. })
     ));
+}
+
+/// `JSON` with `broker_url` set to `broker`, or removed for `None`.
+fn with_broker(broker: Option<&str>) -> serde_json::Result<IdentityFile> {
+    let mut file: serde_json::Value = serde_json::from_str(JSON).unwrap();
+    match broker {
+        Some(broker) => file["broker_url"] = broker.into(),
+        None => {
+            file.as_object_mut().unwrap().remove("broker_url");
+        }
+    }
+    serde_json::from_value(file)
+}
+
+#[test]
+fn broker_url_takes_mqtt_mqtts_and_wss() {
+    for good in [
+        "mqtt://localhost:1883",
+        "mqtts://agmen.example.com:8883",
+        "wss://agmen.example.com/mqtt",
+        "wss://agmen.example.com:8443/mqtt",
+    ] {
+        let identity = with_broker(Some(good)).unwrap();
+        assert_eq!(identity.broker_url.to_string(), good);
+        // agmen join writes the file with the same value.
+        assert_eq!(serde_json::to_value(&identity).unwrap()["broker_url"], good);
+    }
+}
+
+#[test]
+fn broker_url_is_required_and_refused_at_parse_time() {
+    assert!(with_broker(None).is_err(), "the field is required");
+    for bad in [
+        "",
+        "https://agmen.example.com",
+        "ws://agmen.example.com/mqtt",
+        "tcp://localhost:1883",
+        "mqtt://localhost",
+        "mqtts://agmen.example.com",
+        "localhost:1883",
+    ] {
+        let err = with_broker(Some(bad)).unwrap_err();
+        assert!(err.to_string().contains("broker address"), "{bad:?}: {err}");
+    }
 }

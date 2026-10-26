@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::event::Me;
+use crate::session::Broker;
 
 /// The folder at the worktree root that holds the identity file.
 pub const IDENTITY_DIR: &str = ".agmen";
@@ -39,8 +40,21 @@ const WALK_MAX: usize = 64;
 /// The largest identity file read; a real one is a few hundred bytes.
 const MAX_FILE_BYTES: u64 = 64 * 1024;
 
-/// What `.agmen/identity.json` holds. Fields this version does not know
-/// are ignored, so a later version can add some.
+/// What `.agmen/identity.json` holds: seven fields, all required, which
+/// `agmen join` writes from the hub's answers. Fields this version does not
+/// know are ignored, so a later version can add some.
+///
+/// ```
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let identity: agmen_client::IdentityFile = serde_json::from_str(r#"{
+///     "tenant": "tenant01", "project": "project1", "identity_id": "idn7k2q9",
+///     "handle": "andy/sol", "owner_id": "andyandy",
+///     "hub_url": "https://api.agmen.example",
+///     "broker_url": "wss://agmen.example/mqtt"
+/// }"#)?;
+/// assert_eq!(identity.broker_url.to_string(), "wss://agmen.example/mqtt");
+/// # Ok(()) }
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct IdentityFile {
     /// The tenant the project belongs to.
@@ -55,6 +69,10 @@ pub struct IdentityFile {
     pub owner_id: IdentityId,
     /// The hub that minted it. Its token is stored under this URL's origin.
     pub hub_url: Url,
+    /// The broker its sessions connect to, as the hub's `GET /v1/me` gave
+    /// it (`AGMEN_PUBLIC_MQTT_URL`, ruling R57): `mqtt://`, `mqtts://` or
+    /// `wss://`. Any other address fails to parse, so the file is refused.
+    pub broker_url: Broker,
 }
 
 impl IdentityFile {

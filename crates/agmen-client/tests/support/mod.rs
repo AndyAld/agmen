@@ -18,7 +18,8 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use agmen_client::{
-    Broker, ClientEvent, ClientKind, Events, HubClient, OutboxState, Session, SessionConfig,
+    Broker, ClientEvent, ClientKind, Events, HubClient, IdentityFile, OutboxState, Session,
+    SessionConfig,
 };
 use agmen_hub::{Config, Hub, Identity, Messaging};
 use agmen_proto::{
@@ -250,6 +251,20 @@ impl Ctx {
             who.token.clone(),
         )
         .unwrap()
+    }
+
+    /// The identity file `agmen join` would write for `who`, with the dev
+    /// EMQX as its broker.
+    pub fn identity_file(&self, who: &TestIdentity) -> IdentityFile {
+        IdentityFile {
+            tenant: self.topics.tenant().clone(),
+            project: self.topics.project().clone(),
+            identity_id: who.identity.id.clone(),
+            handle: who.identity.handle.clone(),
+            owner_id: who.identity.owner.as_str().parse().unwrap(),
+            hub_url: self.base.clone(),
+            broker_url: self.broker.clone(),
+        }
     }
 
     /// The identity's state folder.

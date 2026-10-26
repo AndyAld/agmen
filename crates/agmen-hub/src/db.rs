@@ -67,22 +67,26 @@ pub(crate) fn is_unique_violation(err: &sqlx::Error) -> bool {
     matches!(err, sqlx::Error::Database(db) if db.is_unique_violation())
 }
 
-/// A person's role in one project (`memberships.role`).
+/// A person's role in one project (`memberships.role`), lowest rights
+/// first. Serializes as `member`, `coordinator` or `admin`.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
 )]
 #[serde(rename_all = "lowercase")]
-pub(crate) enum Role {
+#[non_exhaustive]
+pub enum Role {
     /// Can mint agents.
     Member,
-    /// Can also mint coordinator identities.
+    /// Can also mint coordinator identities and invite members.
     Coordinator,
-    /// Can also invite people.
+    /// Can also invite coordinators and admins.
     Admin,
 }
 
 impl Role {
-    pub(crate) const fn as_str(self) -> &'static str {
+    /// The name `memberships.role` stores.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Member => "member",
             Self::Coordinator => "coordinator",
@@ -97,10 +101,10 @@ impl fmt::Display for Role {
     }
 }
 
-/// A `role` value the schema's check constraint should have refused.
-#[derive(Debug, thiserror::Error)]
-#[error("unknown role {0:?} in the database")]
-pub(crate) struct UnknownRole(String);
+/// A text that names no [`Role`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("unknown role {0:?}")]
+pub struct UnknownRole(String);
 
 impl FromStr for Role {
     type Err = UnknownRole;

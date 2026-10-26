@@ -10,6 +10,8 @@
 mod device;
 mod oauth;
 
+#[cfg(feature = "test-hooks")]
+pub(crate) use device::approve_as;
 pub use oauth::{GithubError, GithubId};
 pub(crate) use oauth::{GithubOAuth, account_by_login, is_human_handle};
 
@@ -117,10 +119,10 @@ impl FromRequestParts<Hub> for Caller {
 /// A successful token endpoint answer (RFC 6749 section 5.1).
 #[derive(Debug, Serialize)]
 pub(crate) struct TokenResponse {
-    access_token: String,
+    pub(crate) access_token: String,
     token_type: &'static str,
     expires_in: i64,
-    refresh_token: String,
+    pub(crate) refresh_token: String,
 }
 
 impl IntoResponse for TokenResponse {

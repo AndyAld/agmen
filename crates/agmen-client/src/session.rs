@@ -20,7 +20,8 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use agmen_proto::{ClientEnvelope, IdentityId, MAX_ENVELOPE_BYTES, Stream, Timestamp, Topics};
-use rumqttc_next::{AckMode, AsyncClient, MqttOptions, PublishOptions};
+use rumqttc_next::{AckMode, AsyncClient, MqttOptions, PublishOptions, Transport};
+use serde::{Deserialize, Serialize, Serializer};
 use tokio::sync::{Notify, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use url::Url;
@@ -48,9 +49,9 @@ const CLIENT_CAPACITY: usize = 64;
 /// How long a disconnected persistent session lasts at the broker (24 h).
 const DEFAULT_SESSION_EXPIRY: Duration = Duration::from_secs(86_400);
 /// How long the first connect may take, CONNACK and SUBACK together.
-const CONNECT_WAIT: Duration = Duration::from_secs(10);
+pub(crate) const CONNECT_WAIT: Duration = Duration::from_secs(10);
 /// How long [`Session::close`] waits for the broker to take the DISCONNECT.
-const CLOSE_WAIT: Duration = Duration::from_secs(5);
+pub(crate) const CLOSE_WAIT: Duration = Duration::from_secs(5);
 /// Events waiting for the application. When it stops reading them the
 /// session waits, which in turn holds back the broker.
 const EVENT_QUEUE: usize = 256;
@@ -98,10 +99,11 @@ impl ClientKind {
     }
 }
 
-/// Where the broker is: `mqtt://host:port` (plain TCP, as in dev) or
-/// `wss://host[:port]/path` (MQTT over WebSocket over TLS, as behind
-/// HAProxy in the cluster, checked against the system's root
-/// certificates).
+/// Where the broker is: `mqtt://host:port` (plain TCP, as in dev),
+/// `mqtts://host:port` (MQTT over TLS) or `wss://host[:port]/path` (MQTT
+/// over WebSocket over TLS, as behind HAProxy in the cluster). TLS is
+/// checked against the system's root certificates. In JSON, such as the
+/// identity file's `broker_url`, it is that URL as a string.
 ///
 /// ```
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -112,7 +114,8 @@ impl ClientKind {
 /// assert!("https://localhost:1883".parse::<Broker>().is_err());
 /// # Ok(()) }
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize)]
+#[serde(try_from = "String")]
 pub struct Broker(Url);
 
 impl FromStr for Broker {
@@ -121,12 +124,27 @@ impl FromStr for Broker {
     fn from_str(s: &str) -> Result<Self, ClientError> {
         let bad = || ClientError::BrokerAddress(s.to_owned());
         let url = Url::parse(s).map_err(|_| bad())?;
+        let host = url.host_str().is_some_and(|host| !host.is_empty());
         let ok = match url.scheme() {
-            "mqtt" => url.host_str().is_some() && url.port().is_some(),
-            "wss" => url.host_str().is_some(),
+            "mqtt" | "mqtts" => host && url.port().is_some(),
+            "wss" => host,
             _ => false,
         };
         if ok { Ok(Self(url)) } else { Err(bad()) }
+    }
+}
+
+impl TryFrom<String> for Broker {
+    type Error = ClientError;
+
+    fn try_from(s: String) -> Result<Self, ClientError> {
+        s.parse()
+    }
+}
+
+impl Serialize for Broker {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
     }
 }
 
@@ -140,9 +158,16 @@ impl fmt::Display for Broker {
 
 impl Broker {
     /// MQTT options for `client_id` at this broker.
-    fn options(&self, client_id: &str) -> Result<MqttOptions, ClientError> {
+    pub(crate) fn options(&self, client_id: &str) -> Result<MqttOptions, ClientError> {
         match (self.0.scheme(), self.0.host_str(), self.0.port()) {
             ("mqtt", Some(host), Some(port)) => Ok(MqttOptions::new(client_id, (host, port))),
+            ("mqtts", Some(host), Some(port)) => {
+                let tls = Transport::try_tls_with_default_config()
+                    .map_err(|err| ClientError::BrokerAddress(format!("{}: {err}", self.0)))?;
+                let mut options = MqttOptions::new(client_id, (host, port));
+                options.set_transport(tls);
+                Ok(options)
+            }
             ("wss", Some(_), _) => {
                 MqttOptions::try_websocket_with_default_tls(client_id, self.0.as_str())
                     .map_err(|err| ClientError::BrokerAddress(format!("{}: {err}", self.0)))
@@ -482,8 +507,25 @@ impl Session {
 }
 
 /// The connection settings of ADR-0003 for `identity`'s `kind` client id,
-/// with `token` as the password. A persistent session keeps its MQTT
-/// session record in `state_dir`.
+/// with `token` as the password, and no session kept at the broker.
+pub(crate) fn clean_options(
+    kind: ClientKind,
+    broker: &Broker,
+    identity: &IdentityId,
+    token: String,
+) -> Result<MqttOptions, ClientError> {
+    let mut options = broker.options(&format!("{identity}-{}", kind.suffix()))?;
+    options
+        .set_credentials(identity.as_str(), token)
+        .set_ack_mode(AckMode::Manual)
+        .set_keep_alive(KEEP_ALIVE_SECS)
+        .set_max_packet_size(Some(MAX_PACKET))
+        .set_clean_start(true);
+    Ok(options)
+}
+
+/// [`clean_options`], except that a persistent session keeps its MQTT
+/// session record in `state_dir` and lasts `session_expiry` at the broker.
 fn mqtt_options(
     kind: ClientKind,
     broker: &Broker,
@@ -492,14 +534,9 @@ fn mqtt_options(
     state_dir: &Path,
     session_expiry: Duration,
 ) -> Result<MqttOptions, ClientError> {
-    let client_id = format!("{identity}-{}", kind.suffix());
-    let mut options = broker.options(&client_id)?;
-    options
-        .set_credentials(identity.as_str(), token)
-        .set_ack_mode(AckMode::Manual)
-        .set_keep_alive(KEEP_ALIVE_SECS)
-        .set_max_packet_size(Some(MAX_PACKET));
+    let mut options = clean_options(kind, broker, identity, token)?;
     if kind.persistent() {
+        let client_id = options.client_id();
         let store = FileSessionStore::new(state_dir.join(format!("{client_id}.mqtt")));
         let expiry = u32::try_from(session_expiry.as_secs()).unwrap_or(u32::MAX);
         options
@@ -507,8 +544,6 @@ fn mqtt_options(
             .set_session_store_scope(broker.to_string())
             .set_clean_start(false)
             .set_session_expiry_interval(Some(expiry));
-    } else {
-        options.set_clean_start(true);
     }
     Ok(options)
 }
@@ -601,5 +636,23 @@ impl Sender {
             emit(&self.events, ClientEvent::Delivery { id: env.id, state }).await;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mqtts_connects_over_tls() {
+        let broker: Broker = "mqtts://agmen.example.com:8883".parse().unwrap();
+        assert_eq!(broker.to_string(), "mqtts://agmen.example.com:8883");
+        let options = broker.options("idn7k2q9-cli").unwrap();
+        assert!(matches!(options.transport(), Transport::Tls(_)));
+        let plain: Broker = "mqtt://localhost:1883".parse().unwrap();
+        assert!(matches!(
+            plain.options("idn7k2q9-cli").unwrap().transport(),
+            Transport::Tcp
+        ));
     }
 }

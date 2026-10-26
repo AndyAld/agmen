@@ -40,6 +40,7 @@ dependencies = [
 name = "agmen-hub"
 version = "0.1.0"
 dependencies = [
+ "agmen-hub",
  "agmen-proto",
  "anyhow",
  "axum",

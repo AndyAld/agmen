@@ -14,8 +14,9 @@ path = "src/main.rs"
 workspace = true
 
 [features]
-# Hub::seed_project and Hub::seed_identity, for other crates' integration
-# tests (agmen-client). Never enabled in the hub binary.
+# Hub::seed_project, seed_identity, seed_human and approve_device, for
+# integration tests (agmen-client's, the CLI's and the hub's own). Never
+# enabled in the hub binary.
 test-hooks = []
 
 [dependencies]
@@ -46,4 +47,7 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 url = "2.5.8"
 
 [dev-dependencies]
+# The hub's own integration tests use the test hooks too; a dev-dependency
+# never reaches the hub binary's build.
+agmen-hub = { version = "0.1.0", path = ".", features = ["test-hooks"] }
 rumqttc = { version = "0.25.1", default-features = false }

@@ -1,5 +1,8 @@
-//! Invite-only onboarding: a project admin makes a one-use code, and the
-//! person who accepts it becomes a member with the invite's role.
+//! Invite-only onboarding: a project admin or coordinator makes a one-use
+//! code, and the person who accepts it becomes a member with the invite's
+//! role. Admins invite any role, coordinators members only (ruling R58).
+
+use std::ops::RangeInclusive;
 
 use agmen_proto::{ProjectId, Timestamp};
 use axum::Json;
@@ -11,14 +14,20 @@ use crate::auth::Caller;
 use crate::db::{Role, hash_secret, new_secret};
 use crate::http::{ApiError, Hub};
 
-/// How long an invite stays open, in seconds (7 days).
-const INVITE_TTL_SECS: i64 = 7 * 24 * 3600;
+/// How long an invite stays open unless the request says, in seconds (7
+/// days).
+const DEFAULT_TTL_SECS: i64 = 7 * 24 * 3600;
+/// The shortest and longest `expires_in_secs`: 1 hour and 30 days.
+const TTL_RANGE_SECS: RangeInclusive<i64> = 3600..=30 * 24 * 3600;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CreateRequest {
     project: ProjectId,
     role: Role,
+    /// How long the invite stays open, in seconds; [`DEFAULT_TTL_SECS`]
+    /// when absent.
+    expires_in_secs: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -30,13 +39,25 @@ pub(crate) struct Created {
     expires_at: Timestamp,
 }
 
-/// `POST /v1/invites` (human token, project admin).
+/// `POST /v1/invites` (human token, project admin or coordinator).
 pub(crate) async fn create(
     State(hub): State<Hub>,
     caller: Caller,
     Json(request): Json<CreateRequest>,
 ) -> Result<(StatusCode, Json<Created>), ApiError> {
     let human = caller.human()?;
+    let ttl = request.expires_in_secs.unwrap_or(DEFAULT_TTL_SECS);
+    if !TTL_RANGE_SECS.contains(&ttl) {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_expiry",
+            format!(
+                "expires_in_secs must be from {} to {}",
+                TTL_RANGE_SECS.start(),
+                TTL_RANGE_SECS.end()
+            ),
+        ));
+    }
     let membership: Option<(String, String)> = sqlx::query_as(
         "SELECT m.role, p.tenant_id FROM memberships m JOIN projects p ON p.id = m.project_id
          WHERE m.human_id = $1 AND m.project_id = $2",
@@ -45,17 +66,22 @@ pub(crate) async fn create(
     .bind(request.project.as_str())
     .fetch_optional(hub.pool())
     .await?;
-    let tenant = match membership {
-        Some((role, tenant)) if role.parse::<Role>().map_err(ApiError::stored)? == Role::Admin => {
-            tenant
-        }
-        _ => {
+    let Some((role, tenant)) = membership else {
+        return Err(may_not_invite());
+    };
+    match (
+        role.parse::<Role>().map_err(ApiError::stored)?,
+        request.role,
+    ) {
+        (Role::Admin, _) | (Role::Coordinator, Role::Member) => {}
+        (Role::Coordinator, _) => {
             return Err(ApiError::forbidden(
                 "admin_required",
-                "only a project admin can invite",
+                "only a project admin can invite a coordinator or an admin",
             ));
         }
-    };
+        (Role::Member, _) => return Err(may_not_invite()),
+    }
     let code = new_secret()?;
     let expires_at: i64 = sqlx::query_scalar(
         "INSERT INTO invites (code_hash, tenant_id, project_id, role, created_by, expires_at)
@@ -67,7 +93,7 @@ pub(crate) async fn create(
     .bind(request.project.as_str())
     .bind(request.role.as_str())
     .bind(human.as_str())
-    .bind(INVITE_TTL_SECS)
+    .bind(ttl)
     .fetch_one(hub.pool())
     .await?;
     Ok((
@@ -79,6 +105,15 @@ pub(crate) async fn create(
             expires_at: Timestamp::from_second(expires_at).map_err(ApiError::stored)?,
         }),
     ))
+}
+
+/// The answer for a caller who is not an admin or coordinator of the
+/// project.
+fn may_not_invite() -> ApiError {
+    ApiError::forbidden(
+        "coordinator_required",
+        "only a project admin or coordinator can invite",
+    )
 }
 
 #[derive(Debug, Serialize)]

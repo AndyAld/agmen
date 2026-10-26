@@ -8,6 +8,7 @@
 
 mod support;
 
+use jiff::Timestamp;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 use support::{
@@ -258,6 +259,125 @@ async fn it_invite_once() {
             .await
             .unwrap();
         assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+    })
+    .await;
+}
+
+/// `POST /v1/invites` with `token` and `body`: the status and the JSON
+/// answer (`null` when the answer is not JSON).
+async fn invite(ctx: &Ctx, token: &str, body: &Value) -> (StatusCode, Value) {
+    let resp = ctx
+        .http
+        .post(ctx.hub.url("/v1/invites"))
+        .bearer_auth(token)
+        .json(body)
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status();
+    (status, resp.json().await.unwrap_or(Value::Null))
+}
+
+/// Admins invite any role; coordinators invite members only (ruling R58).
+#[tokio::test]
+async fn it_invite_roles_by_inviter() {
+    run(|ctx| async move {
+        let project = seed_project(&ctx.pool).await;
+        let admin = member_with_token(&ctx, &project, ANDY, "andy", "admin").await;
+        let coord = member_with_token(&ctx, &project, 2, "adam", "coordinator").await;
+        let member = member_with_token(&ctx, &project, 3, "mel", "member").await;
+        let ask = |role: &str| json!({ "project": project.project, "role": role });
+
+        for role in ["member", "coordinator", "admin"] {
+            let (status, body) = invite(&ctx, &admin, &ask(role)).await;
+            assert_eq!(status, StatusCode::CREATED, "admin inviting {role}: {body}");
+            assert_eq!(body["role"], role);
+        }
+
+        let (status, body) = invite(&ctx, &coord, &ask("member")).await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "coordinator inviting member: {body}"
+        );
+        for role in ["coordinator", "admin"] {
+            let (status, body) = invite(&ctx, &coord, &ask(role)).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "coordinator inviting {role}");
+            assert_eq!(body["error"], "admin_required", "{body}");
+        }
+
+        let (status, body) = invite(&ctx, &member, &ask("member")).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "member inviting");
+        assert_eq!(body["error"], "coordinator_required", "{body}");
+
+        assert_eq!(
+            count(
+                &ctx.pool,
+                "SELECT count(*) FROM invites WHERE project_id = $1",
+                &project.project
+            )
+            .await,
+            4,
+            "only the allowed invites were stored"
+        );
+    })
+    .await;
+}
+
+/// `expires_in_secs` is optional, 3600 to 2592000, default 604800 (ruling
+/// R58); the request still refuses unknown fields.
+#[tokio::test]
+async fn it_invite_expiry_bounds() {
+    run(|ctx| async move {
+        let project = seed_project(&ctx.pool).await;
+        let admin = member_with_token(&ctx, &project, ANDY, "andy", "admin").await;
+        let ask = |extra: Value| {
+            let mut body = json!({ "project": project.project, "role": "member" });
+            for (key, value) in extra.as_object().unwrap() {
+                body[key] = value.clone();
+            }
+            body
+        };
+        // Seconds from now to the invite's expires_at.
+        let lifetime = |body: &Value| {
+            let at: Timestamp = body["expires_at"].as_str().unwrap().parse().unwrap();
+            at.as_second() - Timestamp::now().as_second()
+        };
+
+        for (extra, want) in [
+            (json!({}), 604_800),
+            (json!({ "expires_in_secs": 3600 }), 3600),
+            (json!({ "expires_in_secs": 2_592_000 }), 2_592_000),
+        ] {
+            let (status, body) = invite(&ctx, &admin, &ask(extra.clone())).await;
+            assert_eq!(status, StatusCode::CREATED, "{extra}: {body}");
+            let got = lifetime(&body);
+            assert!(
+                (want - 60..=want).contains(&got),
+                "{extra}: expires in {got} s, want {want}"
+            );
+        }
+
+        for secs in [0, 3599, 2_592_001, -1] {
+            let (status, body) =
+                invite(&ctx, &admin, &ask(json!({ "expires_in_secs": secs }))).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{secs}: {body}");
+            assert_eq!(body["error"], "invalid_expiry", "{body}");
+        }
+
+        let (status, _) = invite(&ctx, &admin, &ask(json!({ "expires": "1d" }))).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "an unknown field");
+
+        assert_eq!(
+            count(
+                &ctx.pool,
+                "SELECT count(*) FROM invites WHERE project_id = $1",
+                &project.project
+            )
+            .await,
+            3,
+            "refused requests stored nothing"
+        );
     })
     .await;
 }

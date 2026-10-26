@@ -2,9 +2,10 @@
 //! binary share.
 //!
 //! [`Hub::connect`] builds the hub from a [`Config`] and [`Hub::router`]
-//! serves its HTTP API: device login with GitHub, identities, invites,
-//! broker tokens and the JWKS EMQX verifies them with
-//! (`docs/adr/0002-broker-emqx.md`). [`Hub::start_messaging`] connects to
+//! serves its HTTP API: device login with GitHub, who is signed in
+//! (`GET /v1/me`), identities, invites, broker tokens and the JWKS EMQX
+//! verifies them with (`docs/adr/0002-broker-emqx.md`).
+//! [`Hub::start_messaging`] connects to
 //! the broker, ingests every client publish ([`Hub::ingest`]) and runs the
 //! sweeper that publishes what ingest stored; [`Hub::post_as_hub`] posts the
 //! hub's own messages. The hub also serves replay of every stream, keeps
@@ -30,6 +31,7 @@ mod ingest;
 mod invites;
 mod items;
 mod lanes;
+mod me;
 mod mqtt;
 mod numbering;
 mod presence;
@@ -47,6 +49,7 @@ pub use claims::LeaseSweepError;
 pub use config::{
     Config, ConfigError, DEFAULT_CLAIM_LEASE, EmqxConfig, GithubConfig, MqttConfig, Secret,
 };
+pub use db::{Role, UnknownRole};
 pub use emqx::{EmqxAdmin, EmqxError};
 pub use http::{Hub, HubError};
 pub use identities::{BROKER_TOKEN_TTL, CLIENT_ID_SUFFIXES, HumanId, Identity};
@@ -54,7 +57,7 @@ pub use ingest::{HUB_IDENTITY, HubPost, IngestError, PostError, Posted};
 pub use mqtt::{Messaging, MessagingError};
 pub use numbering::{NumberingError, next_seq};
 #[cfg(feature = "test-hooks")]
-pub use test_hooks::HookError;
+pub use test_hooks::{HookError, SeededHuman};
 
 /// The hub's Postgres migrations from `migrations/`, embedded at compile time.
 ///

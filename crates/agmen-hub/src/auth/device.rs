@@ -155,6 +155,28 @@ pub(super) async fn approve(
     )))
 }
 
+/// Approves the open device login whose user code is `user_code` (as
+/// people type it) for `human`, as the confirm page's button does after a
+/// GitHub sign-in. Returns whether a login was approved: `false` for an
+/// unknown, expired or already approved code.
+#[cfg(feature = "test-hooks")]
+pub(crate) async fn approve_as(hub: &Hub, user_code: &str, human: &str) -> Result<bool, ApiError> {
+    let Some(code) = normalize_user_code(user_code) else {
+        return Ok(false);
+    };
+    let approved = sqlx::query(
+        "UPDATE device_authorizations
+         SET human_id = $1, approved_at = now(), oauth_state_hash = NULL, approval_hash = NULL
+         WHERE user_code = $2 AND expires_at > now() AND approved_at IS NULL",
+    )
+    .bind(human)
+    .bind(&code)
+    .execute(hub.pool())
+    .await?
+    .rows_affected();
+    Ok(approved == 1)
+}
+
 /// The device code grant: tokens once the login is approved, otherwise the
 /// RFC 8628 section 3.5 error. A device code is redeemed once.
 pub(super) async fn redeem(hub: &Hub, device_code: &str) -> Result<TokenResponse, ApiError> {

@@ -39,6 +39,10 @@ use fake_github::FakeGithub;
 pub const DEV_KEY_1: &str = "agmen-dev-1";
 pub const DEV_KEY_2: &str = "agmen-dev-2";
 
+/// The broker URL the test hub tells clients to use (`/v1/me`). Nothing
+/// listens there: it only has to differ from the hub's own `AGMEN_MQTT_URL`.
+pub const PUBLIC_MQTT_URL: &str = "wss://broker.agmen.test/mqtt";
+
 pub fn env(name: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| {
         panic!(
@@ -279,6 +283,7 @@ impl TestHub {
                 instance: new_id(),
                 share_group: new_id(),
             },
+            public_mqtt_url: Url::parse(PUBLIC_MQTT_URL).unwrap(),
             jwt_signing_key: jwt_key(signing),
             jwt_extra_keys: extra.iter().map(|name| jwt_key(name)).collect(),
             claim_lease: lease,

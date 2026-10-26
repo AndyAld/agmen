@@ -54,7 +54,10 @@ pub enum ClientError {
     #[error("{0}")]
     Token(String),
     /// The broker address is not one the session can connect to.
-    #[error("the broker address {0:?} is not mqtt://host:port or wss://host[:port]/path")]
+    #[error(
+        "the broker address {0:?} is not mqtt://host:port, mqtts://host:port or \
+         wss://host[:port]/path"
+    )]
     BrokerAddress(String),
     /// The MQTT client could not be built.
     #[error("the MQTT client settings are invalid")]
@@ -85,6 +88,18 @@ pub enum ClientError {
         /// The last failure.
         #[source]
         source: Box<ClientError>,
+    },
+    /// A retained state key that is not one topic level.
+    #[error("the state key {0:?} is not one topic level")]
+    StateKey(String),
+    /// A retained `state/{key}` payload is not what that key holds.
+    #[error("the retained state/{key} is not valid")]
+    BadState {
+        /// The key.
+        key: String,
+        /// What is wrong.
+        #[source]
+        source: serde_json::Error,
     },
     /// The identity's state folder could not be created.
     #[error("creating the state folder {path} failed")]

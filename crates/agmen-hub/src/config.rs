@@ -159,6 +159,24 @@ fn mqtt_addr(value: &str) -> Result<(String, u16), ConfigError> {
     }
 }
 
+/// `value` as the broker URL clients connect to, or
+/// [`ConfigError::Invalid`]: `mqtt://host:port`, `mqtts://host:port` or
+/// `wss://host[:port]/path`, the forms agmen-client's `Broker` takes.
+fn public_broker_url(value: &str) -> Result<Url, ConfigError> {
+    let url = Url::parse(value).ok().filter(|url| {
+        let host = url.host_str().is_some_and(|host| !host.is_empty());
+        match url.scheme() {
+            "mqtt" | "mqtts" => host && url.port().is_some(),
+            "wss" => host,
+            _ => false,
+        }
+    });
+    url.ok_or(ConfigError::Invalid {
+        name: "AGMEN_PUBLIC_MQTT_URL",
+        what: "mqtt://host:port, mqtts://host:port or wss://host[:port]/path URL",
+    })
+}
+
 /// How long a claim lasts without a HEARTBEAT (protocol section 8).
 pub const DEFAULT_CLAIM_LEASE: Duration = Duration::from_secs(30 * 60);
 
@@ -181,6 +199,11 @@ pub struct Config {
     pub emqx: EmqxConfig,
     /// The broker connection for ingest and the sweeper.
     pub mqtt: MqttConfig,
+    /// `AGMEN_PUBLIC_MQTT_URL`, default `AGMEN_MQTT_URL`: the broker
+    /// address clients connect to, which `GET /v1/me` serves as
+    /// `broker_url` (ruling R57). In a cluster it differs from the hub's
+    /// own connection, such as `wss://agmen.example.com/mqtt`.
+    pub public_mqtt_url: Url,
     /// `AGMEN_JWT_SIGNING_KEY`: the ES256 private key (PKCS#8 PEM) that
     /// signs broker tokens. Its key id is the file name without `.pem`.
     pub jwt_signing_key: PathBuf,
@@ -252,6 +275,7 @@ impl Config {
     /// assert_eq!(config.mqtt.client_id(), "agmen-hub-main");
     /// assert_eq!(config.mqtt.up_filter(), "$share/hub/agmen/v1/+/+/up/+");
     /// assert_eq!(config.claim_lease, agmen_hub::DEFAULT_CLAIM_LEASE);
+    /// assert_eq!(config.public_mqtt_url.as_str(), "mqtt://emqx:1883");
     /// # Ok(()) }
     /// ```
     pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Self, ConfigError> {
@@ -303,6 +327,11 @@ impl Config {
                     share_group: name("AGMEN_MQTT_SHARE_GROUP", "hub")?,
                 }
             },
+            // After `mqtt`, so a bad AGMEN_MQTT_URL is reported by its name.
+            public_mqtt_url: public_broker_url(&match get("AGMEN_PUBLIC_MQTT_URL") {
+                Some(value) => value,
+                None => required("AGMEN_MQTT_URL")?,
+            })?,
             jwt_signing_key: required("AGMEN_JWT_SIGNING_KEY")?.into(),
             jwt_extra_keys: get("AGMEN_JWT_EXTRA_KEYS")
                 .map(|list| {
@@ -410,6 +439,64 @@ mod tests {
                     with_lease(bad),
                     Err(ConfigError::Invalid {
                         name: "AGMEN_CLAIM_LEASE_SECS",
+                        ..
+                    })
+                ),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn public_mqtt_url_defaults_to_the_hub_connection() {
+        let with_public = |value: Option<&'static str>| {
+            Config::from_lookup(|name| match name {
+                "AGMEN_PUBLIC_MQTT_URL" => value.map(str::to_owned),
+                "AGMEN_DATABASE_URL" => Some("postgres://localhost/agmen".to_owned()),
+                "AGMEN_PUBLIC_URL" => Some("https://api.example.com".to_owned()),
+                "AGMEN_EMQX_API_URL" => Some("http://emqx:18083/api/v5".to_owned()),
+                "AGMEN_MQTT_URL" => Some("mqtt://emqx:1883".to_owned()),
+                "AGMEN_JWT_SIGNING_KEY" => Some("/keys/hub-1.pem".to_owned()),
+                "AGMEN_GITHUB_CLIENT_ID"
+                | "AGMEN_GITHUB_CLIENT_SECRET"
+                | "AGMEN_EMQX_API_KEY"
+                | "AGMEN_EMQX_API_SECRET" => Some("x".to_owned()),
+                _ => None,
+            })
+        };
+        for (value, want) in [
+            (None, "mqtt://emqx:1883"),
+            (Some(""), "mqtt://emqx:1883"),
+            (
+                Some("wss://agmen.example.com/mqtt"),
+                "wss://agmen.example.com/mqtt",
+            ),
+            (Some("wss://agmen.example.com"), "wss://agmen.example.com/"),
+            (
+                Some("mqtts://agmen.example.com:8883"),
+                "mqtts://agmen.example.com:8883",
+            ),
+            (Some("mqtt://localhost:1883"), "mqtt://localhost:1883"),
+        ] {
+            assert_eq!(
+                with_public(value).unwrap().public_mqtt_url.as_str(),
+                want,
+                "{value:?}"
+            );
+        }
+        for bad in [
+            "https://agmen.example.com",
+            "ws://agmen.example.com/mqtt",
+            "mqtt://agmen.example.com",
+            "mqtts://agmen.example.com",
+            "wss://",
+            "agmen.example.com:1883",
+        ] {
+            assert!(
+                matches!(
+                    with_public(Some(bad)),
+                    Err(ConfigError::Invalid {
+                        name: "AGMEN_PUBLIC_MQTT_URL",
                         ..
                     })
                 ),

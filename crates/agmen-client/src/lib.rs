@@ -1,5 +1,6 @@
-//! MQTT 5 session, SQLite outbox, cursors, and replay for agmen clients:
-//! the library `agmen` (the CLI), `agmen mcp` and `agmen watch` share.
+//! MQTT 5 session, SQLite outbox, cursors, replay, and one-off reads of
+//! retained state for agmen clients: the library `agmen` (the CLI),
+//! `agmen mcp` and `agmen watch` share.
 
 #![warn(missing_docs)]
 
@@ -14,6 +15,7 @@ mod mqtt_store;
 mod outbox;
 mod replay;
 mod session;
+mod state;
 mod token;
 mod token_store;
 
@@ -26,5 +28,6 @@ pub use identity::{
 };
 pub use outbox::{Outbox, OutboxState};
 pub use session::{Broker, ClientKind, Events, STATE_DB, Session, SessionConfig};
+pub use state::{read_state, resolve_handle};
 pub use token::TokenSource;
 pub use token_store::{TokenKey, TokenStore, TokenStoreError};
