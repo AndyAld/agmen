@@ -56,19 +56,36 @@ done
 b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
 
 # Public JWK for a P-256 key: the DER public key ends with 04 || x || y.
+# Called inside $(...), where bash does not apply errexit, so each step
+# that can fail returns 1 itself.
 jwk() {
-  local der
-  der="$(mktemp)"
-  openssl pkey -in "$dir/jwt/$1.pem" -pubout -outform DER -out "$der" 2>/dev/null
-  printf '{"kty":"EC","crv":"P-256","alg":"ES256","use":"sig","kid":"%s","x":"%s","y":"%s"}' \
-    "$1" "$(tail -c 64 "$der" | head -c 32 | b64url)" "$(tail -c 32 "$der" | b64url)"
+  local der size x y
+  der="$(mktemp)" || return 1
+  if ! openssl pkey -in "$dir/jwt/$1.pem" -pubout -outform DER -out "$der" 2>/dev/null; then
+    rm -f "$der"
+    echo "init.sh: cannot read the public key in $dir/jwt/$1.pem" >&2
+    return 1
+  fi
+  size="$(wc -c <"$der" | tr -d ' ')" || return 1
+  if ((size < 64)); then
+    rm -f "$der"
+    echo "init.sh: the public key in $dir/jwt/$1.pem is $size bytes, too short for P-256" >&2
+    return 1
+  fi
+  x="$(tail -c 64 "$der" | head -c 32 | b64url)" || return 1
+  y="$(tail -c 32 "$der" | b64url)" || return 1
   rm -f "$der"
+  printf '{"kty":"EC","crv":"P-256","alg":"ES256","use":"sig","kid":"%s","x":"%s","y":"%s"}' "$1" "$x" "$y"
 }
 
 # Rebuilt on every run from the key files, so it always matches them. The
-# jwks service serves this directory at http://localhost:8090/v1/jwks.
+# jwks service serves this directory at http://localhost:8090/v1/jwks. Each
+# JWK is assigned on its own line so errexit sees a failed jwk; inside
+# printf's arguments its status would be lost.
+k1="$(jwk agmen-dev-1)"
+k2="$(jwk agmen-dev-2)"
 jwks_tmp="$(mktemp "$dir/jwks/.jwks.XXXXXX")"
-printf '{"keys":[%s,%s]}\n' "$(jwk agmen-dev-1)" "$(jwk agmen-dev-2)" >"$jwks_tmp"
+printf '{"keys":[%s,%s]}\n' "$k1" "$k2" >"$jwks_tmp"
 chmod 644 "$jwks_tmp"
 mv "$jwks_tmp" "$dir/jwks/jwks.json"
 
