@@ -355,7 +355,10 @@ fn frame_time(cx: &mut TestAppContext, body: &str) -> std::time::Duration {
 /// Plan Focus 4: no frame over 16.7 ms.
 const FRAME_BUDGET: std::time::Duration = std::time::Duration::from_micros(16_700);
 
+// a_32_kib_body_in_short_lines_draws_as_one_text is the gate; wall-clock
+// time swings with machine load, so this timing runs only on request.
 #[gpui::test]
+#[ignore = "wall-clock timing; run with cargo nextest run --release --run-ignored only a_32_kib_body_draws_quickly"]
 fn a_32_kib_body_draws_quickly(cx: &mut TestAppContext) {
     // Measured on an M2 Max, three runs each: release 0.4 ms for one line
     // and 0.9 ms for 1,424 short lines; debug 8 ms and 12 ms. In release a
