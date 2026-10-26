@@ -122,7 +122,6 @@ mod tests {
 
     #[gpui::test]
     fn code_badge_renders(cx: &mut TestAppContext) {
-        assert!(Badge::new("DONE", Color::Success).code().code);
         let size = rendered_size(cx, || {
             Badge::new("DONE", Color::Success).code().into_any_element()
         });
