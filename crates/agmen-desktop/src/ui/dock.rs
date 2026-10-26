@@ -87,10 +87,21 @@ impl RenderOnce for LeftDockTabs {
 
 /// A right dock panel's title, subtitle and close button, with its rule
 /// inside.
-#[derive(Debug, IntoElement)]
+#[derive(IntoElement)]
 pub(crate) struct RightDockHeader {
     title: SharedString,
     subtitle: SharedString,
+    // Task 19: the plan panel's state pill before the close button.
+    end: Option<gpui::AnyElement>,
+}
+
+impl std::fmt::Debug for RightDockHeader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RightDockHeader")
+            .field("title", &self.title)
+            .field("subtitle", &self.subtitle)
+            .finish_non_exhaustive()
+    }
 }
 
 impl RightDockHeader {
@@ -99,7 +110,16 @@ impl RightDockHeader {
         Self {
             title: title.into(),
             subtitle: subtitle.into(),
+            end: None,
         }
+    }
+
+    /// Task 19: drawn at the right, before the close button, as the plan
+    /// panel's state pill (node 8940).
+    #[must_use]
+    pub(crate) fn end(mut self, end: impl IntoElement) -> Self {
+        self.end = Some(end.into_any_element());
+        self
     }
 }
 
@@ -119,6 +139,7 @@ impl RenderOnce for RightDockHeader {
             .child(Label::new(self.title).weight(FontWeight::SEMIBOLD))
             .child(Label::new(self.subtitle).code().color(Color::Placeholder))
             .child(div().flex_1())
+            .children(self.end)
             .child(
                 IconButton::new("close-right-dock", UiIcon::ChevronRight)
                     .size(IconSize::Glyph)

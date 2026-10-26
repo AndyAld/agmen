@@ -11,9 +11,9 @@ use gpui::{
 use super::{ClickHandler, Color, Label, LabelSize};
 use crate::appearance::{Appearance, Theme};
 use crate::ui::tokens::{
-    BORDER_WIDTH, BUTTON_HOVER_OPACITY, BUTTON_TINT, RADIUS_CARD, RADIUS_MD, RADIUS_SM, SPACE_1,
-    SPACE_2, SPACE_3, SPACE_4, SPACE_5, SPACE_6, SPACE_7, SPACE_8, SPACE_9, SPACE_10, SPACE_12,
-    TINT_SELECTED, tint,
+    BORDER_WIDTH, BUTTON_HOVER_OPACITY, BUTTON_TINT, RADIUS_CARD, RADIUS_INPUT, RADIUS_MD,
+    RADIUS_SM, SPACE_1, SPACE_2, SPACE_3, SPACE_4, SPACE_5, SPACE_6, SPACE_7, SPACE_8, SPACE_9,
+    SPACE_10, SPACE_12, SPACE_14, TINT_SELECTED, tint,
 };
 
 /// How the button is drawn.
@@ -90,6 +90,12 @@ pub(crate) enum ButtonSize {
     /// Padding 6 by 12, radius 6 and body text, as a dialog's Cancel and
     /// Check again (nodes 2443, 2445).
     Large,
+    /// Task 19: body text and padding that makes a 32 px button with or
+    /// without a border (nodes 9777 and 10953): Primary pads 8 by 14, the
+    /// other styles 7 by 12 inside their border; the input's radius. The
+    /// plan panel's Kick off and Pause all, and the kick-off dialog's
+    /// buttons.
+    Tall,
 }
 
 /// The fill `style` draws in `theme`, before hover and selection.
@@ -115,6 +121,8 @@ pub(crate) struct Button {
     size: ButtonSize,
     weight: Option<FontWeight>,
     selected: bool,
+    // Task 19: "Kick off · waiting on sean".
+    disabled: bool,
     leading: Option<AnyElement>,
     trailing: Option<AnyElement>,
     on_click: Option<ClickHandler>,
@@ -139,6 +147,7 @@ impl Button {
             size: ButtonSize::Default,
             weight: None,
             selected: false,
+            disabled: false,
             leading: None,
             trailing: None,
             on_click: None,
@@ -182,6 +191,14 @@ impl Button {
         self
     }
 
+    /// Task 19: a button that cannot be clicked now, its label dimmed, as
+    /// "Kick off · waiting on sean" (node 9046).
+    #[must_use]
+    pub(crate) const fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
+    }
+
     /// Something drawn before the label, such as a glyph.
     #[must_use]
     pub(crate) fn leading(mut self, leading: impl IntoElement) -> Self {
@@ -202,7 +219,8 @@ impl Button {
 impl RenderOnce for Button {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = &cx.global::<Appearance>().theme;
-        let hover = hover(self.style, theme);
+        // A disabled button does not light up under the pointer (Task 19).
+        let hover = (!self.disabled).then(|| hover(self.style, theme));
         let selector = self.id.to_string();
         let base = div()
             .id(self.id)
@@ -245,10 +263,12 @@ impl RenderOnce for Button {
             }
             ButtonStyle::Subtle => base.rounded(RADIUS_MD).py(SPACE_3).px(SPACE_9),
         };
-        let styled = styled.hover(move |style| match hover {
-            Hover::Fill(fill) => style.bg(fill),
-            Hover::Border(border) => style.border_color(border),
-            Hover::Fade => style.opacity(BUTTON_HOVER_OPACITY),
+        let styled = styled.when_some(hover, |styled, hover| {
+            styled.hover(move |style| match hover {
+                Hover::Fill(fill) => style.bg(fill),
+                Hover::Border(border) => style.border_color(border),
+                Hover::Fade => style.opacity(BUTTON_HOVER_OPACITY),
+            })
         });
         let styled = if selected {
             styled.bg(tint(theme.text_accent, TINT_SELECTED))
@@ -274,15 +294,28 @@ impl RenderOnce for Button {
                 styled.py(SPACE_6).px(SPACE_12).rounded(RADIUS_CARD),
                 LabelSize::Default,
             ),
+            ButtonSize::Tall => {
+                let (py, px) = if self.style == ButtonStyle::Primary {
+                    (SPACE_8, SPACE_14)
+                } else {
+                    (SPACE_7, SPACE_12)
+                };
+                (
+                    styled.py(py).px(px).rounded(RADIUS_INPUT),
+                    LabelSize::Default,
+                )
+            }
         };
         let label = Label::new(self.label).size(text);
+        let on_click = if self.disabled { None } else { self.on_click };
         styled
-            .when_some(self.on_click, |this, handler| {
+            .when_some(on_click, |this, handler| {
                 this.cursor_pointer().on_click(handler)
             })
             .children(self.leading)
             .child({
                 let label = match self.style {
+                    _ if self.disabled => label.color(Color::Placeholder),
                     ButtonStyle::Primary | ButtonStyle::Danger => {
                         label.weight(FontWeight::SEMIBOLD).color(Color::Background)
                     }
@@ -508,5 +541,43 @@ mod tests {
         let theme = Appearance::builtin().theme;
         assert_eq!(fill(ButtonStyle::Inset, &theme), theme.background);
         assert_eq!(fill(ButtonStyle::Outlined, &theme), theme.elevated_surface);
+    }
+
+    // Task 19: the plan panel's Kick off and Pause all (nodes 9046, 9777,
+    // 10953) and the dialog's buttons are 13 px text, 32 tall.
+    #[gpui::test]
+    fn large_buttons_are_one_height_with_or_without_a_border(cx: &mut TestAppContext) {
+        let primary = rendered_size(cx, || {
+            Button::new("go", "Kick off · 7 agents")
+                .style(ButtonStyle::Primary)
+                .size(ButtonSize::Tall)
+                .into_any_element()
+        });
+        let mut cx2 = TestAppContext::single();
+        let outlined = rendered_size(&mut cx2, || {
+            Button::new("pause", "Pause all")
+                .size(ButtonSize::Tall)
+                .into_any_element()
+        });
+        let mut cx3 = TestAppContext::single();
+        let text = rendered_size(&mut cx3, || Label::new("Pause all").into_any_element());
+        assert_eq!(primary.height, outlined.height);
+        assert_eq!(primary.height - text.height, px(16.));
+    }
+
+    #[gpui::test]
+    fn disabled_button_ignores_clicks(cx: &mut TestAppContext) {
+        let clicked = std::rc::Rc::new(std::cell::Cell::new(false));
+        let flag = clicked.clone();
+        let cx = crate::ui::test_support::draw(cx, move || {
+            let flag = flag.clone();
+            Button::new("wait", "Kick off · waiting on sean")
+                .size(ButtonSize::Tall)
+                .disabled(true)
+                .on_click(move |_, _, _| flag.set(true))
+                .into_any_element()
+        });
+        crate::ui::test_support::click(cx, "wait");
+        assert!(!clicked.get());
     }
 }

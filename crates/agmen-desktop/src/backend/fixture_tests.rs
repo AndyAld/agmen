@@ -668,3 +668,58 @@ fn spawn_worker_plays_the_delegated_exchange() {
             .starts_with("andy/fx3 · Engineer · claude")
     );
 }
+
+// Task 19: the planning room's actions change the fixture's plan.
+fn plan_of(backend: &FixtureBackend) -> crate::backend::PlanInfo {
+    backend.snapshot().plan.unwrap()
+}
+
+#[test]
+fn fixture_kick_off_runs_only_a_ready_plan() {
+    let draft = FixtureBackend::for_screen(Screen::Plan).unwrap();
+    assert!(draft.act(Action::KickOff).is_err());
+    assert!(!plan_of(&draft).running);
+
+    let ready = FixtureBackend::for_screen(Screen::PlanReady).unwrap();
+    let mut updates = ready.subscribe();
+    ready.act(Action::KickOff).unwrap();
+    assert!(plan_of(&ready).running);
+    let Some(Update::Snapshot(snapshot)) = futures::executor::block_on(updates.next()) else {
+        panic!("no snapshot after kick off");
+    };
+    assert!(snapshot.plan.unwrap().running);
+}
+
+#[test]
+fn fixture_approve_spec_checks_the_sha() {
+    let backend = FixtureBackend::for_screen(Screen::Plan).unwrap();
+    let design = plan_of(&backend).specs[0].clone();
+    let stale: agmen_proto::GitSha = "0000000".parse().unwrap();
+    assert!(
+        backend
+            .act(Action::ApproveSpec {
+                path: design.path.clone(),
+                sha: stale,
+            })
+            .is_err()
+    );
+    let draft = plan_of(&backend).specs[1].clone();
+    assert!(draft.draft_note.is_some());
+    assert!(
+        backend
+            .act(Action::ApproveSpec {
+                path: draft.path,
+                sha: draft.sha,
+            })
+            .is_err()
+    );
+    // andy approved the design at 15:47 already, so approving again keeps it.
+    let before = plan_of(&backend).reviews[0].approved_at.clone();
+    backend
+        .act(Action::ApproveSpec {
+            path: design.path,
+            sha: design.sha,
+        })
+        .unwrap();
+    assert_eq!(plan_of(&backend).reviews[0].approved_at, before);
+}

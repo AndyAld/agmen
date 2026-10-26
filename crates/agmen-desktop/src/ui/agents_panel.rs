@@ -11,7 +11,7 @@ use gpui::{
 use super::components::{Color, Icon, IconSize, Indent, Label, LabelSize, ListItem, StatusDot};
 use super::format::title_case;
 use super::tokens::SPACE_6;
-use crate::backend::{AgentRow, PersonGroup};
+use crate::backend::{AgentRow, AgentStatus, PersonGroup};
 use agmen_proto::IdentityId;
 
 use crate::icons::UiIcon;
@@ -102,25 +102,60 @@ impl AgentsPanel {
 
     fn agent_row(&self, agent: &AgentRow, cx: &mut Context<Self>) -> ListItem {
         let id = agent.id.clone();
-        ListItem::new(
+        agent_item(
             format!("agent:{}", agent.handle),
-            Indent::Depth(agent.depth),
+            agent.depth,
+            agent.status,
+            &agent.name,
+            &AgentRole::of(&agent.role),
+            &agent.harness,
         )
         .selected(self.selected.as_ref() == Some(&id))
-        .leading(StatusDot::new(agent.status))
-        .child(Label::new(agent.name.clone()).code())
+        .on_click(cx.listener(move |this, _, _, cx| this.clicked(&id, cx)))
+    }
+}
+
+/// An agent's role: its name, which picks the color, and its label.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AgentRole {
+    pub(crate) name: String,
+    pub(crate) label: String,
+}
+
+impl AgentRole {
+    /// A built-in role labelled as its name: `engineer` reads "Engineer".
+    pub(crate) fn of(name: &str) -> Self {
+        Self {
+            name: name.to_owned(),
+            label: title_case(name),
+        }
+    }
+}
+
+/// An agent's row as the Agents dock draws it, without its click or
+/// selection: status, name, role and harness. The planning room draws its
+/// agents with it too (mockup fix 47).
+pub(crate) fn agent_item(
+    id: String,
+    depth: u8,
+    status: AgentStatus,
+    name: &str,
+    role: &AgentRole,
+    harness: &str,
+) -> ListItem {
+    ListItem::new(id, Indent::Depth(depth))
+        .leading(StatusDot::new(status))
+        .child(Label::new(name.to_owned()).code())
         .child(
-            Label::new(title_case(&agent.role))
+            Label::new(role.label.clone())
                 .size(LabelSize::Small)
-                .color(Color::Role(agent.role.clone().into())),
+                .color(Color::Role(role.name.clone().into())),
         )
         .end(
-            Label::new(agent.harness.clone())
+            Label::new(harness.to_owned())
                 .code()
                 .color(Color::Placeholder),
         )
-        .on_click(cx.listener(move |this, _, _, cx| this.clicked(&id, cx)))
-    }
 }
 
 impl Render for AgentsPanel {

@@ -37,6 +37,11 @@ pub(crate) use highlighted_label::HighlightedLabel;
 mod model_tag;
 mod radio;
 pub(crate) use {model_tag::ModelTag, radio::Radio};
+// Task 19: the planning room, plan panel and kick-off dialog.
+mod check_row;
+mod modal;
+mod section_header;
+mod table_card;
 
 pub(crate) use avatar::Avatar;
 pub(crate) use badge::Badge;
@@ -56,6 +61,11 @@ pub(crate) use progress::ProgressBar;
 pub(crate) use status_dot::StatusDot;
 pub(crate) use tab::Tab;
 pub(crate) use tool_card::ToolCard;
+// Task 19.
+pub(crate) use {
+    check_row::CheckRow, modal::Modal, section_header::Heading, section_header::SectionHeader,
+    table_card::TableCard,
+};
 pub(crate) use {dropdown::Dropdown, segmented::Segmented, stepper::Stepper, toggle::Toggle};
 
 // Task 13: the needs-you banner's and the toast's glyph disc.

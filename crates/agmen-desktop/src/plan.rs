@@ -160,7 +160,7 @@ fn has_spec(plan: &PlanInfo) -> bool {
 }
 
 /// The plan's owners, each once, in team order.
-fn owners(plan: &PlanInfo) -> Vec<&str> {
+pub(crate) fn owners(plan: &PlanInfo) -> Vec<&str> {
     let mut owners: Vec<&str> = Vec::new();
     for row in &plan.team {
         if !owners.contains(&row.owner.as_str()) {
@@ -189,7 +189,8 @@ fn waiting_on(plan: &PlanInfo) -> Vec<&str> {
     names.into_iter().collect()
 }
 
-fn agent_count(n: usize) -> String {
+/// "7 agents", "1 agent".
+pub(crate) fn agent_count(n: usize) -> String {
     if n == 1 {
         "1 agent".into()
     } else {

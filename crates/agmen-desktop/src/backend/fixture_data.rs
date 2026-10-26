@@ -683,6 +683,11 @@ pub(super) fn plan(ready: bool, running: bool) -> Result<PlanInfo, BackendError>
         branch_merged: ready || running,
         shares_approved: BTreeMap::from([("andy".into(), true), ("sean".into(), ready || running)]),
         running,
+        // Task 19: spec texts, approval times, caps and presence.
+        reviews: super::fixture_plan::reviews(ready || running, sha("3f1c0d2")?)?,
+        caps_usd: super::fixture_plan::caps_usd(),
+        shares_approved_at: super::fixture_plan::shares_approved_at(ready || running)?,
+        presence: super::fixture_plan::presence(),
     })
 }
 

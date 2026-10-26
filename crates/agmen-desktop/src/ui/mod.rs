@@ -55,6 +55,16 @@ mod add_agent_dialog;
 mod switch_menu;
 mod terminal_view;
 
+// Task 19: the planning room, plan panel, spec tab and kick-off dialog.
+mod kickoff_dialog;
+mod plan_model;
+mod plan_panel;
+mod plan_room;
+#[cfg(test)]
+mod plan_test_support;
+mod review_panel;
+mod spec_view;
+
 pub(crate) use agent_view::AgentView;
 pub(crate) use code_view::{CodeView, GutterMark};
 pub(crate) use dev_views::{DevFrame, GitDev, GitDevLayout, ProjectDev, ProjectTests, RolesDev};

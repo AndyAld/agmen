@@ -19,14 +19,17 @@ use crate::ui::syntax::Language;
 
 impl Workspace {
     /// What the status bar shows in the listener's place for the active
-    /// tab, else "andy/fx1 · taken over" while a session is taken over
-    /// (Task 14, node 1265), or `None` for the listener's state.
+    /// tab, else the plan's state in a project with a plan (Task 19), else
+    /// "andy/fx1 · taken over" while a session is taken over (Task 14, node
+    /// 1265), or `None` for the listener's state.
     pub(crate) fn status_context(&self, cx: &App) -> Option<SharedString> {
         self.pane_group
             .read(cx)
             .active_tab(cx)
             .and_then(|(item, label)| context_for(&item, &label, &self.snapshot))
             .map(Into::into)
+            // Task 19: "ridgeline · planning" in a project with a plan.
+            .or_else(|| self.plan_status_context(cx))
             .or_else(|| self.chat.read(cx).take_over_status(cx))
     }
 

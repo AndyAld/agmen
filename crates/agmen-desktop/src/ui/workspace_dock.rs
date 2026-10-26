@@ -132,7 +132,11 @@ impl Workspace {
     /// The left dock's panel for its tab.
     pub(super) fn left_dock_content(&self) -> AnyElement {
         match self.left.tab {
-            LeftDockTab::Agents => self.agents_panel.clone().into_any_element(),
+            // Task 19: a project with a plan shows its planning room.
+            LeftDockTab::Agents => match &self.plan.room {
+                Some(room) => room.clone().into_any_element(),
+                None => self.agents_panel.clone().into_any_element(),
+            },
             LeftDockTab::Project => self.left.project.clone().into_any_element(),
             LeftDockTab::Git => self.left.git.clone().into_any_element(),
             LeftDockTab::Roles => self.left.roles.clone().into_any_element(),
@@ -141,7 +145,11 @@ impl Workspace {
 
     /// The right dock's panel: a role's, an agent's or the Listener panel;
     /// `None` for base, which has no Role panel.
-    pub(super) fn right_panel(&self) -> Option<AnyElement> {
+    pub(super) fn right_panel(&self, cx: &gpui::App) -> Option<AnyElement> {
+        // Task 19: the plan panel, or the Review panel beside a spec tab.
+        if let Some(panel) = self.plan_panel(cx) {
+            return Some(panel);
+        }
         if let Some(role) = &self.left.shown_role {
             return role
                 .info

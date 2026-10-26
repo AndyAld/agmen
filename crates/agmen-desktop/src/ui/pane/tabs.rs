@@ -179,7 +179,10 @@ impl Pane {
     pub(super) fn tab_file_icon(&self, item: &TabItem, cx: &App) -> Option<FileIcon> {
         if !matches!(
             item,
-            TabItem::File { .. } | TabItem::RoleFile(_) | TabItem::SettingsFile(_)
+            TabItem::File { .. }
+                | TabItem::RoleFile(_)
+                | TabItem::SettingsFile(_)
+                | TabItem::Spec(_)
         ) {
             return None;
         }

@@ -7,16 +7,18 @@
 
 mod fixture;
 mod fixture_data;
+// Task 19: the planning room's spec texts, comments, caps and presence.
+mod fixture_plan;
 mod screen;
 mod worktree;
-// Task 15: installed agents, models and the model a message ran on.
+// Task 15: the models each agent offers and the model a message ran on.
 mod fixture_models;
 mod models;
 pub(crate) use models::{ChoiceScope, Effort, ModelChoice, ModelGroup};
 
 use std::collections::BTreeMap;
 
-use agmen_proto::{GitSha, IdentityId, MessageId, Seq, StampedEnvelope, Stream};
+use agmen_proto::{GitSha, IdentityId, MessageId, Seq, StampedEnvelope, Stream, Timestamp};
 use futures::channel::mpsc::UnboundedReceiver;
 use gpui::SharedString;
 
@@ -231,6 +233,37 @@ pub(crate) struct PlanInfo {
     /// Per owner: whether they approved their own agents and spend.
     pub(crate) shares_approved: BTreeMap<String, bool>,
     pub(crate) running: bool,
+    // Task 19: what the spec tab, the Review panel, the kick-off dialog and
+    // the planning room show beyond the checklist's inputs.
+    /// Each spec's text, approval times and comments, by path.
+    pub(crate) reviews: Vec<SpecReview>,
+    /// Per owner: their daily spend cap, when they set one.
+    pub(crate) caps_usd: BTreeMap<String, u32>,
+    /// Per owner: when they approved their own agents and spend.
+    pub(crate) shares_approved_at: BTreeMap<String, Timestamp>,
+    /// Per person in the planning room: whether they are at work.
+    pub(crate) presence: BTreeMap<String, AgentStatus>,
+}
+
+// Task 19: a spec's review, as the spec tab and the Review panel show it.
+/// One comment on a spec under review.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SpecComment {
+    /// A person or agent handle, such as `sean/plan`.
+    pub(crate) author: String,
+    pub(crate) body: String,
+}
+
+/// A spec file's text at its approved commit, who approved it when, and
+/// the comments on it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SpecReview {
+    pub(crate) path: String,
+    /// The commit `text` is at, which an approval from the tab names.
+    pub(crate) sha: GitSha,
+    pub(crate) text: SharedString,
+    pub(crate) approved_at: BTreeMap<String, Timestamp>,
+    pub(crate) comments: Vec<SpecComment>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

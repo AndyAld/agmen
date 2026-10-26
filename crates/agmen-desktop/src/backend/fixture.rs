@@ -329,13 +329,15 @@ impl Backend for FixtureBackend {
                 self.publish(&Update::Snapshot(Box::new(self.snapshot())));
                 Ok(())
             }
-            // shortcut: the fixture records nothing for these; the views that send
-            // them (Tasks 15 to 19) add fixture behavior as they need it. Snoozing
-            // stays in the person's own view (Task 13).
-            Action::SnoozeAlert(_)
-            | Action::ApproveSpec { .. }
-            | Action::ApproveShare
-            | Action::KickOff => Ok(()),
+            // shortcut: the fixture records nothing for this; snoozing stays
+            // in the person's own view (Task 13).
+            Action::SnoozeAlert(_) => Ok(()),
+            // Task 19: the planning room's actions change the plan.
+            Action::ApproveSpec { .. } | Action::ApproveShare | Action::KickOff => {
+                super::fixture_plan::act(&mut self.state.borrow_mut(), action)?;
+                self.publish(&Update::Snapshot(Box::new(self.snapshot())));
+                Ok(())
+            }
             // Task 18: the palette's spawn rows.
             Action::SpawnWorker { agent } => self.spawn_worker(&agent),
         }

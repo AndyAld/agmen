@@ -24,6 +24,9 @@ enum BadgeShape {
     Pill,
     /// A solid marker in a message's head, padded 1 by 6.
     Marker,
+    /// Task 19: the elevated surface instead of a tint, padded at the sides
+    /// only.
+    Neutral,
 }
 
 #[derive(Debug, IntoElement)]
@@ -53,6 +56,14 @@ impl Badge {
     #[must_use]
     pub(crate) const fn code(mut self) -> Self {
         self.code = true;
+        self
+    }
+
+    /// Task 19: a count chip on the elevated surface instead of a tint,
+    /// with no padding above or below (a dock section's count, node 8688).
+    #[must_use]
+    pub(crate) const fn neutral(mut self) -> Self {
+        self.shape = BadgeShape::Neutral;
         self
     }
 
@@ -93,18 +104,20 @@ impl RenderOnce for Badge {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = &cx.global::<Appearance>().theme;
         let fill = self.color.hsla(theme);
-        let (bg, text) = if self.shape == BadgeShape::Tinted {
-            (tint(fill, TINT_FILL), self.color.clone())
-        } else {
-            (fill, Color::Background)
+        let (bg, text) = match self.shape {
+            BadgeShape::Tinted => (tint(fill, TINT_FILL), self.color.clone()),
+            BadgeShape::Neutral => (theme.elevated_surface, self.color.clone()),
+            BadgeShape::Solid | BadgeShape::Pill | BadgeShape::Marker => (fill, Color::Background),
         };
         let label = Label::new(self.label).color(text.clone());
         let label = match self.shape {
             BadgeShape::Pill | BadgeShape::Marker => {
                 label.size(LabelSize::XSmall).weight(FontWeight::BOLD)
             }
-            BadgeShape::Tinted | BadgeShape::Solid if self.code => label.code(),
-            BadgeShape::Tinted | BadgeShape::Solid => {
+            BadgeShape::Tinted | BadgeShape::Solid | BadgeShape::Neutral if self.code => {
+                label.code()
+            }
+            BadgeShape::Tinted | BadgeShape::Solid | BadgeShape::Neutral => {
                 label.size(LabelSize::Small).weight(FontWeight::SEMIBOLD)
             }
         };
@@ -115,6 +128,7 @@ impl RenderOnce for Badge {
             BadgeShape::Tinted | BadgeShape::Marker => {
                 base.py(SPACE_1).px(SPACE_6).rounded(RADIUS_SM)
             }
+            BadgeShape::Neutral => base.px(SPACE_6).rounded(RADIUS_SM),
         };
         shaped
             .when_some(self.leading, |this, glyph| {
@@ -176,6 +190,21 @@ mod tests {
         });
         assert_eq!(pill.width - text.width, px(10.));
         assert_eq!(pill.height, text.height);
+    }
+
+    // Task 19: the dock section's count chip (node 8688) has no padding above.
+    #[gpui::test]
+    fn neutral_badge_pads_six_each_side_and_none_above(cx: &mut TestAppContext) {
+        let badge = rendered_size(cx, || {
+            Badge::new("4", Color::Placeholder)
+                .code()
+                .neutral()
+                .into_any_element()
+        });
+        let mut cx2 = TestAppContext::single();
+        let text = rendered_size(&mut cx2, || Label::new("4").code().into_any_element());
+        assert_eq!(badge.width - text.width, px(12.));
+        assert_eq!(badge.height, text.height);
     }
 
     #[gpui::test]

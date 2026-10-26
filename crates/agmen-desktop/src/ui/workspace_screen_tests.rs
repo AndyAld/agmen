@@ -231,23 +231,56 @@ fn settings_screen_shows_settings_with_the_right_dock_closed(cx: &mut TestAppCon
     );
 }
 
+// Task 19: the planning room in the Agents tab, the chat as the plan tab,
+// the plan panel or the spec's Review panel, and the kick-off dialog.
+const PLAN_PANEL: &str = "plan-panel";
+const REVIEW: &str = "review-panel";
+const DESIGN: &str = "docs/specs/ridgeline-design.md";
+
 #[gpui::test]
-fn plan_screens_keep_the_chat_and_the_listener_for_now(_cx: &mut TestAppContext) {
+fn plan_screens_show_the_planning_room_and_the_plan_panel(_cx: &mut TestAppContext) {
     for screen in [
         Screen::Plan,
-        Screen::Spec,
         Screen::PlanReady,
         Screen::KickOff,
         Screen::Running,
     ] {
         let mut app = TestAppContext::single();
-        assert_screen(
+        let (workspace, app) = assert_screen(
             &mut app,
             screen,
             LeftDockTab::Agents,
             |_, _| TabItem::Chat,
-            Some(LISTENER),
+            Some(PLAN_PANEL),
         );
+        for selector in [PLAN_PANEL, "plan-room"] {
+            assert!(
+                app.debug_bounds(selector).is_some(),
+                "{screen:?} {selector}"
+            );
+        }
+        assert!(app.debug_bounds(REVIEW).is_none(), "{screen:?}");
+        assert_eq!(
+            app.debug_bounds("kickoff-dialog").is_some(),
+            screen == Screen::KickOff,
+            "{screen:?} dialog"
+        );
+        // The plan panel is the mockup's 470 px (node 8935).
+        assert_eq!(
+            app.debug_bounds(PLAN_PANEL).unwrap().size.width,
+            crate::ui::tokens::PLAN_PANEL_WIDTH - crate::ui::tokens::BORDER_WIDTH
+        );
+        let context = if screen == Screen::Running {
+            "ridgeline · 7 agents"
+        } else {
+            "ridgeline · planning"
+        };
+        workspace.read_with(app, |w, cx| {
+            assert_eq!(w.status_context(cx).as_deref(), Some(context), "{screen:?}");
+            // The spec the mockup opens is the plan tab's neighbour.
+            let pane = w.pane_group.read(cx).panes()[0].clone();
+            assert!(pane.read(cx).tabs().contains(&TabItem::Spec(DESIGN.into())));
+        });
     }
 }
 
@@ -277,4 +310,43 @@ fn toggling_the_right_dock_keeps_the_picker_open(cx: &mut TestAppContext) {
         redraw(cx);
         assert!(cx.debug_bounds("model-picker").is_some());
     }
+}
+
+#[gpui::test]
+fn spec_screen_shows_the_spec_tab_and_its_review(cx: &mut TestAppContext) {
+    let (_, cx) = assert_screen(
+        cx,
+        Screen::Spec,
+        LeftDockTab::Agents,
+        |_, _| TabItem::Spec(DESIGN.into()),
+        Some(REVIEW),
+    );
+    assert!(cx.debug_bounds("spec-view").is_some());
+    assert!(cx.debug_bounds(PLAN_PANEL).is_none());
+}
+
+#[gpui::test]
+fn a_plan_spec_click_opens_its_tab_and_escape_closes_the_dialog(cx: &mut TestAppContext) {
+    let (workspace, cx) = open(cx, Screen::KickOff);
+    cx.update(|_, cx| crate::keymap::bind_all(cx));
+    // main.rs focuses the workspace once the window opens; the dialog takes
+    // focus from it and gives it back when it closes.
+    cx.update(|window, cx| {
+        let focus = workspace.read(cx).focus_handle.clone();
+        focus.focus(window, cx);
+    });
+    redraw(cx);
+    cx.simulate_keystrokes("escape");
+    redraw(cx);
+    assert!(cx.debug_bounds("kickoff-dialog").is_none());
+    cx.update(|window, cx| assert!(workspace.read(cx).focus_handle.is_focused(window)));
+    crate::ui::test_support::click(cx, "plan:spec:docs/specs/ridgeline-design.md");
+    workspace.read_with(cx, |w, cx| {
+        let pane = w.pane_group.read(cx).panes()[0].clone();
+        assert_eq!(
+            pane.read(cx).active_item(),
+            Some(&TabItem::Spec(DESIGN.into()))
+        );
+    });
+    assert!(cx.debug_bounds(REVIEW).is_some());
 }

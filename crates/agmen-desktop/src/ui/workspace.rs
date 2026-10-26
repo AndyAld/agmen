@@ -39,6 +39,9 @@ pub(crate) use alert_wiring::OpenAlerts;
 // Task 14: take-over keys and the Agent panel following the chat.
 #[path = "workspace_take_over.rs"]
 mod take_over;
+// Task 19: the planning room, plan panel and kick-off dialog.
+#[path = "workspace_plan.rs"]
+mod plan_wiring;
 
 // Task 18: the actions moved to src/keymap.rs with their bindings.
 pub(crate) use crate::keymap::{Quit, ToggleLeftDock, ToggleRightDock};
@@ -63,6 +66,8 @@ pub(crate) struct Workspace {
     left: LeftDockState,
     /// Task 18: the command palette, while open.
     palette: palette::PaletteState,
+    /// Task 19: the planning room's views, when the project has a plan.
+    plan: plan_wiring::PlanWiring,
     _agents_events: Subscription,
     // Task 13: the status bar's counts and the toast come from the chat;
     // Task 14: it also holds the take-over terminal.
@@ -91,6 +96,7 @@ impl Workspace {
         let tabs = starting_tabs(&snapshot);
         let pane_group = cx.new(|cx| PaneGroup::new(&snapshot, Some(chat.clone()), tabs, cx));
         let left = LeftDockState::new(&snapshot, cx);
+        let plan = plan_wiring::PlanWiring::new(&snapshot, cx);
         Self {
             focus_handle: cx.focus_handle(),
             snapshot,
@@ -101,6 +107,7 @@ impl Workspace {
             selected_agent: None,
             left,
             palette: palette::PaletteState::default(),
+            plan,
             _agents_events: agents_events,
             chat,
             _chat_changes: chat_changes,
@@ -173,6 +180,8 @@ fn starting_tabs(snapshot: &Snapshot) -> Vec<TabItem> {
     if agents.any(|agent| agent.role == MOCKUP_ROLE) {
         tabs.push(TabItem::RoleFile(MOCKUP_ROLE.into()));
     }
+    // Task 19: the plan's spec beside the plan tab (frame 8640, tab 9174).
+    tabs.extend(plan_wiring::mockup_spec(snapshot).map(TabItem::Spec));
     tabs
 }
 
@@ -245,10 +254,12 @@ impl Render for Workspace {
                 .child(self.pane_group.clone()),
         );
         if self.is_dock_open(DockSide::Right) {
-            let panel = self.right_panel();
+            let panel = self.right_panel(cx);
+            // Task 19: the plan panel is wider than the other panels.
+            let width = self.plan_dock_width(cx).unwrap_or(self.right_dock.width());
             body = body.child(
                 div()
-                    .w(self.right_dock.width())
+                    .w(width)
                     .flex_none()
                     .h_full()
                     .flex()
@@ -265,11 +276,18 @@ impl Render for Workspace {
             );
         }
 
-        // Tasks 18, 13 and 14: the palette's, alerts' and take-over's actions.
-        Self::take_over_actions(
-            Self::alert_actions(Self::palette_actions(Self::dock_actions(div(), cx), cx), cx),
+        // Task 19: the kick-off dialog over everything.
+        let overlay = self.plan_overlay(cx);
+        // Tasks 18, 13, 14 and 19: the palette's, alerts', take-over's and
+        // plan's actions.
+        Self::plan_actions(
+            Self::take_over_actions(
+                Self::alert_actions(Self::palette_actions(Self::dock_actions(div(), cx), cx), cx),
+                cx,
+            ),
             cx,
         )
+        .relative()
         .track_focus(&self.focus_handle)
         .key_context(crate::keymap::WORKSPACE_CONTEXT)
         .on_action(cx.listener(|this, _: &ToggleLeftDock, _, cx| {
@@ -295,6 +313,7 @@ impl Render for Workspace {
         )
         .children(palette)
         .children(self.alert_toast(cx))
+        .children(overlay)
     }
 }
 

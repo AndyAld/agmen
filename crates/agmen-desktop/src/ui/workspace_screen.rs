@@ -56,6 +56,8 @@ pub(super) enum CenterTab {
     /// fx1's main.rs diff.
     Diff,
     Settings,
+    /// Task 19: the plan's design spec (frame "Desktop · spec").
+    Spec,
 }
 
 /// The right dock's panel.
@@ -66,6 +68,8 @@ pub(super) enum RightDock {
     Agent,
     /// reviewer's Role panel.
     Role,
+    /// Task 19: the plan panel, or the Review panel beside a spec tab.
+    Plan,
 }
 
 /// What a screen opens over the take-over terminal (Task 14).
@@ -95,6 +99,8 @@ pub(super) struct WorkspaceState {
     popup: Option<Popup>,
     /// Task 15: whether the frame shows the composer's model picker open.
     model_picker: bool,
+    /// Task 19: whether the frame shows the kick-off dialog.
+    kickoff: bool,
 }
 
 /// Task 13: what a screen shows of an alert beyond its history, silently.
@@ -134,6 +140,7 @@ impl WorkspaceState {
                     alert: AlertMoment::None,
                     popup: None,
                     model_picker: false,
+                    kickoff: false,
                 };
             }
             // Task 14: the fixture takes fx1 over; the popups open below.
@@ -148,11 +155,11 @@ impl WorkspaceState {
             Screen::Git => (LeftDock::Git, CenterTab::Diff, None),
             Screen::GitCollapsed => (LeftDock::GitChangesFolded, CenterTab::Diff, None),
             Screen::Settings => (LeftDock::Agents, CenterTab::Settings, None),
-            // shortcut: the plan and spec tabs and the Plan and Review panels
-            // are not built (Task 19); the chat and the Listener stand in.
-            Screen::Plan | Screen::Spec | Screen::PlanReady | Screen::KickOff | Screen::Running => {
-                (LeftDock::Agents, CenterTab::Chat, Some(RightDock::Listener))
+            // Task 19: the chat is the plan tab; KickOff adds the dialog.
+            Screen::Plan | Screen::PlanReady | Screen::KickOff | Screen::Running => {
+                (LeftDock::Agents, CenterTab::Chat, Some(RightDock::Plan))
             }
+            Screen::Spec => (LeftDock::Agents, CenterTab::Spec, Some(RightDock::Plan)),
         };
         let popup = match screen {
             Screen::SwitchAgent => Some(Popup::SwitchMenu),
@@ -171,6 +178,7 @@ impl WorkspaceState {
             },
             popup,
             model_picker: matches!(screen, Screen::ModelPicker),
+            kickoff: matches!(screen, Screen::KickOff),
         }
     }
 }
@@ -206,6 +214,10 @@ impl Workspace {
         if state.model_picker {
             self.chat
                 .update(cx, |chat, cx| chat.set_model_picker_open(true, cx));
+        }
+        // Task 19: the kick-off frame shows the confirm dialog.
+        if state.kickoff {
+            self.open_kickoff(cx);
         }
         cx.notify();
     }
@@ -247,7 +259,8 @@ impl Workspace {
                 self.right_dock.close();
                 self.set_selection(None, cx);
             }
-            Some(RightDock::Listener) => {
+            // With nothing selected, a project with a plan shows its plan.
+            Some(RightDock::Listener | RightDock::Plan) => {
                 self.set_selection(None, cx);
                 self.right_dock.open();
             }
@@ -281,6 +294,7 @@ impl Workspace {
                 path: MAIN_RS.into(),
             },
             CenterTab::Settings => TabItem::Settings(SettingsPage::default()),
+            CenterTab::Spec => TabItem::Spec(super::plan_wiring::mockup_spec(&self.snapshot)?),
         })
     }
 }

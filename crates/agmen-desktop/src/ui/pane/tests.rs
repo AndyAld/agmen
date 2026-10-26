@@ -540,3 +540,15 @@ fn active_tab_gives_the_item_and_its_label(cx: &mut TestAppContext) {
         assert_eq!(active, Some((item, label.to_owned())));
     }
 }
+
+// Task 19: a project with a plan calls its chat "plan" (frame 8719).
+#[test]
+fn a_planning_projects_chat_tab_is_the_plan() {
+    use crate::backend::{Backend as _, FixtureBackend, Screen};
+    let plan = FixtureBackend::for_screen(Screen::Plan).unwrap().snapshot();
+    let names = super::names::PaneNames::from_snapshot(&plan);
+    assert_eq!(names.tab_label(&TabItem::Chat), "plan");
+    assert_eq!(names.breadcrumb(&TabItem::Chat), ["ridgeline", "plan"]);
+    let chat = super::names::PaneNames::from_snapshot(&crate::backend::chat_snapshot());
+    assert_eq!(chat.tab_label(&TabItem::Chat), "chat");
+}
