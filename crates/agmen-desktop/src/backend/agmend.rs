@@ -30,8 +30,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use agmen_local::console::{
-    ConsoleEvent, ConsoleSnapshot, FileTextEntry, GitFactsEntry, Me, RoleFileInfo, RosterEntry,
-    Status, WorktreeEntry,
+    ConsoleEvent, ConsoleSnapshot, FileTextEntry, GitFactsEntry, LocalData, Me, RosterEntry, Status,
 };
 use agmen_local::{API, ApiError, ErrorCode, Outcome, Request, Response, frame};
 use agmen_proto::{
@@ -94,36 +93,27 @@ struct Shared {
     live: Mutex<Live>,
 }
 
-/// `console_snapshot`'s params: the project, and the checkout when the
-/// window found one.
-fn snapshot_params(project: &str, root: Option<&Path>) -> Value {
+/// `console_snapshot` and `console_watch` params: the project, and the
+/// checkout when the window found one.
+fn checkout_params(project: &str, root: Option<&Path>) -> Value {
     match root {
         Some(root) => json!({ "project": project, "root": root }),
         None => json!({ "project": project }),
     }
 }
 
-/// Task 8: what agmend read from disk at the last snapshot.
-#[derive(Debug)]
-struct LocalData {
-    roles: Vec<RoleFileInfo>,
-    worktrees: Vec<WorktreeEntry>,
-    git: GitFactsEntry,
-}
-
-impl LocalData {
-    fn of(console: &mut ConsoleSnapshot) -> Self {
-        Self {
-            roles: std::mem::take(&mut console.roles),
-            worktrees: std::mem::take(&mut console.worktrees),
-            git: std::mem::take(&mut console.git),
-        }
+/// Task 8: what agmend read from disk, taken out of a snapshot.
+fn take_local(console: &mut ConsoleSnapshot) -> LocalData {
+    LocalData {
+        roles: std::mem::take(&mut console.roles),
+        worktrees: std::mem::take(&mut console.worktrees),
+        git: std::mem::take(&mut console.git),
     }
 }
 
 impl Shared {
-    fn snapshot_params(&self) -> Value {
-        snapshot_params(&self.project, self.root.as_deref())
+    fn checkout_params(&self) -> Value {
+        checkout_params(&self.project, self.root.as_deref())
     }
 
     fn lock(&self) -> MutexGuard<'_, Live> {
@@ -310,7 +300,7 @@ impl AgmendBackend {
         timing: Timing,
     ) -> Result<Self, BackendError> {
         let mut conn = Conn::open(socket)?;
-        let mut console = match conn.call("console_snapshot", snapshot_params(project, root)) {
+        let mut console = match conn.call("console_snapshot", checkout_params(project, root)) {
             Ok(value) => parse::<ConsoleSnapshot>(value)?,
             // agmend is up but the hub is not: open on who the person is,
             // and the watch fills the chat in once the hub is back.
@@ -329,7 +319,7 @@ impl AgmendBackend {
             }
             Err(fail) => return Err(fail.into()),
         };
-        let local = LocalData::of(&mut console);
+        let local = take_local(&mut console);
         let mut held = Held::default();
         held.merge(console.messages);
         let shared = Arc::new(Shared {
@@ -561,11 +551,8 @@ fn watch_once(shared: &Shared, jobs: &SyncSender<Job>) -> String {
 /// when the backend was dropped meanwhile.
 fn open_watch(shared: &Shared) -> Result<Option<UnixStream>, BackendError> {
     let mut conn = Conn::open(&shared.socket)?;
-    let request = Request::new(
-        conn.next_id,
-        "console_watch",
-        json!({ "project": shared.project }),
-    );
+    // With the checkout, so agmend sends its changes (Task 8 review fix 3).
+    let request = Request::new(conn.next_id, "console_watch", shared.checkout_params());
     frame::write(&mut conn.stream, &request).map_err(lost)?;
     // Events can be minutes apart; the watch waits for the next one.
     conn.stream.set_read_timeout(None).map_err(io_failed)?;
@@ -616,6 +603,13 @@ fn on_event(shared: &Shared, jobs: &SyncSender<Job>, event: ConsoleEvent) -> Res
             live.roster = roster;
             live.publish_snapshot();
         }
+        // Task 8 review fix 3: the checkout changed on disk. A snapshot
+        // answer still pending replaces it with its own read, which is at
+        // most one tick older; the next change sends it again.
+        ConsoleEvent::Local(local) => {
+            live.local = *local;
+            live.publish_snapshot();
+        }
     }
     Ok(())
 }
@@ -631,7 +625,7 @@ fn serve_jobs(shared: &Shared, queue: &Receiver<Job>, mut conn: Option<Conn>) {
                     shared,
                     &mut conn,
                     "console_snapshot",
-                    shared.snapshot_params(),
+                    shared.checkout_params(),
                 )
                 .and_then(|value| parse::<ConsoleSnapshot>(value).map_err(|e| e.to_string()));
                 take_snapshot(shared, generation, answer);
@@ -675,7 +669,7 @@ fn take_snapshot(shared: &Shared, generation: u64, answer: Result<ConsoleSnapsho
     }
     match answer {
         Ok(mut console) => {
-            live.local = LocalData::of(&mut console);
+            live.local = take_local(&mut console);
             live.project = console.project;
             live.me = console.me;
             live.roster = console.roster;

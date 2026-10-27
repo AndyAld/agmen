@@ -554,3 +554,36 @@ fn a_cut_file_keeps_its_full_size() {
         None
     );
 }
+
+#[test]
+fn local_events_update_the_snapshot() {
+    // Task 8 review fix 3: the panels follow edits made after connect.
+    let start = fake_agmend::console_with_checkout(vec![]);
+    let fake = FakeAgmend::start(start.clone());
+    let backend =
+        AgmendBackend::connect_with(&fake.path(), PROJECT, Some(Path::new(ROOT)), FAST).unwrap();
+    let mut updates = backend.subscribe();
+    wait_for(&mut updates, is_live);
+    let asked = fake.state.lock().unwrap().watch_params.clone();
+    assert!(
+        !asked.is_empty() && asked.iter().all(|p| p["root"] == ROOT),
+        "{asked:?}"
+    );
+    let mut local = agmen_local::console::LocalData {
+        roles: start.roles,
+        worktrees: start.worktrees,
+        git: start.git,
+    };
+    local.worktrees[0].files.push("src/new.rs".into());
+    local.git.files.push("src/new.rs".into());
+    fake.push(&ConsoleEvent::Local(Box::new(local)));
+    wait_for(
+        &mut updates,
+        |u| matches!(u, Update::Snapshot(s) if s.worktrees[0].files.contains(&"src/new.rs".to_owned())),
+    );
+    let s = backend.snapshot();
+    assert!(s.git.files.contains("src/new.rs"));
+    // The chat and roster stay as they were.
+    assert_eq!(s.roster.len(), backend.snapshot().roster.len());
+    assert!(s.roles.iter().any(|r| r.name == "reviewer"));
+}

@@ -304,4 +304,23 @@ pub enum ConsoleEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<crate::ApiError>,
     },
+    /// What agmend reads from the watch's checkout changed (Task 8); this
+    /// is all of it. Sent only to a watch that named a `root`. An older
+    /// reader skips an event it does not know.
+    Local(Box<LocalData>),
+}
+
+/// The role files, worktrees and git facts agmend read from disk, as a
+/// snapshot carries them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalData {
+    /// As [`ConsoleSnapshot::roles`].
+    #[serde(default)]
+    pub roles: Vec<RoleFileInfo>,
+    /// As [`ConsoleSnapshot::worktrees`].
+    #[serde(default)]
+    pub worktrees: Vec<WorktreeEntry>,
+    /// As [`ConsoleSnapshot::git`].
+    #[serde(default)]
+    pub git: GitFactsEntry,
 }

@@ -370,6 +370,7 @@ impl Home {
         Config::new(self.socket(), self.login_file(), self.tokens())
             .roster_every(Duration::from_millis(100))
             .personal_roles(self.personal_roles())
+            .local_every(Duration::from_millis(100))
     }
 }
 
@@ -461,14 +462,14 @@ impl Client {
 
     /// Starts `console_watch` and hands the frames to a channel, so a test
     /// can wait on them with a timeout without cutting a frame in half.
-    pub async fn watch(mut self, project: &str) -> mpsc::Receiver<Response> {
+    pub async fn watch(self, project: &str) -> mpsc::Receiver<Response> {
+        self.watch_with(json!({"project": project})).await
+    }
+
+    /// As [`Client::watch`], with any params, such as a checkout `root`.
+    pub async fn watch_with(mut self, params: Value) -> mpsc::Receiver<Response> {
         let id = self.next;
-        self.send(&Request::new(
-            id,
-            "console_watch",
-            json!({"project": project}),
-        ))
-        .await;
+        self.send(&Request::new(id, "console_watch", params)).await;
         let (tx, rx) = mpsc::channel(1024);
         tokio::spawn(async move {
             while let Ok(response) = frame::read_async::<Response>(&mut self.stream).await {

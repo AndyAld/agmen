@@ -20,8 +20,8 @@ use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use agmen_local::console::{
-    ChangeEntry, CommitEntry, FileTextEntry, GitFactsEntry, HeadEntry, HunkEntry, MarkEntry, Me,
-    RoleFileInfo, RoleLayer, WorktreeEntry,
+    ChangeEntry, CommitEntry, FileTextEntry, GitFactsEntry, HeadEntry, HunkEntry, LocalData,
+    MarkEntry, Me, RoleFileInfo, RoleLayer, WorktreeEntry,
 };
 use agmen_local::roles;
 use agmen_local::{ApiError, ErrorCode};
@@ -66,7 +66,7 @@ const MAX_ROLE_FILES: usize = 64;
 const MAX_ROLE_BYTES: u64 = 64 * 1024;
 
 /// What the disk reads need to know.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct Local {
     /// `~/.config/agmen/roles`, or `None` to read no personal roles.
     pub(crate) personal_roles: Option<PathBuf>,
@@ -125,6 +125,25 @@ pub(crate) async fn checkout(project: &ProjectId, root: &Path) -> Option<PathBuf
 }
 
 impl Local {
+    /// Everything agmend reads from disk for `project`: the role layers,
+    /// and for a trusted checkout at `root` its worktrees and git facts.
+    pub(crate) async fn read(&self, project: &ProjectId, root: Option<&Path>) -> LocalData {
+        let checkout = match root {
+            Some(root) => checkout(project, root).await,
+            None => None,
+        };
+        let roles = self.roles(checkout.as_deref()).await;
+        let data = match &checkout {
+            Some(root) => checkout_data(root).await,
+            None => CheckoutData::default(),
+        };
+        LocalData {
+            roles,
+            worktrees: data.worktrees,
+            git: data.git,
+        }
+    }
+
     /// The built-in, project and personal role files, in that order; the
     /// project layer only for a trusted `checkout`.
     pub(crate) async fn roles(&self, checkout: Option<&Path>) -> Vec<RoleFileInfo> {

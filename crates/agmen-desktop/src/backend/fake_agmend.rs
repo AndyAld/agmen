@@ -179,6 +179,8 @@ pub(crate) struct FakeState {
     pub(crate) snapshot_params: Vec<Value>,
     /// Task 8: each `file_text`'s params.
     pub(crate) file_text_params: Vec<Value>,
+    /// Task 8 review fix 3: each `console_watch`'s params.
+    pub(crate) watch_params: Vec<Value>,
     /// Each watch's connection and its request id.
     pub(crate) watchers: Vec<(UnixStream, u64)>,
     /// Every accepted connection, to drop on stop.
@@ -334,6 +336,7 @@ fn serve(mut stream: UnixStream, state: &Mutex<FakeState>) {
             }
             "console_watch" => {
                 let mut state = state.lock().unwrap();
+                state.watch_params.push(request.params.clone());
                 let mut watch = stream.try_clone().unwrap();
                 for event in state.opening.clone() {
                     let value = serde_json::to_value(&event).unwrap();

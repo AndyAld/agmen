@@ -12,6 +12,7 @@ use agmen_local::ErrorCode;
 use agmen_local::console::{
     ChangeKindEntry, ConsoleSnapshot, FileTextEntry, HeadEntry, MarkEntry, RoleLayer, WorktreeEntry,
 };
+use agmen_local::console::{ConsoleEvent, LocalData};
 use serde_json::json;
 use support::{Daemon, PROJECT, error, result};
 
@@ -441,4 +442,61 @@ async fn hunks_stay_with_their_file_beside_a_submodule() {
     );
     let z = main.changes.iter().find(|c| c.path == "z.txt").unwrap();
     assert_eq!((z.added, z.removed), (2, 1));
+}
+
+/// Watch frames until a `Local` event arrives, within 10 s.
+async fn next_local(frames: &mut tokio::sync::mpsc::Receiver<agmen_local::Response>) -> LocalData {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let response = tokio::time::timeout_at(deadline, frames.recv())
+            .await
+            .expect("a Local event within 10 s")
+            .expect("the watch is still open");
+        if let ConsoleEvent::Local(local) = serde_json::from_value(result(response)).unwrap() {
+            return *local;
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_watch_with_a_root_sends_local_changes() {
+    // Review fix 3: the Git and Project panels follow edits after connect.
+    let dir = scratch();
+    let root = checkout(dir.path(), PROJECT, &[("a.txt", "a\n")]);
+    let daemon = Daemon::start().await;
+    let mut frames = daemon
+        .client()
+        .await
+        .watch_with(json!({"project": PROJECT, "root": root}))
+        .await;
+    // The first read covers anything since the snapshot.
+    let first = next_local(&mut frames).await;
+    assert!(find(&first.worktrees, &root).changes.is_empty());
+    assert_eq!(first.roles.len(), agmen_local::roles::BUILT_IN.len());
+
+    std::fs::write(root.join("a.txt"), "a\nb\n").unwrap();
+    let changed = next_local(&mut frames).await;
+    let main = find(&changed.worktrees, &root);
+    assert_eq!(main.changes.len(), 1, "{:?}", main.changes);
+    assert_eq!(main.changes[0].path, "a.txt");
+
+    // Nothing changes, so nothing more is sent, though agmend keeps reading.
+    let quiet = tokio::time::timeout(
+        std::time::Duration::from_millis(600),
+        next_local(&mut frames),
+    )
+    .await;
+    assert!(quiet.is_err(), "sent an unchanged read: {quiet:?}");
+}
+
+#[tokio::test]
+async fn a_watch_without_a_root_sends_no_local_events() {
+    let daemon = Daemon::start().await;
+    let mut frames = daemon.client().await.watch(PROJECT).await;
+    let quiet = tokio::time::timeout(
+        std::time::Duration::from_millis(600),
+        next_local(&mut frames),
+    )
+    .await;
+    assert!(quiet.is_err());
 }

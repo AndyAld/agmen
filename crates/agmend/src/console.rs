@@ -7,9 +7,10 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use agmen_client::PAGE_LIMIT;
-use agmen_local::console::{ConsoleEvent, ConsoleSnapshot, Me};
+use agmen_local::console::{ConsoleEvent, ConsoleSnapshot, LocalData, Me};
 use agmen_local::{ApiError, ErrorCode, MAX_FRAME, Response, frame};
 use agmen_proto::{ClientEnvelope, ProjectId, Seq, StampedEnvelope};
 use serde::de::DeserializeOwned;
@@ -29,6 +30,8 @@ pub(crate) struct Console {
     pub(crate) hub: Arc<Hub>,
     pub(crate) feeds: Arc<Feeds>,
     pub(crate) local: Local,
+    /// How often a watch with a checkout re-reads its local data.
+    pub(crate) local_every: Duration,
 }
 
 /// `params` as `T`, or `bad_request`.
@@ -106,17 +109,21 @@ fn to_value(value: &impl Serialize) -> Result<Value, ApiError> {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ProjectParams {
-    project: ProjectId,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct SnapshotParams {
     project: ProjectId,
     /// The person's checkout of the project, which the desktop found;
     /// without it the snapshot has no worktrees, git facts or project
     /// roles (Task 8).
+    #[serde(default)]
+    root: Option<PathBuf>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WatchParams {
+    project: ProjectId,
+    /// The checkout whose local data the watch re-reads and sends as
+    /// `Local` events when it changes (Task 8 review fix 3).
     #[serde(default)]
     root: Option<PathBuf>,
 }
@@ -197,15 +204,7 @@ impl Console {
             .before(&project, head.saturating_add(1), PAGE_LIMIT)
             .await?;
         let roster = self.hub.roster(&project).await?;
-        let checkout = match &root {
-            Some(root) => local::checkout(&project, root).await,
-            None => None,
-        };
-        let roles = self.local.roles(checkout.as_deref()).await;
-        let data = match &checkout {
-            Some(root) => local::checkout_data(root).await,
-            None => local::CheckoutData::default(),
-        };
+        let local = self.local.read(&project, root.as_deref()).await;
         let mut snapshot = ConsoleSnapshot {
             project: project.to_string(),
             me: Me {
@@ -215,9 +214,9 @@ impl Console {
             roster,
             messages: Vec::new(),
             older,
-            roles,
-            worktrees: data.worktrees,
-            git: data.git,
+            roles: local.roles,
+            worktrees: local.worktrees,
+            git: local.git,
         };
         let (messages, trimmed) = fit(messages, json_len(&snapshot)?)?;
         snapshot.messages = messages;
@@ -305,7 +304,7 @@ impl Console {
         mut reader: OwnedReadHalf,
         writer: &mut OwnedWriteHalf,
     ) -> Result<(), ApiError> {
-        let ProjectParams { project } = params(raw)?;
+        let WatchParams { project, root } = params(raw)?;
         // A project the person may not read fails here, not as a stream
         // that never connects. An unreachable hub is not an error: the
         // watch starts disconnected and connects when the hub is back.
@@ -319,12 +318,17 @@ impl Console {
             return Ok(());
         }
         let mut probe = [0u8; 1];
+        let mut local = LocalWatch::new(self, &project, root, self.local_every);
         loop {
             let event = tokio::select! {
                 event = watch.rx.recv() => event,
                 // Cancel safe. A watch connection takes no more requests,
                 // so any read (bytes or EOF) ends it.
                 _ = reader.read(&mut probe) => return Ok(()),
+                changed = local.next() => match changed {
+                    Some(data) => Ok(ConsoleEvent::Local(Box::new(data))),
+                    None => continue,
+                },
             };
             match event {
                 Ok(event) => {
@@ -342,6 +346,71 @@ impl Console {
                 }
                 Err(RecvError::Closed) => return Ok(()),
             }
+        }
+    }
+}
+
+/// Task 8 review fix 3: a watch's re-reads of its checkout. One read runs
+/// at a time, every `every` from the watch's start; a tick while one runs
+/// is skipped. The first read is always sent, since the snapshot before
+/// the watch may be stale; later ones only when they differ.
+struct LocalWatch {
+    reader: Option<(Local, ProjectId, PathBuf)>,
+    ticks: tokio::time::Interval,
+    running: Option<tokio::task::JoinHandle<LocalData>>,
+    last: Option<LocalData>,
+}
+
+impl LocalWatch {
+    fn new(console: &Console, project: &ProjectId, root: Option<PathBuf>, every: Duration) -> Self {
+        let mut ticks = tokio::time::interval(every);
+        ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        Self {
+            reader: root.map(|root| (console.local.clone(), project.clone(), root)),
+            ticks,
+            running: None,
+            last: None,
+        }
+    }
+
+    /// The next read that changed; `None` when a step finished with
+    /// nothing to send. Pends forever for a watch without a checkout.
+    /// Cancel safe: the tick and the join handle both are, and a read
+    /// keeps running in its task.
+    async fn next(&mut self) -> Option<LocalData> {
+        let Some((local, project, root)) = &self.reader else {
+            return std::future::pending().await;
+        };
+        if let Some(running) = &mut self.running {
+            let read = running.await;
+            self.running = None;
+            let data = match read {
+                Ok(data) => data,
+                Err(err) => {
+                    tracing::debug!(error = %err, "re-reading the checkout stopped");
+                    return None;
+                }
+            };
+            if self.last.as_ref() == Some(&data) {
+                return None;
+            }
+            self.last = Some(data.clone());
+            return Some(data);
+        }
+        self.ticks.tick().await;
+        let (local, project, root) = (local.clone(), project.clone(), root.clone());
+        self.running = Some(tokio::spawn(async move {
+            local.read(&project, Some(&root)).await
+        }));
+        None
+    }
+}
+
+impl Drop for LocalWatch {
+    fn drop(&mut self) {
+        // A read for a watch that ended has no one to tell.
+        if let Some(running) = self.running.take() {
+            running.abort();
         }
     }
 }

@@ -45,6 +45,9 @@ pub const SOCKET_NAME: &str = agmen_client::AGMEND_SOCKET;
 const MAX_CONNECTIONS: usize = 64;
 /// How often a watched project's roster is re-read.
 const ROSTER_EVERY: Duration = Duration::from_secs(15);
+/// How often a watch with a checkout re-reads its roles, worktrees and git
+/// facts (Task 8 review fix 3).
+const LOCAL_EVERY: Duration = Duration::from_secs(15);
 
 /// Why agmend could not start.
 #[derive(Debug, thiserror::Error)]
@@ -85,6 +88,7 @@ pub struct Config {
     login_file: PathBuf,
     tokens: TokenStore,
     roster_every: Duration,
+    local_every: Duration,
     personal_roles: Option<PathBuf>,
 }
 
@@ -102,6 +106,7 @@ impl Config {
             login_file: login_file.into(),
             tokens,
             roster_every: ROSTER_EVERY,
+            local_every: LOCAL_EVERY,
             personal_roles: None,
         }
     }
@@ -132,6 +137,14 @@ impl Config {
     #[must_use]
     pub const fn roster_every(mut self, every: Duration) -> Self {
         self.roster_every = every;
+        self
+    }
+
+    /// Re-reads a watched checkout's local data this often instead of
+    /// every 15 s.
+    #[must_use]
+    pub const fn local_every(mut self, every: Duration) -> Self {
+        self.local_every = every;
         self
     }
 
@@ -179,6 +192,7 @@ impl Agmend {
                 local: Local {
                     personal_roles: config.personal_roles,
                 },
+                local_every: config.local_every,
             }),
         })
     }
