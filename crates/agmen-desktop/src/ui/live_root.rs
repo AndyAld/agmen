@@ -109,11 +109,8 @@ impl Wording {
                 body: "agmen-desktop reads your project's chat through agmend, the agmen \
                        daemon. Start it, then press Retry."
                     .into(),
-                // shortcut: agmend runs in the foreground only; once
-                // `agmend service install` is built (m0-m1 Task 13), offer
-                // it here and drop the note.
-                command: Some("agmend"),
-                note: Some("Run agmend in a terminal and leave it open.".into()),
+                command: Some("agmend service install"),
+                note: None,
                 retry: true,
             },
             LiveState::Refused(why) => Self {

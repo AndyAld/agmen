@@ -160,10 +160,19 @@ fn write_unit(unit: &Unit) -> Result<()> {
         file.sync_all().context("syncing service unit")?;
         std::fs::rename(&temporary, &unit.path).context("replacing service unit")
     })();
-    if written.is_err() {
-        std::fs::remove_file(&temporary).context("cleaning up temporary service unit")?;
+    finish_write(written, || std::fs::remove_file(&temporary))
+}
+
+fn finish_write(written: Result<()>, cleanup: impl FnOnce() -> std::io::Result<()>) -> Result<()> {
+    if let Err(error) = written {
+        return Err(match cleanup() {
+            Ok(()) => error,
+            Err(cleanup_error) => error.context(format!(
+                "cleaning up temporary service unit failed: {cleanup_error}"
+            )),
+        });
     }
-    written
+    Ok(())
 }
 
 fn remove_unit(unit: &Unit) -> Result<()> {
@@ -177,11 +186,29 @@ fn remove_unit(unit: &Unit) -> Result<()> {
 fn checked(result: &ProcessResult, operation: &str) -> Result<()> {
     ensure!(
         result.code == Some(0),
-        "{operation} failed (exit {:?}, {} stderr bytes)",
+        "{operation} failed (exit {:?}, {} stderr bytes); stderr: {}",
         result.code,
-        result.stderr.len()
+        result.stderr.len(),
+        stderr_excerpt(&result.stderr)
     );
     Ok(())
+}
+
+fn stderr_excerpt(stderr: &[u8]) -> String {
+    const MAX_EXCERPT_BYTES: usize = 512;
+    let bounded = &stderr[..stderr.len().min(MAX_EXCERPT_BYTES)];
+    let mut excerpt = String::new();
+    // At most 512 input bytes, including lossy replacements.
+    for ch in String::from_utf8_lossy(bounded).chars() {
+        if ch.is_control() {
+            continue;
+        }
+        if excerpt.len() + ch.len_utf8() > MAX_EXCERPT_BYTES {
+            break;
+        }
+        excerpt.push(ch);
+    }
+    excerpt
 }
 
 const MAX_OUTPUT_BYTES: usize = 64 * 1024;
@@ -336,6 +363,83 @@ mod management_tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt as _;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn service_write_failure_preserves_original_when_cleanup_fails() {
+        for operation in ["writing service unit", "replacing service unit"] {
+            let original = std::io::Error::other("original disk failure");
+            let written = Err(original).context(operation);
+            let error = finish_write(written, || {
+                Err(std::io::Error::other("cleanup permission denied"))
+            })
+            .unwrap_err();
+            assert_eq!(error.root_cause().to_string(), "original disk failure");
+            let message = format!("{error:#}");
+            assert!(message.contains(operation), "{message}");
+            assert!(
+                message.contains("cleaning up temporary service unit"),
+                "{message}"
+            );
+            assert!(message.contains("cleanup permission denied"), "{message}");
+        }
+    }
+
+    #[test]
+    fn service_errors_include_bounded_lossy_stderr() {
+        for stderr in [
+            b"permission denied\n\t\0\x1b".to_vec(),
+            [b"bad byte: ".as_slice(), &[0xff], b"\n"].concat(),
+            vec![b'x'; 1024],
+            vec![0xff; 1024],
+            "\u{85}denied\u{9f}".as_bytes().to_vec(),
+            [vec![b'x'; 511], "\u{20ac}".as_bytes().to_vec()].concat(),
+        ] {
+            let response = ProcessResult {
+                code: Some(1),
+                stdout: Vec::new(),
+                stderr,
+            };
+            let message = checked(&response, "systemctl --user start")
+                .unwrap_err()
+                .to_string();
+            let (_, excerpt) = message
+                .split_once("stderr: ")
+                .expect("missing stderr excerpt");
+            assert!(excerpt.len() <= 512, "excerpt length: {}", excerpt.len());
+            assert!(!excerpt.chars().any(char::is_control));
+            assert!(!excerpt.is_empty());
+            assert!(message.contains("systemctl --user start"));
+            assert!(message.contains("Some(1)"));
+            if response.stderr.starts_with(b"permission") {
+                assert_eq!(excerpt, "permission denied");
+            }
+            if response.stderr.starts_with(b"bad byte") {
+                assert_eq!(excerpt, "bad byte: \u{fffd}");
+            }
+        }
+        assert!(checked(&result(0, ""), "systemctl").is_ok());
+    }
+
+    #[test]
+    fn service_launchctl_print_error_includes_stderr() {
+        let home = tempfile::tempdir().unwrap();
+        let response = ProcessResult {
+            code: Some(1),
+            stdout: Vec::new(),
+            stderr: b"access denied\n".to_vec(),
+        };
+        let (answer, calls) = exercise(
+            Backend::Launchd,
+            ServiceAction::Status,
+            &paths(&home),
+            vec![response],
+        );
+        let message = answer.unwrap_err().to_string();
+        assert!(message.contains("launchctl print"), "{message}");
+        assert!(message.contains("access denied"), "{message}");
+        assert!(!message.chars().any(char::is_control));
+        assert_eq!(calls.len(), 1);
+    }
 
     fn paths(home: &tempfile::TempDir) -> ServicePaths {
         ServicePaths {

@@ -1,6 +1,6 @@
 //! launchd property list rendering and management through an injected runner.
 
-use anyhow::{Context as _, Result, ensure};
+use anyhow::{Context as _, Result};
 
 use super::{
     ProcessResult, Runner, ServiceAction, ServicePaths, Unit, append, checked, executable,
@@ -28,11 +28,9 @@ pub(super) fn manage(
 ) -> Result<String> {
     let target = format!("gui/{}/dev.agmen.agmend", paths.uid);
     let found = invoke(run, "print", &target, None)?;
-    ensure!(
-        matches!(found.code, Some(0 | 113)),
-        "launchctl print failed (exit {:?})",
-        found.code
-    );
+    if found.code != Some(113) {
+        checked(&found, "launchctl print")?;
+    }
     if action == ServiceAction::Status {
         return Ok(if found.code == Some(113) {
             if unit.path.try_exists().context("checking service unit")? {
