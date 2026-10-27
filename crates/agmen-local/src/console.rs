@@ -74,9 +74,16 @@ pub enum ConsoleEvent {
     Message(StampedEnvelope),
     /// The roster changed; this is the whole new roster.
     Roster(Vec<RosterEntry>),
-    /// The daemon's hub connection went up or down.
+    /// The daemon's hub connection went up or down, or the reason it stays
+    /// down changed.
     Hub {
         /// Whether the hub is reachable.
         connected: bool,
+        /// Why the hub refuses the connection, when a retry soon will not
+        /// help by itself: not signed in, no access to the project, or too
+        /// many streams. Left out while connected or merely unreachable.
+        /// The daemon keeps retrying either way.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<crate::ApiError>,
     },
 }

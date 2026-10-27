@@ -21,8 +21,12 @@
 //!
 //! # The console's contract
 //!
-//! Each watch's first frame is `Hub { connected }`, sent after the console
-//! joined the channel. Every `Hub { connected: true }` is sent after the
+//! Each watch's first frame is `Hub { connected, error }`, sent after the
+//! console joined the channel. While the hub refuses the stream for a
+//! reason a retry soon will not fix (signed out, 401, 403, 404, 429), the
+//! `Hub` event carries that `error`, once per distinct cause; the task
+//! keeps retrying with backoff either way. Every `Hub { connected: true }`
+//! is sent after the
 //! task's positions are set, so a snapshot the console takes after it
 //! overlaps the stream and misses nothing; the console drops the overlap by
 //! `(stream, seq)`.
@@ -32,6 +36,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
+use agmen_local::ApiError;
 use agmen_local::console::{ConsoleEvent, RosterEntry};
 use agmen_proto::{ProjectId, StampedEnvelope, Stream};
 use tokio::sync::broadcast;
@@ -61,23 +66,45 @@ pub(crate) struct Feeds {
 #[derive(Debug)]
 struct Feed {
     tx: broadcast::Sender<ConsoleEvent>,
-    /// Whether the events stream is up; changed and read under this lock
-    /// together with sends of `Hub` events, so a new console's first frame
-    /// is never older than the events after it.
-    connected: Mutex<bool>,
+    /// Whether the events stream is up, and why the hub refuses it; changed
+    /// and read under this lock together with sends of `Hub` events, so a
+    /// new console's first frame is never older than the events after it.
+    status: Mutex<HubStatus>,
+}
+
+/// The state a `Hub` event reports.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct HubStatus {
+    connected: bool,
+    error: Option<ApiError>,
+}
+
+impl HubStatus {
+    fn event(&self) -> ConsoleEvent {
+        ConsoleEvent::Hub {
+            connected: self.connected,
+            error: self.error.clone(),
+        }
+    }
 }
 
 impl Feed {
-    fn set_connected(&self, connected: bool) {
-        let mut now = self
-            .connected
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        if *now != connected {
-            *now = connected;
+    /// Sets the status, telling the consoles when it changed: each new
+    /// cause reaches them once, not once per retry.
+    fn set_status(&self, status: HubStatus) {
+        let mut now = self.status.lock().unwrap_or_else(PoisonError::into_inner);
+        if *now != status {
+            *now = status;
             // No receivers is fine: the task checks for that and ends.
-            let _sent = self.tx.send(ConsoleEvent::Hub { connected });
+            let _sent = self.tx.send(now.event());
         }
+    }
+
+    fn set_connected(&self, connected: bool) {
+        self.set_status(HubStatus {
+            connected,
+            error: None,
+        });
     }
 
     fn send(&self, event: ConsoleEvent) {
@@ -114,21 +141,16 @@ impl Feeds {
             None => {
                 let feed = Arc::new(Feed {
                     tx: broadcast::channel(CHANNEL).0,
-                    connected: Mutex::new(false),
+                    status: Mutex::new(HubStatus::default()),
                 });
                 feeds.insert(project.clone(), feed.clone());
                 (feed, true)
             }
         };
-        let connected = feed
-            .connected
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let status = feed.status.lock().unwrap_or_else(PoisonError::into_inner);
         let rx = feed.tx.subscribe();
-        let first = ConsoleEvent::Hub {
-            connected: *connected,
-        };
-        drop(connected);
+        let first = status.event();
+        drop(status);
         drop(feeds);
         if started {
             tokio::spawn(run(self.clone(), project.clone(), feed));
@@ -181,7 +203,15 @@ async fn run(feeds: Arc<Feeds>, project: ProjectId, feed: Arc<Feed>) {
             }
             Err(err) => {
                 tracing::warn!(%project, error = %err, "the hub's events stream did not open");
-                feed.set_connected(false);
+                // A refusal a retry soon will not fix goes to the consoles;
+                // an unreachable or busy hub is only "disconnected". Either
+                // way the task keeps retrying.
+                let reported =
+                    err.is_final() || matches!(err, HubError::Refused { status: 429, .. });
+                feed.set_status(HubStatus {
+                    connected: false,
+                    error: reported.then(|| ApiError::from(err)),
+                });
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(BACKOFF_CAP);
             }

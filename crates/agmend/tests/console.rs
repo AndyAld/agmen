@@ -30,10 +30,21 @@ fn event(frame: Value) -> ConsoleEvent {
 /// shared events stream opens, then `Hub { connected: true }`.
 async fn until_connected(frames: &mut tokio::sync::mpsc::Receiver<agmen_local::Response>) {
     let mut event = event(next(frames).await);
-    if event == (ConsoleEvent::Hub { connected: false }) {
+    if event
+        == (ConsoleEvent::Hub {
+            connected: false,
+            error: None,
+        })
+    {
         event = self::event(next(frames).await);
     }
-    assert_eq!(event, ConsoleEvent::Hub { connected: true });
+    assert_eq!(
+        event,
+        ConsoleEvent::Hub {
+            connected: true,
+            error: None
+        }
+    );
 }
 
 #[tokio::test]
@@ -160,13 +171,19 @@ async fn a_dropped_stream_resumes_without_duplicates() {
     daemon.hub.state.drop_streams();
     assert_eq!(
         event(next(&mut frames).await),
-        ConsoleEvent::Hub { connected: false }
+        ConsoleEvent::Hub {
+            connected: false,
+            error: None
+        }
     );
     // Posted while agmend is between connections: the resume replays it.
     daemon.hub.state.publish("four");
     assert_eq!(
         event(next(&mut frames).await),
-        ConsoleEvent::Hub { connected: true }
+        ConsoleEvent::Hub {
+            connected: true,
+            error: None
+        }
     );
     daemon.hub.state.publish("five");
     let mut got = Vec::new();
@@ -197,7 +214,10 @@ async fn the_last_console_leaving_closes_the_stream() {
     let mut frames = daemon.client().await.watch(PROJECT).await;
     assert_eq!(
         event(next(&mut frames).await),
-        ConsoleEvent::Hub { connected: false }
+        ConsoleEvent::Hub {
+            connected: false,
+            error: None
+        }
     );
     until_connected(&mut frames).await;
     assert_eq!(daemon.hub.state.event_streams.load(Ordering::SeqCst), 2);
@@ -327,7 +347,10 @@ async fn a_watch_while_renewal_cannot_reach_the_hub_starts_disconnected() {
     let mut frames = daemon.client().await.watch(PROJECT).await;
     assert_eq!(
         event(next(&mut frames).await),
-        ConsoleEvent::Hub { connected: false }
+        ConsoleEvent::Hub {
+            connected: false,
+            error: None
+        }
     );
     // Still retrying, and nothing says the person signed out.
     quiet(&mut frames, Duration::from_millis(500)).await;
@@ -371,4 +394,54 @@ async fn a_snapshot_over_the_frame_cap_keeps_the_newest_that_fit() {
     );
     assert_newest_that_fit(&seqs(&page["messages"]), got[0] - 1);
     assert_eq!(page["older"], true);
+}
+
+/// Reads frames until a `Hub` event carries an error, and returns it.
+async fn until_hub_error(
+    frames: &mut tokio::sync::mpsc::Receiver<agmen_local::Response>,
+) -> agmen_local::ApiError {
+    for _ in 0..20 {
+        if let ConsoleEvent::Hub {
+            connected,
+            error: Some(error),
+        } = event(next(frames).await)
+        {
+            assert!(!connected);
+            return error;
+        }
+    }
+    panic!("no Hub event with an error");
+}
+
+#[tokio::test]
+async fn signing_out_mid_watch_tells_the_console() {
+    let daemon = Daemon::start().await;
+    let mut frames = daemon.client().await.watch(PROJECT).await;
+    until_connected(&mut frames).await;
+    // A logout: the hub drops the access token, the store loses it, and the
+    // stream ends.
+    daemon.hub.state.revoked.store(true, Ordering::SeqCst);
+    std::fs::remove_dir_all(daemon.home.dir.path().join("tokens")).unwrap();
+    daemon.hub.state.drop_streams();
+    let error = until_hub_error(&mut frames).await;
+    assert_eq!(error.code, ErrorCode::Unauthorized, "{}", error.message);
+}
+
+#[tokio::test]
+async fn too_many_streams_tells_the_console_and_retries() {
+    let daemon = Daemon::start().await;
+    *daemon.hub.state.events_refusal.lock().unwrap() =
+        Some((StatusCode::TOO_MANY_REQUESTS, "too_many_streams"));
+    let mut frames = daemon.client().await.watch(PROJECT).await;
+    let error = until_hub_error(&mut frames).await;
+    assert_eq!(error.code, ErrorCode::Hub);
+    assert!(
+        error.message.contains("too_many_streams"),
+        "{}",
+        error.message
+    );
+    // The same refusal again sends nothing new; once the hub has room the
+    // retry connects.
+    *daemon.hub.state.events_refusal.lock().unwrap() = None;
+    until_connected(&mut frames).await;
 }

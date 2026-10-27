@@ -5,7 +5,7 @@
 
 use std::convert::Infallible;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -79,6 +79,10 @@ pub struct HubState {
     pub post_answer: Mutex<Option<(StatusCode, Value)>>,
     /// How many `events` connections were opened.
     pub event_streams: AtomicUsize,
+    /// When set, every route answers 401, as after a logout.
+    pub revoked: AtomicBool,
+    /// When set, `events` answers this status and error code.
+    pub events_refusal: Mutex<Option<(StatusCode, &'static str)>>,
     /// The `after` query of each `events` connection.
     pub event_afters: Mutex<Vec<Option<String>>>,
     live: Mutex<Option<broadcast::Sender<Value>>>,
@@ -124,12 +128,13 @@ pub struct FakeHub {
     pub state: Arc<HubState>,
 }
 
-fn authorized(headers: &HeaderMap) -> Result<(), Box<HttpResponse>> {
+fn authorized(hub: &HubState, headers: &HeaderMap) -> Result<(), Box<HttpResponse>> {
     let want = format!("Bearer {ACCESS}");
-    if headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| v == want)
+    if !hub.revoked.load(Ordering::SeqCst)
+        && headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v == want)
     {
         Ok(())
     } else {
@@ -154,7 +159,7 @@ async fn state_route(
     headers: HeaderMap,
     Query(query): Query<KeyQuery>,
 ) -> HttpResponse {
-    if let Err(denied) = authorized(&headers) {
+    if let Err(denied) = authorized(&hub, &headers) {
         return *denied;
     }
     assert_eq!(project, PROJECT);
@@ -181,7 +186,7 @@ async fn replay_route(
     headers: HeaderMap,
     Query(query): Query<PageQuery>,
 ) -> HttpResponse {
-    if let Err(denied) = authorized(&headers) {
+    if let Err(denied) = authorized(&hub, &headers) {
         return *denied;
     }
     assert_eq!((project.as_str(), stream.as_str()), (PROJECT, "feed"));
@@ -212,10 +217,13 @@ async fn events_route(
     headers: HeaderMap,
     Query(query): Query<EventsQuery>,
 ) -> HttpResponse {
-    if let Err(denied) = authorized(&headers) {
+    if let Err(denied) = authorized(&hub, &headers) {
         return *denied;
     }
     assert_eq!(project, PROJECT);
+    if let Some((status, code)) = *hub.events_refusal.lock().unwrap() {
+        return (status, axum::Json(json!({"error": code}))).into_response();
+    }
     hub.event_streams.fetch_add(1, Ordering::SeqCst);
     hub.event_afters.lock().unwrap().push(query.after.clone());
     let after = query
@@ -279,7 +287,7 @@ async fn post_route(
         .unwrap_or_default()
         .to_owned();
     hub.posts.lock().unwrap().push((auth, body.clone()));
-    if let Err(denied) = authorized(&headers) {
+    if let Err(denied) = authorized(&hub, &headers) {
         return *denied;
     }
     if let Some((status, answer)) = hub.post_answer.lock().unwrap().clone() {

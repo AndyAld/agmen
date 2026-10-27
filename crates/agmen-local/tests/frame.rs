@@ -167,7 +167,30 @@ fn console_snapshot_round_trips() -> TestResult {
     };
     let back: ConsoleSnapshot = serde_json::from_value(serde_json::to_value(&snap)?)?;
     assert_eq!(back, snap);
-    let ev = ConsoleEvent::Hub { connected: false };
+    let ev = ConsoleEvent::Hub {
+        connected: false,
+        error: None,
+    };
+    assert_eq!(
+        serde_json::to_value(&ev)?,
+        json!({"hub": {"connected": false}})
+    );
+    assert_eq!(
+        serde_json::from_value::<ConsoleEvent>(serde_json::to_value(&ev)?)?,
+        ev
+    );
+    let ev = ConsoleEvent::Hub {
+        connected: false,
+        error: Some(ApiError {
+            code: ErrorCode::Unauthorized,
+            message: "not signed in".into(),
+        }),
+    };
+    assert_eq!(
+        serde_json::to_value(&ev)?,
+        json!({"hub": {"connected": false,
+                       "error": {"code": "unauthorized", "message": "not signed in"}}})
+    );
     assert_eq!(
         serde_json::from_value::<ConsoleEvent>(serde_json::to_value(&ev)?)?,
         ev
