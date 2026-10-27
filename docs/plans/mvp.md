@@ -302,6 +302,7 @@ Use agmen's own cluster, registry, secret store and domain, separate from GroupD
 - One EMQX StatefulSet replica (single node keeps the BSL community terms; no clustering) on a persistent volume, pinned `emqx/emqx` tag from ADR-0001. Config from a ConfigMap; the hub's EMQX API key comes from the cluster's secret store through a Kubernetes Secret.
 - `mqtt-ws.` ingress points at EMQX 8083. The dashboard (18083) gets no ingress.
 - The hub serves `/v1/jwks` inside the cluster; EMQX fetches it by the Service name.
+- Verify with `scripts/cluster-check.sh --api-host <api-host> --mqtt-host <mqtt-ws-host>`: current-context namespace and workload readiness, hub Secret key names, effective EMQX `durable_sessions.enable = false` (R71), and ingress DNS and HTTPS. It needs `kubectl`, `curl`, GNU `timeout` (or `gtimeout`), and read access plus `pods/exec` for the config query. Then run `scripts/smoke-deployed.sh https://<api-host> wss://<mqtt-ws-host>/mqtt`: `/healthz`, `/v1/jwks`, unauthenticated `/v1/me` returning 401, and the MQTT WSS upgrade. Both require explicit hosts, bound network calls, and stop at the first failure. Run them after deploy; neither changes resources or context.
 - Record the first deploy in ADR-0008 (`docs/adr/0008-first-deploy.md`).
 
 ### Task 17: Dogfood
