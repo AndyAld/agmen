@@ -877,9 +877,10 @@ fn take_snapshot(shared: &Shared, generation: u64, answer: Result<ConsoleSnapsho
             // this overwrites it. agmend sends Local only on a change, so
             // the older read stays until the next disk change it sees.
             // Ceiling: a change that lands during the snapshot's round
-            // trip, once each time the hub link comes up (the only time a
-            // snapshot is asked for). Revisit if stale git facts show
-            // after a reconnect; the fix is a counter bumped on each Local
+            // trip, once per snapshot request: each time the hub link comes
+            // up and each time "Show the newest" loads the newest page.
+            // Revisit if stale git facts show after a reconnect or after
+            // "Show the newest"; the fix is a counter bumped on each Local
             // event, read when the request goes out, that keeps the newer
             // data here.
             live.local = take_local(&mut console);
