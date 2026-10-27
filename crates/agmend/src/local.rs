@@ -20,8 +20,8 @@ use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use agmen_local::console::{
-    ChangeEntry, CommitEntry, FileTextEntry, GitFactsEntry, HeadEntry, MarkEntry, Me, RoleFileInfo,
-    RoleLayer, WorktreeEntry,
+    ChangeEntry, CommitEntry, FileTextEntry, GitFactsEntry, HeadEntry, HunkEntry, MarkEntry, Me,
+    RoleFileInfo, RoleLayer, WorktreeEntry,
 };
 use agmen_local::roles;
 use agmen_local::{ApiError, ErrorCode};
@@ -388,43 +388,40 @@ async fn changes(
     budget: &mut Budget,
 ) -> (Vec<ChangeEntry>, bool) {
     let cut = entries.len() > MAX_CHANGES;
-    let diff_args = [
+    // One run gives counts and patch, so both describe the same state; the
+    // fixed prefixes and short submodule lines keep each section's header
+    // in the one shape `sections_by_path` reads, whatever the person's
+    // diff settings.
+    let mut args = vec![
         "diff",
         "HEAD",
         "--no-ext-diff",
         "--no-textconv",
         "--no-renames",
+        "--no-color",
+        "--submodule=short",
+        "--src-prefix=a/",
+        "--dst-prefix=b/",
+        "--numstat",
+        "-z",
     ];
-    let numstat = git
-        .run_str(
-            &[&diff_args[..], &["--numstat", "-z"]].concat(),
-            STATUS_BYTES,
-        )
-        .await
-        .map(|out| git::parse_numstat(&out))
-        .unwrap_or_default();
-    let cap = PATCH_BYTES.min(budget.diff);
-    let patch = if cap == 0 || numstat.is_empty() {
-        None
-    } else {
-        git.run_str(&[&diff_args[..], &["--no-color", "-U3"]].concat(), cap)
-            .await
-            .ok()
-    };
-    let mut hunks = std::collections::HashMap::new();
-    if let Some(patch) = &patch {
-        budget.diff = budget.diff.saturating_sub(patch.stdout.len());
-        let sections = git::split_patch(&patch.stdout, patch.truncated);
-        // The patch lists files in numstat's order; anything else and the
-        // pairing is unsafe, so no hunks.
-        if sections.len() <= numstat.len() {
-            for ((path, _, _), section) in numstat.iter().zip(sections) {
-                if section.len() <= FILE_DIFF_BYTES {
-                    hunks.insert(path.clone(), git::parse_hunks(section));
-                }
-            }
-        }
+    let patch_cap = PATCH_BYTES.min(budget.diff);
+    if patch_cap > 0 {
+        args.extend(["--patch", "-U3"]);
     }
+    let out = git.run_str(&args, STATUS_BYTES + patch_cap).await.ok();
+    let (numstat, patch) = out
+        .as_ref()
+        .map(|out| git::split_numstat_patch(&out.stdout))
+        .unwrap_or_default();
+    budget.diff = budget.diff.saturating_sub(patch.len());
+    let truncated = out.as_ref().is_some_and(|out| out.truncated);
+    let mut hunks: std::collections::HashMap<Vec<u8>, Vec<HunkEntry>> =
+        git::sections_by_path(patch, truncated)
+            .into_iter()
+            .filter(|(_, section)| section.len() <= FILE_DIFF_BYTES)
+            .map(|(path, section)| (path, git::parse_hunks(section)))
+            .collect();
     let counts: std::collections::HashMap<&[u8], (u32, u32)> = numstat
         .iter()
         .map(|(path, added, removed)| (path.as_slice(), (*added, *removed)))

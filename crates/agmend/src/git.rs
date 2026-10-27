@@ -289,8 +289,12 @@ fn parse_ab(ab: &[u8]) -> Option<Upstream> {
 
 /// One `git diff --numstat -z --no-renames` record: added, removed and the
 /// raw path; a binary file counts 0 and 0.
-pub(crate) fn parse_numstat(out: &Output) -> Vec<(Vec<u8>, u32, u32)> {
-    records(out)
+pub(crate) fn parse_numstat(bytes: &[u8]) -> Vec<NumstatRow> {
+    let mut parts: Vec<&[u8]> = bytes.split(|b| *b == 0).collect();
+    // Empty after the final NUL, or a record cut short: dropped either way.
+    parts.pop();
+    parts
+        .into_iter()
         .filter_map(|record| {
             let mut parts = record.splitn(3, |b| *b == b'\t');
             let added = parts.next()?;
@@ -306,6 +310,9 @@ pub(crate) fn parse_numstat(out: &Output) -> Vec<(Vec<u8>, u32, u32)> {
         })
         .collect()
 }
+
+/// A numstat row: the raw path, lines added and lines removed.
+pub(crate) type NumstatRow = (Vec<u8>, u32, u32);
 
 /// One commit of `git log -z --format=%H%x00%h%x00%an%x00%ct%x00%s`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -421,11 +428,94 @@ pub(crate) fn parse_marks(diff: &[u8]) -> Vec<MarkEntry> {
         .collect()
 }
 
+/// `git diff --numstat --patch -z` output as its numstat records and its
+/// patch, which git separates with an empty record. One run gives both,
+/// so they describe the same state of the worktree.
+pub(crate) fn split_numstat_patch(bytes: &[u8]) -> (Vec<NumstatRow>, &[u8]) {
+    match bytes.windows(2).position(|w| w == b"\0\0") {
+        Some(at) => (
+            parse_numstat(bytes.get(..=at).unwrap_or_default()),
+            bytes.get(at + 2..).unwrap_or_default(),
+        ),
+        // No patch yet: the output was cut inside the numstat part.
+        None => (parse_numstat(bytes), &[]),
+    }
+}
+
+/// A C-quoted name as git writes one (`"a/q\"t\303\251"`): its bytes, and
+/// the rest of the line after the closing quote.
+fn unquote(text: &[u8]) -> Option<(Vec<u8>, &[u8])> {
+    let mut out = Vec::new();
+    let mut i = 1;
+    while let Some(&b) = text.get(i) {
+        match b {
+            b'"' => return Some((out, text.get(i + 1..).unwrap_or_default())),
+            b'\\' => {
+                let next = *text.get(i + 1)?;
+                i += 2;
+                out.push(match next {
+                    b'a' => 0x07,
+                    b'b' => 0x08,
+                    b't' => b'\t',
+                    b'n' => b'\n',
+                    b'v' => 0x0b,
+                    b'f' => 0x0c,
+                    b'r' => b'\r',
+                    b'0'..=b'7' => {
+                        let digits = text.get(i - 1..i + 2)?;
+                        i += 2;
+                        let octal = std::str::from_utf8(digits).ok()?;
+                        u8::from_str_radix(octal, 8).ok()?
+                    }
+                    other => other,
+                });
+            }
+            other => {
+                out.push(other);
+                i += 1;
+            }
+        }
+    }
+    None
+}
+
+/// The path a `diff --git a/P b/P` header names, as raw bytes. With
+/// `--no-renames` both sides name the same path; a quoted header is
+/// unquoted. The prefixes are fixed with `--src-prefix` and `--dst-prefix`.
+fn section_path(section: &[u8]) -> Option<Vec<u8>> {
+    let header = section.split(|b| *b == b'\n').next()?;
+    let rest = header.strip_prefix(b"diff --git ")?;
+    if rest.first() == Some(&b'"') {
+        let (old, _) = unquote(rest)?;
+        return old.strip_prefix(b"a/").map(<[u8]>::to_vec);
+    }
+    // "a/P b/P": both halves the same length.
+    let len = rest.len().checked_sub(5)? / 2;
+    let old = rest.get(2..2 + len)?;
+    let new = rest.get(len + 5..)?;
+    (rest.get(..2)? == b"a/" && rest.get(2 + len..len + 5)? == b" b/" && old == new)
+        .then(|| old.to_vec())
+}
+
+/// A patch's sections by the path each one's own header names, so a file
+/// set that differs from numstat's (a submodule shown as a log, or a file
+/// git lists in one and not the other) cannot shift hunks onto another
+/// file. A section whose header cannot be read is left out.
+pub(crate) fn sections_by_path(
+    patch: &[u8],
+    truncated: bool,
+) -> std::collections::HashMap<Vec<u8>, &[u8]> {
+    split_patch(patch, truncated)
+        .into_iter()
+        .filter_map(|section| Some((section_path(section)?, section)))
+        .collect()
+}
+
 /// A patch split at each `diff --git` header, one section per file in the
 /// order git printed them. A content line always starts with a space, `+`
 /// or `-`, so only a header starts with `diff --git `. When `truncated`,
 /// the last section may be partial and is dropped.
-pub(crate) fn split_patch(patch: &[u8], truncated: bool) -> Vec<&[u8]> {
+fn split_patch(patch: &[u8], truncated: bool) -> Vec<&[u8]> {
     const HEADER: &[u8] = b"diff --git ";
     let mut starts: Vec<usize> = Vec::new();
     let mut at = 0;

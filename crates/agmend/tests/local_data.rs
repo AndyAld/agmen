@@ -375,3 +375,68 @@ async fn project_roles_stay_inside_the_checkout() {
     let snap = snapshot(&daemon, &root).await;
     assert!(snap.roles.iter().all(|r| r.layer != RoleLayer::Project));
 }
+
+#[tokio::test]
+async fn hunks_stay_with_their_file_beside_a_submodule() {
+    // Review fix 1: with diff.submodule=log the patch has no section of its
+    // own for the submodule, so hunks paired by position landed on it.
+    let dir = scratch();
+    let sub = dir.path().join("subrepo");
+    std::fs::create_dir_all(&sub).unwrap();
+    git(&sub, &["init", "-q"]);
+    git(&sub, &["commit", "-q", "--allow-empty", "-m", "Sub one"]);
+    let root = checkout(
+        dir.path(),
+        PROJECT,
+        &[("a.txt", "a1\na2\n"), ("z.txt", "z1\nz2\n")],
+    );
+    git(
+        &root,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            sub.to_str().unwrap(),
+            "sub",
+        ],
+    );
+    git(&root, &["commit", "-q", "-m", "Add sub"]);
+    git(&root, &["config", "diff.submodule", "log"]);
+    git(
+        &root.join("sub"),
+        &["commit", "-q", "--allow-empty", "-m", "Sub two"],
+    );
+    std::fs::write(root.join("a.txt"), "a1\nA2\n").unwrap();
+    std::fs::write(root.join("z.txt"), "z1\nZ2\nz3\n").unwrap();
+
+    let daemon = Daemon::start().await;
+    let snap = snapshot(&daemon, &root).await;
+    let main = find(&snap.worktrees, &root);
+    let text_of = |path: &str| -> Vec<String> {
+        main.changes
+            .iter()
+            .find(|c| c.path == path)
+            .unwrap_or_else(|| panic!("no change {path}: {:?}", main.changes))
+            .hunks
+            .iter()
+            .flat_map(|h| h.lines.iter().map(|l| l.text.clone()))
+            .collect()
+    };
+    assert!(
+        text_of("z.txt").contains(&"Z2".to_owned()),
+        "{:?}",
+        main.changes
+    );
+    assert!(text_of("a.txt").contains(&"A2".to_owned()));
+    let sub_lines = text_of("sub");
+    assert!(
+        !sub_lines
+            .iter()
+            .any(|l| l.starts_with('z') || l.starts_with('Z')),
+        "z.txt's hunks landed on the submodule: {sub_lines:?}"
+    );
+    let z = main.changes.iter().find(|c| c.path == "z.txt").unwrap();
+    assert_eq!((z.added, z.removed), (2, 1));
+}

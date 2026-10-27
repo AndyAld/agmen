@@ -78,7 +78,7 @@ fn a_cut_short_output_drops_its_partial_record() {
 
 #[test]
 fn numstat_reads_tabs_in_paths_and_binary_files() {
-    let rows = parse_numstat(&out(b"3\t1\ta\tb.rs\0-\t-\timg.png\0"));
+    let rows = parse_numstat(b"3\t1\ta\tb.rs\0-\t-\timg.png\0");
     assert_eq!(
         rows,
         [(b"a\tb.rs".to_vec(), 3, 1), (b"img.png".to_vec(), 0, 0)]
@@ -142,4 +142,31 @@ fn a_patch_splits_per_file() {
     assert_eq!(sections.len(), 2);
     assert!(sections[0].ends_with(b"+b\n"));
     assert_eq!(split_patch(patch, true).len(), 1);
+}
+
+#[test]
+fn sections_are_keyed_by_their_own_header() {
+    // Review fix 1: the patch's file set can differ from numstat's (a
+    // submodule shown as a log, or an edit between runs), so each section
+    // names its own file.
+    let patch = b"diff --git a/sp ace.txt b/sp ace.txt\n@@ -1 +1 @@\n-a\n+b\n\
+diff --git \"a/q\\\"t\\tx\\303\\251.txt\" \"b/q\\\"t\\tx\\303\\251.txt\"\n@@ -1 +1 @@\n-c\n+d\n\
+diff --git a/z.txt b/z.txt\n@@ -1 +1 @@\n-y\n+z\n";
+    let by_path = sections_by_path(patch, false);
+    let path = |p: &str| p.as_bytes().to_vec();
+    assert_eq!(by_path.len(), 3);
+    assert!(by_path[&path("sp ace.txt")].ends_with(b"+b\n"));
+    assert!(by_path[&path("q\"t\tx\u{e9}.txt")].ends_with(b"+d\n"));
+    assert!(by_path[&path("z.txt")].ends_with(b"+z\n"));
+}
+
+#[test]
+fn one_diff_run_gives_numstat_and_patch() {
+    let out =
+        out(b"1\t0\ta.txt\x002\t1\tz.txt\0\0diff --git a/a.txt b/a.txt\n@@ -1 +1,2 @@\n a\n+b\n");
+    let (numstat, patch) = split_numstat_patch(&out.stdout);
+    assert_eq!(numstat.len(), 2);
+    assert!(patch.starts_with(b"diff --git a/a.txt"));
+    let (numstat, patch) = split_numstat_patch(b"");
+    assert!(numstat.is_empty() && patch.is_empty());
 }
