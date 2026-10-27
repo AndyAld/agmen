@@ -7,6 +7,17 @@ use std::process::ExitCode;
 use agmend::{Agmend, Config};
 use anyhow::{Context as _, Result};
 
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "A T2 renderers are consumed by service execution in A T3"
+    )
+)]
+mod service;
+
+use service::ServiceAction;
+
 const USAGE: &str = "usage: agmend [--help | -h]\n       agmend service <install | uninstall | status>\n\n\
                      Runs the agmen daemon in the foreground until Ctrl-C. \
                      Leave it running while you use agmen-desktop.";
@@ -16,13 +27,6 @@ enum Command {
     Foreground,
     Help,
     Service(ServiceAction),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ServiceAction {
-    Install,
-    Uninstall,
-    Status,
 }
 
 fn parse(args: &[OsString]) -> Result<Command, String> {
