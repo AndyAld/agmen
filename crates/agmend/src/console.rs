@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use agmen_client::PAGE_LIMIT;
 use agmen_local::console::{ConsoleEvent, ConsoleSnapshot, Me};
-use agmen_local::{ApiError, ErrorCode, Response, frame};
+use agmen_local::{ApiError, ErrorCode, MAX_FRAME, Response, frame};
 use agmen_proto::{ClientEnvelope, ProjectId, Seq, StampedEnvelope};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -46,11 +46,59 @@ pub(crate) fn bad_request(message: impl Into<String>) -> ApiError {
     }
 }
 
-fn to_value(value: &impl Serialize) -> Result<Value, ApiError> {
-    serde_json::to_value(value).map_err(|err| ApiError {
+/// Room left in a frame for the `{"id": n, "result": ...}` wrapper, with
+/// slack for any difference between sizing and the final encoding.
+const FRAME_SLACK: usize = 4096;
+
+/// The JSON length of `value`.
+fn json_len(value: &impl Serialize) -> Result<usize, ApiError> {
+    serde_json::to_vec(value)
+        .map(|json| json.len())
+        .map_err(encode_error)
+}
+
+/// The newest of `messages` (oldest first) that fit one frame next to a
+/// result of `base` bytes, and whether any were dropped. Dropped ones are
+/// the oldest, so a console reaches them with `chat_history` from the
+/// oldest one kept. A message that cannot fit even alone is an error.
+fn fit(
+    mut messages: Vec<StampedEnvelope>,
+    base: usize,
+) -> Result<(Vec<StampedEnvelope>, bool), ApiError> {
+    let budget = usize::try_from(MAX_FRAME)
+        .unwrap_or(usize::MAX)
+        .saturating_sub(base.saturating_add(FRAME_SLACK));
+    let mut used = 0usize;
+    let mut keep = 0usize;
+    for message in messages.iter().rev() {
+        // One more byte for the comma between messages.
+        let len = json_len(message)?.saturating_add(1);
+        if used.saturating_add(len) > budget {
+            break;
+        }
+        used += len;
+        keep += 1;
+    }
+    if keep == 0 && !messages.is_empty() {
+        return Err(ApiError {
+            code: ErrorCode::Hub,
+            message: format!("the newest message does not fit the {MAX_FRAME} byte frame cap"),
+        });
+    }
+    let dropped = messages.len() - keep;
+    messages.drain(..dropped);
+    Ok((messages, dropped > 0))
+}
+
+fn encode_error(err: serde_json::Error) -> ApiError {
+    ApiError {
         code: ErrorCode::Hub,
         message: format!("encoding the answer failed: {err}"),
-    })
+    }
+}
+
+fn to_value(value: &impl Serialize) -> Result<Value, ApiError> {
+    serde_json::to_value(value).map_err(encode_error)
 }
 
 #[derive(Debug, Deserialize)]
@@ -125,16 +173,20 @@ impl Console {
             .before(&project, head.saturating_add(1), PAGE_LIMIT)
             .await?;
         let roster = self.hub.roster(&project).await?;
-        to_value(&ConsoleSnapshot {
+        let mut snapshot = ConsoleSnapshot {
             project: project.to_string(),
             me: Me {
                 id: login.human_id,
                 handle: login.handle,
             },
             roster,
-            messages,
+            messages: Vec::new(),
             older,
-        })
+        };
+        let (messages, trimmed) = fit(messages, json_len(&snapshot)?)?;
+        snapshot.messages = messages;
+        snapshot.older |= trimmed;
+        to_value(&snapshot)
     }
 
     /// `chat_history {project, before?, limit?}`: up to `limit` (default
@@ -155,7 +207,15 @@ impl Console {
             None => self.hub.head(&project).await?.saturating_add(1),
         };
         let (messages, older) = self.before(&project, before, limit).await?;
-        to_value(&History { messages, older })
+        let base = json_len(&History {
+            messages: Vec::new(),
+            older,
+        })?;
+        let (messages, trimmed) = fit(messages, base)?;
+        to_value(&History {
+            messages,
+            older: older || trimmed,
+        })
     }
 
     /// Up to `limit` feed messages with seqs below `before`, and whether

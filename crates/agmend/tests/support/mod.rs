@@ -103,6 +103,14 @@ impl HubState {
         self.live.lock().unwrap().take();
     }
 
+    /// Fills the feed to `count` messages that each carry `body`.
+    pub fn fill_with(&self, count: u64, body: &str) {
+        let mut feed = self.feed.lock().unwrap();
+        for seq in feed.len() as u64 + 1..=count {
+            feed.push(stamped(seq, body));
+        }
+    }
+
     pub fn fill(&self, count: u64) {
         let mut feed = self.feed.lock().unwrap();
         for seq in feed.len() as u64 + 1..=count {

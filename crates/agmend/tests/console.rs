@@ -332,3 +332,43 @@ async fn a_watch_while_renewal_cannot_reach_the_hub_starts_disconnected() {
     // Still retrying, and nothing says the person signed out.
     quiet(&mut frames, Duration::from_millis(500)).await;
 }
+
+/// A body at the 32 KiB cap made of quotes, which JSON doubles: 500 of
+/// these are about 33 MB, over the 16 MiB frame cap.
+fn heavy_body() -> String {
+    "\"".repeat(32 * 1024)
+}
+
+/// Asserts `seqs` are contiguous and end at `last`, and fit one frame.
+fn assert_newest_that_fit(seqs: &[u64], last: u64) {
+    assert!(!seqs.is_empty());
+    assert!(seqs.len() < 500, "{} messages cannot fit", seqs.len());
+    assert_eq!(*seqs.last().unwrap(), last);
+    assert!(seqs.windows(2).all(|w| w[1] == w[0] + 1), "{seqs:?}");
+}
+
+#[tokio::test]
+async fn a_snapshot_over_the_frame_cap_keeps_the_newest_that_fit() {
+    let daemon = Daemon::start().await;
+    daemon.hub.state.fill_with(600, &heavy_body());
+    let mut client = daemon.client().await;
+    let snap = result(
+        client
+            .call("console_snapshot", json!({"project": PROJECT}))
+            .await,
+    );
+    let got = seqs(&snap["messages"]);
+    assert_newest_that_fit(&got, 600);
+    assert_eq!(snap["older"], true);
+    // Paging back from the oldest one kept reaches the dropped ones.
+    let page = result(
+        client
+            .call(
+                "chat_history",
+                json!({"project": PROJECT, "before": got[0]}),
+            )
+            .await,
+    );
+    assert_newest_that_fit(&seqs(&page["messages"]), got[0] - 1);
+    assert_eq!(page["older"], true);
+}

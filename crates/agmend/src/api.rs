@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use agmen_local::{API, ApiError, ErrorCode, Request, Response, frame};
+use agmen_local::{API, ApiError, ErrorCode, MAX_FRAME, Request, Response, frame};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::net::UnixStream;
@@ -115,6 +115,16 @@ async fn answer(writer: &mut OwnedWriteHalf, id: u64, outcome: Result<Value, Api
     };
     match frame::write_async(writer, &response).await {
         Ok(()) => true,
+        // Nothing was written, so the stream is still in step: say so
+        // instead of hanging up, or the client would ask again forever.
+        Err(frame::FrameError::TooLarge { len }) => {
+            let refusal = Response::err(
+                id,
+                ErrorCode::Hub,
+                format!("the answer is {len} bytes, over the {MAX_FRAME} byte frame cap"),
+            );
+            frame::write_async(writer, &refusal).await.is_ok()
+        }
         Err(err) => {
             tracing::debug!(error = %err, "writing an answer failed");
             false
