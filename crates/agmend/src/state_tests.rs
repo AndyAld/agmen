@@ -107,6 +107,26 @@ fn pending_store_deduplicates_stream_seq() {
 }
 
 #[test]
+fn duplicate_pending_copy_is_a_no_op_and_advances_position() {
+    let (_dir, mut store, who) = setup();
+    let mut event = message(1);
+    store.ingest(ORIGIN, &who.project, &event).unwrap();
+    event.stream = Stream::Inbox(who.identity_id.clone());
+    store.ingest(ORIGIN, &who.project, &event).unwrap();
+    assert_eq!(
+        store.positions(ORIGIN, &who.project).unwrap()[&event.stream],
+        1
+    );
+    assert_eq!(
+        store
+            .drain(ORIGIN, &who.identity_id, 500, usize::MAX)
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
 fn pending_store_deduplicates_cross_stream_message() {
     let (_dir, mut store, who) = setup();
     let mut event = message(1);
@@ -194,9 +214,135 @@ fn state_rejects_future_schema() {
     let path = dir.path().join("agmend.db");
     rusqlite::Connection::open(&path)
         .unwrap()
-        .pragma_update(None, "user_version", 2)
+        .pragma_update(None, "user_version", 3)
         .unwrap();
-    assert!(matches!(Store::open(&path), Err(StoreError::Version(2))));
+    assert!(matches!(Store::open(&path), Err(StoreError::Version(3))));
+}
+
+#[test]
+fn two_senders_with_same_id_both_deliver() {
+    for assign in [false, true] {
+        let (_dir, mut store, who) = setup();
+        let mut event = message(1);
+        if assign {
+            event.client.payload = Payload::Assign {
+                item: "B-4".parse().unwrap(),
+                to: who.identity_id.clone(),
+            };
+        }
+        store.ingest(ORIGIN, &who.project, &event).unwrap();
+        event.from = "sender02".parse().unwrap();
+        event.seq.0 = 2;
+        store.ingest(ORIGIN, &who.project, &event).unwrap();
+        let rows = store
+            .drain(ORIGIN, &who.identity_id, 500, usize::MAX)
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_ne!(rows[0].from, rows[1].from);
+    }
+}
+
+#[test]
+fn version_one_migrates_pending_and_receipts() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("agmend.db");
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch("CREATE TABLE identities (origin TEXT NOT NULL, identity TEXT NOT NULL, owner TEXT NOT NULL, project TEXT NOT NULL, metadata TEXT NOT NULL, PRIMARY KEY(origin,identity)) STRICT;
+        CREATE TABLE positions (origin TEXT NOT NULL, project TEXT NOT NULL, stream TEXT NOT NULL, seq INTEGER NOT NULL CHECK(seq >= 0), PRIMARY KEY(origin,project,stream)) STRICT;
+        CREATE TABLE pending (n INTEGER PRIMARY KEY AUTOINCREMENT, origin TEXT NOT NULL, project TEXT NOT NULL, identity TEXT NOT NULL, id TEXT NOT NULL, message TEXT NOT NULL, UNIQUE(origin,project,identity,id)) STRICT;
+        CREATE INDEX pending_identity ON pending(origin,identity,n);
+        CREATE TABLE receipts (origin TEXT NOT NULL, project TEXT NOT NULL, identity TEXT NOT NULL, id TEXT NOT NULL, feed INTEGER, inbox INTEGER, PRIMARY KEY(origin,project,identity,id)) STRICT;
+        CREATE INDEX receipts_identity ON receipts(origin,identity);
+        PRAGMA user_version=1;").unwrap();
+    let who = identity();
+    let event = message(1);
+    conn.execute(
+        "INSERT INTO pending VALUES (7,?1,?2,?3,?4,?5)",
+        params![
+            ORIGIN,
+            who.project.as_str(),
+            who.identity_id.as_str(),
+            event.client.id.as_str(),
+            serde_json::to_string(&event).unwrap()
+        ],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO receipts VALUES (?1,?2,?3,?4,1,NULL)",
+        params![
+            ORIGIN,
+            who.project.as_str(),
+            who.identity_id.as_str(),
+            event.client.id.as_str()
+        ],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO identities VALUES (?1,?2,?3,?4,?5)",
+        params![
+            ORIGIN,
+            who.identity_id.as_str(),
+            who.owner_id.as_str(),
+            who.project.as_str(),
+            serde_json::to_string(&who).unwrap()
+        ],
+    )
+    .unwrap();
+    // These legacy receipts outlived their drained pending messages.
+    conn.execute(
+        "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<19999)
+        INSERT INTO receipts SELECT ?1,?2,?3,printf('old-%d',x),x,NULL FROM n",
+        params![ORIGIN, who.project.as_str(), who.identity_id.as_str()],
+    )
+    .unwrap();
+    drop(conn);
+    let mut store = Store::open(&path).unwrap();
+    assert_eq!(
+        store
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    let sender: String = store
+        .conn
+        .query_row(
+            "SELECT sender FROM receipts WHERE id=?1",
+            [event.client.id.as_str()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(sender, event.from.as_str());
+    assert_eq!(
+        store
+            .conn
+            .query_row("SELECT count(*) FROM receipts", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        20000
+    );
+    assert_eq!(
+        store
+            .drain(ORIGIN, &who.identity_id, 500, usize::MAX)
+            .unwrap(),
+        vec![event]
+    );
+    assert_eq!(
+        store.identities(ORIGIN, &who.owner_id).unwrap(),
+        vec![who.clone()]
+    );
+    let mut next = message(1);
+    next.client.id = message(2).client.id;
+    next.client.payload = Payload::Assign {
+        item: "B-4".parse().unwrap(),
+        to: who.identity_id.clone(),
+    };
+    store.ingest(ORIGIN, &who.project, &next).unwrap();
+    assert_eq!(
+        store
+            .drain(ORIGIN, &who.identity_id, 500, usize::MAX)
+            .unwrap(),
+        vec![next]
+    );
 }
 
 #[test]
@@ -467,7 +613,7 @@ fn receipt_cap_refuses_without_cursor_advance() {
         .conn
         .execute(
             "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<20000)
-         INSERT INTO receipts SELECT ?1, ?2, ?3, printf('old-%d',x), x, NULL FROM n",
+         INSERT INTO receipts SELECT ?1, ?2, ?3, 'sender01', printf('old-%d',x), x, NULL FROM n",
             params![ORIGIN, who.project.as_str(), who.identity_id.as_str()],
         )
         .unwrap();

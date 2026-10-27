@@ -25,13 +25,13 @@ CREATE TABLE positions (
 ) STRICT;
 CREATE TABLE pending (
  n INTEGER PRIMARY KEY AUTOINCREMENT, origin TEXT NOT NULL, project TEXT NOT NULL,
- identity TEXT NOT NULL, id TEXT NOT NULL, message TEXT NOT NULL,
- UNIQUE(origin, project, identity, id)
+ identity TEXT NOT NULL, sender TEXT NOT NULL, id TEXT NOT NULL, message TEXT NOT NULL,
+ UNIQUE(origin, project, identity, sender, id)
 ) STRICT;
 CREATE INDEX pending_identity ON pending(origin, identity, n);
 CREATE TABLE receipts (
- origin TEXT NOT NULL, project TEXT NOT NULL, identity TEXT NOT NULL, id TEXT NOT NULL,
- feed INTEGER, inbox INTEGER, PRIMARY KEY(origin, project, identity, id)
+ origin TEXT NOT NULL, project TEXT NOT NULL, identity TEXT NOT NULL, sender TEXT NOT NULL, id TEXT NOT NULL,
+ feed INTEGER, inbox INTEGER, PRIMARY KEY(origin, project, identity, sender, id)
 ) STRICT;
 CREATE INDEX receipts_identity ON receipts(origin, identity);
 ";
@@ -57,7 +57,7 @@ pub(crate) enum StoreError {
     Sql(#[from] rusqlite::Error),
     #[error("daemon database JSON is invalid")]
     Json(#[from] serde_json::Error),
-    #[error("daemon database schema {0} is unsupported (expected 1)")]
+    #[error("daemon database schema {0} is unsupported (expected 2)")]
     Version(i64),
     #[error("daemon database invariant failed: {0}")]
     Invalid(&'static str),
@@ -111,9 +111,32 @@ impl Store {
         match tx.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))? {
             0 => {
                 tx.execute_batch(SCHEMA)?;
-                tx.pragma_update(None, "user_version", 1)?;
+                tx.pragma_update(None, "user_version", 2)?;
             }
-            1 => {}
+            1 => {
+                // A drained v1 receipt has no recoverable sender. Preserve it
+                // with an empty sender, without deduplicating another sender
+                // against it or charging it to the active receipt quota.
+                tx.execute_batch("ALTER TABLE pending RENAME TO pending_v1;
+                    ALTER TABLE receipts RENAME TO receipts_v1;
+                    DROP INDEX pending_identity; DROP INDEX receipts_identity;
+                    CREATE TABLE pending (
+                        n INTEGER PRIMARY KEY AUTOINCREMENT, origin TEXT NOT NULL, project TEXT NOT NULL,
+                        identity TEXT NOT NULL, sender TEXT NOT NULL, id TEXT NOT NULL, message TEXT NOT NULL,
+                        UNIQUE(origin,project,identity,sender,id)) STRICT;
+                    CREATE INDEX pending_identity ON pending(origin,identity,n);
+                    INSERT INTO pending SELECT n,origin,project,identity,json_extract(message,'$.from'),id,message FROM pending_v1;
+                    CREATE TABLE receipts (
+                        origin TEXT NOT NULL, project TEXT NOT NULL, identity TEXT NOT NULL,
+                        sender TEXT NOT NULL, id TEXT NOT NULL, feed INTEGER, inbox INTEGER,
+                        PRIMARY KEY(origin,project,identity,sender,id)) STRICT;
+                    CREATE INDEX receipts_identity ON receipts(origin,identity);
+                    INSERT INTO receipts SELECT r.origin,r.project,r.identity,coalesce(p.sender,''),r.id,r.feed,r.inbox
+                        FROM receipts_v1 r LEFT JOIN pending p ON p.origin=r.origin AND p.project=r.project AND p.identity=r.identity AND p.id=r.id;
+                    DROP TABLE pending_v1; DROP TABLE receipts_v1;
+                    PRAGMA user_version=2;")?;
+            }
+            2 => {}
             other => return Err(StoreError::Version(other)),
         }
         tx.commit()?;
@@ -251,14 +274,14 @@ impl Store {
             }
             let needs_receipt =
                 matches!(&message.client.payload, Payload::Assign { to, .. } if to == &id);
-            let seen = needs_receipt && tx.query_row("SELECT EXISTS(SELECT 1 FROM receipts WHERE origin=?1 AND project=?2 AND identity=?3 AND id=?4)",
-                params![origin, project.as_str(), id.as_str(), message.client.id.as_str()], |r| r.get(0))?;
+            let seen: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM pending WHERE origin=?1 AND project=?2 AND identity=?3 AND sender=?4 AND id=?5) OR (?6 AND EXISTS(SELECT 1 FROM receipts WHERE origin=?1 AND project=?2 AND identity=?3 AND sender=?4 AND id=?5))",
+                params![origin, project.as_str(), id.as_str(), message.from.as_str(), message.client.id.as_str(), needs_receipt], |r| r.get(0))?;
             if !seen {
                 if raw.len() > crate::sse::MAX_EVENT {
                     return Err(StoreError::Full("message envelope bytes"));
                 }
                 let (pending, receipts): (i64, i64) = tx.query_row(
-                    "SELECT (SELECT count(*) FROM pending WHERE origin=?1 AND identity=?2), (SELECT count(*) FROM receipts WHERE origin=?1 AND identity=?2)",
+                    "SELECT (SELECT count(*) FROM pending WHERE origin=?1 AND identity=?2), (SELECT count(*) FROM receipts WHERE origin=?1 AND identity=?2 AND sender!='')",
                     params![origin, id.as_str()], |r| Ok((r.get(0)?, r.get(1)?)))?;
                 if pending >= 10_000 {
                     return Err(StoreError::Full("10000 pending rows"));
@@ -268,19 +291,19 @@ impl Store {
                         "20000 receipts; awaiting other stream copies",
                     ));
                 }
-                tx.execute("INSERT INTO pending(origin, project, identity, id, message) VALUES (?1,?2,?3,?4,?5)",
-                    params![origin, project.as_str(), id.as_str(), message.client.id.as_str(), raw])?;
+                tx.execute("INSERT INTO pending(origin, project, identity, sender, id, message) VALUES (?1,?2,?3,?4,?5,?6) ON CONFLICT DO NOTHING",
+                    params![origin, project.as_str(), id.as_str(), message.from.as_str(), message.client.id.as_str(), raw])?;
             }
             if needs_receipt {
                 let (feed, inbox) = match message.stream {
                     Stream::Feed => (Some(seq), None),
                     Stream::Inbox(_) => (None, Some(seq)),
                 };
-                tx.execute("INSERT INTO receipts VALUES (?1,?2,?3,?4,?5,?6) ON CONFLICT(origin,project,identity,id) DO UPDATE SET feed=coalesce(excluded.feed,feed), inbox=coalesce(excluded.inbox,inbox)",
-                    params![origin, project.as_str(), id.as_str(), message.client.id.as_str(), feed, inbox])?;
+                tx.execute("INSERT INTO receipts VALUES (?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(origin,project,identity,sender,id) DO UPDATE SET feed=coalesce(excluded.feed,feed), inbox=coalesce(excluded.inbox,inbox)",
+                    params![origin, project.as_str(), id.as_str(), message.from.as_str(), message.client.id.as_str(), feed, inbox])?;
                 // Both copies commit contiguously; positions reject subsequent replays.
-                tx.execute("DELETE FROM receipts WHERE origin=?1 AND project=?2 AND identity=?3 AND id=?4 AND feed IS NOT NULL AND inbox IS NOT NULL",
-                    params![origin, project.as_str(), id.as_str(), message.client.id.as_str()])?;
+                tx.execute("DELETE FROM receipts WHERE origin=?1 AND project=?2 AND identity=?3 AND sender=?4 AND id=?5 AND feed IS NOT NULL AND inbox IS NOT NULL",
+                    params![origin, project.as_str(), id.as_str(), message.from.as_str(), message.client.id.as_str()])?;
             }
         }
         drop(stmt);
