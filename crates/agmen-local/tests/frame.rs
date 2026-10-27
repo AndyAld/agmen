@@ -2,7 +2,7 @@
 
 use agmen_local::console::{ConsoleEvent, ConsoleSnapshot, Me, RosterEntry};
 use agmen_local::frame::{self, FrameError};
-use agmen_local::{API, ApiError, ErrorCode, MAX_FRAME, Request, Response};
+use agmen_local::{API, ApiError, ErrorCode, MAX_FRAME, Outcome, Request, Response};
 use serde_json::json;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -72,6 +72,29 @@ fn request_serializes_as_with_the_wire_name() -> TestResult {
 }
 
 #[test]
+fn null_result_is_a_success() -> TestResult {
+    let wire = serde_json::to_value(Response::ok(4, serde_json::Value::Null))?;
+    assert_eq!(wire, json!({"id": 4, "result": null}));
+    let back: Response = serde_json::from_value(wire)?;
+    assert_eq!(back, Response::ok(4, serde_json::Value::Null));
+    Ok(())
+}
+
+#[test]
+fn response_with_neither_key_is_an_error() {
+    assert!(serde_json::from_value::<Response>(json!({"id": 5})).is_err());
+}
+
+#[test]
+fn unknown_error_code_keeps_id_and_message() -> TestResult {
+    let wire = json!({"id": 6, "error": {"code": "rate_limited", "message": "slow down"}});
+    let back: Response = serde_json::from_value(wire)?;
+    assert_eq!(back.id, 6);
+    assert_eq!(back, Response::err(6, ErrorCode::Unknown, "slow down"));
+    Ok(())
+}
+
+#[test]
 fn response_shapes_and_error_codes() -> TestResult {
     let ok = serde_json::to_value(Response::ok(1, json!({"x": 2})))?;
     assert_eq!(ok, json!({"id": 1, "result": {"x": 2}}));
@@ -91,11 +114,13 @@ fn response_shapes_and_error_codes() -> TestResult {
     }
     let back: Response = serde_json::from_value(err)?;
     assert_eq!(
-        back.error,
-        Some(ApiError {
-            code: ErrorCode::NotFound,
-            message: "no such project".into()
-        })
+        back.outcome,
+        Outcome::Err {
+            error: ApiError {
+                code: ErrorCode::NotFound,
+                message: "no such project".into()
+            }
+        }
     );
     Ok(())
 }
