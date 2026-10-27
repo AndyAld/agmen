@@ -23,6 +23,7 @@ mod local;
 mod login;
 mod socket;
 mod sse;
+mod worktree;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
