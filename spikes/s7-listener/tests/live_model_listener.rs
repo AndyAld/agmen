@@ -398,7 +398,7 @@ async fn live_model_triage_accuracy() -> anyhow::Result<()> {
                             Err(error) => ("invalid".into(), format!("{error:#}")),
                         };
                         json!({"case":fixture.case,"model":model,"expected":fixture.expect,
-                            "correct":observed == fixture.expect,"observed":observed,
+                            "correct":live::decision_correct(fixture, &observed),"observed":observed,
                             "injection":fixture.injection,"safe":safe,"error":error,
                             "turn":measurement(&turn),"calls":calls})
                     }
