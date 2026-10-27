@@ -16,8 +16,15 @@ use std::path::PathBuf;
 /// A folder could not be found because the variable that names it is unset
 /// or not an absolute path.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("{0} is not set to an absolute path")]
-pub struct PathError(&'static str);
+#[non_exhaustive]
+pub enum PathError {
+    /// `HOME` is unset, empty or relative.
+    #[error("HOME is not set to an absolute path")]
+    Home,
+    /// The Windows folder variable is unset, empty or relative.
+    #[error("{0} is not set")]
+    Windows(&'static str),
+}
 
 /// The config folder, which holds `login.json`.
 ///
@@ -56,9 +63,9 @@ fn base(xdg: &str, fallback: &str, windows_var: &'static str) -> Result<PathBuf,
             .map(PathBuf::from)
             .filter(|path| path.is_absolute())
     };
-    let home = || var("HOME").ok_or(PathError("HOME"));
+    let home = || var("HOME").ok_or(PathError::Home);
     let dir = if cfg!(target_os = "windows") {
-        var(windows_var).ok_or(PathError(windows_var))?
+        var(windows_var).ok_or(PathError::Windows(windows_var))?
     } else if cfg!(target_os = "macos") {
         home()?.join("Library").join("Application Support")
     } else {

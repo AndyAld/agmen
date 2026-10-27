@@ -31,8 +31,8 @@ pub enum LoginError {
     /// the hub no longer takes the refresh token.
     #[error("not signed in")]
     NotSignedIn,
-    /// The login file could not be read or written.
-    #[error("the login file {path} failed")]
+    /// The login file could not be read.
+    #[error("reading {}", path.display())]
     File {
         /// The file.
         path: PathBuf,
@@ -41,7 +41,7 @@ pub enum LoginError {
         source: std::io::Error,
     },
     /// The login file is not JSON this version reads.
-    #[error("{path} is not a valid login file")]
+    #[error("{} is not a valid login file", path.display())]
     BadFile {
         /// The file.
         path: PathBuf,
@@ -49,15 +49,27 @@ pub enum LoginError {
         #[source]
         source: serde_json::Error,
     },
-    /// The token store failed.
-    #[error("the token store failed")]
-    Store(#[from] TokenStoreError),
+    /// The login's hub URL has no origin to key its tokens by.
+    #[error("the login's hub URL")]
+    Key(#[source] TokenStoreError),
+    /// The token store could not be read.
+    #[error("reading the token store failed")]
+    StoreRead(#[source] TokenStoreError),
+    /// The token store could not be written.
+    #[error("writing the token store failed")]
+    StoreWrite(#[source] TokenStoreError),
     /// The tokens could not be encoded for the store.
-    #[error("encoding the tokens failed")]
+    #[error("encoding the tokens")]
     Encode(#[source] serde_json::Error),
-    /// The hub could not be reached, or its answer could not be read.
-    #[error("calling the hub failed")]
+    /// The hub could not be reached.
+    #[error("the hub could not be reached")]
     Http(#[source] reqwest::Error),
+    /// The hub's answer could not be read.
+    #[error("reading the hub's answer failed")]
+    ReadAnswer(#[source] reqwest::Error),
+    /// The hub answered success with a body that is not a token response.
+    #[error("the hub's answer is not what agmen expects")]
+    BadAnswer(#[source] serde_json::Error),
     /// The hub's token endpoint refused.
     #[error("the hub answered {status} {code}")]
     Refused {
@@ -196,8 +208,10 @@ struct ErrorBody {
 ///
 /// # Errors
 ///
-/// [`LoginError::Refused`] with the OAuth error when the hub refuses, and
-/// [`LoginError::Http`] when it cannot be reached or answers nonsense.
+/// [`LoginError::Refused`] with the OAuth error when the hub refuses,
+/// [`LoginError::Http`] when it cannot be reached, and
+/// [`LoginError::ReadAnswer`] or [`LoginError::BadAnswer`] when its
+/// success answer cannot be read.
 pub async fn token_grant(
     http: &reqwest::Client,
     hub: &Url,
@@ -215,7 +229,9 @@ pub async fn token_grant(
         .map_err(LoginError::Http)?;
     let status = response.status();
     if status.is_success() {
-        let granted: TokenResponse = response.json().await.map_err(LoginError::Http)?;
+        let bytes = response.bytes().await.map_err(LoginError::ReadAnswer)?;
+        let granted: TokenResponse =
+            serde_json::from_slice(&bytes).map_err(LoginError::BadAnswer)?;
         return Ok(HumanTokens::new(
             granted.access_token,
             granted.refresh_token,
@@ -235,19 +251,19 @@ pub async fn token_grant(
 ///
 /// # Errors
 ///
-/// [`LoginError::Store`] when the store cannot be written.
+/// [`LoginError::StoreWrite`] when the store cannot be written.
 pub async fn store_tokens(
     store: &TokenStore,
     login: &Login,
     tokens: &HumanTokens,
 ) -> Result<(), LoginError> {
-    let key = login.key()?;
+    let key = login.key().map_err(LoginError::Key)?;
     let json = serde_json::to_string(tokens).map_err(LoginError::Encode)?;
     let store = store.clone();
     tokio::task::spawn_blocking(move || store.set(&key, &json))
         .await
-        .map_err(LoginError::Join)??;
-    Ok(())
+        .map_err(LoginError::Join)?
+        .map_err(LoginError::StoreWrite)
 }
 
 /// `login`'s tokens from `store`, renewed through the hub first when the
@@ -273,11 +289,12 @@ pub async fn human_tokens(
     store: &TokenStore,
     login: &Login,
 ) -> Result<HumanTokens, LoginError> {
-    let key = login.key()?;
+    let key = login.key().map_err(LoginError::Key)?;
     let reader = store.clone();
     let stored = tokio::task::spawn_blocking(move || reader.get(&key))
         .await
-        .map_err(LoginError::Join)??
+        .map_err(LoginError::Join)?
+        .map_err(LoginError::StoreRead)?
         .ok_or(LoginError::NotSignedIn)?;
     let tokens: HumanTokens = serde_json::from_str(&stored).map_err(|_| LoginError::NotSignedIn)?;
     if !tokens.expiring() {

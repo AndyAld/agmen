@@ -180,6 +180,11 @@ fn login_error(err: LoginError) -> anyhow::Error {
     }
 }
 
+/// The token-store key of `login`'s tokens.
+fn key(login: &Login) -> Result<TokenKey> {
+    login.key().context("the login's hub URL")
+}
+
 /// The signed-in person and an API client with their access token.
 #[derive(Debug)]
 pub(crate) struct Human {
@@ -196,13 +201,11 @@ pub(crate) async fn read_login() -> Result<Option<Login>> {
 /// Stores `tokens` and writes the login file, replacing an earlier login.
 pub(crate) async fn save_login(login: &Login, tokens: &HumanTokens) -> Result<()> {
     if let Some(old) = read_login().await?
-        && old.key()? != login.key()?
+        && key(&old)? != key(login)?
     {
-        delete_token(old.key()?).await?;
+        delete_token(key(&old)?).await?;
     }
-    agmen_client::store_tokens(&TokenStore::from_env(), login, tokens)
-        .await
-        .context("writing the token store failed")?;
+    agmen_client::store_tokens(&TokenStore::from_env(), login, tokens).await?;
     let path = paths::login_file()?;
     let json = serde_json::to_vec_pretty(login).context("encoding the login file")?;
     blocking(move || {
@@ -220,7 +223,7 @@ pub(crate) async fn forget_login() -> Result<Option<Login>> {
     let Some(login) = read_login().await? else {
         return Ok(None);
     };
-    delete_token(login.key()?).await?;
+    delete_token(key(&login)?).await?;
     let path = paths::login_file()?;
     blocking(move || match std::fs::remove_file(&path) {
         Ok(()) => Ok(()),
@@ -242,8 +245,14 @@ pub(crate) async fn human() -> Result<Human> {
     let tokens = agmen_client::human_tokens(&http()?, &TokenStore::from_env(), &login)
         .await
         .map_err(|err| match err {
-            err @ (LoginError::NotSignedIn | LoginError::Refused { .. }) => login_error(err),
-            err => anyhow::Error::new(err).context("renewing the sign-in failed"),
+            // The renewal's own call to the hub failed: the CLI has always
+            // said so with this context. Reading and writing the store, the
+            // login's key and a blocking task speak for themselves.
+            err @ (LoginError::Refused { .. }
+            | LoginError::Http(_)
+            | LoginError::ReadAnswer(_)
+            | LoginError::BadAnswer(_)) => login_error(err).context("renewing the sign-in failed"),
+            err => login_error(err),
         })?;
     let api = Api::new(login.hub_url.clone(), tokens.access_token())?;
     Ok(Human { login, api })
