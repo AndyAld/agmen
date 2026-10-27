@@ -788,6 +788,18 @@ fn serve_jobs(shared: &Shared, queue: &Receiver<Job>, mut conn: Option<Conn>) {
             Job::Post { draft, envelope } => {
                 let params = json!({ "project": shared.project, "envelope": envelope });
                 // A post that lands comes back on the watch.
+                // shortcut: `request` retries a lost answer on a reused
+                // connection once, with this same envelope, so the hub
+                // dedupes it. What remains: the
+                // answer is lost on a fresh connection or on that retry
+                // (agmend died or took over REQUEST_TIMEOUT after taking
+                // the post), the post landed anyway, and NotSent puts the
+                // draft back. Sending it again mints a new id in
+                // envelope_for, so the chat shows it twice. Ceiling: one
+                // extra copy per resend of such a post. Revisit if people
+                // see doubles; the fix is to keep the envelope id with the
+                // returned draft, or drop the NotSent once the watch hears
+                // that id.
                 if let Err(why) = request(shared, &mut conn, "post", params) {
                     let why = why.to_string();
                     shared.lock().publish(&Update::NotSent { draft, why });
