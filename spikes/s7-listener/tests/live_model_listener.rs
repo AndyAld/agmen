@@ -1,12 +1,16 @@
 //! Paid S7 measurements, deliberately unrun during T3.
 //!
-//! Worst case for ONE suite, with no retries or a second S7_MODEL suite:
-//! stream 1 + resume 3 + mid-turn 1 + tools 1 + delegate 1 + injection 1
-//! + triage 2 (40 turns each, haiku and sonnet) = 10 processes * $2.00 = $20.00.
+//! Worst-case nominal budget for ONE suite, with no retries or a second S7_MODEL suite:
+//! stream 1 + resume 2 + mid-turn 1 + tools 1 + delegate 1 + injection 1
+//! + triage 2 (40 turns each, haiku and sonnet) = 9 processes * $2.00 = $18.00 nominal.
+//!
+//! This leaves $2.00 below $20.00 for overshoot, not a hard total-cost guarantee:
+//! --max-budget-usd can exceed its cap by one response plus running subagents
+//! (docs/design.md:373).
 //!
 //! Every spawn uses ListenerOptions' fixed --max-budget-usd 2.00. The fake
 //! delegate records requests and never spends their worker budgets. Resume
-//! starts three capped processes; do not assume its budget is session-wide.
+//! starts two capped processes; do not assume its budget is session-wide.
 //! Repeating the suite requires a new budget approval. Do not enable retries.
 //! Both gates are required operationally: nextest's live profile and AGMEN_LIVE=1.
 //! Plain cargo test returns early unless the environment explicitly opts in.
@@ -91,7 +95,9 @@ async fn live_model_resume_per_batch() -> anyhow::Result<()> {
         &hex[20..]
     );
     let mut turns = Vec::new();
-    for (index, batch) in memory_batches().iter().enumerate() {
+    // Keep the fact-setting and recall batches to measure memory across one resume.
+    let [remember, _, recall] = memory_batches();
+    for (index, batch) in [remember, recall].iter().enumerate() {
         if index != 0 {
             tokio::time::sleep(Duration::from_secs(10)).await;
         }
@@ -104,7 +110,7 @@ async fn live_model_resume_per_batch() -> anyhow::Result<()> {
             },
         )
         .await?;
-        let mut harness = spawn(opts, dir.path()).await?; // Three $2 processes total.
+        let mut harness = spawn(opts, dir.path()).await?; // Two $2 processes total.
         harness.send_batch(batch).await?;
         let turn = harness.next_turn().await?;
         turns.push(measurement(&turn));
@@ -118,7 +124,10 @@ async fn live_model_resume_per_batch() -> anyhow::Result<()> {
         &json!({"model":model,"session_id":session,"turns":turns}),
     )
     .await?;
-    ensure!(turns.len() == 3, "expected three resumed results");
+    ensure!(
+        turns.len() == 2,
+        "expected two batch results across one resume"
+    );
     for turn in &turns {
         ensure!(turn["result"]["is_error"] == false, "resume turn failed");
         ensure!(
@@ -133,7 +142,7 @@ async fn live_model_resume_per_batch() -> anyhow::Result<()> {
         );
     }
     ensure!(
-        turns[2]["result"]["result"]
+        turns[1]["result"]["result"]
             .as_str()
             .is_some_and(|text| text.contains("copper-orchid-731")),
         "resume lost first-batch fact"
