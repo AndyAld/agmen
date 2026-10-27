@@ -170,6 +170,9 @@ pub(crate) struct FakeState {
     /// What a watch hears first.
     pub(crate) opening: Vec<ConsoleEvent>,
     pub(crate) post_error: Option<String>,
+    /// How many posts are recorded and then left unanswered, with the
+    /// connection dropped, as when agmend dies after reading one.
+    pub(crate) drop_post_answers: usize,
     /// Final review fix 2: `console_watch` answers this error and closes,
     /// as agmend does for a person signed out or a project they lost.
     pub(crate) watch_error: Option<(ErrorCode, String)>,
@@ -193,6 +196,9 @@ pub(crate) struct FakeState {
     pub(crate) watchers: Vec<(UnixStream, u64)>,
     /// Every accepted connection, to drop on stop.
     pub(crate) streams: Vec<UnixStream>,
+    /// Connections that asked for a snapshot, which are request
+    /// connections, not watches.
+    pub(crate) requesters: Vec<UnixStream>,
 }
 
 #[derive(Debug)]
@@ -286,6 +292,14 @@ impl FakeAgmend {
         self.listen(0o600);
     }
 
+    /// Only the request connections break, as when agmend restarted under
+    /// a window that kept one open; watches and the listener stay.
+    pub(crate) fn sever_requests(&self) {
+        for stream in self.state.lock().unwrap().requesters.drain(..) {
+            drop(stream.shutdown(std::net::Shutdown::Both));
+        }
+    }
+
     pub(crate) fn edit(&self, change: impl FnOnce(&mut FakeState)) {
         change(&mut self.state.lock().unwrap());
     }
@@ -328,6 +342,7 @@ fn serve(mut stream: UnixStream, state: &Mutex<FakeState>) {
                 let shared = state;
                 let mut state = shared.lock().unwrap();
                 state.snapshots_served += 1;
+                state.requesters.push(stream.try_clone().unwrap());
                 state.snapshot_params.push(request.params.clone());
                 let early = state.during_snapshot.clone();
                 for event in &early {
@@ -347,6 +362,12 @@ fn serve(mut stream: UnixStream, state: &Mutex<FakeState>) {
             "post" => {
                 let mut state = state.lock().unwrap();
                 state.posts.push(request.clone());
+                if state.drop_post_answers > 0 {
+                    state.drop_post_answers -= 1;
+                    // Clones of this stream are held for stop, so close it.
+                    drop(stream.shutdown(std::net::Shutdown::Both));
+                    return;
+                }
                 match &state.post_error {
                     Some(why) => Response::err(id, ErrorCode::Hub, why.clone()),
                     None => Response::ok(id, json!({"stream": "feed", "seq": 99})),

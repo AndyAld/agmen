@@ -780,20 +780,28 @@ fn serve_jobs(shared: &Shared, queue: &Receiver<Job>, mut conn: Option<Conn>) {
                     "console_snapshot",
                     shared.checkout_params(),
                 )
-                .and_then(|value| parse::<ConsoleSnapshot>(value).map_err(|e| e.to_string()));
+                .and_then(|value| {
+                    parse::<ConsoleSnapshot>(value)
+                        .map_err(|e| RequestError::Refused(e.to_string()))
+                });
                 take_snapshot(shared, generation, answer);
             }
             Job::Post { draft, envelope } => {
                 let params = json!({ "project": shared.project, "envelope": envelope });
                 // A post that lands comes back on the watch.
                 if let Err(why) = request(shared, &mut conn, "post", params) {
+                    let why = why.to_string();
                     shared.lock().publish(&Update::NotSent { draft, why });
                 }
             }
             Job::History { before } => {
                 let params = json!({ "project": shared.project, "before": before, "limit": PAGE });
                 let answer = request(shared, &mut conn, "chat_history", params)
-                    .and_then(|value| parse::<HistoryPage>(value).map_err(|e| e.to_string()));
+                    .and_then(|value| {
+                        parse::<HistoryPage>(value)
+                            .map_err(|e| RequestError::Refused(e.to_string()))
+                    })
+                    .map_err(|e| e.to_string());
                 take_history(shared, before, answer);
             }
             Job::FileText {
@@ -807,11 +815,13 @@ fn serve_jobs(shared: &Shared, queue: &Receiver<Job>, mut conn: Option<Conn>) {
                     "worktree": worktree,
                     "path": path,
                 });
-                let answer = request(shared, &mut conn, "file_text", params).and_then(|value| {
-                    parse::<FileTextEntry>(value)
-                        .map(agmend_local::file_text_from)
-                        .map_err(|e| e.to_string())
-                });
+                let answer = request(shared, &mut conn, "file_text", params)
+                    .and_then(|value| {
+                        parse::<FileTextEntry>(value)
+                            .map(agmend_local::file_text_from)
+                            .map_err(|e| RequestError::Refused(e.to_string()))
+                    })
+                    .map_err(|e| e.to_string());
                 // The file view may have closed meanwhile.
                 drop(reply.send(answer));
             }
@@ -842,7 +852,7 @@ fn take_history(shared: &Shared, before: Seq, answer: Result<HistoryPage, String
 }
 
 /// Applies a snapshot answer, or ends the watch so it starts over.
-fn take_snapshot(shared: &Shared, generation: u64, answer: Result<ConsoleSnapshot, String>) {
+fn take_snapshot(shared: &Shared, generation: u64, answer: Result<ConsoleSnapshot, RequestError>) {
     let mut live = shared.lock();
     if live.generation != generation || live.early.is_none() {
         // The watch moved on since it asked.
@@ -862,7 +872,15 @@ fn take_snapshot(shared: &Shared, generation: u64, answer: Result<ConsoleSnapsho
             live.publish_snapshot();
             live.set_link(Link::Live);
         }
-        Err(why) => {
+        // The request connection could not reach agmend, even afresh. The
+        // watch is a different connection and keeps its own state: if agmend
+        // is really gone it ends by itself and says so.
+        Err(RequestError::Down(why)) => {
+            live.set_link(Link::AgmendDown {
+                why: format!("the chat's snapshot could not reach agmend: {why}"),
+            });
+        }
+        Err(RequestError::Refused(why)) => {
             live.ended = Some(format!("the chat's snapshot failed: {why}"));
             if let Some(watch) = live.watch.take() {
                 // The watch thread sees its read fail and reconnects.
@@ -872,28 +890,58 @@ fn take_snapshot(shared: &Shared, generation: u64, answer: Result<ConsoleSnapsho
     }
 }
 
+/// Why a request on the request connection failed.
+#[derive(Debug)]
+enum RequestError {
+    /// Agmend could not be reached or spoke out of step, even on a fresh
+    /// connection. This says nothing about the watch, which has its own.
+    Down(String),
+    /// agmend answered with an error.
+    Refused(String),
+}
+
+impl std::fmt::Display for RequestError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (Self::Down(why) | Self::Refused(why)) = self;
+        f.write_str(why)
+    }
+}
+
 /// One request on the request connection, opening it first when needed.
-/// A connection that failed is dropped, so the next job opens a new one.
+///
+/// A reused connection may belong to an agmend that has since restarted.
+/// When it fails at the connection level (not with an error answer), it is
+/// dropped and the request goes once more on a fresh, greeted connection.
+/// Every request is safe to repeat: a `post` carries its envelope's id, and
+/// the hub dedupes on `(from, id)` (protocol 5.2 step 3), so a second try
+/// of a post agmend already took gets the original ACK, not a second message.
+/// A connection that failed is never kept.
 fn request(
     shared: &Shared,
     conn: &mut Option<Conn>,
     method: &str,
     params: Value,
-) -> Result<Value, String> {
-    let mut open = match conn.take() {
-        Some(open) => open,
-        None => Conn::open(&shared.socket).map_err(|err| err.to_string())?,
+) -> Result<Value, RequestError> {
+    let down = |err: BackendError| RequestError::Down(err.to_string());
+    let (mut open, reused) = match conn.take() {
+        Some(open) => (open, true),
+        None => (Conn::open(&shared.socket).map_err(down)?, false),
     };
-    match open.call(method, params) {
+    let mut result = open.call(method, params.clone());
+    if reused && matches!(result, Err(Fail::Lost(_))) {
+        open = Conn::open(&shared.socket).map_err(down)?;
+        result = open.call(method, params);
+    }
+    match result {
         Ok(value) => {
             *conn = Some(open);
             Ok(value)
         }
         Err(Fail::Refused(error)) => {
             *conn = Some(open);
-            Err(error.message)
+            Err(RequestError::Refused(error.message))
         }
-        Err(Fail::Lost(why)) => Err(why),
+        Err(Fail::Lost(why)) => Err(RequestError::Down(why)),
     }
 }
 

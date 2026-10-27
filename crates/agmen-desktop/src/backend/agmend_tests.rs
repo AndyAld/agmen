@@ -332,6 +332,63 @@ fn a_gap_after_reconnect_drops_the_older_page() {
 }
 
 #[test]
+fn a_restart_reconnects_without_a_refusal() {
+    let mut fake = FakeAgmend::start(console(vec![message(1), message(2)]));
+    let (backend, mut updates) = live_backend(&fake);
+    fake.stop();
+    wait_for(&mut updates, |u| {
+        matches!(u, Update::Link(Link::AgmendDown { .. }))
+    });
+    fake.edit(|s| s.snapshot = Some(console(vec![message(1), message(2), message(3)])));
+    let started = Instant::now();
+    fake.restart();
+    let seen = wait_for(&mut updates, is_live);
+    // The request connection still pointed at the dead agmend; the first
+    // snapshot must retry on a fresh one instead of showing a refusal.
+    assert!(
+        !seen
+            .iter()
+            .any(|u| matches!(u, Update::Link(Link::Refused { .. }))),
+        "a restart showed a refusal: {seen:?}"
+    );
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert_eq!(seqs(&backend.snapshot().messages), vec![1, 2, 3]);
+}
+
+#[test]
+fn a_post_on_a_dead_connection_is_retried_once() {
+    let fake = FakeAgmend::start(console(vec![]));
+    let (backend, mut updates) = live_backend(&fake);
+    fake.sever_requests();
+    backend.send(draft("hi")).unwrap();
+    until(|| !fake.posts().is_empty());
+    // Time for a duplicate or a failure to show.
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(fake.posts().len(), 1, "the post landed once");
+    while let Ok(update) = updates.try_recv() {
+        assert!(
+            !matches!(update, Update::NotSent { .. }),
+            "the post was reported unsent: {update:?}"
+        );
+    }
+}
+
+#[test]
+fn a_post_whose_answer_was_lost_reuses_its_envelope_id() {
+    let fake = FakeAgmend::start(console(vec![]));
+    fake.edit(|s| s.drop_post_answers = 1);
+    let (backend, _updates) = live_backend(&fake);
+    backend.send(draft("hi")).unwrap();
+    until(|| fake.posts().len() == 2);
+    let posts = fake.posts();
+    // The hub dedupes on (from, id), so the second try returns the first ACK.
+    assert_eq!(
+        posts[0].params["envelope"]["id"],
+        posts[1].params["envelope"]["id"]
+    );
+}
+
+#[test]
 fn backoff_doubles_up_to_30_s() {
     let mut delay = BACKOFF.first;
     let mut waits = vec![delay.as_secs()];
