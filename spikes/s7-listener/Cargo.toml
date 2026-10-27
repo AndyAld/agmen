@@ -19,5 +19,6 @@ thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "time", "process", "io-util", "fs"] }
 
 [dev-dependencies]
+agmen-proto = { version = "0.1.0", path = "../../crates/agmen-proto" }
 rmcp = { version = "3.7.0", features = ["client"] }
 tempfile = "3.27.0"

@@ -2441,6 +2441,7 @@ dependencies = [
 name = "s7-listener"
 version = "0.1.0"
 dependencies = [
+ "agmen-proto",
  "anyhow",
  "rmcp",
  "schemars",
