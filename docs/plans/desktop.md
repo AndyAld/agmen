@@ -147,7 +147,7 @@ Andy's decision (2026-10-26): reuse what Andy's Marked editor (MIT) does for col
 - [ ] **Step 2:** Implement; gate; shot `chat` with the Marked theme chosen. **Commit** `Add Marked's palette and Zed theme overrides`
 
 **Files:**
-- Create: `crates/agmen-desktop/assets/icons/lucide/*.svg` (only the icons used: `users`, `folder-tree`, `git-branch`, `user`, `search`, `square-terminal`, `messages-square`, `bell`, `settings`, `chevron-down`, `chevron-right`, `chevron-left`, `sparkle`, `diff`, `pencil`, `x`, `check`, `plus`, `minus`, `corner-down-left`, `circle-alert`, `panel-right`, `file`, `folder`, `folder-open`), `assets/icons/LICENSE-lucide.txt`, `src/assets.rs` (GPUI `AssetSource`), `src/icons/mod.rs`, `src/icons/zed_theme.rs`, `src/icons/system.rs`, `src/icons/zed_theme_tests.rs`, `tests/fixtures/zed/icon_theme/icon_themes/fixture.json` plus three small SVGs
+- Create: `crates/agmen-desktop/assets/icons/lucide/*.svg` (only the icons used: `users`, `folder-tree`, `git-branch`, `user`, `search`, `terminal`, `message-square`, `bell`, `settings`, `chevron-down`, `chevron-right`, `chevron-left`, `sparkles`, `diff`, `pencil`, `x`, `check`, `plus`, `minus`, `corner-down-left`, `circle-alert`, `panel-right`, `file`, `folder`, `folder-open`), `assets/icons/LICENSE-lucide.txt`, `src/assets.rs` (GPUI `AssetSource`), `src/icons/mod.rs`, `src/icons/zed_theme.rs`, `src/icons/system.rs`, `src/icons/zed_theme_tests.rs`, `tests/fixtures/zed/icon_theme/icon_themes/fixture.json` plus three small SVGs
 - Modify: `src/ui/workspace.rs` (left dock tab icons, status bar buttons)
 
 **Interfaces:**

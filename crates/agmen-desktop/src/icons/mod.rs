@@ -283,14 +283,14 @@ impl UiIcon {
             Self::Git => "icons/lucide/git-branch.svg",
             Self::Roles => "icons/lucide/user.svg",
             Self::Search => "icons/lucide/search.svg",
-            Self::Terminal => "icons/lucide/square-terminal.svg",
-            Self::Chat => "icons/lucide/messages-square.svg",
+            Self::Terminal => "icons/lucide/terminal.svg",
+            Self::Chat => "icons/lucide/message-square.svg",
             Self::Bell => "icons/lucide/bell.svg",
             Self::Settings => "icons/lucide/settings.svg",
             Self::ChevronDown => "icons/lucide/chevron-down.svg",
             Self::ChevronRight => "icons/lucide/chevron-right.svg",
             Self::ChevronLeft => "icons/lucide/chevron-left.svg",
-            Self::Sparkle => "icons/lucide/sparkle.svg",
+            Self::Sparkle => "icons/lucide/sparkles.svg",
             Self::Diff => "icons/lucide/diff.svg",
             Self::Pencil => "icons/lucide/pencil.svg",
             Self::Close => "icons/lucide/x.svg",
@@ -367,6 +367,15 @@ mod tests {
                 icon.path()
             );
         }
+    }
+
+    #[test]
+    fn ui_icons_follow_the_mockup_icon_map() {
+        // console.py ZED_TO_LUCIDE: terminal, chat and sparkle draw Lucide
+        // terminal, message-square and sparkles (Task 20 shot diff).
+        assert_eq!(UiIcon::Terminal.path(), "icons/lucide/terminal.svg");
+        assert_eq!(UiIcon::Chat.path(), "icons/lucide/message-square.svg");
+        assert_eq!(UiIcon::Sparkle.path(), "icons/lucide/sparkles.svg");
     }
 
     #[gpui::test]
