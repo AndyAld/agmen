@@ -1,0 +1,403 @@
+//! UI icons (Lucide) and file icons (the Zed icon theme, or the OS).
+
+// agmen-c7 fix-hosting: render the first frame's theme icons ahead.
+mod preload;
+mod system;
+#[cfg(test)]
+pub(crate) mod test_theme;
+mod zed_theme;
+
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use gpui::{
+    AnyElement, App, Global, Hsla, Image, ImageFormat, IntoElement as _, Pixels, RenderImage,
+    Styled as _, Svg, img, svg,
+};
+
+use system::IconKind;
+pub(crate) use zed_theme::IconTheme;
+
+use crate::appearance::IconThemeChoice;
+
+/// Where one file's icon comes from.
+#[derive(Debug, Clone)]
+pub(crate) enum FileIcon {
+    /// An SVG from the person's Zed icon theme, drawn in its own colors.
+    Svg(PathBuf),
+    /// The same SVG rendered ahead by [`FileIcons::preload`], so it draws
+    /// without waiting for a load.
+    Rendered(Arc<RenderImage>),
+    /// The operating system's icon.
+    Image(Arc<Image>),
+    /// agmen's Lucide fallback.
+    Ui(UiIcon),
+}
+
+impl FileIcon {
+    pub(crate) fn render(&self, color: Hsla, size: Pixels) -> AnyElement {
+        match self {
+            Self::Svg(path) => img(path.clone()).size(size).flex_none().into_any_element(),
+            Self::Rendered(image) => img(image.clone()).size(size).flex_none().into_any_element(),
+            Self::Image(image) => img(image.clone()).size(size).flex_none().into_any_element(),
+            Self::Ui(icon) => icon.render(color, size).into_any_element(),
+        }
+    }
+}
+
+/// An OS icon lookup: running, or done (with no icon when the OS had none).
+#[derive(Debug, Clone)]
+enum Slot {
+    Pending,
+    Ready(Option<Arc<Image>>),
+}
+
+/// Resolves file and folder icons: the Zed icon theme, then the OS, then
+/// Lucide. Held as a GPUI global. OS icons are looked up by type on the
+/// background executor; until one arrives the Lucide icon stands in.
+#[derive(Debug)]
+pub(crate) struct FileIcons {
+    theme: Option<IconTheme>,
+    system: bool,
+    cache: RefCell<HashMap<IconKind, Slot>>,
+    /// Theme SVGs rendered ahead, by path; at most `preload::MAX_PRELOADED`.
+    rendered: RefCell<HashMap<PathBuf, Arc<RenderImage>>>,
+    wanted: RefCell<Vec<IconKind>>,
+    /// Whether a lookup task is running.
+    fetching: Cell<bool>,
+}
+
+impl Global for FileIcons {}
+
+/// OS icons are cached per file type; past this many types, they are not
+/// looked up at all (about 20 KB each).
+const MAX_CACHED_TYPES: usize = 512;
+
+impl FileIcons {
+    /// Builds the resolver for `choice`; a Zed theme that is not installed
+    /// falls back to the OS icons and returns a warning.
+    pub(crate) fn new(choice: &IconThemeChoice, extensions_dir: &Path) -> (Self, Option<String>) {
+        let (theme, system, warning) = match choice {
+            IconThemeChoice::Zed(name) => match IconTheme::load(extensions_dir, name) {
+                Ok(theme) => (Some(theme), true, None),
+                Err(err) => (
+                    None,
+                    true,
+                    Some(format!("{err}; using the system's file icons")),
+                ),
+            },
+            IconThemeChoice::System => (None, true, None),
+            IconThemeChoice::Lucide => (None, false, None),
+        };
+        let icons = Self {
+            theme,
+            system,
+            cache: RefCell::new(HashMap::new()),
+            rendered: RefCell::new(HashMap::new()),
+            wanted: RefCell::new(Vec::new()),
+            fetching: Cell::new(false),
+        };
+        (icons, warning)
+    }
+
+    /// The icon for a file or folder named by the last part of `path`. Call
+    /// [`FileIcons::fetch_wanted`] after a frame that asked for icons.
+    pub(crate) fn icon(&self, path: &Path, is_dir: bool, open: bool) -> FileIcon {
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        let themed = self.theme.as_ref().and_then(|theme| {
+            if is_dir {
+                theme.folder(name, open)
+            } else {
+                theme.file(name)
+            }
+        });
+        if let Some(svg) = themed {
+            return match self.rendered.borrow().get(&svg) {
+                Some(image) => FileIcon::Rendered(image.clone()),
+                None => FileIcon::Svg(svg),
+            };
+        }
+        if self.system
+            && let Some(image) = self.system_icon(icon_kind(path, is_dir))
+        {
+            return FileIcon::Image(image);
+        }
+        FileIcon::Ui(match (is_dir, open) {
+            (true, true) => UiIcon::FolderOpen,
+            (true, false) => UiIcon::Folder,
+            (false, _) => UiIcon::File,
+        })
+    }
+
+    fn system_icon(&self, kind: IconKind) -> Option<Arc<Image>> {
+        let mut cache = self.cache.borrow_mut();
+        match cache.get(&kind) {
+            Some(Slot::Ready(image)) => image.clone(),
+            Some(Slot::Pending) => None,
+            None => {
+                if cache.len() < MAX_CACHED_TYPES {
+                    cache.insert(kind.clone(), Slot::Pending);
+                    self.wanted.borrow_mut().push(kind);
+                }
+                None
+            }
+        }
+    }
+
+    /// Looks up, off the UI thread, every OS icon that frames asked for, and
+    /// repaints when each one arrives.
+    pub(crate) fn fetch_wanted(cx: &mut App) {
+        let icons = cx.global::<Self>();
+        // One lookup task at a time: Apple documents NSImage as usable from
+        // any thread but only from one thread at a time, and says nothing
+        // about NSWorkspace (ADR-0010), so lookups never overlap.
+        if icons.fetching.get() || icons.wanted.borrow().is_empty() {
+            return;
+        }
+        icons.fetching.set(true);
+        let wanted = std::mem::take(&mut *icons.wanted.borrow_mut());
+        cx.spawn(async move |cx| {
+            let found = cx
+                .background_executor()
+                .spawn(async move {
+                    wanted
+                        .into_iter()
+                        .map(|kind| {
+                            let tiff = system::icon_tiff(&kind);
+                            (kind, tiff)
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            cx.update(|cx| {
+                let icons = cx.global::<Self>();
+                let mut cache = icons.cache.borrow_mut();
+                for (kind, tiff) in found {
+                    let image =
+                        tiff.map(|bytes| Arc::new(Image::from_bytes(ImageFormat::Tiff, bytes)));
+                    cache.insert(kind, Slot::Ready(image));
+                }
+                drop(cache);
+                icons.fetching.set(false);
+                cx.refresh_windows();
+            });
+        })
+        .detach();
+    }
+}
+
+fn icon_kind(path: &Path, is_dir: bool) -> IconKind {
+    if is_dir {
+        return IconKind::Folder;
+    }
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map_or(IconKind::Plain, |e| {
+            IconKind::Extension(e.to_ascii_lowercase())
+        })
+}
+
+/// agmen's UI icons, all Lucide (ISC).
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the views of Tasks 7 to 19 in the desktop plan use the rest"
+    )
+)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum UiIcon {
+    Agents,
+    Project,
+    Git,
+    Roles,
+    Search,
+    Terminal,
+    Chat,
+    Bell,
+    Settings,
+    ChevronDown,
+    ChevronRight,
+    ChevronLeft,
+    Sparkle,
+    Diff,
+    Pencil,
+    Close,
+    Check,
+    Plus,
+    Minus,
+    /// Maximize, in the Windows and Linux title bar.
+    Square,
+    /// Restore a maximized window.
+    Copy,
+    Enter,
+    Alert,
+    PanelRight,
+    File,
+    Folder,
+    FolderOpen,
+}
+
+impl UiIcon {
+    #[cfg(test)]
+    pub(crate) const ALL: [Self; 27] = [
+        Self::Agents,
+        Self::Project,
+        Self::Git,
+        Self::Roles,
+        Self::Search,
+        Self::Terminal,
+        Self::Chat,
+        Self::Bell,
+        Self::Settings,
+        Self::ChevronDown,
+        Self::ChevronRight,
+        Self::ChevronLeft,
+        Self::Sparkle,
+        Self::Diff,
+        Self::Pencil,
+        Self::Close,
+        Self::Check,
+        Self::Plus,
+        Self::Minus,
+        Self::Square,
+        Self::Copy,
+        Self::Enter,
+        Self::Alert,
+        Self::PanelRight,
+        Self::File,
+        Self::Folder,
+        Self::FolderOpen,
+    ];
+
+    /// The asset path, under `assets/`.
+    pub(crate) const fn path(self) -> &'static str {
+        match self {
+            Self::Agents => "icons/lucide/users.svg",
+            Self::Project => "icons/lucide/folder-tree.svg",
+            Self::Git => "icons/lucide/git-branch.svg",
+            Self::Roles => "icons/lucide/user.svg",
+            Self::Search => "icons/lucide/search.svg",
+            Self::Terminal => "icons/lucide/square-terminal.svg",
+            Self::Chat => "icons/lucide/messages-square.svg",
+            Self::Bell => "icons/lucide/bell.svg",
+            Self::Settings => "icons/lucide/settings.svg",
+            Self::ChevronDown => "icons/lucide/chevron-down.svg",
+            Self::ChevronRight => "icons/lucide/chevron-right.svg",
+            Self::ChevronLeft => "icons/lucide/chevron-left.svg",
+            Self::Sparkle => "icons/lucide/sparkle.svg",
+            Self::Diff => "icons/lucide/diff.svg",
+            Self::Pencil => "icons/lucide/pencil.svg",
+            Self::Close => "icons/lucide/x.svg",
+            Self::Check => "icons/lucide/check.svg",
+            Self::Plus => "icons/lucide/plus.svg",
+            Self::Minus => "icons/lucide/minus.svg",
+            Self::Square => "icons/lucide/square.svg",
+            Self::Copy => "icons/lucide/copy.svg",
+            Self::Enter => "icons/lucide/corner-down-left.svg",
+            Self::Alert => "icons/lucide/circle-alert.svg",
+            Self::PanelRight => "icons/lucide/panel-right.svg",
+            Self::File => "icons/lucide/file.svg",
+            Self::Folder => "icons/lucide/folder.svg",
+            Self::FolderOpen => "icons/lucide/folder-open.svg",
+        }
+    }
+
+    /// The icon tinted `color` at `size` square.
+    pub(crate) fn render(self, color: Hsla, size: Pixels) -> Svg {
+        svg()
+            .path(self.path())
+            .size(size)
+            .flex_none()
+            .text_color(color)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use gpui::TestAppContext;
+
+    use super::*;
+
+    #[test]
+    fn every_ui_icon_asset_exists() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets");
+        // A new variant must be added to ALL: this match stops compiling otherwise.
+        for icon in UiIcon::ALL {
+            match icon {
+                UiIcon::Agents
+                | UiIcon::Project
+                | UiIcon::Git
+                | UiIcon::Roles
+                | UiIcon::Search
+                | UiIcon::Terminal
+                | UiIcon::Chat
+                | UiIcon::Bell
+                | UiIcon::Settings
+                | UiIcon::ChevronDown
+                | UiIcon::ChevronRight
+                | UiIcon::ChevronLeft
+                | UiIcon::Sparkle
+                | UiIcon::Diff
+                | UiIcon::Pencil
+                | UiIcon::Close
+                | UiIcon::Check
+                | UiIcon::Plus
+                | UiIcon::Minus
+                | UiIcon::Square
+                | UiIcon::Copy
+                | UiIcon::Enter
+                | UiIcon::Alert
+                | UiIcon::PanelRight
+                | UiIcon::File
+                | UiIcon::Folder
+                | UiIcon::FolderOpen => {}
+            }
+            assert!(root.join(icon.path()).is_file(), "{}", icon.path());
+            assert!(
+                crate::assets::Assets::get(icon.path()).is_some(),
+                "{}",
+                icon.path()
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn os_icons_arrive_in_the_background(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let (icons, _) = FileIcons::new(&IconThemeChoice::System, Path::new(""));
+            cx.set_global(icons);
+        });
+        let first = cx.read(|cx| {
+            cx.global::<FileIcons>()
+                .icon(Path::new("a.rs"), false, false)
+        });
+        assert!(matches!(first, FileIcon::Ui(UiIcon::File)), "{first:?}");
+        cx.update(FileIcons::fetch_wanted);
+        cx.run_until_parked();
+        let later = cx.read(|cx| {
+            cx.global::<FileIcons>()
+                .icon(Path::new("b.rs"), false, false)
+        });
+        if cfg!(target_os = "macos") {
+            assert!(matches!(later, FileIcon::Image(_)), "{later:?}");
+        }
+    }
+
+    #[test]
+    fn folders_and_files_get_their_kind() {
+        assert_eq!(icon_kind(Path::new("src"), true), IconKind::Folder);
+        assert_eq!(
+            icon_kind(Path::new("x/Main.RS"), false),
+            IconKind::Extension("rs".into())
+        );
+        assert_eq!(icon_kind(Path::new("Makefile"), false), IconKind::Plain);
+    }
+}

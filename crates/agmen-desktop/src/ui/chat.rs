@@ -1,0 +1,465 @@
+//! The chat pane (frame "Desktop · chat", stream node 137 and composer node
+//! 374): the project chat as a virtualized list of message rows above the
+//! composer. Rows wrap, so the list measures each one. Change cards sit
+//! under the listener message they belong to, and ledger presence lines
+//! (HELLO, BYE, ROLLCALL, HEARTBEAT) hide until "Show ledger".
+
+use std::collections::BTreeSet;
+use std::rc::Rc;
+
+use agmen_proto::{MessageId, Seq, StampedEnvelope, Stream};
+use futures::StreamExt as _;
+use gpui::prelude::FluentBuilder as _;
+use gpui::{
+    AnyElement, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
+    InteractiveElement as _, IntoElement, ListAlignment, ListOffset, ListState, ParentElement as _,
+    Render, SharedString, StyleRefinement, Styled as _, Task, WeakEntity, Window, div, list, px,
+};
+use jiff::tz::TimeZone;
+
+use super::chat_context::ChatContext;
+use super::components::{Color, Label, LabelSize};
+use super::composer::Composer;
+use super::message::{MessageRow, is_presence};
+use super::ref_chip::RefEvent;
+use super::tokens::{LIST_OVERDRAW, SPACE_2, SPACE_6, SPACE_10, SPACE_12, SPACE_14};
+use crate::alerts::AlertState;
+use crate::backend::{Action, BackendError, BackendHandle, Draft, Snapshot, Update};
+use crate::local_time::LocalZone;
+
+// Task 13: the banner, toast, chime and notification for alerts.
+#[path = "chat_alerts.rs"]
+mod alert_wiring;
+use super::needs_you::{AlertLook, Signals};
+pub(crate) use alert_wiring::AlertCounts;
+
+// Task 14: the take-over terminal between the messages and the composer.
+#[path = "chat_take_over.rs"]
+mod take_over;
+use take_over::TakeOverSlot;
+pub(crate) use take_over::TerminalPopup;
+
+/// The indices of the messages the chat draws, oldest first.
+#[must_use]
+fn visible_rows(messages: &[StampedEnvelope], show_ledger: bool) -> Vec<usize> {
+    messages
+        .iter()
+        .enumerate()
+        .filter(|(_, env)| show_ledger || !is_presence(env))
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// The message list. It is a view of its own, drawn cached, so a keystroke
+/// in the composer (which redraws the chat around it) reuses the rows from
+/// the last frame; it redraws only when the chat notifies it with new rows
+/// or the list notifies it on a scroll.
+pub(crate) struct ChatStream {
+    context: Rc<ChatContext>,
+    /// Indices into the snapshot's messages of the drawn rows, oldest first.
+    rows: Vec<usize>,
+    list: ListState,
+    /// Where chips and change card buttons report.
+    chat: WeakEntity<ChatView>,
+    /// Task 13: how alert rows draw, by message index.
+    looks: Rc<std::collections::BTreeMap<usize, AlertLook>>,
+}
+
+impl std::fmt::Debug for ChatStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChatStream")
+            .field("rows", &self.rows.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl ChatStream {
+    /// Shows `rows` of `context`'s snapshot. When the old rows lead the new
+    /// ones, the list keeps its measurements and scroll position.
+    fn set_rows(&mut self, context: Rc<ChatContext>, rows: Vec<usize>, cx: &mut Context<Self>) {
+        self.context = context;
+        let old = std::mem::replace(&mut self.rows, rows);
+        if self.rows.starts_with(&old) {
+            self.list
+                .splice(old.len()..old.len(), self.rows.len() - old.len());
+            // A card's state may have changed its row's height.
+            self.list.remeasure();
+        } else {
+            self.list.reset(self.rows.len());
+        }
+        cx.notify();
+    }
+
+    /// Shows `rows`, keeping the message at the top of the view where it
+    /// was. A view that followed the newest message keeps following it.
+    fn set_rows_keeping_top(&mut self, rows: Vec<usize>, cx: &mut Context<Self>) {
+        let top = self.list.logical_scroll_top();
+        let top_message = self.rows.get(top.item_ix).copied();
+        self.rows = rows;
+        self.list.reset(self.rows.len());
+        if let Some(message) = top_message {
+            // The first row at or after the old top: the same message, or the
+            // one after a presence line that just hid.
+            let item_ix = self.rows.partition_point(|&row| row < message);
+            let same = self.rows.get(item_ix) == Some(&message);
+            self.list.scroll_to(ListOffset {
+                item_ix,
+                offset_in_item: if same { top.offset_in_item } else { px(0.) },
+            });
+        }
+        cx.notify();
+    }
+
+    fn render_row(&self, ix: usize) -> AnyElement {
+        let Some(&index) = self.rows.get(ix) else {
+            return div().into_any_element();
+        };
+        let (on_ref, on_action, on_answer) =
+            (self.chat.clone(), self.chat.clone(), self.chat.clone());
+        let on_reply = self.chat.clone();
+        let row = MessageRow::new(index, self.context.clone())
+            .when_some(self.looks.get(&index).copied(), MessageRow::alert)
+            .on_reply(move |index, window, cx| {
+                // A row outlives its chat only while the window closes.
+                on_reply
+                    .update(cx, |chat, cx| chat.reply(index, window, cx))
+                    .unwrap_or_default();
+            })
+            .on_ref(move |event, _, cx| {
+                // A chip outlives its chat only while the window closes.
+                on_ref
+                    .update(cx, |_, cx| cx.emit(event))
+                    .unwrap_or_default();
+            })
+            .on_action(move |action, _, cx| {
+                on_action
+                    .update(cx, |chat, cx| chat.act(action, cx))
+                    .unwrap_or_default();
+            })
+            // Task 15: an ASK card's answer.
+            .on_answer(move |draft, _, cx| {
+                on_answer
+                    .update(cx, |chat, cx| {
+                        // A refusal shows above the composer; `send` puts it there.
+                        let _shown = chat.send(draft, cx);
+                    })
+                    .unwrap_or_default();
+            });
+        // The stream's side padding (node 137) sits on each row: a list lays
+        // its items out at its left edge whatever its padding.
+        div()
+            .px(SPACE_12)
+            .when(ix > 0, |this| this.pt(SPACE_2))
+            .child(row)
+            .into_any_element()
+    }
+}
+
+impl Render for ChatStream {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        list(
+            self.list.clone(),
+            cx.processor(|this, ix, _, _| this.render_row(ix)),
+        )
+        .size_full()
+        .pt(SPACE_10)
+        .pb(SPACE_6)
+    }
+}
+
+/// The chat. It hears the backend's updates, so what the person sends
+/// and the cards they apply show up here. Reference chips are passed on
+/// as [`RefEvent`]s for the center to open. Tests find a refusal from the
+/// backend as `"chat:error"`.
+pub(crate) struct ChatView {
+    snapshot: Rc<Snapshot>,
+    stream: Entity<ChatStream>,
+    show_ledger: bool,
+    alerts: AlertState,
+    /// Task 13: the banner, toast and snooze state beside `alerts`.
+    alert_ui: alert_wiring::ChatAlerts,
+    composer: Entity<Composer>,
+    /// Why the last send or action failed, until the next one succeeds.
+    error: Option<SharedString>,
+    zone: TimeZone,
+    take_over: TakeOverSlot,
+    _updates: Option<Task<()>>,
+}
+
+impl std::fmt::Debug for ChatView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChatView")
+            .field("show_ledger", &self.show_ledger)
+            .field("error", &self.error)
+            .finish_non_exhaustive()
+    }
+}
+
+impl EventEmitter<RefEvent> for ChatView {}
+
+impl ChatView {
+    /// The chat over `snapshot`, sending and acting through the
+    /// [`BackendHandle`] global when there is one.
+    pub(crate) fn new(snapshot: Rc<Snapshot>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let zone = cx
+            .try_global::<LocalZone>()
+            .map_or(TimeZone::UTC, |local| local.0.clone());
+        let chat = cx.entity().downgrade();
+        let composer = cx.new(|cx| {
+            Composer::new(
+                &snapshot,
+                move |draft, _, cx| {
+                    chat.update(cx, |chat, cx| chat.send(draft, cx))
+                        // The chat closes with its window before its
+                        // composer; a draft sent in between is refused.
+                        .unwrap_or(Err(BackendError::Unsupported(
+                            "sending after the chat closed",
+                        )))
+                },
+                window,
+                cx,
+            )
+        });
+        let updates = cx
+            .try_global::<BackendHandle>()
+            .map(|backend| backend.0.subscribe());
+        // The loop ends when the backend drops its sender or the chat closes.
+        let updates = updates.map(|mut updates| {
+            cx.spawn(async move |chat, cx| {
+                while let Some(update) = updates.next().await {
+                    if chat.update(cx, |chat, cx| chat.apply(update, cx)).is_err() {
+                        break;
+                    }
+                }
+            })
+        });
+        let rows = visible_rows(&snapshot.messages, false);
+        let (alerts, alert_ui) = alert_wiring::replay(&snapshot);
+        let looks = Rc::new(super::needs_you::alert_looks(&alerts, &snapshot.messages));
+        let context = Rc::new(ChatContext::new(snapshot.clone()).with_zone(zone.clone()));
+        let chat = cx.entity().downgrade();
+        let stream = cx.new(|_| ChatStream {
+            context,
+            list: ListState::new(rows.len(), ListAlignment::Bottom, LIST_OVERDRAW),
+            rows,
+            chat,
+            looks,
+        });
+        let mut chat = Self {
+            snapshot,
+            stream,
+            show_ledger: false,
+            alerts,
+            alert_ui,
+            composer,
+            error: None,
+            zone,
+            take_over: TakeOverSlot::default(),
+            _updates: updates,
+        };
+        chat.sync_take_over(cx);
+        chat
+    }
+
+    /// How many messages the chat holds.
+    #[cfg(test)]
+    pub(crate) fn message_count(&self) -> usize {
+        self.snapshot.messages.len()
+    }
+
+    /// Opens the composer's model picker (Task 15).
+    pub(crate) fn open_model_picker(&mut self, cx: &mut Context<Self>) {
+        self.composer
+            .update(cx, |composer, cx| composer.open_model_picker(cx));
+    }
+
+    /// The chat tab's red count: urgent alerts that need me (Task 13).
+    pub(crate) fn badge(&self) -> usize {
+        self.alerts.badge()
+    }
+
+    /// Whether the presence lines show; the breadcrumb's "Show ledger".
+    pub(crate) const fn show_ledger(&self) -> bool {
+        self.show_ledger
+    }
+
+    /// Shows or hides the presence lines, keeping the message at the top of
+    /// the view where it was. A view that followed the newest message keeps
+    /// following it.
+    pub(crate) fn set_show_ledger(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.show_ledger == on {
+            return;
+        }
+        self.show_ledger = on;
+        let rows = visible_rows(&self.snapshot.messages, on);
+        self.stream
+            .update(cx, |stream, cx| stream.set_rows_keeping_top(rows, cx));
+        cx.notify();
+    }
+
+    /// Sends `draft` through the backend; a refusal shows above the
+    /// composer until the next send or action succeeds.
+    ///
+    /// # Errors
+    ///
+    /// When the backend refuses the draft, or there is no backend.
+    pub(crate) fn send(
+        &mut self,
+        draft: Draft,
+        cx: &mut Context<Self>,
+    ) -> Result<(), BackendError> {
+        let result = BackendHandle::send(draft, cx);
+        self.error = result.as_ref().err().map(|err| err.to_string().into());
+        if result.is_ok() {
+            self.show_newest(cx);
+        }
+        cx.notify();
+        result
+    }
+
+    /// The person wants to see what they sent, wherever they had scrolled.
+    fn show_newest(&self, cx: &mut Context<Self>) {
+        self.stream.update(cx, |stream, cx| {
+            stream.list.scroll_to_end();
+            cx.notify();
+        });
+    }
+
+    /// Why the backend refused the last send or action, shown above the
+    /// composer.
+    #[cfg(test)]
+    pub(crate) fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
+    /// Task 18: asks for a worker on `agent` and shows the exchange it
+    /// starts; a refusal shows above the composer.
+    pub(crate) fn spawn_worker(&mut self, agent: &str, cx: &mut Context<Self>) {
+        self.act(
+            Action::SpawnWorker {
+                agent: agent.to_owned(),
+            },
+            cx,
+        );
+        if self.error.is_none() {
+            self.show_newest(cx);
+        }
+    }
+
+    /// Does `action` through the backend, such as a change card's Apply.
+    fn act(&mut self, action: Action, cx: &mut Context<Self>) {
+        // Task 13: Snooze is also the person's own view of the alert.
+        let snooze = match &action {
+            Action::SnoozeAlert(alert) => Some(alert.clone()),
+            _ => None,
+        };
+        let result = match cx.try_global::<BackendHandle>() {
+            Some(backend) => backend.0.act(action),
+            None => Err(BackendError::Unsupported("acting without a backend")),
+        };
+        if let (Some(alert), true) = (snooze, result.is_ok()) {
+            self.snooze(alert, cx);
+        }
+        self.error = result.err().map(|err| err.to_string().into());
+        cx.notify();
+    }
+
+    pub(super) fn apply(&mut self, update: Update, cx: &mut Context<Self>) {
+        // Task 13: what live messages ask of the window, signalled once the
+        // chat has them.
+        let mut signals = Vec::new();
+        let snapshot = match update {
+            Update::Message(env) => {
+                let earlier = self.snapshot.clone();
+                signals.push(self.hear(&env, &earlier.messages));
+                // shortcut: each message clones the snapshot and rebuilds the
+                // context, O(messages); keep messages in a persistent list if
+                // long chats lag.
+                let mut snapshot = (*self.snapshot).clone();
+                snapshot.messages.push(*env);
+                snapshot
+            }
+            Update::Snapshot(snapshot) => {
+                // Only messages the chat has not seen update the alerts, so
+                // an alert the person snoozed or cleared stays that way.
+                let old = self.snapshot.clone();
+                let seen: BTreeSet<(&Stream, Seq, &MessageId)> =
+                    old.messages.iter().map(position).collect();
+                let missed = snapshot
+                    .messages
+                    .iter()
+                    .filter(|env| !seen.contains(&position(env)))
+                    .map(|env| self.hear(env, &snapshot.messages));
+                signals.push(Signals::catch_up(missed));
+                // Task 15: the model chip follows the new agents and listener.
+                self.composer
+                    .update(cx, |composer, cx| composer.set_snapshot(&snapshot, cx));
+                *snapshot
+            }
+        };
+        self.snapshot = Rc::new(snapshot);
+        let context = Rc::new(ChatContext::new(self.snapshot.clone()).with_zone(self.zone.clone()));
+        let rows = visible_rows(&self.snapshot.messages, self.show_ledger);
+        self.stream
+            .update(cx, |stream, cx| stream.set_rows(context, rows, cx));
+        self.refresh_alerts(cx);
+        for signal in &signals {
+            self.signal(signal, cx);
+        }
+        self.sync_take_over(cx);
+        cx.notify();
+    }
+}
+
+/// Where the hub put `env`, with its client id: a client id alone is
+/// unique per sender only.
+fn position(env: &StampedEnvelope) -> (&Stream, Seq, &MessageId) {
+    (&env.stream, env.seq, &env.client.id)
+}
+
+impl Focusable for ChatView {
+    fn focus_handle(&self, cx: &gpui::App) -> FocusHandle {
+        self.composer.focus_handle(cx)
+    }
+}
+
+impl Render for ChatView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .debug_selector(|| "chat".into())
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            // Task 13: the needs-you or answered banner (node 5704).
+            .children(self.banner_element(cx))
+            .child(
+                self.stream
+                    .clone()
+                    .cached(StyleRefinement::default().flex_1().min_h_0()),
+            )
+            .children(self.shown_terminal())
+            .when_some(self.error.clone(), |this, error| {
+                this.child(refusal("chat:error", error))
+            })
+            .child(self.composer.clone())
+    }
+}
+
+/// Why the backend refused a send or an action, above a composer; tests
+/// find it as `selector`.
+pub(super) fn refusal(selector: &'static str, error: SharedString) -> impl IntoElement {
+    div()
+        .debug_selector(|| selector.into())
+        .px(SPACE_14)
+        .child(Label::new(error).size(LabelSize::Small).color(Color::Error))
+}
+
+#[cfg(test)]
+#[path = "chat_tests.rs"]
+mod tests;
+
+#[cfg(test)]
+#[path = "chat_alert_tests.rs"]
+mod alert_tests;
