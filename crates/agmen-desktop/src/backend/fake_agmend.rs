@@ -114,6 +114,9 @@ pub(crate) struct FakeState {
     /// What a watch hears first.
     pub(crate) opening: Vec<ConsoleEvent>,
     pub(crate) post_error: Option<String>,
+    /// How long each `console_snapshot` waits before it answers, as a
+    /// slow hub makes agmend wait.
+    pub(crate) snapshot_delay: Duration,
     pub(crate) posts: Vec<Request>,
     pub(crate) snapshots_served: usize,
     /// Each watch's connection and its request id.
@@ -227,6 +230,8 @@ fn serve(mut stream: UnixStream, state: &Mutex<FakeState>) {
             "hello" => Response::ok(id, json!({"api": 1})),
             "whoami" => Response::ok(id, json!({"id": "idandy00", "handle": "andy"})),
             "console_snapshot" => {
+                let delay = state.lock().unwrap().snapshot_delay;
+                std::thread::sleep(delay);
                 let shared = state;
                 let mut state = shared.lock().unwrap();
                 state.snapshots_served += 1;

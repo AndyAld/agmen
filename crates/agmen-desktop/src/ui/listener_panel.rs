@@ -9,10 +9,14 @@ use super::components::{Button, Color, EmptyState, KvRow, KvSection};
 use super::dock::RightDockHeader;
 use super::format::{listener_tokens, money, money_of, workers_today};
 use super::tokens::{SPACE_14, SPACE_16};
-use crate::backend::{ListenerInfo, RecentKind};
+use crate::backend::{ListenerDetails, ListenerInfo, RecentKind};
 
 /// What the panel says when the person has no listener in the project.
 pub(crate) const NO_LISTENER: &str = "No listener for this project";
+
+/// What it says while agmend reports the listener but not its policy or
+/// spend (Task 7 review).
+pub(crate) const NO_DETAILS: &str = "No policy or spend from agmend yet";
 
 /// Tests find it as `listener-panel`, and its empty state as
 /// `listener-panel:none`.
@@ -40,59 +44,81 @@ impl RenderOnce for ListenerPanel {
                 .child(EmptyState::new("listener-panel:none", NO_LISTENER))
                 .into_any_element();
         };
-        let runs = KvSection::new("Runs")
-            .row(KvRow::new("Harness", i.harness_label))
-            .row(KvRow::new("Role", i.role_label))
-            .row(KvRow::new("Can use", i.can_use.join(" ")).color(Color::Success))
-            .row(KvRow::new("Never", i.never.join(" ")).color(Color::Error));
-        let policy = KvSection::new("Policy")
-            .row(KvRow::new("Takes work from", i.takes_work_from))
-            .row(KvRow::new("Per worker", money(i.per_worker_usd)))
-            .row(KvRow::new(
-                "Workers today",
-                workers_today(
-                    i.workers_today_usd,
-                    i.workers_cap_usd,
-                    i.workers_running,
-                    i.workers_max,
-                ),
-            ))
-            .row(KvRow::new(
-                "Listener today",
-                money_of(i.listener_today_usd, i.listener_cap_usd),
-            ))
-            .row(KvRow::new(
-                "Listener tokens",
-                listener_tokens(i.tokens_in, i.tokens_out, i.uptime_minutes),
-            ));
-        let recent = i
-            .recent
-            .into_iter()
-            .fold(KvSection::new("Recent"), |section, action| {
-                let color = recent_color(action.kind);
-                section.row(KvRow::new(action.time, action.text).color(color))
-            });
+        let Some(d) = i.details else {
+            // Review fix 3: the handle, agent and state agmend reports,
+            // and no figures it has no source for.
+            return div()
+                .debug_selector(|| "listener-panel".into())
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(RightDockHeader::new("Listener", i.handle))
+                .child(
+                    div().w_full().p(SPACE_14).child(
+                        KvSection::new("Runs")
+                            .row(KvRow::new("Agent", i.agent))
+                            .row(KvRow::new("State", i.state)),
+                    ),
+                )
+                .child(EmptyState::new("listener-panel:no-details", NO_DETAILS))
+                .into_any_element();
+        };
         div()
             .debug_selector(|| "listener-panel".into())
             .size_full()
             .flex()
             .flex_col()
             .child(RightDockHeader::new("Listener", i.handle))
-            .child(
-                div()
-                    .w_full()
-                    .flex()
-                    .flex_col()
-                    .items_start()
-                    .gap(SPACE_16)
-                    .p(SPACE_14)
-                    .child(runs)
-                    .child(policy)
-                    .child(recent)
-                    .child(Button::new("change-listener", "Change listener…")),
-            )
+            .child(details(d))
             .into_any_element()
     }
+}
+
+/// The Runs, Policy and Recent sections, and the Change listener button.
+fn details(d: ListenerDetails) -> impl IntoElement {
+    let runs = KvSection::new("Runs")
+        .row(KvRow::new("Harness", d.harness_label))
+        .row(KvRow::new("Role", d.role_label))
+        .row(KvRow::new("Can use", d.can_use.join(" ")).color(Color::Success))
+        .row(KvRow::new("Never", d.never.join(" ")).color(Color::Error));
+    let policy = KvSection::new("Policy")
+        .row(KvRow::new("Takes work from", d.takes_work_from))
+        .row(KvRow::new("Per worker", money(d.per_worker_usd)))
+        .row(KvRow::new(
+            "Workers today",
+            workers_today(
+                d.workers_today_usd,
+                d.workers_cap_usd,
+                d.workers_running,
+                d.workers_max,
+            ),
+        ))
+        .row(KvRow::new(
+            "Listener today",
+            money_of(d.listener_today_usd, d.listener_cap_usd),
+        ))
+        .row(KvRow::new(
+            "Listener tokens",
+            listener_tokens(d.tokens_in, d.tokens_out, d.uptime_minutes),
+        ));
+    let recent = d
+        .recent
+        .into_iter()
+        .fold(KvSection::new("Recent"), |section, action| {
+            let color = recent_color(action.kind);
+            section.row(KvRow::new(action.time, action.text).color(color))
+        });
+    div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .items_start()
+        .gap(SPACE_16)
+        .p(SPACE_14)
+        .child(runs)
+        .child(policy)
+        .child(recent)
+        .child(Button::new("change-listener", "Change listener…"))
 }
 
 /// A Recent row's text color (console.py 1504 to 1511).
@@ -141,6 +167,35 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_live_listener_shows_no_dollar_figures(cx: &mut TestAppContext) {
+        // Review fix 3: agmend reports the listener's handle, agent and
+        // state, not its policy or spend, so the panel shows no $0.00
+        // that reads as a measured cap.
+        let listener = crate::backend::live_snapshot().listener;
+        assert!(listener.as_ref().is_some_and(|l| l.details.is_none()));
+        let cx = draw(cx, move || {
+            div()
+                .w(crate::ui::tokens::RIGHT_DOCK_WIDTH)
+                .child(ListenerPanel::new(listener.clone()))
+                .into_any_element()
+        });
+        assert!(cx.debug_bounds("listener-panel:no-details").is_some());
+        assert!(cx.debug_bounds("kv-label:Agent:0").is_some());
+        assert!(cx.debug_bounds("kv-label:State:1").is_some());
+        for label in [
+            "Per worker:1",
+            "Workers today:2",
+            "Listener today:3",
+            "Harness:0",
+        ] {
+            let selector: &'static str = Box::leak(format!("kv-label:{label}").into_boxed_str());
+            assert!(cx.debug_bounds(selector).is_none(), "{label}");
+        }
+        // Not wired yet, so not offered.
+        assert!(cx.debug_bounds("change-listener").is_none());
+    }
+
+    #[gpui::test]
     fn a_listener_shows_its_rows_and_no_empty_state(cx: &mut TestAppContext) {
         // The other side of `empty_listener_panel_says_none`'s selectors.
         let cx = draw(cx, || {
@@ -151,6 +206,9 @@ mod tests {
         });
         assert!(cx.debug_bounds("kv-label:Harness:0").is_some());
         assert!(cx.debug_bounds("listener-panel:none").is_none());
+        assert!(cx.debug_bounds("kv-label:Per worker:1").is_some());
+        assert!(cx.debug_bounds("change-listener").is_some());
+        assert!(cx.debug_bounds("listener-panel:no-details").is_none());
     }
 
     #[gpui::test]

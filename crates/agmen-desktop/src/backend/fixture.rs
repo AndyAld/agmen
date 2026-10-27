@@ -49,7 +49,10 @@ fn base(project: &str) -> Result<Snapshot, BackendError> {
     let roster = roster()?;
     let roles = role_files(&roster);
     let listener = listener()?;
-    let spend = listener.workers_today_usd + listener.listener_today_usd;
+    let spend = listener
+        .details
+        .as_ref()
+        .map_or(0.0, |d| d.workers_today_usd + d.listener_today_usd);
     Ok(Snapshot {
         project: project.into(),
         me: "andy".into(),
@@ -133,8 +136,8 @@ impl FixtureBackend {
                         RecentKind::Waiting,
                     )
                 };
-                if let Some(listener) = s.listener.as_mut() {
-                    listener.recent.insert(0, row);
+                if let Some(details) = s.listener.as_mut().and_then(|l| l.details.as_mut()) {
+                    details.recent.insert(0, row);
                 }
                 s
             }
@@ -419,7 +422,7 @@ fn ask_snapshot(screen: Screen) -> Result<Snapshot, BackendError> {
     let mut s = with_messages("pr-3331", msgs)?;
     if screen == Screen::Ask {
         // Mockup fix 36: the answer's $0.31 shows in the listener's spend.
-        if let Some(listener) = s.listener.as_mut() {
+        if let Some(listener) = s.listener.as_mut().and_then(|l| l.details.as_mut()) {
             listener.listener_today_usd = 0.73;
             listener.recent.insert(
                 0,

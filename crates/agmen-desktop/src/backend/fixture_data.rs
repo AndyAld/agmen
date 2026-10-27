@@ -19,9 +19,9 @@ use crate::roles;
 use super::{
     AgentInfo, AgentRow, AgentSession, AgentStatus, Approval, BackendError, ChangeCard, ChangeId,
     ChangeKind, ChangeRow, ChangeState, CommitInfo, DiffLine, DiffLineKind, FileChange, FileText,
-    GitFacts, GutterMark, Hunk, LaneInfo, ListenerInfo, PersonGroup, PlanInfo, RecentAction,
-    RecentKind, RoleFile, RoleInfo, RoleLayer, SessionRow, SpecState, TeamRow, Tone, WorktreeHead,
-    WorktreeInfo, WorktreeState,
+    GitFacts, GutterMark, Hunk, LaneInfo, ListenerDetails, ListenerInfo, PersonGroup, PlanInfo,
+    RecentAction, RecentKind, RoleFile, RoleInfo, RoleLayer, SessionRow, SpecState, TeamRow, Tone,
+    WorktreeHead, WorktreeInfo, WorktreeState,
 };
 
 use crate::roles::words;
@@ -99,39 +99,41 @@ pub(super) fn listener() -> Result<ListenerInfo, BackendError> {
         handle: "andy/listen".into(),
         agent: "codex".into(),
         state: "idle".into(),
-        harness_label: "Codex 0.164.0 over ACP".into(),
-        role_label: "Listener (built-in)".into(),
-        can_use: words("Read Grep Glob git_log git_show git_diff git_status"),
-        never: words("Edit Write Bash"),
-        takes_work_from: "andy, coordinators".into(),
-        per_worker_usd: 5.00,
-        // Mockup fix 36: workers plus listener is the status bar's $14.20.
-        workers_today_usd: 13.78,
-        workers_cap_usd: 20.00,
-        workers_running: 3,
-        workers_max: 4,
-        listener_today_usd: 0.42,
-        listener_cap_usd: 2.00,
-        tokens_in: 96_000,
-        tokens_out: 8_000,
-        uptime_minutes: 400,
-        recent: vec![
-            recent(
-                "15:31",
-                "delegated andy/fx1 · Engineer · claude",
-                RecentKind::Delegated,
-            ),
-            recent(
-                "14:06",
-                "delegated andy/t7k · Tester · opencode",
-                RecentKind::Delegated,
-            ),
-            recent(
-                "13:52",
-                "answered: is C012 merged? (git_log)",
-                RecentKind::Answered,
-            ),
-        ],
+        details: Some(ListenerDetails {
+            harness_label: "Codex 0.164.0 over ACP".into(),
+            role_label: "Listener (built-in)".into(),
+            can_use: words("Read Grep Glob git_log git_show git_diff git_status"),
+            never: words("Edit Write Bash"),
+            takes_work_from: "andy, coordinators".into(),
+            per_worker_usd: 5.00,
+            // Mockup fix 36: workers plus listener is the status bar's $14.20.
+            workers_today_usd: 13.78,
+            workers_cap_usd: 20.00,
+            workers_running: 3,
+            workers_max: 4,
+            listener_today_usd: 0.42,
+            listener_cap_usd: 2.00,
+            tokens_in: 96_000,
+            tokens_out: 8_000,
+            uptime_minutes: 400,
+            recent: vec![
+                recent(
+                    "15:31",
+                    "delegated andy/fx1 · Engineer · claude",
+                    RecentKind::Delegated,
+                ),
+                recent(
+                    "14:06",
+                    "delegated andy/t7k · Tester · opencode",
+                    RecentKind::Delegated,
+                ),
+                recent(
+                    "13:52",
+                    "answered: is C012 merged? (git_log)",
+                    RecentKind::Answered,
+                ),
+            ],
+        }),
     })
 }
 

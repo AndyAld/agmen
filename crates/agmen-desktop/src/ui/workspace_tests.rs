@@ -423,3 +423,41 @@ fn live_panels_without_data_say_so(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("agent-panel:none").is_some());
     assert!(cx.debug_bounds("listener-panel").is_none());
 }
+
+/// The id of the live roster's agent with `handle`.
+fn live_agent(snapshot: &Snapshot, handle: &str) -> IdentityId {
+    snapshot
+        .roster
+        .iter()
+        .flat_map(|g| &g.agents)
+        .find(|a| a.handle == handle)
+        .map(|a| a.id.clone())
+        .unwrap_or_else(|| panic!("the fake roster has {handle}"))
+}
+
+#[gpui::test]
+fn selecting_the_live_listener_shows_the_listener_panel(cx: &mut TestAppContext) {
+    // The listener has no Agent panel of its own, live or not.
+    let snapshot = crate::backend::live_snapshot();
+    let listener = live_agent(&snapshot, "andy/listen");
+    let (workspace, cx) = open_live(cx, snapshot);
+    workspace.update(cx, |w, cx| w.select_agent(&listener, cx));
+    redraw(cx);
+    assert!(cx.debug_bounds("listener-panel").is_some());
+    assert!(cx.debug_bounds("agent-panel:none").is_none());
+    workspace.read_with(cx, |w, _| assert!(w.selected_agent.is_none()));
+}
+
+#[gpui::test]
+fn selecting_another_persons_live_agent_shows_the_listener_panel(cx: &mut TestAppContext) {
+    // Another person's agent never runs here, so "No local agents" is not
+    // about it.
+    let snapshot = crate::backend::live_snapshot();
+    let theirs = live_agent(&snapshot, "sean/plan");
+    let (workspace, cx) = open_live(cx, snapshot);
+    workspace.update(cx, |w, cx| w.select_agent(&theirs, cx));
+    redraw(cx);
+    assert!(cx.debug_bounds("listener-panel").is_some());
+    assert!(cx.debug_bounds("agent-panel:none").is_none());
+    workspace.read_with(cx, |w, _| assert!(w.selected_agent.is_none()));
+}

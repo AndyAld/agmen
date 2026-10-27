@@ -62,12 +62,8 @@ fn live_without_agmend_says_so(cx: &mut TestAppContext) {
         settings: Some(settings.clone()),
     };
     let (root, cx) = open(cx, launch);
-    root.read_with(cx, |root, _| {
-        assert!(
-            matches!(root.state(), LiveState::AgmendDown),
-            "{:?}",
-            root.state()
-        );
+    wait_until(cx, |cx| {
+        root.read_with(cx, |root, _| matches!(root.state(), LiveState::AgmendDown))
     });
     assert!(cx.debug_bounds("live:agmend-down").is_some());
     assert!(cx.debug_bounds("live:command").is_some());
@@ -89,12 +85,8 @@ fn live_without_agmend_says_so(cx: &mut TestAppContext) {
     // agmend starts; Retry opens the project's chat and remembers it.
     fake.restart();
     click(cx, "live:retry");
-    root.read_with(cx, |root, _| {
-        assert!(
-            matches!(root.state(), LiveState::Open(_)),
-            "{:?}",
-            root.state()
-        );
+    wait_until(cx, |cx| {
+        root.read_with(cx, |root, _| matches!(root.state(), LiveState::Open(_)))
     });
     assert!(cx.debug_bounds("chat").is_some());
     assert!(cx.debug_bounds("live:agmend-down").is_none());
@@ -167,4 +159,35 @@ fn status_bar_shows_reconnecting(cx: &mut TestAppContext) {
     wait_until(cx, |cx| {
         link_text(&root, cx).as_deref() == Some("offline: can't reach agmend")
     });
+}
+
+#[gpui::test]
+fn the_window_draws_while_agmend_is_slow(cx: &mut TestAppContext) {
+    // Review fix 2: the connect runs off the main thread, so the window
+    // shows that it is connecting before agmend answers, then goes live.
+    let fake = FakeAgmend::start(console(vec![message(1)]));
+    fake.edit(|s| s.snapshot_delay = Duration::from_millis(300));
+    let launch = LiveLaunch {
+        socket: fake.path(),
+        project: ProjectChoice::Project(project()),
+        settings: None,
+    };
+    let (root, cx) = open(cx, launch);
+    root.read_with(cx, |root, _| {
+        assert!(
+            matches!(root.state(), LiveState::Connecting),
+            "{:?}",
+            root.state()
+        );
+    });
+    assert!(cx.debug_bounds("live:connecting").is_some());
+    assert!(cx.update(|_, cx| cx.try_global::<BackendHandle>().is_none()));
+    // Retry waits for the connect under way.
+    let wording = Wording::of(&LiveState::Connecting, &ProjectChoice::Project(project()));
+    assert!(!wording.retry);
+    wait_until(cx, |cx| {
+        root.read_with(cx, |root, _| matches!(root.state(), LiveState::Open(_)))
+    });
+    assert!(cx.debug_bounds("chat").is_some());
+    assert!(cx.update(|_, cx| cx.try_global::<BackendHandle>().is_some()));
 }

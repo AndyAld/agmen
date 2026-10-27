@@ -430,6 +430,15 @@ pub(crate) struct ListenerInfo {
     pub(crate) handle: String,
     pub(crate) agent: String,
     pub(crate) state: String,
+    /// What it runs, may do and spent; `None` while agmend reports none
+    /// (Task 7 review: until roles-listener Task 6 and this plan's Task
+    /// 10), so the panel shows no figures it has no source for.
+    pub(crate) details: Option<ListenerDetails>,
+}
+
+/// The Listener panel's Runs, Policy and Recent sections.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ListenerDetails {
     pub(crate) harness_label: String,
     pub(crate) role_label: String,
     pub(crate) can_use: Vec<String>,

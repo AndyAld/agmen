@@ -129,7 +129,7 @@ fn snapshot_maps_roster_into_person_groups() {
     assert!(s.models.is_empty());
     assert!(s.installed_agents.is_empty());
     assert!(s.plan.is_none());
-    assert!(s.listener.as_ref().unwrap().recent.is_empty());
+    assert!(s.listener.as_ref().unwrap().details.is_none());
     assert_eq!(s.status.worktrees, 0);
 }
 

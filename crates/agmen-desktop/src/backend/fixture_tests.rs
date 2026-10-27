@@ -113,7 +113,7 @@ fn status_counts_follow_one_rule() {
     use crate::alerts::{AlertState, Me, alert_count};
     let chat = chat();
     assert_eq!(chat.status.worktrees, 5);
-    let listener = chat.listener.as_ref().unwrap();
+    let listener = chat.listener.as_ref().unwrap().details.as_ref().unwrap();
     let total = listener.workers_today_usd + listener.listener_today_usd;
     assert!(
         (total - chat.status.spend_today_usd).abs() < 0.005,
@@ -287,6 +287,8 @@ fn settings_screens_lead_recent_with_their_change() {
             .unwrap()
             .snapshot()
             .listener
+            .unwrap()
+            .details
             .unwrap()
             .recent
             .remove(0)

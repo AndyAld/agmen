@@ -862,8 +862,8 @@ fn depth(entry: &RosterEntry, roster: &[RosterEntry]) -> u8 {
     depth
 }
 
-/// The Listener panel: the listener's identity, handle and agent, and
-/// nothing agmend does not report yet.
+/// The Listener panel: the listener's identity, handle, agent and state;
+/// no details, since agmend reports no policy or spend yet.
 fn listener_info(listener: &RosterEntry) -> ListenerInfo {
     ListenerInfo {
         id: listener.identity_id.clone(),
@@ -871,22 +871,7 @@ fn listener_info(listener: &RosterEntry) -> ListenerInfo {
         agent: harness_of(listener),
         // The title bar's "listener: codex · offline".
         state: status_word(listener.status).to_owned(),
-        harness_label: String::new(),
-        role_label: String::new(),
-        can_use: Vec::new(),
-        never: Vec::new(),
-        takes_work_from: String::new(),
-        per_worker_usd: 0.0,
-        workers_today_usd: 0.0,
-        workers_cap_usd: 0.0,
-        workers_running: 0,
-        workers_max: 0,
-        listener_today_usd: 0.0,
-        listener_cap_usd: 0.0,
-        tokens_in: 0,
-        tokens_out: 0,
-        uptime_minutes: 0,
-        recent: Vec::new(),
+        details: None,
     }
 }
 

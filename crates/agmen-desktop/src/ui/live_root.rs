@@ -10,7 +10,7 @@ use agmen_proto::ProjectId;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AppContext as _, Context, Entity, FocusHandle, Focusable, FontWeight, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, Styled as _, Window, div,
+    IntoElement, ParentElement as _, Render, Styled as _, Task, Window, div,
 };
 
 use super::Workspace;
@@ -36,6 +36,8 @@ pub(crate) struct LiveLaunch {
 pub(crate) enum LiveState {
     /// Neither the folder nor the settings name a project.
     NoProject,
+    /// Review fix 2: the connect runs off the main thread; Retry waits.
+    Connecting,
     /// Nothing answers at agmend's socket.
     AgmendDown,
     /// agmend answered and refused, or its socket is not the person's own;
@@ -74,6 +76,16 @@ impl Wording {
                     ProjectChoice::None { why } => why.clone(),
                     ProjectChoice::Project(_) => None,
                 },
+                retry: false,
+            },
+            LiveState::Connecting => Self {
+                heading: "Connecting to agmend…".into(),
+                body: match project {
+                    ProjectChoice::Project(id) => format!("Opening {id}."),
+                    ProjectChoice::None { .. } => "Opening the project.".into(),
+                },
+                command: None,
+                note: None,
                 retry: false,
             },
             LiveState::AgmendDown => Self {
@@ -116,6 +128,8 @@ pub(crate) struct LiveRoot {
     launch: LiveLaunch,
     state: LiveState,
     focus_handle: FocusHandle,
+    /// The connect under way, dropped with the window.
+    _connecting: Option<Task<()>>,
 }
 
 impl LiveRoot {
@@ -125,6 +139,7 @@ impl LiveRoot {
             launch,
             state: LiveState::NoProject,
             focus_handle: cx.focus_handle(),
+            _connecting: None,
         };
         root.connect(window, cx);
         root
@@ -145,14 +160,56 @@ impl LiveRoot {
         }
     }
 
-    /// Connects to agmend for the launch's project and opens its workspace,
-    /// or shows why not.
+    /// Starts connecting to agmend for the launch's project. The connect
+    /// blocks on agmend, which waits on the hub (up to its 30 s request
+    /// timeout), so it runs on a thread of its own and the window shows
+    /// Connecting meanwhile. A thread rather than gpui's background
+    /// executor: a call that blocks this long would hold one of its
+    /// workers, and gpui's test scheduler runs background tasks on the
+    /// test thread, where the window could never draw Connecting first.
     fn connect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let ProjectChoice::Project(project) = &self.launch.project else {
             self.state = LiveState::NoProject;
             return;
         };
-        let backend = match AgmendBackend::connect(&self.launch.socket, project.as_str()) {
+        let socket = self.launch.socket.clone();
+        let project = project.clone();
+        let (done, result) = futures::channel::oneshot::channel();
+        let spawned = std::thread::Builder::new()
+            .name("agmend-connect".into())
+            .spawn(move || {
+                // The window closed meanwhile; the backend drops here.
+                drop(done.send(AgmendBackend::connect(&socket, project.as_str())));
+            });
+        if let Err(err) = spawned {
+            self.state = LiveState::Refused(format!("starting the agmend link failed: {err}"));
+            return;
+        }
+        self.state = LiveState::Connecting;
+        let task = cx.spawn_in(window, async move |this, cx| {
+            let result = result
+                .await
+                .unwrap_or_else(|_| Err(BackendError::Agmend("the agmend connect stopped".into())));
+            // The window closed meanwhile; the backend drops with the result.
+            drop(this.update_in(cx, |this, window, cx| this.connected(result, window, cx)));
+        });
+        self._connecting = Some(task);
+    }
+
+    /// Opens the workspace on the connected backend, or shows why not.
+    fn connected(
+        &mut self,
+        result: Result<AgmendBackend, BackendError>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self._connecting = None;
+        cx.notify();
+        let ProjectChoice::Project(project) = &self.launch.project else {
+            self.state = LiveState::NoProject;
+            return;
+        };
+        let backend = match result {
             Ok(backend) => backend,
             Err(BackendError::NotConnected) => {
                 self.state = LiveState::AgmendDown;
@@ -190,8 +247,11 @@ impl LiveRoot {
         }
     }
 
-    /// Retry: tries agmend again.
+    /// Retry: tries agmend again, unless a try is under way.
     fn retry(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.state, LiveState::Connecting) {
+            return;
+        }
         self.connect(window, cx);
         cx.notify();
     }
@@ -200,6 +260,7 @@ impl LiveRoot {
         let wording = Wording::of(&self.state, &self.launch.project);
         let selector = match self.state {
             LiveState::NoProject => "live:no-project",
+            LiveState::Connecting => "live:connecting",
             LiveState::AgmendDown => "live:agmend-down",
             LiveState::Refused(_) | LiveState::Open(_) => "live:refused",
         };

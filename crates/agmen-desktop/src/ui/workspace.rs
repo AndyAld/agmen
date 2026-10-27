@@ -179,10 +179,12 @@ impl Workspace {
     /// Shows the agent's panel in the right dock, opening the dock. An agent
     /// without details (the listener, other people's agents) shows the
     /// Listener panel and no highlighted row. Task 7: while this machine
-    /// has no local agents at all, the Agent panel says so instead.
+    /// has no local agents at all, one of my own agents other than the
+    /// listener shows the Agent panel's "No local agents" instead.
     fn select_agent(&mut self, id: &IdentityId, cx: &mut Context<Self>) {
-        let shown = (self.snapshot.agents.contains_key(id) || self.snapshot.agents.is_empty())
-            .then(|| id.clone());
+        let s = &self.snapshot;
+        let no_local_yet = s.agents.is_empty() && s.listener_id() != Some(id) && is_mine(s, id);
+        let shown = (s.agents.contains_key(id) || no_local_yet).then(|| id.clone());
         self.set_selection(shown, cx);
         self.right_dock.open();
         cx.notify();
@@ -196,6 +198,17 @@ impl Workspace {
             .as_ref()
             .and_then(|id| self.snapshot.agents.get(id))
     }
+}
+
+/// Whether `id` is one of the person's own agents: in their roster group,
+/// the only agents that can run on this machine.
+fn is_mine(snapshot: &Snapshot, id: &IdentityId) -> bool {
+    snapshot
+        .roster
+        .iter()
+        .filter(|group| group.you)
+        .flat_map(|group| &group.agents)
+        .any(|agent| agent.id == *id)
 }
 
 /// The tabs the center opens behind the chat: the mockup's agent tab and
