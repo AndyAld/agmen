@@ -91,12 +91,22 @@ pub(crate) fn workers_today(today: f64, cap: f64, running: u32, max: u32) -> Str
     format!("{} · {running} of {max} running", money_of(today, cap))
 }
 
-/// The listener as the title bar and status bar name it:
+/// The listener as the title bar chip names it (console.py:732):
 /// `listener: codex · idle`, or `no listener` when the person has none.
 #[must_use]
 pub(crate) fn listener_label(listener: Option<&ListenerInfo>) -> String {
     match listener {
         Some(listener) => format!("listener: {} · {}", listener.agent, listener.state),
+        None => "no listener".to_owned(),
+    }
+}
+
+/// The listener as the status bar names it, with no colon (console.py:815):
+/// `listener codex · idle`, or `no listener` when the person has none.
+#[must_use]
+pub(crate) fn status_listener_label(listener: Option<&ListenerInfo>) -> String {
+    match listener {
+        Some(listener) => format!("listener {} · {}", listener.agent, listener.state),
         None => "no listener".to_owned(),
     }
 }
@@ -210,6 +220,18 @@ mod tests {
         assert_eq!(listener_label(listener.as_ref()), "listener: codex · idle");
         // Task 7: a project with no listener for the person says so.
         assert_eq!(listener_label(None), "no listener");
+    }
+
+    #[test]
+    fn status_bar_listener_has_no_colon() {
+        // console.py:815 and :1509: "listener codex · idle" in the status
+        // bar, where the title bar chip (console.py:732) has the colon.
+        let listener = crate::backend::chat_snapshot().listener;
+        assert_eq!(
+            status_listener_label(listener.as_ref()),
+            "listener codex · idle"
+        );
+        assert_eq!(status_listener_label(None), "no listener");
     }
 
     #[test]

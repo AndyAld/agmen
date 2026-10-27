@@ -9,7 +9,7 @@ use gpui::{
 
 use super::chat::AlertCounts;
 use super::components::{Badge, Button, ButtonStyle, Color, IconButton, KeyHint, Label, LabelSize};
-use super::format::{counted, counted_capped, listener_label, spend_today};
+use super::format::{counted, counted_capped, spend_today, status_listener_label};
 use super::left_dock::PanelButtons;
 use super::tokens::{BORDER_WIDTH, SPACE_5, SPACE_10, SPACE_14, STATUS_BAR_HEIGHT};
 use super::workspace::{OpenAlerts, ToggleRightDock};
@@ -38,7 +38,7 @@ impl StatusBar {
     pub(crate) fn new(snapshot: &Snapshot, listener_toggle: bool) -> Self {
         Self {
             status: snapshot.status.clone(),
-            context: listener_label(snapshot.listener.as_ref()).into(),
+            context: status_listener_label(snapshot.listener.as_ref()).into(),
             listener_toggle,
             panels: PanelButtons::default(),
             palette_open: false,
@@ -291,5 +291,13 @@ mod tests {
         assert_eq!(link_label(&down, true).1, Color::Error);
         assert_eq!(link_label(&hub(None), true).1, Color::Warning);
         assert_eq!(link_label(&Link::Live, true).1, Color::Success);
+    }
+
+    #[test]
+    fn context_names_the_listener_without_a_colon() {
+        // Task 20 shot diff (ask, palette, needs-you-answered): the status
+        // bar reads "listener codex · idle" (console.py:815).
+        let bar = StatusBar::new(&crate::backend::chat_snapshot(), false);
+        assert_eq!(bar.context.as_ref(), "listener codex · idle");
     }
 }
