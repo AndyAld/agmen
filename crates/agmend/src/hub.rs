@@ -147,11 +147,14 @@ struct Head {
 #[derive(Debug)]
 pub(crate) struct Hub {
     http: reqwest::Client,
-    credentials: Credentials,
+    credentials: std::sync::Arc<Credentials>,
 }
 
 impl Hub {
-    pub(crate) const fn new(http: reqwest::Client, credentials: Credentials) -> Self {
+    pub(crate) const fn new(
+        http: reqwest::Client,
+        credentials: std::sync::Arc<Credentials>,
+    ) -> Self {
         Self { http, credentials }
     }
 
@@ -169,7 +172,7 @@ impl Hub {
             .build()
     }
 
-    pub(crate) const fn credentials(&self) -> &Credentials {
+    pub(crate) fn credentials(&self) -> &Credentials {
         &self.credentials
     }
 

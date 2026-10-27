@@ -19,6 +19,7 @@ mod console;
 mod feed;
 mod git;
 mod hub;
+mod identities;
 mod local;
 mod login;
 mod socket;
@@ -36,6 +37,7 @@ use tokio::task::JoinSet;
 use crate::console::Console;
 use crate::feed::Feeds;
 use crate::hub::Hub;
+use crate::identities::Identities;
 use crate::local::Local;
 use crate::login::Credentials;
 use crate::state::Store;
@@ -44,11 +46,9 @@ use crate::state::Store;
 #[derive(Debug)]
 pub(crate) struct Core {
     console: Arc<Console>,
-    #[expect(
-        dead_code,
-        reason = "identity API methods consume the store in B T2 and B T5"
-    )]
+    #[expect(dead_code, reason = "pending API consumes the store in B T5")]
     store: Arc<std::sync::Mutex<Store>>,
+    identities: Arc<Identities>,
 }
 
 /// The socket's file name in the state folder (agmen-client's, which the
@@ -203,8 +203,12 @@ impl Agmend {
     /// else the step that failed.
     pub fn bind(config: Config) -> Result<Self, AgmendError> {
         let http = Hub::http().map_err(AgmendError::Http)?;
-        let credentials = Credentials::new(config.login_file, config.tokens, http.clone());
-        let hub = Arc::new(Hub::new(http, credentials));
+        let credentials = Arc::new(Credentials::new(
+            config.login_file,
+            config.tokens,
+            http.clone(),
+        ));
+        let hub = Arc::new(Hub::new(http, credentials.clone()));
         let feeds = Feeds::new(hub.clone(), config.roster_every);
         let bound = socket::bind(&config.socket)?;
         let path = config.socket.with_file_name("agmend.db");
@@ -233,11 +237,18 @@ impl Agmend {
                 path,
                 source: Box::new(source),
             })?;
+        let store = Arc::new(std::sync::Mutex::new(store));
+        let identities = Arc::new(Identities::new(
+            credentials,
+            store.clone(),
+            config.socket.with_file_name(""),
+        ));
         Ok(Self {
             bound,
             opening,
             core: Arc::new(Core {
-                store: Arc::new(std::sync::Mutex::new(store)),
+                store,
+                identities,
                 console: Arc::new(Console {
                     hub,
                     feeds,

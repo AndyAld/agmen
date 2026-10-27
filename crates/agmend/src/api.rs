@@ -1,9 +1,7 @@
 //! One local API connection: `hello` first, then requests one at a time,
 //! each answered before the next is read (m0-m1 Task 13 frames).
 //!
-//! Requests act as the person. A request with `as` is refused with
-//! `bad_request` for now: identities act through agmend over MQTT in m0-m1
-//! Task 13, which this crate does not build yet.
+//! Each request authenticates its own identity credential before dispatch.
 
 use std::sync::Arc;
 
@@ -15,6 +13,8 @@ use tokio::net::unix::OwnedWriteHalf;
 
 use crate::Core;
 use crate::console::{Console, bad_request, params};
+use crate::identities::{Caller, forbidden, unauthorized};
+use agmen_proto::{ClientEnvelope, ProjectId};
 
 /// `hello`'s params.
 #[derive(Debug, Deserialize)]
@@ -24,11 +24,12 @@ struct Hello {
 
 /// Serves `stream` until the peer hangs up or breaks the framing.
 pub(crate) async fn serve(stream: UnixStream, core: Arc<Core>) {
+    // shortcut: Unix-only local API; revisit when S6 Windows IPC is approved.
     let console = &core.console;
     let (mut reader, mut writer) = stream.into_split();
     let mut greeted = false;
     loop {
-        let request: Request = match frame::read_async(&mut reader).await {
+        let mut request: Request = match frame::read_async(&mut reader).await {
             Ok(request) => request,
             Err(frame::FrameError::Io(_)) => return,
             Err(err) => {
@@ -44,17 +45,35 @@ pub(crate) async fn serve(stream: UnixStream, core: Arc<Core>) {
         let id = request.id;
         let outcome = if let Some(refusal) = refuse(&request, greeted) {
             Err(refusal)
-        } else if request.method == "hello" {
-            hello(request.params).inspect(|_| greeted = true)
-        } else if request.method == "console_watch" {
-            // The watch keeps the connection; whatever it ends with is the
-            // last frame.
-            if let Err(error) = console.watch(id, request.params, reader, &mut writer).await {
-                answer(&mut writer, id, Err(error)).await;
-            }
-            return;
         } else {
-            call(console, &request.method, request.params).await
+            let token = extract_token(&mut request.params);
+            let caller = match token {
+                Ok(ref token) => {
+                    core.identities
+                        .authorize(request.as_.as_ref(), token.as_deref())
+                        .await
+                }
+                Err(error) => Err(error),
+            };
+            match caller {
+                Err(error) => Err(error),
+                Ok(Caller::Identity(caller)) => {
+                    identity_call(&core, &caller, &request.method, request.params).await
+                }
+                Ok(Caller::Human) if request.method == "hello" => {
+                    hello(request.params).inspect(|_| greeted = true)
+                }
+                Ok(Caller::Human) if request.method == "console_watch" => {
+                    // The watch keeps the connection; whatever it ends with is the
+                    // last frame.
+                    if let Err(error) = console.watch(id, request.params, reader, &mut writer).await
+                    {
+                        answer(&mut writer, id, Err(error)).await;
+                    }
+                    return;
+                }
+                Ok(Caller::Human) => call(console, &request.method, request.params).await,
+            }
         };
         if !answer(&mut writer, id, outcome).await {
             return;
@@ -76,12 +95,58 @@ fn refuse(request: &Request, greeted: bool) -> Option<ApiError> {
     if !greeted && request.method != "hello" {
         return Some(bad_request("the first request must be hello {api: 1}"));
     }
-    if request.as_.is_some() {
-        return Some(bad_request(
-            "acting as an identity (as) is not supported yet; leave it out to act as yourself",
-        ));
+    if request.method == "hello"
+        && let Err(error) = hello(request.params.clone())
+    {
+        return Some(error);
     }
     None
+}
+
+fn extract_token(raw: &mut Value) -> Result<Option<String>, ApiError> {
+    match raw
+        .as_object_mut()
+        .and_then(|object| object.remove("local_token"))
+    {
+        None => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value)),
+        Some(_) => Err(unauthorized()),
+    }
+}
+
+async fn identity_call(
+    core: &Core,
+    caller: &crate::state::ManagedIdentity,
+    method: &str,
+    raw: Value,
+) -> Result<Value, ApiError> {
+    match method {
+        "post" => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Post {
+                #[serde(default)]
+                project: Option<ProjectId>,
+                envelope: ClientEnvelope,
+            }
+            let Post { project, envelope } = params(raw)?;
+            if project.is_some_and(|project| project != caller.project) {
+                return Err(forbidden());
+            }
+            core.identities.post(caller, envelope).await
+        }
+        // The scoped read handlers land in B T5.
+        "inbox" | "watch" | "state" | "pending" => Err(ApiError {
+            code: ErrorCode::NotFound,
+            message: format!("agmend has no method {method:?}"),
+        }),
+        "hello" | "whoami" | "console_watch" | "console_snapshot" | "chat_history"
+        | "file_text" | "identity_mint" | "identity_list" => Err(forbidden()),
+        other => Err(ApiError {
+            code: ErrorCode::NotFound,
+            message: format!("agmend has no method {other:?}"),
+        }),
+    }
 }
 
 fn hello(raw: Value) -> Result<Value, ApiError> {

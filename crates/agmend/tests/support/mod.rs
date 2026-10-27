@@ -75,6 +75,8 @@ pub struct HubState {
     pub roster: Mutex<Value>,
     /// Bodies posted to `messages`, with their Authorization header.
     pub posts: Mutex<Vec<(String, Value)>>,
+    /// Calls to the identity mint endpoint.
+    pub mint_calls: AtomicUsize,
     /// When set, `messages` answers this status and body.
     pub post_answer: Mutex<Option<(StatusCode, Value)>>,
     /// How many `events` connections were opened.
@@ -303,6 +305,13 @@ pub async fn fake_hub() -> FakeHub {
     let state = Arc::new(HubState::default());
     *state.roster.lock().unwrap() = roster("online");
     let app = Router::new()
+        .route(
+            "/v1/identities",
+            post(|State(hub): State<Arc<HubState>>| async move {
+                hub.mint_calls.fetch_add(1, Ordering::SeqCst);
+                StatusCode::FORBIDDEN
+            }),
+        )
         .route("/v1/projects/{p}/state", get(state_route))
         .route("/v1/projects/{p}/streams/{s}", get(replay_route))
         .route("/v1/projects/{p}/events", get(events_route))
@@ -323,6 +332,38 @@ pub struct Home {
 }
 
 impl Home {
+    /// Seeds metadata through SQLite and credentials through the directory store.
+    pub fn seed_identity(&self, hub: &str, id: &str, token: &str) {
+        use agmen_client::TokenKey;
+        let origin = url::Url::parse(hub).unwrap();
+        let identity = id.parse().unwrap();
+        let metadata = json!({
+            "hub_url":hub, "broker_url":"mqtt://127.0.0.1:9",
+            "tenant":"tenant01", "project":PROJECT, "identity_id":id,
+            "owner_id":HUMAN, "handle":format!("andy/{id}"), "kind":"agent"
+        });
+        rusqlite::Connection::open(self.database())
+            .unwrap()
+            .execute(
+                "INSERT INTO identities VALUES (?1,?2,?3,?4,?5)",
+                rusqlite::params![
+                    origin.origin().ascii_serialization(),
+                    id,
+                    HUMAN,
+                    PROJECT,
+                    metadata.to_string()
+                ],
+            )
+            .unwrap();
+        let key = TokenKey::new(&"https://agmend.invalid".parse().unwrap(), &identity).unwrap();
+        self.tokens().set(&key, &json!({"origin":origin.origin().ascii_serialization(), "owner_id":HUMAN, "local_token":token}).to_string()).unwrap();
+        self.tokens()
+            .set(
+                &TokenKey::new(&origin, &identity).unwrap(),
+                "fake-identity-hub-credential",
+            )
+            .unwrap();
+    }
     /// A home where the CLI signed in at `hub_url`.
     pub async fn signed_in(hub_url: &str) -> Self {
         Self::signed_in_for(hub_url, 3600).await
@@ -385,6 +426,14 @@ pub struct Daemon {
 }
 
 impl Daemon {
+    pub async fn seeded() -> Self {
+        let hub = fake_hub().await;
+        let home = Home::signed_in(&hub.url).await;
+        drop(Agmend::bind(home.config()).unwrap());
+        home.seed_identity(&hub.url, "agent001", &"a".repeat(64));
+        home.seed_identity(&hub.url, "agent002", &"b".repeat(64));
+        Self::run(hub, home)
+    }
     pub async fn start() -> Self {
         let hub = fake_hub().await;
         let home = Home::signed_in(&hub.url).await;
