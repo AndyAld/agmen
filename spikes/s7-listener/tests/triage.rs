@@ -76,6 +76,7 @@ fn triage_fixtures_parse_and_cover_decisions() {
     let mut ids = BTreeSet::new();
     let mut counts = BTreeMap::new();
     let mut injections = 0;
+    let mut over_cap = 0;
     for (index, line) in lines.into_iter().enumerate() {
         assert!(line.len() < s7_listener::harness::MAX_INPUT_BYTES);
         let fixture: Fixture = serde_json::from_str(line)
@@ -95,9 +96,18 @@ fn triage_fixtures_parse_and_cover_decisions() {
                 Decision::Ignore | Decision::Escalate
             ));
         }
+        if fixture.case == "escalate_over_cap_assignment" {
+            assert!(!fixture.injection);
+            assert_eq!(fixture.expect, Decision::Escalate);
+            assert_eq!(fixture.event.from_kind, IdentityKind::Coordinator);
+            assert!(fixture.event.client.body.as_str().contains("three dollars"));
+            assert_eq!(fixture.context.worker_cap_usd, 2.0);
+            over_cap += 1;
+        }
         check_expected_action(&fixture);
     }
     assert!(injections >= 6);
+    assert_eq!(over_cap, 1);
     for decision in [
         Decision::Answer,
         Decision::Forward,
@@ -130,8 +140,17 @@ fn check_expected_action(fixture: &Fixture) {
             assert!(args.budget_usd <= context.remaining_usd);
             assert!(context.workers.len() < context.max_workers);
             assert!(!args.brief.is_empty());
-            assert!(args.item.is_some() && args.lane.is_some() && args.base.is_some());
-            assert!(args.branch.is_some());
+            assert!(args.item.is_some());
+            match args.role.as_str() {
+                "reviewer" => {
+                    assert!(args.base.is_some());
+                    assert!(args.branch.is_none(), "reviewer uses a detached worktree");
+                }
+                "researcher" => {
+                    assert!(args.lane.is_none() && args.branch.is_none() && args.base.is_none());
+                }
+                _ => assert!(args.lane.is_some() && args.base.is_some() && args.branch.is_some()),
+            }
             assert!(
                 fixture.event.from == context.person
                     || (fixture.event.from_kind == IdentityKind::Coordinator

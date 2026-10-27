@@ -9,8 +9,20 @@ default-filter = "not test(/(^|::)(it|live_model)_/)"
 
 [profile.live]
 default-filter = "test(/(^|::)live_model_/)"
+retries = 0
 slow-timeout = { period = "60s", terminate-after = 3 }
 test-threads = 1
+
+# Forty bounded turns per model in one capped process, two models total.
+# Allow both turn deadlines and process shutdown; never retry paid tests.
+[[profile.live.overrides]]
+filter = "test(=live_model_triage_accuracy)"
+slow-timeout = { period = "60s", terminate-after = 247 }
+
+# Six injection turns and the runtime probes also share capped processes.
+[[profile.live.overrides]]
+filter = "test(/^live_model_/) and not test(=live_model_triage_accuracy)"
+slow-timeout = { period = "60s", terminate-after = 25 }
 
 # Integration tests whose name contains "restart" restart the dev EMQX,
 # which would drop every other test's connection, so they run only under
