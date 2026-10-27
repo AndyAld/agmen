@@ -30,7 +30,11 @@ impl Tools {
                 "Bash" => ToolClass::Shell,
                 "WebFetch" | "WebSearch" => ToolClass::Web,
                 "Agent" | "Task" => ToolClass::Subagents,
-                _ => return Err(RoleError::Schema(format!("cannot map Claude tool {tool}"))),
+                _ => {
+                    return Err(RoleError::Schema(format!(
+                        "cannot map Claude tool {tool:.64}"
+                    )));
+                }
             });
         }
         Ok(classes)
@@ -95,7 +99,7 @@ pub fn import_subagent(md: &str, name: &str) -> Result<String, RoleError> {
         Some((model, line)) => {
             return Err(yaml_error(
                 line,
-                &format!("cannot map model {model} to a tier"),
+                &format!("cannot map model {model:.64} to a tier"),
             ));
         }
     };
@@ -124,12 +128,16 @@ pub fn import_subagent(md: &str, name: &str) -> Result<String, RoleError> {
 }
 
 fn frontmatter(text: &str) -> Result<(Frontmatter, &str), RoleError> {
-    let Some(rest) = text.strip_prefix("---\n") else {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let Some((opening, rest)) = text.split_once('\n') else {
         return Ok((Frontmatter::default(), text));
     };
+    if opening.trim_end() != "---" {
+        return Ok((Frontmatter::default(), text));
+    }
     let mut offset = 0;
     for (index, line) in rest.split_inclusive('\n').enumerate() {
-        if line.trim_end_matches('\n') == "---" {
+        if line.trim_end() == "---" {
             let front = read_header(&rest[..offset])?;
             return Ok((front, &rest[offset + line.len()..]));
         }
@@ -171,6 +179,9 @@ fn read_header(header: &str) -> Result<Frontmatter, RoleError> {
             }
             *block_indent = Some(indent);
             let value = scalar(text[2..].trim(), line)?;
+            Tools::Text(value.clone())
+                .classes()
+                .map_err(|error| yaml_error(line, &error.to_string()))?;
             let target = if *key == "tools" {
                 &mut front.tools
             } else {
@@ -180,9 +191,6 @@ fn read_header(header: &str) -> Result<Frontmatter, RoleError> {
             if let Tools::List(items) = tools {
                 items.push(value);
             }
-            tools
-                .classes()
-                .map_err(|error| yaml_error(line, &error.to_string()))?;
             continue;
         }
         if indent > 0 {
@@ -196,8 +204,19 @@ fn read_header(header: &str) -> Result<Frontmatter, RoleError> {
             .split_once(':')
             .ok_or_else(|| yaml_error(line, "expected key: value"))?;
         let value = value.trim();
+        if key.starts_with(['\'', '"']) {
+            return Err(yaml_error(line, "quoted keys are not supported"));
+        }
         if key.is_empty() || key.chars().any(char::is_whitespace) {
             return Err(yaml_error(line, "invalid key"));
+        }
+        // Flow, complex, anchor, alias, tag and merge syntax can name a real key
+        // indirectly, so refuse it instead of ignoring the line as an unknown key.
+        if key.starts_with(['{', '[', '?', '&', '*', '!', '|', '>', '%', '@', '`'])
+            || key.contains(['\'', '"', '{', '}', '[', ']', '&', '*', '!'])
+            || key.contains("<<")
+        {
+            return Err(yaml_error(line, "unsupported key syntax"));
         }
         ignore_children = !matches!(key, "tools" | "disallowedTools" | "model" | "omitClaudeMd");
         if ignore_children {
