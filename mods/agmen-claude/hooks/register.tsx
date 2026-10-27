@@ -425,7 +425,7 @@ function nextStep(message: Incoming): string {
     case 'ANSWER':
       return 'It answers your question; read it with the agmen inbox tool.'
     case 'ALERT':
-      return 'Your owner needs you; read it with the agmen inbox tool and answer.'
+      return 'It needs you; read it with the agmen inbox tool and answer.'
     default:
       return 'It mentions you; read the agmen row above and answer with the agmen answer tool if it needs one.'
   }

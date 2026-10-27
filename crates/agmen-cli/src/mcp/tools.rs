@@ -22,8 +22,13 @@ use crate::joined::{Recorded, client_error};
 use crate::output::{clean, message_line_with_id, recorded};
 
 /// What the server tells the client about itself.
-const INSTRUCTIONS: &str = "agmen connects this worktree's agent to its project's other agents and \
-people. Read what is addressed to you with inbox. Claim an item before editing files in its lane, \
+const INSTRUCTIONS: &str = "agmen connects this worktree's agent to its project's other agents \
+and people. They see only what you post, so communicating with them is part of the work: tell the \
+ones your work affects (dm, or an FYI with mentions), answer every ASK addressed to you, and when \
+you are blocked, say so at once instead of waiting: ask an agent that can unblock you (with to), \
+or post an ALERT for a person. Keep each message to one accurate point, naming the item, file, \
+commit or number and anything you did not check. Read what is addressed to you with inbox, before \
+you start a task and before you report it done. Claim an item before editing files in its lane, \
 report finished work with done, give a claim up with release, and report a new problem with \
 found. Talk with post, ask, answer and dm; wherever a tool names an identity, a handle such as \
 andy/sol works. A tool that sends answers recorded #<seq> (<stream>) once the hub has the \
@@ -33,12 +38,13 @@ or rejected: <reason>. Never send a rejected message again unchanged.";
 /// `post`'s arguments.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub(crate) struct PostParams {
-    /// The verb, such as FYI, STATUS or BLOCKED.
+    /// The verb, such as FYI, STATUS or ALERT.
     verb: String,
     /// The message text, at most 32768 bytes.
     #[serde(default)]
     body: String,
-    /// The verb's data as a JSON object, for verbs that carry data.
+    /// The verb's data as a JSON object, for verbs that carry data: STATUS needs
+    /// `summary` and ALERT needs `need`.
     data: Option<Map<String, Value>>,
     /// Recipients by handle or id, for DM and ASK only.
     #[serde(default)]
@@ -177,7 +183,7 @@ fn recorded_line(at: &Recorded) -> String {
 impl Server {
     #[tool(
         description = "Post a message to the project with any protocol verb (FYI, STATUS, \
-        BLOCKED and the rest). Answers recorded, queued or rejected."
+        ALERT and the rest). Answers recorded, queued or rejected."
     )]
     async fn post(&self, Parameters(params): Parameters<PostParams>) -> CallToolResult {
         self.respond(move |live: Arc<Live>| async move {
@@ -363,6 +369,7 @@ impl ServerHandler for Server {
 
 #[cfg(test)]
 mod tests {
+    use agmen_proto::Verb;
     use rmcp::handler::server::tool::parse_json_object;
     use serde_json::json;
 
@@ -396,6 +403,41 @@ mod tests {
         allowed(&Value::Object((*tool.input_schema).clone()), &mut keys);
         keys.sort();
         assert_eq!(keys, ["head", "roster"], "{:?}", tool.input_schema);
+    }
+
+    /// The all-caps words in `text`, such as `FYI` or `PUSH_REQUEST`.
+    fn caps_words(text: &str) -> Vec<&str> {
+        text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .filter(|word| {
+                word.len() > 1 && word.chars().all(|c| c.is_ascii_uppercase() || c == '_')
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_texts_name_only_protocol_verbs() {
+        let post = Server::tool_router()
+            .list_all()
+            .into_iter()
+            .find(|tool| tool.name == "post")
+            .unwrap();
+        let verb_field = post.input_schema["properties"]["verb"]["description"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let texts = [
+            INSTRUCTIONS.to_owned(),
+            post.description.unwrap().into_owned(),
+            verb_field,
+        ];
+        for text in &texts {
+            for word in caps_words(text) {
+                assert!(
+                    word.parse::<Verb>().is_ok(),
+                    "{word} in {text:?} is not a protocol verb"
+                );
+            }
+        }
     }
 
     #[test]

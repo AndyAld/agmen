@@ -760,6 +760,27 @@ for (const surface of SURFACES) {
       expect(wake?.origin).toEqual({ kind: 'plugin', name: 'agmen' })
     })
 
+    test('alert_wakeup_from_a_peer_names_no_owner', async ($, on) => {
+      // A coordinator session is mentioned on every ALERT, so most of its ALERTs come from peers.
+      const alert = stamped(3, {
+        verb: 'ALERT',
+        to: [],
+        stream: 'feed',
+        mentioned: [SELF],
+        data: { need: 'unblock L-API', urgency: 'normal', needs: 'anyone', actions: [] },
+      })
+      const w = world(on, { feed: [{ text: line(SELF_LINE) }, { text: message(alert) }] })
+
+      await start($, w, surface)
+      await w.clock.advance(WAKE_INTERVAL_MS)
+
+      expect(w.submitted).toHaveLength(1)
+      const wake = w.submitted[0]?.text
+      expect(wake).toContain('ALERT from adam/coord')
+      expect(wake).toContain('agmen inbox tool')
+      expect(wake).not.toContain('owner')
+    })
+
     test('wakeup_rate_limited', async ($, on) => {
       // DMs at 0, 2.5, 5, 7.5 and 10 s.
       const feed: Piece[] = [{ text: line(SELF_LINE) }, { text: message(stamped(1)) }]
