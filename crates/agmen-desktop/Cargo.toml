@@ -34,6 +34,7 @@ serde_json = "1.0.154"
 tar = { version = "0.4.46", default-features = false }
 thiserror = "2.0.21"
 toml = "1.1.8"
+toml_edit = { version = "0.25.17", default-features = false, features = ["parse", "display"] }
 tree-sitter = "0.27.1"
 tree-sitter-highlight = "0.27.1"
 tree-sitter-md = "0.5.4"

@@ -193,30 +193,90 @@ impl DesktopSettings {
     }
 
     /// Replaces the `[desktop]` keys this version owns in `path`, keeping
-    /// every other key and table, as [`AgmenSettings::save`] does.
+    /// every other key and table. Settings equal to the file's leave it
+    /// untouched; a change edits the file in place, so its comments and
+    /// key order stay (final review fix 4).
     ///
     /// # Errors
     ///
     /// When the existing file cannot be parsed (it is left alone), or the
     /// folder or file cannot be written.
     pub(crate) fn save(&self, path: &Path) -> Result<(), AppearanceError> {
-        let mut table = read_settings_table(path)?.unwrap_or_default();
-        let value = toml::Value::try_from(self).map_err(|err| AppearanceError::Serialize {
+        // Checks the size cap and the TOML, and gives what the file holds.
+        let existing = read_settings_table(path)?;
+        let stored = match existing.and_then(|mut table| table.remove(DESKTOP_TABLE)) {
+            Some(value) => value.try_into().ok(),
+            None => Some(Self::default()),
+        };
+        if stored.as_ref() == Some(self) {
+            return Ok(());
+        }
+        let parse = |message: String| AppearanceError::Parse {
             path: path.to_owned(),
-            message: err.to_string(),
-        })?;
-        let mut merged = match table.remove(DESKTOP_TABLE) {
-            Some(toml::Value::Table(existing)) => existing,
+            message,
+        };
+        let serialize = |message: String| AppearanceError::Serialize {
+            path: path.to_owned(),
+            message,
+        };
+        let text = match fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(source) => {
+                return Err(AppearanceError::Io {
+                    path: path.to_owned(),
+                    source,
+                });
+            }
+        };
+        let mut doc = text
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|err| parse(err.to_string()))?;
+        let ours = match toml::Value::try_from(self).map_err(|err| serialize(err.to_string()))? {
+            toml::Value::Table(ours) => ours,
             _ => toml::Table::new(),
         };
+        // A `desktop` key that is not a table is replaced, as before.
+        if !doc
+            .get(DESKTOP_TABLE)
+            .is_some_and(toml_edit::Item::is_table_like)
+        {
+            doc.insert(DESKTOP_TABLE, toml_edit::table());
+        }
+        let Some(table) = doc
+            .get_mut(DESKTOP_TABLE)
+            .and_then(toml_edit::Item::as_table_like_mut)
+        else {
+            return Err(serialize(format!(
+                "the [{DESKTOP_TABLE}] table could not be made"
+            )));
+        };
         for key in DESKTOP_KEYS {
-            merged.remove(*key);
+            match ours.get(*key) {
+                Some(value) => {
+                    // toml's text for one value is toml_edit's input.
+                    let value = value
+                        .to_string()
+                        .parse::<toml_edit::Value>()
+                        .map_err(|err| serialize(err.to_string()))?;
+                    match table.get_mut(key).and_then(toml_edit::Item::as_value_mut) {
+                        // Keeps the comments around the old value.
+                        Some(old) => {
+                            let decor = old.decor().clone();
+                            *old = value;
+                            *old.decor_mut() = decor;
+                        }
+                        None => {
+                            table.insert(key, toml_edit::value(value));
+                        }
+                    }
+                }
+                None => {
+                    table.remove(key);
+                }
+            }
         }
-        if let toml::Value::Table(ours) = value {
-            merged.extend(ours);
-        }
-        table.insert(DESKTOP_TABLE.to_owned(), toml::Value::Table(merged));
-        write_settings_table(path, &table)
+        write_settings_text(path, &doc.to_string())
     }
 }
 
@@ -232,14 +292,20 @@ pub(crate) fn write_settings_table(
     path: &Path,
     table: &toml::Table,
 ) -> Result<(), AppearanceError> {
-    let io = |source| AppearanceError::Io {
-        path: path.to_owned(),
-        source,
-    };
     let text = toml::to_string_pretty(table).map_err(|err| AppearanceError::Serialize {
         path: path.to_owned(),
         message: err.to_string(),
     })?;
+    write_settings_text(path, &text)
+}
+
+/// Writes `text` as the whole settings file at `path`, as
+/// [`write_settings_table`] does.
+fn write_settings_text(path: &Path, text: &str) -> Result<(), AppearanceError> {
+    let io = |source| AppearanceError::Io {
+        path: path.to_owned(),
+        source,
+    };
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).map_err(io)?;
     }

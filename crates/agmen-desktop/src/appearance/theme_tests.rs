@@ -766,3 +766,48 @@ fn bad_nested_override_values_keep_the_themes_own() {
     assert_eq!(style["players"][0]["cursor"], "#222222");
     assert_eq!(style["players"][0]["selection"], "#444444");
 }
+
+/// Final review fix 4: a settings file the person wrote by hand, with
+/// comments and its own key order.
+const HAND_WRITTEN: &str = "# agmen settings\n\
+[desktop]\n\
+# opened last\n\
+last_project = \"project1\" # keep\n\
+added_later = 1\n\
+\n\
+[appearance]\n\
+density = \"compact\"\n";
+
+#[test]
+fn desktop_settings_unchanged_leave_the_file_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.toml");
+    fs::write(&path, HAND_WRITTEN).unwrap();
+    DesktopSettings {
+        last_project: Some("project1".parse().unwrap()),
+    }
+    .save(&path)
+    .unwrap();
+    assert_eq!(fs::read_to_string(&path).unwrap(), HAND_WRITTEN);
+}
+
+#[test]
+fn desktop_settings_change_keeps_comments_and_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.toml");
+    fs::write(&path, HAND_WRITTEN).unwrap();
+    let project: agmen_proto::ProjectId = "project2".parse().unwrap();
+    DesktopSettings {
+        last_project: Some(project.clone()),
+    }
+    .save(&path)
+    .unwrap();
+    assert_eq!(
+        DesktopSettings::load(&path).unwrap().last_project,
+        Some(project)
+    );
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        HAND_WRITTEN.replace("\"project1\"", "\"project2\"")
+    );
+}
