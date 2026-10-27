@@ -24,6 +24,7 @@ use tokio::sync::{Notify, watch};
 
 use crate::claims::LedgerMessage;
 use crate::db::{Role, is_unique_violation};
+use crate::events::Wakes;
 use crate::http::{Hub, error_chain};
 use crate::numbering::{NumberingError, lock_head, next_seq};
 use crate::secrets_scan::find_secret;
@@ -148,7 +149,7 @@ pub(crate) struct Handled {
 pub(crate) struct IngestState {
     limiter: Mutex<RateLimiter>,
     outbox_ready: Notify,
-    stored: watch::Sender<()>,
+    stored: Wakes,
 }
 
 impl IngestState {
@@ -157,16 +158,17 @@ impl IngestState {
         &self.outbox_ready
     }
 
-    /// Call after each commit that stored messages: wakes the sweeper and
-    /// every events stream.
-    pub(crate) fn stored(&self) {
+    /// Call after each commit that stored messages in `project`: wakes the
+    /// sweeper and that project's events streams.
+    pub(crate) fn stored(&self, project: &ProjectId) {
         self.outbox_ready.notify_one();
-        self.stored.send_replace(());
+        self.stored.wake(project);
     }
 
-    /// A receiver that sees a change after each [`IngestState::stored`].
-    pub(crate) fn watch_stored(&self) -> watch::Receiver<()> {
-        self.stored.subscribe()
+    /// A receiver that sees a change after each [`IngestState::stored`]
+    /// for `project`.
+    pub(crate) fn watch_stored(&self, project: &ProjectId) -> watch::Receiver<()> {
+        self.stored.watch(project)
     }
 }
 
@@ -330,7 +332,7 @@ impl Hub {
                         })?;
                 }
                 tx.commit().await.map_err(StoreError::from)?;
-                self.ingest_state().stored();
+                self.ingest_state().stored(topics.project());
                 self.on_recorded(topics, verb, &sender.id, sender.kind, &id)
                     .await;
                 let (stream, seq) = recorded.ack;
@@ -448,7 +450,7 @@ impl Hub {
         let mut tx = self.pool().begin().await.map_err(PostError::store)?;
         let posted = post_hub(&mut tx, topics, post, None).await?;
         tx.commit().await.map_err(PostError::store)?;
-        self.ingest_state().stored();
+        self.ingest_state().stored(topics.project());
         Ok(posted)
     }
 }

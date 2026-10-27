@@ -66,6 +66,19 @@ impl Events {
         }
     }
 
+    /// Whether the hub ends the stream within `wait`, ignoring anything
+    /// sent before the end.
+    async fn ends_within(&mut self, wait: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + wait;
+        loop {
+            match tokio::time::timeout_at(deadline, self.resp.chunk()).await {
+                Err(_) => return false,
+                Ok(Ok(None) | Err(_)) => return true,
+                Ok(Ok(Some(_))) => {}
+            }
+        }
+    }
+
     async fn next(&mut self) -> Event {
         self.next_within(EVENT_WAIT)
             .await
@@ -434,6 +447,92 @@ async fn it_events_cover_owned_inboxes_only() {
         let event = stream.next().await;
         assert_eq!(event.id, format!("inbox:{}:1", nova.id));
         assert!(stream.quiet().await.is_empty());
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn it_events_end_when_the_token_does() {
+    run(|ctx| async move {
+        let (project, _, deleted) = room(&ctx).await;
+        let p = project.project.as_str();
+        let expired = login(&ctx, ANDY, "andy").await;
+        let kept = login(&ctx, ANDY, "andy").await;
+        let mut gone = events(&ctx, &deleted, p, None, None).await;
+        let mut lapsed = events(&ctx, &expired, p, None, None).await;
+        let mut open_one = events(&ctx, &kept, p, None, None).await;
+
+        // Logging out deletes the token row; an hour after login the
+        // token expires. Either ends a stream opened with it.
+        sqlx::query("DELETE FROM tokens WHERE hash = sha256(convert_to($1, 'UTF8'))")
+            .bind(&deleted)
+            .execute(&ctx.pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE tokens SET expires_at = now() - interval '1 second'
+             WHERE hash = sha256(convert_to($1, 'UTF8'))",
+        )
+        .bind(&expired)
+        .execute(&ctx.pool)
+        .await
+        .unwrap();
+        assert!(
+            gone.ends_within(EVENT_WAIT).await,
+            "a deleted token's stream went on"
+        );
+        assert!(
+            lapsed.ends_within(EVENT_WAIT).await,
+            "an expired token's stream went on"
+        );
+
+        // A stream on a live token keeps delivering.
+        say(&ctx, &kept, p, "still here").await;
+        assert_eq!(open_one.next().await.id, "feed:1");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn it_events_connections_are_capped() {
+    run(|ctx| async move {
+        let (project, _, token) = room(&ctx).await;
+        let p = project.project.as_str();
+        let carol = seed_human(&ctx.pool, CAROL, "carol").await;
+        seed_member(&ctx.pool, &carol, &project, "member").await;
+        let carol_token = login(&ctx, CAROL, "carol").await;
+        ctx.hub.hub.set_events_limits(3, 2);
+
+        let first = events(&ctx, &token, p, None, None).await;
+        let _second = events(&ctx, &token, p, None, None).await;
+        // A person over their own cap is told to slow down.
+        let resp = open(&ctx, &token, p, None, None).await;
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        let body: Value = resp.json().await.unwrap();
+        assert_eq!(body["error"], "too_many_streams");
+
+        // A full hub refuses everyone.
+        let _carols = events(&ctx, &carol_token, p, None, None).await;
+        let resp = open(&ctx, &carol_token, p, None, None).await;
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body: Value = resp.json().await.unwrap();
+        assert_eq!(body["error"], "hub_busy");
+
+        // Closing a stream frees its place once the hub notices.
+        drop(first);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            let resp = open(&ctx, &token, p, None, None).await;
+            if resp.status() == StatusCode::OK {
+                break;
+            }
+            assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the place was never freed"
+            );
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
     })
     .await;
 }

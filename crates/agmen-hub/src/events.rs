@@ -28,8 +28,10 @@
 //! commit in order with no gaps (protocol 5.2), so a read after seq N sees
 //! N + 1 next or nothing, and replay and live delivery are the same loop
 //! with no seam where a message could be lost or sent twice. A pass runs
-//! when ingest commits (`IngestState::stored`, an in-process watch, which
-//! coalesces bursts) and at least every second, which covers commits that
+//! when ingest commits in the stream's project (`IngestState::stored`, an
+//! in-process watch per project, [`Wakes`], which coalesces bursts and
+//! leaves other projects' streams asleep) and at least every second, which
+//! covers commits that
 //! do not signal it (the lane and lease sweeps) and a second hub replica,
 //! should one ever run (today the sweeper requires one; see `sweeper.rs`).
 //! Postgres LISTEN/NOTIFY would only replace the wake-up and needs a
@@ -38,15 +40,23 @@
 //! connected is covered from the next pass, and a person who stops being a
 //! member is disconnected.
 //!
+//! Each pass also checks the access token the stream was opened with, so
+//! a stream ends within a second of its token expiring or being deleted
+//! (a logout). The reader reconnects with a fresh token.
+//!
 //! # Bounds
 //!
 //! Events go through a channel of [`CHANNEL`] events per connection. A
 //! client that leaves an event unread for [`SEND_WAIT`] is disconnected;
-//! it reconnects and replays, so nothing builds up in the hub.
+//! it reconnects and replays, so nothing builds up in the hub. A hub holds
+//! at most [`MAX_STREAMS`] streams open, and [`MAX_STREAMS_PER_HUMAN`] for
+//! one person: past the person's cap the answer is 429 `too_many_streams`,
+//! past the hub's 503 `hub_busy`.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::convert::Infallible;
 use std::pin::Pin;
+use std::sync::{Mutex, PoisonError};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -56,10 +66,11 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, KeepAliveStream, Sse};
 use serde::Deserialize;
-use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::SendTimeoutError;
+use tokio::sync::{mpsc, watch};
 
-use crate::auth::Caller;
+use crate::auth::{Caller, bearer};
+use crate::db::hash_secret;
 use crate::http::{ApiError, Hub, error_chain};
 use crate::identities::HumanId;
 use crate::ingest::stream_key;
@@ -81,6 +92,16 @@ const CHANNEL: usize = 64;
 const SEND_WAIT: Duration = Duration::from_secs(30);
 /// The most `after` entries a reader may name.
 const MAX_AFTER: usize = 256;
+/// The most events streams one hub holds open.
+///
+/// shortcut: fixed caps, sized so the passes of every open stream (three
+/// short queries at least once a second each) leave the pool's 10
+/// connections room for ingest and replay. Make them settings, or move
+/// the wake-up to LISTEN/NOTIFY, when one hub serves more people.
+const MAX_STREAMS: usize = 128;
+/// The most events streams one person may hold open, across tabs and
+/// devices.
+const MAX_STREAMS_PER_HUMAN: usize = 8;
 
 /// The query string: `after`, the reader's last seq per stream.
 #[derive(Debug, Deserialize)]
@@ -102,6 +123,9 @@ pub(crate) async fn events(
     query: Result<Query<EventsQuery>, QueryRejection>,
 ) -> Result<Sse<KeepAliveStream<Events>>, ApiError> {
     let human = caller.human()?;
+    // The extractor accepted this token; keep its hash to check it again
+    // on every pass.
+    let token = hash_secret(bearer(&headers).ok_or_else(ApiError::unauthorized)?);
     let (project, _) = member_of(&hub, Caller::Human(human.clone()), &project).await?;
     let Query(query) = query.map_err(|err| invalid(err.body_text()))?;
     let mut positions = match &query.after {
@@ -119,11 +143,19 @@ pub(crate) async fn events(
             *at = (*at).max(seq);
         }
     }
+    let slot = take_slot(&hub, &human)?;
     let (tx, rx) = mpsc::channel(CHANNEL);
+    let conn = Conn {
+        hub,
+        human,
+        project,
+        token,
+        _slot: slot,
+    };
     // Not joined: the task ends by itself once the response is dropped,
     // because every send and every wait also watches for the channel
-    // closing.
-    tokio::spawn(pump(hub, human, project, positions, tx));
+    // closing. Its slot goes with it.
+    tokio::spawn(pump(conn, positions, tx));
     Ok(Sse::new(Events { rx }).keep_alive(KeepAlive::new().interval(KEEP_ALIVE)))
 }
 
@@ -182,17 +214,25 @@ enum Ended {
     TooSlow,
     /// The person is no longer a member of the project.
     NotAMember,
+    /// The access token expired or was deleted.
+    TokenGone,
 }
 
-/// Runs one connection until it ends, and logs why.
-async fn pump(
+/// One open stream: who it is for, the hash of the token it was opened
+/// with, and its place among the hub's streams.
+#[derive(Debug)]
+struct Conn {
     hub: Hub,
     human: HumanId,
     project: ProjectId,
-    mut positions: BTreeMap<Stream, u64>,
-    tx: mpsc::Sender<Event>,
-) {
-    match deliver(&hub, &human, &project, &mut positions, &tx).await {
+    token: Vec<u8>,
+    _slot: Slot,
+}
+
+/// Runs one connection until it ends, and logs why.
+async fn pump(conn: Conn, mut positions: BTreeMap<Stream, u64>, tx: mpsc::Sender<Event>) {
+    let project = &conn.project;
+    match deliver(&conn, &mut positions, &tx).await {
         Ok(ended) => tracing::debug!(%project, ?ended, "events stream ended"),
         Err(err) => {
             tracing::warn!(%project, error = %error_chain(&err), "events stream failed");
@@ -202,16 +242,31 @@ async fn pump(
 
 /// Replays and then delivers live until the stream ends (module docs).
 async fn deliver(
-    hub: &Hub,
-    human: &HumanId,
-    project: &ProjectId,
+    conn: &Conn,
     positions: &mut BTreeMap<Stream, u64>,
     tx: &mpsc::Sender<Event>,
 ) -> Result<Ended, ApiError> {
-    let mut wake = hub.ingest_state().watch_stored();
+    let Conn {
+        hub,
+        human,
+        project,
+        token,
+        ..
+    } = conn;
+    let mut wake = hub.ingest_state().watch_stored(project);
     loop {
         // Before reading, so a commit during this pass runs another.
         wake.mark_unchanged();
+        let live: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM tokens
+                            WHERE hash = $1 AND kind = 'access' AND expires_at > now())",
+        )
+        .bind(token)
+        .fetch_one(hub.pool())
+        .await?;
+        if !live {
+            return Ok(Ended::TokenGone);
+        }
         let Some(streams) = human_streams(hub.pool(), human, project).await? else {
             return Ok(Ended::NotAMember);
         };
@@ -301,6 +356,138 @@ async fn heads(
     Ok(heads)
 }
 
+/// A watch per project that events streams sleep on until a commit in
+/// their project (or the poll) wakes them.
+#[derive(Debug, Default)]
+pub(crate) struct Wakes {
+    by_project: Mutex<HashMap<ProjectId, watch::Sender<()>>>,
+}
+
+impl Wakes {
+    /// Wakes `project`'s streams. A project nobody watches any more loses
+    /// its entry here, so the map holds only watched projects.
+    pub(crate) fn wake(&self, project: &ProjectId) {
+        let mut by_project = self
+            .by_project
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(sender) = by_project.get(project)
+            && sender.send(()).is_err()
+        {
+            by_project.remove(project);
+        }
+    }
+
+    /// A receiver that sees a change after each [`Wakes::wake`] of
+    /// `project`.
+    pub(crate) fn watch(&self, project: &ProjectId) -> watch::Receiver<()> {
+        self.by_project
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(project.clone())
+            .or_default()
+            .subscribe()
+    }
+
+    /// How many projects have an entry.
+    #[cfg(test)]
+    fn watched(&self) -> usize {
+        self.by_project
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
+    }
+}
+
+/// How many events streams are open, in all and per person.
+#[derive(Debug)]
+pub(crate) struct Slots {
+    counts: Mutex<Counts>,
+}
+
+#[derive(Debug)]
+struct Counts {
+    total: usize,
+    per_human: HashMap<HumanId, usize>,
+    max_total: usize,
+    max_per_human: usize,
+}
+
+impl Default for Slots {
+    fn default() -> Self {
+        Self {
+            counts: Mutex::new(Counts {
+                total: 0,
+                per_human: HashMap::new(),
+                max_total: MAX_STREAMS,
+                max_per_human: MAX_STREAMS_PER_HUMAN,
+            }),
+        }
+    }
+}
+
+impl Slots {
+    fn counts(&self) -> std::sync::MutexGuard<'_, Counts> {
+        self.counts.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Replaces the caps (test hook).
+    #[cfg(feature = "test-hooks")]
+    pub(crate) fn set_limits(&self, total: usize, per_human: usize) {
+        let mut counts = self.counts();
+        counts.max_total = total;
+        counts.max_per_human = per_human;
+    }
+}
+
+/// One open stream's place, freed on drop.
+#[derive(Debug)]
+struct Slot {
+    hub: Hub,
+    human: HumanId,
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        let mut counts = self.hub.event_slots().counts();
+        counts.total = counts.total.saturating_sub(1);
+        if let Some(mine) = counts.per_human.get_mut(&self.human) {
+            *mine = mine.saturating_sub(1);
+            if *mine == 0 {
+                counts.per_human.remove(&self.human);
+            }
+        }
+    }
+}
+
+/// A place for one more stream of `human`'s, or 429 past their cap and
+/// 503 past the hub's.
+fn take_slot(hub: &Hub, human: &HumanId) -> Result<Slot, ApiError> {
+    let mut counts = hub.event_slots().counts();
+    let mine = counts.per_human.get(human).copied().unwrap_or(0);
+    if mine >= counts.max_per_human {
+        return Err(ApiError::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too_many_streams",
+            "you have too many event streams open; close one",
+        ));
+    }
+    if counts.total >= counts.max_total {
+        return Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "hub_busy",
+            "the hub has too many event streams open; try again later",
+        ));
+    }
+    counts.total += 1;
+    counts.per_human.insert(human.clone(), mine + 1);
+    drop(counts);
+    Ok(Slot {
+        hub: hub.clone(),
+        human: human.clone(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -342,6 +529,26 @@ mod tests {
         assert!(parse_after("").unwrap().is_empty());
         assert!(parse_after("feed:1,").is_err());
         assert!(parse_after("feed:1;inbox:abc").is_err());
+    }
+
+    #[test]
+    fn a_wake_reaches_only_its_project() {
+        let wakes = Wakes::default();
+        let a: ProjectId = "projecta1".parse().unwrap();
+        let b: ProjectId = "projectb1".parse().unwrap();
+        let mut on_a = wakes.watch(&a);
+        wakes.wake(&b);
+        assert!(
+            !on_a.has_changed().unwrap(),
+            "a commit in b woke a stream in a"
+        );
+        wakes.wake(&a);
+        assert!(on_a.has_changed().unwrap());
+        on_a.mark_unchanged();
+        // A project nobody watches keeps no entry.
+        drop(on_a);
+        wakes.wake(&a);
+        assert_eq!(wakes.watched(), 0);
     }
 
     #[test]

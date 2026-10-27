@@ -150,23 +150,19 @@ pub(crate) async fn human_streams(
     human: &HumanId,
     project: &ProjectId,
 ) -> Result<Option<BTreeSet<Stream>>, ApiError> {
-    let member: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM memberships WHERE human_id = $1 AND project_id = $2)",
+    // One row when `human` is a member, holding the identities they own.
+    let owned: Option<Vec<String>> = sqlx::query_scalar(
+        "SELECT ARRAY(SELECT id FROM identities
+                      WHERE project_id = $2 AND owner_human_id = $1 ORDER BY id)
+         FROM memberships WHERE human_id = $1 AND project_id = $2",
     )
     .bind(human.as_str())
     .bind(project.as_str())
-    .fetch_one(pool)
+    .fetch_optional(pool)
     .await?;
-    if !member {
+    let Some(owned) = owned else {
         return Ok(None);
-    }
-    let owned: Vec<String> = sqlx::query_scalar(
-        "SELECT id FROM identities WHERE project_id = $1 AND owner_human_id = $2",
-    )
-    .bind(project.as_str())
-    .bind(human.as_str())
-    .fetch_all(pool)
-    .await?;
+    };
     let mut streams = BTreeSet::from([Stream::Feed]);
     for id in std::iter::once(human.as_str()).chain(owned.iter().map(String::as_str)) {
         streams.insert(Stream::Inbox(id.parse().map_err(ApiError::stored)?));

@@ -17,6 +17,7 @@ use crate::auth::{self, GithubError, GithubOAuth};
 use crate::broker_tokens::{BrokerTokens, SigningKey, TokenError};
 use crate::config::Config;
 use crate::emqx::{EmqxAdmin, EmqxError};
+use crate::events::Slots;
 use crate::ingest::IngestState;
 use crate::presence::PresenceState;
 use crate::{db, events, health, human_post, identities, invites, items, lanes, me, replay};
@@ -61,6 +62,7 @@ struct Inner {
     public_mqtt_url: Url,
     ingest: IngestState,
     presence: PresenceState,
+    events: Slots,
     claim_lease: Duration,
 }
 
@@ -108,6 +110,7 @@ impl Hub {
                 public_mqtt_url: config.public_mqtt_url.clone(),
                 ingest: IngestState::default(),
                 presence: PresenceState::default(),
+                events: Slots::default(),
                 claim_lease: config.claim_lease,
             }),
         })
@@ -164,6 +167,11 @@ impl Hub {
 
     pub(crate) fn presence(&self) -> &PresenceState {
         &self.inner.presence
+    }
+
+    /// The places for open events streams.
+    pub(crate) fn event_slots(&self) -> &Slots {
+        &self.inner.events
     }
 
     /// How long a granted claim lasts without a HEARTBEAT.
