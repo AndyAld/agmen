@@ -1,0 +1,590 @@
+use super::*;
+use serde_json::json;
+
+const ORIGIN: &str = "https://hub.example";
+
+fn identity() -> ManagedIdentity {
+    ManagedIdentity {
+        hub_url: ORIGIN.parse().unwrap(),
+        broker_url: "mqtts://broker.example:8883".parse().unwrap(),
+        tenant: "tenant01".parse().unwrap(),
+        project: "project1".parse().unwrap(),
+        identity_id: "agent001".parse().unwrap(),
+        owner_id: "owner001".parse().unwrap(),
+        handle: "owner/agent".into(),
+        kind: IdentityKind::Agent,
+    }
+}
+
+fn message(seq: u64) -> StampedEnvelope {
+    serde_json::from_value(json!({
+        "v":1, "id":format!("{seq:026}"), "verb":"DM", "data":{},
+        "to":["agent001"], "body":"hello", "sent_at":"2026-10-27T12:00:00Z",
+        "stream":"feed", "seq":seq, "from":"sender01", "from_handle":"sender",
+        "from_kind":"human", "hub_at":"2026-10-27T12:00:00Z"
+    }))
+    .unwrap()
+}
+
+fn setup() -> (tempfile::TempDir, Store, ManagedIdentity) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open(&dir.path().join("agmend.db")).unwrap();
+    let who = identity();
+    store.register(&who).unwrap();
+    (dir, store, who)
+}
+
+#[test]
+fn state_opens_private_database() {
+    let dir = tempfile::tempdir().unwrap();
+    let parent = dir.path().join("private");
+    let path = parent.join("agmend.db");
+    let _store = Store::open(&path).unwrap();
+    assert_eq!(
+        std::fs::metadata(&parent).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    for name in ["agmend.db", "agmend.db-wal", "agmend.db-shm"] {
+        assert_eq!(
+            std::fs::metadata(parent.join(name))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+}
+
+#[test]
+fn state_reopen_preserves_identities_and_positions() {
+    let (dir, mut store, who) = setup();
+    store.ingest(ORIGIN, &who.project, &message(1)).unwrap();
+    drop(store);
+    let mut store = Store::open(&dir.path().join("agmend.db")).unwrap();
+    assert_eq!(
+        store.identities(ORIGIN, &who.owner_id).unwrap(),
+        vec![who.clone()]
+    );
+    assert_eq!(
+        store.positions(ORIGIN, &who.project).unwrap()[&Stream::Feed],
+        1
+    );
+    assert_eq!(
+        store
+            .drain(ORIGIN, &who.identity_id, 500, usize::MAX)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        store
+            .identities("https://other.example", &who.owner_id)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn pending_store_deduplicates_stream_seq() {
+    let (_dir, mut store, who) = setup();
+    for _ in 0..2 {
+        store.ingest(ORIGIN, &who.project, &message(1)).unwrap();
+    }
+    assert_eq!(
+        store
+            .drain(ORIGIN, &who.identity_id, 500, usize::MAX)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        store
+            .drain(ORIGIN, &who.identity_id, 500, usize::MAX)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn pending_store_deduplicates_cross_stream_message() {
+    let (_dir, mut store, who) = setup();
+    let mut event = message(1);
+    event.client.payload = Payload::Assign {
+        item: "B-4".parse().unwrap(),
+        to: who.identity_id.clone(),
+    };
+    store.ingest(ORIGIN, &who.project, &event).unwrap();
+    assert_eq!(
+        store
+            .drain(ORIGIN, &who.identity_id, 500, usize::MAX)
+            .unwrap()
+            .len(),
+        1
+    );
+    event.stream = Stream::Inbox(who.identity_id.clone());
+    store.ingest(ORIGIN, &who.project, &event).unwrap();
+    assert!(
+        store
+            .drain(ORIGIN, &who.identity_id, 500, usize::MAX)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn pending_store_transaction_rolls_back_on_full() {
+    let (_dir, mut store, who) = setup();
+    for seq in 1..=10_000 {
+        store.ingest(ORIGIN, &who.project, &message(seq)).unwrap();
+    }
+    assert!(
+        store
+            .ingest(ORIGIN, &who.project, &message(10_001))
+            .is_err()
+    );
+    assert_eq!(
+        store.positions(ORIGIN, &who.project).unwrap()[&Stream::Feed],
+        10_000
+    );
+    store
+        .drain(ORIGIN, &who.identity_id, 1, usize::MAX)
+        .unwrap();
+    store
+        .ingest(ORIGIN, &who.project, &message(10_001))
+        .unwrap();
+    let batch = store
+        .drain(ORIGIN, &who.identity_id, u32::MAX, usize::MAX)
+        .unwrap();
+    assert_eq!(batch.len(), 500);
+    assert_eq!(batch.first().unwrap().seq.0, 2);
+    assert_eq!(batch.last().unwrap().seq.0, 501);
+}
+
+#[test]
+fn pending_store_drain_is_atomic() {
+    let (dir, mut store, who) = setup();
+    for seq in 1..=4 {
+        store.ingest(ORIGIN, &who.project, &message(seq)).unwrap();
+    }
+    let path = dir.path().join("agmend.db");
+    let other = who.clone();
+    let task = std::thread::spawn(move || {
+        Store::open(&path)
+            .unwrap()
+            .drain(ORIGIN, &other.identity_id, 2, usize::MAX)
+            .unwrap()
+    });
+    let first = store
+        .drain(ORIGIN, &who.identity_id, 2, usize::MAX)
+        .unwrap();
+    let second = task.join().unwrap();
+    assert_eq!(first.len(), 2);
+    assert_eq!(second.len(), 2);
+    assert!(
+        first
+            .iter()
+            .all(|a| second.iter().all(|b| a.client.id != b.client.id))
+    );
+}
+
+#[test]
+fn state_rejects_future_schema() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("agmend.db");
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .pragma_update(None, "user_version", 2)
+        .unwrap();
+    assert!(matches!(Store::open(&path), Err(StoreError::Version(2))));
+}
+
+#[test]
+fn maximum_seq_and_malformed_json_are_errors() {
+    let (_dir, mut store, who) = setup();
+    assert!(
+        store
+            .ingest(ORIGIN, &who.project, &message(u64::MAX))
+            .is_err()
+    );
+    store.ingest(ORIGIN, &who.project, &message(1)).unwrap();
+    store
+        .conn
+        .execute("UPDATE pending SET message = '{}'", [])
+        .unwrap();
+    assert!(
+        store
+            .drain(ORIGIN, &who.identity_id, 500, usize::MAX)
+            .is_err()
+    );
+    assert_eq!(
+        store
+            .conn
+            .query_row("SELECT count(*) FROM pending", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn gaps_qualifiers_and_byte_budget() {
+    let (_dir, mut store, who) = setup();
+    assert!(store.ingest(ORIGIN, &who.project, &message(2)).is_err());
+    let mut event = message(1);
+    event.client.payload = Payload::Answer {};
+    store.ingest(ORIGIN, &who.project, &event).unwrap();
+    event = message(2);
+    event.from = who.identity_id.clone();
+    store.ingest(ORIGIN, &who.project, &event).unwrap();
+    event = message(3);
+    event.client.payload = Payload::Answer {};
+    event.mentioned.push(who.identity_id.clone());
+    store.ingest(ORIGIN, &who.project, &event).unwrap();
+    let size = serde_json::to_vec(&event).unwrap().len();
+    assert!(
+        store
+            .drain(ORIGIN, &who.identity_id, 500, size + 1)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        store
+            .drain(ORIGIN, &who.identity_id, 500, size + 2)
+            .unwrap(),
+        vec![event]
+    );
+}
+
+#[test]
+fn assign_receipts_prune_after_both_streams_and_survive_reopen() {
+    for first_stream in [Stream::Feed, Stream::Inbox(identity().identity_id)] {
+        let (dir, mut store, who) = setup();
+        let mut event = message(1);
+        event.client.to.clear();
+        event.client.payload = Payload::Assign {
+            item: "B-4".parse().unwrap(),
+            to: who.identity_id.clone(),
+        };
+        event.stream = first_stream.clone();
+        store.ingest(ORIGIN, &who.project, &event).unwrap();
+        assert_eq!(
+            store
+                .drain(ORIGIN, &who.identity_id, 500, usize::MAX)
+                .unwrap(),
+            vec![event.clone()]
+        );
+        drop(store);
+        let mut store = Store::open(&dir.path().join("agmend.db")).unwrap();
+        assert_eq!(
+            store
+                .conn
+                .query_row("SELECT count(*) FROM receipts", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        event.stream = match first_stream {
+            Stream::Feed => Stream::Inbox(who.identity_id.clone()),
+            Stream::Inbox(_) => Stream::Feed,
+        };
+        store.ingest(ORIGIN, &who.project, &event).unwrap();
+        assert_eq!(
+            store
+                .conn
+                .query_row("SELECT count(*) FROM receipts", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert!(
+            store
+                .drain(ORIGIN, &who.identity_id, 500, usize::MAX)
+                .unwrap()
+                .is_empty()
+        );
+        store.ingest(ORIGIN, &who.project, &event).unwrap();
+        event.stream = first_stream;
+        store.ingest(ORIGIN, &who.project, &event).unwrap();
+        assert!(
+            store
+                .drain(ORIGIN, &who.identity_id, 500, usize::MAX)
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
+
+#[test]
+fn feed_mentions_do_not_create_receipts() {
+    let (_dir, mut store, who) = setup();
+    let mut event = message(1);
+    event.client.to.clear();
+    event.client.payload = Payload::Fyi {};
+    event.mentioned.push(who.identity_id.clone());
+    store.ingest(ORIGIN, &who.project, &event).unwrap();
+    assert_eq!(
+        store
+            .drain(ORIGIN, &who.identity_id, 1, usize::MAX)
+            .unwrap(),
+        vec![event]
+    );
+    assert_eq!(
+        store
+            .conn
+            .query_row("SELECT count(*) FROM receipts", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn inbox_dms_do_not_accumulate_receipts() {
+    let (_dir, mut store, who) = setup();
+    let stream = Stream::Inbox(who.identity_id.clone());
+    for seq in 1..=20_001 {
+        let mut event = message(seq);
+        event.stream = stream.clone();
+        store.ingest(ORIGIN, &who.project, &event).unwrap();
+        assert_eq!(
+            store
+                .drain(ORIGIN, &who.identity_id, 1, usize::MAX)
+                .unwrap(),
+            vec![event]
+        );
+    }
+    assert_eq!(
+        store.positions(ORIGIN, &who.project).unwrap()[&stream],
+        20_001
+    );
+    assert_eq!(
+        store
+            .conn
+            .query_row("SELECT count(*) FROM receipts", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn stamped_client_near_envelope_cap_ingests_and_drains() {
+    let (dir, mut store, who) = setup();
+    let mut event = message(1);
+    event.client.to.clear();
+    event.client.payload = Payload::Fyi {};
+    event.client.mentions = vec!["all".parse().unwrap()];
+    event.client.body = "".try_into().unwrap();
+    let remaining = 65_487 - serde_json::to_vec(&event.client).unwrap().len();
+    event.client.body = format!(
+        "{}{}",
+        "\n".repeat(remaining / 2),
+        "x".repeat(remaining % 2)
+    )
+    .try_into()
+    .unwrap();
+    let client_raw = serde_json::to_vec(&event.client).unwrap();
+    assert_eq!(client_raw.len(), 65_487);
+    let client = agmen_proto::ClientEnvelope::from_json(&client_raw).unwrap();
+    agmen_proto::validate(&client, event.hub_at).unwrap();
+    event.mentioned = (0..99)
+        .map(|n| format!("peer{n:05}").parse().unwrap())
+        .collect();
+    event.mentioned.push(who.identity_id.clone());
+    event.from_handle.clear();
+    event.from_handle = "h".repeat(66_928 - serde_json::to_vec(&event).unwrap().len());
+    assert_eq!(event.mentioned.len(), 100);
+    assert_eq!(serde_json::to_vec(&event).unwrap().len(), 66_928);
+    store.ingest(ORIGIN, &who.project, &event).unwrap();
+    assert_eq!(
+        store.positions(ORIGIN, &who.project).unwrap()[&Stream::Feed],
+        1
+    );
+    drop(store);
+    let mut store = Store::open(&dir.path().join("agmend.db")).unwrap();
+    assert_eq!(
+        store
+            .drain(ORIGIN, &who.identity_id, 500, usize::MAX)
+            .unwrap(),
+        vec![event]
+    );
+}
+
+#[test]
+fn nonqualifying_oversized_message_advances_position() {
+    let (_dir, mut store, who) = setup();
+    let mut event = message(1);
+    event.client.to.clear();
+    event.client.payload = Payload::Fyi {};
+    event.from_handle = "h".repeat(crate::sse::MAX_EVENT);
+    store.ingest(ORIGIN, &who.project, &event).unwrap();
+    assert_eq!(
+        store.positions(ORIGIN, &who.project).unwrap()[&Stream::Feed],
+        1
+    );
+    store.ingest(ORIGIN, &who.project, &message(2)).unwrap();
+    assert_eq!(
+        store
+            .drain(ORIGIN, &who.identity_id, 500, usize::MAX)
+            .unwrap(),
+        vec![message(2)]
+    );
+}
+
+#[test]
+fn stored_rows_use_receive_cap() {
+    let (_dir, mut store, who) = setup();
+    let mut event = message(1);
+    event.from_handle.clear();
+    event.from_handle =
+        "h".repeat(crate::sse::MAX_EVENT - serde_json::to_vec(&event).unwrap().len());
+    assert_eq!(
+        serde_json::to_vec(&event).unwrap().len(),
+        crate::sse::MAX_EVENT
+    );
+    event.from_handle.push('h');
+    assert!(matches!(
+        store.ingest(ORIGIN, &who.project, &event),
+        Err(StoreError::Full(_))
+    ));
+    assert!(store.positions(ORIGIN, &who.project).unwrap().is_empty());
+    event.from_handle.pop();
+    store.ingest(ORIGIN, &who.project, &event).unwrap();
+    assert_eq!(
+        store
+            .drain(ORIGIN, &who.identity_id, 500, usize::MAX)
+            .unwrap(),
+        vec![event]
+    );
+}
+
+#[test]
+fn receipt_cap_refuses_without_cursor_advance() {
+    let (_dir, mut store, who) = setup();
+    let mut event = message(1);
+    event.client.to.clear();
+    event.client.payload = Payload::Assign {
+        item: "B-4".parse().unwrap(),
+        to: who.identity_id.clone(),
+    };
+    store
+        .conn
+        .execute(
+            "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<20000)
+         INSERT INTO receipts SELECT ?1, ?2, ?3, printf('old-%d',x), x, NULL FROM n",
+            params![ORIGIN, who.project.as_str(), who.identity_id.as_str()],
+        )
+        .unwrap();
+    assert!(matches!(
+        store.ingest(ORIGIN, &who.project, &event),
+        Err(StoreError::Full(_))
+    ));
+    assert!(store.positions(ORIGIN, &who.project).unwrap().is_empty());
+    assert!(
+        store
+            .drain(ORIGIN, &who.identity_id, 500, usize::MAX)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn registration_and_stream_counts_are_bounded() {
+    let (_dir, mut store, who) = setup();
+    for n in 1..64 {
+        let mut next = who.clone();
+        next.identity_id = format!("peers{n:03}").parse().unwrap();
+        next.project = format!("proj{n:04}").parse().unwrap();
+        store.register(&next).unwrap();
+    }
+    let mut extra = who.clone();
+    extra.identity_id = "extra001".parse().unwrap();
+    assert!(matches!(store.register(&extra), Err(StoreError::Full(_))));
+    store.register(&who).unwrap();
+    extra = who.clone();
+    extra.owner_id = "other001".parse().unwrap();
+    assert!(store.register(&extra).is_err());
+    for n in 0..256 {
+        let mut event = message(1);
+        event.stream = Stream::Inbox(format!("inbox{n:03}").parse().unwrap());
+        store.ingest(ORIGIN, &who.project, &event).unwrap();
+    }
+    assert!(matches!(
+        store.ingest(ORIGIN, &who.project, &message(1)),
+        Err(StoreError::Full(_))
+    ));
+    assert_eq!(store.positions(ORIGIN, &who.project).unwrap().len(), 256);
+}
+
+#[test]
+fn drain_errors_roll_back_the_whole_selection() {
+    let (_dir, mut store, who) = setup();
+    store.ingest(ORIGIN, &who.project, &message(1)).unwrap();
+    store.ingest(ORIGIN, &who.project, &message(2)).unwrap();
+    store
+        .conn
+        .execute("UPDATE pending SET message='{}' WHERE n=2", [])
+        .unwrap();
+    assert!(
+        store
+            .drain(ORIGIN, &who.identity_id, 500, usize::MAX)
+            .is_err()
+    );
+    assert_eq!(
+        store
+            .conn
+            .query_row("SELECT count(*) FROM pending", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    store.conn.pragma_update(None, "query_only", true).unwrap();
+    assert!(
+        store
+            .drain(ORIGIN, &who.identity_id, 1, usize::MAX)
+            .is_err()
+    );
+}
+
+#[test]
+fn origin_and_project_isolate_pending_and_positions() {
+    let (_dir, mut store, who) = setup();
+    let other_origin = "https://other.example";
+    let mut other = who.clone();
+    other.hub_url = other_origin.parse().unwrap();
+    store.register(&other).unwrap();
+    store.ingest(ORIGIN, &who.project, &message(1)).unwrap();
+    assert!(
+        store
+            .positions(other_origin, &who.project)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        store
+            .drain(other_origin, &who.identity_id, 500, usize::MAX)
+            .unwrap()
+            .is_empty()
+    );
+    store
+        .ingest(other_origin, &who.project, &message(1))
+        .unwrap();
+    assert_eq!(
+        store
+            .drain(other_origin, &who.identity_id, 500, usize::MAX)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        store
+            .drain(ORIGIN, &who.identity_id, 500, usize::MAX)
+            .unwrap()
+            .len(),
+        1
+    );
+    let project = "project2".parse().unwrap();
+    store.ingest(ORIGIN, &project, &message(1)).unwrap();
+    assert_eq!(store.positions(ORIGIN, &project).unwrap()[&Stream::Feed], 1);
+    assert!(
+        store
+            .drain(ORIGIN, &who.identity_id, 500, usize::MAX)
+            .unwrap()
+            .is_empty()
+    );
+}

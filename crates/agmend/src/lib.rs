@@ -23,6 +23,7 @@ mod local;
 mod login;
 mod socket;
 mod sse;
+mod state;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -37,6 +38,18 @@ use crate::feed::Feeds;
 use crate::hub::Hub;
 use crate::local::Local;
 use crate::login::Credentials;
+use crate::state::Store;
+
+/// Shared context for all local API connections.
+#[derive(Debug)]
+pub(crate) struct Core {
+    console: Arc<Console>,
+    #[expect(
+        dead_code,
+        reason = "identity API methods consume the store in B T2 and B T5"
+    )]
+    store: Arc<std::sync::Mutex<Store>>,
+}
 
 /// The socket's file name in the state folder (agmen-client's, which the
 /// desktop app connects to).
@@ -79,6 +92,15 @@ pub enum AgmendError {
     /// The HTTP client could not be built.
     #[error("building the HTTP client failed")]
     Http(#[source] reqwest::Error),
+    /// Opening the daemon's durable database failed.
+    #[error("opening daemon state at {} failed", path.display())]
+    Store {
+        /// Database path.
+        path: PathBuf,
+        /// Database or blocking task failure.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 }
 
 /// Where agmend listens and whose login it reads.
@@ -167,7 +189,8 @@ impl Config {
 #[derive(Debug)]
 pub struct Agmend {
     bound: socket::Bound,
-    console: Arc<Console>,
+    core: Arc<Core>,
+    opening: tokio::task::JoinHandle<()>,
 }
 
 impl Agmend {
@@ -184,15 +207,45 @@ impl Agmend {
         let hub = Arc::new(Hub::new(http, credentials));
         let feeds = Feeds::new(hub.clone(), config.roster_every);
         let bound = socket::bind(&config.socket)?;
+        let path = config.socket.with_file_name("agmend.db");
+        let database = path.clone();
+        let (send, receive) = std::sync::mpsc::sync_channel(1);
+        // bind is synchronous for compatibility. SQLite runs on a blocking
+        // worker; the worker owns the lock even if this bounded wait expires.
+        let opening = tokio::task::spawn_blocking(move || {
+            let result = Store::open(&database).map(|store| (bound, store));
+            // A timed-out caller has gone away; dropping the result closes
+            // the database and releases the socket lock.
+            if send.send(result).is_err() {
+                tracing::debug!("daemon state opener's caller left");
+            }
+        });
+        let result = receive.recv_timeout(Duration::from_secs(10));
+        if result.is_err() {
+            opening.abort();
+        }
+        let (bound, store) = result
+            .map_err(|source| AgmendError::Store {
+                path: path.clone(),
+                source: Box::new(source),
+            })?
+            .map_err(|source| AgmendError::Store {
+                path,
+                source: Box::new(source),
+            })?;
         Ok(Self {
             bound,
-            console: Arc::new(Console {
-                hub,
-                feeds,
-                local: Local {
-                    personal_roles: config.personal_roles,
-                },
-                local_every: config.local_every,
+            opening,
+            core: Arc::new(Core {
+                store: Arc::new(std::sync::Mutex::new(store)),
+                console: Arc::new(Console {
+                    hub,
+                    feeds,
+                    local: Local {
+                        personal_roles: config.personal_roles,
+                    },
+                    local_every: config.local_every,
+                }),
             }),
         })
     }
@@ -206,6 +259,10 @@ impl Agmend {
     /// Accepts connections until the future is dropped, one task each.
     /// Dropping it removes the socket and releases the lock.
     pub async fn serve(self) {
+        if let Err(error) = self.opening.await {
+            tracing::warn!(%error, "daemon state opener failed");
+            return;
+        }
         let slots = Arc::new(Semaphore::new(MAX_CONNECTIONS));
         let mut tasks = JoinSet::new();
         loop {
@@ -228,9 +285,9 @@ impl Agmend {
                 tracing::warn!("refused a connection: {MAX_CONNECTIONS} are open");
                 continue;
             };
-            let console = self.console.clone();
+            let core = self.core.clone();
             tasks.spawn(async move {
-                api::serve(stream, console).await;
+                api::serve(stream, core).await;
                 drop(slot);
             });
         }

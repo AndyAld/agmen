@@ -353,6 +353,10 @@ impl Home {
         self.dir.path().join("agmend.sock")
     }
 
+    pub fn database(&self) -> PathBuf {
+        self.socket().with_file_name("agmend.db")
+    }
+
     pub fn login_file(&self) -> PathBuf {
         self.dir.path().join("login.json")
     }

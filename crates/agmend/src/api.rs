@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 use tokio::net::UnixStream;
 use tokio::net::unix::OwnedWriteHalf;
 
+use crate::Core;
 use crate::console::{Console, bad_request, params};
 
 /// `hello`'s params.
@@ -22,7 +23,8 @@ struct Hello {
 }
 
 /// Serves `stream` until the peer hangs up or breaks the framing.
-pub(crate) async fn serve(stream: UnixStream, console: Arc<Console>) {
+pub(crate) async fn serve(stream: UnixStream, core: Arc<Core>) {
+    let console = &core.console;
     let (mut reader, mut writer) = stream.into_split();
     let mut greeted = false;
     loop {
@@ -52,7 +54,7 @@ pub(crate) async fn serve(stream: UnixStream, console: Arc<Console>) {
             }
             return;
         } else {
-            call(&console, &request.method, request.params).await
+            call(console, &request.method, request.params).await
         };
         if !answer(&mut writer, id, outcome).await {
             return;

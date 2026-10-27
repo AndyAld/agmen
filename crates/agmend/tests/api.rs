@@ -33,6 +33,29 @@ async fn second_agmend_exits() {
 }
 
 #[tokio::test]
+async fn database_opens_after_lock_and_future_schema_is_contextual() {
+    use std::error::Error as _;
+
+    let hub = support::fake_hub().await;
+    let home = support::Home::signed_in(&hub.url).await;
+    let daemon = Agmend::bind(home.config()).unwrap();
+    let conn = rusqlite::Connection::open(home.database()).unwrap();
+    conn.pragma_update(None, "user_version", 2).unwrap();
+    let error = Agmend::bind(home.config()).unwrap_err();
+    assert!(matches!(error, AgmendError::AlreadyRunning { .. }));
+    drop(daemon);
+    let error = Agmend::bind(home.config()).unwrap_err();
+    assert!(matches!(error, AgmendError::Store { .. }));
+    assert!(error.to_string().contains("agmend.db"));
+    assert!(error.source().unwrap().to_string().contains("schema 2"));
+    assert!(!home.socket().exists());
+    conn.pragma_update(None, "user_version", 1).unwrap();
+    drop(conn);
+    let reopened = Agmend::bind(home.config()).unwrap();
+    assert!(reopened.socket().exists());
+}
+
+#[tokio::test]
 async fn hello_with_api_2_is_version_error() {
     let daemon = Daemon::start().await;
     let mut client = Client::connect(&daemon.home.socket()).await;
