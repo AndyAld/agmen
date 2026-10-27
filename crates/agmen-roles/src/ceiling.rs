@@ -18,7 +18,10 @@ pub(crate) fn apply(
 ) {
     tools.retain(|tool| {
         let allowed = match kind {
-            Kind::Listener => !matches!(tool, ToolClass::Edit | ToolClass::Shell | ToolClass::Web),
+            Kind::Listener => !matches!(
+                tool,
+                ToolClass::Edit | ToolClass::Shell | ToolClass::Web | ToolClass::Subagents
+            ),
             Kind::Agent => *tool != ToolClass::Settings,
             Kind::Coordinator => true,
         };

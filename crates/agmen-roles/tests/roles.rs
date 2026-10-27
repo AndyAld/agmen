@@ -59,6 +59,17 @@ fn ceiling_strips_listener_shell() {
     assert_eq!(role.stripped, ["tool shell"]);
 }
 #[test]
+fn ceiling_strips_listener_subagents() {
+    let (_dir, layers) = layer(
+        r#"<role name="listener" extends="base" kind="listener" tier="small"><tools allow="read subagents"/></role>"#,
+    );
+    let catalog = layers.load().unwrap();
+    let role = catalog.get("listener").unwrap();
+    assert_eq!(role.tools, set([ToolClass::Read]));
+    assert_eq!(role.stripped, ["tool subagents"]);
+    assert!(!claude_tools(role).contains(&"Agent"));
+}
+#[test]
 fn ceiling_strips_agent_ruling() {
     let (_dir, layers) = layer(
         r#"<role name="engineer" extends="base" kind="agent" tier="standard"><verbs allow="RULING"/></role>"#,
