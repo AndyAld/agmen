@@ -757,8 +757,7 @@ fn on_event(shared: &Shared, jobs: &SyncSender<Job>, event: ConsoleEvent) -> Res
             live.publish_snapshot();
         }
         // Task 8 review fix 3: the checkout changed on disk. A snapshot
-        // answer still pending replaces it with its own read, which is at
-        // most one tick older; the next change sends it again.
+        // answer still pending can replace it (see take_snapshot).
         ConsoleEvent::Local(local) => {
             live.local = *local;
             live.publish_snapshot();
@@ -860,6 +859,17 @@ fn take_snapshot(shared: &Shared, generation: u64, answer: Result<ConsoleSnapsho
     }
     match answer {
         Ok(mut console) => {
+            // shortcut: agmend reads the snapshot's local data (worktrees,
+            // role files, git facts) while it answers, so a Local event the
+            // watch applied before this answer arrived can be newer, and
+            // this overwrites it. agmend sends Local only on a change, so
+            // the older read stays until the next disk change it sees.
+            // Ceiling: a change that lands during the snapshot's round
+            // trip, once each time the hub link comes up (the only time a
+            // snapshot is asked for). Revisit if stale git facts show
+            // after a reconnect; the fix is a counter bumped on each Local
+            // event, read when the request goes out, that keeps the newer
+            // data here.
             live.local = take_local(&mut console);
             live.project = console.project;
             live.me = console.me;
