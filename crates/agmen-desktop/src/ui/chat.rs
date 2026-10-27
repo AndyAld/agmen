@@ -535,6 +535,13 @@ impl ChatView {
             // list, but it alerts as a live one would. Remembering it as
             // heard makes "Show the newest" bring it in as history, so it
             // does not alert twice.
+            // shortcut: the in-chat banner and the status bar's open-alert
+            // count read the list, so a waiting alert reaches them only on
+            // "Show the newest"; until then only the chime, notification,
+            // toast and needs-you badge show it. Ceiling: both lag for as
+            // long as the chat stays paused past the 2,000 cap. Revisit if
+            // people miss a needs-you alert while paused, or when the
+            // backend counts open alerts.
             Update::Waiting { message, waiting } => {
                 let earlier = self.snapshot.clone();
                 let signal = self.hear(&message, &earlier.messages, Arrival::Live);
