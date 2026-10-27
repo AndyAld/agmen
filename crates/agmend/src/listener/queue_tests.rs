@@ -160,10 +160,10 @@ fn thread_cap_at_two_three_and_four_posts() {
 }
 
 #[test]
-fn only_human_or_worker_posts_reset_same_resolved_thread() {
+fn only_trusted_senders_reset_same_resolved_thread() {
     for (from, kind, reset) in [
-        ("stranger", IdentityKind::Human, true),
-        ("worker02", IdentityKind::Agent, true),
+        ("stranger", IdentityKind::Human, false),
+        ("worker02", IdentityKind::Agent, false),
         ("listen02", IdentityKind::Listener, false),
         ("coord001", IdentityKind::Coordinator, false),
         ("hub00001", IdentityKind::Hub, false),
@@ -185,6 +185,53 @@ fn only_human_or_worker_posts_reset_same_resolved_thread() {
             }
         );
     }
+}
+
+#[test]
+fn outside_agent_does_not_reset_thread_cap_even_when_addressed() {
+    let (tx, mut queue) = queue();
+    let thread = message_id(1);
+    for _ in 0..3 {
+        assert_eq!(queue.try_post(&thread), PostDecision::Allow);
+    }
+    let mut reply = message(9, "worker02", IdentityKind::Agent, Verb::Status);
+    reply.mentioned = vec![identity("listener1")];
+    send(&tx, reply);
+    assert!(queue.poll(seconds(0), &[identity("worker01")]).is_some());
+    assert_eq!(queue.try_post(&thread), PostDecision::ThreadCap);
+}
+
+#[test]
+fn started_worker_resets_thread_cap() {
+    let (tx, mut queue) = queue();
+    let thread = message_id(1);
+    for _ in 0..3 {
+        assert_eq!(queue.try_post(&thread), PostDecision::Allow);
+    }
+    send(
+        &tx,
+        message(9, "worker01", IdentityKind::Agent, Verb::Status),
+    );
+    assert!(queue.poll(seconds(0), &[identity("worker01")]).is_some());
+    for _ in 0..3 {
+        assert_eq!(queue.try_post(&thread), PostDecision::Allow);
+    }
+    assert_eq!(queue.try_post(&thread), PostDecision::ThreadCap);
+}
+
+#[test]
+fn person_resets_thread_cap() {
+    let (tx, mut queue) = queue();
+    let thread = message_id(1);
+    for _ in 0..3 {
+        assert_eq!(queue.try_post(&thread), PostDecision::Allow);
+    }
+    send(&tx, message(9, "person01", IdentityKind::Human, Verb::Fyi));
+    assert!(queue.poll(seconds(0), &[]).is_some());
+    for _ in 0..3 {
+        assert_eq!(queue.try_post(&thread), PostDecision::Allow);
+    }
+    assert_eq!(queue.try_post(&thread), PostDecision::ThreadCap);
 }
 
 #[test]

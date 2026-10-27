@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use agmen_proto::{IdentityId, IdentityKind, MessageId, Payload, StampedEnvelope, Verb};
+use agmen_proto::{IdentityId, MessageId, Payload, StampedEnvelope, Verb};
 use tokio::sync::mpsc;
 
 const CAPACITY: usize = 256;
@@ -81,7 +81,7 @@ impl Queue {
                 break;
             };
             let message = incoming.message;
-            if matches!(message.from_kind, IdentityKind::Human | IdentityKind::Agent) {
+            if message.from == self.person || workers.contains(&message.from) {
                 self.posts.remove(&incoming.thread);
             }
             if self.includes(&message, workers) {
