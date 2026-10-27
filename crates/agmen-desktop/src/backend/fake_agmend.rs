@@ -173,6 +173,11 @@ pub(crate) struct FakeState {
     /// How many posts are recorded and then left unanswered, with the
     /// connection dropped, as when agmend dies after reading one.
     pub(crate) drop_post_answers: usize,
+    /// How many `hello`s are cut off while a watch is open, as when
+    /// agmend restarts again right after the watch reconnected.
+    pub(crate) drop_hellos_while_watching: usize,
+    /// `hello` answers this error, as a version mismatch does.
+    pub(crate) hello_error: Option<String>,
     /// Final review fix 2: `console_watch` answers this error and closes,
     /// as agmend does for a person signed out or a project they lost.
     pub(crate) watch_error: Option<(ErrorCode, String)>,
@@ -334,7 +339,18 @@ fn serve(mut stream: UnixStream, state: &Mutex<FakeState>) {
     while let Ok(request) = frame::read::<Request>(&mut stream) {
         let id = request.id;
         let answer = match request.method.as_str() {
-            "hello" => Response::ok(id, json!({"api": 1})),
+            "hello" => {
+                let mut state = state.lock().unwrap();
+                if !state.watchers.is_empty() && state.drop_hellos_while_watching > 0 {
+                    state.drop_hellos_while_watching -= 1;
+                    drop(stream.shutdown(std::net::Shutdown::Both));
+                    return;
+                }
+                match &state.hello_error {
+                    Some(why) => Response::err(id, ErrorCode::Hub, why.clone()),
+                    None => Response::ok(id, json!({"api": 1})),
+                }
+            }
             "whoami" => Response::ok(id, json!({"id": "idandy00", "handle": "andy"})),
             "console_snapshot" => {
                 let delay = state.lock().unwrap().snapshot_delay;

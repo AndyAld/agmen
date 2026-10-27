@@ -148,7 +148,7 @@ struct Live {
     /// snapshot can end it.
     watch: Option<UnixStream>,
     /// Why the request thread ended the watch, when it did.
-    ended: Option<String>,
+    ended: Option<Link>,
     /// Set when the backend is dropped.
     closed: bool,
     subscribers: Vec<UnboundedSender<Update>>,
@@ -647,8 +647,8 @@ fn watch_loop(shared: &Shared, jobs: &SyncSender<Job>, stop: &Receiver<()>, timi
             if std::mem::take(&mut live.went_live) {
                 delay = timing.first;
             }
-            // A snapshot that failed ended the watch; agmend was reached.
-            let link = live.ended.take().map_or(link, |why| Link::Refused { why });
+            // A snapshot that failed ended the watch, and says which link.
+            let link = live.ended.take().unwrap_or(link);
             live.set_link(link);
         }
         match stop.recv_timeout(delay) {
@@ -872,16 +872,18 @@ fn take_snapshot(shared: &Shared, generation: u64, answer: Result<ConsoleSnapsho
             live.publish_snapshot();
             live.set_link(Link::Live);
         }
-        // The request connection could not reach agmend, even afresh. The
-        // watch is a different connection and keeps its own state: if agmend
-        // is really gone it ends by itself and says so.
-        Err(RequestError::Down(why)) => {
-            live.set_link(Link::AgmendDown {
-                why: format!("the chat's snapshot could not reach agmend: {why}"),
+        // No snapshot is queued again until the watch restarts, so a
+        // watch left open would sit unread in `early`. Either way it ends
+        // and starts over through its own backoff; only the link differs.
+        Err(err) => {
+            live.ended = Some(match err {
+                RequestError::Down(why) => Link::AgmendDown {
+                    why: format!("the chat's snapshot could not reach agmend: {why}"),
+                },
+                RequestError::Refused(why) => Link::Refused {
+                    why: format!("the chat's snapshot failed: {why}"),
+                },
             });
-        }
-        Err(RequestError::Refused(why)) => {
-            live.ended = Some(format!("the chat's snapshot failed: {why}"));
             if let Some(watch) = live.watch.take() {
                 // The watch thread sees its read fail and reconnects.
                 drop(watch.shutdown(std::net::Shutdown::Both));
@@ -922,14 +924,13 @@ fn request(
     method: &str,
     params: Value,
 ) -> Result<Value, RequestError> {
-    let down = |err: BackendError| RequestError::Down(err.to_string());
     let (mut open, reused) = match conn.take() {
         Some(open) => (open, true),
-        None => (Conn::open(&shared.socket).map_err(down)?, false),
+        None => (open_for_request(&shared.socket)?, false),
     };
     let mut result = open.call(method, params.clone());
     if reused && matches!(result, Err(Fail::Lost(_))) {
-        open = Conn::open(&shared.socket).map_err(down)?;
+        open = open_for_request(&shared.socket)?;
         result = open.call(method, params);
     }
     match result {
@@ -941,6 +942,17 @@ fn request(
             *conn = Some(open);
             Err(RequestError::Refused(error.message))
         }
+        Err(Fail::Lost(why)) => Err(RequestError::Down(why)),
+    }
+}
+
+/// A greeted connection, with a refused `hello` (an API version mismatch,
+/// say) told apart from a socket that failed.
+fn open_for_request(socket: &Path) -> Result<Conn, RequestError> {
+    let mut conn = Conn::connect(socket).map_err(|err| RequestError::Down(err.to_string()))?;
+    match conn.call("hello", json!({ "api": API })) {
+        Ok(_) => Ok(conn),
+        Err(Fail::Refused(error)) => Err(RequestError::Refused(error.message)),
         Err(Fail::Lost(why)) => Err(RequestError::Down(why)),
     }
 }
@@ -983,6 +995,13 @@ fn io_failed(err: std::io::Error) -> BackendError {
 impl Conn {
     /// Checks the socket is the person's own, connects and says `hello`.
     fn open(socket: &Path) -> Result<Self, BackendError> {
+        let mut conn = Self::connect(socket)?;
+        conn.call("hello", json!({ "api": API }))?;
+        Ok(conn)
+    }
+
+    /// Checks the socket is the person's own and connects, before `hello`.
+    fn connect(socket: &Path) -> Result<Self, BackendError> {
         check_socket(socket, rustix::process::geteuid().as_raw())?;
         let stream = UnixStream::connect(socket).map_err(|_| BackendError::NotConnected)?;
         stream
@@ -991,9 +1010,7 @@ impl Conn {
         stream
             .set_write_timeout(Some(REQUEST_TIMEOUT))
             .map_err(io_failed)?;
-        let mut conn = Self { stream, next_id: 1 };
-        conn.call("hello", json!({ "api": API }))?;
-        Ok(conn)
+        Ok(Self { stream, next_id: 1 })
     }
 
     fn call(&mut self, method: &str, params: Value) -> Result<Value, Fail> {

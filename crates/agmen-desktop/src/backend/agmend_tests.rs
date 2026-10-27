@@ -356,6 +356,59 @@ fn a_restart_reconnects_without_a_refusal() {
 }
 
 #[test]
+fn a_failed_retry_connection_does_not_strand_a_healthy_watch() {
+    let fake = FakeAgmend::start(console(vec![message(1), message(2), message(3)]));
+    let (backend, mut updates) = live_backend(&fake);
+    // The request connection is dead, and the fresh one agmend gives for
+    // the retry is cut off too, while the watch itself stays up.
+    fake.sever_requests();
+    fake.edit(|s| s.drop_hellos_while_watching = 1);
+    fake.push(&ConsoleEvent::Hub {
+        connected: false,
+        error: None,
+    });
+    fake.push(&ConsoleEvent::Hub {
+        connected: true,
+        error: None,
+    });
+    let seen = wait_for(&mut updates, |u| {
+        matches!(u, Update::Link(Link::AgmendDown { .. }))
+    });
+    assert!(
+        !seen
+            .iter()
+            .any(|u| matches!(u, Update::Link(Link::Refused { .. }))),
+        "a transport failure showed a refusal: {seen:?}"
+    );
+    // The watch reconnects and snapshots again instead of staying down.
+    wait_for(&mut updates, is_live);
+    assert_eq!(seqs(&backend.snapshot().messages), vec![1, 2, 3]);
+}
+
+#[test]
+fn a_refused_hello_is_a_refusal_not_agmend_down() {
+    let fake = FakeAgmend::start(console(vec![]));
+    let (_backend, mut updates) = live_backend(&fake);
+    fake.sever_requests();
+    fake.edit(|s| s.hello_error = Some("api 9 is not supported".into()));
+    fake.push(&ConsoleEvent::Hub {
+        connected: false,
+        error: None,
+    });
+    fake.push(&ConsoleEvent::Hub {
+        connected: true,
+        error: None,
+    });
+    let seen = wait_for(&mut updates, |u| {
+        matches!(u, Update::Link(Link::Refused { .. }))
+    });
+    let Some(Update::Link(Link::Refused { why })) = seen.last() else {
+        panic!("the last update is the one matched")
+    };
+    assert!(why.contains("api 9 is not supported"), "{why}");
+}
+
+#[test]
 fn a_post_on_a_dead_connection_is_retried_once() {
     let fake = FakeAgmend::start(console(vec![]));
     let (backend, mut updates) = live_backend(&fake);
