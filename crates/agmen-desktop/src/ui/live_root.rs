@@ -50,6 +50,19 @@ pub(crate) enum LiveState {
     Open(Entity<Workspace>),
 }
 
+impl LiveState {
+    /// The debug selector tests find this state by.
+    const fn selector(&self) -> &'static str {
+        match self {
+            Self::NoProject => "live:no-project",
+            Self::Connecting => "live:connecting",
+            Self::AgmendDown => "live:agmend-down",
+            Self::Refused(_) => "live:refused",
+            Self::Open(_) => "live:open",
+        }
+    }
+}
+
 /// The words a state other than [`LiveState::Open`] shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Wording {
@@ -126,8 +139,8 @@ impl Wording {
 }
 
 /// The live window's root view. Tests find each state as `live:no-project`,
-/// `live:agmend-down` and `live:refused`, its command as `live:command` and
-/// its button as `live:retry`.
+/// `live:connecting`, `live:agmend-down`, `live:refused` and `live:open`,
+/// its command as `live:command` and its button as `live:retry`.
 pub(crate) struct LiveRoot {
     launch: LiveLaunch,
     state: LiveState,
@@ -267,12 +280,7 @@ impl LiveRoot {
 
     fn message(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let wording = Wording::of(&self.state, &self.launch.project);
-        let selector = match self.state {
-            LiveState::NoProject => "live:no-project",
-            LiveState::Connecting => "live:connecting",
-            LiveState::AgmendDown => "live:agmend-down",
-            LiveState::Refused(_) | LiveState::Open(_) => "live:refused",
-        };
+        let selector = self.state.selector();
         div()
             .debug_selector(|| selector.into())
             .w(LAUNCH_STATE_WIDTH)
@@ -319,6 +327,7 @@ impl Render for LiveRoot {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if let LiveState::Open(workspace) = &self.state {
             return div()
+                .debug_selector(|| self.state.selector().into())
                 .size_full()
                 .child(workspace.clone())
                 .into_any_element();

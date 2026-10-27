@@ -216,4 +216,8 @@ fn the_window_draws_while_agmend_is_slow(cx: &mut TestAppContext) {
     });
     assert!(cx.debug_bounds("chat").is_some());
     assert!(cx.update(|_, cx| cx.try_global::<BackendHandle>().is_some()));
+    // The open window has its own selector, not a refusal's.
+    assert!(cx.debug_bounds("live:open").is_some());
+    assert!(cx.debug_bounds("live:refused").is_none());
+    assert!(cx.debug_bounds("live:connecting").is_none());
 }
