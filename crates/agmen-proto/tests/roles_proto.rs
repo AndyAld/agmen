@@ -83,6 +83,22 @@ fn listener_kind_serializes() {
 }
 
 #[test]
+fn lanes_within_wire_scope_round_trip() {
+    let wire = json!({"scope": "lanes_within", "globs": ["docs/**"]});
+    let scope: agmen_proto::EditScope = serde_json::from_value(wire.clone()).unwrap();
+    assert_eq!(
+        scope,
+        agmen_proto::EditScope::LanesWithin {
+            globs: vec!["docs/**".into()]
+        }
+    );
+    assert_eq!(serde_json::to_value(scope).unwrap(), wire);
+    assert!(
+        serde_json::from_value::<agmen_proto::EditScope>(json!({"scope": "lanes_within"})).is_err()
+    );
+}
+
+#[test]
 fn role_spec_round_trip() {
     use std::collections::BTreeSet;
 
@@ -91,6 +107,12 @@ fn role_spec_round_trip() {
     for (edits, wire_edits) in [
         (EditScope::None, json!({"scope": "none"})),
         (EditScope::Lanes, json!({"scope": "lanes"})),
+        (
+            EditScope::LanesWithin {
+                globs: vec!["tests/**".into()],
+            },
+            json!({"scope": "lanes_within", "globs": ["tests/**"]}),
+        ),
         (
             EditScope::Paths {
                 globs: vec!["docs/**".into(), ".agmen/**".into()],

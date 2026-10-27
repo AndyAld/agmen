@@ -3,7 +3,11 @@
 /**
  * What a role may edit, as defined by the roles design's section 3.
  */
-export type EditScope = { "scope": "none" } | { "scope": "lanes" } | { "scope": "paths", 
+export type EditScope = { "scope": "none" } | { "scope": "lanes" } | { "scope": "lanes_within", 
+/**
+ * Globs relative to the project root, such as `tests/**`.
+ */
+globs: Array<string>, } | { "scope": "paths", 
 /**
  * Globs relative to the project root, such as `docs/**`.
  */

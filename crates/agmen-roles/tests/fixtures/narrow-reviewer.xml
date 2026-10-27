@@ -1,0 +1,1 @@
+<role name="narrow-reviewer" extends="reviewer" version="1"><tools allow="read search"/><rules><rule>Only inspect the requested files.</rule></rules></role>

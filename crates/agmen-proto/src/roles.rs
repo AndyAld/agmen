@@ -29,6 +29,12 @@ pub enum EditScope {
     None,
     /// Paths in claimed or lent lanes, subject to the existing lane checks.
     Lanes,
+    /// Paths in claimed or lent lanes that also match the listed globs.
+    /// The hub must apply both the existing lane checks and the glob restrictions.
+    LanesWithin {
+        /// Globs relative to the project root, such as `tests/**`.
+        globs: Vec<String>,
+    },
     /// Paths matching the listed globs.
     Paths {
         /// Globs relative to the project root, such as `docs/**`.

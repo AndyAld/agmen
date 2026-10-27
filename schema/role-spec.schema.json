@@ -62,6 +62,27 @@
           ]
         },
         {
+          "description": "Paths in claimed or lent lanes that also match the listed globs.\nThe hub must apply both the existing lane checks and the glob restrictions.",
+          "type": "object",
+          "properties": {
+            "globs": {
+              "description": "Globs relative to the project root, such as `tests/**`.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "scope": {
+              "type": "string",
+              "const": "lanes_within"
+            }
+          },
+          "required": [
+            "scope",
+            "globs"
+          ]
+        },
+        {
           "description": "Paths matching the listed globs.",
           "type": "object",
           "properties": {
