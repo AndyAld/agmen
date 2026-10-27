@@ -46,9 +46,16 @@ fn the_project_comes_from_the_folders_identity() {
     let elsewhere = tempfile::tempdir().unwrap();
     let settings = settings_with(elsewhere.path(), "projectold");
     // The identity file wins over the last project.
+    let (project, root) = choose_project(wt.path(), Some(&settings));
     assert_eq!(
-        choose_project(wt.path(), Some(&settings)),
+        project,
         ProjectChoice::Project("projectcwd".parse().unwrap())
+    );
+    // Task 8: and the checkout's root, for agmend to read.
+    let root = root.unwrap();
+    assert_eq!(
+        std::fs::canonicalize(root).unwrap(),
+        std::fs::canonicalize(wt.path()).unwrap()
     );
 }
 
@@ -58,7 +65,7 @@ fn else_the_last_project_opens() {
     let settings = settings_with(outside.path(), "projectold");
     assert_eq!(
         choose_project(outside.path(), Some(&settings)),
-        ProjectChoice::Project("projectold".parse().unwrap())
+        (ProjectChoice::Project("projectold".parse().unwrap()), None)
     );
 }
 
@@ -67,11 +74,11 @@ fn neither_gives_no_project() {
     let outside = tempfile::tempdir().unwrap();
     let missing = outside.path().join("settings.toml");
     assert_eq!(
-        choose_project(outside.path(), Some(&missing)),
+        choose_project(outside.path(), Some(&missing)).0,
         ProjectChoice::None { why: None }
     );
     assert_eq!(
-        choose_project(outside.path(), None),
+        choose_project(outside.path(), None).0,
         ProjectChoice::None { why: None }
     );
 }
@@ -84,7 +91,8 @@ fn an_identity_agmen_may_not_use_says_why() {
     std::fs::write(wt.path().join(".git/info/exclude"), "").unwrap();
     let elsewhere = tempfile::tempdir().unwrap();
     let settings = settings_with(elsewhere.path(), "projectold");
-    let ProjectChoice::None { why: Some(why) } = choose_project(wt.path(), Some(&settings)) else {
+    let (ProjectChoice::None { why: Some(why) }, None) = choose_project(wt.path(), Some(&settings))
+    else {
         panic!("an untrusted identity opened a project");
     };
     assert!(why.contains("agmen does not use"), "{why}");

@@ -29,16 +29,8 @@ pub(crate) enum WorktreeState {
 /// How a file differs from the worktree's base.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum ChangeKind {
-    #[expect(
-        dead_code,
-        reason = "the fixture's changes are all modified; git reports added files once the live backend lands (ADR-0011)"
-    )]
     Added,
     Modified,
-    #[expect(
-        dead_code,
-        reason = "the fixture's changes are all modified; git reports deleted files once the live backend lands (ADR-0011)"
-    )]
     Deleted,
 }
 
@@ -82,8 +74,12 @@ pub(crate) struct WorktreeInfo {
     pub(crate) commits: Vec<CommitInfo>,
     pub(crate) state: WorktreeState,
     /// File contents the backend has read, by path, with their change
-    /// marks; a file not here shows a placeholder.
+    /// marks; a file not here is asked of the backend when it opens
+    /// (Task 8), or shows a placeholder.
     pub(crate) texts: BTreeMap<String, FileText>,
+    /// Task 8: its folder on disk as agmend listed it, which `file_text`
+    /// takes; `None` in the fixture.
+    pub(crate) root: Option<String>,
 }
 
 /// A change mark beside a line. Line numbers start at 1; ranges are

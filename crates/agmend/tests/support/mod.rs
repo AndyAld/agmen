@@ -361,9 +361,15 @@ impl Home {
         TokenStore::Dir(self.dir.path().join("tokens"))
     }
 
+    /// Where this home's personal roles live.
+    pub fn personal_roles(&self) -> PathBuf {
+        self.dir.path().join("roles")
+    }
+
     pub fn config(&self) -> Config {
         Config::new(self.socket(), self.login_file(), self.tokens())
             .roster_every(Duration::from_millis(100))
+            .personal_roles(self.personal_roles())
     }
 }
 

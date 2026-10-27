@@ -26,6 +26,9 @@ pub(crate) struct LiveLaunch {
     /// agmend's socket.
     pub(crate) socket: PathBuf,
     pub(crate) project: ProjectChoice,
+    /// Task 8: the checkout the working folder is in, when it named the
+    /// project; agmend reads its worktrees and git facts.
+    pub(crate) root: Option<PathBuf>,
     /// agmen's settings file, where a launch that opens remembers its
     /// project; `None` remembers nothing.
     pub(crate) settings: Option<PathBuf>,
@@ -174,12 +177,17 @@ impl LiveRoot {
         };
         let socket = self.launch.socket.clone();
         let project = project.clone();
+        let root = self.launch.root.clone();
         let (done, result) = futures::channel::oneshot::channel();
         let spawned = std::thread::Builder::new()
             .name("agmend-connect".into())
             .spawn(move || {
                 // The window closed meanwhile; the backend drops here.
-                drop(done.send(AgmendBackend::connect(&socket, project.as_str())));
+                drop(done.send(AgmendBackend::connect(
+                    &socket,
+                    project.as_str(),
+                    root.as_deref(),
+                )));
             });
         if let Err(err) = spawned {
             self.state = LiveState::Refused(format!("starting the agmend link failed: {err}"));

@@ -3,9 +3,10 @@
 //! login` signed in. The desktop holds no tokens; agmend reads the CLI's
 //! login and calls the hub over HTTP.
 //!
-//! Methods: `hello {api}`, `whoami`, `console_snapshot {project}`,
-//! `chat_history {project, before, limit}`, `console_watch {project}` and
-//! `post {project, envelope}`. Frames and errors are agmen-local's.
+//! Methods: `hello {api}`, `whoami`, `console_snapshot {project, root?}`,
+//! `chat_history {project, before, limit}`, `console_watch {project}`,
+//! `post {project, envelope}` and `file_text {project, root, worktree,
+//! path}`. Frames and errors are agmen-local's.
 //!
 //! The `agmend` binary calls [`Config::from_env`], [`Agmend::bind`] and
 //! [`Agmend::serve`]; tests do the same with a [`Config`] that points at a
@@ -16,7 +17,9 @@
 mod api;
 mod console;
 mod feed;
+mod git;
 mod hub;
+mod local;
 mod login;
 mod socket;
 mod sse;
@@ -32,6 +35,7 @@ use tokio::task::JoinSet;
 use crate::console::Console;
 use crate::feed::Feeds;
 use crate::hub::Hub;
+use crate::local::Local;
 use crate::login::Credentials;
 
 /// The socket's file name in the state folder (agmen-client's, which the
@@ -81,6 +85,7 @@ pub struct Config {
     login_file: PathBuf,
     tokens: TokenStore,
     roster_every: Duration,
+    personal_roles: Option<PathBuf>,
 }
 
 impl Config {
@@ -97,29 +102,44 @@ impl Config {
             login_file: login_file.into(),
             tokens,
             roster_every: ROSTER_EVERY,
+            personal_roles: None,
         }
     }
 
     /// This user's config: the socket in the state folder
     /// (`$XDG_STATE_HOME/agmen/agmend.sock`, on macOS
-    /// `~/Library/Application Support/agmen/agmend.sock`), and the CLI's
-    /// login file and token store.
+    /// `~/Library/Application Support/agmen/agmend.sock`), the CLI's login
+    /// file and token store, and personal roles in `~/.config/agmen/roles`.
     ///
     /// # Errors
     ///
     /// [`AgmendError::Path`] when `HOME` is not set.
     pub fn from_env() -> Result<Self, AgmendError> {
-        Ok(Self::new(
+        let config = Self::new(
             agmen_client::agmend_socket()?,
             agmen_client::login_file()?,
             TokenStore::from_env(),
-        ))
+        );
+        // Spec 3.5 and the desktop's settings use ~/.config/agmen on every
+        // platform, not agmen-client's config folder.
+        Ok(match std::env::home_dir() {
+            Some(home) => config.personal_roles(home.join(".config/agmen/roles")),
+            None => config,
+        })
     }
 
     /// Re-reads each watched roster this often instead of every 15 s.
     #[must_use]
     pub const fn roster_every(mut self, every: Duration) -> Self {
         self.roster_every = every;
+        self
+    }
+
+    /// Reads the person's own role files from `dir` (spec 3.5's personal
+    /// layer) instead of none.
+    #[must_use]
+    pub fn personal_roles(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.personal_roles = Some(dir.into());
         self
     }
 
@@ -153,7 +173,13 @@ impl Agmend {
         let bound = socket::bind(&config.socket)?;
         Ok(Self {
             bound,
-            console: Arc::new(Console { hub, feeds }),
+            console: Arc::new(Console {
+                hub,
+                feeds,
+                local: Local {
+                    personal_roles: config.personal_roles,
+                },
+            }),
         })
     }
 

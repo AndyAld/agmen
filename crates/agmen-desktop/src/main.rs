@@ -337,10 +337,11 @@ fn live_launch() -> Result<ui::LiveLaunch> {
     let settings =
         std::env::home_dir().map(|home| appearance::agmen_settings_path(&home.join(".config")));
     let cwd = std::env::current_dir().context("reading the working folder")?;
-    let project = project::choose_project(&cwd, settings.as_deref());
+    let (project, root) = project::choose_project(&cwd, settings.as_deref());
     Ok(ui::LiveLaunch {
         socket,
         project,
+        root,
         settings,
     })
 }

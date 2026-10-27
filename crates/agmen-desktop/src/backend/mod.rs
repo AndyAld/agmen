@@ -7,6 +7,8 @@
 
 // Task 6: the live backend over agmend's socket; Task 7 opens the app on it.
 mod agmend;
+// Task 8: agmend's local data as the window's types.
+mod agmend_local;
 // Task 7: the fake agmend the backend's and the window's tests talk to.
 #[cfg(test)]
 pub(crate) mod fake_agmend;
@@ -14,6 +16,8 @@ mod fixture;
 mod fixture_data;
 // Task 19: the planning room's spec texts, comments, caps and presence.
 mod fixture_plan;
+// Task 8: role files resolved for the Roles panel, fixture and live.
+mod role_files;
 mod screen;
 mod worktree;
 // Task 15: the models each agent offers and the model a message ran on.
@@ -99,7 +103,17 @@ pub(crate) trait Backend: 'static {
     fn act(&self, action: Action) -> Result<(), BackendError>;
     /// Updates from now on, until the receiver is dropped.
     fn subscribe(&self) -> UnboundedReceiver<Update>;
+    /// Task 8: reads `path` in `worktree` from disk, for a file the
+    /// snapshot holds no text for; the answer, or why there is none,
+    /// arrives on the receiver. `None` when this backend reads no files,
+    /// as the fixture, whose texts are all in its snapshot.
+    fn file_text(&self, _worktree: &WorktreeInfo, _path: &str) -> Option<FileTextReply> {
+        None
+    }
 }
+
+/// Where a [`Backend::file_text`] answer arrives.
+pub(crate) type FileTextReply = futures::channel::oneshot::Receiver<Result<FileText, String>>;
 
 /// The app's backend as a GPUI global, so any view can read and act
 /// through it.

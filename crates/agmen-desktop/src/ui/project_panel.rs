@@ -9,7 +9,7 @@ use agmen_proto::IdentityId;
 use gpui::{
     AnyElement, AppContext as _, Context, Entity, EventEmitter, FontWeight,
     InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString, Styled as _,
-    Window, div,
+    Task, Window, div,
 };
 
 use super::code_view::{CodeView, GutterMark};
@@ -20,7 +20,7 @@ use super::scope_chip::{ScopeChip, ScopeChipEvent, ScopeOption, branch_label};
 use super::syntax::Language;
 use super::tokens::{ICON_LG, ICON_SM, PROJECT_ROW_HEIGHT, SPACE_6};
 use crate::appearance::Appearance;
-use crate::backend::{ChangeKind, FileChange, WorktreeHead, WorktreeInfo};
+use crate::backend::{BackendHandle, ChangeKind, FileChange, FileText, WorktreeHead, WorktreeInfo};
 use crate::icons::{FileIcons, UiIcon};
 
 /// What the Project panel tells the workspace.
@@ -385,17 +385,23 @@ impl Render for ProjectPanel {
 }
 
 /// A file from a worktree in a center tab: the worktree and the path in
-/// the breadcrumb, then the text with its change marks.
+/// the breadcrumb, then the text with its change marks. A file the
+/// snapshot holds no text for is asked of the backend (Task 8), and shows
+/// a line saying so until the answer lands.
 pub(crate) struct FileView {
     parts: Vec<SharedString>,
     code: Entity<CodeView>,
+    language: Language,
+    /// Lines a reference asked to show, kept for the text still loading.
+    lines: Option<RangeInclusive<u32>>,
+    /// The backend's read of the file, dropped with the view.
+    _reading: Option<Task<()>>,
 }
 
 /// The text and change marks of `path` in `worktree`.
 fn contents(worktree: &WorktreeInfo, path: &str) -> (String, Vec<GutterMark>) {
-    // shortcut: a file the backend has not read shows a placeholder line;
-    // the live backend reads files and their marks from `git diff`
-    // (ADR-0011).
+    // A file neither the snapshot nor the backend can give shows a line
+    // saying so.
     worktree.texts.get(path).map_or_else(
         || {
             (
@@ -409,7 +415,16 @@ fn contents(worktree: &WorktreeInfo, path: &str) -> (String, Vec<GutterMark>) {
 
 impl FileView {
     pub(crate) fn new(worktree: &WorktreeInfo, path: &str, cx: &mut Context<Self>) -> Self {
-        let (text, marks) = contents(worktree, path);
+        let reading = if worktree.texts.contains_key(path) {
+            None
+        } else {
+            cx.try_global::<BackendHandle>()
+                .and_then(|backend| backend.0.file_text(worktree, path))
+        };
+        let (text, marks) = match reading {
+            Some(_) => (format!("Reading {path} through agmend.\n"), Vec::new()),
+            None => contents(worktree, path),
+        };
         let language = Language::for_path(Path::new(path));
         let code = cx.new(|_| CodeView::new(&text, language, marks));
         let parts = std::iter::once(SharedString::from(worktree.handle.clone()))
@@ -418,12 +433,54 @@ impl FileView {
                     .map(|part| SharedString::from(part.to_owned())),
             )
             .collect();
-        Self { parts, code }
+        let shown = path.to_owned();
+        let reading = reading.map(|answer| {
+            cx.spawn(async move |view, cx| {
+                let answer = answer
+                    .await
+                    .unwrap_or_else(|_| Err("the agmend link closed".to_owned()));
+                // The tab closed meanwhile: nothing to show it in.
+                drop(view.update(cx, |view, cx| view.read(&shown, answer, cx)));
+            })
+        });
+        Self {
+            parts,
+            code,
+            language,
+            lines: None,
+            _reading: reading,
+        }
+    }
+
+    /// Shows the backend's answer for `path`: its text, or why there is none.
+    fn read(&mut self, path: &str, answer: Result<FileText, String>, cx: &mut Context<Self>) {
+        let (text, marks) = match answer {
+            Ok(file) => (file.text, file.marks),
+            Err(why) => (format!("{path} cannot be shown: {why}\n"), Vec::new()),
+        };
+        let language = self.language;
+        self.code = cx.new(|_| CodeView::new(&text, language, marks));
+        if let Some(lines) = self.lines.clone() {
+            self.code.update(cx, |code, cx| code.show_lines(lines, cx));
+        }
+        self._reading = None;
+        cx.notify();
     }
 
     /// Scrolls to `lines` (1-based) and highlights them.
     pub(crate) fn show_lines(&mut self, lines: RangeInclusive<u32>, cx: &mut Context<Self>) {
+        self.lines = Some(lines.clone());
         self.code.update(cx, |code, cx| code.show_lines(lines, cx));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn text(&self, cx: &gpui::App) -> String {
+        self.code.read(cx).text()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn marks(&self, cx: &gpui::App) -> Vec<GutterMark> {
+        self.code.read(cx).marks()
     }
 
     #[cfg(test)]

@@ -39,6 +39,23 @@ impl Line {
 }
 
 #[cfg(test)]
+impl CodeView {
+    /// The text shown, lines joined by newlines.
+    pub(crate) fn text(&self) -> String {
+        self.lines
+            .iter()
+            .map(|line| line.text.as_ref())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The change marks shown.
+    pub(crate) fn marks(&self) -> Vec<GutterMark> {
+        self.marks.as_ref().clone()
+    }
+}
+
+#[cfg(test)]
 impl Line {
     /// The line's highlights, as byte ranges within it and syntax names.
     pub(super) fn highlights(&self) -> &[(Range<usize>, &'static str)] {

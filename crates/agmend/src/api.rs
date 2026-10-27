@@ -100,6 +100,7 @@ async fn call(console: &Console, method: &str, raw: Value) -> Result<Value, ApiE
         "console_snapshot" => console.snapshot(raw).await,
         "chat_history" => console.history(raw).await,
         "post" => console.post(raw).await,
+        "file_text" => console.file_text(raw).await,
         other => Err(ApiError {
             code: ErrorCode::NotFound,
             message: format!("agmend has no method {other:?}"),

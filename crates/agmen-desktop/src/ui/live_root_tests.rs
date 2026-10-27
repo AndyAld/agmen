@@ -58,6 +58,7 @@ fn live_without_agmend_says_so(cx: &mut TestAppContext) {
     let settings = fake.dir.path().join("settings.toml");
     let launch = LiveLaunch {
         socket: fake.path(),
+        root: None,
         project: ProjectChoice::Project(project()),
         settings: Some(settings.clone()),
     };
@@ -101,6 +102,7 @@ fn no_project_says_how_to_join(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let launch = LiveLaunch {
         socket: dir.path().join("agmend.sock"),
+        root: None,
         project: ProjectChoice::None { why: None },
         settings: None,
     };
@@ -123,6 +125,7 @@ fn status_bar_shows_reconnecting(cx: &mut TestAppContext) {
     let fake = FakeAgmend::start(console(vec![message(1)]));
     let launch = LiveLaunch {
         socket: fake.path(),
+        root: None,
         project: ProjectChoice::Project(project()),
         settings: None,
     };
@@ -169,6 +172,7 @@ fn the_window_draws_while_agmend_is_slow(cx: &mut TestAppContext) {
     fake.edit(|s| s.snapshot_delay = Duration::from_millis(300));
     let launch = LiveLaunch {
         socket: fake.path(),
+        root: None,
         project: ProjectChoice::Project(project()),
         settings: None,
     };

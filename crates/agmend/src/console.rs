@@ -1,10 +1,11 @@
 //! The console methods: `whoami`, `console_snapshot`, `chat_history`,
-//! `console_watch` and `post`, all as the signed-in person.
+//! `console_watch`, `post` and `file_text`, all as the signed-in person.
 //!
 //! Messages are the project feed, newest last. Feed seqs commit with no
 //! gaps (protocol 5.2), so the page before seq `n` starts after
 //! `n - 1 - limit`, and replay, which only pages forward, can serve it.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use agmen_client::PAGE_LIMIT;
@@ -20,12 +21,14 @@ use tokio::sync::broadcast::error::RecvError;
 
 use crate::feed::Feeds;
 use crate::hub::{Hub, HubError};
+use crate::local::{self, Local};
 
 /// What every console method needs.
 #[derive(Debug)]
 pub(crate) struct Console {
     pub(crate) hub: Arc<Hub>,
     pub(crate) feeds: Arc<Feeds>,
+    pub(crate) local: Local,
 }
 
 /// `params` as `T`, or `bad_request`.
@@ -109,6 +112,26 @@ struct ProjectParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct SnapshotParams {
+    project: ProjectId,
+    /// The person's checkout of the project, which the desktop found;
+    /// without it the snapshot has no worktrees, git facts or project
+    /// roles (Task 8).
+    #[serde(default)]
+    root: Option<PathBuf>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileTextParams {
+    project: ProjectId,
+    root: PathBuf,
+    worktree: PathBuf,
+    path: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct HistoryParams {
     project: ProjectId,
     /// Left out for the newest page, as m0-m1's `chat_history` allows.
@@ -158,10 +181,11 @@ impl Console {
         })
     }
 
-    /// `console_snapshot {project}`: the newest 500 feed messages and the
-    /// roster.
+    /// `console_snapshot {project, root?}`: the newest 500 feed messages,
+    /// the roster, the role files, and, for a trusted checkout at `root`,
+    /// its worktrees and git facts.
     pub(crate) async fn snapshot(&self, raw: Value) -> Result<Value, ApiError> {
-        let ProjectParams { project } = params(raw)?;
+        let SnapshotParams { project, root } = params(raw)?;
         let login = self
             .hub
             .credentials()
@@ -173,6 +197,15 @@ impl Console {
             .before(&project, head.saturating_add(1), PAGE_LIMIT)
             .await?;
         let roster = self.hub.roster(&project).await?;
+        let checkout = match &root {
+            Some(root) => local::checkout(&project, root).await,
+            None => None,
+        };
+        let roles = self.local.roles(checkout.as_deref()).await;
+        let data = match &checkout {
+            Some(root) => local::checkout_data(root).await,
+            None => local::CheckoutData::default(),
+        };
         let mut snapshot = ConsoleSnapshot {
             project: project.to_string(),
             me: Me {
@@ -182,6 +215,9 @@ impl Console {
             roster,
             messages: Vec::new(),
             older,
+            roles,
+            worktrees: data.worktrees,
+            git: data.git,
         };
         let (messages, trimmed) = fit(messages, json_len(&snapshot)?)?;
         snapshot.messages = messages;
@@ -238,6 +274,18 @@ impl Console {
         let mut messages = page.messages;
         messages.retain(|m| m.seq.0 < before);
         Ok((messages, after > 0))
+    }
+
+    /// `file_text {project, root, worktree, path}`: one file's text, at
+    /// most 512 KiB, and its gutter marks.
+    pub(crate) async fn file_text(&self, raw: Value) -> Result<Value, ApiError> {
+        let FileTextParams {
+            project,
+            root,
+            worktree,
+            path,
+        } = params(raw)?;
+        to_value(&local::file_text(&project, &root, &worktree, &path).await?)
     }
 
     /// `post {project, envelope}`: the envelope as the person, over HTTP.

@@ -1,6 +1,10 @@
 //! Frame codec and wire type tests.
 
-use agmen_local::console::{ConsoleEvent, ConsoleSnapshot, Me, RosterEntry};
+use agmen_local::console::{
+    ChangeEntry, ChangeKindEntry, ConsoleEvent, ConsoleSnapshot, DiffLineEntry, DiffLineKindEntry,
+    GitFactsEntry, HeadEntry, HunkEntry, Me, RoleFileInfo, RoleLayer, RosterEntry, Upstream,
+    WorktreeEntry,
+};
 use agmen_local::frame::{self, FrameError};
 use agmen_local::{API, ApiError, ErrorCode, MAX_FRAME, Outcome, Request, Response};
 use serde_json::json;
@@ -164,9 +168,51 @@ fn console_snapshot_round_trips() -> TestResult {
         roster: serde_json::from_str(ROSTER)?,
         messages: vec![message()?],
         older: true,
+        roles: vec![RoleFileInfo {
+            name: "reviewer".into(),
+            layer: RoleLayer::BuiltIn,
+            text: "<role name=\"reviewer\"/>".into(),
+        }],
+        worktrees: vec![WorktreeEntry {
+            path: "/src/agmen".into(),
+            identity: None,
+            head: HeadEntry::Branch {
+                name: "main".into(),
+            },
+            upstream: Some(Upstream {
+                ahead: 1,
+                behind: 0,
+            }),
+            files: vec!["a b.rs".into()],
+            changes: vec![ChangeEntry {
+                path: "a b.rs".into(),
+                kind: ChangeKindEntry::Modified,
+                added: 1,
+                removed: 0,
+                hunks: vec![HunkEntry {
+                    old_start: 1,
+                    new_start: 1,
+                    lines: vec![DiffLineEntry {
+                        kind: DiffLineKindEntry::Added,
+                        text: "x".into(),
+                    }],
+                }],
+            }],
+            commits: Vec::new(),
+            truncated: false,
+        }],
+        git: GitFactsEntry::default(),
     };
     let back: ConsoleSnapshot = serde_json::from_value(serde_json::to_value(&snap)?)?;
     assert_eq!(back, snap);
+    // Task 8: an older agmend's snapshot, without the local fields, parses.
+    let mut old = serde_json::to_value(&snap)?;
+    for field in ["roles", "worktrees", "git"] {
+        old.as_object_mut().map(|o| o.remove(field));
+    }
+    let old: ConsoleSnapshot = serde_json::from_value(old)?;
+    assert!(old.roles.is_empty() && old.worktrees.is_empty());
+    assert_eq!(old.git, GitFactsEntry::default());
     let ev = ConsoleEvent::Hub {
         connected: false,
         error: None,

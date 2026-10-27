@@ -91,3 +91,10 @@ fn kind_cap_matches_the_hub() {
     // The hub takes REVIEW from no kind yet (ingest.rs may_send).
     assert!(!kind_may_send(RoleKind::Agent, Verb::Review));
 }
+
+#[test]
+fn built_in_names_match_their_files() {
+    for (name, text) in BUILT_IN {
+        assert_eq!(parse(text).unwrap().name, name);
+    }
+}

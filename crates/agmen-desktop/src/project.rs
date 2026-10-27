@@ -1,6 +1,6 @@
 //! Which project a live launch opens (Task 7).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use agmen_proto::ProjectId;
 
@@ -22,16 +22,35 @@ pub(crate) enum ProjectChoice {
 /// `settings`, the desktop's settings file. An identity file agmen may not
 /// use gives `None` with its reason rather than some other project, so the
 /// person sees why their folder did not open.
-pub(crate) fn choose_project(cwd: &Path, settings: Option<&Path>) -> ProjectChoice {
+///
+/// Task 8: with the project comes the checkout root when the folder named
+/// it, which agmend reads worktrees and git facts from; a project from the
+/// settings has none.
+pub(crate) fn choose_project(
+    cwd: &Path,
+    settings: Option<&Path>,
+) -> (ProjectChoice, Option<PathBuf>) {
     match agmen_client::find_identity(cwd) {
-        Ok(Some(joined)) => return ProjectChoice::Project(joined.identity.project),
+        Ok(Some(joined)) => {
+            return (
+                ProjectChoice::Project(joined.identity.project),
+                Some(joined.root),
+            );
+        }
         Ok(None) => {}
         Err(err) => {
-            return ProjectChoice::None {
-                why: Some(err.to_string()),
-            };
+            return (
+                ProjectChoice::None {
+                    why: Some(err.to_string()),
+                },
+                None,
+            );
         }
     }
+    (from_settings(settings), None)
+}
+
+fn from_settings(settings: Option<&Path>) -> ProjectChoice {
     let Some(settings) = settings else {
         return ProjectChoice::None { why: None };
     };

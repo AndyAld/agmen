@@ -9,7 +9,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use agmen_local::console::{ConsoleEvent, ConsoleSnapshot, Me, RosterEntry, Status};
+use agmen_local::console::{
+    ConsoleEvent, ConsoleSnapshot, GitFactsEntry, Me, RoleFileInfo, RoleLayer, RosterEntry, Status,
+    WorktreeEntry,
+};
 use agmen_local::{ErrorCode, Request, Response, frame};
 use agmen_proto::{IdentityId, IdentityKind, StampedEnvelope};
 use serde_json::{Value, json};
@@ -100,6 +103,59 @@ pub(crate) fn console(messages: Vec<StampedEnvelope>) -> ConsoleSnapshot {
         roster: roster(),
         messages,
         older: false,
+        roles: Vec::new(),
+        worktrees: Vec::new(),
+        git: GitFactsEntry::default(),
+    }
+}
+
+/// The checkout root the window found, as Task 8's tests name it.
+pub(crate) const ROOT: &str = "/src/agmen";
+
+/// Task 8: a snapshot with agmend's local data: the built-in roles, two
+/// worktrees of [`ROOT`] (fx1's, and a detached one with no identity
+/// file) and their git facts.
+pub(crate) fn console_with_checkout(messages: Vec<StampedEnvelope>) -> ConsoleSnapshot {
+    let worktrees: Vec<WorktreeEntry> = serde_json::from_value(json!([
+        {
+            "path": ROOT,
+            "identity": {"id": "idfx1abc", "handle": "andy/fx1"},
+            "head": {"kind": "branch", "name": "main"},
+            "upstream": {"ahead": 1, "behind": 0},
+            "files": ["src/main.rs"],
+            "changes": [{"path": "src/main.rs", "kind": "modified", "added": 1, "removed": 0,
+                         "hunks": [{"old_start": 1, "new_start": 1, "lines": [
+                             {"kind": "context", "text": "fn live() {}"},
+                             {"kind": "added", "text": "fn more() {}"}]}]}],
+            "commits": [{"sha": "9e2a71c0000000000000000000000000000000aa", "short": "9e2a71c",
+                         "subject": "Resolve mod list", "author": "Andy",
+                         "at": "2026-10-25T21:31:00Z"}],
+        },
+        {
+            "path": "/src/review",
+            "head": {"kind": "detached", "sha": "4d9fdc8000000000000000000000000000000000"},
+            "files": ["src/main.rs"],
+            "changes": [],
+            "commits": [],
+        },
+    ]))
+    .unwrap();
+    ConsoleSnapshot {
+        roles: agmen_local::roles::BUILT_IN
+            .iter()
+            .map(|(name, text)| RoleFileInfo {
+                name: (*name).into(),
+                layer: RoleLayer::BuiltIn,
+                text: (*text).into(),
+            })
+            .collect(),
+        worktrees,
+        git: GitFactsEntry {
+            branches: vec!["main".into()],
+            commits: vec!["9e2a71c0000000000000000000000000000000aa".into()],
+            files: vec!["src/main.rs".into()],
+        },
+        ..console(messages)
     }
 }
 
@@ -119,6 +175,10 @@ pub(crate) struct FakeState {
     pub(crate) snapshot_delay: Duration,
     pub(crate) posts: Vec<Request>,
     pub(crate) snapshots_served: usize,
+    /// Task 8: each `console_snapshot`'s params.
+    pub(crate) snapshot_params: Vec<Value>,
+    /// Task 8: each `file_text`'s params.
+    pub(crate) file_text_params: Vec<Value>,
     /// Each watch's connection and its request id.
     pub(crate) watchers: Vec<(UnixStream, u64)>,
     /// Every accepted connection, to drop on stop.
@@ -235,6 +295,7 @@ fn serve(mut stream: UnixStream, state: &Mutex<FakeState>) {
                 let shared = state;
                 let mut state = shared.lock().unwrap();
                 state.snapshots_served += 1;
+                state.snapshot_params.push(request.params.clone());
                 let early = state.during_snapshot.clone();
                 for event in &early {
                     push(&mut state, event);
@@ -257,6 +318,19 @@ fn serve(mut stream: UnixStream, state: &Mutex<FakeState>) {
                     Some(why) => Response::err(id, ErrorCode::Hub, why.clone()),
                     None => Response::ok(id, json!({"stream": "feed", "seq": 99})),
                 }
+            }
+            // Task 8: the fixture's main.rs, with a second line added.
+            "file_text" => {
+                state
+                    .lock()
+                    .unwrap()
+                    .file_text_params
+                    .push(request.params.clone());
+                Response::ok(
+                    id,
+                    json!({"text": "fn live() {}\nfn more() {}", "truncated": false,
+                           "marks": [{"kind": "added", "from": 2, "to": 3}]}),
+                )
             }
             "console_watch" => {
                 let mut state = state.lock().unwrap();

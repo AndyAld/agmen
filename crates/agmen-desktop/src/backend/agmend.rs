@@ -1,5 +1,6 @@
 //! [`AgmendBackend`]: the project chat and roster, live from agmend's local
-//! socket.
+//! socket, and since Task 8 the roles, worktrees, git facts and file texts
+//! agmend reads from the person's checkout.
 //!
 //! Three threads share one [`Live`] state behind a mutex:
 //!
@@ -7,7 +8,7 @@
 //! - The watch thread owns the `console_watch` connection. It reconnects
 //!   with backoff (1, 2, 4 ... 30 s) and pushes each event to subscribers.
 //! - The request thread owns a second connection and runs one job at a
-//!   time: a snapshot once a watch is connected, or a post.
+//!   time: a snapshot once a watch is connected, a post, or a file's text.
 //!
 //! Only `Send` data crosses threads: agmen-local and agmen-proto types and
 //! [`Update`]s. The backend itself stays on the main thread as an
@@ -28,19 +29,25 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TryS
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use agmen_local::console::{ConsoleEvent, ConsoleSnapshot, Me, RosterEntry, Status};
+use agmen_local::console::{
+    ConsoleEvent, ConsoleSnapshot, FileTextEntry, GitFactsEntry, Me, RoleFileInfo, RosterEntry,
+    Status, WorktreeEntry,
+};
 use agmen_local::{API, ApiError, ErrorCode, Outcome, Request, Response, frame};
 use agmen_proto::{
     Body, ClientEnvelope, IdentityKind, MAX_BODY_BYTES, Mention, MessageId, Payload, Seq,
     StampedEnvelope, Stream, Timestamp,
 };
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
+use futures::channel::oneshot;
+use gpui::SharedString;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
+use super::agmend_local;
 use super::{
-    Action, AgentRow, AgentStatus, Backend, BackendError, Draft, GitFacts, Link, ListenerInfo,
-    PersonGroup, Snapshot, StatusSummary, Update,
+    Action, AgentRow, AgentStatus, Backend, BackendError, Draft, FileText, FileTextReply, GitFacts,
+    Link, ListenerInfo, PersonGroup, Snapshot, StatusSummary, Update, WorktreeInfo,
 };
 
 /// The most messages held per project; the oldest go first (the plan's
@@ -81,10 +88,44 @@ pub(crate) struct AgmendBackend {
 struct Shared {
     socket: PathBuf,
     project: String,
+    /// Task 8: the person's checkout of the project, which agmend reads
+    /// worktrees, git facts and project roles from.
+    root: Option<PathBuf>,
     live: Mutex<Live>,
 }
 
+/// `console_snapshot`'s params: the project, and the checkout when the
+/// window found one.
+fn snapshot_params(project: &str, root: Option<&Path>) -> Value {
+    match root {
+        Some(root) => json!({ "project": project, "root": root }),
+        None => json!({ "project": project }),
+    }
+}
+
+/// Task 8: what agmend read from disk at the last snapshot.
+#[derive(Debug)]
+struct LocalData {
+    roles: Vec<RoleFileInfo>,
+    worktrees: Vec<WorktreeEntry>,
+    git: GitFactsEntry,
+}
+
+impl LocalData {
+    fn of(console: &mut ConsoleSnapshot) -> Self {
+        Self {
+            roles: std::mem::take(&mut console.roles),
+            worktrees: std::mem::take(&mut console.worktrees),
+            git: std::mem::take(&mut console.git),
+        }
+    }
+}
+
 impl Shared {
+    fn snapshot_params(&self) -> Value {
+        snapshot_params(&self.project, self.root.as_deref())
+    }
+
     fn lock(&self) -> MutexGuard<'_, Live> {
         // A panic while the lock was held leaves plain data, still readable.
         self.live.lock().unwrap_or_else(PoisonError::into_inner)
@@ -97,6 +138,7 @@ struct Live {
     project: String,
     me: Me,
     roster: Vec<RosterEntry>,
+    local: LocalData,
     held: Held,
     link: Link,
     /// Watch messages that came before the pending snapshot's answer, at
@@ -129,6 +171,9 @@ impl Live {
             // shortcut: no `older` in Snapshot until scroll-back pages
             // history; at most the newest 2000 messages show until then.
             older: false,
+            roles: self.local.roles.clone(),
+            worktrees: self.local.worktrees.clone(),
+            git: self.local.git.clone(),
         })
     }
 
@@ -233,27 +278,39 @@ enum Job {
         draft: Draft,
         envelope: Box<ClientEnvelope>,
     },
+    /// Task 8: one file's text, for a file view that opened.
+    FileText {
+        worktree: String,
+        path: String,
+        reply: oneshot::Sender<Result<FileText, String>>,
+    },
 }
 
 impl AgmendBackend {
-    /// Connects to agmend at `socket` and opens `project`'s chat.
+    /// Connects to agmend at `socket` and opens `project`'s chat, with the
+    /// local data of the checkout at `root` when the window found one.
     ///
     /// # Errors
     ///
     /// [`BackendError::NotConnected`] when nothing answers at `socket`, and
     /// [`BackendError::Agmend`] when the socket is not the person's own or
     /// agmend refuses the project, such as when the person is signed out.
-    pub(crate) fn connect(socket: &Path, project: &str) -> Result<Self, BackendError> {
-        Self::connect_with(socket, project, BACKOFF)
+    pub(crate) fn connect(
+        socket: &Path,
+        project: &str,
+        root: Option<&Path>,
+    ) -> Result<Self, BackendError> {
+        Self::connect_with(socket, project, root, BACKOFF)
     }
 
     pub(super) fn connect_with(
         socket: &Path,
         project: &str,
+        root: Option<&Path>,
         timing: Timing,
     ) -> Result<Self, BackendError> {
         let mut conn = Conn::open(socket)?;
-        let console = match conn.call("console_snapshot", json!({ "project": project })) {
+        let mut console = match conn.call("console_snapshot", snapshot_params(project, root)) {
             Ok(value) => parse::<ConsoleSnapshot>(value)?,
             // agmend is up but the hub is not: open on who the person is,
             // and the watch fills the chat in once the hub is back.
@@ -265,19 +322,25 @@ impl AgmendBackend {
                     roster: Vec::new(),
                     messages: Vec::new(),
                     older: false,
+                    roles: Vec::new(),
+                    worktrees: Vec::new(),
+                    git: GitFactsEntry::default(),
                 }
             }
             Err(fail) => return Err(fail.into()),
         };
+        let local = LocalData::of(&mut console);
         let mut held = Held::default();
         held.merge(console.messages);
         let shared = Arc::new(Shared {
             socket: socket.to_owned(),
             project: project.to_owned(),
+            root: root.map(Path::to_owned),
             live: Mutex::new(Live {
                 project: console.project,
                 me: console.me,
                 roster: console.roster,
+                local,
                 held,
                 link: Link::HubDown { why: None },
                 early: None,
@@ -407,6 +470,30 @@ impl Backend for AgmendBackend {
             live.subscribers.push(tx);
         }
         rx
+    }
+
+    fn file_text(&self, worktree: &WorktreeInfo, path: &str) -> Option<FileTextReply> {
+        // Only a worktree agmend listed has a folder to read in.
+        let folder = worktree.root.clone()?;
+        let (reply, answer) = oneshot::channel();
+        let job = Job::FileText {
+            worktree: folder,
+            path: path.to_owned(),
+            reply,
+        };
+        if let Err(err) = self.jobs.try_send(job) {
+            let why = match &err {
+                TrySendError::Full(_) => "agmend is busy; open the file again in a moment",
+                TrySendError::Disconnected(_) => "not connected to agmend",
+            };
+            if let TrySendError::Full(Job::FileText { reply, .. })
+            | TrySendError::Disconnected(Job::FileText { reply, .. }) = err
+            {
+                // The view may have closed; nothing then waits.
+                drop(reply.send(Err(why.to_owned())));
+            }
+        }
+        Some(answer)
     }
 }
 
@@ -544,7 +631,7 @@ fn serve_jobs(shared: &Shared, queue: &Receiver<Job>, mut conn: Option<Conn>) {
                     shared,
                     &mut conn,
                     "console_snapshot",
-                    json!({ "project": shared.project }),
+                    shared.snapshot_params(),
                 )
                 .and_then(|value| parse::<ConsoleSnapshot>(value).map_err(|e| e.to_string()));
                 take_snapshot(shared, generation, answer);
@@ -555,6 +642,25 @@ fn serve_jobs(shared: &Shared, queue: &Receiver<Job>, mut conn: Option<Conn>) {
                 if let Err(why) = request(shared, &mut conn, "post", params) {
                     shared.lock().publish(&Update::NotSent { draft, why });
                 }
+            }
+            Job::FileText {
+                worktree,
+                path,
+                reply,
+            } => {
+                let params = json!({
+                    "project": shared.project,
+                    "root": shared.root,
+                    "worktree": worktree,
+                    "path": path,
+                });
+                let answer = request(shared, &mut conn, "file_text", params).and_then(|value| {
+                    parse::<FileTextEntry>(value)
+                        .map(agmend_local::file_text_from)
+                        .map_err(|e| e.to_string())
+                });
+                // The file view may have closed meanwhile.
+                drop(reply.send(answer));
             }
         }
     }
@@ -568,7 +674,8 @@ fn take_snapshot(shared: &Shared, generation: u64, answer: Result<ConsoleSnapsho
         return;
     }
     match answer {
-        Ok(console) => {
+        Ok(mut console) => {
+            live.local = LocalData::of(&mut console);
             live.project = console.project;
             live.me = console.me;
             live.roster = console.roster;
@@ -729,8 +836,9 @@ fn parse<T: DeserializeOwned>(value: Value) -> Result<T, BackendError> {
 
 // Mapping agmend's data to the window's.
 
-/// The window's snapshot from agmend's: the chat, the person and the
-/// roster. Every field agmend has no source for yet stays empty.
+/// The window's snapshot from agmend's: the chat, the person, the roster,
+/// and (Task 8) the role files, worktrees and git facts. Every field
+/// agmend has no source for yet stays empty.
 #[must_use]
 pub(super) fn snapshot_from(console: ConsoleSnapshot) -> Snapshot {
     let ConsoleSnapshot {
@@ -739,6 +847,9 @@ pub(super) fn snapshot_from(console: ConsoleSnapshot) -> Snapshot {
         roster,
         messages,
         older: _,
+        roles,
+        worktrees,
+        git,
     } = console;
     // The person's own listener; another person's never takes their
     // messages by default.
@@ -746,25 +857,44 @@ pub(super) fn snapshot_from(console: ConsoleSnapshot) -> Snapshot {
         .iter()
         .find(|e| e.kind == IdentityKind::Listener && person_of(&e.handle) == me.handle);
     let online = roster.iter().filter(|e| e.status == Status::Online).count();
+    let groups = person_groups(&roster, &me.handle);
+    let roles = super::role_files::role_files(
+        roles
+            .into_iter()
+            .map(|file| {
+                (
+                    file.name,
+                    agmend_local::role_layer(file.layer),
+                    SharedString::from(file.text),
+                )
+            })
+            .collect(),
+        &groups,
+    );
+    let worktrees = agmend_local::worktrees_from(worktrees, &me);
     Snapshot {
         project,
         listener: listener.map(listener_info),
-        roster: person_groups(&roster, &me.handle),
+        roster: groups,
         me: me.handle,
         me_id: me.id,
         agents: BTreeMap::new(),
         status: StatusSummary {
             online: u32::try_from(online).unwrap_or(u32::MAX),
-            worktrees: 0,
+            worktrees: u32::try_from(worktrees.len()).unwrap_or(u32::MAX),
             spend_today_usd: 0.0,
         },
         messages,
         changes: BTreeMap::new(),
         plan: None,
-        git: GitFacts::default(),
+        git: GitFacts {
+            branches: git.branches.into_iter().collect(),
+            commits: git.commits.into_iter().collect(),
+            files: git.files.into_iter().collect(),
+        },
         sessions: BTreeMap::new(),
-        roles: Vec::new(),
-        worktrees: Vec::new(),
+        roles,
+        worktrees,
         take_overs: BTreeMap::new(),
         installed_agents: Vec::new(),
         agent_scans: 0,

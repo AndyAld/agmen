@@ -20,7 +20,7 @@ use super::{
     AgentInfo, AgentRow, AgentSession, AgentStatus, Approval, BackendError, ChangeCard, ChangeId,
     ChangeKind, ChangeRow, ChangeState, CommitInfo, DiffLine, DiffLineKind, FileChange, FileText,
     GitFacts, GutterMark, Hunk, LaneInfo, ListenerDetails, ListenerInfo, PersonGroup, PlanInfo,
-    RecentAction, RecentKind, RoleFile, RoleInfo, RoleLayer, SessionRow, SpecState, TeamRow, Tone,
+    RecentAction, RecentKind, RoleFile, RoleLayer, SessionRow, SpecState, TeamRow, Tone,
     WorktreeHead, WorktreeInfo, WorktreeState,
 };
 
@@ -763,78 +763,21 @@ pub(super) fn fx1_session() -> AgentSession {
     }
 }
 
-/// The built-in role whose color a role's dot takes: itself, or the
-/// nearest built-in it extends. Base has no role color.
-fn palette_role(
-    name: &str,
-    files: &[(&str, RoleLayer, &'static str)],
-    specs: &[roles::RoleSpec],
-) -> Option<String> {
-    let mut current = name;
-    // Bounded like resolve: a chain longer than the files is a loop.
-    for _ in 0..=files.len() {
-        if current == "base" {
-            return None;
-        }
-        if files
-            .iter()
-            .any(|(n, layer, _)| *n == current && *layer == RoleLayer::BuiltIn)
-        {
-            return Some(current.to_owned());
-        }
-        current = specs
-            .iter()
-            .find(|s| s.name == current)?
-            .extends
-            .as_deref()?;
-    }
-    None
-}
-
 /// The built-in reviewer role, which the code view's dev window also shows.
 pub(crate) const REVIEWER_XML: &str = include_str!("../../../../roles/reviewer.xml");
 
-/// The built-in roles ship in the binary from the repo's `roles/` folder
-/// (spec 3.2); the project and personal ones are the mockup's examples.
-/// Each role's panel is resolved from the files, the way agmend will.
+/// The built-in roles ship in the binary (agmen-local's `BUILT_IN`); the
+/// project and personal ones are the mockup's examples. Each role's panel
+/// is resolved from the files, the way the live backend resolves agmend's.
 pub(super) fn role_files(roster: &[PersonGroup]) -> Vec<RoleFile> {
-    let files: [(&str, RoleLayer, &'static str); 10] = [
+    let builtin = roles::BUILT_IN.iter().map(|(name, text)| {
         (
-            "base",
+            (*name).to_owned(),
             RoleLayer::BuiltIn,
-            include_str!("../../../../roles/base.xml"),
-        ),
-        (
-            "listener",
-            RoleLayer::BuiltIn,
-            include_str!("../../../../roles/listener.xml"),
-        ),
-        (
-            "coordinator",
-            RoleLayer::BuiltIn,
-            include_str!("../../../../roles/coordinator.xml"),
-        ),
-        (
-            "planner",
-            RoleLayer::BuiltIn,
-            include_str!("../../../../roles/planner.xml"),
-        ),
-        (
-            "researcher",
-            RoleLayer::BuiltIn,
-            include_str!("../../../../roles/researcher.xml"),
-        ),
-        (
-            "engineer",
-            RoleLayer::BuiltIn,
-            include_str!("../../../../roles/engineer.xml"),
-        ),
-        (
-            "tester",
-            RoleLayer::BuiltIn,
-            include_str!("../../../../roles/tester.xml"),
-        ),
-        ("reviewer", RoleLayer::BuiltIn, REVIEWER_XML),
+            SharedString::new_static(text),
+        )
+    });
+    let examples = [
         (
             "security-reviewer",
             RoleLayer::Project,
@@ -845,69 +788,9 @@ pub(super) fn role_files(roster: &[PersonGroup]) -> Vec<RoleFile> {
             RoleLayer::Personal,
             "<role name=\"docs-writer\" extends=\"engineer\" kind=\"agent\" tier=\"standard\" version=\"1\">\n  <summary>Writes docs in docs/**.</summary>\n  <edits scope=\"paths\" globs=\"docs/**\" />\n</role>\n",
         ),
-    ];
-    let specs: Vec<roles::RoleSpec> = files
-        .iter()
-        .filter_map(|(_, _, text)| roles::parse(text).ok())
-        .collect();
-    let info = |name: &str| -> Option<RoleInfo> {
-        // A role that does not resolve shows its file with no panel.
-        let resolved = roles::resolve(name, &specs).ok()?;
-        // Ruling D12: what the kind could send but this role cannot.
-        let refused = agmen_proto::Verb::ALL
-            .iter()
-            .filter(|v| roles::kind_may_send(resolved.kind, **v))
-            .map(|v| v.as_str())
-            .filter(|v| !resolved.verbs.iter().any(|own| own == v))
-            .map(str::to_owned)
-            .collect();
-        let used_by: Vec<(String, String)> = roster
-            .iter()
-            .flat_map(|group| &group.agents)
-            .filter(|agent| agent.role == name)
-            .map(|agent| {
-                let mut note = format!("{} · {}", agent.harness, agent.status.label());
-                if let Some(item) = &agent.item {
-                    note = format!("{note} {item}");
-                }
-                (agent.handle.clone(), note)
-            })
-            .collect();
-        let extended_by = specs
-            .iter()
-            .filter(|s| s.extends.as_deref() == Some(name))
-            .map(|s| s.name.clone())
-            .collect();
-        // Spec 3.4: no agent can limit which commands a shell runs.
-        let read_only_shell =
-            resolved.tools.iter().any(|t| t == "shell") && resolved.edits == roles::Edits::None;
-        Some(RoleInfo {
-            kind: resolved.kind,
-            tier: resolved.tier,
-            tools: resolved.tools,
-            bash_note: read_only_shell
-                .then(|| "read-only by rule only; not enforceable".to_owned()),
-            edits: resolved.edits,
-            verbs: resolved.verbs,
-            refused,
-            used_by,
-            extended_by,
-            mention: (
-                format!("@{name}s"),
-                format!("role:{name} on the wire · humans and coordinators"),
-            ),
-        })
-    };
-    files
-        .iter()
-        .map(|(name, layer, text)| RoleFile {
-            name: (*name).to_owned(),
-            layer: *layer,
-            text: SharedString::new_static(text),
-            info: info(name),
-            palette_role: palette_role(name, &files, &specs),
-        })
-        .collect()
+    ]
+    .map(|(name, layer, text)| (name.to_owned(), layer, SharedString::new_static(text)));
+    super::role_files::role_files(builtin.chain(examples).collect(), roster)
 }
 
 /// The worktrees on Andy's machine, by person, Andy's first: fx1's files
@@ -944,6 +827,7 @@ pub(super) fn worktrees() -> Result<Vec<WorktreeInfo>, BackendError> {
             commits,
             state,
             texts: BTreeMap::new(),
+            root: None,
         })
     };
     let branch = |name: &str| WorktreeHead::Branch(name.into());

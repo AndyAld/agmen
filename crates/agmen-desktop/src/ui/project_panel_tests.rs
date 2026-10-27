@@ -22,6 +22,7 @@ fn rv2() -> WorktreeInfo {
         commits: Vec::new(),
         texts: std::collections::BTreeMap::new(),
         state: crate::backend::WorktreeState::Reading,
+        root: None,
     }
 }
 

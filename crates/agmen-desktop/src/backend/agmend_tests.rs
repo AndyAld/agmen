@@ -11,9 +11,12 @@ use serde_json::json;
 
 use super::*;
 use crate::backend::fake_agmend::{
-    FakeAgmend, PROJECT, console, ident, message, message_with, roster,
+    self, FakeAgmend, PROJECT, ROOT, console, ident, message, message_with, roster,
 };
-use crate::backend::{Action, Backend, BackendError, ChangeId, Draft, Link, Update};
+use crate::backend::{
+    Action, Backend, BackendError, ChangeId, Draft, GutterMark, Link, RoleLayer, Update,
+    WorktreeHead, WorktreeState,
+};
 
 /// Long enough for a loaded test machine, short enough to fail fast.
 const WAIT: Duration = Duration::from_secs(10);
@@ -74,7 +77,7 @@ fn until(mut done: impl FnMut() -> bool) {
 }
 
 fn live_backend(fake: &FakeAgmend) -> (AgmendBackend, UnboundedReceiver<Update>) {
-    let backend = AgmendBackend::connect_with(&fake.path(), PROJECT, FAST).unwrap();
+    let backend = AgmendBackend::connect_with(&fake.path(), PROJECT, None, FAST).unwrap();
     let mut updates = backend.subscribe();
     wait_for(&mut updates, is_live);
     (backend, updates)
@@ -401,7 +404,7 @@ fn refuses_foreign_socket() {
 
     // Readable by others.
     std::fs::set_permissions(fake.path(), std::fs::Permissions::from_mode(0o644)).unwrap();
-    let refused = AgmendBackend::connect(&fake.path(), PROJECT).map(|_| ());
+    let refused = AgmendBackend::connect(&fake.path(), PROJECT, None).map(|_| ());
     assert!(
         matches!(&refused, Err(BackendError::Agmend(why)) if why.contains("0644")),
         "{refused:?}"
@@ -418,7 +421,7 @@ fn refuses_foreign_socket() {
 
     // Nothing there: agmend is not running.
     assert!(matches!(
-        AgmendBackend::connect(Path::new("/nonexistent/agmend.sock"), PROJECT),
+        AgmendBackend::connect(Path::new("/nonexistent/agmend.sock"), PROJECT, None),
         Err(BackendError::NotConnected)
     ));
 }
@@ -461,5 +464,74 @@ fn unsupported_actions_say_so() {
         backend
             .act(Action::SnoozeAlert(message(1).client.id))
             .is_ok()
+    );
+}
+
+// Task 8: roles, worktrees, git facts and file text from agmend.
+
+#[test]
+fn local_data_maps_into_the_snapshot() {
+    let fake = FakeAgmend::start(fake_agmend::console_with_checkout(vec![]));
+    let backend =
+        AgmendBackend::connect_with(&fake.path(), PROJECT, Some(Path::new(ROOT)), FAST).unwrap();
+    let mut updates = backend.subscribe();
+    wait_for(&mut updates, is_live);
+    // The snapshot names the checkout the window found.
+    let asked = fake.state.lock().unwrap().snapshot_params.clone();
+    assert!(asked.iter().all(|p| p["root"] == ROOT), "{asked:?}");
+    let s = backend.snapshot();
+    let main = &s.worktrees[0];
+    assert_eq!(main.handle, "andy/fx1");
+    assert_eq!(main.owner, ident("idfx1abc"));
+    assert_eq!(main.root.as_deref(), Some(ROOT));
+    assert_eq!(main.head, WorktreeHead::Branch("main".into()));
+    assert_eq!(main.state, WorktreeState::LocalOnly);
+    assert_eq!(main.files, ["src/main.rs"]);
+    assert_eq!(main.changes[0].added, 1);
+    assert_eq!(main.commits[0].sha.as_str(), "9e2a71c");
+    // A worktree with no identity file of its own is the person's.
+    let review = &s.worktrees[1];
+    assert_eq!(review.owner, s.me_id);
+    assert_eq!(review.handle, "andy/review");
+    assert_eq!(review.state, WorktreeState::Reading);
+    assert_eq!(s.status.worktrees, 2);
+    assert!(s.git.branches.contains("main"));
+    assert!(s.git.files.contains("src/main.rs"));
+    // Roles resolve as the fixture's do.
+    let reviewer = s.roles.iter().find(|r| r.name == "reviewer").unwrap();
+    assert_eq!(reviewer.layer, RoleLayer::BuiltIn);
+    assert!(reviewer.info.is_some());
+}
+
+#[gpui::test]
+fn file_view_reads_through_agmend(cx: &mut TestAppContext) {
+    use crate::ui::{FileView, init_for_tests as init};
+
+    let fake = FakeAgmend::start(fake_agmend::console_with_checkout(vec![]));
+    let backend =
+        AgmendBackend::connect_with(&fake.path(), PROJECT, Some(Path::new(ROOT)), FAST).unwrap();
+    let mut updates = backend.subscribe();
+    wait_for(&mut updates, is_live);
+    let wt = backend.snapshot().worktrees[0].clone();
+    init(cx);
+    cx.update(|cx| cx.set_global(crate::backend::BackendHandle(std::rc::Rc::new(backend))));
+    let (view, cx) = cx.add_window_view(|_, cx| FileView::new(&wt, "src/main.rs", cx));
+    let deadline = Instant::now() + WAIT;
+    loop {
+        cx.run_until_parked();
+        let text = view.read_with(cx, |file, cx| file.text(cx));
+        if text == "fn live() {}\nfn more() {}" {
+            break;
+        }
+        assert!(Instant::now() < deadline, "still showing {text:?}");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    view.read_with(cx, |file, cx| {
+        assert_eq!(file.marks(cx), [GutterMark::Added(2..3)]);
+    });
+    let asked = fake.state.lock().unwrap().file_text_params.clone();
+    assert_eq!(
+        asked,
+        [json!({"project": PROJECT, "root": ROOT, "worktree": ROOT, "path": "src/main.rs"})]
     );
 }
