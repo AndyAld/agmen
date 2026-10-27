@@ -10,8 +10,8 @@
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, Entity, FocusHandle, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
-    RenderOnce, Styled as _, Window, div,
+    App, Entity, FocusHandle, FontWeight, Hsla, InteractiveElement as _, IntoElement,
+    ParentElement as _, RenderOnce, Styled as _, Window, div,
 };
 use jiff::tz::TimeZone;
 
@@ -21,7 +21,8 @@ use jiff::tz::TimeZone;
 use crate::keymap::{Cancel, KICKOFF_CONTEXT};
 
 use super::components::{
-    Button, ButtonSize, ButtonStyle, Card, Color, Label, LabelSize, Modal, SectionHeading,
+    Button, ButtonSize, ButtonStyle, Card, CheckMark, CheckState, Color, Label, LabelSize, Modal,
+    SectionHeading,
 };
 use super::format::clock;
 use super::plan_model::{ErrorSource, PlanModel};
@@ -31,12 +32,13 @@ use crate::backend::PlanInfo;
 use crate::local_time::LocalZone;
 use crate::plan;
 
-/// One owner's box: the title, their approval, and their agents and spend.
+/// One owner's box: the title, their approval (its mark and words), and
+/// their agents and spend.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct OwnerBox {
     owner: String,
     title: String,
-    approval: (String, Color),
+    approval: (CheckState, String),
     detail: String,
 }
 
@@ -73,9 +75,9 @@ fn owner_boxes(plan: &PlanInfo, me: &str, zone: &TimeZone) -> Vec<OwnerBox> {
                     .get(owner)
                     .map(|at| format!(" {}", clock(*at, zone)))
                     .unwrap_or_default();
-                (format!("✓ {who} approved{at}"), Color::Success)
+                (CheckState::Done, format!("{who} approved{at}"))
             } else {
-                (format!("○ waiting on {who}"), Color::Warning)
+                (CheckState::Open, format!("waiting on {who}"))
             };
             OwnerBox {
                 owner: owner.to_owned(),
@@ -89,6 +91,43 @@ fn owner_boxes(plan: &PlanInfo, me: &str, zone: &TimeZone) -> Vec<OwnerBox> {
             }
         })
         .collect()
+}
+
+impl OwnerBox {
+    /// The box as the dialog draws it on `background`.
+    fn card(self, background: Hsla) -> impl IntoElement {
+        let selector = format!("kickoff:owner:{}", self.owner);
+        let (state, status) = self.approval;
+        let card = Card::new()
+            .bg(background)
+            .border_0()
+            .rounded(RADIUS_CARD)
+            .gap(SPACE_3)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(SPACE_8)
+                    .child(Label::new(self.title).weight(FontWeight::SEMIBOLD))
+                    .child(div().flex_1())
+                    .child(
+                        // The mockup's "✓ " in front of the words
+                        // (console.py:1979): a 12 px mark, then about a space.
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(SPACE_3)
+                            .child(CheckMark::new(state))
+                            .child(
+                                Label::new(status)
+                                    .size(LabelSize::Small)
+                                    .color(state.color()),
+                            ),
+                    ),
+            )
+            .child(Label::new(self.detail).code().color(Color::Placeholder));
+        div().debug_selector(|| selector).child(card)
+    }
 }
 
 /// "What happens" (nodes 10305 to 10314), from the plan's lanes, its plan
@@ -164,26 +203,7 @@ impl RenderOnce for KickoffDialog {
         let (boxes, bullets) = (owner_boxes(plan, model.me(), &zone), what_happens(plan));
         let go = format!("Kick off {}", plan::agent_count(plan.team.len()));
         let focus = self.hold_focus(window, cx);
-        let boxes = boxes.into_iter().map(|owner| {
-            let selector = format!("kickoff:owner:{}", owner.owner);
-            let (status, color) = owner.approval;
-            let card = Card::new()
-                .bg(background)
-                .border_0()
-                .rounded(RADIUS_CARD)
-                .gap(SPACE_3)
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(SPACE_8)
-                        .child(Label::new(owner.title).weight(FontWeight::SEMIBOLD))
-                        .child(div().flex_1())
-                        .child(Label::new(status).size(LabelSize::Small).color(color)),
-                )
-                .child(Label::new(owner.detail).code().color(Color::Placeholder));
-            div().debug_selector(|| selector).child(card)
-        });
+        let boxes = boxes.into_iter().map(|owner| owner.card(background));
         let bullets = bullets.into_iter().map(|text| {
             div()
                 .flex()
@@ -271,13 +291,13 @@ mod tests {
                 OwnerBox {
                     owner: "andy".into(),
                     title: "andy's machine (you)".into(),
-                    approval: ("✓ you approved".into(), Color::Success),
+                    approval: (CheckState::Done, "you approved".into()),
                     detail: "coord, core, app, rev · $65/day of your $80 cap".into(),
                 },
                 OwnerBox {
                     owner: "sean".into(),
                     title: "sean's machine".into(),
-                    approval: ("✓ sean approved 15:52".into(), Color::Success),
+                    approval: (CheckState::Done, "sean approved 15:52".into()),
                     detail: "sync, qa, tiles · $40/day of sean's $60 cap".into(),
                 },
             ]
@@ -285,7 +305,7 @@ mod tests {
         let draft = owner_boxes(&plan(Screen::Plan), "andy", &mountain());
         assert_eq!(
             draft[1].approval,
-            ("○ waiting on sean".into(), Color::Warning)
+            (CheckState::Open, "waiting on sean".into())
         );
     }
 
@@ -324,6 +344,8 @@ mod tests {
     fn kick_off_sends_kick_off_and_closes(cx: &mut TestAppContext) {
         let (recording, model, cx) = open(cx);
         assert!(cx.debug_bounds("kickoff:owner:andy").is_some());
+        // Task 20 shot diff: an approval starts with Lucide's check.
+        assert!(cx.debug_bounds("check:mark").is_some());
         click(cx, "kickoff:go");
         assert_eq!(*recording.acts.borrow(), [Action::KickOff]);
         cx.run_until_parked();

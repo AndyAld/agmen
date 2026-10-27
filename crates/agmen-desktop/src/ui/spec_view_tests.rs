@@ -125,6 +125,8 @@ fn approved_spec_shows_approved_and_request_changes(cx: &mut TestAppContext) {
     // andy approved the design at 15:47 (frame 9089).
     let (recording, _, cx) = open(cx, Screen::Spec, None, DESIGN);
     assert!(cx.debug_bounds("spec:approved").is_some());
+    // Task 20 shot diff: "Approved" ends with Lucide's check, not a ✓ glyph.
+    assert!(cx.debug_bounds("spec:approved:check").is_some());
     assert!(cx.debug_bounds("spec:approve").is_none());
     assert!(cx.debug_bounds("spec:request-changes").is_some());
     click(cx, "spec:approved");

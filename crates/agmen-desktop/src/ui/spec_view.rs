@@ -1,8 +1,9 @@
 //! A spec's tab (frame "Desktop · spec", node 9089): the breadcrumb with
 //! Approve (or "Approved ✓" once I approved) and Request changes, and the
 //! spec's text at the commit the approval names. Tests find the buttons as
-//! `spec:approve`, `spec:approved` and `spec:request-changes`, a refusal as
-//! `spec:error` and the text as `spec:code`.
+//! `spec:approve`, `spec:approved` (its check as `spec:approved:check`) and
+//! `spec:request-changes`, a refusal as `spec:error` and the text as
+//! `spec:code`.
 
 use std::path::Path;
 
@@ -15,12 +16,13 @@ use gpui::{
 };
 
 use super::code_view::CodeView;
-use super::components::{Breadcrumb, Button, ButtonStyle, Color, Label, LabelSize};
+use super::components::{Breadcrumb, Button, ButtonStyle, Color, Icon, IconSize, Label, LabelSize};
 use super::plan_model::{ErrorSource, PlanModel};
 use super::syntax::Language;
-use super::tokens::{SPACE_8, SPACE_14};
+use super::tokens::{SPACE_3, SPACE_8, SPACE_14};
 use crate::appearance::Appearance;
 use crate::backend::Approval;
+use crate::icons::UiIcon;
 
 /// The breadcrumb's parts: the project, then each part of the path.
 fn breadcrumb_parts(project: &str, path: &str) -> Vec<SharedString> {
@@ -91,13 +93,27 @@ impl SpecView {
     }
 
     /// Approve, or "Approved ✓" once I approved, then Request changes;
-    /// none for a draft or a spec I do not approve.
+    /// none for a draft or a spec I do not approve. The check is Lucide's
+    /// in the selected label's accent: the UI font has no "✓" (Task 20).
     fn buttons(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let approval = self.model.read(cx).my_approval(&self.path)?;
         let approve = match (approval, self.shown.clone()) {
-            (Approval::Approved, _) => Button::new("spec:approved", "Approved ✓")
+            (Approval::Approved, _) => Button::new("spec:approved", "Approved")
                 .style(ButtonStyle::Subtle)
-                .selected(true),
+                .selected(true)
+                .trailing(
+                    // The icon's 2 px side bearing plus the button's 5 px gap
+                    // leave 7 px of air before the mark; the mockup's
+                    // "Approved ✓" has about 4 (console.py:2035).
+                    div()
+                        .debug_selector(|| "spec:approved:check".into())
+                        .ml(-SPACE_3)
+                        .child(
+                            Icon::new(UiIcon::Check)
+                                .color(Color::Accent)
+                                .size(IconSize::Small),
+                        ),
+                ),
             (Approval::Waiting, Some(sha)) => {
                 let model = self.model.clone();
                 let path = self.path.clone();

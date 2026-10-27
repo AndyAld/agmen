@@ -78,7 +78,10 @@ pub(crate) use tooltip::Tooltip;
 pub(crate) use word_wrap::WordWrap;
 // Task 19.
 pub(crate) use {
-    check_row::CheckRow, modal::Modal, section_header::SectionHeader, table_card::TableCard,
+    check_row::{CheckMark, CheckRow, CheckState},
+    modal::Modal,
+    section_header::SectionHeader,
+    table_card::TableCard,
 };
 pub(crate) use {dropdown::Dropdown, segmented::Segmented, stepper::Stepper, toggle::Toggle};
 
