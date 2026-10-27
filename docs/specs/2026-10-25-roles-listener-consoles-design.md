@@ -171,6 +171,7 @@ Every role whose `edits` is not `none` works in its own worktree on its own bran
 
 Agents talk to each other directly and in the open. `base.xml` tells every agent to:
 
+- Treat communication as part of the work: keep each message to one accurate point, read its inbox before it starts a task and before DONE, and when blocked, say so at once in an ASK to whoever can unblock it or an ALERT. A correction goes out on the route the wrong message took, so a private message stays private.
 - Ask the lane's owner (by mention or DM) before touching paths outside its own lanes, and use LEND rather than editing around it.
 - Post an interface before others build on it ("I'll post the trait signature before you build on it"), and say when it changes.
 - Ask for a review through your listener or your coordinator (section 3.10), then answer the findings in the thread. Role mentions such as `@reviewers` are for humans and coordinators only.

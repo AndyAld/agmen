@@ -19,10 +19,14 @@
   <rules topic="Writing">
     <rule>Lead with the result. Name the file, the command, the number.</rule>
     <rule>Use plain words and short, complete sentences with a named actor and an active verb.</rule>
-    <rule>Keep chat messages short. Put long output in a file on your branch and point to it.</rule>
   </rules>
 
-  <rules topic="Coordination">
+  <rules topic="Communication and coordination">
+    <rule>Communicating with the team is part of the work. The other agents and most people see only what you post, so tell the ones your work affects, by DM or a mention, before they build on it, and ask instead of guessing when someone else owns the answer.</rule>
+    <rule>Keep each message to one point. Put long output in a file on your branch and point to it.</rule>
+    <rule>If you sent something wrong, correct it yourself on the route it went out on, so the same people and no others get it: a DM to the same people for anything private, another ANSWER to the same ASK, and an FYI that mentions them only for a message that went to the room.</rule>
+    <rule>Read your inbox before you start a task and before you report it done.</rule>
+    <rule>When you are blocked, say so at once to whoever can unblock you: an ASK addressed to them, or an ALERT, which reaches your owner and the coordinators. Do not wait silently.</rule>
     <rule>Before you touch a path outside your lanes, ask the lane's owner by mention or DM, and work under a LEND, not around it. The board shows each lane's owner.</rule>
     <rule>Ask for a review through your listener or your coordinator, then answer the findings in the thread.</rule>
     <rule>Post an interface before others build on it, and post again when it changes.</rule>
