@@ -297,6 +297,29 @@ impl Composer {
         cx.notify();
     }
 
+    // Task 6: a post the live backend refused after the input cleared.
+    /// Puts a refused message's `body` back, with the `reply` it was
+    /// (message and sender), when the input is empty. Text typed since
+    /// stays as it is, with its own reply state: the person's newer words
+    /// win, and the error above the composer still says what was lost.
+    pub(crate) fn restore(
+        &mut self,
+        body: &str,
+        reply: Option<(MessageId, Target)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.input.read(cx).text().is_empty() {
+            return;
+        }
+        self.input
+            .update(cx, |input, cx| input.set_text(body, window, cx));
+        if reply.is_some() {
+            self.reply = reply;
+        }
+        cx.notify();
+    }
+
     /// Ends the reply: the next message goes to the recipient again. Escape
     /// and the "reply to" chip's close mark call it.
     pub(crate) fn cancel_reply(&mut self, cx: &mut Context<Self>) {

@@ -19,7 +19,7 @@ use jiff::tz::TimeZone;
 
 use super::chat_context::ChatContext;
 use super::components::{Color, Label, LabelSize};
-use super::composer::Composer;
+use super::composer::{Composer, Target};
 use super::message::{MessageRow, is_presence};
 use super::ref_chip::RefEvent;
 use super::tokens::{LIST_OVERDRAW, SPACE_2, SPACE_6, SPACE_10, SPACE_12, SPACE_14};
@@ -225,9 +225,11 @@ impl ChatView {
             .map(|backend| backend.0.subscribe());
         // The loop ends when the backend drops its sender or the chat closes.
         let updates = updates.map(|mut updates| {
-            cx.spawn(async move |chat, cx| {
+            cx.spawn_in(window, async move |chat, cx| {
                 while let Some(update) = updates.next().await {
-                    if chat.update(cx, |chat, cx| chat.apply(update, cx)).is_err() {
+                    let applied =
+                        chat.update_in(cx, |chat, window, cx| chat.apply_in(update, window, cx));
+                    if applied.is_err() {
                         break;
                     }
                 }
@@ -364,6 +366,42 @@ impl ChatView {
         cx.notify();
     }
 
+    /// [`Self::apply`], plus what needs the window: a draft refused after
+    /// `send` returned goes back into the composer. The update loop calls
+    /// this one.
+    pub(super) fn apply_in(&mut self, update: Update, window: &mut Window, cx: &mut Context<Self>) {
+        let Update::NotSent { draft, why } = update else {
+            self.apply(update, cx);
+            return;
+        };
+        self.show_not_sent(&why, cx);
+        // The composer answers the same message again, addressed to its
+        // sender, as the alert's Reply set it up.
+        let reply = draft.reply_to.as_ref().and_then(|id| {
+            self.snapshot
+                .messages
+                .iter()
+                .find(|m| &m.client.id == id)
+                .map(|m| {
+                    let to = Target {
+                        id: m.from.clone(),
+                        handle: m.from_handle.clone(),
+                    };
+                    (id.clone(), to)
+                })
+        });
+        self.composer.update(cx, |composer, cx| {
+            composer.restore(&draft.body, reply, window, cx)
+        });
+    }
+
+    /// Task 6: why a post was refused after the composer cleared, shown
+    /// above the composer as a refusal at send is.
+    fn show_not_sent(&mut self, why: &str, cx: &mut Context<Self>) {
+        self.error = Some(format!("Not sent: {why}").into());
+        cx.notify();
+    }
+
     pub(super) fn apply(&mut self, update: Update, cx: &mut Context<Self>) {
         // Task 13: what live messages ask of the window, signalled once the
         // chat has them.
@@ -398,11 +436,10 @@ impl ChatView {
             }
             // Task 7 shows the link in the status bar.
             Update::Link(_) => return,
-            // Task 6: a post the hub refused after the composer cleared;
-            // it shows above the composer, as a refusal at send does.
+            // Without a window only the error shows; the update loop goes
+            // through apply_in, which also puts the draft back.
             Update::NotSent { why, .. } => {
-                self.error = Some(format!("Not sent: {why}").into());
-                cx.notify();
+                self.show_not_sent(&why, cx);
                 return;
             }
         };

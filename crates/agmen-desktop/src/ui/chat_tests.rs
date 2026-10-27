@@ -5,6 +5,7 @@ use gpui::{TestAppContext, VisualTestContext, div, px};
 
 use super::*;
 use crate::backend::{Backend, ChangeState, FixtureBackend, Screen, chat_snapshot};
+use crate::ui::composer::Target;
 use crate::ui::message::is_ledger;
 use crate::ui::test_support::{click, init, redraw};
 use crate::ui::text_input::bind_keys;
@@ -194,32 +195,66 @@ fn refused_send_shows_why_until_the_next_send(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("chat:error").is_none());
 }
 
-// Task 6: the live backend refuses some posts only after send returned.
-#[gpui::test]
-fn a_post_refused_later_shows_why(cx: &mut TestAppContext) {
-    let (chat, backend, cx) = open_screen(cx, Screen::Chat);
-    let draft = Draft {
-        to: vec![backend.snapshot().listener_id],
-        body: "hi".into(),
-        reply_to: None,
-        model: None,
+// Task 6: the live backend refuses some posts only after send returned,
+// when the composer has already cleared.
+/// A NotSent for a reply to the first message not from andy, and that
+/// message's sender.
+fn refused_reply(snapshot: &Snapshot, body: &str) -> (Update, Target) {
+    let parent = snapshot
+        .messages
+        .iter()
+        .find(|m| m.from_handle != snapshot.me)
+        .unwrap();
+    let update = Update::NotSent {
+        draft: Draft {
+            to: vec![parent.from.clone()],
+            body: body.into(),
+            reply_to: Some(parent.client.id.clone()),
+            model: None,
+        },
+        why: "the hub refused it: forbidden_mention".into(),
     };
-    chat.update(cx, |chat, cx| {
-        chat.apply(
-            Update::NotSent {
-                draft,
-                why: "the hub refused it: forbidden_mention".into(),
-            },
-            cx,
-        );
-    });
+    let sender = Target {
+        id: parent.from.clone(),
+        handle: parent.from_handle.clone(),
+    };
+    (update, sender)
+}
+
+#[gpui::test]
+fn a_post_refused_later_comes_back_into_the_composer(cx: &mut TestAppContext) {
+    let (chat, backend, cx) = open_screen(cx, Screen::Chat);
+    let (update, sender) = refused_reply(&backend.snapshot(), "yes, rebase");
+    chat.update_in(cx, |chat, window, cx| chat.apply_in(update, window, cx));
     redraw(cx);
     assert!(cx.debug_bounds("chat:error").is_some());
-    chat.read_with(cx, |chat, _| {
+    chat.read_with(cx, |chat, cx| {
         assert_eq!(
-            chat.error().map(|e| e.to_string()),
-            Some("Not sent: the hub refused it: forbidden_mention".into())
+            chat.error(),
+            Some("Not sent: the hub refused it: forbidden_mention")
         );
+        let composer = chat.composer.read(cx);
+        assert_eq!(composer.text(cx), "yes, rebase");
+        // The reply comes back too, so Enter answers the same message.
+        assert_eq!(composer.target(cx), &sender);
+    });
+}
+
+#[gpui::test]
+fn a_post_refused_later_keeps_newer_text(cx: &mut TestAppContext) {
+    let (chat, backend, cx) = open_screen(cx, Screen::Chat);
+    let listener = chat.read_with(cx, |chat, cx| chat.composer.read(cx).target(cx).clone());
+    cx.simulate_input("something newer");
+    let (update, _) = refused_reply(&backend.snapshot(), "yes, rebase");
+    chat.update_in(cx, |chat, window, cx| chat.apply_in(update, window, cx));
+    redraw(cx);
+    assert!(cx.debug_bounds("chat:error").is_some());
+    chat.read_with(cx, |chat, cx| {
+        let composer = chat.composer.read(cx);
+        // What the person typed since stays, and so does its target; the
+        // error still says the earlier message was not sent.
+        assert_eq!(composer.text(cx), "something newer");
+        assert_eq!(composer.target(cx), &listener);
     });
 }
 
