@@ -12,7 +12,7 @@ use gpui::{
     Task, Window, div,
 };
 
-use super::code_view::{CodeView, GutterMark};
+use super::code_view::CodeView;
 use super::components::{
     Breadcrumb, Button, ButtonStyle, Color, EmptyState, Icon, IconSize, Indent, Label, ListItem,
 };
@@ -511,7 +511,7 @@ impl FileView {
     }
 
     #[cfg(test)]
-    pub(crate) fn marks(&self, cx: &gpui::App) -> Vec<GutterMark> {
+    pub(crate) fn marks(&self, cx: &gpui::App) -> Vec<crate::backend::GutterMark> {
         self.code.read(cx).marks()
     }
 
