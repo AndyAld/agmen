@@ -140,7 +140,7 @@ As [m0-m1 Task 5](m0-m1.md#task-5-spike-s4-claude-code-mod-streams-a-child-proce
 - **Guard:** a `tool.call` handler on Edit, Write and NotebookEdit denies paths under `forbidden/` and denies on any thrown error.
 
 - [x] Tests (`register.test.tsx`): `wakeup_on_dm_when_idle`, `no_wakeup_for_own_message`, `guard_denies_forbidden_path`, `guard_denies_on_error`.
-- [ ] Interactive check in `claude --plugin-dir mods/agmen-claude` on Claude Code 2.1.310; record the results and the version in ADR-0005.
+- [ ] Run [ADR-0006's two-session interactive check](../adr/0006-claude-code-plugin.md#results); record the results and the versions there. It replaces ADR-0005's spike check.
 - [x] Commit: `Spike S4: mod wake-ups, context rows, and edit guard`
 
 These spike tests are recorded in [ADR-0005 Results](../adr/0005-mod-streaming.md#results) at commit `d6a173a`; Task 14 replaces the spike module with the installed plugin. The interactive check remains pending.

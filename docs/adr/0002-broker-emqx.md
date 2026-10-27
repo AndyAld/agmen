@@ -3,6 +3,7 @@
 Status: accepted
 Date: 2026-10-25
 Amended: 2026-10-26 (ruling R71: durable sessions off)
+Amended: 2026-10-27 (resumed-session ACL finding from the RMQTT spike)
 
 ## Context
 
@@ -203,6 +204,12 @@ Adam ran Spike S1 independently (commit 9866443, 2026-10-25, rumqttc 0.25.1, 16 
 ### Test isolation
 
 Every test mints its own identity ids (`id` plus 8 random `[a-z0-9]`), client ids and share group, so the `it` profile runs them 4 at a time; five consecutive runs passed. `it_offline_session_replays_after_restart` restarts EMQX, which would cut every other test's connection, so `.config/nextest.toml` keeps any `it_` test with `restart` in its name out of the `it` profile and runs it under `--profile it-restart` with one thread. It calls `docker compose -f deploy/dev/compose.yaml restart emqx`, so it needs the Docker CLI where the tests run.
+
+### Resumed-session ACLs (RMQTT spike)
+
+EMQX 6.3.2 keeps subscriptions that a resumed session's new token no longer allows. The RMQTT spike measured this on a throwaway EMQX container with durable sessions on and the dev config at `3e40dfb`. The resumed session received both `inbox/A` and `feed` in 2 of 2 runs after its new token lost the `inbox/A` rule. A fresh SUBSCRIBE to `inbox/A` with that token got 0x87. See [ADR-0007, Subscriptions of a resumed session](0007-broker-rmqtt.md#subscriptions-of-a-resumed-session) (`docs/adr/0007-broker-rmqtt.md:212`; branch `spike/rmqtt` at `3174d6e`, the same file at line 210).
+
+The spike ran with durable sessions on, but this ADR now keeps them off (R71, "Durable sessions off" above). With them off, EMQX keeps the session in memory, and nobody measured whether a resumed in-memory session also keeps subscriptions its new token no longer allows. Until someone measures that, treat the finding as applying to the deployed config too. The hub then relies on a later token for the same client id never allowing less than an earlier token. The spike did not check whether the hub guarantees that. It did not measure EMQX's queued-message behavior (`docs/adr/0007-broker-rmqtt.md:210`). The branch's `it_resumed_subscription_needs_current_grant` and `it_queued_message_needs_current_grant` test RMQTT's fixes, not EMQX (`spike/rmqtt:spikes/s11-rmqtt/tests/it_s11_broker.rs:1210`, line 1239 for the queue test).
 
 ## Consequences
 
