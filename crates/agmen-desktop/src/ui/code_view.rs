@@ -15,7 +15,7 @@ use gpui::{
 
 use super::syntax::{self, Language};
 use super::tokens::{
-    DELETED_MARK_HEIGHT, GUTTER_MARK_WIDTH, MONO_CELL_HEIGHT, MONO_CELL_WIDTH, SPACE_8,
+    DELETED_MARK_HEIGHT, DELETED_MARK_WIDTH, MONO_CELL_HEIGHT, MONO_CELL_WIDTH, SPACE_8,
 };
 use crate::appearance::{Appearance, Theme};
 
@@ -267,19 +267,22 @@ fn render_line(
             .bg(theme.deleted);
         if top { edge.top_0() } else { edge.bottom_0() }
     });
-    // The mark column is one cell wide; its bar is Zed's narrow git bar.
-    // Without it, text keeps the same two cells after the numbers.
+    // The mark column is one cell wide. An added or modified bar fills it,
+    // as console.py's g.bg(r, 5, 6, OK) does (Task 20); a deletion mark is
+    // Zed's narrow bar. Without marks, text keeps the same two cells after
+    // the numbers.
     let gutter = (gutter_kind == Gutter::Marks).then(|| {
         div()
             .debug_selector(move || format!("line:{number}:mark"))
+            .relative()
             .w(cell)
             .h_full()
+            .children(fill)
             .child(
                 div()
                     .relative()
-                    .w(GUTTER_MARK_WIDTH)
+                    .w(DELETED_MARK_WIDTH)
                     .h_full()
-                    .children(fill)
                     .children(deleted),
             )
             .flex_none()

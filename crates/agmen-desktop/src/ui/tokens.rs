@@ -86,8 +86,9 @@ pub(crate) const KV_LABEL_WIDTH: Pixels = px(96.);
 // The code font's cell at 13 px.
 pub(crate) const MONO_CELL_WIDTH: Pixels = px(7.62);
 pub(crate) const MONO_CELL_HEIGHT: Pixels = px(18.);
-/// The code view's change bar beside a line number, as Zed's git gutter.
-pub(crate) const GUTTER_MARK_WIDTH: Pixels = px(4.);
+/// A deletion mark's width: Zed's narrow git bar. Added and modified bars
+/// fill the whole one-cell mark column, as the mockup's do (Task 20).
+pub(crate) const DELETED_MARK_WIDTH: Pixels = px(4.);
 /// A deletion mark: a short bar on the edge between two lines.
 pub(crate) const DELETED_MARK_HEIGHT: Pixels = px(3.);
 

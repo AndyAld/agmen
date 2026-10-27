@@ -29,6 +29,11 @@ fn code_view_marks_gutter(cx: &mut TestAppContext) {
         cx.debug_bounds("gutter:6:added").is_none(),
         "ranges are end-exclusive"
     );
+    // Task 20 shot diff (project): an added line's bar fills its one-cell
+    // mark column, as console.py's g.bg(r, 5, 6, OK) does.
+    let bar = cx.debug_bounds("gutter:5:added").unwrap();
+    let column = cx.debug_bounds("line:5:mark").unwrap();
+    assert_eq!(bar.size.width, column.size.width);
 }
 
 #[test]
