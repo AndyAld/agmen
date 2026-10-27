@@ -1,11 +1,11 @@
 //! The right dock's Agent panel, for the agent selected in the Agents dock.
 
 use gpui::{
-    App, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce, Styled as _, Window,
-    div,
+    App, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce, SharedString,
+    Styled as _, Window, div,
 };
 
-use super::components::{Color, KvRow, KvSection, ProgressBar};
+use super::components::{Color, EmptyState, KvRow, KvSection, ProgressBar};
 use super::dock::RightDockHeader;
 use super::format::{agent_tokens, money_of, wall_clock};
 use super::tokens::{SPACE_7, SPACE_14, SPACE_16};
@@ -33,6 +33,22 @@ impl AgentPanel {
         self.taken_over = taken_over;
         self
     }
+}
+
+/// What the Agent panel says for an agent while this machine has no
+/// local agents to show details for (Task 7).
+pub(crate) const NO_LOCAL_AGENTS: &str = "No local agents";
+
+/// The Agent panel for `handle` without details: its empty state. Tests
+/// find it as `agent-panel:none`.
+pub(crate) fn no_local_agents(handle: impl Into<SharedString>) -> impl IntoElement {
+    div()
+        .debug_selector(|| "agent-panel".into())
+        .size_full()
+        .flex()
+        .flex_col()
+        .child(RightDockHeader::new("Agent", handle))
+        .child(EmptyState::new("agent-panel:none", NO_LOCAL_AGENTS))
 }
 
 /// The State row's text and color: the take-over in the accent color while

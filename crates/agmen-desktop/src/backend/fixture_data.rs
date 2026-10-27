@@ -88,13 +88,14 @@ pub(super) fn roster() -> Result<Vec<PersonGroup>, BackendError> {
     ])
 }
 
-pub(super) fn listener() -> ListenerInfo {
+pub(super) fn listener() -> Result<ListenerInfo, BackendError> {
     let recent = |time: &str, text: &str, kind| RecentAction {
         time: time.into(),
         text: text.into(),
         kind,
     };
-    ListenerInfo {
+    Ok(ListenerInfo {
+        id: id("andy/listen")?,
         handle: "andy/listen".into(),
         agent: "codex".into(),
         state: "idle".into(),
@@ -131,7 +132,7 @@ pub(super) fn listener() -> ListenerInfo {
                 RecentKind::Answered,
             ),
         ],
-    }
+    })
 }
 
 pub(super) fn fx1() -> Result<AgentInfo, BackendError> {

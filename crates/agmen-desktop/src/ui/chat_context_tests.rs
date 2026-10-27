@@ -212,13 +212,13 @@ fn change_card_needs_the_listener_as_sender_at_its_position() {
     let real = snapshot
         .messages
         .iter()
-        .find(|m| m.client.id == id && m.from == snapshot.listener_id)
+        .find(|m| m.client.id == id && Some(&m.from) == snapshot.listener_id())
         .unwrap()
         .clone();
     let other = snapshot
         .messages
         .iter()
-        .find(|m| m.from != snapshot.listener_id)
+        .find(|m| Some(&m.from) != snapshot.listener_id())
         .unwrap()
         .from
         .clone();

@@ -13,9 +13,10 @@ use gpui::{
 };
 
 use super::components::{
-    Badge, Color, Dot, Icon, IconSize, Indent, Label, LabelSize, ListItem, Tooltip,
+    Badge, Color, Dot, EmptyState, Icon, IconSize, Indent, Label, LabelSize, ListItem, Tooltip,
 };
 use super::format::clock;
+use super::project_panel::NO_WORKTREES;
 use super::scope_chip::{ScopeChip, ScopeChipEvent, ScopeOption};
 use super::tagged;
 use super::tokens::{ICON_LG, PROJECT_ROW_HEIGHT, SPACE_6};
@@ -475,6 +476,13 @@ impl GitPanel {
 
 impl Render for GitPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Task 7: nothing to scope, list or fold until a worktree exists.
+        if self.worktrees.is_empty() {
+            return div()
+                .w_full()
+                .py(SPACE_6)
+                .child(EmptyState::new("git-panel:none", NO_WORKTREES));
+        }
         let mut rows: Vec<AnyElement> = Vec::new();
         for section in GitSection::ALL {
             rows.push(self.section_row(section, cx).into_any_element());

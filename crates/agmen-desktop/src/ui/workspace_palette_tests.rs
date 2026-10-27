@@ -194,7 +194,7 @@ fn spawn_row_opens_the_delegated_flow_in_the_chat(cx: &mut TestAppContext) {
     assert_eq!(messages.len(), before + 3);
     let sent = &messages[before];
     assert_eq!(sent.client.body.as_str(), "Spawn a worker with codex");
-    let listener = workspace.read_with(cx, |w, _| w.snapshot.listener_id.clone());
+    let listener = workspace.read_with(cx, |w, _| w.snapshot.listener_id().cloned().unwrap());
     assert_eq!(sent.client.to, [listener]);
     let delegated = messages.last().unwrap();
     assert!(

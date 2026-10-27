@@ -51,7 +51,7 @@ impl TitleBar {
     pub(crate) fn new(snapshot: &Snapshot) -> Self {
         Self {
             project: snapshot.project.clone().into(),
-            listener: listener_label(&snapshot.listener.agent, &snapshot.listener.state).into(),
+            listener: listener_label(snapshot.listener.as_ref()).into(),
             me: snapshot.me.clone().into(),
             platform: PlatformStyle::current(),
         }

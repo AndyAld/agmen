@@ -4,6 +4,7 @@
 use std::fs;
 use std::path::Path;
 
+use agmen_proto::ProjectId;
 use serde::{Deserialize, Serialize};
 
 use super::zed::Mode;
@@ -147,6 +148,74 @@ impl AgmenSettings {
             merged.insert("fonts".to_owned(), toml::Value::Table(fonts));
         }
         table.insert(TABLE.to_owned(), toml::Value::Table(merged));
+        write_settings_table(path, &table)
+    }
+}
+
+// Task 7: what the desktop app remembers between launches.
+/// The `[desktop]` table of agmen's settings file: what the app keeps
+/// between launches, apart from how it looks. Keys this version does not
+/// know are kept.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct DesktopSettings {
+    /// The project the last live launch opened, which a launch outside a
+    /// joined folder opens again.
+    pub(crate) last_project: Option<ProjectId>,
+}
+
+/// The table that holds [`DesktopSettings`].
+const DESKTOP_TABLE: &str = "desktop";
+/// The `[desktop]` keys this version writes.
+const DESKTOP_KEYS: &[&str] = &["last_project"];
+
+impl DesktopSettings {
+    /// Reads the `[desktop]` table of `path`; a missing file or table gives
+    /// the defaults.
+    ///
+    /// # Errors
+    ///
+    /// When the file exists but is too large, unreadable, or not valid,
+    /// such as a `last_project` that is not a project id.
+    pub(crate) fn load(path: &Path) -> Result<Self, AppearanceError> {
+        let Some(mut table) = read_settings_table(path)? else {
+            return Ok(Self::default());
+        };
+        let Some(value) = table.remove(DESKTOP_TABLE) else {
+            return Ok(Self::default());
+        };
+        value
+            .try_into()
+            .map_err(|err: toml::de::Error| AppearanceError::Parse {
+                path: path.to_owned(),
+                message: err.to_string(),
+            })
+    }
+
+    /// Replaces the `[desktop]` keys this version owns in `path`, keeping
+    /// every other key and table, as [`AgmenSettings::save`] does.
+    ///
+    /// # Errors
+    ///
+    /// When the existing file cannot be parsed (it is left alone), or the
+    /// folder or file cannot be written.
+    pub(crate) fn save(&self, path: &Path) -> Result<(), AppearanceError> {
+        let mut table = read_settings_table(path)?.unwrap_or_default();
+        let value = toml::Value::try_from(self).map_err(|err| AppearanceError::Serialize {
+            path: path.to_owned(),
+            message: err.to_string(),
+        })?;
+        let mut merged = match table.remove(DESKTOP_TABLE) {
+            Some(toml::Value::Table(existing)) => existing,
+            _ => toml::Table::new(),
+        };
+        for key in DESKTOP_KEYS {
+            merged.remove(*key);
+        }
+        if let toml::Value::Table(ours) = value {
+            merged.extend(ours);
+        }
+        table.insert(DESKTOP_TABLE.to_owned(), toml::Value::Table(merged));
         write_settings_table(path, &table)
     }
 }

@@ -98,7 +98,7 @@ impl ChatContext {
                 snapshot
                     .messages
                     .iter()
-                    .filter(|m| &m.client.id == id && m.from == snapshot.listener_id)
+                    .filter(|m| &m.client.id == id && Some(&m.from) == snapshot.listener_id())
                     .map(|m| (m.stream.clone(), m.seq, m.client.id.clone()))
                     .min()
             })
@@ -158,7 +158,7 @@ impl ChatContext {
     #[must_use]
     pub(crate) fn change_card(&self, env: &StampedEnvelope) -> Option<&ChangeCard> {
         let key = (env.stream.clone(), env.seq, env.client.id.clone());
-        if env.from == self.snapshot.listener_id && self.card_rows.contains(&key) {
+        if Some(&env.from) == self.snapshot.listener_id() && self.card_rows.contains(&key) {
             self.snapshot.changes.get(&env.client.id)
         } else {
             None
@@ -510,11 +510,7 @@ struct DoneFields<'a> {
 }
 
 const fn status_text(status: AgentStatus) -> &'static str {
-    match status {
-        AgentStatus::Working => "working",
-        AgentStatus::Idle => "idle",
-        AgentStatus::Reading => "reading",
-    }
+    status.label()
 }
 
 const fn verdict_text(verdict: Verdict) -> &'static str {

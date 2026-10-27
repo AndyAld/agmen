@@ -10,8 +10,8 @@ use gpui::{
 
 use super::code_view::CodeView;
 use super::components::{
-    Breadcrumb, Button, ButtonStyle, Color, Dot, Icon, IconSize, Indent, KvRow, KvSection, Label,
-    LabelSize, ListItem,
+    Breadcrumb, Button, ButtonStyle, Color, Dot, EmptyState, Icon, IconSize, Indent, KvRow,
+    KvSection, Label, LabelSize, ListItem,
 };
 use super::dock::RightDockHeader;
 use super::syntax::Language;
@@ -119,8 +119,18 @@ fn role_dot(name: &str, palette_role: Option<&str>) -> impl IntoElement {
         .child(Dot::new(role_dot_color(palette_role)))
 }
 
+/// What the Roles panel says while it has no role files (Task 7).
+pub(crate) const NO_ROLES: &str = "No roles yet";
+
 impl Render for RolesPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Task 7: three empty layer headers would read as a broken list.
+        if self.roles.is_empty() {
+            return div()
+                .w_full()
+                .py(SPACE_6)
+                .child(EmptyState::new("roles-panel:none", NO_ROLES));
+        }
         let mut rows = Vec::new();
         for (layer, title, slug) in LAYERS {
             rows.push(

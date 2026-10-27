@@ -110,6 +110,7 @@ dependencies = [
 name = "agmen-desktop"
 version = "0.1.0"
 dependencies = [
+ "agmen-client",
  "agmen-local",
  "agmen-proto",
  "anyhow",

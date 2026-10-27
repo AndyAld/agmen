@@ -45,13 +45,23 @@ pub(crate) struct ModelMenu {
     open: bool,
 }
 
+/// The listener's agent, such as `codex`. Empty without a listener; the
+/// composer then draws no model chip (Task 7).
+fn listener_agent(snapshot: &Snapshot) -> String {
+    snapshot
+        .listener
+        .as_ref()
+        .map(|listener| listener.agent.clone())
+        .unwrap_or_default()
+}
+
 impl ModelMenu {
     /// Starts on the person's standing model when the picker offers it,
     /// and otherwise on the listener's own agent and configured model
     /// (fix 31).
     #[must_use]
     pub(crate) fn new(snapshot: &Snapshot) -> Self {
-        let listener = ModelChoice::configured(snapshot.listener.agent.clone());
+        let listener = ModelChoice::configured(listener_agent(snapshot));
         let mut menu = Self {
             groups: Rc::from([]),
             headings: Rc::from([]),
@@ -120,10 +130,15 @@ impl ModelMenu {
             .collect();
         self.groups = groups;
         self.headings = headings;
-        self.listener_handle = snapshot.listener.handle.clone().into();
+        self.listener_handle = snapshot
+            .listener
+            .as_ref()
+            .map(|listener| listener.handle.clone())
+            .unwrap_or_default()
+            .into();
         let old = std::mem::replace(
             &mut self.listener,
-            ModelChoice::configured(snapshot.listener.agent.clone()),
+            ModelChoice::configured(listener_agent(snapshot)),
         );
         let stays =
             |menu: &Self, choice: &ModelChoice| !choice.same_model(&old) && menu.offers(choice);

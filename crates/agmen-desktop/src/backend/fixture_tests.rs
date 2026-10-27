@@ -113,7 +113,8 @@ fn status_counts_follow_one_rule() {
     use crate::alerts::{AlertState, Me, alert_count};
     let chat = chat();
     assert_eq!(chat.status.worktrees, 5);
-    let total = chat.listener.workers_today_usd + chat.listener.listener_today_usd;
+    let listener = chat.listener.as_ref().unwrap();
+    let total = listener.workers_today_usd + listener.listener_today_usd;
     assert!(
         (total - chat.status.spend_today_usd).abs() < 0.005,
         "{total}"
@@ -216,7 +217,7 @@ fn fixture_send_appends_and_notifies() {
     let mut updates = backend.subscribe();
     backend
         .send(Draft {
-            to: vec![backend.snapshot().listener_id.clone()],
+            to: vec![backend.snapshot().listener_id().cloned().unwrap()],
             body: "hi".into(),
             reply_to: None,
             model: None,
@@ -286,6 +287,7 @@ fn settings_screens_lead_recent_with_their_change() {
             .unwrap()
             .snapshot()
             .listener
+            .unwrap()
             .recent
             .remove(0)
     };
@@ -629,7 +631,10 @@ fn spawn_worker_plays_the_delegated_exchange() {
     assert_eq!(verbs, [Some("FYI"), Some("ANSWER"), Some("DELEGATED")]);
     assert_eq!(new[0].from_handle.as_str(), "andy");
     assert_eq!(new[0].client.body.as_str(), "Spawn a worker with codex");
-    assert_eq!(new[0].client.to, std::slice::from_ref(&s.listener_id));
+    assert_eq!(
+        new[0].client.to,
+        std::slice::from_ref(s.listener_id().unwrap())
+    );
     for reply in &new[1..] {
         assert_eq!(reply.from_handle.as_str(), "andy/listen");
         assert_eq!(reply.client.reply_to, Some(new[0].client.id.clone()));

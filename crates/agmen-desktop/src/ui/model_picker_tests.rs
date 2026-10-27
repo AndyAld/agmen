@@ -266,7 +266,7 @@ fn a_mention_carries_no_model_and_keeps_the_choice(cx: &mut TestAppContext) {
 /// The chat fixture with the listener on claude.
 fn claude_listener() -> Snapshot {
     let mut snapshot = chat_snapshot();
-    snapshot.listener.agent = "claude".into();
+    snapshot.listener.as_mut().unwrap().agent = "claude".into();
     snapshot
 }
 

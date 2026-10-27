@@ -12,9 +12,11 @@ use gpui::{App, SharedString};
 
 use super::Workspace;
 use crate::backend::Snapshot;
+use crate::ui::components::Color;
 use crate::ui::dock::DockSide;
 use crate::ui::pane::TabItem;
 use crate::ui::scope_chip::branch_label;
+use crate::ui::status_bar::link_label;
 use crate::ui::syntax::Language;
 
 impl Workspace {
@@ -31,6 +33,14 @@ impl Workspace {
             // Task 19: "ridgeline · planning" in a project with a plan.
             .or_else(|| self.plan_status_context(cx))
             .or_else(|| self.chat.read(cx).take_over_status(cx))
+    }
+
+    /// Task 7: what the status bar says about the link to agmend and the
+    /// hub, from the chat's last `Update::Link`; `None` for the fixture,
+    /// which sends none.
+    pub(crate) fn status_link(&self, cx: &App) -> Option<(SharedString, Color)> {
+        let chat = self.chat.read(cx);
+        chat.link().map(|link| link_label(link, chat.was_live()))
     }
 
     /// Whether the status bar offers the Listener toggle.

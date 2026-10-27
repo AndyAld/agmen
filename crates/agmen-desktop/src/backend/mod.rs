@@ -5,9 +5,11 @@
 //! [`Draft`] and [`Action`] types later (ADR-0011). Messages cross it as
 //! `agmen_proto::StampedEnvelope`, unchanged from the wire.
 
-// Task 6: the live backend over agmend's socket.
-#[cfg_attr(not(test), expect(dead_code, reason = "Task 7 opens the app on it"))]
+// Task 6: the live backend over agmend's socket; Task 7 opens the app on it.
 mod agmend;
+// Task 7: the fake agmend the backend's and the window's tests talk to.
+#[cfg(test)]
+pub(crate) mod fake_agmend;
 mod fixture;
 mod fixture_data;
 // Task 19: the planning room's spec texts, comments, caps and presence.
@@ -27,7 +29,6 @@ use gpui::SharedString;
 
 use crate::roles::{Edits, RoleKind, Tier};
 
-#[expect(unused_imports, reason = "Task 7 opens the app on it")]
 pub(crate) use agmend::AgmendBackend;
 pub(crate) use fixture::FixtureBackend;
 pub(crate) use fixture_data::REVIEWER_XML;
@@ -43,6 +44,13 @@ pub(crate) fn fixture_id(handle: &str) -> IdentityId {
 }
 #[cfg(test)]
 pub(crate) use fixture::chat_snapshot;
+
+/// Task 7: the window's snapshot of the fake agmend's roster and chat, as
+/// a live launch maps it.
+#[cfg(test)]
+pub(crate) fn live_snapshot() -> Snapshot {
+    agmend::snapshot_from(fake_agmend::console(vec![fake_agmend::message(1)]))
+}
 pub(crate) use screen::Screen;
 
 /// What a backend can refuse.
@@ -63,11 +71,9 @@ pub(crate) enum BackendError {
     // Task 6: the live backend's refusals.
     /// agmend refused the request, or its socket is not the person's own;
     /// the text says which.
-    #[cfg_attr(not(test), expect(dead_code, reason = "Task 7 opens the app on it"))]
     #[error("{0}")]
     Agmend(String),
     /// agmend cannot be reached now, or its hub stream is down.
-    #[cfg_attr(not(test), expect(dead_code, reason = "Task 7 opens the app on it"))]
     #[error("not connected to agmend, so nothing was sent")]
     NotConnected,
 }
@@ -118,7 +124,8 @@ impl BackendHandle {
 /// A chat message the person writes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Draft {
-    /// Who it is addressed to; the listener unless the person picks.
+    /// Who it is addressed to; the listener unless the person picks, and
+    /// no one, the chat as a whole, when the person has no listener.
     pub(crate) to: Vec<IdentityId>,
     pub(crate) body: String,
     /// The message it answers. A reply to an ASK or an ALERT goes out as
@@ -173,11 +180,9 @@ pub(crate) enum Update {
     Snapshot(Box<Snapshot>),
     // Task 6: what only the live backend says.
     /// How the link to agmend and the hub stands now. A new subscriber
-    /// hears the current state first; Task 7 shows it in the status bar.
-    #[cfg_attr(not(test), expect(dead_code, reason = "Task 7 opens the app on it"))]
+    /// hears the current state first; the status bar shows it (Task 7).
     Link(Link),
     /// A draft `send` accepted that agmend or the hub then refused.
-    #[cfg_attr(not(test), expect(dead_code, reason = "Task 7 opens the app on it"))]
     NotSent {
         draft: Draft,
         why: String,
@@ -351,6 +356,8 @@ pub(crate) enum AgentStatus {
     Working,
     Idle,
     Reading,
+    /// Task 7: not connected to the hub, so not reachable now.
+    Offline,
 }
 
 impl AgentStatus {
@@ -360,6 +367,7 @@ impl AgentStatus {
             Self::Working => "working",
             Self::Idle => "idle",
             Self::Reading => "reading",
+            Self::Offline => "offline",
         }
     }
 }
@@ -417,6 +425,8 @@ pub(crate) enum RecentKind {
 /// The right dock's Listener panel.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ListenerInfo {
+    /// Task 7: the listener's identity, which the composer addresses.
+    pub(crate) id: IdentityId,
     pub(crate) handle: String,
     pub(crate) agent: String,
     pub(crate) state: String,
@@ -496,9 +506,10 @@ pub(crate) struct Snapshot {
     /// The person's handle, such as `andy`.
     pub(crate) me: String,
     pub(crate) me_id: IdentityId,
-    pub(crate) listener_id: IdentityId,
     pub(crate) roster: Vec<PersonGroup>,
-    pub(crate) listener: ListenerInfo,
+    /// The person's own listener; `None` when the project has none for
+    /// them (Task 7), and the Listener panel says so.
+    pub(crate) listener: Option<ListenerInfo>,
     /// Keyed by identity id.
     pub(crate) agents: BTreeMap<IdentityId, AgentInfo>,
     pub(crate) status: StatusSummary,
@@ -533,6 +544,13 @@ pub(crate) struct Snapshot {
     /// The person's "until I change it" model, which the composer's chip
     /// opens on; `None` opens it on the listener's own model.
     pub(crate) standing_model: Option<ModelChoice>,
+}
+
+impl Snapshot {
+    /// The person's own listener's identity, when they have one.
+    pub(crate) fn listener_id(&self) -> Option<&IdentityId> {
+        self.listener.as_ref().map(|listener| &listener.id)
+    }
 }
 
 /// One row of an agent's session, as the agent view shows it.

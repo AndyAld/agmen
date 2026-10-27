@@ -103,7 +103,7 @@ fn composer_is_the_chat_composer_addressed_to_the_agent(cx: &mut TestAppContext)
     let (view, cx) = open_fx1(cx);
     redraw(cx);
     view.read_with(cx, |view, cx| {
-        let target = view.composer.read(cx).target(cx);
+        let target = view.composer.read(cx).target(cx).unwrap();
         assert_eq!(target.handle, "andy/fx1");
         assert_eq!(target.id, crate::backend::fixture_id("andy/fx1"));
     });

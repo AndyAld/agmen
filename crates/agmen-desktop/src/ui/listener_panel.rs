@@ -5,27 +5,41 @@ use gpui::{
     div,
 };
 
-use super::components::{Button, Color, KvRow, KvSection};
+use super::components::{Button, Color, EmptyState, KvRow, KvSection};
 use super::dock::RightDockHeader;
 use super::format::{listener_tokens, money, money_of, workers_today};
 use super::tokens::{SPACE_14, SPACE_16};
 use crate::backend::{ListenerInfo, RecentKind};
 
+/// What the panel says when the person has no listener in the project.
+pub(crate) const NO_LISTENER: &str = "No listener for this project";
+
+/// Tests find it as `listener-panel`, and its empty state as
+/// `listener-panel:none`.
 #[derive(Debug, IntoElement)]
 pub(crate) struct ListenerPanel {
-    info: ListenerInfo,
+    info: Option<ListenerInfo>,
 }
 
 impl ListenerPanel {
     #[must_use]
-    pub(crate) const fn new(info: ListenerInfo) -> Self {
+    pub(crate) const fn new(info: Option<ListenerInfo>) -> Self {
         Self { info }
     }
 }
 
 impl RenderOnce for ListenerPanel {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        let i = self.info;
+        let Some(i) = self.info else {
+            return div()
+                .debug_selector(|| "listener-panel".into())
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(RightDockHeader::new("Listener", ""))
+                .child(EmptyState::new("listener-panel:none", NO_LISTENER))
+                .into_any_element();
+        };
         let runs = KvSection::new("Runs")
             .row(KvRow::new("Harness", i.harness_label))
             .row(KvRow::new("Role", i.role_label))
@@ -77,6 +91,7 @@ impl RenderOnce for ListenerPanel {
                     .child(recent)
                     .child(Button::new("change-listener", "Change listener…")),
             )
+            .into_any_element()
     }
 }
 
@@ -97,7 +112,7 @@ const fn recent_color(kind: RecentKind) -> Color {
 mod tests {
     use super::*;
     use crate::backend::chat_snapshot;
-    use crate::ui::test_support::rendered_size;
+    use crate::ui::test_support::{draw, rendered_size};
     use gpui::{TestAppContext, px};
 
     #[test]
@@ -107,6 +122,35 @@ mod tests {
         assert_eq!(recent_color(RecentKind::Applied), Color::Accent);
         assert_eq!(recent_color(RecentKind::Delegated), Color::Default);
         assert_eq!(recent_color(RecentKind::Answered), Color::Placeholder);
+    }
+
+    #[gpui::test]
+    fn empty_listener_panel_says_none(cx: &mut TestAppContext) {
+        // Task 7: a project with no listener for the person says so, with
+        // none of the fixture's numbers.
+        let cx = draw(cx, || {
+            div()
+                .w(crate::ui::tokens::RIGHT_DOCK_WIDTH)
+                .child(ListenerPanel::new(None))
+                .into_any_element()
+        });
+        assert!(cx.debug_bounds("listener-panel").is_some());
+        assert!(cx.debug_bounds("listener-panel:none").is_some());
+        assert!(cx.debug_bounds("kv-label:Harness:0").is_none());
+        assert_eq!(NO_LISTENER, "No listener for this project");
+    }
+
+    #[gpui::test]
+    fn a_listener_shows_its_rows_and_no_empty_state(cx: &mut TestAppContext) {
+        // The other side of `empty_listener_panel_says_none`'s selectors.
+        let cx = draw(cx, || {
+            div()
+                .w(crate::ui::tokens::RIGHT_DOCK_WIDTH)
+                .child(ListenerPanel::new(chat_snapshot().listener))
+                .into_any_element()
+        });
+        assert!(cx.debug_bounds("kv-label:Harness:0").is_some());
+        assert!(cx.debug_bounds("listener-panel:none").is_none());
     }
 
     #[gpui::test]

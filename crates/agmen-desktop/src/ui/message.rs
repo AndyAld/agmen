@@ -6,7 +6,7 @@
 
 use std::rc::Rc;
 
-use agmen_proto::{IdentityKind, Payload, StampedEnvelope, Verb, Verdict};
+use agmen_proto::{IdentityId, IdentityKind, Mention, Payload, StampedEnvelope, Verb, Verdict};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
@@ -100,6 +100,8 @@ fn row_kind(env: &StampedEnvelope, context: &ChatContext) -> RowKind {
 /// message carrying a change card reads SETTINGS though the wire verb is
 /// ANSWER (V67); a person's FYI addressed to someone reads "to" and the target,
 /// the sender's own prefix dropped ("to listen" for andy to andy/listen); a
+/// live post carries its recipients as mentions, since FYI takes no `to`
+/// (protocol 5), so a person's FYI with no `to` reads its mentions (Task 7); a
 /// REVIEW is green for pass and red for changes (mockup fix 42).
 #[must_use]
 fn verb_badge(env: &StampedEnvelope, context: &ChatContext) -> (String, Color) {
@@ -107,12 +109,24 @@ fn verb_badge(env: &StampedEnvelope, context: &ChatContext) -> (String, Color) {
         return ("SETTINGS".to_owned(), Color::Accent);
     }
     let payload = &env.client.payload;
-    if matches!(payload, Payload::Fyi {}) && !env.client.to.is_empty() {
-        let own = format!("{}/", env.from_handle);
-        let targets: Vec<String> = env
-            .client
-            .to
+    // A person's handle has no slash, as `sender` reads it.
+    let person = !env.from_handle.contains('/');
+    let to: Vec<&IdentityId> = if env.client.to.is_empty() && person {
+        env.client
+            .mentions
             .iter()
+            .filter_map(|mention| match mention {
+                Mention::Identity(id) => Some(id),
+                _ => None,
+            })
+            .collect()
+    } else {
+        env.client.to.iter().collect()
+    };
+    if matches!(payload, Payload::Fyi {}) && !to.is_empty() {
+        let own = format!("{}/", env.from_handle);
+        let targets: Vec<String> = to
+            .into_iter()
             .map(|id| {
                 let handle = context.handle(id).unwrap_or(id.as_str());
                 handle.strip_prefix(&own).unwrap_or(handle).to_owned()

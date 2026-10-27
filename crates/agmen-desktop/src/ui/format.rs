@@ -2,6 +2,8 @@
 //! views show them.
 
 use agmen_proto::Timestamp;
+
+use crate::backend::ListenerInfo;
 use jiff::tz::TimeZone;
 
 /// Dollars with cents: `$14.20`. Values that are not finite show `$0.00`.
@@ -90,10 +92,13 @@ pub(crate) fn workers_today(today: f64, cap: f64, running: u32, max: u32) -> Str
 }
 
 /// The listener as the title bar and status bar name it:
-/// `listener: codex · idle`.
+/// `listener: codex · idle`, or `no listener` when the person has none.
 #[must_use]
-pub(crate) fn listener_label(agent: &str, state: &str) -> String {
-    format!("listener: {agent} · {state}")
+pub(crate) fn listener_label(listener: Option<&ListenerInfo>) -> String {
+    match listener {
+        Some(listener) => format!("listener: {} · {}", listener.agent, listener.state),
+        None => "no listener".to_owned(),
+    }
 }
 
 /// `1 alert`, `2 alerts`.
@@ -201,7 +206,10 @@ mod tests {
 
     #[test]
     fn listener_label_has_colon() {
-        assert_eq!(listener_label("codex", "idle"), "listener: codex · idle");
+        let listener = crate::backend::chat_snapshot().listener;
+        assert_eq!(listener_label(listener.as_ref()), "listener: codex · idle");
+        // Task 7: a project with no listener for the person says so.
+        assert_eq!(listener_label(None), "no listener");
     }
 
     #[test]

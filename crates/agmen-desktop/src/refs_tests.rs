@@ -251,7 +251,10 @@ fn spans_are_sorted_and_disjoint() {
 fn known_names_handles_by_id() {
     let snapshot = chat_snapshot();
     let known = Known::from_snapshot(&snapshot);
-    assert_eq!(known.handle(&snapshot.listener_id), Some("andy/listen"));
+    assert_eq!(
+        known.handle(snapshot.listener_id().unwrap()),
+        Some("andy/listen")
+    );
     assert_eq!(known.handle(&snapshot.me_id), Some("andy"));
     let stranger: IdentityId = "zzzz0000".parse().unwrap();
     assert_eq!(known.handle(&stranger), None);

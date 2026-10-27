@@ -71,7 +71,7 @@ fn a_draft_with_a_model_is_tagged_with_it() {
     let mut updates = backend.subscribe();
     backend
         .send(Draft {
-            to: vec![backend.snapshot().listener_id.clone()],
+            to: vec![backend.snapshot().listener_id().cloned().unwrap()],
             body: "why?".into(),
             reply_to: None,
             model: Some(ask_model()),

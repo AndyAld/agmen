@@ -11,6 +11,9 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+# Task 7: the CLI's identity file finder and agmend's socket path. Only
+# those synchronous functions are called; no runtime starts.
+agmen-client = { version = "0.1.0", path = "../agmen-client" }
 # The blocking frame codec only; the tokio feature stays off.
 agmen-local = { version = "0.1.0", path = "../agmen-local" }
 agmen-proto = { version = "0.1.0", path = "../agmen-proto" }

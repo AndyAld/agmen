@@ -360,3 +360,66 @@ fn the_chat_and_the_center_share_the_workspaces_snapshot(cx: &mut TestAppContext
         assert!(std::rc::Rc::ptr_eq(&workspace.snapshot, center), "center");
     });
 }
+
+/// Task 7: a live workspace over agmend's roster and chat, drawn once.
+fn open_live(
+    cx: &mut TestAppContext,
+    snapshot: Snapshot,
+) -> (Entity<Workspace>, &mut gpui::VisualTestContext) {
+    init(cx);
+    let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::live(snapshot, window, cx));
+    redraw(cx);
+    (workspace, cx)
+}
+
+#[gpui::test]
+fn a_live_workspace_opens_no_mockup_tabs(cx: &mut TestAppContext) {
+    // The roster has an andy/fx1, as the mockup does, but a live window
+    // opens only the chat.
+    let snapshot = crate::backend::live_snapshot();
+    let fx1 = snapshot
+        .roster
+        .iter()
+        .flat_map(|g| &g.agents)
+        .find(|a| a.handle == "andy/fx1")
+        .map(|a| a.id.clone())
+        .expect("the fake roster has andy/fx1");
+    let (workspace, cx) = open_live(cx, snapshot);
+    workspace.read_with(cx, |w, cx| {
+        let group = w.pane_group.read(cx);
+        assert!(!group.holds(&TabItem::Agent(fx1), cx));
+        assert!(!group.holds(&TabItem::RoleFile(MOCKUP_ROLE.into()), cx));
+        assert_eq!(group.active_item(cx), Some(TabItem::Chat));
+    });
+}
+
+#[gpui::test]
+fn live_panels_without_data_say_so(cx: &mut TestAppContext) {
+    // Task 7: the panels agmend has no source for yet show plain empty
+    // states, never the fixture's worktrees, roles or agents.
+    let mut snapshot = crate::backend::live_snapshot();
+    snapshot.listener = None;
+    let fx1 = snapshot
+        .roster
+        .iter()
+        .flat_map(|g| &g.agents)
+        .find(|a| a.handle == "andy/fx1")
+        .map(|a| a.id.clone())
+        .expect("the fake roster has andy/fx1");
+    let (workspace, cx) = open_live(cx, snapshot);
+    assert!(cx.debug_bounds("listener-panel:none").is_some());
+    for (tab, selector) in [
+        (LeftDockTab::Project, "project-panel:none"),
+        (LeftDockTab::Git, "git-panel:none"),
+        (LeftDockTab::Roles, "roles-panel:none"),
+    ] {
+        workspace.update(cx, |w, cx| w.show_left_tab(tab, cx));
+        redraw(cx);
+        assert!(cx.debug_bounds(selector).is_some(), "{tab:?}");
+    }
+    // An agent with no details on this machine: no local agents yet.
+    workspace.update(cx, |w, cx| w.select_agent(&fx1, cx));
+    redraw(cx);
+    assert!(cx.debug_bounds("agent-panel:none").is_some());
+    assert!(cx.debug_bounds("listener-panel").is_none());
+}

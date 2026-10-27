@@ -13,7 +13,7 @@ use super::format::{counted, counted_capped, listener_label, spend_today};
 use super::left_dock::PanelButtons;
 use super::tokens::{BORDER_WIDTH, SPACE_5, SPACE_10, SPACE_14, STATUS_BAR_HEIGHT};
 use super::workspace::{OpenAlerts, ToggleRightDock};
-use crate::backend::{Snapshot, StatusSummary};
+use crate::backend::{Link, Snapshot, StatusSummary};
 use crate::icons::UiIcon;
 use crate::keymap::{OpenSettings, ToggleCommandPalette};
 
@@ -29,6 +29,8 @@ pub(crate) struct StatusBar {
     palette_open: bool,
     /// Task 13: the chat's counts, not stored numbers (mockup fix 34).
     alerts: AlertCounts,
+    /// Task 7: the live link's state and its color; `None` draws nothing.
+    link: Option<(SharedString, Color)>,
 }
 
 impl StatusBar {
@@ -36,12 +38,20 @@ impl StatusBar {
     pub(crate) fn new(snapshot: &Snapshot, listener_toggle: bool) -> Self {
         Self {
             status: snapshot.status.clone(),
-            context: listener_label(&snapshot.listener.agent, &snapshot.listener.state).into(),
+            context: listener_label(snapshot.listener.as_ref()).into(),
             listener_toggle,
             panels: PanelButtons::default(),
             palette_open: false,
             alerts: AlertCounts::default(),
+            link: None,
         }
+    }
+
+    /// Task 7: the link to agmend and the hub, as [`link_label`] words it.
+    #[must_use]
+    pub(crate) fn link(mut self, link: Option<(SharedString, Color)>) -> Self {
+        self.link = link;
+        self
     }
 
     /// The red needs-you pill and the alert count, from the chat's alert
@@ -74,6 +84,22 @@ impl StatusBar {
     pub(crate) fn context(mut self, context: impl Into<SharedString>) -> Self {
         self.context = context.into();
         self
+    }
+}
+
+/// Task 7: the status bar's words for the live backend's link. agmend and
+/// the hub are up: connected. agmend is up and retries the hub: connecting
+/// before the first success, reconnecting after. The hub refused for a
+/// reason a retry will not fix, or agmend is gone: offline, with why.
+#[must_use]
+pub(crate) fn link_label(link: &Link, was_live: bool) -> (SharedString, Color) {
+    match link {
+        Link::Live => ("connected".into(), Color::Success),
+        Link::HubDown { why: None } if was_live => ("reconnecting".into(), Color::Warning),
+        Link::HubDown { why: None } => ("connecting".into(), Color::Warning),
+        Link::HubDown { why: Some(why) } => (format!("offline: {why}").into(), Color::Error),
+        // The backend's own text is about its socket; this names the cause.
+        Link::AgmendDown { .. } => ("offline: can't reach agmend".into(), Color::Error),
     }
 }
 
@@ -132,6 +158,25 @@ impl RenderOnce for StatusBar {
                         .solid()
                         .leading("!"),
                     ),
+                )
+            })
+            // Task 7: connected, reconnecting or offline, with the hub's
+            // reason; the long reason gives way before the counts.
+            .when_some(self.link, |this, (text, color)| {
+                this.child(
+                    div()
+                        .debug_selector(|| "status-link".into())
+                        .flex()
+                        .min_w_0()
+                        .items_center()
+                        .gap(SPACE_5)
+                        .child(Label::new("●").size(LabelSize::Small).color(color.clone()))
+                        .child(
+                            Label::new(text)
+                                .size(LabelSize::Small)
+                                .color(color)
+                                .truncate(),
+                        ),
                 )
             })
             .child(item(
@@ -203,4 +248,32 @@ fn palette_trigger(palette_open: bool) -> impl IntoElement {
             })
         })
         .child(KeyHint::new(crate::keymap::palette_hint()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn link_label_words_each_state() {
+        let hub = |why: Option<&str>| Link::HubDown {
+            why: why.map(str::to_owned),
+        };
+        let text = |link: &Link, was_live| link_label(link, was_live).0.to_string();
+        assert_eq!(text(&Link::Live, false), "connected");
+        // The first connect is not a reconnect.
+        assert_eq!(text(&hub(None), false), "connecting");
+        assert_eq!(text(&hub(None), true), "reconnecting");
+        assert_eq!(
+            text(&hub(Some("signed out: run agmen login")), true),
+            "offline: signed out: run agmen login"
+        );
+        let down = Link::AgmendDown {
+            why: "not connected to agmend, so nothing was sent".into(),
+        };
+        assert_eq!(text(&down, true), "offline: can't reach agmend");
+        assert_eq!(link_label(&down, true).1, Color::Error);
+        assert_eq!(link_label(&hub(None), true).1, Color::Warning);
+        assert_eq!(link_label(&Link::Live, true).1, Color::Success);
+    }
 }

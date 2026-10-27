@@ -14,6 +14,7 @@ mod keymap;
 mod local_time;
 mod notify;
 mod plan;
+mod project;
 mod refs;
 mod roles;
 mod spike;
@@ -31,7 +32,7 @@ use appearance::{Appearance, SystemMode};
 
 use ui::{Quit, Workspace};
 
-const USAGE: &str = "usage: agmen-desktop [--screen <name> | --list-screens | --view <name> | --spike list [--autoscroll] | --spike notify]";
+const USAGE: &str = "usage: agmen-desktop [--fixture | --screen <name> | --list-screens | --view <name> | --spike list [--autoscroll] | --spike notify]";
 
 /// The views `--view` can show alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,8 +58,11 @@ enum DevView {
 /// What the command line asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Launch {
-    /// The normal app window.
+    /// The normal app window, live through agmend (Task 7).
     App,
+    /// The app window on the fixture's chat, as a plain launch opened it
+    /// before agmend's local API existed.
+    Fixture,
     /// Spike S8's list check, optionally scrolling by itself and quitting.
     ListSpike { autoscroll: bool },
     /// Spike S8's notification check: post one, then quit.
@@ -75,6 +79,7 @@ impl Launch {
     fn parse(args: &[String]) -> Result<Self> {
         match args {
             [] => Ok(Self::App),
+            [flag] if flag == "--fixture" => Ok(Self::Fixture),
             [flag, name, rest @ ..] if flag == "--spike" && name == "list" => match rest {
                 [] => Ok(Self::ListSpike { autoscroll: false }),
                 [a] if a == "--autoscroll" => {
@@ -111,6 +116,28 @@ impl Launch {
     }
 }
 
+impl Launch {
+    /// The fixture screen this launch opens; `None` for the live app and
+    /// the windows that are not the app.
+    const fn fixture_screen(&self) -> Option<backend::Screen> {
+        match self {
+            Self::Fixture => Some(backend::Screen::Chat),
+            Self::Screen(screen) => Some(*screen),
+            Self::App
+            | Self::ListSpike { .. }
+            | Self::NotifySpike
+            | Self::ListScreens
+            | Self::View(_) => None,
+        }
+    }
+
+    /// Whether this launch is the person's app, which runs once: spikes
+    /// and screenshot screens run beside it.
+    const fn takes_instance_lock(&self) -> bool {
+        matches!(self, Self::App | Self::Fixture)
+    }
+}
+
 #[cfg(not(target_os = "macos"))]
 fn main() {
     // shortcut: macOS only until spike S8 runs on Windows and Linux (ADR-0010).
@@ -130,7 +157,7 @@ fn main() -> Result<()> {
     }
     // Spikes and screenshot screens run beside a normal app, so only the app
     // takes the instance lock.
-    let listener = if launch == Launch::App {
+    let listener = if launch.takes_instance_lock() {
         let dir = std::env::home_dir()
             .context("no home folder")?
             .join("Library/Application Support/agmen");
@@ -302,6 +329,22 @@ fn open_dev_view(
     Ok(window.context("opening the view window")?.into())
 }
 
+/// Task 7: where a plain launch connects and which project it opens: the
+/// working folder's `.agmen/identity.json`, else the last project in
+/// `~/.config/agmen/settings.toml`.
+fn live_launch() -> Result<ui::LiveLaunch> {
+    let socket = agmen_client::agmend_socket().context("finding agmend's socket")?;
+    let settings =
+        std::env::home_dir().map(|home| appearance::agmen_settings_path(&home.join(".config")));
+    let cwd = std::env::current_dir().context("reading the working folder")?;
+    let project = project::choose_project(&cwd, settings.as_deref());
+    Ok(ui::LiveLaunch {
+        socket,
+        project,
+        settings,
+    })
+}
+
 fn open_main_window(launch: &Launch, cx: &mut App) -> Result<()> {
     keymap::bind_all(cx);
     cx.on_action(|_: &Quit, cx| cx.quit());
@@ -325,12 +368,23 @@ fn open_main_window(launch: &Launch, cx: &mut App) -> Result<()> {
 
     let options = window_options(cx);
     let window = match launch {
-        Launch::App | Launch::Screen(_) => {
-            let screen = match launch {
-                Launch::Screen(screen) => *screen,
-                _ => backend::Screen::Chat,
+        Launch::App => {
+            let launch = live_launch()?;
+            // Task 13: live alerts chime and post notifications.
+            cx.set_global(ui::AlarmHandle::system());
+            cx.open_window(options, |window, cx| {
+                let root = cx.new(|cx| ui::LiveRoot::new(launch, window, cx));
+                window.focus(&root.focus_handle(cx), cx);
+                root
+            })
+            .map(Into::into)
+        }
+        Launch::Fixture | Launch::Screen(_) => {
+            let Some(screen) = launch.fixture_screen() else {
+                return Ok(());
             };
-            // shortcut: the fixture stands in for agmend until its local API exists (ADR-0011).
+            // The fixture serves --fixture and --screen, for tests and
+            // screenshots (ADR-0011); a plain launch is live.
             let backend: Rc<dyn backend::Backend> = Rc::new(
                 backend::FixtureBackend::for_screen(screen).context("building the fixture data")?,
             );
@@ -419,5 +473,29 @@ mod tests {
         );
         assert!(Launch::parse(&args(&["--spike", "nope"])).is_err());
         assert!(Launch::parse(&args(&["--bogus"])).is_err());
+    }
+
+    #[test]
+    fn fixture_flag_keeps_the_fixture() {
+        // Task 7: a plain launch is live; --fixture opens the fixture's
+        // chat as a plain launch did before, and --screen is unchanged.
+        assert_eq!(
+            Launch::parse(&args(&["--fixture"])).unwrap(),
+            Launch::Fixture
+        );
+        assert_eq!(
+            Launch::Fixture.fixture_screen(),
+            Some(backend::Screen::Chat)
+        );
+        assert_eq!(Launch::App.fixture_screen(), None);
+        assert_eq!(
+            Launch::Screen(backend::Screen::NeedsYou).fixture_screen(),
+            Some(backend::Screen::NeedsYou)
+        );
+        assert!(USAGE.contains("--fixture"));
+        // Only the windows a person opens take the instance lock.
+        assert!(Launch::App.takes_instance_lock());
+        assert!(Launch::Fixture.takes_instance_lock());
+        assert!(!Launch::Screen(backend::Screen::Chat).takes_instance_lock());
     }
 }

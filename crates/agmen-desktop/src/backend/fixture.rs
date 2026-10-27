@@ -48,15 +48,14 @@ fn base(project: &str) -> Result<Snapshot, BackendError> {
     let fx1 = fx1()?;
     let roster = roster()?;
     let roles = role_files(&roster);
-    let listener = listener();
+    let listener = listener()?;
     let spend = listener.workers_today_usd + listener.listener_today_usd;
     Ok(Snapshot {
         project: project.into(),
         me: "andy".into(),
         me_id: id("andy")?,
-        listener_id: id("andy/listen")?,
         roster,
-        listener,
+        listener: Some(listener),
         agents: BTreeMap::from([(fx1.id.clone(), fx1)]),
         status: StatusSummary {
             online: 9,
@@ -134,7 +133,9 @@ impl FixtureBackend {
                         RecentKind::Waiting,
                     )
                 };
-                s.listener.recent.insert(0, row);
+                if let Some(listener) = s.listener.as_mut() {
+                    listener.recent.insert(0, row);
+                }
                 s
             }
             Screen::Ask | Screen::ModelPicker => ask_snapshot(screen)?,
@@ -418,16 +419,18 @@ fn ask_snapshot(screen: Screen) -> Result<Snapshot, BackendError> {
     let mut s = with_messages("pr-3331", msgs)?;
     if screen == Screen::Ask {
         // Mockup fix 36: the answer's $0.31 shows in the listener's spend.
-        s.listener.listener_today_usd = 0.73;
-        s.listener.recent.insert(
-            0,
-            recent(
-                "15:52",
-                "answered: musl in C014 (git_show, opus)",
-                RecentKind::Answered,
-            ),
-        );
-        s.status.spend_today_usd = s.listener.workers_today_usd + s.listener.listener_today_usd;
+        if let Some(listener) = s.listener.as_mut() {
+            listener.listener_today_usd = 0.73;
+            listener.recent.insert(
+                0,
+                recent(
+                    "15:52",
+                    "answered: musl in C014 (git_show, opus)",
+                    RecentKind::Answered,
+                ),
+            );
+            s.status.spend_today_usd = listener.workers_today_usd + listener.listener_today_usd;
+        }
         // V67: the question and its answer ran on opus.
         tag_from(&mut s, first, &ask_model());
         s.standing_model = Some(ask_model());

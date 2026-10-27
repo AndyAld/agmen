@@ -13,7 +13,7 @@ use crate::keymap::{
     ActivatePane, CloseActiveTab, OpenSearch, OpenSettings, SplitRight, ToggleGitPanel,
     ToggleProjectPanel,
 };
-use crate::ui::agent_panel::AgentPanel;
+use crate::ui::agent_panel::{AgentPanel, no_local_agents};
 use crate::ui::git_panel::{GitPanel, GitPanelEvent};
 use crate::ui::left_dock::{LeftDockTab, PanelButtons, ShowLeftDockTab};
 use crate::ui::listener_panel::ListenerPanel;
@@ -197,11 +197,23 @@ impl Workspace {
                 .clone()
                 .map(|info| RolePanel::new(role.name.clone(), info).into_any_element());
         }
-        Some(match self.shown_agent() {
-            Some(info) => AgentPanel::new(info.clone())
+        Some(match (self.shown_agent(), &self.selected_agent) {
+            (Some(info), _) => AgentPanel::new(info.clone())
                 .taken_over(self.snapshot.take_overs.contains_key(&info.id))
                 .into_any_element(),
-            None => ListenerPanel::new(self.snapshot.listener.clone()).into_any_element(),
+            // Task 7: selected while there are no local agents.
+            (None, Some(id)) => {
+                let handle = self
+                    .snapshot
+                    .roster
+                    .iter()
+                    .flat_map(|group| &group.agents)
+                    .find(|agent| agent.id == *id)
+                    .map(|agent| agent.handle.clone())
+                    .unwrap_or_default();
+                no_local_agents(handle).into_any_element()
+            }
+            (None, None) => ListenerPanel::new(self.snapshot.listener.clone()).into_any_element(),
         })
     }
 

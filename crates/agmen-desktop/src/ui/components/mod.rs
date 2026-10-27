@@ -18,6 +18,8 @@ mod control_harness;
 mod detail_row;
 mod dot;
 mod dropdown;
+// Task 7: the live panels' empty states.
+mod empty_state;
 mod icon;
 mod icon_button;
 mod input_frame;
@@ -58,6 +60,7 @@ pub(crate) use chip::Chip;
 pub(crate) use color::Color;
 pub(crate) use detail_row::DetailRow;
 pub(crate) use dot::Dot;
+pub(crate) use empty_state::EmptyState;
 pub(crate) use icon::{Icon, IconSize};
 pub(crate) use icon_button::{ClickHandler, IconButton, IconButtonStyle};
 pub(crate) use input_frame::InputFrame;

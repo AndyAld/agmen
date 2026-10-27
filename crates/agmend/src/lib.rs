@@ -34,8 +34,9 @@ use crate::feed::Feeds;
 use crate::hub::Hub;
 use crate::login::Credentials;
 
-/// The socket's file name in the state folder.
-pub const SOCKET_NAME: &str = "agmend.sock";
+/// The socket's file name in the state folder (agmen-client's, which the
+/// desktop app connects to).
+pub const SOCKET_NAME: &str = agmen_client::AGMEND_SOCKET;
 /// The most local API connections open at once; more are closed at once.
 const MAX_CONNECTIONS: usize = 64;
 /// How often a watched project's roster is re-read.
@@ -109,7 +110,7 @@ impl Config {
     /// [`AgmendError::Path`] when `HOME` is not set.
     pub fn from_env() -> Result<Self, AgmendError> {
         Ok(Self::new(
-            agmen_client::state_dir()?.join(SOCKET_NAME),
+            agmen_client::agmend_socket()?,
             agmen_client::login_file()?,
             TokenStore::from_env(),
         ))

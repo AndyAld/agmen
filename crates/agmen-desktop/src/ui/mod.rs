@@ -21,6 +21,8 @@ mod ink_clip;
 mod inline_flow;
 mod left_dock;
 mod listener_panel;
+// Task 7: the live window, before and after agmend answers.
+mod live_root;
 mod message;
 mod palette;
 mod palette_filter;
@@ -71,6 +73,7 @@ mod spec_view;
 pub(crate) use agent_view::AgentView;
 pub(crate) use code_view::{CodeView, GutterMark};
 pub(crate) use dev_views::{DevFrame, GitDev, GitDevLayout, ProjectDev, ProjectTests, RolesDev};
+pub(crate) use live_root::{LiveLaunch, LiveRoot};
 pub(crate) use scope_chip::ScopeOption;
 pub(crate) use settings_view::{SettingsSources, SettingsView};
 pub(crate) use syntax::Language;

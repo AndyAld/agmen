@@ -123,7 +123,10 @@ fn composer_sends_to_listener_by_default(cx: &mut TestAppContext) {
     let snapshot = backend.snapshot();
     assert_eq!(snapshot.messages.len(), before + 1);
     let sent = snapshot.messages.last().unwrap();
-    assert_eq!(sent.client.to, vec![snapshot.listener_id.clone()]);
+    assert_eq!(
+        sent.client.to,
+        vec![snapshot.listener_id().cloned().unwrap()]
+    );
     assert_eq!(sent.client.body.as_str(), "hi");
     assert_eq!(sent.from_handle, "andy");
 }
@@ -176,7 +179,7 @@ fn apply_on_the_hosted_card_changes_it(cx: &mut TestAppContext) {
 #[gpui::test]
 fn refused_send_shows_why_until_the_next_send(cx: &mut TestAppContext) {
     let (chat, backend, cx) = open_screen(cx, Screen::Chat);
-    let to = vec![backend.snapshot().listener_id];
+    let to = vec![backend.snapshot().listener_id().cloned().unwrap()];
     let draft = |body: String| Draft {
         to: to.clone(),
         body,
@@ -236,14 +239,14 @@ fn a_post_refused_later_comes_back_into_the_composer(cx: &mut TestAppContext) {
         let composer = chat.composer.read(cx);
         assert_eq!(composer.text(cx), "yes, rebase");
         // The reply comes back too, so Enter answers the same message.
-        assert_eq!(composer.target(cx), &sender);
+        assert_eq!(composer.target(cx), Some(&sender));
     });
 }
 
 #[gpui::test]
 fn a_post_refused_later_keeps_newer_text(cx: &mut TestAppContext) {
     let (chat, backend, cx) = open_screen(cx, Screen::Chat);
-    let listener = chat.read_with(cx, |chat, cx| chat.composer.read(cx).target(cx).clone());
+    let listener = chat.read_with(cx, |chat, cx| chat.composer.read(cx).target(cx).cloned());
     cx.simulate_input("something newer");
     let (update, _) = refused_reply(&backend.snapshot(), "yes, rebase");
     chat.update_in(cx, |chat, window, cx| chat.apply_in(update, window, cx));
@@ -254,14 +257,14 @@ fn a_post_refused_later_keeps_newer_text(cx: &mut TestAppContext) {
         // What the person typed since stays, and so does its target; the
         // error still says the earlier message was not sent.
         assert_eq!(composer.text(cx), "something newer");
-        assert_eq!(composer.target(cx), &listener);
+        assert_eq!(composer.target(cx), listener.as_ref());
     });
 }
 
 #[gpui::test]
 fn send_without_a_backend_shows_why(cx: &mut TestAppContext) {
     let snapshot = chat_snapshot();
-    let to = vec![snapshot.listener_id.clone()];
+    let to = vec![snapshot.listener_id().cloned().unwrap()];
     let (chat, cx) = open_with(cx, snapshot);
     let refused = chat.update(cx, |chat, cx| {
         chat.send(
@@ -432,7 +435,7 @@ fn a_snapshot_reaches_the_composers_model_chip(cx: &mut TestAppContext) {
     // Task 15: a new listener agent shows on the chip.
     let (chat, cx) = open_with(cx, chat_snapshot());
     let mut later = chat_snapshot();
-    later.listener.agent = "claude".into();
+    later.listener.as_mut().unwrap().agent = "claude".into();
     chat.update(cx, |chat, cx| {
         chat.apply(Update::Snapshot(Box::new(later)), cx);
     });

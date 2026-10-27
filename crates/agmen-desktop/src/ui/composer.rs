@@ -30,6 +30,11 @@ use crate::keymap::Dismiss;
 /// The input's placeholder (node 384).
 const PLACEHOLDER: &str = "Ask or tell your listener · @ to mention someone else · ⏎ send";
 
+/// Task 7: the placeholder and the "to" chip while the person has no
+/// listener, so a message goes to the project chat with no mention.
+const PLACEHOLDER_NO_LISTENER: &str = "Message the project chat · @ to mention someone · ⏎ send";
+const EVERYONE: &str = "everyone";
+
 /// How many lines the input grows to before it scrolls.
 const MAX_INPUT_LINES: usize = 6;
 
@@ -77,8 +82,12 @@ fn mention_handle(text: &str) -> Option<&str> {
 pub(crate) struct Composer {
     input: Entity<TextInput>,
     /// Who a message without an `@mention` goes to: the listener, or the
-    /// agent a DM composer is for.
-    recipient: Target,
+    /// agent a DM composer is for. Task 7: `None` without a listener, so
+    /// the message goes to the chat as a whole and mentions no one.
+    recipient: Option<Target>,
+    /// Task 7: whether the recipient is the snapshot's listener, which a
+    /// new snapshot can bring, change or take away.
+    follows_listener: bool,
     /// Every agent in the roster, which an `@mention` can address.
     agents: Vec<Target>,
     addressing: Addressing,
@@ -120,7 +129,7 @@ impl Composer {
         if let Some((planner, placeholder)) = super::plan_room::planner_target(snapshot) {
             return Self::build(
                 agents,
-                planner,
+                Some(planner),
                 placeholder.into(),
                 None,
                 Rc::new(on_send),
@@ -128,23 +137,23 @@ impl Composer {
                 cx,
             );
         }
-        let listener = agents
-            .iter()
-            .find(|agent| agent.id == snapshot.listener_id)
-            .cloned()
-            .unwrap_or_else(|| Target {
-                id: snapshot.listener_id.clone(),
-                handle: snapshot.listener.handle.clone(),
-            });
-        Self::build(
-            agents,
-            listener,
-            PLACEHOLDER.into(),
-            Some(ModelMenu::new(snapshot)),
-            Rc::new(on_send),
-            window,
-            cx,
-        )
+        let listener = listener_target(snapshot);
+        let (placeholder, models) = match listener {
+            Some(_) => (PLACEHOLDER, Some(ModelMenu::new(snapshot))),
+            None => (PLACEHOLDER_NO_LISTENER, None),
+        };
+        Self {
+            follows_listener: true,
+            ..Self::build(
+                agents,
+                listener,
+                placeholder.into(),
+                models,
+                Rc::new(on_send),
+                window,
+                cx,
+            )
+        }
     }
 
     /// A DM composer for `agent`'s view (node 650): it draws no "to" chip
@@ -165,7 +174,7 @@ impl Composer {
             addressing: Addressing::Fixed,
             ..Self::build(
                 roster_targets(snapshot),
-                agent,
+                Some(agent),
                 placeholder.into(),
                 None,
                 Rc::new(on_send),
@@ -177,7 +186,7 @@ impl Composer {
 
     fn build(
         agents: Vec<Target>,
-        recipient: Target,
+        recipient: Option<Target>,
         placeholder: SharedString,
         models: Option<ModelMenu>,
         on_send: SendHandler,
@@ -199,6 +208,7 @@ impl Composer {
         Self {
             input,
             recipient,
+            follows_listener: false,
             agents,
             addressing: Addressing::Chip,
             models,
@@ -210,17 +220,23 @@ impl Composer {
     }
 
     /// Who the text typed so far goes to: the agent an `@mention` at its
-    /// start names, or the recipient.
-    pub(crate) fn target(&self, cx: &App) -> &Target {
+    /// start names, or the recipient; `None` for the chat as a whole.
+    pub(crate) fn target(&self, cx: &App) -> Option<&Target> {
         self.target_for(self.input.read(cx).text())
+    }
+
+    /// What the "to" chip names: the target's handle, or "everyone".
+    fn target_label(&self, cx: &App) -> String {
+        self.target(cx)
+            .map_or_else(|| EVERYONE.to_owned(), |t| t.handle.clone())
     }
 
     /// Unknown handles stay plain text, and the message goes to the
     /// recipient, or to the sender of the message it replies to.
-    fn target_for(&self, text: &str) -> &Target {
+    fn target_for(&self, text: &str) -> Option<&Target> {
         self.mentioned(text)
             .or(self.reply.as_ref().map(|(_, to)| to))
-            .unwrap_or(&self.recipient)
+            .or(self.recipient.as_ref())
     }
 
     /// The roster agent an `@mention` at the start of `text` names; none
@@ -255,9 +271,9 @@ impl Composer {
         let target = self.target_for(body);
         // Task 15: the model choice is for the recipient; an @mention of
         // another agent runs on that agent's own model.
-        let to_recipient = target.id == self.recipient.id;
+        let to_recipient = target.map(|t| &t.id) == self.recipient.as_ref().map(|r| &r.id);
         let draft = Draft {
-            to: vec![target.id.clone()],
+            to: target.map(|t| vec![t.id.clone()]).unwrap_or_default(),
             body: body.to_owned(),
             reply_to: self.reply_for(body).cloned(),
             model: self
@@ -352,12 +368,36 @@ impl Composer {
         self.models.as_ref().map(ModelMenu::current)
     }
 
-    /// Takes a new snapshot's installed agents, models and listener.
+    /// Takes a new snapshot's installed agents, models and listener. Task 7:
+    /// a composer addressed to the listener follows it, since a live chat
+    /// can open before the hub sends the roster; the roster's agents become
+    /// what an `@mention` can address.
     pub(crate) fn set_snapshot(&mut self, snapshot: &Snapshot, cx: &mut Context<Self>) {
-        if let Some(models) = &mut self.models {
+        self.agents = roster_targets(snapshot);
+        if self.follows_listener {
+            let listener = listener_target(snapshot);
+            if listener.is_some() != self.recipient.is_some() {
+                let placeholder = if listener.is_some() {
+                    PLACEHOLDER
+                } else {
+                    PLACEHOLDER_NO_LISTENER
+                };
+                self.input
+                    .update(cx, |input, cx| input.set_placeholder(placeholder, cx));
+            }
+            self.models = match (self.models.take(), &listener) {
+                (Some(mut models), Some(_)) => {
+                    models.refresh(snapshot);
+                    Some(models)
+                }
+                (None, Some(_)) => Some(ModelMenu::new(snapshot)),
+                (_, None) => None,
+            };
+            self.recipient = listener;
+        } else if let Some(models) = &mut self.models {
             models.refresh(snapshot);
-            cx.notify();
         }
+        cx.notify();
     }
 
     /// Opens the model picker.
@@ -535,7 +575,7 @@ impl Render for Composer {
                     .child(
                         // C260: a narrow box cuts the handle, not the close
                         // mark or the caret after it.
-                        Chip::new(self.target(cx).handle.clone())
+                        Chip::new(self.target_label(cx))
                             .compact()
                             .code()
                             // Node 378: 12 px mono on its 14 px line.
@@ -626,6 +666,14 @@ impl Render for Composer {
                     .child(self.box_probe(cx)),
             )
     }
+}
+
+/// The snapshot's listener as a recipient, when the person has one.
+fn listener_target(snapshot: &Snapshot) -> Option<Target> {
+    snapshot.listener.as_ref().map(|listener| Target {
+        id: listener.id.clone(),
+        handle: listener.handle.clone(),
+    })
 }
 
 /// Every agent in the snapshot's roster, as an `@mention` can address it.

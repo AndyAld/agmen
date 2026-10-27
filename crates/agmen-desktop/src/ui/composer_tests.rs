@@ -4,7 +4,7 @@ use std::rc::Rc;
 use gpui::{TestAppContext, VisualTestContext};
 
 use super::*;
-use crate::backend::{BackendError, chat_snapshot};
+use crate::backend::{BackendError, Snapshot, chat_snapshot};
 use crate::ui::test_support::{click, clip_right, init, redraw};
 use crate::ui::text_input::bind_keys;
 use crate::ui::tokens::{
@@ -50,11 +50,93 @@ fn open_composer(cx: &mut TestAppContext) -> (Entity<Composer>, Sent, &mut Visua
     (composer, sent, cx)
 }
 
+/// A focused composer over `snapshot` whose sends land in `Sent`.
+fn open_on(
+    cx: &mut TestAppContext,
+    snapshot: Snapshot,
+) -> (Entity<Composer>, Sent, &mut VisualTestContext) {
+    init(cx);
+    cx.update(bind_keys);
+    let sent = Sent::default();
+    let sink = sent.clone();
+    let (composer, cx) = cx.add_window_view(|window, cx| {
+        window.set_rem_size(MOCKUP_REM);
+        Composer::new(
+            &snapshot,
+            move |draft, _, _| {
+                sink.borrow_mut().push(draft);
+                Ok(())
+            },
+            window,
+            cx,
+        )
+    });
+    composer.update_in(cx, |composer, window, cx| {
+        composer.input.focus_handle(cx).focus(window, cx);
+    });
+    cx.run_until_parked();
+    (composer, sent, cx)
+}
+
+#[gpui::test]
+fn without_a_listener_a_message_goes_to_the_chat(cx: &mut TestAppContext) {
+    // Task 7: with no listener the default recipient is the chat as a
+    // whole: no mention, the chip says so, and no model chip, since no
+    // listener runs the message.
+    let mut snapshot = chat_snapshot();
+    snapshot.listener = None;
+    let (composer, sent, cx) = open_on(cx, snapshot);
+    composer.read_with(cx, |composer, cx| {
+        assert_eq!(composer.target(cx), None);
+        assert!(composer.model_choice().is_none());
+    });
+    redraw(cx);
+    assert!(cx.debug_bounds("composer:to").is_some());
+    assert!(cx.debug_bounds("composer:model").is_none());
+    cx.simulate_input("hi all");
+    cx.simulate_keystrokes("enter");
+    assert_eq!(
+        *sent.borrow(),
+        vec![Draft {
+            to: Vec::new(),
+            body: "hi all".into(),
+            reply_to: None,
+            model: None,
+        }]
+    );
+    // An @mention still addresses that agent.
+    cx.simulate_input("@andy/fx1 go");
+    cx.simulate_keystrokes("enter");
+    assert_eq!(sent.borrow()[1].to, vec![agent_id("andy/fx1")]);
+}
+
+#[gpui::test]
+fn the_composer_follows_a_listener_that_arrives_later(cx: &mut TestAppContext) {
+    // Task 7: agmend opens before the hub answers, so the listener can
+    // arrive in a later snapshot; the composer then addresses it.
+    let full = chat_snapshot();
+    let mut empty = full.clone();
+    empty.listener = None;
+    empty.roster.clear();
+    let (composer, sent, cx) = open_on(cx, empty);
+    composer.update(cx, |composer, cx| composer.set_snapshot(&full, cx));
+    composer.read_with(cx, |composer, cx| {
+        assert_eq!(
+            composer.target(cx).map(|t| t.handle.as_str()),
+            Some("andy/listen")
+        );
+        assert!(composer.model_choice().is_some());
+    });
+    cx.simulate_input("@andy/fx1 go");
+    cx.simulate_keystrokes("enter");
+    assert_eq!(sent.borrow()[0].to, vec![agent_id("andy/fx1")]);
+}
+
 #[gpui::test]
 fn composer_sends_to_listener_by_default(cx: &mut TestAppContext) {
     let (composer, sent, cx) = open_composer(cx);
     composer.read_with(cx, |composer, cx| {
-        assert_eq!(composer.target(cx).handle, "andy/listen");
+        assert_eq!(composer.target(cx).unwrap().handle, "andy/listen");
     });
     cx.simulate_input("hi");
     cx.simulate_keystrokes("enter");
@@ -99,7 +181,7 @@ fn composer_at_mention_overrides_target(cx: &mut TestAppContext) {
     let (composer, sent, cx) = open_composer(cx);
     cx.simulate_input("@andy/fx1, rebase on main");
     composer.read_with(cx, |composer, cx| {
-        assert_eq!(composer.target(cx).handle, "andy/fx1");
+        assert_eq!(composer.target(cx).unwrap().handle, "andy/fx1");
     });
     cx.simulate_keystrokes("enter");
     assert_eq!(
@@ -113,7 +195,7 @@ fn composer_at_mention_overrides_target(cx: &mut TestAppContext) {
     );
     // The input is empty again, so the chip is back on the listener.
     composer.read_with(cx, |composer, cx| {
-        assert_eq!(composer.target(cx).handle, "andy/listen");
+        assert_eq!(composer.target(cx).unwrap().handle, "andy/listen");
     });
 }
 
@@ -255,7 +337,7 @@ fn the_chat_composers_input_row_is_the_mockups_16_px_line(cx: &mut TestAppContex
 fn direct_composer_sends_to_its_agent(cx: &mut TestAppContext) {
     let (composer, sent, cx) = open_direct(cx);
     composer.read_with(cx, |composer, cx| {
-        assert_eq!(composer.target(cx).handle, "andy/fx1");
+        assert_eq!(composer.target(cx).unwrap().handle, "andy/fx1");
     });
     cx.simulate_input("rebase first");
     cx.simulate_keystrokes("enter");
@@ -302,7 +384,7 @@ fn reply_goes_to_the_alerts_sender_once(cx: &mut TestAppContext) {
     });
     composer.update_in(cx, |composer, window, cx| {
         assert!(composer.input.focus_handle(cx).is_focused(window));
-        assert_eq!(composer.target(cx), &coord);
+        assert_eq!(composer.target(cx), Some(&coord));
     });
     cx.simulate_input("Revert #10 now");
     cx.simulate_keystrokes("enter");
@@ -363,10 +445,12 @@ fn escape_cancels_a_reply(cx: &mut TestAppContext) {
     // Review: a Reply the person changed their mind about must not turn the
     // next message into an ANSWER.
     let (composer, sent, cx, coord) = replying(cx);
-    composer.read_with(cx, |composer, cx| assert_eq!(composer.target(cx), &coord));
+    composer.read_with(cx, |composer, cx| {
+        assert_eq!(composer.target(cx), Some(&coord))
+    });
     cx.simulate_keystrokes("escape");
     composer.read_with(cx, |composer, cx| {
-        assert_eq!(composer.target(cx).handle, "andy/listen");
+        assert_eq!(composer.target(cx).unwrap().handle, "andy/listen");
     });
     cx.simulate_input("hi");
     cx.simulate_keystrokes("enter");
@@ -458,7 +542,9 @@ fn a_reply_to_an_open_alert_stays(cx: &mut TestAppContext) {
     composer.update(cx, |composer, cx| {
         composer.drop_reply_unless(|_| true, cx);
     });
-    composer.read_with(cx, |composer, cx| assert_eq!(composer.target(cx), &coord));
+    composer.read_with(cx, |composer, cx| {
+        assert_eq!(composer.target(cx), Some(&coord))
+    });
     assert!(cx.debug_bounds("composer:cancel-reply").is_some());
 }
 
@@ -471,7 +557,7 @@ fn planning_composer_targets_the_planner(cx: &mut TestAppContext) {
     let (composer, cx) =
         cx.add_window_view(|window, cx| Composer::new(&snapshot, |_, _, _| Ok(()), window, cx));
     composer.read_with(cx, |composer, cx| {
-        assert_eq!(composer.target(cx).handle, "sean/plan");
+        assert_eq!(composer.target(cx).unwrap().handle, "sean/plan");
         assert_eq!(composer.model_choice(), None);
         assert_eq!(
             composer.input.read(cx).placeholder_text(),
@@ -872,7 +958,7 @@ fn a_hidden_model_chip_closes_its_picker_so_escape_cancels_the_reply(cx: &mut Te
     assert!(!open(&composer, cx), "the hidden chip's picker is open");
     cx.simulate_keystrokes("escape");
     composer.read_with(cx, |composer, cx| {
-        assert_eq!(composer.target(cx).handle, "andy/listen");
+        assert_eq!(composer.target(cx).unwrap().handle, "andy/listen");
     });
     cx.simulate_input("hi");
     cx.simulate_keystrokes("enter");

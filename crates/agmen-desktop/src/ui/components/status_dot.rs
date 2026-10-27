@@ -1,4 +1,4 @@
-//! An agent's status glyph: ● working, ○ idle, ◐ reading.
+//! An agent's status glyph: ● working, ○ idle, ◐ reading, ◌ offline.
 
 use gpui::{App, IntoElement, RenderOnce, Window};
 
@@ -11,6 +11,9 @@ pub(crate) const fn status_glyph(status: AgentStatus) -> (&'static str, Color) {
     match status {
         AgentStatus::Working => ("●", Color::Success),
         AgentStatus::Idle => ("○", Color::Placeholder),
+        // Task 7: console.py has no offline; DIM (icon.muted) and a dotted
+        // ring keep it apart from idle's FAINT ○.
+        AgentStatus::Offline => ("◌", Color::Muted),
         AgentStatus::Reading => ("◐", Color::Accent),
     }
 }
@@ -45,6 +48,9 @@ mod tests {
         assert_eq!(status_glyph(AgentStatus::Working), ("●", Color::Success));
         assert_eq!(status_glyph(AgentStatus::Idle), ("○", Color::Placeholder));
         assert_eq!(status_glyph(AgentStatus::Reading), ("◐", Color::Accent));
+        // Task 7: offline is dimmer than idle and drawn apart from it, so
+        // an offline agent does not read as reachable.
+        assert_eq!(status_glyph(AgentStatus::Offline), ("◌", Color::Muted));
     }
 
     #[gpui::test]

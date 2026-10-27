@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use gpui::{Hsla, Rgba};
 
 use super::fallback::gruvbox_material_dark_hard;
-use super::settings::{AgmenSettings, Density, IconThemeChoice};
+use super::settings::{AgmenSettings, Density, DesktopSettings, IconThemeChoice};
 use super::theme::load_theme;
 use super::zed::{Mode, ThemeChoice, read_zed_settings};
 use super::{AppearanceSource, SystemMode, resolve_paths};
@@ -432,6 +432,44 @@ fn settings_keep_other_keys() {
         AgmenSettings::load(&path).unwrap().density,
         Density::Compact
     );
+}
+
+#[test]
+fn last_project_keeps_the_appearance() {
+    // Task 7: a live launch writes its project to the [desktop] table and
+    // leaves every other table as it was.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("agmen/settings.toml");
+    assert_eq!(
+        DesktopSettings::load(&path).unwrap(),
+        DesktopSettings::default()
+    );
+    let look = AgmenSettings {
+        density: Density::Compact,
+        ..AgmenSettings::default()
+    };
+    look.save(&path).unwrap();
+    fs::write(
+        &path,
+        fs::read_to_string(&path).unwrap() + "\n[desktop]\nadded_later = 1\n",
+    )
+    .unwrap();
+    let project: agmen_proto::ProjectId = "project1".parse().unwrap();
+    DesktopSettings {
+        last_project: Some(project.clone()),
+    }
+    .save(&path)
+    .unwrap();
+    assert_eq!(
+        DesktopSettings::load(&path).unwrap().last_project,
+        Some(project)
+    );
+    assert_eq!(AgmenSettings::load(&path).unwrap(), look);
+    let table: toml::Table = fs::read_to_string(&path).unwrap().parse().unwrap();
+    assert_eq!(table["desktop"]["added_later"].as_integer(), Some(1));
+    // A value that is not a project id is an error, not a project.
+    fs::write(&path, "[desktop]\nlast_project = \"../etc\"\n").unwrap();
+    assert!(DesktopSettings::load(&path).is_err());
 }
 
 #[test]

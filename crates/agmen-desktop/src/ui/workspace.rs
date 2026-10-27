@@ -85,7 +85,25 @@ pub(crate) struct Workspace {
 }
 
 impl Workspace {
+    /// The workspace over a fixture snapshot, with the mockup's tabs open
+    /// behind the chat.
     pub(crate) fn new(snapshot: Snapshot, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let tabs = starting_tabs(&snapshot);
+        Self::with_tabs(snapshot, tabs, window, cx)
+    }
+
+    /// Task 7: the workspace over agmend's live data, with only the chat
+    /// open.
+    pub(crate) fn live(snapshot: Snapshot, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::with_tabs(snapshot, Vec::new(), window, cx)
+    }
+
+    fn with_tabs(
+        snapshot: Snapshot,
+        tabs: Vec<TabItem>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         // agmen-c7 fix-hosting: the first frame draws the snapshot's file
         // icons, even in a window macOS will not draw again, and the center
         // shares the snapshot.
@@ -102,7 +120,6 @@ impl Workspace {
             this.follow_chat(cx);
             cx.notify();
         });
-        let tabs = starting_tabs(&snapshot);
         let pane_group = cx.new(|cx| PaneGroup::new(&snapshot, Some(chat.clone()), tabs, cx));
         let pane_events = cx.subscribe(&pane_group, |this, _, event, cx| match event {
             PaneGroupEvent::TabClosed(item) => this.tab_closed(item, cx),
@@ -161,9 +178,11 @@ impl Workspace {
 
     /// Shows the agent's panel in the right dock, opening the dock. An agent
     /// without details (the listener, other people's agents) shows the
-    /// Listener panel and no highlighted row.
+    /// Listener panel and no highlighted row. Task 7: while this machine
+    /// has no local agents at all, the Agent panel says so instead.
     fn select_agent(&mut self, id: &IdentityId, cx: &mut Context<Self>) {
-        let shown = self.snapshot.agents.contains_key(id).then(|| id.clone());
+        let shown = (self.snapshot.agents.contains_key(id) || self.snapshot.agents.is_empty())
+            .then(|| id.clone());
         self.set_selection(shown, cx);
         self.right_dock.open();
         cx.notify();
@@ -321,6 +340,7 @@ impl Render for Workspace {
         .child(body)
         .child(
             StatusBar::new(&self.snapshot, self.shows_listener_toggle(cx))
+                .link(self.status_link(cx))
                 .panels(self.panel_buttons(cx))
                 .alert_counts(self.chat.read(cx).alert_counts())
                 .when_some(self.status_context(cx), StatusBar::context)

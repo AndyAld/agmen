@@ -24,7 +24,7 @@ use super::message::{MessageRow, is_presence};
 use super::ref_chip::RefEvent;
 use super::tokens::{LIST_OVERDRAW, SPACE_2, SPACE_6, SPACE_10, SPACE_12, SPACE_14};
 use crate::alerts::AlertState;
-use crate::backend::{Action, BackendError, BackendHandle, Draft, Snapshot, Update};
+use crate::backend::{Action, BackendError, BackendHandle, Draft, Link, Snapshot, Update};
 use crate::local_time::LocalZone;
 
 // Task 13: the banner, toast, chime and notification for alerts.
@@ -183,6 +183,12 @@ pub(crate) struct ChatView {
     error: Option<SharedString>,
     zone: TimeZone,
     take_over: TakeOverSlot,
+    /// Task 7: how the live backend's link stands, for the status bar;
+    /// `None` until a backend reports one (the fixture never does).
+    link: Option<Link>,
+    /// Whether the link was ever live, so a drop reads "reconnecting" and
+    /// the first connect "connecting".
+    was_live: bool,
     _updates: Option<Task<()>>,
 }
 
@@ -257,10 +263,22 @@ impl ChatView {
             error: None,
             zone,
             take_over: TakeOverSlot::default(),
+            link: None,
+            was_live: false,
             _updates: updates,
         };
         chat.sync_take_over(cx);
         chat
+    }
+
+    /// Task 7: the live backend's last link state, for the status bar.
+    pub(crate) const fn link(&self) -> Option<&Link> {
+        self.link.as_ref()
+    }
+
+    /// Task 7: whether the link was live at some point.
+    pub(crate) const fn was_live(&self) -> bool {
+        self.was_live
     }
 
     /// How many messages the chat holds.
@@ -434,8 +452,14 @@ impl ChatView {
                     .update(cx, |composer, cx| composer.set_snapshot(&snapshot, cx));
                 *snapshot
             }
-            // Task 7 shows the link in the status bar.
-            Update::Link(_) => return,
+            // Task 7: the status bar shows it; the workspace redraws on
+            // the notify.
+            Update::Link(link) => {
+                self.was_live |= link == Link::Live;
+                self.link = Some(link);
+                cx.notify();
+                return;
+            }
             // Without a window only the error shows; the update loop goes
             // through apply_in, which also puts the draft back.
             Update::NotSent { why, .. } => {

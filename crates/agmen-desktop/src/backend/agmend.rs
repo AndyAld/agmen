@@ -745,12 +745,10 @@ pub(super) fn snapshot_from(console: ConsoleSnapshot) -> Snapshot {
     let listener = roster
         .iter()
         .find(|e| e.kind == IdentityKind::Listener && person_of(&e.handle) == me.handle);
-    let listener_id = listener.map_or_else(|| me.id.clone(), |e| e.identity_id.clone());
     let online = roster.iter().filter(|e| e.status == Status::Online).count();
     Snapshot {
         project,
-        listener_id,
-        listener: listener_info(listener),
+        listener: listener.map(listener_info),
         roster: person_groups(&roster, &me.handle),
         me: me.handle,
         me_id: me.id,
@@ -773,6 +771,15 @@ pub(super) fn snapshot_from(console: ConsoleSnapshot) -> Snapshot {
         models: Vec::new(),
         message_models: BTreeMap::new(),
         standing_model: None,
+    }
+}
+
+/// The roster status as the title bar words it.
+const fn status_word(status: Status) -> &'static str {
+    match status {
+        Status::Online => "online",
+        Status::Away => "away",
+        Status::Offline => "offline",
     }
 }
 
@@ -831,7 +838,9 @@ fn agent_row(entry: &RosterEntry, roster: &[RosterEntry]) -> AgentRow {
         harness: harness_of(entry),
         status: match entry.status {
             Status::Online => AgentStatus::Working,
-            Status::Away | Status::Offline => AgentStatus::Idle,
+            Status::Away => AgentStatus::Idle,
+            // Task 7: not reachable, so it must not read idle.
+            Status::Offline => AgentStatus::Offline,
         },
         depth: depth(entry, roster),
         item: None,
@@ -853,13 +862,15 @@ fn depth(entry: &RosterEntry, roster: &[RosterEntry]) -> u8 {
     depth
 }
 
-/// The Listener panel: the listener's handle and agent, and nothing agmend
-/// does not report yet.
-fn listener_info(listener: Option<&RosterEntry>) -> ListenerInfo {
+/// The Listener panel: the listener's identity, handle and agent, and
+/// nothing agmend does not report yet.
+fn listener_info(listener: &RosterEntry) -> ListenerInfo {
     ListenerInfo {
-        handle: listener.map(|e| e.handle.clone()).unwrap_or_default(),
-        agent: listener.map(harness_of).unwrap_or_default(),
-        state: String::new(),
+        id: listener.identity_id.clone(),
+        handle: listener.handle.clone(),
+        agent: harness_of(listener),
+        // The title bar's "listener: codex · offline".
+        state: status_word(listener.status).to_owned(),
         harness_label: String::new(),
         role_label: String::new(),
         can_use: Vec::new(),

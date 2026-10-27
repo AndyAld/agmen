@@ -365,6 +365,9 @@ pub(crate) const ANSWERED_BANNER_HEIGHT: Pixels = px(35.);
 pub(crate) const GLYPH_DISC: Pixels = px(18.);
 /// The in-app toast (node 6004).
 pub(crate) const TOAST_WIDTH: Pixels = px(360.);
+/// Task 7: the column of words a live window shows while it cannot open
+/// its project, such as "agmend isn't running".
+pub(crate) const LAUNCH_STATE_WIDTH: Pixels = px(440.);
 /// The toast's top edge in the window (node 6004 at y 150).
 pub(crate) const TOAST_TOP: Pixels = px(150.);
 /// The toast's and a dialog's corners (nodes 6004, 2418 and 10290).

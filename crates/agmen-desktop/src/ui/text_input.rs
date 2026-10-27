@@ -128,6 +128,17 @@ impl TextInput {
         self
     }
 
+    /// Task 7: changes what the empty input shows, as when a listener
+    /// arrives in a live chat.
+    pub(crate) fn set_placeholder(
+        &mut self,
+        text: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        self.placeholder = text.into();
+        cx.notify();
+    }
+
     /// Task 19: what the empty input shows, for tests.
     #[cfg(test)]
     pub(crate) fn placeholder_text(&self) -> &str {

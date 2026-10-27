@@ -87,7 +87,11 @@ impl Workspace {
     /// agent comes first, as the mockup's codex row (node 11489), then the
     /// others in the order the backend lists them.
     fn spawn_entries(&self) -> impl Iterator<Item = PaletteEntry> + '_ {
-        let listener = self.snapshot.listener.agent.as_str();
+        let listener = self
+            .snapshot
+            .listener
+            .as_ref()
+            .map_or("", |listener| listener.agent.as_str());
         let installed = self
             .snapshot
             .installed_agents

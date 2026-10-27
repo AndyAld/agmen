@@ -44,6 +44,20 @@ pub fn state_dir() -> Result<PathBuf, PathError> {
     base("XDG_STATE_HOME", ".local/state", "LOCALAPPDATA")
 }
 
+/// The file name of agmend's socket in the state folder.
+pub const AGMEND_SOCKET: &str = "agmend.sock";
+
+/// agmend's socket, which agmend binds and the desktop app connects to:
+/// `$XDG_STATE_HOME/agmen/agmend.sock`, on macOS
+/// `~/Library/Application Support/agmen/agmend.sock`.
+///
+/// # Errors
+///
+/// As [`state_dir`].
+pub fn agmend_socket() -> Result<PathBuf, PathError> {
+    Ok(state_dir()?.join(AGMEND_SOCKET))
+}
+
 /// The login file `agmen login` writes.
 ///
 /// # Errors
@@ -75,4 +89,19 @@ fn base(xdg: &str, fallback: &str, windows_var: &'static str) -> Result<PathBuf,
         }
     };
     Ok(dir.join("agmen"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agmend_socket_is_in_the_state_folder() {
+        // agmend binds here and the desktop app connects here (Task 7).
+        assert_eq!(
+            agmend_socket().unwrap(),
+            state_dir().unwrap().join("agmend.sock")
+        );
+        assert_eq!(AGMEND_SOCKET, "agmend.sock");
+    }
 }

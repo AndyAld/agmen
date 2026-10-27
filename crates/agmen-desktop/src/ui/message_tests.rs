@@ -83,6 +83,31 @@ fn verb_badge_colors() {
 }
 
 #[test]
+fn live_post_badge_reads_its_mentions() {
+    // Task 7: a live post is an FYI that mentions its recipient, since
+    // FYI takes no `to` (protocol 5), so the badge reads "to listen" too.
+    let (messages, c) = chat();
+    let mut live = messages[2].clone();
+    let listener = live.client.to.clone();
+    live.client.mentions = listener
+        .iter()
+        .cloned()
+        .map(agmen_proto::Mention::Identity)
+        .collect();
+    live.client.to.clear();
+    assert_eq!(verb_badge(&live, &c), ("to listen".into(), Color::Accent));
+    // A post to the chat as a whole mentions no one and stays an FYI.
+    live.client.mentions.clear();
+    assert_eq!(verb_badge(&live, &c), ("FYI".into(), Color::Default));
+    // An agent's FYI that mentions someone is not addressed to them.
+    let mut agent = messages[8].clone();
+    agent.from_kind = IdentityKind::Agent;
+    agent.from_handle = "sean/plan".into();
+    agent.client.mentions = vec![agmen_proto::Mention::Identity(c.snapshot().me_id.clone())];
+    assert_eq!(verb_badge(&agent, &c), ("FYI".into(), Color::Default));
+}
+
+#[test]
 fn settings_reply_is_labelled_from_its_change_card() {
     // V67: the wire verb is ANSWER; the card makes it a SETTINGS message.
     let snapshot = snapshot_of(Screen::SettingsFromChat);

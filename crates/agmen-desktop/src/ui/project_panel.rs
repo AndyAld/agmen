@@ -14,7 +14,7 @@ use gpui::{
 
 use super::code_view::{CodeView, GutterMark};
 use super::components::{
-    Breadcrumb, Button, ButtonStyle, Color, Icon, IconSize, Indent, Label, ListItem,
+    Breadcrumb, Button, ButtonStyle, Color, EmptyState, Icon, IconSize, Indent, Label, ListItem,
 };
 use super::scope_chip::{ScopeChip, ScopeChipEvent, ScopeOption, branch_label};
 use super::syntax::Language;
@@ -358,8 +358,19 @@ impl ProjectPanel {
     }
 }
 
+/// What the Project and Git panels say while this machine has no
+/// worktrees of the project (Task 7).
+pub(crate) const NO_WORKTREES: &str = "No worktrees yet";
+
 impl Render for ProjectPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.worktrees.is_empty() {
+            return div()
+                .debug_selector(|| "project-panel".into())
+                .w_full()
+                .pt(SPACE_6)
+                .child(EmptyState::new("project-panel:none", NO_WORKTREES));
+        }
         let visible: Vec<Entry> = self.visible_rows().cloned().collect();
         let rows: Vec<ListItem> = visible.iter().map(|entry| self.row(entry, cx)).collect();
         div()
