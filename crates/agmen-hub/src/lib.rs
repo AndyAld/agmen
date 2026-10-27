@@ -8,7 +8,8 @@
 //! [`Hub::start_messaging`] connects to
 //! the broker, ingests every client publish ([`Hub::ingest`]) and runs the
 //! sweeper that publishes what ingest stored; [`Hub::post_as_hub`] posts the
-//! hub's own messages. The hub also serves replay of every stream, keeps
+//! hub's own messages. The hub also serves replay of every stream and a
+//! member's chat as server-sent events, keeps
 //! each project's retained `state/roster` from presence, and answers
 //! ROLLCALL. The ledger (lanes, items and claims, design 6.5) answers
 //! CLAIM, FOUND and DONE as they are ingested, serves lanes, items and path
@@ -25,6 +26,7 @@ mod claims;
 mod config;
 mod db;
 mod emqx;
+mod events;
 mod health;
 mod http;
 mod human_post;

@@ -19,7 +19,7 @@ use crate::config::Config;
 use crate::emqx::{EmqxAdmin, EmqxError};
 use crate::ingest::IngestState;
 use crate::presence::PresenceState;
-use crate::{db, health, human_post, identities, invites, items, lanes, me, replay};
+use crate::{db, events, health, human_post, identities, invites, items, lanes, me, replay};
 
 /// How long the hub waits for GitHub or EMQX to answer.
 const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(10);
@@ -137,6 +137,7 @@ impl Hub {
             .route("/v1/projects/{project}/check-path", post(lanes::check_path))
             .route("/v1/projects/{project}/items", get(items::list))
             .route("/v1/projects/{project}/messages", post(human_post::post))
+            .route("/v1/projects/{project}/events", get(events::events))
             .layer(axum::middleware::map_response(refuse_framing))
             .with_state(self.clone())
     }

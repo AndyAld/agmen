@@ -14,13 +14,13 @@ use std::time::{Duration, Instant};
 
 use agmen_proto::{
     Body, ClientEnvelope, DeliveryReply, IdentityId, IdentityKind, ItemKey, LaneName, Mention,
-    MessageId, NackReason, Payload, Seq, Severity, StampedEnvelope, Stream, Timestamp, Topics,
-    Verb, validate,
+    MessageId, NackReason, Payload, ProjectId, Seq, Severity, StampedEnvelope, Stream, Timestamp,
+    Topics, Verb, validate,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use sqlx::{PgExecutor, PgPool, Postgres, Transaction};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, watch};
 
 use crate::claims::LedgerMessage;
 use crate::db::{Role, is_unique_violation};
@@ -142,17 +142,31 @@ pub(crate) struct Handled {
     pub(crate) route: ReplyRoute,
 }
 
-/// Ingest's shared state: the rate limiter and the sweeper's wake-up.
+/// Ingest's shared state: the rate limiter, the sweeper's wake-up and the
+/// events streams' wake-up.
 #[derive(Debug, Default)]
 pub(crate) struct IngestState {
     limiter: Mutex<RateLimiter>,
     outbox_ready: Notify,
+    stored: watch::Sender<()>,
 }
 
 impl IngestState {
     /// Signalled after each commit that added outbox rows.
     pub(crate) fn outbox_ready(&self) -> &Notify {
         &self.outbox_ready
+    }
+
+    /// Call after each commit that stored messages: wakes the sweeper and
+    /// every events stream.
+    pub(crate) fn stored(&self) {
+        self.outbox_ready.notify_one();
+        self.stored.send_replace(());
+    }
+
+    /// A receiver that sees a change after each [`IngestState::stored`].
+    pub(crate) fn watch_stored(&self) -> watch::Receiver<()> {
+        self.stored.subscribe()
     }
 }
 
@@ -316,7 +330,7 @@ impl Hub {
                         })?;
                 }
                 tx.commit().await.map_err(StoreError::from)?;
-                self.ingest_state().outbox_ready().notify_one();
+                self.ingest_state().stored();
                 self.on_recorded(topics, verb, &sender.id, sender.kind, &id)
                     .await;
                 let (stream, seq) = recorded.ack;
@@ -434,7 +448,7 @@ impl Hub {
         let mut tx = self.pool().begin().await.map_err(PostError::store)?;
         let posted = post_hub(&mut tx, topics, post, None).await?;
         tx.commit().await.map_err(PostError::store)?;
-        self.ingest_state().outbox_ready().notify_one();
+        self.ingest_state().stored();
         Ok(posted)
     }
 }
@@ -563,7 +577,12 @@ fn envelope_hash(env: &ClientEnvelope) -> Result<Vec<u8>, serde_json::Error> {
 
 /// The `stream_heads` key of one project's stream: `<project_id>/<stream>`.
 pub(crate) fn head_key(topics: &Topics, stream: &Stream) -> String {
-    format!("{}/{stream}", topics.project())
+    stream_key(topics.project(), stream)
+}
+
+/// [`head_key`] from the project id alone.
+pub(crate) fn stream_key(project: &ProjectId, stream: &Stream) -> String {
+    format!("{project}/{stream}")
 }
 
 /// The broker topic a copy in `stream` is published on.

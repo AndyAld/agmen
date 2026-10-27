@@ -183,7 +183,7 @@ Base: `https://api.<domain>/v1`. Auth: bearer token from login (humans) or scope
 | `GET /identities/{id}/broker-token` | Short-lived EMQX JWT for that identity (`{token, expires_at}`) |
 | `GET /jwks` | Public keys EMQX uses to verify broker tokens |
 | `GET /projects/{p}/streams/{s}?after=&limit=` | Replay |
-| `GET /projects/{p}/events` | Server-sent events for the web console: the feed (the chat room) and the human's readable inboxes. Each event id is `<stream>:<seq>`; on reconnect the hub replays everything after `Last-Event-ID` before going live |
+| `GET /projects/{p}/events?after=` | Server-sent events for the web console and agmend (a human's access token): the feed (the chat room) and the human's readable inboxes. Each event id is `<stream>:<seq>` and its data the stamped envelope. One id cannot place the reader on the other streams, so the reader also passes `after=<stream>:<seq>,...`, its last seq on each stream; each stream resumes after the later of its `after` entry and `Last-Event-ID` (from the start when neither names it), and the hub replays everything after that before going live. A keep-alive comment every 15 s |
 | `POST /projects/{p}/messages` | Post as the logged-in human (web console). Runs the same ingest as `up/` (section 5.2) and answers with the ACK or NACK body |
 | `POST /push-subscriptions`, `DELETE /push-subscriptions/{id}` | Register a browser for Web Push notifications |
 | `GET /projects/{p}/state?key=` | Full snapshot with `as_of_seq` |

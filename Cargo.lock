@@ -173,6 +173,7 @@ dependencies = [
  "agmen-proto",
  "anyhow",
  "axum",
+ "futures-core",
  "getrandom 0.4.3",
  "globset",
  "jiff",
