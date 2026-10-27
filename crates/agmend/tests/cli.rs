@@ -1,4 +1,4 @@
-//! agmend's command line: it takes no arguments but `--help`.
+//! agmend's command line: help and rejection of invalid argument lists.
 
 #![cfg(test)]
 
@@ -36,12 +36,10 @@ fn agmend(args: &[&str]) -> std::process::Output {
 
 #[test]
 fn unknown_argument_exits_non_zero() {
-    // `agmend service install` is not built yet (m0-m1 Task 13); it must
-    // not run the daemon in the foreground as if it were.
-    let out = agmend(&["service", "install"]);
+    let out = agmend(&["service", "frobnicate"]);
     assert_eq!(out.status.code(), Some(2), "{out:?}");
     let stderr = String::from_utf8(out.stderr).unwrap();
-    assert!(stderr.contains("unknown argument: service"), "{stderr}");
+    assert!(stderr.contains("unknown service action"), "{stderr}");
     assert!(stderr.contains("usage: agmend"), "{stderr}");
 }
 
