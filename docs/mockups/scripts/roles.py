@@ -176,7 +176,7 @@ def screen(name, active):
     cmd("node.set", {"id": side, "width": 232})
     brand = col(side, "brand", gap=2, padding=[0, 8, 14, 8], sizingH="fill")
     text(brand, "agmen", 17, TEXT, style="Semibold")
-    text(brand, "integrally · pr-3331", 12, MUTED)
+    text(brand, "a 17-agent PR", 12, MUTED)
     for item in NAV:
         on = item == active
         it = row(side, f"nav {item}", gap=8, padding=[7, 10, 7, 10], cornerRadius=6,

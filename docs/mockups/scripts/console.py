@@ -740,21 +740,29 @@ def zwindow(name, project="pr-3331"):
 
 
 # ---------------------------------------------------------------- icons
-# UI icons: Zed's assets/icons SVGs from a folder named by ZED_ICONS (not bundled here).
-# File icons: the Zed icon theme installed on this machine (MATERIAL_ICON_THEME, default the
-# Material Icon Theme extension), read through its own mapping file.
+# All icons are Lucide (ISC) SVGs from the icons/ folder of the release archive, named by
+# LUCIDE_ICONS (not bundled here). The layout code names UI icons by their Zed names;
+# ZED_TO_LUCIDE maps each to the Lucide icon drawn in its place. File and folder icons are
+# Lucide's file and folder shapes, tinted per folder name or file suffix.
 
 OUT_PATH = pathlib.Path(sys.argv[1]).resolve()
 ICON_CACHE = OUT_PATH.parent / "icon-cache"
-ZED_ICONS = pathlib.Path(os.environ["ZED_ICONS"]) if os.environ.get("ZED_ICONS") else None
-MAT_ROOT = pathlib.Path(os.environ.get(
-    "MATERIAL_ICON_THEME",
-    str(pathlib.Path.home() / "Library/Application Support/Zed/extensions/installed/"
-                               "material-icon-theme")))
-try:
-    MAT = json.loads((MAT_ROOT / "icon_themes/material-icon-theme.json").read_text())["themes"][0]
-except (OSError, ValueError, KeyError, IndexError):
-    MAT = None
+LUCIDE_ICONS = (pathlib.Path(os.environ["LUCIDE_ICONS"]) if os.environ.get("LUCIDE_ICONS")
+                else None)
+LUCIDE_SIZE = 24  # every Lucide icon has viewBox="0 0 24 24"
+
+ZED_TO_LUCIDE = {
+    "file_tree": "folder-tree", "git_branch": "git-branch", "magnifying_glass": "search",
+    "terminal": "terminal", "chat": "message-square", "bell": "bell", "settings": "settings",
+    "user_group": "users", "person": "user", "chevron_down": "chevron-down",
+    "chevron_right": "chevron-right", "sparkle": "sparkles", "diff": "diff", "pencil": "pencil",
+}
+
+FOLDER_TINT = {"src": GRN, "ui": MAG, "tests": ACCENT}
+FILE_ICON = {  # suffix: (Lucide icon, tint)
+    "rs": ("file-code", ORG), "toml": ("file-code", TEXT), "xml": ("file-code", GRN),
+    "yml": ("file-code", ERR), "md": ("file-text", ACCENT), "lock": ("file", WARN),
+}
 
 
 def place(parent, path, size, native):
@@ -765,43 +773,29 @@ def place(parent, path, size, native):
     return ref
 
 
-def zicon(parent, name, color, size=14):
-    src = ZED_ICONS / f"{name}.svg" if ZED_ICONS else None
+def lucide(parent, name, color, size, fallback):
+    src = LUCIDE_ICONS / f"{name}.svg" if LUCIDE_ICONS else None
     if not src or not src.exists():
-        return text(parent, "·", size, color)
+        return fallback()
     svg = re.sub(r'(stroke|fill)="(?!none)[^"]*"', lambda m: f'{m.group(1)}="{color}"',
                  src.read_text())
     ICON_CACHE.mkdir(exist_ok=True)
     out = ICON_CACHE / f"{name}-{color.lstrip('#')}.svg"
     out.write_text(svg)
-    return place(parent, out, size, 16)
+    return place(parent, out, size, LUCIDE_SIZE)
 
 
-def mat_icon_path(name, is_dir=False, expanded=False):
-    if not MAT:
-        return None
-    if is_dir:
-        d = MAT["named_directory_icons"].get(name) or MAT["directory_icons"]
-        rel = d["expanded" if expanded else "collapsed"]
-    else:
-        key = MAT["file_stems"].get(name)
-        parts = name.split(".")
-        for i in range(1, len(parts)):
-            if key:
-                break
-            key = MAT["file_suffixes"].get(".".join(parts[i:]))
-        entry = MAT["file_icons"].get(key) if key else None
-        rel = entry["path"] if entry else "./icons/file.svg"
-    path = MAT_ROOT / rel.removeprefix("./")
-    return path if path.exists() else None
+def zicon(parent, name, color, size=14):
+    return lucide(parent, ZED_TO_LUCIDE[name], color, size,
+                  lambda: text(parent, "·", size, color))
 
 
 def ficon(parent, name, is_dir=False, expanded=False, size=16):
-    path = mat_icon_path(name, is_dir, expanded)
-    if not path:
-        return text(parent, "▪", 10, FAINT)
-    m = re.search(r'viewBox="[\d.-]+\s+[\d.-]+\s+([\d.]+)\s+[\d.]+"', path.read_text()[:600])
-    return place(parent, path, size, float(m.group(1)) if m else 32.0)
+    if is_dir:
+        icon, color = ("folder-open" if expanded else "folder"), FOLDER_TINT.get(name, FAINT)
+    else:
+        icon, color = FILE_ICON.get(name.rsplit(".", 1)[-1], ("file", FAINT))
+    return lucide(parent, icon, color, size, lambda: text(parent, "▪", 10, FAINT))
 
 
 def icon_spec(parent, spec, color, size=14):
