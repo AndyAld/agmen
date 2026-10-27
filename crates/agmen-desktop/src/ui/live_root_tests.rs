@@ -164,10 +164,25 @@ fn status_bar_shows_reconnecting(cx: &mut TestAppContext) {
         link_text(&root, cx).as_deref() == Some("offline: signed out: run agmen login")
     });
 
+    // Final review fix 2: agmend ends the watch because the console fell
+    // behind; the status bar says so, not "can't reach agmend".
+    fake.push(&ConsoleEvent::Hub {
+        connected: true,
+        error: None,
+    });
+    wait_until(cx, |cx| {
+        link_text(&root, cx).as_deref() == Some("connected")
+    });
+    fake.end_watches(ErrorCode::Hub, "this console fell 3 events behind");
+    wait_until(cx, |cx| {
+        link_text(&root, cx).as_deref() == Some("offline: this console fell 3 events behind")
+    });
+
     // agmend itself goes away.
     fake.stop();
     wait_until(cx, |cx| {
-        link_text(&root, cx).as_deref() == Some("offline: can't reach agmend")
+        link_text(&root, cx).as_deref()
+            == Some("offline: can't reach agmend: nothing answers at its socket")
     });
 }
 

@@ -212,7 +212,13 @@ pub(crate) enum Link {
     /// catching up. `why` is set when the hub refuses the stream for a
     /// reason a retry soon will not fix, such as being signed out.
     HubDown { why: Option<String> },
-    /// agmend cannot be reached; the backend keeps retrying.
+    /// agmend is up, but refused the chat or ended it with an error: the
+    /// person signed out or lost the project, the console fell behind, or
+    /// a snapshot failed or could not be read. `why` is agmend's or the
+    /// backend's reason; the backend keeps retrying.
+    Refused { why: String },
+    /// agmend cannot be reached, for the reason `why`; the backend keeps
+    /// retrying.
     AgmendDown { why: String },
 }
 

@@ -221,6 +221,63 @@ fn hub_refusal_reaches_subscribers() {
 }
 
 #[test]
+fn a_refused_watch_says_why() {
+    // Final review fix 2: agmend is up, but refuses the watch; that is
+    // not "can't reach agmend".
+    let fake = FakeAgmend::start(console(vec![]));
+    let (_backend, mut updates) = live_backend(&fake);
+    fake.edit(|s| {
+        s.watch_error = Some((
+            ErrorCode::Unauthorized,
+            "signed out: run agmen login".into(),
+        ));
+    });
+    fake.end_watches(ErrorCode::Hub, "the hub closed the stream");
+    let seen = wait_for(
+        &mut updates,
+        |u| matches!(u, Update::Link(Link::Refused { why }) if why.contains("signed out")),
+    );
+    assert_eq!(
+        seen.last(),
+        Some(&Update::Link(Link::Refused {
+            why: "signed out: run agmen login".into()
+        }))
+    );
+}
+
+#[test]
+fn a_lagged_console_says_why() {
+    let fake = FakeAgmend::start(console(vec![]));
+    let (_backend, mut updates) = live_backend(&fake);
+    let lagged = "this console fell 3 events behind; take a new snapshot and watch again";
+    fake.end_watches(ErrorCode::Hub, lagged);
+    let seen = wait_for(&mut updates, |u| {
+        matches!(u, Update::Link(Link::Refused { .. }))
+    });
+    assert_eq!(
+        seen.last(),
+        Some(&Update::Link(Link::Refused { why: lagged.into() }))
+    );
+    // The backend watches again and catches up.
+    wait_for(&mut updates, is_live);
+}
+
+#[test]
+fn agmend_gone_says_why() {
+    let fake = FakeAgmend::start(console(vec![]));
+    let (_backend, mut updates) = live_backend(&fake);
+    fake.stop();
+    let seen = wait_for(
+        &mut updates,
+        |u| matches!(u, Update::Link(Link::AgmendDown { why }) if why.contains("nothing answers")),
+    );
+    let Some(Update::Link(Link::AgmendDown { why })) = seen.last() else {
+        panic!("the last update is the one matched")
+    };
+    assert_eq!(why, "nothing answers at its socket");
+}
+
+#[test]
 fn reconnect_resnapshots_without_duplicates() {
     let mut fake = FakeAgmend::start(console(vec![message(1), message(2)]));
     let (backend, mut updates) = live_backend(&fake);

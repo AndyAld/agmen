@@ -170,6 +170,9 @@ pub(crate) struct FakeState {
     /// What a watch hears first.
     pub(crate) opening: Vec<ConsoleEvent>,
     pub(crate) post_error: Option<String>,
+    /// Final review fix 2: `console_watch` answers this error and closes,
+    /// as agmend does for a person signed out or a project they lost.
+    pub(crate) watch_error: Option<(ErrorCode, String)>,
     /// How long each `console_snapshot` waits before it answers, as a
     /// slow hub makes agmend wait.
     pub(crate) snapshot_delay: Duration,
@@ -273,6 +276,16 @@ impl FakeAgmend {
         push(&mut self.state.lock().unwrap(), event);
     }
 
+    /// Final review fix 2: ends every watch with an error frame, as agmend
+    /// does for a console that fell behind.
+    pub(crate) fn end_watches(&self, code: ErrorCode, message: &str) {
+        let mut state = self.state.lock().unwrap();
+        for (mut stream, id) in state.watchers.drain(..) {
+            drop(frame::write(&mut stream, &Response::err(id, code, message)));
+            drop(stream.shutdown(std::net::Shutdown::Both));
+        }
+    }
+
     pub(crate) fn posts(&self) -> Vec<Request> {
         self.state.lock().unwrap().posts.clone()
     }
@@ -337,6 +350,10 @@ fn serve(mut stream: UnixStream, state: &Mutex<FakeState>) {
             "console_watch" => {
                 let mut state = state.lock().unwrap();
                 state.watch_params.push(request.params.clone());
+                if let Some((code, why)) = state.watch_error.clone() {
+                    drop(frame::write(&mut stream, &Response::err(id, code, why)));
+                    return;
+                }
                 let mut watch = stream.try_clone().unwrap();
                 for event in state.opening.clone() {
                     let value = serde_json::to_value(&event).unwrap();

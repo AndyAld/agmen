@@ -492,7 +492,7 @@ impl Backend for AgmendBackend {
 fn watch_loop(shared: &Shared, jobs: &SyncSender<Job>, stop: &Receiver<()>, timing: Timing) {
     let mut delay = timing.first;
     loop {
-        let why = watch_once(shared, jobs);
+        let link = watch_once(shared, jobs);
         {
             let mut live = shared.lock();
             if live.closed {
@@ -503,8 +503,9 @@ fn watch_loop(shared: &Shared, jobs: &SyncSender<Job>, stop: &Receiver<()>, timi
             if std::mem::take(&mut live.went_live) {
                 delay = timing.first;
             }
-            let why = live.ended.take().unwrap_or(why);
-            live.set_link(Link::AgmendDown { why });
+            // A snapshot that failed ended the watch; agmend was reached.
+            let link = live.ended.take().map_or(link, |why| Link::Refused { why });
+            live.set_link(link);
         }
         match stop.recv_timeout(delay) {
             Err(RecvTimeoutError::Timeout) => {}
@@ -520,29 +521,37 @@ fn next_delay(delay: Duration, timing: Timing) -> Duration {
     delay.saturating_mul(2).min(timing.cap)
 }
 
-/// Runs one watch until it ends, and says why it ended.
-fn watch_once(shared: &Shared, jobs: &SyncSender<Job>) -> String {
+/// Runs one watch until it ends, and says why as the link to show until
+/// the next try: [`Link::Refused`] when agmend answered with an error,
+/// such as a person signed out or a console that fell behind, and
+/// [`Link::AgmendDown`] when the socket failed (final review fix 2).
+fn watch_once(shared: &Shared, jobs: &SyncSender<Job>) -> Link {
+    let down = |why: String| Link::AgmendDown { why };
     let mut stream = match open_watch(shared) {
         Ok(Some(stream)) => stream,
-        Ok(None) => return "the window closed".to_owned(),
-        Err(err) => return err.to_string(),
+        Ok(None) => return down("the window closed".to_owned()),
+        Err(BackendError::NotConnected) => return down("nothing answers at its socket".to_owned()),
+        Err(err) => return down(err.to_string()),
     };
     loop {
         let response: Response = match frame::read(&mut stream) {
             Ok(response) => response,
-            Err(err) => return format!("agmend's watch ended: {err}"),
+            Err(err) => return down(format!("agmend's watch ended: {err}")),
         };
         let value = match response.outcome {
             Outcome::Ok { result } => result,
             // A refused or lagging watch: agmend closes it after this.
-            Outcome::Err { error } => return error.message,
+            Outcome::Err { error } => {
+                return Link::Refused { why: error.message };
+            }
         };
         // An event a newer agmend added; the rest of the watch still holds.
         let Ok(event) = serde_json::from_value::<ConsoleEvent>(value) else {
             continue;
         };
+        // Only the request thread stopping fails here: this app's side.
         if let Err(why) = on_event(shared, jobs, event) {
-            return why;
+            return down(why);
         }
     }
 }

@@ -89,8 +89,8 @@ impl StatusBar {
 
 /// Task 7: the status bar's words for the live backend's link. agmend and
 /// the hub are up: connected. agmend is up and retries the hub: connecting
-/// before the first success, reconnecting after. The hub refused for a
-/// reason a retry will not fix, or agmend is gone: offline, with why.
+/// before the first success, reconnecting after. The hub or agmend refused
+/// for a reason a retry will not fix, or agmend is gone: offline, with why.
 #[must_use]
 pub(crate) fn link_label(link: &Link, was_live: bool) -> (SharedString, Color) {
     match link {
@@ -98,8 +98,12 @@ pub(crate) fn link_label(link: &Link, was_live: bool) -> (SharedString, Color) {
         Link::HubDown { why: None } if was_live => ("reconnecting".into(), Color::Warning),
         Link::HubDown { why: None } => ("connecting".into(), Color::Warning),
         Link::HubDown { why: Some(why) } => (format!("offline: {why}").into(), Color::Error),
-        // The backend's own text is about its socket; this names the cause.
-        Link::AgmendDown { .. } => ("offline: can't reach agmend".into(), Color::Error),
+        // Final review fix 2: agmend answered, so its reason is the cause.
+        Link::Refused { why } => (format!("offline: {why}").into(), Color::Error),
+        Link::AgmendDown { why } => (
+            format!("offline: can't reach agmend: {why}").into(),
+            Color::Error,
+        ),
     }
 }
 
@@ -268,10 +272,22 @@ mod tests {
             text(&hub(Some("signed out: run agmen login")), true),
             "offline: signed out: run agmen login"
         );
+        // Final review fix 2: each cause shows its reason.
         let down = Link::AgmendDown {
-            why: "not connected to agmend, so nothing was sent".into(),
+            why: "nothing answers at its socket".into(),
         };
-        assert_eq!(text(&down, true), "offline: can't reach agmend");
+        assert_eq!(
+            text(&down, true),
+            "offline: can't reach agmend: nothing answers at its socket"
+        );
+        let refused = Link::Refused {
+            why: "this console fell 3 events behind; take a new snapshot and watch again".into(),
+        };
+        assert_eq!(
+            text(&refused, true),
+            "offline: this console fell 3 events behind; take a new snapshot and watch again"
+        );
+        assert_eq!(link_label(&refused, true).1, Color::Error);
         assert_eq!(link_label(&down, true).1, Color::Error);
         assert_eq!(link_label(&hub(None), true).1, Color::Warning);
         assert_eq!(link_label(&Link::Live, true).1, Color::Success);
