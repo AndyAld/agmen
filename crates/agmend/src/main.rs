@@ -1,5 +1,5 @@
 //! `agmend`: runs the per-user daemon until SIGINT or SIGTERM, prints help,
-//! or parses a service command whose execution waits for A T3.
+//! or manages its per-user OS service.
 
 use std::ffi::OsString;
 use std::process::ExitCode;
@@ -7,13 +7,6 @@ use std::process::ExitCode;
 use agmend::{Agmend, Config};
 use anyhow::{Context as _, Result};
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "A T2 renderers are consumed by service execution in A T3"
-    )
-)]
 mod service;
 
 use service::ServiceAction;
@@ -52,10 +45,17 @@ fn main() -> ExitCode {
             println!("{USAGE}");
             return ExitCode::SUCCESS;
         }
-        Ok(Command::Service(_)) => {
-            // shortcut: service execution waits for A T3 in this lane; remove before handoff.
-            eprintln!("agmend: service execution is unavailable until A T3");
-            return ExitCode::FAILURE;
+        Ok(Command::Service(action)) => {
+            return match service::execute(action) {
+                Ok(message) => {
+                    print!("{message}");
+                    ExitCode::SUCCESS
+                }
+                Err(err) => {
+                    eprintln!("agmend: {err:#}");
+                    ExitCode::FAILURE
+                }
+            };
         }
         Err(err) => {
             eprintln!("agmend: {err}\n{USAGE}");

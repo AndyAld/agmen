@@ -1,8 +1,79 @@
-//! launchd XML property list rendering, without filesystem or manager access.
+//! launchd property list rendering and management through an injected runner.
 
-use anyhow::Result;
+use anyhow::{Context as _, Result, ensure};
 
-use super::{ServicePaths, Unit, append, executable};
+use super::{
+    ProcessResult, Runner, ServiceAction, ServicePaths, Unit, append, checked, executable,
+    remove_unit,
+};
+
+fn invoke(
+    run: &mut Runner<'_>,
+    action: &str,
+    target: &str,
+    path: Option<&std::path::Path>,
+) -> Result<ProcessResult> {
+    let mut argv = vec!["launchctl".into(), action.into(), target.into()];
+    if let Some(path) = path {
+        argv.push(path.as_os_str().to_owned());
+    }
+    run(&argv).with_context(|| format!("launchctl {action}"))
+}
+
+pub(super) fn manage(
+    action: ServiceAction,
+    paths: &ServicePaths,
+    unit: &Unit,
+    run: &mut Runner<'_>,
+) -> Result<String> {
+    let target = format!("gui/{}/dev.agmen.agmend", paths.uid);
+    let found = invoke(run, "print", &target, None)?;
+    ensure!(
+        matches!(found.code, Some(0 | 113)),
+        "launchctl print failed (exit {:?})",
+        found.code
+    );
+    if action == ServiceAction::Status {
+        return Ok(if found.code == Some(113) {
+            if unit.path.try_exists().context("checking service unit")? {
+                "stopped\n"
+            } else {
+                "not installed\n"
+            }
+        } else if std::str::from_utf8(&found.stdout)
+            .context("decoding launchctl print")?
+            .lines()
+            .any(|line| line.trim() == "state = running")
+        {
+            "running\n"
+        } else {
+            "stopped\n"
+        }
+        .to_owned());
+    }
+    if found.code == Some(0) {
+        checked(&invoke(run, "bootout", &target, None)?, "launchctl bootout")?;
+    }
+    match action {
+        ServiceAction::Install => {
+            checked(
+                &invoke(
+                    run,
+                    "bootstrap",
+                    &format!("gui/{}", paths.uid),
+                    Some(&unit.path),
+                )?,
+                "launchctl bootstrap",
+            )?;
+            Ok("installed\n".to_owned())
+        }
+        ServiceAction::Uninstall => {
+            remove_unit(unit)?;
+            Ok("uninstalled\n".to_owned())
+        }
+        ServiceAction::Status => anyhow::bail!("status already handled"),
+    }
+}
 
 pub(super) fn render(paths: &ServicePaths) -> Result<Unit> {
     let executable = executable(paths)?;
@@ -19,11 +90,35 @@ pub(super) fn render(paths: &ServicePaths) -> Result<Unit> {
             "  <array><string>",
         ),
     )?;
+    escape(&mut contents, executable)?;
+    append(
+        &mut contents,
+        "</string></array>\n  <key>RunAtLoad</key><true/>\n",
+    )?;
+    // shortcut: no automatic restart after a crash; revisit when Andy chooses a bounded restart policy.
+    append(&mut contents, "  <key>KeepAlive</key><false/>\n")?;
+    let log = paths.home.join("Library/Logs/agmen/agmend.log");
+    let log = super::validate_path(&log)?;
+    for key in ["StandardOutPath", "StandardErrorPath"] {
+        append(&mut contents, &format!("  <key>{key}</key><string>"))?;
+        escape(&mut contents, log)?;
+        append(&mut contents, "</string>\n")?;
+    }
+    append(&mut contents, "</dict>\n</plist>\n")?;
+    Ok(Unit {
+        path: paths
+            .home
+            .join("Library/LaunchAgents/dev.agmen.agmend.plist"),
+        contents,
+    })
+}
+
+fn escape(contents: &mut String, text: &str) -> Result<()> {
     // Validation limits this loop to at most 64 KiB of input.
-    for ch in executable.chars() {
+    for ch in text.chars() {
         let mut utf8 = [0; 4];
         append(
-            &mut contents,
+            contents,
             match ch {
                 '&' => "&amp;",
                 '"' => "&quot;",
@@ -34,21 +129,7 @@ pub(super) fn render(paths: &ServicePaths) -> Result<Unit> {
             },
         )?;
     }
-    append(
-        &mut contents,
-        "</string></array>\n  <key>RunAtLoad</key><true/>\n",
-    )?;
-    // shortcut: no automatic restart after a crash; revisit when Andy chooses a bounded restart policy.
-    append(
-        &mut contents,
-        "  <key>KeepAlive</key><false/>\n</dict>\n</plist>\n",
-    )?;
-    Ok(Unit {
-        path: paths
-            .home
-            .join("Library/LaunchAgents/dev.agmen.agmend.plist"),
-        contents,
-    })
+    Ok(())
 }
 
 #[cfg(test)]
@@ -83,6 +164,8 @@ mod tests {
                 "  <array><string>/opt/agmen/agmend</string></array>\n",
                 "  <key>RunAtLoad</key><true/>\n",
                 "  <key>KeepAlive</key><false/>\n",
+                "  <key>StandardOutPath</key><string>/test/home/Library/Logs/agmen/agmend.log</string>\n",
+                "  <key>StandardErrorPath</key><string>/test/home/Library/Logs/agmen/agmend.log</string>\n",
                 "</dict>\n</plist>\n",
             )
         );
