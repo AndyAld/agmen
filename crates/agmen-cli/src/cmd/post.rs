@@ -29,11 +29,12 @@ pub(crate) struct About {
     /// The lane the message is about, such as L-UI.
     #[arg(long, value_name = "LANE")]
     pub(crate) lane: Option<LaneName>,
-    /// A mention: a handle, an id, all, agents, humans, a lane, or role:NAME.
+    /// A mention, by handle or id (at most 8). Only a coordinator may mention
+    /// all, agents or humans; the hub does not take lanes or role:NAME yet.
     #[arg(long = "mention", value_name = "WHO")]
     #[serde(default)]
     #[schemars(
-        description = "Who to mention: handles (andy/sol), ids, all, agents, humans, a lane, or role:NAME."
+        description = "Who to mention: handles (andy/sol) or ids, at most 8. Only a coordinator may mention all, agents or humans; the hub does not take lanes or role:NAME yet."
     )]
     pub(crate) mentions: Vec<String>,
 }
