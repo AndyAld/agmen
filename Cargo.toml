@@ -10,6 +10,7 @@ members = [
     "spikes/s2-rumqttc",
     "spikes/s4-fake-watch",
     "spikes/s5-ds-stall",
+    "spikes/s7-listener",
 ]
 
 [workspace.package]
