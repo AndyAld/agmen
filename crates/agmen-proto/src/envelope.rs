@@ -305,7 +305,8 @@ impl WireClient {
 /// It checks the verb (`Payload::Unknown` is `schema`), the version, `to`
 /// (1 to 8 recipients on DM, 0 to 8 on ASK, none elsewhere),
 /// `reply_to` on the verbs that answer something, `valid_until` on CLAIM
-/// with a 120 s skew allowance, `mentions` (only on FYI, ASK, ANSWER and
+/// with a 120 s skew allowance, PLAN's `version` (at least 1),
+/// `mentions` (only on FYI, ASK, ANSWER and
 /// ALERT, at most 8 identities), and HELLO's `client`, `agent`, `model` and
 /// `looking_at` (each at most [`MAX_HELLO_FIELD_BYTES`]). The body limit holds by construction of
 /// [`Body`]. Which kinds may use group, lane and role mentions, and who may
@@ -360,6 +361,9 @@ pub fn validate(env: &ClientEnvelope, hub_now: Timestamp) -> Result<(), NackReas
             | Verb::PushNo
     );
     if needs_reply_to && env.reply_to.is_none() {
+        return Err(NackReason::Schema);
+    }
+    if matches!(env.payload, Payload::Plan { version: 0, .. }) {
         return Err(NackReason::Schema);
     }
     if verb == Verb::Claim && env.valid_until.is_none() {

@@ -39,6 +39,7 @@ mod envelope;
 mod error;
 mod ids;
 mod reply;
+mod roles;
 mod topics;
 mod verbs;
 
@@ -52,6 +53,7 @@ pub use ids::{
     RoleName, Seq, Stream, TenantId, Timestamp,
 };
 pub use reply::{DeliveryReply, NackReason};
+pub use roles::{EditScope, RoleSpec};
 pub use topics::{Topics, parse_up};
 pub use verbs::{
     Change, Check, DenyReason, Finding, FindingSeverity, Needs, Outcome, Payload, Severity, Tokens,

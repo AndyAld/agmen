@@ -5,7 +5,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use agmen_proto::{ClientEnvelope, DeliveryReply, StampedEnvelope};
+use agmen_proto::{ClientEnvelope, DeliveryReply, RoleSpec, StampedEnvelope};
 use anyhow::Context as _;
 use schemars::JsonSchema;
 use schemars::generate::SchemaSettings;
@@ -21,6 +21,7 @@ pub fn export(dir: &Path) -> anyhow::Result<()> {
     write_schema::<ClientEnvelope>(dir, "envelope.schema.json")?;
     write_schema::<StampedEnvelope>(dir, "stamped-envelope.schema.json")?;
     write_schema::<DeliveryReply>(dir, "delivery-reply.schema.json")?;
+    write_schema::<RoleSpec>(dir, "role-spec.schema.json")?;
     // JSON numbers parse to JS numbers, so u64 fields are `number`, not `bigint`.
     let cfg = Config::new()
         .with_out_dir(dir.join("ts"))
@@ -28,6 +29,7 @@ pub fn export(dir: &Path) -> anyhow::Result<()> {
     ClientEnvelope::export_all(&cfg).context("export ClientEnvelope TypeScript")?;
     StampedEnvelope::export_all(&cfg).context("export StampedEnvelope TypeScript")?;
     DeliveryReply::export_all(&cfg).context("export DeliveryReply TypeScript")?;
+    RoleSpec::export_all(&cfg).context("export RoleSpec TypeScript")?;
     Ok(())
 }
 
