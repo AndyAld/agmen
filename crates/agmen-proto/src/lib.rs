@@ -50,7 +50,7 @@ pub use envelope::{
 pub use error::ProtoError;
 pub use ids::{
     Body, GitSha, IdentityId, ItemKey, LaneName, MAX_BODY_BYTES, Mention, MessageId, ProjectId,
-    RoleName, Seq, Stream, TenantId, Timestamp,
+    RoleName, Seq, Sha256Hex, Stream, TenantId, Timestamp,
 };
 pub use reply::{DeliveryReply, NackReason};
 pub use roles::{EditScope, RoleSpec};

@@ -1,7 +1,7 @@
 //! Role and listener protocol contracts from Task 2.
 
 use agmen_proto::{
-    ClientEnvelope, IdentityKind, Mention, NackReason, Needs, Payload, Urgency, validate,
+    ClientEnvelope, IdentityKind, Mention, NackReason, Needs, Payload, Sha256Hex, Urgency, validate,
 };
 use serde_json::json;
 
@@ -102,7 +102,7 @@ fn role_spec_round_trip() {
             role: "planner".parse().unwrap(),
             verbs: BTreeSet::from(["PROPOSAL".into(), "PLAN".into()]),
             edits,
-            role_sha256: "a".repeat(64),
+            role_sha256: "a".repeat(64).parse().unwrap(),
         };
         let wire = json!({
             "role": "planner", "verbs": ["PLAN", "PROPOSAL"],
@@ -113,6 +113,50 @@ fn role_spec_round_trip() {
     }
     for edits in [json!({"scope": "unknown"}), json!({"scope": "paths"})] {
         assert!(serde_json::from_value::<EditScope>(edits).is_err());
+    }
+}
+
+#[test]
+fn sha256_hex_rules() {
+    let valid = "0123456789abcdef".repeat(4);
+    let hash: Sha256Hex = valid.parse().unwrap();
+    assert_eq!(hash.as_str(), valid);
+    assert_eq!(serde_json::to_value(&hash).unwrap(), json!(valid));
+    assert_eq!(
+        serde_json::from_value::<Sha256Hex>(json!(valid)).unwrap(),
+        hash
+    );
+    for invalid in [
+        "A".repeat(64),
+        "a".repeat(63),
+        "a".repeat(65),
+        "g".repeat(64),
+        String::new(),
+    ] {
+        assert!(invalid.parse::<Sha256Hex>().is_err(), "{invalid:?} parsed");
+        assert!(Sha256Hex::try_from(invalid.clone()).is_err());
+        assert!(serde_json::from_value::<Sha256Hex>(json!(invalid)).is_err());
+    }
+}
+
+#[test]
+fn role_spec_rejects_invalid_sha256() {
+    for invalid in [
+        "zz".to_owned(),
+        "A".repeat(64),
+        "a".repeat(63),
+        "a".repeat(65),
+        "g".repeat(64),
+        String::new(),
+    ] {
+        let wire = json!({
+            "role": "planner", "verbs": ["PLAN"],
+            "edits": {"scope": "none"}, "role_sha256": invalid
+        });
+        assert!(
+            serde_json::from_value::<agmen_proto::RoleSpec>(wire).is_err(),
+            "{invalid:?} accepted"
+        );
     }
 }
 

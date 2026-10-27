@@ -6,7 +6,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use crate::ids::RoleName;
+use crate::ids::{RoleName, Sha256Hex};
 
 /// The resolved role settings sent to `POST /identities`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema, TS)]
@@ -18,7 +18,7 @@ pub struct RoleSpec {
     /// What the role may edit.
     pub edits: EditScope,
     /// The SHA-256 of the role text, without storing the text at the hub.
-    pub role_sha256: String,
+    pub role_sha256: Sha256Hex,
 }
 
 /// What a role may edit, as defined by the roles design's section 3.

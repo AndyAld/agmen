@@ -14,7 +14,7 @@
     },
     "role_sha256": {
       "description": "The SHA-256 of the role text, without storing the text at the hub.",
-      "type": "string"
+      "$ref": "#/$defs/Sha256Hex"
     },
     "verbs": {
       "description": "The verbs the role may send, capped by its identity kind at mint.",
@@ -87,6 +87,10 @@
     "RoleName": {
       "type": "string",
       "pattern": "^[a-z][a-z0-9-]{1,31}$"
+    },
+    "Sha256Hex": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
     }
   }
 }
