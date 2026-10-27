@@ -1,5 +1,125 @@
 use super::*;
 
+#[tokio::test]
+async fn failed_command_returns_stderr() {
+    let dir = tempfile::tempdir().unwrap();
+    let git = Git::new(dir.path(), Instant::now() + Duration::from_secs(10));
+    let err = git
+        .run_str(&["--l8-invalid-option"], 1024)
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("unknown option: --l8-invalid-option")
+    );
+}
+
+#[tokio::test]
+async fn per_call_timeout_can_exceed_five_seconds() {
+    let dir = tempfile::tempdir().unwrap();
+    let git = Git::new(dir.path(), Instant::now() + Duration::from_secs(15));
+    let args = ["-c", "alias.l8-wait=!sleep 6", "l8-wait"].map(OsStr::new);
+    git.run_with_options(&args, 1024, Duration::from_secs(10), None)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn explicit_index_is_set_only_for_that_call() {
+    let dir = tempfile::tempdir().unwrap();
+    let index = dir.path().join("alternate index");
+    let git = Git::new(dir.path(), Instant::now() + Duration::from_secs(10));
+    let args = [
+        "-c",
+        "alias.l8-index=!printf '%s' \"${GIT_INDEX_FILE-unset}\"",
+        "l8-index",
+    ]
+    .map(OsStr::new);
+    let out = git
+        .run_with_options(&args, 1024, Duration::from_secs(5), Some(&index))
+        .await
+        .unwrap();
+    assert_eq!(out.stdout, index.as_os_str().as_bytes());
+    let out = git.run(&args, 1024).await.unwrap();
+    assert_eq!(out.stdout, b"unset");
+}
+
+#[tokio::test]
+async fn long_timeout_still_obeys_shared_deadline() {
+    let dir = tempfile::tempdir().unwrap();
+    let started = Instant::now();
+    let git = Git::new(dir.path(), Instant::now() + Duration::from_millis(100));
+    let args = ["-c", "alias.l8-wait=!exec sleep 6", "l8-wait"].map(OsStr::new);
+    let err = git
+        .run_with_options(&args, 1024, Duration::from_secs(10), None)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, GitError::Timeout(_)));
+    assert!(started.elapsed() < Duration::from_secs(2));
+}
+
+#[tokio::test]
+async fn short_per_call_timeout_is_enforced() {
+    let dir = tempfile::tempdir().unwrap();
+    let started = Instant::now();
+    let git = Git::new(dir.path(), Instant::now() + Duration::from_secs(10));
+    let args = ["-c", "alias.l8-wait=!exec sleep 6", "l8-wait"].map(OsStr::new);
+    let err = git
+        .run_with_options(&args, 1024, Duration::from_millis(100), None)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, GitError::Timeout(_)));
+    assert!(started.elapsed() < Duration::from_secs(2));
+}
+
+#[tokio::test]
+async fn default_call_timeout_remains_five_seconds() {
+    let dir = tempfile::tempdir().unwrap();
+    let git = Git::new(dir.path(), Instant::now() + Duration::from_secs(15));
+    let err = git
+        .run_str(&["-c", "alias.l8-wait=!exec sleep 6", "l8-wait"], 1024)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, GitError::Timeout(_)));
+}
+
+#[tokio::test]
+async fn stderr_is_bounded_and_drained_without_blocking_stdout() {
+    let dir = tempfile::tempdir().unwrap();
+    let git = Git::new(dir.path(), Instant::now() + Duration::from_secs(10));
+    let err = git
+        .run_str(
+            &[
+                "-c",
+                "alias.l8-error=!printf '%0131072d' 0 >&2; printf ok; exit 7",
+                "l8-error",
+            ],
+            1024,
+        )
+        .await
+        .unwrap_err();
+    let GitError::Failed { stderr, .. } = err else {
+        panic!("expected a failed exit, got {err:?}");
+    };
+    assert_eq!(stderr.len(), 64 * 1024);
+    assert!(stderr.bytes().all(|byte| byte == b'0'));
+}
+
+#[tokio::test]
+async fn stdout_cap_keeps_existing_truncated_success() {
+    let dir = tempfile::tempdir().unwrap();
+    let git = Git::new(dir.path(), Instant::now() + Duration::from_secs(10));
+    let out = git
+        .run_str(
+            &["-c", "alias.l8-output=!printf '%0100000d' 0", "l8-output"],
+            10,
+        )
+        .await
+        .unwrap();
+    assert_eq!(out.stdout, b"0000000000");
+    assert!(out.truncated);
+}
+
 fn out(bytes: &[u8]) -> Output {
     Output {
         stdout: bytes.to_vec(),
