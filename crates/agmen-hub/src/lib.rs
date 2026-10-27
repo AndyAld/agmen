@@ -42,6 +42,7 @@ mod presence;
 mod replay;
 mod rollcall;
 mod secrets_scan;
+mod state;
 mod sweeper;
 #[cfg(feature = "test-hooks")]
 mod test_hooks;
