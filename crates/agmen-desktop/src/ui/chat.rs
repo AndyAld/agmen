@@ -314,6 +314,12 @@ impl ChatView {
         }
     }
 
+    /// The paused bar's words.
+    #[cfg(test)]
+    pub(crate) fn waiting_note(&self) -> SharedString {
+        waiting_note(self.snapshot.waiting)
+    }
+
     /// Final review fix 1: the line above the messages about older ones.
     pub(crate) fn history_note(&self) -> Option<SharedString> {
         history_note(&self.snapshot.older, self.at_top)
@@ -525,6 +531,22 @@ impl ChatView {
                     .update(cx, |composer, cx| composer.set_snapshot(&snapshot, cx));
                 *snapshot
             }
+            // Reading back past the cap: the message is not added to the
+            // list, but it alerts as a live one would. Remembering it as
+            // heard makes "Show the newest" bring it in as history, so it
+            // does not alert twice.
+            Update::Waiting { message, waiting } => {
+                let earlier = self.snapshot.clone();
+                let signal = self.hear(&message, &earlier.messages, Arrival::Live);
+                self.newest_heard = self.newest_heard.clone().max(Some(heard_key(&message)));
+                let mut snapshot = (*earlier).clone();
+                snapshot.waiting = waiting;
+                self.snapshot = Rc::new(snapshot);
+                self.refresh_alerts(cx);
+                self.signal(&signal, cx);
+                cx.notify();
+                return;
+            }
             // Task 7: the status bar shows it; the workspace redraws on
             // the notify.
             Update::Link(link) => {
@@ -585,6 +607,19 @@ pub(super) fn history_note(older: &Older, at_top: bool) -> Option<SharedString> 
     }
 }
 
+/// Final review fix 1: the paused bar's words, with how many new messages
+/// wait for "Show the newest".
+#[must_use]
+pub(super) fn waiting_note(waiting: usize) -> SharedString {
+    match waiting {
+        0 => "Newer messages are not shown while you read back.".into(),
+        1 => "1 new message is waiting. It is not shown while you read back.".into(),
+        n => {
+            format!("{n} new messages are waiting. They are not shown while you read back.").into()
+        }
+    }
+}
+
 /// Where the hub put `env`, with its client id: a client id alone is
 /// unique per sender only.
 fn position(env: &StampedEnvelope) -> (&Stream, Seq, &MessageId) {
@@ -638,7 +673,7 @@ impl Render for ChatView {
                         .items_center()
                         .gap(SPACE_6)
                         .child(
-                            Label::new("Newer messages are not shown while you read back.")
+                            Label::new(waiting_note(self.snapshot.waiting))
                                 .size(LabelSize::Small)
                                 .color(Color::Placeholder),
                         )

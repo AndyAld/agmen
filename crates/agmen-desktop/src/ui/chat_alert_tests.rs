@@ -463,3 +463,127 @@ fn an_older_page_raises_no_alert(cx: &mut TestAppContext) {
     assert!(o.alarm.notices.borrow().is_empty());
     assert!(o.chat.read_with(o.cx, |chat, _| chat.toast().is_none()));
 }
+
+/// The chat reading back past the cap: `newer` set, as agmend's snapshot
+/// says.
+fn paused(cx: &mut TestAppContext) -> Opened<'_> {
+    let o = open(cx, Screen::Chat);
+    let mut snapshot = o.backend.snapshot();
+    snapshot.newer = true;
+    o.chat.update(o.cx, |chat, cx| {
+        chat.apply(Update::Snapshot(Box::new(snapshot)), cx);
+    });
+    redraw(o.cx);
+    o
+}
+
+#[gpui::test]
+fn an_alert_while_paused_raises_what_it_would_unpaused(cx: &mut TestAppContext) {
+    let alert = urgent_alert(&FixtureBackend::for_screen(Screen::NeedsYou).unwrap());
+    let o = paused(cx);
+    let before = o.chat.read_with(o.cx, |chat, _| chat.message_count());
+    o.chat.update(o.cx, |chat, cx| {
+        chat.apply(
+            Update::Waiting {
+                message: Box::new(alert.clone()),
+                waiting: 1,
+            },
+            cx,
+        );
+    });
+    redraw(o.cx);
+    // The same chime, notification and toast as `a_live_urgent_alert_...`.
+    assert_eq!(o.alarm.chimes.get(), 1);
+    assert_eq!(o.alarm.notices.borrow()[0].title, "adam/coord needs you");
+    let toast = o
+        .chat
+        .read_with(o.cx, |chat, _| chat.toast().cloned())
+        .unwrap();
+    assert_eq!(toast.title, "adam/coord needs you");
+    assert_eq!(
+        o.chat
+            .read_with(o.cx, |chat, _| chat.alert_counts().needs_you),
+        1,
+        "the status bar's needs-you count"
+    );
+    // The list does not change while paused.
+    assert_eq!(
+        o.chat.read_with(o.cx, |chat, _| chat.message_count()),
+        before
+    );
+    // A redelivery does not chime again.
+    o.chat.update(o.cx, |chat, cx| {
+        chat.apply(
+            Update::Waiting {
+                message: Box::new(alert),
+                waiting: 1,
+            },
+            cx,
+        );
+    });
+    assert_eq!(o.alarm.chimes.get(), 1);
+}
+
+#[gpui::test]
+fn show_the_newest_shows_the_waiting_alert_without_a_second_alert(cx: &mut TestAppContext) {
+    let alert = urgent_alert(&FixtureBackend::for_screen(Screen::NeedsYou).unwrap());
+    let o = paused(cx);
+    let mut newest = o.backend.snapshot();
+    newest.messages.push(alert.clone());
+    o.chat.update(o.cx, |chat, cx| {
+        chat.apply(
+            Update::Waiting {
+                message: Box::new(alert),
+                waiting: 1,
+            },
+            cx,
+        );
+    });
+    assert_eq!(o.alarm.chimes.get(), 1, "alerted while paused");
+    let before = o.chat.read_with(o.cx, |chat, _| chat.message_count());
+    // "Show the newest": the backend's fresh page, with the message in it.
+    o.chat.update(o.cx, |chat, cx| {
+        chat.apply(Update::Snapshot(Box::new(newest)), cx);
+    });
+    redraw(o.cx);
+    assert_eq!(
+        o.chat.read_with(o.cx, |chat, _| chat.message_count()),
+        before + 1,
+        "shown once"
+    );
+    assert_eq!(o.alarm.chimes.get(), 1, "no second chime");
+    assert_eq!(o.alarm.notices.borrow().len(), 1, "no second notification");
+}
+
+#[gpui::test]
+fn the_paused_bar_counts_the_waiting_messages(cx: &mut TestAppContext) {
+    let alert = urgent_alert(&FixtureBackend::for_screen(Screen::NeedsYou).unwrap());
+    let o = paused(cx);
+    assert_eq!(
+        o.chat.read_with(o.cx, |chat, _| chat.waiting_note()),
+        "Newer messages are not shown while you read back."
+    );
+    o.chat.update(o.cx, |chat, cx| {
+        chat.apply(
+            Update::Waiting {
+                message: Box::new(alert),
+                waiting: 3,
+            },
+            cx,
+        );
+    });
+    redraw(o.cx);
+    assert!(o.cx.debug_bounds("chat:newest").is_some());
+    assert_eq!(
+        o.chat.read_with(o.cx, |chat, _| chat.waiting_note()),
+        "3 new messages are waiting. They are not shown while you read back."
+    );
+}
+
+#[test]
+fn the_waiting_note_words_one_message() {
+    assert_eq!(
+        waiting_note(1),
+        "1 new message is waiting. It is not shown while you read back."
+    );
+}

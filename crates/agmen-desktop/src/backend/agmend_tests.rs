@@ -531,6 +531,68 @@ fn paging_back_past_2000_lets_the_newest_go() {
 }
 
 #[test]
+fn a_message_while_paused_is_announced_not_held() {
+    let fake = FakeAgmend::with_history(3000);
+    let (backend, mut updates) = live_backend(&fake);
+    for _ in 0..3 {
+        page_back(&backend, &mut updates);
+    }
+    assert!(page_back(&backend, &mut updates).newer);
+
+    // The chat does not change, but the view hears each message once, with
+    // the count waiting.
+    fake.push(&ConsoleEvent::Message(message(3001)));
+    let seen = wait_for(&mut updates, |u| matches!(u, Update::Waiting { .. }));
+    let Some(Update::Waiting {
+        message: heard,
+        waiting,
+    }) = seen.last()
+    else {
+        panic!("no waiting update in {seen:?}");
+    };
+    assert_eq!((heard.seq.0, *waiting), (3001, 1));
+    fake.push(&ConsoleEvent::Message(message(3001)));
+    fake.push(&ConsoleEvent::Message(message(3002)));
+    let seen = wait_for(&mut updates, |u| matches!(u, Update::Waiting { .. }));
+    let Some(Update::Waiting {
+        message: heard,
+        waiting,
+    }) = seen.last()
+    else {
+        panic!("no waiting update in {seen:?}");
+    };
+    assert_eq!(
+        (heard.seq.0, *waiting),
+        (3002, 2),
+        "a redelivery is not counted"
+    );
+    let s = backend.snapshot();
+    assert_eq!(seqs(&s.messages), (501..=2500).collect::<Vec<_>>());
+    assert_eq!(s.waiting, 2);
+
+    // The newest page takes them, and the count restarts.
+    backend.load_newest();
+    wait_for(
+        &mut updates,
+        |u| matches!(u, Update::Snapshot(s) if !s.newer),
+    );
+    assert_eq!(backend.snapshot().waiting, 0);
+}
+
+#[test]
+fn held_counts_each_waiting_message_once() {
+    let mut held = Held::default();
+    held.merge((1..=2000).map(message).collect(), true);
+    held.newer = true;
+    assert_eq!(held.insert(message(2001)), Added::Waiting);
+    assert_eq!(held.insert(message(2001)), Added::Nothing);
+    assert_eq!(held.insert(message(1500)), Added::Nothing);
+    assert_eq!(held.insert(message(2002)), Added::Waiting);
+    assert_eq!(held.waiting, 2);
+    assert_eq!(held.to_vec().len(), 2000);
+}
+
+#[test]
 fn a_page_overlapping_the_chat_adds_each_message_once() {
     let mut held = Held::default();
     held.merge((501..=1000).map(message).collect(), true);

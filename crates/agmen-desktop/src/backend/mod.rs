@@ -201,6 +201,15 @@ pub(crate) enum Action {
 pub(crate) enum Update {
     Message(Box<StampedEnvelope>),
     Snapshot(Box<Snapshot>),
+    /// A live message that arrived while the chat reads back past the cap.
+    /// It is not added to the chat; the view feeds it to its alerts, so a
+    /// message that needs the person still chimes, and shows `waiting`.
+    Waiting {
+        message: Box<StampedEnvelope>,
+        /// How many such messages wait for "Show the newest", this one
+        /// included.
+        waiting: usize,
+    },
     // Task 6: what only the live backend says.
     /// How the link to agmend and the hub stands now. A new subscriber
     /// hears the current state first; the status bar shows it (Task 7).
@@ -575,6 +584,9 @@ pub(crate) struct Snapshot {
     /// newest messages go; new ones are not added until the person goes
     /// back to the newest page ([`Backend::load_newest`]).
     pub(crate) newer: bool,
+    /// How many live messages arrived since `newer` was set; they show on
+    /// "Show the newest".
+    pub(crate) waiting: usize,
     /// Change cards, keyed by the listener message they belong to.
     pub(crate) changes: BTreeMap<MessageId, ChangeCard>,
     pub(crate) plan: Option<PlanInfo>,

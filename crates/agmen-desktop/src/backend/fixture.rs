@@ -70,6 +70,7 @@ fn base(project: &str) -> Result<Snapshot, BackendError> {
         // The fixture holds its whole chat.
         older: Older::Start,
         newer: false,
+        waiting: 0,
         changes: BTreeMap::new(),
         plan: None,
         git: git_facts(),

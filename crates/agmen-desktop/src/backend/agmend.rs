@@ -174,6 +174,7 @@ impl Live {
             (Paging::Idle, true) => Older::More,
         };
         snapshot.newer = self.held.newer;
+        snapshot.waiting = self.held.waiting;
         snapshot
     }
 
@@ -205,6 +206,11 @@ impl Live {
             // A full snapshot, so the views drop the oldest message too and
             // stay at the cap.
             Added::Trimmed => self.publish_snapshot(),
+            // Not held, but the view still hears it, for its alerts.
+            Added::Waiting => self.publish(&Update::Waiting {
+                message: Box::new(env),
+                waiting: self.held.waiting,
+            }),
             Added::Nothing => {}
         }
     }
@@ -226,6 +232,10 @@ pub(super) struct Held {
     pub(super) older: bool,
     /// Paging back let messages after the last one held go.
     pub(super) newer: bool,
+    /// Live messages heard since `newer` was set, none of them held.
+    pub(super) waiting: usize,
+    /// The newest of those, so a redelivery is not counted twice.
+    waiting_last: Option<(Stream, Seq)>,
 }
 
 /// What [`Held::insert`] did.
@@ -237,18 +247,29 @@ enum Added {
     /// Held already, older than everything kept at the cap, or newer than
     /// a chat that paged back past the cap.
     Nothing,
+    /// A new message the chat does not hold, since it reads back past the
+    /// cap; the view alerts on it and counts it.
+    Waiting,
 }
 
 impl Held {
     /// Adds one message the watch heard.
     fn insert(&mut self, env: StampedEnvelope) -> Added {
-        // shortcut: while the chat reads back past the cap, a new message
-        // waits for the jump to the newest page, and so does any alert it
-        // raises; keep a count of them if people miss that.
-        if self.newer {
-            return Added::Nothing;
-        }
         let key = (env.stream.clone(), env.seq);
+        if self.newer {
+            // Held messages and ones already counted are not new. The rest
+            // wait for the jump to the newest page, but still reach the
+            // alerts, and are counted for the view.
+            let last = self.messages.last_key_value().map(|(held, _)| held);
+            let seen = last.is_some_and(|last| key <= *last)
+                || self.waiting_last.as_ref().is_some_and(|last| key <= *last);
+            if seen {
+                return Added::Nothing;
+            }
+            self.waiting = self.waiting.saturating_add(1);
+            self.waiting_last = Some(key);
+            return Added::Waiting;
+        }
         if self.messages.contains_key(&key) {
             return Added::Nothing;
         }
@@ -283,6 +304,8 @@ impl Held {
         if gap || self.newer {
             self.messages.clear();
             self.newer = false;
+            self.waiting = 0;
+            self.waiting_last = None;
         }
         if self.messages.is_empty() || starts_earlier {
             self.older = older;
@@ -1039,6 +1062,7 @@ pub(super) fn snapshot_from(console: ConsoleSnapshot) -> Snapshot {
         messages,
         older: if older { Older::More } else { Older::Start },
         newer: false,
+        waiting: 0,
         changes: BTreeMap::new(),
         plan: None,
         git: GitFacts {
