@@ -19,6 +19,7 @@ mod console;
 mod feed;
 mod git;
 mod hub;
+mod listener;
 mod local;
 mod login;
 mod socket;
