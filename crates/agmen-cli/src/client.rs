@@ -1,17 +1,14 @@
 //! The hub's HTTP API as the CLI calls it, and the signed-in person: who
 //! `agmen login` signed in at which hub, and their tokens.
 //!
-//! A person's access and refresh tokens are one token-store entry, keyed by
-//! the hub's origin and the person's id (rulings R17 and R42), and are sent
-//! only to that hub. The access token lasts 1 hour; the CLI renews it with
-//! the refresh grant shortly before it runs out.
+//! The login file and the person's tokens are agmen-client's (`login.rs`
+//! there), which agmend reads too; this wraps them in the CLI's errors.
 
 use std::time::Duration;
 
-use agmen_client::{TokenKey, TokenStore};
-use agmen_proto::{IdentityId, Timestamp};
+use agmen_client::{LoginError, TokenKey, TokenStore};
+use agmen_proto::IdentityId;
 use anyhow::{Context as _, Result};
-use jiff::SignedDuration;
 use reqwest::{Method, RequestBuilder};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -22,10 +19,6 @@ use crate::paths;
 
 /// How long one request to the hub may take.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
-/// Renew the access token when it has less than this left.
-const RENEW_LEAD: SignedDuration = SignedDuration::from_secs(120);
-/// The largest login file read.
-const MAX_LOGIN_BYTES: u64 = 64 * 1024;
 
 /// The hub refused a request: its status and `{error, error_description}`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -158,69 +151,32 @@ impl Api {
     }
 }
 
-/// Who `agmen login` signed in, kept in the login file.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct Login {
-    /// The hub they signed in at.
-    pub(crate) hub_url: Url,
-    /// Their id at that hub.
-    pub(crate) human_id: IdentityId,
-    /// Their handle.
-    pub(crate) handle: String,
-}
+pub(crate) use agmen_client::{HumanTokens, Login};
 
-impl Login {
-    fn key(&self) -> Result<TokenKey> {
-        TokenKey::new(&self.hub_url, &self.human_id).context("the login's hub URL")
-    }
-}
-
-/// A person's tokens, stored as one JSON value.
-#[derive(Clone, Serialize, Deserialize)]
-pub(crate) struct HumanTokens {
-    access_token: String,
-    refresh_token: String,
-    expires_at: Timestamp,
-}
-
-impl std::fmt::Debug for HumanTokens {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("HumanTokens")
-            .field("expires_at", &self.expires_at)
-            .finish_non_exhaustive()
-    }
-}
-
-/// The token endpoint's answer (RFC 6749 section 5.1).
-#[derive(Deserialize)]
-struct TokenResponse {
-    access_token: String,
-    refresh_token: String,
-    expires_in: i64,
-}
-
-impl TokenResponse {
-    fn into_tokens(self) -> HumanTokens {
-        HumanTokens {
-            access_token: self.access_token,
-            refresh_token: self.refresh_token,
-            expires_at: Timestamp::now()
-                .checked_add(SignedDuration::from_secs(self.expires_in))
-                .unwrap_or_else(|_| Timestamp::now()),
-        }
-    }
-}
-
-/// Calls the token endpoint of the hub at `hub` with `form`.
+/// Calls the token endpoint of the hub at `hub` with `form`. A refusal
+/// comes back as a [`Refusal`].
 pub(crate) async fn token_grant(hub: &Url, form: &[(&str, &str)]) -> Result<HumanTokens> {
-    let request = http()?.post(url(hub, &["auth", "token"])).form(form);
-    Ok(send::<TokenResponse>(request).await?.into_tokens())
+    agmen_client::token_grant(&http()?, hub, form)
+        .await
+        .map_err(login_error)
 }
 
-impl HumanTokens {
-    /// The access token.
-    pub(crate) fn access_token(&self) -> &str {
-        &self.access_token
+/// `err` as the CLI reports it: a refusal as a [`Refusal`], nobody signed
+/// in as [`Fail::not_signed_in`].
+fn login_error(err: LoginError) -> anyhow::Error {
+    match err {
+        LoginError::Refused {
+            status,
+            code,
+            description,
+        } => Refusal {
+            status,
+            code,
+            description,
+        }
+        .into(),
+        LoginError::NotSignedIn => Fail::not_signed_in().into(),
+        err => anyhow::Error::new(err),
     }
 }
 
@@ -234,22 +190,7 @@ pub(crate) struct Human {
 /// Reads the login file, or `None` when nobody is signed in.
 pub(crate) async fn read_login() -> Result<Option<Login>> {
     let path = paths::login_file()?;
-    blocking(move || {
-        use std::io::Read as _;
-        let file = match std::fs::File::open(&path) {
-            Ok(file) => file,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(err) => return Err(err).with_context(|| format!("reading {}", path.display())),
-        };
-        let mut raw = Vec::new();
-        file.take(MAX_LOGIN_BYTES)
-            .read_to_end(&mut raw)
-            .with_context(|| format!("reading {}", path.display()))?;
-        serde_json::from_slice(&raw)
-            .map(Some)
-            .with_context(|| format!("{} is not a valid login file", path.display()))
-    })
-    .await
+    blocking(move || Ok(Login::read(&path)?)).await
 }
 
 /// Stores `tokens` and writes the login file, replacing an earlier login.
@@ -259,7 +200,9 @@ pub(crate) async fn save_login(login: &Login, tokens: &HumanTokens) -> Result<()
     {
         delete_token(old.key()?).await?;
     }
-    store_human_tokens(login, tokens).await?;
+    agmen_client::store_tokens(&TokenStore::from_env(), login, tokens)
+        .await
+        .context("writing the token store failed")?;
     let path = paths::login_file()?;
     let json = serde_json::to_vec_pretty(login).context("encoding the login file")?;
     blocking(move || {
@@ -288,11 +231,6 @@ pub(crate) async fn forget_login() -> Result<Option<Login>> {
     Ok(Some(login))
 }
 
-async fn store_human_tokens(login: &Login, tokens: &HumanTokens) -> Result<()> {
-    let json = serde_json::to_string(tokens).context("encoding the tokens")?;
-    set_token(login.key()?, json).await
-}
-
 /// The signed-in person, with a fresh access token.
 ///
 /// # Errors
@@ -301,28 +239,13 @@ async fn store_human_tokens(login: &Login, tokens: &HumanTokens) -> Result<()> {
 /// takes the refresh token.
 pub(crate) async fn human() -> Result<Human> {
     let login = read_login().await?.ok_or_else(Fail::not_signed_in)?;
-    let stored = get_token(TokenStore::from_env(), login.key()?)
-        .await?
-        .ok_or_else(Fail::not_signed_in)?;
-    let mut tokens: HumanTokens =
-        serde_json::from_str(&stored).map_err(|_| Fail::not_signed_in())?;
-    if tokens.expires_at.duration_since(Timestamp::now()) < RENEW_LEAD {
-        let refresh = tokens.refresh_token.clone();
-        tokens = match token_grant(
-            &login.hub_url,
-            &[("grant_type", "refresh_token"), ("refresh_token", &refresh)],
-        )
+    let tokens = agmen_client::human_tokens(&http()?, &TokenStore::from_env(), &login)
         .await
-        {
-            Ok(tokens) => tokens,
-            Err(err) if refusal(&err).is_some_and(|r| r.status == 400) => {
-                return Err(Fail::not_signed_in().into());
-            }
-            Err(err) => return Err(err.context("renewing the sign-in failed")),
-        };
-        store_human_tokens(&login, &tokens).await?;
-    }
-    let api = Api::new(login.hub_url.clone(), tokens.access_token)?;
+        .map_err(|err| match err {
+            err @ (LoginError::NotSignedIn | LoginError::Refused { .. }) => login_error(err),
+            err => anyhow::Error::new(err).context("renewing the sign-in failed"),
+        })?;
+    let api = Api::new(login.hub_url.clone(), tokens.access_token())?;
     Ok(Human { login, api })
 }
 
