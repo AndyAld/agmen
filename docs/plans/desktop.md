@@ -407,9 +407,9 @@ Screens: `desktop-plan`, `desktop-spec`, `desktop-plan-ready`, `desktop-kick-off
 
 - [ ] Done
 
-- [ ] **Step 1:** Capture all 25 screens with `shot.sh` into `target/shots/`, build a side-by-side sheet (mockup left, app right) in the scratch dir, and list the remaining differences per screen in this file.
+- [x] **Step 1:** Capture all 25 screens with `shot.sh` into `target/shots/`, build a side-by-side sheet (mockup left, app right) in the scratch dir, and list the remaining differences per screen in this file. As built (2026-10-27): 25 screens, sheet at `target/task20/sheet.png`; 44 open, 180 kept, 75 refuted (screens past 12 differences had only their first 12 checked). Fixed on Andy's ruling: the terminal, chat and sparkle icons (Lucide terminal, message-square, sparkles), the status bar's listener text without the colon, Lucide's check for done checks and Approved, and cell-wide gutter bars. The rest are kept differences under Tasks 7, 9, 10, 12 and 19. rv2's indent and harness in the fixture wait for Andy, since fix 28 and Task 7's depth step recorded the current data.
 - [x] **Step 2:** `rg 'shortcut:' crates/agmen-desktop` and list each in ADR-0010's Consequences. Done: 46 at ff47dcd, 49 on desktop/routing3 (b3247e9 plus C313 to C321), in ADR-0010's "Deliberate shortcuts" table.
-- [ ] **Step 3:** Full gate; tell Andy it is ready for the review loop.
+- [x] **Step 3:** Full gate; tell Andy it is ready for the review loop. Gate passed 2026-10-27 on 354822c: 1398 tests passed, 148 skipped.
 
 ## Work claimed by agmen-c7 (Andy, 2026-10-26)
 
