@@ -15,6 +15,7 @@
 #![warn(missing_docs)]
 
 mod api;
+mod budget;
 mod console;
 mod feed;
 mod git;
