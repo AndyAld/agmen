@@ -14,15 +14,18 @@
 //! | NACK `conflict` | 409 |
 //! | any other NACK (final) | 422 |
 //!
-//! A body with no readable `id` cannot be named in a NACK and gets 400.
+//! A body with no readable `id` cannot be named in a NACK and gets 400. A
+//! body over the 64 KiB envelope limit is refused unread with 413
+//! `envelope_too_large`.
 //! Only an access token may call it; an identity token gets 403, because
 //! identities post over MQTT.
 
 use std::time::Duration;
 
-use agmen_proto::{DeliveryReply, IdentityId, NackReason, Topics};
+use agmen_proto::{DeliveryReply, IdentityId, MAX_ENVELOPE_BYTES, NackReason, Topics};
 use axum::Json;
 use axum::body::Bytes;
+use axum::extract::rejection::BytesRejection;
 use axum::extract::{Path, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -37,7 +40,7 @@ pub(crate) async fn post(
     State(hub): State<Hub>,
     Path(project): Path<String>,
     caller: Caller,
-    body: Bytes,
+    body: Result<Bytes, BytesRejection>,
 ) -> Result<Response, ApiError> {
     let human = caller.human()?;
     let (project, _) = member_of(&hub, Caller::Human(human.clone()), &project).await?;
@@ -51,6 +54,8 @@ pub(crate) async fn post(
         project.as_str().parse().map_err(ApiError::stored)?,
     );
     let from: IdentityId = human.as_str().parse().map_err(ApiError::stored)?;
+    // After the membership check, so a non-member gets 403 at any size.
+    let body = body.map_err(refused_body)?;
     let reply = hub
         .ingest(&topics, &from, &body)
         .await
@@ -64,6 +69,21 @@ pub(crate) async fn post(
             IngestError::Database(err) => ApiError::Database(err),
         })?;
     Ok(respond(&reply))
+}
+
+/// A body the route could not read, in the hub's error shape: over the
+/// envelope limit (the route's `DefaultBodyLimit`) or cut off.
+fn refused_body(rejection: BytesRejection) -> ApiError {
+    let status = rejection.status();
+    if status == StatusCode::PAYLOAD_TOO_LARGE {
+        ApiError::new(
+            status,
+            "envelope_too_large",
+            format!("the body is over the {MAX_ENVELOPE_BYTES} byte envelope limit"),
+        )
+    } else {
+        ApiError::new(status, "invalid_request", rejection.body_text())
+    }
 }
 
 /// The response for `reply`: its status and the reply as the JSON body.

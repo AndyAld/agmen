@@ -9,6 +9,7 @@
 
 mod support;
 
+use agmen_proto::MAX_ENVELOPE_BYTES;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 use support::{
@@ -130,12 +131,34 @@ async fn it_human_post_runs_ingest_checks() {
         assert_eq!(nack["reason"], "body_too_large");
         assert_eq!(nack["retryable"], false);
 
-        // A 70 KiB body also exceeds the envelope limit, which ingest
-        // answers as `schema` (the envelope check comes first).
-        let huge = "x".repeat(70 * 1024);
-        let (status, _, nack) = post(&ctx, &token, &project.project, fyi(&ulid(), &huge)).await;
+        // A request body of exactly the 64 KiB envelope limit reaches
+        // ingest, which answers with the NACK.
+        // One envelope, so `sent_at` keeps its length.
+        let mut env: Value = serde_json::from_slice(&fyi(&ulid(), "")).unwrap();
+        let pad = MAX_ENVELOPE_BYTES - serde_json::to_vec(&env).unwrap().len();
+        let mut padded = |len: usize| {
+            env["body"] = json!("x".repeat(len));
+            serde_json::to_vec(&env).unwrap()
+        };
+        let at_limit = padded(pad);
+        assert_eq!(at_limit.len(), MAX_ENVELOPE_BYTES);
+        let (status, _, nack) = post(&ctx, &token, &project.project, at_limit).await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{nack}");
-        assert_eq!(nack["reason"], "schema");
+        assert_eq!(nack["reason"], "body_too_large");
+
+        // One byte more is refused before ingest reads it: 413 with the
+        // hub's error body.
+        let over = padded(pad + 1);
+        let (status, _, body) = post(&ctx, &token, &project.project, over).await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+        assert_eq!(body["error"], "envelope_too_large");
+        let stored = count(
+            &ctx.pool,
+            "SELECT count(*) FROM messages WHERE project_id = $1",
+            &project.project,
+        )
+        .await;
+        assert_eq!(stored, 0);
 
         // A credential-shaped string.
         let secret = "key AKIAIOSFODNN7EXAMPLE";

@@ -4,6 +4,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use agmen_proto::MAX_ENVELOPE_BYTES;
+use axum::extract::DefaultBodyLimit;
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
@@ -139,7 +141,12 @@ impl Hub {
             )
             .route("/v1/projects/{project}/check-path", post(lanes::check_path))
             .route("/v1/projects/{project}/items", get(items::list))
-            .route("/v1/projects/{project}/messages", post(human_post::post))
+            // The body is one envelope: past its limit, refuse before
+            // reading the rest (axum's default would buffer 2 MB).
+            .route(
+                "/v1/projects/{project}/messages",
+                post(human_post::post).layer(DefaultBodyLimit::max(MAX_ENVELOPE_BYTES)),
+            )
             .route("/v1/projects/{project}/events", get(events::events))
             .route("/v1/projects/{project}/state", get(state::get))
             .layer(axum::middleware::map_response(refuse_framing))
