@@ -194,6 +194,35 @@ fn refused_send_shows_why_until_the_next_send(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("chat:error").is_none());
 }
 
+// Task 6: the live backend refuses some posts only after send returned.
+#[gpui::test]
+fn a_post_refused_later_shows_why(cx: &mut TestAppContext) {
+    let (chat, backend, cx) = open_screen(cx, Screen::Chat);
+    let draft = Draft {
+        to: vec![backend.snapshot().listener_id],
+        body: "hi".into(),
+        reply_to: None,
+        model: None,
+    };
+    chat.update(cx, |chat, cx| {
+        chat.apply(
+            Update::NotSent {
+                draft,
+                why: "the hub refused it: forbidden_mention".into(),
+            },
+            cx,
+        );
+    });
+    redraw(cx);
+    assert!(cx.debug_bounds("chat:error").is_some());
+    chat.read_with(cx, |chat, _| {
+        assert_eq!(
+            chat.error().map(|e| e.to_string()),
+            Some("Not sent: the hub refused it: forbidden_mention".into())
+        );
+    });
+}
+
 #[gpui::test]
 fn send_without_a_backend_shows_why(cx: &mut TestAppContext) {
     let snapshot = chat_snapshot();

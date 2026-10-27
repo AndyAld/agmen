@@ -396,6 +396,15 @@ impl ChatView {
                     .update(cx, |composer, cx| composer.set_snapshot(&snapshot, cx));
                 *snapshot
             }
+            // Task 7 shows the link in the status bar.
+            Update::Link(_) => return,
+            // Task 6: a post the hub refused after the composer cleared;
+            // it shows above the composer, as a refusal at send does.
+            Update::NotSent { why, .. } => {
+                self.error = Some(format!("Not sent: {why}").into());
+                cx.notify();
+                return;
+            }
         };
         self.snapshot = Rc::new(snapshot);
         let context = Rc::new(ChatContext::new(self.snapshot.clone()).with_zone(self.zone.clone()));

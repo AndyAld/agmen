@@ -5,6 +5,9 @@
 //! [`Draft`] and [`Action`] types later (ADR-0011). Messages cross it as
 //! `agmen_proto::StampedEnvelope`, unchanged from the wire.
 
+// Task 6: the live backend over agmend's socket.
+#[cfg_attr(not(test), expect(dead_code, reason = "Task 7 opens the app on it"))]
+mod agmend;
 mod fixture;
 mod fixture_data;
 // Task 19: the planning room's spec texts, comments, caps and presence.
@@ -24,6 +27,8 @@ use gpui::SharedString;
 
 use crate::roles::{Edits, RoleKind, Tier};
 
+#[expect(unused_imports, reason = "Task 7 opens the app on it")]
+pub(crate) use agmend::AgmendBackend;
 pub(crate) use fixture::FixtureBackend;
 pub(crate) use fixture_data::REVIEWER_XML;
 pub(crate) use worktree::{
@@ -55,6 +60,16 @@ pub(crate) enum BackendError {
     AgentNotReady { agent: String, why: String },
     #[error("the built-in fixture is broken: {0}")]
     BadFixture(String),
+    // Task 6: the live backend's refusals.
+    /// agmend refused the request, or its socket is not the person's own;
+    /// the text says which.
+    #[cfg_attr(not(test), expect(dead_code, reason = "Task 7 opens the app on it"))]
+    #[error("{0}")]
+    Agmend(String),
+    /// agmend cannot be reached now, or its hub stream is down.
+    #[cfg_attr(not(test), expect(dead_code, reason = "Task 7 opens the app on it"))]
+    #[error("not connected to agmend, so nothing was sent")]
+    NotConnected,
 }
 
 /// The console's view of agmen: one snapshot, a way to send and act, and a
@@ -156,6 +171,47 @@ pub(crate) enum Action {
 pub(crate) enum Update {
     Message(Box<StampedEnvelope>),
     Snapshot(Box<Snapshot>),
+    // Task 6: what only the live backend says.
+    /// How the link to agmend and the hub stands now. A new subscriber
+    /// hears the current state first; Task 7 shows it in the status bar.
+    #[cfg_attr(not(test), expect(dead_code, reason = "Task 7 opens the app on it"))]
+    Link(Link),
+    /// A draft `send` accepted that agmend or the hub then refused.
+    #[cfg_attr(not(test), expect(dead_code, reason = "Task 7 opens the app on it"))]
+    NotSent {
+        draft: Draft,
+        why: String,
+    },
+}
+
+/// How far the live backend reaches (Task 6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Link {
+    /// agmend and its hub stream are up, and the chat is current.
+    Live,
+    /// agmend is up, but its hub stream is not, or the chat is still
+    /// catching up. `why` is set when the hub refuses the stream for a
+    /// reason a retry soon will not fix, such as being signed out.
+    HubDown { why: Option<String> },
+    /// agmend cannot be reached; the backend keeps retrying.
+    AgmendDown { why: String },
+}
+
+/// Whether `reply_to` names an ASK or an ALERT among `messages` (Task 15):
+/// a reply to one goes out as an ANSWER, anything else as an FYI.
+fn answers_a_question<'a>(
+    messages: impl IntoIterator<Item = &'a StampedEnvelope>,
+    reply_to: Option<&MessageId>,
+) -> bool {
+    reply_to.is_some_and(|parent| {
+        messages.into_iter().any(|m| {
+            &m.client.id == parent
+                && matches!(
+                    m.client.payload.verb(),
+                    Some(agmen_proto::Verb::Ask | agmen_proto::Verb::Alert)
+                )
+        })
+    })
 }
 
 /// A settings change the listener proposed or made (spec 4).

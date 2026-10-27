@@ -265,7 +265,7 @@ impl Backend for FixtureBackend {
             let seq = snapshot.messages.len() + 1;
             // Task 15: answering an ASK or an ALERT is an ANSWER (protocol
             // section 4); anything else the person writes is an FYI.
-            let verb = if answers_a_question(&snapshot, draft.reply_to.as_ref()) {
+            let verb = if super::answers_a_question(&snapshot.messages, draft.reply_to.as_ref()) {
                 "ANSWER"
             } else {
                 "FYI"
@@ -433,19 +433,6 @@ fn ask_snapshot(screen: Screen) -> Result<Snapshot, BackendError> {
         s.standing_model = Some(ask_model());
     }
     Ok(s)
-}
-
-/// Whether `reply_to` names an ASK or an ALERT in the chat (Task 15).
-fn answers_a_question(snapshot: &Snapshot, reply_to: Option<&agmen_proto::MessageId>) -> bool {
-    reply_to.is_some_and(|parent| {
-        snapshot.messages.iter().any(|m| {
-            &m.client.id == parent
-                && matches!(
-                    m.client.payload.verb(),
-                    Some(agmen_proto::Verb::Ask | agmen_proto::Verb::Alert)
-                )
-        })
-    })
 }
 
 #[cfg(test)]

@@ -110,11 +110,13 @@ dependencies = [
 name = "agmen-desktop"
 version = "0.1.0"
 dependencies = [
+ "agmen-local",
  "agmen-proto",
  "anyhow",
  "base64 0.23.1",
  "flate2",
  "futures",
+ "getrandom 0.4.3",
  "gpui",
  "gpui_apple",
  "gpui_macos",
@@ -128,6 +130,7 @@ dependencies = [
  "regex",
  "reqwest",
  "roxmltree 0.21.2",
+ "rustix",
  "serde",
  "serde_json",
  "tar",

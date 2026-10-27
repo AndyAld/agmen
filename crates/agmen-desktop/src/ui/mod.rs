@@ -78,6 +78,14 @@ pub(crate) use text_input::TextInput;
 pub(crate) use title_bar::TitleBar;
 pub(crate) use workspace::{Quit, Workspace};
 
+// Task 6: the agmend backend's tests type into a composer.
+#[cfg(test)]
+pub(crate) use composer::Composer;
+#[cfg(test)]
+pub(crate) use test_support::init as init_for_tests;
+#[cfg(test)]
+pub(crate) use text_input::bind_keys;
+
 use gpui::App;
 
 // Task 18: the text input's actions, which src/keymap.rs binds.
