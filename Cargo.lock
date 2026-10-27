@@ -197,6 +197,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "agmen-local"
+version = "0.1.0"
+dependencies = [
+ "agmen-proto",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+]
+
+[[package]]
 name = "agmen-proto"
 version = "0.1.0"
 dependencies = [
