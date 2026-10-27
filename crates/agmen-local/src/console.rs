@@ -275,6 +275,9 @@ pub struct FileTextEntry {
     /// Whether the text stops at the cap.
     #[serde(default)]
     pub truncated: bool,
+    /// The whole file's size in bytes; 0 from an agmend that does not say.
+    #[serde(default)]
+    pub size: u64,
 }
 
 /// A change pushed after the snapshot.

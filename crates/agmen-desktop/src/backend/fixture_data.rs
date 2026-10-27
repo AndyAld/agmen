@@ -1011,5 +1011,6 @@ fn fx1_main_rs() -> FileText {
             GutterMark::Added(5..6),
             GutterMark::Added(7..8),
         ],
+        full_size: None,
     }
 }

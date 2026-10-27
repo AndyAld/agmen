@@ -451,6 +451,7 @@ fn file_ref_opens_centered_on_its_highlighted_lines(cx: &mut TestAppContext) {
         FileText {
             text,
             marks: Vec::new(),
+            full_size: None,
         },
     );
     let (workspace, cx) = open_with(snapshot, cx);

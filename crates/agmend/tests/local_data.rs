@@ -278,6 +278,8 @@ async fn file_text_caps_at_512k() {
     assert!(file.text.len() <= 512 * 1024, "{}", file.text.len());
     assert!(file.text.len() > 511 * 1024, "{}", file.text.len());
     assert!(big.starts_with(&file.text));
+    // Review fix 2: the full size, so the desktop can say how much is cut.
+    assert_eq!(file.size, big.len() as u64);
     // An untracked file is all new lines.
     std::fs::write(root.join("new.txt"), "a\nb\n").unwrap();
     let file = file_text(&daemon, &root, &root, "new.txt").await.unwrap();

@@ -394,23 +394,42 @@ pub(crate) struct FileView {
     language: Language,
     /// Lines a reference asked to show, kept for the text still loading.
     lines: Option<RangeInclusive<u32>>,
+    /// The whole file's size when only its start is shown.
+    cut: Option<u64>,
     /// The backend's read of the file, dropped with the view.
     _reading: Option<Task<()>>,
 }
 
-/// The text and change marks of `path` in `worktree`.
-fn contents(worktree: &WorktreeInfo, path: &str) -> (String, Vec<GutterMark>) {
+/// The text of `path` in `worktree`, with its marks and cut.
+fn contents(worktree: &WorktreeInfo, path: &str) -> FileText {
     // A file neither the snapshot nor the backend can give shows a line
     // saying so.
-    worktree.texts.get(path).map_or_else(
-        || {
-            (
-                format!("{path}: the fixture has no contents for this file.\n"),
-                Vec::new(),
-            )
-        },
-        |file| (file.text.clone(), file.marks.clone()),
-    )
+    worktree
+        .texts
+        .get(path)
+        .cloned()
+        .unwrap_or_else(|| FileText {
+            text: format!("{path}: the fixture has no contents for this file.\n"),
+            marks: Vec::new(),
+            full_size: None,
+        })
+}
+
+/// Task 8 review fix 2: the line over a file agmend cut at its 512 KiB cap.
+pub(super) fn cut_note(full_size: u64) -> String {
+    const KIB: u64 = 1024;
+    let size = if full_size < KIB * KIB {
+        format!("{} KiB", full_size.div_ceil(KIB))
+    } else {
+        // Display only; precision past one decimal does not matter.
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a file size shown to one decimal"
+        )]
+        let mib = full_size as f64 / (KIB * KIB) as f64;
+        format!("{mib:.1} MiB")
+    };
+    format!("Only the first 512 KiB of {size} is shown.")
 }
 
 impl FileView {
@@ -421,12 +440,17 @@ impl FileView {
             cx.try_global::<BackendHandle>()
                 .and_then(|backend| backend.0.file_text(worktree, path))
         };
-        let (text, marks) = match reading {
-            Some(_) => (format!("Reading {path} through agmend.\n"), Vec::new()),
+        let file = match reading {
+            Some(_) => FileText {
+                text: format!("Reading {path} through agmend.\n"),
+                marks: Vec::new(),
+                full_size: None,
+            },
             None => contents(worktree, path),
         };
         let language = Language::for_path(Path::new(path));
-        let code = cx.new(|_| CodeView::new(&text, language, marks));
+        let cut = file.full_size;
+        let code = cx.new(|_| CodeView::new(&file.text, language, file.marks));
         let parts = std::iter::once(SharedString::from(worktree.handle.clone()))
             .chain(
                 path.split('/')
@@ -448,18 +472,21 @@ impl FileView {
             code,
             language,
             lines: None,
+            cut,
             _reading: reading,
         }
     }
 
     /// Shows the backend's answer for `path`: its text, or why there is none.
     fn read(&mut self, path: &str, answer: Result<FileText, String>, cx: &mut Context<Self>) {
-        let (text, marks) = match answer {
-            Ok(file) => (file.text, file.marks),
-            Err(why) => (format!("{path} cannot be shown: {why}\n"), Vec::new()),
-        };
+        let file = answer.unwrap_or_else(|why| FileText {
+            text: format!("{path} cannot be shown: {why}\n"),
+            marks: Vec::new(),
+            full_size: None,
+        });
         let language = self.language;
-        self.code = cx.new(|_| CodeView::new(&text, language, marks));
+        self.cut = file.full_size;
+        self.code = cx.new(|_| CodeView::new(&file.text, language, file.marks));
         if let Some(lines) = self.lines.clone() {
             self.code.update(cx, |code, cx| code.show_lines(lines, cx));
         }
@@ -471,6 +498,11 @@ impl FileView {
     pub(crate) fn show_lines(&mut self, lines: RangeInclusive<u32>, cx: &mut Context<Self>) {
         self.lines = Some(lines.clone());
         self.code.update(cx, |code, cx| code.show_lines(lines, cx));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cut_note(&self) -> Option<String> {
+        self.cut.map(cut_note)
     }
 
     #[cfg(test)]
@@ -505,6 +537,12 @@ impl Render for FileView {
             .flex_col()
             .bg(theme.editor_background)
             .child(crumb)
+            .children(self.cut.map(|size| {
+                div()
+                    .debug_selector(|| "file-cut".into())
+                    .px(SPACE_6)
+                    .child(Label::new(cut_note(size)).color(Color::Muted))
+            }))
             .child(div().flex_1().min_h_0().child(self.code.clone()))
     }
 }

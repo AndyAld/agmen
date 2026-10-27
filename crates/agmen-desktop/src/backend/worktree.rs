@@ -120,6 +120,9 @@ impl WorktreeInfo {
 pub(crate) struct FileText {
     pub(crate) text: String,
     pub(crate) marks: Vec<GutterMark>,
+    /// Task 8: the whole file's size in bytes when `text` is only its
+    /// start (agmend sends at most 512 KiB); `None` for a whole file.
+    pub(crate) full_size: Option<u64>,
 }
 
 /// What a worktree has checked out.

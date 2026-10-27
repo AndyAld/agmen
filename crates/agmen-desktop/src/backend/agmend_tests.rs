@@ -535,3 +535,22 @@ fn file_view_reads_through_agmend(cx: &mut TestAppContext) {
         [json!({"project": PROJECT, "root": ROOT, "worktree": ROOT, "path": "src/main.rs"})]
     );
 }
+
+#[test]
+fn a_cut_file_keeps_its_full_size() {
+    // Task 8 review fix 2: the desktop must know a file was cut.
+    let entry = |truncated| agmen_local::console::FileTextEntry {
+        text: "a\n".into(),
+        marks: Vec::new(),
+        truncated,
+        size: 700_000,
+    };
+    assert_eq!(
+        super::agmend_local::file_text_from(entry(true)).full_size,
+        Some(700_000)
+    );
+    assert_eq!(
+        super::agmend_local::file_text_from(entry(false)).full_size,
+        None
+    );
+}

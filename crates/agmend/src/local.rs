@@ -522,15 +522,16 @@ pub(crate) async fn file_text(
             worktree.display()
         )));
     };
-    let (rel, text, truncated) = {
+    let read = {
         let (worktree, path) = (worktree.clone(), path.to_owned());
         blocking(move || read_inside(&worktree, &path)).await??
     };
-    let marks = marks(&Git::new(&worktree, deadline), &rel, &text).await;
+    let marks = marks(&Git::new(&worktree, deadline), &read.rel, &read.text).await;
     Ok(FileTextEntry {
-        text,
+        text: read.text,
         marks,
-        truncated,
+        truncated: read.truncated,
+        size: read.size,
     })
 }
 
@@ -541,11 +542,9 @@ fn is_git_dir(part: &OsStr) -> bool {
         .is_some_and(|p| p.eq_ignore_ascii_case(".git"))
 }
 
-/// Reads `path` inside `worktree`: its path from the root once links are
-/// followed, at most [`MAX_TEXT`] bytes of its text, and whether it was
-/// cut. Refuses a path that leaves the root, before or after following
+/// Reads at most [`MAX_TEXT`] bytes of `path` inside `worktree`. Refuses a path that leaves the root, before or after following
 /// links, or that reaches into `.git`.
-fn read_inside(worktree: &Path, path: &str) -> Result<(PathBuf, String, bool), ApiError> {
+fn read_inside(worktree: &Path, path: &str) -> Result<Read, ApiError> {
     let given = Path::new(path);
     let plain = !path.is_empty()
         && given.components().all(|part| match part {
@@ -577,9 +576,10 @@ fn read_inside(worktree: &Path, path: &str) -> Result<(PathBuf, String, bool), A
     }
     let mut file =
         File::open(&full).map_err(|err| not_found(format!("{path} cannot be read: {err}")))?;
-    if !is_file(file.metadata()) {
-        return Err(refused(format!("{path} is not a file")));
-    }
+    let size = match file.metadata() {
+        Ok(meta) if meta.is_file() => meta.len(),
+        _ => return Err(refused(format!("{path} is not a file"))),
+    };
     let mut bytes = Vec::new();
     let limit = u64::try_from(MAX_TEXT).unwrap_or(u64::MAX) + 1;
     file.by_ref()
@@ -599,7 +599,23 @@ fn read_inside(worktree: &Path, path: &str) -> Result<(PathBuf, String, bool), A
         }
         Err(_) => return Err(refused(format!("{path} is not UTF-8 text"))),
     };
-    Ok((rel, text, truncated))
+    Ok(Read {
+        rel,
+        text,
+        truncated,
+        size,
+    })
+}
+
+/// What [`read_inside`] read.
+#[derive(Debug)]
+struct Read {
+    /// The path from the worktree root once links are followed.
+    rel: PathBuf,
+    text: String,
+    truncated: bool,
+    /// The whole file's size in bytes.
+    size: u64,
 }
 
 /// The gutter marks of `rel` against `HEAD`; every line is new in an

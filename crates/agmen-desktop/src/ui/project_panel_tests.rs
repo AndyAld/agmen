@@ -222,11 +222,12 @@ fn normalized_worktrees_keep_markers_and_texts() {
         crate::backend::FileText {
             text: "fn main() {}\n".into(),
             marks: Vec::new(),
+            full_size: None,
         },
     )]);
     let wt = wt.normalized();
     assert!(change_marker(&wt.changes, "src/main.rs").is_some());
-    assert_eq!(contents(&wt, "src/main.rs").0, "fn main() {}\n");
+    assert_eq!(contents(&wt, "src/main.rs").text, "fn main() {}\n");
 }
 
 #[gpui::test]
@@ -243,4 +244,38 @@ fn file_view_diff_button_is_plain(cx: &mut TestAppContext) {
     let want = cx.debug_bounds("want-plain").unwrap();
     let diff = cx.debug_bounds("file-diff").unwrap();
     assert_eq!(diff.size, want.size, "{diff:?} {want:?}");
+}
+
+#[gpui::test]
+fn a_cut_file_says_only_its_start_is_shown(cx: &mut TestAppContext) {
+    // Task 8 review fix 2: agmend sends at most 512 KiB of a file.
+    init(cx);
+    let mut wt = fx1_worktree();
+    let text = |full_size| crate::backend::FileText {
+        text: "fn main() {}\n".into(),
+        marks: Vec::new(),
+        full_size,
+    };
+    wt.texts
+        .insert("big.rs".into(), text(Some(3 * 1024 * 1024)));
+    wt.texts.insert("whole.rs".into(), text(None));
+    let (_, cx) = cx.add_window_view(|_, cx| FileView::new(&wt, "big.rs", cx));
+    redraw(cx);
+    assert!(cx.debug_bounds("file-cut").is_some());
+    let (view, cx) = cx.add_window_view(|_, cx| FileView::new(&wt, "whole.rs", cx));
+    redraw(cx);
+    assert!(cx.debug_bounds("file-cut").is_none());
+    view.read_with(cx, |file, _| assert_eq!(file.cut_note(), None));
+}
+
+#[test]
+fn cut_notes_name_the_full_size() {
+    assert_eq!(
+        cut_note(3 * 1024 * 1024 + 300 * 1024),
+        "Only the first 512 KiB of 3.3 MiB is shown."
+    );
+    assert_eq!(
+        cut_note(600 * 1024),
+        "Only the first 512 KiB of 600 KiB is shown."
+    );
 }

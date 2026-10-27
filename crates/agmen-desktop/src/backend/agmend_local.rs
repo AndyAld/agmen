@@ -126,10 +126,9 @@ fn change_from(change: ChangeEntry) -> FileChange {
 }
 
 /// `file_text`'s answer as the file view shows it.
-// shortcut: a file cut at agmend's 512 KiB cap shows its first 512 KiB
-// with no note; add one if people open files that large.
 pub(super) fn file_text_from(entry: FileTextEntry) -> FileText {
     FileText {
+        full_size: entry.truncated.then_some(entry.size),
         text: entry.text,
         marks: entry
             .marks
