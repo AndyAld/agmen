@@ -6,14 +6,12 @@
 //! with [`AgmendError::AlreadyRunning`] and leaves the first one's socket
 //! alone; a socket left by a crashed agmend is replaced. The folder is
 //! made 0700 when agmend creates it, the socket is set to 0600 right after
-//! bind, and each connection's peer must run as the user that owns the lock
-//! file, so another user cannot talk to agmend even in the moment between
+//! bind, and each connection's peer must run as agmend's own effective
+//! uid, so another user cannot talk to agmend even in the moment between
 //! bind and chmod.
 
 use std::fs::{self, File, OpenOptions, TryLockError};
-use std::os::unix::fs::{
-    DirBuilderExt as _, MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _,
-};
+use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 
 use tokio::net::{UnixListener, UnixStream};
@@ -52,6 +50,12 @@ impl Drop for Bound {
     }
 }
 
+/// This process's effective uid: the only user whose connections agmend
+/// serves.
+fn process_uid() -> u32 {
+    rustix::process::geteuid().as_raw()
+}
+
 fn io(what: &'static str, path: &Path) -> impl FnOnce(std::io::Error) -> AgmendError {
     let path = path.to_owned();
     move |source| AgmendError::Io { what, path, source }
@@ -87,10 +91,6 @@ pub(crate) fn bind(socket: &Path) -> Result<Bound, AgmendError> {
         }
         Err(TryLockError::Error(err)) => return Err(io("locking", &lock_path)(err)),
     }
-    let uid = lock
-        .metadata()
-        .map_err(io("reading the lock file", &lock_path))?
-        .uid();
     match fs::remove_file(socket) {
         Ok(()) => {}
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
@@ -100,10 +100,28 @@ pub(crate) fn bind(socket: &Path) -> Result<Bound, AgmendError> {
     let bound = Bound {
         listener,
         path: socket.to_owned(),
-        uid,
+        uid: process_uid(),
         _lock: lock,
     };
     fs::set_permissions(socket, fs::Permissions::from_mode(0o600))
         .map_err(io("setting the socket's mode", socket))?;
     Ok(bound)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn peers_are_checked_against_the_process_uid() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("agmend.sock");
+        let bound = bind(&socket).unwrap();
+        assert_eq!(bound.uid, process_uid());
+        assert_eq!(process_uid(), rustix::process::geteuid().as_raw());
+        let client = UnixStream::connect(&socket).await.unwrap();
+        let (accepted, _) = bound.listener.accept().await.unwrap();
+        assert!(bound.is_own(&accepted));
+        drop(client);
+    }
 }
