@@ -222,6 +222,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "agmend"
+version = "0.1.0"
+dependencies = [
+ "agmen-client",
+ "agmen-local",
+ "agmen-proto",
+ "anyhow",
+ "axum",
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+]
+
+[[package]]
 name = "aho-corasick"
 version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -67,11 +67,11 @@ pub fn read<T: DeserializeOwned>(r: &mut impl Read) -> Result<T, FrameError> {
     Ok(serde_json::from_slice(&body)?)
 }
 
-/// [`write`] over a tokio writer.
+/// [`write`](fn@write) over a tokio writer.
 ///
 /// # Errors
 ///
-/// As [`write`].
+/// As [`write`](fn@write).
 #[cfg(feature = "tokio")]
 pub async fn write_async(
     w: &mut (impl tokio::io::AsyncWrite + Unpin),
@@ -86,12 +86,12 @@ pub async fn write_async(
     Ok(())
 }
 
-/// [`read`] over a tokio reader. Not cancel safe: drop the stream after a
+/// [`read`](fn@read) over a tokio reader. Not cancel safe: drop the stream after a
 /// cancelled read.
 ///
 /// # Errors
 ///
-/// As [`read`].
+/// As [`read`](fn@read).
 #[cfg(feature = "tokio")]
 pub async fn read_async<T: DeserializeOwned>(
     r: &mut (impl tokio::io::AsyncRead + Unpin),
