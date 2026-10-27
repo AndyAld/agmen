@@ -1,11 +1,28 @@
-//! `agmend`: runs the per-user daemon until SIGINT or SIGTERM.
+//! `agmend`: runs the per-user daemon until SIGINT or SIGTERM. It takes no
+//! arguments but `--help`; anything else is refused, so a command that is
+//! not built yet (such as `agmend service install`) never starts the
+//! daemon in the foreground instead.
 
 use std::process::ExitCode;
 
 use agmend::{Agmend, Config};
 use anyhow::{Context as _, Result};
 
+const USAGE: &str = "usage: agmend [--help]\n\nRuns the agmen daemon in the foreground until Ctrl-C. \
+                     Leave it running while you use agmen-desktop.";
+
 fn main() -> ExitCode {
+    if let Some(arg) = std::env::args_os().nth(1) {
+        if arg == "--help" || arg == "-h" {
+            println!("{USAGE}");
+            return ExitCode::SUCCESS;
+        }
+        eprintln!(
+            "agmend: unknown argument: {}\n{USAGE}",
+            arg.to_string_lossy()
+        );
+        return ExitCode::from(2);
+    }
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(
