@@ -3,7 +3,7 @@
 #![cfg_attr(not(test), expect(dead_code, reason = "wired by L17"))]
 
 use std::ffi::OsStr;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
@@ -34,6 +34,13 @@ async fn call(dir: &Path, args: &[&OsStr], index: Option<&Path>) -> Result<Outpu
         .await?;
     if out.truncated {
         bail!("git output exceeded {OUTPUT_BYTES} bytes; refusing incomplete worktree data");
+    }
+    #[cfg(test)]
+    if args.starts_with(&[OsStr::new("worktree"), OsStr::new("add")]) {
+        let hook = AFTER_ADD.with_borrow_mut(Option::take);
+        if let Some(hook) = hook {
+            hook();
+        }
     }
     Ok(out)
 }
@@ -156,9 +163,9 @@ pub(crate) async fn create(repo: &Path, base: &str, branch: &str) -> Result<Path
     branch_ref(repo, branch).await?;
     refuse_default_branch(repo, branch).await?;
     let (root, _) = worktree_root(repo).await?;
-    let path = contained_path(&root, &root.join(branch))?;
     let base = commit(repo, base).await?;
-    call(
+    let path = reserve_leaf(&root, &root.join(branch))?;
+    add_worktree(
         repo,
         &[
             "worktree".as_ref(),
@@ -168,9 +175,10 @@ pub(crate) async fn create(repo: &Path, base: &str, branch: &str) -> Result<Path
             path.as_os_str(),
             base.as_ref(),
         ],
-        None,
+        &path,
     )
     .await?;
+    check_added_worktree(repo, &root, &path).await?;
     Ok(path)
 }
 
@@ -182,9 +190,9 @@ pub(crate) async fn create_detached(repo: &Path, base: &str, path: &Path) -> Res
     } else {
         trees[0].path.join(path)
     };
-    let path = contained_path(&root, &path)?;
     let base = commit(repo, base).await?;
-    call(
+    let path = reserve_leaf(&root, &path)?;
+    add_worktree(
         repo,
         &[
             "worktree".as_ref(),
@@ -193,10 +201,106 @@ pub(crate) async fn create_detached(repo: &Path, base: &str, path: &Path) -> Res
             path.as_os_str(),
             base.as_ref(),
         ],
-        None,
+        &path,
     )
     .await?;
+    check_added_worktree(repo, &root, &path).await?;
     Ok(path)
+}
+
+/// Reserves a new leaf under the root, which may be nested (`fix/b-1-slug`).
+/// Every existing component from the root to the leaf's parent must be a real
+/// directory, never a symlink; missing ones are created one at a time, and the
+/// leaf itself with `create_dir`, which fails if anything exists there.
+fn reserve_leaf(root: &Path, path: &Path) -> Result<PathBuf> {
+    const OUTSIDE: &str = "worker path is outside the main worktree's .worktrees root";
+    let main = root.parent().context("worker root has no parent")?;
+    if path
+        .components()
+        .any(|part| !matches!(part, Component::RootDir | Component::Normal(_)))
+    {
+        bail!("worker path must be absolute without . or .. components");
+    }
+    // The shallowest ancestor that is the main worktree: symlinks above it
+    // (such as /var on macOS) are allowed, and nothing below it is followed.
+    // One canonicalize per component bounds this scan.
+    let ancestors: Vec<&Path> = path.ancestors().collect();
+    let start = ancestors
+        .into_iter()
+        .rev()
+        .find(|ancestor| std::fs::canonicalize(ancestor).is_ok_and(|real| real == main))
+        .context(OUTSIDE)?;
+    let mut parts = path.strip_prefix(start)?.components();
+    if parts.next() != Some(Component::Normal(OsStr::new(".worktrees"))) {
+        bail!(OUTSIDE);
+    }
+    let names: Vec<&OsStr> = parts.map(Component::as_os_str).collect();
+    let Some((leaf, parents)) = names.split_last() else {
+        bail!(OUTSIDE);
+    };
+    let mut current = root.to_path_buf();
+    real_dir(&current)?;
+    for name in parents {
+        current.push(name);
+        real_dir(&current)?;
+    }
+    current.push(leaf);
+    std::fs::create_dir(&current).context("reserving worker leaf directory")?;
+    let resolved =
+        std::fs::canonicalize(&current).context("resolving reserved worker directory")?;
+    if resolved != current {
+        bail!("{OUTSIDE}: reserved directory resolved elsewhere");
+    }
+    Ok(current)
+}
+
+/// Accepts an existing real directory, or creates a missing one; refuses a
+/// symlink or any other entry without following it.
+fn real_dir(path: &Path) -> Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_dir() => Ok(()),
+        Ok(_) => bail!("worker path component is not a real directory"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir(path).context("creating worker parent directory")
+        }
+        Err(error) => Err(error).context("reading worker path component"),
+    }
+}
+
+/// Runs `git worktree add`; on failure, removes the leaf reserved for it.
+/// `remove_dir` only removes an empty directory, so it cannot delete work.
+async fn add_worktree(repo: &Path, args: &[&OsStr], path: &Path) -> Result<()> {
+    if let Err(error) = call(repo, args, None).await {
+        if let Err(cleanup) = std::fs::remove_dir(path)
+            && cleanup.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(error.context(format!("leaving reserved worker directory: {cleanup}")));
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
+async fn check_added_worktree(repo: &Path, root: &Path, path: &Path) -> Result<()> {
+    let checked = std::fs::canonicalize(path)
+        .context("resolving added worker worktree")
+        .and_then(|resolved| contained_path(root, &resolved));
+    if let Err(error) = checked {
+        call(
+            repo,
+            &[
+                "worktree".as_ref(),
+                "remove".as_ref(),
+                "--".as_ref(),
+                path.as_os_str(),
+            ],
+            None,
+        )
+        .await
+        .with_context(|| format!("{error:#}; removing escaped worktree failed"))?;
+        return Err(error);
+    }
+    Ok(())
 }
 
 pub(crate) async fn merged_state(repo: &Path, branch: &str, base: &str) -> Result<Merged> {
@@ -471,6 +575,7 @@ pub(crate) fn slug(brief: &str) -> String {
 #[cfg(test)]
 thread_local! {
     static COMMANDS: std::cell::RefCell<Vec<Vec<std::ffi::OsString>>> = const { std::cell::RefCell::new(Vec::new()) };
+    static AFTER_ADD: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]

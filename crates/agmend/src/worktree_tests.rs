@@ -4,6 +4,87 @@ use std::ffi::OsStr;
 use std::time::Duration;
 use tokio::time::Instant;
 
+#[tokio::test]
+async fn create_refuses_existing_leaf_before_git_add() {
+    #[derive(Debug)]
+    enum Leaf {
+        File,
+        Directory,
+        Symlink,
+        Dangling,
+    }
+    let repo = repo().await;
+    let root = repo.path().join(".worktrees");
+    std::fs::create_dir(&root).unwrap();
+    for detached in [false, true] {
+        for kind in [Leaf::File, Leaf::Directory, Leaf::Symlink, Leaf::Dangling] {
+            let path = root.join("occupied");
+            match kind {
+                Leaf::File => std::fs::write(&path, "keep").unwrap(),
+                Leaf::Directory => std::fs::create_dir(&path).unwrap(),
+                Leaf::Symlink => std::os::unix::fs::symlink(&root, &path).unwrap(),
+                Leaf::Dangling => std::os::unix::fs::symlink(root.join("missing"), &path).unwrap(),
+            }
+            COMMANDS.with_borrow_mut(Vec::clear);
+            let result = if detached {
+                create_detached(repo.path(), "main", &path).await
+            } else {
+                create(repo.path(), "main", "occupied").await
+            };
+            assert!(result.is_err(), "{kind:?}, detached={detached}");
+            COMMANDS.with_borrow(|log| {
+                assert!(
+                    !log.iter()
+                        .any(|args| args.starts_with(&["worktree".into(), "add".into()])),
+                    "{kind:?}, detached={detached}"
+                );
+            });
+            assert!(std::fs::symlink_metadata(&path).is_ok());
+            if matches!(kind, Leaf::Directory) {
+                std::fs::remove_dir(&path).unwrap();
+            } else {
+                std::fs::remove_file(&path).unwrap();
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn create_checks_containment_after_add_and_removes_without_force() {
+    for detached in [false, true] {
+        let repo = repo().await;
+        let outside = tempfile::tempdir().unwrap();
+        let path = repo.path().join(".worktrees/worker");
+        let escaped = outside.path().join("escaped");
+        let leaf = path.clone();
+        let target = escaped.clone();
+        AFTER_ADD.with_borrow_mut(|hook| {
+            *hook = Some(Box::new(move || {
+                std::fs::rename(&leaf, &target).unwrap();
+                std::os::unix::fs::symlink(&target, &leaf).unwrap();
+            }));
+        });
+        let result = if detached {
+            create_detached(repo.path(), "main", &path).await
+        } else {
+            create(repo.path(), "main", "worker").await
+        };
+        let error = result.unwrap_err();
+        assert!(format!("{error:#}").contains("outside"), "{error:#}");
+        COMMANDS.with_borrow(|log| {
+            assert!(
+                log.iter()
+                    .any(|args| args.starts_with(&["worktree".into(), "remove".into()]))
+            );
+            assert!(
+                log.iter()
+                    .flatten()
+                    .all(|arg| arg != "--force" && arg != "-f" && arg != "-D")
+            );
+        });
+    }
+}
+
 async fn git(dir: &Path, args: &[&str]) -> String {
     let args: Vec<&OsStr> = args.iter().map(OsStr::new).collect();
     let out = Git::new(dir, Instant::now() + Duration::from_secs(30))
@@ -487,4 +568,77 @@ async fn create_refuses_default_branch_without_a_local_copy() {
             .await
             .is_empty()
     );
+}
+
+fn added(log: &[Vec<std::ffi::OsString>]) -> bool {
+    log.iter()
+        .any(|args| args.starts_with(&["worktree".into(), "add".into()]))
+}
+
+#[tokio::test]
+async fn create_refuses_symlinked_or_file_intermediate_component() {
+    let repo = repo().await;
+    let root = repo.path().join(".worktrees");
+    std::fs::create_dir_all(root.join("real")).unwrap();
+    // A symlink that stays inside the root is still refused, not followed.
+    std::os::unix::fs::symlink(root.join("real"), root.join("fix")).unwrap();
+    std::fs::write(root.join("file"), "keep").unwrap();
+    for branch in ["fix/b-1-slug", "file/b-1-slug"] {
+        COMMANDS.with_borrow_mut(Vec::clear);
+        let error = create(repo.path(), "main", branch).await.unwrap_err();
+        assert!(
+            format!("{error:#}").contains("not a real directory"),
+            "{error:#}"
+        );
+        COMMANDS.with_borrow(|log| assert!(!added(log), "{branch}"));
+    }
+    COMMANDS.with_borrow_mut(Vec::clear);
+    assert!(
+        create_detached(repo.path(), "main", &root.join("fix/review"))
+            .await
+            .is_err()
+    );
+    COMMANDS.with_borrow(|log| assert!(!added(log)));
+    assert!(!root.join("real/b-1-slug").exists());
+    assert!(!root.join("real/review").exists());
+    assert_eq!(std::fs::read_to_string(root.join("file")).unwrap(), "keep");
+}
+
+#[tokio::test]
+async fn create_refuses_symlinked_root() {
+    let repo = repo().await;
+    let outside = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(outside.path(), repo.path().join(".worktrees")).unwrap();
+    assert!(create(repo.path(), "main", "worker").await.is_err());
+    assert!(
+        create_detached(repo.path(), "main", &repo.path().join(".worktrees/review"))
+            .await
+            .is_err()
+    );
+    assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
+}
+
+#[tokio::test]
+async fn create_nests_slash_branches_in_real_directories() {
+    let repo = repo().await;
+    let path = create(repo.path(), "main", "fix/b-1-slug").await.unwrap();
+    let root = std::fs::canonicalize(repo.path())
+        .unwrap()
+        .join(".worktrees");
+    assert_eq!(path, root.join("fix/b-1-slug"));
+    for dir in [root.clone(), root.join("fix")] {
+        assert!(std::fs::symlink_metadata(dir).unwrap().file_type().is_dir());
+    }
+    let second = create(repo.path(), "main", "fix/c-2-other").await.unwrap();
+    assert_eq!(second, root.join("fix/c-2-other"));
+}
+
+#[tokio::test]
+async fn failed_add_releases_reserved_leaf() {
+    let repo = repo().await;
+    git(repo.path(), &["branch", "taken"]).await;
+    assert!(create(repo.path(), "main", "taken").await.is_err());
+    assert!(!repo.path().join(".worktrees/taken").exists());
+    git(repo.path(), &["branch", "-d", "taken"]).await;
+    create(repo.path(), "main", "taken").await.unwrap();
 }

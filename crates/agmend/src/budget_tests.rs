@@ -67,29 +67,28 @@ fn zero_cap_fires_once_on_first_valid_observation() {
 }
 
 #[test]
-fn overflow_does_not_reset_spend_or_steps() {
-    let mut budget = Budget::new(money("1"));
-    let mut steps = Vec::new();
-    budget
-        .observe_total_cost_usd("0.8", |step| steps.push(step))
-        .unwrap();
+fn overflow_saturates_spend_and_fires_remaining_steps() {
     for value in [
         "18446744073709.551616",
         "1e100",
         "999999999999999999999999999999999999999999",
+        "1e99999999999999999999999999999999999999999",
     ] {
-        assert!(
-            budget
-                .observe_total_cost_usd(value, |step| steps.push(step))
-                .is_err()
-        );
-        assert_eq!(budget.spent(), money("0.8"));
-        assert_eq!(steps, [Step::Warn]);
+        let mut budget = Budget::new(money("1"));
+        let mut steps = Vec::new();
+        budget
+            .observe_total_cost_usd("0.8", |step| steps.push(step))
+            .unwrap();
+        budget
+            .observe_total_cost_usd(value, |step| steps.push(step))
+            .unwrap();
+        assert_eq!(budget.spent(), Money(u64::MAX));
+        assert_eq!(steps, [Step::Warn, Step::WrapUp, Step::Stop]);
+        budget
+            .observe_total_cost_usd(value, |step| steps.push(step))
+            .unwrap();
+        assert_eq!(steps, [Step::Warn, Step::WrapUp, Step::Stop]);
     }
-    budget
-        .observe_total_cost_usd("1", |step| steps.push(step))
-        .unwrap();
-    assert_eq!(steps, [Step::Warn, Step::WrapUp, Step::Stop]);
 }
 
 #[test]
@@ -106,8 +105,26 @@ fn lower_and_malformed_values_preserve_high_water_mark() {
         assert_eq!(budget.spent(), money("0.95"));
     }
     for value in [
-        "", "-1", "-0", "NaN", "Infinity", "null", "true", "\"0.99\"", "01", ".8", "1.", "1e",
-        "1e2e3", "1 2", "0.9x", "0.8\n",
+        "",
+        "-1",
+        "-0",
+        "NaN",
+        "Infinity",
+        "null",
+        "true",
+        "\"0.99\"",
+        "01",
+        ".8",
+        "1.",
+        "1e",
+        "1e2e3",
+        "1 2",
+        "0.9x",
+        "0.8\n",
+        "1e+",
+        "1e 2",
+        "999999999999999999999999999999999999999999x",
+        "999999999999999999999999999999999999999999eNaN",
     ] {
         assert!(
             budget
@@ -133,6 +150,16 @@ fn decimal_conversion_is_fixed_point_and_supports_exponents() {
     assert_eq!(money("8.0e+1"), money("80"));
     assert_eq!(money("1e-100"), Money(0));
     assert_eq!(money("18446744073709.551615"), Money(u64::MAX));
+    assert_eq!(
+        money("123456789012345678901234567890123456789012e-40"),
+        Money(12_345_678)
+    );
+    assert_eq!(
+        money("0.000000000000000000000000000000000000000001e42"),
+        money("1")
+    );
+    assert_eq!(money("0e999999999999999999999"), Money(0));
+    assert_eq!(money("1e-999999999999999999999"), Money(0));
     assert!(Money::from_usd(&"0".repeat(129)).is_err());
 }
 

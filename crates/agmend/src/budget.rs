@@ -12,16 +12,30 @@ pub(crate) struct InvalidCost;
 
 impl Money {
     /// Parses a raw JSON number token, not a quoted string or an f64 rendering.
-    /// At most 128 bytes; nonnegative JSON decimal syntax with an i32 exponent.
+    /// Nonnegative JSON decimal syntax; out-of-range amounts saturate.
     /// Fractions below one millionth are truncated, so rounding cannot fire a
-    /// step early. Rejects coefficient or money overflow without changing spend.
+    /// step early. Validate the entire token before saturating an overflow.
     pub(crate) fn from_usd(value: &str) -> Result<Self, InvalidCost> {
-        if value.is_empty() || value.len() > 128 {
+        if value.is_empty() {
             return Err(InvalidCost);
         }
         let (decimal, exponent) = match value.split_once(['e', 'E']) {
             Some((decimal, exponent)) => {
-                (decimal, exponent.parse::<i32>().map_err(|_| InvalidCost)?)
+                let (negative, digits) = if let Some(digits) = exponent.strip_prefix('-') {
+                    (true, digits)
+                } else {
+                    (false, exponent.strip_prefix('+').unwrap_or(exponent))
+                };
+                if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+                    return Err(InvalidCost);
+                }
+                // Both scans are bounded by the input token length.
+                let exponent = digits.bytes().fold(0_i64, |value, byte| {
+                    value
+                        .saturating_mul(10)
+                        .saturating_add(i64::from(byte - b'0'))
+                });
+                (decimal, if negative { -exponent } else { exponent })
             }
             None => (value, 0),
         };
@@ -33,34 +47,41 @@ impl Money {
         if whole.is_empty() || (whole.len() > 1 && whole.starts_with('0')) {
             return Err(InvalidCost);
         }
-        let mut coefficient = 0_u128;
-        // The token's 128-byte limit bounds this loop and its checked arithmetic.
+        // Validate before conversion so a malformed suffix cannot trigger Stop.
         for byte in whole.bytes().chain(fraction.bytes()) {
             if !byte.is_ascii_digit() {
                 return Err(InvalidCost);
             }
-            coefficient = coefficient
-                .checked_mul(10)
-                .and_then(|value| value.checked_add(u128::from(byte - b'0')))
-                .ok_or(InvalidCost)?;
         }
         let fraction_digits = i64::try_from(fraction.len()).map_err(|_| InvalidCost)?;
-        let shift = i64::from(exponent) + 6 - fraction_digits;
-        let power = u32::try_from(shift.unsigned_abs()).map_err(|_| InvalidCost)?;
-        let micros = if coefficient == 0 {
-            0
-        } else if shift >= 0 {
-            10_u128
-                .checked_pow(power)
-                .and_then(|scale| coefficient.checked_mul(scale))
-                .ok_or(InvalidCost)?
-        } else {
-            match 10_u128.checked_pow(power) {
-                Some(scale) => coefficient / scale,
-                None => 0,
-            }
-        };
-        Ok(Self(u64::try_from(micros).map_err(|_| InvalidCost)?))
+        let digits = whole
+            .bytes()
+            .chain(fraction.bytes())
+            .skip_while(|byte| *byte == b'0');
+        let significant = i64::try_from(digits.clone().count()).map_err(|_| InvalidCost)?;
+        if significant == 0 {
+            return Ok(Self(0));
+        }
+        let places = exponent
+            .saturating_sub(fraction_digits)
+            .saturating_add(significant)
+            .saturating_add(6);
+        if places <= 0 {
+            return Ok(Self(0));
+        }
+        if places > 20 {
+            return Ok(Self(u64::MAX));
+        }
+        // At most 20 integer micro-dollar digits, padding with zeros if needed.
+        let micros = digits
+            .chain(std::iter::repeat(b'0'))
+            .take(places as usize)
+            .fold(0_u64, |value, byte| {
+                value
+                    .saturating_mul(10)
+                    .saturating_add(u64::from(byte - b'0'))
+            });
+        Ok(Self(micros))
     }
 }
 
