@@ -309,6 +309,12 @@ pub struct Home {
 impl Home {
     /// A home where the CLI signed in at `hub_url`.
     pub async fn signed_in(hub_url: &str) -> Self {
+        Self::signed_in_for(hub_url, 3600).await
+    }
+
+    /// As [`Home::signed_in`], with an access token that runs out in
+    /// `expires_in` seconds (under 120 makes agmend renew it first).
+    pub async fn signed_in_for(hub_url: &str, expires_in: i64) -> Self {
         // In target/tmp: short enough for a Unix socket path (104 bytes on
         // macOS), and inside the worktree.
         let dir = tempfile::Builder::new()
@@ -322,7 +328,7 @@ impl Home {
             handle: HANDLE.to_owned(),
         };
         std::fs::write(home.login_file(), serde_json::to_vec(&login).unwrap()).unwrap();
-        let tokens = HumanTokens::new(ACCESS.to_owned(), "refresh-1".to_owned(), 3600);
+        let tokens = HumanTokens::new(ACCESS.to_owned(), "refresh-1".to_owned(), expires_in);
         store_tokens(&home.tokens(), &login, &tokens).await.unwrap();
         home
     }
@@ -355,6 +361,18 @@ impl Daemon {
     pub async fn start() -> Self {
         let hub = fake_hub().await;
         let home = Home::signed_in(&hub.url).await;
+        Self::run(hub, home)
+    }
+
+    /// An agmend whose login names a hub nobody listens on, with a token
+    /// that needs renewing, so every renewal fails to connect.
+    pub async fn start_unreachable() -> Self {
+        let hub = fake_hub().await;
+        let home = Home::signed_in_for("http://127.0.0.1:9/", 30).await;
+        Self::run(hub, home)
+    }
+
+    fn run(hub: FakeHub, home: Home) -> Self {
         let agmend = Agmend::bind(home.config()).unwrap();
         tokio::spawn(agmend.serve());
         Self { hub, home }

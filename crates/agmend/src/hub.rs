@@ -57,6 +57,23 @@ pub(crate) enum HubError {
     },
 }
 
+impl HubError {
+    /// Whether retrying soon will not help: nobody is signed in, the hub
+    /// refused the sign-in, or it refused this person the project (401,
+    /// 403, 404). Everything else (unreachable, 5xx, a broken answer) is
+    /// the hub being away.
+    pub(crate) const fn is_final(&self) -> bool {
+        matches!(
+            self,
+            Self::Login(LoginError::NotSignedIn | LoginError::Refused { .. })
+                | Self::Refused {
+                    status: 401 | 403 | 404,
+                    ..
+                }
+        )
+    }
+}
+
 impl From<HubError> for ApiError {
     fn from(err: HubError) -> Self {
         let (code, message) = match &err {
@@ -64,7 +81,15 @@ impl From<HubError> for ApiError {
                 ErrorCode::Unauthorized,
                 "not signed in: run agmen login --hub <url>".to_owned(),
             ),
-            HubError::Login(_) => (ErrorCode::Unauthorized, chain(&err)),
+            // The hub refused the refresh grant: the sign-in is over.
+            HubError::Login(LoginError::Refused { .. }) => (
+                ErrorCode::Unauthorized,
+                format!("{}: run agmen login", chain(&err)),
+            ),
+            // The renewal could not reach the hub, or the store or the
+            // login file failed: nothing says the person signed out, so a
+            // console treats it as the hub being away and retries.
+            HubError::Login(_) => (ErrorCode::Hub, chain(&err)),
             HubError::Refused { status: 401, .. } => (
                 ErrorCode::Unauthorized,
                 format!("{err}: the sign-in has ended; run agmen login"),

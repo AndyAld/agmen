@@ -303,3 +303,32 @@ async fn post_with_a_bad_envelope_is_a_bad_request() {
     assert_eq!(err.code, ErrorCode::BadRequest);
     assert!(daemon.hub.state.posts.lock().unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn an_unreachable_hub_during_renewal_is_a_hub_error() {
+    let daemon = Daemon::start_unreachable().await;
+    let mut client = daemon.client().await;
+    let err = error(
+        client
+            .call("console_snapshot", json!({"project": PROJECT}))
+            .await,
+    );
+    assert_eq!(err.code, ErrorCode::Hub, "{}", err.message);
+    assert!(
+        err.message.contains("could not be reached"),
+        "{}",
+        err.message
+    );
+}
+
+#[tokio::test]
+async fn a_watch_while_renewal_cannot_reach_the_hub_starts_disconnected() {
+    let daemon = Daemon::start_unreachable().await;
+    let mut frames = daemon.client().await.watch(PROJECT).await;
+    assert_eq!(
+        event(next(&mut frames).await),
+        ConsoleEvent::Hub { connected: false }
+    );
+    // Still retrying, and nothing says the person signed out.
+    quiet(&mut frames, Duration::from_millis(500)).await;
+}

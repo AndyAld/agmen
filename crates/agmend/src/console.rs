@@ -201,8 +201,8 @@ impl Console {
         // A project the person may not read fails here, not as a stream
         // that never connects. An unreachable hub is not an error: the
         // watch starts disconnected and connects when the hub is back.
-        if let Err(err @ (HubError::Refused { .. } | HubError::Login(_))) =
-            self.hub.head(&project).await
+        if let Err(err) = self.hub.head(&project).await
+            && err.is_final()
         {
             return Err(err.into());
         }
