@@ -27,6 +27,7 @@ mod db;
 mod emqx;
 mod health;
 mod http;
+mod human_post;
 mod identities;
 mod ingest;
 mod invites;

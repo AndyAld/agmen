@@ -163,8 +163,9 @@ impl Hub {
     /// limit (10 per second, burst 30, per sender), check that the sender
     /// is a live member of the project and may send the verb, scan for
     /// credentials, dedupe on `(from, id)`, expand mentions, then number
-    /// and store every copy with its outbox rows. A fresh ACK is also
-    /// queued for `ack/{from}` behind the message itself.
+    /// and store every copy with its outbox rows. A fresh ACK from an
+    /// identity is also queued for `ack/{from}` behind the message itself;
+    /// a human's is not, because the human reads it from the HTTP reply.
     ///
     /// A ledger verb (CLAIM, HEARTBEAT, RELEASE, ASSIGN, FOUND, DONE) is
     /// acted on, and the hub's answer posted, in the same transaction.
@@ -273,6 +274,13 @@ impl Hub {
             from_owner: sender.owner.clone(),
             hub_at,
         });
+        // A human posts over HTTP and reads the reply from the response, so
+        // no ACK is queued for a topic nobody listens on.
+        let (ack, route) = if sender.kind == IdentityKind::Human {
+            (AckCopy::None, ReplyRoute::Caller)
+        } else {
+            (AckCopy::Queue, ReplyRoute::Outbox)
+        };
         let draft = Draft {
             topics,
             client: env,
@@ -283,7 +291,7 @@ impl Hub {
             streams,
             hash: hash.clone(),
             hub_at,
-            ack: AckCopy::Queue,
+            ack,
         };
         let mut tx = pool.begin().await.map_err(StoreError::from)?;
         if ledger.is_some() {
@@ -314,7 +322,7 @@ impl Hub {
                 let (stream, seq) = recorded.ack;
                 Ok(Handled {
                     reply: DeliveryReply::Ack { id, stream, seq },
-                    route: ReplyRoute::Outbox,
+                    route,
                 })
             }
             // A copy of the same message committed first: answer as for a
