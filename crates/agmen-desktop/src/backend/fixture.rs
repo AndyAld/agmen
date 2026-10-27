@@ -15,8 +15,8 @@ use super::fixture_data::{
 };
 use super::fixture_models::{ask_model, model_groups, tag_from};
 use super::{
-    Action, Backend, BackendError, ChangeState, Draft, RecentAction, RecentKind, Screen, Snapshot,
-    StatusSummary, Update,
+    Action, Backend, BackendError, ChangeState, Draft, Older, RecentAction, RecentKind, Screen,
+    Snapshot, StatusSummary, Update,
 };
 
 /// Serves one mockup screen's state, and keeps what is sent and done in
@@ -67,6 +67,9 @@ fn base(project: &str) -> Result<Snapshot, BackendError> {
             spend_today_usd: spend,
         },
         messages: Vec::new(),
+        // The fixture holds its whole chat.
+        older: Older::Start,
+        newer: false,
         changes: BTreeMap::new(),
         plan: None,
         git: git_facts(),

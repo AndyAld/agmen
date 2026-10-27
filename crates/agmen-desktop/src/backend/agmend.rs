@@ -8,7 +8,8 @@
 //! - The watch thread owns the `console_watch` connection. It reconnects
 //!   with backoff (1, 2, 4 ... 30 s) and pushes each event to subscribers.
 //! - The request thread owns a second connection and runs one job at a
-//!   time: a snapshot once a watch is connected, a post, or a file's text.
+//!   time: a snapshot once a watch is connected, a post, a file's text,
+//!   or an older page of the chat (final review fix 1).
 //!
 //! Only `Send` data crosses threads: agmen-local and agmen-proto types and
 //! [`Update`]s. The backend itself stays on the main thread as an
@@ -46,7 +47,7 @@ use serde_json::{Value, json};
 use super::agmend_local;
 use super::{
     Action, AgentRow, AgentStatus, Backend, BackendError, Draft, FileText, FileTextReply, GitFacts,
-    Link, ListenerInfo, PersonGroup, Snapshot, StatusSummary, Update, WorktreeInfo,
+    Link, ListenerInfo, Older, PersonGroup, Snapshot, StatusSummary, Update, WorktreeInfo,
 };
 
 /// The most messages held per project; the oldest go first (the plan's
@@ -130,6 +131,8 @@ struct Live {
     roster: Vec<RosterEntry>,
     local: LocalData,
     held: Held,
+    /// Final review fix 1: the older page on its way, or why it failed.
+    paging: Paging,
     link: Link,
     /// Watch messages that came before the pending snapshot's answer, at
     /// most [`MAX_MESSAGES`] (more would be trimmed anyway); `None` while
@@ -153,18 +156,25 @@ struct Live {
 
 impl Live {
     fn snapshot(&self) -> Snapshot {
-        snapshot_from(ConsoleSnapshot {
+        let mut snapshot = snapshot_from(ConsoleSnapshot {
             project: self.project.clone(),
             me: self.me.clone(),
             roster: self.roster.clone(),
             messages: self.held.to_vec(),
-            // shortcut: no `older` in Snapshot until scroll-back pages
-            // history; at most the newest 2000 messages show until then.
-            older: false,
+            older: self.held.older,
             roles: self.local.roles.clone(),
             worktrees: self.local.worktrees.clone(),
             git: self.local.git.clone(),
-        })
+        });
+        // Final review fix 1: what paging back is doing.
+        snapshot.older = match (&self.paging, self.held.older) {
+            (Paging::Loading, _) => Older::Loading,
+            (_, false) => Older::Start,
+            (Paging::Failed(why), true) => Older::Failed(why.clone()),
+            (Paging::Idle, true) => Older::More,
+        };
+        snapshot.newer = self.held.newer;
+        snapshot
     }
 
     // shortcut: subscribers' channels are unbounded, as the Backend trait
@@ -203,8 +213,20 @@ impl Live {
 /// The chat as held: at most [`MAX_MESSAGES`], keyed and ordered by
 /// `(stream, seq)`. The console is the project feed, whose seqs are the
 /// chat's order.
+///
+/// Final review fix 1: the held messages are always one run with no hole.
+/// New messages push the oldest out. Paging back pushes the newest out
+/// instead, since the person is reading the page they scrolled to; the
+/// chat then stops taking new messages (`newer`) until the person goes back
+/// to the newest page, which replaces the whole run.
 #[derive(Debug, Default)]
-pub(super) struct Held(BTreeMap<(Stream, Seq), StampedEnvelope>);
+pub(super) struct Held {
+    messages: BTreeMap<(Stream, Seq), StampedEnvelope>,
+    /// agmend has messages before the first one held.
+    pub(super) older: bool,
+    /// Paging back let messages after the last one held go.
+    pub(super) newer: bool,
+}
 
 /// What [`Held::insert`] did.
 #[derive(Debug, PartialEq, Eq)]
@@ -212,52 +234,112 @@ enum Added {
     New,
     /// Added, and the oldest message dropped to stay at the cap.
     Trimmed,
-    /// Held already, or older than everything kept at the cap.
+    /// Held already, older than everything kept at the cap, or newer than
+    /// a chat that paged back past the cap.
     Nothing,
 }
 
 impl Held {
+    /// Adds one message the watch heard.
     fn insert(&mut self, env: StampedEnvelope) -> Added {
-        let key = (env.stream.clone(), env.seq);
-        if self.0.contains_key(&key) {
+        // shortcut: while the chat reads back past the cap, a new message
+        // waits for the jump to the newest page, and so does any alert it
+        // raises; keep a count of them if people miss that.
+        if self.newer {
             return Added::Nothing;
         }
-        self.0.insert(key.clone(), env);
-        if self.0.len() <= MAX_MESSAGES {
+        let key = (env.stream.clone(), env.seq);
+        if self.messages.contains_key(&key) {
+            return Added::Nothing;
+        }
+        self.messages.insert(key.clone(), env);
+        if self.messages.len() <= MAX_MESSAGES {
             return Added::New;
         }
-        match self.0.pop_first() {
+        self.older = true;
+        match self.messages.pop_first() {
             Some((oldest, _)) if oldest == key => Added::Nothing,
             _ => Added::Trimmed,
         }
     }
 
-    /// Takes a fresh snapshot's page. When the page starts past the newest
-    /// held message, the messages between are missing, so the old page goes
-    /// rather than leave a silent hole in the chat.
-    pub(super) fn merge(&mut self, fresh: Vec<StampedEnvelope>) {
-        let gap = match (self.0.last_key_value(), fresh.first()) {
+    /// Takes a fresh snapshot's page, the newest messages, and whether
+    /// older ones exist. When the page starts past the newest held message,
+    /// the messages between are missing, so the old page goes rather than
+    /// leave a silent hole in the chat; a chat that paged back past the cap
+    /// goes the same way.
+    pub(super) fn merge(&mut self, fresh: Vec<StampedEnvelope>, older: bool) {
+        let gap = match (self.messages.last_key_value(), fresh.first()) {
             (Some(((stream, newest), _)), Some(first)) => {
                 *stream == first.stream && first.seq.0 > newest.0.saturating_add(1)
             }
             _ => false,
         };
-        if gap {
-            self.0.clear();
+        let starts_earlier = match (self.messages.first_key_value(), fresh.first()) {
+            (Some((oldest, _)), Some(first)) => (first.stream.clone(), first.seq) < *oldest,
+            (None, _) => true,
+            (Some(_), None) => false,
+        };
+        if gap || self.newer {
+            self.messages.clear();
+            self.newer = false;
+        }
+        if self.messages.is_empty() || starts_earlier {
+            self.older = older;
         }
         for env in fresh {
             self.insert(env);
         }
     }
 
+    /// Takes the `chat_history` page asked for before seq `before`, and
+    /// whether older ones exist; `false` when the chat no longer starts at
+    /// `before`, so the page would leave a hole. Past the cap the newest
+    /// messages go.
+    pub(super) fn prepend(&mut self, before: Seq, page: Vec<StampedEnvelope>, older: bool) -> bool {
+        if self.first_seq() != Some(before) {
+            return false;
+        }
+        for env in page.into_iter().filter(|env| env.seq < before) {
+            self.messages
+                .entry((env.stream.clone(), env.seq))
+                .or_insert(env);
+        }
+        self.older = older;
+        while self.messages.len() > MAX_MESSAGES {
+            self.messages.pop_last();
+            self.newer = true;
+        }
+        true
+    }
+
+    /// The seq of the oldest message held.
+    fn first_seq(&self) -> Option<Seq> {
+        self.messages.first_key_value().map(|((_, seq), _)| *seq)
+    }
+
     pub(super) fn to_vec(&self) -> Vec<StampedEnvelope> {
-        self.0.values().cloned().collect()
+        self.messages.values().cloned().collect()
     }
 
     fn find(&self, id: &MessageId) -> Option<&StampedEnvelope> {
-        self.0.values().find(|m| &m.client.id == id)
+        self.messages.values().find(|m| &m.client.id == id)
     }
 }
+
+/// Final review fix 1: what paging back is doing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Paging {
+    Idle,
+    /// A `chat_history` request is on the request thread.
+    Loading,
+    /// The last one failed, for this reason.
+    Failed(String),
+}
+
+/// The largest `chat_history` page agmend serves (the plan's Global
+/// Constraints).
+const PAGE: u32 = 500;
 
 /// A job for the request thread.
 #[derive(Debug)]
@@ -268,6 +350,8 @@ enum Job {
         draft: Draft,
         envelope: Box<ClientEnvelope>,
     },
+    /// Final review fix 1: the page before the oldest held message.
+    History { before: Seq },
     /// Task 8: one file's text, for a file view that opened.
     FileText {
         worktree: String,
@@ -321,7 +405,7 @@ impl AgmendBackend {
         };
         let local = take_local(&mut console);
         let mut held = Held::default();
-        held.merge(console.messages);
+        held.merge(console.messages, console.older);
         let shared = Arc::new(Shared {
             socket: socket.to_owned(),
             project: project.to_owned(),
@@ -332,6 +416,7 @@ impl AgmendBackend {
                 roster: console.roster,
                 local,
                 held,
+                paging: Paging::Idle,
                 link: Link::HubDown { why: None },
                 early: None,
                 generation: 0,
@@ -401,7 +486,7 @@ impl Backend for AgmendBackend {
             if live.link != Link::Live {
                 return Err(BackendError::NotConnected);
             }
-            envelope_for(&draft, live.held.0.values())?
+            envelope_for(&draft, live.held.messages.values())?
         };
         let job = Job::Post {
             draft,
@@ -460,6 +545,42 @@ impl Backend for AgmendBackend {
             live.subscribers.push(tx);
         }
         rx
+    }
+
+    fn load_older(&self) {
+        let mut live = self.shared.lock();
+        if live.paging == Paging::Loading || !live.held.older {
+            return;
+        }
+        let Some(before) = live.held.first_seq() else {
+            return;
+        };
+        // Never blocks, so holding the lock is fine.
+        live.paging = match self.jobs.try_send(Job::History { before }) {
+            Ok(()) => Paging::Loading,
+            Err(TrySendError::Full(_)) => {
+                Paging::Failed("agmend is busy; scroll up again in a moment".to_owned())
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                Paging::Failed("not connected to agmend".to_owned())
+            }
+        };
+        live.publish_snapshot();
+    }
+
+    fn load_newest(&self) {
+        let mut live = self.shared.lock();
+        // A snapshot already pending brings the newest page too.
+        if !live.held.newer || live.link != Link::Live || live.early.is_some() {
+            return;
+        }
+        // The same path a watch takes once the hub is up: watch messages
+        // from now wait for the answer, which replaces the paged-back run.
+        live.generation += 1;
+        let generation = live.generation;
+        if self.jobs.try_send(Job::Snapshot { generation }).is_ok() {
+            live.early = Some(VecDeque::new());
+        }
     }
 
     fn file_text(&self, worktree: &WorktreeInfo, path: &str) -> Option<FileTextReply> {
@@ -646,6 +767,12 @@ fn serve_jobs(shared: &Shared, queue: &Receiver<Job>, mut conn: Option<Conn>) {
                     shared.lock().publish(&Update::NotSent { draft, why });
                 }
             }
+            Job::History { before } => {
+                let params = json!({ "project": shared.project, "before": before, "limit": PAGE });
+                let answer = request(shared, &mut conn, "chat_history", params)
+                    .and_then(|value| parse::<HistoryPage>(value).map_err(|e| e.to_string()));
+                take_history(shared, before, answer);
+            }
             Job::FileText {
                 worktree,
                 path,
@@ -669,6 +796,28 @@ fn serve_jobs(shared: &Shared, queue: &Receiver<Job>, mut conn: Option<Conn>) {
     }
 }
 
+/// `chat_history`'s answer (agmend's console.rs `History`).
+#[derive(Debug, serde::Deserialize)]
+struct HistoryPage {
+    messages: Vec<StampedEnvelope>,
+    older: bool,
+}
+
+/// Final review fix 1: applies an older page, or says why there is none.
+fn take_history(shared: &Shared, before: Seq, answer: Result<HistoryPage, String>) {
+    let mut live = shared.lock();
+    live.paging = match answer {
+        // A page for a chat a snapshot replaced meanwhile is dropped; the
+        // next scroll to the top asks again.
+        Ok(page) => {
+            live.held.prepend(before, page.messages, page.older);
+            Paging::Idle
+        }
+        Err(why) => Paging::Failed(why),
+    };
+    live.publish_snapshot();
+}
+
 /// Applies a snapshot answer, or ends the watch so it starts over.
 fn take_snapshot(shared: &Shared, generation: u64, answer: Result<ConsoleSnapshot, String>) {
     let mut live = shared.lock();
@@ -682,7 +831,7 @@ fn take_snapshot(shared: &Shared, generation: u64, answer: Result<ConsoleSnapsho
             live.project = console.project;
             live.me = console.me;
             live.roster = console.roster;
-            live.held.merge(console.messages);
+            live.held.merge(console.messages, console.older);
             for env in live.early.take().unwrap_or_default() {
                 live.held.insert(env);
             }
@@ -849,7 +998,7 @@ pub(super) fn snapshot_from(console: ConsoleSnapshot) -> Snapshot {
         me,
         roster,
         messages,
-        older: _,
+        older,
         roles,
         worktrees,
         git,
@@ -888,6 +1037,8 @@ pub(super) fn snapshot_from(console: ConsoleSnapshot) -> Snapshot {
             spend_today_usd: 0.0,
         },
         messages,
+        older: if older { Older::More } else { Older::Start },
+        newer: false,
         changes: BTreeMap::new(),
         plan: None,
         git: GitFacts {

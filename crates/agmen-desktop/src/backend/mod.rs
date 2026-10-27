@@ -110,6 +110,15 @@ pub(crate) trait Backend: 'static {
     fn file_text(&self, _worktree: &WorktreeInfo, _path: &str) -> Option<FileTextReply> {
         None
     }
+    /// Final review fix 1: asks for the page of messages before the oldest
+    /// one held, when the snapshot's `older` is [`Older::More`] or
+    /// [`Older::Failed`]. The page arrives as an [`Update::Snapshot`].
+    /// Nothing happens for a backend that holds its whole chat, as the
+    /// fixture.
+    fn load_older(&self) {}
+    /// Final review fix 1: goes back to the newest page after paging back
+    /// let the newest messages go (the snapshot's `newer`).
+    fn load_newest(&self) {}
 }
 
 /// Where a [`Backend::file_text`] answer arrives.
@@ -201,6 +210,22 @@ pub(crate) enum Update {
         draft: Draft,
         why: String,
     },
+}
+
+/// Final review fix 1: whether the chat has messages older than the ones
+/// a snapshot holds, and what paging them in is doing.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) enum Older {
+    /// The snapshot starts at the chat's first message.
+    #[default]
+    Start,
+    /// Older messages exist; scrolling to the top asks for them.
+    More,
+    /// A page of older messages is on its way.
+    Loading,
+    /// The last page did not arrive, for this reason; scrolling up tries
+    /// again.
+    Failed(String),
 }
 
 /// How far the live backend reaches (Task 6).
@@ -544,6 +569,12 @@ pub(crate) struct Snapshot {
     pub(crate) status: StatusSummary,
     /// The project chat, oldest first.
     pub(crate) messages: Vec<StampedEnvelope>,
+    /// Final review fix 1: what comes before `messages`.
+    pub(crate) older: Older,
+    /// Final review fix 1: paging back past the 2000 message cap let the
+    /// newest messages go; new ones are not added until the person goes
+    /// back to the newest page ([`Backend::load_newest`]).
+    pub(crate) newer: bool,
     /// Change cards, keyed by the listener message they belong to.
     pub(crate) changes: BTreeMap<MessageId, ChangeCard>,
     pub(crate) plan: Option<PlanInfo>,

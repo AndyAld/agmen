@@ -442,3 +442,24 @@ fn a_snapshot_catch_up_signals_once_for_the_newest_alert(cx: &mut TestAppContext
     let toast = o.chat.read_with(o.cx, |chat, _| chat.toast().cloned());
     assert_eq!(toast.map(|toast| toast.alert), Some(newer.client.id));
 }
+
+#[gpui::test]
+fn an_older_page_raises_no_alert(cx: &mut TestAppContext) {
+    // Final review fix 1: an urgent alert in a page paged in on
+    // scroll-back is history: it shows, but it does not chime or toast.
+    let mut alert = urgent_alert(&FixtureBackend::for_screen(Screen::NeedsYou).unwrap());
+    let o = open(cx, Screen::Chat);
+    let mut earlier = o.backend.snapshot();
+    alert.seq = agmen_proto::Seq(0);
+    earlier.messages.insert(0, alert);
+    o.chat.update(o.cx, |chat, cx| {
+        chat.apply(Update::Snapshot(Box::new(earlier)), cx);
+    });
+    assert_eq!(
+        o.chat.read_with(o.cx, |chat, _| chat.message_count()),
+        o.backend.snapshot().messages.len() + 1
+    );
+    assert_eq!(o.alarm.chimes.get(), 0);
+    assert!(o.alarm.notices.borrow().is_empty());
+    assert!(o.chat.read_with(o.cx, |chat, _| chat.toast().is_none()));
+}

@@ -180,6 +180,11 @@ pub(crate) struct FakeState {
     pub(crate) snapshots_served: usize,
     /// Task 8: each `console_snapshot`'s params.
     pub(crate) snapshot_params: Vec<Value>,
+    /// Final review fix 1: the whole feed `chat_history` pages through,
+    /// oldest first; empty answers every page with nothing.
+    pub(crate) history: Vec<StampedEnvelope>,
+    /// Final review fix 1: each `chat_history`'s params.
+    pub(crate) history_params: Vec<Value>,
     /// Task 8: each `file_text`'s params.
     pub(crate) file_text_params: Vec<Value>,
     /// Task 8 review fix 3: each `console_watch`'s params.
@@ -219,6 +224,19 @@ impl FakeAgmend {
             stop: Arc::new(AtomicBool::new(false)),
         };
         fake.listen(0o600);
+        fake
+    }
+
+    /// Final review fix 1: a project whose feed holds messages 1 to `n`;
+    /// snapshots carry the newest 500, as agmend's do.
+    pub(crate) fn with_history(n: u64) -> Self {
+        let all: Vec<StampedEnvelope> = (1..=n).map(message).collect();
+        let newest = all[all.len().saturating_sub(500)..].to_vec();
+        let fake = Self::start(ConsoleSnapshot {
+            older: n > 500,
+            ..console(newest)
+        });
+        fake.edit(|s| s.history = all);
         fake
     }
 
@@ -333,6 +351,22 @@ fn serve(mut stream: UnixStream, state: &Mutex<FakeState>) {
                     Some(why) => Response::err(id, ErrorCode::Hub, why.clone()),
                     None => Response::ok(id, json!({"stream": "feed", "seq": 99})),
                 }
+            }
+            // Final review fix 1: up to `limit` messages before `before`,
+            // as agmend's console.rs answers.
+            "chat_history" => {
+                let mut state = state.lock().unwrap();
+                state.history_params.push(request.params.clone());
+                let before = request.params["before"].as_u64().unwrap_or(u64::MAX);
+                let limit = request.params["limit"].as_u64().unwrap_or(500);
+                let earlier: Vec<&StampedEnvelope> =
+                    state.history.iter().filter(|m| m.seq.0 < before).collect();
+                let skip = earlier
+                    .len()
+                    .saturating_sub(usize::try_from(limit).unwrap());
+                let page: Vec<&StampedEnvelope> = earlier[skip..].to_vec();
+                let older = page.first().is_some_and(|m| m.seq.0 > 1);
+                Response::ok(id, json!({"messages": page, "older": older}))
             }
             // Task 8: the fixture's main.rs, with a second line added.
             "file_text" => {

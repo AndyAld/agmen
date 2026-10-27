@@ -152,12 +152,18 @@ impl ChatView {
         }));
     }
 
-    /// Feeds one message that arrives now.
-    pub(super) fn hear(&mut self, env: &StampedEnvelope, earlier: &[StampedEnvelope]) -> Signals {
+    /// Feeds one message that arrives now, or (final review fix 1) one
+    /// from history, such as an older page, which never signals.
+    pub(super) fn hear(
+        &mut self,
+        env: &StampedEnvelope,
+        earlier: &[StampedEnvelope],
+        arrival: Arrival,
+    ) -> Signals {
         let me = Me::from(&*self.snapshot);
         self.alert_ui
             .needs_you
-            .on_message(&mut self.alerts, env, &me, earlier, Arrival::Live)
+            .on_message(&mut self.alerts, env, &me, earlier, arrival)
     }
 
     /// Chimes, notifies and starts the toast's timer as `signals` ask.

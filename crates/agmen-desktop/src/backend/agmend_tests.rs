@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use agmen_local::console::ConsoleEvent;
 use agmen_local::{ApiError, ErrorCode};
-use agmen_proto::StampedEnvelope;
+use agmen_proto::{Seq, StampedEnvelope};
 use futures::channel::mpsc::{TryRecvError, UnboundedReceiver};
 use gpui::TestAppContext;
 use serde_json::json;
@@ -14,8 +14,8 @@ use crate::backend::fake_agmend::{
     self, FakeAgmend, PROJECT, ROOT, console, ident, message, message_with, roster,
 };
 use crate::backend::{
-    Action, Backend, BackendError, ChangeId, Draft, GutterMark, Link, RoleLayer, Update,
-    WorktreeHead, WorktreeState,
+    Action, Backend, BackendError, ChangeId, Draft, GutterMark, Link, Older, RoleLayer, Snapshot,
+    Update, WorktreeHead, WorktreeState,
 };
 
 /// Long enough for a loaded test machine, short enough to fail fast.
@@ -324,10 +324,10 @@ fn reconnect_resnapshots_without_duplicates() {
 #[test]
 fn a_gap_after_reconnect_drops_the_older_page() {
     let mut held = Held::default();
-    held.merge(vec![message(1), message(2)]);
+    held.merge(vec![message(1), message(2)], false);
     // More was posted while agmend was down than one snapshot carries, so
     // 3 to 9 are missing; the window shows no hole.
-    held.merge(vec![message(10), message(11)]);
+    held.merge(vec![message(10), message(11)], true);
     assert_eq!(seqs(&held.to_vec()), vec![10, 11]);
 }
 
@@ -443,6 +443,112 @@ fn holds_at_most_2000() {
     let held = seqs(&backend.snapshot().messages);
     assert_eq!(held.len(), MAX_MESSAGES);
     assert_eq!(held.first(), Some(&101));
+}
+
+// Final review fix 1: paging older messages on scroll-back.
+
+/// Asks for the next older page and waits for the snapshot that ends the
+/// load, Loading first.
+fn page_back(backend: &AgmendBackend, updates: &mut UnboundedReceiver<Update>) -> Snapshot {
+    backend.load_older();
+    assert_eq!(backend.snapshot().older, Older::Loading);
+    let seen = wait_for(
+        updates,
+        |u| matches!(u, Update::Snapshot(s) if s.older != Older::Loading),
+    );
+    let Some(Update::Snapshot(s)) = seen.last() else {
+        panic!("the last update is the one matched")
+    };
+    (**s).clone()
+}
+
+#[test]
+fn history_pages_back_on_request() {
+    let fake = FakeAgmend::with_history(1200);
+    let (backend, mut updates) = live_backend(&fake);
+    let first = backend.snapshot();
+    assert_eq!(seqs(&first.messages), (701..=1200).collect::<Vec<_>>());
+    assert_eq!(first.older, Older::More);
+
+    let s = page_back(&backend, &mut updates);
+    assert_eq!(seqs(&s.messages), (201..=1200).collect::<Vec<_>>());
+    assert_eq!(s.older, Older::More);
+    let s = page_back(&backend, &mut updates);
+    // Each message once across the pages, oldest first.
+    assert_eq!(seqs(&s.messages), (1..=1200).collect::<Vec<_>>());
+    assert_eq!(s.older, Older::Start);
+    assert!(!s.newer);
+    let asked = fake.state.lock().unwrap().history_params.clone();
+    assert_eq!(
+        asked,
+        [
+            json!({"project": PROJECT, "before": 701, "limit": 500}),
+            json!({"project": PROJECT, "before": 201, "limit": 500}),
+        ]
+    );
+    // Nothing older: no more requests.
+    backend.load_older();
+    assert_eq!(backend.snapshot().older, Older::Start);
+    assert_eq!(fake.state.lock().unwrap().history_params.len(), 2);
+}
+
+#[test]
+fn paging_back_past_2000_lets_the_newest_go() {
+    let fake = FakeAgmend::with_history(3000);
+    let (backend, mut updates) = live_backend(&fake);
+    // 2501 to 3000, then three pages back: 2000 held, at the cap.
+    for _ in 0..2 {
+        page_back(&backend, &mut updates);
+    }
+    let s = page_back(&backend, &mut updates);
+    assert_eq!(seqs(&s.messages), (1001..=3000).collect::<Vec<_>>());
+    assert!(!s.newer);
+
+    // The fourth page passes the cap: the page the person scrolled to
+    // stays, and the newest 500 go.
+    let s = page_back(&backend, &mut updates);
+    assert_eq!(s.messages.len(), MAX_MESSAGES);
+    assert_eq!(seqs(&s.messages), (501..=2500).collect::<Vec<_>>());
+    assert_eq!(s.older, Older::More);
+    assert!(s.newer);
+    // A live message would leave a hole after 2500; it waits.
+    fake.push(&ConsoleEvent::Message(message(3001)));
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(backend.snapshot().messages.len(), MAX_MESSAGES);
+    assert_eq!(backend.snapshot().messages.last().unwrap().seq.0, 2500);
+
+    // Back to the newest page: a fresh snapshot, and live messages again.
+    backend.load_newest();
+    wait_for(
+        &mut updates,
+        |u| matches!(u, Update::Snapshot(s) if !s.newer),
+    );
+    let s = backend.snapshot();
+    assert_eq!(seqs(&s.messages), (2501..=3000).collect::<Vec<_>>());
+    assert_eq!(s.older, Older::More);
+    fake.push(&ConsoleEvent::Message(message(3001)));
+    until(|| backend.snapshot().messages.last().map(|m| m.seq.0) == Some(3001));
+}
+
+#[test]
+fn a_page_overlapping_the_chat_adds_each_message_once() {
+    let mut held = Held::default();
+    held.merge((501..=1000).map(message).collect(), true);
+    // agmend's page reaches into what is held.
+    assert!(held.prepend(Seq(501), (1..=600).map(message).collect(), false));
+    assert_eq!(seqs(&held.to_vec()), (1..=1000).collect::<Vec<_>>());
+    assert!(!held.older);
+}
+
+#[test]
+fn a_stale_page_is_dropped() {
+    let mut held = Held::default();
+    held.merge((501..=1000).map(message).collect(), true);
+    // A reconnect replaced the chat while the page was on its way.
+    held.merge((5001..=5500).map(message).collect(), true);
+    assert!(!held.prepend(Seq(501), (1..=500).map(message).collect(), false));
+    assert_eq!(seqs(&held.to_vec()), (5001..=5500).collect::<Vec<_>>());
+    assert!(held.older);
 }
 
 #[test]

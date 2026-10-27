@@ -447,3 +447,116 @@ fn a_snapshot_reaches_the_composers_model_chip(cx: &mut TestAppContext) {
     });
     assert_eq!(chip.as_deref(), Some("claude · default"));
 }
+
+// Final review fix 1: older messages page in on scroll-back.
+
+/// Scrolls the chat's message list up until its first row shows. The list
+/// measures rows as they come into view, so one wheel event reaches only
+/// as far as the rows measured so far.
+fn scroll_to_top(chat: &Entity<ChatView>, cx: &mut VisualTestContext) {
+    let bounds = cx.debug_bounds("chat").unwrap();
+    for _ in 0..200 {
+        cx.simulate_event(gpui::ScrollEvent {
+            position: bounds.origin + gpui::point(px(100.), px(100.)),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(100_000.))),
+            ..Default::default()
+        });
+        redraw(cx);
+        if chat.read_with(cx, |chat, _| chat.at_top) {
+            return;
+        }
+    }
+    panic!("the chat never reached its first row");
+}
+
+/// Runs the window until `done`, failing after 10 s: the live backend's
+/// threads answer from outside the test's executor.
+fn wait_until(cx: &mut VisualTestContext, mut done: impl FnMut(&mut VisualTestContext) -> bool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        cx.run_until_parked();
+        redraw(cx);
+        if done(cx) {
+            return;
+        }
+        assert!(std::time::Instant::now() < deadline, "timed out");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+#[gpui::test]
+fn scrolling_to_the_top_loads_older_messages(cx: &mut TestAppContext) {
+    use crate::backend::fake_agmend::{FakeAgmend, PROJECT};
+    use crate::backend::{AgmendBackend, Older};
+
+    let fake = FakeAgmend::with_history(1200);
+    cx.executor().allow_parking();
+    let backend: Rc<dyn Backend> =
+        Rc::new(AgmendBackend::connect(&fake.path(), PROJECT, None).unwrap());
+    cx.update(|cx| cx.set_global(BackendHandle(backend.clone())));
+    let (chat, cx) = open_with(cx, backend.snapshot());
+    let count = |cx: &mut VisualTestContext| chat.read_with(cx, |chat, _| chat.message_count());
+    assert_eq!(count(cx), 500);
+    // The newest message shows, not the top of the page.
+    assert!(cx.debug_bounds("chat:history").is_none());
+
+    scroll_to_top(&chat, cx);
+    wait_until(cx, |cx| count(cx) == 1000);
+    // The message the person scrolled to stays at the top of the view.
+    let top = chat.read_with(cx, |chat, cx| {
+        let stream = chat.stream.read(cx);
+        let row = stream.rows[stream.list.logical_scroll_top().item_ix];
+        chat.snapshot.messages[row].seq.0
+    });
+    assert_eq!(top, 701);
+
+    scroll_to_top(&chat, cx);
+    wait_until(cx, |cx| count(cx) == 1200);
+    scroll_to_top(&chat, cx);
+    chat.read_with(cx, |chat, _| {
+        assert_eq!(chat.snapshot.older, Older::Start);
+        assert_eq!(
+            chat.history_note().as_deref(),
+            Some("This is the start of the chat.")
+        );
+    });
+    assert!(cx.debug_bounds("chat:history").is_some());
+    assert_eq!(fake.state.lock().unwrap().history_params.len(), 2);
+}
+
+#[test]
+fn history_notes_word_each_state() {
+    use crate::backend::Older;
+
+    let note = |older: &Older, at_top| history_note(older, at_top).map(|n| n.to_string());
+    assert_eq!(
+        note(&Older::Loading, false).as_deref(),
+        Some("Loading older messages…")
+    );
+    assert_eq!(
+        note(&Older::Failed("agmend is busy".into()), true).as_deref(),
+        Some("Older messages did not load: agmend is busy. Scroll up to try again.")
+    );
+    assert_eq!(
+        note(&Older::Start, true).as_deref(),
+        Some("This is the start of the chat.")
+    );
+    // Only at the top; and More turns into Loading at once.
+    assert_eq!(note(&Older::Start, false), None);
+    assert_eq!(note(&Older::More, true), None);
+}
+
+#[gpui::test]
+fn reading_back_past_the_cap_offers_the_newest(cx: &mut TestAppContext) {
+    let mut snapshot = chat_snapshot();
+    snapshot.newer = true;
+    let (chat, cx) = open_with(cx, snapshot);
+    assert!(cx.debug_bounds("chat:newest").is_some());
+    chat.update(cx, |chat, cx| {
+        let mut s = (*chat.snapshot).clone();
+        s.newer = false;
+        chat.apply(Update::Snapshot(Box::new(s)), cx);
+    });
+    redraw(cx);
+    assert!(cx.debug_bounds("chat:newest").is_none());
+}

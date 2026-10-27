@@ -18,19 +18,19 @@ use gpui::{
 use jiff::tz::TimeZone;
 
 use super::chat_context::ChatContext;
-use super::components::{Color, Label, LabelSize};
+use super::components::{Button, Color, Label, LabelSize};
 use super::composer::{Composer, Target};
 use super::message::{MessageRow, is_presence};
 use super::ref_chip::RefEvent;
 use super::tokens::{LIST_OVERDRAW, SPACE_2, SPACE_6, SPACE_10, SPACE_12, SPACE_14};
 use crate::alerts::AlertState;
-use crate::backend::{Action, BackendError, BackendHandle, Draft, Link, Snapshot, Update};
+use crate::backend::{Action, BackendError, BackendHandle, Draft, Link, Older, Snapshot, Update};
 use crate::local_time::LocalZone;
 
 // Task 13: the banner, toast, chime and notification for alerts.
 #[path = "chat_alerts.rs"]
 mod alert_wiring;
-use super::needs_you::{AlertLook, Signals};
+use super::needs_you::{AlertLook, Arrival, Signals};
 pub(crate) use alert_wiring::AlertCounts;
 
 // Task 14: the take-over terminal between the messages and the composer.
@@ -92,9 +92,11 @@ impl ChatStream {
 
     /// Shows `rows`, keeping the message at the top of the view where it
     /// was. A view that followed the newest message keeps following it.
-    fn set_rows_keeping_top(&mut self, rows: Vec<usize>, cx: &mut Context<Self>) {
+    /// `shift` is how many messages came in before the old ones (final
+    /// review fix 1: an older page), which moves each old index up by it.
+    fn set_rows_keeping_top(&mut self, rows: Vec<usize>, shift: usize, cx: &mut Context<Self>) {
         let top = self.list.logical_scroll_top();
-        let top_message = self.rows.get(top.item_ix).copied();
+        let top_message = self.rows.get(top.item_ix).map(|row| row + shift);
         self.rows = rows;
         self.list.reset(self.rows.len());
         if let Some(message) = top_message {
@@ -189,6 +191,13 @@ pub(crate) struct ChatView {
     /// Whether the link was ever live, so a drop reads "reconnecting" and
     /// the first connect "connecting".
     was_live: bool,
+    /// Final review fix 1: whether the list's first row is in view, from
+    /// the list's last scroll.
+    at_top: bool,
+    /// Final review fix 1: the newest message the chat has heard. A
+    /// snapshot's unseen messages at or before it are history, such as an
+    /// older page or messages paging back let go, and raise no alert.
+    newest_heard: Option<(Stream, Seq)>,
     _updates: Option<Task<()>>,
 }
 
@@ -253,6 +262,23 @@ impl ChatView {
             chat,
             looks,
         });
+        // Final review fix 1: reaching the top asks for the older page.
+        // The handler runs while the list's state is borrowed, and its
+        // event names the rows from before the scroll, so the chat reads
+        // where the list stopped once the event is done.
+        let on_scroll = cx.entity().downgrade();
+        stream.read(cx).list.set_scroll_handler(move |_, _, cx| {
+            let chat = on_scroll.clone();
+            cx.defer(move |cx| {
+                // The chat closes with its window, list and all.
+                chat.update(cx, |chat, cx| {
+                    let at_top = chat.stream.read(cx).list.logical_scroll_top().item_ix == 0;
+                    chat.scrolled(at_top, cx);
+                })
+                .unwrap_or_default();
+            });
+        });
+        let newest_heard = snapshot.messages.last().map(heard_key);
         let mut chat = Self {
             snapshot,
             stream,
@@ -265,10 +291,39 @@ impl ChatView {
             take_over: TakeOverSlot::default(),
             link: None,
             was_live: false,
+            at_top: false,
+            newest_heard,
             _updates: updates,
         };
         chat.sync_take_over(cx);
         chat
+    }
+
+    /// Final review fix 1: the list scrolled; at the top, the older page
+    /// is asked for when there is one.
+    fn scrolled(&mut self, at_top: bool, cx: &mut Context<Self>) {
+        if self.at_top != at_top {
+            self.at_top = at_top;
+            cx.notify();
+        }
+        if at_top
+            && matches!(self.snapshot.older, Older::More | Older::Failed(_))
+            && let Some(backend) = cx.try_global::<BackendHandle>()
+        {
+            backend.0.load_older();
+        }
+    }
+
+    /// Final review fix 1: the line above the messages about older ones.
+    pub(crate) fn history_note(&self) -> Option<SharedString> {
+        history_note(&self.snapshot.older, self.at_top)
+    }
+
+    /// Final review fix 1: back to the newest page after reading back.
+    fn show_newest_page(&self, cx: &mut Context<Self>) {
+        if let Some(backend) = cx.try_global::<BackendHandle>() {
+            backend.0.load_newest();
+        }
     }
 
     /// Task 7: the live backend's last link state, for the status bar.
@@ -313,7 +368,7 @@ impl ChatView {
         self.show_ledger = on;
         let rows = visible_rows(&self.snapshot.messages, on);
         self.stream
-            .update(cx, |stream, cx| stream.set_rows_keeping_top(rows, cx));
+            .update(cx, |stream, cx| stream.set_rows_keeping_top(rows, 0, cx));
         cx.notify();
     }
 
@@ -424,10 +479,12 @@ impl ChatView {
         // Task 13: what live messages ask of the window, signalled once the
         // chat has them.
         let mut signals = Vec::new();
+        let mut shift = 0;
         let snapshot = match update {
             Update::Message(env) => {
                 let earlier = self.snapshot.clone();
-                signals.push(self.hear(&env, &earlier.messages));
+                signals.push(self.hear(&env, &earlier.messages, Arrival::Live));
+                self.newest_heard = self.newest_heard.clone().max(Some(heard_key(&env)));
                 // shortcut: each message clones the snapshot and rebuilds the
                 // context, O(messages); keep messages in a persistent list if
                 // long chats lag.
@@ -441,12 +498,28 @@ impl ChatView {
                 let old = self.snapshot.clone();
                 let seen: BTreeSet<(&Stream, Seq, &MessageId)> =
                     old.messages.iter().map(position).collect();
+                let heard = self.newest_heard.clone();
                 let missed = snapshot
                     .messages
                     .iter()
                     .filter(|env| !seen.contains(&position(env)))
-                    .map(|env| self.hear(env, &snapshot.messages));
+                    .map(|env| {
+                        // Final review fix 1: an older page is history.
+                        let arrival = if Some(heard_key(env)) <= heard {
+                            Arrival::History
+                        } else {
+                            Arrival::Live
+                        };
+                        self.hear(env, &snapshot.messages, arrival)
+                    });
                 signals.push(Signals::catch_up(missed));
+                self.newest_heard = heard.max(snapshot.messages.last().map(heard_key));
+                // Final review fix 1: how many came in before the old ones.
+                shift = old.messages.first().map_or(0, |first| {
+                    snapshot
+                        .messages
+                        .partition_point(|env| heard_key(env) < heard_key(first))
+                });
                 // Task 15: the model chip follows the new agents and listener.
                 self.composer
                     .update(cx, |composer, cx| composer.set_snapshot(&snapshot, cx));
@@ -470,14 +543,45 @@ impl ChatView {
         self.snapshot = Rc::new(snapshot);
         let context = Rc::new(ChatContext::new(self.snapshot.clone()).with_zone(self.zone.clone()));
         let rows = visible_rows(&self.snapshot.messages, self.show_ledger);
-        self.stream
-            .update(cx, |stream, cx| stream.set_rows(context, rows, cx));
+        self.stream.update(cx, |stream, cx| {
+            if shift > 0 {
+                // An older page: the person stays where they were reading,
+                // which is no longer the first row.
+                stream.context = context;
+                stream.set_rows_keeping_top(rows, shift, cx);
+            } else {
+                stream.set_rows(context, rows, cx);
+            }
+        });
+        if shift > 0 {
+            self.at_top = false;
+        }
         self.refresh_alerts(cx);
         for signal in &signals {
             self.signal(signal, cx);
         }
         self.sync_take_over(cx);
         cx.notify();
+    }
+}
+
+/// Where the hub put `env`, as the backend orders the chat.
+fn heard_key(env: &StampedEnvelope) -> (Stream, Seq) {
+    (env.stream.clone(), env.seq)
+}
+
+/// Final review fix 1: the line above the messages about older ones:
+/// while a page loads, when it failed, and at the top of a chat that holds
+/// its first message. More shows nothing, since reaching the top loads.
+#[must_use]
+pub(super) fn history_note(older: &Older, at_top: bool) -> Option<SharedString> {
+    match older {
+        Older::Loading => Some("Loading older messages…".into()),
+        Older::Failed(why) => {
+            Some(format!("Older messages did not load: {why}. Scroll up to try again.").into())
+        }
+        Older::Start if at_top => Some("This is the start of the chat.".into()),
+        Older::Start | Older::More => None,
     }
 }
 
@@ -504,11 +608,46 @@ impl Render for ChatView {
             .flex_col()
             // Task 13: the needs-you or answered banner (node 5704).
             .children(self.banner_element(cx))
+            // Final review fix 1: loading, failed, or the chat's start.
+            .when_some(self.history_note(), |this, note| {
+                this.child(
+                    div()
+                        .debug_selector(|| "chat:history".into())
+                        .px(SPACE_14)
+                        .pt(SPACE_6)
+                        .child(
+                            Label::new(note)
+                                .size(LabelSize::Small)
+                                .color(Color::Placeholder),
+                        ),
+                )
+            })
             .child(
                 self.stream
                     .clone()
                     .cached(StyleRefinement::default().flex_1().min_h_0()),
             )
+            // Final review fix 1: reading back past the cap let the newest
+            // messages go; this brings them back.
+            .when(self.snapshot.newer, |this| {
+                this.child(
+                    div()
+                        .debug_selector(|| "chat:newest".into())
+                        .px(SPACE_14)
+                        .flex()
+                        .items_center()
+                        .gap(SPACE_6)
+                        .child(
+                            Label::new("Newer messages are not shown while you read back.")
+                                .size(LabelSize::Small)
+                                .color(Color::Placeholder),
+                        )
+                        .child(
+                            Button::new("chat:show-newest", "Show the newest")
+                                .on_click(cx.listener(|chat, _, _, cx| chat.show_newest_page(cx))),
+                        ),
+                )
+            })
             .children(self.shown_terminal())
             .when_some(self.error.clone(), |this, error| {
                 this.child(refusal("chat:error", error))
