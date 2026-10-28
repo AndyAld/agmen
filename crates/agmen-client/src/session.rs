@@ -15,7 +15,6 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -108,16 +107,40 @@ impl ClientKind {
         matches!(self, Self::Watch)
     }
 
-    /// Whether the session publishes the identity's presence (protocol
+    /// The default for publishing the identity's presence (protocol
     /// section 2): a retained online on each connect and a retained
-    /// offline last will. Only `Watch` does (ruling R65): an identity has
-    /// one `presence/{id}`, so if its `Mcp` session also set the will, an
-    /// MCP server that stopped or restarted would show the identity offline
-    /// while its watch still ran. A one-shot `Cli` command never changes
-    /// the roster.
-    pub(crate) const fn publishes_presence(self) -> bool {
-        matches!(self, Self::Watch)
+    /// offline last will. The session config chooses, with the kind as
+    /// its default (amends ruling R65). An identity has one `presence/{id}`;
+    /// callers must choose which session publishes it. A one-shot `Cli`
+    /// command never changes the roster.
+    #[must_use]
+    pub const fn default_presence(self) -> Presence {
+        match self {
+            Self::Watch => Presence::Publish,
+            Self::Mcp | Self::Cli => Presence::Skip,
+        }
     }
+}
+
+/// Whether a session publishes retained online presence on each connect
+/// and leaves a retained offline last will. [`ClientKind::Watch`] defaults
+/// to [`Presence::Publish`]; the other kinds default to [`Presence::Skip`].
+/// A [`ClientKind::Cli`] session always skips presence.
+///
+/// ```no_run
+/// # async fn example(config: agmen_client::SessionConfig) -> Result<(), agmen_client::ClientError> {
+/// use agmen_client::{Presence, Session};
+/// let (session, events) = Session::connect(config.with_presence(Presence::Publish)).await?;
+/// drop(events);
+/// session.close_quietly().await?;
+/// # Ok(()) }
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Presence {
+    /// Publish retained online presence and leave an offline last will.
+    Publish,
+    /// Leave the identity's presence unchanged and set no last will.
+    Skip,
 }
 
 /// Where the broker is: `mqtt://host:port` (plain TCP, as in dev),
@@ -235,6 +258,7 @@ impl Broker {
 #[derive(Debug, Clone)]
 pub struct SessionConfig<T = HubClient> {
     kind: ClientKind,
+    presence: Presence,
     topics: Topics,
     hub: HubClient,
     broker: Broker,
@@ -257,6 +281,7 @@ impl SessionConfig<HubClient> {
     ) -> Self {
         Self {
             kind,
+            presence: kind.default_presence(),
             topics,
             tokens: hub.clone(),
             hub,
@@ -273,6 +298,7 @@ impl<T> SessionConfig<T> {
     pub fn with_token_source<U: TokenSource>(self, tokens: U) -> SessionConfig<U> {
         SessionConfig {
             kind: self.kind,
+            presence: self.presence,
             topics: self.topics,
             hub: self.hub,
             broker: self.broker,
@@ -290,6 +316,18 @@ impl<T> SessionConfig<T> {
         self.session_expiry = expiry;
         self
     }
+
+    /// Chooses whether this session publishes presence, overriding the
+    /// kind's default. A [`ClientKind::Cli`] session always skips presence,
+    /// even when given [`Presence::Publish`].
+    #[must_use]
+    pub const fn with_presence(mut self, presence: Presence) -> Self {
+        self.presence = match self.kind {
+            ClientKind::Cli => Presence::Skip,
+            _ => presence,
+        };
+        self
+    }
 }
 
 /// A connected session. Dropping it stops its tasks without a DISCONNECT;
@@ -300,11 +338,12 @@ pub struct Session {
     outbox: Outbox,
     cursors: Cursors,
     wake: Arc<Notify>,
-    /// Tells the link task that DISCONNECT is coming.
-    closing: Arc<AtomicBool>,
+    /// Tells the link task that DISCONNECT is coming and whether to send
+    /// the will if a token rotation replaces the client meanwhile.
+    closing: watch::Sender<Option<Presence>>,
     /// Whether the session publishes presence, so its DISCONNECT asks the
     /// broker to send the last will.
-    presence: bool,
+    presence: Presence,
     state_reads: StateReads,
     tasks: Task<Result<(), ClientError>>,
 }
@@ -388,6 +427,7 @@ impl Session {
     ) -> Result<(Self, Events), ClientError> {
         let SessionConfig {
             kind,
+            presence,
             topics,
             hub,
             broker,
@@ -399,9 +439,7 @@ impl Session {
         let (outbox, cursors) = open_state(state_dir.clone()).await?;
         let token = tokens.token().await?;
         let refresh_at = token::refresh_at(Timestamp::now(), token::expiry(&token)?);
-        let presence = kind
-            .publishes_presence()
-            .then(|| topics.presence(&identity));
+        let presence_topic = (presence == Presence::Publish).then(|| topics.presence(&identity));
         let options = mqtt_options(
             kind,
             &broker,
@@ -409,7 +447,7 @@ impl Session {
             token,
             &state_dir,
             session_expiry,
-            presence.as_deref(),
+            presence_topic.as_deref(),
         )?;
         let (client, eventloop) = AsyncClient::builder(options)
             .capacity(CLIENT_CAPACITY)
@@ -421,7 +459,7 @@ impl Session {
         let (connected_tx, connected_rx) = watch::channel(false);
         let (refresh_tx, refresh_rx) = watch::channel(refresh_at);
         let (ready_tx, ready_rx) = oneshot::channel();
-        let closing = Arc::new(AtomicBool::new(false));
+        let (closing, _) = watch::channel(None);
         let wake = Arc::new(Notify::new());
         let watched = if kind.reads_streams() {
             vec![Stream::Feed, Stream::Inbox(identity.clone())]
@@ -451,7 +489,7 @@ impl Session {
             refresh_at: refresh_tx,
             ready: Some(ready_tx),
             closing: closing.clone(),
-            presence: presence.clone(),
+            presence: presence_topic,
             state_reads: state_slot.clone(),
         });
         let state_reads = StateReads::new(topics.clone(), routes, state_slot, connected_rx.clone());
@@ -475,7 +513,7 @@ impl Session {
             cursors,
             wake,
             closing,
-            presence: presence.is_some(),
+            presence,
             state_reads,
             tasks,
         };
@@ -557,6 +595,13 @@ impl Session {
         &self.cursors
     }
 
+    /// Whether this session publishes presence, after applying the
+    /// [`ClientKind::Cli`] restriction.
+    #[must_use]
+    pub const fn presence(&self) -> Presence {
+        self.presence
+    }
+
     /// Sends DISCONNECT, so the broker keeps a persistent session for its
     /// expiry and forgets a `Cli` one, then stops the session's tasks. A
     /// session that publishes presence disconnects with reason 0x04, so the
@@ -565,14 +610,34 @@ impl Session {
     /// # Errors
     ///
     /// The error that stopped the session earlier, if one did.
-    pub async fn close(mut self) -> Result<(), ClientError> {
+    pub async fn close(self) -> Result<(), ClientError> {
+        let publish_will = self.presence == Presence::Publish;
+        self.disconnect(publish_will).await
+    }
+
+    /// Sends a normal DISCONNECT (reason 0x00), discarding the last will
+    /// and leaving retained presence unchanged, then stops the session's
+    /// tasks. This lets another session take over publishing presence.
+    ///
+    /// # Errors
+    ///
+    /// The error that stopped the session earlier, if one did.
+    pub async fn close_quietly(self) -> Result<(), ClientError> {
+        self.disconnect(false).await
+    }
+
+    async fn disconnect(mut self, publish_will: bool) -> Result<(), ClientError> {
         // The link stops acking first: rumqttc would send an ack queued
         // after DISCONNECT, and EMQX aborts the connection for it.
-        self.closing.store(true, Ordering::SeqCst);
+        self.closing.send_replace(Some(if publish_will {
+            Presence::Publish
+        } else {
+            Presence::Skip
+        }));
         let closed = tokio::time::timeout(CLOSE_WAIT, async {
             // Fails only when the session has already stopped; its result
             // says why.
-            let (reason, properties) = close_disconnect(self.presence);
+            let (reason, properties) = close_disconnect(publish_will);
             let sent = self
                 .client
                 .current()
@@ -773,33 +838,62 @@ mod tests {
     use super::*;
 
     #[test]
-    fn presence_sessions_leave_an_offline_will() {
-        assert!(ClientKind::Watch.publishes_presence());
-        assert!(!ClientKind::Mcp.publishes_presence());
-        assert!(!ClientKind::Cli.publishes_presence());
+    fn presence_follows_the_config() {
+        assert_eq!(ClientKind::Watch.default_presence(), Presence::Publish);
+        assert_eq!(ClientKind::Mcp.default_presence(), Presence::Skip);
+        assert_eq!(ClientKind::Cli.default_presence(), Presence::Skip);
         let broker: Broker = "mqtt://localhost:1883".parse().unwrap();
         let id: IdentityId = "idn7k2q9".parse().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let topic = "agmen/v1/tenant01/project1/presence/idn7k2q9";
-        let options = |kind, presence| {
-            mqtt_options(
+        let topics = Topics::new("tenant01".parse().unwrap(), "project1".parse().unwrap());
+        let hub = HubClient::new(
+            "http://localhost:8080".parse().unwrap(),
+            topics.project().clone(),
+            id.clone(),
+            "token",
+        )
+        .unwrap();
+        let config = |kind| {
+            SessionConfig::new(
                 kind,
-                &broker,
+                topics.clone(),
+                hub.clone(),
+                broker.clone(),
+                dir.path(),
+            )
+        };
+        let options = |config: SessionConfig| {
+            let topic = (config.presence == Presence::Publish).then(|| config.topics.presence(&id));
+            mqtt_options(
+                config.kind,
+                &config.broker,
                 &id,
                 "token".to_owned(),
-                dir.path(),
-                DEFAULT_SESSION_EXPIRY,
-                presence,
+                &config.state_dir,
+                config.session_expiry,
+                topic.as_deref(),
             )
             .unwrap()
         };
-        let will = options(ClientKind::Watch, Some(topic)).last_will().unwrap();
-        assert_eq!(&will.topic[..], topic.as_bytes());
-        assert_eq!(&will.message[..], OFFLINE);
-        assert!(will.retain);
-        assert_eq!(will.qos, QoS::AtLeastOnce);
-        assert!(options(ClientKind::Mcp, None).last_will().is_none());
-        assert!(options(ClientKind::Cli, None).last_will().is_none());
+        for config in [
+            config(ClientKind::Mcp)
+                .with_presence(Presence::Publish)
+                .with_token_source(hub.clone()),
+            config(ClientKind::Watch),
+        ] {
+            let will = options(config).last_will().unwrap();
+            assert_eq!(&will.topic[..], topics.presence(&id).as_bytes());
+            assert_eq!(&will.message[..], br#"{"status":"offline"}"#);
+            assert!(will.retain);
+            assert_eq!(will.qos, QoS::AtLeastOnce);
+        }
+        for config in [
+            config(ClientKind::Mcp),
+            config(ClientKind::Cli).with_presence(Presence::Publish),
+            config(ClientKind::Watch).with_presence(Presence::Skip),
+        ] {
+            assert!(options(config).last_will().is_none());
+        }
     }
 
     #[test]

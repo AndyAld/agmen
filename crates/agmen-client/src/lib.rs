@@ -42,7 +42,7 @@ pub use install_receipt::{
 pub use login::{HumanTokens, Login, LoginError, human_tokens, store_tokens, token_grant};
 pub use outbox::{Outbox, OutboxState};
 pub use paths::{AGMEND_SOCKET, PathError, agmend_socket, config_dir, login_file, state_dir};
-pub use session::{Broker, ClientKind, Events, STATE_DB, Session, SessionConfig};
+pub use session::{Broker, ClientKind, Events, Presence, STATE_DB, Session, SessionConfig};
 pub use state::{read_state, resolve_handle};
 pub use token::TokenSource;
 pub use token_store::{TokenKey, TokenStore, TokenStoreError};
