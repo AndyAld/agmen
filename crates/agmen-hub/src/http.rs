@@ -4,6 +4,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use agmen_proto::MAX_ENVELOPE_BYTES;
+use axum::extract::DefaultBodyLimit;
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
@@ -17,9 +19,10 @@ use crate::auth::{self, GithubError, GithubOAuth};
 use crate::broker_tokens::{BrokerTokens, SigningKey, TokenError};
 use crate::config::Config;
 use crate::emqx::{EmqxAdmin, EmqxError};
+use crate::events::Slots;
 use crate::ingest::IngestState;
 use crate::presence::PresenceState;
-use crate::{db, health, identities, invites, items, lanes, me, replay};
+use crate::{db, events, health, human_post, identities, invites, items, lanes, me, replay, state};
 
 /// How long the hub waits for GitHub or EMQX to answer.
 const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(10);
@@ -61,6 +64,7 @@ struct Inner {
     public_mqtt_url: Url,
     ingest: IngestState,
     presence: PresenceState,
+    events: Slots,
     claim_lease: Duration,
 }
 
@@ -108,6 +112,7 @@ impl Hub {
                 public_mqtt_url: config.public_mqtt_url.clone(),
                 ingest: IngestState::default(),
                 presence: PresenceState::default(),
+                events: Slots::default(),
                 claim_lease: config.claim_lease,
             }),
         })
@@ -136,6 +141,14 @@ impl Hub {
             )
             .route("/v1/projects/{project}/check-path", post(lanes::check_path))
             .route("/v1/projects/{project}/items", get(items::list))
+            // The body is one envelope: past its limit, refuse before
+            // reading the rest (axum's default would buffer 2 MB).
+            .route(
+                "/v1/projects/{project}/messages",
+                post(human_post::post).layer(DefaultBodyLimit::max(MAX_ENVELOPE_BYTES)),
+            )
+            .route("/v1/projects/{project}/events", get(events::events))
+            .route("/v1/projects/{project}/state", get(state::get))
             .layer(axum::middleware::map_response(refuse_framing))
             .with_state(self.clone())
     }
@@ -162,6 +175,11 @@ impl Hub {
 
     pub(crate) fn presence(&self) -> &PresenceState {
         &self.inner.presence
+    }
+
+    /// The places for open events streams.
+    pub(crate) fn event_slots(&self) -> &Slots {
+        &self.inner.events
     }
 
     /// How long a granted claim lasts without a HEARTBEAT.

@@ -1,0 +1,17 @@
+// An extension theme with most keys missing.
+{
+  "name": "Partial",
+  "author": "agmen test fixture",
+  "themes": [
+    {
+      "name": "Partial Dark",
+      "appearance": "dark",
+      "style": {
+        "background": "#101010",
+        "terminal.ansi.green": "#00ff00",
+        "terminal.foreground": "#aabbcc",
+        "editor.highlighted_line.background": "#334455",
+      },
+    },
+  ],
+}

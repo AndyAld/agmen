@@ -14,16 +14,17 @@ use std::time::{Duration, Instant};
 
 use agmen_proto::{
     Body, ClientEnvelope, DeliveryReply, IdentityId, IdentityKind, ItemKey, LaneName, Mention,
-    MessageId, NackReason, Payload, Seq, Severity, StampedEnvelope, Stream, Timestamp, Topics,
-    Verb, validate,
+    MessageId, NackReason, Payload, ProjectId, Seq, Severity, StampedEnvelope, Stream, Timestamp,
+    Topics, Verb, validate,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use sqlx::{PgExecutor, PgPool, Postgres, Transaction};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, watch};
 
 use crate::claims::LedgerMessage;
 use crate::db::{Role, is_unique_violation};
+use crate::events::Wakes;
 use crate::http::{Hub, error_chain};
 use crate::numbering::{NumberingError, lock_head, next_seq};
 use crate::secrets_scan::find_secret;
@@ -142,17 +143,32 @@ pub(crate) struct Handled {
     pub(crate) route: ReplyRoute,
 }
 
-/// Ingest's shared state: the rate limiter and the sweeper's wake-up.
+/// Ingest's shared state: the rate limiter, the sweeper's wake-up and the
+/// events streams' wake-up.
 #[derive(Debug, Default)]
 pub(crate) struct IngestState {
     limiter: Mutex<RateLimiter>,
     outbox_ready: Notify,
+    stored: Wakes,
 }
 
 impl IngestState {
     /// Signalled after each commit that added outbox rows.
     pub(crate) fn outbox_ready(&self) -> &Notify {
         &self.outbox_ready
+    }
+
+    /// Call after each commit that stored messages in `project`: wakes the
+    /// sweeper and that project's events streams.
+    pub(crate) fn stored(&self, project: &ProjectId) {
+        self.outbox_ready.notify_one();
+        self.stored.wake(project);
+    }
+
+    /// A receiver that sees a change after each [`IngestState::stored`]
+    /// for `project`.
+    pub(crate) fn watch_stored(&self, project: &ProjectId) -> watch::Receiver<()> {
+        self.stored.watch(project)
     }
 }
 
@@ -163,8 +179,9 @@ impl Hub {
     /// limit (10 per second, burst 30, per sender), check that the sender
     /// is a live member of the project and may send the verb, scan for
     /// credentials, dedupe on `(from, id)`, expand mentions, then number
-    /// and store every copy with its outbox rows. A fresh ACK is also
-    /// queued for `ack/{from}` behind the message itself.
+    /// and store every copy with its outbox rows. A fresh ACK from an
+    /// identity is also queued for `ack/{from}` behind the message itself;
+    /// a human's is not, because the human reads it from the HTTP reply.
     ///
     /// A ledger verb (CLAIM, HEARTBEAT, RELEASE, ASSIGN, FOUND, DONE) is
     /// acted on, and the hub's answer posted, in the same transaction.
@@ -273,6 +290,13 @@ impl Hub {
             from_owner: sender.owner.clone(),
             hub_at,
         });
+        // A human posts over HTTP and reads the reply from the response, so
+        // no ACK is queued for a topic nobody listens on.
+        let (ack, route) = if sender.kind == IdentityKind::Human {
+            (AckCopy::None, ReplyRoute::Caller)
+        } else {
+            (AckCopy::Queue, ReplyRoute::Outbox)
+        };
         let draft = Draft {
             topics,
             client: env,
@@ -283,7 +307,7 @@ impl Hub {
             streams,
             hash: hash.clone(),
             hub_at,
-            ack: AckCopy::Queue,
+            ack,
         };
         let mut tx = pool.begin().await.map_err(StoreError::from)?;
         if ledger.is_some() {
@@ -308,13 +332,13 @@ impl Hub {
                         })?;
                 }
                 tx.commit().await.map_err(StoreError::from)?;
-                self.ingest_state().outbox_ready().notify_one();
+                self.ingest_state().stored(topics.project());
                 self.on_recorded(topics, verb, &sender.id, sender.kind, &id)
                     .await;
                 let (stream, seq) = recorded.ack;
                 Ok(Handled {
                     reply: DeliveryReply::Ack { id, stream, seq },
-                    route: ReplyRoute::Outbox,
+                    route,
                 })
             }
             // A copy of the same message committed first: answer as for a
@@ -426,7 +450,7 @@ impl Hub {
         let mut tx = self.pool().begin().await.map_err(PostError::store)?;
         let posted = post_hub(&mut tx, topics, post, None).await?;
         tx.commit().await.map_err(PostError::store)?;
-        self.ingest_state().outbox_ready().notify_one();
+        self.ingest_state().stored(topics.project());
         Ok(posted)
     }
 }
@@ -555,7 +579,12 @@ fn envelope_hash(env: &ClientEnvelope) -> Result<Vec<u8>, serde_json::Error> {
 
 /// The `stream_heads` key of one project's stream: `<project_id>/<stream>`.
 pub(crate) fn head_key(topics: &Topics, stream: &Stream) -> String {
-    format!("{}/{stream}", topics.project())
+    stream_key(topics.project(), stream)
+}
+
+/// [`head_key`] from the project id alone.
+pub(crate) fn stream_key(project: &ProjectId, stream: &Stream) -> String {
+    format!("{project}/{stream}")
 }
 
 /// The broker topic a copy in `stream` is published on.

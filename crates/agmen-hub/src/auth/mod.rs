@@ -17,7 +17,7 @@ pub(crate) use oauth::{GithubOAuth, account_by_login, is_human_handle};
 
 use axum::extract::{Form, FromRequestParts, State};
 use axum::http::request::Parts;
-use axum::http::{HeaderValue, header};
+use axum::http::{HeaderMap, HeaderValue, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -79,20 +79,24 @@ impl Caller {
     }
 }
 
+/// The bearer token in `headers`' `Authorization`, if there is a non-empty
+/// one.
+pub(crate) fn bearer(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| {
+            let (scheme, token) = value.split_once(' ')?;
+            scheme.eq_ignore_ascii_case("bearer").then(|| token.trim())
+        })
+        .filter(|token| !token.is_empty())
+}
+
 impl FromRequestParts<Hub> for Caller {
     type Rejection = ApiError;
 
     async fn from_request_parts(parts: &mut Parts, hub: &Hub) -> Result<Self, ApiError> {
-        let token = parts
-            .headers
-            .get(header::AUTHORIZATION)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| {
-                let (scheme, token) = value.split_once(' ')?;
-                scheme.eq_ignore_ascii_case("bearer").then(|| token.trim())
-            })
-            .filter(|token| !token.is_empty())
-            .ok_or_else(ApiError::unauthorized)?;
+        let token = bearer(&parts.headers).ok_or_else(ApiError::unauthorized)?;
         let row: Option<(String, Option<String>)> = sqlx::query_as(
             "SELECT human_id, identity_id FROM tokens
              WHERE hash = $1 AND kind IN ('access', 'identity')

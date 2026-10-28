@@ -1,0 +1,291 @@
+use gpui::{AppContext as _, TestAppContext};
+
+use super::*;
+use crate::ui::syntax::Language;
+use crate::ui::test_support::{init, redraw};
+
+const MAIN_RS: &str = "mod app;\nmod cylinder;\nmod document;\nmod minimap;\nmod ui;\n\nuse ui::tabs::Tabs;\n\nfn main() -> anyhow::Result<()> {\n    let tabs = Tabs::default();\n    app::run(tabs)\n}\n";
+
+#[gpui::test]
+fn code_view_marks_gutter(cx: &mut TestAppContext) {
+    init(cx);
+    let marks = vec![
+        GutterMark::Added(5..6),
+        GutterMark::Added(7..8),
+        GutterMark::Deleted(4),
+    ];
+    let (_, cx) = cx.add_window_view(|_, _| CodeView::new(MAIN_RS, Language::Rust, marks));
+    redraw(cx);
+    assert!(cx.debug_bounds("line:1").is_some());
+    assert!(cx.debug_bounds("line:12").is_some());
+    assert!(
+        cx.debug_bounds("line:13").is_none(),
+        "12 lines, no phantom last line"
+    );
+    assert!(cx.debug_bounds("gutter:5:added").is_some());
+    assert!(cx.debug_bounds("gutter:7:added").is_some());
+    assert!(cx.debug_bounds("gutter:4:deleted").is_some());
+    assert!(
+        cx.debug_bounds("gutter:6:added").is_none(),
+        "ranges are end-exclusive"
+    );
+    // Task 20 shot diff (project): an added line's bar fills its one-cell
+    // mark column, as console.py's g.bg(r, 5, 6, OK) does.
+    let bar = cx.debug_bounds("gutter:5:added").unwrap();
+    let column = cx.debug_bounds("line:5:mark").unwrap();
+    assert_eq!(bar.size.width, column.size.width);
+}
+
+#[test]
+fn lines_split_highlights_at_line_breaks() {
+    let lines = layout_lines("fn a() {\n    1\n}\n", Language::Rust);
+    assert_eq!(lines.len(), 3);
+    assert_eq!(lines[0].text, "fn a() {");
+    assert!(
+        lines[0]
+            .highlights
+            .iter()
+            .any(|(r, name)| &lines[0].text[r.clone()] == "fn" && name.starts_with("keyword"))
+    );
+    for line in &lines {
+        for (r, _) in &line.highlights {
+            assert!(r.end <= line.text.len());
+        }
+    }
+}
+
+#[test]
+fn syntax_color_falls_back_to_the_parent_name() {
+    let theme = crate::appearance::Appearance::builtin().theme;
+    assert_eq!(
+        syntax_color(&theme, "keyword.function"),
+        theme.syntax.get("keyword").copied()
+    );
+    assert_eq!(
+        syntax_color(&theme, "string"),
+        theme.syntax.get("string").copied()
+    );
+    assert_eq!(syntax_color(&theme, "nothing.like.this"), None);
+}
+
+/// Hosts a code view in a 200 px wide box, narrower than a long line.
+struct Narrow(gpui::Entity<CodeView>);
+
+impl gpui::Render for Narrow {
+    fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+        div()
+            .w(gpui::px(200.))
+            .h(gpui::px(300.))
+            .child(self.0.clone())
+    }
+}
+
+#[gpui::test]
+fn long_lines_stay_on_one_row(cx: &mut TestAppContext) {
+    // Review C149: a line wider than the pane must not wrap over the next.
+    init(cx);
+    let text = format!("{}\nshort\n", "x".repeat(400));
+    let (_, cx) = cx.add_window_view(|_, cx| {
+        let code = cx.new(|_| CodeView::new(&text, Language::Plain, Vec::new()));
+        Narrow(code)
+    });
+    redraw(cx);
+    let first = cx.debug_bounds("line:1:text").unwrap();
+    let second = cx.debug_bounds("line:2").unwrap();
+    assert!(first.size.height <= MONO_CELL_HEIGHT, "{first:?}");
+    assert!(
+        first.size.width <= gpui::px(200.),
+        "clipped to the pane: {first:?}"
+    );
+    assert!(first.bottom() <= second.top(), "{first:?} {second:?}");
+}
+
+#[gpui::test]
+fn deleted_marks_sit_inside_their_row(cx: &mut TestAppContext) {
+    // Review C153: Deleted(0) marks lines removed above line 1, and every
+    // deleted mark stays inside its line's row and gutter.
+    init(cx);
+    let marks = vec![
+        GutterMark::Deleted(0),
+        GutterMark::Deleted(4),
+        GutterMark::Modified(2..3),
+    ];
+    let (_, cx) = cx.add_window_view(|_, _| CodeView::new(MAIN_RS, Language::Rust, marks));
+    redraw(cx);
+    let above = cx.debug_bounds("gutter:0:deleted").unwrap();
+    let line1 = cx.debug_bounds("line:1").unwrap();
+    assert!(above.top() >= line1.top() && above.bottom() <= line1.bottom());
+    let after4 = cx.debug_bounds("gutter:4:deleted").unwrap();
+    let line4 = cx.debug_bounds("line:4").unwrap();
+    assert!(after4.top() >= line4.top() && after4.bottom() <= line4.bottom());
+    assert!(after4.size.width <= gpui::px(4.), "{after4:?}");
+    // Review C157: a Modified mark shows.
+    assert!(cx.debug_bounds("gutter:2:modified").is_some());
+    assert!(cx.debug_bounds("gutter:3:modified").is_none());
+}
+
+#[test]
+fn crlf_lines_drop_the_carriage_return() {
+    // Review C158.
+    let lines = layout_lines("a\r\nb\r\n", Language::Plain);
+    let texts: Vec<&str> = lines.iter().map(|l| l.text.as_ref()).collect();
+    assert_eq!(texts, ["a", "b"]);
+}
+
+#[gpui::test]
+fn line_one_shows_deletions_above_and_below(cx: &mut TestAppContext) {
+    // Review C161: Deleted(0) and Deleted(1) both mark line 1.
+    init(cx);
+    let marks = vec![GutterMark::Deleted(0), GutterMark::Deleted(1)];
+    let (_, cx) = cx.add_window_view(|_, _| CodeView::new(MAIN_RS, Language::Rust, marks));
+    redraw(cx);
+    let above = cx.debug_bounds("gutter:0:deleted").unwrap();
+    let below = cx.debug_bounds("gutter:1:deleted").unwrap();
+    assert!(above.top() < below.top(), "{above:?} {below:?}");
+}
+
+fn number_column_width(cx: &mut TestAppContext, code_size: f32) -> gpui::Pixels {
+    init(cx);
+    cx.update(|cx| {
+        let mut appearance = cx.global::<crate::appearance::Appearance>().clone();
+        appearance.fonts.code_size = gpui::px(code_size);
+        cx.set_global(appearance);
+    });
+    let (_, cx) = cx.add_window_view(|_, _| CodeView::new(MAIN_RS, Language::Rust, Vec::new()));
+    redraw(cx);
+    cx.debug_bounds("line:10:number").unwrap().size.width
+}
+
+#[gpui::test]
+fn line_numbers_fit_the_code_font(cx: &mut TestAppContext) {
+    // Task 11 found "10" drawn as "l0" at the default 15 px code font: the
+    // number column used a fixed 7.62 px cell instead of the font's digits.
+    let small = number_column_width(cx, 10.);
+    let large = number_column_width(cx, 30.);
+    assert!(large > small * 2., "{small:?} {large:?}");
+}
+
+#[gpui::test]
+fn columns_follow_the_mockup_grid(cx: &mut TestAppContext) {
+    // V84: console.py renders the grid 8 px into the editor and starts at
+    // row 1, so line 1 sits 26 px below the breadcrumb; numbers end at
+    // column 4, the mark is column 5 and text starts at column 7, in code
+    // font cells.
+    init(cx);
+    let (_, cx) = cx.add_window_view(|_, _| CodeView::new(MAIN_RS, Language::Rust, Vec::new()));
+    redraw(cx);
+    let cell = cx.update(|window, cx| {
+        cell_width(window, &cx.global::<crate::appearance::Appearance>().fonts)
+    });
+    let line = cx.debug_bounds("line:1").unwrap();
+    assert_eq!(line.top(), gpui::px(26.), "{line:?}");
+    let close = |a: gpui::Pixels, b: gpui::Pixels| (a - b).abs() < gpui::px(0.5);
+    let number = cx.debug_bounds("line:10:number").unwrap();
+    assert!(close(number.right(), cell * 4.), "{number:?} {cell:?}");
+    let mark = cx.debug_bounds("line:1:mark").unwrap();
+    assert!(close(mark.left(), cell * 5.), "{mark:?} {cell:?}");
+    let text = cx.debug_bounds("line:1:text").unwrap();
+    assert!(close(text.left(), cell * 7.), "{text:?} {cell:?}");
+}
+
+/// The theme's color over all of `piece` on `line`, or `None` when no one
+/// highlight covers it.
+fn color_over(line: &Line, piece: &str, theme: &Theme) -> Option<Hsla> {
+    let from = line.text.find(piece)?;
+    let range = from..from + piece.len();
+    let (_, name) = line
+        .highlights
+        .iter()
+        .find(|(r, _)| r.start <= range.start && range.end <= r.end)?;
+    syntax_color(theme, name)
+}
+
+// Shot diff (spec, frame "Desktop · spec"): headings in accent (node 9193),
+// list markers in warning (9207) and the Status line in text.placeholder
+// (9195), the way the theme colors agmen's Markdown names.
+#[test]
+fn spec_markdown_takes_the_mockup_colors() {
+    let theme = Appearance::builtin().theme;
+    let text = "# Ridgeline design\nStatus: v3 · drafted by sean/plan\n\n## 2. Goals\n- One Rust core.\n\nPlain text.\n";
+    let lines = layout_lines(text, Language::Markdown);
+    let accent = Some(theme.text_accent);
+    assert_eq!(color_over(&lines[0], "# Ridgeline design", &theme), accent);
+    assert_eq!(color_over(&lines[3], "## 2. Goals", &theme), accent);
+    assert_eq!(color_over(&lines[4], "-", &theme), Some(theme.warning));
+    assert_eq!(color_over(&lines[4], "One Rust core.", &theme), None);
+    assert_eq!(
+        color_over(&lines[1], "Status: v3 · drafted by sean/plan", &theme),
+        Some(theme.text_placeholder)
+    );
+    assert_eq!(color_over(&lines[6], "Plain text.", &theme), None);
+}
+
+// Shot diff (spec, nodes 9228 to 9232): console.py draws a table row's "|"
+// in the line number color and its cells in text, whether or not the
+// table has a delimiter row (the spec's has none).
+#[test]
+fn spec_table_pipes_take_the_line_number_color() {
+    let theme = Appearance::builtin().theme;
+    let text = "## 4. Lanes\n| Lane    | Paths    |\n| L-CORE  | core/**  |\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\n```\n| code |\n```\n";
+    let lines = layout_lines(text, Language::Markdown);
+    for ix in [1, 2, 4, 5, 6] {
+        let line = &lines[ix];
+        let pipes: Vec<usize> = line.text.match_indices('|').map(|(at, _)| at).collect();
+        assert!(!pipes.is_empty(), "line {ix}");
+        for at in pipes {
+            let color = line
+                .highlights
+                .iter()
+                .find(|(r, _)| r.start <= at && at < r.end)
+                .and_then(|(_, name)| syntax_color(&theme, name));
+            assert_eq!(color, Some(theme.line_number), "line {ix} at {at}");
+        }
+    }
+    assert_eq!(color_over(&lines[1], "Lane", &theme), None);
+    assert_eq!(color_over(&lines[2], "core/**", &theme), None);
+    // A pipe inside a code block keeps the code block's color.
+    let names: Vec<&str> = lines[9].highlights.iter().map(|(_, name)| *name).collect();
+    assert_eq!(names, ["text.literal"]);
+}
+
+/// Whether line `n` is drawn, and whether it is highlighted.
+fn line_state(cx: &mut gpui::VisualTestContext, n: u32) -> (bool, bool) {
+    let line: &'static str = Box::leak(format!("line:{n}").into_boxed_str());
+    let lit: &'static str = Box::leak(format!("line:{n}:highlight").into_boxed_str());
+    (
+        cx.debug_bounds(line).is_some(),
+        cx.debug_bounds(lit).is_some(),
+    )
+}
+
+#[gpui::test]
+fn code_view_scrolls_to_line(cx: &mut TestAppContext) {
+    init(cx);
+    let text: String = (1..=300).map(|n| format!("// line {n}\n")).collect();
+    let (view, cx) = cx.add_window_view(|_, _| CodeView::new(&text, Language::Rust, Vec::new()));
+    redraw(cx);
+    assert!(cx.debug_bounds("line:1").is_some());
+    assert!(cx.debug_bounds("line:150").is_none(), "off screen at first");
+    view.update(cx, |code, cx| code.show_lines(150..=152, cx));
+    redraw(cx);
+    redraw(cx);
+    // C295: line 150 sits in the middle, as Zed's go-to-line centers it,
+    // and the named lines are highlighted.
+    let above = (1..150).filter(|&n| line_state(cx, n).0).count();
+    let below = (151..=300).filter(|&n| line_state(cx, n).0).count();
+    assert!(above > 1, "line 150 is not the top line");
+    assert!(above.abs_diff(below) <= 1, "{above} above, {below} below");
+    assert_eq!(line_state(cx, 149), (true, false));
+    for n in 150..=152 {
+        assert_eq!(line_state(cx, n), (true, true), "line {n}");
+    }
+    assert_eq!(line_state(cx, 153), (true, false));
+    // A line past the end scrolls to the last line.
+    view.update(cx, |code, cx| code.show_lines(9_999..=9_999, cx));
+    redraw(cx);
+    redraw(cx);
+    assert!(
+        cx.debug_bounds("line:300").is_some(),
+        "the last line is drawn"
+    );
+}

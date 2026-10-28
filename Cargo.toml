@@ -2,10 +2,13 @@
 resolver = "3"
 members = [
     "crates/agmen-proto",
+    "crates/agmen-local",
     "crates/agmen-client",
     "crates/agmen-cli",
     "crates/agmen-hub",
+    "crates/agmend",
     "tests/e2e",
+    "crates/agmen-desktop",
     "spikes/s1-emqx",
     "spikes/s2-rumqttc",
     "spikes/s4-fake-watch",

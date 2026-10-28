@@ -11,8 +11,10 @@ mod event;
 mod hub;
 mod identity;
 mod link;
+mod login;
 mod mqtt_store;
 mod outbox;
+mod paths;
 mod replay;
 mod session;
 mod state;
@@ -26,7 +28,9 @@ pub use hub::{HubClient, PAGE_LIMIT, Page};
 pub use identity::{
     IDENTITY_DIR, IDENTITY_FILE, IdentityError, IdentityFile, Joined, find_identity,
 };
+pub use login::{HumanTokens, Login, LoginError, human_tokens, store_tokens, token_grant};
 pub use outbox::{Outbox, OutboxState};
+pub use paths::{AGMEND_SOCKET, PathError, agmend_socket, config_dir, login_file, state_dir};
 pub use session::{Broker, ClientKind, Events, STATE_DB, Session, SessionConfig};
 pub use state::{read_state, resolve_handle};
 pub use token::TokenSource;

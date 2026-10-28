@@ -30,6 +30,12 @@ pub struct SeededHuman {
 }
 
 impl Hub {
+    /// Sets how many events streams the hub holds open in all, and per
+    /// person, so a test can reach the caps with a few streams.
+    pub fn set_events_limits(&self, total: usize, per_human: usize) {
+        self.event_slots().set_limits(total, per_human);
+    }
+
     /// Makes a tenant and a project, each with a fresh id, and returns the
     /// project's topics.
     ///
