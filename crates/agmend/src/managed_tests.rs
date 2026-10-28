@@ -1276,6 +1276,32 @@ async fn remove_revokes_and_forgets_the_agent_but_keeps_its_worktree_and_branch(
 }
 
 #[tokio::test]
+async fn remove_finishes_when_the_revoked_credential_cannot_be_deleted() {
+    // A credential another program saved (the CLI's `agmen join`) can be
+    // one agmend may not delete; once the hub has revoked it, it is dead.
+    let fixture = Fixture::new().await;
+    fixture.launch().await;
+    let tokens = fixture.dir.path().join("tokens");
+    std::fs::set_permissions(&tokens, std::os::unix::fs::PermissionsExt::from_mode(0o500)).unwrap();
+    let managed = &fixture.daemon.core.managed;
+    let removed = managed.remove(json!({"identity":"agent001"})).await;
+    std::fs::set_permissions(&tokens, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+    let removed = removed.unwrap();
+    assert_eq!(removed["removed"], true);
+    assert_eq!(
+        *fixture.revoked.lock().unwrap(),
+        vec!["agent001".to_owned()]
+    );
+    assert!(!managed.state_dir.join("managed/agent001").exists());
+    assert!(
+        managed.list(json!({})).await.unwrap()["agents"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn remove_of_a_hand_joined_identity_keeps_the_folder() {
     let fixture = Fixture::new().await;
     let repo = fixture.dir.path().join("repo");

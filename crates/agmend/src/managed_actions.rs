@@ -417,10 +417,21 @@ impl Managed {
         if let Some(joined) = joined {
             delete_identity_file(&joined.root).await?;
         }
-        self.hub
+        // The hub has revoked it, so a credential left behind no longer
+        // works. The Keychain refuses agmend a delete of one that another
+        // program saved, such as the CLI's `agmen join`.
+        if let Err(failure) = self
+            .hub
             .credentials()
             .delete_token(&identity.hub_url, &identity.identity_id)
-            .await?;
+            .await
+        {
+            tracing::warn!(
+                identity = %identity.identity_id,
+                "the revoked credential was not deleted: {}",
+                failure.message
+            );
+        }
         self.identities()
             .ok_or_else(|| error("identity service stopped"))?
             .forget(&identity)
