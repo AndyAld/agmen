@@ -240,8 +240,9 @@ type State = {
   /** Messages the next wake-up names, oldest first, and how many past WAITING_MAX it only counts. */
   waiting: readonly Incoming[]
   uncounted: number
-  /** The open wake-up window; the wake-up is due when it ends. */
+  /** The rate-limit window after a wake-up; pending messages become due when it ends. */
   window: Timer | undefined
+  /** No wake-up has been submitted within WAKE_INTERVAL_MS. */
   isDue: boolean
   /** A main-loop turn is running. */
   isBusy: boolean
@@ -456,6 +457,9 @@ function tryWake($: EngineInterface, state: State): void {
   state.waiting = []
   state.uncounted = 0
   state.isDue = false
+  state.window = $.clock.after(WAKE_INTERVAL_MS, () => {
+    windowEnds($, state)
+  })
   void $.prompt
     .submit({ text })
     .then(entered => {
@@ -484,11 +488,6 @@ async function deliver($: EngineInterface, state: State, message: Incoming): Pro
   else state.uncounted += 1
   // A new message ends the hold an interrupted turn left.
   state.isHeld = false
-  if (state.window === undefined && !state.isDue) {
-    state.window = $.clock.after(WAKE_INTERVAL_MS, () => {
-      windowEnds($, state)
-    })
-  }
   tryWake($, state)
 }
 
@@ -1318,7 +1317,7 @@ export const register: Register = on => {
     waiting: [],
     uncounted: 0,
     window: undefined,
-    isDue: false,
+    isDue: true,
     isBusy: false,
     isHeld: false,
     isBashCheckDown: false,

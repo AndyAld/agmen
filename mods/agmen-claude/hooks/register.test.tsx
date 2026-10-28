@@ -747,9 +747,9 @@ for (const surface of SURFACES) {
       const w = world(on, { feed: [{ text: line(SELF_LINE) }, { text: message(assign) }] })
 
       await start($, w, surface)
-      await w.clock.advance(WAKE_INTERVAL_MS)
 
       expect(w.submitted).toHaveLength(1)
+      expect(w.submittedAt).toEqual([w.clock.now()])
       const wake = w.submitted[0]
       expect(wake?.text).toContain('ASSIGN B-412 from adam/coord')
       expect(wake?.text).toContain('agmen inbox tool')
@@ -790,25 +790,54 @@ for (const surface of SURFACES) {
       await start($, w, surface)
       await w.clock.advance(10_000)
       expect(w.appended()).toHaveLength(5)
-      await w.clock.advance(WAKE_INTERVAL_MS)
-
       expect(w.submitted).toHaveLength(1)
-      for (const seq of [1, 2, 3, 4, 5]) expect(w.submitted[0]?.text).toContain(`#${seq}`)
+      expect(w.submitted[0]?.text).toContain('#1')
+      await w.clock.advance(19_999)
+      expect(w.submitted).toHaveLength(1)
+      await w.clock.advance(1)
+      expect(w.submitted).toHaveLength(2)
+      for (const seq of [2, 3, 4, 5]) expect(w.submitted[1]?.text).toContain(`#${seq}`)
 
       await w.clock.advance(WAKE_INTERVAL_MS * 3)
+      expect(w.submitted).toHaveLength(2)
+    })
+
+    test('wakeup_collects_messages_until_interval_ends', async ($, on) => {
+      const w = world(on, {
+        feed: [
+          { text: line(SELF_LINE) },
+          { text: message(stamped(1)) },
+          { text: message(stamped(2)), afterMs: 1_000 },
+          { text: message(stamped(3)), afterMs: 1_000 },
+        ],
+      })
+
+      await start($, w, surface)
+      await w.clock.advance(2_000)
+      expect(w.appended()).toHaveLength(3)
       expect(w.submitted).toHaveLength(1)
+      await w.clock.advance(27_999)
+      expect(w.submitted).toHaveLength(1)
+      await w.clock.advance(1)
+      expect(w.submitted).toHaveLength(2)
+      expect(w.submitted[1]?.text).toContain('2 messages arrived')
+      expect(w.submitted[1]?.text).toContain('#2')
+      expect(w.submitted[1]?.text).toContain('#3')
+      expect(w.submitted[1]?.text).not.toContain('#1')
     })
 
     test('wakeup_spaced_by_the_limit', async ($, on) => {
-      // A DM, and another just after the first wake-up: the second still waits the limit out.
+      // With no pending messages, the next DM after the interval wakes at once.
       const w = world(on, {
         feed: [{ text: line(SELF_LINE) }, { text: message(stamped(1)) }, { text: message(stamped(2)), afterMs: 31_000 }],
       })
 
       await start($, w, surface)
-      await w.clock.advance(WAKE_INTERVAL_MS * 3)
+      const startedAt = w.clock.now()
+      await w.clock.advance(31_000)
 
       expect(w.submitted).toHaveLength(2)
+      expect(w.submittedAt).toEqual([startedAt, startedAt + 31_000])
       expect(w.submitted[0]?.text).toContain('#1')
       expect(w.submitted[1]?.text).toContain('#2')
       const [first = 0, second = 0] = w.submittedAt
@@ -929,7 +958,7 @@ for (const surface of SURFACES) {
       // A subagent's turns leave the main loop's busy flag alone.
       await $.turn.start({ text: 'look', turnId: 's1', agentId: 'a1' })
       await $.turn.complete({ answer: 'seen', durationMs: 1, isAborted: false, turnId: 's1', reason: 'answer', agentId: 'a1' })
-      await w.clock.advance(WAKE_INTERVAL_MS * 2)
+      await w.clock.advance(1_000)
       expect(w.appended()).toHaveLength(1)
       expect(w.submitted).toEqual([])
 
