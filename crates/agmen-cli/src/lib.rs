@@ -21,6 +21,7 @@ mod mcp;
 mod open;
 mod output;
 mod paths;
+mod setup;
 
 use std::process::ExitCode;
 

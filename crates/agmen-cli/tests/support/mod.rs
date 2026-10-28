@@ -346,9 +346,59 @@ pub struct Home {
 
 impl Home {
     pub fn new() -> Self {
-        Self {
+        let home = Self {
             dir: tempfile::tempdir().unwrap(),
+        };
+        #[cfg(unix)]
+        {
+            for dir in ["/usr/bin", "/bin"] {
+                for agent in [
+                    "claude",
+                    "codex",
+                    "opencode",
+                    "cursor",
+                    "cursor-agent",
+                    "gemini",
+                ] {
+                    assert!(
+                        !Path::new(dir).join(agent).exists(),
+                        "an agent program is installed in /usr/bin or /bin; the setup tests cannot hide it"
+                    );
+                }
+            }
+            let git = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+                .map(|dir| dir.join("git"))
+                .find(|path| {
+                    use std::os::unix::fs::PermissionsExt as _;
+                    std::fs::metadata(path).is_ok_and(|metadata| {
+                        metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+                    })
+                })
+                .expect("git is on the test PATH");
+            let bin = home.path().join("bin");
+            std::fs::create_dir(&bin).unwrap();
+            std::os::unix::fs::symlink(std::fs::canonicalize(git).unwrap(), bin.join("git"))
+                .unwrap();
         }
+        home
+    }
+
+    /// A fake executable that records its arguments inside this temp home.
+    #[cfg(unix)]
+    pub fn fake_program(&self, name: &str, script: &str) {
+        use std::os::unix::fs::PermissionsExt as _;
+        assert!(
+            !name.is_empty()
+                && name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        );
+        let path = self.path().join("bin").join(name);
+        let text = format!(
+            "#!/bin/sh\nmkdir -p \"$HOME/calls\"\nprintf '%s\\n' \"$*\" >> \"$HOME/calls/{name}.log\"\n{script}\n"
+        );
+        std::fs::write(&path, text).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
 
     pub fn path(&self) -> &Path {
@@ -409,6 +459,11 @@ impl Home {
             .env("GIT_AUTHOR_EMAIL", "test@example.com")
             .env("GIT_COMMITTER_NAME", "Test")
             .env("GIT_COMMITTER_EMAIL", "test@example.com")
+            .env(
+                "PATH",
+                format!("{}:/usr/bin:/bin", home.join("bin").display()),
+            )
+            .env_remove("CODEX_HOME")
             .env_remove("AGMEN_HUB")
             .env_remove("AGMEN_LOG");
     }

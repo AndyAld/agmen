@@ -1,6 +1,7 @@
 //! The git calls the CLI makes: the worktree root, the commit a claim
 //! starts from, and DONE's commit, branch and changed paths.
 
+use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -74,6 +75,65 @@ pub(crate) async fn exclude_file(root: &Path) -> Result<PathBuf> {
     Ok(root.join(path))
 }
 
+/// Whether `rel` is in the index; an untracked path is git's exit code 1.
+pub(crate) async fn is_tracked(root: &Path, rel: &str) -> Result<bool> {
+    let status = tokio::time::timeout(
+        GIT_TIMEOUT,
+        Command::new("git")
+            .args(["ls-files", "--error-unmatch", "--", rel])
+            .current_dir(root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .status(),
+    )
+    .await
+    .context("git ls-files did not answer within 10 s")?
+    .context("git ls-files could not run")?;
+    match status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        Some(code) => bail!("git ls-files exited {code}"),
+        None => bail!("git ls-files was killed"),
+    }
+}
+
+/// Adds `line` to `info/exclude` unless it is already present.
+pub(crate) fn add_exclude(path: &Path, line: &str) -> Result<()> {
+    const MAX_EXCLUDE_BYTES: u64 = 1024 * 1024;
+    let mut existing = String::new();
+    match std::fs::File::open(path) {
+        Ok(file) => {
+            file.take(MAX_EXCLUDE_BYTES + 1)
+                .read_to_string(&mut existing)
+                .with_context(|| format!("reading {}", path.display()))?;
+            if existing.len() as u64 > MAX_EXCLUDE_BYTES {
+                bail!("{} exceeds the 1 MiB limit", path.display());
+            }
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err).with_context(|| format!("reading {}", path.display())),
+    }
+    if existing.lines().any(|existing| existing.trim() == line) {
+        return Ok(());
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(path)
+        .with_context(|| format!("opening {}", path.display()))?;
+    let lead = if existing.is_empty() || existing.ends_with('\n') {
+        ""
+    } else {
+        "\n"
+    };
+    writeln!(file, "{lead}{line}").with_context(|| format!("writing {}", path.display()))
+}
+
 /// The full id of the commit `rev` names.
 pub(crate) async fn commit(root: &Path, rev: &str) -> Result<GitSha> {
     let spec = format!("{rev}^{{commit}}");
@@ -134,6 +194,53 @@ fn parse_name_status(out: &[u8]) -> Result<Vec<Change>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exclude_is_added_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("info/exclude");
+        add_exclude(&path, ".agmen/").unwrap();
+        add_exclude(&path, ".agmen/").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), ".agmen/\n");
+        std::fs::write(&path, "# git ls-files\n*.log").unwrap();
+        add_exclude(&path, ".agmen/").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "# git ls-files\n*.log\n.agmen/\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn is_tracked_sees_committed_files_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        git(root, &["init", "-q"]).await.unwrap();
+        std::fs::write(root.join("tracked"), "yes").unwrap();
+        std::fs::write(root.join("untracked"), "no").unwrap();
+        git(root, &["add", "tracked"]).await.unwrap();
+        git(
+            root,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-q",
+                "-m",
+                "fixture",
+            ],
+        )
+        .await
+        .unwrap();
+        assert!(is_tracked(root, "tracked").await.unwrap());
+        assert!(!is_tracked(root, "untracked").await.unwrap());
+        assert!(!is_tracked(root, "missing").await.unwrap());
+        let outside = tempfile::tempdir().unwrap();
+        assert!(is_tracked(outside.path(), "missing").await.is_err());
+    }
 
     #[test]
     fn name_status_pairs() {

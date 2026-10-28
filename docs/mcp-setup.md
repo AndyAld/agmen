@@ -4,8 +4,8 @@
 
 Before any client can use it:
 
-1. Install `agmen` on your `PATH` and sign in: `agmen login --hub <url>`.
-2. In the worktree, join the project: `agmen join <invite>` (or `agmen join --project <id>` when you are already a member).
+1. Install `agmen` on your `PATH`, sign in with `agmen login --hub <url>`, and join the project in the worktree: `agmen join <invite>` (or `agmen join --project <id>` when you are already a member).
+2. Run `agmen setup` after joining to write your installed agents' entries. This version supports Claude Code. Use `--agent claude` to select it, or `--no-plugin` to use its MCP config without installing the plugin.
 
 Outside a joined worktree every tool answers `not joined: run agmen join <invite> in this worktree`, and nothing connects to the hub or the broker. The same happens when the identity file fails the trust test: it must sit at the worktree root as `.agmen/identity.json` (exactly those names, no symbolic links), and git must ignore it. `agmen join` sets that up. An identity file that came with the repository is never used, since it could send your token to another hub.
 
@@ -13,7 +13,11 @@ Outside a joined worktree every tool answers `not joined: run agmen join <invite
 
 ## Claude Code
 
-The agmen plugin (`mods/agmen-claude`) already starts the server; you need nothing else. Without the plugin, add this to `.mcp.json` in the worktree (or to your user MCP config):
+`agmen setup` installs the agmen plugin (`mods/agmen-claude`), which starts the server and adds wake-ups and the lane guard. In a terminal, setup asks before installing; without a terminal it installs unless you pass `--no-plugin`. The lane guard hook is available only through the Claude Code plugin; other agents can call `check_path`.
+
+If you decline the plugin or installation fails, setup writes `.mcp.json` and adds it to git's local `info/exclude`. It preserves other servers and settings, skips tracked or unreadable files, and reports `already set up` on a second run. Until the `agmen-dev/agmen` marketplace is published, installation falls back to this file.
+
+For manual setup, add this to `.mcp.json` in the worktree (or to your user MCP config):
 
 ```json
 {

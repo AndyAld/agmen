@@ -13,6 +13,256 @@ const IDENTITY: &str = r#"{"tenant":"tenant01","project":"project1","identity_id
 "handle":"andy/sol","owner_id":"andyandy","hub_url":"http://127.0.0.1:9",
 "broker_url":"mqtt://127.0.0.1:9"}"#;
 
+#[cfg(unix)]
+fn setup_worktree(home: &Home) -> Worktree {
+    let wt = Worktree::new(home);
+    std::fs::create_dir(wt.path().join(".agmen")).unwrap();
+    std::fs::write(wt.path().join(".agmen/identity.json"), IDENTITY).unwrap();
+    std::fs::write(wt.path().join(".git/info/exclude"), ".agmen/\n").unwrap();
+    wt
+}
+
+#[cfg(unix)]
+#[test]
+fn setup_needs_a_joined_worktree() {
+    let home = Home::new();
+    let wt = Worktree::new(&home);
+    let out = home.agmen(&wt.path(), &["setup"]).output().unwrap();
+    assert_exit(&out, 3);
+    assert!(stderr(&out).contains("not joined: run agmen join"));
+}
+
+#[cfg(unix)]
+#[test]
+fn setup_refuses_an_agent_it_cannot_set_up_yet() {
+    let home = Home::new();
+    let out = home
+        .agmen(home.path(), &["setup", "--agent", "codex"])
+        .output()
+        .unwrap();
+    assert_exit(&out, 2);
+    assert!(
+        stderr(&out).contains("possible values: claude"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn fake_programs_can_run_system_tools() {
+    let home = Home::new();
+    home.fake_program(
+        "probe",
+        "cat \"$1\" > \"$HOME/out\"; mv \"$HOME/out\" \"$HOME/moved\"",
+    );
+    let file = home.path().join("input");
+    std::fs::write(&file, "hello\n").unwrap();
+    let mut cmd = std::process::Command::new("probe");
+    cmd.arg(&file);
+    home.apply_env(&mut cmd);
+    assert_exit(&cmd.output().unwrap(), 0);
+    assert_eq!(
+        std::fs::read_to_string(home.path().join("moved")).unwrap(),
+        "hello\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(home.path().join("calls/probe.log"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn setup_with_no_agents_says_so() {
+    let home = Home::new();
+    let wt = setup_worktree(&home);
+    let out = home.agmen(&wt.path(), &["setup"]).output().unwrap();
+    assert_exit(&out, 0);
+    assert_eq!(
+        stdout(&out),
+        "no agents found: install one, then run agmen setup\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn setup_installs_the_claude_plugin() {
+    let home = Home::new();
+    home.fake_program("claude", "if [ \"$2\" = list ]; then printf '[]\\n'; fi");
+    let wt = setup_worktree(&home);
+    let out = home
+        .agmen(&wt.path(), &["setup", "--agent", "claude"])
+        .output()
+        .unwrap();
+    assert_exit(&out, 0);
+    assert_eq!(stdout(&out), "Claude Code: installed the agmen plugin\n");
+    assert_eq!(
+        std::fs::read_to_string(home.path().join("calls/claude.log")).unwrap(),
+        "plugin list --json\nplugin install agmen --marketplace agmen-dev/agmen --scope user --yes\n"
+    );
+    assert!(!wt.path().join(".mcp.json").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn setup_skips_an_installed_plugin() {
+    let home = Home::new();
+    home.fake_program("claude", r#"printf '%s\n' '[{"id":"agmen@agmen","version":"1","scope":"user","enabled":true,"installPath":"test"}]'"#);
+    let wt = setup_worktree(&home);
+    let out = home.agmen(&wt.path(), &["setup"]).output().unwrap();
+    assert_exit(&out, 0);
+    assert_eq!(stdout(&out), "Claude Code: already set up\n");
+    assert_eq!(
+        std::fs::read_to_string(home.path().join("calls/claude.log")).unwrap(),
+        "plugin list --json\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn setup_no_plugin_writes_mcp_json() {
+    let home = Home::new();
+    std::fs::create_dir(home.path().join(".claude")).unwrap();
+    let wt = setup_worktree(&home);
+    let out = home
+        .agmen(&wt.path(), &["setup", "--no-plugin"])
+        .output()
+        .unwrap();
+    assert_exit(&out, 0);
+    assert!(stdout(&out).contains("wrote .mcp.json"));
+    let text = std::fs::read_to_string(wt.path().join(".mcp.json")).unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&text).unwrap(),
+        serde_json::json!({"mcpServers":{"agmen":{"command":"agmen","args":["mcp"]}}})
+    );
+    let exclude = std::fs::read_to_string(wt.path().join(".git/info/exclude")).unwrap();
+    assert!(exclude.lines().any(|line| line == ".mcp.json"));
+    let out = home
+        .agmen(&wt.path(), &["setup", "--no-plugin"])
+        .output()
+        .unwrap();
+    assert_exit(&out, 0);
+    assert_eq!(stdout(&out), "Claude Code: already set up\n");
+    assert_eq!(
+        std::fs::read_to_string(wt.path().join(".mcp.json")).unwrap(),
+        text
+    );
+    assert_eq!(
+        std::fs::read_to_string(wt.path().join(".git/info/exclude")).unwrap(),
+        exclude
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn setup_falls_back_when_plugin_install_fails() {
+    let home = Home::new();
+    home.fake_program("claude", "if [ \"$2\" = list ]; then printf '[]\\n'; else printf 'offline\\nother error\\n' >&2; exit 1; fi");
+    let wt = setup_worktree(&home);
+    let out = home.agmen(&wt.path(), &["setup"]).output().unwrap();
+    assert_exit(&out, 0);
+    assert_eq!(
+        stdout(&out),
+        "Claude Code: plugin install failed (offline); wrote .mcp.json instead\n"
+    );
+    assert!(wt.path().join(".mcp.json").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn setup_leaves_a_tracked_mcp_json_alone() {
+    let home = Home::new();
+    std::fs::create_dir(home.path().join(".claude")).unwrap();
+    let wt = setup_worktree(&home);
+    let original = "{\"mcpServers\":{\"other\":{\"command\":\"other\"}}}\n";
+    std::fs::write(wt.path().join(".mcp.json"), original).unwrap();
+    wt.git(&home, &["add", ".mcp.json"]);
+    wt.git(&home, &["commit", "-q", "-m", "config"]);
+    let out = home
+        .agmen(&wt.path(), &["setup", "--no-plugin"])
+        .output()
+        .unwrap();
+    assert_exit(&out, 0);
+    assert!(
+        stdout(&out).contains(
+            ".mcp.json is tracked by git; add the agmen entry by hand (docs/mcp-setup.md)"
+        )
+    );
+    assert_eq!(
+        std::fs::read_to_string(wt.path().join(".mcp.json")).unwrap(),
+        original
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn setup_preserves_unreadable_and_oversized_configs() {
+    for original in [
+        "// comment\n{}".to_owned(),
+        "[]".to_owned(),
+        " ".repeat(1024 * 1024 + 1),
+    ] {
+        let home = Home::new();
+        std::fs::create_dir(home.path().join(".claude")).unwrap();
+        let wt = setup_worktree(&home);
+        std::fs::write(wt.path().join(".mcp.json"), &original).unwrap();
+        let out = home
+            .agmen(&wt.path(), &["setup", "--no-plugin"])
+            .output()
+            .unwrap();
+        assert_exit(&out, 0);
+        assert!(stdout(&out).contains(".mcp.json"));
+        assert!(!stdout(&out).contains("wrote"));
+        assert_eq!(
+            std::fs::read_to_string(wt.path().join(".mcp.json")).unwrap(),
+            original
+        );
+        assert_eq!(
+            std::fs::read_to_string(wt.path().join(".git/info/exclude")).unwrap(),
+            ".agmen/\n"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn setup_fallback_does_not_claim_a_tracked_file_was_written() {
+    let home = Home::new();
+    home.fake_program("claude", "exit 1");
+    let wt = setup_worktree(&home);
+    std::fs::write(wt.path().join(".mcp.json"), "{}").unwrap();
+    wt.git(&home, &["add", ".mcp.json"]);
+    let out = home.agmen(&wt.path(), &["setup"]).output().unwrap();
+    assert_exit(&out, 0);
+    assert!(stdout(&out).contains("is tracked by git"));
+    assert!(!stdout(&out).contains("wrote"));
+    assert_eq!(
+        std::fs::read_to_string(wt.path().join(".mcp.json")).unwrap(),
+        "{}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn setup_caps_plugin_stderr_at_200_characters() {
+    let home = Home::new();
+    home.fake_program("claude", "if [ \"$2\" = list ]; then printf '[]\\n'; else printf '%0300d\\nsecond line\\n' 0 >&2; exit 1; fi");
+    let wt = setup_worktree(&home);
+    let out = home.agmen(&wt.path(), &["setup"]).output().unwrap();
+    assert_exit(&out, 0);
+    assert_eq!(
+        stdout(&out),
+        format!(
+            "Claude Code: plugin install failed ({}); wrote .mcp.json instead\n",
+            "0".repeat(200)
+        )
+    );
+}
+
 #[test]
 fn install_receipt_command_uses_shared_reader() {
     let home = Home::new();
@@ -396,4 +646,90 @@ fn project_create_accepts_bootstrap_name_starting_with_hyphen() {
         "--help"
     );
     assert!(server.join().unwrap().contains("\"name\":\"--help\""));
+}
+
+#[cfg(unix)]
+#[test]
+fn setup_never_runs_a_program_from_a_relative_path_entry() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let home = Home::new();
+    let wt = setup_worktree(&home);
+    // A repository that ships its own `claude` must not get it run.
+    let planted = wt.path().join("claude");
+    std::fs::write(&planted, "#!/bin/sh\necho ran >> \"$HOME/planted.log\"\n").unwrap();
+    std::fs::set_permissions(&planted, std::fs::Permissions::from_mode(0o700)).unwrap();
+    for entry in [".", "", "bin"] {
+        let mut cmd = home.agmen(&wt.path(), &["setup"]);
+        cmd.env(
+            "PATH",
+            format!(
+                "{}:{entry}:/usr/bin:/bin",
+                home.path().join("bin").display()
+            ),
+        );
+        let out = cmd.output().unwrap();
+        assert_exit(&out, 0);
+        assert_eq!(
+            stdout(&out),
+            "no agents found: install one, then run agmen setup\n",
+            "PATH entry {entry:?}"
+        );
+        assert!(!home.path().join("planted.log").exists());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn setup_replaces_mcp_json_without_writing_through_a_hard_link() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let home = Home::new();
+    std::fs::create_dir(home.path().join(".claude")).unwrap();
+    let wt = setup_worktree(&home);
+    let other = home.path().join("other.json");
+    let original = "{\"mcpServers\":{\"x\":{\"command\":\"x\"}}}\n";
+    std::fs::write(&other, original).unwrap();
+    std::fs::hard_link(&other, wt.path().join(".mcp.json")).unwrap();
+    std::fs::set_permissions(&other, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let out = home
+        .agmen(&wt.path(), &["setup", "--no-plugin"])
+        .output()
+        .unwrap();
+    assert_exit(&out, 0);
+    assert!(stdout(&out).contains("wrote .mcp.json"), "{}", stdout(&out));
+    assert_eq!(std::fs::read_to_string(&other).unwrap(), original);
+    let text = std::fs::read_to_string(wt.path().join(".mcp.json")).unwrap();
+    assert!(text.contains("\"agmen\"") && text.contains("\"x\""));
+    let mode = std::fs::metadata(wt.path().join(".mcp.json"))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600);
+    let names: Vec<_> = std::fs::read_dir(wt.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert!(
+        names
+            .iter()
+            .all(|name| !name.to_string_lossy().contains("tmp")),
+        "{names:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn setup_leaves_a_symlinked_mcp_json_alone() {
+    let home = Home::new();
+    std::fs::create_dir(home.path().join(".claude")).unwrap();
+    let wt = setup_worktree(&home);
+    let target = home.path().join("outside.json");
+    std::fs::write(&target, "{}").unwrap();
+    std::os::unix::fs::symlink(&target, wt.path().join(".mcp.json")).unwrap();
+    let out = home
+        .agmen(&wt.path(), &["setup", "--no-plugin"])
+        .output()
+        .unwrap();
+    assert_exit(&out, 0);
+    assert!(!stdout(&out).contains("wrote"), "{}", stdout(&out));
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "{}");
 }
