@@ -171,6 +171,37 @@ pub(crate) struct DesktopSettings {
     pub(crate) start_at_login: bool,
     /// Checkout roots, most recently opened first. At most ten are kept.
     pub(crate) recent_projects: Vec<PathBuf>,
+    /// The width, in pixels, the person dragged the left dock to; unset
+    /// for its default. The workspace clamps it into the dock's bounds.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient_width"
+    )]
+    pub(crate) left_dock_width: Option<u32>,
+    /// As `left_dock_width`, for the right dock.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient_width"
+    )]
+    pub(crate) right_dock_width: Option<u32>,
+}
+
+/// A saved dock width: a number, rounded and held to `0..=u32::MAX`.
+/// Anything else reads as unset, so a hand-edited width that is not a
+/// number costs only that width, not the rest of the `[desktop]` table.
+fn lenient_width<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = toml::Value::deserialize(deserializer)?;
+    Ok(match value {
+        toml::Value::Integer(n) => Some(u32::try_from(n.max(0)).unwrap_or(u32::MAX)),
+        toml::Value::Float(f) if f.is_finite() => {
+            // Rounded and held in range, so the cast cannot wrap.
+            Some(f.round().clamp(0., f64::from(u32::MAX)) as u32)
+        }
+        _ => None,
+    })
 }
 
 /// The table that holds [`DesktopSettings`].
@@ -182,6 +213,8 @@ const DESKTOP_KEYS: &[&str] = &[
     "quit_keep_running",
     "start_at_login",
     "recent_projects",
+    "left_dock_width",
+    "right_dock_width",
 ];
 
 impl DesktopSettings {

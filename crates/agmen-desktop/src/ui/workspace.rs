@@ -14,7 +14,7 @@ use super::dock::{Dock, DockSide, LeftDockTabs};
 use super::pane::{PaneGroup, PaneGroupEvent, TabItem};
 use super::status_bar::StatusBar;
 use super::title_bar::TitleBar;
-use super::tokens::{BORDER_WIDTH, LEFT_DOCK_WIDTH, RIGHT_DOCK_WIDTH};
+use super::tokens::BORDER_WIDTH;
 use crate::appearance::Appearance;
 use agmen_proto::IdentityId;
 
@@ -46,6 +46,9 @@ mod plan_wiring;
 #[path = "workspace_refs.rs"]
 mod ref_routes;
 pub(super) use ref_routes::{RefRoute, route};
+// The docks' drag handles and their saved widths.
+#[path = "workspace_resize.rs"]
+mod resize;
 
 // Task 18: the actions moved to src/keymap.rs with their bindings.
 pub(crate) use crate::keymap::{Quit, ToggleLeftDock, ToggleRightDock};
@@ -59,6 +62,9 @@ pub(crate) struct Workspace {
     new_agent_events: Option<Subscription>,
     left_dock: Dock,
     right_dock: Dock,
+    /// A dock handle's drag has moved a dock since the mouse went down, so
+    /// letting go saves the widths.
+    dock_dragged: bool,
     agents_panel: Entity<AgentsPanel>,
     /// The center: the chat, and the tabs and splits its chips open.
     ///
@@ -139,6 +145,7 @@ impl Workspace {
         let chat_refs = cx.subscribe(&chat, |this, _, event, cx| this.open_ref(event, cx));
         let left = LeftDockState::new(&snapshot, cx);
         let plan = plan_wiring::PlanWiring::new(&snapshot, cx);
+        let (left_width, right_width) = Self::saved_dock_widths(cx);
         Self {
             focus_handle: cx.focus_handle(),
             snapshot,
@@ -146,8 +153,9 @@ impl Workspace {
             new_agent: None,
             new_agent_events: None,
             pane_group,
-            left_dock: Dock::new(LEFT_DOCK_WIDTH),
-            right_dock: Dock::new(RIGHT_DOCK_WIDTH),
+            left_dock: Dock::new(left_width),
+            right_dock: Dock::new(right_width),
+            dock_dragged: false,
             agents_panel,
             selected_agent: None,
             left,
@@ -322,24 +330,23 @@ impl Focusable for Workspace {
     }
 }
 
-impl Render for Workspace {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Task 18: the palette over everything.
-        let palette = self.palette_overlay(window, cx);
-        // Fetch the OS file icons the last frame asked for, off the render path.
-        cx.defer(FileIcons::fetch_wanted);
-        let appearance = cx.global::<Appearance>();
-        let theme = &appearance.theme;
-        let fonts = &appearance.fonts;
-        // Text sizes are rems, so they follow the person's UI font size.
-        window.set_rem_size(appearance.fonts.ui_size);
-
-        let mut body = div().flex().flex_row().flex_1().min_h_0();
-        if self.is_dock_open(DockSide::Left) {
+impl Workspace {
+    /// The docks and the center between the title and status bars.
+    fn body(&self, window: &Window, cx: &Context<Self>) -> gpui::Div {
+        let theme = &cx.global::<Appearance>().theme;
+        // The workspace fills the window, so its body is the window wide.
+        let (left_width, right_width) = self.dock_widths(window.viewport_size().width, cx);
+        let mut body = Self::dock_resize_listeners(div(), cx)
+            .flex()
+            .flex_row()
+            .flex_1()
+            .min_h_0();
+        if let Some(width) = left_width {
             body = body.child(
                 div()
                     .debug_selector(|| "left-dock".into())
-                    .w(self.left_dock.width())
+                    .relative()
+                    .w(width)
                     .flex_none()
                     .h_full()
                     .flex()
@@ -354,7 +361,8 @@ impl Render for Workspace {
                             .flex_col()
                             .child(LeftDockTabs(self.left.tab))
                             .child(self.left_dock_content()),
-                    ),
+                    )
+                    .child(Self::dock_resize_handle(DockSide::Left, cx)),
             );
         }
         body = body.child(
@@ -365,12 +373,12 @@ impl Render for Workspace {
                 .flex()
                 .child(self.pane_group.clone()),
         );
-        if self.is_dock_open(DockSide::Right) {
+        if let Some(width) = right_width {
             let panel = self.right_panel(cx);
-            // Task 19: the plan panel is wider than the other panels.
-            let width = self.plan_dock_width(cx).unwrap_or(self.right_dock.width());
             body = body.child(
                 div()
+                    .debug_selector(|| "right-dock".into())
+                    .relative()
                     .w(width)
                     .flex_none()
                     .h_full()
@@ -384,9 +392,27 @@ impl Render for Workspace {
                             .h_full()
                             .overflow_hidden()
                             .children(panel),
-                    ),
+                    )
+                    .child(Self::dock_resize_handle(DockSide::Right, cx)),
             );
         }
+        body
+    }
+}
+
+impl Render for Workspace {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Task 18: the palette over everything.
+        let palette = self.palette_overlay(window, cx);
+        // Fetch the OS file icons the last frame asked for, off the render path.
+        cx.defer(FileIcons::fetch_wanted);
+        let appearance = cx.global::<Appearance>();
+        let theme = &appearance.theme;
+        let fonts = &appearance.fonts;
+        // Text sizes are rems, so they follow the person's UI font size.
+        window.set_rem_size(appearance.fonts.ui_size);
+
+        let body = self.body(window, cx);
 
         // Task 19: the kick-off dialog over everything.
         let overlay = self.plan_overlay(cx);

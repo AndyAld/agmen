@@ -63,6 +63,15 @@ pub(crate) const TITLE_BAR_HEIGHT: Pixels = px(38.);
 pub(crate) const STATUS_BAR_HEIGHT: Pixels = px(28.);
 pub(crate) const LEFT_DOCK_WIDTH: Pixels = px(272.);
 pub(crate) const RIGHT_DOCK_WIDTH: Pixels = px(340.);
+/// How narrow and wide a person can drag each dock, and the center
+/// column's least width beside them.
+pub(crate) const LEFT_DOCK_MIN_WIDTH: Pixels = px(200.);
+pub(crate) const LEFT_DOCK_MAX_WIDTH: Pixels = px(480.);
+pub(crate) const RIGHT_DOCK_MIN_WIDTH: Pixels = px(260.);
+pub(crate) const RIGHT_DOCK_MAX_WIDTH: Pixels = px(640.);
+pub(crate) const CENTER_MIN_WIDTH: Pixels = px(360.);
+/// A dock's drag handle: a hit area centered on its inner border.
+pub(crate) const RESIZE_HANDLE_WIDTH: Pixels = px(6.);
 pub(crate) const TAB_BAR_HEIGHT: Pixels = px(34.);
 pub(crate) const BREADCRUMB_HEIGHT: Pixels = px(32.);
 /// Where the title bar's text starts, past the traffic lights at x 12 to 68

@@ -3,7 +3,7 @@ use crate::backend::{chat_snapshot, fixture_id};
 use crate::ui::left_dock::LeftDockTab;
 use crate::ui::pane::SplitDirection;
 use crate::ui::test_support::{click, init, redraw};
-use crate::ui::tokens::{STATUS_BAR_HEIGHT, TAB_BAR_HEIGHT, TITLE_BAR_HEIGHT};
+use crate::ui::tokens::{LEFT_DOCK_WIDTH, STATUS_BAR_HEIGHT, TAB_BAR_HEIGHT, TITLE_BAR_HEIGHT};
 use agmen_proto::GitSha;
 use gpui::TestAppContext;
 

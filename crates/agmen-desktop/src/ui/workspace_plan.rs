@@ -101,12 +101,13 @@ impl Workspace {
         }
     }
 
-    /// The right dock's width: the plan panel is wider (node 8935, 470).
-    pub(super) fn plan_dock_width(&self, cx: &App) -> Option<Pixels> {
-        Some(match self.plan_dock(cx)? {
-            PlanDock::Plan => PLAN_PANEL_WIDTH,
-            PlanDock::Review(_) => RIGHT_DOCK_WIDTH,
-        })
+    /// The right dock's width until the person resizes it: the plan
+    /// panel is wider than the others (node 8935, 470).
+    pub(super) fn right_dock_default_width(&self, cx: &App) -> Pixels {
+        match self.plan_dock(cx) {
+            Some(PlanDock::Plan) => PLAN_PANEL_WIDTH,
+            Some(PlanDock::Review(_)) | None => RIGHT_DOCK_WIDTH,
+        }
     }
 
     /// The kick-off dialog over the window while it is open.

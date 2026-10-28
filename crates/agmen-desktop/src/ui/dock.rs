@@ -7,7 +7,10 @@ use gpui::{
 
 use super::components::{Color, IconButton, IconButtonStyle, IconSize, Label};
 use super::left_dock::LeftDockTab;
-use super::tokens::{BORDER_WIDTH, SPACE_8, SPACE_10, SPACE_14, TAB_BAR_HEIGHT};
+use super::tokens::{
+    BORDER_WIDTH, LEFT_DOCK_MAX_WIDTH, LEFT_DOCK_MIN_WIDTH, RIGHT_DOCK_MAX_WIDTH,
+    RIGHT_DOCK_MIN_WIDTH, SPACE_8, SPACE_10, SPACE_14, TAB_BAR_HEIGHT,
+};
 use super::workspace::{ToggleLeftDock, ToggleRightDock};
 use crate::icons::UiIcon;
 
@@ -18,15 +21,35 @@ pub(crate) enum DockSide {
     Right,
 }
 
-/// A dock's open state and width.
+impl DockSide {
+    /// How narrow and wide a person can drag this dock.
+    pub(crate) const fn width_bounds(self) -> (Pixels, Pixels) {
+        match self {
+            Self::Left => (LEFT_DOCK_MIN_WIDTH, LEFT_DOCK_MAX_WIDTH),
+            Self::Right => (RIGHT_DOCK_MIN_WIDTH, RIGHT_DOCK_MAX_WIDTH),
+        }
+    }
+
+    /// `width` held inside this dock's bounds.
+    #[must_use]
+    pub(crate) fn clamp_width(self, width: Pixels) -> Pixels {
+        let (min, max) = self.width_bounds();
+        width.max(min).min(max)
+    }
+}
+
+/// A dock's open state and the width the person dragged it to.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Dock {
     open: bool,
-    width: Pixels,
+    /// `None` until the person resizes the dock; it then draws at its
+    /// default, which for the right dock depends on the panel it shows.
+    width: Option<Pixels>,
 }
 
 impl Dock {
-    pub(crate) const fn new(width: Pixels) -> Self {
+    /// An open dock at `width`, or at its default for `None`.
+    pub(crate) const fn new(width: Option<Pixels>) -> Self {
         Self { open: true, width }
     }
 
@@ -34,8 +57,12 @@ impl Dock {
         self.open
     }
 
-    pub(crate) const fn width(&self) -> Pixels {
+    pub(crate) const fn width(&self) -> Option<Pixels> {
         self.width
+    }
+
+    pub(crate) const fn set_width(&mut self, width: Option<Pixels>) {
+        self.width = width;
     }
 
     pub(crate) const fn toggle(&mut self) {
