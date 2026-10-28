@@ -255,8 +255,9 @@ Listener settings (agent, model, effort, caps, `accept_from`, which always inclu
 
 For owner-only local methods, agmend checks the socket peer PID and refuses
 processes in a running managed worker's process group with `forbidden` and
-`agents cannot call owner-only methods`. This covers agent launch, stop and
-list, human posts, host methods, shutdown and login. Identity-authenticated
+`agents cannot call owner-only methods`. This covers agent launch, stop,
+list, start, attach, detach and remove, human posts, host methods, shutdown
+and login. Identity-authenticated
 posts and identity read/watch methods remain available. If the peer PID cannot
 be read, owner-only calls are refused; while a worker runs, so are calls from a
 peer whose process group cannot be read. This is a guard against accidental
@@ -391,6 +392,85 @@ inspection above, without creating or migrating stores or changing journal
 mode. Missing stores, incomplete discovery and inspection failures return
 nonzero. Compare the complete path and version set before rollback; a failed
 snapshot does not establish rollback safety.
+
+### Managed agent methods
+
+Human callers manage their own agents with these methods. Identity callers
+receive `forbidden`, and so do worker peers (above). Each checks that the
+agent's owner and hub origin match the signed-in login.
+
+- `agent_launch {project, name, root?, model?, budget_usd?}` makes a worktree
+  on a new `agent/<name>-<8 hex>` branch, mints an identity in it and writes
+  `managed/<identity>/agent.json`. The agent starts `idle`.
+- `agent_list {project?}` answers `{"agents":[{identity, project, handle,
+  state, model, budget_usd, spent_usd, worktree, branch, source}]}`. `state`
+  is `running`, `idle`, `offline` or `attached`; `source` is `launched` or
+  `joined`.
+- `agent_stop {identity}` cancels a running batch, posts BYE and sets
+  `offline`.
+- `agent_start {identity, project?, root?}` brings an offline agent back.
+  After agmend restarts, every saved record loads as `offline` and nothing runs
+  until Start. A record restores its spend (`status.json`) and both session
+  ids; each tier's next batch uses `--resume <id>` when Claude Code has saved
+  that session (`<claude home>/projects/<folder with every non-alphanumeric
+  character as ->/<id>.jsonl`), else `--session-id <id>`. A saved owner
+  session passes the transcript check below first; when it fails, the owner
+  tier gets a fresh session id, saved in the record, and `context` says why.
+  A record in the older format with one `session_id` (which ran every batch,
+  owner's and others') loads it as the owner session, subject to that check,
+  gets a fresh others session, and is saved again in the current format. For an identity
+  joined by hand (no record), `project` is required; agmend looks for the
+  worktree of that project's open checkout whose `.agmen/identity.json` names
+  the identity, or uses `root` when the person picked the folder. It answers
+  `not_found` when it finds no folder. The folder becomes the agent's
+  worktree, with no new worktree or branch, and the owner session resumes the
+  newest transcript for that folder, or starts fresh when there is none.
+  Because owner batches run with bypassPermissions and an interactive session
+  with the agmen plugin sees every sender's messages, that transcript is
+  resumed only when it holds nothing from anyone but the owner: agmend reads
+  the transcript and its subagents' (`<id>/subagents/*.jsonl`, at most 256),
+  at most 32 MiB and 50,000 lines in all, treats their contents as data, and
+  starts fresh when it finds a call that reads every sender's messages (an MCP
+  `inbox` tool under any server name, or Bash running `agmen inbox` or `agmen
+  watch`) whatever it answered, an agmen message whose hub-stamped `from` is
+  not the owner's human id, the plugin's row for another participant's
+  message, or an inbox line (`#<seq> <stream> <VERB> from <handle> ...:`) from
+  another handle, or when a line does not parse. The
+  answer's `context` says what happened: `resumed`, `new`,
+  `skipped_others` or `skipped_unreadable`; the desktop shows a line for
+  the last two.
+  Adoption requires the folder's trusted identity file to name that identity,
+  project, owner and hub origin. Start refuses an identity the hub roster shows
+  `online` or `away`, such as an interactive Claude Code with the agmen plugin,
+  and refuses when the roster cannot be read.
+- `agent_attach {identity, project?, root?}` opens Terminal on a script in
+  `managed/<identity>/attach.command` that runs `claude --resume <owner
+  session>` (or `--session-id` when that session was never started) in the
+  agent's worktree, with the login-shell PATH, in Claude Code's normal
+  permission mode. It never opens the others session. Since later owner
+  batches resume this session with bypassPermissions, other senders' messages
+  are kept out of it: Claude Code runs with `--disallowedTools
+  mcp__agmen__inbox,mcp__plugin_agmen_agmen__inbox` and `AGMEN_MANAGED=1`,
+  which makes the agmen plugin skip its watch, wake-ups and `/agmen` while its
+  lane and Bash guards stay on and fail closed. Bash in the attached session is
+  the person's to approve, so `agmen inbox` can still run there; when the
+  attached session ends, its transcript goes through the check above, and a
+  session that read other senders' messages is not resumed: the owner tier
+  starts fresh. A running batch is cancelled first, without charging the
+  budget, as Stop does; an offline agent is adopted as Start does. While
+  `attached` the agent's messages wait and no batch runs. The script writes
+  Claude Code's process id to `attach.pid`; when that process exits, or no
+  process id appears within 120 s, the agent returns to `idle` and later owner
+  batches resume the same session when it passes the check.
+- `agent_detach {identity}` sends SIGTERM to the attached Claude Code and
+  returns the agent to `idle`.
+- `agent_remove {identity, project?, root?}` ends an attached Claude Code,
+  stops the agent (BYE), revokes the identity with `DELETE
+  /v1/identities/{id}` as `agmen leave` does (a 404 counts as revoked), deletes
+  its identity file when that file names it, its hub token, its local queue and
+  `managed/<identity>/`. It keeps the folder and branch and answers
+  `{"identity":..., "removed":true, "kept":{"folder":..., "branch":...}}`.
+
 ### Host mode
 
 `agmend host init --env-file <path> [--env-file <path> ...] [--hub-bin <path>] [--public-url <url>] [--tailscale-serve] [--force]` writes `<agmen state dir>/host.toml` with mode 0600. It refuses an existing configuration unless `--force` is present. Relative paths become absolute. Without `--hub-bin`, an agmend inside `Contents/MacOS` selects its adjacent `agmen-hub`; outside an app bundle the executable path is required. The URL comes from `--public-url` or `AGMEN_PUBLIC_URL` in the environment files.

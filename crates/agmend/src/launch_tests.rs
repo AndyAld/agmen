@@ -478,3 +478,116 @@ async fn missing_agmen_error_names_the_missing_executable_directly() {
     assert_eq!(error.to_string(), "agmen executable was not found");
     assert_eq!(error.reported_cost(), Some("0"));
 }
+
+fn attach_spec(dir: &std::path::Path, cwd: &std::path::Path, resume: bool) -> AttachSpec {
+    AttachSpec {
+        cwd: cwd.to_owned(),
+        session_id: "a6cddf07-a8fd-46e1-9585-2571af65af24".into(),
+        resume,
+        script: dir.join("attach.command"),
+        pid_file: dir.join("attach.pid"),
+    }
+}
+
+#[tokio::test]
+async fn attach_opens_terminal_on_a_script_that_runs_the_owner_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state it's");
+    let cwd = dir.path().join("work tree");
+    std::fs::create_dir(&state).unwrap();
+    std::fs::create_dir(&cwd).unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let claude = bin.join("claude");
+    std::fs::write(
+        &claude,
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$AGMEN_TEST_OUT/claude-args\"\npwd -P > \"$AGMEN_TEST_OUT/claude-cwd\"\nprintf '%s' \"$$\" > \"$AGMEN_TEST_OUT/claude-pid\"\nprintf '%s' \"$AGMEN_MANAGED\" > \"$AGMEN_TEST_OUT/claude-managed\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o700)).unwrap();
+    // Stands in for `open -a Terminal <script>`: runs the script itself.
+    let opener = fake(
+        dir.path(),
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$AGMEN_TEST_OUT/opener-args\"\nexec /bin/sh \"$3\"\n",
+    );
+    let out = dir.path().join("out");
+    std::fs::create_dir(&out).unwrap();
+    let runner = ClaudeRunner {
+        program: "claude".into(),
+        opener,
+        opener_env: vec![("AGMEN_TEST_OUT".into(), out.clone().into())],
+        shell: Arc::new(TestShell {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            output: format!("{LOGIN_PATH_MARKER}\n{}:/bin:/usr/bin\n", bin.display()),
+        }),
+        ..ClaudeRunner::default()
+    };
+    let spec = attach_spec(&state, &cwd, true);
+    runner.attach(spec.clone()).await.unwrap();
+    let opened = std::fs::read_to_string(out.join("opener-args")).unwrap();
+    assert_eq!(
+        opened.lines().collect::<Vec<_>>(),
+        ["-a", "Terminal", spec.script.to_str().unwrap()]
+    );
+    let args = std::fs::read_to_string(out.join("claude-args")).unwrap();
+    assert_eq!(
+        args.lines().collect::<Vec<_>>(),
+        [
+            "--resume",
+            "a6cddf07-a8fd-46e1-9585-2571af65af24",
+            "--disallowedTools",
+            "mcp__agmen__inbox,mcp__plugin_agmen_agmen__inbox"
+        ],
+        "Claude Code's normal permission mode, without the inbox tool"
+    );
+    // The plugin then delivers no other sender's message into the session.
+    assert_eq!(
+        std::fs::read_to_string(out.join("claude-managed")).unwrap(),
+        "1"
+    );
+    assert_eq!(
+        std::fs::read_to_string(out.join("claude-cwd"))
+            .unwrap()
+            .trim(),
+        std::fs::canonicalize(&cwd).unwrap().to_str().unwrap()
+    );
+    // exec keeps the script's pid, so the pid file names Claude Code.
+    assert_eq!(
+        std::fs::read_to_string(&spec.pid_file).unwrap().trim(),
+        std::fs::read_to_string(out.join("claude-pid")).unwrap()
+    );
+    let mode = std::fs::metadata(&spec.script)
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o700);
+
+    // A session that was never started is created, not resumed.
+    runner
+        .attach(attach_spec(&state, &cwd, false))
+        .await
+        .unwrap();
+    let args = std::fs::read_to_string(out.join("claude-args")).unwrap();
+    assert_eq!(
+        args.lines().collect::<Vec<_>>(),
+        [
+            "--session-id",
+            "a6cddf07-a8fd-46e1-9585-2571af65af24",
+            "--disallowedTools",
+            "mcp__agmen__inbox,mcp__plugin_agmen_agmen__inbox"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn attach_refuses_a_session_id_that_is_not_a_uuid() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut spec = attach_spec(dir.path(), dir.path(), true);
+    spec.session_id = "--dangerously-skip-permissions".into();
+    let runner = ClaudeRunner {
+        opener: "/nonexistent/open".into(),
+        ..ClaudeRunner::default()
+    };
+    assert!(runner.attach(spec.clone()).await.is_err());
+    assert!(!spec.script.exists());
+}

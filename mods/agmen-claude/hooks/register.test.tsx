@@ -743,6 +743,26 @@ for (const surface of SURFACES) {
       expect(w.submitted).toEqual([])
     })
 
+    test('attached_session_gets_no_peer_messages_and_refuses_the_agmen_command', async ($, on) => {
+      // agmend's Attach runs Claude Code with AGMEN_MANAGED=1 on the owner
+      // session, which later headless batches resume with bypassPermissions:
+      // nothing another sender wrote may enter it through the plugin.
+      const w = world(on, {
+        hostEnv: { AGMEN_MANAGED: '1' },
+        feed: [{ text: line(SELF_LINE) }, { text: message(stamped(1, { body: INJECTED })) }],
+      })
+      await start($, w, surface)
+      const inbox = await $.command.run(typed('inbox'))
+
+      expect(w.spawns).toEqual([])
+      expect(w.appended()).toEqual([])
+      expect(w.submitted).toEqual([])
+      expect(inbox.text).toBe(
+        'agmen: /agmen is off in a session agmend runs, so other senders\' messages stay out of it. Run agmen in a terminal instead.',
+      )
+      expect(w.runs.some(argv => argv[0] === 'agmen' && argv[1] === 'inbox')).toBe(false)
+    })
+
     test('managed_session_still_runs_the_lane_guard_and_bash_check', async ($, on) => {
       const w = world(on, {
         hostEnv: { AGMEN_MANAGED: '1' },

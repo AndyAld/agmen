@@ -3,13 +3,15 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Context, EventEmitter, FontWeight, IntoElement, ParentElement as _, Render, Styled as _,
-    Window, div,
+    AnyElement, Context, EventEmitter, FontWeight, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, Styled as _, Window, div,
 };
 
 use super::components::{
-    Button, ButtonStyle, Color, Icon, IconSize, Indent, Label, LabelSize, ListItem, StatusDot,
+    Button, ButtonStyle, Color, Icon, IconSize, Indent, Label, LabelSize, ListItem, Menu, MenuRow,
+    StatusDot,
 };
 use super::format::title_case;
 use super::tokens::SPACE_6;
@@ -25,6 +27,43 @@ pub(crate) enum AgentsPanelEvent {
     Selected(IdentityId),
     NewAgent,
     Stop(IdentityId),
+    /// Start from the agent's menu: back online with its previous context.
+    Start(IdentityId),
+    /// Attach Claude Code… from the agent's menu.
+    Attach(IdentityId),
+    Detach(IdentityId),
+    /// Remove… from the agent's menu; the workspace asks first.
+    Remove(IdentityId),
+}
+
+/// The agent menu's items for a managed state, as (key, label). An agent
+/// agmend does not manage is offline.
+fn menu_items(state: Option<&str>) -> &'static [(&'static str, &'static str)] {
+    match state {
+        Some("attached") => &[("detach", "Detach"), ("remove", "Remove…")],
+        Some("running" | "idle") => &[
+            ("stop", "Stop"),
+            ("attach", "Attach Claude Code…"),
+            ("remove", "Remove…"),
+        ],
+        _ => &[
+            ("start", "Start"),
+            ("attach", "Attach Claude Code…"),
+            ("remove", "Remove…"),
+        ],
+    }
+}
+
+/// The event a menu item emits.
+fn menu_event(key: &str, id: IdentityId) -> Option<AgentsPanelEvent> {
+    Some(match key {
+        "start" => AgentsPanelEvent::Start(id),
+        "stop" => AgentsPanelEvent::Stop(id),
+        "attach" => AgentsPanelEvent::Attach(id),
+        "detach" => AgentsPanelEvent::Detach(id),
+        "remove" => AgentsPanelEvent::Remove(id),
+        _ => return None,
+    })
 }
 
 pub(crate) struct AgentsPanel {
@@ -34,6 +73,12 @@ pub(crate) struct AgentsPanel {
     folded: BTreeSet<String>,
     /// The row the right dock shows; the workspace sets it.
     selected: Option<IdentityId>,
+    /// The person's listener, which has no agent menu.
+    listener: Option<IdentityId>,
+    /// The agent whose menu is open.
+    menu: Option<IdentityId>,
+    /// A line about the last agent action that is not an error.
+    notice: Option<String>,
 }
 
 impl EventEmitter<AgentsPanelEvent> for AgentsPanel {}
@@ -46,7 +91,43 @@ impl AgentsPanel {
             error: None,
             folded: BTreeSet::new(),
             selected: None,
+            listener: None,
+            menu: None,
+            notice: None,
         }
+    }
+
+    /// Tells the panel which agent is the person's listener.
+    /// Shows `notice` under New Agent…, such as a Start that began fresh.
+    pub(crate) fn set_notice(&mut self, notice: Option<String>, cx: &mut Context<Self>) {
+        if self.notice != notice {
+            self.notice = notice;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn set_listener(&mut self, listener: Option<IdentityId>, cx: &mut Context<Self>) {
+        self.listener = listener;
+        cx.notify();
+    }
+
+    fn open_menu(&mut self, id: &IdentityId, cx: &mut Context<Self>) {
+        self.menu = Some(id.clone());
+        cx.notify();
+    }
+
+    fn close_menu(&mut self, cx: &mut Context<Self>) {
+        if self.menu.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    fn pick(&mut self, key: &str, id: &IdentityId, cx: &mut Context<Self>) {
+        self.menu = None;
+        if let Some(event) = menu_event(key, id.clone()) {
+            cx.emit(event);
+        }
+        cx.notify();
     }
 
     pub(crate) fn set_managed(
@@ -132,7 +213,10 @@ impl AgentsPanel {
             .on_click(cx.listener(move |this, _, _, cx| this.toggle_fold(&person, cx)))
     }
 
-    fn agent_row(&self, agent: &AgentRow, cx: &mut Context<Self>) -> ListItem {
+    /// An agent's row. The person's own agents, other than the listener,
+    /// open the agent menu on a left or right click.
+    fn agent_row(&self, agent: &AgentRow, mine: bool, cx: &mut Context<Self>) -> AnyElement {
+        let menu = mine && self.listener.as_ref() != Some(&agent.id);
         let id = agent.id.clone();
         let item = agent_item(
             format!("agent:{}", agent.handle),
@@ -143,7 +227,62 @@ impl AgentsPanel {
             &agent.harness,
         )
         .selected(self.selected.as_ref() == Some(&id))
-        .on_click(cx.listener(move |this, _, _, cx| this.clicked(&id, cx)));
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.clicked(&id, cx);
+            if menu {
+                this.open_menu(&id, cx);
+            }
+        }));
+        let item = if menu {
+            let id = agent.id.clone();
+            item.on_secondary_click(cx.listener(move |this, _, _, cx| this.open_menu(&id, cx)))
+        } else {
+            item
+        };
+        let open = menu && self.menu.as_ref() == Some(&agent.id);
+        div()
+            .relative()
+            .w_full()
+            .child(self.with_stop(item, agent, cx))
+            .when(open, |row| {
+                row.child(
+                    div()
+                        .absolute()
+                        .top_full()
+                        .left(SPACE_6)
+                        .child(self.agent_menu(agent, cx)),
+                )
+            })
+            .into_any_element()
+    }
+
+    /// The open menu of `agent`'s actions for its state.
+    fn agent_menu(&self, agent: &AgentRow, cx: &mut Context<Self>) -> Menu {
+        let rows: Vec<_> = menu_items(self.managed.get(&agent.id).map(String::as_str))
+            .iter()
+            .map(|(key, label)| {
+                let id = agent.id.clone();
+                MenuRow::new(format!("agent:{}:menu:{key}", agent.handle))
+                    .child(Label::new(*label))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.pick(key, &id, cx);
+                    }))
+            })
+            .collect();
+        let this = cx.entity().downgrade();
+        Menu::new(format!("agent:{}:menu", agent.handle))
+            .children(rows)
+            .on_close(move |_, cx| {
+                // Gone only while the window closes; nothing to close.
+                if let Some(this) = this.upgrade() {
+                    this.update(cx, |this, cx| this.close_menu(cx));
+                }
+            })
+    }
+
+    /// The managed state and Stop at the row's end, as before the menu.
+    fn with_stop(&self, item: ListItem, agent: &AgentRow, cx: &mut Context<Self>) -> ListItem {
         match self.managed.get(&agent.id) {
             Some(state) => {
                 let identity = agent.id.clone();
@@ -215,10 +354,10 @@ impl Render for AgentsPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mut rows = Vec::new();
         for group in &self.roster {
-            rows.push(self.person_row(group, cx));
+            rows.push(self.person_row(group, cx).into_any_element());
             if !self.folded.contains(&group.person) {
                 for agent in &group.agents {
-                    rows.push(self.agent_row(agent, cx));
+                    rows.push(self.agent_row(agent, group.you, cx));
                 }
             }
         }
@@ -232,6 +371,11 @@ impl Render for AgentsPanel {
                     .style(ButtonStyle::Plain)
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(AgentsPanelEvent::NewAgent))),
             )
+            .children(self.notice.clone().map(|notice| {
+                div()
+                    .debug_selector(|| "agents:notice".into())
+                    .child(Label::new(notice).color(Color::Muted).wrap())
+            }))
             .children(
                 self.error
                     .clone()

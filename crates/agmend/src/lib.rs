@@ -30,6 +30,7 @@ mod managed;
 mod socket;
 mod sse;
 mod state;
+mod transcripts;
 mod worktree;
 
 use std::path::{Path, PathBuf};
@@ -136,6 +137,7 @@ pub struct Config {
     local_every: Duration,
     personal_roles: Option<PathBuf>,
     runner: Arc<dyn launch::Runner>,
+    claude_home: Option<PathBuf>,
 }
 
 impl Config {
@@ -157,6 +159,7 @@ impl Config {
             local_every: LOCAL_EVERY,
             personal_roles: None,
             runner: Arc::new(launch::ClaudeRunner::default()),
+            claude_home: transcripts::home_from_env(),
         }
     }
 
@@ -278,6 +281,7 @@ impl Agmend {
             hub.clone(),
             config.runner,
             config.socket.with_file_name(""),
+            config.claude_home,
         ));
         Ok(Self {
             bound,
@@ -330,6 +334,8 @@ impl Agmend {
         tasks.spawn(async move {
             identities.supervise().await;
         });
+        // Agents launched before a restart come back offline until Start.
+        self.core.managed.load().await;
         let managed = self.core.managed.clone();
         tasks.spawn(async move {
             managed.supervise().await;

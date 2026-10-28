@@ -194,6 +194,8 @@ pub(crate) struct FakeState {
     pub(crate) posts: Vec<Request>,
     pub(crate) agent_requests: Vec<Request>,
     pub(crate) managed_state: Option<String>,
+    /// What agent actions other than `agent_list` answer; `{}` when null.
+    pub(crate) agent_answer: Value,
     pub(crate) snapshots_served: usize,
     /// Task 8: each `console_snapshot`'s params.
     pub(crate) snapshot_params: Vec<Value>,
@@ -382,19 +384,22 @@ fn managed_response(request: Request, state: &Mutex<FakeState>) -> Response {
     let id = request.id;
     let mut state = state.lock().unwrap();
     if request.method == "agent_list" {
-        let agents = state.managed_state.as_ref().map(|status| json!({"identity": "idmanaged", "project": PROJECT, "handle": "andy/worker", "state": status})).into_iter().collect::<Vec<_>>();
+        let agents = state.managed_state.as_ref().map(|status| json!({"identity": "idmanaged", "project": PROJECT, "handle": "andy/worker", "state": status, "worktree": "/repo/.worktrees/agent/worker-1234", "branch": "agent/worker-1234", "source": "launched"})).into_iter().collect::<Vec<_>>();
         Response::ok(id, json!({"agents": agents}))
     } else {
-        state.managed_state = Some(
-            if request.method == "agent_launch" {
-                "idle"
-            } else {
-                "offline"
-            }
-            .into(),
-        );
+        state.managed_state = match request.method.as_str() {
+            "agent_launch" | "agent_start" | "agent_detach" => Some("idle".into()),
+            "agent_attach" => Some("attached".into()),
+            "agent_remove" => None,
+            _ => Some("offline".into()),
+        };
         state.agent_requests.push(request);
-        Response::ok(id, json!({}))
+        let answer = if state.agent_answer.is_null() {
+            json!({})
+        } else {
+            state.agent_answer.clone()
+        };
+        Response::ok(id, answer)
     }
 }
 
@@ -439,7 +444,7 @@ fn serve(mut stream: UnixStream, state: &Mutex<FakeState>) -> Option<()> {
                     None => Response::err(id, ErrorCode::Hub, "the hub cannot be reached"),
                 }
             }
-            "agent_launch" | "agent_stop" | "agent_list" => managed_response(request, state),
+            method if method.starts_with("agent_") => managed_response(request, state),
             "post" => {
                 let mut state = state.lock().unwrap();
                 state.posts.push(request.clone());

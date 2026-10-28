@@ -48,10 +48,20 @@ struct Record {
     others_session_id: String,
     model: Option<String>,
     budget_usd: String,
+    #[serde(default)]
+    source: Source,
 }
 
-// shortcut: launch records are durable but workers are not re-adopted after a
-// daemon restart; restore their spend and session together before enabling adoption.
+/// How the agent's folder came to be.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum Source {
+    /// New Agent made its worktree and branch.
+    #[default]
+    Launched,
+    /// The person joined the folder by hand; Start adopted it.
+    Joined,
+}
 
 #[derive(Debug)]
 struct Worker {
@@ -63,6 +73,33 @@ struct Worker {
     stop: Option<oneshot::Sender<()>>,
     task: Option<tokio::task::JoinHandle<()>>,
     last_run: Option<tokio::time::Instant>,
+    /// The interactive Claude Code while the state is `attached`.
+    attached: Option<Attached>,
+}
+
+impl Worker {
+    fn offline(record: Record, budget: Budget) -> Self {
+        Self {
+            record,
+            budget,
+            state: "offline",
+            owner_resumed: false,
+            others_resumed: false,
+            stop: None,
+            task: None,
+            last_run: None,
+            attached: None,
+        }
+    }
+}
+
+/// An interactive Claude Code on the owner session, opened by Attach.
+#[derive(Debug)]
+struct Attached {
+    pid_file: PathBuf,
+    since: tokio::time::Instant,
+    /// Whether the pid file has named a process yet.
+    seen: bool,
 }
 
 /// One launch authority for the current signed-in human.
@@ -72,6 +109,7 @@ pub(crate) struct Managed {
     identities: OnceCell<Weak<Identities>>,
     runner: Arc<dyn Runner>,
     state_dir: PathBuf,
+    claude_home: Option<PathBuf>,
     roots: Mutex<BTreeMap<ProjectId, PathBuf>>,
     workers: Mutex<BTreeMap<IdentityId, Arc<Mutex<Worker>>>>,
     launching: Mutex<()>,
@@ -82,12 +120,18 @@ impl Managed {
     pub(crate) fn contains_peer(&self, pid: i32) -> bool {
         self.runner.contains_peer(pid)
     }
-    pub(crate) fn new(hub: Arc<Hub>, runner: Arc<dyn Runner>, state_dir: PathBuf) -> Self {
+    pub(crate) fn new(
+        hub: Arc<Hub>,
+        runner: Arc<dyn Runner>,
+        state_dir: PathBuf,
+        claude_home: Option<PathBuf>,
+    ) -> Self {
         Self {
             hub,
             identities: OnceCell::new(),
             runner,
             state_dir,
+            claude_home,
             roots: Mutex::new(BTreeMap::new()),
             workers: Mutex::new(BTreeMap::new()),
             launching: Mutex::new(()),
@@ -271,11 +315,9 @@ impl Managed {
             budget_usd: launch
                 .budget_usd
                 .map_or_else(|| "5".into(), |n| n.to_string()),
+            source: Source::Launched,
         };
-        let config_dir = self
-            .state_dir
-            .join("managed")
-            .join(identity.identity_id.as_str());
+        let config_dir = self.agent_dir(&identity.identity_id);
         let record_copy = record.clone();
         tokio::task::spawn_blocking(move || {
             std::fs::DirBuilder::new()
@@ -300,30 +342,12 @@ impl Managed {
         if self.shutting_down.load(Ordering::Acquire) {
             return Err(error("daemon is shutting down"));
         }
-        workers.insert(
-            identity.identity_id.clone(),
-            Arc::new(Mutex::new(Worker {
-                record,
-                budget,
-                state: "idle",
-                owner_resumed: false,
-                others_resumed: false,
-                stop: None,
-                task: None,
-                last_run: None,
-            })),
-        );
+        let mut worker = Worker::offline(record, budget);
+        worker.state = "idle";
+        workers.insert(identity.identity_id.clone(), Arc::new(Mutex::new(worker)));
         drop(workers);
         // HELLO goes through the same durable identity outbox as agent chat.
-        let hello = envelope(
-            Payload::Hello {
-                client: format!("agmend/{}", env!("CARGO_PKG_VERSION")),
-                agent: Some("claude-code".into()),
-                model,
-                looking_at: Some(branch.clone()),
-            },
-            "Ready for messages.",
-        )?;
+        let hello = actions::hello(model, branch.clone())?;
         if let Err(error) = identities.post(&metadata_for(&identity), hello).await {
             tracing::warn!(code=?error.code,"managed agent HELLO is pending connection");
         }
@@ -395,7 +419,7 @@ impl Managed {
             {
                 continue;
             }
-            agents.push(json!({"identity":record.identity.identity_id,"project":record.identity.project,"handle":record.identity.handle,"state":worker.state,"model":record.model,"budget_usd":record.budget_usd,"spent_usd":worker.budget.spent().usd(),"worktree":record.worktree,"branch":record.branch}));
+            agents.push(json!({"identity":record.identity.identity_id,"project":record.identity.project,"handle":record.identity.handle,"state":worker.state,"model":record.model,"budget_usd":record.budget_usd,"spent_usd":worker.budget.spent().usd(),"worktree":record.worktree,"branch":record.branch,"source":record.source}));
         }
         Ok(json!({"agents":agents}))
     }
@@ -434,6 +458,8 @@ impl Managed {
                 return Ok(());
             }
             worker.state = "offline";
+            // An attached Claude Code is the person's own session: it keeps running.
+            worker.attached = None;
             if let Some(stop) = worker.stop.take() {
                 let _sent = stop.send(());
             }
@@ -511,6 +537,12 @@ impl Managed {
                 }
                 continue;
             }
+            if held.state == "attached" {
+                if self.attach_ended(&mut held).await {
+                    self.finish_attach(&mut held).await;
+                }
+                continue;
+            }
             if held.state != "idle"
                 || held.budget.exhausted()
                 || held.task.as_ref().is_some_and(|task| !task.is_finished())
@@ -558,9 +590,7 @@ impl Managed {
                 model: held.record.model.clone(),
                 budget_remaining: held.budget.remaining_usd(),
                 mcp_config: self
-                    .state_dir
-                    .join("managed")
-                    .join(held.record.identity.identity_id.as_str())
+                    .agent_dir(&held.record.identity.identity_id)
                     .join("mcp.json"),
                 owner_handle: held
                     .record
@@ -580,8 +610,9 @@ impl Managed {
             let worker = worker.clone();
             let runner = self.runner.clone();
             let identities = identities.clone();
+            let status = self.agent_dir(&held.record.identity.identity_id);
             held.task = Some(tokio::spawn(run_worker(
-                worker, runner, spec, stopped, identities,
+                worker, runner, spec, stopped, identities, status,
             )));
         }
     }
@@ -593,6 +624,7 @@ async fn run_worker(
     spec: RunSpec,
     stopped: oneshot::Receiver<()>,
     identities: Arc<Identities>,
+    agent_dir: PathBuf,
 ) {
     let owner_only = spec.owner_only;
     let result = runner.run(spec, stopped).await;
@@ -610,7 +642,15 @@ async fn run_worker(
     if held.state == "offline" {
         return;
     }
-    held.state = "idle";
+    // Attach cancelled it: like Stop, the person's own cancel does not
+    // reserve the rest of the budget, which would end every later run.
+    if held.state == "attached" && matches!(result, Err(RunError::Cancelled)) {
+        return;
+    }
+    // Attach cancels a batch and keeps its own state.
+    if held.state == "running" {
+        held.state = "idle";
+    }
     match result {
         Ok(result) => {
             let mut steps = Vec::new();
@@ -627,7 +667,9 @@ async fn run_worker(
             let stopped = steps.contains(&Step::Stop);
             let warn = steps.contains(&Step::Warn);
             let record = held.record.clone();
+            let spent = held.budget.spent();
             drop(held);
+            actions::save_spent(&agent_dir, spent).await;
             if warn {
                 let message = envelope(
                     Payload::Alert {
@@ -662,7 +704,9 @@ async fn run_worker(
                 tracing::error!(%error,"charging failed batch cost failed");
             }
             let identity = held.record.identity.clone();
+            let spent = held.budget.spent();
             drop(held);
+            actions::save_spent(&agent_dir, spent).await;
             let explanation = if error.reported_cost().is_none() {
                 " Remaining budget is reserved because usage was not reported."
             } else {
@@ -793,6 +837,10 @@ fn envelope(payload: Payload, body: &str) -> Result<ClientEnvelope, ApiError> {
         payload,
     })
 }
+
+// Start, Attach, Detach and Remove.
+#[path = "managed_actions.rs"]
+mod actions;
 
 #[cfg(test)]
 #[path = "managed_tests.rs"]

@@ -197,6 +197,34 @@ impl Hub {
             .map_err(HubError::Http)?;
         json_with_limit(response, MAX_HUB_RESPONSE_BYTES).await
     }
+    /// Revokes one of the person's identities, as `agmen leave` does
+    /// (`DELETE /v1/identities/{id}` with the owner's token). `Ok(false)`
+    /// when the hub knows no such identity of theirs.
+    pub(crate) async fn revoke_identity(&self, id: &IdentityId) -> Result<bool, HubError> {
+        let (login, token) = self.credentials.access().await?;
+        agmen_client::check_hub_url(&login.hub_url).map_err(LoginError::from)?;
+        let mut url = login.hub_url.clone();
+        url.path_segments_mut()
+            .map_err(|_| HubError::Invalid("hub URL has no path segments"))?
+            .pop_if_empty()
+            .extend(["v1", "identities", id.as_str()]);
+        let response = self
+            .http
+            .delete(url)
+            .bearer_auth(token)
+            .timeout(REQUEST_TIMEOUT)
+            .send()
+            .await
+            .map_err(HubError::Http)?;
+        if response.status().is_success() {
+            Ok(true)
+        } else if response.status() == StatusCode::NOT_FOUND {
+            Ok(false)
+        } else {
+            Err(refusal(response).await)
+        }
+    }
+
     pub(crate) const fn new(
         http: reqwest::Client,
         credentials: std::sync::Arc<Credentials>,

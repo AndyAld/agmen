@@ -54,6 +54,7 @@ pub(crate) struct ListItem {
     children: Vec<AnyElement>,
     end: Option<AnyElement>,
     on_click: Option<ClickHandler>,
+    on_secondary_click: Option<ClickHandler>,
 }
 
 impl std::fmt::Debug for ListItem {
@@ -80,6 +81,7 @@ impl ListItem {
             children: Vec::new(),
             end: None,
             on_click: None,
+            on_secondary_click: None,
         }
     }
 
@@ -121,6 +123,17 @@ impl ListItem {
         handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     ) -> Self {
         self.on_click = Some(Box::new(handler));
+        self
+    }
+
+    /// Called on a right click (a control-click on macOS), as for a
+    /// context menu.
+    #[must_use]
+    pub(crate) fn on_secondary_click(
+        mut self,
+        handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_secondary_click = Some(Box::new(handler));
         self
     }
 }
@@ -165,6 +178,13 @@ impl RenderOnce for ListItem {
             })
             .when_some(self.on_click, |this, handler| {
                 this.cursor_pointer().on_click(handler)
+            })
+            .when_some(self.on_secondary_click, |this, handler| {
+                this.on_aux_click(move |event, window, cx| {
+                    if event.is_secondary() {
+                        handler(event, window, cx);
+                    }
+                })
             })
             .when_some(self.leading, |this, leading| {
                 this.child(
