@@ -21,6 +21,7 @@ mod feed;
 mod git;
 mod hub;
 mod identities;
+mod listener;
 mod local;
 mod login;
 mod socket;
