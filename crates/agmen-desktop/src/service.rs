@@ -4,7 +4,7 @@ use std::ffi::OsString;
 use std::io::{Read as _, Seek as _, Write as _};
 use std::os::unix::fs::FileExt as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use agmen_client::InstallReceipt;

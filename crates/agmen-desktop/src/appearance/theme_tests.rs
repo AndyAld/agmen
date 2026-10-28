@@ -829,3 +829,28 @@ fn desktop_quit_preference_and_optional_login_round_trip() {
         assert_eq!(DesktopSettings::load(&path).unwrap(), settings);
     }
 }
+
+#[test]
+fn desktop_recents_and_quit_settings_survive_each_others_updates() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.toml");
+    let mut settings = DesktopSettings::load(&path).unwrap();
+    settings.quit_keep_running = Some(false);
+    settings.start_at_login = true;
+    settings.save(&path).unwrap();
+
+    let mut settings = DesktopSettings::load(&path).unwrap();
+    settings.last_project = Some("project1".parse().unwrap());
+    settings.recent_projects = vec![dir.path().canonicalize().unwrap()];
+    settings.save(&path).unwrap();
+    assert_eq!(DesktopSettings::load(&path).unwrap(), settings);
+
+    let mut settings = DesktopSettings::load(&path).unwrap();
+    settings.quit_keep_running = None;
+    settings.start_at_login = false;
+    settings.save(&path).unwrap();
+    assert_eq!(DesktopSettings::load(&path).unwrap(), settings);
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(!text.contains("quit_keep_running"));
+    assert!(!text.contains("start_at_login"));
+}

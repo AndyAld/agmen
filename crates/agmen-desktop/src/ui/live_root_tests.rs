@@ -1191,27 +1191,37 @@ fn app_owned_quit_renders_choice_and_remember_checkbox(cx: &mut TestAppContext) 
 
 #[gpui::test]
 fn cancel_quit_from_launch_screen(cx: &mut TestAppContext) {
-    check_cancel_quit(cx, false, false, false);
+    check_cancel_quit(cx, false, false, false, false);
 }
 
 #[gpui::test]
 fn escape_cancels_quit_from_launch_screen(cx: &mut TestAppContext) {
-    check_cancel_quit(cx, false, true, false);
+    check_cancel_quit(cx, false, true, false, false);
 }
 
 #[gpui::test]
 fn cancel_quit_from_workspace(cx: &mut TestAppContext) {
-    check_cancel_quit(cx, true, false, false);
+    check_cancel_quit(cx, true, false, false, false);
 }
 
 #[gpui::test]
 fn escape_cancels_quit_from_workspace(cx: &mut TestAppContext) {
-    check_cancel_quit(cx, true, true, false);
+    check_cancel_quit(cx, true, true, false, false);
 }
 
 #[gpui::test]
 fn closing_window_then_cancel_quit_keeps_window(cx: &mut TestAppContext) {
-    check_cancel_quit(cx, true, false, true);
+    check_cancel_quit(cx, true, false, true, false);
+}
+
+#[gpui::test]
+fn cancel_quit_from_unjoined_folder(cx: &mut TestAppContext) {
+    check_cancel_quit(cx, true, false, false, true);
+}
+
+#[gpui::test]
+fn escape_cancels_quit_from_unjoined_folder(cx: &mut TestAppContext) {
+    check_cancel_quit(cx, true, true, false, true);
 }
 
 /// A bundled executable that only answers status, without a service manager.
@@ -1234,7 +1244,13 @@ fn status_only_bundle(dir: &std::path::Path) -> Bundle {
     }
 }
 
-fn check_cancel_quit(cx: &mut TestAppContext, workspace: bool, escape: bool, close_window: bool) {
+fn check_cancel_quit(
+    cx: &mut TestAppContext,
+    workspace: bool,
+    escape: bool,
+    close_window: bool,
+    rejected: bool,
+) {
     let dir = tempfile::tempdir().unwrap();
     let bundle = status_only_bundle(dir.path());
     let fake = FakeAgmend::start(console(vec![]));
@@ -1260,6 +1276,12 @@ fn check_cancel_quit(cx: &mut TestAppContext, workspace: bool, escape: bool, clo
             root.read_with(cx, |root, _| matches!(root.state(), LiveState::Open(_)))
         });
     }
+    if rejected {
+        cx.simulate_keystrokes("cmd-o");
+        assert!(cx.did_prompt_for_paths());
+        cx.simulate_path_prompt_response(|_| Some(vec![fake.dir.path().to_owned()]));
+        wait_until(cx, |cx| cx.debug_bounds("live:not-a-project").is_some());
+    }
     DesktopSettings {
         last_project: Some(project()),
         ..DesktopSettings::default()
@@ -1267,10 +1289,8 @@ fn check_cancel_quit(cx: &mut TestAppContext, workspace: bool, escape: bool, clo
     .save(&path)
     .unwrap();
     let settings_before = std::fs::read(&path).unwrap();
+    root.update_in(cx, |root, _, _| root.bundle = Some(bundle));
     cx.update(|window, cx| {
-        root.update(cx, |root, _| {
-            root.bundle = Some(bundle);
-        });
         // The same close guard installed by main for a live window.
         let weak = root.downgrade();
         window.on_window_should_close(cx, move |window, cx| {
@@ -1312,6 +1332,7 @@ fn check_cancel_quit(cx: &mut TestAppContext, workspace: bool, escape: bool, clo
         assert!(root._quitting.is_none());
     });
     assert!(cx.debug_bounds("quit:dialog").is_none());
+    assert_eq!(cx.debug_bounds("live:not-a-project").is_some(), rejected);
     assert_eq!(std::fs::read(&path).unwrap(), settings_before);
     fake.edit(|state| assert_eq!(state.shutdown_calls, 0));
     assert!(AgmendBackend::probe(&fake.path()).is_ok());
