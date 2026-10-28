@@ -4,6 +4,7 @@ mod alerts;
 mod appearance;
 mod assets;
 mod backend;
+mod bundle;
 // Task 13: the urgent-alert chime.
 mod chime;
 mod icons;
@@ -32,7 +33,7 @@ use appearance::{Appearance, SystemMode};
 
 use ui::{Quit, Workspace};
 
-const USAGE: &str = "usage: agmen-desktop [--fixture | --screen <name> | --list-screens | --view <name> | --spike list [--autoscroll] | --spike notify]";
+const USAGE: &str = "usage: agmen-desktop [--version | --fixture | --screen <name> | --list-screens | --view <name> | --spike list [--autoscroll] | --spike notify]";
 
 /// The views `--view` can show alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,6 +59,8 @@ enum DevView {
 /// What the command line asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Launch {
+    /// Prints the workspace version and build without starting GPUI.
+    Version,
     /// The normal app window, live through agmend (Task 7).
     App,
     /// The app window on the fixture's chat, as a plain launch opened it
@@ -79,6 +82,7 @@ impl Launch {
     fn parse(args: &[String]) -> Result<Self> {
         match args {
             [] => Ok(Self::App),
+            [flag] if flag == "--version" => Ok(Self::Version),
             [flag] if flag == "--fixture" => Ok(Self::Fixture),
             [flag, name, rest @ ..] if flag == "--spike" && name == "list" => match rest {
                 [] => Ok(Self::ListSpike { autoscroll: false }),
@@ -124,6 +128,7 @@ impl Launch {
             Self::Fixture => Some(backend::Screen::Chat),
             Self::Screen(screen) => Some(*screen),
             Self::App
+            | Self::Version
             | Self::ListSpike { .. }
             | Self::NotifySpike
             | Self::ListScreens
@@ -149,6 +154,14 @@ fn main() {
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let launch = Launch::parse(&args)?;
+    if launch == Launch::Version {
+        println!(
+            "agmen-desktop {} ({})",
+            env!("CARGO_PKG_VERSION"),
+            option_env!("AGMEN_BUILD").unwrap_or("dev")
+        );
+        return Ok(());
+    }
     if launch == Launch::ListScreens {
         for screen in backend::Screen::ALL {
             println!("{}", screen.name());
@@ -404,7 +417,7 @@ fn open_main_window(launch: &Launch, cx: &mut App) -> Result<()> {
             })
             .map(Into::into)
         }
-        Launch::NotifySpike | Launch::ListScreens => return Ok(()),
+        Launch::Version | Launch::NotifySpike | Launch::ListScreens => return Ok(()),
         Launch::View(view) => Ok(open_dev_view(*view, options, cx)?),
         Launch::ListSpike { autoscroll } => {
             let autoscroll = *autoscroll;

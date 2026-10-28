@@ -5,21 +5,9 @@
 //! so they post through `notify-rust` (the deprecated
 //! `NSUserNotificationCenter`, which still works without a bundle).
 
-use std::path::Path;
-
 use gpui::{App, SystemNotification};
 
-/// Whether `exe` sits inside a macOS app bundle (`X.app/Contents/MacOS/x`).
-fn in_app_bundle(exe: &Path) -> bool {
-    let mut parts = exe.components().rev().skip(1);
-    matches!(
-        (parts.next(), parts.next(), parts.next()),
-        (Some(macos), Some(contents), Some(app))
-            if macos.as_os_str() == "MacOS"
-                && contents.as_os_str() == "Contents"
-                && Path::new(app.as_os_str()).extension().is_some_and(|e| e == "app")
-    )
-}
+use crate::bundle::in_app_bundle;
 
 /// Shows a notification without blocking the UI thread. `tag` replaces an
 /// earlier notification with the same tag where the platform can.
@@ -61,23 +49,4 @@ fn post_unbundled(title: String, body: String, cx: &App) {
         body: body.into(),
         actions: Vec::new(),
     });
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn bundle_detection() {
-        assert!(in_app_bundle(Path::new(
-            "/Applications/agmen.app/Contents/MacOS/agmen-desktop"
-        )));
-        assert!(!in_app_bundle(Path::new(
-            "/Users/a/agmen/target/debug/agmen-desktop"
-        )));
-        assert!(!in_app_bundle(Path::new(
-            "/x/agmen.app/Contents/Resources/agmen-desktop"
-        )));
-        assert!(!in_app_bundle(Path::new("agmen-desktop")));
-    }
 }
