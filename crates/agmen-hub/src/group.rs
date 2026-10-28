@@ -163,16 +163,20 @@ pub(crate) async fn claim(
     )
     .fetch_one(&mut *tx)
     .await?;
-    let owned: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM tenant_members WHERE tenant_id = $1 AND role = 'owner')",
-    )
-    .bind(&tenant)
-    .fetch_one(&mut *tx)
-    .await?;
-    if owned {
+    let used: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM tenant_members WHERE tenant_id = $1)")
+            .bind(&tenant)
+            .fetch_one(&mut *tx)
+            .await?;
+    if used {
+        // Commit the cleared token: a refusal alone would roll it back.
+        sqlx::query("UPDATE hub_group SET claim_hash = NULL, claim_expires_at = NULL")
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
         return Err(ApiError::conflict(
             "already_claimed",
-            "this group already has an owner",
+            "this group already has members",
         ));
     }
     if hash.as_deref() != Some(hash_secret(&request.token).as_slice()) {

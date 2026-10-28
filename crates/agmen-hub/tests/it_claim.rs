@@ -273,3 +273,32 @@ async fn it_adopted_group_with_members_mints_no_claim_token() {
     })
     .await;
 }
+
+#[tokio::test]
+async fn it_claim_refused_once_the_group_has_a_member() {
+    run(|ctx| async move {
+        let human = claimant(&ctx).await;
+        let token = ctx.hub.hub.mint_claim_token().await.unwrap().unwrap();
+        // Someone joins the empty group by another route after the mint.
+        let member = seed_human(&ctx.pool, 78, "early").await;
+        sqlx::query(
+            "INSERT INTO tenant_members (tenant_id, human_id, role)
+             SELECT tenant_id, $1, 'member' FROM hub_group",
+        )
+        .bind(&member)
+        .execute(&ctx.pool)
+        .await
+        .unwrap();
+        let (status, body) = claim(&ctx, &human.access_token, &token).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"], "already_claimed");
+        let cleared: bool = sqlx::query_scalar(
+            "SELECT claim_hash IS NULL AND claim_expires_at IS NULL FROM hub_group",
+        )
+        .fetch_one(&ctx.pool)
+        .await
+        .unwrap();
+        assert!(cleared, "the refusal left the token stored");
+    })
+    .await;
+}
