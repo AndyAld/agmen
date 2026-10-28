@@ -48,7 +48,7 @@ unicode-segmentation = "1.13.3"
 gpui_macos = { git = "https://github.com/zed-industries/zed", rev = "08cbb88a152c3751a43e853425a70e9f631a5918", version = "0.1.0", features = ["runtime_shaders", "font-kit"] }
 notify-rust = { version = "4.18.2", default-features = false }
 objc2 = "0.6.4"
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSWorkspace", "NSImage", "std", "NSImageRep", "objc2-uniform-type-identifiers"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSWorkspace", "NSAccessibility", "NSImage", "std", "NSImageRep", "objc2-uniform-type-identifiers"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSString", "NSData", "std", "NSGeometry"] }
 objc2-uniform-type-identifiers = { version = "0.3.2", default-features = false, features = ["UTType", "std"] }
 
