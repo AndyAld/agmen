@@ -9,6 +9,109 @@ mod support;
 use support::{Home, Worktree, assert_exit, stderr, stdout};
 
 #[test]
+fn join_link_to_another_hub_refuses_without_a_terminal() {
+    for from_stdin in [false, true] {
+        let home = Home::new();
+        let wt = Worktree::new(&home);
+        sign_in_expired(&home, "https://saved.example/");
+        let before = std::fs::read(home.login_file()).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let link = format!("{origin}/i#{}", "ab".repeat(32));
+        let mut cmd = if from_stdin {
+            let input = home.path().join("invite");
+            std::fs::write(&input, &link).unwrap();
+            let mut cmd = home.agmen(&wt.path(), &["join", "--stdin"]);
+            cmd.stdin(std::fs::File::open(input).unwrap());
+            cmd
+        } else {
+            home.agmen(&wt.path(), &["join", &link])
+        };
+        let out = cmd.output().unwrap();
+        assert_exit(&out, 2);
+        let text = stderr(&out);
+        for expected in [
+            "https://saved.example",
+            &origin,
+            "--yes",
+            &format!("agmen login --hub {origin}"),
+        ] {
+            assert!(text.contains(expected), "{text}");
+        }
+        assert_eq!(std::fs::read(home.login_file()).unwrap(), before);
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock,
+            "no connection should reach the invite's hub"
+        );
+    }
+}
+
+#[test]
+fn join_link_to_the_same_hub_asks_nothing() {
+    let home = Home::new();
+    let wt = Worktree::new(&home);
+    let (hub, server) = account_fixture(&home, serde_json::json!({"error":"test"}));
+    let saved = format!("{}hub", hub);
+    sign_in_expired(&home, &saved);
+    let link = format!("{saved}/i#{}", "ab".repeat(32));
+    let out = home.agmen(&wt.path(), &["join", &link]).output().unwrap();
+    assert_exit(&out, 1);
+    assert!(
+        server
+            .join()
+            .unwrap()
+            .starts_with("POST /hub/v1/auth/token ")
+    );
+    let text = stderr(&out);
+    assert!(text.contains("renewing the sign-in failed"), "{text}");
+    assert!(!text.contains("Switch your sign-in"), "{text}");
+    assert!(!text.contains("--yes"), "{text}");
+}
+
+#[test]
+fn join_failed_device_login_preserves_the_saved_sign_in() {
+    let home = Home::new();
+    let wt = Worktree::new(&home);
+    let (hub, server) = account_fixture(&home, serde_json::json!({"error":"test"}));
+    sign_in_expired(&home, "https://saved.example/");
+    let before = std::fs::read(home.login_file()).unwrap();
+    let key = agmen_client::TokenKey::new(
+        &"https://saved.example/".parse().unwrap(),
+        &"hmn7k2q9".parse().unwrap(),
+    )
+    .unwrap();
+    let tokens = home.tokens().get(&key).unwrap();
+    let link = format!("{hub}i#{}", "ab".repeat(32));
+    let out = home
+        .agmen(&wt.path(), &["join", &link, "--yes"])
+        .output()
+        .unwrap();
+    assert_exit(&out, 1);
+    assert!(server.join().unwrap().starts_with("POST /v1/auth/device "));
+    assert!(stderr(&out).contains("starting the device login failed"));
+    assert_eq!(std::fs::read(home.login_file()).unwrap(), before);
+    assert_eq!(home.tokens().get(&key).unwrap(), tokens);
+}
+
+#[test]
+fn join_without_saved_login_shows_the_hub_before_signing_in() {
+    let home = Home::new();
+    let wt = Worktree::new(&home);
+    let link = format!("http://127.0.0.1:9/i#{}", "ab".repeat(32));
+    let out = home.agmen(&wt.path(), &["join", &link]).output().unwrap();
+    assert_exit(&out, 1);
+    let text = stderr(&out);
+    assert!(
+        text.starts_with("Signing in to http://127.0.0.1:9 to accept this invite.\n"),
+        "{text}"
+    );
+    assert!(text.contains("starting the device login failed"), "{text}");
+    assert!(!home.login_file().exists());
+}
+
+#[test]
 fn join_bare_code_needs_a_hub() {
     let home = Home::new();
     let wt = Worktree::new(&home);

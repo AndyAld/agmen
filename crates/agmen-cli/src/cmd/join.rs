@@ -7,7 +7,7 @@
 //! checks that the file passes the trust test every command applies.
 
 use std::collections::BTreeSet;
-use std::io::Write as _;
+use std::io::{BufRead as _, IsTerminal as _, Write as _};
 use std::path::Path;
 
 use agmen_client::{Broker, IDENTITY_DIR, IDENTITY_FILE, IdentityFile, TokenKey, find_identity};
@@ -104,6 +104,9 @@ pub(crate) struct JoinArgs {
     /// Read the invite from stdin, at most 8 KiB within 5 seconds.
     #[arg(long)]
     stdin: bool,
+    /// Allow an invite link to switch your sign-in to another hub.
+    #[arg(long)]
+    yes: bool,
     /// The hub for a bare invite code.
     #[arg(long, env = "AGMEN_HUB", value_name = "URL")]
     hub: Option<Url>,
@@ -278,6 +281,9 @@ pub(crate) async fn join(args: JoinArgs) -> Result<()> {
     };
     let (human, root, permissions, project, name) = if let (Some(invite), Some(hub)) = (invite, hub)
     {
+        if matches!(invite, Invite::Link { .. }) {
+            confirm_link_hub(&hub, &args).await?;
+        }
         let (Invite::Link { code, .. } | Invite::Code(code)) = invite;
         let human = sign_in(&hub).await?;
         let accepted = accept(&human, &code).await?;
@@ -327,6 +333,79 @@ pub(crate) async fn join(args: JoinArgs) -> Result<()> {
     }
     println!("Next: start your agent in this folder; it has the agmen tools.");
     Ok(())
+}
+
+/// A link may choose a new hub only after the person consents, before any request.
+async fn confirm_link_hub(hub: &Url, args: &JoinArgs) -> Result<()> {
+    let origin = hub.origin().ascii_serialization();
+    let Some(saved) = read_login().await? else {
+        eprintln!("Signing in to {origin} to accept this invite.");
+        return Ok(());
+    };
+    if same_hub(&saved.hub_url, hub) || args.yes {
+        return Ok(());
+    }
+    let saved = saved.hub_url.origin().ascii_serialization();
+    if args.stdin || !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
+        return Err(Fail::usage(format!(
+            "This invite is for {origin}. You are signed in to {saved}. Sign in to that hub first.\n\
+             Rerun with --yes or sign in with agmen login --hub {origin}"
+        ))
+        .into());
+    }
+    let (send, receive) = tokio::sync::oneshot::channel();
+    std::thread::Builder::new()
+        .name("join-confirm".into())
+        .spawn(move || {
+            let result = confirm_switch(
+                &saved,
+                &origin,
+                std::io::stdin().lock(),
+                std::io::stderr().lock(),
+            );
+            drop(send.send(result));
+        })
+        .context("starting the sign-in confirmation reader")?;
+    // A detached reader lets the CLI exit on timeout without waiting for terminal input.
+    match tokio::time::timeout(std::time::Duration::from_secs(120), receive).await {
+        Ok(answer) => answer.context("reading the sign-in confirmation")?,
+        Err(_) => bail!("join cancelled; your sign-in is unchanged"),
+    }
+}
+
+fn confirm_switch(
+    saved: &str,
+    origin: &str,
+    input: impl std::io::BufRead,
+    mut output: impl std::io::Write,
+) -> Result<()> {
+    write!(
+        output,
+        "Switch your sign-in from {saved} to {origin}? [y/N] "
+    )
+    .context("printing the sign-in confirmation")?;
+    output
+        .flush()
+        .context("flushing the sign-in confirmation")?;
+    // The timeout must be able to print to stderr while this reader waits.
+    drop(output);
+    let mut answer = Vec::new();
+    input
+        .take(1024)
+        .read_until(b'\n', &mut answer)
+        .context("reading the sign-in confirmation")?;
+    if answer.len() < 1024
+        && matches!(
+            String::from_utf8_lossy(&answer)
+                .trim()
+                .to_ascii_lowercase()
+                .as_str(),
+            "y" | "yes"
+        )
+    {
+        return Ok(());
+    }
+    bail!("join cancelled; your sign-in is unchanged")
 }
 
 /// The signed-in person for `hub`: the saved sign-in when it is for that hub
@@ -688,6 +767,90 @@ pub(crate) async fn leave() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hub_switch_releases_stderr_before_waiting_for_input() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        struct Prompt(Rc<Cell<bool>>);
+        impl std::io::Write for Prompt {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl Drop for Prompt {
+            fn drop(&mut self) {
+                self.0.set(true);
+            }
+        }
+        struct Answer(Rc<Cell<bool>>);
+        impl std::io::Read for Answer {
+            fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+                assert!(
+                    self.0.get(),
+                    "stderr must be unlocked before input can block"
+                );
+                bytes[..2].copy_from_slice(b"y\n");
+                Ok(2)
+            }
+        }
+
+        let released = Rc::new(Cell::new(false));
+        confirm_switch(
+            "https://saved.example",
+            "https://link.example",
+            std::io::BufReader::new(Answer(released.clone())),
+            Prompt(released),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn hub_switch_requires_an_explicit_yes() {
+        for answer in ["y\n", "yes\n", "Y\n", "YeS\n", " yes \n"] {
+            let mut prompt = Vec::new();
+            confirm_switch(
+                "https://saved.example",
+                "https://link.example",
+                answer.as_bytes(),
+                &mut prompt,
+            )
+            .unwrap();
+            assert_eq!(
+                String::from_utf8(prompt).unwrap(),
+                "Switch your sign-in from https://saved.example to https://link.example? [y/N] "
+            );
+        }
+        for answer in [
+            "",
+            "\n",
+            "n\n",
+            "no\n",
+            "yes please\n",
+            "yesterday\n",
+            "y\0\n",
+            &format!("y{}", " ".repeat(1024)),
+        ] {
+            let error = confirm_switch(
+                "https://saved.example",
+                "https://link.example",
+                answer.as_bytes(),
+                Vec::new(),
+            )
+            .unwrap_err();
+            let (message, code) = crate::output::explain(&error);
+            assert_eq!(code, 1);
+            assert!(
+                message.contains("join cancelled; your sign-in is unchanged"),
+                "{message}"
+            );
+        }
+    }
 
     #[test]
     fn invite_links_and_codes_parse() {
