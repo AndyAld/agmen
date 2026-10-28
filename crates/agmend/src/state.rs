@@ -542,25 +542,66 @@ impl Store {
         limit: u32,
         byte_budget: usize,
     ) -> Result<Vec<StampedEnvelope>, StoreError> {
+        self.drain_batch(origin, identity, limit, byte_budget, None)
+    }
+
+    pub(crate) fn drain_launch(
+        &mut self,
+        origin: &str,
+        identity: &ManagedIdentity,
+    ) -> Result<Vec<StampedEnvelope>, StoreError> {
+        self.drain_batch(
+            origin,
+            &identity.identity_id,
+            32,
+            96 * 1024,
+            Some(&identity.owner_id),
+        )
+    }
+
+    fn drain_batch(
+        &mut self,
+        origin: &str,
+        identity: &IdentityId,
+        limit: u32,
+        byte_budget: usize,
+        owner: Option<&IdentityId>,
+    ) -> Result<Vec<StampedEnvelope>, StoreError> {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let mut stmt = tx.prepare(
-            "SELECT n, message FROM pending WHERE origin=?1 AND identity=?2 ORDER BY n LIMIT ?3",
-        )?;
-        let rows = stmt.query_map(params![origin, identity.as_str(), limit.min(500)], |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
-        })?;
+        let query = if owner.is_some() {
+            "SELECT n, message FROM pending WHERE origin=?1 AND identity=?2 ORDER BY CASE WHEN json_extract(message, '$.from')=?4 AND json_extract(message, '$.from_kind')='human' THEN 0 ELSE 1 END, n LIMIT ?3"
+        } else {
+            "SELECT n, message FROM pending WHERE origin=?1 AND identity=?2 ORDER BY n LIMIT ?3"
+        };
+        let mut stmt = tx.prepare(query)?;
+        let decode = |r: &rusqlite::Row<'_>| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?));
+        let rows = if let Some(owner) = owner {
+            stmt.query_map(
+                params![origin, identity.as_str(), limit.min(500), owner.as_str()],
+                decode,
+            )?
+        } else {
+            stmt.query_map(params![origin, identity.as_str(), limit.min(500)], decode)?
+        };
         let budget = byte_budget.min(agmen_local::MAX_FRAME as usize - 4096);
         let mut bytes: usize = 2; // JSON array brackets.
         let mut selected = Vec::new();
         let mut result = Vec::new();
+        let mut owner_batch = None;
         for row in rows {
             let (n, raw) = row?;
             if raw.len() > crate::sse::MAX_EVENT {
                 return Err(StoreError::Invalid("stored envelope exceeds cap"));
             }
             let message: StampedEnvelope = serde_json::from_str(&raw)?;
+            if let Some(owner) = owner {
+                let is_owner = message.from == *owner && message.from_kind == IdentityKind::Human;
+                if *owner_batch.get_or_insert(is_owner) != is_owner {
+                    break;
+                }
+            }
             let size = serde_json::to_vec(&message)?.len() + usize::from(!result.is_empty());
             if size > budget.saturating_sub(bytes) {
                 break;

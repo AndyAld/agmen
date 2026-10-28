@@ -948,3 +948,23 @@ fn owner_position_namespaces_preserve_project_quota() {
         Err(StoreError::Full("256 stream positions"))
     ));
 }
+
+#[test]
+fn launch_batches_prioritize_owner_and_preserve_other_senders() {
+    let (_dir, mut store, who) = setup();
+    for seq in 1..=4 {
+        let mut row = message(seq);
+        if seq >= 2 {
+            row.from = who.owner_id.clone();
+        }
+        if seq == 3 {
+            row.from_kind = IdentityKind::Agent;
+        }
+        store.ingest(ORIGIN, &who.project, &row).unwrap();
+    }
+    let owner = store.drain_launch(ORIGIN, &who).unwrap();
+    assert_eq!(owner.iter().map(|m| m.seq.0).collect::<Vec<_>>(), [2, 4]);
+    let others = store.drain_launch(ORIGIN, &who).unwrap();
+    assert_eq!(others.iter().map(|m| m.seq.0).collect::<Vec<_>>(), [1, 3]);
+    assert!(store.drain_launch(ORIGIN, &who).unwrap().is_empty());
+}

@@ -77,6 +77,9 @@ pub(crate) struct Managed {
 }
 
 impl Managed {
+    pub(crate) fn contains_peer(&self, pid: i32) -> bool {
+        self.runner.contains_peer(pid)
+    }
     pub(crate) fn new(hub: Arc<Hub>, runner: Arc<dyn Runner>, state_dir: PathBuf) -> Self {
         Self {
             hub,
@@ -158,6 +161,7 @@ impl Managed {
 
     pub(crate) async fn launch(self: &Arc<Self>, raw: Value) -> Result<Value, ApiError> {
         let launch = Self::validate_launch(raw)?;
+        let agmen = self.runner.mcp_command().await.map_err(error)?;
         let _launching = self.launching.lock().await;
         if self.shutting_down.load(Ordering::Acquire) {
             return Err(error("daemon is shutting down"));
@@ -207,7 +211,14 @@ impl Managed {
             .ok_or_else(|| error("worker root has no main checkout"))?
             .to_owned();
         let result = self
-            .complete_launch(launch, joined, login, branch.clone(), worktree.clone())
+            .complete_launch(
+                launch,
+                joined,
+                login,
+                branch.clone(),
+                worktree.clone(),
+                agmen,
+            )
             .await;
         match result {
             Ok(result) => Ok(result),
@@ -230,6 +241,7 @@ impl Managed {
         login: agmen_client::Login,
         branch: String,
         worktree: PathBuf,
+        agmen: PathBuf,
     ) -> Result<Value, ApiError> {
         let (worker_root, _) = crate::worktree::worktree_root(&joined.root)
             .await
@@ -273,7 +285,7 @@ impl Managed {
             )?;
             private_json(
                 &config_dir.join("mcp.json"),
-                &json!({"mcpServers":{"agmen":{"command":"agmen","args":["mcp"]}}}),
+                &json!({"mcpServers":{"agmen":{"command":agmen,"args":["mcp"]}}}),
             )
         })
         .await
@@ -546,6 +558,10 @@ impl Managed {
                     .unwrap_or_default()
                     .into(),
                 owner_id: held.record.identity.owner_id.clone(),
+                owner_only: rows.iter().all(|row| {
+                    row.from == held.record.identity.owner_id
+                        && row.from_kind == IdentityKind::Human
+                }),
             };
             held.resumed = true;
             held.last_run = Some(tokio::time::Instant::now());

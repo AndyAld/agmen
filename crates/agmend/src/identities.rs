@@ -337,9 +337,9 @@ impl Identities {
         caller: &ManagedIdentity,
     ) -> Result<Vec<StampedEnvelope>, ApiError> {
         let origin = caller.hub_url.origin().ascii_serialization();
-        let identity = caller.identity_id.clone();
+        let identity = caller.clone();
         let rows = store_work(self.store.clone(), move |store| {
-            store.drain(&origin, &identity, 32, 96 * 1024)
+            store.drain_launch(&origin, &identity)
         })
         .await?;
         if let Err(error) = self.project_channel(&caller.project).await {

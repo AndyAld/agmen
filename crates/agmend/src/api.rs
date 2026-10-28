@@ -28,6 +28,21 @@ struct Shutdown {}
 
 /// Serves `stream` until the peer hangs up or breaks the framing.
 pub(crate) async fn serve(stream: UnixStream, core: Arc<Core>) {
+    serve_with_peer(stream, core, |stream| {
+        stream
+            .peer_cred()?
+            .pid()
+            .ok_or_else(|| std::io::Error::other("peer PID unavailable"))
+    })
+    .await;
+}
+
+pub(crate) async fn serve_with_peer(
+    stream: UnixStream,
+    core: Arc<Core>,
+    peer: impl FnOnce(&UnixStream) -> std::io::Result<i32>,
+) {
+    let peer = peer(&stream).map_err(|error| error.to_string());
     core.managed.attach(&core.identities).await;
     // shortcut: Unix-only local API; revisit when S6 Windows IPC is approved.
     let console = &core.console;
@@ -57,14 +72,7 @@ pub(crate) async fn serve(stream: UnixStream, core: Arc<Core>) {
         let outcome = if let Some(refusal) = refuse(&request, greeted) {
             Err(refusal)
         } else {
-            let caller = match extract_token(&mut request.params) {
-                Ok(ref token) => {
-                    core.identities
-                        .authorize(request.as_.as_ref(), token.as_deref())
-                        .await
-                }
-                Err(error) => Err(error),
-            };
+            let caller = authorize(&core, &mut request, &peer).await;
             match caller {
                 Err(error) => Err(error),
                 Ok(caller) if request.method == "watch" => {
@@ -129,6 +137,28 @@ pub(crate) async fn serve(stream: UnixStream, core: Arc<Core>) {
         if !written {
             return;
         }
+    }
+}
+
+pub(crate) fn owner_peer_check(
+    managed: &crate::managed::Managed,
+    caller: &Caller,
+    method: &str,
+    lookup: impl FnOnce() -> std::io::Result<i32>,
+) -> Result<(), ApiError> {
+    // Identity-scoped chat uses its authenticated identity, never the human post.
+    if (method == "post" && matches!(caller, Caller::Identity(_)))
+        || matches!(method, "hello" | "watch" | "inbox" | "state" | "pending")
+    {
+        return Ok(());
+    }
+    if lookup().is_ok_and(|pid| !managed.contains_peer(pid)) {
+        Ok(())
+    } else {
+        Err(ApiError {
+            code: ErrorCode::Forbidden,
+            message: "agents cannot call owner-only methods".into(),
+        })
     }
 }
 
@@ -206,15 +236,30 @@ fn refuse(request: &Request, greeted: bool) -> Option<ApiError> {
     None
 }
 
-fn extract_token(raw: &mut Value) -> Result<Option<String>, ApiError> {
-    match raw
+async fn authorize(
+    core: &Core,
+    request: &mut Request,
+    peer: &Result<i32, String>,
+) -> Result<Caller, ApiError> {
+    let token = match request
+        .params
         .as_object_mut()
         .and_then(|object| object.remove("local_token"))
     {
-        None => Ok(None),
-        Some(Value::String(value)) => Ok(Some(value)),
-        Some(_) => Err(unauthorized()),
-    }
+        None => None,
+        Some(Value::String(value)) => Some(value),
+        Some(_) => return Err(unauthorized()),
+    };
+    let caller = core
+        .identities
+        .authorize(request.as_.as_ref(), token.as_deref())
+        .await?;
+    owner_peer_check(&core.managed, &caller, &request.method, || {
+        peer.as_ref()
+            .copied()
+            .map_err(|error| std::io::Error::other(error.clone()))
+    })?;
+    Ok(caller)
 }
 
 async fn identity_call(

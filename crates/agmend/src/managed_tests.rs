@@ -17,6 +17,9 @@ struct FakeRunner {
 }
 
 impl crate::launch::Runner for FakeRunner {
+    fn contains_peer(&self, pid: i32) -> bool {
+        pid == 4242
+    }
     fn run(
         &self,
         spec: crate::launch::RunSpec,
@@ -410,4 +413,149 @@ fn managed_api_rejects_invalid_names_and_budget() {
     ] {
         assert!(Managed::validate_launch(raw).is_err());
     }
+}
+
+#[tokio::test]
+async fn worker_peer_cannot_call_owner_methods_even_without_identity_credentials() {
+    let fixture = Fixture::new().await;
+    for method in [
+        "agent_launch",
+        "agent_stop",
+        "agent_list",
+        "post",
+        "host_list",
+        "host_add",
+        "shutdown",
+        "login",
+        "console_watch",
+        "file_text",
+    ] {
+        let error = crate::api::owner_peer_check(
+            &fixture.daemon.core.managed,
+            &crate::identities::Caller::Human,
+            method,
+            || Ok(4242),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, agmen_local::ErrorCode::Forbidden);
+        assert_eq!(error.message, "agents cannot call owner-only methods");
+        assert!(
+            crate::api::owner_peer_check(
+                &fixture.daemon.core.managed,
+                &crate::identities::Caller::Human,
+                method,
+                || Ok(4243)
+            )
+            .is_ok()
+        );
+    }
+    // A peer that cannot be identified is refused too.
+    let error = crate::api::owner_peer_check(
+        &fixture.daemon.core.managed,
+        &crate::identities::Caller::Human,
+        "agent_launch",
+        || Err(std::io::Error::other("no peer")),
+    )
+    .unwrap_err();
+    assert_eq!(error.message, "agents cannot call owner-only methods");
+    for method in ["hello", "watch", "inbox", "state", "pending"] {
+        assert!(
+            crate::api::owner_peer_check(
+                &fixture.daemon.core.managed,
+                &crate::identities::Caller::Human,
+                method,
+                || Ok(4242)
+            )
+            .is_ok()
+        );
+    }
+}
+
+#[tokio::test]
+async fn framed_owner_request_from_worker_is_forbidden() {
+    use agmen_local::{Outcome, Request, Response, frame};
+    let fixture = Fixture::new().await;
+    let (mut client, server) = tokio::net::UnixStream::pair().unwrap();
+    let task = tokio::spawn(crate::api::serve_with_peer(
+        server,
+        fixture.daemon.core.clone(),
+        |_| Ok(4242),
+    ));
+    frame::write_async(&mut client, &Request::new(1, "hello", json!({"api":1})))
+        .await
+        .unwrap();
+    let hello: Response = frame::read_async(&mut client).await.unwrap();
+    assert!(matches!(hello.outcome, Outcome::Ok { .. }));
+    for method in [
+        "agent_launch",
+        "agent_stop",
+        "agent_list",
+        "post",
+        "shutdown",
+        "login",
+        "host_add",
+    ] {
+        frame::write_async(&mut client, &Request::new(2, method, json!({})))
+            .await
+            .unwrap();
+        let response: Response = frame::read_async(&mut client).await.unwrap();
+        match response.outcome {
+            Outcome::Err { error } => {
+                assert_eq!(error.code, agmen_local::ErrorCode::Forbidden);
+                assert_eq!(error.message, "agents cannot call owner-only methods");
+            }
+            other => panic!("expected forbidden: {other:?}"),
+        }
+    }
+    drop(client);
+    task.await.unwrap();
+}
+
+#[tokio::test]
+async fn mixed_queue_runs_owner_batch_before_default_batch() {
+    let fixture = Fixture::new().await;
+    fixture.launch().await;
+    let other = serde_json::from_value(json!({"v":1,"id":"01JBX6Q4T7W3C2M8Y9K5P00001","verb":"FYI","data":{},"body":"other request","sent_at":"2026-10-25T16:04:11Z","stream":"feed","seq":1,"from":"sender01","from_handle":"owner","from_kind":"human","mentioned":["agent001"],"hub_at":"2026-10-25T16:04:12Z"})).unwrap();
+    fixture.daemon.core.identities.enqueue_test(other).await;
+    enqueue(&fixture, 2, "agent001").await;
+    for batch in 0..2 {
+        fixture.daemon.core.managed.tick().await;
+        let worker = fixture
+            .daemon
+            .core
+            .managed
+            .workers
+            .lock()
+            .await
+            .values()
+            .next()
+            .unwrap()
+            .clone();
+        for _ in 0..200 {
+            if worker
+                .lock()
+                .await
+                .task
+                .as_ref()
+                .is_some_and(tokio::task::JoinHandle::is_finished)
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        {
+            let runs = fixture.runner.runs.lock().unwrap();
+            assert_eq!(runs.len(), batch + 1);
+            let run = &runs[batch];
+            assert_eq!(run.owner_only, batch == 0);
+            let messages: Vec<Value> = serde_json::from_str(&run.prompt).unwrap();
+            assert_eq!(messages.len(), 1);
+            assert_eq!(
+                messages[0]["from"],
+                if batch == 0 { "owner001" } else { "sender01" }
+            );
+        }
+        worker.lock().await.last_run = None;
+    }
+    fixture.daemon.core.managed.shutdown().await;
 }
