@@ -249,6 +249,33 @@ async fn it_login_device_flow() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn it_login_declined_on_github() {
+    run(Ingest::Off, |ctx| async move {
+        let home = Home::new();
+        let base = ctx.base.to_string();
+        let mut command =
+            tokio::process::Command::from(home.agmen(home.path(), &["login", "--hub", &base]));
+        let mut child = command
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut lines = Lines::new(&mut child);
+        let line = lines.next().await.expect("login shows a code first");
+        let code = line.strip_prefix("Your code is ").unwrap();
+        ctx.github.deny(code);
+        let output = tokio::time::timeout(WAIT, child.wait_with_output())
+            .await
+            .expect("declined login ends")
+            .unwrap();
+        assert_exit(&output, 1);
+        assert!(stderr(&output).contains("declined on GitHub"));
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn it_invite_and_join() {
     run(Ingest::On, |ctx| async move {
         let admin = ctx.hub.seed_human(&ctx.topics, Role::Admin).await.unwrap();
@@ -263,10 +290,12 @@ async fn it_invite_and_join() {
             .await;
         assert_exit(&out, 0);
         let text = stdout(&out);
+        assert!(!text.contains("copied"));
+        let prefix = format!("  {}i#", ctx.base);
         let code = text
             .lines()
-            .find_map(|line| line.trim().strip_prefix("agmen join "))
-            .expect("a ready-to-paste join line")
+            .find_map(|line| line.strip_prefix(&prefix))
+            .expect("an invite link with the code in its fragment")
             .to_owned();
 
         // A person from another project joins with the code.

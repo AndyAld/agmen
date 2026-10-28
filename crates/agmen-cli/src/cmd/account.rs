@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::client::{
-    Login, blocking, forget_login, http, human, read_login, refusal, save_login, send, token_grant,
-    url,
+    Api, Human, Login, blocking, forget_login, http, human, read_login, refusal, save_login, send,
+    token_grant, url,
 };
 use crate::output::{Fail, clean};
 
@@ -83,8 +83,15 @@ pub(crate) async fn login(args: LoginArgs) -> Result<()> {
                 Fail::usage("name the hub: agmen login --hub <url>, or set AGMEN_HUB")
             })?,
     };
-    agmen_client::check_hub_url(&hub)?;
-    let start: DeviceStart = send(http()?.post(url(&hub, &["auth", "device"])))
+    let human = device_login(&hub).await?;
+    println!("signed in as {}", clean(&human.login.handle));
+    Ok(())
+}
+
+/// Signs in with the hub's device flow and returns the freshly saved login.
+pub(crate) async fn device_login(hub: &Url) -> Result<Human> {
+    agmen_client::check_hub_url(hub)?;
+    let start: DeviceStart = send(http()?.post(url(hub, &["auth", "device"])))
         .await
         .context("starting the device login failed")?;
     println!("Your code is {}", clean(&start.user_code));
@@ -93,6 +100,7 @@ pub(crate) async fn login(args: LoginArgs) -> Result<()> {
         clean(start.verification_uri.as_str()),
         start.expires_in / 60
     );
+    blocking(move || Ok(crate::open::open_url(&start.verification_uri))).await?;
     let mut interval = Duration::from_secs(start.interval.max(1));
     let deadline = tokio::time::Instant::now() + Duration::from_secs(start.expires_in);
     let mut tokens = None;
@@ -102,7 +110,7 @@ pub(crate) async fn login(args: LoginArgs) -> Result<()> {
             break;
         }
         let grant = token_grant(
-            &hub,
+            hub,
             &[
                 ("grant_type", DEVICE_CODE_GRANT),
                 ("device_code", &start.device_code),
@@ -118,6 +126,9 @@ pub(crate) async fn login(args: LoginArgs) -> Result<()> {
                 Some("authorization_pending") => {}
                 Some("slow_down") => interval += SLOW_DOWN,
                 Some("expired_token") => break,
+                Some("access_denied") if refusal(&err).is_some_and(|r| r.status == 400) => {
+                    bail!("the sign-in was declined on GitHub; run agmen login again");
+                }
                 _ => return Err(err.context("signing in failed")),
             },
         }
@@ -125,18 +136,15 @@ pub(crate) async fn login(args: LoginArgs) -> Result<()> {
     let Some(tokens) = tokens else {
         bail!("the code expired before it was confirmed; run agmen login again");
     };
-    let me = crate::client::Api::new(hub.clone(), tokens.access_token())?
-        .me()
-        .await
-        .context("reading who signed in failed")?;
+    let api = Api::new(hub.clone(), tokens.access_token())?;
+    let me = api.me().await.context("reading who signed in failed")?;
     let login = Login {
-        hub_url: hub,
+        hub_url: hub.clone(),
         human_id: me.id,
         handle: me.handle,
     };
     save_login(&login, &tokens).await?;
-    println!("signed in as {}", clean(&login.handle));
-    Ok(())
+    Ok(Human { login, api })
 }
 
 /// `agmen logout`.
@@ -249,7 +257,7 @@ struct CreateInvite<'a> {
 
 #[derive(Debug, Deserialize)]
 struct Created {
-    code: String,
+    link: Url,
     project: String,
     expires_at: String,
 }
@@ -289,7 +297,11 @@ pub(crate) async fn invite(args: InviteArgs) -> Result<()> {
         },
         clean(&created.expires_at)
     );
-    println!("  agmen join {}", clean(&created.code));
+    println!("  {}", clean(created.link.as_str()));
+    if blocking(move || Ok(crate::open::copy_text(created.link.as_str()))).await? {
+        println!("(copied to the clipboard)");
+    }
+    println!("Send it. They open it and follow the steps on the page.");
     Ok(())
 }
 

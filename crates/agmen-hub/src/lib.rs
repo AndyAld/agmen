@@ -32,6 +32,7 @@ mod http;
 mod human_post;
 mod identities;
 mod ingest;
+mod invite_page;
 mod invites;
 mod items;
 mod lanes;

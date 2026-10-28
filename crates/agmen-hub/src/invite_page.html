@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Join a project with agmen</title>
+  <style>
+    :root { color-scheme: light dark; font-family: system-ui, sans-serif; line-height: 1.5; }
+    body { margin: 0; background: light-dark(#fafafa, #191919); color: light-dark(#202020, #eeeeee); }
+    main { max-width: 48rem; margin: 0 auto; padding: 3rem 1.5rem; }
+    h1 { font-size: clamp(1.75rem, 5vw, 2.5rem); line-height: 1.15; margin: 0 0 1rem; }
+    h2 { font-size: 1.25rem; margin: 0 0 .75rem; }
+    section { margin-top: 2.5rem; }
+    p { max-width: 65ch; }
+    pre { padding: 1rem; background: light-dark(#ececec, #282828); white-space: pre-wrap; overflow-wrap: anywhere; }
+    code { font-family: ui-monospace, monospace; font-size: .95rem; }
+    [hidden] { display: none; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Join a project with agmen</h1>
+    <p id="message" role="status">This link is missing its invite code. Ask for a new link.</p>
+    <noscript><p>Enable JavaScript to read the invite code from this link.</p></noscript>
+    <div id="steps" hidden>
+      <section aria-labelledby="install-heading">
+        <h2 id="install-heading">Install agmen</h2>
+        <p>Run this command in your terminal.</p>
+        <pre><code id="install"></code></pre>
+        <div id="homebrew" hidden>
+          <p>Or install with Homebrew:</p>
+          <pre><code>brew install agmen-dev/tap/agmen</code></pre>
+        </div>
+      </section>
+      <section aria-labelledby="join-heading">
+        <h2 id="join-heading">Join the project</h2>
+        <p>Run this command in a clone of the project's repository.</p>
+        <pre><code id="join"></code></pre>
+      </section>
+    </div>
+  </main>
+  <script>
+    const code = location.hash.slice(1).toLowerCase();
+    if (/^[0-9a-f]{64}$/.test(code)) {
+      const windows = /Windows/i.test(navigator.userAgent);
+      const mac = /Macintosh|Mac OS X/i.test(navigator.userAgent);
+      document.getElementById('install').textContent = windows
+        ? 'powershell -ExecutionPolicy Bypass -c "irm https://getagmen.ai/install.ps1 | iex"'
+        : "curl --proto '=https' --tlsv1.2 -fsSL https://getagmen.ai/install.sh | sh";
+      document.getElementById('homebrew').hidden = !mac;
+      const link = location.origin + location.pathname + '#' + code;
+      document.getElementById('join').textContent = 'agmen join ' + link;
+      document.getElementById('message').textContent = 'You have been invited to an agmen project. Install agmen, then join from your terminal.';
+      document.getElementById('steps').hidden = false;
+    }
+  </script>
+</body>
+</html>

@@ -18,6 +18,7 @@ mod cmd;
 mod git;
 mod joined;
 mod mcp;
+mod open;
 mod output;
 mod paths;
 

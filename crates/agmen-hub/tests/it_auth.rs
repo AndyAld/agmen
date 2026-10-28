@@ -18,6 +18,52 @@ use support::{
 
 const ANDY: u64 = 4242;
 
+#[tokio::test]
+async fn it_invite_page_headers() {
+    run(|ctx| async move {
+        let mut bodies = Vec::new();
+        for path in ["/i", "/i?x=1"] {
+            let response = ctx.http.get(ctx.hub.url(path)).send().await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            for (name, value) in [
+                ("content-type", "text/html; charset=utf-8"),
+                ("referrer-policy", "no-referrer"),
+                ("cache-control", "no-store"),
+                ("x-frame-options", "DENY"),
+                ("content-security-policy", "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"),
+            ] {
+                assert_eq!(response.headers()[name], value, "{path}: {name}");
+            }
+            bodies.push(response.text().await.unwrap());
+        }
+        assert_eq!(bodies[0], bodies[1]);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn it_invite_answer_carries_the_link() {
+    run(|ctx| async move {
+        let project = seed_project(&ctx.pool).await;
+        let admin = member_with_token(&ctx, &project, ANDY, "andy", "admin").await;
+        let (status, body) = invite(
+            &ctx,
+            &admin,
+            &json!({"project": project.project, "role": "member"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let code = body["code"].as_str().unwrap();
+        assert_eq!(code.len(), 64);
+        assert!(
+            code.bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        );
+        assert_eq!(body["link"], format!("{}i#{code}", ctx.hub.base));
+    })
+    .await;
+}
+
 async fn refresh(ctx: &Ctx, refresh_token: &str) -> (StatusCode, Value) {
     let resp = ctx
         .http

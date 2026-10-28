@@ -34,6 +34,7 @@ pub(crate) struct CreateRequest {
 pub(crate) struct Created {
     /// The code, shown once; the hub keeps only its hash.
     code: String,
+    link: url::Url,
     project: String,
     role: Role,
     expires_at: Timestamp,
@@ -96,10 +97,13 @@ pub(crate) async fn create(
     .bind(ttl)
     .fetch_one(hub.pool())
     .await?;
+    let mut link = hub.public_link("i");
+    link.set_fragment(Some(&code));
     Ok((
         StatusCode::CREATED,
         Json(Created {
             code,
+            link,
             project: request.project.into(),
             role: request.role,
             // Rounded down: the reported expiry is never past the stored one.
