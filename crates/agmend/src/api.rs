@@ -285,7 +285,8 @@ async fn identity_call(
         }
         "shutdown" | "hello" | "ready" | "whoami" | "console_watch" | "console_snapshot"
         | "chat_history" | "file_text" | "identity_mint" | "identity_list" | "agent_launch"
-        | "host_status" | "host_restart" | "agent_stop" | "agent_list" => Err(forbidden()),
+        | "host_status" | "host_restart" | "agent_stop" | "agent_list" | "agent_start"
+        | "agent_attach" | "agent_detach" | "agent_remove" => Err(forbidden()),
         other => Err(ApiError {
             code: ErrorCode::NotFound,
             message: format!("agmend has no method {other:?}"),
@@ -330,6 +331,10 @@ async fn call(
         "agent_launch" => core.managed.launch(raw).await,
         "agent_stop" => core.managed.stop(raw).await,
         "agent_list" => core.managed.list(raw).await,
+        "agent_start" => core.managed.start(raw).await,
+        "agent_attach" => core.managed.attach_claude(raw).await,
+        "agent_detach" => core.managed.detach(raw).await,
+        "agent_remove" => core.managed.remove(raw).await,
         "whoami" => console.whoami().await,
         "console_snapshot" => {
             core.managed.remember_root(&raw).await;

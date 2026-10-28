@@ -968,3 +968,24 @@ fn launch_batches_prioritize_owner_and_preserve_other_senders() {
     assert_eq!(others.iter().map(|m| m.seq.0).collect::<Vec<_>>(), [1, 3]);
     assert!(store.drain_launch(ORIGIN, &who).unwrap().is_empty());
 }
+
+#[test]
+fn unregister_forgets_the_identity_and_its_waiting_messages() {
+    let (_dir, mut store, who) = setup();
+    store.ingest(ORIGIN, &who.project, &message(1)).unwrap();
+    store.unregister(ORIGIN, &who.identity_id).unwrap();
+    assert!(store.identities(ORIGIN, &who.owner_id).unwrap().is_empty());
+    let pending: i64 = store
+        .conn
+        .query_row("SELECT count(*) FROM pending", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(pending, 0);
+    // Registering again starts from an empty queue.
+    store.register(&who).unwrap();
+    assert!(
+        store
+            .drain(ORIGIN, &who.identity_id, 500, 1 << 20)
+            .unwrap()
+            .is_empty()
+    );
+}

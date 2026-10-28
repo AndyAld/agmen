@@ -155,6 +155,22 @@ impl Identities {
         Ok(())
     }
 
+    /// Forgets a removed identity: closes its session and drops its row and
+    /// waiting messages, so it no longer counts toward the 64 identity cap.
+    pub(crate) async fn forget(&self, identity: &ManagedIdentity) -> Result<(), ApiError> {
+        self.close_identity(identity).await;
+        let origin = identity.hub_url.origin().ascii_serialization();
+        self.launched
+            .lock()
+            .await
+            .remove(&(origin.clone(), identity.identity_id.clone()));
+        let id = identity.identity_id.clone();
+        store_work(self.store.clone(), move |store| {
+            store.unregister(&origin, &id)
+        })
+        .await
+    }
+
     pub(crate) async fn close_identity(&self, identity: &ManagedIdentity) {
         let key = (
             identity.hub_url.origin().ascii_serialization(),
@@ -1210,7 +1226,15 @@ mod tests {
     #[tokio::test]
     async fn managed_agent_methods_require_a_human_caller() {
         let fixture = Fixture::new(None);
-        for method in ["agent_launch", "agent_stop", "agent_list"] {
+        for method in [
+            "agent_launch",
+            "agent_stop",
+            "agent_list",
+            "agent_start",
+            "agent_attach",
+            "agent_detach",
+            "agent_remove",
+        ] {
             let refusal = error(
                 fixture
                     .call(method, json!({"local_token":"a".repeat(64)}))

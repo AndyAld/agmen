@@ -55,6 +55,16 @@ impl Credentials {
             .map_err(|_| token_error())
     }
 
+    /// Deletes one identity's credential, as `agmen leave` does.
+    pub(crate) async fn delete_token(&self, origin: &Url, id: &IdentityId) -> Result<(), ApiError> {
+        let key = TokenKey::new(origin, id).map_err(|_| token_error())?;
+        let store = self.store.clone();
+        tokio::task::spawn_blocking(move || store.delete(&key))
+            .await
+            .map_err(|_| token_error())?
+            .map_err(|_| token_error())
+    }
+
     pub(crate) fn new(login_file: PathBuf, store: TokenStore, http: reqwest::Client) -> Self {
         Self {
             login_file,

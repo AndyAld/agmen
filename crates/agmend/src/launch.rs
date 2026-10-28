@@ -125,6 +125,8 @@ pub(crate) enum RunError {
     OutputLimit,
     #[error("Claude Code batch failed after reporting ${total_cost_usd}")]
     Failed { total_cost_usd: String },
+    #[error("could not open Terminal: {0}")]
+    Terminal(String),
 }
 
 impl RunError {
@@ -141,15 +143,35 @@ impl RunError {
     pub(crate) fn started(&self) -> bool {
         !matches!(
             self,
-            Self::Spawn(_) | Self::NotInstalled | Self::AgmenNotInstalled | Self::LoginPath(_)
+            Self::Spawn(_)
+                | Self::NotInstalled
+                | Self::AgmenNotInstalled
+                | Self::LoginPath(_)
+                | Self::Terminal(_)
         )
     }
 }
 
 type RunFuture = Pin<Box<dyn Future<Output = Result<RunResult, RunError>> + Send>>;
 
+/// An interactive Claude Code on the agent's owner session.
+#[derive(Debug, Clone)]
+pub(crate) struct AttachSpec {
+    pub(crate) cwd: PathBuf,
+    pub(crate) session_id: String,
+    pub(crate) resume: bool,
+    /// The script Terminal runs; agmend writes it.
+    pub(crate) script: PathBuf,
+    /// Where the script writes Claude Code's process id.
+    pub(crate) pid_file: PathBuf,
+}
+
+type AttachFuture<'a> = Pin<Box<dyn Future<Output = Result<(), RunError>> + Send + 'a>>;
+
 pub(crate) trait Runner: std::fmt::Debug + Send + Sync {
     fn run(&self, spec: RunSpec, stop: oneshot::Receiver<()>) -> RunFuture;
+    /// Opens `spec`'s interactive session in a terminal window.
+    fn attach(&self, spec: AttachSpec) -> AttachFuture<'_>;
     fn mcp_command(&self) -> Pin<Box<dyn Future<Output = Result<PathBuf, RunError>> + Send + '_>> {
         Box::pin(async { Ok(PathBuf::from("agmen")) })
     }
@@ -166,6 +188,10 @@ pub(crate) struct ClaudeRunner {
     environment: Arc<tokio::sync::OnceCell<OsString>>,
     executable: PathBuf,
     groups: Arc<Mutex<BTreeSet<i32>>>,
+    /// Opens the attach script in Terminal: `open -a Terminal <script>`.
+    opener: PathBuf,
+    /// Extra environment for the opener; tests point it at their folder.
+    opener_env: Vec<(OsString, OsString)>,
 }
 
 impl Default for ClaudeRunner {
@@ -177,6 +203,8 @@ impl Default for ClaudeRunner {
             environment: Arc::new(tokio::sync::OnceCell::new()),
             executable: std::env::current_exe().unwrap_or_default(),
             groups: Arc::default(),
+            opener: "/usr/bin/open".into(),
+            opener_env: Vec::new(),
         }
     }
 }
@@ -322,7 +350,91 @@ impl Drop for ProcessGroup {
     }
 }
 
+/// `text` as one single-quoted POSIX shell word.
+fn shell_word(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "'\\''"))
+}
+
+/// The script Terminal runs for `spec`. `exec` keeps the script's process
+/// id, so the pid file names Claude Code itself.
+fn attach_script(environment: &LaunchEnvironment, spec: &AttachSpec) -> Result<String, RunError> {
+    let text = |path: &Path| {
+        path.to_str()
+            .map(shell_word)
+            .ok_or_else(|| RunError::Terminal(format!("{} is not UTF-8", path.display())))
+    };
+    let path = environment
+        .path
+        .to_str()
+        .map(shell_word)
+        .ok_or_else(|| RunError::Terminal("login PATH is not UTF-8".into()))?;
+    let flag = if spec.resume {
+        "--resume"
+    } else {
+        "--session-id"
+    };
+    Ok(format!(
+        "#!/bin/sh\n# Written by agmend: Claude Code on this agent's owner session.\ncd {cwd} || exit 1\nprintf '%s\\n' \"$$\" > {pid}\nPATH={path}\nexport PATH\nexec {claude} {flag} {id}\n",
+        cwd = text(&spec.cwd)?,
+        pid = text(&spec.pid_file)?,
+        claude = text(&environment.claude)?,
+        id = shell_word(&spec.session_id),
+    ))
+}
+
 impl Runner for ClaudeRunner {
+    fn attach(&self, spec: AttachSpec) -> AttachFuture<'_> {
+        Box::pin(async move {
+            // The id lands in a shell script and in Claude Code's argv.
+            if !crate::transcripts::is_session_id(&spec.session_id) {
+                return Err(RunError::Terminal("the session id is not a UUID".into()));
+            }
+            let environment = self.environment().await?;
+            let script = attach_script(&environment, &spec)?;
+            let (path, pid_file) = (spec.script.clone(), spec.pid_file.clone());
+            tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+                use std::io::Write as _;
+                use std::os::unix::fs::OpenOptionsExt as _;
+                for stale in [&path, &pid_file] {
+                    match std::fs::remove_file(stale) {
+                        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                            return Err(error);
+                        }
+                        _ => {}
+                    }
+                }
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o700)
+                    .open(&path)?;
+                file.write_all(script.as_bytes())?;
+                file.sync_all()
+            })
+            .await
+            .map_err(|error| RunError::Terminal(error.to_string()))?
+            .map_err(|error| RunError::Terminal(format!("writing the attach script: {error}")))?;
+            let mut child = tokio::process::Command::new(&self.opener)
+                .args(["-a", "Terminal"])
+                .arg(&spec.script)
+                .envs(self.opener_env.iter().map(|(key, value)| (key, value)))
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .kill_on_drop(true)
+                .spawn()
+                .map_err(RunError::Spawn)?;
+            let status = tokio::time::timeout(Duration::from_secs(10), child.wait())
+                .await
+                .map_err(|_| RunError::Terminal("open did not finish within 10 s".into()))??;
+            if status.success() {
+                Ok(())
+            } else {
+                Err(RunError::Terminal(format!("open exited with {status}")))
+            }
+        })
+    }
+
     fn mcp_command(&self) -> Pin<Box<dyn Future<Output = Result<PathBuf, RunError>> + Send + '_>> {
         Box::pin(async {
             let environment = self.environment().await?;

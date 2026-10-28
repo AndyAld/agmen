@@ -350,6 +350,25 @@ impl Store {
         Ok(())
     }
 
+    /// Forgets a removed identity: its row, waiting messages and receipts.
+    pub(crate) fn unregister(
+        &mut self,
+        origin: &str,
+        identity: &IdentityId,
+    ) -> Result<(), StoreError> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for table in ["identities", "pending", "receipts"] {
+            tx.execute(
+                &format!("DELETE FROM {table} WHERE origin=?1 AND identity=?2"),
+                params![origin, identity.as_str()],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub(crate) fn identities(
         &self,
         origin: &str,
