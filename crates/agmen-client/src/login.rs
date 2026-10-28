@@ -16,6 +16,7 @@ use jiff::SignedDuration;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
+use crate::body::{BodyReadError, read_hub_body};
 use crate::token_store::{TokenKey, TokenStore, TokenStoreError};
 
 /// Renew the access token when it has less than this left.
@@ -67,6 +68,12 @@ pub enum LoginError {
     /// The hub's answer could not be read.
     #[error("reading the hub's answer failed")]
     ReadAnswer(#[source] reqwest::Error),
+    /// The hub's response body exceeded the size limit.
+    #[error("the hub's response body exceeds the {limit} byte limit")]
+    HubBodyTooLarge {
+        /// The maximum response body size.
+        limit: usize,
+    },
     /// The hub answered success with a body that is not a token response.
     #[error("the hub's answer is not what agmen expects")]
     BadAnswer(#[source] serde_json::Error),
@@ -83,6 +90,15 @@ pub enum LoginError {
     /// A blocking task (the file or the keychain) failed to run.
     #[error("a blocking task failed")]
     Join(#[source] tokio::task::JoinError),
+}
+
+impl From<BodyReadError> for LoginError {
+    fn from(error: BodyReadError) -> Self {
+        match error {
+            BodyReadError::Http(error) => Self::ReadAnswer(error),
+            BodyReadError::TooLarge { limit } => Self::HubBodyTooLarge { limit },
+        }
+    }
 }
 
 /// Who `agmen login` signed in, kept in the login file.
@@ -212,6 +228,7 @@ struct ErrorBody {
 /// [`LoginError::Http`] when it cannot be reached, and
 /// [`LoginError::ReadAnswer`] or [`LoginError::BadAnswer`] when its
 /// success answer cannot be read.
+/// [`LoginError::HubBodyTooLarge`] when a success or error body exceeds 16 MiB.
 pub async fn token_grant(
     http: &reqwest::Client,
     hub: &Url,
@@ -228,8 +245,9 @@ pub async fn token_grant(
         .await
         .map_err(LoginError::Http)?;
     let status = response.status();
+    let bytes = read_hub_body(response).await;
     if status.is_success() {
-        let bytes = response.bytes().await.map_err(LoginError::ReadAnswer)?;
+        let bytes = bytes.map_err(LoginError::from)?;
         let granted: TokenResponse =
             serde_json::from_slice(&bytes).map_err(LoginError::BadAnswer)?;
         return Ok(HumanTokens::new(
@@ -239,7 +257,13 @@ pub async fn token_grant(
         ));
     }
     // A body that does not parse leaves only the status.
-    let body = response.json::<ErrorBody>().await.ok();
+    let body = match bytes {
+        // A malformed error body leaves only the status.
+        Ok(bytes) => serde_json::from_slice::<ErrorBody>(&bytes).ok(),
+        // Preserve status-only errors when the body cannot be read.
+        Err(BodyReadError::Http(_)) => None,
+        Err(error) => return Err(error.into()),
+    };
     Err(LoginError::Refused {
         status: status.as_u16(),
         code: body.as_ref().map(|b| b.error.clone()).unwrap_or_default(),

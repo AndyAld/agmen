@@ -11,7 +11,10 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use agmen_client::{LoginError, Page};
+use agmen_client::{
+    BodyReadError, LoginError, MAX_HUB_RESPONSE_BYTES, MAX_PAGE_RESPONSE_BYTES, Page,
+    read_hub_body, read_hub_body_with_limit,
+};
 use agmen_local::console::RosterEntry;
 use agmen_local::{ApiError, ErrorCode};
 use agmen_proto::{ClientEnvelope, DeliveryReply, NackReason, ProjectId, Seq, Stream};
@@ -30,6 +33,15 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// keep-alives, so a dead events stream is noticed within 45 s.
 const READ_TIMEOUT: Duration = Duration::from_secs(45);
 
+/// Keeps reqwest's decode error text and source after a bounded read.
+#[derive(Debug, thiserror::Error)]
+#[error("error decoding response body for url ({url})")]
+pub(crate) struct DecodeError {
+    url: Url,
+    #[source]
+    source: serde_json::Error,
+}
+
 /// Why a hub call failed.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum HubError {
@@ -39,6 +51,12 @@ pub(crate) enum HubError {
     /// The hub could not be reached, or its answer could not be read.
     #[error("the hub could not be reached")]
     Http(#[source] reqwest::Error),
+    /// The hub answered with invalid JSON.
+    #[error("the hub could not be reached")]
+    BadAnswer(#[source] DecodeError),
+    /// The hub's response body exceeded the shared cap.
+    #[error(transparent)]
+    Body(BodyReadError),
     /// The hub refused with an error body.
     #[error("the hub answered {status} {code}")]
     Refused {
@@ -103,9 +121,11 @@ impl From<HubError> for ApiError {
                 ErrorCode::Hub,
                 format!("the hub refused the message: {reason} (retry after {ms} ms)"),
             ),
-            HubError::Refused { .. } | HubError::Http(_) | HubError::Nack { .. } => {
-                (ErrorCode::Hub, chain(&err))
-            }
+            HubError::Refused { .. }
+            | HubError::Http(_)
+            | HubError::BadAnswer(_)
+            | HubError::Body(_)
+            | HubError::Nack { .. } => (ErrorCode::Hub, chain(&err)),
         };
         Self { code, message }
     }
@@ -231,12 +251,16 @@ impl Hub {
         limit: u32,
     ) -> Result<Page, HubError> {
         let (after, limit) = (after.to_string(), limit.to_string());
-        self.get(
-            project,
-            &["streams", "feed"],
-            &[("after", &after), ("limit", &limit)],
-        )
-        .await
+        let response = self
+            .send(
+                Method::GET,
+                project,
+                &["streams", "feed"],
+                &[("after", &after), ("limit", &limit)],
+                |r| r.timeout(REQUEST_TIMEOUT),
+            )
+            .await?;
+        json_with_limit(response, MAX_PAGE_RESPONSE_BYTES).await
     }
 
     /// Posts `envelope` as the person; the stream and seq it was recorded
@@ -257,7 +281,14 @@ impl Hub {
         if !matches!(status, 200 | 409 | 422 | 429 | 503) {
             return Err(refusal(response).await);
         }
-        match response.json().await.map_err(HubError::Http)? {
+        let url = response.url().clone();
+        let bytes = read_hub_body(response).await.map_err(|error| match error {
+            BodyReadError::Http(error) => HubError::Http(error),
+            error => HubError::Body(error),
+        })?;
+        match serde_json::from_slice(&bytes)
+            .map_err(|source| HubError::BadAnswer(DecodeError { url, source }))?
+        {
             DeliveryReply::Ack { stream, seq, .. } => Ok((stream, seq)),
             DeliveryReply::Nack {
                 reason,
@@ -318,20 +349,242 @@ fn url(base: &Url, project: &ProjectId, segments: &[&str]) -> Url {
 
 /// A success's JSON body, or the refusal.
 async fn json<T: DeserializeOwned>(response: reqwest::Response) -> Result<T, HubError> {
+    json_with_limit(response, MAX_HUB_RESPONSE_BYTES).await
+}
+
+/// A JSON answer bounded by the endpoint's response limit.
+async fn json_with_limit<T: DeserializeOwned>(
+    response: reqwest::Response,
+    limit: usize,
+) -> Result<T, HubError> {
     if response.status().is_success() {
-        response.json().await.map_err(HubError::Http)
+        let url = response.url().clone();
+        let bytes =
+            read_hub_body_with_limit(response, limit)
+                .await
+                .map_err(|error| match error {
+                    BodyReadError::Http(error) => HubError::Http(error),
+                    error => HubError::Body(error),
+                })?;
+        serde_json::from_slice(&bytes)
+            .map_err(|source| HubError::BadAnswer(DecodeError { url, source }))
     } else {
-        Err(refusal(response).await)
+        Err(refusal_with_limit(response, limit).await)
     }
 }
 
 /// A failed answer as [`HubError::Refused`].
 async fn refusal(response: reqwest::Response) -> HubError {
+    refusal_with_limit(response, MAX_HUB_RESPONSE_BYTES).await
+}
+
+/// A failed answer bounded by the endpoint's response limit.
+async fn refusal_with_limit(response: reqwest::Response, limit: usize) -> HubError {
     let status = response.status().as_u16();
     // A body that does not parse leaves only the status.
-    let code = response
-        .json::<ErrorBody>()
-        .await
-        .map_or_else(|_| String::new(), |body| body.error);
+    let code = match read_hub_body_with_limit(response, limit).await {
+        Ok(bytes) => serde_json::from_slice::<ErrorBody>(&bytes)
+            .map_or_else(|_| String::new(), |body| body.error),
+        Err(BodyReadError::Http(_)) => String::new(),
+        Err(error) => return HubError::Body(error),
+    };
     HubError::Refused { status, code }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn replay_page_body_boundaries() {
+        use agmen_client::{HumanTokens, Login, TokenStore, store_tokens};
+
+        let cap = 500 * 80 * 1024 + 1024 * 1024;
+        for (status, size) in [(200, cap - 1), (200, cap + 1), (403, cap + 1)] {
+            let mut body = br#"{"messages":[],"next_after":null,"head":0}"#.to_vec();
+            body.resize(size, b' ');
+            let app = axum::Router::new().route(
+                "/v1/projects/projectp1/streams/feed",
+                axum::routing::get(move || {
+                    let body = body.clone();
+                    async move { (axum::http::StatusCode::from_u16(status).unwrap(), body) }
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let login = Login {
+                hub_url: format!("http://{}", listener.local_addr().unwrap())
+                    .parse()
+                    .unwrap(),
+                human_id: "hmn7k2q9".parse().unwrap(),
+                handle: "andy".to_owned(),
+            };
+            let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let dir = tempfile::tempdir().unwrap();
+            let login_file = dir.path().join("login.json");
+            std::fs::write(&login_file, serde_json::to_vec(&login).unwrap()).unwrap();
+            let store = TokenStore::Dir(dir.path().join("tokens"));
+            store_tokens(
+                &store,
+                &login,
+                &HumanTokens::new("access".into(), "refresh".into(), 3600),
+            )
+            .await
+            .unwrap();
+            let http = Hub::http().unwrap();
+            let hub = Hub::new(http.clone(), Credentials::new(login_file, store, http));
+            let result = hub.page(&"projectp1".parse().unwrap(), 0, 500).await;
+            task.abort();
+            if size < cap {
+                let page = result.unwrap();
+                assert!(page.messages.is_empty());
+                assert_eq!(page.next_after, None);
+                assert_eq!(page.head, 0);
+            } else {
+                assert!(matches!(result, Err(HubError::Body(_))), "{result:?}");
+                assert!(result.unwrap_err().to_string().contains(&cap.to_string()));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn normal_hub_error_text_is_unchanged() {
+        for (status, body) in [
+            (200, ""),
+            (200, "not json"),
+            (403, r#"{"error":"forbidden"}"#),
+            (403, ""),
+            (403, "not json"),
+        ] {
+            let app = axum::Router::new().fallback(move || async move {
+                (axum::http::StatusCode::from_u16(status).unwrap(), body)
+            });
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let http = Hub::http().unwrap();
+            let expected = if status == 200 {
+                let error = http
+                    .get(&url)
+                    .send()
+                    .await
+                    .unwrap()
+                    .json::<serde_json::Value>()
+                    .await
+                    .unwrap_err();
+                chain(&HubError::Http(error))
+            } else if body.starts_with('{') {
+                "the hub answered 403 forbidden".to_owned()
+            } else {
+                "the hub answered 403 ".to_owned()
+            };
+            let error = json::<serde_json::Value>(http.get(&url).send().await.unwrap())
+                .await
+                .unwrap_err();
+            task.abort();
+            assert_eq!(chain(&error), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn oversized_post_replies_are_refused() {
+        use agmen_client::{HumanTokens, Login, TokenStore, store_tokens};
+        use axum::body::{Body, Bytes};
+
+        for status in [200, 409, 422, 429, 503, 403] {
+            let app = axum::Router::new().fallback(move || async move {
+                axum::http::Response::builder()
+                    .status(status)
+                    .header("content-length", "16777217")
+                    .body(Body::from_stream(tokio_stream::pending::<
+                        Result<Bytes, std::convert::Infallible>,
+                    >()))
+                    .unwrap()
+            });
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let login = Login {
+                hub_url: format!("http://{}", listener.local_addr().unwrap())
+                    .parse()
+                    .unwrap(),
+                human_id: "hmn7k2q9".parse().unwrap(),
+                handle: "andy".to_owned(),
+            };
+            let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let dir = tempfile::tempdir().unwrap();
+            let login_file = dir.path().join("login.json");
+            std::fs::write(&login_file, serde_json::to_vec(&login).unwrap()).unwrap();
+            let store = TokenStore::Dir(dir.path().join("tokens"));
+            store_tokens(
+                &store,
+                &login,
+                &HumanTokens::new("access".into(), "refresh".into(), 3600),
+            )
+            .await
+            .unwrap();
+            let http = Hub::http().unwrap();
+            let hub = Hub::new(http.clone(), Credentials::new(login_file, store, http));
+            let envelope = serde_json::from_value(serde_json::json!({
+                "v": 1, "id": "01JBX6Q4T7W3C2M8Y9K5P00001", "verb": "FYI",
+                "data": {}, "body": "hello", "sent_at": "2026-10-25T16:04:11Z"
+            }))
+            .unwrap();
+            let result = tokio::time::timeout(
+                Duration::from_secs(3),
+                hub.post(&"projectp1".parse().unwrap(), &envelope),
+            )
+            .await;
+            task.abort();
+            let error = result
+                .expect("refuse before reading the post body")
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("16777216 byte limit"),
+                "{status}: {error}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn oversized_hub_bodies_are_refused() {
+        for status in [200, 403] {
+            for chunked in [false, true] {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let url = format!("http://{}", listener.local_addr().unwrap());
+                let task = tokio::spawn(async move {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    socket.read_exact(&mut [0; 1]).await.unwrap();
+                    let framing = if chunked {
+                        "Transfer-Encoding: chunked"
+                    } else {
+                        "Content-Length: 16777217"
+                    };
+                    socket
+                        .write_all(
+                            format!("HTTP/1.1 {status} Test\r\n{framing}\r\n\r\n").as_bytes(),
+                        )
+                        .await
+                        .unwrap();
+                    if chunked {
+                        let chunk = format!("10000\r\n{}\r\n", " ".repeat(65536));
+                        for _ in 0..257 {
+                            if socket.write_all(chunk.as_bytes()).await.is_err() {
+                                return;
+                            }
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                });
+                let result = tokio::time::timeout(Duration::from_secs(3), async {
+                    let response = Hub::http().unwrap().get(url).send().await.unwrap();
+                    json::<serde_json::Value>(response).await
+                })
+                .await;
+                task.abort();
+                let error = result
+                    .expect("refuse before the stalled body ends")
+                    .unwrap_err();
+                assert!(error.to_string().contains("16777216 byte limit"), "{error}");
+            }
+        }
+    }
 }
