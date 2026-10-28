@@ -40,6 +40,9 @@ impl crate::launch::Runner for FakeRunner {
                     total_cost_usd: "0.25".into(),
                 });
             }
+            if mode == 3 {
+                return Err(crate::launch::RunError::NotInstalled);
+            }
             if mode == 2 {
                 let _stopped = stop.await;
                 cancelled.fetch_add(1, Ordering::SeqCst);
@@ -645,4 +648,48 @@ async fn managed_record_persists_two_distinct_session_ids() {
     assert_ne!(owner, others);
     let restored: super::Record = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(serde_json::to_value(restored).unwrap(), value);
+}
+
+#[tokio::test]
+async fn batch_that_never_started_claude_keeps_its_tier_unresumed() {
+    let fixture = Fixture::new().await;
+    fixture.runner.mode.store(3, Ordering::SeqCst);
+    fixture.launch().await;
+    let worker = fixture
+        .daemon
+        .core
+        .managed
+        .workers
+        .lock()
+        .await
+        .values()
+        .next()
+        .unwrap()
+        .clone();
+    for seq in 1..=2 {
+        enqueue(&fixture, seq, "agent001").await;
+        worker.lock().await.last_run = None;
+        fixture.daemon.core.managed.tick().await;
+        for _ in 0..200 {
+            if worker
+                .lock()
+                .await
+                .task
+                .as_ref()
+                .is_some_and(tokio::task::JoinHandle::is_finished)
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        fixture.runner.mode.store(0, Ordering::SeqCst);
+    }
+    fixture.daemon.core.managed.shutdown().await;
+    let runs = fixture.runner.runs.lock().unwrap();
+    assert_eq!(runs.len(), 2);
+    assert_eq!(runs[0].session_id, runs[1].session_id);
+    assert!(
+        !runs[1].resume,
+        "Claude never started, so the session it would resume does not exist"
+    );
 }

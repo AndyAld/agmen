@@ -128,11 +128,17 @@ impl RunError {
         match self {
             Self::Failed { total_cost_usd } => Some(total_cost_usd),
             // Nothing ran, so nothing was spent.
-            Self::Spawn(_) | Self::NotInstalled | Self::AgmenNotInstalled | Self::LoginPath(_) => {
-                Some("0")
-            }
+            _ if !self.started() => Some("0"),
             _ => None,
         }
+    }
+
+    /// Whether Claude Code was spawned, so it may have created the session.
+    pub(crate) fn started(&self) -> bool {
+        !matches!(
+            self,
+            Self::Spawn(_) | Self::NotInstalled | Self::AgmenNotInstalled | Self::LoginPath(_)
+        )
     }
 }
 

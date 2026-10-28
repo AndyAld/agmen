@@ -23,7 +23,7 @@ use crate::budget::{Budget, Money, Step};
 use crate::console::{bad_request, params};
 use crate::hub::Hub;
 use crate::identities::Identities;
-use crate::launch::{RunSpec, Runner};
+use crate::launch::{RunError, RunSpec, Runner};
 use crate::state::ManagedIdentity;
 
 const MAX_AGENTS: usize = 64;
@@ -573,11 +573,6 @@ impl Managed {
                 owner_id: held.record.identity.owner_id.clone(),
                 owner_only,
             };
-            if owner_only {
-                held.owner_resumed = true;
-            } else {
-                held.others_resumed = true;
-            }
             held.last_run = Some(tokio::time::Instant::now());
             held.state = "running";
             let (stop, stopped) = oneshot::channel();
@@ -599,9 +594,19 @@ async fn run_worker(
     stopped: oneshot::Receiver<()>,
     identities: Arc<Identities>,
 ) {
+    let owner_only = spec.owner_only;
     let result = runner.run(spec, stopped).await;
     let mut held = worker.lock().await;
     held.stop = None;
+    // A batch that never spawned Claude created no session: the next batch
+    // of this tier must start it with --session-id, not resume it.
+    if result.as_ref().map_or_else(RunError::started, |_| true) {
+        if owner_only {
+            held.owner_resumed = true;
+        } else {
+            held.others_resumed = true;
+        }
+    }
     if held.state == "offline" {
         return;
     }
