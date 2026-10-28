@@ -192,6 +192,8 @@ pub(crate) struct FakeState {
     /// slow hub makes agmend wait.
     pub(crate) snapshot_delay: Duration,
     pub(crate) posts: Vec<Request>,
+    pub(crate) agent_requests: Vec<Request>,
+    pub(crate) managed_state: Option<String>,
     pub(crate) snapshots_served: usize,
     /// Task 8: each `console_snapshot`'s params.
     pub(crate) snapshot_params: Vec<Value>,
@@ -376,6 +378,26 @@ fn host_response(id: u64, method: &str, state: &Mutex<FakeState>) -> Response {
     )
 }
 
+fn managed_response(request: Request, state: &Mutex<FakeState>) -> Response {
+    let id = request.id;
+    let mut state = state.lock().unwrap();
+    if request.method == "agent_list" {
+        let agents = state.managed_state.as_ref().map(|status| json!({"identity": "idmanaged", "project": PROJECT, "handle": "andy/worker", "state": status})).into_iter().collect::<Vec<_>>();
+        Response::ok(id, json!({"agents": agents}))
+    } else {
+        state.managed_state = Some(
+            if request.method == "agent_launch" {
+                "idle"
+            } else {
+                "offline"
+            }
+            .into(),
+        );
+        state.agent_requests.push(request);
+        Response::ok(id, json!({}))
+    }
+}
+
 fn serve(mut stream: UnixStream, state: &Mutex<FakeState>) -> Option<()> {
     while let Ok(request) = frame::read::<Request>(&mut stream) {
         if request.method == "shutdown" {
@@ -417,6 +439,7 @@ fn serve(mut stream: UnixStream, state: &Mutex<FakeState>) -> Option<()> {
                     None => Response::err(id, ErrorCode::Hub, "the hub cannot be reached"),
                 }
             }
+            "agent_launch" | "agent_stop" | "agent_list" => managed_response(request, state),
             "post" => {
                 let mut state = state.lock().unwrap();
                 state.posts.push(request.clone());
@@ -441,8 +464,7 @@ fn serve(mut stream: UnixStream, state: &Mutex<FakeState>) -> Option<()> {
                 let limit = limit.min(state.history_page_size.unwrap_or(limit));
                 let earlier: Vec<&StampedEnvelope> =
                     state.history.iter().filter(|m| m.seq.0 < before).collect();
-                let limit = usize::try_from(limit).unwrap();
-                let skip = earlier.len().saturating_sub(limit);
+                let skip = earlier.len().saturating_sub(limit.try_into().unwrap());
                 let page: Vec<&StampedEnvelope> = earlier[skip..].to_vec();
                 let older = page.first().is_some_and(|m| m.seq.0 > 1);
                 Response::ok(id, json!({"messages": page, "older": older}))

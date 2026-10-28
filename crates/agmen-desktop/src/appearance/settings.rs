@@ -162,6 +162,9 @@ pub(crate) struct DesktopSettings {
     /// The project the last live launch opened, which a launch outside a
     /// joined folder opens again.
     pub(crate) last_project: Option<ProjectId>,
+    /// Model used by the New Agent dialog when no model is entered.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) default_agent_model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) quit_keep_running: Option<bool>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -175,6 +178,7 @@ const DESKTOP_TABLE: &str = "desktop";
 /// The `[desktop]` keys this version writes.
 const DESKTOP_KEYS: &[&str] = &[
     "last_project",
+    "default_agent_model",
     "quit_keep_running",
     "start_at_login",
     "recent_projects",

@@ -846,3 +846,23 @@ fn general_shows_host_error_when_daemon_status_is_unavailable(cx: &mut TestAppCo
     }
     assert!(cx.debug_bounds("host:restart").is_some());
 }
+
+#[gpui::test]
+fn general_settings_saves_default_agent_model(cx: &mut TestAppContext) {
+    init(cx);
+    let home = Home::new();
+    let (view, cx) = cx.add_window_view(|_, cx| SettingsView::new(home.sources(), cx));
+    view.update_in(cx, |view, window, cx| {
+        view.page = Page::General;
+        view.agent_model
+            .update(cx, |input, cx| input.set_text("opus", window, cx));
+    });
+    click(cx, "default-agent-model:save");
+    assert_eq!(
+        crate::appearance::DesktopSettings::load(&home.settings_path())
+            .unwrap()
+            .default_agent_model
+            .as_deref(),
+        Some("opus")
+    );
+}

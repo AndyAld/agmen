@@ -25,7 +25,9 @@ fn open(
     let (room, cx) = cx.add_window_view(|_, cx| PlanRoom::new(roster, model, cx));
     cx.update(|_, cx| {
         cx.subscribe(&room, move |_, event: &AgentsPanelEvent, _| {
-            let AgentsPanelEvent::Selected(id) = event;
+            let AgentsPanelEvent::Selected(id) = event else {
+                panic!("unexpected agent action")
+            };
             sink.borrow_mut().push(id.clone());
         })
         .detach();

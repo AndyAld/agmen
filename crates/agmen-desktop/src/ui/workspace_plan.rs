@@ -48,8 +48,9 @@ impl PlanWiring {
         };
         let room = cx.new(|cx| PlanRoom::new(snapshot.roster.clone(), model.clone(), cx));
         let room_events = cx.subscribe(&room, |this, _, event, cx| {
-            let AgentsPanelEvent::Selected(id) = event;
-            this.select_agent(id, cx);
+            if let AgentsPanelEvent::Selected(id) = event {
+                this.select_agent(id, cx);
+            }
         });
         // The dock, the dialog and the status bar follow the plan.
         let model_changes = cx.observe(&model, |_, _, cx| cx.notify());

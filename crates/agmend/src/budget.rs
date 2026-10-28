@@ -1,6 +1,4 @@
 //! Private worker budget steps for the Claude Code launcher.
-// shortcut: L17 wires this module and removes this expectation.
-#![cfg_attr(not(test), expect(dead_code, reason = "wired by L17"))]
 
 /// Millionths of a dollar, with no floating-point conversion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -11,6 +9,9 @@ pub(crate) struct Money(u64);
 pub(crate) struct InvalidCost;
 
 impl Money {
+    pub(crate) fn usd(self) -> String {
+        format!("{}.{:06}", self.0 / 1_000_000, self.0 % 1_000_000)
+    }
     /// Parses a raw JSON number token, not a quoted string or an f64 rendering.
     /// Nonnegative JSON decimal syntax; out-of-range amounts saturate.
     /// Fractions below one millionth are truncated, so rounding cannot fire a
@@ -111,6 +112,25 @@ impl Budget {
 
     pub(crate) fn spent(&self) -> Money {
         self.spent
+    }
+
+    pub(crate) fn remaining_usd(&self) -> String {
+        Money(self.cap.0.saturating_sub(self.spent.0)).usd()
+    }
+
+    pub(crate) fn exhausted(&self) -> bool {
+        self.spent >= self.cap
+    }
+
+    /// Adds one batch's reported cost to the managed agent's lifetime spend.
+    pub(crate) fn add_cost_usd(
+        &mut self,
+        value: &str,
+        fire: impl FnMut(Step),
+    ) -> Result<(), InvalidCost> {
+        let cost = Money::from_usd(value)?;
+        let total = Money(self.spent.0.saturating_add(cost.0));
+        self.observe_total_cost_usd(&total.usd(), fire)
     }
 
     pub(crate) fn observe_total_cost_usd(

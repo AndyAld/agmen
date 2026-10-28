@@ -72,8 +72,6 @@ impl Git {
 
     /// Runs one call with its own timeout and optional index path. The shared
     /// deadline still applies; an absent index removes inherited `GIT_INDEX_FILE`.
-    // shortcut: L17 wires launcher calls and removes this expectation.
-    #[cfg_attr(not(test), expect(dead_code, reason = "wired by L17"))]
     pub(crate) async fn run_with_options(
         &self,
         args: &[&OsStr],

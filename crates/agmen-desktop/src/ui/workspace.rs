@@ -55,6 +55,8 @@ pub(crate) struct Workspace {
     focus_handle: FocusHandle,
     snapshot: Rc<Snapshot>,
     invite_people: bool,
+    new_agent: Option<Entity<super::new_agent_dialog::NewAgentDialog>>,
+    new_agent_events: Option<Subscription>,
     left_dock: Dock,
     right_dock: Dock,
     agents_panel: Entity<AgentsPanel>,
@@ -111,8 +113,17 @@ impl Workspace {
         super::icon_preload::preload_snapshot(&snapshot, cx);
         let snapshot = Rc::new(snapshot);
         let agents_panel = cx.new(|_| AgentsPanel::new(snapshot.roster.clone()));
+        agents_panel.update(cx, |panel, cx| {
+            panel.set_managed(
+                snapshot.managed_agents.clone(),
+                snapshot.agent_error.clone(),
+                cx,
+            )
+        });
         let agents_events = cx.subscribe(&agents_panel, |this, _, event, cx| match event {
             AgentsPanelEvent::Selected(id) => this.select_agent(id, cx),
+            AgentsPanelEvent::NewAgent => this.open_new_agent(cx),
+            AgentsPanelEvent::Stop(id) => this.stop_managed_agent(id, cx),
         });
         let chat = cx.new(|cx| ChatView::new(Rc::clone(&snapshot), window, cx));
         // Task 13: the status bar's counts and the toast redraw on any change;
@@ -132,6 +143,8 @@ impl Workspace {
             focus_handle: cx.focus_handle(),
             snapshot,
             invite_people: false,
+            new_agent: None,
+            new_agent_events: None,
             pane_group,
             left_dock: Dock::new(LEFT_DOCK_WIDTH),
             right_dock: Dock::new(RIGHT_DOCK_WIDTH),
@@ -145,6 +158,49 @@ impl Workspace {
             _chat_refs: chat_refs,
             chat,
             _chat_changes: chat_changes,
+        }
+    }
+
+    pub(super) fn open_new_agent(&mut self, cx: &mut Context<Self>) {
+        let settings = cx
+            .try_global::<super::settings_view::SettingsSources>()
+            .map(|sources| crate::appearance::DesktopSettings::load(&sources.settings_path()))
+            .transpose();
+        let (model, error) = match settings {
+            Ok(settings) => (
+                settings
+                    .and_then(|settings| settings.default_agent_model)
+                    .unwrap_or_else(|| "sonnet".into()),
+                None,
+            ),
+            Err(error) => ("sonnet".into(), Some(error.to_string())),
+        };
+        let dialog = cx.new(|cx| super::new_agent_dialog::NewAgentDialog::new(model, error, cx));
+        self.new_agent_events = Some(cx.subscribe(
+            &dialog,
+            |this, _, _: &super::new_agent_dialog::Closed, cx| {
+                this.new_agent = None;
+                this.new_agent_events = None;
+                cx.notify();
+            },
+        ));
+        self.new_agent = Some(dialog);
+        cx.notify();
+    }
+
+    fn stop_managed_agent(&mut self, identity: &IdentityId, cx: &mut Context<Self>) {
+        if let Some(backend) = cx.try_global::<crate::backend::BackendHandle>()
+            && let Err(error) = backend
+                .0
+                .act(crate::backend::Action::StopAgent(identity.clone()))
+        {
+            self.agents_panel.update(cx, |panel, cx| {
+                panel.set_managed(
+                    self.snapshot.managed_agents.clone(),
+                    Some(error.to_string()),
+                    cx,
+                )
+            });
         }
     }
 
@@ -343,6 +399,10 @@ impl Render for Workspace {
             ),
             cx,
         )
+        .on_action(cx.listener(|this, _: &crate::keymap::NewAgent, _, cx| {
+            this.open_new_agent(cx);
+            cx.stop_propagation();
+        }))
         .relative()
         .track_focus(&self.focus_handle)
         .key_context(crate::keymap::WORKSPACE_CONTEXT)
@@ -371,6 +431,7 @@ impl Render for Workspace {
         .children(palette)
         .children(self.alert_toast(cx))
         .children(overlay)
+        .children(self.new_agent.clone())
     }
 }
 

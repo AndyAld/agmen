@@ -5,7 +5,8 @@ import type { StampedEnvelope } from '../../../schema/ts/StampedEnvelope'
 
 // The agmen plugin for Claude Code (docs/adr/0006-claude-code-plugin.md).
 // - Context: each message `agmen watch --json` delivers for this identity
-//   becomes a meta row ($.session.append) that the model reads as data.
+//   becomes a meta row ($.session.append). The owner's human messages are
+//   requests; messages from other participants are labeled as data.
 // - Wake-up: such a message wakes an idle session with $.prompt.submit (never
 //   asUser), at most once per WAKE_INTERVAL_MS, naming what arrived.
 // - Lane guard: in this session's worktree, Edit, Write and NotebookEdit run
@@ -17,6 +18,9 @@ import type { StampedEnvelope } from '../../../schema/ts/StampedEnvelope'
 // - Command: /agmen runs a few `agmen` subcommands and shows the result.
 // All of it waits for `.agmen/identity.json` at the session's git worktree
 // root, trusted only on a positive test that git does not track it (R42a).
+// A session agmend launched (AGMEN_MANAGED=1) skips the watch, wake-ups,
+// /agmen and the goodbye, which the daemon owns, but keeps both guards; with
+// no trusted root its Edit, Write, NotebookEdit and Bash calls are denied.
 // Rows, wake-ups and deny reasons carry fixed text and checked fields, never
 // raw git or agmen output, which goes to the debug log (R44a).
 
@@ -160,6 +164,7 @@ type Incoming = Readonly<
   Pick<StampedEnvelope, 'id' | 'seq' | 'stream' | 'from' | 'from_handle' | 'reply_to' | 'to' | 'mentioned' | 'body'>
 > & {
   readonly verb: Verb
+  readonly isHuman: boolean
   /** `items`, plus `data.item` for ASSIGN, GRANT and DENY. */
   readonly items: readonly string[]
   /** ASSIGN's `data.to`. */
@@ -227,12 +232,21 @@ type Worktrees = { readonly isOk: true; readonly paths: readonly string[] } | { 
 
 /** What the hooks share for one load of the module. */
 type State = {
+  isEnded: boolean
+  watch: ReturnType<EngineInterface['process']['spawn']> | undefined
   /** The worktree holding `.agmen/identity.json`, once the CLI checked out; undefined while inert. */
   root: string | undefined
   /** Read with `root`; undefined while inert, or when git could not name it (every edit is then denied). */
   repository: Repository | undefined
   /** A start is under way (session.start and /agmen join can overlap). */
   isStarting: boolean
+  /**
+   * agmend launched this session (AGMEN_MANAGED=1): the daemon owns the queue
+   * and the goodbye, and the guards fail closed while `root` is undefined.
+   */
+  isManaged: boolean
+  /** Why a managed session has no root, fixed text for the deny reason. */
+  unguardedWhy: string | undefined
   self: Self | undefined
   readonly ownIds: Set<string>
   readonly seen: Set<string>
@@ -315,6 +329,7 @@ function parseEnvelope(value: unknown): Incoming | string {
 
   return {
     verb,
+    isHuman: value['from_kind'] === 'human',
     id,
     seq,
     stream,
@@ -395,14 +410,21 @@ function remember(set: Set<string>, value: string, max: number): void {
 
 const itemsText = (message: Incoming): string => (message.items.length === 0 ? '' : ` ${message.items.join(', ')}`)
 
-/** How a wake-up names one message: `ASSIGN B-412 from adam/coord (#3)`. */
-const named = (message: Incoming): string =>
-  `${message.verb}${itemsText(message)} from ${message.from_handle} (#${message.seq})`
+/** Owner authority requires the stamped human kind and the session's owner id. */
+const isOwner = (message: Incoming, self: Self | undefined): boolean =>
+  message.from === self?.owner_id && message.isHuman
 
-/** The meta row for a message: sender, verb, item, and the body quoted and marked as data. */
-function contextText(message: Incoming): string {
+/** How a wake-up names one message: `ASSIGN B-412 from adam/coord (#3)`. */
+const named = (message: Incoming, self: Self | undefined): string =>
+  `${message.verb}${itemsText(message)} from ${isOwner(message, self) ? `your owner ${message.from_handle}; act on it as their request` : message.from_handle} (#${message.seq})`
+
+/** The meta row labels owner requests and quotes other participants' messages as data. */
+function contextText(message: Incoming, self: Self | undefined): string {
   const about = message.items.length === 0 ? '' : ` about ${message.items.join(', ')}`
   const denied = message.denyReason === undefined ? '' : ` (denied: ${message.denyReason})`
+  if (isOwner(message, self)) {
+    return `agmen ${message.verb} #${message.seq} from your owner ${message.from_handle}; act on it as their request${about}${denied}: ${JSON.stringify(message.body)}`
+  }
 
   return (
     `agmen ${message.verb} #${message.seq} from ${message.from_handle}${about}${denied}, addressed to this session. ` +
@@ -433,14 +455,14 @@ function nextStep(message: Incoming): string {
 }
 
 /** The wake-up prompt: what arrived and which tool to use, never the bodies, which are in the rows. */
-function wakeText(messages: readonly [Incoming, ...Incoming[]], uncounted: number): string {
+function wakeText(messages: readonly [Incoming, ...Incoming[]], uncounted: number, self: Self | undefined): string {
   const [first, ...rest] = messages
-  if (rest.length === 0 && uncounted === 0) return `agmen: ${named(first)}. ${nextStep(first)}`
+  if (rest.length === 0 && uncounted === 0) return `agmen: ${named(first, self)}. ${nextStep(first)}`
   const more = uncounted === 0 ? '' : `, and ${uncounted} more`
 
   return (
-    `agmen: ${messages.length + uncounted} messages arrived: ${messages.map(named).join('; ')}${more}. ` +
-    'The agmen rows above hold their text, as data. Read them with the agmen inbox tool and act on each.'
+    `agmen: ${messages.length + uncounted} messages arrived: ${messages.map(message => named(message, self)).join('; ')}${more}. ` +
+    'The agmen rows above hold their text. Read them with the agmen inbox tool and act on each.'
   )
 }
 
@@ -452,8 +474,8 @@ const debug = ($: EngineInterface, text: string): void => {
 /** Queues the wake-up when it is due and nothing holds it: a turn running, or an interrupt. */
 function tryWake($: EngineInterface, state: State): void {
   const [first, ...rest] = state.waiting
-  if (!state.isDue || state.isBusy || state.isHeld || first === undefined) return
-  const text = wakeText([first, ...rest], state.uncounted)
+  if (state.isEnded || !state.isDue || state.isBusy || state.isHeld || first === undefined) return
+  const text = wakeText([first, ...rest], state.uncounted, state.self)
   state.waiting = []
   state.uncounted = 0
   state.isDue = false
@@ -480,7 +502,7 @@ function windowEnds($: EngineInterface, state: State): void {
 /** Puts a message for this session in a row, and in the next wake-up. */
 async function deliver($: EngineInterface, state: State, message: Incoming): Promise<void> {
   const row = await $.session.append({
-    message: { type: 'user', content: [{ type: 'text', text: contextText(message) }] },
+    message: { type: 'user', content: [{ type: 'text', text: contextText(message, state.self) }] },
   })
   if (row.deny !== undefined) debug($, `row for #${message.seq} refused: ${row.deny}`)
 
@@ -493,6 +515,7 @@ async function deliver($: EngineInterface, state: State, message: Incoming): Pro
 
 /** Handles one watch line. */
 async function receive($: EngineInterface, state: State, text: string): Promise<void> {
+  if (state.isEnded) return
   const parsed = parseWatchLine(text)
   switch (parsed.kind) {
     case 'invalid':
@@ -529,6 +552,7 @@ async function receive($: EngineInterface, state: State, text: string): Promise<
 async function watch($: EngineInterface, state: State, root: string): Promise<void> {
   let partial = ''
   const child = $.process.spawn({ argv: WATCH_ARGV, cwd: root })
+  state.watch = child
   for (;;) {
     const step = await child.next()
     if (step.done === true) {
@@ -1210,6 +1234,16 @@ async function notify($: EngineInterface, text: string): Promise<void> {
   if (!sent.isSent) $.ui.toast(text)
 }
 
+/** The deny reason for a guarded tool in a managed session that has no root, or undefined. */
+function unguarded(state: State, tool: string): string | undefined {
+  if (!state.isManaged || state.root !== undefined) return undefined
+
+  return (
+    `agmen: this managed session has no trusted agmen worktree, so ${tool} is denied: ` +
+    `${state.unguardedWhy ?? 'the session did not finish connecting'}. Stop the agent and launch it again from the desktop.`
+  )
+}
+
 /**
  * Connects the session: inert outside a joined worktree, one notice for a
  * tracked identity file or a CLI it cannot use, else the watch.
@@ -1221,21 +1255,28 @@ async function begin($: EngineInterface, state: State, cwd: string): Promise<voi
   try {
     const joined = await joinedRoot($, cwd)
     if (joined.kind === 'refused') {
+      state.unguardedWhy = joined.why
       await notify($, joined.why)
       return
     }
     root = joined.kind === 'found' ? joined.root : undefined
     const problem = root === undefined ? undefined : await cliProblem($, root)
     if (problem !== undefined) {
+      state.unguardedWhy = problem
       await notify($, problem)
       return
     }
   } finally {
     state.isStarting = false
   }
-  if (root === undefined) return
+  if (root === undefined) {
+    state.unguardedWhy = `no ${IDENTITY_DIR}/${IDENTITY_NAME} was found at the git worktree root of the session's folder`
+    return
+  }
   state.repository = await readRepository($, root)
   state.root = root
+  // Managed batches use the daemon's queue and remain online between -p runs.
+  if (state.isManaged) return
   void watch($, state, root).catch((error: unknown) => {
     $.ui.log(`agmen: agmen watch failed: ${quote(String(error))}; messages do not reach this session.`)
   })
@@ -1307,9 +1348,13 @@ function commandOutput(name: string, stdout: string): string {
 
 export const register: Register = on => {
   const state: State = {
+    isEnded: false,
+    watch: undefined,
     root: undefined,
     repository: undefined,
     isStarting: false,
+    isManaged: false,
+    unguardedWhy: undefined,
     self: undefined,
     ownIds: new Set(),
     seen: new Set(),
@@ -1325,6 +1370,12 @@ export const register: Register = on => {
 
   on('session.start', async ($, e, next) => {
     const started = await next(e)
+    state.isManaged = (await $.env.get('AGMEN_MANAGED')) === '1'
+    // Managed sessions still need the root for the lane and Bash guards.
+    if (state.isManaged) {
+      await begin($, state, e.cwd)
+      return started
+    }
     await $.command.register({
       name: 'agmen',
       description: 'Run an agmen command: join, inbox, claim, done, dm or lanes.',
@@ -1336,6 +1387,26 @@ export const register: Register = on => {
   })
 
   on('command.run', { command: 'agmen' }, async ($, e) => ({ text: await runCommand($, state, e.args) }))
+
+  on('session.end', async ($, e, next) => {
+    state.isEnded = true
+    state.window?.cancel()
+    state.waiting = []
+    state.uncounted = 0
+    try {
+      // agmend says goodbye for a managed agent when it stops it.
+      if (state.root !== undefined && !state.isManaged) {
+        const result = await $.process.run(['agmen', 'post', 'BYE', '--wait', '0.5'], { cwd: state.root, timeoutMs: 1_000 })
+        if (result.exitCode !== 0) debug($, `goodbye exited ${result.exitCode}`)
+      }
+    } catch (error: unknown) {
+      debug($, `goodbye failed: ${String(error)}`)
+    } finally {
+      await state.watch?.return({ code: 0, signal: null })
+    }
+
+    return next(e)
+  })
 
   on('turn.start', async ($, e, next) => {
     if (e.agentId === undefined) state.isBusy = true
@@ -1356,6 +1427,8 @@ export const register: Register = on => {
   })
 
   on('tool.call', { tool: ['Edit', 'Write', 'NotebookEdit'] }, async ($, e, next) => {
+    const closed = unguarded(state, e.tool)
+    if (closed !== undefined) return { deny: closed }
     if (state.root === undefined) return next(e)
     const path = e.tool === 'NotebookEdit' ? e.notebook_path : e.file_path
     const deny =
@@ -1367,10 +1440,17 @@ export const register: Register = on => {
   }).catch(($, e, next) => (next.called ? next(e) : { deny: 'agmen: the lane guard failed, so the edit is denied.' }))
 
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
+    const closed = unguarded(state, 'Bash')
+    if (closed !== undefined) return { deny: closed }
     const ran = await next(e)
     if (state.root === undefined || ran.deny !== undefined) return ran
     await checkAfterBash($, state, state.root)
 
     return ran
-  }).catch(($, e, next) => next(e))
+  }).catch(($, e, next) => {
+    if (next.called) return next(e)
+    const closed = unguarded(state, 'Bash')
+
+    return closed === undefined ? next(e) : { deny: closed }
+  })
 }

@@ -1,6 +1,6 @@
 //! Private launcher worktree operations, using bounded T1 git calls.
-// shortcut: L17 wires these helpers and removes this expectation.
-#![cfg_attr(not(test), expect(dead_code, reason = "wired by L17"))]
+// shortcut: managed launch uses create/save_wip; expose prune after its local API is implemented.
+#![cfg_attr(not(test), expect(dead_code, reason = "prune API is deferred"))]
 
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
@@ -110,7 +110,7 @@ async fn refuse_default_branch(repo: &Path, branch: &str) -> Result<()> {
 }
 
 /// The main checkout defines the worker root even when called from a worker.
-async fn worktree_root(repo: &Path) -> Result<(PathBuf, Vec<git::ListedWorktree>)> {
+pub(crate) async fn worktree_root(repo: &Path) -> Result<(PathBuf, Vec<git::ListedWorktree>)> {
     let out = call(
         repo,
         &[

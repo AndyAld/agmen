@@ -27,6 +27,20 @@ pub(crate) struct Credentials {
 }
 
 impl Credentials {
+    /// Stores one freshly minted identity's credential without logging it.
+    pub(crate) async fn set_token(
+        &self,
+        origin: &Url,
+        id: &IdentityId,
+        token: String,
+    ) -> Result<(), ApiError> {
+        let key = TokenKey::new(origin, id).map_err(|_| token_error())?;
+        let store = self.store.clone();
+        tokio::task::spawn_blocking(move || store.set(&key, &token))
+            .await
+            .map_err(|_| token_error())?
+            .map_err(|_| token_error())
+    }
     /// Reads a credential off the async worker, without exposing store errors or values.
     pub(crate) async fn token(
         &self,

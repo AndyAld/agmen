@@ -28,6 +28,22 @@ struct Shutdown {}
 
 /// Serves `stream` until the peer hangs up or breaks the framing.
 pub(crate) async fn serve(stream: UnixStream, core: Arc<Core>) {
+    serve_with_peer(stream, core, |stream| {
+        stream
+            .peer_cred()?
+            .pid()
+            .ok_or_else(|| std::io::Error::other("peer PID unavailable"))
+    })
+    .await;
+}
+
+pub(crate) async fn serve_with_peer(
+    stream: UnixStream,
+    core: Arc<Core>,
+    peer: impl FnOnce(&UnixStream) -> std::io::Result<i32>,
+) {
+    let peer = peer(&stream).map_err(|error| error.to_string());
+    core.managed.attach(&core.identities).await;
     // shortcut: Unix-only local API; revisit when S6 Windows IPC is approved.
     let console = &core.console;
     let (mut reader, mut writer) = stream.into_split();
@@ -56,15 +72,7 @@ pub(crate) async fn serve(stream: UnixStream, core: Arc<Core>) {
         let outcome = if let Some(refusal) = refuse(&request, greeted) {
             Err(refusal)
         } else {
-            let token = extract_token(&mut request.params);
-            let caller = match token {
-                Ok(ref token) => {
-                    core.identities
-                        .authorize(request.as_.as_ref(), token.as_deref())
-                        .await
-                }
-                Err(error) => Err(error),
-            };
+            let caller = authorize(&core, &mut request, &peer).await;
             match caller {
                 Err(error) => Err(error),
                 Ok(caller) if request.method == "watch" => {
@@ -102,10 +110,8 @@ pub(crate) async fn serve(stream: UnixStream, core: Arc<Core>) {
                     shutting_down = result.is_ok();
                     result
                 }
-                Ok(Caller::Human) if request.method == "ready" => {
-                    finite(deadline, ready(&core, request.params, deadline)).await
-                }
                 Ok(Caller::Human) if request.method == "console_watch" => {
+                    core.managed.remember_root(&request.params).await;
                     // The watch keeps the connection; whatever it ends with is the
                     // last frame.
                     if let Err(error) = console.watch(id, request.params, reader, &mut writer).await
@@ -114,7 +120,7 @@ pub(crate) async fn serve(stream: UnixStream, core: Arc<Core>) {
                     }
                     return;
                 }
-                Ok(Caller::Human) => call(&core, &request.method, request.params).await,
+                Ok(Caller::Human) => call(&core, &request.method, request.params, deadline).await,
             }
         };
         let written = if bounded {
@@ -131,6 +137,28 @@ pub(crate) async fn serve(stream: UnixStream, core: Arc<Core>) {
         if !written {
             return;
         }
+    }
+}
+
+pub(crate) fn owner_peer_check(
+    managed: &crate::managed::Managed,
+    caller: &Caller,
+    method: &str,
+    lookup: impl FnOnce() -> std::io::Result<i32>,
+) -> Result<(), ApiError> {
+    // Identity-scoped chat uses its authenticated identity, never the human post.
+    if (method == "post" && matches!(caller, Caller::Identity(_)))
+        || matches!(method, "hello" | "watch" | "inbox" | "state" | "pending")
+    {
+        return Ok(());
+    }
+    if lookup().is_ok_and(|pid| !managed.contains_peer(pid)) {
+        Ok(())
+    } else {
+        Err(ApiError {
+            code: ErrorCode::Forbidden,
+            message: "agents cannot call owner-only methods".into(),
+        })
     }
 }
 
@@ -208,15 +236,30 @@ fn refuse(request: &Request, greeted: bool) -> Option<ApiError> {
     None
 }
 
-fn extract_token(raw: &mut Value) -> Result<Option<String>, ApiError> {
-    match raw
+async fn authorize(
+    core: &Core,
+    request: &mut Request,
+    peer: &Result<i32, String>,
+) -> Result<Caller, ApiError> {
+    let token = match request
+        .params
         .as_object_mut()
         .and_then(|object| object.remove("local_token"))
     {
-        None => Ok(None),
-        Some(Value::String(value)) => Ok(Some(value)),
-        Some(_) => Err(unauthorized()),
-    }
+        None => None,
+        Some(Value::String(value)) => Some(value),
+        Some(_) => return Err(unauthorized()),
+    };
+    let caller = core
+        .identities
+        .authorize(request.as_.as_ref(), token.as_deref())
+        .await?;
+    owner_peer_check(&core.managed, &caller, &request.method, || {
+        peer.as_ref()
+            .copied()
+            .map_err(|error| std::io::Error::other(error.clone()))
+    })?;
+    Ok(caller)
 }
 
 async fn identity_call(
@@ -241,8 +284,8 @@ async fn identity_call(
             core.identities.post(caller, envelope).await
         }
         "shutdown" | "hello" | "ready" | "whoami" | "console_watch" | "console_snapshot"
-        | "chat_history" | "file_text" | "identity_mint" | "identity_list" | "host_status"
-        | "host_restart" => Err(forbidden()),
+        | "chat_history" | "file_text" | "identity_mint" | "identity_list" | "agent_launch"
+        | "host_status" | "host_restart" | "agent_stop" | "agent_list" => Err(forbidden()),
         other => Err(ApiError {
             code: ErrorCode::NotFound,
             message: format!("agmend has no method {other:?}"),
@@ -269,7 +312,12 @@ fn hello(raw: Value) -> Result<Value, ApiError> {
     }
 }
 
-async fn call(core: &Core, method: &str, raw: Value) -> Result<Value, ApiError> {
+async fn call(
+    core: &Arc<Core>,
+    method: &str,
+    raw: Value,
+    deadline: tokio::time::Instant,
+) -> Result<Value, ApiError> {
     let console = &core.console;
     match method {
         "host_status" => params::<Shutdown>(raw).map(|_| core.host.status()),
@@ -278,8 +326,15 @@ async fn call(core: &Core, method: &str, raw: Value) -> Result<Value, ApiError> 
                 .restart()
                 .map_err(|error| bad_request(format!("{error:#}")))
         }),
+        "ready" => finite(deadline, ready(core, raw, deadline)).await,
+        "agent_launch" => core.managed.launch(raw).await,
+        "agent_stop" => core.managed.stop(raw).await,
+        "agent_list" => core.managed.list(raw).await,
         "whoami" => console.whoami().await,
-        "console_snapshot" => console.snapshot(raw).await,
+        "console_snapshot" => {
+            core.managed.remember_root(&raw).await;
+            console.snapshot(raw).await
+        }
         "chat_history" => console.history(raw).await,
         "post" => console.post(raw).await,
         "file_text" => console.file_text(raw).await,

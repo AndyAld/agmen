@@ -174,6 +174,29 @@ pub(crate) struct Hub {
 }
 
 impl Hub {
+    /// The same mint endpoint used by `agmen join`, authenticated as the owner.
+    pub(crate) async fn mint_identity(
+        &self,
+        body: &serde_json::Value,
+    ) -> Result<serde_json::Value, HubError> {
+        let (login, token) = self.credentials.access().await?;
+        agmen_client::check_hub_url(&login.hub_url).map_err(LoginError::from)?;
+        let mut url = login.hub_url.clone();
+        url.path_segments_mut()
+            .map_err(|_| HubError::Invalid("hub URL has no path segments"))?
+            .pop_if_empty()
+            .extend(["v1", "identities"]);
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(token)
+            .json(body)
+            .timeout(REQUEST_TIMEOUT)
+            .send()
+            .await
+            .map_err(HubError::Http)?;
+        json_with_limit(response, MAX_HUB_RESPONSE_BYTES).await
+    }
     pub(crate) const fn new(
         http: reqwest::Client,
         credentials: std::sync::Arc<Credentials>,

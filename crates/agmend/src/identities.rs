@@ -1,6 +1,6 @@
 //! Per-request local caller authentication and identity session publishing.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
@@ -133,8 +133,9 @@ pub(crate) struct Identities {
     hub: Arc<Hub>,
     runtimes: AsyncMutex<BTreeMap<RuntimeKey, RuntimeSlot>>,
     collectors: AsyncMutex<BTreeMap<ProjectKey, Collector>>,
+    launched: AsyncMutex<BTreeSet<RuntimeKey>>,
     #[cfg(test)]
-    publisher: Option<Publisher>,
+    pub(crate) publisher: Option<Publisher>,
 }
 
 impl std::fmt::Debug for Identities {
@@ -144,6 +145,41 @@ impl std::fmt::Debug for Identities {
 }
 
 impl Identities {
+    pub(crate) async fn register(&self, identity: ManagedIdentity) -> Result<(), ApiError> {
+        let key = (
+            identity.hub_url.origin().ascii_serialization(),
+            identity.identity_id.clone(),
+        );
+        store_work(self.store.clone(), move |store| store.register(&identity)).await?;
+        self.launched.lock().await.insert(key);
+        Ok(())
+    }
+
+    pub(crate) async fn close_identity(&self, identity: &ManagedIdentity) {
+        let key = (
+            identity.hub_url.origin().ascii_serialization(),
+            identity.identity_id.clone(),
+        );
+        if let Some(slot) = self.runtimes.lock().await.remove(&key) {
+            stop_runtimes([slot], tokio::time::Instant::now() + DEADLINE).await;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn enqueue_test(&self, message: StampedEnvelope) {
+        let login = self.credentials.login().await.unwrap();
+        let origin = login.hub_url.origin().ascii_serialization();
+        store_work(self.store.clone(), move |s| {
+            s.ingest_for_owner(
+                &origin,
+                &"project1".parse().unwrap(),
+                &message,
+                Some(&login.human_id),
+            )
+        })
+        .await
+        .unwrap();
+    }
     pub(crate) fn new(
         credentials: Arc<Credentials>,
         store: Arc<Mutex<Store>>,
@@ -160,6 +196,7 @@ impl Identities {
             hub,
             runtimes: AsyncMutex::new(BTreeMap::new()),
             collectors: AsyncMutex::new(BTreeMap::new()),
+            launched: AsyncMutex::new(BTreeSet::new()),
             #[cfg(test)]
             publisher: None,
         }
@@ -292,6 +329,23 @@ impl Identities {
             tracing::warn!(code = ?error.code,"pending batch committed but collector restart failed");
         }
         serde_json::to_value(rows).map_err(|_| hub_error("encoding pending batch failed"))
+    }
+
+    /// Keeps a prompt below operating systems' per-argument size limit.
+    pub(crate) async fn launch_pending(
+        &self,
+        caller: &ManagedIdentity,
+    ) -> Result<Vec<StampedEnvelope>, ApiError> {
+        let origin = caller.hub_url.origin().ascii_serialization();
+        let identity = caller.clone();
+        let rows = store_work(self.store.clone(), move |store| {
+            store.drain_launch(&origin, &identity)
+        })
+        .await?;
+        if let Err(error) = self.project_channel(&caller.project).await {
+            tracing::warn!(code=?error.code,"launcher collector restart failed");
+        }
+        Ok(rows)
     }
 
     async fn project_channel(
@@ -635,8 +689,16 @@ impl Identities {
         .await
         .map_err(|_| hub_error("creating identity state directory failed"))?
         .map_err(|_| hub_error("creating identity state directory failed"))?;
+        let kind = if self.launched.lock().await.contains(&(
+            caller.hub_url.origin().ascii_serialization(),
+            caller.identity_id.clone(),
+        )) {
+            ClientKind::Watch
+        } else {
+            ClientKind::Mcp
+        };
         let config = SessionConfig::new(
-            ClientKind::Mcp,
+            kind,
             Topics::new(caller.tenant.clone(), caller.project.clone()),
             hub,
             caller.broker_url.clone(),
@@ -658,6 +720,7 @@ impl Identities {
             self.store.clone(),
             caller.clone(),
             tx,
+            kind == ClientKind::Watch,
         ));
         Ok(session)
     }
@@ -671,23 +734,33 @@ impl Runtime {
         store: Arc<Database>,
         identity: ManagedIdentity,
         tx: broadcast::Sender<WatchEvent>,
+        reconnect: bool,
     ) -> Self {
         let session = Arc::downgrade(&held);
         let (stop, mut stopped) = oneshot::channel();
         let task = tokio::spawn(async move {
             let mut check = tokio::time::interval(Duration::from_secs(1));
-            // A run ends at the first connection loss. An explicit post can
-            // start another run, without an automatic daemon restart.
+            // Managed Watch sessions retain the client's reconnect loop so idle
+            // agents keep presence after transient broker loss. Manual MCP
+            // sessions still require an explicit post to restart.
             loop {
                 tokio::select! {
                     _ = &mut stopped => break,
                     event = events.recv() => match event {
                         None => break,
                         Some(event @ (ClientEvent::Delivery { .. } | ClientEvent::Connection { .. })) => {
+                            if let ClientEvent::Delivery { id, .. } = &event {
+                                let id = id.clone();
+                                let origin = identity.hub_url.origin().ascii_serialization();
+                                let who = identity.identity_id.clone();
+                                if let Err(error) = store_work(store.clone(), move |s| s.remember_own(&origin, &who, &id)).await {
+                                    tracing::warn!(code = ?error.code, "remembering outgoing message failed");
+                                }
+                            }
                             // No watcher is fine; authoritative messages come from SSE.
                             let disconnected = matches!(event,ClientEvent::Connection { connected:false });
                             let _receivers = tx.send((Some(identity.identity_id.clone()), Ok(event)));
-                            if disconnected { break; }
+                            if disconnected && !reconnect { break; }
                         }
                         Some(_) => {}
                     },
@@ -1132,6 +1205,19 @@ mod tests {
 
     fn envelope() -> Value {
         json!({"v":1,"id":"01JBX6Q4T7W3C2M8Y9K5N0P1RS","verb":"FYI","data":{},"body":"hello","sent_at":"2026-10-27T12:00:00Z"})
+    }
+
+    #[tokio::test]
+    async fn managed_agent_methods_require_a_human_caller() {
+        let fixture = Fixture::new(None);
+        for method in ["agent_launch", "agent_stop", "agent_list"] {
+            let refusal = error(
+                fixture
+                    .call(method, json!({"local_token":"a".repeat(64)}))
+                    .await,
+            );
+            assert_eq!(refusal.code, ErrorCode::Forbidden);
+        }
     }
 
     #[tokio::test]

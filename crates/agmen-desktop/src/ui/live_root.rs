@@ -939,6 +939,11 @@ impl LiveRoot {
                     }
                 }),
             )
+            .on_action(cx.listener(|this, _: &crate::keymap::NewAgent, _, cx| {
+                if let LiveState::Open(workspace) = &this.state {
+                    workspace.update(cx, |workspace, cx| workspace.open_new_agent(cx));
+                }
+            }))
             .on_action(
                 cx.listener(|this, _: &crate::keymap::OpenProject, window, cx| {
                     this.prompt_project(window, cx)

@@ -1,6 +1,6 @@
 //! Durable daemon metadata, pending notifications and receive positions.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::fs::{self, OpenOptions};
 use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::Path;
@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use agmen_client::Broker;
 use agmen_proto::{
-    IdentityId, IdentityKind, Payload, ProjectId, StampedEnvelope, Stream, TenantId,
+    IdentityId, IdentityKind, MessageId, Payload, ProjectId, StampedEnvelope, Stream, TenantId,
 };
 use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
@@ -78,6 +78,7 @@ pub(crate) enum StoreError {
 #[derive(Debug)]
 pub(crate) struct Store {
     conn: Connection,
+    own_ids: BTreeMap<(String, IdentityId), VecDeque<MessageId>>,
 }
 
 /// How a schema check reads a store: strictly, or as the preflight of a
@@ -309,13 +310,12 @@ impl Store {
         conn.pragma_update(None, "synchronous", "FULL")?;
         // Initialize WAL sidecars now, while the database and directory are private.
         conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn,
+            own_ids: BTreeMap::new(),
+        })
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "identity registration lands in B T3")
-    )]
     pub(crate) fn register(&mut self, identity: &ManagedIdentity) -> Result<(), StoreError> {
         let origin = identity.hub_url.origin().ascii_serialization();
         let tx = self
@@ -447,27 +447,27 @@ impl Store {
                 return Err(StoreError::Full("256 stream positions"));
             }
         }
-        let mut stmt = tx.prepare("SELECT identity FROM identities WHERE origin=?1 AND project=?2 AND (?3 IS NULL OR owner=?3) ORDER BY identity LIMIT 64")?;
+        let mut remember = None;
+        let mut stmt = tx.prepare("SELECT identity,owner FROM identities WHERE origin=?1 AND project=?2 AND (?3 IS NULL OR owner=?3) ORDER BY identity LIMIT 64")?;
         let identities = stmt.query_map(
             params![origin, project.as_str(), owner.map(IdentityId::as_str)],
-            |r| r.get::<_, String>(0),
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
         )?;
         for row in identities {
-            let id = row?
+            let (id, owner) = row?;
+            let id = id
                 .parse::<IdentityId>()
                 .map_err(|_| StoreError::Invalid("stored identity"))?;
-            if message.from == id
-                || matches!(&message.stream, Stream::Inbox(recipient) if recipient != &id)
-            {
+            if message.from == id {
+                remember = Some(id);
                 continue;
             }
-            let qualifies = message.mentioned.contains(&id)
-                || match &message.client.payload {
-                    Payload::Dm {} => message.client.to.contains(&id),
-                    Payload::Assign { to, .. } => to == &id,
-                    _ => false,
-                };
-            if !qualifies {
+            if !addressed_to(
+                message,
+                &id,
+                &owner,
+                self.own_ids.get(&(origin.to_owned(), id.clone())),
+            )? {
                 continue;
             }
             let needs_receipt =
@@ -508,6 +508,30 @@ impl Store {
         tx.execute("INSERT INTO positions VALUES (?1,?2,?3,?4) ON CONFLICT(origin,project,stream) DO UPDATE SET seq=excluded.seq",
             params![position_origin, project.as_str(), stream, seq])?;
         tx.commit()?;
+        if let Some(id) = remember {
+            self.remember_own(origin, &id, &message.client.id)?;
+        }
+        Ok(())
+    }
+
+    /// Watches receive delivery IDs even when an outgoing ASK has no feed copy.
+    pub(crate) fn remember_own(
+        &mut self,
+        origin: &str,
+        identity: &IdentityId,
+        id: &MessageId,
+    ) -> Result<(), StoreError> {
+        let key = (origin.to_owned(), identity.clone());
+        if self.own_ids.len() >= 64 && !self.own_ids.contains_key(&key) {
+            return Err(StoreError::Full("64 own-message trackers"));
+        }
+        let ids = self.own_ids.entry(key).or_default();
+        if !ids.contains(id) {
+            if ids.len() == 1000 {
+                ids.pop_front();
+            }
+            ids.push_back(id.clone());
+        }
         Ok(())
     }
 
@@ -518,25 +542,66 @@ impl Store {
         limit: u32,
         byte_budget: usize,
     ) -> Result<Vec<StampedEnvelope>, StoreError> {
+        self.drain_batch(origin, identity, limit, byte_budget, None)
+    }
+
+    pub(crate) fn drain_launch(
+        &mut self,
+        origin: &str,
+        identity: &ManagedIdentity,
+    ) -> Result<Vec<StampedEnvelope>, StoreError> {
+        self.drain_batch(
+            origin,
+            &identity.identity_id,
+            32,
+            96 * 1024,
+            Some(&identity.owner_id),
+        )
+    }
+
+    fn drain_batch(
+        &mut self,
+        origin: &str,
+        identity: &IdentityId,
+        limit: u32,
+        byte_budget: usize,
+        owner: Option<&IdentityId>,
+    ) -> Result<Vec<StampedEnvelope>, StoreError> {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let mut stmt = tx.prepare(
-            "SELECT n, message FROM pending WHERE origin=?1 AND identity=?2 ORDER BY n LIMIT ?3",
-        )?;
-        let rows = stmt.query_map(params![origin, identity.as_str(), limit.min(500)], |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
-        })?;
+        let query = if owner.is_some() {
+            "SELECT n, message FROM pending WHERE origin=?1 AND identity=?2 ORDER BY CASE WHEN json_extract(message, '$.from')=?4 AND json_extract(message, '$.from_kind')='human' THEN 0 ELSE 1 END, n LIMIT ?3"
+        } else {
+            "SELECT n, message FROM pending WHERE origin=?1 AND identity=?2 ORDER BY n LIMIT ?3"
+        };
+        let mut stmt = tx.prepare(query)?;
+        let decode = |r: &rusqlite::Row<'_>| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?));
+        let rows = if let Some(owner) = owner {
+            stmt.query_map(
+                params![origin, identity.as_str(), limit.min(500), owner.as_str()],
+                decode,
+            )?
+        } else {
+            stmt.query_map(params![origin, identity.as_str(), limit.min(500)], decode)?
+        };
         let budget = byte_budget.min(agmen_local::MAX_FRAME as usize - 4096);
         let mut bytes: usize = 2; // JSON array brackets.
         let mut selected = Vec::new();
         let mut result = Vec::new();
+        let mut owner_batch = None;
         for row in rows {
             let (n, raw) = row?;
             if raw.len() > crate::sse::MAX_EVENT {
                 return Err(StoreError::Invalid("stored envelope exceeds cap"));
             }
             let message: StampedEnvelope = serde_json::from_str(&raw)?;
+            if let Some(owner) = owner {
+                let is_owner = message.from == *owner && message.from_kind == IdentityKind::Human;
+                if *owner_batch.get_or_insert(is_owner) != is_owner {
+                    break;
+                }
+            }
             let size = serde_json::to_vec(&message)?.len() + usize::from(!result.is_empty());
             if size > budget.saturating_sub(bytes) {
                 break;
@@ -552,6 +617,28 @@ impl Store {
         tx.commit()?;
         Ok(result)
     }
+}
+
+/// Reuse the client's R31 routing rules, also implemented by the plugin.
+fn addressed_to(
+    message: &StampedEnvelope,
+    id: &IdentityId,
+    owner: &str,
+    own_ids: Option<&VecDeque<MessageId>>,
+) -> Result<bool, StoreError> {
+    if matches!(&message.stream, Stream::Inbox(recipient) if recipient != id) {
+        return Ok(false);
+    }
+    let me = agmen_client::Me {
+        identity_id: id.clone(),
+        handle: String::new(),
+        owner_id: owner
+            .parse()
+            .map_err(|_| StoreError::Invalid("stored owner identity"))?,
+    };
+    Ok(me.is_for_me(message, |reply| {
+        own_ids.is_some_and(|own| own.contains(reply))
+    }))
 }
 
 #[cfg(test)]

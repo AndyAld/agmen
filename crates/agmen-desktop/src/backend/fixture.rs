@@ -58,6 +58,8 @@ fn base(project: &str) -> Result<Snapshot, BackendError> {
         me: "andy".into(),
         me_id: id("andy")?,
         roster,
+        managed_agents: BTreeMap::new(),
+        agent_error: None,
         listener: Some(listener),
         agents: BTreeMap::from([(fx1.id.clone(), fx1)]),
         status: StatusSummary {
@@ -320,6 +322,9 @@ impl Backend for FixtureBackend {
 
     fn act(&self, action: Action) -> Result<(), BackendError> {
         match action {
+            Action::LaunchAgent { .. } | Action::StopAgent(_) => {
+                Err(BackendError::Unsupported("managed agents in fixture"))
+            }
             Action::Apply(id) => self.set_change(&id, |_| ChangeState::Applied),
             Action::Cancel(id) => self.set_change(&id, |_| ChangeState::Cancelled),
             // Andy's answer to review C93 (V72): undoing a narrowing change

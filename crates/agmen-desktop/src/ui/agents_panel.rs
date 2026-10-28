@@ -1,14 +1,16 @@
 //! The left dock's Agents tab: people and their agents, nested by who
 //! delegated to whom.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use gpui::{
     Context, EventEmitter, FontWeight, IntoElement, ParentElement as _, Render, Styled as _,
     Window, div,
 };
 
-use super::components::{Color, Icon, IconSize, Indent, Label, LabelSize, ListItem, StatusDot};
+use super::components::{
+    Button, ButtonStyle, Color, Icon, IconSize, Indent, Label, LabelSize, ListItem, StatusDot,
+};
 use super::format::title_case;
 use super::tokens::SPACE_6;
 use crate::backend::{AgentRow, AgentStatus, PersonGroup};
@@ -21,10 +23,14 @@ use crate::icons::UiIcon;
 pub(crate) enum AgentsPanelEvent {
     /// An agent row was clicked; holds its identity id.
     Selected(IdentityId),
+    NewAgent,
+    Stop(IdentityId),
 }
 
 pub(crate) struct AgentsPanel {
     roster: Vec<PersonGroup>,
+    managed: BTreeMap<IdentityId, String>,
+    error: Option<String>,
     folded: BTreeSet<String>,
     /// The row the right dock shows; the workspace sets it.
     selected: Option<IdentityId>,
@@ -36,9 +42,22 @@ impl AgentsPanel {
     pub(crate) const fn new(roster: Vec<PersonGroup>) -> Self {
         Self {
             roster,
+            managed: BTreeMap::new(),
+            error: None,
             folded: BTreeSet::new(),
             selected: None,
         }
+    }
+
+    pub(crate) fn set_managed(
+        &mut self,
+        managed: BTreeMap<IdentityId, String>,
+        error: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.managed = managed;
+        self.error = error;
+        cx.notify();
     }
 
     /// Folds or unfolds `person`'s agents.
@@ -115,7 +134,7 @@ impl AgentsPanel {
 
     fn agent_row(&self, agent: &AgentRow, cx: &mut Context<Self>) -> ListItem {
         let id = agent.id.clone();
-        agent_item(
+        let item = agent_item(
             format!("agent:{}", agent.handle),
             agent.depth,
             agent.status,
@@ -124,7 +143,28 @@ impl AgentsPanel {
             &agent.harness,
         )
         .selected(self.selected.as_ref() == Some(&id))
-        .on_click(cx.listener(move |this, _, _, cx| this.clicked(&id, cx)))
+        .on_click(cx.listener(move |this, _, _, cx| this.clicked(&id, cx)));
+        match self.managed.get(&agent.id) {
+            Some(state) => {
+                let identity = agent.id.clone();
+                item.end(
+                    div()
+                        .flex()
+                        .items_center()
+                        .child(Label::new(state.clone()).size(LabelSize::Small))
+                        .child(
+                            Button::new(format!("agent:{}:stop", agent.handle), "Stop")
+                                .style(ButtonStyle::Plain)
+                                .disabled(state == "offline")
+                                .on_click(cx.listener(move |_, _, _, cx| {
+                                    cx.stop_propagation();
+                                    cx.emit(AgentsPanelEvent::Stop(identity.clone()));
+                                })),
+                        ),
+                )
+            }
+            None => item,
+        }
     }
 }
 
@@ -182,7 +222,22 @@ impl Render for AgentsPanel {
                 }
             }
         }
-        div().w_full().flex().flex_col().py(SPACE_6).children(rows)
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .py(SPACE_6)
+            .child(
+                Button::new("agents:new", "New Agent…")
+                    .style(ButtonStyle::Plain)
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(AgentsPanelEvent::NewAgent))),
+            )
+            .children(
+                self.error
+                    .clone()
+                    .map(|error| Label::new(error).color(Color::Error).wrap()),
+            )
+            .children(rows)
     }
 }
 

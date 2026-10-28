@@ -253,6 +253,24 @@ Listener settings (agent, model, effort, caps, `accept_from`, which always inclu
 
 ## 10. Local daemon identity, readiness and service ownership
 
+For owner-only local methods, agmend checks the socket peer PID and refuses
+processes in a running managed worker's process group with `forbidden` and
+`agents cannot call owner-only methods`. This covers agent launch, stop and
+list, human posts, host methods, shutdown and login. Identity-authenticated
+posts and identity read/watch methods remain available. If the peer PID cannot
+be read, owner-only calls are refused; while a worker runs, so are calls from a
+peer whose process group cannot be read. This is a guard against accidental
+misuse, not isolation: workers share the user's uid and can escape a process
+group or access the user's files and credentials.
+
+Managed workers drain owner messages first in separate batches. Only messages
+with the hub-stamped owner ID and `from_kind: human` get
+`--permission-mode bypassPermissions`. Other batches use `--permission-mode
+default`, `--disallowedTools Bash,Edit,Write,NotebookEdit` (deny rules override
+allow rules in the user's and project's Claude Code settings) and an appended
+instruction to read, think and reply through agmen, without running commands or
+editing files, and wait for the owner if changes are needed.
+
 The per-user Unix socket uses agmen-local's length-prefixed JSON frames. The
 first request remains `hello` with `{"api":1}`. Its result identifies the running
 process:
