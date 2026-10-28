@@ -46,7 +46,7 @@ fn without_worktree(snapshot: &mut Snapshot, handle: &str) {
 #[gpui::test]
 fn start_of_an_agent_agmend_knows_names_only_the_agent(cx: &mut TestAppContext) {
     let (backend, _, cx) = open(cx, |s| managed(s, "andy/fx1", "offline"));
-    click(cx, "agent:andy/fx1");
+    click(cx, "agent:andy/fx1:more");
     click(cx, "agent:andy/fx1:menu:start");
     assert_eq!(
         *backend.acts.borrow(),
@@ -60,7 +60,7 @@ fn start_of_an_agent_agmend_knows_names_only_the_agent(cx: &mut TestAppContext) 
 #[gpui::test]
 fn start_of_a_hand_joined_agent_passes_its_folder(cx: &mut TestAppContext) {
     let (backend, _, cx) = open(cx, |s| folder(s, "andy/fx1", "/Users/andy/Marked-sol"));
-    click(cx, "agent:andy/fx1");
+    click(cx, "agent:andy/fx1:more");
     click(cx, "agent:andy/fx1:menu:start");
     assert_eq!(
         *backend.acts.borrow(),
@@ -74,7 +74,7 @@ fn start_of_a_hand_joined_agent_passes_its_folder(cx: &mut TestAppContext) {
 #[gpui::test]
 fn start_without_a_known_folder_asks_for_one(cx: &mut TestAppContext) {
     let (backend, _, cx) = open(cx, |s| without_worktree(s, "andy/fx1"));
-    click(cx, "agent:andy/fx1");
+    click(cx, "agent:andy/fx1:more");
     click(cx, "agent:andy/fx1:menu:start");
     assert!(cx.did_prompt_for_paths());
     assert!(backend.acts.borrow().is_empty());
@@ -95,9 +95,9 @@ fn attach_and_detach_reach_the_backend(cx: &mut TestAppContext) {
         managed(s, "andy/fx1", "idle");
         managed(s, "andy/rv2", "attached");
     });
-    click(cx, "agent:andy/fx1");
+    click(cx, "agent:andy/fx1:more");
     click(cx, "agent:andy/fx1:menu:attach");
-    click(cx, "agent:andy/rv2");
+    click(cx, "agent:andy/rv2:more");
     click(cx, "agent:andy/rv2:menu:detach");
     assert_eq!(
         *backend.acts.borrow(),
@@ -124,7 +124,7 @@ fn remove_asks_first_and_names_the_kept_folder_and_branch(cx: &mut TestAppContex
             },
         );
     });
-    click(cx, "agent:andy/fx1");
+    click(cx, "agent:andy/fx1:more");
     click(cx, "agent:andy/fx1:menu:remove");
     assert!(cx.debug_bounds("remove-agent").is_some());
     assert!(
@@ -143,7 +143,7 @@ fn remove_asks_first_and_names_the_kept_folder_and_branch(cx: &mut TestAppContex
     assert!(cx.debug_bounds("remove-agent").is_none());
     assert!(backend.acts.borrow().is_empty());
 
-    click(cx, "agent:andy/fx1");
+    click(cx, "agent:andy/fx1:more");
     click(cx, "agent:andy/fx1:menu:remove");
     click(cx, "remove-agent:confirm");
     // The fixture refuses managed agents, so the dialog stays with its error.
@@ -160,7 +160,7 @@ fn remove_asks_first_and_names_the_kept_folder_and_branch(cx: &mut TestAppContex
 #[gpui::test]
 fn remove_of_a_hand_joined_agent_says_its_folder_is_not_deleted(cx: &mut TestAppContext) {
     let (backend, workspace, cx) = open(cx, |s| folder(s, "andy/fx1", "/Users/andy/Marked-sol"));
-    click(cx, "agent:andy/fx1");
+    click(cx, "agent:andy/fx1:more");
     click(cx, "agent:andy/fx1:menu:remove");
     let message = workspace
         .read_with(cx, |w, cx| w.remove_message(cx))
@@ -180,7 +180,7 @@ fn remove_of_a_hand_joined_agent_says_its_folder_is_not_deleted(cx: &mut TestApp
 #[gpui::test]
 fn remove_without_a_known_folder_asks_for_one_first(cx: &mut TestAppContext) {
     let (backend, workspace, cx) = open(cx, |s| without_worktree(s, "andy/fx1"));
-    click(cx, "agent:andy/fx1");
+    click(cx, "agent:andy/fx1:more");
     click(cx, "agent:andy/fx1:menu:remove");
     assert!(cx.did_prompt_for_paths());
     assert!(cx.debug_bounds("remove-agent").is_none());

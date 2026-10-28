@@ -5,8 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, Context, EventEmitter, FontWeight, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, Styled as _, Window, div,
+    AnyElement, ClickEvent, Context, EventEmitter, FontWeight, InteractiveElement as _,
+    IntoElement, ParentElement as _, Render, Styled as _, Window, div,
 };
 
 use super::components::{
@@ -213,8 +213,9 @@ impl AgentsPanel {
             .on_click(cx.listener(move |this, _, _, cx| this.toggle_fold(&person, cx)))
     }
 
-    /// An agent's row. The person's own agents, other than the listener,
-    /// open the agent menu on a left or right click.
+    /// An agent's row. A left click selects it. The person's own agents,
+    /// other than the listener, open the agent menu on a right click, a
+    /// control-click or their `…` button.
     fn agent_row(&self, agent: &AgentRow, mine: bool, cx: &mut Context<Self>) -> AnyElement {
         let menu = mine && self.listener.as_ref() != Some(&agent.id);
         let id = agent.id.clone();
@@ -227,10 +228,13 @@ impl AgentsPanel {
             &agent.harness,
         )
         .selected(self.selected.as_ref() == Some(&id))
-        .on_click(cx.listener(move |this, _, _, cx| {
-            this.clicked(&id, cx);
-            if menu {
+        .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+            // gpui reports macOS's control-click as a left click with
+            // control held, not as a right click.
+            if menu && event.modifiers().control {
                 this.open_menu(&id, cx);
+            } else {
+                this.clicked(&id, cx);
             }
         }));
         let item = if menu {
@@ -243,7 +247,7 @@ impl AgentsPanel {
         div()
             .relative()
             .w_full()
-            .child(self.with_stop(item, agent, cx))
+            .child(self.with_end(item, agent, menu, cx))
             .when(open, |row| {
                 row.child(
                     div()
@@ -281,29 +285,45 @@ impl AgentsPanel {
             })
     }
 
-    /// The managed state and Stop at the row's end, as before the menu.
-    fn with_stop(&self, item: ListItem, agent: &AgentRow, cx: &mut Context<Self>) -> ListItem {
-        match self.managed.get(&agent.id) {
-            Some(state) => {
-                let identity = agent.id.clone();
-                item.end(
-                    div()
-                        .flex()
-                        .items_center()
-                        .child(Label::new(state.clone()).size(LabelSize::Small))
-                        .child(
-                            Button::new(format!("agent:{}:stop", agent.handle), "Stop")
-                                .style(ButtonStyle::Plain)
-                                .disabled(state == "offline")
-                                .on_click(cx.listener(move |_, _, _, cx| {
-                                    cx.stop_propagation();
-                                    cx.emit(AgentsPanelEvent::Stop(identity.clone()));
-                                })),
-                        ),
-                )
-            }
-            None => item,
+    /// The row's end: the managed state and Stop, as before the menu, and
+    /// `…` for an agent with a menu.
+    fn with_end(
+        &self,
+        item: ListItem,
+        agent: &AgentRow,
+        menu: bool,
+        cx: &mut Context<Self>,
+    ) -> ListItem {
+        let state = self.managed.get(&agent.id);
+        if state.is_none() && !menu {
+            return item;
         }
+        let stop = state.map(|state| {
+            let identity = agent.id.clone();
+            div()
+                .flex()
+                .items_center()
+                .child(Label::new(state.clone()).size(LabelSize::Small))
+                .child(
+                    Button::new(format!("agent:{}:stop", agent.handle), "Stop")
+                        .style(ButtonStyle::Plain)
+                        .disabled(state == "offline")
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            cx.stop_propagation();
+                            cx.emit(AgentsPanelEvent::Stop(identity.clone()));
+                        })),
+                )
+        });
+        let more = menu.then(|| {
+            let identity = agent.id.clone();
+            Button::new(format!("agent:{}:more", agent.handle), "…")
+                .style(ButtonStyle::Plain)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.open_menu(&identity, cx);
+                }))
+        });
+        item.end(div().flex().items_center().children(stop).children(more))
     }
 }
 

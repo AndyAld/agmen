@@ -179,16 +179,11 @@ fn menu_items(cx: &mut gpui::VisualTestContext, handle: &str) -> Vec<&'static st
 #[gpui::test]
 fn own_agents_open_a_menu_of_actions_for_their_state(cx: &mut TestAppContext) {
     let (_, cx, events) = menu_panel(cx, &[("andy/fx1", "running"), ("andy/rv2", "attached")]);
-    click(cx, "agent:andy/fx1");
+    crate::ui::test_support::right_click(cx, "agent:andy/fx1");
     assert!(cx.debug_bounds("agent:andy/fx1:menu").is_some());
     assert_eq!(menu_items(cx, "andy/fx1"), ["stop", "attach", "remove"]);
-    // A left click still selects the row.
-    assert_eq!(
-        *events.borrow(),
-        vec![AgentsPanelEvent::Selected(crate::backend::fixture_id(
-            "andy/fx1"
-        ))]
-    );
+    // A right click opens the menu without selecting the row.
+    assert!(events.borrow().is_empty());
 
     crate::ui::test_support::right_click(cx, "agent:andy/rv2");
     assert_eq!(menu_items(cx, "andy/rv2"), ["detach", "remove"]);
@@ -211,6 +206,39 @@ fn others_agents_and_the_listener_get_no_menu(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("agent:sean/plan:menu").is_none());
     click(cx, "agent:andy/listen");
     assert!(cx.debug_bounds("agent:andy/listen:menu").is_none());
+    for more in ["agent:sean/plan:more", "agent:andy/listen:more"] {
+        assert!(cx.debug_bounds(more).is_none(), "{more}");
+    }
+}
+
+#[gpui::test]
+fn a_left_click_only_selects_and_the_more_button_or_a_control_click_opens_the_menu(
+    cx: &mut TestAppContext,
+) {
+    let (_, cx, events) = menu_panel(cx, &[("andy/fx1", "idle")]);
+    let selected = vec![AgentsPanelEvent::Selected(crate::backend::fixture_id(
+        "andy/fx1",
+    ))];
+    click(cx, "agent:andy/fx1");
+    assert!(cx.debug_bounds("agent:andy/fx1:menu").is_none());
+    assert_eq!(*events.borrow(), selected);
+
+    click(cx, "agent:andy/fx1:more");
+    assert_eq!(menu_items(cx, "andy/fx1"), ["stop", "attach", "remove"]);
+    assert_eq!(*events.borrow(), selected, "the button does not select");
+
+    // macOS sends a control-click as a left click with control held.
+    redraw(cx);
+    let row = cx.debug_bounds("agent:andy/t7k").unwrap();
+    cx.simulate_click(row.center(), gpui::Modifiers::control());
+    redraw(cx);
+    assert!(cx.debug_bounds("agent:andy/fx1:menu").is_none());
+    assert_eq!(menu_items(cx, "andy/t7k"), ["start", "attach", "remove"]);
+    assert_eq!(
+        *events.borrow(),
+        selected,
+        "a control-click does not select"
+    );
 }
 
 #[gpui::test]
