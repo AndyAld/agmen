@@ -1,7 +1,7 @@
 //! `agmen-hub bootstrap`: the operator command that makes a tenant, a
 //! project in it, and the project's first admin (rulings R37 and R39).
 
-use agmen_proto::{ProjectId, TenantId};
+use agmen_proto::{ProjectId, RepoUrl, TenantId};
 use serde::Serialize;
 use sqlx::PgPool;
 use url::Url;
@@ -46,6 +46,9 @@ pub enum BootstrapError {
     /// The database returned an id the schema should have refused.
     #[error("the database holds an invalid id")]
     StoredId(#[from] agmen_proto::ProtoError),
+    /// The database holds a repository URL outside the allowed forms.
+    #[error("the database holds an invalid repository URL")]
+    StoredRepoUrl(#[from] agmen_proto::BadRepoUrl),
 }
 
 /// Who the first admin is. Either way the hub stores the account id, since
@@ -66,10 +69,11 @@ pub struct Bootstrap {
     tenant: String,
     project: String,
     admin: AdminGithub,
+    repo_url: Option<RepoUrl>,
 }
 
 /// What [`Bootstrap::run`] made or found. Serializes as
-/// `{"tenant", "project", "admin_github_id", "admin_github"}`.
+/// `{"tenant", "project", "admin_github_id", "admin_github", "repo_url"}`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[non_exhaustive]
 pub struct Bootstrapped {
@@ -82,6 +86,8 @@ pub struct Bootstrapped {
     /// The first admin's GitHub login as GitHub spells it, lowercased; for
     /// display only. `None` when the admin was named by id.
     pub admin_github: Option<String>,
+    /// The project's repository URL, if set.
+    pub repo_url: Option<RepoUrl>,
 }
 
 fn is_name(name: &str) -> bool {
@@ -128,7 +134,24 @@ impl Bootstrap {
             tenant,
             project,
             admin,
+            repo_url: None,
         })
+    }
+
+    /// Sets the project's repository URL. Without this option, a rerun
+    /// preserves the stored URL.
+    ///
+    /// ```
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// use agmen_hub::{AdminGithub, Bootstrap};
+    /// let request = Bootstrap::new("Acme", "agmen", AdminGithub::Id("1".parse()?))?
+    ///     .with_repo_url("https://github.com/agmen-dev/agmen".parse()?);
+    /// # Ok(()) }
+    /// ```
+    #[must_use]
+    pub fn with_repo_url(mut self, repo_url: RepoUrl) -> Self {
+        self.repo_url = Some(repo_url);
+        self
     }
 
     /// Resolves a login to its account id through GitHub's users API at
@@ -204,6 +227,19 @@ impl Bootstrap {
         let project = insert_project(&mut tx, &tenant, &self.project, true)
             .await?
             .ok_or(sqlx::Error::RowNotFound)?;
+        if let Some(repo_url) = &self.repo_url {
+            sqlx::query("UPDATE projects SET repo_url = $1 WHERE id = $2")
+                .bind(repo_url.as_str())
+                .bind(&project)
+                .execute(&mut *tx)
+                .await?;
+        }
+        let repo_url: Option<String> =
+            sqlx::query_scalar("SELECT repo_url FROM projects WHERE id = $1")
+                .bind(&project)
+                .fetch_one(&mut *tx)
+                .await?;
+        let repo_url = repo_url.map(RepoUrl::try_from).transpose()?;
         // A claimed row stays claimed, so a re-run is a no-op.
         sqlx::query(
             "INSERT INTO bootstrap_admins (project_id, github_id, github_login)
@@ -221,6 +257,7 @@ impl Bootstrap {
             project: project.parse()?,
             admin_github_id: admin_id,
             admin_github: admin_login,
+            repo_url,
         })
     }
 }
