@@ -8,6 +8,9 @@ use agmen_proto::{IdentityId, ProjectId, StampedEnvelope, Stream};
 use serde::Deserialize;
 use url::Url;
 
+use crate::body::{
+    BodyReadError, MAX_HUB_RESPONSE_BYTES, MAX_PAGE_RESPONSE_BYTES, read_hub_body_with_limit,
+};
 use crate::error::ClientError;
 use crate::token::TokenSource;
 
@@ -123,13 +126,16 @@ impl HubClient {
     /// [`ClientError::Http`] when the hub cannot be reached, and
     /// [`ClientError::Hub`] when it refuses (403 `forbidden_stream` for a
     /// stream this identity may not read).
+    /// [`ClientError::HubBodyTooLarge`] when its body exceeds
+    /// [`MAX_PAGE_RESPONSE_BYTES`], or
+    /// [`ClientError::BadAnswer`] when a success body is not valid JSON.
     pub async fn page(&self, stream: &Stream, after: u64) -> Result<Page, ClientError> {
         let stream = stream.to_string();
         let mut url = self.url(&["projects", self.project.as_str(), "streams", &stream]);
         url.query_pairs_mut()
             .append_pair("after", &after.to_string())
             .append_pair("limit", &PAGE_LIMIT.to_string());
-        self.get(url).await
+        self.get(url, MAX_PAGE_RESPONSE_BYTES).await
     }
 
     /// A fresh broker token for this identity (1 hour).
@@ -139,9 +145,11 @@ impl HubClient {
     /// [`ClientError::Http`] when the hub cannot be reached, and
     /// [`ClientError::Hub`] when it refuses (403 `identity_revoked` once the
     /// identity is revoked).
+    /// [`ClientError::HubBodyTooLarge`] when its body exceeds 16 MiB, or
+    /// [`ClientError::BadAnswer`] when a success body is not valid JSON.
     pub async fn broker_token(&self) -> Result<String, ClientError> {
         let url = self.url(&["identities", self.identity.as_str(), "broker-token"]);
-        let answer: BrokerToken = self.get(url).await?;
+        let answer: BrokerToken = self.get(url, MAX_HUB_RESPONSE_BYTES).await?;
         Ok(answer.token)
     }
 
@@ -154,7 +162,11 @@ impl HubClient {
         url
     }
 
-    async fn get<T: for<'de> Deserialize<'de>>(&self, url: Url) -> Result<T, ClientError> {
+    async fn get<T: for<'de> Deserialize<'de>>(
+        &self,
+        url: Url,
+        limit: usize,
+    ) -> Result<T, ClientError> {
         let response = self
             .http
             .get(url)
@@ -163,15 +175,20 @@ impl HubClient {
             .await
             .map_err(ClientError::Http)?;
         let status = response.status();
+        let bytes = read_hub_body_with_limit(response, limit).await;
         if status.is_success() {
-            return response.json().await.map_err(ClientError::Http);
+            let bytes = bytes.map_err(ClientError::from)?;
+            return serde_json::from_slice(&bytes).map_err(ClientError::BadAnswer);
         }
         // The body names the error; a body that does not parse leaves only
         // the status.
-        let code = response
-            .json::<ErrorBody>()
-            .await
-            .map_or_else(|_| String::new(), |body| body.error);
+        let code = match bytes {
+            Ok(bytes) => serde_json::from_slice::<ErrorBody>(&bytes)
+                .map_or_else(|_| String::new(), |body| body.error),
+            // Preserve status-only errors when the body cannot be read.
+            Err(BodyReadError::Http(_)) => String::new(),
+            Err(error) => return Err(error.into()),
+        };
         Err(ClientError::Hub {
             status: status.as_u16(),
             code,

@@ -4,6 +4,7 @@
 
 #![warn(missing_docs)]
 
+mod body;
 mod cursor;
 mod db;
 mod error;
@@ -21,6 +22,10 @@ mod state;
 mod token;
 mod token_store;
 
+pub use body::{
+    BodyReadError, MAX_HUB_RESPONSE_BYTES, MAX_PAGE_RESPONSE_BYTES, read_hub_body,
+    read_hub_body_with_limit,
+};
 pub use cursor::{Advance, Cursors};
 pub use error::ClientError;
 pub use event::{ClientEvent, Me};

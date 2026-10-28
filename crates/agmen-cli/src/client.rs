@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use agmen_client::{LoginError, TokenKey, TokenStore};
+use agmen_client::{BodyReadError, LoginError, TokenKey, TokenStore, read_hub_body};
 use agmen_proto::IdentityId;
 use anyhow::{Context as _, Result};
 use reqwest::{Method, RequestBuilder};
@@ -80,8 +80,7 @@ pub(crate) async fn send<T: DeserializeOwned>(request: RequestBuilder) -> Result
         .context("the hub could not be reached")?;
     let status = response.status();
     if status.is_success() {
-        let bytes = response
-            .bytes()
+        let bytes = read_hub_body(response)
             .await
             .context("reading the hub's answer failed")?;
         // A 204 carries no body; the caller asks for `()` then.
@@ -92,7 +91,12 @@ pub(crate) async fn send<T: DeserializeOwned>(request: RequestBuilder) -> Result
         };
         return serde_json::from_slice(bytes).context("the hub's answer is not what agmen expects");
     }
-    let body = response.json::<ErrorBody>().await.ok();
+    let body = match read_hub_body(response).await {
+        Ok(bytes) => serde_json::from_slice::<ErrorBody>(&bytes).ok(),
+        // Preserve status-only refusals when the transport fails.
+        Err(BodyReadError::Http(_)) => None,
+        Err(error) => return Err(error.into()),
+    };
     Err(Refusal {
         status: status.as_u16(),
         code: body.as_ref().map(|b| b.error.clone()).unwrap_or_default(),
@@ -315,4 +319,93 @@ pub(crate) async fn blocking<R: Send + 'static>(
     tokio::task::spawn_blocking(work)
         .await
         .context("a blocking task failed")?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn normal_hub_answers_keep_their_behavior() {
+        for (status, body, expected) in [
+            (204, "", ""),
+            (200, r#"{"ok":true}"#, ""),
+            (
+                403,
+                r#"{"error":"forbidden","error_description":"no access"}"#,
+                "no access (the hub answered 403 forbidden)",
+            ),
+            (
+                403,
+                r#"{"error":"forbidden"}"#,
+                "the hub answered 403 forbidden",
+            ),
+            (403, "", "the hub answered 403 "),
+            (403, "not json", "the hub answered 403 "),
+        ] {
+            let app = axum::Router::new().fallback(move || async move {
+                (axum::http::StatusCode::from_u16(status).unwrap(), body)
+            });
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let result = send::<serde_json::Value>(http().unwrap().get(url)).await;
+            task.abort();
+            if status == 204 {
+                assert_eq!(result.unwrap(), serde_json::Value::Null);
+            } else if status == 200 {
+                assert_eq!(result.unwrap(), serde_json::json!({"ok": true}));
+            } else {
+                assert_eq!(result.unwrap_err().to_string(), expected);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn oversized_hub_bodies_are_refused() {
+        for status in [200, 403] {
+            for chunked in [false, true] {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let url = format!("http://{}", listener.local_addr().unwrap());
+                let task = tokio::spawn(async move {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    socket.read_exact(&mut [0; 1]).await.unwrap();
+                    let framing = if chunked {
+                        "Transfer-Encoding: chunked"
+                    } else {
+                        "Content-Length: 16777217"
+                    };
+                    socket
+                        .write_all(
+                            format!("HTTP/1.1 {status} Test\r\n{framing}\r\n\r\n").as_bytes(),
+                        )
+                        .await
+                        .unwrap();
+                    if chunked {
+                        let chunk = format!("10000\r\n{}\r\n", " ".repeat(65536));
+                        for _ in 0..257 {
+                            if socket.write_all(chunk.as_bytes()).await.is_err() {
+                                return;
+                            }
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                });
+                let result = tokio::time::timeout(
+                    Duration::from_secs(3),
+                    send::<serde_json::Value>(http().unwrap().get(url)),
+                )
+                .await;
+                task.abort();
+                let error = result
+                    .expect("refuse before the stalled body ends")
+                    .unwrap_err();
+                assert!(
+                    format!("{error:#}").contains("16777216 byte limit"),
+                    "{error:#}"
+                );
+            }
+        }
+    }
 }

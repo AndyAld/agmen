@@ -2,6 +2,8 @@
 
 use agmen_proto::MessageId;
 
+use crate::body::BodyReadError;
+
 /// Why an agmen-client call failed.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -41,6 +43,15 @@ pub enum ClientError {
     /// The hub could not be reached, or its answer could not be read.
     #[error("calling the hub failed")]
     Http(#[source] reqwest::Error),
+    /// The hub answered success with invalid JSON.
+    #[error("calling the hub failed")]
+    BadAnswer(#[source] serde_json::Error),
+    /// The hub's response body exceeded the size limit.
+    #[error("the hub's response body exceeds the {limit} byte limit")]
+    HubBodyTooLarge {
+        /// The maximum response body size.
+        limit: usize,
+    },
     /// The hub refused a request.
     #[error("the hub answered {status} {code}")]
     Hub {
@@ -122,6 +133,15 @@ pub enum ClientError {
     /// A session task panicked.
     #[error("a session task panicked")]
     Panicked(#[source] tokio::task::JoinError),
+}
+
+impl From<BodyReadError> for ClientError {
+    fn from(error: BodyReadError) -> Self {
+        match error {
+            BodyReadError::Http(error) => Self::Http(error),
+            BodyReadError::TooLarge { limit } => Self::HubBodyTooLarge { limit },
+        }
+    }
 }
 
 impl ClientError {
