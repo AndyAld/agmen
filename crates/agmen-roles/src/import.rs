@@ -157,6 +157,12 @@ fn yaml_error(line: usize, message: &str) -> RoleError {
 }
 
 fn read_header(header: &str) -> Result<Frontmatter, RoleError> {
+    // YAML also breaks lines at a lone CR, NEL, LS and PS. Reading them as
+    // text would hide the key after them, so refuse them.
+    if let Some(at) = header.find(['\r', '\u{85}', '\u{2028}', '\u{2029}']) {
+        let line = header[..at].matches('\n').count() + 2;
+        return Err(yaml_error(line, "line breaks must be LF or CRLF"));
+    }
     let mut front = Frontmatter::default();
     let mut seen = BTreeSet::new();
     let mut block: Option<(&str, Option<usize>)> = None;

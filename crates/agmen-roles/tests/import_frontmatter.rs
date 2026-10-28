@@ -325,3 +325,25 @@ fn unknown_key_bodies_cannot_hide_or_inject_known_keys() {
     .unwrap();
     assert!(xml.contains("allow=\"read\""), "{xml}");
 }
+
+#[test]
+fn line_breaks_other_than_lf_or_crlf_in_the_header_are_rejected() {
+    // A lone CR, NEL, LS or PS would hide the key after it, so the agent
+    // would inherit every tool.
+    for brk in ['\r', '\u{85}', '\u{2028}', '\u{2029}'] {
+        for header in [
+            format!("name: x{brk}tools: Read"),
+            format!("description: foo{brk}disallowedTools: Bash"),
+        ] {
+            let error =
+                import_subagent(&format!("---\n{header}\n---\nBody"), "custom").unwrap_err();
+            assert!(matches!(error, RoleError::Schema(_)));
+            assert!(
+                error
+                    .to_string()
+                    .contains("subagent YAML line 2: line breaks must be LF or CRLF"),
+                "{brk:?}: {error}"
+            );
+        }
+    }
+}
