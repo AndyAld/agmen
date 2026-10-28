@@ -3,15 +3,12 @@
 
 use agmen_proto::{ProjectId, RepoUrl, TenantId};
 use serde::Serialize;
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 use url::Url;
 
 use crate::auth::{GithubError, GithubId, account_by_login, is_human_handle};
-use crate::db::{self, new_id};
+use crate::db::{self, is_display_name, new_id};
 use crate::http::upstream_client;
-
-/// The longest tenant or project name, in characters.
-const MAX_NAME_CHARS: usize = 64;
 
 /// Why bootstrapping failed.
 #[derive(Debug, thiserror::Error)]
@@ -90,12 +87,6 @@ pub struct Bootstrapped {
     pub repo_url: Option<RepoUrl>,
 }
 
-fn is_name(name: &str) -> bool {
-    (1..=MAX_NAME_CHARS).contains(&name.chars().count())
-        && !name.chars().any(char::is_control)
-        && name.trim() == name
-}
-
 impl Bootstrap {
     /// Checks the names. GitHub logins are case-insensitive, so a login is
     /// kept lowercased.
@@ -120,10 +111,10 @@ impl Bootstrap {
         admin: AdminGithub,
     ) -> Result<Self, BootstrapError> {
         let (tenant, project) = (tenant.into(), project.into());
-        if !is_name(&tenant) {
+        if !is_display_name(&tenant) {
             return Err(BootstrapError::BadName { what: "tenant" });
         }
-        if !is_name(&project) {
+        if !is_display_name(&project) {
             return Err(BootstrapError::BadName { what: "project" });
         }
         let admin = match admin {
@@ -224,7 +215,7 @@ impl Bootstrap {
         .bind(&self.tenant)
         .fetch_one(&mut *tx)
         .await?;
-        let project = insert_project(&mut tx, &tenant, &self.project, true)
+        let project = insert_project(&mut tx, &tenant, &self.project, true, None)
             .await?
             .ok_or(sqlx::Error::RowNotFound)?;
         if let Some(repo_url) = &self.repo_url {
@@ -263,14 +254,15 @@ impl Bootstrap {
 }
 
 /// Shared insert: bootstrap finds an existing project; HTTP creation refuses it.
-async fn insert_project(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+pub(crate) async fn insert_project(
+    conn: &mut PgConnection,
     tenant: &str,
     name: &str,
     reuse: bool,
+    repo_url: Option<&RepoUrl>,
 ) -> Result<Option<String>, BootstrapError> {
     Ok(sqlx::query_scalar(
-        "INSERT INTO projects (id, tenant_id, name) VALUES ($1, $2, $3)
+        "INSERT INTO projects (id, tenant_id, name, repo_url) VALUES ($1, $2, $3, $5)
          ON CONFLICT (tenant_id, name) DO UPDATE SET name = EXCLUDED.name
          WHERE $4
          RETURNING id",
@@ -279,116 +271,9 @@ async fn insert_project(
     .bind(tenant)
     .bind(name)
     .bind(reuse)
-    .fetch_optional(&mut **tx)
+    .bind(repo_url.map(RepoUrl::as_str))
+    .fetch_optional(conn)
     .await?)
-}
-
-#[derive(Debug, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct CreateProject {
-    name: String,
-    tenant: Option<TenantId>,
-}
-
-#[derive(Debug, Serialize)]
-pub(crate) struct CreatedProject {
-    tenant: String,
-    project: String,
-    name: String,
-    role: crate::db::Role,
-}
-
-fn project_tenant(
-    admin_tenants: &[String],
-    tenant: Option<&str>,
-) -> Result<String, crate::http::ApiError> {
-    use crate::http::ApiError;
-    let forbidden = || {
-        ApiError::forbidden(
-            "admin_required",
-            "only a project admin can create a project in this tenant",
-        )
-    };
-    if let Some(tenant) = tenant {
-        return admin_tenants
-            .iter()
-            .find(|id| id.as_str() == tenant)
-            .cloned()
-            .ok_or_else(forbidden);
-    }
-    match admin_tenants {
-        [] => Err(forbidden()),
-        [only] => Ok(only.clone()),
-        _ => Err(ApiError::new(
-            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
-            "tenant_required",
-            "name the tenant when you administer several tenants",
-        )),
-    }
-}
-
-fn project_name(name: &str) -> Result<(), crate::http::ApiError> {
-    if is_name(name) {
-        return Ok(());
-    }
-    Err(crate::http::ApiError::new(
-        axum::http::StatusCode::UNPROCESSABLE_ENTITY,
-        "invalid_name",
-        BootstrapError::BadName { what: "project" }.to_string(),
-    ))
-}
-
-fn duplicate_project() -> crate::http::ApiError {
-    crate::http::ApiError::conflict(
-        "project_exists",
-        "a project with that name already exists in this tenant",
-    )
-}
-
-/// `POST /v1/projects`: atomically create the project and its admin membership.
-pub(crate) async fn create_project(
-    axum::extract::State(hub): axum::extract::State<crate::http::Hub>,
-    caller: crate::auth::Caller,
-    axum::Json(request): axum::Json<CreateProject>,
-) -> Result<(axum::http::StatusCode, axum::Json<CreatedProject>), crate::http::ApiError> {
-    use crate::http::ApiError;
-    let human = caller.human()?;
-    let mut tx = hub.pool().begin().await?;
-    // Keep the memberships authorizing this write alive until commit.
-    let mut tenants: Vec<String> = sqlx::query_scalar(
-        "SELECT p.tenant_id FROM memberships m JOIN projects p ON p.id = m.project_id
-         WHERE m.human_id = $1 AND m.role = 'admin' FOR SHARE OF m",
-    )
-    .bind(human.as_str())
-    .fetch_all(&mut *tx)
-    .await?;
-    tenants.sort();
-    tenants.dedup();
-    let tenant = project_tenant(&tenants, request.tenant.as_ref().map(TenantId::as_str))?;
-    project_name(&request.name)?;
-    let project = insert_project(&mut tx, &tenant, &request.name, false)
-        .await
-        .map_err(|error| match error {
-            BootstrapError::Database(error) => ApiError::Database(error),
-            BootstrapError::Random(error) => ApiError::Random(error),
-            error => ApiError::stored(error),
-        })?
-        .ok_or_else(duplicate_project)?;
-    sqlx::query("INSERT INTO memberships (human_id, project_id, role) VALUES ($1, $2, 'admin')")
-        .bind(human.as_str())
-        .bind(&project)
-        .execute(&mut *tx)
-        .await?;
-    tx.commit().await?;
-    Ok((
-        axum::http::StatusCode::CREATED,
-        axum::Json(CreatedProject {
-            tenant,
-            project,
-            name: request.name,
-            role: crate::db::Role::Admin,
-        }),
-    ))
 }
 
 /// `login` lowercased, if it is one GitHub allows.
@@ -438,62 +323,5 @@ mod tests {
                 "{bad:?}"
             );
         }
-    }
-}
-
-#[cfg(test)]
-mod project_creation_tests {
-    use super::*;
-    use axum::http::StatusCode;
-    use axum::response::IntoResponse as _;
-
-    #[test]
-    fn project_creation_selects_only_admin_tenants() {
-        assert_eq!(
-            project_tenant(&["tenant01".into()], None).unwrap(),
-            "tenant01"
-        );
-        assert_eq!(
-            project_tenant(&["tenant01".into(), "tenant02".into()], Some("tenant02")).unwrap(),
-            "tenant02"
-        );
-        assert_eq!(
-            project_tenant(&[], None)
-                .unwrap_err()
-                .into_response()
-                .status(),
-            StatusCode::FORBIDDEN
-        );
-        assert_eq!(
-            project_tenant(&["tenant01".into()], Some("tenant02"))
-                .unwrap_err()
-                .into_response()
-                .status(),
-            StatusCode::FORBIDDEN
-        );
-        assert_eq!(
-            project_tenant(&["tenant01".into(), "tenant02".into()], None)
-                .unwrap_err()
-                .into_response()
-                .status(),
-            StatusCode::UNPROCESSABLE_ENTITY
-        );
-    }
-
-    #[test]
-    fn project_creation_reuses_bootstrap_names_and_rejects_duplicates() {
-        for name in ["marked", "A project", &"x".repeat(64)] {
-            assert!(project_name(name).is_ok());
-        }
-        for name in ["", " space", "space ", "a\nb", &"x".repeat(65)] {
-            assert_eq!(
-                project_name(name).unwrap_err().into_response().status(),
-                StatusCode::UNPROCESSABLE_ENTITY
-            );
-        }
-        assert_eq!(
-            duplicate_project().into_response().status(),
-            StatusCode::CONFLICT
-        );
     }
 }

@@ -131,7 +131,7 @@ impl Hub {
             .route("/v1/jwks", get(jwks))
             .merge(auth::routes())
             .route("/v1/me", get(me::me))
-            .route("/v1/projects", post(crate::bootstrap::create_project))
+            .route("/v1/projects", post(crate::projects::create))
             .route("/v1/identities", post(identities::mint))
             .route("/v1/identities/{id}", delete(identities::revoke))
             .route(

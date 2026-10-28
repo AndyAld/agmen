@@ -19,6 +19,15 @@ const ID_ALPHABET: &[u8; 32] = b"abcdefghijkmnpqrstuvwxyz23456789";
 /// the protocol's `[a-z0-9]{8,32}`.
 const ID_LEN: usize = 16;
 
+/// The longest tenant or project name, in characters.
+const MAX_NAME_CHARS: usize = 64;
+
+pub(crate) fn is_display_name(name: &str) -> bool {
+    (1..=MAX_NAME_CHARS).contains(&name.chars().count())
+        && !name.chars().any(char::is_control)
+        && name.trim() == name
+}
+
 /// Connects to Postgres and runs the hub's migrations.
 pub(crate) async fn connect(url: &str) -> Result<PgPool, sqlx::Error> {
     let pool = PgPoolOptions::new()
