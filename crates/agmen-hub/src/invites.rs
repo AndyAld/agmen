@@ -126,6 +126,8 @@ pub(crate) struct Accepted {
     tenant: String,
     project: String,
     role: Role,
+    name: String,
+    repo_url: Option<agmen_proto::RepoUrl>,
 }
 
 /// `POST /v1/invites/{code}/accept` (human token): joins the project and
@@ -136,21 +138,48 @@ pub(crate) async fn accept(
     Path(code): Path<String>,
     caller: Caller,
 ) -> Result<Json<Accepted>, ApiError> {
+    #[derive(sqlx::FromRow)]
+    struct Invite {
+        tenant: String,
+        project: String,
+        role: String,
+        used: bool,
+        expired: bool,
+        name: String,
+        repo_url: Option<String>,
+    }
+
     let human = caller.human()?;
     let hash = hash_secret(&code);
     let mut tx = hub.pool().begin().await?;
-    let invite: Option<(String, String, String, bool, bool)> = sqlx::query_as(
-        "SELECT tenant_id, project_id, role, used_by IS NOT NULL, expires_at <= now()
-         FROM invites WHERE code_hash = $1 FOR UPDATE",
+    let invite: Option<Invite> = sqlx::query_as(
+        "SELECT i.tenant_id AS tenant, i.project_id AS project, i.role,
+                i.used_by IS NOT NULL AS used, i.expires_at <= now() AS expired,
+                p.name, p.repo_url
+         FROM invites i JOIN projects p ON p.id = i.project_id
+         WHERE i.code_hash = $1 FOR UPDATE OF i",
     )
     .bind(&hash)
     .fetch_optional(&mut *tx)
     .await?;
-    let Some((tenant, project, role, used, expired)) = invite else {
+    let Some(Invite {
+        tenant,
+        project,
+        role,
+        used,
+        expired,
+        name,
+        repo_url,
+    }) = invite
+    else {
         return Err(ApiError::not_found("no such invite"));
     };
     // Parsed before anything changes, so nothing after the commit can fail.
     let role: Role = role.parse().map_err(ApiError::stored)?;
+    let repo_url = repo_url
+        .map(agmen_proto::RepoUrl::try_from)
+        .transpose()
+        .map_err(ApiError::stored)?;
     let topics = Topics::new(
         tenant.parse().map_err(ApiError::stored)?,
         project.parse().map_err(ApiError::stored)?,
@@ -196,5 +225,7 @@ pub(crate) async fn accept(
         tenant,
         project,
         role,
+        name,
+        repo_url,
     }))
 }

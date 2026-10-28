@@ -209,7 +209,7 @@ Base: `https://api.<domain>/v1`. Auth: bearer token from login (humans) or scope
 | `GET /projects/{p}/settings`, `PATCH /projects/{p}/settings` | Read or change project settings (admins change) |
 | `PUT /projects/{p}/members/{human}/settings` | A person's override for their own agents |
 | `GET /projects/{p}/packs`, `PUT /projects/{p}/packs/{name}`, `DELETE /projects/{p}/packs/{name}` | Packs recommended to the project (design 6.12). `PUT` takes `{source, sha}` from a project admin: `source` is `github:<owner>/<repo>` or an `https://`, `ssh://` or `git@` URL, and `sha` is a 40-character commit id. The hub stores only those fields plus `attached_by` and `attached_at`, never pack contents, and each change updates `state/packs` |
-| `POST /invites`, `POST /invites/{code}/accept` | Invite-only onboarding. Create returns `{code, link, project, role, expires_at}`; `link` is the hub's public `/i#<code>` URL, with the code only in the fragment |
+| `POST /invites`, `POST /invites/{code}/accept` | Invite-only onboarding. Create returns `{code, link, project, role, expires_at}`; `link` is the hub's public `/i#<code>` URL, with the code only in the fragment. Accept returns `{tenant, project, role, name, repo_url}`; `repo_url` is `null` when unset |
 | `GET /i` (outside `/v1`) | Static invite page. Reads the code only from the URL fragment and sends no requests. Serves `Referrer-Policy: no-referrer`, `Cache-Control: no-store` and a CSP that blocks external requests |
 
 ## 7. Project settings

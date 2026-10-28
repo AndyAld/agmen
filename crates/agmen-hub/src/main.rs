@@ -18,11 +18,12 @@
 use std::ffi::OsString;
 
 use agmen_hub::{AdminGithub, GithubConfig};
+use agmen_proto::RepoUrl;
 use anyhow::{Context as _, bail};
 use tracing_subscriber::EnvFilter;
 
 const USAGE: &str = "usage: agmen-hub [serve]
-       agmen-hub bootstrap --tenant <name> --project <name> (--admin-github <login> | --admin-github-id <id>)";
+       agmen-hub bootstrap --tenant <name> --project <name> (--admin-github <login> | --admin-github-id <id>) [--repo-url <url>]";
 
 /// What the command line asks for.
 #[derive(Debug, PartialEq, Eq)]
@@ -32,6 +33,7 @@ enum Command {
         tenant: String,
         project: String,
         admin: AdminGithub,
+        repo_url: Option<RepoUrl>,
     },
     Help,
 }
@@ -51,7 +53,8 @@ async fn main() -> anyhow::Result<()> {
             tenant,
             project,
             admin,
-        } => bootstrap(tenant, project, admin).await,
+            repo_url,
+        } => bootstrap(tenant, project, admin, repo_url).await,
         Command::Help => {
             println!("{USAGE}");
             Ok(())
@@ -82,12 +85,14 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> anyhow::Result<Comman
         Some("-h" | "--help" | "help") => return Ok(Command::Help),
         Some("bootstrap") => {
             let (mut tenant, mut project, mut login, mut id) = (None, None, None, None);
+            let mut repo_url = None;
             while let Some(flag) = args.next() {
                 let slot = match flag.as_str() {
                     "--tenant" => &mut tenant,
                     "--project" => &mut project,
                     "--admin-github" => &mut login,
                     "--admin-github-id" => &mut id,
+                    "--repo-url" => &mut repo_url,
                     _ => bail!("unknown option {flag:?}\n{USAGE}"),
                 };
                 let value = args
@@ -112,6 +117,9 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> anyhow::Result<Comman
                 tenant: tenant.with_context(|| missing("--tenant"))?,
                 project: project.with_context(|| missing("--project"))?,
                 admin,
+                repo_url: repo_url
+                    .map(|url| url.parse().context("invalid --repo-url"))
+                    .transpose()?,
             });
         }
         Some(other) => bail!("unknown command {other:?}\n{USAGE}"),
@@ -156,8 +164,16 @@ async fn serve() -> anyhow::Result<()> {
     }
 }
 
-async fn bootstrap(tenant: String, project: String, admin: AdminGithub) -> anyhow::Result<()> {
-    let request = agmen_hub::Bootstrap::new(tenant, project, admin)?;
+async fn bootstrap(
+    tenant: String,
+    project: String,
+    admin: AdminGithub,
+    repo_url: Option<RepoUrl>,
+) -> anyhow::Result<()> {
+    let mut request = agmen_hub::Bootstrap::new(tenant, project, admin)?;
+    if let Some(repo_url) = repo_url {
+        request = request.with_repo_url(repo_url);
+    }
     let database_url = std::env::var("AGMEN_DATABASE_URL")
         .ok()
         .filter(|url| !url.is_empty())
@@ -219,6 +235,41 @@ mod tests {
     }
 
     #[test]
+    fn bootstrap_takes_a_repo_url() {
+        let base = [
+            "bootstrap",
+            "--tenant",
+            "t",
+            "--project",
+            "p",
+            "--admin-github-id",
+            "1",
+        ];
+        let url = "https://github.com/agmen-dev/agmen";
+        let mut args = base.to_vec();
+        args.extend(["--repo-url", url]);
+        assert_eq!(
+            parse(&args).unwrap(),
+            Command::Bootstrap {
+                tenant: "t".to_owned(),
+                project: "p".to_owned(),
+                admin: AdminGithub::Id("1".parse().unwrap()),
+                repo_url: Some(url.parse::<agmen_proto::RepoUrl>().unwrap()),
+            }
+        );
+        for suffix in [
+            vec!["--repo-url", "/tmp/repo"],
+            vec!["--repo-url"],
+            vec!["--repo-url", url, "--repo-url", url],
+        ] {
+            let mut args = base.to_vec();
+            args.extend(suffix);
+            let error = parse(&args).unwrap_err();
+            assert!(error.to_string().contains("--repo-url"), "{error:#}");
+        }
+    }
+
+    #[test]
     fn commands() {
         assert_eq!(parse(&[]).unwrap(), Command::Serve);
         assert_eq!(parse(&["serve"]).unwrap(), Command::Serve);
@@ -238,6 +289,7 @@ mod tests {
                 tenant: "Acme Co".to_owned(),
                 project: "agmen".to_owned(),
                 admin: AdminGithub::Login("Andy".to_owned()),
+                repo_url: None,
             }
         );
         assert_eq!(
@@ -255,6 +307,7 @@ mod tests {
                 tenant: "t".to_owned(),
                 project: "p".to_owned(),
                 admin: AdminGithub::Id("583231".parse().unwrap()),
+                repo_url: None,
             }
         );
     }

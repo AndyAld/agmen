@@ -30,6 +30,30 @@ pub struct SeededHuman {
 }
 
 impl Hub {
+    /// Sets the repository URL for the given project.
+    ///
+    /// # Errors
+    ///
+    /// When the database query fails or the project does not exist.
+    pub async fn set_repo_url(
+        &self,
+        topics: &Topics,
+        repo_url: &agmen_proto::RepoUrl,
+    ) -> Result<(), HookError> {
+        let updated =
+            sqlx::query("UPDATE projects SET repo_url = $1 WHERE tenant_id = $2 AND id = $3")
+                .bind(repo_url.as_str())
+                .bind(topics.tenant().as_str())
+                .bind(topics.project().as_str())
+                .execute(self.pool())
+                .await?
+                .rows_affected();
+        if updated == 0 {
+            return Err("no such project".into());
+        }
+        Ok(())
+    }
+
     /// Sets how many events streams the hub holds open in all, and per
     /// person, so a test can reach the caps with a few streams.
     pub fn set_events_limits(&self, total: usize, per_human: usize) {

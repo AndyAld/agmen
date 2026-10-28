@@ -64,6 +64,92 @@ async fn it_invite_answer_carries_the_link() {
     .await;
 }
 
+#[tokio::test]
+async fn it_accept_answers_project_name_and_repo_url() {
+    run(|ctx| async move {
+        let topics = ctx.hub.hub.seed_project().await.unwrap();
+        let admin = ctx
+            .hub
+            .hub
+            .seed_human(&topics, agmen_hub::Role::Admin)
+            .await
+            .unwrap();
+        let repo_url = "https://github.com/agmen-dev/agmen";
+        for (id, name, expected_url) in [(2, "adam", Value::Null), (3, "eve", json!(repo_url))] {
+            if id == 3 {
+                ctx.hub
+                    .hub
+                    .set_repo_url(&topics, &repo_url.parse().unwrap())
+                    .await
+                    .unwrap();
+            }
+            let token = login(&ctx, id, name).await;
+            let (status, created) = invite(
+                &ctx,
+                &admin.access_token,
+                &json!({
+                    "project": topics.project(), "role": "member",
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{created}");
+            let code = created["code"].as_str().unwrap();
+            let response = ctx
+                .http
+                .post(ctx.hub.url(&format!("/v1/invites/{code}/accept")))
+                .bearer_auth(token)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let accepted: Value = response.json().await.unwrap();
+            assert_eq!(
+                accepted,
+                json!({
+                    "tenant": topics.tenant(), "project": topics.project(), "role": "member",
+                    "name": format!("project {}", topics.project()), "repo_url": expected_url,
+                })
+            );
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn it_bootstrap_sets_repo_url() {
+    run(|ctx| async move {
+        let repo_url = "https://github.com/agmen-dev/agmen";
+        let made = bootstrap(
+            &ctx,
+            "Acme",
+            "agmen",
+            &["--admin-github-id", "1", "--repo-url", repo_url],
+        )
+        .await;
+        assert_eq!(made["repo_url"], repo_url);
+        let project = made["project"].as_str().unwrap();
+        let stored: Option<String> =
+            sqlx::query_scalar("SELECT repo_url FROM projects WHERE id = $1")
+                .bind(project)
+                .fetch_one(&ctx.pool)
+                .await
+                .unwrap();
+        assert_eq!(stored.as_deref(), Some(repo_url));
+        assert_eq!(
+            bootstrap(&ctx, "Acme", "agmen", &["--admin-github-id", "1"]).await,
+            made
+        );
+        let stored: Option<String> =
+            sqlx::query_scalar("SELECT repo_url FROM projects WHERE id = $1")
+                .bind(project)
+                .fetch_one(&ctx.pool)
+                .await
+                .unwrap();
+        assert_eq!(stored.as_deref(), Some(repo_url));
+    })
+    .await;
+}
+
 async fn refresh(ctx: &Ctx, refresh_token: &str) -> (StatusCode, Value) {
     let resp = ctx
         .http
