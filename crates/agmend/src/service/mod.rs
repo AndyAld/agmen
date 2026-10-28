@@ -82,6 +82,14 @@ enum Backend {
 }
 
 pub(super) fn execute(action: ServiceAction, program: Option<PathBuf>) -> Result<String> {
+    execute_with_token(action, program, None)
+}
+
+pub(super) fn execute_with_token(
+    action: ServiceAction,
+    program: Option<PathBuf>,
+    token: Option<PathBuf>,
+) -> Result<String> {
     let deadline = Instant::now() + Duration::from_secs(120);
     let paths = ServicePaths {
         home: std::env::home_dir().context("locating service home")?,
@@ -94,7 +102,10 @@ pub(super) fn execute(action: ServiceAction, program: Option<PathBuf>) -> Result
     if action == ServiceAction::Install {
         validate_program(&paths.executable)?;
     }
-    let answer = manage(action, &paths, &mut |argv| {
+    if let Some(token) = &token {
+        validate_token_store(token)?;
+    }
+    let answer = manage_with_token(action, &paths, token.as_deref(), &mut |argv| {
         let remaining = deadline
             .checked_duration_since(Instant::now())
             .context("service transition exceeded 120 s deadline")?;
@@ -105,7 +116,13 @@ pub(super) fn execute(action: ServiceAction, program: Option<PathBuf>) -> Result
             &agmen_client::agmend_socket()?,
             env!("CARGO_PKG_VERSION"),
             deadline,
-        )?;
+        )
+        .with_context(|| {
+            format!(
+                "service setup failed; log: {}",
+                paths.home.join("Library/Logs/agmen/agmend.log").display()
+            )
+        })?;
     }
     Ok(answer)
 }
@@ -160,22 +177,38 @@ fn configured_program(backend: Backend, unit: &Unit) -> Result<Option<PathBuf>> 
     Ok(Some(program))
 }
 
-fn manage(action: ServiceAction, paths: &ServicePaths, run: &mut Runner<'_>) -> Result<String> {
+fn manage_with_token(
+    action: ServiceAction,
+    paths: &ServicePaths,
+    token: Option<&Path>,
+    run: &mut Runner<'_>,
+) -> Result<String> {
     // shortcut: Unix-only service; revisit when S6 Windows support is approved.
     #[cfg(target_os = "macos")]
     let backend = Backend::Launchd;
     #[cfg(target_os = "linux")]
     let backend = Backend::Systemd;
-    manage_backend(backend, action, paths, run)
+    manage_backend_with_token(backend, action, paths, token, run)
 }
 
+#[cfg(test)]
 fn manage_backend(
     backend: Backend,
     action: ServiceAction,
     paths: &ServicePaths,
     run: &mut Runner<'_>,
 ) -> Result<String> {
-    let unit = match backend {
+    manage_backend_with_token(backend, action, paths, None, run)
+}
+
+fn manage_backend_with_token(
+    backend: Backend,
+    action: ServiceAction,
+    paths: &ServicePaths,
+    token: Option<&Path>,
+    run: &mut Runner<'_>,
+) -> Result<String> {
+    let mut unit = match backend {
         #[cfg(any(target_os = "macos", test))]
         Backend::Launchd => launchd::render(paths)?,
         #[cfg(any(target_os = "linux", test))]
@@ -186,6 +219,21 @@ fn manage_backend(
     } else {
         None
     };
+    if action == ServiceAction::Install {
+        let selected = token.map(Path::to_owned).map_or_else(
+            || configured_token_store(backend, &unit),
+            |path| Ok(Some(path)),
+        )?;
+        if let Some(token) = selected {
+            validate_token_store(&token)?;
+            unit = match backend {
+                #[cfg(any(target_os = "macos", test))]
+                Backend::Launchd => launchd::render_with_token(paths, Some(&token))?,
+                #[cfg(any(target_os = "linux", test))]
+                Backend::Systemd => systemd::render_with_token(paths, Some(&token))?,
+            };
+        }
+    }
     #[cfg(any(target_os = "linux", test))]
     let active = if backend == Backend::Systemd && action == ServiceAction::Install {
         systemd::active(run)?
@@ -217,6 +265,52 @@ fn manage_backend(
         ));
     }
     Ok(answer)
+}
+
+fn configured_token_store(backend: Backend, unit: &Unit) -> Result<Option<PathBuf>> {
+    use std::io::Read as _;
+    let file = match std::fs::File::open(&unit.path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let mut contents = String::new();
+    file.take(MAX_UNIT_BYTES as u64 + 1)
+        .read_to_string(&mut contents)?;
+    ensure!(
+        contents.len() <= MAX_UNIT_BYTES,
+        "service unit exceeds 64 KiB"
+    );
+    match backend {
+        #[cfg(any(target_os = "macos", test))]
+        Backend::Launchd => launchd::token_store(&contents),
+        #[cfg(any(target_os = "linux", test))]
+        Backend::Systemd => systemd::token_store(&contents),
+    }
+}
+
+fn validate_token_store(path: &Path) -> Result<()> {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+    validate_path(path).context("invalid token store path")?;
+    let metadata = std::fs::symlink_metadata(path).context("reading token store directory")?;
+    ensure!(
+        metadata.is_dir()
+            && metadata.permissions().mode() & 0o777 == 0o700
+            && metadata.uid() == rustix::process::geteuid().as_raw(),
+        "token store must be an owner-only directory with mode 0700"
+    );
+    for (index, entry) in std::fs::read_dir(path)?.enumerate() {
+        ensure!(index < 4096, "token store exceeds 4096 files");
+        let entry = entry?;
+        let metadata = entry.path().symlink_metadata()?;
+        ensure!(
+            metadata.is_file()
+                && metadata.permissions().mode() & 0o777 == 0o600
+                && metadata.uid() == rustix::process::geteuid().as_raw(),
+            "token store files must be owner-only regular files with mode 0600"
+        );
+    }
+    Ok(())
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -312,6 +406,8 @@ fn wait_ready(socket: &Path, version: &str, deadline: Instant) -> Result<()> {
     let remaining = deadline
         .checked_duration_since(Instant::now())
         .context("service transition exceeded 120 s deadline")?;
+    let remaining = remaining.min(Duration::from_secs(30));
+    let ready_deadline = Instant::now() + remaining;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -319,30 +415,40 @@ fn wait_ready(socket: &Path, version: &str, deadline: Instant) -> Result<()> {
     runtime.block_on(async {
         let operation = async {
             let mut last = String::from("daemon has not answered");
-            // At most 1200 attempts within the shared 120 s transition deadline.
-            for _ in 0..1200 {
+            // At most 300 attempts within the 30 s readiness budget.
+            for _ in 0..300 {
                 match tokio::time::timeout(Duration::from_secs(2), ready_handshake(socket, version))
                     .await
                 {
                     Ok(Ok(())) => return Ok(()),
+                    Ok(Err(error)) if error.is::<VersionMismatch>() => return Err(error),
                     Ok(Err(error)) => last = format!("{error:#}"),
                     Err(_) => last = "hello/ready handshake timed out".to_owned(),
                 }
                 let pause = Duration::from_millis(100);
                 if Instant::now()
                     .checked_add(pause)
-                    .is_none_or(|next| next >= deadline)
+                    .is_none_or(|next| next >= ready_deadline)
                 {
-                    anyhow::bail!("service transition exceeded 120 s deadline: {last}");
+                    anyhow::bail!(
+                        "agmend did not become ready within 30 s (transition deadline): {last}"
+                    );
                 }
                 tokio::time::sleep(pause).await;
             }
-            anyhow::bail!("service never became ready: {last}")
+            anyhow::bail!("agmend did not become ready within 30 s: {last}")
         };
         tokio::time::timeout(remaining, operation)
             .await
-            .context("service transition exceeded 120 s deadline while waiting for hello/ready")?
+            .context("agmend did not become ready within 30 s (transition deadline)")?
     })
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("installed agmend version {actual:?} does not match expected {expected}")]
+struct VersionMismatch {
+    actual: Option<String>,
+    expected: String,
 }
 
 async fn ready_handshake(socket: &Path, version: &str) -> Result<()> {
@@ -366,10 +472,16 @@ async fn ready_handshake(socket: &Path, version: &str) -> Result<()> {
     };
     let hello: HelloAnswer = serde_json::from_value(result)?;
     ensure!(
-        hello.api == API && hello.version.as_deref() == Some(version),
-        "installed agmend version {:?} does not match {version}",
-        hello.version
+        hello.api == API,
+        "installed agmend API does not match expected {API}"
     );
+    if hello.version.as_deref() != Some(version) {
+        return Err(VersionMismatch {
+            actual: hello.version,
+            expected: version.to_owned(),
+        }
+        .into());
+    }
     frame::write_async(
         &mut stream,
         &Request::new(2, "ready", serde_json::json!({})),
@@ -471,6 +583,130 @@ async fn read_output(pipe: impl tokio::io::AsyncRead + Unpin) -> Result<Vec<u8>>
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn launchd_token_store_dir_is_persisted() {
+        let dir = tempfile::tempdir().unwrap();
+        let token = dir.path().join("tokens &'\"<>%$");
+        std::fs::create_dir(&token).unwrap();
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o700)).unwrap();
+        validate_token_store(&token).unwrap();
+        let paths = ServicePaths {
+            home: dir.path().into(),
+            executable: "/active/agmend".into(),
+            uid: 501,
+        };
+        let unit = launchd::render_with_token(&paths, Some(&token)).unwrap();
+        let document = roxmltree::Document::parse_with_options(
+            &unit.contents,
+            roxmltree::ParsingOptions {
+                allow_dtd: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            document
+                .descendants()
+                .any(|node| node.has_tag_name("string") && node.text() == token.to_str())
+        );
+        assert!(unit.contents.contains("AGMEN_TOKEN_STORE_DIR"));
+        std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(validate_token_store(&token).is_err());
+        assert!(validate_token_store(Path::new("relative")).is_err());
+    }
+
+    #[test]
+    fn systemd_token_store_dir_is_persisted() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = ServicePaths {
+            home: dir.path().into(),
+            executable: "/active/agmend".into(),
+            uid: 501,
+        };
+        let token = Path::new("/tokens &\"<>%$");
+        let unit = systemd::render_with_token(&paths, Some(token)).unwrap();
+        assert!(
+            unit.contents
+                .contains("Environment=\"AGMEN_TOKEN_STORE_DIR=/tokens &\\\"<>%%$\""),
+            "{}",
+            unit.contents
+        );
+    }
+
+    #[test]
+    fn token_store_survives_reinstall() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = ServicePaths {
+            home: home.path().into(),
+            executable: "/active/agmend".into(),
+            uid: 501,
+        };
+        let token = home.path().join("tokens \"&%$");
+        std::fs::create_dir(&token).unwrap();
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o700)).unwrap();
+        for backend in [Backend::Launchd, Backend::Systemd] {
+            let unit = match backend {
+                Backend::Launchd => launchd::render_with_token(&paths, Some(&token)),
+                Backend::Systemd => systemd::render_with_token(&paths, Some(&token)),
+            }
+            .unwrap();
+            write_unit(&unit).unwrap();
+            manage_backend(backend, ServiceAction::Install, &paths, &mut |_| {
+                Ok(ProcessResult {
+                    code: Some(0),
+                    stdout: b"ActiveState=inactive\nLoadState=loaded\n".to_vec(),
+                    stderr: vec![],
+                })
+            })
+            .unwrap();
+            assert_eq!(
+                configured_token_store(backend, &unit).unwrap(),
+                Some(token.clone())
+            );
+        }
+    }
+
+    #[test]
+    fn service_install_fails_when_daemon_never_ready() {
+        let dir = tempfile::tempdir().unwrap();
+        let error = wait_ready(
+            &dir.path().join("absent"),
+            "new",
+            Instant::now() + Duration::from_millis(50),
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("agmend did not become ready within 30 s"));
+    }
+
+    #[test]
+    fn service_install_fails_on_version_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("s");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            let request: agmen_local::Request = agmen_local::frame::read(&mut stream).unwrap();
+            agmen_local::frame::write(
+                &mut stream,
+                &agmen_local::Response::ok(
+                    request.id,
+                    serde_json::json!({"api":1,"version":"old"}),
+                ),
+            )
+            .unwrap();
+        });
+        let start = Instant::now();
+        let error = wait_ready(&socket, "new", start + Duration::from_secs(2)).unwrap_err();
+        assert!(start.elapsed() < Duration::from_secs(1));
+        assert!(format!("{error:#}").contains("old"));
+        server.join().unwrap();
+    }
 
     #[test]
     fn service_render_refuses_invalid_paths() {

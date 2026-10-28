@@ -14,6 +14,41 @@ const IDENTITY: &str = r#"{"tenant":"tenant01","project":"project1","identity_id
 "broker_url":"mqtt://127.0.0.1:9"}"#;
 
 #[test]
+fn install_receipt_command_uses_shared_reader() {
+    let home = Home::new();
+    let out = home
+        .agmen(home.path(), &["install-receipt", "--json"])
+        .output()
+        .unwrap();
+    assert_exit(&out, 0);
+    assert_eq!(stdout(&out).trim(), "null");
+    let dir = home.state_base();
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("install-receipt.json");
+    let receipt =
+        serde_json::json!({"channel":"shell","version":"1","owned_paths":["/active/agmen"]});
+    std::fs::write(&path, receipt.to_string()).unwrap();
+    let out = home
+        .agmen(home.path(), &["install-receipt", "--json"])
+        .output()
+        .unwrap();
+    assert_exit(&out, 0);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&stdout(&out)).unwrap(),
+        receipt
+    );
+    std::fs::write(&path, "broken").unwrap();
+    assert!(
+        !home
+            .agmen(home.path(), &["install-receipt", "--json"])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+}
+
+#[test]
 fn hub_url_policy_cli_and_env() {
     let home = Home::new();
     for hub in [

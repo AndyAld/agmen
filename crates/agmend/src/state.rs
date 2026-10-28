@@ -152,6 +152,41 @@ pub(crate) fn schemas(dir: &Path, deadline: Instant) -> Result<BTreeMap<String, 
     Ok(versions)
 }
 
+/// A strict snapshot for rollback: every discovered file must be readable, including future schemas.
+pub(crate) fn snapshot(dir: &Path) -> Result<Vec<(std::path::PathBuf, i64)>, StoreError> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut paths = identity_stores(dir)?;
+    paths.push(dir.join("agmend.db"));
+    paths.sort();
+    let mut result = Vec::with_capacity(paths.len());
+    for path in &paths {
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or(StoreError::Full("store inspection deadline"))?;
+        let version = agmen_client::store_schema(path, remaining)
+            .map_err(|source| StoreError::Identity {
+                path: path.clone(),
+                source: Box::new(StoreError::Client(source)),
+            })?
+            .ok_or_else(|| StoreError::Identity {
+                path: path.clone(),
+                source: Box::new(StoreError::Invalid(
+                    "store snapshot is incomplete: store is missing",
+                )),
+            })?;
+        result.push((path.clone(), version));
+    }
+    let mut after = identity_stores(dir)?;
+    after.push(dir.join("agmend.db"));
+    after.sort();
+    if paths != after {
+        return Err(StoreError::Invalid(
+            "store discovery changed during snapshot",
+        ));
+    }
+    Ok(result)
+}
+
 pub(crate) fn open_stores(path: &Path) -> Result<Store, StoreError> {
     let dir = path
         .parent()

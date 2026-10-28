@@ -11,6 +11,7 @@ mod error;
 mod event;
 mod hub;
 mod identity;
+mod install_receipt;
 mod link;
 mod login;
 mod mqtt_store;
@@ -33,6 +34,10 @@ pub use event::{ClientEvent, Me};
 pub use hub::{HubClient, HubUrlError, PAGE_LIMIT, Page, check_hub_url};
 pub use identity::{
     IDENTITY_DIR, IDENTITY_FILE, IdentityError, IdentityFile, Joined, find_identity,
+};
+pub use install_receipt::{
+    InstallReceipt, ReceiptError, install_receipt_path, read_install_receipt,
+    read_install_receipt_at,
 };
 pub use login::{HumanTokens, Login, LoginError, human_tokens, store_tokens, token_grant};
 pub use outbox::{Outbox, OutboxState};

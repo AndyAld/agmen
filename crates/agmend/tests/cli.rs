@@ -52,6 +52,46 @@ fn help_prints_usage() {
 }
 
 #[test]
+fn store_schema_reads_without_migrating() {
+    let home = tempfile::tempdir().unwrap();
+    let base = if cfg!(target_os = "macos") {
+        home.path().join("Library/Application Support/agmen")
+    } else {
+        home.path().join("agmen")
+    };
+    std::fs::create_dir_all(&base).unwrap();
+    let path = base.join("agmend.db");
+    let run = || {
+        Command::new(env!("CARGO_BIN_EXE_agmend"))
+            .args(["store-schema", "--json"])
+            .env("HOME", home.path())
+            .env("XDG_STATE_HOME", home.path())
+            .output()
+            .unwrap()
+    };
+    assert!(!run().status.success());
+    assert!(!path.exists());
+    for version in [1, 99] {
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .pragma_update(None, "user_version", version)
+            .unwrap();
+        drop(connection);
+        let before = std::fs::read(&path).unwrap();
+        let entries = std::fs::read_dir(&base).unwrap().count();
+        let out = run();
+        assert!(out.status.success(), "{out:?}");
+        let answer: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(answer["stores"][0]["schema_version"], version);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(std::fs::read_dir(&base).unwrap().count(), entries);
+    }
+    let identity = base.join("identities/example");
+    std::fs::create_dir_all(identity).unwrap();
+    assert!(!run().status.success());
+}
+
+#[test]
 fn service_install_preserves_explicit_stable_path() {
     // A missing explicit target must reach validation, never the service manager.
     let out = agmend(&[

@@ -56,6 +56,20 @@ pub(crate) struct Core {
 /// The socket's file name in the state folder (agmen-client's, which the
 /// desktop app connects to).
 pub const SOCKET_NAME: &str = agmen_client::AGMEND_SOCKET;
+
+/// Read-only rollback snapshot of every existing daemon store.
+///
+/// # Errors
+/// Returns an error for missing stores, incomplete discovery or unavailable snapshots.
+pub fn store_snapshot(dir: &Path) -> Result<serde_json::Value, AgmendError> {
+    let stores = state::snapshot(dir).map_err(|source| AgmendError::Store {
+        path: dir.to_owned(),
+        source: Box::new(source),
+    })?;
+    Ok(
+        serde_json::json!({"stores": stores.into_iter().map(|(path, schema_version)| serde_json::json!({"path":path,"schema_version":schema_version})).collect::<Vec<_>>()}),
+    )
+}
 /// The most local API connections open at once; more are closed at once.
 const MAX_CONNECTIONS: usize = 64;
 /// How often a watched project's roster is re-read.

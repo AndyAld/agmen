@@ -172,6 +172,10 @@ pub(super) fn program(contents: &str) -> Result<std::path::PathBuf> {
 
 /// Decode the unit's quoting and C escapes; refuse executable expansions.
 fn exec_words(command: &str) -> Result<Vec<String>> {
+    unit_words(command, true)
+}
+
+fn unit_words(command: &str, executable: bool) -> Result<Vec<String>> {
     use anyhow::ensure;
     let mut words = Vec::new();
     let mut word = Vec::new();
@@ -223,7 +227,7 @@ fn exec_words(command: &str) -> Result<Vec<String>> {
     if started {
         words.push(String::from_utf8(word).context("ExecStart is not UTF-8")?);
     }
-    if let Some(first) = words.first_mut() {
+    if executable && let Some(first) = words.first_mut() {
         let mut program = String::new();
         let mut chars = first.chars();
         while let Some(ch) = chars.next() {
@@ -283,6 +287,13 @@ fn decode_escape(chars: &mut std::str::Chars<'_>) -> Result<Vec<u8>> {
 }
 
 pub(super) fn render(paths: &ServicePaths) -> Result<Unit> {
+    render_with_token(paths, None)
+}
+
+pub(super) fn render_with_token(
+    paths: &ServicePaths,
+    token: Option<&std::path::Path>,
+) -> Result<Unit> {
     let executable = executable(paths)?;
     let mut contents = String::new();
     append(
@@ -307,14 +318,67 @@ pub(super) fn render(paths: &ServicePaths) -> Result<Unit> {
         )?;
     }
     // shortcut: no automatic restart after a crash; revisit when Andy chooses a bounded restart policy.
-    append(
-        &mut contents,
-        "\"\nRestart=no\n\n[Install]\nWantedBy=default.target\n",
-    )?;
+    append(&mut contents, "\"\nRestart=no\n")?;
+    if let Some(token) = token {
+        append(&mut contents, "Environment=\"AGMEN_TOKEN_STORE_DIR=")?;
+        for ch in super::validate_path(token)?.chars() {
+            let mut utf8 = [0; 4];
+            append(
+                &mut contents,
+                match ch {
+                    '"' => "\\\"",
+                    '\\' => "\\\\",
+                    '%' => "%%",
+                    _ => ch.encode_utf8(&mut utf8),
+                },
+            )?;
+        }
+        append(&mut contents, "\"\n")?;
+    }
+    append(&mut contents, "\n[Install]\nWantedBy=default.target\n")?;
     Ok(Unit {
         path: paths.home.join(".config/systemd/user/agmend.service"),
         contents,
     })
+}
+
+pub(super) fn token_store(contents: &str) -> Result<Option<std::path::PathBuf>> {
+    let mut section = "";
+    let mut found = None;
+    for line in contents.lines().map(str::trim) {
+        if line.starts_with('[') {
+            section = line;
+        }
+        if section != "[Service]" {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once('=')
+            && key.trim() == "Environment"
+        {
+            if value.trim().is_empty() {
+                found = None;
+                continue;
+            }
+            for word in unit_words(value.trim(), false)? {
+                let mut decoded = String::new();
+                let mut chars = word.chars();
+                while let Some(ch) = chars.next() {
+                    if ch == '%' {
+                        anyhow::ensure!(
+                            chars.next() == Some('%'),
+                            "unresolved environment specifier"
+                        );
+                    }
+                    decoded.push(ch);
+                }
+                if let Some(path) = decoded.strip_prefix("AGMEN_TOKEN_STORE_DIR=") {
+                    anyhow::ensure!(found.is_none(), "duplicate token store environment");
+                    found = Some(path.into());
+                }
+            }
+        }
+    }
+    Ok(found)
 }
 
 #[cfg(test)]
@@ -322,6 +386,29 @@ mod tests {
     use super::*;
     use crate::service::ServicePaths;
     use std::path::PathBuf;
+
+    #[test]
+    fn systemd_token_store_accepts_assignment_whitespace() {
+        assert_eq!(
+            token_store("[Service]\nEnvironment = \"AGMEN_TOKEN_STORE_DIR=/private/tokens\"\n")
+                .unwrap(),
+            Some(PathBuf::from("/private/tokens"))
+        );
+    }
+
+    #[test]
+    fn systemd_token_store_honors_environment_reset() {
+        let configured =
+            "[Service]\nEnvironment=\"AGMEN_TOKEN_STORE_DIR=/private/old\"\nEnvironment=\n";
+        assert_eq!(token_store(configured).unwrap(), None);
+        assert_eq!(
+            token_store(&format!(
+                "{configured}Environment = \"AGMEN_TOKEN_STORE_DIR=/private/new\"\n"
+            ))
+            .unwrap(),
+            Some(PathBuf::from("/private/new"))
+        );
+    }
 
     #[test]
     fn systemd_renders_user_unit() {

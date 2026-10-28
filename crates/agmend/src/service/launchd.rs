@@ -169,6 +169,13 @@ fn container_text(node: roxmltree::Node<'_, '_>) -> Result<()> {
 }
 
 pub(super) fn render(paths: &ServicePaths) -> Result<Unit> {
+    render_with_token(paths, None)
+}
+
+pub(super) fn render_with_token(
+    paths: &ServicePaths,
+    token: Option<&std::path::Path>,
+) -> Result<Unit> {
     let executable = executable(paths)?;
     let mut contents = String::new();
     append(
@@ -190,6 +197,14 @@ pub(super) fn render(paths: &ServicePaths) -> Result<Unit> {
     )?;
     // shortcut: no automatic restart after a crash; revisit when Andy chooses a bounded restart policy.
     append(&mut contents, "  <key>KeepAlive</key><false/>\n")?;
+    if let Some(token) = token {
+        append(
+            &mut contents,
+            "  <key>EnvironmentVariables</key><dict><key>AGMEN_TOKEN_STORE_DIR</key><string>",
+        )?;
+        escape(&mut contents, super::validate_path(token)?)?;
+        append(&mut contents, "</string></dict>\n")?;
+    }
     let log = paths.home.join("Library/Logs/agmen/agmend.log");
     let log = super::validate_path(&log)?;
     for key in ["StandardOutPath", "StandardErrorPath"] {
@@ -204,6 +219,49 @@ pub(super) fn render(paths: &ServicePaths) -> Result<Unit> {
             .join("Library/LaunchAgents/dev.agmen.agmend.plist"),
         contents,
     })
+}
+
+pub(super) fn token_store(contents: &str) -> Result<Option<std::path::PathBuf>> {
+    let document = roxmltree::Document::parse_with_options(
+        contents,
+        roxmltree::ParsingOptions {
+            allow_dtd: true,
+            nodes_limit: 16384,
+            ..Default::default()
+        },
+    )?;
+    let mut found = None;
+    for node in document
+        .descendants()
+        .filter(|node| node.has_tag_name("key") && node.text() == Some("EnvironmentVariables"))
+    {
+        anyhow::ensure!(found.is_none(), "duplicate EnvironmentVariables");
+        let dict = node
+            .next_sibling_element()
+            .context("missing EnvironmentVariables value")?;
+        anyhow::ensure!(dict.has_tag_name("dict"), "invalid EnvironmentVariables");
+        let entries: Vec<_> = dict
+            .children()
+            .filter(roxmltree::Node::is_element)
+            .collect();
+        anyhow::ensure!(
+            entries.len().is_multiple_of(2),
+            "invalid environment dictionary"
+        );
+        let mut keys = std::collections::BTreeSet::new();
+        for pair in entries.as_chunks::<2>().0 {
+            anyhow::ensure!(
+                pair[0].has_tag_name("key") && pair[1].has_tag_name("string"),
+                "invalid environment entry"
+            );
+            let key = xml_text(pair[0]);
+            anyhow::ensure!(keys.insert(key.clone()), "duplicate environment key");
+            if key == "AGMEN_TOKEN_STORE_DIR" {
+                found = Some(xml_text(pair[1]).into());
+            }
+        }
+    }
+    Ok(found)
 }
 
 fn escape(contents: &mut String, text: &str) -> Result<()> {

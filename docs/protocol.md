@@ -327,4 +327,33 @@ user manager, install fails before writing the unit and names foreground
 hello plus ready handshake share a 120 s deadline. Each manager process has at
 most 10 s and 64 KiB per output stream. Installation reports success only after
 the running daemon matches the installing helper's release version and answers
-ready.
+ready. After manager start, readiness has its own 30 s ceiling inside that
+120 s deadline. A version mismatch fails immediately with expected and actual
+versions. A timeout reports `agmend did not become ready within 30 s` and the
+daemon log path.
+
+`agmend service install --token-store-dir <absolute-path>` selects an explicit
+file token store for the service. The directory must be owned by the user with
+mode 0700; token files must be regular files with mode 0600. launchd stores
+`AGMEN_TOKEN_STORE_DIR` in `EnvironmentVariables`; systemd stores it in an
+escaped `Environment=` entry. Reinstall preserves an existing selection when
+the option is omitted. This does not copy tokens from Keychain.
+
+`agmen install-receipt --json` reads the shared install receipt at
+`state_dir()/install-receipt.json`. The result is
+`{"channel":"shell","version":"0.1.0","owned_paths":["/absolute/path"]}`,
+or JSON `null` if absent, both with exit status 0. Invalid or unreadable receipts
+return nonzero and block ownership changes. The shared typed reader reads at
+most 64 KiB and requires absolute owned paths. On macOS the fixed location is
+`~/Library/Application Support/agmen/install-receipt.json`; on Linux it is
+`${XDG_STATE_HOME:-~/.local/state}/agmen/install-receipt.json`, with the HOME
+fallback for relative XDG paths.
+
+`agmend store-schema --json` reports
+`{"stores":[{"path":"/absolute/state/agmend.db","schema_version":2}]}`.
+The snapshot includes daemon metadata and every discovered identity store,
+including schemas newer than this build. It reuses the read-only store
+inspection above, without creating or migrating stores or changing journal
+mode. Missing stores, incomplete discovery and inspection failures return
+nonzero. Compare the complete path and version set before rollback; a failed
+snapshot does not establish rollback safety.

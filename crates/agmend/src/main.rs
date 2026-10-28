@@ -14,8 +14,9 @@ use service::ServiceAction;
 const USAGE: &str = "usage: agmend [--help | -h]\n       agmend service <install | uninstall | status>\n\n\
                      Runs the agmen daemon in the foreground until Ctrl-C. \
                      Leave it running while you use agmen-desktop.\n\n\
-                     service install [--program <absolute-path>]\n\
-                     service status [--json]";
+                     service install [--program <absolute-path>] [--token-store-dir <absolute-path>]\n\
+                     service status [--json]\n\
+                     agmend store-schema --json";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Command {
@@ -23,10 +24,42 @@ enum Command {
     Help,
     Service(ServiceAction),
     InstallProgram(std::path::PathBuf),
+    InstallOptions {
+        program: Option<std::path::PathBuf>,
+        token: std::path::PathBuf,
+    },
+    StoreSchema,
 }
 
 fn parse(args: &[OsString]) -> Result<Command, String> {
+    if args.len() >= 2
+        && args[0] == "service"
+        && args[1] == "install"
+        && args.iter().any(|arg| arg == "--token-store-dir")
+    {
+        let mut program = None;
+        let mut token = None;
+        for pair in args[2..].chunks(2) {
+            let [flag, value] = pair else {
+                return Err("service install option requires a path".into());
+            };
+            if flag == "--program" && program.is_none() {
+                program = Some(value.into());
+            } else if flag == "--token-store-dir" && token.is_none() {
+                token = Some(value.into());
+            } else {
+                return Err("unknown or repeated service install option".into());
+            }
+        }
+        return Ok(Command::InstallOptions {
+            program,
+            token: token.ok_or("missing token store directory")?,
+        });
+    }
     match args {
+        [command, flag] if command == "store-schema" && flag == "--json" => {
+            Ok(Command::StoreSchema)
+        }
         [] => Ok(Command::Foreground),
         [arg] if arg == "--help" || arg == "-h" => Ok(Command::Help),
         [command, action, flag]
@@ -51,7 +84,7 @@ fn parse(args: &[OsString]) -> Result<Command, String> {
 
 fn main() -> ExitCode {
     // One argument beyond a valid form is sufficient to reject excess input.
-    let args: Vec<_> = std::env::args_os().skip(1).take(5).collect();
+    let args: Vec<_> = std::env::args_os().skip(1).take(7).collect();
     match parse(&args) {
         Ok(Command::Foreground) => {}
         Ok(Command::Help) => {
@@ -63,6 +96,21 @@ fn main() -> ExitCode {
         }
         Ok(Command::InstallProgram(program)) => {
             return service_exit(ServiceAction::Install, Some(program));
+        }
+        Ok(Command::InstallOptions { program, token }) => {
+            return output_exit(service::execute_with_token(
+                ServiceAction::Install,
+                program,
+                Some(token),
+            ));
+        }
+        Ok(Command::StoreSchema) => {
+            return output_exit((|| -> Result<String> {
+                Ok(format!(
+                    "{}\n",
+                    agmend::store_snapshot(&agmen_client::state_dir()?)?
+                ))
+            })());
         }
         Err(err) => {
             eprintln!("agmend: {err}\n{USAGE}");
@@ -105,7 +153,11 @@ fn main() -> ExitCode {
 }
 
 fn service_exit(action: ServiceAction, program: Option<std::path::PathBuf>) -> ExitCode {
-    match service::execute(action, program) {
+    output_exit(service::execute(action, program))
+}
+
+fn output_exit(result: Result<String>) -> ExitCode {
+    match result {
         Ok(message) => {
             print!("{message}");
             ExitCode::SUCCESS
@@ -144,6 +196,22 @@ mod tests {
     use super::*;
     use std::ffi::OsString;
     use std::os::unix::ffi::OsStringExt as _;
+
+    #[test]
+    fn token_store_option_parses_with_program() {
+        let args: Vec<_> = [
+            "service",
+            "install",
+            "--program",
+            "/active/agmend",
+            "--token-store-dir",
+            "/private/tokens",
+        ]
+        .map(OsString::from)
+        .into();
+        assert!(parse(&args).is_ok());
+        assert!(parse(&[OsString::from("store-schema"), OsString::from("--json")]).is_ok());
+    }
 
     #[test]
     fn service_commands_parse() {

@@ -5,6 +5,7 @@
 mod account;
 pub(crate) mod claim;
 pub(crate) mod inbox;
+mod install_receipt;
 mod join;
 pub(crate) mod lanes;
 pub(crate) mod post;
@@ -25,6 +26,8 @@ pub(crate) struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Read the shell install receipt without changing ownership.
+    InstallReceipt(install_receipt::ReceiptArgs),
     /// Sign in to a hub with your browser (device login).
     Login(account::LoginArgs),
     /// Sign out: forget your tokens on this machine.
@@ -96,6 +99,7 @@ impl Cli {
     /// Runs the parsed command.
     pub(crate) async fn run(self) -> Result<()> {
         match self.command {
+            Command::InstallReceipt(args) => install_receipt::run(args),
             Command::Login(args) => account::login(args).await,
             Command::Logout => account::logout().await,
             Command::Whoami => account::whoami().await,
