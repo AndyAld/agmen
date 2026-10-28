@@ -40,6 +40,7 @@ mod me;
 mod mqtt;
 mod numbering;
 mod presence;
+mod projects;
 mod refs;
 mod replay;
 mod roles;
