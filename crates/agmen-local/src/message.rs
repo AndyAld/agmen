@@ -50,6 +50,10 @@ pub enum ErrorCode {
     Hub,
     /// The params are malformed.
     BadRequest,
+    /// The caller is forbidden from performing this action.
+    Forbidden,
+    /// The request refers to stale state.
+    StaleRequest,
     /// A code a newer daemon added. The response still parses, so its `id`
     /// and message survive; the original code string is not kept.
     #[serde(other)]
@@ -115,5 +119,47 @@ impl Response {
                 },
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn local_error_codes_round_trip() -> Result<(), serde_json::Error> {
+        for (id, code, text, message) in [
+            (7, ErrorCode::Forbidden, "forbidden", "action is forbidden"),
+            (
+                8,
+                ErrorCode::StaleRequest,
+                "stale_request",
+                "request is stale",
+            ),
+        ] {
+            let response = Response::err(id, code, message);
+            let wire = serde_json::to_value(&response)?;
+            assert_eq!(
+                wire,
+                json!({"id": id, "error": {"code": text, "message": message}})
+            );
+            assert_eq!(serde_json::from_value::<Response>(wire)?, response);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn unknown_local_error_still_parses() -> Result<(), serde_json::Error> {
+        let wire = json!({
+            "id": 9,
+            "error": {"code": "future_local_error", "message": "future failure"}
+        });
+        let response: Response = serde_json::from_value(wire)?;
+        assert_eq!(
+            response,
+            Response::err(9, ErrorCode::Unknown, "future failure")
+        );
+        Ok(())
     }
 }

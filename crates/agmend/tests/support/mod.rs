@@ -72,9 +72,13 @@ pub fn roster(status: &str) -> Value {
 #[derive(Default)]
 pub struct HubState {
     pub feed: Mutex<Vec<Value>>,
+    pub inboxes: Mutex<std::collections::BTreeMap<String, Vec<Value>>>,
+    tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     pub roster: Mutex<Value>,
     /// Bodies posted to `messages`, with their Authorization header.
     pub posts: Mutex<Vec<(String, Value)>>,
+    /// Calls to the identity mint endpoint.
+    pub mint_calls: AtomicUsize,
     /// When set, `messages` answers this status and body.
     pub post_answer: Mutex<Option<(StatusCode, Value)>>,
     /// How many `events` connections were opened.
@@ -89,6 +93,24 @@ pub struct HubState {
 }
 
 impl HubState {
+    /// Injects one stamped event, bounded to 2000 rows per fixture stream.
+    pub fn inject(&self, message: Value) {
+        serde_json::from_value::<agmen_proto::StampedEnvelope>(message.clone()).unwrap();
+        let stream = message["stream"].as_str().unwrap();
+        if stream == "feed" {
+            let mut feed = self.feed.lock().unwrap();
+            assert!(feed.len() < 2000);
+            feed.push(message.clone());
+        } else {
+            let mut inboxes = self.inboxes.lock().unwrap();
+            let rows = inboxes.entry(stream.to_owned()).or_default();
+            assert!(rows.len() < 2000);
+            rows.push(message.clone());
+        }
+        if let Some(live) = self.live.lock().unwrap().as_ref() {
+            let _receivers = live.send(message);
+        }
+    }
     /// Appends a feed message and sends it to every open events stream.
     pub fn publish(&self, body: &str) -> u64 {
         let mut feed = self.feed.lock().unwrap();
@@ -126,6 +148,16 @@ impl HubState {
 pub struct FakeHub {
     pub url: String,
     pub state: Arc<HubState>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for FakeHub {
+    fn drop(&mut self) {
+        self.task.abort();
+        for task in self.state.tasks.lock().unwrap().iter() {
+            task.abort();
+        }
+    }
 }
 
 fn authorized(hub: &HubState, headers: &HeaderMap) -> Result<(), Box<HttpResponse>> {
@@ -189,10 +221,20 @@ async fn replay_route(
     if let Err(denied) = authorized(&hub, &headers) {
         return *denied;
     }
-    assert_eq!((project.as_str(), stream.as_str()), (PROJECT, "feed"));
+    assert_eq!(project, PROJECT);
     let limit = query.limit.unwrap_or(500);
     assert!((1..=500).contains(&limit), "limit {limit}");
-    let feed = hub.feed.lock().unwrap();
+    let rows = if stream == "feed" {
+        hub.feed.lock().unwrap().clone()
+    } else {
+        hub.inboxes
+            .lock()
+            .unwrap()
+            .get(&stream)
+            .cloned()
+            .unwrap_or_default()
+    };
+    let feed = &rows;
     let head = feed.len() as u64;
     let messages: Vec<Value> = feed
         .iter()
@@ -226,31 +268,36 @@ async fn events_route(
     }
     hub.event_streams.fetch_add(1, Ordering::SeqCst);
     hub.event_afters.lock().unwrap().push(query.after.clone());
-    let after = query
+    let after: std::collections::BTreeMap<String, u64> = query
         .after
         .unwrap_or_default()
         .split(',')
-        .find_map(|entry| {
-            entry
-                .strip_prefix("feed:")
-                .map(|s| s.parse::<u64>().unwrap())
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| {
+            let (stream, seq) = entry.rsplit_once(':').unwrap();
+            (stream.to_owned(), seq.parse().unwrap())
         })
-        .unwrap_or(0);
+        .collect();
     let (replay, mut live) = {
         let feed = hub.feed.lock().unwrap();
+        let inboxes = hub.inboxes.lock().unwrap();
         let mut slot = hub.live.lock().unwrap();
         let live = slot
-            .get_or_insert_with(|| broadcast::channel(1024).0)
+            .get_or_insert_with(|| broadcast::channel(2048).0)
             .subscribe();
         let replay: Vec<Value> = feed
             .iter()
-            .skip(usize::try_from(after).unwrap())
+            .chain(inboxes.values().flatten())
+            .filter(|message| {
+                message["seq"].as_u64().unwrap()
+                    > *after.get(message["stream"].as_str().unwrap()).unwrap_or(&0)
+            })
             .cloned()
             .collect();
         (replay, live)
     };
     let (tx, rx) = mpsc::channel::<Value>(1024);
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         for message in replay {
             if tx.send(message).await.is_err() {
                 return;
@@ -262,10 +309,15 @@ async fn events_route(
             }
         }
     });
+    hub.tasks.lock().unwrap().push(task);
     let events = ReceiverStream::new(rx).map(|message| {
         Ok::<_, Infallible>(
             Event::default()
-                .id(format!("feed:{}", message["seq"]))
+                .id(format!(
+                    "{}:{}",
+                    message["stream"].as_str().unwrap(),
+                    message["seq"]
+                ))
                 .data(message.to_string()),
         )
     });
@@ -303,6 +355,13 @@ pub async fn fake_hub() -> FakeHub {
     let state = Arc::new(HubState::default());
     *state.roster.lock().unwrap() = roster("online");
     let app = Router::new()
+        .route(
+            "/v1/identities",
+            post(|State(hub): State<Arc<HubState>>| async move {
+                hub.mint_calls.fetch_add(1, Ordering::SeqCst);
+                StatusCode::FORBIDDEN
+            }),
+        )
         .route("/v1/projects/{p}/state", get(state_route))
         .route("/v1/projects/{p}/streams/{s}", get(replay_route))
         .route("/v1/projects/{p}/events", get(events_route))
@@ -310,10 +369,11 @@ pub async fn fake_hub() -> FakeHub {
         .with_state(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     FakeHub {
         url: format!("http://{addr}/"),
         state,
+        task,
     }
 }
 
@@ -323,6 +383,38 @@ pub struct Home {
 }
 
 impl Home {
+    /// Seeds metadata through SQLite and credentials through the directory store.
+    pub fn seed_identity(&self, hub: &str, id: &str, token: &str) {
+        use agmen_client::TokenKey;
+        let origin = url::Url::parse(hub).unwrap();
+        let identity = id.parse().unwrap();
+        let metadata = json!({
+            "hub_url":hub, "broker_url":"mqtt://127.0.0.1:9",
+            "tenant":"tenant01", "project":PROJECT, "identity_id":id,
+            "owner_id":HUMAN, "handle":format!("andy/{id}"), "kind":"agent"
+        });
+        rusqlite::Connection::open(self.database())
+            .unwrap()
+            .execute(
+                "INSERT INTO identities VALUES (?1,?2,?3,?4,?5)",
+                rusqlite::params![
+                    origin.origin().ascii_serialization(),
+                    id,
+                    HUMAN,
+                    PROJECT,
+                    metadata.to_string()
+                ],
+            )
+            .unwrap();
+        let key = TokenKey::new(&"https://agmend.invalid".parse().unwrap(), &identity).unwrap();
+        self.tokens().set(&key, &json!({"origin":origin.origin().ascii_serialization(), "owner_id":HUMAN, "local_token":token}).to_string()).unwrap();
+        self.tokens()
+            .set(
+                &TokenKey::new(&origin, &identity).unwrap(),
+                "fake-identity-hub-credential",
+            )
+            .unwrap();
+    }
     /// A home where the CLI signed in at `hub_url`.
     pub async fn signed_in(hub_url: &str) -> Self {
         Self::signed_in_for(hub_url, 3600).await
@@ -353,6 +445,10 @@ impl Home {
         self.dir.path().join("agmend.sock")
     }
 
+    pub fn database(&self) -> PathBuf {
+        self.socket().with_file_name("agmend.db")
+    }
+
     pub fn login_file(&self) -> PathBuf {
         self.dir.path().join("login.json")
     }
@@ -378,9 +474,27 @@ impl Home {
 pub struct Daemon {
     pub hub: FakeHub,
     pub home: Home,
+    task: Option<tokio::task::JoinHandle<()>>,
+    stop: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl Drop for Daemon {
+    fn drop(&mut self) {
+        if let Some(task) = &self.task {
+            task.abort();
+        }
+    }
 }
 
 impl Daemon {
+    pub async fn seeded() -> Self {
+        let hub = fake_hub().await;
+        let home = Home::signed_in(&hub.url).await;
+        drop(Agmend::bind(home.config()).unwrap());
+        home.seed_identity(&hub.url, "agent001", &"a".repeat(64));
+        home.seed_identity(&hub.url, "agent002", &"b".repeat(64));
+        Self::run(hub, home)
+    }
     pub async fn start() -> Self {
         let hub = fake_hub().await;
         let home = Home::signed_in(&hub.url).await;
@@ -397,8 +511,55 @@ impl Daemon {
 
     fn run(hub: FakeHub, home: Home) -> Self {
         let agmend = Agmend::bind(home.config()).unwrap();
-        tokio::spawn(agmend.serve());
-        Self { hub, home }
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let task = Some(tokio::spawn(agmend.serve_until(async {
+            let _stopped = stopped.await;
+        })));
+        Self {
+            hub,
+            home,
+            task,
+            stop: Some(stop),
+        }
+    }
+
+    pub async fn pause(&mut self) {
+        if let Some(task) = self.task.take() {
+            self.stop.take().unwrap().send(()).unwrap();
+            tokio::time::timeout(Duration::from_secs(5), task)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+    }
+
+    pub fn resume(&mut self) {
+        assert!(self.task.is_none());
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        self.stop = Some(stop);
+        self.task = Some(tokio::spawn(
+            Agmend::bind(self.home.config())
+                .unwrap()
+                .serve_until(async {
+                    let _stopped = stopped.await;
+                }),
+        ));
+    }
+
+    pub async fn restart(&mut self) {
+        self.pause().await;
+        self.resume();
+    }
+
+    pub async fn stop(mut self) {
+        self.pause().await;
+        self.hub.task.abort();
+        assert!((&mut self.hub.task).await.as_ref().is_err());
+        let tasks = std::mem::take(&mut *self.hub.state.tasks.lock().unwrap());
+        for task in tasks {
+            task.abort();
+            assert!(task.await.map_or_else(|e| e.is_cancelled(), |()| true));
+        }
     }
 
     /// A connection that has said hello.
@@ -449,6 +610,10 @@ impl Client {
 
     pub async fn read(&mut self) -> Response {
         frame::read_async(&mut self.stream).await.unwrap()
+    }
+
+    pub async fn try_read(&mut self) -> Result<Response, frame::FrameError> {
+        frame::read_async(&mut self.stream).await
     }
 
     pub async fn call(&mut self, method: &str, params: Value) -> Response {

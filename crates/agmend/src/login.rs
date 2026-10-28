@@ -11,8 +11,11 @@
 
 use std::path::PathBuf;
 
-use agmen_client::{HumanTokens, Login, LoginError, TokenStore, human_tokens};
+use agmen_client::{HumanTokens, Login, LoginError, TokenKey, TokenStore, human_tokens};
+use agmen_local::{ApiError, ErrorCode};
+use agmen_proto::IdentityId;
 use tokio::sync::Mutex;
+use url::Url;
 
 /// The signed-in person's login and access token.
 #[derive(Debug)]
@@ -24,6 +27,20 @@ pub(crate) struct Credentials {
 }
 
 impl Credentials {
+    /// Reads a credential off the async worker, without exposing store errors or values.
+    pub(crate) async fn token(
+        &self,
+        origin: &Url,
+        id: &IdentityId,
+    ) -> Result<Option<String>, ApiError> {
+        let key = TokenKey::new(origin, id).map_err(|_| token_error())?;
+        let store = self.store.clone();
+        tokio::task::spawn_blocking(move || store.get(&key))
+            .await
+            .map_err(|_| token_error())?
+            .map_err(|_| token_error())
+    }
+
     pub(crate) fn new(login_file: PathBuf, store: TokenStore, http: reqwest::Client) -> Self {
         Self {
             login_file,
@@ -72,5 +89,12 @@ impl Credentials {
     /// renewal by the CLI), so the next call reads the store again.
     pub(crate) async fn forget(&self) {
         *self.cache.lock().await = None;
+    }
+}
+
+fn token_error() -> ApiError {
+    ApiError {
+        code: ErrorCode::Unauthorized,
+        message: "could not read identity credential".into(),
     }
 }

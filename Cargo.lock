@@ -250,6 +250,7 @@ dependencies = [
  "anyhow",
  "axum",
  "reqwest",
+ "rusqlite",
  "rustix",
  "rustls",
  "serde",
