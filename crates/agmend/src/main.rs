@@ -63,11 +63,19 @@ async fn run() -> Result<()> {
     tracing::info!(socket = %agmend.socket().display(), "agmend is listening");
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .context("listening for SIGTERM")?;
-    tokio::select! {
-        () = agmend.serve() => {}
-        result = tokio::signal::ctrl_c() => result.context("listening for SIGINT")?,
-        _ = term.recv() => {}
-    }
+    // serve_until joins the collectors and sessions before it returns, so a
+    // signal stops them within their 10 s bound instead of dropping them.
+    let mut signal_result = Ok(());
+    agmend
+        .serve_until(async {
+            tokio::select! {
+                result = tokio::signal::ctrl_c() => {
+                    signal_result = result.context("listening for SIGINT");
+                }
+                _ = term.recv() => {}
+            }
+        })
+        .await;
     tracing::info!("agmend stopped");
-    Ok(())
+    signal_result
 }

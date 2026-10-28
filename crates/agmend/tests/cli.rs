@@ -52,3 +52,84 @@ fn help_prints_usage() {
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert!(stdout.starts_with("usage: agmend"), "{stdout}");
 }
+
+/// Starts the daemon in a temporary state folder, sends it `signal`, and
+/// returns its exit status and stderr. The daemon logs when it listens and
+/// when it stops; a run that does neither within 10 s is killed.
+fn stop_with(signal: &str) -> (std::process::ExitStatus, String) {
+    use std::io::{BufRead as _, BufReader, Read as _};
+
+    // The socket lives under HOME, and macOS limits a socket path to 103
+    // bytes, which the default temp folder's name already exceeds.
+    let state = tempfile::Builder::new()
+        .prefix("agd")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_agmend"))
+        .env("HOME", state.path())
+        .env("XDG_STATE_HOME", state.path())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stderr = BufReader::new(child.stderr.take().unwrap());
+    let (listening, ready) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let mut seen = String::new();
+        let mut line = String::new();
+        let mut announced = false;
+        // At most 1000 lines, so a noisy child cannot keep this thread alive.
+        for _ in 0..1000 {
+            line.clear();
+            if stderr.read_line(&mut line).unwrap_or(0) == 0 {
+                break;
+            }
+            seen.push_str(&line);
+            if !announced && line.contains("agmend is listening") {
+                announced = true;
+                let _sent = listening.send(());
+            }
+        }
+        let mut rest = String::new();
+        let _read = stderr.read_to_string(&mut rest);
+        seen.push_str(&rest);
+        seen
+    });
+    if ready.recv_timeout(Duration::from_secs(10)).is_err() {
+        child.kill().unwrap();
+        child.wait().unwrap();
+        panic!("agmend never listened: {:?}", reader.join());
+    }
+    let sent = Command::new("kill")
+        .args([signal, &child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(sent.success());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() > deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("agmend ignored {signal}: {:?}", reader.join());
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    (status, reader.join().unwrap())
+}
+
+#[test]
+fn sigterm_stops_the_daemon_after_its_shutdown_path() {
+    let (status, log) = stop_with("-TERM");
+    assert!(status.success(), "{status:?}\n{log}");
+    assert!(log.contains("agmend stopped"), "{log}");
+}
+
+#[test]
+fn sigint_stops_the_daemon_after_its_shutdown_path() {
+    let (status, log) = stop_with("-INT");
+    assert!(status.success(), "{status:?}\n{log}");
+    assert!(log.contains("agmend stopped"), "{log}");
+}
