@@ -6,6 +6,7 @@
 //! file format), adds `.agmen/` to the worktree's `info/exclude`, and then
 //! checks that the file passes the trust test every command applies.
 
+use std::collections::BTreeSet;
 use std::io::Write as _;
 use std::path::Path;
 
@@ -54,6 +55,9 @@ pub(crate) struct JoinArgs {
     /// The kind of identity.
     #[arg(long, value_enum, default_value = "agent")]
     kind: Kind,
+    /// Resolve a local role; its kind determines the identity kind.
+    #[arg(long, value_name = "NAME", conflicts_with = "kind")]
+    role: Option<String>,
 }
 
 impl JoinArgs {
@@ -62,6 +66,36 @@ impl JoinArgs {
             self.invite = Some(read_stdin_invite().await?);
         }
         Ok(self)
+    }
+
+    async fn permissions(&self, root: &Path) -> Result<(Kind, Option<agmen_proto::RoleSpec>)> {
+        let Some(name) = &self.role else {
+            return Ok((self.kind, None));
+        };
+        let catalog = super::role::catalog(Some(root.to_owned())).await?;
+        let role = super::role::find(&catalog, name)?;
+        let kind = match role.kind {
+            agmen_roles::Kind::Agent => Kind::Agent,
+            agmen_roles::Kind::Coordinator => Kind::Coordinator,
+            agmen_roles::Kind::Listener => {
+                return Err(Fail::usage("listeners are started by agmend, not agmen join").into());
+            }
+        };
+        if !role.stripped.is_empty() {
+            eprintln!(
+                "role ceiling stripped: {}",
+                clean(&role.stripped.join(", "))
+            );
+        }
+        Ok((
+            kind,
+            Some(agmen_proto::RoleSpec {
+                role: role.role.name.parse().context("the role's name")?,
+                verbs: role.verbs.clone(),
+                edits: role.edits.clone().into(),
+                role_sha256: role.sha256.parse().context("the resolved role's SHA-256")?,
+            }),
+        ))
     }
 }
 
@@ -76,6 +110,29 @@ struct Mint<'a> {
     handle: &'a str,
     project: &'a str,
     kind: Kind,
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    role: Option<agmen_proto::RoleSpec>,
+}
+
+impl Mint<'_> {
+    async fn send(&self, human: &Human) -> Result<Minted> {
+        let handle = self.handle;
+        match human.api.post(&["identities"], self).await {
+            Ok(minted) => Ok(minted),
+            Err(err) => Err(match refusal(&err) {
+                Some(r) if r.code == "bad_handle" || (r.status == 422 && r.code == "bad_role") => {
+                    Fail::usage(clean(&r.description)).into()
+                }
+                Some(r) if r.code == "handle_taken" => {
+                    anyhow::anyhow!("{handle} is taken in this project; pick another with --handle")
+                }
+                Some(r) if r.code == "coordinator_role_required" => anyhow::anyhow!(
+                    "a coordinator identity needs the coordinator or admin role in the project"
+                ),
+                _ => err.context("minting the identity failed"),
+            }),
+        }
+    }
 }
 
 /// `POST /v1/identities`'s answer.
@@ -86,6 +143,38 @@ struct Minted {
     tenant: String,
     project: String,
     token: String,
+    verbs: Option<BTreeSet<String>>,
+}
+
+impl Minted {
+    fn report_verb_changes(&self, role: Option<&agmen_proto::RoleSpec>) -> Result<()> {
+        let Some(role) = role else {
+            return Ok(());
+        };
+        let granted = self
+            .verbs
+            .as_ref()
+            .context("the hub omitted the role's capped verbs")?;
+        if granted != &role.verbs {
+            let removed = role
+                .verbs
+                .difference(granted)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(" ");
+            let added = granted
+                .difference(&role.verbs)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(" ");
+            eprintln!(
+                "hub verb changes: removed [{}]; added [{}]",
+                clean(&removed),
+                clean(&added)
+            );
+        }
+        Ok(())
+    }
 }
 
 /// `agmen join`.
@@ -93,6 +182,7 @@ pub(crate) async fn join(args: JoinArgs) -> Result<()> {
     let args = args.with_stdin().await?;
     let cwd = std::env::current_dir().context("reading the working directory")?;
     let root = git::toplevel(&cwd).await?;
+    let (kind, role) = args.permissions(&root).await?;
     let file = root.join(IDENTITY_DIR).join(IDENTITY_FILE);
     let existing = file.clone();
     let present = blocking(move || {
@@ -142,23 +232,11 @@ pub(crate) async fn join(args: JoinArgs) -> Result<()> {
     let request = Mint {
         handle: &handle,
         project: &project,
-        kind: args.kind,
+        kind,
+        role,
     };
-    let minted: Minted = match human.api.post(&["identities"], &request).await {
-        Ok(minted) => minted,
-        Err(err) => {
-            return Err(match refusal(&err) {
-                Some(r) if r.code == "bad_handle" => Fail::usage(clean(&r.description)).into(),
-                Some(r) if r.code == "handle_taken" => {
-                    anyhow::anyhow!("{handle} is taken in this project; pick another with --handle")
-                }
-                Some(r) if r.code == "coordinator_role_required" => anyhow::anyhow!(
-                    "a coordinator identity needs the coordinator or admin role in the project"
-                ),
-                _ => err.context("minting the identity failed"),
-            });
-        }
-    };
+    let minted = request.send(&human).await?;
+    minted.report_verb_changes(request.role.as_ref())?;
     let identity = IdentityFile {
         tenant: minted.tenant.parse().context("the hub's tenant id")?,
         project: minted.project.parse().context("the hub's project id")?,
@@ -167,6 +245,9 @@ pub(crate) async fn join(args: JoinArgs) -> Result<()> {
         owner_id: me.id,
         hub_url: human.login.hub_url.clone(),
         broker_url: broker,
+        role: request.role.as_ref().map(|role| role.role.clone()),
+        role_sha256: request.role.as_ref().map(|role| role.role_sha256.clone()),
+        verbs: request.role.as_ref().and(minted.verbs),
     };
     let key = TokenKey::new(&identity.hub_url, &identity.identity_id).context("the hub URL")?;
     // The exclude goes first: once the file exists, every command applies

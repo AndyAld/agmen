@@ -1,13 +1,16 @@
-//! The twelve tools `agmen mcp` serves. Each is a thin layer over what the
+//! The role-filtered tools `agmen mcp` serves, with twelve for legacy or
+//! unjoined worktrees and an additional review tool for roles with REVIEW.
+//! Each is a thin layer over what the
 //! matching `agmen` command does (`crate::cmd`), sending through the
 //! server's held session instead of a one-shot one, and answering with
 //! text instead of printing it. Input schemas come from schemars, with the
 //! agmen-proto types (item keys, lane names, message ids, severities)
 //! giving their own patterns.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use agmen_proto::{ItemKey, LaneName, MessageId, Payload, Severity};
+use agmen_proto::{Finding, ItemKey, LaneName, MessageId, Payload, Severity, Verdict};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Implementation, ServerCapabilities, ServerConfig};
 use rmcp::{ServerHandler, tool, tool_handler, tool_router};
@@ -34,6 +37,41 @@ found. Talk with post, ask, answer and dm; wherever a tool names an identity, a 
 andy/sol works. A tool that sends answers recorded #<seq> (<stream>) once the hub has the \
 message, queued id=<id> (not yet recorded) while it is still on its way (agmen keeps sending it), \
 or rejected: <reason>. Never send a rejected message again unchanged.";
+
+/// Tool visibility at startup; absence of verbs preserves the legacy list.
+pub(crate) fn hidden_tools(verbs: Option<&BTreeSet<String>>) -> Vec<&'static str> {
+    const GATED: [(&str, &str); 8] = [
+        ("claim", "CLAIM"),
+        ("release", "RELEASE"),
+        ("done", "DONE"),
+        ("ask", "ASK"),
+        ("answer", "ANSWER"),
+        ("dm", "DM"),
+        ("found", "FOUND"),
+        ("review", "REVIEW"),
+    ];
+    GATED
+        .into_iter()
+        .filter_map(|(tool, verb)| {
+            let visible = verbs.map_or(tool != "review", |verbs| verbs.contains(verb));
+            (!visible).then_some(tool)
+        })
+        .collect()
+}
+
+/// `review`'s arguments. A review always threads under a DONE.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct ReviewParams {
+    /// The id of the DONE being reviewed.
+    reply_to: MessageId,
+    /// Whether the work passes or needs changes.
+    verdict: Verdict,
+    /// Findings with their severity, path and trigger.
+    #[serde(default)]
+    findings: Vec<Finding>,
+    /// The execution paths traced during review.
+    traced: Option<String>,
+}
 
 /// `post`'s arguments.
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -181,6 +219,27 @@ fn recorded_line(at: &Recorded) -> String {
 
 #[tool_router(vis = "pub(super)")]
 impl Server {
+    #[tool(
+        description = "Review a DONE by its id with a verdict, findings and the paths traced. Sends REVIEW."
+    )]
+    async fn review(&self, Parameters(params): Parameters<ReviewParams>) -> CallToolResult {
+        self.respond(move |live: Arc<Live>| async move {
+            let out = Outgoing {
+                reply_to: Some(params.reply_to),
+                ..Outgoing::new(
+                    Payload::Review {
+                        verdict: params.verdict,
+                        findings: params.findings,
+                        traced: params.traced,
+                    },
+                    String::new(),
+                )
+            };
+            Ok(recorded_line(&send(&live.agent, live.via(), out).await?))
+        })
+        .await
+    }
+
     #[tool(
         description = "Post a message to the project with any protocol verb (FYI, STATUS, \
         ALERT and the rest). Answers recorded, queued or rejected."
@@ -374,6 +433,45 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn review_params_require_reply_to() {
+        assert!(serde_json::from_value::<ReviewParams>(json!({"verdict":"pass"})).is_err());
+        let params = serde_json::from_value::<ReviewParams>(json!({
+            "reply_to":"01JBX6Q4T7W3C2M8Y9K5N0P1RS", "verdict":"pass"
+        }))
+        .unwrap();
+        assert!(params.findings.is_empty());
+        assert!(params.traced.is_none());
+    }
+
+    #[test]
+    fn hidden_tools_follow_verbs() {
+        assert_eq!(hidden_tools(None), ["review"]);
+        let gated = [
+            ("claim", "CLAIM"),
+            ("release", "RELEASE"),
+            ("done", "DONE"),
+            ("ask", "ASK"),
+            ("answer", "ANSWER"),
+            ("dm", "DM"),
+            ("found", "FOUND"),
+            ("review", "REVIEW"),
+        ];
+        let empty = std::collections::BTreeSet::new();
+        assert_eq!(hidden_tools(Some(&empty)), gated.map(|(tool, _)| tool));
+        let all = gated.map(|(_, verb)| verb.to_owned()).into_iter().collect();
+        assert!(hidden_tools(Some(&all)).is_empty());
+        for (allowed, verb) in gated {
+            let verbs = [verb.to_owned()].into_iter().collect();
+            let hidden = hidden_tools(Some(&verbs));
+            assert!(!hidden.contains(&allowed));
+            assert_eq!(hidden.len(), 7);
+            for always in ["post", "inbox", "state", "lanes", "check_path"] {
+                assert!(!hidden.contains(&always));
+            }
+        }
+    }
 
     /// Every string an `enum` or `const` in `schema` allows.
     fn allowed(schema: &Value, out: &mut Vec<String>) {

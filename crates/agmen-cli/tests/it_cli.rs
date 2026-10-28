@@ -18,6 +18,132 @@ use support::{Home, Ingest, Member, WAIT, Worktree, assert_exit, run, stderr, st
 use tokio::io::{AsyncBufReadExt as _, BufReader};
 use tokio::process::{Child, ChildStdout};
 
+// shortcut: Ctx exposes no per-test database handle, so these join tests check
+// files only. Add hub-row assertions when the harness exposes its pool.
+#[tokio::test(flavor = "multi_thread")]
+async fn it_join_with_role_mints_spec() {
+    run(Ingest::On, |ctx| async move {
+        let human = ctx.hub.seed_human(&ctx.topics, Role::Member).await.unwrap();
+        let home = Home::new();
+        home.sign_in(&ctx.base, &human);
+        let wt = Worktree::new(&home);
+        let out = home
+            .run(
+                &wt.path(),
+                &[
+                    "join",
+                    "--project",
+                    ctx.topics.project().as_str(),
+                    "--handle",
+                    "rev",
+                    "--role",
+                    "reviewer",
+                ],
+            )
+            .await;
+        assert_exit(&out, 0);
+        let file: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(wt.path().join(".agmen/identity.json")).unwrap())
+                .unwrap();
+        assert_eq!(file["role"], "reviewer");
+        let sha = file["role_sha256"].as_str().unwrap();
+        assert_eq!(sha.len(), 64);
+        assert!(
+            sha.bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        );
+        let verbs: std::collections::BTreeSet<String> =
+            serde_json::from_value(file["verbs"].clone()).unwrap();
+        assert_eq!(
+            verbs,
+            [
+                "HELLO", "BYE", "FYI", "ASK", "ANSWER", "ACK", "STATUS", "DM", "ALERT", "FOUND",
+                "REVIEW"
+            ]
+            .map(str::to_owned)
+            .into_iter()
+            .collect()
+        );
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn it_join_with_coordinator_role_needs_membership() {
+    run(Ingest::On, |ctx| async move {
+        let human = ctx.hub.seed_human(&ctx.topics, Role::Member).await.unwrap();
+        let home = Home::new();
+        home.sign_in(&ctx.base, &human);
+        let wt = Worktree::new(&home);
+        let out = home
+            .run(
+                &wt.path(),
+                &[
+                    "join",
+                    "--project",
+                    ctx.topics.project().as_str(),
+                    "--handle",
+                    "coord",
+                    "--role",
+                    "coordinator",
+                ],
+            )
+            .await;
+        assert_exit(&out, 1);
+        assert!(
+            stderr(&out).contains(
+                "a coordinator identity needs the coordinator or admin role in the project"
+            )
+        );
+        assert!(!wt.path().join(".agmen/identity.json").exists());
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn it_join_unknown_role_fails_before_minting() {
+    run(Ingest::On, |ctx| async move {
+        let human = ctx.hub.seed_human(&ctx.topics, Role::Member).await.unwrap();
+        let home = Home::new();
+        home.sign_in(&ctx.base, &human);
+        let wt = Worktree::new(&home);
+        let out = home
+            .run(
+                &wt.path(),
+                &[
+                    "join",
+                    "--project",
+                    ctx.topics.project().as_str(),
+                    "--handle",
+                    "rev",
+                    "--role",
+                    "nope",
+                ],
+            )
+            .await;
+        assert_exit(&out, 2);
+        assert!(stderr(&out).contains("available roles:"));
+        assert!(!wt.path().join(".agmen/identity.json").exists());
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn it_join_without_role_is_unchanged() {
+    run(Ingest::On, |ctx| async move {
+        let member = ctx.member(Role::Member, "plain", "agent").await;
+        let file: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(member.wt.path().join(".agmen/identity.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(file.as_object().unwrap().len(), 7);
+        for key in ["role", "role_sha256", "verbs"] {
+            assert!(file.get(key).is_none());
+        }
+    })
+    .await;
+}
+
 /// Starts `cmd` with stdout piped and stderr in the test output.
 fn spawn(cmd: Command) -> Child {
     let mut cmd = tokio::process::Command::from(cmd);
