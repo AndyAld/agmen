@@ -123,6 +123,8 @@ fn assert_unframeable(resp: &reqwest::Response, no_store: bool) {
 #[tokio::test]
 async fn it_responses_refuse_framing() {
     run(|ctx| async move {
+        // Move the whole context: capturing only `ctx.http` drops the fake GitHub.
+        let ctx = ctx;
         let start = ctx
             .http
             .post(ctx.hub.url("/v1/auth/device"))
@@ -845,6 +847,128 @@ async fn it_device_upsert_refusal_keeps_interval() {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(body["error"], "authorization_pending");
         assert_eq!(ctx.github.token_polls(), 1);
+    })
+    .await;
+}
+
+/// `GET /v1/me` must answer quickly while the hub waits on a slow GitHub:
+/// it needs a pool connection, so it fails if sign-in holds them all.
+async fn me_answers_fast(ctx: &Ctx, token: &str) {
+    let started = std::time::Instant::now();
+    let resp = ctx
+        .http
+        .get(ctx.hub.url("/v1/me"))
+        .bearer_auth(token)
+        .timeout(std::time::Duration::from_secs(1))
+        .send()
+        .await
+        .expect("GET /v1/me must not wait on sign-in's GitHub calls");
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
+}
+
+async fn rows(ctx: &Ctx, table: &'static str) -> i64 {
+    sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT count(*) FROM {table}")))
+        .fetch_one(&ctx.pool)
+        .await
+        .unwrap()
+}
+
+/// More sign-ins than the hub's 10 pooled connections.
+const MANY: usize = 14;
+const SLOW_GITHUB: std::time::Duration = std::time::Duration::from_secs(3);
+
+#[tokio::test]
+async fn it_concurrent_device_starts_do_not_starve_the_pool() {
+    run(|ctx| async move {
+        let token = login(&ctx, ANDY, "Andy").await;
+        ctx.github.set_delay(SLOW_GITHUB);
+        let starts: Vec<_> = (0..MANY)
+            .map(|_| {
+                let request = ctx.http.post(ctx.hub.url("/v1/auth/device"));
+                tokio::spawn(async move { request.send().await.map(|resp| resp.status()) })
+            })
+            .collect();
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        me_answers_fast(&ctx, &token).await;
+        for start in starts {
+            let status = tokio::time::timeout(std::time::Duration::from_secs(15), start)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(status, StatusCode::OK);
+        }
+        assert_eq!(rows(&ctx, "device_authorizations").await, MANY as i64);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn it_concurrent_device_approvals_do_not_starve_the_pool() {
+    run(|ctx| async move {
+        let token = login(&ctx, ANDY, "Andy").await;
+        let mut codes = Vec::new();
+        for n in 0..MANY {
+            let start = start_device_login(&ctx).await;
+            ctx.github
+                .approve(&start.user_code, 9000 + n as u64, &format!("person-{n}"));
+            codes.push(start.device_code);
+        }
+        ctx.github.set_delay(SLOW_GITHUB);
+        let polls: Vec<_> = codes
+            .iter()
+            .map(|code| {
+                let request = ctx.http.post(ctx.hub.url("/v1/auth/token")).form(&[
+                    ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+                    ("device_code", code.as_str()),
+                ]);
+                tokio::spawn(async move { request.send().await.map(|resp| resp.status()) })
+            })
+            .collect();
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        me_answers_fast(&ctx, &token).await;
+        for poll in polls {
+            let status = tokio::time::timeout(std::time::Duration::from_secs(20), poll)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(status, StatusCode::OK);
+        }
+        assert_eq!(rows(&ctx, "device_authorizations").await, 0);
+        assert_eq!(
+            rows(&ctx, "humans").await,
+            MANY as i64 + 1,
+            "one human per approved account"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn it_second_poll_during_a_slow_github_call_answers_pending() {
+    run(|ctx| async move {
+        let start = start_device_login(&ctx).await;
+        ctx.github.set_delay(std::time::Duration::from_secs(2));
+        let first = {
+            let request = ctx.http.post(ctx.hub.url("/v1/auth/token")).form(&[
+                ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+                ("device_code", start.device_code.as_str()),
+            ]);
+            tokio::spawn(async move { request.send().await.map(|resp| resp.status()) })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let started = std::time::Instant::now();
+        let (status, body) = poll_device_token(&ctx, &start.device_code).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "authorization_pending");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "a second poll must not wait for the first poll's GitHub call"
+        );
+        assert_eq!(ctx.github.token_polls(), 1);
+        assert_eq!(first.await.unwrap().unwrap(), StatusCode::BAD_REQUEST);
     })
     .await;
 }

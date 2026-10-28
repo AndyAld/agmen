@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use axum::extract::{DefaultBodyLimit, Form, Path, State};
 use axum::http::{HeaderMap, StatusCode, header};
@@ -45,6 +46,7 @@ struct Accounts {
     refusal: Option<String>,
     device_status: Option<u16>,
     polls: usize,
+    delay: Duration,
     device_form: Option<Vec<(String, String)>>,
     token_form: Option<Vec<(String, String)>>,
     device_accept: Option<String>,
@@ -60,6 +62,7 @@ impl Default for Accounts {
             refusal: None,
             device_status: None,
             polls: 0,
+            delay: Duration::ZERO,
             device_form: None,
             token_form: None,
             device_accept: None,
@@ -188,6 +191,12 @@ impl FakeGithub {
             .insert(login.to_ascii_lowercase(), (id, login.to_owned()));
     }
 
+    /// Makes every device, token and user answer wait this long first, as a
+    /// slow GitHub does. Requests are counted before they wait.
+    pub fn set_delay(&self, delay: Duration) {
+        lock(&self.accounts).delay = delay;
+    }
+
     /// The number of token requests received.
     #[must_use]
     pub fn token_polls(&self) -> usize {
@@ -213,6 +222,13 @@ impl FakeGithub {
     }
 }
 
+async fn pause(accounts: &Shared) {
+    let delay = lock(accounts).delay;
+    if !delay.is_zero() {
+        tokio::time::sleep(delay).await;
+    }
+}
+
 fn accepts_json(headers: &HeaderMap) -> bool {
     headers
         .get(header::ACCEPT)
@@ -230,6 +246,7 @@ async fn device_code(
     headers: HeaderMap,
     Form(form): Form<Vec<(String, String)>>,
 ) -> Response {
+    pause(&accounts).await;
     let mut accounts = lock(&accounts);
     accounts.device_accept = headers
         .get(header::ACCEPT)
@@ -280,8 +297,9 @@ async fn access_token(
     headers: HeaderMap,
     Form(form): Form<Vec<(String, String)>>,
 ) -> Response {
+    lock(&accounts).polls += 1;
+    pause(&accounts).await;
     let mut accounts = lock(&accounts);
-    accounts.polls += 1;
     let valid = field(&form, "client_id") == Some(FAKE_GITHUB_CLIENT_ID)
         && field(&form, "grant_type") == Some("urn:ietf:params:oauth:grant-type:device_code");
     let code = field(&form, "device_code").unwrap_or_default().to_owned();
@@ -321,6 +339,7 @@ async fn access_token(
 }
 
 async fn user(State((accounts, _)): State<(Shared, Url)>, headers: HeaderMap) -> Response {
+    pause(&accounts).await;
     if headers.get(header::USER_AGENT).is_none() {
         return (StatusCode::FORBIDDEN, "User-Agent required").into_response();
     }
