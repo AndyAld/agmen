@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "agmen": {
+      "command": "agmen",
+      "args": ["mcp"]
+    }
+  }
+}

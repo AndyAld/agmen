@@ -6,7 +6,7 @@ agmen gives a shared software effort one place where people and their agents ann
 
 *agmen* is Latin for an army on the march: a column moving together, each unit in its place.
 
-> **Status: design stage.** The design, protocol, and first build plan are written and approved. No code has landed yet. The first deliverable is a Claude Code plugin MVP on EMQX and a thin hub ([docs/plans/mvp.md](docs/plans/mvp.md)). Commands and configuration shown below are the planned interface and may change as the spikes report.
+> **Status: MVP built, in final testing.** The first deliverable, a Claude Code plugin on EMQX and a thin hub ([docs/plans/mvp.md](docs/plans/mvp.md)), is built: the hub (`crates/agmen-hub`), the client library (`crates/agmen-client`), the `agmen` CLI with its `agmen mcp` server (`crates/agmen-cli`), and the Claude Code plugin (`mods/agmen-claude`). The [CLI](#cli) and [MCP server](#mcp-server-for-any-agent) sections below describe what is built. Everything else in this README (agmend, the listener, the terminal UI, the web console, the desktop app, packs, push approval) is the planned design for later milestones and may change.
 
 ## Contents
 
@@ -74,7 +74,7 @@ The full evidence and the reasoning behind each decision are in [docs/design.md]
 
 ```
  Claude Code + agmen mod ──($.process.spawn `agmen watch --json`, $.process.run `agmen ...`)─┐
- OpenCode / Codex / Claude ──(MCP stdio: `agmen mcp --identity <id>`)──────────────────────────┤
+ OpenCode / Codex / Claude ──(MCP stdio: `agmen mcp`)──────────────────────────────────────────┤
  GPUI desktop app ──(local API)────────────────────────────────────────────────────────────────┤
  agmen (vim-style terminal UI, in a terminal or over SSH) ──(local API)────────────────────────┤
                                                                                                  ▼
@@ -166,38 +166,45 @@ The full specification, including delivery guarantees, rejection reasons, the HT
 
 ## Clients
 
-### CLI (planned interface)
+### CLI
+
+Each worktree acts as one identity: `agmen join` writes `.agmen/identity.json` at the worktree root, and every other command reads it. Wherever a command names an identity, a handle such as `andy/sol` or an id works.
 
 ```sh
-agmen login                                   # browser or device-code login
-agmen join <invite-code>                      # accept a project invite
-agmen identity mint andy/sol --project <id>   # an agent identity under your account
-agmen chat "rebasing main, hold pushes for 10 min" --all   # message the swarm, as you
-agmen chat                                    # follow the room live; each line you type is sent
-agmen post FYI --as <identity> "joined; looking at B-412"
-agmen dm <identity> --as <identity> "can you take the API half?"
-agmen watch --json                            # one JSON event per line
-agmen claim B-412                             # M2
-agmen done B-412 --branch fix/... --commit ...  # M2
-agmen settings push-approval owner --project <id>   # M2: require your OK for your agents' pushes
-agmen approve <request>                       # M2: answer a push request
-agmen launch --agent claude --item B-412 --lane L-UI --budget 5.00   # M3
-agmen                                         # M3: the vim-style terminal UI and agent view
-agmen listener start --project <id>           # M3: your small-model listener
-agmen delegate approve <id>                   # M3: allow a delegation over your caps
-agmen pack add github:owner/repo              # M3: review a pack, approve, install into your agents
-agmen pack update <name>                      # M3: show the diff since your approval; approve again
-agmen pack attach github:owner/repo@<sha> --project <id>   # M3: admins recommend a pack to the project
+agmen login --hub <url>                       # browser device login
+agmen logout                                  # forget your tokens on this machine
+agmen whoami                                  # you, your projects and roles, this worktree's identity
+agmen invite --project <id> --role member     # a single-use invite (admins and coordinators)
+agmen join <invite>                           # join this worktree as a new identity of yours
+agmen join --project <id> --handle sol        # or join a project you already belong to
+agmen leave                                   # revoke this worktree's identity
+agmen post FYI "joined; looking at B-412" --mention all   # any verb
+agmen ask "who owns the API half?" --to adam/coord
+agmen answer <ask-id> "I do"
+agmen dm andy/sol "can you take the API half?"   # 1 to 8 recipients, then the text
+agmen inbox                                   # new messages for this identity, marked read
+agmen watch --json                            # follow the feed and inbox, one JSON object per line
+agmen claim B-412                             # answers with the GRANT or DENY
+agmen heartbeat                               # renew the leases of this worktree's claims
+agmen release B-412 --reason "blocked on the API"
+agmen done B-412 --commit HEAD                # agmen fills in the branch and changed paths
+agmen found "map truncation hides rows" --lane L-UI --severity med
+agmen assign B-412 andy/sol                   # coordinators
+agmen lanes                                   # show the lanes
+agmen lanes set lanes.toml                    # replace them from a TOML or JSON file
+agmen items                                   # items and who holds each
+agmen check-path -- src/ui/map.ts             # may this identity edit these paths?
+agmen mcp                                     # the MCP server, on stdin and stdout
 ```
 
-Exit codes: `0` recorded, `2` usage error, `3` not logged in, `4` rejected, `5` queued but not yet recorded.
+Publishing commands take `--wait <seconds>` (default 5). Exit codes: `0` recorded, `2` usage error, `3` not logged in or not joined, `4` rejected, `5` queued but not yet recorded.
 
 ### MCP server for any agent
 
-Claude Code (`--mcp-config` file or project `.mcp.json`):
+`agmen mcp` is a stdio MCP server that acts as the identity of the worktree it starts in. The Claude Code plugin starts it for you. Without the plugin, Claude Code reads it from `.mcp.json` in the worktree:
 
 ```json
-{ "mcpServers": { "agmen": { "command": "agmen", "args": ["mcp", "--identity", "<identity_id>"] } } }
+{ "mcpServers": { "agmen": { "command": "agmen", "args": ["mcp"] } } }
 ```
 
 Codex (`~/.codex/config.toml`):
@@ -205,10 +212,10 @@ Codex (`~/.codex/config.toml`):
 ```toml
 [mcp_servers.agmen]
 command = "agmen"
-args = ["mcp", "--identity", "<identity_id>"]
+args = ["mcp"]
 ```
 
-OpenCode reads the same command from the `mcp` section of `opencode.json`. Tools in M1: `post`, `chat`, `read_chat`, `ask`, `answer`, `dm`, `inbox`, `state`, and every result ends with the messages pending for that agent; M2 adds `claim`, `release`, `done`, `lanes`, `check_path`, `request_push`.
+OpenCode reads the same command from the `mcp` section of `opencode.json`. `--identity <id>` is optional: with it, the server acts only when the worktree's identity file names that id, and otherwise every tool answers that it is not joined. Tools: `post`, `ask`, `answer`, `dm`, `inbox`, `state`, `claim`, `release`, `done`, `found`, `lanes`, `check_path`. Setup for each client and what each tool answers: [docs/mcp-setup.md](docs/mcp-setup.md).
 
 ### Claude Code mod
 
@@ -223,13 +230,14 @@ Built on the Claude Code hooks API (tested against 2.1.310):
 | Wake-ups | An idle session starts a turn when it is assigned work, gets a DM, or is mentioned in chat (including `@all`). The model reads it as "The agmen plugin sent a message", never as your words, and wake-ups are rate limited |
 | Guards | Edits outside your lanes are refused with a reason; when push approval is on, a raw `git push` waits for your OK. Every guard fails closed |
 
-Install from this repository's marketplace once the mod ships (M3):
+Install the CLI and the plugin from this repository:
 
 ```sh
+cargo install --locked --git https://git.groupdrive.xyz/groupdrive/agmen agmen-cli
 claude plugin marketplace add https://git.groupdrive.xyz/groupdrive/agmen.git
 ```
 
-then `/plugin install agmen@<marketplace>` at the Claude Code prompt.
+then `/plugin install agmen@agmen` at the Claude Code prompt. The marketplace (`.claude-plugin/marketplace.json`) and the plugin (`mods/agmen-claude`) are both named `agmen`.
 
 ### Terminal UI
 
@@ -271,7 +279,7 @@ A native Rust app on Zed's GPUI. It shows everything the web console does, read 
 
 | Milestone | Scope | Status |
 |---|---|---|
-| **MVP** | Claude Code plugin on EMQX and a thin hub: posts and DMs with confirmed delivery, wake-ups, claims and the lane edit guard | Next |
+| **MVP** | Claude Code plugin on EMQX and a thin hub: posts and DMs with confirmed delivery, wake-ups, claims and the lane edit guard | Built, in final testing |
 | **M0** | Workspace scaffold; spikes on the broker, the MQTT client, gapless numbering, the Claude Code mod, Windows local IPC, and the listener runtime and model | Spikes folded into the MVP |
 | **M1** | Hub, broker, daemon, CLI, MCP: logins, identities, typed messages, acknowledgements, replay, DMs, presence, swarm chat; first deploy | Planned |
 | **M2** | Ledger and push approval: lanes, items, atomic claims, loans, the push approval setting, alerts | Planned |
@@ -285,7 +293,7 @@ The current plan is [docs/plans/mvp.md](docs/plans/mvp.md); [docs/plans/m0-m1.md
 
 ## Repository layout
 
-Planned; created in M0.
+Built so far: `agmen-proto`, `agmen-client`, `agmen-cli`, `agmen-hub`, `mods/agmen-claude`, `deploy/dev` and `schema/`. The rest is planned.
 
 ```
 crates/
@@ -297,15 +305,13 @@ crates/
   agmen-hub/      hosted service
 apps/desktop/     GPUI desktop app (Rust)
 apps/web/         web console (TypeScript, React), served by the hub
-mods/agmen-claude/ Claude Code mod and marketplace manifest
-deploy/           local docker compose; Kubernetes manifests
+mods/agmen-claude/ Claude Code mod (its marketplace manifest is .claude-plugin/ at the root)
+deploy/dev/       local docker compose (cluster manifests live in agmen-kubernetes)
 schema/           generated JSON Schema and TypeScript types
 docs/             design, protocol, ADRs, plans
 ```
 
 ## Development
-
-These steps apply once M0 Task 1 lands.
 
 **Prerequisites**
 - Rust 1.99.1 (pinned by `rust-toolchain.toml`; `rustup` installs it on first build)
@@ -316,11 +322,12 @@ These steps apply once M0 Task 1 lands.
 **Run the dev stack and tests**
 
 ```sh
-deploy/dev/init.sh                            # once: local secrets in deploy/dev/.secrets
+deploy/dev/init.sh                            # local secrets in deploy/dev/.secrets; rerun after deploy/dev changes
 docker compose -f deploy/dev/compose.yaml up -d --wait
 set -a; . deploy/dev/.secrets/dev.env; set +a  # AGMEN_IT_* for integration tests
 cargo nextest run --workspace                 # unit tests
 cargo nextest run --workspace --profile it    # integration tests against the dev stack
+cargo nextest run --workspace --profile it-restart  # tests that restart EMQX, one at a time
 ```
 
 **The gate every change passes**
@@ -338,7 +345,7 @@ For the mod: `claude plugin validate mods/agmen-claude`, `tsc -p mods/agmen-clau
 
 ## Deployment
 
-The hosted beta runs on the GroupDrive RKE2 cluster through its existing GitOps flow: Jenkins builds the hub image into Nexus (`docker.groupdrive.xyz`), and ArgoCD syncs manifests from `groupdrive/Kubernetes` (`agmen-env/`). EMQX (one node) and Postgres run as StatefulSets on Ceph RBD with pinned image tags, secrets come from Vault through the Vault Secrets Operator, and HAProxy ingress with Let's Encrypt serves the API and MQTT over WebSocket on port 443. Postgres is dumped nightly to Ceph object storage. Details: [docs/design.md](docs/design.md#69-hosting).
+agmen runs on its own Kubernetes cluster, image registry, secret store and domain, separate from GroupDrive's. The cluster manifests live in their own repository, `agmen-kubernetes` (`https://git.groupdrive.xyz/groupdrive/agmen-kubernetes`, mirrored to the private `github.com/AndyAld/agmen-kubernetes`), which ArgoCD in agmen's cluster syncs. Jenkins builds the hub image from this repository (`crates/agmen-hub/Dockerfile`) and pushes it to agmen's registry (`AGMEN_REGISTRY`). EMQX (one node) and Postgres run as StatefulSets with pinned image tags, the pods read Kubernetes Secrets that any secret store can fill, and Postgres is dumped nightly to S3 compatible storage. Details: `agmen-env/README.md` in agmen-kubernetes, and [docs/design.md](docs/design.md#69-hosting).
 
 ## Contributing
 

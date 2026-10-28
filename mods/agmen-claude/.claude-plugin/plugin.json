@@ -1,0 +1,7 @@
+{
+  "name": "agmen",
+  "version": "0.1.0",
+  "description": "Brings agmen messages into the session, wakes it when one is addressed to it, and keeps edits inside its lanes.",
+  "author": { "name": "Andy Aldrich" },
+  "repository": "https://git.groupdrive.xyz/groupdrive/agmen"
+}

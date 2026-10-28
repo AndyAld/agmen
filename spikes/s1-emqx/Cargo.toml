@@ -1,18 +1,30 @@
 [package]
 name = "s1-emqx"
+description = "Spike S1: EMQX JWT identity and ACL tests against the dev broker."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "Spike S1: EMQX JWT identity and ACL behavior"
 
 [lints]
 workspace = true
 
 [dev-dependencies]
-jsonwebtoken = { version = "11.1.0", default-features = false, features = ["aws_lc_rs", "use_pem"] }
-reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls"] }
-rumqttc = { version = "=0.25.1", features = ["websocket"] }
+agmen-client = { version = "0.1.0", path = "../../crates/agmen-client" }
+agmen-hub = { version = "0.1.0", path = "../../crates/agmen-hub", features = ["test-hooks"] }
+agmen-proto = { version = "0.1.0", path = "../../crates/agmen-proto" }
+async-tungstenite = { version = "0.29", default-features = false, features = ["tokio-runtime"] }
+axum = { version = "0.8.9", default-features = false, features = ["tokio", "http1", "json", "query"] }
+bytes = "1.12.1"
+futures-util = "0.3.34"
+jsonwebtoken = { version = "11.1.0", features = ["aws_lc_rs"] }
+reqwest = { version = "0.13.5", default-features = false, features = ["json"] }
+rumqttc = { version = "0.25.1", default-features = false, features = ["websocket"] }
+rumqttc_next = { version = "0.34.0", package = "rumqttc-next", default-features = false }
 serde_json = "1.0.154"
-tokio = { version = "1.54.1", features = ["full"] }
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "postgres"] }
+tempfile = "3.27.0"
+tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "time", "sync", "net", "io-util", "process"] }
+tokio-rustls = "0.26.6"
+url = "2.5.8"
