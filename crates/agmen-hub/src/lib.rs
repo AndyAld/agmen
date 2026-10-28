@@ -39,7 +39,9 @@ mod me;
 mod mqtt;
 mod numbering;
 mod presence;
+mod refs;
 mod replay;
+mod roles;
 mod rollcall;
 mod secrets_scan;
 mod state;
@@ -61,6 +63,7 @@ pub use identities::{BROKER_TOKEN_TTL, CLIENT_ID_SUFFIXES, HumanId, Identity};
 pub use ingest::{HUB_IDENTITY, HubPost, IngestError, PostError, Posted};
 pub use mqtt::{Messaging, MessagingError};
 pub use numbering::{NumberingError, next_seq};
+pub use roles::cap_verbs;
 #[cfg(feature = "test-hooks")]
 pub use test_hooks::{HookError, SeededHuman};
 

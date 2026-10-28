@@ -1,10 +1,14 @@
 //! Identities: minting a person's agents and coordinators, their broker
 //! tokens, and revocation.
 
+use std::collections::BTreeSet;
 use std::fmt;
 use std::time::Duration;
 
-use agmen_proto::{IdentityId, IdentityKind, ProjectId, TenantId, Timestamp, Topics};
+use agmen_proto::{
+    EditScope, IdentityId, IdentityKind, ProjectId, RoleName, RoleSpec, Sha256Hex, TenantId,
+    Timestamp, Topics,
+};
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -62,7 +66,7 @@ pub struct Identity {
     pub tenant: TenantId,
     /// The one project it works in.
     pub project: ProjectId,
-    /// `agent` or `coordinator`.
+    /// `agent`, `coordinator` or `listener`.
     pub kind: IdentityKind,
     /// Its display name, `<owner handle>/<name>`.
     pub handle: String,
@@ -94,6 +98,7 @@ impl Identity {
         let kind = match kind.as_str() {
             "agent" => IdentityKind::Agent,
             "coordinator" => IdentityKind::Coordinator,
+            "listener" => IdentityKind::Listener,
             other => {
                 return Err(ApiError::stored(UnknownKind(other.to_owned())));
             }
@@ -117,7 +122,7 @@ impl Identity {
 #[error("unknown identity kind {0:?} in the database")]
 struct UnknownKind(String);
 
-/// The kinds a person may mint in the MVP (no listeners: ruling R10).
+/// The kinds a person may mint.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum MintKind {
@@ -126,6 +131,8 @@ pub(crate) enum MintKind {
     Agent,
     /// Needs the coordinator or admin role in the project.
     Coordinator,
+    /// At most one live listener per owner and project.
+    Listener,
 }
 
 impl MintKind {
@@ -133,12 +140,12 @@ impl MintKind {
         match self {
             Self::Agent => "agent",
             Self::Coordinator => "coordinator",
+            Self::Listener => "listener",
         }
     }
 }
 
-/// `POST /v1/identities` body. Unknown fields such as `delegated_by` are
-/// refused.
+/// `POST /v1/identities` body. Unknown fields are refused.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct MintRequest {
@@ -146,6 +153,12 @@ pub(crate) struct MintRequest {
     project: ProjectId,
     #[serde(default)]
     kind: MintKind,
+    role: Option<RoleName>,
+    verbs: Option<BTreeSet<String>>,
+    edits: Option<EditScope>,
+    role_sha256: Option<Sha256Hex>,
+    agent: Option<String>,
+    delegated_by: Option<IdentityId>,
 }
 
 #[derive(Debug, Serialize)]
@@ -157,6 +170,44 @@ pub(crate) struct Minted {
     project: String,
     /// The identity's own hub token, shown once.
     token: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verbs: Option<BTreeSet<String>>,
+}
+
+impl MintRequest {
+    fn permissions(&self) -> Result<Option<RoleSpec>, ApiError> {
+        match (&self.role, &self.verbs, &self.edits, &self.role_sha256) {
+            (None, None, None, None) => Ok(None),
+            (Some(role), Some(verbs), Some(edits), Some(sha)) => {
+                crate::lanes::validate_edits(edits)?;
+                if self.kind == MintKind::Listener && *edits != EditScope::None {
+                    return Err(bad_role("a listener's edits must be none"));
+                }
+                let kind = match self.kind {
+                    MintKind::Agent => IdentityKind::Agent,
+                    MintKind::Coordinator => IdentityKind::Coordinator,
+                    MintKind::Listener => IdentityKind::Listener,
+                };
+                let mut verbs = crate::roles::cap_verbs(kind, verbs);
+                if kind == IdentityKind::Listener && role.as_str() != "coordinator" {
+                    verbs.remove("ASSIGN");
+                }
+                Ok(Some(RoleSpec {
+                    role: role.clone(),
+                    verbs,
+                    edits: edits.clone(),
+                    role_sha256: sha.clone(),
+                }))
+            }
+            _ => Err(bad_role(
+                "role, verbs, edits and role_sha256 must be supplied together",
+            )),
+        }
+    }
+}
+
+fn bad_role(message: &str) -> ApiError {
+    ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "bad_role", message)
 }
 
 /// Whether `name` may follow `<owner>/` in a child handle.
@@ -174,6 +225,10 @@ fn is_child_name(name: &str) -> bool {
 /// `POST /v1/identities` (human token): mints an identity owned by the
 /// caller in a project they belong to. Its handle must be
 /// `<caller's handle>/<name>`.
+#[expect(
+    clippy::too_many_lines,
+    reason = "keep mint authorization, validation and its single insert together"
+)]
 pub(crate) async fn mint(
     State(hub): State<Hub>,
     caller: Caller,
@@ -217,18 +272,58 @@ pub(crate) async fn mint(
             ),
         ));
     }
-    if request.kind == MintKind::Coordinator && role < Role::Coordinator {
+    let coordinator = request.kind == MintKind::Coordinator
+        || (request.kind == MintKind::Listener
+            && request
+                .role
+                .as_ref()
+                .is_some_and(|role| role.as_str() == "coordinator"));
+    if coordinator && role < Role::Coordinator {
         return Err(ApiError::forbidden(
             "coordinator_role_required",
             "minting a coordinator needs the coordinator role in the project",
         ));
     }
 
+    let permissions = request.permissions()?;
+    if request
+        .agent
+        .as_ref()
+        .is_some_and(|agent| agent.len() > agmen_proto::MAX_HELLO_FIELD_BYTES)
+    {
+        return Err(bad_role("agent is too long"));
+    }
+    let verbs = permissions.as_ref().map(|spec| spec.verbs.clone());
+    let edits = permissions
+        .as_ref()
+        .map(|spec| serde_json::to_value(&spec.edits))
+        .transpose()
+        .map_err(ApiError::stored)?;
+
     let id = new_id()?;
     let mut tx = hub.pool().begin().await?;
+    if let Some(listener) = &request.delegated_by {
+        // Hold the listener through the worker insert. A revocation that
+        // already holds the row wins, and its committed state is rechecked.
+        let valid: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM identities WHERE id=$1 AND owner_human_id=$2
+             AND project_id=$3 AND kind='listener' AND revoked_at IS NULL FOR UPDATE",
+        )
+        .bind(listener.as_str())
+        .bind(human.as_str())
+        .bind(request.project.as_str())
+        .fetch_optional(&mut *tx)
+        .await?;
+        if request.kind != MintKind::Agent || valid.is_none() {
+            return Err(bad_role(
+                "delegated_by must name a live listener of this owner and project for an agent worker",
+            ));
+        }
+    }
     let inserted = sqlx::query(
-        "INSERT INTO identities (id, tenant_id, project_id, kind, handle, owner_human_id)
-         VALUES ($1, $2, $3, $4, $5, $6)",
+        "INSERT INTO identities (id, tenant_id, project_id, kind, handle, owner_human_id,
+          role, verbs, edits, role_sha256, agent, delegated_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
     )
     .bind(&id)
     .bind(&tenant)
@@ -236,11 +331,28 @@ pub(crate) async fn mint(
     .bind(request.kind.as_str())
     .bind(&request.handle)
     .bind(human.as_str())
+    .bind(permissions.as_ref().map(|spec| spec.role.as_str()))
+    .bind(
+        verbs
+            .as_ref()
+            .map(|set| set.iter().cloned().collect::<Vec<_>>()),
+    )
+    .bind(edits)
+    .bind(permissions.as_ref().map(|spec| spec.role_sha256.as_str()))
+    .bind(&request.agent)
+    .bind(request.delegated_by.as_ref().map(IdentityId::as_str))
     .execute(&mut *tx)
     .await;
     match inserted {
         Ok(_) => {}
         Err(err) if is_unique_violation(&err) => {
+            if matches!(&err, sqlx::Error::Database(db) if db.constraint() == Some("identities_one_listener"))
+            {
+                return Err(ApiError::conflict(
+                    "listener_exists",
+                    "this owner already has a live listener in this project",
+                ));
+            }
             return Err(ApiError::conflict(
                 "handle_taken",
                 format!(
@@ -265,6 +377,7 @@ pub(crate) async fn mint(
             tenant,
             project: request.project.into(),
             token,
+            verbs,
         }),
     ))
 }
