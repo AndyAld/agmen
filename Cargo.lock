@@ -246,6 +246,7 @@ dependencies = [
  "agmen-client",
  "agmen-local",
  "agmen-proto",
+ "agmen-roles",
  "anyhow",
  "axum",
  "reqwest",

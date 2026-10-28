@@ -25,6 +25,12 @@ const OUTPUT_CAP: u64 = 4 * 1024 * 1024;
 const LOGIN_PATH_MARKER: &str = "__AGMEN_LOGIN_PATH_8F3C21__";
 
 #[derive(Debug, Clone)]
+pub(crate) struct RoleRun {
+    pub(crate) tools: String,
+    pub(crate) prompt_file: PathBuf,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct RunSpec {
     pub(crate) cwd: PathBuf,
     pub(crate) prompt: String,
@@ -36,6 +42,7 @@ pub(crate) struct RunSpec {
     pub(crate) owner_handle: String,
     pub(crate) owner_id: agmen_proto::IdentityId,
     pub(crate) owner_only: bool,
+    pub(crate) role: Option<RoleRun>,
 }
 
 impl RunSpec {
@@ -93,6 +100,14 @@ impl RunSpec {
         }
         if let Some(model) = &self.model {
             args.extend(["--model".into(), model.clone()]);
+        }
+        if let Some(role) = &self.role {
+            args.extend([
+                "--tools".into(),
+                role.tools.clone(),
+                "--append-system-prompt-file".into(),
+                role.prompt_file.to_string_lossy().into_owned(),
+            ]);
         }
         args
     }

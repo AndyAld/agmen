@@ -9,6 +9,482 @@ use serde_json::{Value, json};
 
 use crate::managed::Managed;
 
+fn role_file(path: impl AsRef<std::path::Path>) -> std::io::Result<String> {
+    use std::io::Read as _;
+    let mut text = String::new();
+    std::fs::File::open(path)?
+        .take(64 * 1024 + 1)
+        .read_to_string(&mut text)?;
+    assert!(text.len() <= 64 * 1024);
+    Ok(text)
+}
+
+async fn role_fixture() -> (Fixture, Arc<Mutex<Vec<Value>>>) {
+    let mut fixture = Fixture::new().await;
+    fixture.hub.abort();
+    let _stopped = tokio::time::timeout(std::time::Duration::from_secs(1), &mut fixture.hub)
+        .await
+        .unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let captured = requests.clone();
+    let app = axum::Router::new().route("/v1/identities", axum::routing::post(move |axum::Json(body): axum::Json<Value>| {
+        let captured = captured.clone();
+        async move {
+            captured.lock().unwrap().push(body.clone());
+            if body["handle"] == "owner/reject" {
+                return (axum::http::StatusCode::UNPROCESSABLE_ENTITY, axum::Json(json!({"error":"bad_role","error_description":"role permissions were refused"}))).into_response();
+            }
+            axum::Json(json!({"id":"agent001","handle":body["handle"],"tenant":"tenant01","project":"project1","token":"fake-agent-token","verbs":["FYI"]})).into_response()
+        }
+    })).route("/v1/projects/{project}/state", axum::routing::get(|| async { axum::Json(json!({"value":[]})) }));
+    let listener = tokio::net::TcpListener::bind(fixture.hub_url.socket_addrs(|| None).unwrap()[0])
+        .await
+        .unwrap();
+    fixture.hub = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (fixture, requests)
+}
+
+#[tokio::test]
+async fn launch_mints_with_role_spec() {
+    let (fixture, requests) = role_fixture().await;
+    let result = fixture.daemon.core.managed.launch(json!({"project":"project1","name":"worker","root":fixture.dir.path().join("repo"),"role":"reviewer"})).await.unwrap();
+    let catalog = agmen_roles::Layers::default().load().unwrap();
+    let role = catalog.get("reviewer").unwrap();
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    let body = &requests[0];
+    assert_eq!(body["kind"], "agent");
+    assert_eq!(body["role"], "reviewer");
+    assert_eq!(body["verbs"], serde_json::to_value(&role.verbs).unwrap());
+    assert_eq!(
+        body["edits"],
+        serde_json::to_value(agmen_proto::EditScope::from(role.edits.clone())).unwrap()
+    );
+    assert_eq!(body["role_sha256"], role.sha256);
+    assert_eq!(role.sha256.len(), 64);
+    assert!(role.sha256.bytes().all(|c| c.is_ascii_hexdigit()));
+    let identity: agmen_client::IdentityFile = serde_json::from_str(
+        &role_file(
+            std::path::Path::new(result["worktree"].as_str().unwrap()).join(".agmen/identity.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(identity.role.unwrap().as_str(), "reviewer");
+    assert_eq!(identity.role_sha256.unwrap().as_str(), role.sha256);
+    assert_eq!(
+        identity.verbs.unwrap(),
+        ["FYI".to_owned()].into_iter().collect()
+    );
+}
+
+#[tokio::test]
+async fn unknown_role_is_refused_before_minting() {
+    let (fixture, requests) = role_fixture().await;
+    let repo = fixture.dir.path().join("repo");
+    let git = crate::git::Git::new(
+        &repo,
+        tokio::time::Instant::now() + std::time::Duration::from_secs(5),
+    );
+    let before = git
+        .run_str(&["worktree", "list", "--porcelain"], 65536)
+        .await
+        .unwrap()
+        .stdout;
+    let failure = fixture
+        .daemon
+        .core
+        .managed
+        .launch(json!({"project":"project1","name":"worker","root":repo,"role":"missing-role"}))
+        .await
+        .unwrap_err();
+    assert_eq!(failure.code, agmen_local::ErrorCode::BadRequest);
+    assert!(failure.message.contains("missing-role"));
+    assert!(failure.message.contains("engineer"));
+    assert!(requests.lock().unwrap().is_empty());
+    let after = git
+        .run_str(&["worktree", "list", "--porcelain"], 65536)
+        .await
+        .unwrap()
+        .stdout;
+    assert_eq!(before, after);
+    assert!(!repo.join(".worktrees").exists());
+}
+
+#[tokio::test]
+async fn listener_role_is_refused() {
+    let (fixture, requests) = role_fixture().await;
+    let failure = fixture.daemon.core.managed.launch(json!({"project":"project1","name":"worker","root":fixture.dir.path().join("repo"),"role":"listener"})).await.unwrap_err();
+    assert_eq!(failure.code, agmen_local::ErrorCode::BadRequest);
+    assert_eq!(
+        failure.message,
+        "listeners are started by the listener runtime, not agent_launch"
+    );
+    assert!(requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn role_survives_restart() {
+    let (fixture, _) = role_fixture().await;
+    let managed = &fixture.daemon.core.managed;
+    managed.launch(json!({"project":"project1","name":"worker","root":fixture.dir.path().join("repo"),"role":"reviewer"})).await.unwrap();
+    managed.shutdown().await;
+    let restored = restarted(&fixture).await;
+    assert_eq!(
+        restored.list(json!({})).await.unwrap()["agents"][0]["role"],
+        "reviewer"
+    );
+    let path = managed
+        .agent_dir(&"agent001".parse().unwrap())
+        .join("agent.json");
+    let mut value: Value = serde_json::from_str(&role_file(&path).unwrap()).unwrap();
+    value.as_object_mut().unwrap().remove("role");
+    std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+    let restored = restarted(&fixture).await;
+    assert_eq!(
+        restored.list(json!({})).await.unwrap()["agents"][0]["role"],
+        Value::Null
+    );
+}
+
+#[tokio::test]
+async fn agent_list_reports_role() {
+    let (fixture, _) = role_fixture().await;
+    fixture.daemon.core.managed.launch(json!({"project":"project1","name":"worker","root":fixture.dir.path().join("repo"),"role":"reviewer"})).await.unwrap();
+    assert_eq!(
+        fixture.daemon.core.managed.list(json!({})).await.unwrap()["agents"][0]["role"],
+        "reviewer"
+    );
+    let fixture = Fixture::new().await;
+    fixture.launch().await;
+    let listed = fixture.daemon.core.managed.list(json!({})).await.unwrap();
+    assert!(
+        listed["agents"][0]
+            .as_object()
+            .unwrap()
+            .contains_key("role")
+    );
+    assert_eq!(listed["agents"][0]["role"], Value::Null);
+}
+
+#[tokio::test]
+async fn role_prompt_is_private_and_a_changed_role_refuses_batches_until_restored() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let (fixture, _) = role_fixture().await;
+    let repo = fixture.dir.path().join("repo");
+    let roles = repo.join(".agmen/roles");
+    std::fs::create_dir(&roles).unwrap();
+    let definition = roles.join("custom.xml");
+    std::fs::write(&definition, "<role name=\"custom\" extends=\"reviewer\" version=\"1\"><rules><rule>first prompt</rule></rules></role>").unwrap();
+    let managed = &fixture.daemon.core.managed;
+    managed
+        .launch(json!({"project":"project1","name":"worker","root":repo,"role":"custom"}))
+        .await
+        .unwrap();
+    managed.shutdown().await;
+    let managed = restarted(&fixture).await;
+    managed.start(json!({"identity":"agent001"})).await.unwrap();
+    enqueue_from(&fixture, 1, "owner001", "agent001").await;
+    batch(&managed, "agent001").await;
+    let prompt = managed.state_dir.join("agents/agent001/role-prompt.md");
+    let text = role_file(&prompt).unwrap();
+    assert!(text.contains("first prompt"));
+    assert_eq!(
+        std::fs::metadata(prompt.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+    assert_eq!(
+        std::fs::metadata(&prompt).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    let original = std::fs::read_to_string(&definition).unwrap();
+    std::fs::write(
+        &definition,
+        original.replace("first prompt", "second prompt"),
+    )
+    .unwrap();
+    enqueue_from(&fixture, 2, "owner001", "agent001").await;
+    batch(&managed, "agent001").await;
+    assert_eq!(fixture.runner.runs.lock().unwrap().len(), 1);
+    assert!(role_file(&prompt).unwrap().contains("first prompt"));
+    let listed = managed.list(json!({})).await.unwrap();
+    assert_eq!(listed["agents"][0]["state"], "offline");
+    let failure = listed["agents"][0]["role_error"].as_str().unwrap();
+    assert!(failure.contains("custom"));
+    assert!(failure.contains("changed since launch; relaunch the agent to use it"));
+    std::fs::remove_file(&definition).unwrap();
+    enqueue_from(&fixture, 3, "owner001", "agent001").await;
+    managed.start(json!({"identity":"agent001"})).await.unwrap();
+    batch(&managed, "agent001").await;
+    assert_eq!(fixture.runner.runs.lock().unwrap().len(), 1);
+    let listed = managed.list(json!({})).await.unwrap();
+    assert_eq!(listed["agents"][0]["state"], "offline");
+    assert!(
+        listed["agents"][0]["role_error"]
+            .as_str()
+            .unwrap()
+            .contains("custom")
+    );
+    std::fs::write(&definition, original).unwrap();
+    managed.start(json!({"identity":"agent001"})).await.unwrap();
+    batch(&managed, "agent001").await;
+    let runs = fixture.runner.runs.lock().unwrap();
+    assert_eq!(runs.len(), 2);
+    assert!(runs[1].prompt.contains("00002") && runs[1].prompt.contains("00003"));
+    assert!(role_file(&prompt).unwrap().contains("first prompt"));
+}
+
+#[tokio::test]
+async fn role_load_errors_and_oversized_prompts_refuse_before_minting() {
+    let (fixture, requests) = role_fixture().await;
+    let repo = fixture.dir.path().join("repo");
+    let roles = repo.join(".agmen/roles");
+    std::fs::create_dir(&roles).unwrap();
+    let definition = roles.join("custom.xml");
+    for xml in [
+        "invalid XML".to_owned(),
+        format!(
+            "<role name=\"custom\" extends=\"reviewer\" version=\"1\"><purpose>{}</purpose></role>",
+            "x".repeat(63 * 1024)
+        ),
+    ] {
+        std::fs::write(&definition, xml).unwrap();
+        let failure = fixture
+            .daemon
+            .core
+            .managed
+            .launch(json!({"project":"project1","name":"worker","root":repo,"role":"custom"}))
+            .await
+            .unwrap_err();
+        assert_eq!(failure.code, agmen_local::ErrorCode::BadRequest);
+        assert!(failure.message.contains("custom"));
+        assert!(failure.message.contains("engineer") || failure.message.contains("64 KiB"));
+        assert!(requests.lock().unwrap().is_empty());
+        assert!(!repo.join(".worktrees").exists());
+    }
+}
+
+#[tokio::test]
+async fn role_mint_bad_role_preserves_hub_description() {
+    let (fixture, _) = role_fixture().await;
+    let failure = fixture.daemon.core.managed.launch(json!({"project":"project1","name":"reject","root":fixture.dir.path().join("repo"),"role":"reviewer"})).await.unwrap_err();
+    assert!(failure.message.contains("bad_role"));
+    assert!(failure.message.contains("role permissions were refused"));
+}
+
+#[tokio::test]
+async fn role_layers_use_main_checkout_and_personal_precedence() {
+    let (mut fixture, requests) = role_fixture().await;
+    let repo = fixture.dir.path().join("repo");
+    let project_roles = repo.join(".agmen/roles");
+    let personal = fixture.dir.path().join("personal-roles");
+    std::fs::create_dir(&project_roles).unwrap();
+    std::fs::create_dir(&personal).unwrap();
+    std::fs::write(project_roles.join("custom.xml"), "<role name=\"custom\" extends=\"engineer\" version=\"1\"><rules><rule>project prompt</rule></rules></role>").unwrap();
+    std::fs::write(personal.join("custom.xml"), "<role name=\"custom\" extends=\"reviewer\" version=\"1\"><rules><rule>personal prompt</rule></rules></role>").unwrap();
+    Arc::get_mut(&mut Arc::get_mut(&mut fixture.daemon.core).unwrap().managed)
+        .unwrap()
+        .personal_roles = Some(personal);
+    let managed = &fixture.daemon.core.managed;
+    managed
+        .launch(json!({"project":"project1","name":"worker","root":repo,"role":"custom"}))
+        .await
+        .unwrap();
+    enqueue_from(&fixture, 1, "owner001", "agent001").await;
+    batch(managed, "agent001").await;
+    let prompt = role_file(managed.state_dir.join("agents/agent001/role-prompt.md")).unwrap();
+    assert!(prompt.contains("personal prompt"));
+    assert!(!prompt.contains("project prompt"));
+    assert_eq!(
+        requests.lock().unwrap()[0]["edits"],
+        json!({"scope":"none"})
+    );
+    assert_eq!(
+        fixture.runner.runs.lock().unwrap()[0]
+            .role
+            .as_ref()
+            .unwrap()
+            .tools,
+        "Read,Grep,Glob,Bash"
+    );
+}
+
+#[tokio::test]
+async fn hostile_role_text_reaches_claude_only_through_the_private_prompt_file() {
+    let (fixture, _) = role_fixture().await;
+    let repo = fixture.dir.path().join("repo");
+    let roles = repo.join(".agmen/roles");
+    std::fs::create_dir(&roles).unwrap();
+    let hostile = "$(touch pwned); `id` --dangerously-skip-permissions --tools Bash";
+    std::fs::write(roles.join("custom.xml"), format!("<role name=\"custom\" extends=\"reviewer\" version=\"1\"><rules><rule>{hostile}\nsecond line</rule></rules></role>")).unwrap();
+    let managed = &fixture.daemon.core.managed;
+    managed
+        .launch(json!({"project":"project1","name":"worker","root":repo,"role":"custom"}))
+        .await
+        .unwrap();
+    enqueue_from(&fixture, 1, "owner001", "agent001").await;
+    batch(managed, "agent001").await;
+    let runs = fixture.runner.runs.lock().unwrap();
+    let run = runs[0].role.as_ref().unwrap();
+    let prompt = managed.state_dir.join("agents/agent001/role-prompt.md");
+    assert_eq!(run.prompt_file, prompt);
+    assert_eq!(run.tools, "Read,Grep,Glob,Bash");
+    assert!(!runs[0].prompt.contains("touch pwned"));
+    assert!(role_file(&prompt).unwrap().contains(hostile));
+}
+
+fn custom_role(extends: &str, scope: &str, rule: &str) -> String {
+    format!(
+        "<role name=\"custom\" extends=\"{extends}\" version=\"1\"><edits scope=\"{scope}\"/><rules><rule>{rule}</rule></rules></role>"
+    )
+}
+
+#[tokio::test]
+async fn role_edited_after_launch_refuses_the_next_batch() {
+    let (fixture, _) = role_fixture().await;
+    let repo = fixture.dir.path().join("repo");
+    let roles = repo.join(".agmen/roles");
+    std::fs::create_dir(&roles).unwrap();
+    let definition = roles.join("custom.xml");
+    std::fs::write(&definition, custom_role("reviewer", "none", "first")).unwrap();
+    let managed = &fixture.daemon.core.managed;
+    managed
+        .launch(json!({"project":"project1","name":"worker","root":repo,"role":"custom"}))
+        .await
+        .unwrap();
+    std::fs::write(&definition, custom_role("reviewer", "none", "second")).unwrap();
+    enqueue_from(&fixture, 1, "owner001", "agent001").await;
+    batch(managed, "agent001").await;
+    assert!(fixture.runner.runs.lock().unwrap().is_empty());
+    let listed = managed.list(json!({})).await.unwrap();
+    assert_eq!(listed["agents"][0]["state"], "offline");
+    let failure = listed["agents"][0]["role_error"].as_str().unwrap();
+    assert!(failure.contains("custom"));
+    assert!(failure.contains("changed since launch; relaunch the agent to use it"));
+}
+
+#[tokio::test]
+async fn project_role_may_not_shadow_a_builtin() {
+    let (fixture, requests) = role_fixture().await;
+    let repo = fixture.dir.path().join("repo");
+    let roles = repo.join(".agmen/roles");
+    std::fs::create_dir(&roles).unwrap();
+    std::fs::write(roles.join("reviewer.xml"), "<role name=\"reviewer\" extends=\"base\" kind=\"agent\" tier=\"deep\" version=\"1\"><tools allow=\"read search edit shell\"/><edits scope=\"lanes\"/></role>").unwrap();
+    let failure = fixture
+        .daemon
+        .core
+        .managed
+        .launch(json!({"project":"project1","name":"worker","root":repo,"role":"reviewer"}))
+        .await
+        .unwrap_err();
+    assert_eq!(failure.code, agmen_local::ErrorCode::BadRequest);
+    assert!(failure.message.contains("project"), "{}", failure.message);
+    assert!(failure.message.contains("reviewer"));
+    assert!(failure.message.contains("built-in"));
+    assert!(requests.lock().unwrap().is_empty());
+    assert!(!repo.join(".worktrees").exists());
+}
+
+#[tokio::test]
+async fn project_role_extending_a_shadowed_builtin_is_refused() {
+    let (fixture, requests) = role_fixture().await;
+    let repo = fixture.dir.path().join("repo");
+    let roles = repo.join(".agmen/roles");
+    std::fs::create_dir(&roles).unwrap();
+    std::fs::write(roles.join("reviewer.xml"), "<role name=\"reviewer\" extends=\"base\" kind=\"agent\" tier=\"deep\" version=\"1\"><tools allow=\"read search edit shell\"/><edits scope=\"lanes\"/></role>").unwrap();
+    std::fs::write(
+        roles.join("custom.xml"),
+        custom_role("reviewer", "none", "x"),
+    )
+    .unwrap();
+    let failure = fixture
+        .daemon
+        .core
+        .managed
+        .launch(json!({"project":"project1","name":"worker","root":repo,"role":"custom"}))
+        .await
+        .unwrap_err();
+    assert_eq!(failure.code, agmen_local::ErrorCode::BadRequest);
+    assert!(failure.message.contains("reviewer"));
+    assert!(failure.message.contains("built-in"));
+    assert!(requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn personal_role_may_shadow_a_builtin_and_the_layer_is_reported() {
+    let (mut fixture, _) = role_fixture().await;
+    let personal = fixture.dir.path().join("personal-roles");
+    std::fs::create_dir(&personal).unwrap();
+    std::fs::write(personal.join("reviewer.xml"), "<role name=\"reviewer\" extends=\"base\" kind=\"agent\" tier=\"deep\" version=\"1\"><tools allow=\"read search\"/><verbs allow=\"REVIEW\"/><edits scope=\"none\"/><rules><rule>mine</rule></rules></role>").unwrap();
+    Arc::get_mut(&mut Arc::get_mut(&mut fixture.daemon.core).unwrap().managed)
+        .unwrap()
+        .personal_roles = Some(personal);
+    let managed = &fixture.daemon.core.managed;
+    let launched = managed
+        .launch(json!({"project":"project1","name":"worker","root":fixture.dir.path().join("repo"),"role":"reviewer"}))
+        .await
+        .unwrap();
+    assert_eq!(launched["layer"], "personal");
+    assert_eq!(
+        managed.list(json!({})).await.unwrap()["agents"][0]["layer"],
+        "personal"
+    );
+}
+
+#[tokio::test]
+async fn role_with_no_edits_gets_no_edit_tools_in_either_tier() {
+    let (fixture, _) = role_fixture().await;
+    let repo = fixture.dir.path().join("repo");
+    let roles = repo.join(".agmen/roles");
+    std::fs::create_dir(&roles).unwrap();
+    std::fs::write(
+        roles.join("custom.xml"),
+        custom_role("engineer", "none", "read only"),
+    )
+    .unwrap();
+    let managed = &fixture.daemon.core.managed;
+    managed
+        .launch(json!({"project":"project1","name":"worker","root":repo,"role":"custom"}))
+        .await
+        .unwrap();
+    enqueue_from(&fixture, 1, "owner001", "agent001").await;
+    batch(managed, "agent001").await;
+    enqueue_from(&fixture, 2, "sender01", "agent001").await;
+    batch(managed, "agent001").await;
+    let runs = fixture.runner.runs.lock().unwrap();
+    assert_eq!(runs.len(), 2);
+    assert!(runs[0].owner_only);
+    assert!(!runs[1].owner_only);
+    for run in runs.iter() {
+        let tools = &run.role.as_ref().unwrap().tools;
+        assert_eq!(tools, "Read,Grep,Glob,Bash");
+    }
+}
+
+#[tokio::test]
+async fn role_coordinator_mints_and_registers_its_kind() {
+    let (fixture, requests) = role_fixture().await;
+    let managed = &fixture.daemon.core.managed;
+    managed.launch(json!({"project":"project1","name":"worker","root":fixture.dir.path().join("repo"),"role":"coordinator"})).await.unwrap();
+    assert_eq!(requests.lock().unwrap()[0]["kind"], "coordinator");
+    assert_eq!(
+        worker_of(managed, "agent001")
+            .await
+            .lock()
+            .await
+            .record
+            .identity
+            .kind,
+        agmen_proto::IdentityKind::Coordinator
+    );
+}
+
 #[derive(Debug, Default)]
 struct FakeRunner {
     runs: Mutex<Vec<crate::launch::RunSpec>>,
@@ -805,6 +1281,7 @@ async fn restarted(fixture: &Fixture) -> Arc<Managed> {
         fixture.runner.clone(),
         old.state_dir.clone(),
         Some(fixture.dir.path().join("claude")),
+        old.personal_roles.clone(),
     ));
     managed.attach(&fixture.daemon.core.identities).await;
     managed.load().await;
