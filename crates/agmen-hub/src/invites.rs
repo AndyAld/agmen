@@ -59,13 +59,19 @@ pub(crate) async fn create(
             ),
         ));
     }
+    // The membership row stays share-locked until the commit. A member
+    // removal deletes that row before it deletes the member's unused invites,
+    // so it waits for this insert and then deletes the invite, or finishes
+    // first and this lookup finds no row.
+    let mut tx = hub.pool().begin().await?;
     let membership: Option<(String, String)> = sqlx::query_as(
         "SELECT m.role, p.tenant_id FROM memberships m JOIN projects p ON p.id = m.project_id
-         WHERE m.human_id = $1 AND m.project_id = $2",
+         WHERE m.human_id = $1 AND m.project_id = $2
+         FOR SHARE OF m",
     )
     .bind(human.as_str())
     .bind(request.project.as_str())
-    .fetch_optional(hub.pool())
+    .fetch_optional(&mut *tx)
     .await?;
     let Some((role, tenant)) = membership else {
         return Err(may_not_invite());
@@ -95,8 +101,9 @@ pub(crate) async fn create(
     .bind(request.role.as_str())
     .bind(human.as_str())
     .bind(ttl)
-    .fetch_one(hub.pool())
+    .fetch_one(&mut *tx)
     .await?;
+    tx.commit().await?;
     let mut link = hub.public_link("i");
     link.set_fragment(Some(&code));
     Ok((
