@@ -44,6 +44,29 @@ const CAROL: u64 = 77;
 /// How long a test waits to be sure nothing arrives.
 const QUIET: Duration = Duration::from_secs(2);
 
+#[tokio::test]
+async fn it_fix1_near_64k_envelope_with_mentions_publishes() {
+    run_in_room(|ctx, room| async move {
+        let _messaging = ctx.hub.start_messaging().await;
+        let mut sol = Agent::connect(&ctx, &room.project, &room.sol).await;
+        let body = format!("{}{}", "#1 ".repeat(128), "\n".repeat(32_000));
+        let raw = envelope(
+            &ulid(),
+            "FYI",
+            json!({}),
+            json!({"body":body,"mentions":[room.coord.id]}),
+        );
+        assert!((64_000..=65_536).contains(&raw.len()), "{}", raw.len());
+        assert!(matches!(sol.post(&raw).await, DeliveryReply::Ack { .. }));
+        let published = sol.feed(ACK_WAIT).await.unwrap();
+        assert_eq!(published.client.body.as_str(), body);
+        assert_eq!(published.mentioned, vec![room.coord.id.parse().unwrap()]);
+        assert_eq!(published.refs.len(), 128);
+        assert!(serde_json::to_vec(&published).unwrap().len() <= 80 * 1024);
+    })
+    .await;
+}
+
 fn fyi(id: &str) -> Vec<u8> {
     envelope(id, "FYI", json!({}), json!({}))
 }

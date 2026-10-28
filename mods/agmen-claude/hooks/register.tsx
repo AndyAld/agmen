@@ -80,7 +80,7 @@ const MAX_BODY_BYTES = 32_768
  * a phrase added there goes here in the same change. A reason of any other
  * shape is not shown: it could carry text the model would read as instructions.
  */
-const CHECK_PATH_PHRASES = ['unowned', 'not claimed', 'not a repository path'] as const
+const CHECK_PATH_PHRASES = ['unowned', 'not claimed', 'not a repository path', 'outside edit scope', 'allowed by lend', 'allowed by edit scope'] as const
 const HELD_BY = /^lane (\S+) held by (\S+)$/
 
 /** The oldest `agmen` this plugin accepts: the workspace's first version. */

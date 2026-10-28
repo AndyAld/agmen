@@ -14,8 +14,8 @@ use std::time::{Duration, Instant};
 
 use agmen_proto::{
     Body, ClientEnvelope, DeliveryReply, IdentityId, IdentityKind, ItemKey, LaneName, Mention,
-    MessageId, NackReason, Payload, ProjectId, Seq, Severity, StampedEnvelope, Stream, Timestamp,
-    Topics, Verb, validate,
+    MessageId, NackReason, Payload, ProjectId, Ref, Seq, Severity, StampedEnvelope, Stream,
+    Timestamp, Topics, Verb, validate,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -36,6 +36,9 @@ pub const HUB_IDENTITY: &str = "agmenhub0";
 
 /// The hub's handle (protocol section 1).
 const HUB_HANDLE: &str = "hub";
+
+/// Leaves 16 KiB for topic and MQTT framing below the client's 96 KiB cap.
+const MAX_STAMPED_ENVELOPE_BYTES: usize = 80 * 1024;
 
 /// Publishes per second each sender may sustain (protocol section 8).
 const RATE_PER_SEC: f64 = 10.0;
@@ -247,6 +250,10 @@ impl Hub {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "keep validation, routing and atomic message effects in protocol order"
+    )]
     async fn accept(
         &self,
         topics: &Topics,
@@ -279,9 +286,37 @@ impl Hub {
             Some(reply_to) => find_parent(pool, topics, &sender.id, reply_to).await?,
             None => None,
         };
+        if verb == Verb::Review && !parent.as_ref().is_some_and(|parent| parent.verb == "DONE") {
+            return Err(NackReason::Schema.into());
+        }
+        if let Payload::Delegated { worker, .. } = &env.payload {
+            let valid: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM identities WHERE id=$1 AND project_id=$2
+                 AND delegated_by=$3 AND revoked_at IS NULL)",
+            )
+            .bind(worker.as_str())
+            .bind(topics.project().as_str())
+            .bind(sender.id.as_str())
+            .fetch_one(pool)
+            .await
+            .map_err(StoreError::from)?;
+            if !valid {
+                return Err(NackReason::Schema.into());
+            }
+        }
+        let refs = if matches!(
+            verb,
+            Verb::Fyi | Verb::Ask | Verb::Answer | Verb::Alert | Verb::Done | Verb::Review
+        ) {
+            let mut db = pool.acquire().await.map_err(StoreError::from)?;
+            load_refs(&mut db, topics, env.body.as_str(), &roster).await?
+        } else {
+            Vec::new()
+        };
         let mentioned = mentioned(verb, &env, &sender, &roster, parent.as_ref())?;
         let streams = route(verb, &env, &sender, &roster, parent.as_ref())?;
         let id = env.id.clone();
+        let lend = (verb == Verb::Lend).then(|| env.clone());
         let ledger = LedgerMessage::handles(verb).then(|| LedgerMessage {
             env: env.clone(),
             from: sender.id.clone(),
@@ -304,6 +339,7 @@ impl Hub {
             from_handle: sender.handle,
             from_kind: sender.kind,
             mentioned,
+            refs,
             streams,
             hash: hash.clone(),
             hub_at,
@@ -321,6 +357,14 @@ impl Hub {
         }
         match write(&mut tx, draft).await {
             Ok(recorded) => {
+                if let Some(lend) = &lend {
+                    crate::lanes::lend(&mut tx, topics, &sender.id, sender.kind, lend)
+                        .await
+                        .map_err(|err| match err {
+                            crate::lanes::LendError::Refused(reason) => Refused::from(reason),
+                            crate::lanes::LendError::Database(err) => Refused::internal(err),
+                        })?;
+                }
                 // The ledger runs in the message's transaction: if it fails,
                 // nothing is recorded and the NACK `hub_busy` makes the
                 // client resend, which runs it again.
@@ -387,7 +431,10 @@ impl Hub {
         let sender = load_sender(self.pool(), topics, from)
             .await?
             .ok_or(NackReason::IdentityRevoked)?;
-        if !may_send(sender.kind, verb) {
+        if !sender.verbs.as_ref().map_or_else(
+            || may_send(sender.kind, verb),
+            |verbs| verbs.iter().any(|v| v == verb.as_str()),
+        ) {
             return Err(NackReason::ForbiddenVerb.into());
         }
         if verb == Verb::PushRequest {
@@ -496,6 +543,7 @@ async fn post_hub(
     let hub_at = hub_now();
     let id = new_message_id(hub_at)?;
     let mut mentioned: BTreeSet<IdentityId> = post.mentioned.into_iter().collect();
+    let mut refs = Vec::new();
     if verb == Verb::Alert {
         let roster = Roster::load(&mut **tx, topics)
             .await
@@ -505,6 +553,9 @@ async fn post_hub(
             mentioned.extend(fallback.cloned());
         }
         mentioned.extend(coordinators);
+        refs = load_refs(&mut *tx, topics, post.body.as_str(), &roster)
+            .await
+            .map_err(PostError::store)?;
     }
     let client = ClientEnvelope {
         v: 1,
@@ -527,6 +578,7 @@ async fn post_hub(
         from_handle: HUB_HANDLE.to_owned(),
         from_kind: IdentityKind::Hub,
         mentioned: mentioned.into_iter().collect(),
+        refs,
         streams: post.streams.into_iter().collect(),
         hash,
         hub_at,
@@ -631,13 +683,18 @@ impl From<NackReason> for Refused {
 
 impl From<StoreError> for Refused {
     fn from(err: StoreError) -> Self {
-        Self::internal(error_chain(&err))
+        match err {
+            StoreError::TooLarge => NackReason::Schema.into(),
+            other => Self::internal(error_chain(&other)),
+        }
     }
 }
 
 /// Why storing or reading messages failed.
 #[derive(Debug, thiserror::Error)]
 enum StoreError {
+    #[error("the stamped envelope exceeds {MAX_STAMPED_ENVELOPE_BYTES} bytes without refs")]
+    TooLarge,
     #[error("database error")]
     Database(#[from] sqlx::Error),
     #[error("numbering failed")]
@@ -690,17 +747,20 @@ struct Sender {
     handle: String,
     /// The human who owns an identity; `None` for a human.
     owner: Option<IdentityId>,
+    verbs: Option<Vec<String>>,
 }
 
 /// The live identity `from` in `topics`' project, or a human who is a
 /// member of it. `None` for a revoked identity and for anyone else.
+type SenderRow = (String, String, String, bool, Option<Vec<String>>);
+
 async fn load_sender(
     pool: &PgPool,
     topics: &Topics,
     from: &IdentityId,
 ) -> Result<Option<Sender>, StoreError> {
-    let identity: Option<(String, String, String, bool)> = sqlx::query_as(
-        "SELECT kind, handle, owner_human_id, revoked_at IS NOT NULL
+    let identity: Option<SenderRow> = sqlx::query_as(
+        "SELECT kind, handle, owner_human_id, revoked_at IS NOT NULL, verbs
          FROM identities WHERE id = $1 AND tenant_id = $2 AND project_id = $3",
     )
     .bind(from.as_str())
@@ -708,7 +768,7 @@ async fn load_sender(
     .bind(topics.project().as_str())
     .fetch_optional(pool)
     .await?;
-    if let Some((kind, handle, owner, revoked)) = identity {
+    if let Some((kind, handle, owner, revoked, verbs)) = identity {
         if revoked {
             return Ok(None);
         }
@@ -717,6 +777,7 @@ async fn load_sender(
             kind: parse_kind(&kind)?,
             handle,
             owner: Some(parse_id(&owner)?),
+            verbs,
         }));
     }
     let human: Option<String> = sqlx::query_scalar(
@@ -735,6 +796,7 @@ async fn load_sender(
         kind: IdentityKind::Human,
         handle,
         owner: None,
+        verbs: None,
     }))
 }
 
@@ -743,11 +805,11 @@ async fn load_sender(
 /// owner, the PUSH_REQUEST's owner) belong to the verbs' own handling.
 ///
 /// - "coordinator" there means the `coordinator` kind. A listener with the
-///   coordinator role (ASSIGN) comes with roles (roles-listener plan).
-/// - REVIEW and PLAN need the reviewer and planner roles, which no identity
-///   holds before the roles-listener plan, so nobody may send them yet.
+///   coordinator role uses its stored permissions for ASSIGN.
+/// - This table is the fallback for NULL verbs. REVIEW and PLAN require
+///   explicit stored permissions and stay closed in this legacy table.
 /// - GRANT, DENY, ITEM and STATE are the hub's own (ruling R34).
-const fn may_send(kind: IdentityKind, verb: Verb) -> bool {
+pub(crate) const fn may_send(kind: IdentityKind, verb: Verb) -> bool {
     use IdentityKind::{Agent, Coordinator, Human, Listener};
     match verb {
         Verb::Hello
@@ -777,37 +839,49 @@ const fn may_send(kind: IdentityKind, verb: Verb) -> bool {
 /// One live member of a project: a non-revoked identity or a human
 /// member.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Member {
-    id: IdentityId,
+pub(crate) struct Member {
+    pub(crate) id: IdentityId,
+    pub(crate) handle: String,
     kind: IdentityKind,
     /// The owning human of an identity.
     owner: Option<IdentityId>,
     /// A human's membership role.
     role: Option<Role>,
+    pub(crate) identity_role: Option<String>,
 }
 
 /// A project's live members.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct Roster(Vec<Member>);
+pub(crate) struct Roster(pub(crate) Vec<Member>);
 
-type MemberRow = (String, String, Option<String>, Option<String>);
+type MemberRow = (
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
 
 impl Roster {
     async fn load(db: impl PgExecutor<'_>, topics: &Topics) -> Result<Self, StoreError> {
         let rows: Vec<MemberRow> = sqlx::query_as(
-            "SELECT id, kind, owner_human_id, NULL::text FROM identities
+            "SELECT id, kind, handle, owner_human_id, NULL::text, role FROM identities
              WHERE project_id = $1 AND revoked_at IS NULL
              UNION ALL
-             SELECT human_id, 'human', NULL, role FROM memberships WHERE project_id = $1",
+             SELECT m.human_id, 'human', h.handle, NULL, m.role, NULL::text
+             FROM memberships m JOIN humans h ON h.id=m.human_id WHERE m.project_id = $1",
         )
         .bind(topics.project().as_str())
         .fetch_all(db)
         .await?;
         rows.into_iter()
-            .map(|(id, kind, owner, role)| {
+            .map(|(id, kind, handle, owner, role, identity_role)| {
                 Ok(Member {
                     id: parse_id(&id)?,
+                    handle,
                     kind: parse_kind(&kind)?,
+                    identity_role,
                     owner: owner.as_deref().map(parse_id).transpose()?,
                     role: role
                         .as_deref()
@@ -841,7 +915,45 @@ impl Roster {
 
 /// Whether handling `env` needs the project's members.
 fn needs_roster(verb: Verb, env: &ClientEnvelope) -> bool {
-    !env.mentions.is_empty() || !env.to.is_empty() || matches!(verb, Verb::Alert | Verb::Assign)
+    !env.mentions.is_empty()
+        || !env.to.is_empty()
+        || matches!(
+            verb,
+            Verb::Fyi
+                | Verb::Ask
+                | Verb::Answer
+                | Verb::Alert
+                | Verb::Done
+                | Verb::Review
+                | Verb::Assign
+        )
+}
+
+/// The same known-target lookup for client messages and hub ALERTs.
+async fn load_refs(
+    db: &mut sqlx::PgConnection,
+    topics: &Topics,
+    body: &str,
+    roster: &Roster,
+) -> Result<Vec<Ref>, StoreError> {
+    let lanes: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM lanes WHERE project_id=$1 ORDER BY name")
+            .bind(topics.project().as_str())
+            .fetch_all(&mut *db)
+            .await?;
+    let candidates = crate::refs::candidate_item_keys(body);
+    let keys: Vec<String> = sqlx::query_scalar(
+        "SELECT key FROM items WHERE project_id=$1 AND key = ANY($2) ORDER BY key",
+    )
+    .bind(topics.project().as_str())
+    .bind(&candidates)
+    .fetch_all(&mut *db)
+    .await?;
+    let keys = keys
+        .iter()
+        .map(|key| key.parse().map_err(stored))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(crate::refs::stamp_refs(body, roster, &lanes, &keys))
 }
 
 /// What `mentions` expand to (protocol section 3): `all`, `agents` and
@@ -852,8 +964,8 @@ fn needs_roster(verb: Verb, env: &ClientEnvelope) -> bool {
 ///
 /// `forbidden_mention` for anything but identities from a kind other than
 /// human and coordinator, or an identity that is not a live member;
-/// `schema` for lane and role mentions, which the MVP does not expand
-/// (ruling R14).
+/// `schema` for lane mentions, which remain reserved. Role mentions expand
+/// from stored mint roles, including identities currently offline.
 fn expand_mentions(
     sender: &Sender,
     mentions: &[Mention],
@@ -871,7 +983,17 @@ fn expand_mentions(
                 continue;
             }
             _ if !may_group => return Err(NackReason::ForbiddenMention),
-            Mention::Lane(_) | Mention::Role(_) => return Err(NackReason::Schema),
+            Mention::Lane(_) => return Err(NackReason::Schema),
+            Mention::Role(role) => {
+                out.extend(
+                    roster
+                        .0
+                        .iter()
+                        .filter(|member| member.identity_role.as_deref() == Some(role.as_str()))
+                        .map(|member| member.id.clone()),
+                );
+                continue;
+            }
             Mention::All => |_| true,
             Mention::Agents => {
                 |member| !matches!(member.kind, IdentityKind::Human | IdentityKind::Hub)
@@ -913,7 +1035,7 @@ fn mentioned(
 ) -> Result<Vec<IdentityId>, NackReason> {
     let mut mentioned = expand_mentions(sender, &env.mentions, roster)?;
     if let Some(parent) = parent
-        && parent.from_kind == IdentityKind::Human
+        && (parent.from_kind == IdentityKind::Human || verb == Verb::Review)
     {
         mentioned.insert(parent.from.clone());
     }
@@ -930,6 +1052,7 @@ fn mentioned(
 struct Parent {
     from: IdentityId,
     from_kind: IdentityKind,
+    verb: String,
     /// Every stream it was stored in.
     streams: BTreeSet<Stream>,
 }
@@ -948,8 +1071,8 @@ async fn find_parent(
         Stream::Feed.to_string(),
         Stream::Inbox(sender.clone()).to_string(),
     ];
-    let row: Option<(String, String)> = sqlx::query_as(
-        "SELECT from_id, envelope->>'from_kind' FROM messages
+    let row: Option<(String, String, String)> = sqlx::query_as(
+        "SELECT from_id, envelope->>'from_kind', envelope->>'verb' FROM messages
          WHERE project_id = $1 AND id = $2 AND stream = ANY($3)
          ORDER BY hub_at, stream, seq LIMIT 1",
     )
@@ -958,7 +1081,7 @@ async fn find_parent(
     .bind(&readable[..])
     .fetch_optional(pool)
     .await?;
-    let Some((from, kind)) = row else {
+    let Some((from, kind, verb)) = row else {
         return Ok(None);
     };
     let streams: Vec<String> = sqlx::query_scalar(
@@ -972,6 +1095,7 @@ async fn find_parent(
     Ok(Some(Parent {
         from: parse_id(&from)?,
         from_kind: parse_kind(&kind)?,
+        verb,
         streams: streams
             .iter()
             .map(|stream| stream.parse().map_err(stored))
@@ -1089,6 +1213,7 @@ struct Draft<'a> {
     from_handle: String,
     from_kind: IdentityKind,
     mentioned: Vec<IdentityId>,
+    refs: Vec<Ref>,
     streams: BTreeSet<Stream>,
     hash: Vec<u8>,
     hub_at: Timestamp,
@@ -1119,7 +1244,7 @@ async fn write(
     for stream in &draft.streams {
         let seq = next_seq(tx, &head_key(draft.topics, stream)).await?;
         let seq = Seq(u64::try_from(seq).map_err(stored)?);
-        let stamped = StampedEnvelope {
+        let mut stamped = StampedEnvelope {
             client: draft.client.clone(),
             stream: stream.clone(),
             seq,
@@ -1127,10 +1252,17 @@ async fn write(
             from_handle: draft.from_handle.clone(),
             from_kind: draft.from_kind,
             mentioned: draft.mentioned.clone(),
-            refs: Vec::new(),
+            refs: draft.refs.clone(),
             hub_at: draft.hub_at,
         };
-        let json = serde_json::to_string(&stamped)?;
+        let mut json = serde_json::to_string(&stamped)?;
+        if json.len() > MAX_STAMPED_ENVELOPE_BYTES {
+            stamped.refs.clear();
+            json = serde_json::to_string(&stamped)?;
+            if json.len() > MAX_STAMPED_ENVELOPE_BYTES {
+                return Err(StoreError::TooLarge);
+            }
+        }
         let inserted = sqlx::query(
             "INSERT INTO messages
                  (project_id, stream, seq, id, from_id, payload_hash, envelope, hub_at, ack_row)

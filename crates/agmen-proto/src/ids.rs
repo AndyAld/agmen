@@ -168,6 +168,14 @@ checked_string!(
     is_git_sha
 );
 
+checked_string!(
+    /// A SHA-256 digest in exactly 64 lowercase hex characters.
+    Sha256Hex,
+    "sha256 hex",
+    "^[0-9a-f]{64}$",
+    is_sha256_hex
+);
+
 fn is_hub_id(s: &str) -> bool {
     (8..=32).contains(&s.len())
         && s.bytes()
@@ -211,6 +219,10 @@ fn is_role_name(s: &str) -> bool {
 
 fn is_git_sha(s: &str) -> bool {
     (7..=64).contains(&s.len()) && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn is_sha256_hex(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// A stream's sequence number. The hub numbers each stream from 1 with no gaps.

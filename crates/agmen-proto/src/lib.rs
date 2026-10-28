@@ -39,6 +39,7 @@ mod envelope;
 mod error;
 mod ids;
 mod reply;
+mod roles;
 mod topics;
 mod verbs;
 
@@ -49,9 +50,10 @@ pub use envelope::{
 pub use error::ProtoError;
 pub use ids::{
     Body, GitSha, IdentityId, ItemKey, LaneName, MAX_BODY_BYTES, Mention, MessageId, ProjectId,
-    RoleName, Seq, Stream, TenantId, Timestamp,
+    RoleName, Seq, Sha256Hex, Stream, TenantId, Timestamp,
 };
 pub use reply::{DeliveryReply, NackReason};
+pub use roles::{EditScope, RoleSpec};
 pub use topics::{Topics, parse_up};
 pub use verbs::{
     Change, Check, DenyReason, Finding, FindingSeverity, Needs, Outcome, Payload, Severity, Tokens,

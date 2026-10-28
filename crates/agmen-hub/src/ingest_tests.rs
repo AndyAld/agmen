@@ -1,5 +1,17 @@
 use super::*;
 
+#[test]
+fn refs_stop_at_128_matches() {
+    for (body, items) in [
+        ("#1 ".repeat(10_922), vec![]),
+        ("B-1 ".repeat(8_192), vec!["B-1".parse().unwrap()]),
+    ] {
+        let refs = crate::refs::stamp_refs(&body, &Roster::default(), &[], &items);
+        assert_eq!(refs.len(), 128);
+        assert!(serde_json::to_vec(&refs).unwrap().len() + body.len() < 80 * 1024);
+    }
+}
+
 fn id(name: &str) -> IdentityId {
     format!("{name:0<8}").parse().unwrap()
 }
@@ -7,9 +19,11 @@ fn id(name: &str) -> IdentityId {
 fn member(name: &str, kind: IdentityKind, owner: Option<&str>, role: Option<Role>) -> Member {
     Member {
         id: id(name),
+        handle: name.to_owned(),
         kind,
         owner: owner.map(id),
         role,
+        identity_role: None,
     }
 }
 
@@ -29,6 +43,7 @@ fn sender(name: &str, kind: IdentityKind, owner: Option<&str>) -> Sender {
         id: id(name),
         kind,
         handle: name.to_owned(),
+        verbs: None,
         owner: owner.map(id),
     }
 }
@@ -151,14 +166,14 @@ fn mention_rules_by_kind() {
         Err(NackReason::ForbiddenMention)
     );
     let andy = sender("andy", IdentityKind::Human, None);
-    // Ruling R14: no lane or role expansion in the MVP.
+    // Lane expansion remains reserved; unknown role mentions expand to nobody.
     assert_eq!(
         expand_mentions(&andy, &[lane], &roster),
         Err(NackReason::Schema)
     );
     assert_eq!(
         expand_mentions(&andy, &[role], &roster),
-        Err(NackReason::Schema)
+        Ok(BTreeSet::new())
     );
     assert_eq!(
         expand_mentions(&sol, &[Mention::Identity(id("coord"))], &roster).unwrap(),
@@ -201,6 +216,7 @@ fn reply_to_a_human_mentions_them() {
         r#","reply_to":"01JBX6Q4T7W3C2M8Y9K5N0P1RT""#,
     );
     let parent = |from: &str, from_kind| Parent {
+        verb: "ASK".to_owned(),
         from: id(from),
         from_kind,
         streams: BTreeSet::from([Stream::Feed]),
@@ -265,6 +281,7 @@ fn answers_follow_their_parent() {
         r#","reply_to":"01JBX6Q4T7W3C2M8Y9K5N0P1RT""#,
     );
     let private = Parent {
+        verb: "ASK".to_owned(),
         from: id("sol"),
         from_kind: IdentityKind::Agent,
         streams: inboxes(&["sol", "andy", "w3f", "adam"]),
@@ -392,6 +409,7 @@ fn never_mentions_the_sender() {
     let roster = roster();
     let andy = sender("andy", IdentityKind::Human, None);
     let own = Parent {
+        verb: "ASK".to_owned(),
         from: id("andy"),
         from_kind: IdentityKind::Human,
         streams: BTreeSet::from([Stream::Feed]),

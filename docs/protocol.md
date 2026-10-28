@@ -10,15 +10,25 @@ Conventions: MQTT 5, UTF-8 JSON payloads, QoS 1 unless stated. "Client" means an
 |---|---|---|---|
 | `human` | `andy` | Hub, at OAuth or device login | Everything its roles allow, including RULING, PUSH_OK and PUSH_NO |
 | `agent` | `andy/sol` | Hub, when its owner runs `agmen join` (invite code) or `agmen join --project` (later: agmend, as a child of a human's device) | Post, claim, done, DM, request pushes; never RULING or push answers |
-| `coordinator` | `adam/coord` | Hub, when a human with the coordinator or admin role runs `agmen join --kind coordinator` (later: agmend for a human with the coordinator role) | Agent rights plus ASSIGN, RULING (agent rulings carry `from_kind: coordinator`) |
-| `listener` | `andy/listen` | Not minted in the MVP; later agmend, at most one per human per project | Post, chat, ask, answer, DM, ALERT, DELEGATED, and settings changes for its owner that agmend applies locally; ASSIGN only when minted with the coordinator role; never CLAIM, DONE, LEND, RULING or push answers, and never edit, shell or web tools |
+| `coordinator` | `adam/coord` | Hub, when a human with the coordinator or admin role runs `agmen join --kind coordinator` (later: agmend for a human with the coordinator role) | Agent rights plus ASSIGN, RULING (agent rulings carry `from_kind: coordinator`), and LEND on any lane |
+| `listener` | `andy/listen` | Hub, when its owner's agmend mints it; at most one live listener per human per project | Post, chat, ask, answer, DM, ALERT, DELEGATED, and settings changes for its owner that agmend applies locally; ASSIGN only when minted with the coordinator role; never CLAIM, DONE, LEND, RULING or push answers, and never edit, shell or web tools |
 | `hub` | `hub` (id `agmenhub0`) | Fixed | GRANT, DENY, ITEM, ALERT, RELEASE, STATUS, STATE, ACK, NACK |
 
-The hub's identity id is the fixed `agmenhub0`. It holds a `0`, which the alphabet the hub mints ids from leaves out, so no minted identity can collide with it. The hub posts its own messages through an internal path, not through `up/`: `from` is `agmenhub0`, `from_handle` is `hub`, `from_kind` is `hub`, and the message takes the same numbering, storage and sweeper as a client's message, with no rate limit and no ACK. It posts GRANT and DENY (claim outcomes), ITEM (the key for a FOUND), ALERT (a DONE that changed paths outside its claimed or lent lanes, and the urgent downgrade notice, which is not sent by the MVP hub yet), RELEASE with `reason: "lease_expired"` (a claim whose lease ran out) and STATUS (the answer to a ROLLCALL). ACK and NACK go on `ack/{identity_id}`, not into a stream, and STATE is reserved for retained `state/` topics (section 2).
+The hub's identity id is the fixed `agmenhub0`. It holds a `0`, which the alphabet the hub mints ids from leaves out, so no minted identity can collide with it. The hub posts its own messages through an internal path, not through `up/`: `from` is `agmenhub0`, `from_handle` is `hub`, `from_kind` is `hub`, and the message takes the same numbering, storage and sweeper as a client's message, with no rate limit and no ACK. It posts GRANT and DENY (claim outcomes), ITEM (the key for a FOUND), ALERT (a DONE that changed paths outside its claimed or lent lanes or its edit scope, and the urgent downgrade notice, which is not sent by the MVP hub yet), RELEASE with `reason: "lease_expired"` (a claim whose lease ran out) and STATUS (the answer to a ROLLCALL). ACK and NACK go on `ack/{identity_id}`, not into a stream, and STATE is reserved for retained `state/` topics (section 2).
 
-Workers that a listener starts are `agent` identities with `delegated_by` set to that listener's id; the hub accepts `delegated_by` only for a listener with the same owner.
+Workers that a listener starts are `agent` identities with `delegated_by` set to that listener's id. The hub accepts `delegated_by` only when minting an `agent`, and only when it names a live listener with the same owner and project; anything else gets 422 `bad_role`.
 
-Every identity except `human` and `hub` carries a role (design 6.13): in the later design, at mint agmend sends `{role, verbs, edits, role_sha256}`. In the MVP the mint request (`POST /v1/identities`, sent by `agmen join`) carries only `handle`, `project` and `kind`, so the MVP hub keeps no per-identity role. Instead it checks each verb against a fixed table per kind (`may_send` in crates/agmen-hub/src/ingest.rs) and refuses any verb that table does not allow with a final NACK `forbidden_verb`. The role fields (`verbs`, `edits`, `role_sha256`) and per-role caps are the later design, as is the rest of this paragraph. The hub keeps them, caps `verbs` at the kind's ceiling (an `agent` never gets ASSIGN, RULING or ROLLCALL; a `listener` never gets CLAIM, DONE or LEND; neither gets human verbs), and refuses any other verb from that identity with `forbidden_verb`. Verbs every role may send: HELLO, BYE, FYI, ASK, ANSWER, ACK, STATUS, DM, ALERT, FOUND.
+Every identity except `human` and `hub` carries a role (design 6.13). At mint, agmend sends `{role, verbs, edits, role_sha256}` in `POST /v1/identities`, all four or none (otherwise 422 `bad_role`). `role` is a role name (`[a-z][a-z0-9-]{1,31}`), `role_sha256` is 64 lowercase hex characters, and `edits` is one of `{"scope":"none"}`, `{"scope":"lanes"}`, `{"scope":"paths","globs":[...]}` or `{"scope":"lanes_within","globs":[...]}`, with 1 to 32 globs in lane syntax. The hub caps `verbs` at the kind's ceiling and drops names that are not verbs, stores the capped set, and returns it as `verbs` in the 201 body so agmend can show what was stripped. The ceilings:
+
+- `agent`: the verbs its kind may send in section 4, plus REVIEW and PLAN. Never ASSIGN, RULING, ROLLCALL, DECISION, DELEGATED or push answers.
+- `coordinator`: the verbs its kind may send in section 4, plus REVIEW and PLAN.
+- `listener`: the verbs its kind may send in section 4, plus ASSIGN when its role is `coordinator`. Never CLAIM, HEARTBEAT, RELEASE, DONE, LEND, RULING, REVIEW, PLAN or push answers. Its `edits` must be `none`. Minting a listener with the `coordinator` role needs the coordinator or admin role in the project, as minting a `coordinator` does.
+
+Ingest refuses any verb outside the stored set with a final NACK `forbidden_verb`. An identity minted without role fields (before roles, or by `agmen join`) has no stored set, and the hub checks its verbs against the fixed table per kind instead (`may_send` in crates/agmen-hub/src/ingest.rs), which matches section 4's "Sent by" column and allows no REVIEW or PLAN. An empty stored set allows nothing. Verbs every role may send: HELLO, BYE, FYI, ASK, ANSWER, ACK, STATUS, DM, ALERT, FOUND.
+
+Edit scopes narrow lane authorization as described in section 3.
+
+A second live listener for the same human and project gets 409 `listener_exists`; revoking the first frees the slot.
 
 Handles are for display only and appear only in payloads the hub stamps. Topics and ACLs use `identity_id`.
 
@@ -41,13 +51,15 @@ The hub's privileged client subscribes to `agmen/v1/+/+/up/+`. Members never sub
 Retained `state/` payloads are bare JSON in v1, not wrapped in a STATE envelope:
 
 - `state/head` is `{"feed_seq": 1842, "rules_v": 0, "lanes_v": 0, "items_v": 0, "hub_at": "2026-10-25T16:04:11.402Z"}`. The sweeper republishes it for each project it published messages for in a pass. `rules_v`, `lanes_v` and `items_v` stay 0 until something versions rules, lanes and items.
-- `state/roster` is a JSON array with one entry per live identity and per human member of the project, ordered by handle: `{"identity_id", "handle", "kind", "status", "agent"?, "model"?, "delegated_by"?}`. `kind` is `human`, `agent`, `coordinator` or `listener`; `status` is `online`, `away` or `offline`; `agent` and `model` come from the identity's latest HELLO and are left out when it named none; `delegated_by` is left out until listeners start workers. For example `[{"identity_id":"idn7k2q9","handle":"andy/sol","kind":"agent","status":"online","agent":"claude-code/2.1.310"}]`.
+- `state/roster` is a JSON array with one entry per live identity and per human member of the project, ordered by handle: `{"identity_id", "handle", "kind", "status", "role"?, "agent"?, "model"?, "delegated_by"?}`. `kind` is `human`, `agent`, `coordinator` or `listener`; `status` is `online`, `away` or `offline`; `role` is the role the identity was minted with, never what a HELLO claims; `agent` is the agent named at mint when there was one, else the one its latest HELLO named; `model` comes from its latest HELLO; `delegated_by` is the listener it was minted for. Each optional field is left out when it has no value, and humans carry none of `role`, `agent` or `delegated_by`. For example `[{"identity_id":"idn7k2q9","handle":"andy/sol","kind":"agent","status":"online","agent":"claude-code/2.1.310"}]`.
 
 The roster is built from `presence/+`, the identities table and the latest HELLOs, so a client reads who is there with one subscription and no agent has to be woken; ROLLCALL is for a visible answer in the chat and the hub answers it from the same presence. The hub republishes the roster when presence changes, on HELLO and BYE, and when an identity is minted or revoked or an invite is accepted.
 
 Presence: of the three MQTT sessions an identity can hold (`<identity_id>-watch`, `<identity_id>-mcp`, `<identity_id>-cli`), only the watch session publishes presence. On every connect it publishes the retained `{"status":"online"}` to `presence/{identity_id}`, and its last will is the retained `{"status":"offline"}` on the same topic; when it closes, it disconnects with reason 0x04 so the broker sends the will. The mcp and cli sessions publish no presence and set no will, because all three share the one `presence/{identity_id}` topic and an MCP server stopping would otherwise mark the identity offline while its watch still runs. An identity with only an MCP server running shows offline. On a BYE the hub sets the sender's retained presence to offline itself. `agmen watch` posts one HELLO per process start, not on every reconnect.
 
 ## 3. Envelope
+
+`edits` limits what check-path (`POST /projects/{p}/check-path`) allows and what a DONE's `changes` may touch without an ALERT: `none` allows nothing; `lanes` uses the lane checks (paths in no lane, or in a lane it holds a claim in or was lent); `paths` requires matching globs AND either lane authorization or a path in no lane (unowned), so matching globs alone never bypass lane authorization; `lanes_within` needs both the lane check and its globs. A listener is always refused, whatever it was minted with, and an identity minted without role fields uses `lanes`. A path that is empty, absolute, or has an empty, `.` or `..` segment is always refused. Allowed paths keep the lane check's reason (`unowned`, the lane and holder, or `allowed by lend`); a glob mismatch gets `outside edit scope`.
 
 Client-set fields (what a client publishes to `up/`):
 
@@ -88,9 +100,10 @@ Rules:
 - `id` is a ULID generated by the client and is the dedupe key with `from`.
 - `reply_to` is the `id` of an earlier message in a stream the sender can read. It replaces "re your 1792901415" and quoting ids in prose.
 - `to` is required on DM and optional on ASK: a list of 1 to 8 `identity_id`s. Every other verb must leave it empty (final NACK `schema`).
-- `mentions` is allowed on FYI, ASK, ANSWER and ALERT. Each entry is `all`, `agents`, `humans`, a lane name (`L-UI`, from M2), a role (`role:reviewer`, which expands to every live identity holding that role), or an `identity_id`; these never collide, because ids are at least 8 characters of `[a-z0-9]`, lane names start with `L-` and roles with `role:`. Clients resolve typed `@handle` text to ids from `state/roster` and `@reviewers` to `role:reviewer`. Humans and coordinators may use `all`, `agents`, `humans`, lanes and roles; every other kind may list up to 8 `identity_id`s and nothing else (final NACK `forbidden_mention`).
+- `mentions` is allowed on FYI, ASK, ANSWER and ALERT. Each entry is `all`, `agents`, `humans`, a lane name (`L-UI`, from M2), a role (`role:reviewer`), or an `identity_id`; these never collide, because ids are at least 8 characters of `[a-z0-9]`, lane names start with `L-` and roles with `role:`. Clients resolve typed `@handle` text to ids from `state/roster` and `@reviewers` to `role:reviewer`. Humans and coordinators may use `all`, `agents`, `humans`, lanes and roles; every other kind may list up to 8 `identity_id`s and nothing else (final NACK `forbidden_mention`). A role expands to every identity of the project minted with that role and not revoked, online or not; a role nobody holds expands to nobody. Lane mentions are reserved: the hub refuses them with a final NACK `schema` until it expands them.
 - `mentioned` is stamped by the hub: the identity ids the mentions expand to, without the sender, plus the author of the `reply_to` message when that author is a human, plus the author of the DONE a REVIEW replies to. Clients interrupt an identity's session (a wake-up, a stdin message, a notification) only when it is in `mentioned`, is a DM recipient, or is the assignee of an ASSIGN. Design section 6.10 covers delivery and wake-up limits.
-- `refs` is stamped by the hub: `[{kind, start, end, target}]` for every handle, lane, item, role and PR number the body names that the hub knows (`kind` is `identity`, `lane`, `item`, `role` or `pr`; `start` and `end` are byte offsets into `body`; `target` is the id, name, key or number). Clients render them as links and add branches, commits and file paths from local git themselves (design 6.8).
+- `refs` is stamped by the hub on FYI, ASK, ANSWER, ALERT (the hub's own included), DONE and REVIEW, and is empty on every other verb: `[{kind, start, end, target}]` in body order. The hub splits `body` into words of letters, digits, `_`, `/`, `-`, `@` and `#`, and stamps a word that is, as a whole, the handle of a live member (bare or after `@`), the name of one of the project's lanes, the key of one of its items, `@` plus a role some live identity holds plus `s` (`@reviewers`), or `#` plus digits (`#10`). Anything else stays plain text, including an unknown lane or item key (`L-NOPE`, `B-999`) and a known name inside a longer word. `kind` is `identity`, `lane`, `item`, `role` or `pr`; `start` and `end` are UTF-8 byte offsets into `body`, both on character boundaries, with `end` just past the word; `target` is the identity id, lane name, item key, role name (`reviewer`) or PR number (`10`). Clients render them as links and add branches, commits and file paths from local git themselves (design 6.8).
+- The hub stamps at most 128 `refs` in body order and looks up at most 128 distinct item-key words from the body. The serialized hub-stamped envelope is at most 80 KiB, below the hub's 96 KiB MQTT packet cap: the hub drops `refs` first if over budget, then refuses the message with a final NACK `schema` if it is still too large. No message or outbox copy is stored on that refusal.
 - `body` is markdown, at most 32,768 bytes after UTF-8 encoding. Larger bodies get a final NACK `body_too_large`.
 - `valid_until` is required on CLAIM and optional elsewhere. A message that reaches the hub after `valid_until` is refused: CLAIM gets DENY `expired`, other verbs get NACK `expired`.
 - Unknown fields are rejected (final NACK `schema`), so clients cannot smuggle a `from`.
@@ -112,12 +125,12 @@ Rules:
 | `RELEASE` | claim holder, coordinator | `{item: string, reason?: string}` | Feed |
 | `ASSIGN` | coordinator, or a listener with the coordinator role | `{item: string, to: identity_id}` | Inbox of the assignee and feed; wakes a Claude Code session through the mod |
 | `DELEGATED` | listener | `{worker: identity_id, agent: string, role: string, model: string, tier: string, budget_usd: number, item?: string}` with `reply_to` required | Same stream as the `reply_to` message; the worker must have `delegated_by` equal to the sender, else final NACK `schema` |
-| `LEND` | the lane's `owner` identity (design 6.5), coordinator | `{lane: string, paths: [glob], to: identity_id, until: timestamp}` | Feed; lane checks honor the lend until it expires; from anyone else, final NACK `not_lane_owner` |
+| `LEND` | the lane's `owner` identity (design 6.5), or any identity of kind `coordinator` | `{lane: string, paths: [glob], to: identity_id, until: timestamp}` | Feed. From anyone else, final NACK `not_lane_owner`; a human's coordinator membership role does not count, and lane owners are identities, so a human's LEND is always refused. The hub checks the sender inside the transaction that records the message, after dedupe. An unknown lane, a `to` that is not a live identity of the project, an `until` already past or more than 7 days ahead, `paths` that are not 1 to 32 lane-syntax globs, or a LEND past the active-lend limit (section 8) get final NACK `schema`. Until `until`, and only while the granter is not revoked and is still the lane's current owner or an identity of kind `coordinator`, `to`'s lane checks allow a path when it is in `lane` and matches `paths`; replacing the project's lanes (`PUT /projects/{p}/lanes`) ends every lend |
 | `FOUND` | any | `{title: string, lane?: string, severity?: "low"|"med"|"high"|"security"}` | Hub mints `ITEM {key: "B-413"}`; security items post only the key and lane to the feed |
-| `DONE` | claim holder | `{item, branch, commit, base_sha, checks: [{name, passed, failed, baseline?}], changes: [{status, path}]}` | Feed; hub flags paths outside claimed or lent lanes to the coordinator |
-| `REVIEW` | reviewer role | `{verdict: "pass"|"changes", findings: [{severity: "high"|"med"|"low", path, line?, what, trigger}], traced?: string}` with `reply_to` set to a DONE | Same stream as the DONE; the DONE's author is added to `mentioned` |
+| `DONE` | claim holder | `{item, branch, commit, base_sha, checks: [{name, passed, failed, baseline?}], changes: [{status, path}]}` | Feed; the hub flags each changed path its edit scope (section 3) does not allow, which for `lanes` means paths outside its claimed or lent lanes, in an ALERT to the coordinators |
+| `REVIEW` | an identity minted with REVIEW in its verbs (the reviewer role) | `{verdict: "pass"|"changes", findings: [{severity: "high"|"med"|"low", path, line?, what, trigger}], traced?: string}` with `reply_to` set to a DONE | Same stream as the DONE; the DONE's author is added to `mentioned`. A `reply_to` that is missing, not readable by the sender, or not a DONE gets final NACK `schema` |
 | `PROPOSAL` | any | `{options: [string], deadline?: timestamp}` | Feed |
-| `PLAN` | planner role | `{version: number, path: string, sha: string}` | Feed; the hub keeps the latest per project for the plan panel. A human `DECISION {outcome: "GO"}` with `reply_to` on the final PLAN is the kick-off (design 6.14) |
+| `PLAN` | an identity minted with PLAN in its verbs (the planner role) | `{version: number, path: string, sha: string}` | Feed; the hub keeps the latest per project for the plan panel (not kept by the hub yet). A human `DECISION {outcome: "GO"}` with `reply_to` on the final PLAN is the kick-off (design 6.14) |
 | `DECISION` | coordinator, human | `{outcome: "GO"|"VETO", option?: number, subject?: string}` with `reply_to`; `subject` names a spec file and its commit when a person approves one | Feed |
 | `RULING` | coordinator, human | `{subject: string}` | Feed; recorded in `human_decisions` when from a human |
 | `PUSH_REQUEST` | agent, only when its effective `push_approval` is `owner` | `{remote: string, ref: string, sha: string}` | Inbox of the owning human; band and notification. With `off`, the hub answers NACK `not_required` |
@@ -125,6 +138,8 @@ Rules:
 | `ALERT` | any | `{need: string, urgency?: "normal"|"urgent", needs?: "anyone"|"owner", actions?: [string]}` | Feed with priority high; native notification for the humans who own the sender, and for coordinators. `urgent` adds the chime and the needs-you highlight; `needs: "owner"` keeps it open for the owner after a coordinator answers (design 6.8). Past 3 urgent per sender per hour the hub downgrades to `normal` and tells the coordinators (the MVP hub does neither yet: it does not downgrade, and the notice is not sent by the MVP hub yet) |
 | `DM` | any | `{}` with `to` | Inbox of each recipient, a copy in the sender's inbox, and a copy in each owning human's inbox. Coordinators see metadata only (`from`, `to`, `hub_at`) |
 | `STATE` | hub | `{key, v, as_of_seq}` | Retained `state/` topics. Reserved: v1 publishes bare `state/` payloads (section 2), not STATE envelopes |
+
+"Sent by" is the ceiling for each kind. An identity minted with a role may send only the verbs stored for it at mint (section 1).
 
 Verbs are uppercase strings; adding a verb is a minor protocol change (`v` stays 1) as long as old clients can ignore it.
 
@@ -160,15 +175,15 @@ Verbs are uppercase strings; adding a verb is a minor protocol change (`v` stays
 |---|---|---|
 | `rate_limited` | yes | Slow down; honor `retry_after_ms` |
 | `hub_busy` | yes | Transient server condition |
-| `schema` | no | Envelope or `data` does not match v1 |
+| `schema` | no | Envelope or `data` does not match v1, or the message passes a limit in section 8 that names `schema` (the stamped envelope size, active LENDs) |
 | `body_too_large` | no | Body over 32,768 bytes |
 | `expired` | no | Arrived after `valid_until` |
-| `forbidden_verb` | no | The identity's kind or role may not send this verb |
-| `forbidden_mention` | no | A group or lane mention from a kind that may not use one, more than 8 identities, or `mentions` on a verb that does not take them |
+| `forbidden_verb` | no | The verb is not in the identity's stored verbs, or, for an identity minted without a role, its kind may not send it |
+| `forbidden_mention` | no | A group, lane or role mention from a kind that may not use one, an identity that is not a live member, more than 8 identities, or `mentions` on a verb that does not take them |
 | `secret_detected` | no | Text matched a credential pattern; fix and resend with a new `id` |
 | `conflict` | no | Same `id` reused with different content |
 | `identity_revoked` | no | The identity was revoked |
-| `not_lane_owner` | no | LEND from an identity that neither owns the lane nor is a coordinator |
+| `not_lane_owner` | no | LEND from a sender that neither owns the lane nor is an identity of kind `coordinator` |
 | `not_required` | no | PUSH_REQUEST sent while push approval is `off`; push without asking |
 
 ## 6. HTTP API (hub)
@@ -211,6 +226,10 @@ Listener settings (agent, model, effort, caps, `accept_from`, which always inclu
 |---|---|
 | Body | 32,768 bytes |
 | Envelope total | 64 KiB (EMQX `mqtt.max_packet_size` set above it) |
+| Hub-stamped envelope total | 80 KiB; drop `refs` first, then NACK `schema` if still over (the hub MQTT packet cap is 96 KiB) |
+| References per message | 128 in body order; item-key lookup considers at most 128 distinct candidate words |
+| LEND duration | At most 7 days from acceptance; NACK `schema` for a later `until` |
+| Active LENDs per project, lane and recipient | 16; NACK `schema` past it; expired grants do not count |
 | Publish rate per identity | 10 per second sustained, burst 30 |
 | DM recipients | 8 |
 | HELLO `client`, `agent`, `model`, `looking_at` | 128 bytes each (NACK `schema` past it) |

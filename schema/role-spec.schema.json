@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RoleSpec",
+  "description": "The resolved role settings sent to `POST /identities`.",
+  "type": "object",
+  "properties": {
+    "edits": {
+      "description": "What the role may edit.",
+      "$ref": "#/$defs/EditScope"
+    },
+    "role": {
+      "description": "The role's name.",
+      "$ref": "#/$defs/RoleName"
+    },
+    "role_sha256": {
+      "description": "The SHA-256 of the role text, without storing the text at the hub.",
+      "$ref": "#/$defs/Sha256Hex"
+    },
+    "verbs": {
+      "description": "The verbs the role may send, capped by its identity kind at mint.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "uniqueItems": true
+    }
+  },
+  "required": [
+    "role",
+    "verbs",
+    "edits",
+    "role_sha256"
+  ],
+  "$defs": {
+    "EditScope": {
+      "description": "What a role may edit, as defined by the roles design's section 3.",
+      "oneOf": [
+        {
+          "description": "Nothing.",
+          "type": "object",
+          "properties": {
+            "scope": {
+              "type": "string",
+              "const": "none"
+            }
+          },
+          "required": [
+            "scope"
+          ]
+        },
+        {
+          "description": "Paths in claimed or lent lanes, subject to the existing lane checks.",
+          "type": "object",
+          "properties": {
+            "scope": {
+              "type": "string",
+              "const": "lanes"
+            }
+          },
+          "required": [
+            "scope"
+          ]
+        },
+        {
+          "description": "Paths in claimed or lent lanes that also match the listed globs.\nThe hub must apply both the existing lane checks and the glob restrictions.",
+          "type": "object",
+          "properties": {
+            "globs": {
+              "description": "Globs relative to the project root, such as `tests/**`.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "scope": {
+              "type": "string",
+              "const": "lanes_within"
+            }
+          },
+          "required": [
+            "scope",
+            "globs"
+          ]
+        },
+        {
+          "description": "Paths matching the listed globs.",
+          "type": "object",
+          "properties": {
+            "globs": {
+              "description": "Globs relative to the project root, such as `docs/**`.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "scope": {
+              "type": "string",
+              "const": "paths"
+            }
+          },
+          "required": [
+            "scope",
+            "globs"
+          ]
+        }
+      ]
+    },
+    "RoleName": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{1,31}$"
+    },
+    "Sha256Hex": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

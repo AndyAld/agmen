@@ -1,0 +1,1 @@
+<role name="listener" extends="base" kind="listener" tier="small" version="1"><tools allow="read shell"/></role>

@@ -30,6 +30,7 @@ fn entry(id: &str, handle: &str, kind: IdentityKind, status: Status) -> RosterEn
         handle: handle.into(),
         kind,
         status,
+        role: None,
         agent: None,
         model: None,
         delegated_by: None,

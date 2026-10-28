@@ -991,6 +991,9 @@ for (const surface of SURFACES) {
         'unowned',
         'not claimed',
         'not a repository path',
+        'outside edit scope',
+        'allowed by lend',
+        'allowed by edit scope',
       ]
       const hidden = [
         INJECTED,

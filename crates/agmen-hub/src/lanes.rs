@@ -13,8 +13,8 @@
 use std::collections::{BTreeSet, HashSet};
 
 use agmen_proto::{
-    Body, Change, IdentityId, IdentityKind, ItemKey, LaneName, MAX_BODY_BYTES, Needs, Payload,
-    ProjectId, Stream, Topics, Urgency,
+    Body, Change, ClientEnvelope, EditScope, IdentityId, IdentityKind, ItemKey, LaneName,
+    MAX_BODY_BYTES, NackReason, Needs, Payload, ProjectId, Stream, Timestamp, Topics, Urgency,
 };
 use axum::Json;
 use axum::extract::{Path, State};
@@ -36,6 +36,12 @@ use crate::items::close_claimed;
 
 /// The most lanes one project may have.
 const MAX_LANES: usize = 64;
+/// The most active grants per project, lane and recipient.
+const MAX_ACTIVE_LENDS: i64 = 16;
+/// A grant may last at most seven days from acceptance.
+const MAX_LEND_DURATION: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 60 * 60);
+/// A recipient can have grants in at most every lane in the project.
+const MAX_LOADED_LENDS: i64 = 64 * MAX_ACTIVE_LENDS;
 /// The most globs one lane may have.
 const MAX_GLOBS_PER_LANE: usize = 32;
 /// The most globs a project's lanes may have together, which bounds the
@@ -177,6 +183,178 @@ fn compile(glob: &str) -> Result<Vec<Glob>, GlobError> {
                 })
         })
         .collect()
+}
+
+/// Reuses lane syntax and limits for role edits and LEND paths.
+fn scope_globs(globs: &[String]) -> Result<GlobSet, String> {
+    if globs.is_empty() || globs.len() > MAX_GLOBS_PER_LANE {
+        return Err(format!("expected 1 to {MAX_GLOBS_PER_LANE} globs"));
+    }
+    let mut builder = GlobSetBuilder::new();
+    for glob in globs {
+        for compiled in compile(glob).map_err(|err| err.to_string())? {
+            builder.add(compiled);
+        }
+    }
+    builder.build().map_err(|err| err.to_string())
+}
+
+pub(crate) fn validate_edits(edits: &EditScope) -> Result<(), ApiError> {
+    if let EditScope::Paths { globs } | EditScope::LanesWithin { globs } = edits {
+        scope_globs(globs).map_err(|err| unprocessable("bad_edits", err))?;
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+enum EditRule {
+    Lanes,
+    None,
+    Paths(GlobSet),
+    LanesWithin(GlobSet),
+}
+
+impl EditRule {
+    fn from_stored(value: Option<serde_json::Value>) -> Result<Self, LedgerError> {
+        let scope = value
+            .map(serde_json::from_value::<EditScope>)
+            .transpose()
+            .map_err(|err| LedgerError::Stored(err.to_string()))?;
+        let globs = |patterns: &[String]| scope_globs(patterns).map_err(LedgerError::Stored);
+        Ok(match scope {
+            None | Some(EditScope::Lanes) => Self::Lanes,
+            Some(EditScope::None) => Self::None,
+            Some(EditScope::Paths { globs: patterns }) => Self::Paths(globs(&patterns)?),
+            Some(EditScope::LanesWithin { globs: patterns }) => {
+                Self::LanesWithin(globs(&patterns)?)
+            }
+        })
+    }
+
+    fn allows(&self, path: &str, lane_allowed: bool) -> bool {
+        match self {
+            Self::None => false,
+            Self::Lanes => lane_allowed,
+            Self::Paths(globs) | Self::LanesWithin(globs) => lane_allowed && globs.is_match(path),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct Lends(Vec<(String, GlobSet)>);
+
+impl Lends {
+    async fn load(
+        db: impl PgExecutor<'_>,
+        project: &str,
+        identity: &IdentityId,
+    ) -> Result<Self, LedgerError> {
+        let rows: Vec<(String, Vec<String>)> = sqlx::query_as(
+            "SELECT g.lane, g.paths FROM lane_lends g
+             JOIN lanes l ON l.project_id=g.project_id AND l.name=g.lane
+             JOIN identities i ON i.id=g.from_id AND i.project_id=g.project_id
+             WHERE g.project_id=$1 AND g.to_id=$2 AND g.until_at > now()
+               AND i.revoked_at IS NULL
+               AND (l.owner_identity_id=g.from_id OR i.kind='coordinator')
+             ORDER BY g.lane, g.until_at, g.message_id LIMIT $3",
+        )
+        .bind(project)
+        .bind(identity.as_str())
+        .bind(MAX_LOADED_LENDS)
+        .fetch_all(db)
+        .await?;
+        rows.into_iter()
+            .map(|(lane, paths)| {
+                scope_globs(&paths)
+                    .map(|globs| (lane, globs))
+                    .map_err(LedgerError::Stored)
+            })
+            .collect::<Result<_, _>>()
+            .map(Self)
+    }
+
+    fn allows(&self, lane: Option<&LaneName>, path: &str) -> bool {
+        lane.is_some_and(|lane| {
+            self.0
+                .iter()
+                .any(|(name, globs)| name == lane.as_str() && globs.is_match(path))
+        })
+    }
+}
+
+/// A LEND refusal is final; database errors remain retryable.
+#[derive(Debug)]
+pub(crate) enum LendError {
+    Refused(NackReason),
+    Database(sqlx::Error),
+}
+
+impl From<sqlx::Error> for LendError {
+    fn from(err: sqlx::Error) -> Self {
+        Self::Database(err)
+    }
+}
+
+/// Validates and stores a LEND in the message transaction. Locking its lane
+/// keeps replacement or ownership changes from racing the authorization.
+pub(crate) async fn lend(
+    tx: &mut Transaction<'_, Postgres>,
+    topics: &Topics,
+    sender: &IdentityId,
+    kind: IdentityKind,
+    env: &ClientEnvelope,
+) -> Result<(), LendError> {
+    let Payload::Lend {
+        lane,
+        paths,
+        to,
+        until,
+    } = &env.payload
+    else {
+        return Err(LendError::Refused(NackReason::Schema));
+    };
+    let owner: Option<Option<String>> = sqlx::query_scalar(
+        "SELECT owner_identity_id FROM lanes WHERE project_id=$1 AND name=$2 FOR UPDATE",
+    )
+    .bind(topics.project().as_str())
+    .bind(lane.as_str())
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some(owner) = owner else {
+        return Err(LendError::Refused(NackReason::Schema));
+    };
+    if kind != IdentityKind::Coordinator && owner.as_deref() != Some(sender.as_str()) {
+        return Err(LendError::Refused(NackReason::NotLaneOwner));
+    }
+    let live: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM identities WHERE id=$1 AND project_id=$2 AND revoked_at IS NULL)",
+    ).bind(to.as_str()).bind(topics.project().as_str()).fetch_one(&mut **tx).await?;
+    let now = Timestamp::now();
+    if !live || *until <= now || *until > now + MAX_LEND_DURATION || scope_globs(paths).is_err() {
+        return Err(LendError::Refused(NackReason::Schema));
+    }
+    // The lane row lock serializes this count with concurrent grants.
+    let active: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM lane_lends WHERE project_id=$1 AND lane=$2 AND to_id=$3 AND until_at > now()",
+    ).bind(topics.project().as_str()).bind(lane.as_str()).bind(to.as_str())
+        .fetch_one(&mut **tx).await?;
+    if active >= MAX_ACTIVE_LENDS {
+        return Err(LendError::Refused(NackReason::Schema));
+    }
+    sqlx::query(
+        "INSERT INTO lane_lends (project_id, lane, message_id, from_id, to_id, paths, until_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7::timestamptz)",
+    )
+    .bind(topics.project().as_str())
+    .bind(lane.as_str())
+    .bind(env.id.as_str())
+    .bind(sender.as_str())
+    .bind(to.as_str())
+    .bind(paths)
+    .bind(until.to_string())
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
 }
 
 /// A DFA for the paths that one lane glob matches.
@@ -622,18 +800,26 @@ pub(crate) async fn check_path(
             format!("check at most {MAX_CHECK_PATHS} paths at once"),
         ));
     }
-    let live: Option<String> = sqlx::query_scalar(
-        "SELECT handle FROM identities WHERE id = $1 AND project_id = $2 AND revoked_at IS NULL",
+    let live: Option<(String, Option<serde_json::Value>)> = sqlx::query_as(
+        "SELECT kind, edits FROM identities WHERE id = $1 AND project_id = $2 AND revoked_at IS NULL",
     )
     .bind(request.identity.as_str())
     .bind(project.as_str())
     .fetch_optional(hub.pool())
     .await?;
-    if live.is_none() {
+    let Some((kind, edits)) = live else {
         return Err(ApiError::not_found(
             "no live identity with that id in this project",
         ));
-    }
+    };
+    let edits = if kind == "listener" {
+        EditRule::None
+    } else {
+        EditRule::from_stored(edits).map_err(ApiError::stored)?
+    };
+    let lends = Lends::load(hub.pool(), project.as_str(), &request.identity)
+        .await
+        .map_err(ApiError::stored)?;
     let lanes = Lanes::load(hub.pool(), project.as_str())
         .await
         .map_err(ApiError::stored)?;
@@ -644,9 +830,32 @@ pub(crate) async fn check_path(
         request
             .paths
             .into_iter()
-            .map(|path| judge(&lanes, &holders, &request.identity, path))
+            .map(|path| judge_scoped(&lanes, &holders, &request.identity, &edits, &lends, path))
             .collect(),
     ))
+}
+
+fn judge_scoped(
+    lanes: &Lanes,
+    holders: &[LaneHolder],
+    identity: &IdentityId,
+    edits: &EditRule,
+    lends: &Lends,
+    path: String,
+) -> PathCheck {
+    let mut check = judge(lanes, holders, identity, path);
+    let Some(path) = repo_path(&check.path) else {
+        return check;
+    };
+    let lane_allowed = check.allowed || lends.allows(check.lane.as_ref(), path);
+    let original_allowed = check.allowed;
+    check.allowed = edits.allows(path, lane_allowed);
+    if !check.allowed && !edits.allows(path, true) {
+        check.reason = "outside edit scope".to_owned();
+    } else if check.allowed && !original_allowed {
+        check.reason = "allowed by lend".to_owned();
+    }
+    check
 }
 
 /// The check-path answer for `path`.
@@ -706,30 +915,47 @@ pub(crate) async fn check_done(
     let holders = lane_holders(&mut **tx, project).await?;
     close_claimed(tx, project, item, &msg.from).await?;
     let lanes = Lanes::load(&mut **tx, project).await?;
-    let held: BTreeSet<&LaneName> = holders
-        .iter()
-        .filter(|holder| holder.identity == msg.from)
-        .map(|holder| &holder.lane)
-        .collect();
+    let edits: Option<serde_json::Value> =
+        sqlx::query_scalar("SELECT edits FROM identities WHERE id=$1")
+            .bind(msg.from.as_str())
+            .fetch_optional(&mut **tx)
+            .await?
+            .flatten();
+    let edits = if msg.from_kind == IdentityKind::Listener {
+        EditRule::None
+    } else {
+        EditRule::from_stored(edits)?
+    };
+    let lends = Lends::load(&mut **tx, project, &msg.from).await?;
     let strays: Vec<Stray> = changes
         .iter()
-        .filter_map(|change| match repo_path(&change.path) {
-            None => Some(Stray {
-                path: change.path.clone(),
-                lane: None,
-            }),
-            Some(path) => lanes
-                .lane_of(path)
-                .filter(|lane| !held.contains(lane))
-                .map(|lane| Stray {
-                    path: change.path.clone(),
-                    lane: Some(lane.clone()),
-                }),
+        .filter_map(|change| {
+            let check = judge_scoped(
+                &lanes,
+                &holders,
+                &msg.from,
+                &edits,
+                &lends,
+                change.path.clone(),
+            );
+            (!check.allowed).then_some(Stray {
+                path: check.path,
+                lane: check.lane,
+            })
         })
         .collect();
     if strays.is_empty() {
         return Ok(());
     }
+    let body = if matches!(edits, EditRule::Lanes) {
+        stray_body(&msg.from_handle, item, &strays)
+    } else {
+        stray_body_with(&msg.from_handle, item, &strays, |stray| match &stray.lane {
+            Some(lane) => lane.to_string(),
+            None if repo_path(&stray.path).is_some() => "outside edit scope".to_owned(),
+            None => NOT_A_REPO_PATH.to_owned(),
+        })
+    };
     let alert = HubPost {
         payload: Payload::Alert {
             need: format!(
@@ -740,7 +966,7 @@ pub(crate) async fn check_done(
             needs: Needs::Anyone,
             actions: Vec::new(),
         },
-        body: Body::try_from(stray_body(&msg.from_handle, item, &strays))?,
+        body: Body::try_from(body)?,
         reply_to: Some(msg.env.id.clone()),
         items: vec![item.clone()],
         lane: None,
@@ -766,15 +992,27 @@ fn plural(n: usize, what: &str) -> String {
 /// newline or other control character in it cannot start a line of the
 /// hub's text (ruling R44c).
 fn stray_body(handle: &str, item: &ItemKey, strays: &[Stray]) -> String {
+    stray_body_with(handle, item, strays, |stray| {
+        stray
+            .lane
+            .as_ref()
+            .map_or_else(|| NOT_A_REPO_PATH.to_owned(), ToString::to_string)
+    })
+}
+
+/// The bounded renderer shared by lane diagnostics and role-scope diagnostics.
+fn stray_body_with(
+    handle: &str,
+    item: &ItemKey,
+    strays: &[Stray],
+    label: impl Fn(&Stray) -> String,
+) -> String {
     let mut body = format!("{handle}'s DONE for {item} changed paths outside its claimed lanes:");
     // Room for the "and N more" line.
     let limit = MAX_BODY_BYTES - 32;
     let mut listed = 0;
     for stray in strays.iter().take(MAX_LISTED_PATHS) {
-        let line = match &stray.lane {
-            Some(lane) => format!("\n- {:?} ({lane})", stray.path),
-            None => format!("\n- {:?} ({NOT_A_REPO_PATH})", stray.path),
-        };
+        let line = format!("\n- {:?} ({})", stray.path, label(stray));
         if body.len() + line.len() > limit {
             break;
         }

@@ -36,6 +36,9 @@ pub struct RosterEntry {
     pub kind: IdentityKind,
     /// Whether it is connected.
     pub status: Status,
+    /// The role supplied when the identity was minted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
     /// The coding agent its latest HELLO named.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
