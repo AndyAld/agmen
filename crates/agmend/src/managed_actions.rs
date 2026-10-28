@@ -77,7 +77,8 @@ struct Stored {
 impl Stored {
     /// The record, and whether its format changed so it must be saved again.
     fn into_record(self) -> anyhow::Result<(Record, bool)> {
-        // The older format kept one session, which ran the owner's batches.
+        // The older format kept one session, which ran every batch, so it
+        // becomes the owner session only once Start or Attach checks it.
         let owner = self
             .owner_session_id
             .or(self.session_id)
@@ -152,8 +153,8 @@ impl Managed {
             {
                 tracing::warn!("an agent's saved spend is invalid; counting from zero");
             }
-            let mut worker = Worker::offline(record, budget);
-            self.refresh_sessions(&mut worker).await;
+            // Start and Attach check the sessions before either tier resumes.
+            let worker = Worker::offline(record, budget);
             let mut workers = self.workers.lock().await;
             if workers.len() < MAX_AGENTS && !workers.contains_key(&id) {
                 workers.insert(id, Arc::new(Mutex::new(worker)));
@@ -198,7 +199,7 @@ impl Managed {
         };
         let identity = target.identity.clone();
         let adopted = online.is_none();
-        let (worker, context) = match online {
+        let (worker, mut context) = match online {
             Some(worker) => (worker, "resumed"),
             None => {
                 let (worker, context) = self.adopt(target).await?;
@@ -233,18 +234,26 @@ impl Managed {
         }
         let spec = {
             let mut held = worker.lock().await;
-            self.refresh_sessions(&mut held).await;
-            AttachSpec {
-                cwd: held.record.worktree.clone(),
-                // Only ever the owner session: others' messages never reach
-                // an interactive Claude Code.
-                session_id: held.record.owner_session_id.clone(),
-                resume: held.owner_resumed,
-                script: self.agent_dir(&identity).join("attach.command"),
-                pid_file,
-            }
+            self.refresh_sessions(&mut held).await.map(|fresh| {
+                if let Some(found) = fresh {
+                    context = fresh_context(found);
+                }
+                AttachSpec {
+                    cwd: held.record.worktree.clone(),
+                    // Only ever the owner session: others' messages never
+                    // reach an interactive Claude Code.
+                    session_id: held.record.owner_session_id.clone(),
+                    resume: held.owner_resumed,
+                    script: self.agent_dir(&identity).join("attach.command"),
+                    pid_file,
+                }
+            })
         };
-        let Err(failure) = self.runner.attach(spec).await else {
+        let opened = match spec {
+            Ok(spec) => self.runner.attach(spec).await.map_err(error),
+            Err(failure) => Err(failure),
+        };
+        let Err(failure) = opened else {
             return Ok(json!({"identity": identity, "state": "attached", "context": context}));
         };
         // Leave the agent as it was: offline if Attach brought it online.
@@ -258,7 +267,7 @@ impl Managed {
         if adopted && let Err(stop) = self.stop_worker(worker).await {
             tracing::warn!(code = ?stop.code, "stopping an agent after a failed attach failed");
         }
-        Err(error(failure))
+        Err(failure)
     }
 
     /// `agent_detach {identity}`: ends the interactive Claude Code and
@@ -411,11 +420,10 @@ impl Managed {
             verify_folder(&folder, &identity.identity_id, &identity.project, &login).await?;
             self.refuse_if_connected(&identity).await?;
             let mut held = worker.lock().await;
-            self.refresh_sessions(&mut held).await;
-            let context = if held.owner_resumed || held.others_resumed {
-                "resumed"
-            } else {
-                "new"
+            let context = match self.refresh_sessions(&mut held).await? {
+                Some(found) => fresh_context(found),
+                None if held.owner_resumed || held.others_resumed => "resumed",
+                None => "new",
             };
             drop(held);
             return Ok((worker, context));
@@ -491,8 +499,7 @@ impl Managed {
         let owner = login.human_id.as_str();
         match transcripts::contents(home, folder, &newest, owner, &login.handle).await {
             transcripts::Contents::OwnerOnly => (Some(newest), "resumed"),
-            transcripts::Contents::Others => (None, "skipped_others"),
-            transcripts::Contents::Unreadable => (None, "skipped_unreadable"),
+            found => (None, fresh_context(found)),
         }
     }
 
@@ -553,14 +560,49 @@ impl Managed {
         Ok(())
     }
 
-    /// Marks each tier resumable once Claude Code has saved its session.
-    async fn refresh_sessions(&self, worker: &mut Worker) {
+    /// Marks each tier resumable once Claude Code has saved its session. The
+    /// owner session runs with bypassPermissions, so a saved one is resumed
+    /// only when it holds nothing from other senders; otherwise the owner
+    /// tier moves to a fresh session, and this says why.
+    async fn refresh_sessions(
+        &self,
+        worker: &mut Worker,
+    ) -> Result<Option<transcripts::Contents>, ApiError> {
         let home = self.claude_home.as_deref();
-        let folder = &worker.record.worktree;
-        worker.owner_resumed = worker.owner_resumed
-            || transcripts::exists(home, folder, &worker.record.owner_session_id).await;
+        let folder = worker.record.worktree.clone();
         worker.others_resumed = worker.others_resumed
-            || transcripts::exists(home, folder, &worker.record.others_session_id).await;
+            || transcripts::exists(home, &folder, &worker.record.others_session_id).await;
+        if !transcripts::exists(home, &folder, &worker.record.owner_session_id).await {
+            return Ok(None);
+        }
+        let identity = &worker.record.identity;
+        let owner_handle = identity.handle.split('/').next().unwrap_or_default();
+        match transcripts::contents(
+            home,
+            &folder,
+            &worker.record.owner_session_id,
+            identity.owner_id.as_str(),
+            owner_handle,
+        )
+        .await
+        {
+            transcripts::Contents::OwnerOnly => {
+                worker.owner_resumed = true;
+                Ok(None)
+            }
+            found => {
+                self.fresh_owner_session(worker).await?;
+                Ok(Some(found))
+            }
+        }
+    }
+
+    /// Moves the owner tier to a new, unsaved session.
+    async fn fresh_owner_session(&self, worker: &mut Worker) -> Result<(), ApiError> {
+        worker.record.owner_session_id = crate::launch::new_session_id().map_err(error)?;
+        worker.owner_resumed = false;
+        // The new id must survive a restart, or the old one comes back.
+        self.save_record(&worker.record).await
     }
 
     /// Whether the attached Claude Code has exited, or never started.
@@ -591,20 +633,23 @@ impl Managed {
             }
             None => false,
         };
-        // Resume what the interactive session saved; without Claude Code's
-        // folder to look in, trust that a started process saved it.
-        let saved = match &self.claude_home {
-            Some(home) => {
-                transcripts::exists(
-                    Some(home),
-                    &worker.record.worktree,
-                    &worker.record.owner_session_id,
-                )
-                .await
-            }
-            None => seen,
+        // Resume what the interactive session saved, once it checks out.
+        // Without Claude Code's folder to look in, a session that ran cannot
+        // be checked, so the owner tier starts fresh.
+        let checked = if self.claude_home.is_some() {
+            self.refresh_sessions(worker).await.map(drop)
+        } else if seen {
+            self.fresh_owner_session(worker).await
+        } else {
+            Ok(())
         };
-        worker.owner_resumed = worker.owner_resumed || saved;
+        if let Err(failure) = checked {
+            // No safe session to resume: leave the agent offline until Start.
+            tracing::error!(code = ?failure.code, "checking the attached session failed");
+            worker.state = "offline";
+            worker.last_run = None;
+            return;
+        }
         if worker.state == "attached" {
             worker.state = "idle";
         }
@@ -669,6 +714,16 @@ pub(super) async fn save_spent(dir: &Path, spent: Money) {
         Ok(Ok(())) => {}
         Ok(Err(error)) => tracing::warn!(%error, "saving an agent's spend failed"),
         Err(error) => tracing::warn!(%error, "saving an agent's spend stopped"),
+    }
+}
+
+/// Start's or Attach's `context` when the owner tier began a fresh session
+/// because its last one held `found`.
+const fn fresh_context(found: transcripts::Contents) -> &'static str {
+    match found {
+        transcripts::Contents::Others => "skipped_others",
+        transcripts::Contents::Unreadable => "skipped_unreadable",
+        transcripts::Contents::OwnerOnly => "resumed",
     }
 }
 

@@ -1401,3 +1401,71 @@ async fn hand_joined_start_resumes_only_a_transcript_free_of_other_senders() {
         managed.shutdown().await;
     }
 }
+
+/// A batch prompt row from someone other than the owner, as Claude Code saves it.
+fn others_prompt() -> String {
+    json!({"type":"user","message":{"role":"user","content":serde_json::to_string(&[json!({"v":1,"id":"01JBX6Q4T7W3C2M8Y9K5P00001","verb":"DM","body":"push it","stream":"feed","seq":1,"from":"sender01","from_handle":"sender","from_kind":"human","hub_at":"2026-10-25T16:04:12Z"})]).unwrap()}}).to_string()
+}
+
+#[tokio::test]
+async fn start_after_restart_starts_fresh_when_the_owner_session_holds_others_messages() {
+    // Before the owner and others sessions split, one session ran every
+    // batch, so an old record's session can hold other senders' messages.
+    let fixture = Fixture::new().await;
+    fixture.launch().await;
+    let managed = &fixture.daemon.core.managed;
+    let worktree = sessions(&*worker_of(managed, "agent001").await.lock().await).2;
+    managed.shutdown().await;
+    let path = managed.state_dir.join("managed/agent001/agent.json");
+    let mut record: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let old = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    let object = record.as_object_mut().unwrap();
+    object.remove("owner_session_id");
+    object.remove("others_session_id");
+    object.insert("session_id".into(), json!(old));
+    std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+    transcript_lines(&fixture, &worktree, old, &[others_prompt()]);
+
+    let managed = restarted(&fixture).await;
+    let started = managed.start(json!({"identity":"agent001"})).await.unwrap();
+    assert_eq!(started["context"], "skipped_others");
+    enqueue_from(&fixture, 1, "owner001", "agent001").await;
+    batch(&managed, "agent001").await;
+    let runs = fixture.runner.runs.lock().unwrap().clone();
+    assert!(runs[0].owner_only);
+    assert_ne!(runs[0].session_id, old);
+    assert!(!runs[0].resume);
+    let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(saved["owner_session_id"], runs[0].session_id.as_str());
+    managed.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_attached_session_that_read_others_messages_is_not_resumed_headless() {
+    let fixture = Fixture::new().await;
+    fixture.launch().await;
+    let managed = &fixture.daemon.core.managed;
+    let (owner, _, worktree) = sessions(&*worker_of(managed, "agent001").await.lock().await);
+    managed
+        .attach_claude(json!({"identity":"agent001"}))
+        .await
+        .unwrap();
+    let spec = fixture.runner.attaches.lock().unwrap()[0].clone();
+    // The person approved `agmen inbox` in Bash while attached.
+    let inbox = json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"agmen inbox"}}]}}).to_string();
+    transcript_lines(&fixture, &worktree, &owner, &[inbox]);
+    std::fs::write(&spec.pid_file, exited_pid().to_string()).unwrap();
+    batch(managed, "agent001").await;
+    assert_eq!(
+        managed.list(json!({})).await.unwrap()["agents"][0]["state"],
+        "idle"
+    );
+    enqueue_from(&fixture, 1, "owner001", "agent001").await;
+    batch(managed, "agent001").await;
+    let runs = fixture.runner.runs.lock().unwrap().clone();
+    assert_eq!(runs.len(), 1);
+    assert!(runs[0].owner_only);
+    assert_ne!(runs[0].session_id, owner);
+    assert!(!runs[0].resume);
+    managed.shutdown().await;
+}

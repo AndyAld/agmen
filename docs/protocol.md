@@ -413,9 +413,12 @@ agent's owner and hub origin match the signed-in login.
   until Start. A record restores its spend (`status.json`) and both session
   ids; each tier's next batch uses `--resume <id>` when Claude Code has saved
   that session (`<claude home>/projects/<folder with every non-alphanumeric
-  character as ->/<id>.jsonl`), else `--session-id <id>`. A record in the older
-  format with one `session_id` loads it as the owner session, gets a fresh
-  others session, and is saved again in the current format. For an identity
+  character as ->/<id>.jsonl`), else `--session-id <id>`. A saved owner
+  session passes the transcript check below first; when it fails, the owner
+  tier gets a fresh session id, saved in the record, and `context` says why.
+  A record in the older format with one `session_id` (which ran every batch,
+  owner's and others') loads it as the owner session, subject to that check,
+  gets a fresh others session, and is saved again in the current format. For an identity
   joined by hand (no record), `project` is required; agmend looks for the
   worktree of that project's open checkout whose `.agmen/identity.json` names
   the identity, or uses `root` when the person picked the folder. It answers
@@ -425,10 +428,14 @@ agent's owner and hub origin match the signed-in login.
   Because owner batches run with bypassPermissions and an interactive session
   with the agmen plugin sees every sender's messages, that transcript is
   resumed only when it holds nothing from anyone but the owner: agmend reads
-  at most 32 MiB and 50,000 lines, treats its contents as data, and starts
-  fresh when it finds an agmen message whose hub-stamped `from` is not the
-  owner's human id, the plugin's row for another participant's message, or an
-  `agmen inbox` line from another handle, or when a line does not parse. The
+  the transcript and its subagents' (`<id>/subagents/*.jsonl`, at most 256),
+  at most 32 MiB and 50,000 lines in all, treats their contents as data, and
+  starts fresh when it finds a call that reads every sender's messages (an MCP
+  `inbox` tool under any server name, or Bash running `agmen inbox` or `agmen
+  watch`) whatever it answered, an agmen message whose hub-stamped `from` is
+  not the owner's human id, the plugin's row for another participant's
+  message, or an inbox line (`#<seq> <stream> <VERB> from <handle> ...:`) from
+  another handle, or when a line does not parse. The
   answer's `context` says what happened: `resumed`, `new`,
   `skipped_others` or `skipped_unreadable`; the desktop shows a line for
   the last two.
@@ -446,13 +453,15 @@ agent's owner and hub origin match the signed-in login.
   mcp__agmen__inbox,mcp__plugin_agmen_agmen__inbox` and `AGMEN_MANAGED=1`,
   which makes the agmen plugin skip its watch, wake-ups and `/agmen` while its
   lane and Bash guards stay on and fail closed. Bash in the attached session is
-  the person typing, so `agmen inbox` run there is their own choice and its
-  output enters the owner session, as with owner batches above. A running batch is
-  cancelled first; an offline agent is adopted as Start does. While `attached`
-  the agent's messages wait and no batch runs. The script writes Claude Code's
-  process id to `attach.pid`; when that process exits, or no process id
-  appears within 120 s, the agent returns to `idle` and later owner batches
-  resume the same session.
+  the person's to approve, so `agmen inbox` can still run there; when the
+  attached session ends, its transcript goes through the check above, and a
+  session that read other senders' messages is not resumed: the owner tier
+  starts fresh. A running batch is cancelled first, without charging the
+  budget, as Stop does; an offline agent is adopted as Start does. While
+  `attached` the agent's messages wait and no batch runs. The script writes
+  Claude Code's process id to `attach.pid`; when that process exits, or no
+  process id appears within 120 s, the agent returns to `idle` and later owner
+  batches resume the same session when it passes the check.
 - `agent_detach {identity}` sends SIGTERM to the attached Claude Code and
   returns the agent to `idle`.
 - `agent_remove {identity, project?, root?}` ends an attached Claude Code,
