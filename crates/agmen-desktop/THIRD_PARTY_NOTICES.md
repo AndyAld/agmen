@@ -17,7 +17,7 @@ agmen is MIT licensed. The desktop app bundles or links the works below, each un
 | gpui, gpui_apple, gpui_macos, gpui_macros, gpui_shared_string, gpui_util, collections, derive_refineable, refineable, http_client, scheduler, sum_tree, ztracing, ztracing_macro | github.com/zed-industries/zed at 08cbb88 | Apache-2.0 (`assets/licenses/zed-LICENSE-APACHE.txt`) |
 | zed-font-kit 0.14.1-zed | github.com/zed-industries/font-kit at 94b0f28 | MIT OR Apache-2.0; agmen uses it under MIT (`assets/licenses/font-kit-LICENSE-MIT.txt`) |
 
-Licenses come from each crate's Cargo metadata (`cargo metadata --locked`, 2026-10-26). Crates from crates.io are checked by `cargo deny check` against `deny.toml`; shipping their license texts with release builds is the release pipeline's job (not built yet).
+Licenses come from each crate's Cargo metadata (`cargo metadata --locked`, 2026-10-26). The macOS bundle includes the root LICENSE, the root THIRD_PARTY_NOTICES.md and this file in Contents/Resources. Crates from crates.io are checked by `cargo deny check` against `deny.toml`; collecting their full license texts for release builds remains unimplemented.
 
 ## Not bundled
 
