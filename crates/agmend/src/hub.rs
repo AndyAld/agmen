@@ -228,25 +228,39 @@ impl Hub {
         project: &ProjectId,
         segments: &[&str],
         query: &[(&str, &str)],
+        limit: usize,
     ) -> Result<T, HubError> {
         let response = self
             .send(Method::GET, project, segments, query, |r| {
                 r.timeout(REQUEST_TIMEOUT)
             })
             .await?;
-        json(response).await
+        json_with_limit(response, limit).await
     }
 
     /// The feed's head seq (`state?key=head`).
     pub(crate) async fn head(&self, project: &ProjectId) -> Result<u64, HubError> {
-        let answer: StateAnswer<Head> = self.get(project, &["state"], &[("key", "head")]).await?;
+        let answer: StateAnswer<Head> = self
+            .get(
+                project,
+                &["state"],
+                &[("key", "head")],
+                MAX_HUB_RESPONSE_BYTES,
+            )
+            .await?;
         Ok(answer.value.feed_seq)
     }
 
     /// The roster (`state?key=roster`).
     pub(crate) async fn roster(&self, project: &ProjectId) -> Result<Vec<RosterEntry>, HubError> {
-        let answer: StateAnswer<Vec<RosterEntry>> =
-            self.get(project, &["state"], &[("key", "roster")]).await?;
+        let answer: StateAnswer<Vec<RosterEntry>> = self
+            .get(
+                project,
+                &["state"],
+                &[("key", "roster")],
+                MAX_HUB_RESPONSE_BYTES,
+            )
+            .await?;
         Ok(answer.value)
     }
 
@@ -258,16 +272,13 @@ impl Hub {
         limit: u32,
     ) -> Result<Page, HubError> {
         let (after, limit) = (after.to_string(), limit.to_string());
-        let response = self
-            .send(
-                Method::GET,
-                project,
-                &["streams", "feed"],
-                &[("after", &after), ("limit", &limit)],
-                |r| r.timeout(REQUEST_TIMEOUT),
-            )
-            .await?;
-        json_with_limit(response, MAX_PAGE_RESPONSE_BYTES).await
+        self.get(
+            project,
+            &["streams", "feed"],
+            &[("after", &after), ("limit", &limit)],
+            MAX_PAGE_RESPONSE_BYTES,
+        )
+        .await
     }
 
     pub(crate) async fn inbox(
@@ -293,6 +304,7 @@ impl Hub {
                 project,
                 &["streams", &stream.to_string()],
                 &[("after", &after.to_string()), ("limit", &limit.to_string())],
+                MAX_PAGE_RESPONSE_BYTES,
             )
             .await?;
         if page.messages.len() > limit as usize
@@ -311,7 +323,8 @@ impl Hub {
         project: &ProjectId,
         key: &str,
     ) -> Result<serde_json::Value, HubError> {
-        self.get(project, &["state"], &[("key", key)]).await
+        self.get(project, &["state"], &[("key", key)], MAX_HUB_RESPONSE_BYTES)
+            .await
     }
 
     /// Posts `envelope` as the person; the stream and seq it was recorded
@@ -399,6 +412,7 @@ fn url(base: &Url, project: &ProjectId, segments: &[&str]) -> Url {
 }
 
 /// A success's JSON body, or the refusal.
+#[cfg(test)]
 async fn json<T: DeserializeOwned>(response: reqwest::Response) -> Result<T, HubError> {
     json_with_limit(response, MAX_HUB_RESPONSE_BYTES).await
 }
@@ -446,6 +460,136 @@ async fn refusal_with_limit(response: reqwest::Response, limit: usize) -> HubErr
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    // Reuse the replay boundary fixture for each endpoint and response cap.
+    async fn response_cap_result(call: &str, status: u16, size: usize) -> Result<Page, HubError> {
+        use agmen_client::{HumanTokens, Login, TokenStore, store_tokens};
+
+        let mut body = br#"{"messages":[],"next_after":null,"head":0}"#.to_vec();
+        body.resize(size, b' ');
+        let path = match call {
+            "inbox" => "/v1/projects/projectp1/streams/inbox:idn7k2q9",
+            "stream" | "page" => "/v1/projects/projectp1/streams/feed",
+            "state" => "/v1/projects/projectp1/state",
+            _ => panic!("unknown test call"),
+        };
+        let app = axum::Router::new().route(
+            path,
+            axum::routing::get(move || {
+                let body = body.clone();
+                async move { (axum::http::StatusCode::from_u16(status).unwrap(), body) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let login = Login {
+            hub_url: format!("http://{}", listener.local_addr().unwrap())
+                .parse()
+                .unwrap(),
+            human_id: "hmn7k2q9".parse().unwrap(),
+            handle: "andy".to_owned(),
+        };
+        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let login_file = dir.path().join("login.json");
+        std::fs::write(&login_file, serde_json::to_vec(&login).unwrap()).unwrap();
+        let store = TokenStore::Dir(dir.path().join("tokens"));
+        store_tokens(
+            &store,
+            &login,
+            &HumanTokens::new("access".into(), "refresh".into(), 3600),
+        )
+        .await
+        .unwrap();
+        let http = Hub::http().unwrap();
+        let hub = Hub::new(
+            http.clone(),
+            std::sync::Arc::new(Credentials::new(login_file, store, http)),
+        );
+        let project = "projectp1".parse().unwrap();
+        let result = match call {
+            "inbox" => {
+                hub.inbox(&project, &"idn7k2q9".parse().unwrap(), 0, 500)
+                    .await
+            }
+            "stream" => hub.stream_page(&project, &Stream::Feed, 0, 500).await,
+            "page" => hub.page(&project, 0, 500).await,
+            "state" => hub
+                .state(&project, "head")
+                .await
+                .map(|value| serde_json::from_value(value).unwrap()),
+            _ => panic!("unknown test call"),
+        };
+        task.abort();
+        result
+    }
+
+    #[tokio::test]
+    async fn inbox_response_cap_accepts_large_page() {
+        let size = MAX_PAGE_RESPONSE_BYTES - 1;
+        assert!(size > MAX_HUB_RESPONSE_BYTES);
+        let page = response_cap_result("inbox", 200, size).await.unwrap();
+        assert!(page.messages.is_empty());
+        assert_eq!(page.next_after, None);
+        assert_eq!(page.head, 0);
+    }
+
+    #[tokio::test]
+    async fn stream_response_cap_accepts_large_page() {
+        let size = MAX_PAGE_RESPONSE_BYTES - 1;
+        assert!(size > MAX_HUB_RESPONSE_BYTES);
+        let page = response_cap_result("stream", 200, size).await.unwrap();
+        assert!(page.messages.is_empty());
+        assert_eq!(page.next_after, None);
+        assert_eq!(page.head, 0);
+    }
+
+    #[tokio::test]
+    async fn inbox_response_cap_rejects_oversized_page() {
+        for status in [200, 403] {
+            let result = response_cap_result("inbox", status, MAX_PAGE_RESPONSE_BYTES + 1).await;
+            assert!(
+                matches!(
+                    result,
+                    Err(HubError::Body(BodyReadError::TooLarge {
+                        limit: MAX_PAGE_RESPONSE_BYTES
+                    }))
+                ),
+                "{status}: {result:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_response_cap_rejects_oversized_page() {
+        for status in [200, 403] {
+            let result = response_cap_result("stream", status, MAX_PAGE_RESPONSE_BYTES + 1).await;
+            assert!(
+                matches!(
+                    result,
+                    Err(HubError::Body(BodyReadError::TooLarge {
+                        limit: MAX_PAGE_RESPONSE_BYTES
+                    }))
+                ),
+                "{status}: {result:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn state_response_cap_stays_at_general_limit() {
+        for status in [200, 403] {
+            let result = response_cap_result("state", status, MAX_HUB_RESPONSE_BYTES + 1).await;
+            assert!(
+                matches!(
+                    result,
+                    Err(HubError::Body(BodyReadError::TooLarge {
+                        limit: MAX_HUB_RESPONSE_BYTES
+                    }))
+                ),
+                "{status}: {result:?}"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn oversized_success_and_refusal_bodies_are_bounded() {
@@ -500,46 +644,9 @@ mod tests {
 
     #[tokio::test]
     async fn replay_page_body_boundaries() {
-        use agmen_client::{HumanTokens, Login, TokenStore, store_tokens};
-
         let cap = 500 * 80 * 1024 + 1024 * 1024;
         for (status, size) in [(200, cap - 1), (200, cap + 1), (403, cap + 1)] {
-            let mut body = br#"{"messages":[],"next_after":null,"head":0}"#.to_vec();
-            body.resize(size, b' ');
-            let app = axum::Router::new().route(
-                "/v1/projects/projectp1/streams/feed",
-                axum::routing::get(move || {
-                    let body = body.clone();
-                    async move { (axum::http::StatusCode::from_u16(status).unwrap(), body) }
-                }),
-            );
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let login = Login {
-                hub_url: format!("http://{}", listener.local_addr().unwrap())
-                    .parse()
-                    .unwrap(),
-                human_id: "hmn7k2q9".parse().unwrap(),
-                handle: "andy".to_owned(),
-            };
-            let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-            let dir = tempfile::tempdir().unwrap();
-            let login_file = dir.path().join("login.json");
-            std::fs::write(&login_file, serde_json::to_vec(&login).unwrap()).unwrap();
-            let store = TokenStore::Dir(dir.path().join("tokens"));
-            store_tokens(
-                &store,
-                &login,
-                &HumanTokens::new("access".into(), "refresh".into(), 3600),
-            )
-            .await
-            .unwrap();
-            let http = Hub::http().unwrap();
-            let hub = Hub::new(
-                http.clone(),
-                std::sync::Arc::new(Credentials::new(login_file, store, http)),
-            );
-            let result = hub.page(&"projectp1".parse().unwrap(), 0, 500).await;
-            task.abort();
+            let result = response_cap_result("page", status, size).await;
             if size < cap {
                 let page = result.unwrap();
                 assert!(page.messages.is_empty());
