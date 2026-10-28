@@ -8,6 +8,7 @@ pub(crate) mod inbox;
 mod install_receipt;
 mod join;
 pub(crate) mod lanes;
+mod open;
 pub(crate) mod post;
 mod watch;
 
@@ -18,14 +19,110 @@ use clap::{Args, Parser, Subcommand};
 
 /// Coordinate agents and people on one repository through an agmen hub.
 #[derive(Debug, Parser)]
-#[command(name = "agmen", version, about, propagate_version = true)]
+#[command(
+    name = "agmen",
+    version,
+    about,
+    propagate_version = true,
+    subcommand_precedence_over_arg = true,
+    args_conflicts_with_subcommands = true,
+    after_help = "With no arguments in a terminal, open the current folder in agmen.app. Use agmen <path> or agmen open [path] for another folder. A path matching a subcommand name requires agmen open <path>."
+)]
 pub(crate) struct Cli {
+    /// Folder to open in the desktop app.
+    path: Option<std::path::PathBuf>,
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
+}
+
+#[cfg(test)]
+mod launch_tests {
+    use super::*;
+
+    #[test]
+    fn bare_cli_opens_cwd() {
+        let dir = tempfile::tempdir().unwrap();
+        let Command::Open { path } = Cli::try_parse_from(["agmen"])
+            .unwrap()
+            .into_command(true)
+            .unwrap()
+        else {
+            panic!("expected open");
+        };
+        assert_eq!(
+            open::folder(path.as_deref(), dir.path()).unwrap(),
+            dir.path().canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn path_and_explicit_open_parse() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+        for args in [
+            vec!["agmen", path],
+            vec!["agmen", "open"],
+            vec!["agmen", "open", path],
+        ] {
+            let Command::Open { path } = Cli::try_parse_from(args)
+                .unwrap()
+                .into_command(true)
+                .unwrap()
+            else {
+                panic!("expected open");
+            };
+            assert_eq!(
+                open::folder(path.as_deref(), dir.path()).unwrap(),
+                dir.path().canonicalize().unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn subcommands_and_help_keep_dispatching() {
+        assert!(
+            format!("{:?}", Cli::try_parse_from(["agmen", "whoami"]).unwrap()).contains("Whoami")
+        );
+        for args in [["agmen", "--help"], ["agmen", "help"]] {
+            assert_eq!(
+                Cli::try_parse_from(args).unwrap_err().kind(),
+                clap::error::ErrorKind::DisplayHelp
+            );
+        }
+    }
+
+    #[test]
+    fn bare_cli_outside_a_terminal_keeps_the_usage_error() {
+        let error = Cli::try_parse_from(["agmen"])
+            .unwrap()
+            .into_command(false)
+            .unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::MissingSubcommand);
+    }
+
+    #[test]
+    fn unknown_word_is_an_unknown_subcommand_not_a_launch() {
+        for interactive in [true, false] {
+            let error = Cli::try_parse_from(["agmen", "no-such-subcommand-or-folder"])
+                .unwrap()
+                .into_command(interactive)
+                .unwrap_err();
+            assert_eq!(error.kind(), clap::error::ErrorKind::InvalidSubcommand);
+        }
+    }
+
+    #[test]
+    fn join_accepts_stdin_but_refuses_two_sources() {
+        assert!(Cli::try_parse_from(["agmen", "join", "--stdin"]).is_ok());
+        assert!(Cli::try_parse_from(["agmen", "join", "--stdin", "secret"]).is_err());
+        assert!(Cli::try_parse_from(["agmen", "join", "--stdin", "--project", "p"]).is_err());
+    }
 }
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Open a folder in the desktop app (defaults to the current folder).
+    Open { path: Option<std::path::PathBuf> },
     /// Read the shell install receipt without changing ownership.
     InstallReceipt(install_receipt::ReceiptArgs),
     /// Sign in to a hub with your browser (device login).
@@ -96,9 +193,39 @@ fn parse_wait(text: &str) -> Result<Duration, String> {
 }
 
 impl Cli {
+    /// What to run. Bare `agmen` opens the app only from a terminal, so a
+    /// script or agent keeps the usage error it got before the app launch
+    /// existed, and a word that is neither a subcommand nor a folder stays an
+    /// unknown subcommand.
+    fn into_command(self, interactive: bool) -> Result<Command, clap::Error> {
+        use clap::CommandFactory as _;
+        use clap::error::ErrorKind;
+        match (self.command, self.path) {
+            (Some(command), _) => Ok(command),
+            (None, None) if !interactive => Err(Self::command().error(
+                ErrorKind::MissingSubcommand,
+                "'agmen' requires a subcommand when not run from a terminal; use agmen open to launch the desktop app",
+            )),
+            (None, Some(path)) if !path.exists() => Err(Self::command().error(
+                ErrorKind::InvalidSubcommand,
+                format!(
+                    "unrecognized subcommand or folder '{}'",
+                    path.display()
+                ),
+            )),
+            (None, path) => Ok(Command::Open { path }),
+        }
+    }
+
     /// Runs the parsed command.
     pub(crate) async fn run(self) -> Result<()> {
-        match self.command {
+        use std::io::IsTerminal as _;
+        let interactive = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+        let command = self
+            .into_command(interactive)
+            .unwrap_or_else(|error| error.exit());
+        match command {
+            Command::Open { path } => open::run(path).await,
             Command::InstallReceipt(args) => install_receipt::run(args),
             Command::Login(args) => account::login(args).await,
             Command::Logout => account::logout().await,

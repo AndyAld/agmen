@@ -30,6 +30,17 @@ pub(crate) fn choose_project(
     cwd: &Path,
     settings: Option<&Path>,
 ) -> (ProjectChoice, Option<PathBuf>) {
+    let choice = choose_folder(cwd);
+    if choice.0 == (ProjectChoice::None { why: None }) {
+        (from_settings(settings), None)
+    } else {
+        choice
+    }
+}
+
+/// An explicit folder never falls back to a different project from settings.
+/// The CLI's finder resolves its checkout root and checks its joined identity.
+pub(crate) fn choose_folder(cwd: &Path) -> (ProjectChoice, Option<PathBuf>) {
     match agmen_client::find_identity(cwd) {
         Ok(Some(joined)) => {
             return (
@@ -47,7 +58,7 @@ pub(crate) fn choose_project(
             );
         }
     }
-    (from_settings(settings), None)
+    (ProjectChoice::None { why: None }, None)
 }
 
 fn from_settings(settings: Option<&Path>) -> ProjectChoice {
