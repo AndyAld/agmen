@@ -4,9 +4,12 @@
 //! An identity reads its project's feed and its own inbox. A human member
 //! reads the feed, its own inbox and the inboxes of the identities it owns
 //! in that project. Everything else is 403, whether the stream exists or
-//! not.
+//! not. The events route (`events.rs`) reads with the same rule
+//! ([`human_streams`]) and the same page query ([`fetch_page`]).
 
-use agmen_proto::{IdentityId, ProjectId, StampedEnvelope, Stream};
+use std::collections::BTreeSet;
+
+use agmen_proto::{ProjectId, StampedEnvelope, Stream};
 use axum::Json;
 use axum::extract::rejection::QueryRejection;
 use axum::extract::{Path, Query, State};
@@ -15,10 +18,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::auth::Caller;
 use crate::http::{ApiError, Hub};
+use crate::identities::HumanId;
+use crate::ingest::stream_key;
 
 /// The most messages one page holds, and the page size when the reader
 /// names none (protocol 5.3).
-const MAX_PAGE: u32 = 500;
+pub(crate) const MAX_PAGE: u32 = 500;
 
 /// The query string: messages after seq `after` (default 0), at most
 /// `limit` of them (default and cap [`MAX_PAGE`]).
@@ -71,26 +76,11 @@ pub(crate) async fn stream(
             "you may not read that stream",
         ));
     }
-    let rows: Vec<String> = sqlx::query_scalar(
-        "SELECT envelope::text FROM messages
-         WHERE project_id = $1 AND stream = $2 AND seq > $3
-         ORDER BY seq LIMIT $4",
-    )
-    .bind(project.as_str())
-    .bind(stream.to_string())
-    .bind(after)
-    .bind(i64::from(limit))
-    .fetch_all(hub.pool())
-    .await?;
-    let messages = rows
-        .iter()
-        .map(|json| serde_json::from_str::<StampedEnvelope>(json))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(ApiError::stored)?;
+    let messages = fetch_page(hub.pool(), &project, &stream, after, limit).await?;
     // Read after the messages: the head moves in the same transaction as
     // each insert, so it is never behind the page.
     let head: Option<i64> = sqlx::query_scalar("SELECT seq FROM stream_heads WHERE stream = $1")
-        .bind(format!("{project}/{stream}"))
+        .bind(stream_key(&project, &stream))
         .fetch_optional(hub.pool())
         .await?;
     let head = u64::try_from(head.unwrap_or(0)).map_err(ApiError::stored)?;
@@ -103,6 +93,33 @@ pub(crate) async fn stream(
         next_after,
         head,
     }))
+}
+
+/// The messages of `stream` in `project` after seq `after`, at most
+/// `limit` of them, in seq order. Seqs commit in order with no gaps
+/// (protocol 5.2), so the page is always the next run of the stream.
+pub(crate) async fn fetch_page(
+    pool: &sqlx::PgPool,
+    project: &ProjectId,
+    stream: &Stream,
+    after: i64,
+    limit: u32,
+) -> Result<Vec<StampedEnvelope>, ApiError> {
+    let rows: Vec<String> = sqlx::query_scalar(
+        "SELECT envelope::text FROM messages
+         WHERE project_id = $1 AND stream = $2 AND seq > $3
+         ORDER BY seq LIMIT $4",
+    )
+    .bind(project.as_str())
+    .bind(stream.to_string())
+    .bind(after)
+    .bind(i64::from(limit))
+    .fetch_all(pool)
+    .await?;
+    rows.iter()
+        .map(|json| serde_json::from_str::<StampedEnvelope>(json))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(ApiError::stored)
 }
 
 /// Whether `caller` may read `stream` in `project` (see the module docs).
@@ -118,41 +135,37 @@ async fn may_read(
                 Stream::Feed => true,
                 Stream::Inbox(id) => *id == identity.id,
             }),
-        Caller::Human(human) => {
-            let member: bool = sqlx::query_scalar(
-                "SELECT EXISTS (SELECT 1 FROM memberships WHERE human_id = $1 AND project_id = $2)",
-            )
-            .bind(human.as_str())
-            .bind(project.as_str())
-            .fetch_one(hub.pool())
-            .await?;
-            if !member {
-                return Ok(false);
-            }
-            match stream {
-                Stream::Feed => Ok(true),
-                Stream::Inbox(id) if id.as_str() == human.as_str() => Ok(true),
-                Stream::Inbox(id) => owns(hub, human.as_str(), project, id).await,
-            }
-        }
+        Caller::Human(human) => Ok(human_streams(hub.pool(), human, project)
+            .await?
+            .is_some_and(|streams| streams.contains(stream))),
     }
 }
 
-/// Whether `human` owns identity `id` in `project`, revoked or not, so an
-/// owner can still read what a revoked identity received.
-async fn owns(
-    hub: &Hub,
-    human: &str,
+/// The streams `human` may read in `project`: the feed, their own inbox and
+/// the inbox of every identity they own there, revoked or not, so an owner
+/// can still read what a revoked identity received. `None` when `human` is
+/// not a member.
+pub(crate) async fn human_streams(
+    pool: &sqlx::PgPool,
+    human: &HumanId,
     project: &ProjectId,
-    id: &IdentityId,
-) -> Result<bool, ApiError> {
-    Ok(sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM identities
-                        WHERE id = $1 AND project_id = $2 AND owner_human_id = $3)",
+) -> Result<Option<BTreeSet<Stream>>, ApiError> {
+    // One row when `human` is a member, holding the identities they own.
+    let owned: Option<Vec<String>> = sqlx::query_scalar(
+        "SELECT ARRAY(SELECT id FROM identities
+                      WHERE project_id = $2 AND owner_human_id = $1 ORDER BY id)
+         FROM memberships WHERE human_id = $1 AND project_id = $2",
     )
-    .bind(id.as_str())
+    .bind(human.as_str())
     .bind(project.as_str())
-    .bind(human)
-    .fetch_one(hub.pool())
-    .await?)
+    .fetch_optional(pool)
+    .await?;
+    let Some(owned) = owned else {
+        return Ok(None);
+    };
+    let mut streams = BTreeSet::from([Stream::Feed]);
+    for id in std::iter::once(human.as_str()).chain(owned.iter().map(String::as_str)) {
+        streams.insert(Stream::Inbox(id.parse().map_err(ApiError::stored)?));
+    }
+    Ok(Some(streams))
 }

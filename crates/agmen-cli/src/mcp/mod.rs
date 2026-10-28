@@ -346,6 +346,10 @@ impl Server {
 
     /// The connected identity, connecting first when none is. `Err` holds
     /// the tool's answer: not joined, or what failed.
+    #[expect(
+        clippy::result_large_err,
+        reason = "gpui enables serde_json preserve_order workspace-wide, which grows CallToolResult"
+    )]
     async fn live(&self) -> Result<Arc<Live>, CallToolResult> {
         let mut slot = self.shared.slot.lock().await;
         if let Some(connected) = slot.as_ref()
@@ -371,6 +375,10 @@ impl Server {
 
     /// The worktree's identity file, once it passed the trust test and
     /// names the identity `--identity` asks for.
+    #[expect(
+        clippy::result_large_err,
+        reason = "gpui enables serde_json preserve_order workspace-wide, which grows CallToolResult"
+    )]
     async fn trusted(&self) -> Result<Joined, CallToolResult> {
         let cwd = self.shared.options.cwd.clone();
         let found = blocking(move || Ok(find_identity(&cwd)))

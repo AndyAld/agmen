@@ -23,6 +23,7 @@ test-hooks = []
 agmen-proto = { version = "0.1.0", path = "../agmen-proto" }
 anyhow = "1.0.104"
 axum = { version = "0.8.9", default-features = false, features = ["form", "http1", "json", "query", "tokio", "tracing"] }
+futures-core = "0.3.34"
 getrandom = "0.4.3"
 globset = "0.4.20"
 jiff = { version = "0.2.38", default-features = false, features = ["std", "serde"] }

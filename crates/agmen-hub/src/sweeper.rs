@@ -50,8 +50,8 @@ enum SweepError {
 /// lanes or items yet, so their versions stay 0 until the tasks that add
 /// them bump them.
 #[derive(Debug, Serialize)]
-struct StateHead {
-    feed_seq: u64,
+pub(crate) struct StateHead {
+    pub(crate) feed_seq: u64,
     rules_v: u64,
     lanes_v: u64,
     items_v: u64,
@@ -144,20 +144,26 @@ async fn sweep(hub: &Hub, client: &AsyncClient) -> Result<usize, SweepError> {
     Ok(ids.len())
 }
 
-/// Publishes `topics`' retained `state/head` with the feed's current seq.
-async fn publish_head(hub: &Hub, client: &AsyncClient, topics: &Topics) -> Result<(), SweepError> {
+/// `topics`' `state/head` as of now: the feed's current seq. The sweeper
+/// publishes it, and `GET /projects/{p}/state?key=head` serves it.
+pub(crate) async fn state_head(hub: &Hub, topics: &Topics) -> Result<StateHead, sqlx::Error> {
     let feed_seq: Option<i64> =
         sqlx::query_scalar("SELECT seq FROM stream_heads WHERE stream = $1")
             .bind(head_key(topics, &Stream::Feed))
             .fetch_optional(hub.pool())
             .await?;
-    let head = StateHead {
+    Ok(StateHead {
         feed_seq: feed_seq.map_or(0, |seq| u64::try_from(seq).unwrap_or(0)),
         rules_v: 0,
         lanes_v: 0,
         items_v: 0,
         hub_at: Timestamp::now(),
-    };
+    })
+}
+
+/// Publishes `topics`' retained `state/head` with the feed's current seq.
+async fn publish_head(hub: &Hub, client: &AsyncClient, topics: &Topics) -> Result<(), SweepError> {
+    let head = state_head(hub, topics).await?;
     let notice = client
         .publish_tracked(
             topics.state_head(),
