@@ -354,19 +354,156 @@ fn app_owned_quit_renders_choice_and_remember_checkbox(cx: &mut TestAppContext) 
 }
 
 #[gpui::test]
-fn quit_path_checks_daemon_ownership_and_persists_keep_running(cx: &mut TestAppContext) {
+fn cancel_quit_from_launch_screen(cx: &mut TestAppContext) {
+    check_cancel_quit(cx, false, false, false);
+}
+
+#[gpui::test]
+fn escape_cancels_quit_from_launch_screen(cx: &mut TestAppContext) {
+    check_cancel_quit(cx, false, true, false);
+}
+
+#[gpui::test]
+fn cancel_quit_from_workspace(cx: &mut TestAppContext) {
+    check_cancel_quit(cx, true, false, false);
+}
+
+#[gpui::test]
+fn escape_cancels_quit_from_workspace(cx: &mut TestAppContext) {
+    check_cancel_quit(cx, true, true, false);
+}
+
+#[gpui::test]
+fn closing_window_then_cancel_quit_keeps_window(cx: &mut TestAppContext) {
+    check_cancel_quit(cx, true, false, true);
+}
+
+/// A bundled executable that only answers status, without a service manager.
+fn status_only_bundle(dir: &std::path::Path) -> Bundle {
     use std::os::unix::fs::PermissionsExt as _;
-    let dir = tempfile::tempdir().unwrap();
-    let app = dir.path().join("agmen.app");
+
+    let app = dir.join("agmen.app");
     let agmend = app.join("Contents/MacOS/agmend");
     std::fs::create_dir_all(agmend.parent().unwrap()).unwrap();
-    // A status-only fixture helper. It never invokes a service manager.
     std::fs::write(
         &agmend,
         "#!/bin/sh\nprintf '%s\\n' '{\"state\":\"not installed\",\"program\":null}'\n",
     )
     .unwrap();
     std::fs::set_permissions(&agmend, std::fs::Permissions::from_mode(0o700)).unwrap();
+    Bundle {
+        app,
+        agmend,
+        agmen: dir.join("agmen"),
+    }
+}
+
+fn check_cancel_quit(cx: &mut TestAppContext, workspace: bool, escape: bool, close_window: bool) {
+    let dir = tempfile::tempdir().unwrap();
+    let bundle = status_only_bundle(dir.path());
+    let fake = FakeAgmend::start(console(vec![]));
+    fake.edit(|state| {
+        state.hello_answer = Some(
+            serde_json::json!({"api":1,"version":env!("CARGO_PKG_VERSION"),"exe":bundle.agmend}),
+        );
+    });
+    let path = dir.path().join("settings.toml");
+    let launch = LiveLaunch {
+        socket: fake.path(),
+        root: None,
+        project: if workspace {
+            ProjectChoice::Project(project())
+        } else {
+            ProjectChoice::None { why: None }
+        },
+        settings: Some(path.clone()),
+    };
+    let (root, cx) = open(cx, launch);
+    if workspace {
+        wait_until(cx, |cx| {
+            root.read_with(cx, |root, _| matches!(root.state(), LiveState::Open(_)))
+        });
+    }
+    DesktopSettings {
+        last_project: Some(project()),
+        ..DesktopSettings::default()
+    }
+    .save(&path)
+    .unwrap();
+    let settings_before = std::fs::read(&path).unwrap();
+    cx.update(|window, cx| {
+        root.update(cx, |root, _| {
+            root.bundle = Some(bundle);
+        });
+        // The same close guard installed by main for a live window.
+        let weak = root.downgrade();
+        window.on_window_should_close(cx, move |window, cx| {
+            weak.update(cx, |root, cx| {
+                if root.quit_approved {
+                    return true;
+                }
+                root.request_quit(window, cx);
+                false
+            })
+            .unwrap_or(true)
+        });
+    });
+    if close_window {
+        assert!(!cx.simulate_close());
+    } else {
+        cx.update(|window, cx| root.update(cx, |root, cx| root.request_quit(window, cx)));
+    }
+    wait_until(cx, |cx| {
+        root.read_with(cx, |root, _| {
+            root.quit_choice == Some(service::QuitChoice::Ask)
+        })
+    });
+    click(cx, "quit:remember");
+    assert!(root.read_with(cx, |root, _| root.quit_remember));
+    if escape {
+        cx.simulate_keystrokes("escape");
+        redraw(cx);
+    } else {
+        click(cx, "quit:cancel");
+    }
+    cx.run_until_parked();
+    root.read_with(cx, |root, _| {
+        assert!(root.quit_choice.is_none(), "cancel must dismiss the dialog");
+        assert!(!root.quit_approved, "cancel must not approve quitting");
+        assert!(!root.quit_busy);
+        assert!(!root.quit_requested);
+        assert!(!root.quit_remember, "cancel must discard the checkbox");
+        assert!(root._quitting.is_none());
+    });
+    assert!(cx.debug_bounds("quit:dialog").is_none());
+    assert_eq!(std::fs::read(&path).unwrap(), settings_before);
+    fake.edit(|state| assert_eq!(state.shutdown_calls, 0));
+    assert!(AgmendBackend::probe(&fake.path()).is_ok());
+    assert_eq!(cx.windows().len(), 1);
+    if workspace {
+        assert!(cx.debug_bounds("chat").is_some());
+    }
+    // A second close still asks, with the remembered checkbox cleared.
+    assert!(!cx.simulate_close());
+    wait_until(cx, |cx| {
+        root.read_with(cx, |root, _| {
+            root.quit_choice == Some(service::QuitChoice::Ask)
+        })
+    });
+    assert!(!root.read_with(cx, |root, _| root.quit_remember));
+    // Return keeps its existing default: quit the app, leave agmend running.
+    cx.simulate_keystrokes("enter");
+    assert!(root.read_with(cx, |root, _| root.quit_approved));
+    assert_eq!(std::fs::read(&path).unwrap(), settings_before);
+    fake.edit(|state| assert_eq!(state.shutdown_calls, 0));
+    assert!(AgmendBackend::probe(&fake.path()).is_ok());
+}
+
+#[gpui::test]
+fn quit_path_checks_daemon_ownership_and_persists_keep_running(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let bundle = status_only_bundle(dir.path());
+    let agmend = bundle.agmend.clone();
     let fake = FakeAgmend::start(console(vec![]));
     let path = dir.path().join("settings.toml");
     let launch = LiveLaunch {
@@ -378,11 +515,7 @@ fn quit_path_checks_daemon_ownership_and_persists_keep_running(cx: &mut TestAppC
     let (root, cx) = open(cx, launch);
     cx.update(|_, cx| {
         root.update(cx, |root, _| {
-            root.bundle = Some(Bundle {
-                app,
-                agmend: agmend.clone(),
-                agmen: dir.path().join("agmen"),
-            });
+            root.bundle = Some(bundle);
         })
     });
     // Foreign and unknown identity skip the dialog even with remembered Stop.

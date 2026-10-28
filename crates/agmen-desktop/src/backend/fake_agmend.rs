@@ -165,6 +165,7 @@ pub(crate) fn console_with_checkout(messages: Vec<StampedEnvelope>) -> ConsoleSn
 #[derive(Debug, Default)]
 pub(crate) struct FakeState {
     pub(crate) ready_calls: usize,
+    pub(crate) shutdown_calls: usize,
     pub(crate) hello_answer: Option<Value>,
     pub(crate) not_ready: bool,
     pub(crate) snapshot: Option<ConsoleSnapshot>,
@@ -354,14 +355,14 @@ fn hello_response(id: u64, stream: &UnixStream, state: &Mutex<FakeState>) -> Opt
     })
 }
 
-fn serve(mut stream: UnixStream, state: &Mutex<FakeState>) {
+fn serve(mut stream: UnixStream, state: &Mutex<FakeState>) -> Option<()> {
     while let Ok(request) = frame::read::<Request>(&mut stream) {
+        if request.method == "shutdown" {
+            state.lock().unwrap().shutdown_calls += 1;
+        }
         let id = request.id;
         let answer = match request.method.as_str() {
-            "hello" => match hello_response(id, &stream, state) {
-                Some(response) => response,
-                None => return,
-            },
+            "hello" => hello_response(id, &stream, state)?,
             "ready" => {
                 let mut state = state.lock().unwrap();
                 state.ready_calls += 1;
@@ -401,7 +402,7 @@ fn serve(mut stream: UnixStream, state: &Mutex<FakeState>) {
                     state.drop_post_answers -= 1;
                     // Clones of this stream are held for stop, so close it.
                     drop(stream.shutdown(std::net::Shutdown::Both));
-                    return;
+                    return None;
                 }
                 match &state.post_error {
                     Some(why) => Response::err(id, ErrorCode::Hub, why.clone()),
@@ -442,7 +443,7 @@ fn serve(mut stream: UnixStream, state: &Mutex<FakeState>) {
                 state.watch_params.push(request.params.clone());
                 if let Some((code, why)) = state.watch_error.clone() {
                     drop(frame::write(&mut stream, &Response::err(id, code, why)));
-                    return;
+                    return None;
                 }
                 let mut watch = stream.try_clone().unwrap();
                 for event in state.opening.clone() {
@@ -453,12 +454,11 @@ fn serve(mut stream: UnixStream, state: &Mutex<FakeState>) {
                 drop(state);
                 // A watch takes no more requests; any read ends it.
                 drop(frame::read::<Value>(&mut stream));
-                return;
+                return None;
             }
             other => Response::err(id, ErrorCode::NotFound, format!("no method {other}")),
         };
-        if frame::write(&mut stream, &answer).is_err() {
-            return;
-        }
+        frame::write(&mut stream, &answer).ok()?;
     }
+    Some(())
 }

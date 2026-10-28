@@ -490,6 +490,17 @@ impl LiveRoot {
         }));
     }
 
+    fn cancel_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.quit_busy || self.quit_choice != Some(service::QuitChoice::Ask) {
+            return;
+        }
+        self.quit_choice = None;
+        self.quit_remember = false;
+        self.quit_requested = false;
+        window.focus(&self.focus_handle(cx), cx);
+        cx.notify();
+    }
+
     fn choose_quit(
         &mut self,
         choice: service::QuitChoice,
@@ -580,6 +591,8 @@ impl LiveRoot {
                 .on_click(cx.listener(|this, _, window, cx| this.choose_quit(service::QuitChoice::Keep, window, cx))))
             .child(Button::new("quit:everything", if busy { "Stopping agmend…" } else { "Quit Everything" })
                 .on_click(cx.listener(|this, _, window, cx| this.choose_quit(service::QuitChoice::Stop, window, cx))))
+            .child(Button::new("quit:cancel", "Cancel")
+                .on_click(cx.listener(|this, _, window, cx| this.cancel_quit(window, cx))))
             .children(self.service_error.clone().map(|error| Label::new(error).color(Color::Error).wrap())))
     }
 
@@ -657,6 +670,11 @@ impl Render for LiveRoot {
                     {
                         this.choose_quit(service::QuitChoice::Keep, window, cx);
                         cx.stop_propagation();
+                    } else if this.quit_choice == Some(service::QuitChoice::Ask)
+                        && event.keystroke.key == "escape"
+                    {
+                        this.cancel_quit(window, cx);
+                        cx.stop_propagation();
                     }
                 }))
                 .debug_selector(|| self.state.selector().into())
@@ -682,6 +700,11 @@ impl Render for LiveRoot {
                     && event.keystroke.key == "enter"
                 {
                     this.choose_quit(service::QuitChoice::Keep, window, cx);
+                    cx.stop_propagation();
+                } else if this.quit_choice == Some(service::QuitChoice::Ask)
+                    && event.keystroke.key == "escape"
+                {
+                    this.cancel_quit(window, cx);
                     cx.stop_propagation();
                 }
             }))
