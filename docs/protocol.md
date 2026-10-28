@@ -416,6 +416,9 @@ agent's owner and hub origin match the signed-in login.
   character as ->/<id>.jsonl`), else `--session-id <id>`. A saved owner
   session passes the transcript check below first; when it fails, the owner
   tier gets a fresh session id, saved in the record, and `context` says why.
+  The same check runs again before every owner batch that resumes its
+  session, since a Claude Code run by hand in the folder (`claude --continue`
+  with the agmen plugin) can add other senders' messages to it at any time.
   A record in the older format with one `session_id` (which ran every batch,
   owner's and others') loads it as the owner session, subject to that check,
   gets a fresh others session, and is saved again in the current format. For an identity
@@ -462,8 +465,15 @@ agent's owner and hub origin match the signed-in login.
   Claude Code's process id to `attach.pid`; when that process exits, or no
   process id appears within 120 s, the agent returns to `idle` and later owner
   batches resume the same session when it passes the check.
-- `agent_detach {identity}` sends SIGTERM to the attached Claude Code and
-  returns the agent to `idle`.
+- `agent_detach {identity}` sends SIGTERM to the attached Claude Code, waits
+  up to 2 s for it to exit, then sends SIGKILL and waits up to 1 s, and only
+  then checks its transcript and returns the agent to `idle`. When the exit
+  cannot be confirmed, the owner tier starts a fresh session instead. agmend
+  counts the process `attach.pid` names as the attached Claude Code only while
+  it runs as this user and started no later than the file was written (from
+  `ps -o etime=`, within 2 s), so a reused process id is never signalled.
+  Start and Attach refuse while `attach.pid` names such a process, as after
+  Stop or an agmend restart during an attach, and Remove ends it.
 - `agent_remove {identity, project?, root?}` ends an attached Claude Code,
   stops the agent (BYE), revokes the identity with `DELETE
   /v1/identities/{id}` as `agmen leave` does (a 404 counts as revoked), deletes

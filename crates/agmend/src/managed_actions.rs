@@ -34,6 +34,33 @@ use crate::transcripts;
 
 /// How long Terminal has to start Claude Code before Attach counts it gone.
 const ATTACH_GRACE: Duration = Duration::from_secs(120);
+/// How long Detach waits for Claude Code to exit after SIGTERM, then after
+/// SIGKILL, and how often it looks.
+const TERM_WAIT: Duration = Duration::from_secs(2);
+const KILL_WAIT: Duration = Duration::from_secs(1);
+const EXIT_POLL: Duration = Duration::from_millis(50);
+/// How much later than the pid file a process may seem to start and still
+/// be the one that wrote it: `ps` counts whole seconds.
+const START_SLACK: Duration = Duration::from_secs(2);
+
+/// Whether an attached Claude Code is known to have exited, so its
+/// transcript holds all it will ever write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Exit {
+    Confirmed,
+    Unconfirmed,
+}
+
+/// What `attach.pid` says about the attached Claude Code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Holder {
+    /// No file yet, or no process id in it.
+    Missing,
+    /// The process it names has exited, or the id now belongs to another
+    /// process.
+    Gone,
+    Running(Pid),
+}
 /// The largest `agent.json` or `status.json` agmend reads.
 const MAX_RECORD_BYTES: u64 = 64 * 1024;
 /// The most worktrees one folder lookup checks.
@@ -167,6 +194,7 @@ impl Managed {
     pub(crate) async fn start(self: &Arc<Self>, raw: Value) -> Result<Value, ApiError> {
         let target: Target = params(raw)?;
         let _launching = self.launching.lock().await;
+        self.refuse_if_still_attached(&target.identity).await?;
         let (worker, context) = self.adopt(target).await?;
         let mut started = self.bring_online(&worker, "idle").await?;
         started["context"] = json!(context);
@@ -197,6 +225,7 @@ impl Managed {
             }
             None => None,
         };
+        self.refuse_if_still_attached(&target.identity).await?;
         let identity = target.identity.clone();
         let adopted = online.is_none();
         let (worker, mut context) = match online {
@@ -218,6 +247,7 @@ impl Managed {
                 pid_file: pid_file.clone(),
                 since: tokio::time::Instant::now(),
                 seen: false,
+                pid: None,
             });
             if let Some(stop) = held.stop.take() {
                 let _sent = stop.send(());
@@ -287,18 +317,29 @@ impl Managed {
             .cloned()
             .ok_or_else(|| bad_request("agent is not managed by this daemon"))?;
         let login = self.hub.credentials().login().await.map_err(error)?;
+        let attached = {
+            let held = worker.lock().await;
+            owned(&held.record.identity, &login)?;
+            if held.state != "attached" {
+                return Err(bad_request(format!(
+                    "{} is not attached",
+                    held.record.identity.handle
+                )));
+            }
+            held.attached
+                .as_ref()
+                .map(|attached| (attached.pid_file.clone(), attached.pid))
+        };
+        // Wait unlocked, so the other agents' batches keep running.
+        let exit = match attached {
+            Some((pid_file, pid)) => end_interactive(&pid_file, pid).await,
+            None => Exit::Confirmed,
+        };
         let mut held = worker.lock().await;
-        owned(&held.record.identity, &login)?;
-        if held.state != "attached" {
-            return Err(bad_request(format!(
-                "{} is not attached",
-                held.record.identity.handle
-            )));
+        // The supervisor may have seen the exit first and finished it.
+        if held.state == "attached" {
+            self.finish_attach(&mut held, exit).await;
         }
-        if let Some(attached) = &held.attached {
-            end_interactive(&attached.pid_file).await;
-        }
-        self.finish_attach(&mut held).await;
         Ok(json!({"identity": identity, "state": held.state}))
     }
 
@@ -346,10 +387,23 @@ impl Managed {
                 Err(_) if existing.is_some() && !present => None,
                 Err(refusal) => return Err(refusal),
             };
+        // An attached Claude Code, or one left open across a restart, is
+        // ended: its identity is about to be revoked.
+        let known = match &existing {
+            Some(worker) => worker
+                .lock()
+                .await
+                .attached
+                .as_ref()
+                .and_then(|attached| attached.pid),
+            None => None,
+        };
+        end_interactive(
+            &self.agent_dir(&identity.identity_id).join("attach.pid"),
+            known,
+        )
+        .await;
         if let Some(worker) = existing {
-            if let Some(attached) = &worker.lock().await.attached {
-                end_interactive(&attached.pid_file).await;
-            }
             self.stop_worker(worker).await?;
         }
         if !self
@@ -605,27 +659,80 @@ impl Managed {
         self.save_record(&worker.record).await
     }
 
+    /// One supervisor look at an attached agent: back to headless runs once
+    /// its Claude Code has exited.
+    pub(super) async fn watch_attached(&self, worker: &mut Worker) {
+        if self.attach_ended(worker).await {
+            self.finish_attach(worker, Exit::Confirmed).await;
+        }
+    }
+
     /// Whether the attached Claude Code has exited, or never started.
-    pub(super) async fn attach_ended(&self, worker: &mut Worker) -> bool {
+    async fn attach_ended(&self, worker: &mut Worker) -> bool {
         let Some(attached) = worker.attached.as_mut() else {
             return true;
         };
         let late = attached.since.elapsed() > ATTACH_GRACE;
-        match tokio::fs::read_to_string(&attached.pid_file).await {
-            Ok(text) => match parse_pid(&text) {
-                Some(pid) => {
-                    attached.seen = true;
-                    !alive(pid)
-                }
-                // Half written, or not a pid at all.
-                None => late,
-            },
-            Err(_) => attached.seen || late,
+        // A pid already checked against its file's age is only probed: no
+        // `ps` on every tick.
+        let named = read_pid(&attached.pid_file).await;
+        if let (Some(pid), Some(known)) = (named, attached.pid)
+            && pid == known
+        {
+            return !running(pid);
+        }
+        match holder(&attached.pid_file).await {
+            Holder::Running(pid) => {
+                attached.seen = true;
+                attached.pid = Some(pid);
+                false
+            }
+            Holder::Gone => {
+                attached.seen = true;
+                true
+            }
+            Holder::Missing => attached.seen || late,
         }
     }
 
-    /// Back to headless runs on the same owner session.
-    pub(super) async fn finish_attach(&self, worker: &mut Worker) {
+    /// Refuses while `attach.pid` names a running attached Claude Code, as
+    /// after Stop or a restart during an attach: headless batches would
+    /// share its session.
+    async fn refuse_if_still_attached(&self, id: &IdentityId) -> Result<(), ApiError> {
+        match holder(&self.agent_dir(id).join("attach.pid")).await {
+            Holder::Running(_) => Err(bad_request(
+                "an attached Claude Code is still open for this agent; quit it, then try again",
+            )),
+            Holder::Missing | Holder::Gone => Ok(()),
+        }
+    }
+
+    /// The session the next batch of a tier runs on, and whether it resumes
+    /// it. The tiers never share one, so untrusted conversation history stays
+    /// out of bypassPermissions batches. An owner session is checked before
+    /// every resume: it may have gained other senders' messages since, from a
+    /// Claude Code run by hand in the folder or one left open across a
+    /// restart.
+    pub(super) async fn batch_session(
+        &self,
+        worker: &mut Worker,
+        owner_only: bool,
+    ) -> Result<(String, bool), ApiError> {
+        if !owner_only {
+            return Ok((
+                worker.record.others_session_id.clone(),
+                worker.others_resumed,
+            ));
+        }
+        if worker.owner_resumed {
+            self.refresh_sessions(worker).await?;
+        }
+        Ok((worker.record.owner_session_id.clone(), worker.owner_resumed))
+    }
+
+    /// Back to headless runs on the same owner session, or a fresh one when
+    /// the attached Claude Code may still be writing to it.
+    async fn finish_attach(&self, worker: &mut Worker, exit: Exit) {
         let seen = match worker.attached.take() {
             Some(attached) => {
                 remove_quietly(&attached.pid_file).await;
@@ -636,7 +743,9 @@ impl Managed {
         // Resume what the interactive session saved, once it checks out.
         // Without Claude Code's folder to look in, a session that ran cannot
         // be checked, so the owner tier starts fresh.
-        let checked = if self.claude_home.is_some() {
+        let checked = if exit == Exit::Unconfirmed {
+            self.fresh_owner_session(worker).await
+        } else if self.claude_home.is_some() {
             self.refresh_sessions(worker).await.map(drop)
         } else if seen {
             self.fresh_owner_session(worker).await
@@ -817,26 +926,116 @@ fn parse_pid(text: &str) -> Option<Pid> {
     text.trim().parse::<i32>().ok().and_then(Pid::from_raw)
 }
 
-fn alive(pid: Pid) -> bool {
-    match rustix::process::test_kill_process(pid) {
-        Ok(()) => true,
-        // Someone else's process with that id: it is not ours to watch,
-        // but something holds the id, so wait rather than resume.
-        Err(errno) => errno == rustix::io::Errno::PERM,
+/// Whether `pid` names a process of this user. Another user's process holds
+/// a reused id: the attached Claude Code runs as this user.
+fn running(pid: Pid) -> bool {
+    rustix::process::test_kill_process(pid).is_ok()
+}
+
+/// What `pid_file` says. A process that started after the file was written
+/// holds a reused id; when `ps` cannot say, the process counts as the one
+/// the script started.
+async fn holder(pid_file: &Path) -> Holder {
+    let path = pid_file.to_owned();
+    let read = tokio::task::spawn_blocking(move || -> std::io::Result<_> {
+        let written = std::fs::metadata(&path)?.modified()?;
+        Ok((read_bounded(&path)?, written))
+    })
+    .await;
+    let Ok(Ok((bytes, written))) = read else {
+        return Holder::Missing;
+    };
+    // Half written, or not a pid at all.
+    let Some(pid) = std::str::from_utf8(&bytes).ok().and_then(parse_pid) else {
+        return Holder::Missing;
+    };
+    if !running(pid) {
+        return Holder::Gone;
+    }
+    match started(pid).await {
+        Some(start) if start > written + START_SLACK => Holder::Gone,
+        _ => Holder::Running(pid),
     }
 }
 
-/// Asks the attached Claude Code to exit.
-async fn end_interactive(pid_file: &Path) {
-    let Ok(text) = tokio::fs::read_to_string(pid_file).await else {
-        return;
+/// The process id `pid_file` names, if any.
+async fn read_pid(pid_file: &Path) -> Option<Pid> {
+    let path = pid_file.to_owned();
+    let bytes = tokio::task::spawn_blocking(move || read_bounded(&path))
+        .await
+        .ok()?
+        .ok()?;
+    std::str::from_utf8(&bytes).ok().and_then(parse_pid)
+}
+
+/// When `pid` started, from `ps -o etime=`.
+async fn started(pid: Pid) -> Option<std::time::SystemTime> {
+    let output = tokio::time::timeout(
+        Duration::from_secs(2),
+        tokio::process::Command::new("/bin/ps")
+            .args(["-o", "etime=", "-p", &pid.as_raw_nonzero().to_string()])
+            .env("LC_ALL", "C")
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    let elapsed = parse_etime(std::str::from_utf8(&output.stdout).ok()?.trim())?;
+    std::time::SystemTime::now().checked_sub(elapsed)
+}
+
+/// `ps`'s elapsed time, `[[dd-]hh:]mm:ss`.
+pub(super) fn parse_etime(text: &str) -> Option<Duration> {
+    let (days, clock) = match text.split_once('-') {
+        Some((days, clock)) => (days.parse::<u64>().ok()?, clock),
+        None => (0, text),
     };
-    if let Some(pid) = parse_pid(&text)
-        && alive(pid)
-        && let Err(error) = rustix::process::kill_process(pid, Signal::TERM)
-    {
-        tracing::warn!(%error, "could not end the attached Claude Code");
+    let parts: Vec<u64> = clock
+        .split(':')
+        .map(|part| part.parse().ok())
+        .collect::<Option<_>>()?;
+    let (hours, minutes, seconds) = match parts.as_slice() {
+        [minutes, seconds] => (0, *minutes, *seconds),
+        [hours, minutes, seconds] => (*hours, *minutes, *seconds),
+        _ => return None,
+    };
+    Some(Duration::from_secs(
+        ((days * 24 + hours) * 60 + minutes) * 60 + seconds,
+    ))
+}
+
+/// Ends the attached Claude Code: SIGTERM, then SIGKILL, each followed by a
+/// bounded wait. `known` is its process id when already checked.
+async fn end_interactive(pid_file: &Path, known: Option<Pid>) -> Exit {
+    let pid = match known {
+        Some(pid) if running(pid) => pid,
+        Some(_) => return Exit::Confirmed,
+        None => match holder(pid_file).await {
+            Holder::Running(pid) => pid,
+            Holder::Missing | Holder::Gone => return Exit::Confirmed,
+        },
+    };
+    for (signal, wait) in [(Signal::TERM, TERM_WAIT), (Signal::KILL, KILL_WAIT)] {
+        match rustix::process::kill_process(pid, signal) {
+            Ok(()) => {}
+            Err(rustix::io::Errno::SRCH) => return Exit::Confirmed,
+            Err(error) => {
+                tracing::warn!(%error, "could not end the attached Claude Code");
+                return Exit::Unconfirmed;
+            }
+        }
+        let deadline = tokio::time::Instant::now() + wait;
+        while tokio::time::Instant::now() < deadline {
+            if !running(pid) {
+                return Exit::Confirmed;
+            }
+            tokio::time::sleep(EXIT_POLL).await;
+        }
     }
+    Exit::Unconfirmed
 }
 
 async fn remove_quietly(path: &Path) {

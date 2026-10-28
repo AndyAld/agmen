@@ -1502,3 +1502,228 @@ async fn attach_over_a_running_batch_leaves_the_budget_for_runs_after_it() {
     assert_eq!(fixture.runner.runs.lock().unwrap().len(), 2);
     managed.shutdown().await;
 }
+
+/// Reaps `child` on its own thread, so its exit shows at once instead of
+/// as a zombie, and hands back how it ended.
+fn reaped(mut child: std::process::Child) -> std::sync::mpsc::Receiver<std::process::ExitStatus> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        if let Ok(status) = child.wait() {
+            // The test may have stopped listening.
+            let _sent = sender.send(status);
+        }
+    });
+    receiver
+}
+
+/// A stand in for the attached Claude Code: on SIGTERM it copies `from`
+/// over `to` (a last write to its transcript), then exits.
+fn late_writer(from: &std::path::Path, to: &std::path::Path) -> std::process::Child {
+    std::process::Command::new("/bin/sh")
+        .args([
+            "-c",
+            "trap 'cat \"$1\" > \"$2\"; exit 0' TERM; while :; do sleep 0.05; done",
+            "sh",
+        ])
+        .arg(from)
+        .arg(to)
+        .spawn()
+        .unwrap()
+}
+
+fn owner_transcript(fixture: &Fixture, folder: &std::path::Path, id: &str) -> std::path::PathBuf {
+    let dir = fixture
+        .dir
+        .path()
+        .join("claude/projects")
+        .join(crate::transcripts::encode(folder).unwrap());
+    std::fs::create_dir_all(&dir).unwrap();
+    dir.join(format!("{id}.jsonl"))
+}
+
+#[tokio::test]
+async fn detach_checks_the_session_only_after_the_attached_claude_exits() {
+    let fixture = Fixture::new().await;
+    fixture.launch().await;
+    let managed = &fixture.daemon.core.managed;
+    let (owner, _, worktree) = sessions(&*worker_of(managed, "agent001").await.lock().await);
+    managed
+        .attach_claude(json!({"identity":"agent001"}))
+        .await
+        .unwrap();
+    let spec = fixture.runner.attaches.lock().unwrap()[0].clone();
+    let path = owner_transcript(&fixture, &worktree, &owner);
+    std::fs::write(&path, "{\"type\":\"user\"}\n").unwrap();
+    let late = fixture.dir.path().join("late.jsonl");
+    std::fs::write(&late, others_prompt()).unwrap();
+    let claude = late_writer(&late, &path);
+    std::fs::write(&spec.pid_file, claude.id().to_string()).unwrap();
+    let exit = reaped(claude);
+    // Let the shell set its trap before it is signalled.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    managed
+        .detach(json!({"identity":"agent001"}))
+        .await
+        .unwrap();
+    assert!(
+        exit.try_recv().is_ok(),
+        "detach returns once Claude has exited"
+    );
+    let worker = worker_of(managed, "agent001").await;
+    let held = worker.lock().await;
+    assert_ne!(held.record.owner_session_id, owner);
+    assert!(!held.owner_resumed);
+    drop(held);
+    managed.shutdown().await;
+}
+
+#[tokio::test]
+async fn detach_kills_a_claude_that_ignores_sigterm_and_starts_fresh_when_its_exit_is_unconfirmed()
+{
+    let fixture = Fixture::new().await;
+    fixture.launch().await;
+    let managed = &fixture.daemon.core.managed;
+    let (owner, _, worktree) = sessions(&*worker_of(managed, "agent001").await.lock().await);
+    managed
+        .attach_claude(json!({"identity":"agent001"}))
+        .await
+        .unwrap();
+    let spec = fixture.runner.attaches.lock().unwrap()[0].clone();
+    std::fs::write(
+        owner_transcript(&fixture, &worktree, &owner),
+        "{\"type\":\"user\"}\n",
+    )
+    .unwrap();
+    // Ignores SIGTERM, and stays a zombie until this test reaps it, so its
+    // exit cannot be confirmed.
+    let mut claude = std::process::Command::new("/bin/sh")
+        .args(["-c", "trap '' TERM; while :; do sleep 0.05; done"])
+        .spawn()
+        .unwrap();
+    std::fs::write(&spec.pid_file, claude.id().to_string()).unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let detached = managed
+        .detach(json!({"identity":"agent001"}))
+        .await
+        .unwrap();
+    assert_eq!(detached["state"], "idle");
+    let mut status = None;
+    for _ in 0..40 {
+        status = claude.try_wait().unwrap();
+        if status.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    if status.is_none() {
+        claude.kill().unwrap();
+        claude.wait().unwrap();
+    }
+    use std::os::unix::process::ExitStatusExt as _;
+    assert_eq!(status.and_then(|status| status.signal()), Some(9));
+    let worker = worker_of(managed, "agent001").await;
+    assert_ne!(worker.lock().await.record.owner_session_id, owner);
+    managed.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_owner_batch_never_resumes_a_session_that_gained_others_messages() {
+    // As when someone runs `claude --continue` in the agent's folder with the
+    // agmen plugin, or agmend restarted while Claude Code was attached.
+    let fixture = Fixture::new().await;
+    fixture.launch().await;
+    let managed = &fixture.daemon.core.managed;
+    let (owner, _, worktree) = sessions(&*worker_of(managed, "agent001").await.lock().await);
+    enqueue_from(&fixture, 1, "owner001", "agent001").await;
+    batch(managed, "agent001").await;
+    transcript_lines(&fixture, &worktree, &owner, &[others_prompt()]);
+    enqueue_from(&fixture, 2, "owner001", "agent001").await;
+    batch(managed, "agent001").await;
+    let runs = fixture.runner.runs.lock().unwrap().clone();
+    assert_eq!(runs.len(), 2);
+    assert_eq!(runs[0].session_id, owner);
+    assert!(runs[1].owner_only);
+    assert_ne!(runs[1].session_id, owner);
+    assert!(!runs[1].resume);
+    managed.shutdown().await;
+}
+
+#[tokio::test]
+async fn start_and_attach_refuse_while_an_attached_claude_is_still_open() {
+    let fixture = Fixture::new().await;
+    fixture.launch().await;
+    let managed = &fixture.daemon.core.managed;
+    managed
+        .attach_claude(json!({"identity":"agent001"}))
+        .await
+        .unwrap();
+    let spec = fixture.runner.attaches.lock().unwrap()[0].clone();
+    let mut claude = std::process::Command::new("/bin/sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    std::fs::write(&spec.pid_file, claude.id().to_string()).unwrap();
+    // agmend restarts while Claude Code is attached: the agent loads offline.
+    managed.shutdown().await;
+    let managed = restarted(&fixture).await;
+    for refusal in [
+        managed
+            .start(json!({"identity":"agent001"}))
+            .await
+            .unwrap_err(),
+        managed
+            .attach_claude(json!({"identity":"agent001"}))
+            .await
+            .unwrap_err(),
+    ] {
+        assert!(
+            refusal.message.contains("still open"),
+            "{}",
+            refusal.message
+        );
+    }
+    assert_eq!(fixture.runner.attaches.lock().unwrap().len(), 1);
+    claude.kill().unwrap();
+    claude.wait().unwrap();
+    managed.start(json!({"identity":"agent001"})).await.unwrap();
+    managed.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_pid_file_older_than_the_process_it_names_is_not_an_attached_claude() {
+    let fixture = Fixture::new().await;
+    fixture.launch().await;
+    let managed = &fixture.daemon.core.managed;
+    managed.shutdown().await;
+    // A reused id: the process started after the file was written.
+    let mut other = std::process::Command::new("/bin/sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    let pid_file = managed.state_dir.join("managed/agent001/attach.pid");
+    std::fs::write(&pid_file, other.id().to_string()).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&pid_file)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600))
+        .unwrap();
+    let managed = restarted(&fixture).await;
+    managed.start(json!({"identity":"agent001"})).await.unwrap();
+    other.kill().unwrap();
+    other.wait().unwrap();
+    managed.shutdown().await;
+}
+
+#[test]
+fn ps_elapsed_times_parse_in_every_form() {
+    use std::time::Duration;
+    let parse = super::actions::parse_etime;
+    assert_eq!(parse("00:07"), Some(Duration::from_secs(7)));
+    assert_eq!(parse("12:34"), Some(Duration::from_secs(754)));
+    assert_eq!(parse("01:02:03"), Some(Duration::from_secs(3723)));
+    assert_eq!(parse("2-01:02:03"), Some(Duration::from_secs(176_523)));
+    for bad in ["", "7", "a:b", "1:2:3:4", "x-01:02"] {
+        assert_eq!(parse(bad), None, "{bad}");
+    }
+}
