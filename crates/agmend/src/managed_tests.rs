@@ -13,6 +13,8 @@ use crate::managed::Managed;
 struct FakeRunner {
     runs: Mutex<Vec<crate::launch::RunSpec>>,
     attaches: Mutex<Vec<crate::launch::AttachSpec>>,
+    /// Attach answers this Terminal failure.
+    attach_error: Mutex<Option<String>>,
     mode: AtomicUsize,
     cancelled: Arc<AtomicUsize>,
 }
@@ -25,7 +27,13 @@ impl crate::launch::Runner for FakeRunner {
         Box<dyn std::future::Future<Output = Result<(), crate::launch::RunError>> + Send + '_>,
     > {
         self.attaches.lock().unwrap().push(spec);
-        Box::pin(async { Ok(()) })
+        let failure = self.attach_error.lock().unwrap().clone();
+        Box::pin(async move {
+            match failure {
+                Some(why) => Err(crate::launch::RunError::Terminal(why)),
+                None => Ok(()),
+            }
+        })
     }
     fn contains_peer(&self, pid: i32) -> bool {
         pid == 4242
@@ -1316,4 +1324,36 @@ async fn remove_refuses_another_owners_identity_file() {
     );
     assert!(fixture.revoked.lock().unwrap().is_empty());
     assert!(folder.join(".agmen/identity.json").exists());
+}
+
+#[tokio::test]
+async fn a_failed_attach_leaves_each_agent_as_it_was() {
+    let fixture = Fixture::new().await;
+    fixture.launch().await;
+    fixture.daemon.core.managed.shutdown().await;
+    let managed = restarted(&fixture).await;
+    *fixture.runner.attach_error.lock().unwrap() = Some("no Terminal".into());
+    let refusal = managed
+        .attach_claude(json!({"identity":"agent001"}))
+        .await
+        .unwrap_err();
+    assert!(
+        refusal.message.contains("no Terminal"),
+        "{}",
+        refusal.message
+    );
+    assert_eq!(
+        managed.list(json!({})).await.unwrap()["agents"][0]["state"],
+        "offline"
+    );
+    managed.start(json!({"identity":"agent001"})).await.unwrap();
+    managed
+        .attach_claude(json!({"identity":"agent001"}))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        managed.list(json!({})).await.unwrap()["agents"][0]["state"],
+        "idle"
+    );
+    managed.shutdown().await;
 }

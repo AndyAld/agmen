@@ -195,6 +195,7 @@ impl Managed {
             None => None,
         };
         let identity = target.identity.clone();
+        let adopted = online.is_none();
         let worker = match online {
             Some(worker) => worker,
             None => {
@@ -241,18 +242,21 @@ impl Managed {
                 pid_file,
             }
         };
-        let opened = self.runner.attach(spec).await;
-        let mut held = worker.lock().await;
-        match opened {
-            Ok(()) => Ok(json!({"identity": identity, "state": "attached"})),
-            Err(failure) => {
-                held.attached = None;
-                if held.state == "attached" {
-                    held.state = "idle";
-                }
-                Err(error(failure))
+        let Err(failure) = self.runner.attach(spec).await else {
+            return Ok(json!({"identity": identity, "state": "attached"}));
+        };
+        // Leave the agent as it was: offline if Attach brought it online.
+        {
+            let mut held = worker.lock().await;
+            held.attached = None;
+            if held.state == "attached" {
+                held.state = "idle";
             }
         }
+        if adopted && let Err(stop) = self.stop_worker(worker).await {
+            tracing::warn!(code = ?stop.code, "stopping an agent after a failed attach failed");
+        }
+        Err(error(failure))
     }
 
     /// `agent_detach {identity}`: ends the interactive Claude Code and
