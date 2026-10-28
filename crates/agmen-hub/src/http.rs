@@ -132,6 +132,19 @@ impl Hub {
             .merge(auth::routes())
             .route("/v1/me", get(me::me))
             .route("/v1/projects", post(crate::projects::create))
+            .route("/v1/tenants/{tenant}/members", get(crate::tenants::list))
+            .route(
+                "/v1/tenants/{tenant}/members/{handle}",
+                delete(crate::tenants::remove),
+            )
+            .route(
+                "/v1/tenants/{tenant}/members/{handle}/role",
+                axum::routing::put(crate::tenants::change_role),
+            )
+            .route(
+                "/v1/tenants/{tenant}/transfer",
+                post(crate::tenants::transfer),
+            )
             .route("/v1/identities", post(identities::mint))
             .route("/v1/identities/{id}", delete(identities::revoke))
             .route(
