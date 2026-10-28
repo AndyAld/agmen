@@ -51,6 +51,7 @@ pub(crate) struct Core {
     identities: Arc<Identities>,
     state_dir: PathBuf,
     schema_scan: Arc<Semaphore>,
+    shutdown: tokio::sync::Notify,
 }
 
 /// The socket's file name in the state folder (agmen-client's, which the
@@ -266,6 +267,7 @@ impl Agmend {
             core: Arc::new(Core {
                 state_dir: config.socket.with_file_name(""),
                 schema_scan: Arc::new(Semaphore::new(1)),
+                shutdown: tokio::sync::Notify::new(),
                 identities,
                 console: Arc::new(Console {
                     hub,
@@ -309,6 +311,7 @@ impl Agmend {
             while tasks.try_join_next().is_some() {}
             let accepted = tokio::select! {
                 () = &mut shutdown => break,
+                () = self.core.shutdown.notified() => break,
                 accepted = self.bound.listener.accept() => accepted,
             };
             let stream = match accepted {

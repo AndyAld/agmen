@@ -1029,3 +1029,42 @@ async fn pending_owner_switch_uses_independent_feed_position() {
     assert_eq!(rows[0]["body"], "for the other owner");
     daemon.stop().await;
 }
+
+#[tokio::test]
+async fn shutdown_refuses_agent_identity() {
+    let daemon = Daemon::seeded().await;
+    let mut client = daemon.client().await;
+    assert_eq!(
+        error(
+            identity_call(
+                &mut client,
+                Some("agent001"),
+                "shutdown",
+                json!({"local_token": "a".repeat(64)})
+            )
+            .await
+        )
+        .code,
+        ErrorCode::Forbidden
+    );
+    assert_eq!(result(client.call("ready", json!({})).await)["ready"], true);
+}
+
+#[tokio::test]
+async fn shutdown_owner_acknowledges_then_releases_socket_and_lock() {
+    let daemon = Daemon::start().await;
+    let mut client = daemon.client().await;
+    assert_eq!(result(client.call("shutdown", json!({})).await), json!({}));
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        for _ in 0..1500 {
+            if !daemon.home.socket().exists() {
+                drop(Agmend::bind(daemon.home.config()).unwrap());
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("shutdown did not release the socket");
+    })
+    .await
+    .unwrap();
+}

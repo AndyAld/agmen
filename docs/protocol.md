@@ -265,6 +265,18 @@ for its next service start. The shared `HelloAnswer` requires `api`; `version`,
 `build` and `exe` are optional so older API 1 answers still parse. Clients must
 treat an absent version as unknown compatibility.
 
+After hello, the socket owner's local human caller can request `shutdown` with
+`{}`. This uses the socket's same-user peer check and the existing human caller
+authorization, with no `as` identity and no identity credential. Agent, listener
+and other identity callers receive `forbidden`; an invalid credential receives
+`unauthorized`. Extra parameters are refused. A successful `{}` reply is written
+before shutdown is signaled, with a 10 s write deadline. The daemon then leaves
+`serve_until` through the same cleanup path as SIGTERM: stop accepting, abort
+local connections, and join daemon-owned collectors and sessions within their
+existing 10 s total bound. Clients waiting for exit should use a 15 s bound.
+The desktop only sends this method to its own bundled executable and never
+stops another installation's daemon.
+
 After hello, a human caller can request `ready` with `{}`. A successful result
 means startup and store initialization completed:
 

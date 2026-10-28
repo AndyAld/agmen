@@ -22,6 +22,10 @@ struct Hello {
     api: u32,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Shutdown {}
+
 /// Serves `stream` until the peer hangs up or breaks the framing.
 pub(crate) async fn serve(stream: UnixStream, core: Arc<Core>) {
     // shortcut: Unix-only local API; revisit when S6 Windows IPC is approved.
@@ -46,8 +50,9 @@ pub(crate) async fn serve(stream: UnixStream, core: Arc<Core>) {
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
         let bounded = matches!(
             request.method.as_str(),
-            "inbox" | "state" | "pending" | "ready"
+            "inbox" | "state" | "pending" | "ready" | "shutdown"
         );
+        let mut shutting_down = false;
         let outcome = if let Some(refusal) = refuse(&request, greeted) {
             Err(refusal)
         } else {
@@ -92,6 +97,11 @@ pub(crate) async fn serve(stream: UnixStream, core: Arc<Core>) {
                 Ok(Caller::Human) if request.method == "hello" => {
                     hello(request.params).inspect(|_| greeted = true)
                 }
+                Ok(Caller::Human) if request.method == "shutdown" => {
+                    let result = params::<Shutdown>(request.params).map(|_| json!({}));
+                    shutting_down = result.is_ok();
+                    result
+                }
                 Ok(Caller::Human) if request.method == "ready" => {
                     finite(deadline, ready(&core, request.params, deadline)).await
                 }
@@ -114,6 +124,10 @@ pub(crate) async fn serve(stream: UnixStream, core: Arc<Core>) {
         } else {
             answer(&mut writer, id, outcome).await
         };
+        if shutting_down {
+            core.shutdown.notify_one();
+            return;
+        }
         if !written {
             return;
         }
@@ -226,8 +240,8 @@ async fn identity_call(
             }
             core.identities.post(caller, envelope).await
         }
-        "hello" | "ready" | "whoami" | "console_watch" | "console_snapshot" | "chat_history"
-        | "file_text" | "identity_mint" | "identity_list" => Err(forbidden()),
+        "shutdown" | "hello" | "ready" | "whoami" | "console_watch" | "console_snapshot"
+        | "chat_history" | "file_text" | "identity_mint" | "identity_list" => Err(forbidden()),
         other => Err(ApiError {
             code: ErrorCode::NotFound,
             message: format!("agmend has no method {other:?}"),
