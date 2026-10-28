@@ -299,7 +299,7 @@ pub(crate) async fn change_role(
 ) -> Result<Json<ChangedRole>, ApiError> {
     let human = caller.human()?;
     let mut tx = lock_tenant(hub.pool(), &tenant).await?;
-    require_group_admin(tenant_role(&mut *tx, &tenant, &human).await?)?;
+    let actor = require_group_admin(tenant_role(&mut *tx, &tenant, &human).await?)?;
     if request.role == TenantRole::Owner {
         return Err(ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -316,10 +316,19 @@ pub(crate) async fn change_role(
     .fetch_optional(&mut *tx)
     .await?;
     let (target, role) = target.ok_or_else(no_such_member)?;
-    if role.parse::<TenantRole>().map_err(ApiError::stored)? == TenantRole::Owner {
+    let role = role.parse::<TenantRole>().map_err(ApiError::stored)?;
+    if role == TenantRole::Owner {
         return Err(ApiError::conflict(
             "owner_role_fixed",
             "use the transfer route to change the owner's role",
+        ));
+    }
+    // Same rule as `remove`: only the owner acts on another admin, or an admin
+    // could demote a peer and then remove them.
+    if actor == TenantRole::Admin && role == TenantRole::Admin && target != human.as_str() {
+        return Err(ApiError::forbidden(
+            "owner_required",
+            "only the owner can demote another admin",
         ));
     }
     sqlx::query("UPDATE tenant_members SET role = $3 WHERE tenant_id = $1 AND human_id = $2")

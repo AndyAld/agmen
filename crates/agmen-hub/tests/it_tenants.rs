@@ -828,7 +828,22 @@ async fn it_role_changes() {
     run(|ctx| async move {
         let group = group(&ctx).await;
         let path = format!("{}/role", member_path(&group, "member"));
-        for (token, role) in [(&group.owner, "admin"), (&group.admin, "member")] {
+        for (token, role) in [(&group.owner, "admin"), (&group.owner, "member")] {
+            if role == "member" {
+                // The target is an admin now: an admin may not demote them.
+                assert_error(
+                    request(
+                        &ctx,
+                        reqwest::Method::PUT,
+                        &path,
+                        &group.admin,
+                        Some(json!({"role": role})),
+                    )
+                    .await,
+                    StatusCode::FORBIDDEN,
+                    "owner_required",
+                );
+            }
             let (status, body) = request(
                 &ctx,
                 reqwest::Method::PUT,
@@ -905,6 +920,63 @@ async fn it_role_changes() {
                 StatusCode::UNPROCESSABLE_ENTITY
             );
         }
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn it_admin_cannot_demote_another_admin() {
+    run(|ctx| async move {
+        let group = group(&ctx).await;
+        member_with_token(&ctx, &group.first, 4, "second-admin", "admin").await;
+        let second_id: String =
+            sqlx::query_scalar("SELECT id FROM humans WHERE handle = 'second-admin'")
+                .fetch_one(&ctx.pool)
+                .await
+                .unwrap();
+        let path = format!("{}/role", member_path(&group, "second-admin"));
+        let rows = group_rows(&ctx.pool, &group.first.tenant).await;
+        assert!(rows.contains(&(second_id.clone(), "admin".to_owned())));
+        assert_error(
+            request(
+                &ctx,
+                reqwest::Method::PUT,
+                &path,
+                &group.admin,
+                Some(json!({"role": "member"})),
+            )
+            .await,
+            StatusCode::FORBIDDEN,
+            "owner_required",
+        );
+        assert_eq!(group_rows(&ctx.pool, &group.first.tenant).await, rows);
+        // The owner can.
+        let (status, body) = request(
+            &ctx,
+            reqwest::Method::PUT,
+            &path,
+            &group.owner,
+            Some(json!({"role": "member"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(
+            group_rows(&ctx.pool, &group.first.tenant)
+                .await
+                .contains(&(second_id.clone(), "member".to_owned()))
+        );
+        // An admin may demote themself.
+        let admin_path = format!("{}/role", member_path(&group, "admin"));
+        let (status, body) = request(
+            &ctx,
+            reqwest::Method::PUT,
+            &admin_path,
+            &group.admin,
+            Some(json!({"role": "member"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body, json!({"handle": "admin", "role": "member"}));
     })
     .await;
 }
