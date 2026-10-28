@@ -8,12 +8,28 @@
 use agmen_proto::Topics;
 
 use crate::auth::{approve_as, issue_human_tokens, issue_identity_token};
-use crate::db::{Role, new_id};
+use crate::db::{Role, TenantRole, new_id};
 use crate::http::{ApiError, Hub};
 use crate::identities::{HumanId, Identity};
+use crate::tenants::join_tenant;
 
 /// What a hook returns when a query or the random source fails.
 pub type HookError = Box<dyn std::error::Error + Send + Sync>;
+
+/// Joins a tenant through the hub's role rules on the test's connection.
+/// This hook lets integration support use those rules within its transaction.
+///
+/// # Errors
+///
+/// When the tenant or human does not exist, an owner conflicts, or a query fails.
+pub async fn seed_tenant_member(
+    conn: &mut sqlx::PgConnection,
+    tenant: &str,
+    human: &str,
+    role: TenantRole,
+) -> Result<(), sqlx::Error> {
+    join_tenant(conn, tenant, human, role).await
+}
 
 /// A person [`Hub::seed_human`] made, signed in as `agmen login` would be.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,6 +122,13 @@ impl Hub {
         .bind(topics.project().as_str())
         .execute(&mut *tx)
         .await?;
+        join_tenant(
+            &mut tx,
+            topics.tenant().as_str(),
+            &human,
+            TenantRole::Member,
+        )
+        .await?;
         sqlx::query(
             "INSERT INTO identities (id, tenant_id, project_id, kind, handle, owner_human_id)
              VALUES ($1, $2, $3, 'agent', $4 || '/agent', $4)",
@@ -149,6 +172,17 @@ impl Hub {
             .bind(role.as_str())
             .execute(&mut *tx)
             .await?;
+        join_tenant(
+            &mut tx,
+            topics.tenant().as_str(),
+            &human,
+            if role == Role::Admin {
+                TenantRole::Admin
+            } else {
+                TenantRole::Member
+            },
+        )
+        .await?;
         let tokens = issue_human_tokens(&mut tx, &human)
             .await
             .map_err(hook_error)?;

@@ -101,7 +101,60 @@ impl fmt::Display for Role {
     }
 }
 
-/// A text that names no [`Role`].
+/// A person's role in a tenant (`tenant_members.role`), lowest rights first.
+///
+/// ```
+/// use agmen_hub::TenantRole;
+/// assert!(TenantRole::Owner > TenantRole::Admin);
+/// assert_eq!("member".parse::<TenantRole>()?, TenantRole::Member);
+/// # Ok::<(), agmen_hub::UnknownRole>(())
+/// ```
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
+)]
+#[serde(rename_all = "lowercase")]
+#[non_exhaustive]
+pub enum TenantRole {
+    /// Belongs to the group.
+    Member,
+    /// Can administer the group and its projects.
+    Admin,
+    /// Also holds the group's ownership.
+    Owner,
+}
+
+impl TenantRole {
+    /// The name `tenant_members.role` stores.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Member => "member",
+            Self::Admin => "admin",
+            Self::Owner => "owner",
+        }
+    }
+}
+
+impl fmt::Display for TenantRole {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for TenantRole {
+    type Err = UnknownRole;
+
+    fn from_str(s: &str) -> Result<Self, UnknownRole> {
+        match s {
+            "member" => Ok(Self::Member),
+            "admin" => Ok(Self::Admin),
+            "owner" => Ok(Self::Owner),
+            other => Err(UnknownRole(other.to_owned())),
+        }
+    }
+}
+
+/// A text that names no [`Role`] or [`TenantRole`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("unknown role {0:?}")]
 pub struct UnknownRole(String);
@@ -146,5 +199,14 @@ mod tests {
         for role in [Role::Member, Role::Coordinator, Role::Admin] {
             assert_eq!(role.as_str().parse::<Role>().unwrap(), role);
         }
+    }
+
+    #[test]
+    fn tenant_roles_are_ordered_by_rights() {
+        assert!(TenantRole::Owner > TenantRole::Admin && TenantRole::Admin > TenantRole::Member);
+        for role in [TenantRole::Member, TenantRole::Admin, TenantRole::Owner] {
+            assert_eq!(role.as_str().parse::<TenantRole>().unwrap(), role);
+        }
+        assert!("coordinator".parse::<TenantRole>().is_err());
     }
 }

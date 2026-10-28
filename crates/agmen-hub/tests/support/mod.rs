@@ -355,13 +355,27 @@ pub async fn seed_human(pool: &PgPool, sub: u64, handle: &str) -> String {
 }
 
 pub async fn seed_member(pool: &PgPool, human: &str, project: &Project, role: &str) {
+    let mut tx = pool.begin().await.unwrap();
     sqlx::query("INSERT INTO memberships (human_id, project_id, role) VALUES ($1, $2, $3)")
         .bind(human)
         .bind(&project.project)
         .bind(role)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .unwrap();
+    agmen_hub::seed_tenant_member(
+        &mut tx,
+        &project.tenant,
+        human,
+        if role == "admin" {
+            agmen_hub::TenantRole::Admin
+        } else {
+            agmen_hub::TenantRole::Member
+        },
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
 }
 
 /// What `POST /v1/auth/device` answered.

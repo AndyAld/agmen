@@ -8,7 +8,7 @@ use axum::extract::State;
 use serde::Serialize;
 
 use crate::auth::Caller;
-use crate::db::Role;
+use crate::db::{Role, TenantRole};
 use crate::http::{ApiError, Hub};
 
 /// `GET /v1/me`'s answer.
@@ -20,6 +20,16 @@ pub(crate) struct Me {
     broker_url: String,
     /// By name.
     projects: Vec<Membership>,
+    /// By name, then tenant id.
+    groups: Vec<Group>,
+}
+
+/// One group the human belongs to.
+#[derive(Debug, Serialize)]
+struct Group {
+    tenant: String,
+    name: String,
+    role: TenantRole,
 }
 
 /// One project the human belongs to.
@@ -58,10 +68,29 @@ pub(crate) async fn me(State(hub): State<Hub>, caller: Caller) -> Result<Json<Me
             })
         })
         .collect::<Result<_, ApiError>>()?;
+    let rows: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT t.id, t.name, m.role
+         FROM tenant_members m JOIN tenants t ON t.id = m.tenant_id
+         WHERE m.human_id = $1 ORDER BY t.name, t.id",
+    )
+    .bind(human.as_str())
+    .fetch_all(hub.pool())
+    .await?;
+    let groups = rows
+        .into_iter()
+        .map(|(tenant, name, role)| {
+            Ok(Group {
+                tenant,
+                name,
+                role: role.parse().map_err(ApiError::stored)?,
+            })
+        })
+        .collect::<Result<_, ApiError>>()?;
     Ok(Json(Me {
         id: human.as_str().to_owned(),
         handle,
         broker_url: hub.public_mqtt_url().as_str().to_owned(),
         projects,
+        groups,
     }))
 }

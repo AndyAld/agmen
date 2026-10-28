@@ -47,6 +47,7 @@ mod rollcall;
 mod secrets_scan;
 mod state;
 mod sweeper;
+mod tenants;
 #[cfg(feature = "test-hooks")]
 mod test_github;
 #[cfg(feature = "test-hooks")]
@@ -60,7 +61,7 @@ pub use config::{
     Config, ConfigError, DEFAULT_CLAIM_LEASE, DEFAULT_GITHUB_CLIENT_ID, EmqxConfig, GithubConfig,
     MqttConfig, Secret,
 };
-pub use db::{Role, UnknownRole};
+pub use db::{Role, TenantRole, UnknownRole};
 pub use emqx::{EmqxAdmin, EmqxError};
 pub use http::{Hub, HubError};
 pub use identities::{BROKER_TOKEN_TTL, CLIENT_ID_SUFFIXES, HumanId, Identity};
@@ -71,7 +72,7 @@ pub use roles::cap_verbs;
 #[cfg(feature = "test-hooks")]
 pub use test_github::{FAKE_GITHUB_CLIENT_ID, FakeGithub};
 #[cfg(feature = "test-hooks")]
-pub use test_hooks::{HookError, SeededHuman};
+pub use test_hooks::{HookError, SeededHuman, seed_tenant_member};
 
 /// The hub's Postgres migrations from `migrations/`, embedded at compile time.
 ///
