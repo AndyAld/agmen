@@ -39,6 +39,7 @@ mod envelope;
 mod error;
 mod ids;
 mod reply;
+mod repo_url;
 mod roles;
 mod topics;
 mod verbs;
@@ -53,6 +54,7 @@ pub use ids::{
     RoleName, Seq, Sha256Hex, Stream, TenantId, Timestamp,
 };
 pub use reply::{DeliveryReply, NackReason};
+pub use repo_url::{BadRepoUrl, RepoUrl};
 pub use roles::{EditScope, RoleSpec};
 pub use topics::{Topics, parse_up};
 pub use verbs::{
