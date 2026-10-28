@@ -903,6 +903,34 @@ impl Focusable for LiveRoot {
     }
 }
 
+/// Routes a live window's quit triggers (Cmd+Q, the Quit menu item and
+/// closing the window) through `request_quit`.
+pub(crate) fn install_quit_handlers(
+    root: &Entity<LiveRoot>,
+    window: &mut Window,
+    cx: &mut gpui::App,
+) {
+    let weak = root.downgrade();
+    window.on_window_should_close(cx, move |window, cx| {
+        weak.update(cx, |root, cx| {
+            if root.quit_approved {
+                return true;
+            }
+            root.request_quit(window, cx);
+            false
+        })
+        .unwrap_or(true)
+    });
+    // The Quit menu item when nothing in the window has focus.
+    let weak = root.downgrade();
+    let handle = window.window_handle();
+    cx.on_action(move |_: &crate::keymap::Quit, cx| {
+        drop(handle.update(cx, |_, window, cx| {
+            drop(weak.update(cx, |root, cx| root.request_quit(window, cx)));
+        }));
+    });
+}
+
 impl LiveRoot {
     fn shell(&self, cx: &mut Context<Self>) -> gpui::Div {
         let appearance = cx.global::<Appearance>();
@@ -949,6 +977,11 @@ impl LiveRoot {
                     this.prompt_project(window, cx)
                 }),
             )
+            // Cmd+Q dispatches here while this window is being updated, where
+            // the app-level handler cannot reach it.
+            .on_action(cx.listener(|this, _: &crate::keymap::Quit, window, cx| {
+                this.request_quit(window, cx)
+            }))
             .on_action(cx.listener(|this, action: &OpenRecent, window, cx| {
                 this.open_folder(action.0.clone(), window, cx)
             }))

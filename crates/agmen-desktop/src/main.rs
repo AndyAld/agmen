@@ -468,24 +468,7 @@ fn open_main_window(launch: &Launch, cx: &mut App) -> Result<()> {
             cx.set_global(ui::AlarmHandle::system());
             cx.open_window(options, |window, cx| {
                 let root = cx.new(|cx| ui::LiveRoot::new(launch, path, window, cx));
-                let weak = root.downgrade();
-                window.on_window_should_close(cx, move |window, cx| {
-                    weak.update(cx, |root, cx| {
-                        if root.quit_approved {
-                            return true;
-                        }
-                        root.request_quit(window, cx);
-                        false
-                    })
-                    .unwrap_or(true)
-                });
-                let weak = root.downgrade();
-                let handle = window.window_handle();
-                cx.on_action(move |_: &Quit, cx| {
-                    drop(handle.update(cx, |_, window, cx| {
-                        drop(weak.update(cx, |root, cx| root.request_quit(window, cx)));
-                    }));
-                });
+                ui::install_quit_handlers(&root, window, cx);
                 window.focus(&root.focus_handle(cx), cx);
                 root
             })

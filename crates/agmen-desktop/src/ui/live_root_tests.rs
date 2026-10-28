@@ -1587,24 +1587,12 @@ fn check_cancel_quit(
     .unwrap();
     let settings_before = std::fs::read(&path).unwrap();
     root.update_in(cx, |root, _, _| root.bundle = Some(bundle));
-    cx.update(|window, cx| {
-        // The same close guard installed by main for a live window.
-        let weak = root.downgrade();
-        window.on_window_should_close(cx, move |window, cx| {
-            weak.update(cx, |root, cx| {
-                if root.quit_approved {
-                    return true;
-                }
-                root.request_quit(window, cx);
-                false
-            })
-            .unwrap_or(true)
-        });
-    });
+    // The same quit handlers main installs for a live window.
+    cx.update(|window, cx| super::install_quit_handlers(&root, window, cx));
     if close_window {
         assert!(!cx.simulate_close());
     } else {
-        cx.update(|window, cx| root.update(cx, |root, cx| root.request_quit(window, cx)));
+        cx.simulate_keystrokes("cmd-q");
     }
     wait_until(cx, |cx| {
         root.read_with(cx, |root, _| {

@@ -76,7 +76,7 @@ mod spec_view;
 pub(crate) use agent_view::AgentView;
 pub(crate) use code_view::{CodeView, GutterMark};
 pub(crate) use dev_views::{DevFrame, GitDev, GitDevLayout, ProjectDev, ProjectTests, RolesDev};
-pub(crate) use live_root::{LiveLaunch, LiveRoot};
+pub(crate) use live_root::{LiveLaunch, LiveRoot, install_quit_handlers};
 pub(crate) use scope_chip::ScopeOption;
 pub(crate) use settings_view::{SettingsSources, SettingsView};
 pub(crate) use syntax::Language;
