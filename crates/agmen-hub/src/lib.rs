@@ -27,6 +27,7 @@ mod config;
 mod db;
 mod emqx;
 mod events;
+mod group;
 mod health;
 mod http;
 mod human_post;
@@ -60,10 +61,11 @@ pub use broker_tokens::{BrokerTokens, SigningKey, TokenError};
 pub use claims::LeaseSweepError;
 pub use config::{
     Config, ConfigError, DEFAULT_CLAIM_LEASE, DEFAULT_GITHUB_CLIENT_ID, EmqxConfig, GithubConfig,
-    MqttConfig, Secret,
+    HubMode, MqttConfig, Secret,
 };
 pub use db::{Role, TenantRole, UnknownRole};
 pub use emqx::{EmqxAdmin, EmqxError};
+pub use group::GroupError;
 pub use http::{Hub, HubError};
 pub use identities::{BROKER_TOKEN_TTL, CLIENT_ID_SUFFIXES, HumanId, Identity};
 pub use ingest::{HUB_IDENTITY, HubPost, IngestError, PostError, Posted};

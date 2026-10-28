@@ -17,9 +17,10 @@ use url::Url;
 
 use crate::auth::{self, Github, GithubError};
 use crate::broker_tokens::{BrokerTokens, SigningKey, TokenError};
-use crate::config::Config;
+use crate::config::{Config, HubMode};
 use crate::emqx::{EmqxAdmin, EmqxError};
 use crate::events::Slots;
+use crate::group::{self, GroupError};
 use crate::ingest::IngestState;
 use crate::presence::PresenceState;
 use crate::{db, events, health, human_post, identities, invites, items, lanes, me, replay, state};
@@ -31,6 +32,9 @@ const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(10);
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum HubError {
+    /// Initializing the self-host group failed.
+    #[error("initializing the self-host group failed")]
+    Group(#[source] GroupError),
     /// Connecting to Postgres or running the migrations failed.
     #[error("connecting to the database failed")]
     Database(#[source] sqlx::Error),
@@ -56,6 +60,7 @@ pub struct Hub {
 
 #[derive(Debug)]
 struct Inner {
+    mode: HubMode,
     pool: PgPool,
     tokens: BrokerTokens,
     emqx: EmqxAdmin,
@@ -106,8 +111,28 @@ impl Hub {
         let pool = db::connect(config.database_url.expose())
             .await
             .map_err(HubError::Database)?;
+        if config.mode == HubMode::SelfHost {
+            let group = group::ensure_group(&pool, &config.group_name)
+                .await
+                .map_err(HubError::Group)?;
+            if let Some(name) = &group.adopted {
+                tracing::info!(
+                    tenant = %group.tenant,
+                    name = %name,
+                    "adopted the database's only tenant as this self-host hub's group; \
+                     set AGMEN_HUB_MODE=hosted to keep tenants separate"
+                );
+            }
+            if let Some(token) = group::mint_claim_token(&pool)
+                .await
+                .map_err(HubError::Group)?
+            {
+                group::log_claim_token(&token);
+            }
+        }
         Ok(Self {
             inner: Arc::new(Inner {
+                mode: config.mode,
                 pool,
                 tokens,
                 emqx,
@@ -125,7 +150,12 @@ impl Hub {
     /// The hub's HTTP routes: the `/v1` API plus the cluster probes
     /// `GET /livez` and `GET /healthz`, which sit outside `/v1`.
     pub fn router(&self) -> Router {
-        Router::new()
+        let router = if self.inner.mode == HubMode::SelfHost {
+            Router::new().route("/v1/claim", post(group::claim))
+        } else {
+            Router::new()
+        };
+        router
             .merge(health::routes())
             .route("/i", get(crate::invite_page::page))
             .route("/v1/jwks", get(jwks))

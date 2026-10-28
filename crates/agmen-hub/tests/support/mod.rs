@@ -23,7 +23,8 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use agmen_hub::{
-    Config, DEFAULT_CLAIM_LEASE, EmqxConfig, GithubConfig, Hub, Messaging, MqttConfig, Secret,
+    Config, DEFAULT_CLAIM_LEASE, EmqxConfig, GithubConfig, Hub, HubMode, Messaging, MqttConfig,
+    Secret,
 };
 use agmen_proto::Topics;
 use jiff::Timestamp;
@@ -190,9 +191,27 @@ where
     F: FnOnce(Ctx) -> Fut,
     Fut: Future<Output = ()> + Send + 'static,
 {
+    run_configured(HubMode::SelfHost, lease, body).await;
+}
+
+/// [`run`] with a hub in the requested mode.
+pub async fn run_in_mode<F, Fut>(mode: HubMode, body: F)
+where
+    F: FnOnce(Ctx) -> Fut,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    run_configured(mode, DEFAULT_CLAIM_LEASE, body).await;
+}
+
+async fn run_configured<F, Fut>(mode: HubMode, lease: Duration, body: F)
+where
+    F: FnOnce(Ctx) -> Fut,
+    Fut: Future<Output = ()> + Send + 'static,
+{
     let db = TestDb::create().await;
     let github = FakeGithub::start().await.unwrap();
-    let hub = TestHub::start_with_lease(&db.url, &github, DEV_KEY_1, &[], lease).await;
+    let hub =
+        TestHub::start_with_mode_and_lease(&db.url, &github, DEV_KEY_1, &[], mode, lease).await;
     let pool = PgPoolOptions::new()
         .max_connections(2)
         .connect(&db.url)
@@ -258,11 +277,37 @@ impl TestHub {
         extra: &[&str],
         lease: Duration,
     ) -> Self {
+        Self::start_with_mode_and_lease(db_url, github, signing, extra, HubMode::SelfHost, lease)
+            .await
+    }
+
+    /// [`TestHub::start`] in the requested hub mode.
+    pub async fn start_in_mode(
+        db_url: &str,
+        github: &FakeGithub,
+        signing: &str,
+        extra: &[&str],
+        mode: HubMode,
+    ) -> Self {
+        Self::start_with_mode_and_lease(db_url, github, signing, extra, mode, DEFAULT_CLAIM_LEASE)
+            .await
+    }
+
+    async fn start_with_mode_and_lease(
+        db_url: &str,
+        github: &FakeGithub,
+        signing: &str,
+        extra: &[&str],
+        mode: HubMode,
+        lease: Duration,
+    ) -> Self {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr: SocketAddr = listener.local_addr().unwrap();
         let base = Url::parse(&format!("http://{addr}")).unwrap();
         let (host, port) = mqtt::mqtt_addr();
         let config = Config {
+            mode,
+            group_name: "agmen".to_owned(),
             database_url: Secret::new(db_url),
             listen: addr,
             public_url: base.clone(),
