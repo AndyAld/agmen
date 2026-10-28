@@ -18,6 +18,9 @@ import type { StampedEnvelope } from '../../../schema/ts/StampedEnvelope'
 // - Command: /agmen runs a few `agmen` subcommands and shows the result.
 // All of it waits for `.agmen/identity.json` at the session's git worktree
 // root, trusted only on a positive test that git does not track it (R42a).
+// A session agmend launched (AGMEN_MANAGED=1) skips the watch, wake-ups,
+// /agmen and the goodbye, which the daemon owns, but keeps both guards; with
+// no trusted root its Edit, Write, NotebookEdit and Bash calls are denied.
 // Rows, wake-ups and deny reasons carry fixed text and checked fields, never
 // raw git or agmen output, which goes to the debug log (R44a).
 
@@ -237,6 +240,13 @@ type State = {
   repository: Repository | undefined
   /** A start is under way (session.start and /agmen join can overlap). */
   isStarting: boolean
+  /**
+   * agmend launched this session (AGMEN_MANAGED=1): the daemon owns the queue
+   * and the goodbye, and the guards fail closed while `root` is undefined.
+   */
+  isManaged: boolean
+  /** Why a managed session has no root, fixed text for the deny reason. */
+  unguardedWhy: string | undefined
   self: Self | undefined
   readonly ownIds: Set<string>
   readonly seen: Set<string>
@@ -1224,34 +1234,49 @@ async function notify($: EngineInterface, text: string): Promise<void> {
   if (!sent.isSent) $.ui.toast(text)
 }
 
+/** The deny reason for a guarded tool in a managed session that has no root, or undefined. */
+function unguarded(state: State, tool: string): string | undefined {
+  if (!state.isManaged || state.root !== undefined) return undefined
+
+  return (
+    `agmen: this managed session has no trusted agmen worktree, so ${tool} is denied: ` +
+    `${state.unguardedWhy ?? 'the session did not finish connecting'}. Stop the agent and launch it again from the desktop.`
+  )
+}
+
 /**
  * Connects the session: inert outside a joined worktree, one notice for a
  * tracked identity file or a CLI it cannot use, else the watch.
  */
 async function begin($: EngineInterface, state: State, cwd: string): Promise<void> {
-  // Managed batches use the daemon's queue and remain online between -p runs.
-  if ((await $.env.get('AGMEN_MANAGED')) === '1') return
   if (state.root !== undefined || state.isStarting) return
   state.isStarting = true
   let root: string | undefined
   try {
     const joined = await joinedRoot($, cwd)
     if (joined.kind === 'refused') {
+      state.unguardedWhy = joined.why
       await notify($, joined.why)
       return
     }
     root = joined.kind === 'found' ? joined.root : undefined
     const problem = root === undefined ? undefined : await cliProblem($, root)
     if (problem !== undefined) {
+      state.unguardedWhy = problem
       await notify($, problem)
       return
     }
   } finally {
     state.isStarting = false
   }
-  if (root === undefined) return
+  if (root === undefined) {
+    state.unguardedWhy = `no ${IDENTITY_DIR}/${IDENTITY_NAME} was found at the git worktree root of the session's folder`
+    return
+  }
   state.repository = await readRepository($, root)
   state.root = root
+  // Managed batches use the daemon's queue and remain online between -p runs.
+  if (state.isManaged) return
   void watch($, state, root).catch((error: unknown) => {
     $.ui.log(`agmen: agmen watch failed: ${quote(String(error))}; messages do not reach this session.`)
   })
@@ -1328,6 +1353,8 @@ export const register: Register = on => {
     root: undefined,
     repository: undefined,
     isStarting: false,
+    isManaged: false,
+    unguardedWhy: undefined,
     self: undefined,
     ownIds: new Set(),
     seen: new Set(),
@@ -1343,7 +1370,12 @@ export const register: Register = on => {
 
   on('session.start', async ($, e, next) => {
     const started = await next(e)
-    if ((await $.env.get('AGMEN_MANAGED')) === '1') return started
+    state.isManaged = (await $.env.get('AGMEN_MANAGED')) === '1'
+    // Managed sessions still need the root for the lane and Bash guards.
+    if (state.isManaged) {
+      await begin($, state, e.cwd)
+      return started
+    }
     await $.command.register({
       name: 'agmen',
       description: 'Run an agmen command: join, inbox, claim, done, dm or lanes.',
@@ -1362,7 +1394,8 @@ export const register: Register = on => {
     state.waiting = []
     state.uncounted = 0
     try {
-      if (state.root !== undefined) {
+      // agmend says goodbye for a managed agent when it stops it.
+      if (state.root !== undefined && !state.isManaged) {
         const result = await $.process.run(['agmen', 'post', 'BYE', '--wait', '0.5'], { cwd: state.root, timeoutMs: 1_000 })
         if (result.exitCode !== 0) debug($, `goodbye exited ${result.exitCode}`)
       }
@@ -1394,6 +1427,8 @@ export const register: Register = on => {
   })
 
   on('tool.call', { tool: ['Edit', 'Write', 'NotebookEdit'] }, async ($, e, next) => {
+    const closed = unguarded(state, e.tool)
+    if (closed !== undefined) return { deny: closed }
     if (state.root === undefined) return next(e)
     const path = e.tool === 'NotebookEdit' ? e.notebook_path : e.file_path
     const deny =
@@ -1405,10 +1440,17 @@ export const register: Register = on => {
   }).catch(($, e, next) => (next.called ? next(e) : { deny: 'agmen: the lane guard failed, so the edit is denied.' }))
 
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
+    const closed = unguarded(state, 'Bash')
+    if (closed !== undefined) return { deny: closed }
     const ran = await next(e)
     if (state.root === undefined || ran.deny !== undefined) return ran
     await checkAfterBash($, state, state.root)
 
     return ran
-  }).catch(($, e, next) => next(e))
+  }).catch(($, e, next) => {
+    if (next.called) return next(e)
+    const closed = unguarded(state, 'Bash')
+
+    return closed === undefined ? next(e) : { deny: closed }
+  })
 }

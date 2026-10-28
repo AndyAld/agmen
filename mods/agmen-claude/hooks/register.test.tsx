@@ -739,9 +739,46 @@ for (const surface of SURFACES) {
       await $.session.end({ reason: 'other', sessionId: 'test-session', resume: { id: 'test-session' } })
 
       expect(w.spawns).toEqual([])
-      expect(w.runs).toEqual([])
+      expect(w.runs.some(argv => argv[0] === 'agmen' && argv[1] === 'post')).toBe(false)
       expect(w.submitted).toEqual([])
     })
+
+    test('managed_session_still_runs_the_lane_guard_and_bash_check', async ($, on) => {
+      const w = world(on, {
+        hostEnv: { AGMEN_MANAGED: '1' },
+        gitStatus: ' M ui/a.ts\0',
+        checkPath: path => allowedEntry(path, false, 'lane L-UI held by adam/ui'),
+      })
+
+      await start($, w, surface)
+      const result = await $.tool.call(edit('/work/ui/a.ts'))
+      await $.tool.call({ tool: 'Bash', command: 'make' })
+
+      expect(result.deny).toContain('"lane L-UI held by adam/ui"')
+      expect(w.ran).toEqual(['Bash'])
+      expect(w.appended().map(row => row.text).join('')).toContain('ui/a.ts')
+      expect(w.spawns).toEqual([])
+    })
+
+    for (const [name, script] of [
+      ['without_an_identity_file', { isJoined: false }],
+      ['with_a_refused_identity_file', { checkIgnoreExit: 1 }],
+      ['without_a_usable_cli', { isInstalled: false }],
+    ] as const) {
+      test(`managed_session_${name}_denies_guarded_tools`, async ($, on) => {
+        const w = world(on, { ...script, hostEnv: { AGMEN_MANAGED: '1' } })
+
+        await start($, w, surface)
+        const edited = await $.tool.call(edit('/work/ui/a.ts'))
+        const written = await $.tool.call({ tool: 'Write', file_path: '/work/ui/b.ts', content: 'x' })
+        const ran = await $.tool.call({ tool: 'Bash', command: 'make' })
+
+        for (const result of [edited, written, ran]) {
+          expect(result.deny).toContain('agmen: this managed session has no trusted agmen worktree')
+        }
+        expect(w.ran).toEqual([])
+      })
+    }
 
     test('session_end_without_a_joined_worktree_is_inert', async ($, on) => {
       const w = world(on, { isJoined: false })
