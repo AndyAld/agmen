@@ -24,8 +24,6 @@ use crate::output::{Fail, clean};
 
 /// The longest name after `<handle>/` (the hub's rule).
 const MAX_NAME: usize = 32;
-/// The line `join` adds to `info/exclude`.
-const EXCLUDE_LINE: &str = ".agmen/";
 
 /// The kind of identity to mint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize)]
@@ -253,7 +251,7 @@ pub(crate) async fn join(args: JoinArgs) -> Result<()> {
     // The exclude goes first: once the file exists, every command applies
     // the trust test, which needs git to ignore it.
     let exclude = git::exclude_file(&root).await?;
-    blocking(move || add_exclude(&exclude)).await?;
+    blocking(move || git::add_exclude(&exclude, ".agmen/")).await?;
     set_token(key, minted.token).await?;
     write_identity(&root, &identity).await?;
     let check_root = root.clone();
@@ -378,33 +376,6 @@ async fn write_identity(root: &Path, identity: &IdentityFile) -> Result<()> {
     .await
 }
 
-/// Adds `.agmen/` to the `info/exclude` file at `path` unless a line
-/// already says it.
-fn add_exclude(path: &Path) -> Result<()> {
-    let existing = match std::fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(err) => return Err(err).with_context(|| format!("reading {}", path.display())),
-    };
-    if existing.lines().any(|line| line.trim() == EXCLUDE_LINE) {
-        return Ok(());
-    }
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    }
-    let mut file = std::fs::OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(path)
-        .with_context(|| format!("opening {}", path.display()))?;
-    let lead = if existing.is_empty() || existing.ends_with('\n') {
-        ""
-    } else {
-        "\n"
-    };
-    writeln!(file, "{lead}{EXCLUDE_LINE}").with_context(|| format!("writing {}", path.display()))
-}
-
 /// `agmen leave`.
 pub(crate) async fn leave() -> Result<()> {
     // The identity's own token is not needed: the owner revokes it, so a
@@ -477,21 +448,6 @@ mod tests {
         assert_eq!(
             default_name(Path::new(&format!("/x/{}", "a".repeat(40)))).len(),
             32
-        );
-    }
-
-    #[test]
-    fn exclude_is_added_once() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("info/exclude");
-        add_exclude(&path).unwrap();
-        add_exclude(&path).unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), ".agmen/\n");
-        std::fs::write(&path, "# git ls-files\n*.log").unwrap();
-        add_exclude(&path).unwrap();
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            "# git ls-files\n*.log\n.agmen/\n"
         );
     }
 }

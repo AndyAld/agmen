@@ -145,6 +145,13 @@ enum Command {
     Invite(account::InviteArgs),
     /// Join this worktree to a project as a new identity of yours.
     Join(join::JoinArgs),
+    /// Set up your installed agents to use agmen in this worktree.
+    Setup {
+        #[arg(long, value_enum)]
+        agent: Option<crate::setup::AgentKind>,
+        #[arg(long)]
+        no_plugin: bool,
+    },
     /// List, show or import local roles.
     Role {
         #[command(subcommand)]
@@ -248,6 +255,23 @@ impl Cli {
             Command::Project { command } => account::project(command).await,
             Command::Invite(args) => account::invite(args).await,
             Command::Join(args) => join::join(args).await,
+            Command::Setup { agent, no_plugin } => {
+                let joined = crate::joined::joined().await?;
+                let plugin =
+                    crate::client::blocking(move || crate::setup::plugin_choice(no_plugin)).await?;
+                let changes =
+                    crate::setup::run(&joined.root, &joined.identity, agent, plugin).await?;
+                if changes.is_empty() {
+                    println!(
+                        "{}",
+                        crate::output::clean("no agents found: install one, then run agmen setup")
+                    );
+                }
+                for change in changes {
+                    println!("{}", crate::output::clean(&change.to_string()));
+                }
+                Ok(())
+            }
             Command::Role { command } => role::run(command).await,
             Command::Leave => join::leave().await,
             Command::Post(args) => post::post(args).await,

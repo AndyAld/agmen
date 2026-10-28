@@ -20,6 +20,7 @@ mod joined;
 mod mcp;
 mod output;
 mod paths;
+mod setup;
 
 use std::process::ExitCode;
 
