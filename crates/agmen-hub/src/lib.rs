@@ -47,6 +47,8 @@ mod secrets_scan;
 mod state;
 mod sweeper;
 #[cfg(feature = "test-hooks")]
+mod test_github;
+#[cfg(feature = "test-hooks")]
 mod test_hooks;
 
 pub use auth::{GithubError, GithubId};
@@ -54,7 +56,8 @@ pub use bootstrap::{AdminGithub, Bootstrap, BootstrapError, Bootstrapped};
 pub use broker_tokens::{BrokerTokens, SigningKey, TokenError};
 pub use claims::LeaseSweepError;
 pub use config::{
-    Config, ConfigError, DEFAULT_CLAIM_LEASE, EmqxConfig, GithubConfig, MqttConfig, Secret,
+    Config, ConfigError, DEFAULT_CLAIM_LEASE, DEFAULT_GITHUB_CLIENT_ID, EmqxConfig, GithubConfig,
+    MqttConfig, Secret,
 };
 pub use db::{Role, UnknownRole};
 pub use emqx::{EmqxAdmin, EmqxError};
@@ -64,6 +67,8 @@ pub use ingest::{HUB_IDENTITY, HubPost, IngestError, PostError, Posted};
 pub use mqtt::{Messaging, MessagingError};
 pub use numbering::{NumberingError, next_seq};
 pub use roles::cap_verbs;
+#[cfg(feature = "test-hooks")]
+pub use test_github::{FAKE_GITHUB_CLIENT_ID, FakeGithub};
 #[cfg(feature = "test-hooks")]
 pub use test_hooks::{HookError, SeededHuman};
 

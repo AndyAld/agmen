@@ -28,7 +28,6 @@ getrandom = "0.4.3"
 globset = "0.4.20"
 jiff = { version = "0.2.38", default-features = false, features = ["std", "serde"] }
 jsonwebtoken = { version = "11.1.0", features = ["aws_lc_rs"] }
-oauth2 = { version = "5.0.0", default-features = false }
 regex = "1.13.1"
 regex-automata = { version = "0.4.18", default-features = false, features = ["std", "syntax", "dfa-build", "dfa-search"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls", "form"] }
@@ -45,7 +44,7 @@ tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "net", "s
 toml = "1.1.8"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-url = "2.5.8"
+url = { version = "2.5.8", features = ["serde"] }
 
 [dev-dependencies]
 # The hub's own integration tests use the test hooks too; a dev-dependency

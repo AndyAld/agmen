@@ -11,7 +11,6 @@
     reason = "each test binary uses a different subset of the helpers"
 )]
 
-pub mod fake_github;
 pub mod globs;
 pub mod mqtt;
 
@@ -36,7 +35,7 @@ use sqlx::{AssertSqlSafe, PgPool};
 use tokio::task::JoinHandle;
 use url::Url;
 
-use fake_github::FakeGithub;
+use agmen_hub::{FAKE_GITHUB_CLIENT_ID, FakeGithub};
 
 pub const DEV_KEY_1: &str = "agmen-dev-1";
 pub const DEV_KEY_2: &str = "agmen-dev-2";
@@ -192,7 +191,7 @@ where
     Fut: Future<Output = ()> + Send + 'static,
 {
     let db = TestDb::create().await;
-    let github = FakeGithub::start().await;
+    let github = FakeGithub::start().await.unwrap();
     let hub = TestHub::start_with_lease(&db.url, &github, DEV_KEY_1, &[], lease).await;
     let pool = PgPoolOptions::new()
         .max_connections(2)
@@ -214,8 +213,7 @@ where
     }
 }
 
-/// A client that does not follow redirects, so tests can step through the
-/// OAuth hops themselves.
+/// A client that exposes redirects to the test instead of following them.
 pub fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .redirect(Policy::none())
@@ -269,10 +267,9 @@ impl TestHub {
             listen: addr,
             public_url: base.clone(),
             github: GithubConfig {
-                client_id: fake_github::CLIENT_ID.to_owned(),
-                client_secret: Secret::new(fake_github::client_secret()),
-                url: github.base.clone(),
-                api_url: github.base.clone(),
+                client_id: FAKE_GITHUB_CLIENT_ID.to_owned(),
+                url: github.base().clone(),
+                api_url: github.base().clone(),
             },
             emqx: EmqxConfig {
                 api_url: Url::parse(&env("AGMEN_IT_EMQX_API")).unwrap(),
@@ -373,7 +370,6 @@ pub struct DeviceStart {
     pub device_code: String,
     pub user_code: String,
     pub verification_uri: String,
-    pub verification_uri_complete: String,
     pub body: Value,
 }
 
@@ -391,7 +387,6 @@ pub async fn start_device_login(ctx: &Ctx) -> DeviceStart {
         device_code: field("device_code"),
         user_code: field("user_code"),
         verification_uri: field("verification_uri"),
-        verification_uri_complete: field("verification_uri_complete"),
         body: body.clone(),
     }
 }
@@ -411,75 +406,11 @@ pub async fn poll_device_token(ctx: &Ctx, device_code: &str) -> (StatusCode, Val
     (resp.status(), resp.json().await.unwrap())
 }
 
-fn location(resp: &reqwest::Response) -> Url {
-    let location = resp
-        .headers()
-        .get(reqwest::header::LOCATION)
-        .unwrap_or_else(|| panic!("{} has no Location header", resp.url()))
-        .to_str()
-        .unwrap();
-    resp.url().join(location).unwrap()
-}
-
-/// The browser half of the device flow: open the verification link, sign
-/// in at the fake GitHub as its current user, and approve on the confirm
-/// page. Returns the confirm page's HTML.
-pub async fn approve_in_browser(ctx: &Ctx, start: &DeviceStart) -> String {
-    let page = open_confirm_page(ctx, start).await.text().await.unwrap();
-    let approved = post_approve(ctx, &page).await;
-    assert_eq!(approved.status(), StatusCode::OK);
-    page
-}
-
-/// Opens the verification link and signs in at the fake GitHub as its
-/// current user. Returns the hub's confirm page response (200).
-pub async fn open_confirm_page(ctx: &Ctx, start: &DeviceStart) -> reqwest::Response {
-    let to_github = ctx
-        .http
-        .get(&start.verification_uri_complete)
-        .send()
-        .await
-        .unwrap();
-    assert!(
-        to_github.status().is_redirection(),
-        "start answered {}",
-        to_github.status()
-    );
-    let back_to_hub = ctx.http.get(location(&to_github)).send().await.unwrap();
-    assert!(back_to_hub.status().is_redirection());
-    let confirm = ctx.http.get(location(&back_to_hub)).send().await.unwrap();
-    assert_eq!(confirm.status(), StatusCode::OK);
-    confirm
-}
-
-/// Presses the confirm page's Approve button.
-pub async fn post_approve(ctx: &Ctx, confirm_page: &str) -> reqwest::Response {
-    let approve = hidden_input(confirm_page, "approve");
-    ctx.http
-        .post(ctx.hub.url("/v1/auth/device/approve"))
-        .form(&[("approve", approve.as_str())])
-        .send()
-        .await
-        .unwrap()
-}
-
-/// The value of `<input type="hidden" name="{name}" value="...">`.
-pub fn hidden_input(page: &str, name: &str) -> String {
-    let marker = format!("name=\"{name}\" value=\"");
-    let start = page
-        .find(&marker)
-        .unwrap_or_else(|| panic!("no {name} input in {page}"))
-        + marker.len();
-    let len = page[start..].find('"').unwrap();
-    page[start..start + len].to_owned()
-}
-
 /// Signs in through the device flow as GitHub account `(sub, login)` and
 /// returns the human's access token.
 pub async fn login(ctx: &Ctx, sub: u64, login: &str) -> String {
-    ctx.github.sign_in_as(sub, login);
     let start = start_device_login(ctx).await;
-    approve_in_browser(ctx, &start).await;
+    ctx.github.approve(&start.user_code, sub, login);
     let (status, body) = poll_device_token(ctx, &start.device_code).await;
     assert_eq!(status, StatusCode::OK, "token poll answered {body}");
     body["access_token"].as_str().unwrap().to_owned()

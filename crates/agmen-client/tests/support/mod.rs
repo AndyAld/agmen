@@ -147,6 +147,7 @@ impl TestDb {
 #[derive(Debug)]
 pub struct Ctx {
     pub hub: Hub,
+    pub github: agmen_hub::FakeGithub,
     /// The hub's base URL.
     pub base: Url,
     pub topics: Topics,
@@ -178,6 +179,7 @@ where
     Fut: Future<Output = ()> + Send + 'static,
 {
     let db = TestDb::create().await;
+    let github = agmen_hub::FakeGithub::start().await.unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let base = Url::parse(&format!("http://{addr}")).unwrap();
@@ -190,10 +192,8 @@ where
             "AGMEN_DATABASE_URL" => db.url.clone(),
             "AGMEN_LISTEN" => addr.to_string(),
             "AGMEN_PUBLIC_URL" => base.to_string(),
-            "AGMEN_GITHUB_CLIENT_ID" => "agmen-client-tests".to_owned(),
-            "AGMEN_GITHUB_CLIENT_SECRET" => "unused".to_owned(),
-            // The client tests never sign in with GitHub; nothing listens here.
-            "AGMEN_GITHUB_URL" | "AGMEN_GITHUB_API_URL" => "http://127.0.0.1:9/".to_owned(),
+            "AGMEN_GITHUB_CLIENT_ID" => agmen_hub::FAKE_GITHUB_CLIENT_ID.to_owned(),
+            "AGMEN_GITHUB_URL" | "AGMEN_GITHUB_API_URL" => github.base().to_string(),
             "AGMEN_EMQX_API_URL" => env("AGMEN_IT_EMQX_API"),
             "AGMEN_EMQX_API_KEY" => env("AGMEN_IT_EMQX_API_KEY"),
             "AGMEN_EMQX_API_SECRET" => env("AGMEN_IT_EMQX_API_SECRET"),
@@ -216,6 +216,7 @@ where
     let seeded = Arc::new(Mutex::new(Vec::new()));
     let ctx = Ctx {
         hub,
+        github,
         base,
         topics: topics.clone(),
         broker: env("AGMEN_IT_MQTT").parse().unwrap(),

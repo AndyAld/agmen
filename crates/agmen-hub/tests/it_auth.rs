@@ -1,4 +1,4 @@
-//! Hub login (RFC 8628 device flow with GitHub sign-in on the approve page)
+//! Hub login (RFC 8628 device flow run by the hub against GitHub)
 //! and invites, against an in-process hub, a fake GitHub and a database of
 //! the test's own on `AGMEN_IT_PG`.
 
@@ -12,8 +12,8 @@ use jiff::Timestamp;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 use support::{
-    Ctx, approve_in_browser, count, login, member_with_token, open_confirm_page, poll_device_token,
-    post_approve, run, seed_human, seed_member, seed_project, start_device_login,
+    Ctx, count, login, member_with_token, poll_device_token, run, seed_human, seed_member,
+    seed_project, start_device_login,
 };
 
 const ANDY: u64 = 4242;
@@ -41,16 +41,10 @@ async fn it_device_flow_issues_human_token() {
 
         let start = start_device_login(&ctx).await;
         assert_eq!(start.user_code.len(), 9, "user code {}", start.user_code);
-        assert_eq!(start.body["interval"], 5);
-        assert_eq!(start.body["expires_in"], 600);
-        assert!(
-            start.verification_uri_complete.contains(&start.user_code),
-            "{}",
-            start.verification_uri_complete
-        );
-        let form = ctx.http.get(&start.verification_uri).send().await.unwrap();
-        assert_eq!(form.status(), StatusCode::OK);
-        assert!(form.text().await.unwrap().contains("name=\"user_code\""));
+        assert_eq!(start.body["interval"], 1);
+        assert_eq!(start.body["expires_in"], 900);
+        assert!(start.verification_uri.ends_with("/login/device"));
+        assert!(start.body.get("verification_uri_complete").is_none());
 
         let (status, body) = poll_device_token(&ctx, &start.device_code).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -58,9 +52,8 @@ async fn it_device_flow_issues_human_token() {
 
         // GitHub reports a different login case; the seeded human matches by
         // account id, not by login.
-        ctx.github.sign_in_as(ANDY, "Andy");
-        let page = approve_in_browser(&ctx, &start).await;
-        assert!(page.contains(&start.user_code), "confirm page: {page}");
+        ctx.github.approve(&start.user_code, ANDY, "Andy");
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
         let (status, body) = poll_device_token(&ctx, &start.device_code).await;
         assert_eq!(status, StatusCode::OK, "{body}");
@@ -88,6 +81,12 @@ async fn it_device_flow_issues_human_token() {
         )
         .await;
         assert_eq!(status, StatusCode::CREATED, "{minted}");
+
+        let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM device_authorizations")
+            .fetch_one(&ctx.pool)
+            .await
+            .unwrap();
+        assert_eq!(rows, 0);
 
         // A device code is redeemed once.
         let (status, body) = poll_device_token(&ctx, &start.device_code).await;
@@ -122,27 +121,16 @@ fn assert_unframeable(resp: &reqwest::Response, no_store: bool) {
 }
 
 #[tokio::test]
-async fn it_login_pages_refuse_framing() {
+async fn it_responses_refuse_framing() {
     run(|ctx| async move {
-        ctx.github.sign_in_as(ANDY, "andy");
-        let start = start_device_login(&ctx).await;
-        let form = ctx.http.get(&start.verification_uri).send().await.unwrap();
-        assert_unframeable(&form, false);
-
-        let confirm = open_confirm_page(&ctx, &start).await;
-        assert_unframeable(&confirm, true);
-        let approved = post_approve(&ctx, &confirm.text().await.unwrap()).await;
-        assert_eq!(approved.status(), StatusCode::OK);
-        assert!(
-            approved
-                .headers()
-                .get("content-type")
-                .is_some_and(|value| value.to_str().unwrap().starts_with("text/html")),
-            "the approve answer is a page"
-        );
-        assert_unframeable(&approved, true);
-
-        // The layer is router wide: JSON answers carry the headers too.
+        let start = ctx
+            .http
+            .post(ctx.hub.url("/v1/auth/device"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(start.status(), StatusCode::OK);
+        assert_unframeable(&start, false);
         let jwks = ctx.http.get(ctx.hub.url("/v1/jwks")).send().await.unwrap();
         assert_unframeable(&jwks, false);
     })
@@ -170,9 +158,8 @@ async fn it_device_flow_new_human_gets_lowercase_handle() {
 async fn it_refresh_token_rotates() {
     run(|ctx| async move {
         seed_human(&ctx.pool, ANDY, "andy").await;
-        ctx.github.sign_in_as(ANDY, "andy");
         let start = start_device_login(&ctx).await;
-        approve_in_browser(&ctx, &start).await;
+        ctx.github.approve(&start.user_code, ANDY, "andy");
         let (_, first) = poll_device_token(&ctx, &start.device_code).await;
         let old = first["refresh_token"].as_str().unwrap();
 
@@ -395,7 +382,7 @@ async fn run_bootstrap(
         .args(["bootstrap", "--tenant", tenant, "--project", project])
         .args(admin)
         .env("AGMEN_DATABASE_URL", &ctx.db_url)
-        .env("AGMEN_GITHUB_API_URL", ctx.github.base.as_str());
+        .env("AGMEN_GITHUB_API_URL", ctx.github.base().as_str());
     tokio::task::spawn_blocking(move || command.output())
         .await
         .unwrap()
@@ -573,6 +560,291 @@ async fn it_bootstrap_admin_is_bound_to_the_github_id() {
             .await,
             0
         );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn it_device_poll_follows_github_interval() {
+    run(|ctx| async move {
+        ctx.github.set_interval(2);
+        let start = start_device_login(&ctx).await;
+        for _ in 0..2 {
+            let (status, body) = poll_device_token(&ctx, &start.device_code).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(body["error"], "authorization_pending");
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert_eq!(ctx.github.token_polls(), 1);
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let (_, body) = poll_device_token(&ctx, &start.device_code).await;
+        assert_eq!(body["error"], "authorization_pending");
+        assert_eq!(ctx.github.token_polls(), 2);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn it_device_flow_slow_down_is_passed_on() {
+    run(|ctx| async move {
+        let start = start_device_login(&ctx).await;
+        ctx.github.slow_down_next(&start.user_code);
+        let (status, body) = poll_device_token(&ctx, &start.device_code).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "slow_down");
+        let interval: i32 = sqlx::query_scalar(
+            "SELECT interval_secs FROM device_authorizations WHERE user_code = $1",
+        )
+        .bind(&start.user_code)
+        .fetch_one(&ctx.pool)
+        .await
+        .unwrap();
+        assert_eq!(interval, 6);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn it_device_flow_access_denied() {
+    run(|ctx| async move {
+        let start = start_device_login(&ctx).await;
+        ctx.github.deny(&start.user_code);
+        let (status, body) = poll_device_token(&ctx, &start.device_code).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "access_denied");
+        let (status, body) = poll_device_token(&ctx, &start.device_code).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "invalid_grant");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn it_device_flow_expired() {
+    run(|ctx| async move {
+        let start = start_device_login(&ctx).await;
+        ctx.github.expire(&start.user_code);
+        let (status, body) = poll_device_token(&ctx, &start.device_code).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "expired_token");
+        let (status, body) = poll_device_token(&ctx, &start.device_code).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "invalid_grant");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn it_device_start_github_down_is_502() {
+    run(|ctx| async move {
+        ctx.github.fail_device_code(503);
+        let resp = ctx
+            .http
+            .post(ctx.hub.url("/v1/auth/device"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+        let body: Value = resp.json().await.unwrap();
+        assert_eq!(body["error"], "upstream_unavailable");
+        let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM device_authorizations")
+            .fetch_one(&ctx.pool)
+            .await
+            .unwrap();
+        assert_eq!(rows, 0);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn it_open_device_logins_are_capped() {
+    run(|ctx| async move {
+        sqlx::query(
+            "INSERT INTO device_authorizations
+             (device_code_hash, user_code, expires_at, github_device_code, interval_secs, next_poll_at)
+             SELECT sha256(n::text::bytea), n::text, now() + interval '15 minutes', n::text, 1, now()
+             FROM generate_series(1, 1000) n",
+        )
+        .execute(&ctx.pool)
+        .await
+        .unwrap();
+        let resp = ctx.http.post(ctx.hub.url("/v1/auth/device")).send().await.unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body: Value = resp.json().await.unwrap();
+        assert_eq!(body["error"], "temporarily_unavailable");
+        assert!(ctx.github.last_device_form().is_none());
+    }).await;
+}
+
+#[tokio::test]
+async fn it_web_oauth_routes_are_gone() {
+    run(|ctx| async move {
+        for (path, expected) in [
+            ("/v1/auth/device", StatusCode::METHOD_NOT_ALLOWED),
+            (
+                "/v1/auth/oauth/github/start?user_code=BCDF-GHJK",
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                "/v1/auth/oauth/github/callback?state=x",
+                StatusCode::NOT_FOUND,
+            ),
+        ] {
+            assert_eq!(
+                ctx.http
+                    .get(ctx.hub.url(path))
+                    .send()
+                    .await
+                    .unwrap()
+                    .status(),
+                expected
+            );
+        }
+        assert_eq!(
+            ctx.http
+                .post(ctx.hub.url("/v1/auth/device/approve"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn it_hub_refuses_github_tokens() {
+    run(|ctx| async move {
+        let token = format!("gho_{}", "a".repeat(36));
+        let resp = ctx
+            .http
+            .post(ctx.hub.url("/v1/auth/token"))
+            .form(&[
+                (
+                    "grant_type",
+                    "urn:ietf:params:oauth:grant-type:token-exchange",
+                ),
+                ("subject_token", token.as_str()),
+            ])
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body: Value = resp.json().await.unwrap();
+        assert_eq!(body["error"], "unsupported_grant_type");
+        assert_eq!(
+            ctx.http
+                .get(ctx.hub.url("/v1/me"))
+                .bearer_auth(token)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn it_device_poll_upstream_failure_keeps_interval() {
+    run(|ctx| async move {
+        ctx.github.set_interval(2);
+        let start = start_device_login(&ctx).await;
+        ctx.github.refuse_next_poll("device_flow_disabled");
+        let (status, body) = poll_device_token(&ctx, &start.device_code).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(body["error"], "upstream_unavailable");
+        let (status, body) = poll_device_token(&ctx, &start.device_code).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "authorization_pending");
+        assert_eq!(ctx.github.token_polls(), 1);
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let (_, body) = poll_device_token(&ctx, &start.device_code).await;
+        assert_eq!(body["error"], "authorization_pending");
+        assert_eq!(ctx.github.token_polls(), 2);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn it_device_start_does_not_lock_out_poll_writes() {
+    run(|ctx| async move {
+        let start = start_device_login(&ctx).await;
+        sqlx::query(
+            "UPDATE device_authorizations SET expires_at = now() - interval '1 second'
+                     WHERE user_code = $1",
+        )
+        .bind(&start.user_code)
+        .execute(&ctx.pool)
+        .await
+        .unwrap();
+        let mut holder = ctx.pool.begin().await.unwrap();
+        sqlx::query("SET LOCAL lock_timeout = '500ms'")
+            .execute(&mut *holder)
+            .await
+            .unwrap();
+        sqlx::query(
+            "SELECT device_code_hash FROM device_authorizations WHERE user_code = $1 FOR UPDATE",
+        )
+        .bind(&start.user_code)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+        let request = ctx
+            .http
+            .post(ctx.hub.url("/v1/auth/device"))
+            .timeout(std::time::Duration::from_secs(5));
+        let starting = tokio::spawn(async move { request.send().await });
+        let mut waiting = false;
+        for _ in 0..100 {
+            waiting = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname = current_database()
+                 AND query LIKE 'DELETE FROM device_authorizations WHERE expires_at%'
+                 AND wait_event_type = 'Lock')",
+            )
+            .fetch_one(&ctx.pool)
+            .await
+            .unwrap();
+            if waiting {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let deleted = sqlx::query("DELETE FROM device_authorizations WHERE user_code = $1")
+            .bind(&start.user_code)
+            .execute(&mut *holder)
+            .await;
+        holder.rollback().await.unwrap();
+        let response = tokio::time::timeout(std::time::Duration::from_secs(5), starting)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(waiting, "the new start must wait for the held row");
+        assert!(
+            deleted.is_ok(),
+            "a start must not prevent a poll from deleting its row: {deleted:?}"
+        );
+        assert_eq!(response.status(), StatusCode::OK);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn it_device_upsert_refusal_keeps_interval() {
+    run(|ctx| async move {
+        ctx.github.set_interval(2);
+        let start = start_device_login(&ctx).await;
+        ctx.github.approve(&start.user_code, ANDY, "-invalid");
+        let (status, body) = poll_device_token(&ctx, &start.device_code).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["error"], "bad_handle");
+        let (status, body) = poll_device_token(&ctx, &start.device_code).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "authorization_pending");
+        assert_eq!(ctx.github.token_polls(), 1);
     })
     .await;
 }

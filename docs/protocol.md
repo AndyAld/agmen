@@ -192,7 +192,7 @@ Base: `https://api.<domain>/v1`. Auth: bearer token from login (humans) or scope
 
 | Method and path | Purpose |
 |---|---|
-| `POST /auth/device`, `POST /auth/token` | Device-code and PKCE token exchange |
+| `POST /auth/device`, `POST /auth/token` | GitHub device sign-in: start returns `{device_code, user_code, verification_uri, expires_in, interval}`; token polls return hub tokens or 400 `authorization_pending`, `slow_down`, `expired_token`, `access_denied`, `invalid_grant`; GitHub failures return 502 `upstream_unavailable` |
 | `POST /devices` | Register this machine |
 | `POST /identities` | Mint a child identity (by agmend for its device). Body `{handle, project, kind, role, verbs, edits, role_sha256, agent?, delegated_by?}`; `kind` is `agent`, `coordinator` or `listener`, and `verbs` is capped at the kind (section 1). A second live listener for the same human and project gets 409 |
 | `GET /identities/{id}/broker-token` | Short-lived EMQX JWT for that identity (`{token, expires_at}`) |

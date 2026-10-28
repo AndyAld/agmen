@@ -98,6 +98,15 @@ async fn it_login_device_flow() {
             "{rest:?}"
         );
 
+        assert!(
+            rest.iter().any(|line| line
+                == &format!(
+                    "Open {}login/device and enter the code. It expires in 15 minutes.",
+                    ctx.github.base()
+                )),
+            "{rest:?}"
+        );
+
         let out = home.run(home.path(), &["whoami"]).await;
         assert_exit(&out, 0);
         let text = stdout(&out);

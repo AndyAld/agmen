@@ -123,6 +123,9 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> anyhow::Result<Comman
 }
 
 async fn serve() -> anyhow::Result<()> {
+    if std::env::var("AGMEN_GITHUB_CLIENT_SECRET").is_ok_and(|value| !value.is_empty()) {
+        tracing::warn!("AGMEN_GITHUB_CLIENT_SECRET is set but no longer used");
+    }
     let config = agmen_hub::Config::from_env().context("reading the configuration")?;
     let hub = agmen_hub::Hub::connect(&config)
         .await
