@@ -15,6 +15,28 @@ const MAX_ROLE_FILES: usize = 64;
 const MAX_ROLE_BYTES: u64 = 64 * 1024;
 const MAX_DIRECTORY_ENTRIES: usize = 4096;
 
+/// The source layer that supplied a role's own definition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
+pub enum Layer {
+    /// Embedded role shipped with agmen.
+    Builtin,
+    /// Role in the project's `.agmen/roles` directory.
+    Project,
+    /// Role in the person's `$HOME/.config/agmen/roles` directory.
+    Personal,
+}
+
+impl std::fmt::Display for Layer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Builtin => "builtin",
+            Self::Project => "project",
+            Self::Personal => "personal",
+        })
+    }
+}
+
 /// Sources in increasing precedence: embedded, project checkout, personal directory.
 #[derive(Debug, Clone)]
 pub struct Layers {
@@ -42,6 +64,8 @@ impl Default for Layers {
 /// A fully inherited role and its launch permissions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Resolved {
+    /// The layer supplying this role's own definition, independent of its ancestors.
+    pub layer: Layer,
     /// Role with inherited settings and prompt filled in.
     pub role: Role,
     /// Effective kind.
@@ -69,6 +93,10 @@ pub struct Catalog {
 }
 
 impl Catalog {
+    /// Iterate over resolved roles in name order, including base.
+    pub fn iter(&self) -> impl Iterator<Item = &Resolved> {
+        self.roles.values()
+    }
     /// Find a role by its exact name.
     #[must_use]
     pub fn get(&self, name: &str) -> Option<&Resolved> {
@@ -96,9 +124,12 @@ impl Layers {
     /// Returns schema, inheritance, duplicate-name, or directory I/O errors.
     pub fn load(&self) -> Result<Catalog, RoleError> {
         let mut sources = BTreeMap::new();
+        let mut layers = BTreeMap::new();
         insert_layer(
             &mut sources,
             self.builtin.iter().map(|(_, xml)| xml.clone()),
+            &mut layers,
+            Layer::Builtin,
         )?;
         if let Some(root) = &self.project {
             let dir = root.join(".agmen/roles");
@@ -106,15 +137,27 @@ impl Layers {
                 (fs::canonicalize(&dir), fs::canonicalize(root))
                 && canonical_dir.starts_with(canonical_root)
             {
-                insert_layer(&mut sources, read_dir(&canonical_dir, false)?)?;
+                insert_layer(
+                    &mut sources,
+                    read_dir(&canonical_dir, false)?,
+                    &mut layers,
+                    Layer::Project,
+                )?;
             }
         }
         if let Some(dir) = &self.personal {
-            insert_layer(&mut sources, read_dir(dir, true)?)?;
+            insert_layer(
+                &mut sources,
+                read_dir(dir, true)?,
+                &mut layers,
+                Layer::Personal,
+            )?;
         }
         let mut roles = BTreeMap::new();
-        for name in sources.keys() {
-            roles.insert(name.clone(), resolve(name, &sources)?);
+        for (name, layer) in layers {
+            let mut role = resolve(&name, &sources)?;
+            role.layer = layer;
+            roles.insert(name, role);
         }
         Ok(Catalog { roles })
     }
@@ -125,6 +168,8 @@ pub(crate) type Sources = BTreeMap<String, (Role, String)>;
 fn insert_layer(
     sources: &mut Sources,
     texts: impl IntoIterator<Item = String>,
+    layers: &mut BTreeMap<String, Layer>,
+    layer: Layer,
 ) -> Result<(), RoleError> {
     let mut names = BTreeSet::new();
     for text in texts {
@@ -135,6 +180,7 @@ fn insert_layer(
                 role.name
             )));
         }
+        layers.insert(role.name.clone(), layer);
         sources.insert(role.name.clone(), (role, text));
     }
     Ok(())
@@ -293,6 +339,7 @@ pub(crate) fn resolve(name: &str, sources: &Sources) -> Result<Resolved, RoleErr
     role.worktree = Some(worktree.clone());
     role.prompt.elements = prompt;
     Ok(Resolved {
+        layer: Layer::Builtin,
         role,
         kind,
         tier,
@@ -332,4 +379,42 @@ fn inheritance_chain<'a>(
         }
     }
     Ok(chain)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn catalog_iter_is_sorted_and_marks_layers() {
+        let project = tempfile::tempdir().unwrap();
+        let personal = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join(".agmen/roles")).unwrap();
+        let reviewer = BUILT_IN
+            .iter()
+            .find(|(name, _)| *name == "reviewer")
+            .unwrap()
+            .1;
+        let engineer = BUILT_IN
+            .iter()
+            .find(|(name, _)| *name == "engineer")
+            .unwrap()
+            .1;
+        std::fs::write(project.path().join(".agmen/roles/reviewer.xml"), reviewer).unwrap();
+        std::fs::write(project.path().join(".agmen/roles/engineer.xml"), engineer).unwrap();
+        std::fs::write(personal.path().join("engineer.xml"), engineer).unwrap();
+        let catalog = Layers {
+            project: Some(project.path().to_owned()),
+            personal: Some(personal.path().to_owned()),
+            ..Layers::default()
+        }
+        .load()
+        .unwrap();
+        let names: Vec<_> = catalog.iter().map(|r| r.role.name.as_str()).collect();
+        assert_eq!(names.len(), 8);
+        assert!(names.windows(2).all(|pair| pair[0] < pair[1]));
+        assert_eq!(catalog.get("base").unwrap().layer, Layer::Builtin);
+        assert_eq!(catalog.get("reviewer").unwrap().layer, Layer::Project);
+        assert_eq!(catalog.get("engineer").unwrap().layer, Layer::Personal);
+    }
 }
