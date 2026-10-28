@@ -8,12 +8,13 @@
 
 mod support;
 
+use agmen_hub::HubMode;
 use jiff::Timestamp;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 use support::{
-    Ctx, count, login, member_with_token, poll_device_token, run, seed_human, seed_member,
-    seed_project, start_device_login,
+    Ctx, count, login, member_with_token, poll_device_token, run, run_in_mode, seed_human,
+    seed_member, seed_project, start_device_login,
 };
 
 const ANDY: u64 = 4242;
@@ -511,12 +512,27 @@ async fn run_bootstrap(
     project: &str,
     admin: &[&str],
 ) -> std::process::Output {
+    run_bootstrap_in_mode(ctx, Some("hosted"), tenant, project, admin).await
+}
+
+/// `agmen-hub bootstrap` with `AGMEN_HUB_MODE` set to `mode`, or unset.
+async fn run_bootstrap_in_mode(
+    ctx: &Ctx,
+    mode: Option<&str>,
+    tenant: &str,
+    project: &str,
+    admin: &[&str],
+) -> std::process::Output {
     let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_agmen-hub"));
     command
         .args(["bootstrap", "--tenant", tenant, "--project", project])
         .args(admin)
         .env("AGMEN_DATABASE_URL", &ctx.db_url)
-        .env("AGMEN_GITHUB_API_URL", ctx.github.base().as_str());
+        .env("AGMEN_GITHUB_API_URL", ctx.github.base().as_str())
+        .env_remove("AGMEN_HUB_MODE");
+    if let Some(mode) = mode {
+        command.env("AGMEN_HUB_MODE", mode);
+    }
     tokio::task::spawn_blocking(move || command.output())
         .await
         .unwrap()
@@ -557,7 +573,7 @@ async fn role_in(ctx: &Ctx, handle: &str, project: &Value) -> Option<String> {
 
 #[tokio::test]
 async fn it_bootstrap_creates_project_and_first_admin() {
-    run(|ctx| async move {
+    run_in_mode(HubMode::Hosted, |ctx| async move {
         ctx.github.register(30, "Root-Admin");
         let made = bootstrap(&ctx, "Acme Co", "agmen", &["--admin-github", "root-ADMIN"]).await;
         assert!(is_hub_id(&made["tenant"]), "{made}");
@@ -1101,6 +1117,104 @@ async fn it_second_poll_during_a_slow_github_call_answers_pending() {
         );
         assert_eq!(ctx.github.token_polls(), 1);
         assert_eq!(first.await.unwrap().unwrap(), StatusCode::BAD_REQUEST);
+    })
+    .await;
+}
+
+/// Bootstraps in self-host mode: the mode comes from the environment, unset.
+async fn self_host_bootstrap(
+    ctx: &Ctx,
+    tenant: &str,
+    project: &str,
+    admin: &[&str],
+) -> std::process::Output {
+    run_bootstrap_in_mode(ctx, None, tenant, project, admin).await
+}
+
+#[tokio::test]
+async fn it_self_host_bootstrap_uses_the_one_group() {
+    run(|ctx| async move {
+        let group: String = sqlx::query_scalar("SELECT tenant_id FROM hub_group")
+            .fetch_one(&ctx.pool)
+            .await
+            .unwrap();
+        let out = self_host_bootstrap(&ctx, "agmen", "docs", &["--admin-github-id", "31"]).await;
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let made: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(made["tenant"], group.as_str(), "{made}");
+        assert_eq!(rows(&ctx, "tenants").await, 1);
+        assert_eq!(
+            count(
+                &ctx.pool,
+                "SELECT count(*) FROM projects WHERE tenant_id = $1",
+                &group
+            )
+            .await,
+            1
+        );
+        // The bootstrap admin's first sign-in takes the vacant ownership, so
+        // the hub's pending claim token has nothing left to claim.
+        login(&ctx, 31, "bob").await;
+        let role: String = sqlx::query_scalar(
+            "SELECT m.role FROM tenant_members m JOIN humans h ON h.id = m.human_id
+             WHERE h.handle = 'bob' AND m.tenant_id = $1",
+        )
+        .bind(&group)
+        .fetch_one(&ctx.pool)
+        .await
+        .unwrap();
+        assert_eq!(role, "owner");
+        assert!(ctx.hub.hub.mint_claim_token().await.unwrap().is_none());
+        // A restart adopts the group; it does not trip over the bootstrap.
+        let second =
+            support::TestHub::start(&ctx.db_url, &ctx.github, support::DEV_KEY_1, &[]).await;
+        drop(second);
+        assert_eq!(rows(&ctx, "tenants").await, 1);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn it_self_host_bootstrap_refuses_another_group_name() {
+    run(|ctx| async move {
+        let out = self_host_bootstrap(&ctx, "Other Co", "docs", &["--admin-github-id", "31"]).await;
+        assert!(!out.status.success());
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("\"agmen\""), "{stderr}");
+        assert_eq!(rows(&ctx, "tenants").await, 1);
+        assert_eq!(rows(&ctx, "projects").await, 0);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn it_self_host_bootstrap_creates_the_group_when_none_exists() {
+    run(|ctx| async move {
+        sqlx::query("DELETE FROM hub_group")
+            .execute(&ctx.pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM tenants")
+            .execute(&ctx.pool)
+            .await
+            .unwrap();
+        let out = self_host_bootstrap(&ctx, "Acme Co", "docs", &["--admin-github-id", "31"]).await;
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let made: Value = serde_json::from_slice(&out.stdout).unwrap();
+        let group: String = sqlx::query_scalar("SELECT tenant_id FROM hub_group")
+            .fetch_one(&ctx.pool)
+            .await
+            .unwrap();
+        assert_eq!(made["tenant"], group.as_str(), "{made}");
+        assert_eq!(rows(&ctx, "tenants").await, 1);
     })
     .await;
 }

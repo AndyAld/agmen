@@ -13,9 +13,12 @@
 //! login is resolved once to its GitHub account id, which is what the admin
 //! is bound to; `--admin-github-id <id>` names the account id directly and
 //! skips the lookup. It reads `AGMEN_DATABASE_URL` and, for the lookup,
-//! `AGMEN_GITHUB_API_URL` (default `https://api.github.com`).
+//! `AGMEN_GITHUB_API_URL` (default `https://api.github.com`). With
+//! `AGMEN_HUB_MODE` unset or `self-host`, the tenant is the hub's one group:
+//! bootstrap creates it when there is none and refuses another name.
 
 use std::ffi::OsString;
+use std::io::IsTerminal as _;
 
 use agmen_hub::{AdminGithub, GithubConfig};
 use agmen_proto::RepoUrl;
@@ -42,6 +45,7 @@ enum Command {
 async fn main() -> anyhow::Result<()> {
     install_crypto_provider()?;
     tracing_subscriber::fmt()
+        .with_ansi(std::io::stderr().is_terminal())
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
@@ -170,7 +174,13 @@ async fn bootstrap(
     admin: AdminGithub,
     repo_url: Option<RepoUrl>,
 ) -> anyhow::Result<()> {
-    let mut request = agmen_hub::Bootstrap::new(tenant, project, admin)?;
+    let mode = std::env::var("AGMEN_HUB_MODE")
+        .ok()
+        .filter(|mode| !mode.is_empty())
+        .map(|mode| mode.parse::<agmen_hub::HubMode>())
+        .transpose()?
+        .unwrap_or_default();
+    let mut request = agmen_hub::Bootstrap::new(tenant, project, admin)?.with_mode(mode);
     if let Some(repo_url) = repo_url {
         request = request.with_repo_url(repo_url);
     }

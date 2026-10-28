@@ -7,7 +7,9 @@ use sqlx::{PgConnection, PgPool};
 use url::Url;
 
 use crate::auth::{GithubError, GithubId, account_by_login, is_human_handle};
+use crate::config::HubMode;
 use crate::db::{self, is_display_name, new_id};
+use crate::group::{self, GroupError};
 use crate::http::upstream_client;
 
 /// Why bootstrapping failed.
@@ -43,6 +45,17 @@ pub enum BootstrapError {
     /// The database returned an id the schema should have refused.
     #[error("the database holds an invalid id")]
     StoredId(#[from] agmen_proto::ProtoError),
+    /// A self-host hub has one group and the requested tenant is another.
+    #[error(
+        "this self-host hub has one group, {group:?}; use --tenant {group:?} or set AGMEN_HUB_MODE=hosted"
+    )]
+    OtherGroup {
+        /// The hub's group name.
+        group: String,
+    },
+    /// The self-host group could not be selected or created.
+    #[error("selecting the self-host group failed")]
+    Group(#[from] GroupError),
     /// The database holds a repository URL outside the allowed forms.
     #[error("the database holds an invalid repository URL")]
     StoredRepoUrl(#[from] agmen_proto::BadRepoUrl),
@@ -67,6 +80,7 @@ pub struct Bootstrap {
     project: String,
     admin: AdminGithub,
     repo_url: Option<RepoUrl>,
+    mode: HubMode,
 }
 
 /// What [`Bootstrap::run`] made or found. Serializes as
@@ -126,7 +140,18 @@ impl Bootstrap {
             project,
             admin,
             repo_url: None,
+            mode: HubMode::default(),
         })
+    }
+
+    /// Sets the hub mode, `self-host` unless this says otherwise. In
+    /// self-host mode the tenant is the hub's one group: it is created when
+    /// the hub has none, and any other tenant name is refused with
+    /// [`BootstrapError::OtherGroup`].
+    #[must_use]
+    pub fn with_mode(mut self, mode: HubMode) -> Self {
+        self.mode = mode;
+        self
     }
 
     /// Sets the project's repository URL. Without this option, a rerun
@@ -204,6 +229,16 @@ impl Bootstrap {
         admin_id: GithubId,
         admin_login: Option<String>,
     ) -> Result<Bootstrapped, BootstrapError> {
+        if self.mode == HubMode::SelfHost {
+            let group = group::ensure_group(pool, &self.tenant).await?;
+            let name: String = sqlx::query_scalar("SELECT name FROM tenants WHERE id = $1")
+                .bind(group.as_str())
+                .fetch_one(pool)
+                .await?;
+            if name != self.tenant {
+                return Err(BootstrapError::OtherGroup { group: name });
+            }
+        }
         let mut tx = pool.begin().await?;
         // The no-op update makes RETURNING give the existing row's id.
         let tenant: String = sqlx::query_scalar(

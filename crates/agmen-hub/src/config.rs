@@ -184,9 +184,40 @@ pub const DEFAULT_CLAIM_LEASE: Duration = Duration::from_secs(30 * 60);
 /// The longest claim lease `AGMEN_CLAIM_LEASE_SECS` may set: one day.
 const MAX_CLAIM_LEASE_SECS: u64 = 24 * 3600;
 
+/// Whether the hub serves one self-hosted group or hosted tenants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum HubMode {
+    /// One group, initialized at startup and claimed by its first owner.
+    #[default]
+    SelfHost,
+    /// Hosted tenants, without self-host initialization or claiming.
+    Hosted,
+}
+
+/// Parses the `AGMEN_HUB_MODE` values `self-host` and `hosted`.
+impl std::str::FromStr for HubMode {
+    type Err = ConfigError;
+
+    fn from_str(value: &str) -> Result<Self, ConfigError> {
+        match value {
+            "self-host" => Ok(Self::SelfHost),
+            "hosted" => Ok(Self::Hosted),
+            _ => Err(ConfigError::Invalid {
+                name: "AGMEN_HUB_MODE",
+                what: "self-host or hosted",
+            }),
+        }
+    }
+}
+
 /// Everything the hub needs to start.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
+    /// `AGMEN_HUB_MODE`, default `self-host`; also accepts `hosted`.
+    pub mode: HubMode,
+    /// `AGMEN_GROUP_NAME`, default `agmen`: the name of a new self-host group.
+    /// Uses 1 to 64 characters, without controls or surrounding whitespace.
+    pub group_name: String,
     /// `AGMEN_DATABASE_URL`, a Postgres URL.
     pub database_url: Secret,
     /// `AGMEN_LISTEN`, default `0.0.0.0:8080`.
@@ -275,6 +306,8 @@ impl Config {
     /// assert_eq!(config.mqtt.up_filter(), "$share/hub/agmen/v1/+/+/up/+");
     /// assert_eq!(config.claim_lease, agmen_hub::DEFAULT_CLAIM_LEASE);
     /// assert_eq!(config.public_mqtt_url.as_str(), "mqtt://emqx:1883");
+    /// assert_eq!(config.mode, agmen_hub::HubMode::SelfHost);
+    /// assert_eq!(config.group_name, "agmen");
     /// # Ok(()) }
     /// ```
     pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Self, ConfigError> {
@@ -290,6 +323,17 @@ impl Config {
         };
         Ok(Self {
             database_url: Secret::new(required("AGMEN_DATABASE_URL")?),
+            mode: get("AGMEN_HUB_MODE").map_or(Ok(HubMode::default()), |mode| mode.parse())?,
+            group_name: {
+                let name = get("AGMEN_GROUP_NAME").unwrap_or_else(|| "agmen".to_owned());
+                if !crate::db::is_display_name(&name) {
+                    return Err(ConfigError::Invalid {
+                        name: "AGMEN_GROUP_NAME",
+                        what: "name of 1 to 64 characters without controls or surrounding whitespace",
+                    });
+                }
+                name
+            },
             listen,
             public_url: url("AGMEN_PUBLIC_URL", required("AGMEN_PUBLIC_URL")?)?,
             github: GithubConfig {
@@ -360,6 +404,65 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hub_mode_parses() {
+        assert_eq!(HubMode::default(), HubMode::SelfHost);
+        for (value, expected) in [
+            (None, HubMode::SelfHost),
+            (Some(""), HubMode::SelfHost),
+            (Some("self-host"), HubMode::SelfHost),
+            (Some("hosted"), HubMode::Hosted),
+        ] {
+            let config = Config::from_lookup(|name| match name {
+                "AGMEN_HUB_MODE" => value.map(str::to_owned),
+                _ => without_github(name),
+            })
+            .unwrap();
+            assert_eq!(config.mode, expected);
+        }
+        for value in ["selfhost", "Hosted", " hosted "] {
+            assert!(matches!(
+                Config::from_lookup(|name| match name {
+                    "AGMEN_HUB_MODE" => Some(value.to_owned()),
+                    _ => without_github(name),
+                }),
+                Err(ConfigError::Invalid {
+                    name: "AGMEN_HUB_MODE",
+                    what: "self-host or hosted",
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn group_name_rules() {
+        for (value, expected) in [
+            (None, "agmen"),
+            (Some(""), "agmen"),
+            (Some("My group"), "My group"),
+            (Some("é"), "é"),
+        ] {
+            let config = Config::from_lookup(|name| match name {
+                "AGMEN_GROUP_NAME" => value.map(str::to_owned),
+                _ => without_github(name),
+            })
+            .unwrap();
+            assert_eq!(config.group_name, expected);
+        }
+        for value in [" x", "x ", "x\n", &"x".repeat(65)] {
+            assert!(matches!(
+                Config::from_lookup(|name| match name {
+                    "AGMEN_GROUP_NAME" => Some(value.to_owned()),
+                    _ => without_github(name),
+                }),
+                Err(ConfigError::Invalid {
+                    name: "AGMEN_GROUP_NAME",
+                    ..
+                })
+            ));
+        }
+    }
 
     fn without_github(name: &str) -> Option<String> {
         match name {

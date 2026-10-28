@@ -46,6 +46,17 @@ pub struct SeededHuman {
 }
 
 impl Hub {
+    /// Replaces the self-host group's pending claim token, unless it has an owner.
+    ///
+    /// # Errors
+    ///
+    /// When the group is missing, a query fails, or the random source fails.
+    pub async fn mint_claim_token(&self) -> Result<Option<String>, HookError> {
+        Ok(crate::group::mint_claim_token(self.pool())
+            .await?
+            .map(|claim| claim.token))
+    }
+
     /// Sets the repository URL for the given project.
     ///
     /// # Errors
