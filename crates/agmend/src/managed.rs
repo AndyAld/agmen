@@ -100,6 +100,9 @@ struct Attached {
     since: tokio::time::Instant,
     /// Whether the pid file has named a process yet.
     seen: bool,
+    /// The process the pid file named, once checked to be the one the
+    /// script started.
+    pid: Option<rustix::process::Pid>,
 }
 
 /// One launch authority for the current signed-in human.
@@ -538,9 +541,7 @@ impl Managed {
                 continue;
             }
             if held.state == "attached" {
-                if self.attach_ended(&mut held).await {
-                    self.finish_attach(&mut held).await;
-                }
+                self.watch_attached(&mut held).await;
                 continue;
             }
             if held.state != "idle"
@@ -576,11 +577,13 @@ impl Managed {
             let owner_only = rows.iter().all(|row| {
                 row.from == held.record.identity.owner_id && row.from_kind == IdentityKind::Human
             });
-            // Keep untrusted conversation history out of bypassPermissions batches.
-            let (session_id, resume) = if owner_only {
-                (held.record.owner_session_id.clone(), held.owner_resumed)
-            } else {
-                (held.record.others_session_id.clone(), held.others_resumed)
+            let (session_id, resume) = match self.batch_session(&mut held, owner_only).await {
+                Ok(session) => session,
+                Err(failure) => {
+                    tracing::error!(code = ?failure.code, "checking the owner session failed");
+                    held.state = "offline";
+                    continue;
+                }
             };
             let spec = RunSpec {
                 cwd: held.record.worktree.clone(),
