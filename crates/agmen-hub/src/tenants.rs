@@ -219,7 +219,7 @@ pub(crate) async fn remove(
     // share lock on that row, so the delete waits for it to commit and this
     // statement then sees the identity it inserted.
     sqlx::query(
-        "UPDATE identities SET revoked_at = now()
+        "UPDATE identities SET revoked_at = clock_timestamp()
          WHERE tenant_id = $1 AND owner_human_id = $2 AND revoked_at IS NULL",
     )
     .bind(&tenant)

@@ -42,7 +42,7 @@ fn project_tenant(
     let forbidden = || {
         ApiError::forbidden(
             "admin_required",
-            "only a project admin can create a project in this tenant",
+            "only a group owner or admin can create a project in this group",
         )
     };
     if let Some(tenant) = tenant {
@@ -58,7 +58,7 @@ fn project_tenant(
         _ => Err(ApiError::new(
             axum::http::StatusCode::UNPROCESSABLE_ENTITY,
             "tenant_required",
-            "name the tenant when you administer several tenants",
+            "name the tenant when you are an owner or admin of several groups",
         )),
     }
 }
