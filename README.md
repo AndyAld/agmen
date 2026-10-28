@@ -343,6 +343,28 @@ cargo deny check
 
 For the mod: `claude plugin validate mods/agmen-claude`, `tsc -p mods/agmen-claude`, `claude plugin test mods/agmen-claude`.
 
+### Trial hub
+
+On Andy's Mac, run `deploy/dev/hub.sh` against the already running dev stack.
+It sources `/Users/andyaldrich/Projects/agmen/deploy/dev/.secrets/dev.env` and
+`trial-hub.env` in the same directory. Override those paths with `AGMEN_DEV_ENV`
+and `AGMEN_TRIAL_HUB_ENV`. The script maps the dev stack's `AGMEN_IT_*` variables
+to the hub's names and uses its `agmen-dev-1.pem` signing key. It runs the release
+hub on `127.0.0.1:8080` with real GitHub sign-in and prints the manual Funnel
+commands for the public API on 443 and MQTT WebSocket on 8443 (`/mqtt`).
+Ctrl-C stops the hub; use the printed off commands to stop background Funnel.
+The script never configures Funnel itself.
+
+Friends with Rust 1.99.1 and repository access can install the CLI from a checkout
+with `cargo install --locked --path crates/agmen-cli`, set
+`AGMEN_HUB=https://andys-macbook-pro.tail55b331.ts.net`, then run `agmen login`.
+`agmen login --hub <url>` takes precedence over `AGMEN_HUB`, then the saved login.
+Andy must already administer a project: run `agmen invite --project <id>` for
+each friend, who runs `agmen join <code>` in a local git worktree. To create the
+first project and admin, use `agmen-hub bootstrap --tenant <name> --project <name>
+--admin-github <login>` with `AGMEN_DATABASE_URL` set to the dev database URL.
+Check the launcher without credentials or services with `bash deploy/dev/tests/hub.sh`.
+
 ## Deployment
 
 agmen runs on its own Kubernetes cluster, image registry, secret store and domain, separate from GroupDrive's. The cluster manifests live in their own repository, `agmen-kubernetes` (`https://git.groupdrive.xyz/groupdrive/agmen-kubernetes`, mirrored to the private `github.com/AndyAld/agmen-kubernetes`), which ArgoCD in agmen's cluster syncs. Jenkins builds the hub image from this repository (`crates/agmen-hub/Dockerfile`) and pushes it to agmen's registry (`AGMEN_REGISTRY`). EMQX (one node) and Postgres run as StatefulSets with pinned image tags, the pods read Kubernetes Secrets that any secret store can fill, and Postgres is dumped nightly to S3 compatible storage. Details: `agmen-env/README.md` in agmen-kubernetes, and [docs/design.md](docs/design.md#69-hosting).
