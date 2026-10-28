@@ -170,7 +170,7 @@ async fn agent_list_reports_role() {
 }
 
 #[tokio::test]
-async fn role_prompt_is_private_and_refreshed_each_batch_after_restart() {
+async fn role_prompt_is_private_and_a_changed_role_refuses_batches_until_restored() {
     use std::os::unix::fs::PermissionsExt as _;
     let (fixture, _) = role_fixture().await;
     let repo = fixture.dir.path().join("repo");
@@ -203,14 +203,26 @@ async fn role_prompt_is_private_and_refreshed_each_batch_after_restart() {
         std::fs::metadata(&prompt).unwrap().permissions().mode() & 0o777,
         0o600
     );
-    std::fs::write(&definition, "<role name=\"custom\" extends=\"reviewer\" version=\"1\"><rules><rule>second prompt</rule></rules></role>").unwrap();
+    let original = std::fs::read_to_string(&definition).unwrap();
+    std::fs::write(
+        &definition,
+        original.replace("first prompt", "second prompt"),
+    )
+    .unwrap();
     enqueue_from(&fixture, 2, "owner001", "agent001").await;
     batch(&managed, "agent001").await;
-    assert!(role_file(&prompt).unwrap().contains("second prompt"));
+    assert_eq!(fixture.runner.runs.lock().unwrap().len(), 1);
+    assert!(role_file(&prompt).unwrap().contains("first prompt"));
+    let listed = managed.list(json!({})).await.unwrap();
+    assert_eq!(listed["agents"][0]["state"], "offline");
+    let failure = listed["agents"][0]["role_error"].as_str().unwrap();
+    assert!(failure.contains("custom"));
+    assert!(failure.contains("changed since launch; relaunch the agent to use it"));
     std::fs::remove_file(&definition).unwrap();
     enqueue_from(&fixture, 3, "owner001", "agent001").await;
+    managed.start(json!({"identity":"agent001"})).await.unwrap();
     batch(&managed, "agent001").await;
-    assert_eq!(fixture.runner.runs.lock().unwrap().len(), 2);
+    assert_eq!(fixture.runner.runs.lock().unwrap().len(), 1);
     let listed = managed.list(json!({})).await.unwrap();
     assert_eq!(listed["agents"][0]["state"], "offline");
     assert!(
@@ -219,12 +231,13 @@ async fn role_prompt_is_private_and_refreshed_each_batch_after_restart() {
             .unwrap()
             .contains("custom")
     );
-    std::fs::write(&definition, "<role name=\"custom\" extends=\"reviewer\" version=\"1\"><rules><rule>repaired prompt</rule></rules></role>").unwrap();
+    std::fs::write(&definition, original).unwrap();
     managed.start(json!({"identity":"agent001"})).await.unwrap();
     batch(&managed, "agent001").await;
     let runs = fixture.runner.runs.lock().unwrap();
-    assert_eq!(runs.len(), 3);
-    assert!(runs[2].prompt.contains("00003"));
+    assert_eq!(runs.len(), 2);
+    assert!(runs[1].prompt.contains("00002") && runs[1].prompt.contains("00003"));
+    assert!(role_file(&prompt).unwrap().contains("first prompt"));
 }
 
 #[tokio::test]
@@ -330,6 +343,30 @@ fn custom_role(extends: &str, scope: &str, rule: &str) -> String {
     format!(
         "<role name=\"custom\" extends=\"{extends}\" version=\"1\"><edits scope=\"{scope}\"/><rules><rule>{rule}</rule></rules></role>"
     )
+}
+
+#[tokio::test]
+async fn role_edited_after_launch_refuses_the_next_batch() {
+    let (fixture, _) = role_fixture().await;
+    let repo = fixture.dir.path().join("repo");
+    let roles = repo.join(".agmen/roles");
+    std::fs::create_dir(&roles).unwrap();
+    let definition = roles.join("custom.xml");
+    std::fs::write(&definition, custom_role("reviewer", "none", "first")).unwrap();
+    let managed = &fixture.daemon.core.managed;
+    managed
+        .launch(json!({"project":"project1","name":"worker","root":repo,"role":"custom"}))
+        .await
+        .unwrap();
+    std::fs::write(&definition, custom_role("reviewer", "none", "second")).unwrap();
+    enqueue_from(&fixture, 1, "owner001", "agent001").await;
+    batch(managed, "agent001").await;
+    assert!(fixture.runner.runs.lock().unwrap().is_empty());
+    let listed = managed.list(json!({})).await.unwrap();
+    assert_eq!(listed["agents"][0]["state"], "offline");
+    let failure = listed["agents"][0]["role_error"].as_str().unwrap();
+    assert!(failure.contains("custom"));
+    assert!(failure.contains("changed since launch; relaunch the agent to use it"));
 }
 
 #[tokio::test]

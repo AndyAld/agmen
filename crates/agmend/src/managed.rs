@@ -60,6 +60,10 @@ struct Record {
     source: Source,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     role: Option<agmen_proto::RoleName>,
+    /// The hash of the role as minted; a batch refuses to run if the role's
+    /// files no longer resolve to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    role_sha256: Option<agmen_proto::Sha256Hex>,
     /// The layer that supplied the role at launch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     role_layer: Option<String>,
@@ -350,6 +354,7 @@ impl Managed {
                 .map_or_else(|| "5".into(), |n| n.to_string()),
             source: Source::Launched,
             role: identity.role.clone(),
+            role_sha256: identity.role_sha256.clone(),
             role_layer: role.as_ref().map(|role| role.layer.to_string()),
         };
         let config_dir = self.agent_dir(&identity.identity_id);
@@ -578,6 +583,11 @@ impl Managed {
             return Ok(None);
         };
         let role = self.resolve_role(&record.repo, name.as_str()).await?;
+        if record.role_sha256.as_ref().map(|sha| sha.as_str()) != Some(role.sha256.as_str()) {
+            return Err(error(format!(
+                "role {name} changed since launch; relaunch the agent to use it"
+            )));
+        }
         self.write_role_prompt(&record.identity.identity_id, &role)
             .await
             .map(Some)
