@@ -265,7 +265,9 @@ group or access the user's files and credentials.
 
 Managed workers drain owner messages first in separate batches. Only messages
 with the hub-stamped owner ID and `from_kind: human` get
-`--permission-mode bypassPermissions`. Other batches use `--permission-mode
+`--permission-mode bypassPermissions` and `--disallowedTools mcp__agmen__inbox`,
+so other senders' messages do not enter that context through the inbox tool.
+Bash in those batches can still run `agmen inbox`. Other batches use `--permission-mode
 default`, `--disallowedTools Bash,Edit,Write,NotebookEdit` (deny rules override
 allow rules in the user's and project's Claude Code settings) and an appended
 instruction to read, think and reply through agmen, without running commands or

@@ -244,10 +244,15 @@ fn other_sender_batch_uses_default_permissions_and_restriction() {
 }
 
 #[test]
-fn owner_batch_denies_no_tools() {
+fn owner_batch_denies_only_the_inbox_tool() {
     let dir = tempfile::tempdir().unwrap();
     let args = spec(dir.path()).args();
-    assert!(!args.iter().any(|a| a == "--disallowedTools"));
+    // The inbox tool reads every sender's messages; a bypassPermissions run
+    // must not pull them into its context.
+    let deny = args.iter().position(|a| a == "--disallowedTools").unwrap();
+    assert_eq!(args[deny + 1], "mcp__agmen__inbox");
+    assert!(args[deny + 2].starts_with("--"));
+    assert_eq!(args.iter().filter(|a| *a == "--disallowedTools").count(), 1);
     assert!(
         !args
             .iter()

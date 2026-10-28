@@ -58,15 +58,19 @@ impl RunSpec {
             }
             .into(),
         ];
-        if !self.owner_only {
-            // Default mode still honors allow rules from user and project
-            // settings; deny rules win over them. One value, because the
-            // option is variadic.
-            args.extend([
-                "--disallowedTools".into(),
-                "Bash,Edit,Write,NotebookEdit".into(),
-            ]);
-        }
+        // Default mode still honors allow rules from user and project
+        // settings; deny rules win over them. One value, because the option is
+        // variadic. Owner batches lose only inbox, which reads every sender's
+        // messages; their own messages arrive in the prompt.
+        args.extend([
+            "--disallowedTools".into(),
+            if self.owner_only {
+                "mcp__agmen__inbox"
+            } else {
+                "Bash,Edit,Write,NotebookEdit"
+            }
+            .into(),
+        ]);
         args.extend([
             "--output-format".into(),
             "json".into(),
