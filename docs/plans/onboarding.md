@@ -234,14 +234,14 @@ git commit -m "Open GitHub's device page from agmen login and name a declined si
   - `POST /v1/invites` answers `{code, link, project, role, expires_at}` with `link = hub.public_link("i")` plus fragment `code`, for example `https://api.getagmen.ai/i#<64 hex>`. Self-host and hosted plans and the desktop app print `link`.
   - CLI: `pub(crate) fn copy_text(text: &str) -> bool` in `open.rs` (terminal only; first of `pbcopy`, `wl-copy`, `xclip -selection clipboard`, `xsel --clipboard --input`, `clip`; 5 s cap).
 
-The page (layout is the builder's): the script reads `location.hash`, accepts only `/^[0-9a-f]{64}$/` after lowercasing, builds the join command from `location.origin + location.pathname + '#' + code`, writes every value with `textContent`, picks the install line from `navigator.userAgent` (Windows: `powershell -ExecutionPolicy Bypass -c "irm https://getagmen.ai/install.ps1 | iex"`; otherwise `curl -fsSL https://getagmen.ai/install.sh | sh`, plus `brew install agmen-dev/tap/agmen` on macOS), and otherwise shows `This link is missing its invite code. Ask for a new link.` It says to run the join command in a clone of the project's repository.
+The page (layout is the builder's): the script reads `location.hash`, accepts only `/^[0-9a-f]{64}$/` after lowercasing, builds the join command from `location.origin + location.pathname + '#' + code`, writes every value with `textContent`, picks the install line from `navigator.userAgent` (Windows: `powershell -ExecutionPolicy Bypass -c "irm https://getagmen.ai/install.ps1 | iex"`; otherwise `curl --proto '=https' --tlsv1.2 -fsSL https://getagmen.ai/install.sh | sh`, plus `brew install agmen-dev/tap/agmen` on macOS), and otherwise shows `This link is missing its invite code. Ask for a new link.` It says to run the join command in a clone of the project's repository.
 
 - [ ] **Step 1: Write the failing tests**
 
 ```rust
 // crates/agmen-hub/src/invite_page.rs
 #[test] fn page_reads_the_code_only_from_the_fragment() // INVITE_PAGE contains "location.hash" and "/^[0-9a-f]{64}$/"; contains none of "fetch(", "XMLHttpRequest", "sendBeacon", "innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "location.search"
-#[test] fn page_shows_the_install_lines_and_join() // contains "curl -fsSL https://getagmen.ai/install.sh | sh", "irm https://getagmen.ai/install.ps1 | iex", "brew install agmen-dev/tap/agmen", "agmen join "
+#[test] fn page_shows_the_install_lines_and_join() // contains "curl --proto '=https' --tlsv1.2 -fsSL https://getagmen.ai/install.sh | sh", "irm https://getagmen.ai/install.ps1 | iex", "brew install agmen-dev/tap/agmen", "agmen join "
 #[test] fn csp_blocks_every_request()              // INVITE_PAGE_CSP contains "default-src 'none'", "frame-ancestors 'none'", "base-uri 'none'", "form-action 'none'"; no "connect-src", no "img-src"
 
 // crates/agmen-hub/tests/it_auth.rs
