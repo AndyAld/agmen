@@ -281,12 +281,19 @@ fn account_fixture(
         while std::time::Instant::now() < deadline {
             match listener.accept() {
                 Ok((mut conn, _)) => {
+                    // On macOS an accepted socket inherits the listener's
+                    // nonblocking mode, so a read before the client writes
+                    // would fail with WouldBlock instead of waiting.
+                    conn.set_nonblocking(false).unwrap();
                     conn.set_read_timeout(Some(std::time::Duration::from_secs(2)))
                         .unwrap();
                     let mut request = Vec::new();
                     let mut buf = [0; 4096];
                     for _ in 0..32 {
                         let n = conn.read(&mut buf).unwrap();
+                        if n == 0 {
+                            break;
+                        }
                         request.extend_from_slice(&buf[..n]);
                         if let Some(end) = request.windows(4).position(|s| s == b"\r\n\r\n") {
                             let headers =
