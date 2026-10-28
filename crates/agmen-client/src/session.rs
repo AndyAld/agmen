@@ -183,8 +183,13 @@ impl Broker {
         match (self.0.scheme(), self.0.host_str(), self.0.port()) {
             ("mqtt", Some(host), Some(port)) => Ok(MqttOptions::new(client_id, (host, port))),
             ("mqtts", Some(host), Some(port)) => {
-                let tls = Transport::try_tls_with_default_config()
-                    .map_err(|err| ClientError::BrokerAddress(format!("{}: {err}", self.0)))?;
+                #[cfg(not(test))]
+                let tls = Transport::try_tls_with_default_config();
+                // Unit tests trust only their CA and never read the user's keychain.
+                #[cfg(test)]
+                let tls = Ok::<_, rumqttc_next::TlsError>(tests::mqtt_tls());
+                let tls =
+                    tls.map_err(|err| ClientError::BrokerAddress(format!("{}: {err}", self.0)))?;
                 let mut options = MqttOptions::new(client_id, (host, port));
                 options.set_transport(tls);
                 Ok(options)
@@ -808,5 +813,23 @@ mod tests {
             plain.options("idn7k2q9-cli").unwrap().transport(),
             Transport::Tcp
         ));
+    }
+
+    pub(super) fn mqtt_tls() -> Transport {
+        use rumqttc_next::tokio_rustls::rustls::{ClientConfig, RootCertStore, crypto};
+
+        // Only the public CA certificate is kept; its private key was discarded.
+        let mut roots = RootCertStore::empty();
+        roots
+            .add(include_bytes!("test_data/mqtt-ca.der").to_vec().into())
+            .unwrap();
+        assert_eq!(roots.len(), 1);
+        let config =
+            ClientConfig::builder_with_provider(Arc::new(crypto::aws_lc_rs::default_provider()))
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+        Transport::tls_with_config(config.into())
     }
 }

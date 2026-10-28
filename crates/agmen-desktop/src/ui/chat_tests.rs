@@ -455,6 +455,7 @@ fn a_snapshot_reaches_the_composers_model_chip(cx: &mut TestAppContext) {
 /// as far as the rows measured so far.
 fn scroll_to_top(chat: &Entity<ChatView>, cx: &mut VisualTestContext) {
     let bounds = cx.debug_bounds("chat").unwrap();
+    let before = chat.read_with(cx, |chat, _| chat.message_count());
     for _ in 0..200 {
         cx.simulate_event(gpui::ScrollEvent {
             position: bounds.origin + gpui::point(px(100.), px(100.)),
@@ -462,56 +463,57 @@ fn scroll_to_top(chat: &Entity<ChatView>, cx: &mut VisualTestContext) {
             ..Default::default()
         });
         redraw(cx);
-        if chat.read_with(cx, |chat, _| chat.at_top) {
+        // A fast page reply can reset at_top during the redraw. Stop before
+        // another wheel event scrolls past the reading position it preserved.
+        if chat.read_with(cx, |chat, _| chat.at_top || chat.message_count() != before) {
             return;
         }
     }
     panic!("the chat never reached its first row");
 }
 
-/// Runs the window until `done`, failing after 10 s: the live backend's
-/// threads answer from outside the test's executor.
-fn wait_until(cx: &mut VisualTestContext, mut done: impl FnMut(&mut VisualTestContext) -> bool) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        cx.run_until_parked();
-        redraw(cx);
-        if done(cx) {
-            return;
-        }
-        assert!(std::time::Instant::now() < deadline, "timed out");
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
-}
-
 #[gpui::test]
-fn scrolling_to_the_top_loads_older_messages(cx: &mut TestAppContext) {
+async fn scrolling_to_the_top_loads_older_messages(cx: &mut TestAppContext) {
     use crate::backend::fake_agmend::{FakeAgmend, PROJECT};
     use crate::backend::{AgmendBackend, Older};
 
-    let fake = FakeAgmend::with_history(1200);
+    // Two older pages, including a partial last page, need only 45 rows.
+    // The backend tests cover the real 500-message page size.
+    let fake = FakeAgmend::with_history(45);
+    fake.edit(|state| {
+        state.history_page_size = Some(20);
+        let snapshot = state.snapshot.as_mut().unwrap();
+        snapshot.messages.drain(..25);
+        snapshot.older = true;
+    });
     cx.executor().allow_parking();
     let backend: Rc<dyn Backend> =
         Rc::new(AgmendBackend::connect(&fake.path(), PROJECT, None).unwrap());
     cx.update(|cx| cx.set_global(BackendHandle(backend.clone())));
     let (chat, cx) = open_with(cx, backend.snapshot());
     let count = |cx: &mut VisualTestContext| chat.read_with(cx, |chat, _| chat.message_count());
-    assert_eq!(count(cx), 500);
+    assert_eq!(count(cx), 20);
     // The newest message shows, not the top of the page.
     assert!(cx.debug_bounds("chat:history").is_none());
 
     scroll_to_top(&chat, cx);
-    wait_until(cx, |cx| count(cx) == 1000);
+    // Await chat notifications while GPUI drives the update task. No frames
+    // or sleeps are needed while the backend's socket thread answers.
+    cx.condition(&chat, |chat, _| chat.message_count() == 40)
+        .await;
+    redraw(cx);
     // The message the person scrolled to stays at the top of the view.
     let top = chat.read_with(cx, |chat, cx| {
         let stream = chat.stream.read(cx);
         let row = stream.rows[stream.list.logical_scroll_top().item_ix];
         chat.snapshot.messages[row].seq.0
     });
-    assert_eq!(top, 701);
+    assert_eq!(top, 26);
 
     scroll_to_top(&chat, cx);
-    wait_until(cx, |cx| count(cx) == 1200);
+    cx.condition(&chat, |chat, _| chat.message_count() == 45)
+        .await;
+    redraw(cx);
     scroll_to_top(&chat, cx);
     chat.read_with(cx, |chat, _| {
         assert_eq!(chat.snapshot.older, Older::Start);

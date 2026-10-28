@@ -191,6 +191,8 @@ pub(crate) struct FakeState {
     /// Final review fix 1: the whole feed `chat_history` pages through,
     /// oldest first; empty answers every page with nothing.
     pub(crate) history: Vec<StampedEnvelope>,
+    /// Caps fake pages so UI tests can exercise paging with a small feed.
+    pub(crate) history_page_size: Option<u64>,
     /// Final review fix 1: each `chat_history`'s params.
     pub(crate) history_params: Vec<Value>,
     /// Task 8: each `file_text`'s params.
@@ -396,11 +398,11 @@ fn serve(mut stream: UnixStream, state: &Mutex<FakeState>) {
                 state.history_params.push(request.params.clone());
                 let before = request.params["before"].as_u64().unwrap_or(u64::MAX);
                 let limit = request.params["limit"].as_u64().unwrap_or(500);
+                let limit = limit.min(state.history_page_size.unwrap_or(limit));
                 let earlier: Vec<&StampedEnvelope> =
                     state.history.iter().filter(|m| m.seq.0 < before).collect();
-                let skip = earlier
-                    .len()
-                    .saturating_sub(usize::try_from(limit).unwrap());
+                let limit = usize::try_from(limit).unwrap();
+                let skip = earlier.len().saturating_sub(limit);
                 let page: Vec<&StampedEnvelope> = earlier[skip..].to_vec();
                 let older = page.first().is_some_and(|m| m.seq.0 > 1);
                 Response::ok(id, json!({"messages": page, "older": older}))
