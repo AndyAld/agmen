@@ -18,9 +18,11 @@ import type { StampedEnvelope } from '../../../schema/ts/StampedEnvelope'
 // - Command: /agmen runs a few `agmen` subcommands and shows the result.
 // All of it waits for `.agmen/identity.json` at the session's git worktree
 // root, trusted only on a positive test that git does not track it (R42a).
-// A session agmend launched (AGMEN_MANAGED=1) skips the watch, wake-ups,
-// /agmen and the goodbye, which the daemon owns, but keeps both guards; with
-// no trusted root its Edit, Write, NotebookEdit and Bash calls are denied.
+// A session agmend launched (AGMEN_MANAGED=1: its headless batches, and the
+// interactive Claude Code its Attach opens on the owner session) skips the
+// watch, wake-ups, /agmen and the goodbye, which the daemon owns, but keeps
+// both guards; with no trusted root its Edit, Write, NotebookEdit and Bash
+// calls are denied.
 // Rows, wake-ups and deny reasons carry fixed text and checked fields, never
 // raw git or agmen output, which goes to the debug log (R44a).
 
@@ -77,6 +79,8 @@ const LANE_NAME = /^L-[A-Z0-9-]{1,40}$/
 // after the slash is at most 32.
 const HANDLE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,38}(?:\/[A-Za-z0-9][A-Za-z0-9._-]{0,31})?$/
 const MAX_BODY_BYTES = 32_768
+const MANAGED_COMMAND_OFF =
+  "agmen: /agmen is off in a session agmend runs, so other senders' messages stay out of it. Run agmen in a terminal instead."
 /**
  * check-path reasons a deny may show, beside `lane <lane> held by <handle>`
  * (docs/plans/mvp.md, `it_check_path`). They are the hub's fixed phrases in
@@ -1386,7 +1390,11 @@ export const register: Register = on => {
     return started
   })
 
-  on('command.run', { command: 'agmen' }, async ($, e) => ({ text: await runCommand($, state, e.args) }))
+  // In a session agmend runs, `/agmen inbox` would put other senders'
+  // messages in a session that bypassPermissions batches resume.
+  on('command.run', { command: 'agmen' }, async ($, e) => ({
+    text: state.isManaged ? MANAGED_COMMAND_OFF : await runCommand($, state, e.args),
+  }))
 
   on('session.end', async ($, e, next) => {
     state.isEnded = true

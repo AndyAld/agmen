@@ -355,8 +355,16 @@ fn shell_word(text: &str) -> String {
     format!("'{}'", text.replace('\'', "'\\''"))
 }
 
-/// The script Terminal runs for `spec`. `exec` keeps the script's process
-/// id, so the pid file names Claude Code itself.
+/// The inbox tool, which reads every sender's messages, kept out of the
+/// attached owner session that bypassPermissions batches resume later. The
+/// first name is agmend's own MCP config's; the second is the agmen plugin's
+/// (Claude Code's `mcp__plugin_<plugin>_<server>__<tool>` naming).
+const ATTACHED_DISALLOWED: &str = "mcp__agmen__inbox,mcp__plugin_agmen_agmen__inbox";
+
+/// The script Terminal runs for `spec`. `AGMEN_MANAGED=1` makes the agmen
+/// plugin deliver no messages into the session and turns /agmen off, while
+/// its lane and Bash guards stay on. `exec` keeps the script's process id,
+/// so the pid file names Claude Code itself.
 fn attach_script(environment: &LaunchEnvironment, spec: &AttachSpec) -> Result<String, RunError> {
     let text = |path: &Path| {
         path.to_str()
@@ -374,11 +382,12 @@ fn attach_script(environment: &LaunchEnvironment, spec: &AttachSpec) -> Result<S
         "--session-id"
     };
     Ok(format!(
-        "#!/bin/sh\n# Written by agmend: Claude Code on this agent's owner session.\ncd {cwd} || exit 1\nprintf '%s\\n' \"$$\" > {pid}\nPATH={path}\nexport PATH\nexec {claude} {flag} {id}\n",
+        "#!/bin/sh\n# Written by agmend: Claude Code on this agent's owner session.\ncd {cwd} || exit 1\nprintf '%s\\n' \"$$\" > {pid}\nPATH={path}\nAGMEN_MANAGED=1\nexport PATH AGMEN_MANAGED\nexec {claude} {flag} {id} --disallowedTools {inbox}\n",
         cwd = text(&spec.cwd)?,
         pid = text(&spec.pid_file)?,
         claude = text(&environment.claude)?,
         id = shell_word(&spec.session_id),
+        inbox = shell_word(ATTACHED_DISALLOWED),
     ))
 }
 

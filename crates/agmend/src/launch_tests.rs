@@ -501,7 +501,7 @@ async fn attach_opens_terminal_on_a_script_that_runs_the_owner_session() {
     let claude = bin.join("claude");
     std::fs::write(
         &claude,
-        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$AGMEN_TEST_OUT/claude-args\"\npwd -P > \"$AGMEN_TEST_OUT/claude-cwd\"\nprintf '%s' \"$$\" > \"$AGMEN_TEST_OUT/claude-pid\"\n",
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$AGMEN_TEST_OUT/claude-args\"\npwd -P > \"$AGMEN_TEST_OUT/claude-cwd\"\nprintf '%s' \"$$\" > \"$AGMEN_TEST_OUT/claude-pid\"\nprintf '%s' \"$AGMEN_MANAGED\" > \"$AGMEN_TEST_OUT/claude-managed\"\n",
     )
     .unwrap();
     std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -532,8 +532,18 @@ async fn attach_opens_terminal_on_a_script_that_runs_the_owner_session() {
     let args = std::fs::read_to_string(out.join("claude-args")).unwrap();
     assert_eq!(
         args.lines().collect::<Vec<_>>(),
-        ["--resume", "a6cddf07-a8fd-46e1-9585-2571af65af24"],
-        "Claude Code's normal permission mode: no bypass, no tool limits"
+        [
+            "--resume",
+            "a6cddf07-a8fd-46e1-9585-2571af65af24",
+            "--disallowedTools",
+            "mcp__agmen__inbox,mcp__plugin_agmen_agmen__inbox"
+        ],
+        "Claude Code's normal permission mode, without the inbox tool"
+    );
+    // The plugin then delivers no other sender's message into the session.
+    assert_eq!(
+        std::fs::read_to_string(out.join("claude-managed")).unwrap(),
+        "1"
     );
     assert_eq!(
         std::fs::read_to_string(out.join("claude-cwd"))
@@ -560,7 +570,12 @@ async fn attach_opens_terminal_on_a_script_that_runs_the_owner_session() {
     let args = std::fs::read_to_string(out.join("claude-args")).unwrap();
     assert_eq!(
         args.lines().collect::<Vec<_>>(),
-        ["--session-id", "a6cddf07-a8fd-46e1-9585-2571af65af24"]
+        [
+            "--session-id",
+            "a6cddf07-a8fd-46e1-9585-2571af65af24",
+            "--disallowedTools",
+            "mcp__agmen__inbox,mcp__plugin_agmen_agmen__inbox"
+        ]
     );
 }
 

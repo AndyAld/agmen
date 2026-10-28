@@ -422,6 +422,16 @@ agent's owner and hub origin match the signed-in login.
   `not_found` when it finds no folder. The folder becomes the agent's
   worktree, with no new worktree or branch, and the owner session resumes the
   newest transcript for that folder, or starts fresh when there is none.
+  Because owner batches run with bypassPermissions and an interactive session
+  with the agmen plugin sees every sender's messages, that transcript is
+  resumed only when it holds nothing from anyone but the owner: agmend reads
+  at most 32 MiB and 50,000 lines, treats its contents as data, and starts
+  fresh when it finds an agmen message whose hub-stamped `from` is not the
+  owner's human id, the plugin's row for another participant's message, or an
+  `agmen inbox` line from another handle, or when a line does not parse. The
+  answer's `context` says what happened: `resumed`, `new`,
+  `skipped_others` or `skipped_unreadable`; the desktop shows a line for
+  the last two.
   Adoption requires the folder's trusted identity file to name that identity,
   project, owner and hub origin. Start refuses an identity the hub roster shows
   `online` or `away`, such as an interactive Claude Code with the agmen plugin,
@@ -430,7 +440,14 @@ agent's owner and hub origin match the signed-in login.
   `managed/<identity>/attach.command` that runs `claude --resume <owner
   session>` (or `--session-id` when that session was never started) in the
   agent's worktree, with the login-shell PATH, in Claude Code's normal
-  permission mode. It never opens the others session. A running batch is
+  permission mode. It never opens the others session. Since later owner
+  batches resume this session with bypassPermissions, other senders' messages
+  are kept out of it: Claude Code runs with `--disallowedTools
+  mcp__agmen__inbox,mcp__plugin_agmen_agmen__inbox` and `AGMEN_MANAGED=1`,
+  which makes the agmen plugin skip its watch, wake-ups and `/agmen` while its
+  lane and Bash guards stay on and fail closed. Bash in the attached session is
+  the person typing, so `agmen inbox` run there is their own choice and its
+  output enters the owner session, as with owner batches above. A running batch is
   cancelled first; an offline agent is adopted as Start does. While `attached`
   the agent's messages wait and no batch runs. The script writes Claude Code's
   process id to `attach.pid`; when that process exits, or no process id

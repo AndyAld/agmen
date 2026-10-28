@@ -166,8 +166,10 @@ impl Managed {
     pub(crate) async fn start(self: &Arc<Self>, raw: Value) -> Result<Value, ApiError> {
         let target: Target = params(raw)?;
         let _launching = self.launching.lock().await;
-        let worker = self.adopt(target).await?;
-        self.bring_online(&worker, "idle").await
+        let (worker, context) = self.adopt(target).await?;
+        let mut started = self.bring_online(&worker, "idle").await?;
+        started["context"] = json!(context);
+        Ok(started)
     }
 
     /// `agent_attach {identity, project?, root?}`: opens an interactive
@@ -196,12 +198,12 @@ impl Managed {
         };
         let identity = target.identity.clone();
         let adopted = online.is_none();
-        let worker = match online {
-            Some(worker) => worker,
+        let (worker, context) = match online {
+            Some(worker) => (worker, "resumed"),
             None => {
-                let worker = self.adopt(target).await?;
+                let (worker, context) = self.adopt(target).await?;
                 self.bring_online(&worker, "attached").await?;
-                worker
+                (worker, context)
             }
         };
         let pid_file = self.agent_dir(&identity).join("attach.pid");
@@ -243,7 +245,7 @@ impl Managed {
             }
         };
         let Err(failure) = self.runner.attach(spec).await else {
-            return Ok(json!({"identity": identity, "state": "attached"}));
+            return Ok(json!({"identity": identity, "state": "attached", "context": context}));
         };
         // Leave the agent as it was: offline if Attach brought it online.
         {
@@ -376,9 +378,11 @@ impl Managed {
     }
 
     /// The offline agent `target` names, read from memory or adopted from a
-    /// hand-joined folder, after its identity file and presence check out.
-    /// The caller holds `launching`.
-    async fn adopt(&self, target: Target) -> Result<Arc<Mutex<Worker>>, ApiError> {
+    /// hand-joined folder, after its identity file and presence check out,
+    /// and what became of its previous context: `resumed`, `new`, or, for a
+    /// hand-joined folder whose last transcript is not resumed,
+    /// `skipped_others` or `skipped_unreadable`. The caller holds `launching`.
+    async fn adopt(&self, target: Target) -> Result<(Arc<Mutex<Worker>>, &'static str), ApiError> {
         if self.shutting_down.load(Ordering::Acquire) {
             return Err(error("daemon is shutting down"));
         }
@@ -406,8 +410,15 @@ impl Managed {
             let folder = worker.lock().await.record.worktree.clone();
             verify_folder(&folder, &identity.identity_id, &identity.project, &login).await?;
             self.refuse_if_connected(&identity).await?;
-            self.refresh_sessions(&mut *worker.lock().await).await;
-            return Ok(worker);
+            let mut held = worker.lock().await;
+            self.refresh_sessions(&mut held).await;
+            let context = if held.owner_resumed || held.others_resumed {
+                "resumed"
+            } else {
+                "new"
+            };
+            drop(held);
+            return Ok((worker, context));
         }
         if self.workers.lock().await.len() >= MAX_AGENTS {
             return Err(bad_request("64 managed agents are already registered"));
@@ -433,7 +444,7 @@ impl Managed {
             .parent()
             .ok_or_else(|| error("worker root has no main checkout"))?
             .to_owned();
-        let newest = transcripts::newest(self.claude_home.as_deref(), &joined.root).await;
+        let (newest, context) = self.owner_context(&joined.root, &login).await;
         let record = Record {
             identity,
             repo,
@@ -464,7 +475,25 @@ impl Managed {
             .lock()
             .await
             .insert(target.identity, worker.clone());
-        Ok(worker)
+        Ok((worker, context))
+    }
+
+    /// The hand-joined folder's newest session, when the owner tier may
+    /// resume it, and what became of it. An interactive session with the
+    /// agmen plugin sees every sender's messages, and the owner tier runs
+    /// with bypassPermissions, so only a transcript holding nothing from
+    /// anyone but the owner is resumed.
+    async fn owner_context(&self, folder: &Path, login: &Login) -> (Option<String>, &'static str) {
+        let home = self.claude_home.as_deref();
+        let Some(newest) = transcripts::newest(home, folder).await else {
+            return (None, "new");
+        };
+        let owner = login.human_id.as_str();
+        match transcripts::contents(home, folder, &newest, owner, &login.handle).await {
+            transcripts::Contents::OwnerOnly => (Some(newest), "resumed"),
+            transcripts::Contents::Others => (None, "skipped_others"),
+            transcripts::Contents::Unreadable => (None, "skipped_unreadable"),
+        }
     }
 
     /// Registers the agent's identity, sets `state`, and says HELLO.
