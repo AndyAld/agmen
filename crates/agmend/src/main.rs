@@ -1,27 +1,66 @@
-//! `agmend`: runs the per-user daemon until SIGINT or SIGTERM. It takes no
-//! arguments but `--help`; anything else is refused, so a command that is
-//! not built yet (such as `agmend service install`) never starts the
-//! daemon in the foreground instead.
+//! `agmend`: runs the per-user daemon until SIGINT or SIGTERM, prints help,
+//! or manages its per-user OS service.
 
+use std::ffi::OsString;
 use std::process::ExitCode;
 
 use agmend::{Agmend, Config};
 use anyhow::{Context as _, Result};
 
-const USAGE: &str = "usage: agmend [--help]\n\nRuns the agmen daemon in the foreground until Ctrl-C. \
+mod service;
+
+use service::ServiceAction;
+
+const USAGE: &str = "usage: agmend [--help | -h]\n       agmend service <install | uninstall | status>\n\n\
+                     Runs the agmen daemon in the foreground until Ctrl-C. \
                      Leave it running while you use agmen-desktop.";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Command {
+    Foreground,
+    Help,
+    Service(ServiceAction),
+}
+
+fn parse(args: &[OsString]) -> Result<Command, String> {
+    match args {
+        [] => Ok(Command::Foreground),
+        [arg] if arg == "--help" || arg == "-h" => Ok(Command::Help),
+        [command, action] if command == "service" => match action.to_str() {
+            Some("install") => Ok(Command::Service(ServiceAction::Install)),
+            Some("uninstall") => Ok(Command::Service(ServiceAction::Uninstall)),
+            Some("status") => Ok(Command::Service(ServiceAction::Status)),
+            _ => Err("unknown service action".to_owned()),
+        },
+        [arg, ..] => Err(format!("unknown argument: {}", arg.to_string_lossy())),
+    }
+}
+
 fn main() -> ExitCode {
-    if let Some(arg) = std::env::args_os().nth(1) {
-        if arg == "--help" || arg == "-h" {
+    // One argument beyond a valid form is sufficient to reject excess input.
+    let args: Vec<_> = std::env::args_os().skip(1).take(4).collect();
+    match parse(&args) {
+        Ok(Command::Foreground) => {}
+        Ok(Command::Help) => {
             println!("{USAGE}");
             return ExitCode::SUCCESS;
         }
-        eprintln!(
-            "agmend: unknown argument: {}\n{USAGE}",
-            arg.to_string_lossy()
-        );
-        return ExitCode::from(2);
+        Ok(Command::Service(action)) => {
+            return match service::execute(action) {
+                Ok(message) => {
+                    print!("{message}");
+                    ExitCode::SUCCESS
+                }
+                Err(err) => {
+                    eprintln!("agmend: {err:#}");
+                    ExitCode::FAILURE
+                }
+            };
+        }
+        Err(err) => {
+            eprintln!("agmend: {err}\n{USAGE}");
+            return ExitCode::from(2);
+        }
     }
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
@@ -78,4 +117,53 @@ async fn run() -> Result<()> {
         .await;
     tracing::info!("agmend stopped");
     signal_result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt as _;
+
+    #[test]
+    fn service_commands_parse() {
+        for (action, expected) in [
+            ("install", ServiceAction::Install),
+            ("uninstall", ServiceAction::Uninstall),
+            ("status", ServiceAction::Status),
+        ] {
+            assert_eq!(
+                parse(&[OsString::from("service"), OsString::from(action)]),
+                Ok(Command::Service(expected))
+            );
+        }
+    }
+
+    #[test]
+    fn foreground_and_help_parse() {
+        assert_eq!(parse(&[]), Ok(Command::Foreground));
+        for flag in ["--help", "-h"] {
+            assert_eq!(parse(&[OsString::from(flag)]), Ok(Command::Help));
+        }
+    }
+
+    #[test]
+    fn extra_and_non_utf8_arguments_are_refused() {
+        for args in [
+            vec!["--help", "extra"],
+            vec!["-h", "extra"],
+            vec!["service"],
+            vec!["service", "restart"],
+            vec!["service", "install", "extra"],
+            vec!["unknown"],
+            vec!["service", "status", "extra", "extra"],
+        ] {
+            let args: Vec<_> = args.into_iter().map(OsString::from).collect();
+            assert!(parse(&args).is_err(), "{args:?}");
+        }
+        let invalid = OsString::from_vec(vec![0xff]);
+        assert!(parse(std::slice::from_ref(&invalid)).is_err());
+        assert!(parse(&[OsString::from("service"), invalid.clone()]).is_err());
+        assert!(parse(&[OsString::from("--help"), invalid]).is_err());
+    }
 }

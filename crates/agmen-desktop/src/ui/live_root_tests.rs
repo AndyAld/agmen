@@ -71,13 +71,9 @@ fn live_without_agmend_says_so(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("live:retry").is_some());
     let copy = Wording::of(&LiveState::AgmendDown, &ProjectChoice::Project(project()));
     assert_eq!(copy.heading, "agmend isn't running");
-    // Final review fix 3: `agmend service install` is not built, and
-    // agmend refuses it; the command that works is plain `agmend`.
-    assert_eq!(copy.command, Some("agmend"));
-    assert_eq!(
-        copy.note.as_deref(),
-        Some("Run agmend in a terminal and leave it open.")
-    );
+    assert_eq!(copy.command, Some("agmend service install"));
+    assert_eq!(copy.note, None);
+    assert!(copy.retry);
     assert!(!copy.body.contains("service"), "{}", copy.body);
     // Never the fixture: no backend, no chat, no fake people.
     assert!(cx.update(|_, cx| cx.try_global::<BackendHandle>().is_none()));
