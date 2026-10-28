@@ -323,7 +323,14 @@ impl AgentsPanel {
                     this.open_menu(&identity, cx);
                 }))
         });
-        item.end(div().flex().items_center().children(stop).children(more))
+        item.end(
+            div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .children(stop)
+                .children(more),
+        )
     }
 }
 
@@ -357,7 +364,7 @@ pub(crate) fn agent_item(
 ) -> ListItem {
     ListItem::new(id, Indent::Depth(depth))
         .leading(StatusDot::new(status))
-        .child(Label::new(name.to_owned()).code())
+        .child(Label::new(name.to_owned()).code().truncate())
         .child(
             Label::new(role.label.clone())
                 .size(LabelSize::Small)

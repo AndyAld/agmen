@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use super::super::Workspace;
 use crate::backend::{Action, ManagedWork, Screen, Snapshot, chat_snapshot, fixture_id};
 use crate::ui::plan_test_support::{Recording, plan_globals};
-use crate::ui::test_support::click;
+use crate::ui::test_support::{click, redraw};
 use gpui::{Entity, TestAppContext, VisualTestContext};
 
 fn open(
@@ -41,6 +41,22 @@ fn folder(snapshot: &mut Snapshot, handle: &str, root: &str) {
 fn without_worktree(snapshot: &mut Snapshot, handle: &str) {
     let id = fixture_id(handle);
     snapshot.worktrees.retain(|worktree| worktree.owner != id);
+}
+
+#[gpui::test]
+fn an_offline_agents_row_stays_inside_the_dock_and_clear_of_its_handle(cx: &mut TestAppContext) {
+    // An offline managed row carries its state, a Stop and `…`; at the default
+    // width they pushed `…` under the left dock's resize handle.
+    let (_, _, cx) = open(cx, |s| managed(s, "andy/fx1", "offline"));
+    redraw(cx);
+    let more = cx.debug_bounds("agent:andy/fx1:more").unwrap();
+    let handle = cx.debug_bounds("left-dock:resize").unwrap();
+    assert!(
+        more.right() <= handle.left(),
+        "`…` ends at {:?}, under the handle from {:?}",
+        more.right(),
+        handle.left()
+    );
 }
 
 #[gpui::test]
