@@ -8,3 +8,33 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+agmen-proto = { version = "0.1.0", path = "../agmen-proto" }
+base64 = "0.23.1"
+futures-core = "0.3.34"
+getrandom = "0.4.3"
+jiff = { version = "0.2.38", default-features = false, features = ["std", "serde"] }
+keyring-core = "1.0.1"
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls", "form"] }
+rumqttc_next = { version = "0.34.0", package = "rumqttc-next", default-features = false, features = ["websocket", "use-rustls"] }
+rusqlite = { version = "0.39.0", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["rt", "macros", "sync", "time"] }
+tracing = "0.1.44"
+url = { version = "2.5.8", features = ["serde"] }
+
+[dev-dependencies]
+agmen-hub = { version = "0.1.0", path = "../agmen-hub", features = ["test-hooks"] }
+axum = { version = "0.8.9", default-features = false, features = ["tokio", "http1", "json", "query"] }
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "postgres"] }
+tempfile = "3.27.0"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net", "time", "sync"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+apple-native-keyring-store = { version = "1.0.2", features = ["keychain"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-native-keyring-store = "1.1.0"

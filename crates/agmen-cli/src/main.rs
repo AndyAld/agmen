@@ -1,5 +1,5 @@
-//! The `agmen` command line and MCP server.
+//! The `agmen` binary; everything it does lives in the agmen-cli library.
 
-fn main() {
-    println!("agmen {}", env!("CARGO_PKG_VERSION"));
+fn main() -> std::process::ExitCode {
+    agmen_cli::run()
 }

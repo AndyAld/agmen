@@ -4,17 +4,12 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
-# Temporary: all six come from rumqttc 0.25.1 (rustls-webpki 0.102.8 and
-# rustls-pemfile), a dev-dependency of spike S1 only. Spike S2 picks the MQTT
-# client and must remove these ignores before any shipped crate depends on
-# one. See ADR-0002.
+# Unmaintained crates that gpui (zed main, ADR-0010) pulls in. None has a
+# known vulnerability; revisit when the gpui pin moves.
 ignore = [
-    { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile unmaintained; via rumqttc 0.25.1 in spike S1 only" },
-    { id = "RUSTSEC-2026-0049", reason = "rustls-webpki 0.102.8; via rumqttc 0.25.1 in spike S1 only" },
-    { id = "RUSTSEC-2026-0098", reason = "rustls-webpki 0.102.8; via rumqttc 0.25.1 in spike S1 only" },
-    { id = "RUSTSEC-2026-0099", reason = "rustls-webpki 0.102.8; via rumqttc 0.25.1 in spike S1 only" },
-    { id = "RUSTSEC-2026-0104", reason = "rustls-webpki 0.102.8; via rumqttc 0.25.1 in spike S1 only" },
-    { id = "RUSTSEC-2026-0382", reason = "rustls-webpki 0.102.8; via rumqttc 0.25.1 in spike S1 only" },
+    { id = "RUSTSEC-2024-0436", reason = "paste, via metal (gpui)" },
+    { id = "RUSTSEC-2026-0206", reason = "rustybuzz, via usvg (gpui)" },
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser, via usvg (gpui)" },
 ]
 
 [licenses]
@@ -30,6 +25,14 @@ allow = [
     "MPL-2.0",
 ]
 
+# webpki-root-certs is Mozilla's CA certificate list, which reqwest's rustls
+# feature pulls in through rustls-platform-verifier; the hub needs it to call
+# GitHub over HTTPS. Its data license is CDLA-Permissive-2.0, which places no
+# conditions on using the data, so it is allowed for this crate only.
+[[licenses.exceptions]]
+crate = "webpki-root-certs"
+allow = ["CDLA-Permissive-2.0"]
+
 # Our own crates are publish = false and UNLICENSED until a license is picked.
 [licenses.private]
 ignore = true
@@ -37,7 +40,17 @@ ignore = true
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# zed-scap is in Cargo.lock only through gpui's screen-capture feature, which
+# agmen does not enable. Its LICENSE is not MIT despite its heading.
+deny = [
+    { name = "zed-scap", reason = "its LICENSE grants use only by Valorant rank; never link it" },
+]
 
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
+# gpui is pinned to one zed commit (ADR-0010); zed pins its font-kit fork.
+allow-git = [
+    "https://github.com/zed-industries/zed",
+    "https://github.com/zed-industries/font-kit",
+]

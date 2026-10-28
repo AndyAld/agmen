@@ -1,0 +1,23 @@
+[package]
+name = "s5-ds-stall"
+description = "Spike S5: measures publish-to-delivery latency of persistent MQTT sessions under concurrency (Task 15s)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "ds-stall"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = "1.0.104"
+jsonwebtoken = { version = "11.1.0", features = ["aws_lc_rs"] }
+reqwest = { version = "0.13.5", default-features = false }
+rumqttc-next = { version = "0.34.0", default-features = false }
+serde_json = "1.0.154"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "time", "sync"] }

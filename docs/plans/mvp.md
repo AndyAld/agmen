@@ -25,7 +25,7 @@ Status: written 2026-10-25. Supersedes the ordering in [m0-m1.md](m0-m1.md); tas
                                 replay, DMs, lanes, items, claims
 ```
 
-- No local daemon. Each joined worktree has `.agmen/identity.json` (`{tenant, project, identity_id, handle, hub_url}`, gitignored). `agmen mcp` and `agmen watch` both resolve the identity from the working directory and are inert outside a joined worktree.
+- No local daemon. Each joined worktree has `.agmen/identity.json` (`{tenant, project, identity_id, handle, owner_id, hub_url, broker_url}`, gitignored; `broker_url` per ruling R57). `agmen mcp` and `agmen watch` both resolve the identity from the working directory and are inert outside a joined worktree.
 - `agmen mcp` holds one MQTT connection (client id `<identity_id>-mcp`) for publishing and ACKs. `agmen watch` holds another (`<identity_id>-watch`) for `feed` and `inbox/`. They share one SQLite file per identity under `$XDG_STATE_HOME/agmen/` (macOS: `~/Library/Application Support/agmen/`) in WAL mode: the outbox belongs to `mcp`, the cursors to `watch`.
 - Tokens: the human refresh token and each identity's token live in the OS keychain (keyring, service `agmen`). A person's own agents are that person's delegates (design 6.3), so this guards against mistakes, not against the person's own processes.
 
@@ -83,9 +83,7 @@ Token shape to test (ES256, `kid` from the JWKS, `sub` = `username` = identity i
 }
 ```
 
-Topics are written in full with `eq` (no `${username}` placeholders), so an id can never widen a rule. Each token also carries a `clientid` claim checked against the connection (`verify_claims`), so the hub mints one token per client id (`<sub>-mcp`, `<sub>-watch`).
-
-**Done 2026-10-25:** 16 tests pass; see ADR-0002. Durable sessions are on, and WSS runs through a local HAProxy TLS front on host port 18443.
+Topics are written in full with `eq` (no `${username}` placeholders), so an id can never widen a rule. The JWT must also be bound to the client ids `<sub>-mcp` and `<sub>-watch`; test whether a payload claim check on `${clientid}` can enforce the prefix, and record the result.
 
 - [ ] **Step 1: Write the failing tests** against the compose broker:
 
@@ -110,7 +108,7 @@ Topics are written in full with `eq` (no `${username}` placeholders), so an id c
 
 ### Task 3: Spike S2, rumqttc v5 against EMQX
 
-As [m0-m1 Task 3](m0-m1.md#task-3-spike-s2-rumqttc-v5-client-behavior), against EMQX. S1 found that rumqttc 0.25.1 pulls `rustls-webpki` 0.102.8 with five advisories and the unmaintained `rustls-pemfile`, and has had no release since 2025-11-21 (ADR-0002). Evaluate `rumqttc-next` 0.34.0 and `mqtt5` 0.48.2 alongside it; the chosen client must pass `cargo deny check` with the six spike ignores removed from `deny.toml`. Plus one test:
+As [m0-m1 Task 3](m0-m1.md#task-3-spike-s2-rumqttc-v5-client-behavior), against EMQX. S1 found that rumqttc 0.25.1's TLS features pull `rustls-webpki` 0.102.8 with five advisories and the unmaintained `rustls-pemfile`, and that 0.25.1, released 2025-11-21, was still its newest release (ADR-0002, ADR-0003). If a test cannot pass with rumqttc, try `rumqttc-next` 0.34.0, then `mqtt5` 0.48.2 (m0-m1 Task 3 Step 4); the chosen client must pass `cargo deny check` with its TLS and WebSocket features on and no advisory ignores (ADR-0003). Plus one test:
 
 ```rust
 #[tokio::test] async fn it_token_refresh_reconnect()  // connect with a token expiring in 5 s; client fetches a new token and reconnects with clean_start=false; session_present == true
@@ -150,8 +148,8 @@ As [m0-m1 Task 7](m0-m1.md#task-7-agmen-proto-envelope-verbs-topics-schema-expor
 As [m0-m1 Task 8](m0-m1.md#task-8-hub-data-model-auth-identities-broker-credentials), with these changes:
 
 - **Login:** GitHub only for the MVP, through the device flow (`agmen login` prints a code and URL). Google and PKCE loopback come later.
-- **No dynsec.** Replace `Dynsec` with `BrokerTokens`: `fn mint(&self, identity: &Identity, client_id: &str, ttl: Duration) -> Result<String, TokenError>` signs an ES256 JWT with the ADR-0002 claims (one token per client id), and `GET /v1/jwks` serves the public keys (two keys during rotation). `pub struct EmqxAdmin` has `async fn kick(&self, client_id: &str) -> Result<(), EmqxError>`.
-- `GET /v1/identities/{id}/broker-token?client=mcp|watch` (identity token required) returns `{token, client_id, expires_at}` with a 1 hour TTL. Clients refresh 5 minutes before expiry.
+- **No dynsec.** Replace `Dynsec` with `BrokerTokens`: `fn mint(&self, identity: &Identity, ttl: Duration) -> Result<String, TokenError>` signs an ES256 JWT with the ADR-0002 claims, and `GET /v1/jwks` serves the public keys (two keys during rotation). `pub struct EmqxAdmin` has `async fn kick(&self, client_id: &str) -> Result<(), EmqxError>`.
+- `GET /v1/identities/{id}/broker-token` (identity token required) returns `{token, expires_at}` with a 1 hour TTL. Clients refresh 5 minutes before expiry.
 - **Revocation:** sets `revoked_at`, kicks `<id>-mcp` and `<id>-watch`, and refuses further broker tokens.
 - **Devices:** no `devices` table. An identity is owned by a human and nothing else; `agmen join` mints it.
 

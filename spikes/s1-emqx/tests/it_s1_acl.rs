@@ -1,955 +1,1122 @@
-//! Spike S1: EMQX JWT identity and ACL behavior against the dev stack.
+//! Spike S1: EMQX JWT identity and ACLs, run against the dev broker in
+//! `deploy/dev`. The results and the config they prove are recorded in
+//! `docs/adr/0002-broker-emqx.md`.
 //!
-//! Run with `cargo nextest run -p s1-emqx --profile it` after
-//! `deploy/dev/init.sh` and `docker compose -f deploy/dev/compose.yaml up -d --wait`,
-//! with `deploy/dev/.secrets/dev.env` exported. Results go into ADR-0002.
+//! Every test mints its own identity ids, client ids and shared
+//! subscription group, so tests can run in parallel without seeing each
+//! other's sessions. `it_offline_session_replays_after_restart` restarts
+//! EMQX and runs only under `--profile it-restart` (`.config/nextest.toml`).
+//! It runs agmen-client against an in-process hub through agmen-client's
+//! own test harness, shared as it is.
+//!
+//! Run with `cargo nextest run -p s1-emqx --profile it`, and the restart
+//! test with `--profile it-restart`, after `deploy/dev/init.sh` and
+//! `docker compose -f deploy/dev/compose.yaml up -d --wait`, with
+//! `deploy/dev/.secrets/dev.env` exported (`set -a; . deploy/dev/.secrets/dev.env; set +a`).
 
-// Test helpers fail the test on any setup error; clippy's in-tests allowances
-// cover only #[test] functions, not the helpers they call.
-#![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+// Integration tests are test code throughout, helpers included: this lets
+// clippy's allow-*-in-tests settings cover the helpers too.
+#![cfg(test)]
 
-use std::collections::HashSet;
-use std::process::Command;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+#[path = "../../../crates/agmen-client/tests/support/mod.rs"]
+mod support;
 
+use std::collections::{HashSet, VecDeque};
+use std::hash::{BuildHasher, Hasher, RandomState};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use agmen_client::{ClientEvent, ClientKind, Events, OutboxState, Session, SessionConfig};
+use agmen_proto::{Seq, Stream as ProtoStream};
+use async_tungstenite::tungstenite::client::IntoClientRequest;
+use async_tungstenite::tungstenite::http::HeaderValue;
+use async_tungstenite::tungstenite::{Error as WsError, Message};
+use bytes::BytesMut;
+use futures_util::{Stream, StreamExt};
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use rumqttc::Transport;
-use rumqttc::v5::mqttbytes::QoS;
-use rumqttc::v5::mqttbytes::v5::{ConnectReturnCode, Packet, PubAckReason, SubscribeReasonCode};
-use rumqttc::v5::{AsyncClient, ConnectionError, Event, MqttOptions};
+use rumqttc::v5::mqttbytes::v5::{
+    ConnAck, Connect, ConnectReturnCode, DisconnectReasonCode, Login, Packet, PubAckReason,
+    Publish, SubscribeReasonCode,
+};
+use rumqttc::v5::mqttbytes::{Error as MqttBytesError, QoS};
+use rumqttc::v5::{AsyncClient, ConnectionError, Event, MqttOptions, StateError};
 use serde_json::{Value, json};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 use tokio::sync::mpsc;
-use tokio::time::{Instant, sleep, timeout};
+use tokio::task::JoinHandle;
+use tokio::time::{sleep, timeout, timeout_at};
+use tokio_rustls::TlsConnector;
+use tokio_rustls::rustls::pki_types::pem::PemObject;
+use tokio_rustls::rustls::pki_types::{CertificateDer, ServerName};
+use tokio_rustls::rustls::{ClientConfig, RootCertStore};
 
-// ---------------------------------------------------------------------------
-// Environment and tokens
+use support::{
+    close, delivered, dm, fyi, messages_until, next_event, next_feed_seq, recorded_on_feed,
+};
 
-struct ItEnv {
-    mqtt_host: String,
-    mqtt_port: u16,
-    ws_url: String,
-    wss_url: String,
-    dev_ca: Vec<u8>,
-    api: String,
-    api_key: String,
-    api_secret: String,
-    jwt_pem: Vec<u8>,
-    kid: String,
-    compose_file: String,
-}
+const TENANT: &str = "t1";
+const PROJECT: &str = "p1";
+/// The hub's MQTT username and `sub`. The `-` keeps it out of the
+/// identity id alphabet (`[a-z0-9]{8,32}`), so no identity can collide.
+const HUB_USER: &str = "agmen-hub";
+/// Key id of the dev signing key; `deploy/dev/init.sh` writes `<kid>.pem`.
+const DEV_KID: &str = "agmen-dev-1";
+/// A key that is not in the dev JWKS.
+const UNTRUSTED_KEY: &str = "untrusted";
+/// Large enough for the 60 KiB publish; EMQX itself caps packets at 96 KB.
+const CLIENT_MAX_PACKET: u32 = 128 * 1024;
+const ACK_WAIT: Duration = Duration::from_secs(10);
 
-fn var(name: &str) -> String {
+// ---------------------------------------------------------------- env
+
+fn env(name: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| {
-        panic!("{name} is unset: run deploy/dev/init.sh and export deploy/dev/.secrets/dev.env")
+        panic!(
+            "{name} is unset: run deploy/dev/init.sh, start the dev stack, then \
+             `set -a; . deploy/dev/.secrets/dev.env; set +a`"
+        )
     })
 }
 
-fn it_env() -> ItEnv {
-    let mqtt = var("AGMEN_IT_MQTT");
-    let hostport = mqtt.trim_start_matches("mqtt://");
-    let (host, port) = hostport
-        .split_once(':')
-        .expect("AGMEN_IT_MQTT is mqtt://host:port");
-    ItEnv {
-        mqtt_host: host.to_owned(),
-        mqtt_port: port.parse().expect("port"),
-        ws_url: var("AGMEN_IT_MQTT_WS"),
-        wss_url: var("AGMEN_IT_MQTT_WSS"),
-        dev_ca: std::fs::read(var("AGMEN_IT_DEV_CA")).expect("read AGMEN_IT_DEV_CA"),
-        api: var("AGMEN_IT_EMQX_API"),
-        api_key: var("AGMEN_IT_EMQX_API_KEY"),
-        api_secret: var("AGMEN_IT_EMQX_API_SECRET"),
-        jwt_pem: std::fs::read(var("AGMEN_IT_JWT_KEY")).expect("read AGMEN_IT_JWT_KEY"),
-        kid: var("AGMEN_IT_JWT_KID"),
-        compose_file: var("AGMEN_IT_COMPOSE_FILE"),
-    }
+/// Host and port from `AGMEN_IT_MQTT` (`mqtt://host:port`).
+fn mqtt_addr() -> (String, u16) {
+    let url = env("AGMEN_IT_MQTT");
+    let rest = url
+        .strip_prefix("mqtt://")
+        .unwrap_or_else(|| panic!("AGMEN_IT_MQTT must start with mqtt://, got {url}"));
+    let (host, port) = rest
+        .rsplit_once(':')
+        .unwrap_or_else(|| panic!("AGMEN_IT_MQTT must name a port, got {url}"));
+    (host.to_owned(), port.parse().unwrap())
 }
 
-fn now() -> u64 {
+/// A fresh identity id in the hub's format: `id` plus 8 of `[a-z0-9]`.
+fn new_id() -> String {
+    const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
+    // RandomState is seeded randomly per process and per instance.
+    let mut hasher = RandomState::new().build_hasher();
+    hasher.write_u128(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos(),
+    );
+    let mut bits = hasher.finish();
+    let mut id = String::from("id");
+    for _ in 0..8 {
+        id.push(char::from(ALPHABET[usize::try_from(bits % 36).unwrap()]));
+        bits /= 36;
+    }
+    id
+}
+
+fn up_topic(id: &str) -> String {
+    format!("agmen/v1/{TENANT}/{PROJECT}/up/{id}")
+}
+
+// ---------------------------------------------------------------- tokens
+
+fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .expect("clock")
+        .unwrap()
         .as_secs()
 }
 
-/// A fresh id in the protocol alphabet `[a-z0-9]{8,32}`.
-fn fresh_id(prefix: &str) -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock")
-        .as_nanos();
-    format!("{prefix}{:x}", nanos % (1 << 60))
-}
-
-/// Tenant and project for one test, so tests never see each other's traffic.
-struct Scope {
-    t: String,
-    p: String,
-}
-
-impl Scope {
-    fn new() -> Self {
-        Scope {
-            t: fresh_id("t"),
-            p: fresh_id("p"),
-        }
-    }
-    fn topic(&self, rest: &str) -> String {
-        format!("agmen/v1/{}/{}/{rest}", self.t, self.p)
-    }
-}
-
-/// The ACL an identity gets: its own topics in full with `eq`, then deny-all.
-fn identity_acl(s: &Scope, id: &str) -> Value {
+/// The ACL claim the hub mints for one identity (ADR-0002). Topics are
+/// written out in full with `eq`, so an id can never widen a rule.
+fn identity_acl(tenant: &str, project: &str, id: &str) -> Value {
+    let base = format!("agmen/v1/{tenant}/{project}");
     json!([
-        { "permission": "allow", "action": "publish",   "topic": format!("eq {}", s.topic(&format!("up/{id}"))), "qos": [1] },
-        { "permission": "allow", "action": "publish",   "topic": format!("eq {}", s.topic(&format!("presence/{id}"))), "retain": true },
-        { "permission": "allow", "action": "subscribe", "topic": format!("eq {}", s.topic("feed")) },
-        { "permission": "allow", "action": "subscribe", "topic": format!("eq {}", s.topic(&format!("inbox/{id}"))) },
-        { "permission": "allow", "action": "subscribe", "topic": format!("eq {}", s.topic(&format!("ack/{id}"))) },
-        { "permission": "allow", "action": "subscribe", "topic": s.topic("state/#") },
-        { "permission": "allow", "action": "subscribe", "topic": s.topic("presence/+") },
+        { "permission": "allow", "action": "publish",   "topic": format!("eq {base}/up/{id}"), "qos": [1] },
+        { "permission": "allow", "action": "publish",   "topic": format!("eq {base}/presence/{id}"), "retain": true },
+        { "permission": "allow", "action": "subscribe", "topic": format!("eq {base}/feed") },
+        { "permission": "allow", "action": "subscribe", "topic": format!("eq {base}/inbox/{id}") },
+        { "permission": "allow", "action": "subscribe", "topic": format!("eq {base}/ack/{id}") },
+        { "permission": "allow", "action": "subscribe", "topic": format!("{base}/state/#") },
+        { "permission": "allow", "action": "subscribe", "topic": format!("{base}/presence/+") },
         { "permission": "deny",  "action": "all",       "topic": "#" }
     ])
 }
 
-/// The hub's ACL: read every `up/`, publish everywhere else under `agmen/v1/`.
-fn hub_acl() -> Value {
-    json!([
-        { "permission": "allow", "action": "subscribe", "topic": "agmen/v1/+/+/up/+" },
-        { "permission": "deny",  "action": "publish",   "topic": "agmen/v1/+/+/up/#" },
-        { "permission": "allow", "action": "publish",   "topic": "agmen/v1/#" },
-        { "permission": "deny",  "action": "all",       "topic": "#" }
-    ])
+fn identity_claims(id: &str, exp: u64) -> Value {
+    json!({ "sub": id, "username": id, "exp": exp, "acl": identity_acl(TENANT, PROJECT, id) })
 }
 
-fn sign(pem: &[u8], kid: &str, claims: &Value) -> String {
+/// The hub's own claims (ADR-0002): one shared subscription on every
+/// `up/`, and publish anywhere under `agmen/v1/` except `up/`.
+fn hub_claims(exp: u64) -> Value {
+    json!({
+        "sub": HUB_USER, "username": HUB_USER, "exp": exp,
+        "acl": [
+            { "permission": "allow", "action": "subscribe", "topic": "eq agmen/v1/+/+/up/+" },
+            { "permission": "deny",  "action": "publish",   "topic": "agmen/v1/+/+/up/#" },
+            { "permission": "allow", "action": "publish",   "topic": "agmen/v1/#" },
+            { "permission": "deny",  "action": "all",       "topic": "#" }
+        ]
+    })
+}
+
+/// Signs `claims` with ES256 using `<key_file>.pem` from `AGMEN_IT_JWT_DIR`.
+/// The header always names `DEV_KID`, so a token signed with the untrusted
+/// key differs from a good one only in its signature.
+fn sign_with(key_file: &str, claims: &Value) -> String {
+    let path = PathBuf::from(env("AGMEN_IT_JWT_DIR")).join(format!("{key_file}.pem"));
+    let pem = std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let key = EncodingKey::from_ec_pem(&pem).unwrap();
     let mut header = Header::new(Algorithm::ES256);
-    header.kid = Some(kid.to_owned());
-    let key = EncodingKey::from_ec_pem(pem).expect("EC key");
-    jsonwebtoken::encode(&header, claims, &key).expect("sign")
+    header.kid = Some(DEV_KID.to_owned());
+    jsonwebtoken::encode(&header, claims, &key).unwrap()
 }
 
-fn token(env: &ItEnv, sub: &str, clientid: &str, acl: Option<Value>, ttl_s: u64) -> String {
-    let mut claims =
-        json!({ "sub": sub, "clientid": clientid, "iat": now(), "exp": now() + ttl_s });
-    if let Some(acl) = acl {
-        claims["acl"] = acl;
-    }
-    sign(&env.jwt_pem, &env.kid, &claims)
+fn sign(claims: &Value) -> String {
+    sign_with(DEV_KID, claims)
 }
 
-// ---------------------------------------------------------------------------
-// MQTT connections
-
-struct Conn {
-    client: AsyncClient,
-    rx: mpsc::UnboundedReceiver<Result<Event, String>>,
-    session_present: bool,
+fn identity_token(id: &str) -> String {
+    sign(&identity_claims(id, now_secs() + 3600))
 }
 
-struct ConnOpts {
-    clean_start: bool,
-    session_expiry: Option<u32>,
-    websocket: bool,
-    /// WSS through the HAProxy TLS front, as on the cluster.
-    wss: bool,
+// ---------------------------------------------------------------- clients
+
+fn tcp_options(client_id: &str, username: &str, token: &str) -> MqttOptions {
+    let (host, port) = mqtt_addr();
+    let mut opts = MqttOptions::new(client_id, host, port);
+    opts.set_credentials(username, token)
+        .set_keep_alive(Duration::from_secs(30))
+        .set_max_packet_size(Some(CLIENT_MAX_PACKET));
+    opts
 }
 
-impl Default for ConnOpts {
-    fn default() -> Self {
-        ConnOpts {
-            clean_start: true,
-            session_expiry: None,
-            websocket: false,
-            wss: false,
-        }
-    }
+/// rumqttc takes host and port from the URL for WebSocket transports, so
+/// the port argument is unused.
+fn ws_options(url: &str, client_id: &str, username: &str, token: &str) -> MqttOptions {
+    let mut opts = MqttOptions::new(client_id, url, 0);
+    opts.set_transport(Transport::Ws)
+        .set_credentials(username, token)
+        .set_keep_alive(Duration::from_secs(30))
+        .set_max_packet_size(Some(CLIENT_MAX_PACKET));
+    opts
 }
 
+/// What the poller task forwards: an incoming packet, or the error that
+/// ended the connection (after which the poller stops, so it never
+/// reconnects behind a test's back).
 #[derive(Debug)]
-#[allow(dead_code)] // fields are read through Debug in assertion messages
-enum ConnectFailure {
-    Refused(ConnectReturnCode),
-    Other(String),
+#[expect(
+    clippy::large_enum_variant,
+    reason = "a test channel item; boxing Packet would only add derefs to every match"
+)]
+enum Ev {
+    Packet(Packet),
+    Closed(ConnectionError),
 }
 
-async fn connect(
-    env: &ItEnv,
-    clientid: &str,
-    username: &str,
-    password: &str,
-    o: ConnOpts,
-) -> Result<Conn, ConnectFailure> {
-    let mut opts = if o.wss {
-        let port = env
-            .wss_url
-            .rsplit(':')
-            .next()
-            .and_then(|p| p.split('/').next())
-            .and_then(|p| p.parse().ok())
-            .expect("port in AGMEN_IT_MQTT_WSS");
-        let mut m = MqttOptions::new(clientid, env.wss_url.clone(), port);
-        m.set_transport(Transport::Wss(rumqttc::TlsConfiguration::Simple {
-            ca: env.dev_ca.clone(),
-            alpn: None,
-            client_auth: None,
-        }));
-        m
-    } else if o.websocket {
-        let mut m = MqttOptions::new(clientid, env.ws_url.clone(), 8083);
-        m.set_transport(Transport::Ws);
-        m
-    } else {
-        MqttOptions::new(clientid, env.mqtt_host.clone(), env.mqtt_port)
-    };
-    opts.set_credentials(username, password);
-    opts.set_keep_alive(Duration::from_secs(10));
-    opts.set_clean_start(o.clean_start);
-    opts.set_session_expiry_interval(o.session_expiry);
-    opts.set_max_packet_size(Some(256 * 1024));
+/// One connected MQTT 5 client whose event loop runs on its own task.
+#[derive(Debug)]
+struct Client {
+    client: AsyncClient,
+    events: mpsc::Receiver<Ev>,
+    /// Publishes that arrived while a call waited for an ack.
+    pending: VecDeque<Publish>,
+    poller: JoinHandle<()>,
+}
 
-    let (client, mut eventloop) = AsyncClient::new(opts, 256);
-    let (tx, mut rx) = mpsc::unbounded_channel();
-    tokio::spawn(async move {
+impl Drop for Client {
+    fn drop(&mut self) {
+        self.poller.abort();
+    }
+}
+
+/// Connects and waits up to 10 s for CONNACK. A refused CONNACK comes back
+/// as `Err(ConnectionError::ConnectionRefused(code))`.
+#[expect(
+    clippy::result_large_err,
+    reason = "returns rumqttc's own error as is, so tests can match the CONNACK code"
+)]
+async fn connect(opts: MqttOptions) -> Result<(Client, ConnAck), ConnectionError> {
+    let (client, mut eventloop) = AsyncClient::new(opts, 64);
+    let connack = loop {
+        let event = timeout(ACK_WAIT, eventloop.poll()).await??;
+        if let Event::Incoming(Packet::ConnAck(ack)) = event {
+            break ack;
+        }
+    };
+    let (tx, events) = mpsc::channel(1024);
+    let poller = tokio::spawn(async move {
         loop {
-            match eventloop.poll().await {
-                Ok(ev) => {
-                    if tx.send(Ok(ev)).is_err() {
-                        break;
-                    }
-                }
-                Err(e) => {
-                    let msg = match &e {
-                        ConnectionError::ConnectionRefused(code) => format!("refused:{code:?}"),
-                        other => other.to_string(),
-                    };
-                    let _ = tx.send(Err(msg));
-                    break;
-                }
+            let ev = match eventloop.poll().await {
+                Ok(Event::Incoming(packet)) => Ev::Packet(packet),
+                Ok(Event::Outgoing(_)) => continue,
+                Err(e) => Ev::Closed(e),
+            };
+            let closed = matches!(ev, Ev::Closed(_));
+            if tx.send(ev).await.is_err() || closed {
+                return;
             }
         }
     });
+    let client = Client {
+        client,
+        events,
+        pending: VecDeque::new(),
+        poller,
+    };
+    Ok((client, connack))
+}
 
-    let first = timeout(Duration::from_secs(10), async {
-        while let Some(ev) = rx.recv().await {
-            match ev {
-                Ok(Event::Incoming(Packet::ConnAck(ack))) => return Ok(ack.session_present),
-                Ok(_) => continue,
-                Err(e) => return Err(e),
-            }
-        }
-        Err("event loop ended".to_owned())
-    })
-    .await;
-
-    match first {
-        Ok(Ok(session_present)) => Ok(Conn {
-            client,
-            rx,
-            session_present,
-        }),
-        Ok(Err(e)) => Err(refusal(&e)),
-        Err(_) => Err(ConnectFailure::Other("no CONNACK within 10 s".to_owned())),
+async fn connect_ok(opts: MqttOptions) -> Client {
+    let id = opts.client_id();
+    match connect(opts).await {
+        Ok((client, _)) => client,
+        Err(e) => panic!("{id} should connect: {e:?}"),
     }
 }
 
-fn refusal(e: &str) -> ConnectFailure {
-    // ConnectionRefused carries the code; match on its Debug name.
-    for code in [
-        ConnectReturnCode::BadUserNamePassword,
-        ConnectReturnCode::NotAuthorized,
-        ConnectReturnCode::Banned,
-        ConnectReturnCode::ClientIdentifierNotValid,
-    ] {
-        if e == format!("refused:{code:?}") {
-            return ConnectFailure::Refused(code);
-        }
+/// Asserts that EMQX refuses the CONNECT with 0x86 (bad username or
+/// password) or 0x87 (not authorized).
+async fn assert_refused(opts: MqttOptions) {
+    let id = format!("{:?}", opts.client_id());
+    match connect(opts).await {
+        Err(ConnectionError::ConnectionRefused(
+            ConnectReturnCode::BadUserNamePassword | ConnectReturnCode::NotAuthorized,
+        )) => {}
+        Ok(_) => panic!("client id {id} was accepted"),
+        Err(e) => panic!("client id {id}: expected CONNACK 0x86 or 0x87, got {e:?}"),
     }
-    ConnectFailure::Other(e.to_owned())
 }
 
-impl Conn {
-    /// Waits for the first event `f` maps to `Some`, up to `within`.
-    async fn wait_for<T>(
-        &mut self,
-        within: Duration,
-        mut f: impl FnMut(&Event) -> Option<T>,
-    ) -> Option<T> {
-        let deadline = Instant::now() + within;
+impl Client {
+    async fn next(&mut self, within: Duration) -> Option<Ev> {
+        timeout(within, self.events.recv()).await.ok().flatten()
+    }
+
+    /// Next non-publish packet; publishes in between go to `pending`.
+    async fn next_control(&mut self) -> Packet {
         loop {
-            let left = deadline.checked_duration_since(Instant::now())?;
-            match timeout(left, self.rx.recv()).await {
-                Ok(Some(Ok(ev))) => {
-                    if let Some(t) = f(&ev) {
-                        return Some(t);
-                    }
-                }
-                Ok(Some(Err(_))) | Ok(None) | Err(_) => return None,
+            match self.next(ACK_WAIT).await {
+                Some(Ev::Packet(Packet::Publish(p))) => self.pending.push_back(p),
+                Some(Ev::Packet(packet)) => return packet,
+                Some(Ev::Closed(e)) => panic!("connection closed while waiting for an ack: {e:?}"),
+                None => panic!("no ack within 10 s"),
             }
         }
     }
 
-    /// Waits until the connection drops. Returns the reason, or None if it stayed up.
-    async fn wait_disconnect(&mut self, within: Duration) -> Option<String> {
-        let deadline = Instant::now() + within;
+    /// Publishes at QoS 1 and returns the PUBACK reason.
+    async fn publish(&mut self, topic: &str, payload: Vec<u8>, retain: bool) -> PubAckReason {
+        self.client
+            .publish(topic, QoS::AtLeastOnce, retain, payload)
+            .await
+            .unwrap();
         loop {
-            let left = deadline.checked_duration_since(Instant::now())?;
-            match timeout(left, self.rx.recv()).await {
-                Ok(Some(Ok(Event::Incoming(Packet::Disconnect(d))))) => {
-                    return Some(format!("DISCONNECT {:?}", d.reason_code));
-                }
-                Ok(Some(Ok(_))) => continue,
-                Ok(Some(Err(e))) => return Some(e),
-                Ok(None) => return Some("event loop ended".to_owned()),
-                Err(_) => return None,
+            if let Packet::PubAck(ack) = self.next_control().await {
+                return ack.reason;
             }
         }
     }
 
+    /// Subscribes at QoS 1 and returns the SUBACK reason.
     async fn subscribe(&mut self, filter: &str) -> SubscribeReasonCode {
         self.client
             .subscribe(filter, QoS::AtLeastOnce)
             .await
-            .expect("queue subscribe");
-        self.wait_for(Duration::from_secs(5), |ev| match ev {
-            Event::Incoming(Packet::SubAck(ack)) => ack.return_codes.first().copied(),
-            _ => None,
-        })
-        .await
-        .expect("SUBACK within 5 s")
-    }
-
-    async fn publish(&mut self, topic: &str, payload: Vec<u8>) -> Option<PubAckReason> {
-        self.client
-            .publish(topic, QoS::AtLeastOnce, false, payload)
-            .await
-            .expect("queue publish");
-        self.wait_for(Duration::from_secs(5), |ev| match ev {
-            Event::Incoming(Packet::PubAck(ack)) => Some(ack.reason),
-            _ => None,
-        })
-        .await
-    }
-
-    /// Collects publish payloads arriving within `within`.
-    async fn collect(&mut self, within: Duration) -> Vec<(String, Vec<u8>)> {
-        let deadline = Instant::now() + within;
-        let mut got = Vec::new();
-        while let Some(left) = deadline.checked_duration_since(Instant::now()) {
-            match timeout(left, self.rx.recv()).await {
-                Ok(Some(Ok(Event::Incoming(Packet::Publish(p))))) => {
-                    got.push((
-                        String::from_utf8_lossy(&p.topic).into_owned(),
-                        p.payload.to_vec(),
-                    ));
-                }
-                Ok(Some(Ok(_))) => continue,
-                _ => break,
+            .unwrap();
+        loop {
+            if let Packet::SubAck(ack) = self.next_control().await {
+                return ack.return_codes[0];
             }
         }
-        got
+    }
+
+    /// The next publish on `topic` within `within`. Publishes on other
+    /// topics (other tests' traffic through a hub subscription) are dropped.
+    async fn recv_on(&mut self, topic: &str, within: Duration) -> Option<Publish> {
+        if let Some(i) = self
+            .pending
+            .iter()
+            .position(|p| p.topic == topic.as_bytes())
+        {
+            return self.pending.remove(i);
+        }
+        let deadline = tokio::time::Instant::now() + within;
+        loop {
+            match timeout_at(deadline, self.events.recv()).await {
+                Ok(Some(Ev::Packet(Packet::Publish(p)))) if p.topic == topic.as_bytes() => {
+                    return Some(p);
+                }
+                Ok(Some(Ev::Packet(_))) => {}
+                Ok(Some(Ev::Closed(e))) => {
+                    panic!("connection closed while waiting on {topic}: {e:?}")
+                }
+                Ok(None) | Err(_) => return None,
+            }
+        }
+    }
+
+    /// Waits for the broker to end the connection. Returns the DISCONNECT
+    /// reason if EMQX sent one (rumqttc reports it as an error), `None` if
+    /// it only closed the socket.
+    async fn closed_within(
+        &mut self,
+        within: Duration,
+    ) -> Result<Option<DisconnectReasonCode>, &'static str> {
+        let deadline = tokio::time::Instant::now() + within;
+        loop {
+            match timeout_at(deadline, self.events.recv()).await {
+                Ok(Some(Ev::Closed(ConnectionError::MqttState(
+                    StateError::ServerDisconnect { reason_code, .. },
+                )))) => return Ok(Some(reason_code)),
+                Ok(Some(Ev::Packet(_))) => {}
+                Ok(Some(Ev::Closed(_)) | None) => return Ok(None),
+                Err(_) => return Err("still connected"),
+            }
+        }
     }
 }
 
-async fn connect_identity(env: &ItEnv, s: &Scope, id: &str, suffix: &str, o: ConnOpts) -> Conn {
-    let cid = format!("{id}-{suffix}");
-    let t = token(env, id, &cid, Some(identity_acl(s, id)), 600);
-    connect(env, &cid, id, &t, o)
+/// A client with the hub's token in its own shared subscription group, so
+/// parallel tests each get every `up/` message.
+async fn hub_subscriber(group: &str) -> Client {
+    let client_id = format!("{HUB_USER}-{}", new_id());
+    let token = sign(&hub_claims(now_secs() + 3600));
+    let mut hub = connect_ok(tcp_options(&client_id, HUB_USER, &token)).await;
+    let filter = format!("$share/{group}/agmen/v1/+/+/up/+");
+    assert_eq!(
+        hub.subscribe(&filter).await,
+        SubscribeReasonCode::Success(QoS::AtLeastOnce)
+    );
+    hub
+}
+
+fn share_group() -> String {
+    format!("hub{}", new_id())
+}
+
+/// A connects as `<A>-mcp` with `opts_for(client_id, username, token)`,
+/// publishes to its own `up/`, and a hub subscriber receives it.
+async fn own_up_round_trip(opts_for: impl Fn(&str, &str, &str) -> MqttOptions) {
+    let mut hub = hub_subscriber(&share_group()).await;
+    let a = new_id();
+    let mut client = connect_ok(opts_for(&format!("{a}-mcp"), &a, &identity_token(&a))).await;
+    assert_eq!(
+        client
+            .publish(&up_topic(&a), b"hello".to_vec(), false)
+            .await,
+        PubAckReason::Success
+    );
+    let got = hub
+        .recv_on(&up_topic(&a), Duration::from_secs(5))
         .await
-        .expect("identity connects")
+        .expect("hub got nothing");
+    assert_eq!(got.payload.as_ref(), b"hello");
 }
 
-async fn connect_hub(env: &ItEnv, name: &str) -> Conn {
-    let id = fresh_id(name);
-    let t = token(env, &id, &id, Some(hub_acl()), 600);
-    connect(env, &id, &id, &t, ConnOpts::default())
-        .await
-        .expect("hub connects")
-}
-
-fn emqx_api(env: &ItEnv) -> (reqwest::Client, String) {
-    (reqwest::Client::new(), env.api.clone())
-}
-
-// ---------------------------------------------------------------------------
-// Tests
+// ---------------------------------------------------------------- tests
 
 #[tokio::test]
 async fn it_publish_to_own_up_allowed() {
-    let env = it_env();
-    let s = Scope::new();
-    let mut hub = connect_hub(&env, "hub").await;
-    assert_eq!(
-        hub.subscribe(&s.topic("up/+")).await,
-        SubscribeReasonCode::Success(QoS::AtLeastOnce)
-    );
-
-    let a = fresh_id("ida");
-    let mut ca = connect_identity(&env, &s, &a, "mcp", ConnOpts::default()).await;
-    let reason = ca
-        .publish(&s.topic(&format!("up/{a}")), b"hello".to_vec())
-        .await;
-    assert_eq!(reason, Some(PubAckReason::Success));
-
-    let got = hub.collect(Duration::from_secs(2)).await;
-    assert_eq!(got, vec![(s.topic(&format!("up/{a}")), b"hello".to_vec())]);
+    own_up_round_trip(tcp_options).await;
 }
 
 #[tokio::test]
 async fn it_publish_to_other_up_refused() {
-    let env = it_env();
-    let s = Scope::new();
-    let mut hub = connect_hub(&env, "hub").await;
-    hub.subscribe(&s.topic("up/+")).await;
-
-    let a = fresh_id("ida");
-    let b = fresh_id("idb");
-    let mut ca = connect_identity(&env, &s, &a, "mcp", ConnOpts::default()).await;
-    let reason = ca
-        .publish(&s.topic(&format!("up/{b}")), b"spoof".to_vec())
-        .await;
-    assert_eq!(reason, Some(PubAckReason::NotAuthorized));
+    let mut hub = hub_subscriber(&share_group()).await;
+    let (a, b) = (new_id(), new_id());
+    let mut client = connect_ok(tcp_options(&format!("{a}-mcp"), &a, &identity_token(&a))).await;
+    assert_eq!(
+        client
+            .publish(&up_topic(&b), b"spoof".to_vec(), false)
+            .await,
+        PubAckReason::NotAuthorized
+    );
     assert!(
-        hub.collect(Duration::from_secs(2)).await.is_empty(),
-        "hub must receive nothing"
+        hub.recv_on(&up_topic(&b), Duration::from_secs(2))
+            .await
+            .is_none()
     );
 }
 
 #[tokio::test]
 async fn it_subscribe_other_tenant_refused() {
-    let env = it_env();
-    let s = Scope::new();
-    let other = Scope::new();
-    let a = fresh_id("ida");
-    let mut ca = connect_identity(&env, &s, &a, "watch", ConnOpts::default()).await;
+    let a = new_id();
+    let mut client = connect_ok(tcp_options(&format!("{a}-watch"), &a, &identity_token(&a))).await;
+    // Control: A's own feed is allowed, so the refusal below is the ACL.
     assert_eq!(
-        ca.subscribe(&other.topic("feed")).await,
+        client
+            .subscribe(&format!("agmen/v1/{TENANT}/{PROJECT}/feed"))
+            .await,
+        SubscribeReasonCode::Success(QoS::AtLeastOnce)
+    );
+    assert_eq!(
+        client.subscribe("agmen/v1/t2/p1/feed").await,
         SubscribeReasonCode::NotAuthorized
     );
 }
 
+/// An identity's wildcard filters cannot reach past its own topics. Every
+/// filter that would widen the ACL gets SUBACK 0x87; the six filters the
+/// ACL names succeed.
 #[tokio::test]
 async fn it_wildcard_subscriptions_cannot_widen_acl() {
-    let env = it_env();
-    let s = Scope::new();
-    let a = fresh_id("ida");
-    let mut ca = connect_identity(&env, &s, &a, "watch", ConnOpts::default()).await;
-
-    let refused = [
+    let a = new_id();
+    let base = format!("agmen/v1/{TENANT}/{PROJECT}");
+    let mut client = connect_ok(tcp_options(&format!("{a}-watch"), &a, &identity_token(&a))).await;
+    for filter in [
         "#".to_owned(),
         "agmen/#".to_owned(),
-        s.topic("#"),
-        s.topic("+"),
-        s.topic("up/+"),
-        s.topic(&format!("up/{a}")),
-        s.topic("inbox/+"),
-        s.topic("ack/+"),
-        format!("agmen/v1/{}/+/feed", s.t),
-        format!("agmen/v1/+/{}/feed", s.p),
-        format!("$share/g/{}", s.topic("inbox/+")),
-    ];
-    for f in &refused {
+        format!("{base}/#"),
+        format!("{base}/+"),
+        format!("{base}/up/+"),
+        format!("{base}/up/{a}"),
+        format!("{base}/inbox/+"),
+        format!("{base}/ack/+"),
+        format!("agmen/v1/{TENANT}/+/feed"),
+        format!("agmen/v1/+/{PROJECT}/feed"),
+        "agmen/v1/+/+/state/#".to_owned(),
+        format!("agmen/v1/{TENANT}/+/presence/+"),
+        format!("$share/g/{base}/inbox/+"),
+    ] {
         assert_eq!(
-            ca.subscribe(f).await,
+            client.subscribe(&filter).await,
             SubscribeReasonCode::NotAuthorized,
-            "filter {f}"
+            "{filter}"
         );
     }
-    let allowed = [
-        s.topic("feed"),
-        s.topic(&format!("inbox/{a}")),
-        s.topic(&format!("ack/{a}")),
-        s.topic("state/head"),
-        s.topic("state/#"),
-        s.topic("presence/+"),
-    ];
-    for f in &allowed {
+    for filter in [
+        format!("{base}/feed"),
+        format!("{base}/inbox/{a}"),
+        format!("{base}/ack/{a}"),
+        format!("{base}/state/head"),
+        format!("{base}/state/#"),
+        format!("{base}/presence/+"),
+    ] {
         assert_eq!(
-            ca.subscribe(f).await,
+            client.subscribe(&filter).await,
             SubscribeReasonCode::Success(QoS::AtLeastOnce),
-            "filter {f}"
+            "{filter}"
         );
     }
 }
 
 #[tokio::test]
 async fn it_no_acl_claim_is_denied() {
-    let env = it_env();
-    let s = Scope::new();
-    let a = fresh_id("ida");
-    let cid = format!("{a}-mcp");
-    let t = token(&env, &a, &cid, None, 600);
-    let mut ca = connect(&env, &cid, &a, &t, ConnOpts::default())
-        .await
-        .expect("signature is valid");
-    assert_eq!(
-        ca.publish(&s.topic(&format!("up/{a}")), b"x".to_vec())
-            .await,
-        Some(PubAckReason::NotAuthorized)
-    );
-    assert_eq!(
-        ca.subscribe(&s.topic("feed")).await,
-        SubscribeReasonCode::NotAuthorized
-    );
+    let a = new_id();
+    let token = sign(&json!({ "sub": a, "username": a, "exp": now_secs() + 3600 }));
+    let mut client = connect_ok(tcp_options(&format!("{a}-mcp"), &a, &token)).await;
+    let base = format!("agmen/v1/{TENANT}/{PROJECT}");
+    for topic in [
+        up_topic(&a),
+        format!("{base}/presence/{a}"),
+        format!("{base}/feed"),
+        "other".to_owned(),
+    ] {
+        for retain in [false, true] {
+            assert_eq!(
+                client.publish(&topic, b"x".to_vec(), retain).await,
+                PubAckReason::NotAuthorized,
+                "{topic}"
+            );
+        }
+    }
+    for filter in [
+        format!("{base}/feed"),
+        format!("{base}/inbox/{a}"),
+        format!("{base}/ack/{a}"),
+        format!("{base}/state/#"),
+        format!("{base}/presence/+"),
+        "#".to_owned(),
+    ] {
+        assert_eq!(
+            client.subscribe(&filter).await,
+            SubscribeReasonCode::NotAuthorized,
+            "{filter}"
+        );
+    }
 }
 
 #[tokio::test]
 async fn it_bad_signature_refused() {
-    let env = it_env();
-    let s = Scope::new();
-    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"));
-    let pem_path = dir.join("s1-other-key.pem");
-    let status = Command::new("sh")
-        .arg("-c")
-        .arg(format!(
-            "openssl ecparam -name prime256v1 -genkey -noout | openssl pkcs8 -topk8 -nocrypt -out {}",
-            pem_path.display()
-        ))
-        .status()
-        .expect("run openssl");
-    assert!(status.success());
-    let other_pem = std::fs::read(&pem_path).expect("read other key");
-
-    let a = fresh_id("ida");
-    let cid = format!("{a}-mcp");
-    let claims = json!({ "sub": a, "clientid": cid, "iat": now(), "exp": now() + 600, "acl": identity_acl(&s, &a) });
-
-    // Same kid, wrong key.
-    let forged = sign(&other_pem, &env.kid, &claims);
-    let r = connect(&env, &cid, &a, &forged, ConnOpts::default()).await;
-    assert!(
-        matches!(r, Err(ConnectFailure::Refused(_))),
-        "forged token: {:?}",
-        r.err()
-    );
-
-    // Unknown kid.
-    let unknown = sign(&other_pem, "nope-1", &claims);
-    let r = connect(&env, &cid, &a, &unknown, ConnOpts::default()).await;
-    assert!(
-        matches!(r, Err(ConnectFailure::Refused(_))),
-        "unknown kid: {:?}",
-        r.err()
-    );
-
-    // Expired.
-    let mut old = claims.clone();
-    old["iat"] = json!(now() - 1200);
-    old["exp"] = json!(now() - 600);
-    let expired = sign(&env.jwt_pem, &env.kid, &old);
-    let r = connect(&env, &cid, &a, &expired, ConnOpts::default()).await;
-    assert!(
-        matches!(r, Err(ConnectFailure::Refused(_))),
-        "expired token: {:?}",
-        r.err()
-    );
-}
-
-#[tokio::test]
-async fn it_username_must_match_sub() {
-    let env = it_env();
-    let s = Scope::new();
-    let a = fresh_id("ida");
-    let b = fresh_id("idb");
-    let cid = format!("{b}-mcp");
-    // A's token presented with B's username and client id.
-    let t = token(&env, &a, &cid, Some(identity_acl(&s, &a)), 600);
-    let r = connect(&env, &cid, &b, &t, ConnOpts::default()).await;
-    assert!(
-        matches!(r, Err(ConnectFailure::Refused(_))),
-        "{:?}",
-        r.err()
-    );
-}
-
-#[tokio::test]
-async fn it_token_bound_to_clientid() {
-    let env = it_env();
-    let s = Scope::new();
-    let a = fresh_id("ida");
-    let t = token(
-        &env,
-        &a,
-        &format!("{a}-mcp"),
-        Some(identity_acl(&s, &a)),
-        600,
-    );
-    let r = connect(&env, &format!("{a}-watch"), &a, &t, ConnOpts::default()).await;
-    assert!(
-        matches!(r, Err(ConnectFailure::Refused(_))),
-        "{:?}",
-        r.err()
-    );
+    let a = new_id();
+    let token = sign_with(UNTRUSTED_KEY, &identity_claims(&a, now_secs() + 3600));
+    assert_refused(tcp_options(&format!("{a}-mcp"), &a, &token)).await;
+    // A token past its exp, signed with the dev key, is refused at CONNACK too.
+    let expired = sign(&identity_claims(&a, now_secs() - 600));
+    assert_refused(tcp_options(&format!("{a}-mcp"), &a, &expired)).await;
+    // Control: the same claims signed with the dev key connect.
+    connect_ok(tcp_options(&format!("{a}-mcp"), &a, &identity_token(&a))).await;
 }
 
 #[tokio::test]
 async fn it_expiry_disconnects() {
-    let env = it_env();
-    let s = Scope::new();
-    let a = fresh_id("ida");
-    let cid = format!("{a}-mcp");
-    let t = token(&env, &a, &cid, Some(identity_acl(&s, &a)), 5);
-    let mut ca = connect(&env, &cid, &a, &t, ConnOpts::default())
+    let a = new_id();
+    let exp = now_secs() + 5;
+    let mut client = connect_ok(tcp_options(
+        &format!("{a}-mcp"),
+        &a,
+        &sign(&identity_claims(&a, exp)),
+    ))
+    .await;
+    let reason = client
+        .closed_within(Duration::from_secs(10))
         .await
-        .expect("connects");
-    let started = Instant::now();
-    let why = ca.wait_disconnect(Duration::from_secs(15)).await;
-    let after = started.elapsed();
-    assert!(why.is_some(), "still connected 15 s after a 5 s token");
-    eprintln!("S1 expiry: disconnected after {after:?}: {why:?}");
+        .expect("session outlived exp");
+    let now = now_secs();
+    assert!(now >= exp, "dropped at {now}, before exp {exp}");
+    assert_eq!(reason, Some(DisconnectReasonCode::NotAuthorized));
 }
 
 #[tokio::test]
 async fn it_rest_kick_disconnects() {
-    let env = it_env();
-    let s = Scope::new();
-    let a = fresh_id("ida");
-    let mut ca = connect_identity(&env, &s, &a, "watch", ConnOpts::default()).await;
-
-    let (http, api) = emqx_api(&env);
-    let resp = http
-        .delete(format!("{api}/clients/{a}-watch"))
-        .basic_auth(&env.api_key, Some(&env.api_secret))
+    let a = new_id();
+    let client_id = format!("{a}-mcp");
+    let mut client = connect_ok(tcp_options(&client_id, &a, &identity_token(&a))).await;
+    let http = reqwest::Client::new();
+    let url = format!("{}/clients/{client_id}", env("AGMEN_IT_EMQX_API"));
+    let (key, secret) = (
+        env("AGMEN_IT_EMQX_API_KEY"),
+        env("AGMEN_IT_EMQX_API_SECRET"),
+    );
+    let kicked = http
+        .delete(&url)
+        .basic_auth(&key, Some(&secret))
         .send()
         .await
-        .expect("REST call");
-    assert_eq!(
-        resp.status().as_u16(),
-        204,
-        "kick: {}",
-        resp.text().await.unwrap_or_default()
-    );
-    let why = ca.wait_disconnect(Duration::from_secs(2)).await;
-    assert!(why.is_some(), "client still connected 2 s after the kick");
-    eprintln!("S1 kick: {why:?}");
+        .unwrap();
+    assert_eq!(kicked.status(), reqwest::StatusCode::NO_CONTENT);
+    let reason = client
+        .closed_within(Duration::from_secs(2))
+        .await
+        .expect("client still connected 2 s after kick");
+    assert_eq!(reason, Some(DisconnectReasonCode::AdministrativeAction));
+    let gone = http
+        .get(&url)
+        .basic_auth(&key, Some(&secret))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(gone.status(), reqwest::StatusCode::NOT_FOUND);
+    // Kicking a client that is not connected is a 404, not an error.
+    let again = http
+        .delete(&url)
+        .basic_auth(&key, Some(&secret))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(again.status(), reqwest::StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
 async fn it_hub_shared_subscription() {
-    let env = it_env();
-    let s = Scope::new();
-    let filter = format!("$share/hub/{}", s.topic("up/+"));
-    let mut h1 = connect_hub(&env, "hubx").await;
-    let mut h2 = connect_hub(&env, "huby").await;
-    assert_eq!(
-        h1.subscribe(&filter).await,
-        SubscribeReasonCode::Success(QoS::AtLeastOnce)
-    );
-    assert_eq!(
-        h2.subscribe(&filter).await,
-        SubscribeReasonCode::Success(QoS::AtLeastOnce)
-    );
-
-    let a = fresh_id("ida");
-    let mut ca = connect_identity(&env, &s, &a, "mcp", ConnOpts::default()).await;
-    for i in 0..100u32 {
+    let group = share_group();
+    let mut hubs = [hub_subscriber(&group).await, hub_subscriber(&group).await];
+    let a = new_id();
+    let mut client = connect_ok(tcp_options(&format!("{a}-mcp"), &a, &identity_token(&a))).await;
+    for n in 0..100 {
         assert_eq!(
-            ca.publish(&s.topic(&format!("up/{a}")), i.to_string().into_bytes())
+            client
+                .publish(&up_topic(&a), format!("{n}").into_bytes(), false)
                 .await,
-            Some(PubAckReason::Success)
+            PubAckReason::Success
         );
     }
-    let (g1, g2) = tokio::join!(
-        h1.collect(Duration::from_secs(3)),
-        h2.collect(Duration::from_secs(3))
-    );
-    let all: HashSet<Vec<u8>> = g1.iter().chain(g2.iter()).map(|(_, p)| p.clone()).collect();
-    eprintln!(
-        "S1 shared subscription: hub1 {} hub2 {}",
-        g1.len(),
-        g2.len()
-    );
-    assert_eq!(g1.len() + g2.len(), 100, "each message delivered once");
-    assert_eq!(all.len(), 100, "no message lost");
-    assert!(
-        !g1.is_empty() && !g2.is_empty(),
-        "both hub clients get a share"
-    );
-}
-
-#[tokio::test]
-async fn it_persistent_session_survives_restart() {
-    let env = it_env();
-    let s = Scope::new();
-    let w = fresh_id("idw");
-    let persistent = || ConnOpts {
-        clean_start: false,
-        session_expiry: Some(86_400),
-        ..ConnOpts::default()
-    };
-
-    let mut cw = connect_identity(&env, &s, &w, "watch", persistent()).await;
-    assert_eq!(
-        cw.subscribe(&s.topic("feed")).await,
-        SubscribeReasonCode::Success(QoS::AtLeastOnce)
-    );
-    cw.client.disconnect().await.expect("disconnect");
-    let _ = cw.wait_disconnect(Duration::from_secs(2)).await;
-
-    let mut hub = connect_hub(&env, "hub").await;
-    for i in 1..=3u8 {
-        assert_eq!(
-            hub.publish(&s.topic("feed"), vec![b'0' + i]).await,
-            Some(PubAckReason::Success)
-        );
-    }
-    drop(hub);
-
-    let out = Command::new("docker")
-        .args(["compose", "-f", &env.compose_file, "restart", "emqx"])
-        .output()
-        .expect("docker compose restart");
-    assert!(
-        out.status.success(),
-        "restart: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let restarted = Instant::now();
-    wait_broker_up(&env).await;
-
-    // Like a real client, retry until the broker takes logins again.
-    let cid = format!("{w}-watch");
-    let mut cw = loop {
-        let t = token(&env, &w, &cid, Some(identity_acl(&s, &w)), 600);
-        match connect(&env, &cid, &w, &t, persistent()).await {
-            Ok(c) => break c,
-            Err(e) if restarted.elapsed() < Duration::from_secs(30) => {
-                eprintln!("S1 restart: retrying after {e:?}");
-                sleep(Duration::from_secs(1)).await;
-            }
-            Err(e) => panic!("no login 30 s after restart: {e:?}"),
+    let mut seen = HashSet::new();
+    let mut per_hub = [0_u32; 2];
+    for (hub, count) in hubs.iter_mut().zip(per_hub.iter_mut()) {
+        while let Some(p) = hub.recv_on(&up_topic(&a), Duration::from_secs(2)).await {
+            assert!(seen.insert(p.payload), "duplicate delivery");
+            *count += 1;
         }
-    };
-    eprintln!(
-        "S1 restart: logins accepted {:?} after the restart finished",
-        restarted.elapsed()
-    );
-    let got = cw.collect(Duration::from_secs(3)).await;
-    eprintln!(
-        "S1 restart: session_present={} messages={}",
-        cw.session_present,
-        got.len()
-    );
-    assert!(cw.session_present, "session survives a broker restart");
-    let payloads: Vec<Vec<u8>> = got.into_iter().map(|(_, p)| p).collect();
-    assert_eq!(payloads, vec![b"1".to_vec(), b"2".to_vec(), b"3".to_vec()]);
-}
-
-async fn wait_broker_up(env: &ItEnv) {
-    let (http, api) = emqx_api(env);
-    for _ in 0..60 {
-        let ok = http
-            .get(format!("{api}/status"))
-            .basic_auth(&env.api_key, Some(&env.api_secret))
-            .send()
-            .await
-            .map(|r| r.status().is_success())
-            .unwrap_or(false);
-        if ok {
-            // Listeners come up just after the API.
-            sleep(Duration::from_secs(2)).await;
-            return;
-        }
-        sleep(Duration::from_secs(1)).await;
     }
-    panic!("EMQX did not come back within 60 s");
+    assert_eq!(seen.len(), 100, "split {per_hub:?}");
+    assert!(
+        per_hub.iter().all(|&n| n > 0),
+        "one hub got everything: {per_hub:?}"
+    );
 }
 
 #[tokio::test]
 async fn it_packet_over_limit_refused() {
-    let env = it_env();
-    let s = Scope::new();
-    let mut hub = connect_hub(&env, "hub").await;
-    hub.subscribe(&s.topic("up/+")).await;
-
-    let a = fresh_id("ida");
-    let mut ca = connect_identity(&env, &s, &a, "mcp", ConnOpts::default()).await;
-    let up = s.topic(&format!("up/{a}"));
+    let mut hub = hub_subscriber(&share_group()).await;
+    let a = new_id();
+    let token = identity_token(&a);
+    let mut client = connect_ok(tcp_options(&format!("{a}-mcp"), &a, &token)).await;
     assert_eq!(
-        ca.publish(&up, vec![b'a'; 60 * 1024]).await,
-        Some(PubAckReason::Success)
+        client
+            .publish(&up_topic(&a), vec![b'x'; 60 * 1024], false)
+            .await,
+        PubAckReason::Success
     );
-    let got = hub.collect(Duration::from_secs(2)).await;
-    assert_eq!(got.len(), 1);
-
-    ca.client
-        .publish(&up, QoS::AtLeastOnce, false, vec![b'b'; 100 * 1024])
+    let got = hub
+        .recv_on(&up_topic(&a), Duration::from_secs(5))
         .await
-        .expect("queue");
-    let why = ca.wait_disconnect(Duration::from_secs(5)).await;
-    eprintln!("S1 oversize: {why:?}");
-    assert!(why.is_some(), "a 100 KiB publish must end the connection");
-    assert!(
-        hub.collect(Duration::from_secs(2)).await.is_empty(),
-        "the oversize message must not arrive"
-    );
-}
+        .expect("60 KiB never arrived");
+    assert_eq!(got.payload.len(), 60 * 1024);
 
-/// Sends CONNECT and an oversize PUBLISH over a raw socket, bypassing the
-/// client library's own check against the broker's advertised limit.
-#[tokio::test]
-async fn it_broker_enforces_packet_limit() {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    let env = it_env();
-    let s = Scope::new();
-    let mut hub = connect_hub(&env, "hub").await;
-    hub.subscribe(&s.topic("up/+")).await;
-
-    let a = fresh_id("ida");
-    let cid = format!("{a}-mcp");
-    let t = token(&env, &a, &cid, Some(identity_acl(&s, &a)), 600);
-
-    let mut sock = tokio::net::TcpStream::connect((env.mqtt_host.as_str(), env.mqtt_port))
+    // rumqttc refuses locally, before sending, once CONNACK has told it the
+    // broker's limit.
+    client
+        .client
+        .publish(
+            up_topic(&a),
+            QoS::AtLeastOnce,
+            false,
+            vec![b'x'; 100 * 1024],
+        )
         .await
-        .expect("tcp");
-    sock.write_all(&raw_connect(&cid, &a, &t))
-        .await
-        .expect("send CONNECT");
-    let mut connack = [0u8; 64];
-    let n = timeout(Duration::from_secs(5), sock.read(&mut connack))
-        .await
-        .expect("CONNACK in time")
-        .expect("read");
-    assert!(
-        n >= 4 && connack[0] == 0x20 && connack[3] == 0x00,
-        "CONNACK success, got {:02x?}",
-        &connack[..n]
-    );
-
-    sock.write_all(&raw_publish_qos1(
-        &s.topic(&format!("up/{a}")),
-        &vec![b'z'; 100 * 1024],
-    ))
-    .await
-    .expect("send PUBLISH");
-    let mut buf = [0u8; 64];
-    let reply = timeout(Duration::from_secs(5), sock.read(&mut buf))
-        .await
-        .expect("broker answers in time");
-    match reply {
-        Ok(0) => eprintln!("S1 raw oversize: broker closed the socket"),
-        Ok(n) => {
-            eprintln!("S1 raw oversize: broker sent {:02x?}", &buf[..n]);
-            // DISCONNECT (0xe0) with reason 0x95 Packet too large.
-            assert_eq!(buf[0], 0xe0, "expected DISCONNECT");
-            assert_eq!(buf.get(2).copied(), Some(0x95), "expected reason 0x95");
-        }
-        Err(e) => eprintln!("S1 raw oversize: socket error {e}"),
+        .unwrap();
+    match client.next(ACK_WAIT).await {
+        Some(Ev::Closed(ConnectionError::MqttState(StateError::Deserialization(
+            MqttBytesError::OutgoingPacketTooLarge { .. },
+        )))) => {}
+        other => panic!("expected a local OutgoingPacketTooLarge, got {other:?}"),
     }
+
+    // A raw client skips that check, so EMQX itself must refuse the packet.
+    // EMQX 6.3.2 closes the socket (log: `{shutdown,emsgsize}`) without a
+    // DISCONNECT 0x95 and without a PUBACK.
+    let reason = raw_publish(&format!("{a}-cli"), &a, &token, &up_topic(&a), 100 * 1024).await;
+    assert_eq!(reason, None);
     assert!(
-        hub.collect(Duration::from_secs(2)).await.is_empty(),
-        "the oversize message must not arrive"
+        hub.recv_on(&up_topic(&a), Duration::from_secs(2))
+            .await
+            .is_none()
     );
-}
-
-fn mqtt_varint(mut n: usize, out: &mut Vec<u8>) {
-    loop {
-        let mut b = (n % 128) as u8;
-        n /= 128;
-        if n > 0 {
-            b |= 0x80;
-        }
-        out.push(b);
-        if n == 0 {
-            break;
-        }
-    }
-}
-
-fn mqtt_str(v: &[u8], out: &mut Vec<u8>) {
-    out.extend_from_slice(&(v.len() as u16).to_be_bytes());
-    out.extend_from_slice(v);
-}
-
-fn mqtt_packet(first: u8, body: Vec<u8>) -> Vec<u8> {
-    let mut out = vec![first];
-    mqtt_varint(body.len(), &mut out);
-    out.extend(body);
-    out
-}
-
-fn raw_connect(cid: &str, user: &str, pass: &str) -> Vec<u8> {
-    let mut b = Vec::new();
-    mqtt_str(b"MQTT", &mut b);
-    b.push(5); // protocol level
-    b.push(0b1100_0010); // username, password, clean start
-    b.extend_from_slice(&30u16.to_be_bytes()); // keep alive
-    b.push(0); // no properties
-    mqtt_str(cid.as_bytes(), &mut b);
-    mqtt_str(user.as_bytes(), &mut b);
-    mqtt_str(pass.as_bytes(), &mut b);
-    mqtt_packet(0x10, b)
-}
-
-fn raw_publish_qos1(topic: &str, payload: &[u8]) -> Vec<u8> {
-    let mut b = Vec::new();
-    mqtt_str(topic.as_bytes(), &mut b);
-    b.extend_from_slice(&1u16.to_be_bytes()); // packet id
-    b.push(0); // no properties
-    b.extend_from_slice(payload);
-    mqtt_packet(0x32, b)
 }
 
 #[tokio::test]
 async fn it_websocket_listener() {
-    let env = it_env();
-    let s = Scope::new();
-    let mut hub = connect_hub(&env, "hub").await;
-    hub.subscribe(&s.topic("up/+")).await;
-
-    let a = fresh_id("ida");
-    let mut ca = connect_identity(
-        &env,
-        &s,
-        &a,
-        "mcp",
-        ConnOpts {
-            websocket: true,
-            ..ConnOpts::default()
-        },
-    )
-    .await;
-    assert_eq!(
-        ca.publish(&s.topic(&format!("up/{a}")), b"ws".to_vec())
-            .await,
-        Some(PubAckReason::Success)
-    );
-    assert_eq!(hub.collect(Duration::from_secs(2)).await.len(), 1);
+    let url = env("AGMEN_IT_MQTT_WS");
+    own_up_round_trip(|client_id, user, token| ws_options(&url, client_id, user, token)).await;
 }
 
+/// The WSS-behind-HAProxy check (m0-m1 Task 2 Step 4): TLS ends at the
+/// haproxy service, which forwards plain WebSocket to EMQX's 8083. A raw
+/// client, because rumqttc's WSS transport needs its TLS features, whose
+/// dependencies fail `cargo deny` (ADR-0002).
 #[tokio::test]
 async fn it_wss_behind_haproxy() {
-    let env = it_env();
-    let s = Scope::new();
-    let mut hub = connect_hub(&env, "hub").await;
-    hub.subscribe(&s.topic("up/+")).await;
-
-    let a = fresh_id("ida");
-    let mut ca = connect_identity(
-        &env,
-        &s,
-        &a,
-        "mcp",
-        ConnOpts {
-            wss: true,
-            ..ConnOpts::default()
-        },
-    )
-    .await;
-    assert_eq!(
-        ca.publish(&s.topic(&format!("up/{a}")), b"wss".to_vec())
-            .await,
-        Some(PubAckReason::Success)
-    );
-    assert_eq!(hub.collect(Duration::from_secs(2)).await.len(), 1);
-
+    let mut hub = hub_subscriber(&share_group()).await;
+    let a = new_id();
+    let reason = wss_publish(&format!("{a}-mcp"), &a, &identity_token(&a), &up_topic(&a)).await;
+    assert_eq!(reason, PubAckReason::Success);
+    let got = hub
+        .recv_on(&up_topic(&a), Duration::from_secs(5))
+        .await
+        .expect("hub got nothing");
+    assert_eq!(got.payload.as_ref(), b"hello");
     // ACLs hold through the proxy too.
-    let b = fresh_id("idb");
+    let b = new_id();
     assert_eq!(
-        ca.publish(&s.topic(&format!("up/{b}")), b"spoof".to_vec())
-            .await,
-        Some(PubAckReason::NotAuthorized)
+        wss_publish(&format!("{a}-cli"), &a, &identity_token(&a), &up_topic(&b)).await,
+        PubAckReason::NotAuthorized
     );
+}
+
+/// R4: one token binds to `<sub>-mcp`, `<sub>-watch` and `<sub>-cli`, and
+/// to no other client id.
+#[tokio::test]
+async fn it_client_ids_bound_to_identity() {
+    let (a, b) = (new_id(), new_id());
+    let token = identity_token(&a);
+    let mut hub = hub_subscriber(&share_group()).await;
+    let suffixes = ["mcp", "watch", "cli"];
+    let mut live = Vec::new();
+    for suffix in suffixes {
+        live.push(connect_ok(tcp_options(&format!("{a}-{suffix}"), &a, &token)).await);
+    }
+    // All three stay up together: none took over another's session.
+    for (client, suffix) in live.iter_mut().zip(suffixes) {
+        assert_eq!(
+            client.publish(&up_topic(&a), suffix.into(), false).await,
+            PubAckReason::Success
+        );
+        let got = hub.recv_on(&up_topic(&a), Duration::from_secs(5)).await;
+        assert_eq!(got.map(|p| p.payload), Some(suffix.into()));
+    }
+    let wrong_ids = [
+        format!("{b}-mcp"),
+        a.clone(),
+        format!("{a}-"),
+        format!("{a}-mcpx"),
+        format!("{a}-mcp-watch"),
+        format!("{a}-MCP"),
+        format!("x{a}-mcp"),
+        format!("{HUB_USER}-{}", new_id()),
+    ];
+    for client_id in &wrong_ids {
+        assert_refused(tcp_options(client_id, &a, &token)).await;
+    }
+    // EMQX drops a CONNECT whose client id ends in a newline before
+    // authentication runs, without a CONNACK.
+    match connect(tcp_options(&format!("{a}-mcp\n"), &a, &token)).await {
+        Err(ConnectionError::MqttState(StateError::ConnectionAborted)) => {}
+        Ok(_) => panic!("client id with a newline was accepted"),
+        Err(e) => panic!("client id with a newline: expected the socket closed, got {e:?}"),
+    }
+    // Username and sub must match too: A's token under B's name is refused.
+    assert_refused(tcp_options(&format!("{b}-mcp"), &b, &token)).await;
+    // An identity token cannot pose as the hub, and the hub's token cannot
+    // use an identity's client id.
+    assert_refused(tcp_options(
+        &format!("{HUB_USER}-{}", new_id()),
+        HUB_USER,
+        &token,
+    ))
+    .await;
+    let hub_token = sign(&hub_claims(now_secs() + 3600));
+    assert_refused(tcp_options(&format!("{a}-mcp"), HUB_USER, &hub_token)).await;
+    assert_refused(tcp_options(&format!("{a}-mcp"), &a, &hub_token)).await;
+}
+
+/// R3: what the hub's own token may do besides its shared subscription.
+#[tokio::test]
+async fn it_hub_token_scope() {
+    let a = new_id();
+    let base = format!("agmen/v1/{TENANT}/{PROJECT}");
+    let mut watch = connect_ok(tcp_options(&format!("{a}-watch"), &a, &identity_token(&a))).await;
+    assert_eq!(
+        watch.subscribe(&format!("{base}/inbox/{a}")).await,
+        SubscribeReasonCode::Success(QoS::AtLeastOnce)
+    );
+    let mut hub = hub_subscriber(&share_group()).await;
+    let inbox = format!("{base}/inbox/{a}");
+    assert_eq!(
+        hub.publish(&inbox, b"dm".to_vec(), false).await,
+        PubAckReason::Success
+    );
+    assert!(
+        watch
+            .recv_on(&inbox, Duration::from_secs(5))
+            .await
+            .is_some(),
+        "inbox message lost"
+    );
+    assert_eq!(
+        hub.publish(&up_topic(&a), b"spoof".to_vec(), false).await,
+        PubAckReason::NotAuthorized
+    );
+    assert_eq!(
+        hub.publish("elsewhere/x", b"x".to_vec(), false).await,
+        PubAckReason::NotAuthorized
+    );
+    assert_eq!(
+        hub.subscribe(&format!("{base}/inbox/+")).await,
+        SubscribeReasonCode::NotAuthorized
+    );
+}
+
+/// R71: EMQX keeps sessions in memory only (`durable_sessions` off), so a
+/// restart drops a persistent session and the messages queued for it.
+/// agmen-client recovers them: a watcher that was offline across the
+/// restart reconnects and gets every message posted meanwhile by replay
+/// from the hub, in order and once each.
+///
+/// Runs only under `--profile it-restart`: it restarts the dev EMQX.
+#[tokio::test(flavor = "multi_thread")]
+async fn it_offline_session_replays_after_restart() {
+    support::run(|ctx| async move {
+        let (poster, watcher) = (ctx.identity().await, ctx.identity().await);
+        let (post, mut posted) =
+            Session::connect(ctx.config(ClientKind::Cli, &poster, &ctx.broker))
+                .await
+                .unwrap();
+        // Longer than the restart takes, so only the restart can drop the
+        // session before the watcher comes back.
+        let watch_config = || {
+            ctx.config(ClientKind::Watch, &watcher, &ctx.broker)
+                .with_session_expiry(Duration::from_secs(300))
+        };
+        let (watch, mut watched) = Session::connect(watch_config()).await.unwrap();
+        let first = fyi("before going offline");
+        post.publish(first.clone()).await.unwrap();
+        assert_eq!(recorded_on_feed(&mut posted, &first.id).await, 1);
+        assert_eq!(next_feed_seq(&mut watched).await, 1);
+        // A clean DISCONNECT: the broker keeps the session and queues for it.
+        close(watch).await;
+
+        let mut sent = Vec::new();
+        for seq in 2..=4 {
+            let message = fyi(&format!("while offline {seq}"));
+            post.publish(message.clone()).await.unwrap();
+            assert_eq!(recorded_on_feed(&mut posted, &message.id).await, seq);
+            sent.push(message.id);
+        }
+        let note = dm(&watcher.identity.id, "psst");
+        post.publish(note.clone()).await.unwrap();
+        assert!(matches!(
+            delivered(&mut posted, &note.id).await,
+            OutboxState::Recorded { .. }
+        ));
+        close(post).await;
+
+        restart_emqx().await;
+        let client_id = format!("{}-watch", watcher.identity.id);
+        assert!(
+            !emqx_lists(&client_id).await,
+            "{client_id}'s session survived the restart, so this test would not reach replay"
+        );
+
+        let (watch, mut watched) = reconnect_after_restart(watch_config).await;
+        let inbox = ProtoStream::Inbox(watcher.identity.id.clone());
+        let caught_up = messages_until(&mut watched, |seen| {
+            seen.iter()
+                .filter(|m| m.stream == ProtoStream::Feed)
+                .count()
+                == sent.len()
+                && seen.iter().any(|m| m.stream == inbox)
+        })
+        .await;
+        let feed: Vec<_> = caught_up
+            .iter()
+            .filter(|m| m.stream == ProtoStream::Feed)
+            .map(|m| (m.seq, m.client.id.clone()))
+            .collect();
+        let want: Vec<_> = (2..=4).map(Seq).zip(sent).collect();
+        assert_eq!(feed, want);
+        let dms: Vec<_> = caught_up
+            .iter()
+            .filter(|m| m.stream == inbox)
+            .map(|m| (m.seq, m.client.id.clone()))
+            .collect();
+        assert_eq!(dms, [(Seq(1), note.id)]);
+        // Nothing comes twice.
+        let late = timeout(Duration::from_secs(2), async {
+            next_event(&mut watched, |event| match event {
+                ClientEvent::Message { message } => Some(message.clone()),
+                _ => None,
+            })
+            .await
+        })
+        .await;
+        assert!(late.is_err(), "a message was delivered twice: {late:?}");
+        close(watch).await;
+    })
+    .await;
+}
+
+// ---------------------------------------------------------------- helpers
+
+/// Sends CONNECT and one QoS 1 PUBLISH of `size` bytes over a raw socket,
+/// without rumqttc's client-side size check. Returns the DISCONNECT reason
+/// EMQX sends, or `None` if it closes without one.
+async fn raw_publish(
+    client_id: &str,
+    username: &str,
+    token: &str,
+    topic: &str,
+    size: usize,
+) -> Option<DisconnectReasonCode> {
+    let mut stream = TcpStream::connect(mqtt_addr()).await.unwrap();
+    stream
+        .write_all(&encode(connect_packet(client_id, username, token)))
+        .await
+        .unwrap();
+    let mut inbuf = BytesMut::new();
+    match read_packet(&mut stream, &mut inbuf).await {
+        Some(Packet::ConnAck(ack)) => assert_eq!(ack.code, ConnectReturnCode::Success),
+        other => panic!("expected CONNACK, got {other:?}"),
+    }
+    stream
+        .write_all(&encode(publish_packet(topic, vec![b'x'; size])))
+        .await
+        .unwrap();
+    match timeout(ACK_WAIT, read_packet(&mut stream, &mut inbuf))
+        .await
+        .expect("EMQX neither answered nor closed")
+    {
+        Some(Packet::Disconnect(d)) => Some(d.reason_code),
+        None => None,
+        Some(other) => panic!("expected DISCONNECT or close, got {other:?}"),
+    }
+}
+
+fn connect_packet(client_id: &str, username: &str, token: &str) -> Packet {
+    let connect = Connect {
+        keep_alive: 30,
+        client_id: client_id.to_owned(),
+        clean_start: true,
+        properties: None,
+    };
+    let login = Login {
+        username: username.to_owned(),
+        password: token.to_owned(),
+    };
+    Packet::Connect(connect, None, Some(login))
+}
+
+/// A QoS 1 PUBLISH with packet id 1.
+fn publish_packet(topic: &str, payload: Vec<u8>) -> Packet {
+    let mut publish = Publish::new(topic, QoS::AtLeastOnce, payload, None);
+    publish.pkid = 1;
+    Packet::Publish(publish)
+}
+
+/// Encodes without a size limit, so a packet over the broker's limit is
+/// still sent.
+fn encode(packet: Packet) -> BytesMut {
+    let mut out = BytesMut::new();
+    packet.write(&mut out, None).unwrap();
+    out
+}
+
+/// Makes aws-lc-rs the process-level rustls provider (ADR-0003). The
+/// workspace builds rustls with both the `ring` and `aws-lc-rs` features, so
+/// `ClientConfig::builder()` panics until a provider is installed.
+fn install_crypto_provider() {
+    // Err means a provider is already installed. Only this function installs
+    // one in this test binary, so it is aws-lc-rs from an earlier call.
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "an earlier call already installed aws-lc-rs"
+    )]
+    let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
+}
+
+/// Sends CONNECT and one QoS 1 PUBLISH of `hello` to `topic` as MQTT over
+/// WebSocket over TLS to `AGMEN_IT_MQTT_WSS`, trusting only the dev CA in
+/// `AGMEN_IT_WSS_CA`. Returns the PUBACK reason.
+async fn wss_publish(client_id: &str, username: &str, token: &str, topic: &str) -> PubAckReason {
+    let url = env("AGMEN_IT_MQTT_WSS");
+    let authority = url
+        .strip_prefix("wss://")
+        .and_then(|rest| rest.split('/').next())
+        .unwrap_or_else(|| panic!("AGMEN_IT_MQTT_WSS must be wss://host:port/path, got {url}"));
+    let (host, port) = authority.rsplit_once(':').unwrap();
+    install_crypto_provider();
+    let mut roots = RootCertStore::empty();
+    for cert in CertificateDer::pem_slice_iter(&std::fs::read(env("AGMEN_IT_WSS_CA")).unwrap()) {
+        roots.add(cert.unwrap()).unwrap();
+    }
+    let config = ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let tcp = TcpStream::connect((host, port.parse::<u16>().unwrap()))
+        .await
+        .unwrap();
+    let tls = TlsConnector::from(Arc::new(config))
+        .connect(ServerName::try_from(host.to_owned()).unwrap(), tcp)
+        .await
+        .unwrap();
+    let mut request = url.as_str().into_client_request().unwrap();
+    request
+        .headers_mut()
+        .insert("Sec-WebSocket-Protocol", HeaderValue::from_static("mqtt"));
+    let (mut ws, _) = async_tungstenite::tokio::client_async(request, tls)
+        .await
+        .unwrap();
+    let mut inbuf = BytesMut::new();
+    ws.send(Message::binary(
+        encode(connect_packet(client_id, username, token)).freeze(),
+    ))
+    .await
+    .unwrap();
+    match ws_read_packet(&mut ws, &mut inbuf).await {
+        Some(Packet::ConnAck(ack)) => assert_eq!(ack.code, ConnectReturnCode::Success),
+        other => panic!("expected CONNACK over WSS, got {other:?}"),
+    }
+    ws.send(Message::binary(
+        encode(publish_packet(topic, b"hello".to_vec())).freeze(),
+    ))
+    .await
+    .unwrap();
+    match ws_read_packet(&mut ws, &mut inbuf).await {
+        Some(Packet::PubAck(ack)) => ack.reason,
+        other => panic!("expected PUBACK over WSS, got {other:?}"),
+    }
+}
+
+/// Reads one packet from WebSocket binary frames; `None` when the stream
+/// ends first.
+async fn ws_read_packet(
+    ws: &mut (impl Stream<Item = Result<Message, WsError>> + Unpin),
+    buf: &mut BytesMut,
+) -> Option<Packet> {
+    loop {
+        match Packet::read(buf, None) {
+            Ok(packet) => return Some(packet),
+            Err(MqttBytesError::InsufficientBytes(_)) => {}
+            Err(e) => panic!("bad packet from EMQX: {e:?}"),
+        }
+        match timeout(ACK_WAIT, ws.next())
+            .await
+            .expect("no answer within 10 s")
+        {
+            Some(Ok(Message::Binary(data))) => buf.extend_from_slice(&data),
+            Some(Ok(_)) => {}
+            Some(Err(e)) => panic!("WebSocket error: {e:?}"),
+            None => return None,
+        }
+    }
+}
+
+/// Reads one packet; `None` when the socket closes first.
+async fn read_packet(stream: &mut TcpStream, buf: &mut BytesMut) -> Option<Packet> {
+    loop {
+        match Packet::read(buf, None) {
+            Ok(packet) => return Some(packet),
+            Err(MqttBytesError::InsufficientBytes(_)) => {}
+            Err(e) => panic!("bad packet from EMQX: {e:?}"),
+        }
+        if stream.read_buf(buf).await.unwrap() == 0 {
+            return None;
+        }
+    }
+}
+
+async fn restart_emqx() {
+    let compose = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../deploy/dev/compose.yaml");
+    let status = tokio::process::Command::new("docker")
+        .arg("compose")
+        .arg("-f")
+        .arg(&compose)
+        .args(["restart", "emqx"])
+        .status()
+        .await
+        .expect("run docker compose");
+    assert!(status.success(), "docker compose restart emqx: {status}");
+}
+
+/// Whether EMQX lists `client_id`, connected or holding its session.
+/// Retries once a second for up to 90 s while the REST API is not yet
+/// answering after a restart.
+async fn emqx_lists(client_id: &str) -> bool {
+    let url = format!("{}/clients/{client_id}", env("AGMEN_IT_EMQX_API"));
+    let (key, secret) = (
+        env("AGMEN_IT_EMQX_API_KEY"),
+        env("AGMEN_IT_EMQX_API_SECRET"),
+    );
+    let http = reqwest::Client::new();
+    let deadline = Instant::now() + Duration::from_secs(90);
+    loop {
+        let status = http
+            .get(&url)
+            .basic_auth(&key, Some(&secret))
+            .send()
+            .await
+            .map(|resp| resp.status());
+        match status {
+            Ok(reqwest::StatusCode::OK) => return true,
+            Ok(reqwest::StatusCode::NOT_FOUND) => return false,
+            _ if Instant::now() < deadline => sleep(Duration::from_secs(1)).await,
+            other => panic!("EMQX REST API not answering 90 s after restart: {other:?}"),
+        }
+    }
+}
+
+/// Retries `Session::connect` once a second for up to 90 s while EMQX
+/// starts and loads the JWKS. Each try gives up after the session's own
+/// 10 s connect wait.
+async fn reconnect_after_restart(config: impl Fn() -> SessionConfig) -> (Session, Events) {
+    let deadline = Instant::now() + Duration::from_secs(90);
+    loop {
+        match Session::connect(config()).await {
+            Ok(connected) => return connected,
+            Err(_) if Instant::now() < deadline => sleep(Duration::from_secs(1)).await,
+            Err(e) => panic!("EMQX not accepting connections 90 s after restart: {e:?}"),
+        }
+    }
 }

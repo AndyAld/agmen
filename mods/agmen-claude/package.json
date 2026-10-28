@@ -1,0 +1,16 @@
+{
+  "name": "agmen-claude",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Checks for the agmen Claude Code plugin: types, manifest and tests.",
+  "scripts": {
+    "pretypecheck": "bash scripts/claude-types.sh",
+    "typecheck": "tsc -p .",
+    "validate": "claude plugin validate .",
+    "test": "claude plugin test ."
+  },
+  "devDependencies": {
+    "typescript": "6.0.3"
+  }
+}

@@ -1,0 +1,78 @@
+{
+  "$schema": "https://zed.dev/schema/icon_themes/v0.3.0.json",
+  "name": "Material Icon Theme",
+  "author": "agmen test fixture",
+  "themes": [
+    {
+      "name": "Material Icon Theme",
+      "appearance": "dark",
+      "directory_icons": {
+        "collapsed": "./icons/folder.svg",
+        "expanded": "./icons/folder-open.svg"
+      },
+      "named_directory_icons": {
+        "src": {
+          "collapsed": "./icons/folder-src.svg",
+          "expanded": "./icons/folder-src-open.svg"
+        }
+      },
+      "file_stems": {
+        "Cargo.toml": "cargo",
+        "Cargo.lock": "lock",
+        "azure-pipelines.yml": "azure",
+        "Dockerfile": "docker",
+        "README.md": "readme"
+      },
+      "file_suffixes": {
+        "rs": "rust",
+        "toml": "toml",
+        "tar.gz": "tgz",
+        "gz": "gz",
+        "yml": "yaml",
+        "md": "markdown",
+        "xml": "xml"
+      },
+      "file_icons": {
+        "default": {
+          "path": "./icons/file.svg"
+        },
+        "rust": {
+          "path": "./icons/rust.svg"
+        },
+        "toml": {
+          "path": "./icons/toml.svg"
+        },
+        "lock": {
+          "path": "./icons/lock.svg"
+        },
+        "tgz": {
+          "path": "./icons/tgz.svg"
+        },
+        "gz": {
+          "path": "./icons/gz.svg"
+        },
+        "cargo": {
+          "path": "./icons/cargo.svg"
+        },
+        "docker": {
+          "path": "./icons/docker.svg"
+        },
+        "azure": {
+          "path": "./icons/azure.svg"
+        },
+        "yaml": {
+          "path": "./icons/yaml.svg"
+        },
+        "markdown": {
+          "path": "./icons/markdown.svg"
+        },
+        "readme": {
+          "path": "./icons/readme.svg"
+        },
+        "xml": {
+          "path": "./icons/xml.svg"
+        }
+      }
+    }
+  ]
+}

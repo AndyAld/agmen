@@ -1,0 +1,7 @@
+# Keep the build context to what cargo needs.
+target/
+**/node_modules/
+.git/
+deploy/dev/.secrets/
+.env
+.env.*

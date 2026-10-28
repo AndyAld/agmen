@@ -15,17 +15,9 @@ spec:
       env:
         - name: CARGO_TERM_COLOR
           value: never
-        # Spike S1 restarts the broker with docker compose; the CLI comes from
-        # the docker container through the shared volume.
-        - name: DOCKER_HOST
-          value: unix:///var/run/docker.sock
-        - name: PATH
-          value: /var/run/ci-bin:/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-        - name: DOCKER_CONFIG
-          value: /var/run/ci-docker
       volumeMounts:
-        - name: docker-run
-          mountPath: /var/run
+        - name: dind-socket
+          mountPath: /var/run/dind
       resources:
         requests:
           memory: "8000Mi"
@@ -34,15 +26,20 @@ spec:
           memory: "8000Mi"
           cpu: "6000m"
     # Runs the EMQX, Postgres and Toxiproxy dev stack for integration tests.
+    # dockerd also listens on a socket shared with the rust container, so
+    # the it-restart tests there can run docker compose restart emqx.
     - name: docker
       image: docker:29.9.2-dind
       command: ["dockerd"]
+      args:
+        - --host=unix:///var/run/docker.sock
+        - --host=unix:///var/run/dind/docker.sock
       tty: true
+      volumeMounts:
+        - name: dind-socket
+          mountPath: /var/run/dind
       securityContext:
         privileged: true
-      volumeMounts:
-        - name: docker-run
-          mountPath: /var/run
       resources:
         requests:
           memory: "3000Mi"
@@ -50,6 +47,18 @@ spec:
         limits:
           memory: "3000Mi"
           cpu: "2000m"
+    # Claude Code plugin checks (docs/adr/0006-claude-code-plugin.md).
+    - name: node
+      image: node:24.22.1-bookworm-slim
+      command: ["sleep"]
+      args: ["infinity"]
+      resources:
+        requests:
+          memory: "1000Mi"
+          cpu: "1000m"
+        limits:
+          memory: "1000Mi"
+          cpu: "1000m"
   volumes:
-    - name: docker-run
+    - name: dind-socket
       emptyDir: {}

@@ -8,3 +8,15 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+jiff = { version = "0.2.38", default-features = false, features = ["std", "serde"] }
+schemars = { version = "1.2.3", features = ["jiff02"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+thiserror = "2.0.21"
+# no-serde-warnings: ts-rs warns on deserialize_with, which does not change the TS type.
+ts-rs = { version = "12.0.1", features = ["jiff-impl", "no-serde-warnings"] }
+
+[dev-dependencies]
+anyhow = "1.0.104"
