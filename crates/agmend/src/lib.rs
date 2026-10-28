@@ -19,6 +19,7 @@ mod budget;
 mod console;
 mod feed;
 mod git;
+pub mod host;
 mod hub;
 mod identities;
 mod listener;
@@ -47,6 +48,7 @@ use crate::login::Credentials;
 /// Shared context for all local API connections.
 #[derive(Debug)]
 pub(crate) struct Core {
+    host: Arc<host::Host>,
     console: Arc<Console>,
     identities: Arc<Identities>,
     state_dir: PathBuf,
@@ -123,6 +125,7 @@ pub enum AgmendError {
 /// Where agmend listens and whose login it reads.
 #[derive(Debug, Clone)]
 pub struct Config {
+    host_log: PathBuf,
     socket: PathBuf,
     login_file: PathBuf,
     tokens: TokenStore,
@@ -140,8 +143,10 @@ impl Config {
         login_file: impl Into<PathBuf>,
         tokens: TokenStore,
     ) -> Self {
+        let socket = socket.into();
         Self {
-            socket: socket.into(),
+            host_log: socket.with_file_name("hub.log"),
+            socket,
             login_file: login_file.into(),
             tokens,
             roster_every: ROSTER_EVERY,
@@ -159,11 +164,14 @@ impl Config {
     ///
     /// [`AgmendError::Path`] when `HOME` is not set.
     pub fn from_env() -> Result<Self, AgmendError> {
-        let config = Self::new(
+        let mut config = Self::new(
             agmen_client::agmend_socket()?,
             agmen_client::login_file()?,
             TokenStore::from_env(),
         );
+        if let Some(home) = std::env::home_dir() {
+            config.host_log = home.join("Library/Logs/agmen/hub.log");
+        }
         // Spec 3.5 and the desktop's settings use ~/.config/agmen on every
         // platform, not agmen-client's config folder.
         Ok(match std::env::home_dir() {
@@ -265,6 +273,7 @@ impl Agmend {
             bound,
             opening,
             core: Arc::new(Core {
+                host: host::Host::new(&config.socket.with_file_name(""), config.host_log),
                 state_dir: config.socket.with_file_name(""),
                 schema_scan: Arc::new(Semaphore::new(1)),
                 shutdown: tokio::sync::Notify::new(),
@@ -301,6 +310,9 @@ impl Agmend {
             return;
         }
         let slots = Arc::new(Semaphore::new(MAX_CONNECTIONS));
+        let hosting = self.core.host.clone().supervise();
+        tokio::pin!(hosting);
+        let mut host_stopped = false;
         let mut tasks = JoinSet::new();
         let identities = self.core.identities.clone();
         tasks.spawn(async move {
@@ -312,6 +324,7 @@ impl Agmend {
             let accepted = tokio::select! {
                 () = &mut shutdown => break,
                 () = self.core.shutdown.notified() => break,
+                () = &mut hosting => { host_stopped = true; break; }
                 accepted = self.bound.listener.accept() => accepted,
             };
             let stream = match accepted {
@@ -341,5 +354,9 @@ impl Agmend {
         tasks.abort_all();
         while tasks.join_next().await.is_some() {}
         self.core.identities.shutdown().await;
+        self.core.host.stop();
+        if !host_stopped {
+            hosting.await;
+        }
     }
 }

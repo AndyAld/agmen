@@ -85,6 +85,47 @@ fn neither_gives_no_project() {
 }
 
 #[test]
+fn most_recent_project_opens_when_last_project_is_absent() {
+    let outside = tempfile::tempdir().unwrap();
+    let wt = joined_worktree();
+    let settings = outside.path().join("settings.toml");
+    DesktopSettings {
+        recent_projects: vec![wt.path().to_owned()],
+        ..DesktopSettings::default()
+    }
+    .save(&settings)
+    .unwrap();
+    let (choice, root) = choose_project(outside.path(), Some(&settings));
+    assert_eq!(
+        choice,
+        ProjectChoice::Project("projectcwd".parse().unwrap())
+    );
+    assert_eq!(
+        root.unwrap().canonicalize().unwrap(),
+        wt.path().canonicalize().unwrap()
+    );
+}
+
+#[test]
+fn last_project_restores_its_recent_checkout() {
+    let outside = tempfile::tempdir().unwrap();
+    let wt = joined_worktree();
+    let settings = outside.path().join("settings.toml");
+    DesktopSettings {
+        last_project: Some("projectcwd".parse().unwrap()),
+        recent_projects: vec![wt.path().to_owned()],
+        ..DesktopSettings::default()
+    }
+    .save(&settings)
+    .unwrap();
+    let (_, root) = choose_project(outside.path(), Some(&settings));
+    assert_eq!(
+        root.unwrap().canonicalize().unwrap(),
+        wt.path().canonicalize().unwrap()
+    );
+}
+
+#[test]
 fn an_identity_agmen_may_not_use_says_why() {
     // A tracked identity file fails the trust test (agmen-client's
     // find_identity); the window says so instead of opening another project.

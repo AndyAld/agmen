@@ -17,7 +17,7 @@ use super::Workspace;
 use super::components::{Button, ButtonStyle, Color, Label, LabelSize, Modal};
 use super::tokens::{LAUNCH_STATE_WIDTH, SPACE_10, SPACE_16, TITLE_BAR_HEIGHT};
 use crate::appearance::{Appearance, DesktopSettings};
-use crate::backend::{AgmendBackend, Backend, BackendError, BackendHandle};
+use crate::backend::{AgmendBackend, Backend, BackendError, BackendHandle, HostSocket, HostState};
 use crate::bundle::Bundle;
 use crate::project::ProjectChoice;
 use crate::service::{self, Check, Observation};
@@ -51,6 +51,7 @@ pub(crate) enum LiveState {
     NoProject,
     /// Review fix 2: the connect runs off the main thread; Retry waits.
     Connecting,
+    HostStarting,
     /// Nothing answers at agmend's socket.
     AgmendDown,
     NeedsService(Check),
@@ -67,6 +68,7 @@ impl LiveState {
         match self {
             Self::NoProject => "live:no-project",
             Self::Connecting => "live:connecting",
+            Self::HostStarting => "live:host-starting",
             Self::AgmendDown => "live:agmend-down",
             Self::NeedsService(_) => "live:needs-service",
             Self::Refused(_) => "live:refused",
@@ -110,6 +112,13 @@ impl Wording {
                     ProjectChoice::Project(id) => format!("Opening {id}."),
                     ProjectChoice::None { .. } => "Opening the project.".into(),
                 },
+                command: None,
+                note: None,
+                retry: false,
+            },
+            LiveState::HostStarting => Self {
+                heading: "Starting your hub…".into(),
+                body: "Waiting up to 30 seconds for your hub to start.".into(),
                 command: None,
                 note: None,
                 retry: false,
@@ -193,6 +202,7 @@ impl LiveRoot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        cx.set_global(HostSocket(launch.socket.clone()));
         let stored = launch
             .settings
             .as_deref()
@@ -266,7 +276,12 @@ impl LiveRoot {
     /// workers, and gpui's test scheduler runs background tasks on the
     /// test thread, where the window could never draw Connecting first.
     fn connect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if matches!(self.launch.project, ProjectChoice::None { .. }) && self.bundle.is_none() {
+        let hosting = self.launch.socket.with_file_name("host.toml").exists();
+        let startup_deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        if matches!(self.launch.project, ProjectChoice::None { .. })
+            && self.bundle.is_none()
+            && !hosting
+        {
             self.state = LiveState::NoProject;
             return;
         }
@@ -279,49 +294,172 @@ impl LiveRoot {
             .name("agmend-connect".into())
             .spawn(move || {
                 // The window closed meanwhile; the backend drops here.
-                let connected = (|| {
-                    let mut observed = match bundle.as_ref() {
-                        Some(bundle) => service::start(bundle, &socket, &mut service::run),
-                        None => service::check(None, &socket, &mut service::run),
-                    }
-                    .map_err(|error| BackendError::Agmend(error.to_string()))?;
-                    if !observed.check.can_connect() || (bundle.is_some() && !observed.running) {
-                        return Ok((observed, None));
-                    }
-                    let backend = match project {
-                        ProjectChoice::Project(project) => {
-                            match AgmendBackend::connect(&socket, project.as_str(), root.as_deref())
-                            {
-                                Ok(backend) => Some(backend),
-                                Err(BackendError::NotConnected) if bundle.is_some() => {
-                                    observed.running = false;
-                                    if observed.check == Check::Ready {
-                                        observed.check = Check::Stopped;
-                                    }
-                                    None
-                                }
-                                Err(error) => return Err(error),
-                            }
-                        }
-                        ProjectChoice::None { .. } => None,
-                    };
-                    Ok((observed, backend))
-                })();
+                let connected = match bundle.as_ref() {
+                    Some(bundle) => service::start(bundle, &socket, &mut service::run),
+                    None => service::check(None, &socket, &mut service::run),
+                }
+                .map_err(|error| BackendError::Agmend(error.to_string()))
+                .and_then(|observed| {
+                    Self::connect_observed(
+                        &socket,
+                        &project,
+                        root.as_deref(),
+                        bundle.is_some(),
+                        hosting.then_some(startup_deadline),
+                        observed,
+                    )
+                });
                 drop(done.send(connected));
             });
         if let Err(err) = spawned {
             self.state = LiveState::Refused(format!("starting the agmend link failed: {err}"));
             return;
         }
-        self.state = LiveState::Connecting;
+        self.state = if hosting {
+            LiveState::HostStarting
+        } else {
+            LiveState::Connecting
+        };
         let task = cx.spawn_in(window, async move |this, cx| {
-            let result = result
-                .await
-                .unwrap_or_else(|_| Err(BackendError::Agmend("the agmend connect stopped".into())));
+            let result = if hosting {
+                let timeout = cx
+                    .background_executor()
+                    .timer(startup_deadline.saturating_duration_since(std::time::Instant::now()));
+                futures::pin_mut!(result, timeout);
+                match futures::future::select(result, timeout).await {
+                    futures::future::Either::Left((result, _)) => result.unwrap_or_else(|_| {
+                        Err(BackendError::Agmend("the agmend connect stopped".into()))
+                    }),
+                    futures::future::Either::Right(_) => Err(BackendError::Agmend(
+                        "Your hub did not become ready within 30 seconds.".into(),
+                    )),
+                }
+            } else {
+                result.await.unwrap_or_else(|_| {
+                    Err(BackendError::Agmend("the agmend connect stopped".into()))
+                })
+            };
             // The window closed meanwhile; the backend drops with the result.
             drop(this.update_in(cx, |this, window, cx| this.connected(result, window, cx)));
         });
         self._connecting = Some(task);
+    }
+
+    /// Connects once agmend's service is checked or started. Hosting waits
+    /// up to `hosting` for the hub to answer.
+    fn connect_observed(
+        socket: &std::path::Path,
+        project: &ProjectChoice,
+        root: Option<&std::path::Path>,
+        bundled: bool,
+        hosting: Option<std::time::Instant>,
+        mut observed: Observation,
+    ) -> Result<(Observation, Option<AgmendBackend>), BackendError> {
+        // A service that needs setup cannot start the hub, so its screen
+        // comes before the hub wait.
+        if !observed.check.can_connect() || (bundled && !observed.running) {
+            return Ok((observed, None));
+        }
+        if let Some(deadline) = hosting {
+            return Self::connect_host(socket, project, root, observed, deadline);
+        }
+        let backend = match project {
+            ProjectChoice::Project(project) => {
+                match AgmendBackend::connect(socket, project.as_str(), root) {
+                    Ok(backend) => Some(backend),
+                    Err(BackendError::NotConnected) if bundled => {
+                        observed.running = false;
+                        if observed.check == Check::Ready {
+                            observed.check = Check::Stopped;
+                        }
+                        None
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            ProjectChoice::None { .. } => None,
+        };
+        Ok((observed, backend))
+    }
+
+    fn connect_host(
+        socket: &std::path::Path,
+        project: &ProjectChoice,
+        root: Option<&std::path::Path>,
+        observed: Observation,
+        deadline: std::time::Instant,
+    ) -> Result<(Observation, Option<AgmendBackend>), BackendError> {
+        use std::time::{Duration, Instant};
+        let mut last_error = "Your hub did not start within 30 seconds.".to_owned();
+        let health = reqwest::blocking::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|error| {
+                BackendError::Agmend(format!("Building hub health client failed: {error}"))
+            })?;
+        for _ in 0..120 {
+            let now = Instant::now();
+            if now >= deadline {
+                break;
+            }
+            match AgmendBackend::host_status_before(
+                socket,
+                false,
+                deadline.min(now + Duration::from_secs(2)),
+            ) {
+                Ok(status) if status.configured && status.state == HostState::Failed => {
+                    return Err(BackendError::Agmend(
+                        status
+                            .last_error
+                            .unwrap_or_else(|| "Your hub failed to start.".into()),
+                    ));
+                }
+                Ok(status) if status.configured && status.state == HostState::Running => {
+                    let connected = match project {
+                        ProjectChoice::Project(project) => {
+                            AgmendBackend::connect_host(socket, project.as_str(), root, deadline)
+                                .map(Some)
+                        }
+                        ProjectChoice::None { .. } => {
+                            let url = status
+                                .public_url
+                                .as_deref()
+                                .and_then(|url| reqwest::Url::parse(url).ok())
+                                .and_then(|url| url.join("healthz").ok())
+                                .ok_or_else(|| {
+                                    BackendError::Agmend(
+                                        "Host configuration has no valid public URL.".into(),
+                                    )
+                                })?;
+                            health
+                                .get(url)
+                                .timeout(
+                                    Duration::from_secs(2)
+                                        .min(deadline.saturating_duration_since(Instant::now())),
+                                )
+                                .send()
+                                .and_then(reqwest::blocking::Response::error_for_status)
+                                .map(|_| None)
+                                .map_err(|error| {
+                                    BackendError::Agmend(format!("Your hub is not ready: {error}"))
+                                })
+                        }
+                    };
+                    match connected {
+                        Ok(backend) => return Ok((observed, backend)),
+                        Err(error) => last_error = error.to_string(),
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => last_error = error.to_string(),
+            }
+            std::thread::sleep(
+                Duration::from_millis(250).min(deadline.saturating_duration_since(Instant::now())),
+            );
+        }
+        Err(BackendError::Agmend(format!(
+            "Your hub did not become ready within 30 seconds: {last_error}"
+        )))
     }
 
     /// Opens the workspace on the connected backend, or shows why not.
@@ -429,10 +567,45 @@ impl LiveRoot {
 
     /// Retry: tries agmend again, unless a try is under way.
     fn retry(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if matches!(self.state, LiveState::Connecting) {
+        if matches!(self.state, LiveState::Connecting | LiveState::HostStarting) {
             return;
         }
         self.connect(window, cx);
+        cx.notify();
+    }
+
+    fn restart_host(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self._connecting.is_some() {
+            return;
+        }
+        let socket = self.launch.socket.clone();
+        let (done, result) = futures::channel::oneshot::channel();
+        let spawned = std::thread::Builder::new()
+            .name("host-restart".into())
+            .spawn(move || {
+                drop(done.send(AgmendBackend::host_status(&socket, true)));
+            });
+        if let Err(error) = spawned {
+            self.state = LiveState::Refused(format!("Restarting your hub failed: {error}"));
+            cx.notify();
+            return;
+        }
+        self.state = LiveState::HostStarting;
+        self._connecting = Some(cx.spawn_in(window, async move |this, cx| {
+            let result = result.await;
+            drop(this.update_in(cx, |this, window, cx| {
+                this._connecting = None;
+                match result {
+                    Ok(Ok(_)) => this.connect(window, cx),
+                    Ok(Err(error)) => this.state = LiveState::Refused(error.to_string()),
+                    Err(error) => {
+                        this.state =
+                            LiveState::Refused(format!("Restarting your hub stopped: {error}"))
+                    }
+                }
+                cx.notify();
+            }));
+        }));
         cx.notify();
     }
 
@@ -498,7 +671,7 @@ impl LiveRoot {
         if self.quit_busy || self.quit_choice.is_some() {
             return;
         }
-        if matches!(self.state, LiveState::Connecting) {
+        if matches!(self.state, LiveState::Connecting | LiveState::HostStarting) {
             self.quit_requested = true;
             return;
         }
@@ -709,6 +882,11 @@ impl LiveRoot {
                         .on_click(cx.listener(|this, _, window, cx| this.retry(window, cx))),
                 )
             })
+            .when(matches!(self.state, LiveState::Refused(_)) && self.launch.socket.with_file_name("host.toml").exists(), |this| {
+                this.child(Button::new("live:restart-host", "Restart hub")
+                    .style(ButtonStyle::Primary)
+                    .on_click(cx.listener(|this, _, window, cx| this.restart_host(window, cx))))
+            })
             .when_some(self.cli_install.clone(), |this, view| this.child(view))
     }
 }
@@ -780,7 +958,12 @@ impl Render for LiveRoot {
         let dialog = self.quit_dialog(cx);
         window.set_rem_size(cx.global::<Appearance>().fonts.ui_size);
         let shell = self.shell(cx);
-        if self.rejected.is_some() {
+        let host_failure = matches!(self.state, LiveState::Refused(_))
+            && self.launch.socket.with_file_name("host.toml").exists();
+        if self.rejected.is_some()
+            && !matches!(self.state, LiveState::HostStarting)
+            && !host_failure
+        {
             let message = self.rejected_message(cx);
             return shell
                 .when_some(

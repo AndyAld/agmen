@@ -164,6 +164,8 @@ pub(crate) fn console_with_checkout(messages: Vec<StampedEnvelope>) -> ConsoleSn
 
 #[derive(Debug, Default)]
 pub(crate) struct FakeState {
+    pub(crate) host_status: Option<Value>,
+    pub(crate) host_restarts: usize,
     pub(crate) ready_calls: usize,
     pub(crate) shutdown_calls: usize,
     pub(crate) hello_answer: Option<Value>,
@@ -355,6 +357,25 @@ fn hello_response(id: u64, stream: &UnixStream, state: &Mutex<FakeState>) -> Opt
     })
 }
 
+fn host_response(id: u64, method: &str, state: &Mutex<FakeState>) -> Response {
+    let mut state = state.lock().unwrap();
+    if method == "host_restart" {
+        state.host_restarts += 1;
+        if let Some(status) = &mut state.host_status {
+            status["state"] = json!("stopped");
+            status["last_error"] = Value::Null;
+        }
+    }
+    Response::ok(
+        id,
+        state.host_status.clone().unwrap_or_else(|| {
+            json!({
+                "configured": false, "state": "stopped", "last_error": null, "public_url": null
+            })
+        }),
+    )
+}
+
 fn serve(mut stream: UnixStream, state: &Mutex<FakeState>) -> Option<()> {
     while let Ok(request) = frame::read::<Request>(&mut stream) {
         if request.method == "shutdown" {
@@ -362,6 +383,7 @@ fn serve(mut stream: UnixStream, state: &Mutex<FakeState>) -> Option<()> {
         }
         let id = request.id;
         let answer = match request.method.as_str() {
+            method @ ("host_status" | "host_restart") => host_response(id, method, state),
             "hello" => hello_response(id, &stream, state)?,
             "ready" => {
                 let mut state = state.lock().unwrap();

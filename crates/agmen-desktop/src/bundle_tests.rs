@@ -70,3 +70,16 @@ fn bundle_detection() {
     )));
     assert!(!in_app_bundle(Path::new("agmen-desktop")));
 }
+
+#[test]
+fn bundle_scripts_build_sign_and_check_the_host_hub() {
+    let build = include_str!("../../../scripts/macos-app.sh");
+    let inspect = include_str!("../../../scripts/test-macos-app.sh");
+    assert!(build.contains("-p agmen-cli -p agmen-hub"));
+    assert!(build.contains("for package in agmend agmen-cli agmen-hub; do"));
+    assert!(build.contains("for binary in agmen-desktop agmend agmen agmen-hub; do"));
+    assert!(build.contains("for binary in agmend agmen agmen-hub; do"));
+    assert!(inspect.contains("for binary in agmen-desktop agmend agmen agmen-hub; do"));
+    assert!(inspect.contains("for binary in agmend agmen agmen-hub; do"));
+    assert!(inspect.contains("\"$app/Contents/MacOS/agmen-hub\" --help"));
+}

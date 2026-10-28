@@ -23,16 +23,15 @@ pub(crate) enum ProjectChoice {
 /// use gives `None` with its reason rather than some other project, so the
 /// person sees why their folder did not open.
 ///
-/// Task 8: with the project comes the checkout root when the folder named
-/// it, which agmend reads worktrees and git facts from; a project from the
-/// settings has none.
+/// The checkout root lets agmend read worktrees and git facts. Saved
+/// projects recover it from their matching recent folder when possible.
 pub(crate) fn choose_project(
     cwd: &Path,
     settings: Option<&Path>,
 ) -> (ProjectChoice, Option<PathBuf>) {
     let choice = choose_folder(cwd);
     if choice.0 == (ProjectChoice::None { why: None }) {
-        (from_settings(settings), None)
+        choose_saved_project(settings)
     } else {
         choice
     }
@@ -61,22 +60,39 @@ pub(crate) fn choose_folder(cwd: &Path) -> (ProjectChoice, Option<PathBuf>) {
     (ProjectChoice::None { why: None }, None)
 }
 
-fn from_settings(settings: Option<&Path>) -> ProjectChoice {
+/// Restores the last project and its checkout, else the newest joined recent.
+pub(crate) fn choose_saved_project(settings: Option<&Path>) -> (ProjectChoice, Option<PathBuf>) {
     let Some(settings) = settings else {
-        return ProjectChoice::None { why: None };
+        return (ProjectChoice::None { why: None }, None);
     };
-    match DesktopSettings::load(settings) {
-        Ok(DesktopSettings {
-            last_project: Some(project),
-            ..
-        }) => ProjectChoice::Project(project),
-        Ok(DesktopSettings {
-            last_project: None, ..
-        }) => ProjectChoice::None { why: None },
-        Err(err) => ProjectChoice::None {
-            why: Some(err.to_string()),
-        },
+    let stored = match DesktopSettings::load(settings) {
+        Ok(stored) => stored,
+        Err(err) => {
+            return (
+                ProjectChoice::None {
+                    why: Some(err.to_string()),
+                },
+                None,
+            );
+        }
+    };
+    for folder in &stored.recent_projects {
+        let (choice, root) = choose_project(folder, None);
+        if let ProjectChoice::Project(project) = &choice
+            && stored
+                .last_project
+                .as_ref()
+                .is_none_or(|last| last == project)
+        {
+            return (choice, root);
+        }
     }
+    (
+        stored
+            .last_project
+            .map_or(ProjectChoice::None { why: None }, ProjectChoice::Project),
+        None,
+    )
 }
 
 #[cfg(test)]

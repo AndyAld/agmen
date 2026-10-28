@@ -403,6 +403,8 @@ async fn agent_cannot_mint() {
         "console_snapshot",
         "chat_history",
         "file_text",
+        "host_status",
+        "host_restart",
     ] {
         assert_eq!(
             error(

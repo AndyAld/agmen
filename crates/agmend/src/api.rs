@@ -12,7 +12,7 @@ use tokio::net::UnixStream;
 use tokio::net::unix::OwnedWriteHalf;
 
 use crate::Core;
-use crate::console::{Console, bad_request, params};
+use crate::console::{bad_request, params};
 use crate::identities::{Caller, forbidden, unauthorized};
 use agmen_proto::{ClientEnvelope, ProjectId};
 
@@ -50,7 +50,7 @@ pub(crate) async fn serve(stream: UnixStream, core: Arc<Core>) {
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
         let bounded = matches!(
             request.method.as_str(),
-            "inbox" | "state" | "pending" | "ready" | "shutdown"
+            "inbox" | "state" | "pending" | "ready" | "shutdown" | "host_status" | "host_restart"
         );
         let mut shutting_down = false;
         let outcome = if let Some(refusal) = refuse(&request, greeted) {
@@ -114,7 +114,7 @@ pub(crate) async fn serve(stream: UnixStream, core: Arc<Core>) {
                     }
                     return;
                 }
-                Ok(Caller::Human) => call(console, &request.method, request.params).await,
+                Ok(Caller::Human) => call(&core, &request.method, request.params).await,
             }
         };
         let written = if bounded {
@@ -241,7 +241,8 @@ async fn identity_call(
             core.identities.post(caller, envelope).await
         }
         "shutdown" | "hello" | "ready" | "whoami" | "console_watch" | "console_snapshot"
-        | "chat_history" | "file_text" | "identity_mint" | "identity_list" => Err(forbidden()),
+        | "chat_history" | "file_text" | "identity_mint" | "identity_list" | "host_status"
+        | "host_restart" => Err(forbidden()),
         other => Err(ApiError {
             code: ErrorCode::NotFound,
             message: format!("agmend has no method {other:?}"),
@@ -268,8 +269,15 @@ fn hello(raw: Value) -> Result<Value, ApiError> {
     }
 }
 
-async fn call(console: &Console, method: &str, raw: Value) -> Result<Value, ApiError> {
+async fn call(core: &Core, method: &str, raw: Value) -> Result<Value, ApiError> {
+    let console = &core.console;
     match method {
+        "host_status" => params::<Shutdown>(raw).map(|_| core.host.status()),
+        "host_restart" => params::<Shutdown>(raw).and_then(|_| {
+            core.host
+                .restart()
+                .map_err(|error| bad_request(format!("{error:#}")))
+        }),
         "whoami" => console.whoami().await,
         "console_snapshot" => console.snapshot(raw).await,
         "chat_history" => console.history(raw).await,

@@ -43,6 +43,7 @@ use agmen_proto::{
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use futures::channel::oneshot;
 use gpui::SharedString;
+use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
@@ -75,6 +76,27 @@ const BACKOFF: Timing = Timing {
     first: Duration::from_secs(1),
     cap: Duration::from_secs(30),
 };
+
+/// The daemon socket shared with Settings by the live window.
+#[derive(Debug, Clone)]
+pub(crate) struct HostSocket(pub(crate) PathBuf);
+impl gpui::Global for HostSocket {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum HostState {
+    Running,
+    Stopped,
+    Failed,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct HostStatus {
+    pub(crate) configured: bool,
+    pub(crate) state: HostState,
+    pub(crate) last_error: Option<String>,
+    pub(crate) public_url: Option<String>,
+}
 
 /// The live backend. Dropping it ends the watch and both threads.
 #[derive(Debug)]
@@ -463,6 +485,31 @@ impl AgmendBackend {
             };
         Ok((hello, ready))
     }
+
+    /// Reads host status, or requests a restart, without contacting the hub.
+    pub(crate) fn host_status(socket: &Path, restart: bool) -> Result<HostStatus, BackendError> {
+        Self::host_status_before(
+            socket,
+            restart,
+            std::time::Instant::now() + Duration::from_secs(2),
+        )
+    }
+
+    pub(crate) fn host_status_before(
+        socket: &Path,
+        restart: bool,
+        deadline: std::time::Instant,
+    ) -> Result<HostStatus, BackendError> {
+        let mut conn = Conn::open_until(socket, deadline)?;
+        parse(conn.call(
+            if restart {
+                "host_restart"
+            } else {
+                "host_status"
+            },
+            json!({}),
+        )?)
+    }
     pub(crate) fn identity(&self) -> &HelloAnswer {
         &self.hello
     }
@@ -492,7 +539,21 @@ impl AgmendBackend {
         root: Option<&Path>,
         timing: Timing,
     ) -> Result<Self, BackendError> {
-        let mut conn = Conn::open(socket)?;
+        Self::connect_before(socket, project, root, timing, None)
+    }
+
+    /// Bounds the first snapshot while a locally hosted hub is starting.
+    fn connect_before(
+        socket: &Path,
+        project: &str,
+        root: Option<&Path>,
+        timing: Timing,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<Self, BackendError> {
+        let mut conn = match deadline {
+            Some(deadline) => Conn::open_until(socket, deadline)?,
+            None => Conn::open(socket)?,
+        };
         let hello = conn
             .hello
             .clone()
@@ -510,7 +571,7 @@ impl AgmendBackend {
             Ok(value) => parse::<ConsoleSnapshot>(value)?,
             // agmend is up but the hub is not: open on who the person is,
             // and the watch fills the chat in once the hub is back.
-            Err(Fail::Refused(error)) if error.code == ErrorCode::Hub => {
+            Err(Fail::Refused(error)) if error.code == ErrorCode::Hub && deadline.is_none() => {
                 let me = parse::<Me>(conn.call("whoami", Value::Null)?)?;
                 ConsoleSnapshot {
                     project: project.to_owned(),
@@ -556,6 +617,7 @@ impl AgmendBackend {
             BackendError::Agmend(format!("starting the agmend link failed: {err}"))
         };
         let requests = shared.clone();
+        conn.clear_deadline()?;
         std::thread::Builder::new()
             .name("agmend-requests".into())
             .spawn(move || serve_jobs(&requests, &queue, Some(conn)))
@@ -573,6 +635,15 @@ impl AgmendBackend {
             jobs,
             _stop: stop,
         })
+    }
+
+    pub(crate) fn connect_host(
+        socket: &Path,
+        project: &str,
+        root: Option<&Path>,
+        deadline: std::time::Instant,
+    ) -> Result<Self, BackendError> {
+        Self::connect_before(socket, project, root, BACKOFF, Some(deadline))
     }
 }
 
@@ -1100,6 +1171,7 @@ struct Conn {
     ready: Option<ReadyAnswer>,
     stream: UnixStream,
     next_id: u64,
+    deadline: Option<std::time::Instant>,
 }
 
 /// Why a request failed.
@@ -1131,7 +1203,25 @@ fn io_failed(err: std::io::Error) -> BackendError {
 impl Conn {
     /// Checks the socket is the person's own, connects and says `hello`.
     fn open(socket: &Path) -> Result<Self, BackendError> {
+        let mut conn = Self::open_until(socket, std::time::Instant::now() + REQUEST_TIMEOUT)?;
+        conn.clear_deadline()?;
+        Ok(conn)
+    }
+
+    /// Ends a startup deadline: later calls get REQUEST_TIMEOUT each.
+    fn clear_deadline(&mut self) -> Result<(), BackendError> {
+        self.deadline = None;
+        self.stream
+            .set_read_timeout(Some(REQUEST_TIMEOUT))
+            .map_err(io_failed)?;
+        self.stream
+            .set_write_timeout(Some(REQUEST_TIMEOUT))
+            .map_err(io_failed)
+    }
+
+    fn open_until(socket: &Path, deadline: std::time::Instant) -> Result<Self, BackendError> {
         let mut conn = Self::connect(socket)?;
+        conn.deadline = Some(deadline);
         let hello: HelloAnswer = parse(conn.call("hello", json!({ "api": API }))?)?;
         if hello.api != API {
             return Err(BackendError::Agmend(format!(
@@ -1170,14 +1260,38 @@ impl Conn {
             next_id: 1,
             hello: None,
             ready: None,
+            deadline: None,
         })
     }
 
+    /// Without a deadline the socket keeps the timeouts last set on it:
+    /// REQUEST_TIMEOUT from `connect`, or a shorter bound from `probe`.
     fn call(&mut self, method: &str, params: Value) -> Result<Value, Fail> {
+        if let Some(deadline) = self.deadline {
+            let timeout = deadline.saturating_duration_since(std::time::Instant::now());
+            if timeout.is_zero() {
+                return Err(Fail::Lost("agmend request deadline expired".into()));
+            }
+            self.stream
+                .set_read_timeout(Some(timeout))
+                .map_err(|error| Fail::Lost(error.to_string()))?;
+            self.stream
+                .set_write_timeout(Some(timeout))
+                .map_err(|error| Fail::Lost(error.to_string()))?;
+        }
         let id = self.next_id;
         self.next_id += 1;
         let broke = |err: frame::FrameError| Fail::Lost(format!("talking to agmend failed: {err}"));
         frame::write(&mut self.stream, &Request::new(id, method, params)).map_err(broke)?;
+        if let Some(deadline) = self.deadline {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(Fail::Lost("agmend request deadline expired".into()));
+            }
+            self.stream
+                .set_read_timeout(Some(remaining))
+                .map_err(|error| Fail::Lost(error.to_string()))?;
+        }
         let response: Response = frame::read(&mut self.stream).map_err(broke)?;
         if response.id != id {
             return Err(Fail::Lost(format!(
