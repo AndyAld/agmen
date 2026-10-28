@@ -389,6 +389,62 @@ enum Job {
 }
 
 impl AgmendBackend {
+    pub(crate) fn shutdown_owned(
+        socket: &Path,
+        exe: &Path,
+        bound: Duration,
+    ) -> Result<(), BackendError> {
+        let deadline = std::time::Instant::now() + bound.min(Duration::from_secs(15));
+        let mut conn = match Conn::connect(socket) {
+            Ok(conn) => conn,
+            Err(BackendError::NotConnected) => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        let timeout = bound
+            .min(Duration::from_secs(2))
+            .max(Duration::from_millis(1));
+        conn.stream
+            .set_read_timeout(Some(timeout))
+            .map_err(io_failed)?;
+        conn.stream
+            .set_write_timeout(Some(timeout))
+            .map_err(io_failed)?;
+        let hello: HelloAnswer = parse(conn.call("hello", json!({"api": API}))?)?;
+        if hello.exe.as_deref() != Some(exe)
+            || hello.version.as_deref() != Some(env!("CARGO_PKG_VERSION"))
+            || hello.api != API
+        {
+            return Err(BackendError::Agmend(
+                "agmend ownership changed; keeping it running".into(),
+            ));
+        }
+        let remaining = deadline
+            .checked_duration_since(std::time::Instant::now())
+            .ok_or_else(|| BackendError::Agmend("shutdown deadline expired".into()))?;
+        conn.stream
+            .set_read_timeout(Some(remaining))
+            .map_err(io_failed)?;
+        conn.stream
+            .set_write_timeout(Some(remaining))
+            .map_err(io_failed)?;
+        conn.call("shutdown", json!({}))?;
+        for _ in 0..150 {
+            if !socket.exists() {
+                return Ok(());
+            }
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(
+                Duration::from_millis(100)
+                    .min(deadline.saturating_duration_since(std::time::Instant::now())),
+            );
+        }
+        Err(BackendError::Agmend(
+            "agmend did not exit within 15 s".into(),
+        ))
+    }
+
     /// Reads identity before enforcing compatibility, for the setup screen.
     pub(crate) fn probe(socket: &Path) -> Result<(HelloAnswer, Option<ReadyAnswer>), BackendError> {
         let mut conn = Conn::connect(socket)?;

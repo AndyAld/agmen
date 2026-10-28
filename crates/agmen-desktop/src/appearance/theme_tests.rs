@@ -457,6 +457,7 @@ fn last_project_keeps_the_appearance() {
     let project: agmen_proto::ProjectId = "project1".parse().unwrap();
     DesktopSettings {
         last_project: Some(project.clone()),
+        ..DesktopSettings::default()
     }
     .save(&path)
     .unwrap();
@@ -785,6 +786,7 @@ fn desktop_settings_unchanged_leave_the_file_alone() {
     fs::write(&path, HAND_WRITTEN).unwrap();
     DesktopSettings {
         last_project: Some("project1".parse().unwrap()),
+        ..DesktopSettings::default()
     }
     .save(&path)
     .unwrap();
@@ -799,6 +801,7 @@ fn desktop_settings_change_keeps_comments_and_order() {
     let project: agmen_proto::ProjectId = "project2".parse().unwrap();
     DesktopSettings {
         last_project: Some(project.clone()),
+        ..DesktopSettings::default()
     }
     .save(&path)
     .unwrap();
@@ -810,4 +813,19 @@ fn desktop_settings_change_keeps_comments_and_order() {
         fs::read_to_string(&path).unwrap(),
         HAND_WRITTEN.replace("\"project1\"", "\"project2\"")
     );
+}
+
+#[test]
+fn desktop_quit_preference_and_optional_login_round_trip() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.toml");
+    let mut settings = DesktopSettings::load(&path).unwrap();
+    assert_eq!(settings.quit_keep_running, None);
+    assert!(!settings.start_at_login);
+    for keep in [true, false] {
+        settings.quit_keep_running = Some(keep);
+        settings.start_at_login = true;
+        settings.save(&path).unwrap();
+        assert_eq!(DesktopSettings::load(&path).unwrap(), settings);
+    }
 }

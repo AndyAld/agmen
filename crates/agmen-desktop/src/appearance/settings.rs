@@ -162,12 +162,16 @@ pub(crate) struct DesktopSettings {
     /// The project the last live launch opened, which a launch outside a
     /// joined folder opens again.
     pub(crate) last_project: Option<ProjectId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) quit_keep_running: Option<bool>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) start_at_login: bool,
 }
 
 /// The table that holds [`DesktopSettings`].
 const DESKTOP_TABLE: &str = "desktop";
 /// The `[desktop]` keys this version writes.
-const DESKTOP_KEYS: &[&str] = &["last_project"];
+const DESKTOP_KEYS: &[&str] = &["last_project", "quit_keep_running", "start_at_login"];
 
 impl DesktopSettings {
     /// Reads the `[desktop]` table of `path`; a missing file or table gives

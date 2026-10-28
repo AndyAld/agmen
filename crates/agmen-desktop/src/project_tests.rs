@@ -34,6 +34,7 @@ fn settings_with(dir: &Path, project: &str) -> std::path::PathBuf {
     let path = dir.join("settings.toml");
     DesktopSettings {
         last_project: Some(project.parse().unwrap()),
+        ..DesktopSettings::default()
     }
     .save(&path)
     .unwrap();

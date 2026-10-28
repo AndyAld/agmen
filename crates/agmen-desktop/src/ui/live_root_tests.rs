@@ -76,7 +76,7 @@ fn bundled_service_screen_offers_setup_and_switch() {
         &LiveState::NeedsService(Check::Missing),
         &ProjectChoice::None { why: None },
     );
-    assert_eq!(wording.heading, "Set up agmend");
+    assert_eq!(wording.heading, "Start agmend");
     assert_eq!(wording.command, None);
     let wording = Wording::of(
         &LiveState::NeedsService(Check::TemporaryBundle),
@@ -327,4 +327,109 @@ fn the_window_draws_while_agmend_is_slow(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("live:open").is_some());
     assert!(cx.debug_bounds("live:refused").is_none());
     assert!(cx.debug_bounds("live:connecting").is_none());
+}
+
+#[gpui::test]
+fn app_owned_quit_renders_choice_and_remember_checkbox(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let launch = LiveLaunch {
+        socket: dir.path().join("agmend.sock"),
+        root: None,
+        project: ProjectChoice::None { why: None },
+        settings: Some(dir.path().join("settings.toml")),
+    };
+    let (root, cx) = open(cx, launch);
+    cx.update(|_, cx| {
+        root.update(cx, |root, cx| {
+            root.quit_choice = Some(service::QuitChoice::Ask);
+            cx.notify();
+        })
+    });
+    redraw(cx);
+    assert!(cx.debug_bounds("quit:dialog").is_some());
+    assert!(cx.debug_bounds("quit:keep").is_some());
+    assert!(cx.debug_bounds("quit:everything").is_some());
+    click(cx, "quit:remember");
+    root.read_with(cx, |root, _| assert!(root.quit_remember));
+}
+
+#[gpui::test]
+fn quit_path_checks_daemon_ownership_and_persists_keep_running(cx: &mut TestAppContext) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    let app = dir.path().join("agmen.app");
+    let agmend = app.join("Contents/MacOS/agmend");
+    std::fs::create_dir_all(agmend.parent().unwrap()).unwrap();
+    // A status-only fixture helper. It never invokes a service manager.
+    std::fs::write(
+        &agmend,
+        "#!/bin/sh\nprintf '%s\\n' '{\"state\":\"not installed\",\"program\":null}'\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&agmend, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let fake = FakeAgmend::start(console(vec![]));
+    let path = dir.path().join("settings.toml");
+    let launch = LiveLaunch {
+        socket: fake.path(),
+        root: None,
+        project: ProjectChoice::None { why: None },
+        settings: Some(path.clone()),
+    };
+    let (root, cx) = open(cx, launch);
+    cx.update(|_, cx| {
+        root.update(cx, |root, _| {
+            root.bundle = Some(Bundle {
+                app,
+                agmend: agmend.clone(),
+                agmen: dir.path().join("agmen"),
+            });
+        })
+    });
+    // Foreign and unknown identity skip the dialog even with remembered Stop.
+    for exe in [serde_json::json!("/shell/agmend"), serde_json::Value::Null] {
+        DesktopSettings {
+            quit_keep_running: Some(false),
+            ..DesktopSettings::default()
+        }
+        .save(&path)
+        .unwrap();
+        fake.edit(|state| {
+            state.hello_answer =
+                Some(serde_json::json!({"api":1,"version":env!("CARGO_PKG_VERSION"),"exe":exe}))
+        });
+        cx.update(|window, cx| {
+            root.update(cx, |root, cx| {
+                root.quit_approved = false;
+                root.request_quit(window, cx);
+            })
+        });
+        wait_until(cx, |cx| root.read_with(cx, |root, _| root.quit_approved));
+        assert!(root.read_with(cx, |root, _| root.quit_choice.is_none()));
+        assert!(AgmendBackend::probe(&fake.path()).is_ok());
+    }
+    DesktopSettings::default().save(&path).unwrap();
+    fake.edit(|state| {
+        state.hello_answer =
+            Some(serde_json::json!({"api":1,"version":env!("CARGO_PKG_VERSION"),"exe":agmend}))
+    });
+    cx.update(|window, cx| {
+        root.update(cx, |root, cx| {
+            root.quit_approved = false;
+            root.request_quit(window, cx);
+        })
+    });
+    wait_until(cx, |cx| {
+        root.read_with(cx, |root, _| {
+            root.quit_choice == Some(service::QuitChoice::Ask)
+        })
+    });
+    redraw(cx);
+    click(cx, "quit:remember");
+    click(cx, "quit:keep");
+    assert!(root.read_with(cx, |root, _| root.quit_approved));
+    assert_eq!(
+        DesktopSettings::load(&path).unwrap().quit_keep_running,
+        Some(true)
+    );
+    assert!(AgmendBackend::probe(&fake.path()).is_ok());
 }

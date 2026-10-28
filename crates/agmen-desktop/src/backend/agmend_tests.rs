@@ -993,3 +993,62 @@ fn local_events_update_the_snapshot() {
     assert_eq!(s.roster.len(), backend.snapshot().roster.len());
     assert!(s.roles.iter().any(|r| r.name == "reviewer"));
 }
+
+#[test]
+fn shutdown_owned_waits_for_exit_and_has_a_deadline() {
+    use std::os::unix::net::UnixListener;
+    for exits in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agmend.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let socket = path.clone();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let hello: Request = frame::read(&mut stream).unwrap();
+            assert_eq!(hello.method, "hello");
+            frame::write(
+                &mut stream,
+                &Response::ok(
+                    hello.id,
+                    json!({"api":API,"version":env!("CARGO_PKG_VERSION"),"exe":"/app/agmend"}),
+                ),
+            )
+            .unwrap();
+            let stop: Request = frame::read(&mut stream).unwrap();
+            assert_eq!(stop.method, "shutdown");
+            frame::write(&mut stream, &Response::ok(stop.id, json!({}))).unwrap();
+            if exits {
+                std::thread::sleep(Duration::from_millis(80));
+                std::fs::remove_file(socket).unwrap();
+            }
+        });
+        let started = Instant::now();
+        let result = AgmendBackend::shutdown_owned(
+            &path,
+            Path::new("/app/agmend"),
+            Duration::from_millis(200),
+        );
+        assert_eq!(result.is_ok(), exits);
+        assert!(started.elapsed() >= Duration::from_millis(80));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        server.join().unwrap();
+    }
+}
+
+#[test]
+fn shutdown_owned_refuses_foreign_executable() {
+    let fake = FakeAgmend::start(console(vec![]));
+    assert!(
+        AgmendBackend::shutdown_owned(
+            &fake.path(),
+            Path::new("/our/agmend"),
+            Duration::from_secs(15)
+        )
+        .is_err()
+    );
+    assert!(AgmendBackend::probe(&fake.path()).is_ok());
+}

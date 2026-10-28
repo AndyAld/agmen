@@ -57,8 +57,11 @@ fn from_settings(settings: Option<&Path>) -> ProjectChoice {
     match DesktopSettings::load(settings) {
         Ok(DesktopSettings {
             last_project: Some(project),
+            ..
         }) => ProjectChoice::Project(project),
-        Ok(DesktopSettings { last_project: None }) => ProjectChoice::None { why: None },
+        Ok(DesktopSettings {
+            last_project: None, ..
+        }) => ProjectChoice::None { why: None },
         Err(err) => ProjectChoice::None {
             why: Some(err.to_string()),
         },

@@ -766,3 +766,15 @@ fn settings_views_share_one_marketplace(cx: &mut TestAppContext) {
     let b = second.update(cx, |view, cx| view.market(cx).unwrap());
     assert!(std::sync::Arc::ptr_eq(&a, &b));
 }
+
+#[gpui::test]
+fn general_offers_optional_start_at_login(cx: &mut TestAppContext) {
+    let home = Home::new();
+    let (view, cx) = open(cx, &home);
+    view.update(cx, |view, cx| {
+        view.page = Page::General;
+        cx.notify();
+    });
+    redraw(cx);
+    assert!(cx.debug_bounds("start-at-login").is_some());
+}

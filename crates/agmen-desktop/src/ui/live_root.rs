@@ -14,7 +14,7 @@ use gpui::{
 };
 
 use super::Workspace;
-use super::components::{Button, ButtonStyle, Color, Label, LabelSize};
+use super::components::{Button, ButtonStyle, Color, Label, LabelSize, Modal};
 use super::tokens::{LAUNCH_STATE_WIDTH, SPACE_10, SPACE_16, TITLE_BAR_HEIGHT};
 use crate::appearance::{Appearance, DesktopSettings};
 use crate::backend::{AgmendBackend, Backend, BackendError, BackendHandle};
@@ -131,7 +131,7 @@ impl Wording {
                 heading: check.action().unwrap_or("Check agmend").into(),
                 body: match check {
                     Check::TemporaryBundle => "Move to Applications, then relaunch agmen from the moved app before setting up agmend.".into(),
-                    Check::Moved { configured } => format!("The service points to a missing executable at {}. Set up agmend from this app with your consent.", configured.display()),
+                    Check::Moved { configured } => format!("The service points to a missing executable at {}. Start agmend from this app. Start at login is optional in Settings.", configured.display()),
                     Check::Skewed { running, ours, .. } => format!("agmend version {} is incompatible with this app's version {ours}. Switching replaces the configured service program with this app's agmend.", running.as_deref().unwrap_or("unknown")),
                     Check::Elsewhere { exe } => format!("The service at {} is stopped or unavailable. Its installation owns this same-version service, so agmen will keep its configured path. Repair or start it through that installation, then Retry.", exe.display()),
                     _ => "agmen needs agmend, the agmen background service, to open your projects.".into(),
@@ -165,6 +165,12 @@ pub(crate) struct LiveRoot {
     service_notice: Option<String>,
     service_error: Option<String>,
     cli_install: Option<Entity<super::cli_install::CliInstall>>,
+    quit_choice: Option<service::QuitChoice>,
+    quit_remember: bool,
+    quit_busy: bool,
+    quit_requested: bool,
+    pub(crate) quit_approved: bool,
+    _quitting: Option<Task<()>>,
 }
 
 impl LiveRoot {
@@ -181,6 +187,12 @@ impl LiveRoot {
             service_notice: None,
             service_error: None,
             cli_install: super::cli_install::CliInstall::for_app(cx),
+            quit_choice: None,
+            quit_remember: false,
+            quit_busy: false,
+            quit_requested: false,
+            quit_approved: false,
+            _quitting: None,
         };
         root.connect(window, cx);
         root
@@ -223,8 +235,11 @@ impl LiveRoot {
             .spawn(move || {
                 // The window closed meanwhile; the backend drops here.
                 let connected = (|| {
-                    let mut observed = service::check(bundle.as_ref(), &socket, &mut service::run)
-                        .map_err(|error| BackendError::Agmend(error.to_string()))?;
+                    let mut observed = match bundle.as_ref() {
+                        Some(bundle) => service::start(bundle, &socket, &mut service::run),
+                        None => service::check(None, &socket, &mut service::run),
+                    }
+                    .map_err(|error| BackendError::Agmend(error.to_string()))?;
                     if !observed.check.can_connect() || (bundle.is_some() && !observed.running) {
                         return Ok((observed, None));
                     }
@@ -266,6 +281,19 @@ impl LiveRoot {
 
     /// Opens the workspace on the connected backend, or shows why not.
     fn connected(
+        &mut self,
+        result: Result<(Observation, Option<AgmendBackend>), BackendError>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.connected_result(result, window, cx);
+        if self.quit_requested {
+            self.quit_requested = false;
+            self.request_quit(window, cx);
+        }
+    }
+
+    fn connected_result(
         &mut self,
         result: Result<(Observation, Option<AgmendBackend>), BackendError>,
         window: &mut Window,
@@ -358,11 +386,18 @@ impl LiveRoot {
             LiveState::NeedsService(check) if check.action().is_some() => check.clone(),
             _ => return,
         };
+        let switch = matches!(previous, Check::Skewed { .. });
+        let socket = self.launch.socket.clone();
         let (done, result) = futures::channel::oneshot::channel();
         let spawned = std::thread::Builder::new()
             .name("agmend-setup".into())
             .spawn(move || {
-                drop(done.send(service::install(&bundle, &mut service::run)));
+                let result = if switch {
+                    service::install(&bundle, &mut service::run)
+                } else {
+                    service::start(&bundle, &socket, &mut service::run).map(|_| ())
+                };
+                drop(done.send(result));
             });
         if let Err(error) = spawned {
             self.service_error = Some(format!("Starting service setup failed: {error}"));
@@ -384,12 +419,168 @@ impl LiveRoot {
                             Ok(Ok(())) => String::new(),
                         });
                         this.state = LiveState::NeedsService(previous);
+                        if this.quit_requested {
+                            this.quit_requested = false;
+                            this.request_quit(window, cx);
+                        }
                     }
                 }
                 cx.notify();
             }));
         }));
         cx.notify();
+    }
+
+    /// All user quit triggers enter here before GPUI starts shutting down.
+    pub(crate) fn request_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.quit_busy || self.quit_choice.is_some() {
+            return;
+        }
+        if matches!(self.state, LiveState::Connecting) {
+            self.quit_requested = true;
+            return;
+        }
+        let Some(bundle) = self.bundle.clone() else {
+            self.quit_approved = true;
+            cx.quit();
+            return;
+        };
+        let socket = self.launch.socket.clone();
+        let settings = self.launch.settings.clone();
+        let (done, result) = futures::channel::oneshot::channel();
+        let spawned = std::thread::Builder::new()
+            .name("agmend-quit-check".into())
+            .spawn(move || {
+                let decision = (|| -> anyhow::Result<_> {
+                    let owned = service::owns_running(&bundle, &socket, &mut service::run)?;
+                    let remembered = settings
+                        .as_ref()
+                        .map(|path| DesktopSettings::load(path))
+                        .transpose()?
+                        .and_then(|settings| settings.quit_keep_running);
+                    Ok(service::quit_choice(owned, remembered))
+                })();
+                drop(done.send(decision));
+            });
+        if let Err(error) = spawned {
+            self.service_error = Some(format!("Checking agmend before quitting: {error}"));
+            cx.notify();
+            return;
+        }
+        self.quit_busy = true;
+        self._quitting = Some(cx.spawn_in(window, async move |this, cx| {
+            let decision = result.await;
+            drop(this.update_in(cx, |this, window, cx| {
+                this.quit_busy = false;
+                this._quitting = None;
+                match decision {
+                    Ok(Ok(service::QuitChoice::Ask)) => {
+                        this.quit_choice = Some(service::QuitChoice::Ask);
+                        window.focus(&this.focus_handle, cx);
+                    }
+                    Ok(Ok(choice)) => this.choose_quit(choice, window, cx),
+                    error => {
+                        // An unreadable identity is never permission to stop a daemon.
+                        eprintln!("agmen-desktop: keeping agmend on quit: {error:?}");
+                        this.choose_quit(service::QuitChoice::Keep, window, cx);
+                    }
+                }
+                cx.notify();
+            }));
+        }));
+    }
+
+    fn choose_quit(
+        &mut self,
+        choice: service::QuitChoice,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.quit_busy {
+            return;
+        }
+        if self.quit_remember
+            && let Some(path) = &self.launch.settings
+        {
+            let saved = DesktopSettings::load(path).and_then(|mut settings| {
+                settings.quit_keep_running = Some(choice == service::QuitChoice::Keep);
+                settings.save(path)
+            });
+            if let Err(error) = saved {
+                self.service_error = Some(format!("Saving the quit choice: {error}"));
+                cx.notify();
+                return;
+            }
+        }
+        if choice == service::QuitChoice::Keep {
+            self.quit_approved = true;
+            cx.quit();
+            return;
+        }
+        let Some(bundle) = self.bundle.clone() else {
+            return;
+        };
+        let socket = self.launch.socket.clone();
+        let (done, result) = futures::channel::oneshot::channel();
+        let spawned = std::thread::Builder::new()
+            .name("agmend-shutdown".into())
+            .spawn(move || {
+                let stopped = service::finish_quit(choice, &mut |bound| {
+                    let deadline = std::time::Instant::now() + bound;
+                    if service::owns_running(&bundle, &socket, &mut service::run)? {
+                        let remaining = deadline
+                            .checked_duration_since(std::time::Instant::now())
+                            .ok_or_else(|| anyhow::anyhow!("shutdown exceeded 15 s"))?;
+                        service::shutdown(&bundle, &socket, remaining)?;
+                    }
+                    Ok(())
+                });
+                drop(done.send(stopped));
+            });
+        if let Err(error) = spawned {
+            self.service_error = Some(format!("Starting shutdown: {error}"));
+            cx.notify();
+            return;
+        }
+        self.quit_busy = true;
+        self.quit_choice = Some(service::QuitChoice::Stop);
+        self._quitting = Some(cx.spawn_in(window, async move |this, cx| {
+            let deadline = cx
+                .background_executor()
+                .timer(std::time::Duration::from_secs(15));
+            futures::pin_mut!(deadline);
+            match futures::future::select(result, deadline).await {
+                futures::future::Either::Left((Ok(Ok(())), _)) => {}
+                futures::future::Either::Left((error, _)) => {
+                    eprintln!("agmen-desktop: shutdown: {error:?}")
+                }
+                futures::future::Either::Right(_) => {
+                    eprintln!("agmen-desktop: shutdown exceeded 15 s")
+                }
+            }
+            drop(this.update(cx, |this, cx| {
+                this.quit_approved = true;
+                cx.quit();
+            }));
+        }));
+        cx.notify();
+    }
+
+    fn quit_dialog(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        self.quit_choice?;
+        let busy = self.quit_busy;
+        Some(Modal::new("quit:dialog", gpui::px(480.), gpui::px(100.))
+            .child(Label::new("Keep agents running in the background?").size(LabelSize::Title))
+            .child(Label::new("Your agents and the listener keep working and receiving messages after agmen closes.").wrap())
+            .child(Button::new("quit:remember", if self.quit_remember { "☑ Don't ask again" } else { "☐ Don't ask again" })
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if !this.quit_busy { this.quit_remember = !this.quit_remember; cx.notify(); }
+                })))
+            .child(Button::new("quit:keep", "Keep Running").style(ButtonStyle::Primary)
+                .on_click(cx.listener(|this, _, window, cx| this.choose_quit(service::QuitChoice::Keep, window, cx))))
+            .child(Button::new("quit:everything", if busy { "Stopping agmend…" } else { "Quit Everything" })
+                .on_click(cx.listener(|this, _, window, cx| this.choose_quit(service::QuitChoice::Stop, window, cx))))
+            .children(self.service_error.clone().map(|error| Label::new(error).color(Color::Error).wrap())))
     }
 
     fn message(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -409,8 +600,9 @@ impl LiveRoot {
             )
             .child(Label::new(wording.body).wrap())
             .when_some(self.bundle.as_ref().filter(|_| matches!(self.state, LiveState::NeedsService(Check::Missing | Check::Stopped | Check::Moved { .. } | Check::Skewed { .. }))), |this, bundle| {
-                let command = service::command(bundle);
-                this.child(Label::new(format!("agmen will add a login item that starts agmend, the agmen background service, from {}. macOS may show a Background Items Added notice.", bundle.app.display())).wrap())
+                let switching = matches!(self.state, LiveState::NeedsService(Check::Skewed { .. }));
+                let command = if switching { service::command(bundle) } else { format!("\"{}\"", bundle.agmend.display()) };
+                this.child(Label::new(if switching { format!("Switching updates the login service to {}. macOS may show a Background Items Added notice.", bundle.app.display()) } else { "agmen starts its bundled agmend. Start at login is optional in Settings.".into() }).wrap())
                     .child(div().debug_selector(|| "live:command".into()).child(Label::new(command.clone()).code().wrap()))
                     .child(Button::new("live:copy-service-command", "Copy command").on_click(move |_, _, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(command.clone()))))
             })
@@ -442,6 +634,9 @@ impl LiveRoot {
 
 impl Focusable for LiveRoot {
     fn focus_handle(&self, cx: &gpui::App) -> FocusHandle {
+        if self.quit_choice.is_some() {
+            return self.focus_handle.clone();
+        }
         match &self.state {
             LiveState::Open(workspace) => workspace.focus_handle(cx),
             _ => self.focus_handle.clone(),
@@ -451,8 +646,19 @@ impl Focusable for LiveRoot {
 
 impl Render for LiveRoot {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let dialog = self.quit_dialog(cx);
         if let LiveState::Open(workspace) = &self.state {
             return div()
+                .relative()
+                .track_focus(&self.focus_handle)
+                .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                    if this.quit_choice == Some(service::QuitChoice::Ask)
+                        && event.keystroke.key == "enter"
+                    {
+                        this.choose_quit(service::QuitChoice::Keep, window, cx);
+                        cx.stop_propagation();
+                    }
+                }))
                 .debug_selector(|| self.state.selector().into())
                 .size_full()
                 .flex()
@@ -461,6 +667,7 @@ impl Render for LiveRoot {
                     this.child(Label::new(notice).color(Color::Placeholder))
                 })
                 .child(workspace.clone())
+                .children(dialog)
                 .into_any_element();
         }
         let message = self.message(cx);
@@ -468,7 +675,16 @@ impl Render for LiveRoot {
         // Text sizes are rems, as in the workspace.
         window.set_rem_size(appearance.fonts.ui_size);
         div()
+            .relative()
             .track_focus(&self.focus_handle)
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                if this.quit_choice == Some(service::QuitChoice::Ask)
+                    && event.keystroke.key == "enter"
+                {
+                    this.choose_quit(service::QuitChoice::Keep, window, cx);
+                    cx.stop_propagation();
+                }
+            }))
             .size_full()
             .flex()
             .flex_col()
@@ -486,6 +702,7 @@ impl Render for LiveRoot {
                     .p(SPACE_16)
                     .child(message),
             )
+            .children(dialog)
             .into_any_element()
     }
 }

@@ -187,6 +187,8 @@ struct Browse {
 /// `settings-page:{slug}`.
 pub(crate) struct SettingsView {
     cli_install: Option<Entity<super::cli_install::CliInstall>>,
+    start_at_login: bool,
+    login_task: Option<gpui::Task<()>>,
     sources: SettingsSources,
     settings: AgmenSettings,
     pub(super) page: Page,
@@ -216,7 +218,7 @@ impl SettingsView {
     /// Settings on Appearance, reading `sources`. The `Appearance` global
     /// must already be set.
     pub(crate) fn new(sources: SettingsSources, cx: &mut Context<Self>) -> Self {
-        let (settings, error) = match AgmenSettings::load(&sources.settings_path()) {
+        let (settings, mut error) = match AgmenSettings::load(&sources.settings_path()) {
             Ok(settings) => (settings, None),
             // Saving refuses to overwrite a file it cannot parse, so the
             // person's file is safe; say why changes will not stick.
@@ -235,8 +237,18 @@ impl SettingsView {
         fonts.extend([".ZedSans".to_owned(), ".ZedMono".to_owned()]);
         fonts.sort();
         fonts.dedup();
+        let start_at_login =
+            match crate::appearance::DesktopSettings::load(&sources.settings_path()) {
+                Ok(settings) => settings.start_at_login,
+                Err(cause) => {
+                    error = Some(cause.to_string());
+                    false
+                }
+            };
         let mut view = Self {
             cli_install: super::cli_install::CliInstall::for_app(cx),
+            start_at_login,
+            login_task: None,
             sources,
             settings,
             page: Page::Appearance,
@@ -1033,6 +1045,80 @@ impl SettingsView {
         }
         out
     }
+
+    fn change_login(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.login_task.is_some() {
+            return;
+        }
+        let Some(bundle) = std::env::current_exe()
+            .ok()
+            .and_then(|exe| crate::bundle::locate(&exe))
+        else {
+            self.error = Some("Open agmen.app to change start at login.".into());
+            cx.notify();
+            return;
+        };
+        let path = self.sources.settings_path();
+        let (done, result) = futures::channel::oneshot::channel();
+        let spawned = std::thread::Builder::new()
+            .name("agmend-login-item".into())
+            .spawn(move || {
+                let changed = (|| -> anyhow::Result<()> {
+                    crate::appearance::DesktopSettings::load(&path)?;
+                    crate::service::login(&bundle, enabled, &mut crate::service::run)?;
+                    if !enabled {
+                        let socket = agmen_client::agmend_socket()?;
+                        crate::service::start(&bundle, &socket, &mut crate::service::run)?;
+                    }
+                    let mut settings = crate::appearance::DesktopSettings::load(&path)?;
+                    settings.start_at_login = enabled;
+                    settings.save(&path)?;
+                    Ok(())
+                })();
+                drop(done.send(changed));
+            });
+        if let Err(error) = spawned {
+            self.error = Some(format!("Changing start at login: {error}"));
+            cx.notify();
+            return;
+        }
+        self.error = None;
+        self.login_task = Some(cx.spawn(async move |this, cx| {
+            let result = result.await;
+            drop(this.update(cx, |this, cx| {
+                this.login_task = None;
+                match result {
+                    Ok(Ok(())) => this.start_at_login = enabled,
+                    result => this.error = Some(format!("Changing start at login: {result:?}")),
+                }
+                cx.notify();
+            }));
+        }));
+        cx.notify();
+    }
+
+    fn general_page(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let mut body = vec![setting(
+            "Start agmen in the background when you log in",
+            "Adds this app's agmend as a login item. macOS may show a Background Items Added notice. Turning this off removes this app's login item.",
+            cx,
+        ).child(Toggle::new("start-at-login", self.start_at_login)
+            .on_change(Self::handler(cx, |this, enabled, cx| this.change_login(enabled, cx))))
+            .into_any_element()];
+        if self.login_task.is_some() {
+            body.push(Label::new("Changing login item…").into_any_element());
+        }
+        if let Some(offer) = &self.cli_install {
+            body.push(offer.clone().into_any_element());
+        } else {
+            body.push(
+                Label::new("Open agmen.app to install the agmen command.")
+                    .wrap()
+                    .into_any_element(),
+            );
+        }
+        body
+    }
 }
 
 /// The OS's light or dark mode.
@@ -1080,16 +1166,7 @@ impl Render for SettingsView {
                 (*title, *slug)
             });
         let body: Vec<AnyElement> = match self.page {
-            Page::General => self.cli_install.as_ref().map_or_else(
-                || {
-                    vec![
-                        Label::new("Open agmen.app to install the agmen command.")
-                            .wrap()
-                            .into_any_element(),
-                    ]
-                },
-                |offer| vec![offer.clone().into_any_element()],
-            ),
+            Page::General => self.general_page(cx),
             Page::Appearance => self.appearance_page(cx),
             Page::About => Self::about_page(),
             _ => vec![

@@ -47,7 +47,7 @@ pub(crate) struct Observation {
 impl Check {
     pub(crate) fn action(&self) -> Option<&'static str> {
         match self {
-            Self::Missing | Self::Stopped | Self::Moved { .. } => Some("Set up agmend"),
+            Self::Missing | Self::Stopped | Self::Moved { .. } => Some("Start agmend"),
             Self::Skewed { .. } => Some("Switch to this app's agmend"),
             Self::TemporaryBundle => Some("Move to Applications"),
             _ => None,
@@ -416,3 +416,205 @@ pub(crate) fn run(program: &Path, args: &[OsString], timeout: Duration) -> Resul
 #[cfg(test)]
 #[path = "service_tests.rs"]
 mod tests;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum QuitChoice {
+    Ask,
+    Keep,
+    Stop,
+}
+
+pub(crate) fn quit_choice(owned: bool, remembered: Option<bool>) -> QuitChoice {
+    match (owned, remembered) {
+        (false, _) | (true, Some(true)) => QuitChoice::Keep,
+        (true, Some(false)) => QuitChoice::Stop,
+        (true, None) => QuitChoice::Ask,
+    }
+}
+
+pub(crate) fn finish_quit(
+    choice: QuitChoice,
+    shutdown: &mut dyn FnMut(Duration) -> Result<()>,
+) -> Result<()> {
+    if choice == QuitChoice::Stop {
+        shutdown(Duration::from_secs(15))?;
+    }
+    Ok(())
+}
+
+fn start_checked(
+    bundle: &Bundle,
+    observed: &Observation,
+    spawn: &mut dyn FnMut(&Bundle) -> Result<()>,
+) -> Result<()> {
+    if !observed.running
+        && !temporary(bundle)
+        && matches!(
+            observed.check,
+            Check::Missing | Check::Stopped | Check::Moved { .. }
+        )
+    {
+        spawn(bundle)?;
+    }
+    Ok(())
+}
+
+fn login_checked(
+    bundle: &Bundle,
+    enabled: bool,
+    check: &Check,
+    receipt: Option<&InstallReceipt>,
+    runner: &mut Runner<'_>,
+) -> Result<(), ServiceError> {
+    if temporary(bundle) {
+        return Err(failure(bundle, "Move to Applications, then relaunch agmen"));
+    }
+    if !enabled && matches!(check, Check::Elsewhere { .. } | Check::Skewed { .. }) {
+        return Err(failure(
+            bundle,
+            "Keeping the daemon owned by another installation",
+        ));
+    }
+    if enabled && *check != Check::Ready {
+        return install_with_timeout(bundle, check, receipt, runner, TRANSITION);
+    }
+    let status = configured_status(bundle, runner, Duration::from_secs(10))?;
+    if status
+        .program
+        .as_ref()
+        .is_some_and(|path| path != &bundle.agmend)
+    {
+        return Err(failure(
+            bundle,
+            "Keeping the login service owned by another installation",
+        ));
+    }
+    if !enabled && status.program.is_none() {
+        return Ok(());
+    }
+    let mut args: Vec<OsString> = vec![
+        "service".into(),
+        if enabled { "install" } else { "uninstall" }.into(),
+    ];
+    if enabled {
+        args.extend(["--program".into(), bundle.agmend.as_os_str().into()]);
+    }
+    let output =
+        runner(&bundle.agmend, &args, TRANSITION).map_err(|error| failure(bundle, error))?;
+    if !output.status.success() {
+        return Err(failure(bundle, String::from_utf8_lossy(&output.stderr)));
+    }
+    Ok(())
+}
+
+/// The Settings toggle is the consent to install or remove this bundle's login item.
+pub(crate) fn login(
+    bundle: &Bundle,
+    enabled: bool,
+    runner: &mut Runner<'_>,
+) -> Result<(), ServiceError> {
+    let socket = agmen_client::agmend_socket().map_err(|error| failure(bundle, error))?;
+    let receipt = agmen_client::read_install_receipt().map_err(|error| failure(bundle, error))?;
+    let observed = check_with_receipt(bundle, &socket, receipt.as_ref(), runner)?;
+    login_checked(bundle, enabled, &observed.check, receipt.as_ref(), runner)
+}
+
+/// Starts the bundle helper without registering a login service. The daemon's
+/// socket lock arbitrates simultaneous launches, including another channel.
+pub(crate) fn start(
+    bundle: &Bundle,
+    socket: &Path,
+    runner: &mut Runner<'_>,
+) -> Result<Observation, ServiceError> {
+    let observed = check(Some(bundle), socket, runner)?;
+    let mut started = false;
+    start_checked(bundle, &observed, &mut |bundle| {
+        spawn_detached(bundle, &log_path())?;
+        started = true;
+        Ok(())
+    })
+    .map_err(|error| failure(bundle, error))?;
+    if !started {
+        return Ok(observed);
+    }
+    let deadline = Instant::now() + Duration::from_secs(15);
+    for _ in 0..150 {
+        match AgmendBackend::probe(socket) {
+            Ok((hello, ready)) => {
+                return Ok(Observation {
+                    check: classify(Some(bundle), Some(&hello), ready.as_ref(), None, None),
+                    running: true,
+                });
+            }
+            Err(BackendError::NotConnected) => {}
+            Err(error) => return Err(failure(bundle, error)),
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Err(failure(
+        bundle,
+        "agmend did not start within 15 s; check the log",
+    ))
+}
+
+fn spawn_detached(bundle: &Bundle, log: &Path) -> Result<()> {
+    use std::os::unix::process::CommandExt as _;
+    if let Some(parent) = log.parent() {
+        std::fs::create_dir_all(parent).context("creating agmend log folder")?;
+    }
+    let output = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log)
+        .context("opening agmend log")?;
+    let mut child = Command::new(&bundle.agmend)
+        .process_group(0)
+        .current_dir(&bundle.app)
+        .stdin(Stdio::null())
+        .stdout(output.try_clone()?)
+        .stderr(output)
+        .spawn()
+        .context("starting bundled agmend")?;
+    // Reap without retaining the app as the daemon's lifetime owner.
+    std::thread::Builder::new()
+        .name("agmend-reap".into())
+        .spawn(move || {
+            if let Err(error) = child.wait() {
+                eprintln!("agmen-desktop: reaping agmend: {error}");
+            }
+        })
+        .context("starting agmend reaper")?;
+    Ok(())
+}
+
+/// Requires a compatible process from this bundle and no foreign login item.
+pub(crate) fn owns_running(
+    bundle: &Bundle,
+    socket: &Path,
+    runner: &mut Runner<'_>,
+) -> Result<bool> {
+    let (hello, ready) = match AgmendBackend::probe(socket) {
+        Ok(identity) => identity,
+        Err(BackendError::NotConnected) => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    if hello.exe.as_ref() != Some(&bundle.agmend)
+        || classify(Some(bundle), Some(&hello), ready.as_ref(), None, None) != Check::Ready
+    {
+        return Ok(false);
+    }
+    let status = configured_status(bundle, runner, Duration::from_secs(10))?;
+    Ok(status
+        .program
+        .as_ref()
+        .is_none_or(|path| path == &bundle.agmend))
+}
+
+pub(crate) fn shutdown(bundle: &Bundle, socket: &Path, bound: Duration) -> Result<()> {
+    // Recheck on the connection that receives shutdown, so a replacement daemon
+    // from another channel is never stopped after a stale UI decision.
+    AgmendBackend::shutdown_owned(socket, &bundle.agmend, bound).map_err(anyhow::Error::new)
+}
