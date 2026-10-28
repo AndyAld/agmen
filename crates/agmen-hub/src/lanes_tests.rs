@@ -1,5 +1,29 @@
 use super::*;
 
+#[test]
+fn scoped_reasons_name_the_authorization_cause() {
+    let lanes = lanes(&[("L-UI", &["src/**"])]);
+    let who: IdentityId = "worker00".parse().unwrap();
+    let lends = Lends(vec![(
+        "L-UI".into(),
+        scope_globs(&["src/tests/**".into()]).unwrap(),
+    )]);
+    for (edits, path, allowed, reason) in [
+        (EditRule::None, "docs/a.md", false, "outside edit scope"),
+        (EditRule::Lanes, "src/tests/a.rs", true, "allowed by lend"),
+        (
+            EditRule::Paths(scope_globs(&["src/**".into()]).unwrap()),
+            "src/a.rs",
+            true,
+            "allowed by edit scope",
+        ),
+    ] {
+        let result = judge_scoped(&lanes, &[], &who, &edits, &lends, path.into());
+        assert_eq!(result.allowed, allowed);
+        assert_eq!(result.reason, reason);
+    }
+}
+
 fn spec(name: &str, globs: &[&str]) -> LaneSpec {
     LaneSpec {
         name: name.parse().unwrap(),
