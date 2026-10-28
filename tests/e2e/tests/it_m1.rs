@@ -100,10 +100,11 @@ async fn it_two_machines_exchange() {
         let coord = ctx.member(Role::Admin, "coord", "coordinator").await;
         let out = coord.run(&["invite"]).await;
         assert_exit(&out, 0);
+        // The invite prints a link whose fragment is the code.
         let code = stdout(&out)
             .lines()
-            .find_map(|line| line.trim().strip_prefix("agmen join "))
-            .expect("a ready-to-paste join line")
+            .find_map(|line| line.trim().split_once("/i#").map(|(_, code)| code))
+            .expect("an invite link")
             .to_owned();
 
         // andy, so far in another project only, joins machine 1 with it.
