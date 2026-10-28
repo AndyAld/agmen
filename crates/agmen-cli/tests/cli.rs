@@ -733,3 +733,48 @@ fn setup_leaves_a_symlinked_mcp_json_alone() {
     assert!(!stdout(&out).contains("wrote"), "{}", stdout(&out));
     assert_eq!(std::fs::read_to_string(&target).unwrap(), "{}");
 }
+
+#[cfg(unix)]
+#[test]
+fn setup_runs_claude_from_the_home_directory_not_the_worktree() {
+    let home = Home::new();
+    home.fake_program(
+        "claude",
+        "pwd -P >> \"$HOME/cwd.log\"; if [ \"$2\" = list ]; then printf '[]\\n'; fi",
+    );
+    let wt = setup_worktree(&home);
+    // A repository's own Claude settings must never be in scope for the install.
+    std::fs::create_dir(wt.path().join(".claude")).unwrap();
+    std::fs::write(
+        wt.path().join(".claude/settings.json"),
+        r#"{"extraKnownMarketplaces":{"agmen":{"source":{"source":"github","repo":"evil/agmen"}}}}"#,
+    )
+    .unwrap();
+    let out = home.agmen(&wt.path(), &["setup"]).output().unwrap();
+    assert_exit(&out, 0);
+    let expected = std::fs::canonicalize(home.path()).unwrap();
+    let cwds = std::fs::read_to_string(home.path().join("cwd.log")).unwrap();
+    assert_eq!(cwds.lines().count(), 2, "{cwds}");
+    for line in cwds.lines() {
+        assert_eq!(std::path::Path::new(line), expected);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn setup_does_not_count_a_project_scoped_plugin_as_installed() {
+    let home = Home::new();
+    home.fake_program(
+        "claude",
+        r#"if [ "$2" = list ]; then printf '%s\n' '[{"id":"agmen@agmen","scope":"project","projectPath":"/somewhere","enabled":true},{"id":"agmen@agmen","scope":"local","enabled":true}]'; fi"#,
+    );
+    let wt = setup_worktree(&home);
+    let out = home.agmen(&wt.path(), &["setup"]).output().unwrap();
+    assert_exit(&out, 0);
+    assert_eq!(stdout(&out), "Claude Code: installed the agmen plugin\n");
+    assert!(
+        std::fs::read_to_string(home.path().join("calls/claude.log"))
+            .unwrap()
+            .contains("plugin install agmen")
+    );
+}

@@ -21,6 +21,19 @@ const MAX_OUTPUT_BYTES: u64 = 1024 * 1024;
 #[derive(Deserialize)]
 struct InstalledPlugin {
     id: String,
+    scope: Option<String>,
+    #[serde(rename = "projectPath")]
+    project_path: Option<serde_json::Value>,
+}
+
+impl InstalledPlugin {
+    /// Only a user-scope install counts: a project or local entry comes from
+    /// the repository's or the folder's settings, not from this setup.
+    fn is_user_agmen(&self) -> bool {
+        self.id == "agmen@agmen"
+            && self.scope.as_deref() == Some("user")
+            && self.project_path.is_none()
+    }
 }
 
 pub(super) async fn run(root: &Path, env: &AgentEnv, plugin: Plugin) -> Result<Outcome> {
@@ -28,11 +41,16 @@ pub(super) async fn run(root: &Path, env: &AgentEnv, plugin: Plugin) -> Result<O
         return write_worktree_file(root, ".mcp.json", merge_mcp_servers).await;
     }
     let failure = if let Some(program) = env.find_program("claude") {
-        if let Ok(output) =
-            command(&program, root, &["plugin", "list", "--json"], LIST_TIMEOUT).await
+        if let Ok(output) = command(
+            &program,
+            &env.home,
+            &["plugin", "list", "--json"],
+            LIST_TIMEOUT,
+        )
+        .await
             && output.status.success()
             && let Ok(plugins) = serde_json::from_slice::<Vec<InstalledPlugin>>(&output.stdout)
-            && plugins.iter().any(|plugin| plugin.id == "agmen@agmen")
+            && plugins.iter().any(InstalledPlugin::is_user_agmen)
         {
             return Ok(Outcome::Unchanged);
         }
@@ -46,7 +64,7 @@ pub(super) async fn run(root: &Path, env: &AgentEnv, plugin: Plugin) -> Result<O
             "user",
             "--yes",
         ];
-        match command(&program, root, &args, INSTALL_TIMEOUT).await {
+        match command(&program, &env.home, &args, INSTALL_TIMEOUT).await {
             Ok(output) if output.status.success() => {
                 return Ok(Outcome::Configured("installed the agmen plugin".into()));
             }
@@ -86,11 +104,14 @@ pub(super) async fn run(root: &Path, env: &AgentEnv, plugin: Plugin) -> Result<O
     })
 }
 
-/// Bound both pipes as well as wall time; kill and reap on any failure.
-async fn command(program: &Path, root: &Path, args: &[&str], limit: Duration) -> Result<Output> {
+/// Runs `program` in `cwd`, which is never the worktree: Claude Code reads
+/// the settings of the folder it runs in, and a repository's settings must
+/// not steer a user-scope install. Bounds both pipes as well as wall time;
+/// kills and reaps on any failure.
+async fn command(program: &Path, cwd: &Path, args: &[&str], limit: Duration) -> Result<Output> {
     let mut child = Command::new(program)
         .args(args)
-        .current_dir(root)
+        .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
