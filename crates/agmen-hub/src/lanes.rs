@@ -38,6 +38,8 @@ use crate::items::close_claimed;
 const MAX_LANES: usize = 64;
 /// The most active grants per project, lane and recipient.
 const MAX_ACTIVE_LENDS: i64 = 16;
+/// A grant may last at most seven days from acceptance.
+const MAX_LEND_DURATION: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 60 * 60);
 /// A recipient can have grants in at most every lane in the project.
 const MAX_LOADED_LENDS: i64 = 64 * MAX_ACTIVE_LENDS;
 /// The most globs one lane may have.
@@ -233,8 +235,7 @@ impl EditRule {
         match self {
             Self::None => false,
             Self::Lanes => lane_allowed,
-            Self::Paths(globs) => globs.is_match(path),
-            Self::LanesWithin(globs) => lane_allowed && globs.is_match(path),
+            Self::Paths(globs) | Self::LanesWithin(globs) => lane_allowed && globs.is_match(path),
         }
     }
 }
@@ -249,9 +250,19 @@ impl Lends {
         identity: &IdentityId,
     ) -> Result<Self, LedgerError> {
         let rows: Vec<(String, Vec<String>)> = sqlx::query_as(
-            "SELECT lane, paths FROM lane_lends WHERE project_id=$1 AND to_id=$2 AND until_at > now()
-             ORDER BY lane, until_at, message_id LIMIT $3",
-        ).bind(project).bind(identity.as_str()).bind(MAX_LOADED_LENDS).fetch_all(db).await?;
+            "SELECT g.lane, g.paths FROM lane_lends g
+             JOIN lanes l ON l.project_id=g.project_id AND l.name=g.lane
+             JOIN identities i ON i.id=g.from_id AND i.project_id=g.project_id
+             WHERE g.project_id=$1 AND g.to_id=$2 AND g.until_at > now()
+               AND i.revoked_at IS NULL
+               AND (l.owner_identity_id=g.from_id OR i.kind='coordinator')
+             ORDER BY g.lane, g.until_at, g.message_id LIMIT $3",
+        )
+        .bind(project)
+        .bind(identity.as_str())
+        .bind(MAX_LOADED_LENDS)
+        .fetch_all(db)
+        .await?;
         rows.into_iter()
             .map(|(lane, paths)| {
                 scope_globs(&paths)
@@ -318,7 +329,8 @@ pub(crate) async fn lend(
     let live: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM identities WHERE id=$1 AND project_id=$2 AND revoked_at IS NULL)",
     ).bind(to.as_str()).bind(topics.project().as_str()).fetch_one(&mut **tx).await?;
-    if !live || *until <= Timestamp::now() || scope_globs(paths).is_err() {
+    let now = Timestamp::now();
+    if !live || *until <= now || *until > now + MAX_LEND_DURATION || scope_globs(paths).is_err() {
         return Err(LendError::Refused(NackReason::Schema));
     }
     // The lane row lock serializes this count with concurrent grants.
@@ -840,8 +852,6 @@ fn judge_scoped(
     check.allowed = edits.allows(path, lane_allowed);
     if !check.allowed && !edits.allows(path, true) {
         check.reason = "outside edit scope".to_owned();
-    } else if check.allowed && matches!(edits, EditRule::Paths(_)) {
-        check.reason = "allowed by edit scope".to_owned();
     } else if check.allowed && !original_allowed {
         check.reason = "allowed by lend".to_owned();
     }

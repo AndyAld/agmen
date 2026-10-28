@@ -14,8 +14,8 @@ fn scoped_reasons_name_the_authorization_cause() {
         (
             EditRule::Paths(scope_globs(&["src/**".into()]).unwrap()),
             "src/a.rs",
-            true,
-            "allowed by edit scope",
+            false,
+            "not claimed",
         ),
     ] {
         let result = judge_scoped(&lanes, &[], &who, &edits, &lends, path.into());

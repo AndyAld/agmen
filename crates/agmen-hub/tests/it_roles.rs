@@ -10,6 +10,133 @@ use support::{
 };
 
 #[tokio::test]
+async fn it_fix2_paths_scope_respects_other_holders_and_allows_unowned() {
+    run(|ctx| async move {
+        let (p, t) = room(&ctx).await;
+        let owner = mint_ok(&ctx, &t, "andy/owner", &p).await;
+        lanes(&ctx, &p, &t, &owner.id).await;
+        let key = item(&ctx, &p, &owner.id).await;
+        claim(&ctx, &p, &owner.id, &key).await;
+        let worker = role(
+            &ctx,
+            &p,
+            &t,
+            "worker",
+            "agent",
+            "engineer",
+            &["DONE"],
+            json!({"scope":"paths","globs":["**"]}),
+        )
+        .await;
+        let id = worker["id"].as_str().unwrap();
+        let result = checks(&ctx, &p, &t, id, &["docs/a.md", "src/main.rs"]).await;
+        assert_eq!(result[0]["allowed"], true, "unowned path remains editable");
+        assert_eq!(
+            result[1]["allowed"], false,
+            "paths must not bypass another holder"
+        );
+        assert_eq!(result[1]["reason"], "lane L-UI held by andy/owner");
+        ack(post(
+            &ctx,
+            &p,
+            id,
+            "DONE",
+            json!({"item":"B-999","branch":"fix/scope",
+            "commit":"a".repeat(40),"base_sha":"b".repeat(40),"checks":[],
+            "changes":[{"status":"M","path":"src/main.rs"}]}),
+            json!({}),
+        )
+        .await);
+        let alerts: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM messages WHERE project_id=$1 AND envelope->>'verb'='ALERT'",
+        )
+        .bind(&p.project)
+        .fetch_one(&ctx.pool)
+        .await
+        .unwrap();
+        assert_eq!(alerts, 1);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn it_fix2_lend_stops_after_granter_revocation() {
+    run(|ctx| async move {
+        let (p, t) = room(&ctx).await;
+        let owner = mint_ok(&ctx, &t, "andy/owner", &p).await;
+        let recipient = mint_ok(&ctx, &t, "andy/recipient", &p).await;
+        let coordinator = support::mint_kind(&ctx, &t, "andy/coord", &p, "coordinator").await;
+        lanes(&ctx, &p, &t, &owner.id).await;
+        for granter in [&owner.id, &coordinator.id] {
+            ack(post(&ctx, &p, granter, "LEND", json!({"lane":"L-UI","paths":["src/tests/**"],
+                "to":recipient.id,"until":(jiff::Timestamp::now()+std::time::Duration::from_secs(3600)).to_string()}), json!({})).await);
+            assert_eq!(checks(&ctx, &p, &t, &recipient.id, &["src/tests/a.rs"]).await[0]["allowed"], true);
+            sqlx::query("UPDATE identities SET revoked_at=now() WHERE id=$1")
+                .bind(granter).execute(&ctx.pool).await.unwrap();
+            assert_eq!(checks(&ctx, &p, &t, &recipient.id, &["src/tests/a.rs"]).await[0]["allowed"], false,
+                "revoked granter {granter} must not authorize a lend");
+        }
+    }).await;
+}
+
+#[tokio::test]
+async fn it_fix2_lend_stops_after_ownership_moves() {
+    run(|ctx| async move {
+        let (p, t) = room(&ctx).await;
+        let owner = mint_ok(&ctx, &t, "andy/owner", &p).await;
+        let recipient = mint_ok(&ctx, &t, "andy/recipient", &p).await;
+        let replacement = mint_ok(&ctx, &t, "andy/replacement", &p).await;
+        let coordinator = support::mint_kind(&ctx, &t, "andy/coord", &p, "coordinator").await;
+        lanes(&ctx, &p, &t, &owner.id).await;
+        ack(post(&ctx, &p, &owner.id, "LEND", json!({"lane":"L-UI","paths":["src/tests/**"],
+            "to":recipient.id,"until":(jiff::Timestamp::now()+std::time::Duration::from_secs(3600)).to_string()}), json!({})).await);
+        ack(post(&ctx, &p, &coordinator.id, "LEND", json!({"lane":"L-UI","paths":["src/coord/**"],
+            "to":recipient.id,"until":(jiff::Timestamp::now()+std::time::Duration::from_secs(3600)).to_string()}), json!({})).await);
+        assert_eq!(checks(&ctx, &p, &t, &recipient.id, &["src/tests/a.rs"]).await[0]["allowed"], true);
+        // Change ownership without replacing lanes, which deletes every grant.
+        sqlx::query("UPDATE lanes SET owner_identity_id=$1 WHERE project_id=$2 AND name='L-UI'")
+            .bind(&replacement.id).bind(&p.project).execute(&ctx.pool).await.unwrap();
+        let result = checks(&ctx, &p, &t, &recipient.id, &["src/coord/a.rs", "src/tests/a.rs"]).await;
+        assert_eq!(result[0]["allowed"], true, "live coordinator can lend any lane");
+        assert_eq!(result[1]["allowed"], false, "former owner must not authorize a lend");
+    }).await;
+}
+
+#[tokio::test]
+async fn it_fix2_lend_refuses_until_past_seven_days() {
+    run(|ctx| async move {
+        let (p, t) = room(&ctx).await;
+        let owner = mint_ok(&ctx, &t, "andy/owner", &p).await;
+        let recipient = mint_ok(&ctx, &t, "andy/recipient", &p).await;
+        lanes(&ctx, &p, &t, &owner.id).await;
+        let data = |seconds| {
+            json!({"lane":"L-UI","paths":["src/**"],"to":recipient.id,
+            "until":(jiff::Timestamp::now()+std::time::Duration::from_secs(seconds)).to_string()})
+        };
+        ack(post(&ctx, &p, &owner.id, "LEND", data(7 * 24 * 3600), json!({})).await);
+        nack(
+            post(
+                &ctx,
+                &p,
+                &owner.id,
+                "LEND",
+                data(7 * 24 * 3600 + 60),
+                json!({}),
+            )
+            .await,
+            NackReason::Schema,
+        );
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM lane_lends WHERE project_id=$1")
+            .bind(&p.project)
+            .fetch_one(&ctx.pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn it_fix1_lend_cap_serializes_concurrent_grants() {
     run(|ctx| async move {
         let (p, t) = room(&ctx).await;
