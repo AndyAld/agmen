@@ -515,10 +515,17 @@ impl Managed {
         .await
         .map_err(error)?
         .map_err(error)?;
-        Ok(RoleRun {
-            tools: agmen_roles::claude_tools(role).join(","),
-            prompt_file,
-        })
+        // shortcut: only an edit scope of none is enforced here, by dropping the
+        // edit tools. Path-scoped scopes (lanes, within, paths) rest on the
+        // plugin's lane guard staying on in managed sessions; revisit when
+        // Claude Code path-scoped permission rules can carry them.
+        let no_edits = role.edits == agmen_roles::EditScope::None;
+        let tools = agmen_roles::claude_tools(role)
+            .into_iter()
+            .filter(|tool| !(no_edits && matches!(*tool, "Edit" | "Write" | "NotebookEdit")))
+            .collect::<Vec<_>>()
+            .join(",");
+        Ok(RoleRun { tools, prompt_file })
     }
 
     fn run_spec(

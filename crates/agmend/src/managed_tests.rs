@@ -326,6 +326,42 @@ async fn hostile_role_text_reaches_claude_only_through_the_private_prompt_file()
     assert!(role_file(&prompt).unwrap().contains(hostile));
 }
 
+fn custom_role(extends: &str, scope: &str, rule: &str) -> String {
+    format!(
+        "<role name=\"custom\" extends=\"{extends}\" version=\"1\"><edits scope=\"{scope}\"/><rules><rule>{rule}</rule></rules></role>"
+    )
+}
+
+#[tokio::test]
+async fn role_with_no_edits_gets_no_edit_tools_in_either_tier() {
+    let (fixture, _) = role_fixture().await;
+    let repo = fixture.dir.path().join("repo");
+    let roles = repo.join(".agmen/roles");
+    std::fs::create_dir(&roles).unwrap();
+    std::fs::write(
+        roles.join("custom.xml"),
+        custom_role("engineer", "none", "read only"),
+    )
+    .unwrap();
+    let managed = &fixture.daemon.core.managed;
+    managed
+        .launch(json!({"project":"project1","name":"worker","root":repo,"role":"custom"}))
+        .await
+        .unwrap();
+    enqueue_from(&fixture, 1, "owner001", "agent001").await;
+    batch(managed, "agent001").await;
+    enqueue_from(&fixture, 2, "sender01", "agent001").await;
+    batch(managed, "agent001").await;
+    let runs = fixture.runner.runs.lock().unwrap();
+    assert_eq!(runs.len(), 2);
+    assert!(runs[0].owner_only);
+    assert!(!runs[1].owner_only);
+    for run in runs.iter() {
+        let tools = &run.role.as_ref().unwrap().tools;
+        assert_eq!(tools, "Read,Grep,Glob,Bash");
+    }
+}
+
 #[tokio::test]
 async fn role_coordinator_mints_and_registers_its_kind() {
     let (fixture, requests) = role_fixture().await;
