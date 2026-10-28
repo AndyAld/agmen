@@ -536,7 +536,7 @@ async fn it_revoke_kicks_and_refuses_refresh() {
         }
         let revoke_url = ctx.hub.url(&format!("/v1/identities/{}", a.id));
 
-        // Only the owner revokes; to anyone else the identity does not exist.
+        // A non-member cannot revoke; to them the identity does not exist.
         let adam = login(&ctx, ADAM, "adam").await;
         let refused = ctx
             .http

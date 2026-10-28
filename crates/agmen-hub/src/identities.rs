@@ -235,16 +235,22 @@ pub(crate) async fn mint(
     Json(request): Json<MintRequest>,
 ) -> Result<(StatusCode, Json<Minted>), ApiError> {
     let human = caller.human()?;
+    // The membership row stays share-locked until the commit. A member
+    // removal deletes that row before it revokes identities, so it waits for
+    // this mint and then revokes the identity, or finishes first and this
+    // lookup finds no row.
+    let mut tx = hub.pool().begin().await?;
     let membership: Option<(String, String, String)> = sqlx::query_as(
         "SELECT h.handle, m.role, p.tenant_id
          FROM humans h
          JOIN memberships m ON m.human_id = h.id
          JOIN projects p ON p.id = m.project_id
-         WHERE h.id = $1 AND m.project_id = $2",
+         WHERE h.id = $1 AND m.project_id = $2
+         FOR SHARE OF m",
     )
     .bind(human.as_str())
     .bind(request.project.as_str())
-    .fetch_optional(hub.pool())
+    .fetch_optional(&mut *tx)
     .await?;
     let Some((owner_handle, role, tenant)) = membership else {
         return Err(ApiError::forbidden(
@@ -301,7 +307,6 @@ pub(crate) async fn mint(
         .map_err(ApiError::stored)?;
 
     let id = new_id()?;
-    let mut tx = hub.pool().begin().await?;
     if let Some(listener) = &request.delegated_by {
         // Hold the listener through the worker insert. A revocation that
         // already holds the row wins, and its committed state is rechecked.
@@ -412,7 +417,7 @@ pub(crate) async fn broker_token(
     Ok(Json(BrokerToken { token, expires_at }))
 }
 
-/// `DELETE /v1/identities/{id}` (the owner's human token): revokes the
+/// `DELETE /v1/identities/{id}` (the owner's or a group admin's human token): revokes the
 /// identity, bans its username in EMQX until its last broker token has
 /// expired, kicks its client ids off the broker, and has its project's
 /// roster published without it. Its broker tokens are refused from then
@@ -428,7 +433,9 @@ pub(crate) async fn revoke(
     // reconnects in between cannot get a fresh broker token.
     let revoked: Option<(String, String, String, i64)> = sqlx::query_as(
         "UPDATE identities SET revoked_at = coalesce(revoked_at, now())
-         WHERE id = $1 AND owner_human_id = $2
+         WHERE id = $1 AND (owner_human_id = $2 OR EXISTS (
+             SELECT 1 FROM tenant_members m WHERE m.tenant_id = identities.tenant_id
+             AND m.human_id = $2 AND m.role IN ('owner', 'admin')))
          RETURNING id, tenant_id, project_id, extract(epoch FROM revoked_at)::bigint",
     )
     .bind(&id)
@@ -461,7 +468,7 @@ pub(crate) async fn revoke(
 /// end: once every broker token minted before the revocation has expired.
 /// A stored time that does not convert bans for good, since a revoked id
 /// is never used again.
-fn ban_until(revoked_at: i64) -> Timestamp {
+pub(crate) fn ban_until(revoked_at: i64) -> Timestamp {
     Timestamp::from_second(revoked_at)
         .and_then(|at| at.checked_add(BROKER_TOKEN_TTL + BAN_MARGIN))
         .unwrap_or_else(|err| {
@@ -473,7 +480,7 @@ fn ban_until(revoked_at: i64) -> Timestamp {
 /// Bans `id`'s username until `ban_until` and kicks each of its client
 /// ids, trying every step even when one fails, and returns the first
 /// failure.
-async fn ban_and_kick(hub: &Hub, id: &str, ban_until: Timestamp) -> Option<EmqxError> {
+pub(crate) async fn ban_and_kick(hub: &Hub, id: &str, ban_until: Timestamp) -> Option<EmqxError> {
     let mut failed = None;
     // Ban before kicking: a kicked client that reconnects with its
     // unexpired token is refused, since EMQX checks only signature and exp.
