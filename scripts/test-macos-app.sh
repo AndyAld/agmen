@@ -27,7 +27,7 @@ else
 		;;
 	esac
 fi
-for binary in agmen-desktop agmend agmen; do
+for binary in agmen-desktop agmend agmen agmen-hub; do
 	archs=$(lipo -archs "$app/Contents/MacOS/$binary")
 	if [ "$archs" = 'x86_64 arm64' ]; then archs='arm64 x86_64'; fi
 	[ "$archs" = "$expected_archs" ] || {
@@ -38,6 +38,7 @@ for binary in agmen-desktop agmend agmen; do
 done
 [ "$("$app/Contents/MacOS/agmen-desktop" --version)" = "agmen-desktop $version (1)" ]
 "$app/Contents/MacOS/agmend" --help
+"$app/Contents/MacOS/agmen-hub" --help
 [ "$("$app/Contents/MacOS/agmen" --version)" = "agmen $version" ]
 for resource in LICENSE THIRD_PARTY_NOTICES.md THIRD_PARTY_NOTICES-desktop.md AppIcon.icns; do
 	test -s "$app/Contents/Resources/$resource"
@@ -45,7 +46,7 @@ done
 cmp "$repo/crates/agmen-desktop/assets/icon/agmen.icns" "$app/Contents/Resources/AppIcon.icns"
 echo 'PASS: bundle layout, versions, architectures, icon and notices'
 sh scripts/macos-app.sh sign --app "$app"
-for binary in agmend agmen; do
+for binary in agmend agmen agmen-hub; do
 	codesign --verify --strict --verbose=2 "$app/Contents/MacOS/$binary"
 done
 codesign --verify --strict --verbose=2 "$app"

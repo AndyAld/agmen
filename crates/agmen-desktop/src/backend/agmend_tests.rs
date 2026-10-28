@@ -26,6 +26,87 @@ const FAST: Timing = Timing {
     cap: Duration::from_millis(40),
 };
 
+#[test]
+fn host_status_and_restart_use_the_local_api() {
+    let fake = FakeAgmend::start(console(vec![]));
+    fake.edit(|state| {
+        state.host_status = Some(json!({
+            "configured": true, "state": "failed", "last_error": "Postgres unavailable",
+            "public_url": "https://hub.example/"
+        }))
+    });
+    let status = AgmendBackend::host_status(&fake.path(), false).unwrap();
+    assert_eq!(status.last_error.as_deref(), Some("Postgres unavailable"));
+    let status = AgmendBackend::host_status(&fake.path(), true).unwrap();
+    assert_eq!(status.state, HostState::Stopped);
+    assert_eq!(fake.state.lock().unwrap().host_restarts, 1);
+}
+
+#[test]
+fn hosted_startup_requires_a_hub_snapshot() {
+    let fake = FakeAgmend::start(console(vec![]));
+    fake.edit(|state| state.snapshot = None);
+    assert!(
+        AgmendBackend::connect_host(&fake.path(), PROJECT, None, Instant::now() + WAIT).is_err()
+    );
+}
+
+#[test]
+fn hosted_startup_obeys_the_request_deadline() {
+    let fake = FakeAgmend::start(console(vec![]));
+    fake.edit(|state| state.snapshot_delay = Duration::from_millis(250));
+    let started = Instant::now();
+    assert!(
+        AgmendBackend::connect_host(
+            &fake.path(),
+            PROJECT,
+            None,
+            started + Duration::from_millis(40)
+        )
+        .is_err()
+    );
+    assert!(started.elapsed() < Duration::from_millis(200));
+}
+
+#[test]
+fn persistent_connection_drops_the_handshake_deadline() {
+    let fake = FakeAgmend::start(console(vec![]));
+    let conn = Conn::open(&fake.path()).unwrap();
+    assert!(
+        conn.deadline.is_none(),
+        "a cached request connection must use a fresh deadline on every call"
+    );
+}
+
+#[test]
+fn call_keeps_a_shorter_timeout_its_caller_set() {
+    // probe and shutdown_owned bound their calls at 2 s, below REQUEST_TIMEOUT.
+    let fake = FakeAgmend::start(console(vec![]));
+    fake.edit(|state| state.snapshot_delay = Duration::from_millis(500));
+    let mut conn = Conn::connect(&fake.path()).unwrap();
+    conn.stream
+        .set_read_timeout(Some(Duration::from_millis(50)))
+        .unwrap();
+    let started = Instant::now();
+    assert!(
+        conn.call("console_snapshot", json!({"project": PROJECT}))
+            .is_err()
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(300),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn opened_connection_restores_the_full_request_timeout() {
+    let fake = FakeAgmend::start(console(vec![]));
+    let conn = Conn::open(&fake.path()).unwrap();
+    assert_eq!(conn.stream.read_timeout().unwrap(), Some(REQUEST_TIMEOUT));
+    assert_eq!(conn.stream.write_timeout().unwrap(), Some(REQUEST_TIMEOUT));
+}
+
 fn seqs(messages: &[StampedEnvelope]) -> Vec<u64> {
     messages.iter().map(|m| m.seq.0).collect()
 }

@@ -873,6 +873,284 @@ fn bare_binary_keeps_todays_agmend_down_screen() {
     assert_eq!(wording.command, Some("agmend service install"));
 }
 
+#[test]
+fn host_without_project_waits_for_hub_health() {
+    let fake = FakeAgmend::start(console(vec![]));
+    fake.edit(|state| {
+        state.host_status = Some(serde_json::json!({
+            "configured": true, "state": "running", "last_error": null,
+            "public_url": "http://127.0.0.1:9/"
+        }))
+    });
+    let result = LiveRoot::connect_host(
+        &fake.path(),
+        &ProjectChoice::None { why: None },
+        None,
+        Observation {
+            check: Check::NoBundle,
+            running: true,
+        },
+        Instant::now() + Duration::from_millis(100),
+    );
+    assert!(
+        result.is_err(),
+        "a live process without a listening hub must keep waiting"
+    );
+}
+
+#[test]
+fn host_without_project_checks_the_hubs_health_endpoint() {
+    use std::io::{Read as _, Write as _};
+    for code in [200, 503] {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            for _ in 0..100 {
+                if let Ok((mut stream, _)) = listener.accept() {
+                    stream
+                        .set_read_timeout(Some(Duration::from_millis(200)))
+                        .unwrap();
+                    let mut request = [0; 4096];
+                    let n = stream.read(&mut request).unwrap();
+                    assert!(
+                        std::str::from_utf8(&request[..n])
+                            .unwrap()
+                            .starts_with("GET /healthz ")
+                    );
+                    write!(
+                        stream,
+                        "HTTP/1.1 {code} Test\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    )
+                    .unwrap();
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            false
+        });
+        let fake = FakeAgmend::start(console(vec![]));
+        fake.edit(|state| {
+            state.host_status = Some(serde_json::json!({
+                "configured": true, "state": "running", "last_error": null, "public_url": url
+            }))
+        });
+        let result = LiveRoot::connect_host(
+            &fake.path(),
+            &ProjectChoice::None { why: None },
+            None,
+            Observation {
+                check: Check::NoBundle,
+                running: true,
+            },
+            Instant::now() + Duration::from_millis(200),
+        );
+        assert_eq!(result.is_ok(), code == 200);
+        assert!(
+            server.join().unwrap(),
+            "the hub health endpoint must be checked"
+        );
+    }
+}
+
+#[gpui::test]
+fn host_starting_draws_without_daemon_down_or_sign_in(cx: &mut TestAppContext) {
+    let fake = FakeAgmend::start(console(vec![]));
+    fake.edit(|state| {
+        state.snapshot_delay = Duration::from_millis(500);
+        state.host_status = Some(serde_json::json!({
+            "configured": true, "state": "running", "last_error": null, "public_url": "https://hub.example/"
+        }));
+    });
+    std::fs::write(fake.dir.path().join("host.toml"), "configured").unwrap();
+    let mut launch = empty_launch(&fake);
+    launch.project = ProjectChoice::Project(project());
+    let (root, cx) = open(cx, launch);
+    assert!(cx.debug_bounds("live:host-starting").is_some());
+    assert!(cx.debug_bounds("live:agmend-down").is_none());
+    assert!(cx.debug_bounds("live:sign-in").is_none());
+    wait_until(cx, |cx| {
+        root.read_with(cx, |root, _| root.workspace().is_some())
+    });
+}
+
+#[gpui::test]
+fn hosted_startup_opens_automatically_when_the_hub_starts(cx: &mut TestAppContext) {
+    let fake = FakeAgmend::start(console(vec![]));
+    fake.edit(|state| state.host_status = Some(serde_json::json!({
+        "configured": true, "state": "stopped", "last_error": null, "public_url": "https://hub.example/"
+    })));
+    std::fs::write(fake.dir.path().join("host.toml"), "configured").unwrap();
+    let mut launch = empty_launch(&fake);
+    launch.project = ProjectChoice::Project(project());
+    let (root, cx) = open(cx, launch);
+    let unjoined = fake.dir.path().join("unjoined");
+    std::fs::create_dir(&unjoined).unwrap();
+    assert!(
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .arg(&unjoined)
+            .status()
+            .unwrap()
+            .success()
+    );
+    root.update_in(cx, |root, window, cx| {
+        root.open_folder(unjoined, window, cx)
+    });
+    wait_until(cx, |cx| {
+        root.read_with(cx, |root, _| root._resolving.is_none())
+    });
+    assert!(cx.debug_bounds("live:host-starting").is_some());
+    assert!(cx.debug_bounds("live:agmend-down").is_none());
+    assert!(cx.debug_bounds("live:sign-in").is_none());
+    fake.edit(|state| state.host_status.as_mut().unwrap()["state"] = serde_json::json!("running"));
+    wait_until(cx, |cx| {
+        root.read_with(cx, |root, _| root.workspace().is_some())
+    });
+}
+
+#[gpui::test]
+fn hosted_startup_reports_the_hubs_failure(cx: &mut TestAppContext) {
+    let fake = FakeAgmend::start(console(vec![]));
+    fake.edit(|state| {
+        state.host_status = Some(serde_json::json!({
+            "configured": true, "state": "failed", "last_error": "Postgres connection refused",
+            "public_url": "https://hub.example/"
+        }))
+    });
+    std::fs::write(fake.dir.path().join("host.toml"), "configured").unwrap();
+    let mut launch = empty_launch(&fake);
+    launch.project = ProjectChoice::Project(project());
+    let (root, cx) = open(cx, launch);
+    wait_until(cx, |cx| {
+        root.read_with(cx, |root, _| matches!(root.state(), LiveState::Refused(_)))
+    });
+    root.read_with(cx, |root, _| assert!(matches!(root.state(), LiveState::Refused(error) if error == "Postgres connection refused")));
+    assert!(cx.debug_bounds("live:agmend-down").is_none());
+    assert!(cx.debug_bounds("live:sign-in").is_none());
+}
+
+#[gpui::test]
+fn failed_host_shows_its_error_over_sign_in_and_can_restart(cx: &mut TestAppContext) {
+    let fake = FakeAgmend::start(console(vec![]));
+    fake.edit(|state| {
+        state.host_status = Some(serde_json::json!({
+            "configured": true, "state": "failed", "last_error": "Postgres connection refused",
+            "public_url": "https://hub.example/"
+        }))
+    });
+    std::fs::write(fake.dir.path().join("host.toml"), "configured").unwrap();
+    let mut launch = empty_launch(&fake);
+    launch.project = ProjectChoice::Project(project());
+    let (root, cx) = open(cx, launch);
+    wait_until(cx, |cx| {
+        root.read_with(cx, |root, _| matches!(root.state(), LiveState::Refused(_)))
+    });
+    let folder = fake.dir.path().join("unjoined");
+    std::fs::create_dir(&folder).unwrap();
+    assert!(
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .arg(&folder)
+            .status()
+            .unwrap()
+            .success()
+    );
+    root.update_in(cx, |root, window, cx| root.open_folder(folder, window, cx));
+    wait_until(cx, |cx| {
+        root.read_with(cx, |root, _| root._resolving.is_none())
+    });
+    assert!(cx.debug_bounds("live:refused").is_some());
+    assert!(cx.debug_bounds("live:sign-in").is_none());
+    assert!(cx.debug_bounds("live:restart-host").is_some());
+    click(cx, "live:restart-host");
+    wait_until(cx, |_| fake.state.lock().unwrap().host_restarts == 1);
+    fake.edit(|state| state.host_status.as_mut().unwrap()["state"] = serde_json::json!("running"));
+    wait_until(cx, |cx| {
+        root.read_with(cx, |root, _| root.workspace().is_some())
+    });
+}
+
+#[gpui::test]
+fn hosted_startup_timeout_stops_the_starting_screen(cx: &mut TestAppContext) {
+    let fake = FakeAgmend::start(console(vec![]));
+    fake.edit(|state| {
+        state.host_status = Some(serde_json::json!({
+            "configured": true, "state": "stopped", "last_error": null,
+            "public_url": "https://hub.example/"
+        }))
+    });
+    std::fs::write(fake.dir.path().join("host.toml"), "configured").unwrap();
+    let mut launch = empty_launch(&fake);
+    launch.project = ProjectChoice::Project(project());
+    let (root, cx) = open(cx, launch);
+    cx.executor().advance_clock(Duration::from_secs(30));
+    cx.run_until_parked();
+    root.read_with(cx, |root, _| {
+        assert!(matches!(root.state(), LiveState::Refused(error) if error.contains("30 seconds")))
+    });
+    fake.edit(|state| {
+        let status = state.host_status.as_mut().unwrap();
+        status["state"] = serde_json::json!("failed");
+        status["last_error"] = serde_json::json!("test stopped");
+    });
+}
+
+#[test]
+fn hosting_still_shows_a_service_that_needs_setup() {
+    // A stale or missing agmend service cannot answer host_status: the
+    // setup screen, not a 30 s hub wait, is what helps.
+    let fake = FakeAgmend::start(console(vec![]));
+    for check in [Check::Missing, Check::Stopped] {
+        let started = Instant::now();
+        let (observed, backend) = LiveRoot::connect_observed(
+            &fake.path(),
+            &ProjectChoice::Project(project()),
+            None,
+            true,
+            Some(Instant::now() + Duration::from_millis(300)),
+            Observation {
+                check: check.clone(),
+                running: false,
+            },
+        )
+        .expect("the service diagnosis comes back");
+        assert_eq!(observed.check, check);
+        assert!(backend.is_none());
+        assert!(started.elapsed() < Duration::from_millis(200));
+    }
+}
+
+#[gpui::test]
+fn launch_restores_the_last_project_directly(cx: &mut TestAppContext) {
+    let fake = FakeAgmend::start(console(vec![]));
+    let folder = fake.dir.path().join("last-project");
+    joined_folder(&folder);
+    let mut launch = empty_launch(&fake);
+    DesktopSettings {
+        last_project: Some(project()),
+        recent_projects: vec![folder.clone()],
+        ..DesktopSettings::default()
+    }
+    .save(launch.settings.as_deref().unwrap())
+    .unwrap();
+    (launch.project, launch.root) =
+        crate::project::choose_saved_project(launch.settings.as_deref());
+    let (root, cx) = open(cx, launch);
+    wait_until(cx, |cx| {
+        root.read_with(cx, |root, _| root.workspace().is_some())
+    });
+    assert!(cx.debug_bounds("live:no-project").is_none());
+    assert!(
+        fake.state
+            .lock()
+            .unwrap()
+            .snapshot_params
+            .iter()
+            .any(|params| params["root"] == folder.canonicalize().unwrap().to_str().unwrap())
+    );
+}
+
 #[gpui::test]
 fn stopped_foreign_service_keeps_bundle_diagnosis_and_retry(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();

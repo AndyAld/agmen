@@ -413,18 +413,16 @@ fn open_dev_view(
     Ok(window.context("opening the view window")?.into())
 }
 
-/// Task 7: where a plain launch connects and which project it opens: the
-/// working folder's `.agmen/identity.json`, else the last project in
-/// `~/.config/agmen/settings.toml`.
+/// A plain launch restores its saved project. Explicit folders resolve
+/// through the live window's folder opener.
 fn live_launch(explicit: bool) -> Result<ui::LiveLaunch> {
     let socket = agmen_client::agmend_socket().context("finding agmend's socket")?;
     let settings =
         std::env::home_dir().map(|home| appearance::agmen_settings_path(&home.join(".config")));
-    let cwd = std::env::current_dir().context("reading the working folder")?;
     let (project, root) = if explicit {
         (project::ProjectChoice::None { why: None }, None)
     } else {
-        project::choose_project(&cwd, settings.as_deref())
+        project::choose_saved_project(settings.as_deref())
     };
     Ok(ui::LiveLaunch {
         socket,

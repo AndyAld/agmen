@@ -31,6 +31,7 @@ use crate::appearance::{
     ThemeEntry, ThemeExtension, ThemeOrigin, agmen_settings_path, install_shared, installed_themes,
     picker_entries, resolve_paths, theme_dirs, zed_extensions_dir,
 };
+use crate::backend::{AgmendBackend, HostSocket, HostState, HostStatus};
 use crate::icons::{FileIcons, IconTheme, UiIcon};
 
 /// Where Settings reads and writes.
@@ -186,6 +187,10 @@ struct Browse {
 /// `terminal-font`, `terminal-size`, `density`; pages as
 /// `settings-page:{slug}`.
 pub(crate) struct SettingsView {
+    host_status: Option<HostStatus>,
+    host_error: Option<String>,
+    host_task: Option<gpui::Task<()>>,
+    _host_poll: Option<gpui::Task<()>>,
     cli_install: Option<Entity<super::cli_install::CliInstall>>,
     start_at_login: bool,
     login_task: Option<gpui::Task<()>>,
@@ -246,6 +251,10 @@ impl SettingsView {
                 }
             };
         let mut view = Self {
+            host_status: None,
+            host_error: None,
+            host_task: None,
+            _host_poll: None,
             cli_install: super::cli_install::CliInstall::for_app(cx),
             start_at_login,
             login_task: None,
@@ -263,6 +272,23 @@ impl SettingsView {
             search_generation: 0,
         };
         view.rescan();
+        if cx.try_global::<HostSocket>().is_some() {
+            view.refresh_host(false, cx);
+            // shortcut: refresh for one day per Settings view; reopen Settings for a longer session.
+            view._host_poll = Some(cx.spawn(async move |this, cx| {
+                for _ in 0..86_400 {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_secs(1))
+                        .await;
+                    if this
+                        .update(cx, |view, cx| view.refresh_host(false, cx))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }));
+        }
         view
     }
 
@@ -1097,6 +1123,44 @@ impl SettingsView {
         cx.notify();
     }
 
+    fn refresh_host(&mut self, restart: bool, cx: &mut Context<Self>) {
+        if self.host_task.is_some() {
+            return;
+        }
+        let Some(socket) = cx.try_global::<HostSocket>().map(|socket| socket.0.clone()) else {
+            return;
+        };
+        let (done, result) = futures::channel::oneshot::channel();
+        let spawned = std::thread::Builder::new()
+            .name("host-status".into())
+            .spawn(move || {
+                drop(done.send(AgmendBackend::host_status(&socket, restart)));
+            });
+        if let Err(error) = spawned {
+            self.host_error = Some(format!("Reading hub status failed: {error}"));
+            cx.notify();
+            return;
+        }
+        self.host_task = Some(cx.spawn(async move |this, cx| {
+            let result = result.await;
+            drop(this.update(cx, |view, cx| {
+                view.host_task = None;
+                match result {
+                    Ok(Ok(status)) => {
+                        view.host_status = Some(status);
+                        view.host_error = None;
+                    }
+                    Ok(Err(error)) => view.host_error = Some(error.to_string()),
+                    Err(error) => {
+                        view.host_error = Some(format!("Reading hub status stopped: {error}"))
+                    }
+                }
+                cx.notify();
+            }));
+        }));
+        cx.notify();
+    }
+
     fn general_page(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut body = vec![setting(
             "Start agmen in the background when you log in",
@@ -1105,6 +1169,43 @@ impl SettingsView {
         ).child(Toggle::new("start-at-login", self.start_at_login)
             .on_change(Self::handler(cx, |this, enabled, cx| this.change_login(enabled, cx))))
             .into_any_element()];
+        let host = self.host_status.as_ref().filter(|status| status.configured);
+        let configured = host.is_some()
+            || cx
+                .try_global::<HostSocket>()
+                .is_some_and(|socket| socket.0.with_file_name("host.toml").exists());
+        if configured {
+            let status = match host.map(|host| host.state) {
+                Some(HostState::Running) => "Running",
+                Some(HostState::Stopped) => "Stopped",
+                Some(HostState::Failed) => "Failed",
+                None => "Checking status…",
+            };
+            body.push(
+                div()
+                    .debug_selector(|| "host:status".into())
+                    .child(Label::new(format!("Your hub: {status}")))
+                    .children(
+                        host.and_then(|host| host.public_url.clone())
+                            .map(Label::new),
+                    )
+                    .children(
+                        host.and_then(|host| host.last_error.clone())
+                            .or_else(|| self.host_error.clone())
+                            .map(|error| {
+                                div()
+                                    .debug_selector(|| "host:error".into())
+                                    .child(Label::new(error).color(Color::Error).wrap())
+                            }),
+                    )
+                    .child(
+                        Button::new("host:restart", "Restart")
+                            .disabled(self.host_task.is_some())
+                            .on_click(cx.listener(|this, _, _, cx| this.refresh_host(true, cx))),
+                    )
+                    .into_any_element(),
+            );
+        }
         if self.login_task.is_some() {
             body.push(Label::new("Changing login item…").into_any_element());
         }

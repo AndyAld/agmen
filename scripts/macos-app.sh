@@ -1,5 +1,5 @@
 #!/bin/sh
-# Build, sign and package the three executables from this workspace.
+# Build, sign and package the four executables from this workspace.
 set -eu
 cd "$(dirname "$0")/.."
 repo=$PWD
@@ -63,7 +63,7 @@ build_app() {
 	workspace_version=$(printf '%s' "$metadata" | jq -er '.packages[] | select(.name == "agmen-desktop") | .version')
 	if [ -z "$version" ]; then version=$workspace_version; fi
 	[ "$version" = "$workspace_version" ] || fail 'version must match the workspace version'
-	for package in agmend agmen-cli; do
+	for package in agmend agmen-cli agmen-hub; do
 		helper_version=$(printf '%s' "$metadata" | jq -er --arg name "$package" '.packages[] | select(.name == $name) | .version')
 		[ "$helper_version" = "$version" ] || fail "$package version differs from desktop"
 	done
@@ -85,14 +85,14 @@ build_app() {
 	fi
 	for target in $targets; do
 		MACOSX_DEPLOYMENT_TARGET=13.0 AGMEN_BUILD=$build CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-3} \
-			cargo build --release --locked --target "$target" -p agmen-desktop -p agmend -p agmen-cli
+			cargo build --release --locked --target "$target" -p agmen-desktop -p agmend -p agmen-cli -p agmen-hub
 	done
 	app=$out/agmen.app
 	[ ! -L "$app" ] || fail 'refusing a symlink at the output app path'
 	mkdir -p "$out"
 	rm -rf "$app"
 	mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-	for binary in agmen-desktop agmend agmen; do
+	for binary in agmen-desktop agmend agmen agmen-hub; do
 		if [ "$targets" = 'aarch64-apple-darwin x86_64-apple-darwin' ]; then
 			lipo -create "$repo/target/aarch64-apple-darwin/release/$binary" "$repo/target/x86_64-apple-darwin/release/$binary" -output "$app/Contents/MacOS/$binary"
 		else
@@ -116,7 +116,7 @@ sign_app() {
 	else
 		set -- --options runtime --timestamp
 	fi
-	for binary in agmend agmen; do
+	for binary in agmend agmen agmen-hub; do
 		codesign --force --sign "$identity" "$@" "$app/Contents/MacOS/$binary"
 	done
 	codesign --force --sign "$identity" "$@" --entitlements "$repo/crates/agmen-desktop/macos/agmen.entitlements" "$app"

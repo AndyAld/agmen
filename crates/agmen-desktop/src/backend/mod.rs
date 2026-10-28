@@ -33,7 +33,7 @@ use gpui::SharedString;
 
 use crate::roles::{Edits, RoleKind, Tier};
 
-pub(crate) use agmend::AgmendBackend;
+pub(crate) use agmend::{AgmendBackend, HostSocket, HostState, HostStatus};
 pub(crate) use fixture::FixtureBackend;
 pub(crate) use fixture_data::REVIEWER_XML;
 pub(crate) use worktree::{

@@ -778,3 +778,71 @@ fn general_offers_optional_start_at_login(cx: &mut TestAppContext) {
     redraw(cx);
     assert!(cx.debug_bounds("start-at-login").is_some());
 }
+
+#[gpui::test]
+fn general_shows_host_error_and_restart(cx: &mut TestAppContext) {
+    use crate::backend::HostSocket;
+    use crate::backend::fake_agmend::{FakeAgmend, console};
+    let home = Home::new();
+    let fake = FakeAgmend::start(console(vec![]));
+    fake.edit(|state| {
+        state.host_status = Some(serde_json::json!({
+            "configured": true, "state": "failed", "last_error": "Postgres unavailable",
+            "public_url": "https://hub.example/"
+        }))
+    });
+    cx.update(|cx| cx.set_global(HostSocket(fake.path())));
+    let (view, cx) = open(cx, &home);
+    cx.executor().allow_parking();
+    view.update(cx, |view, cx| {
+        view.page = Page::General;
+        cx.notify();
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while cx.debug_bounds("host:restart").is_none() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "host status did not appear"
+        );
+        cx.run_until_parked();
+        redraw(cx);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(cx.debug_bounds("host:error").is_some());
+    click(cx, "host:restart");
+    while fake.state.lock().unwrap().host_restarts == 0 {
+        assert!(std::time::Instant::now() < deadline);
+        cx.run_until_parked();
+        redraw(cx);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(fake.state.lock().unwrap().host_restarts, 1);
+}
+
+#[gpui::test]
+fn general_shows_host_error_when_daemon_status_is_unavailable(cx: &mut TestAppContext) {
+    use crate::backend::HostSocket;
+    use crate::backend::fake_agmend::{FakeAgmend, console};
+    let home = Home::new();
+    let fake = FakeAgmend::start(console(vec![]));
+    fs::write(fake.dir.path().join("host.toml"), "configured").unwrap();
+    fake.stop();
+    cx.update(|cx| cx.set_global(HostSocket(fake.path())));
+    let (view, cx) = open(cx, &home);
+    cx.executor().allow_parking();
+    view.update(cx, |view, cx| {
+        view.page = Page::General;
+        cx.notify();
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while cx.debug_bounds("host:error").is_none() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "host API error did not appear"
+        );
+        cx.run_until_parked();
+        redraw(cx);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(cx.debug_bounds("host:restart").is_some());
+}

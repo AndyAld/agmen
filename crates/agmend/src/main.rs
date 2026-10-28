@@ -16,7 +16,8 @@ const USAGE: &str = "usage: agmend [--help | -h]\n       agmend service <install
                      Leave it running while you use agmen-desktop.\n\n\
                      service install [--program <absolute-path>] [--token-store-dir <absolute-path>]\n\
                      service status [--json]\n\
-                     agmend store-schema --json";
+                     agmend store-schema --json\n\
+                     agmend host init --env-file <path> [--env-file <path> ...] [--hub-bin <path>] [--public-url <url>] [--tailscale-serve] [--force]";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Command {
@@ -29,9 +30,19 @@ enum Command {
         token: std::path::PathBuf,
     },
     StoreSchema,
+    HostInit {
+        files: Vec<std::path::PathBuf>,
+        hub: Option<std::path::PathBuf>,
+        public_url: Option<String>,
+        tailscale: bool,
+        force: bool,
+    },
 }
 
 fn parse(args: &[OsString]) -> Result<Command, String> {
+    if args.first().is_some_and(|arg| arg == "host") {
+        return parse_host(args);
+    }
     if args.len() >= 2
         && args[0] == "service"
         && args[1] == "install"
@@ -82,9 +93,98 @@ fn parse(args: &[OsString]) -> Result<Command, String> {
     }
 }
 
+fn parse_host(args: &[OsString]) -> Result<Command, String> {
+    if args.get(1).is_none_or(|arg| arg != "init") {
+        return Err("expected host init".into());
+    }
+    let mut files = Vec::new();
+    let mut hub = None;
+    let mut public_url = None;
+    let mut tailscale = false;
+    let mut force = false;
+    let mut index = 2;
+    while index < args.len() {
+        let flag = &args[index];
+        if flag == "--tailscale-serve" && !tailscale {
+            tailscale = true;
+        } else if flag == "--force" && !force {
+            force = true;
+        } else {
+            let value = args
+                .get(index + 1)
+                .ok_or("host init option requires a value")?;
+            if flag == "--env-file" && files.len() < 16 {
+                files.push(value.into());
+            } else if flag == "--hub-bin" && hub.is_none() {
+                hub = Some(value.into());
+            } else if flag == "--public-url" && public_url.is_none() {
+                public_url = Some(value.to_str().ok_or("public URL must be UTF-8")?.to_owned());
+            } else {
+                return Err("unknown or repeated host init option".into());
+            }
+            index += 1;
+        }
+        index += 1;
+    }
+    if files.is_empty() {
+        return Err("host init requires --env-file".into());
+    }
+    Ok(Command::HostInit {
+        files,
+        hub,
+        public_url,
+        tailscale,
+        force,
+    })
+}
+
+fn host_init(
+    files: Vec<std::path::PathBuf>,
+    hub: Option<std::path::PathBuf>,
+    public_url: Option<String>,
+    tailscale: bool,
+    force: bool,
+) -> Result<String> {
+    let cwd = std::env::current_dir().context("reading current directory")?;
+    let absolute = |path: std::path::PathBuf| {
+        if path.is_absolute() {
+            path
+        } else {
+            cwd.join(path)
+        }
+    };
+    let mut files = files.into_iter().map(absolute);
+    let env_file = files.next().context("--env-file is required")?;
+    let extra_env_files: Vec<_> = files.collect();
+    let hub_bin = Some(match hub {
+        Some(path) => absolute(path),
+        None => agmend::host::bundled_hub(&std::env::current_exe()?)?,
+    });
+    let public_url = match public_url {
+        Some(url) => url,
+        None => {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            let mut files = vec![env_file.clone()];
+            files.extend(extra_env_files.clone());
+            runtime.block_on(agmend::host::public_url_from_files(&files))?
+        }
+    };
+    let config = agmend::host::HostConfig {
+        hub_bin,
+        env_file,
+        extra_env_files,
+        public_url,
+        tailscale_serve: tailscale,
+    };
+    let path = config.write(&agmen_client::state_dir()?, force)?;
+    Ok(format!("Wrote {}\n", path.display()))
+}
+
 fn main() -> ExitCode {
     // One argument beyond a valid form is sufficient to reject excess input.
-    let args: Vec<_> = std::env::args_os().skip(1).take(7).collect();
+    let args: Vec<_> = std::env::args_os().skip(1).take(43).collect();
     match parse(&args) {
         Ok(Command::Foreground) => {}
         Ok(Command::Help) => {
@@ -111,6 +211,15 @@ fn main() -> ExitCode {
                     agmend::store_snapshot(&agmen_client::state_dir()?)?
                 ))
             })());
+        }
+        Ok(Command::HostInit {
+            files,
+            hub,
+            public_url,
+            tailscale,
+            force,
+        }) => {
+            return output_exit(host_init(files, hub, public_url, tailscale, force));
         }
         Err(err) => {
             eprintln!("agmend: {err}\n{USAGE}");
