@@ -5,11 +5,13 @@ use std::time::Duration;
 
 use anyhow::{Context as _, ensure};
 use gpui::prelude::FluentBuilder as _;
-use gpui::{Context, IntoElement, ParentElement as _, Styled as _, Window, div};
+use gpui::{
+    Context, InteractiveElement as _, IntoElement, ParentElement as _, Styled as _, Window, div,
+};
 use serde::Deserialize;
 
 use super::{LiveRoot, ProjectChoice};
-use crate::ui::components::{Button, ButtonStyle, Label, Modal};
+use crate::ui::components::{Button, ButtonStyle, Indent, Label, ListItem, Modal};
 
 #[derive(Debug, Clone, Deserialize)]
 pub(super) struct Membership {
@@ -352,20 +354,29 @@ impl LiveRoot {
                     .children(projects.iter().enumerate().map(|(index, project)| {
                         let project = project.clone();
                         let active = selected.as_ref() == Some(&project.project);
-                        Button::new(
-                            format!("live:project-choice:{index}"),
-                            format!(
-                                "{}{} (tenant {})",
-                                if active { "✓ " } else { "" },
-                                project.name,
-                                project.tenant
-                            ),
-                        )
-                        .disabled(busy)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.onboarding.selected = Some(project.project.clone());
-                            cx.notify();
-                        }))
+                        ListItem::new(format!("live:project-choice:{index}"), Indent::Group)
+                            .selected(active)
+                            .child(
+                                div()
+                                    .flex()
+                                    .min_w_0()
+                                    .debug_selector(move || {
+                                        format!("live:project-choice:{index}:label")
+                                    })
+                                    .child(
+                                        Label::new(format!(
+                                            "{} (tenant {})",
+                                            project.name, project.tenant
+                                        ))
+                                        .truncate(),
+                                    ),
+                            )
+                            .when(!busy, |item| {
+                                item.on_click(cx.listener(move |this, _, _, cx| {
+                                    this.onboarding.selected = Some(project.project.clone());
+                                    cx.notify();
+                                }))
+                            })
                     }))
                     .child(
                         Button::new("live:join-project", "Join")

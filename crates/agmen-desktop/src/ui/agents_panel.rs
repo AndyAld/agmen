@@ -10,11 +10,11 @@ use gpui::{
 };
 
 use super::components::{
-    Button, ButtonStyle, Color, Icon, IconSize, Indent, Label, LabelSize, ListItem, Menu, MenuRow,
-    StatusDot,
+    Button, ButtonStyle, Color, Icon, IconButton, IconButtonStyle, IconSize, Indent, Label,
+    LabelSize, ListItem, Menu, MenuRow, StatusDot,
 };
 use super::format::title_case;
-use super::tokens::SPACE_6;
+use super::tokens::{SPACE_4, SPACE_6};
 use crate::backend::{AgentRow, AgentStatus, PersonGroup};
 use agmen_proto::IdentityId;
 
@@ -285,8 +285,7 @@ impl AgentsPanel {
             })
     }
 
-    /// The row's end: the managed state and Stop, as before the menu, and
-    /// `…` for an agent with a menu.
+    /// The harness, managed state and Stop, then `…` for an agent with a menu.
     fn with_end(
         &self,
         item: ListItem,
@@ -303,7 +302,15 @@ impl AgentsPanel {
             div()
                 .flex()
                 .items_center()
-                .child(Label::new(state.clone()).size(LabelSize::Small))
+                .gap(SPACE_4)
+                .child(
+                    div()
+                        .debug_selector({
+                            let selector = format!("agent:{}:state", agent.handle);
+                            move || selector
+                        })
+                        .child(Label::new(state.clone()).size(LabelSize::Small)),
+                )
                 .child(
                     Button::new(format!("agent:{}:stop", agent.handle), "Stop")
                         .style(ButtonStyle::Plain)
@@ -316,8 +323,8 @@ impl AgentsPanel {
         });
         let more = menu.then(|| {
             let identity = agent.id.clone();
-            Button::new(format!("agent:{}:more", agent.handle), "…")
-                .style(ButtonStyle::Plain)
+            IconButton::new(format!("agent:{}:more", agent.handle), UiIcon::Ellipsis)
+                .style(IconButtonStyle::InRow)
                 .on_click(cx.listener(move |this, _, _, cx| {
                     cx.stop_propagation();
                     this.open_menu(&identity, cx);
@@ -328,6 +335,11 @@ impl AgentsPanel {
                 .flex()
                 .flex_none()
                 .items_center()
+                .gap(SPACE_4)
+                .child(harness_label(
+                    format!("agent:{}", agent.handle),
+                    &agent.harness,
+                ))
                 .children(stop)
                 .children(more),
         )
@@ -362,15 +374,24 @@ pub(crate) fn agent_item(
     role: &AgentRole,
     harness: &str,
 ) -> ListItem {
-    ListItem::new(id, Indent::Depth(depth))
+    ListItem::new(id.clone(), Indent::Depth(depth))
         .leading(StatusDot::new(status))
         .child(Label::new(name.to_owned()).code().truncate())
         .child(
             Label::new(role.label.clone())
                 .size(LabelSize::Small)
-                .color(Color::Role(role.name.clone().into())),
+                .color(Color::Role(role.name.clone().into()))
+                .truncate(),
         )
-        .end(
+        .end(harness_label(id, harness))
+}
+
+/// Shared by the bare row and the row with managed-agent controls.
+fn harness_label(id: String, harness: &str) -> impl IntoElement {
+    div()
+        .flex_none()
+        .debug_selector(move || format!("{id}:harness"))
+        .child(
             Label::new(harness.to_owned())
                 .code()
                 .color(Color::Placeholder),

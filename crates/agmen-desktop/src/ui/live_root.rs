@@ -10,12 +10,15 @@ use agmen_proto::ProjectId;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AppContext as _, Context, Entity, FocusHandle, Focusable, FontWeight, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, Styled as _, Task, Window, div,
+    IntoElement, ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, Task,
+    Window, div,
 };
 
 use super::Workspace;
-use super::components::{Button, ButtonStyle, Color, Label, LabelSize, Modal};
-use super::tokens::{LAUNCH_STATE_WIDTH, SPACE_10, SPACE_16, TITLE_BAR_HEIGHT};
+use super::components::{
+    Button, ButtonSize, ButtonStyle, CheckRow, Color, Label, LabelSize, Modal,
+};
+use super::tokens::{LAUNCH_STATE_WIDTH, SPACE_8, SPACE_10, SPACE_16, TITLE_BAR_HEIGHT};
 use crate::appearance::{Appearance, DesktopSettings};
 use crate::backend::{AgmendBackend, Backend, BackendError, BackendHandle, HostSocket, HostState};
 use crate::bundle::Bundle;
@@ -815,20 +818,43 @@ impl LiveRoot {
     fn quit_dialog(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
         self.quit_choice?;
         let busy = self.quit_busy;
-        Some(Modal::new("quit:dialog", gpui::px(480.), gpui::px(100.))
-            .child(Label::new("Keep agents running in the background?").size(LabelSize::Title))
-            .child(Label::new("Your agents and the listener keep working and receiving messages after agmen closes.").wrap())
-            .child(Button::new("quit:remember", if self.quit_remember { "☑ Don't ask again" } else { "☐ Don't ask again" })
-                .on_click(cx.listener(|this, _, _, cx| {
-                    if !this.quit_busy { this.quit_remember = !this.quit_remember; cx.notify(); }
-                })))
-            .child(Button::new("quit:keep", "Keep Running").style(ButtonStyle::Primary)
-                .on_click(cx.listener(|this, _, window, cx| this.choose_quit(service::QuitChoice::Keep, window, cx))))
-            .child(Button::new("quit:everything", if busy { "Stopping agmend…" } else { "Quit Everything" })
-                .on_click(cx.listener(|this, _, window, cx| this.choose_quit(service::QuitChoice::Stop, window, cx))))
-            .child(Button::new("quit:cancel", "Cancel")
-                .on_click(cx.listener(|this, _, window, cx| this.cancel_quit(window, cx))))
-            .children(self.service_error.clone().map(|error| Label::new(error).color(Color::Error).wrap())))
+        Some(
+            Modal::new("quit:dialog", gpui::px(480.), gpui::px(100.))
+                .child(Label::new("Keep agents running in the background?").size(LabelSize::Title))
+                .child(Label::new("Your agents and the listener keep working and receiving messages after agmen closes.").wrap())
+                .children(self.service_error.clone().map(|error| Label::new(error).color(Color::Error).wrap()))
+                .child(
+                    div()
+                        .id("quit:remember")
+                        .debug_selector(|| "quit:remember".into())
+                        .when(!busy, |this| this.cursor_pointer())
+                        .child(CheckRow::new("Don't ask again", self.quit_remember))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            if !this.quit_busy {
+                                this.quit_remember = !this.quit_remember;
+                                cx.notify();
+                            }
+                        })),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .justify_end()
+                        .gap(SPACE_8)
+                        .child(Button::new("quit:cancel", "Cancel")
+                            .style(ButtonStyle::Inset)
+                            .size(ButtonSize::Large)
+                            .on_click(cx.listener(|this, _, window, cx| this.cancel_quit(window, cx))))
+                        .child(Button::new("quit:keep", "Keep Running")
+                            .style(ButtonStyle::Primary)
+                            .size(ButtonSize::Large)
+                            .on_click(cx.listener(|this, _, window, cx| this.choose_quit(service::QuitChoice::Keep, window, cx))))
+                        .child(Button::new("quit:everything", if busy { "Stopping agmend…" } else { "Quit Everything" })
+                            .style(ButtonStyle::Danger)
+                            .size(ButtonSize::Large)
+                            .on_click(cx.listener(|this, _, window, cx| this.choose_quit(service::QuitChoice::Stop, window, cx)))),
+                ),
+        )
     }
 
     fn message(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {

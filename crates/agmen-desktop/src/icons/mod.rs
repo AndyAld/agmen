@@ -220,6 +220,7 @@ pub(crate) enum UiIcon {
     Terminal,
     Chat,
     Bell,
+    Ellipsis,
     Settings,
     ChevronDown,
     ChevronRight,
@@ -245,7 +246,7 @@ pub(crate) enum UiIcon {
 
 impl UiIcon {
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 27] = [
+    pub(crate) const ALL: [Self; 28] = [
         Self::Agents,
         Self::Project,
         Self::Git,
@@ -254,6 +255,7 @@ impl UiIcon {
         Self::Terminal,
         Self::Chat,
         Self::Bell,
+        Self::Ellipsis,
         Self::Settings,
         Self::ChevronDown,
         Self::ChevronRight,
@@ -286,6 +288,7 @@ impl UiIcon {
             Self::Terminal => "icons/lucide/terminal.svg",
             Self::Chat => "icons/lucide/message-square.svg",
             Self::Bell => "icons/lucide/bell.svg",
+            Self::Ellipsis => "icons/lucide/ellipsis.svg",
             Self::Settings => "icons/lucide/settings.svg",
             Self::ChevronDown => "icons/lucide/chevron-down.svg",
             Self::ChevronRight => "icons/lucide/chevron-right.svg",
@@ -340,6 +343,7 @@ mod tests {
                 | UiIcon::Terminal
                 | UiIcon::Chat
                 | UiIcon::Bell
+                | UiIcon::Ellipsis
                 | UiIcon::Settings
                 | UiIcon::ChevronDown
                 | UiIcon::ChevronRight

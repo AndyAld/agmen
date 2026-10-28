@@ -14,6 +14,91 @@ fn project() -> ProjectId {
     "project1".parse().unwrap()
 }
 
+fn quit_fixture(cx: &mut TestAppContext) -> (Entity<LiveRoot>, &mut VisualTestContext) {
+    let launch = LiveLaunch {
+        socket: PathBuf::from("/injected/agmend.sock"),
+        root: None,
+        project: ProjectChoice::None { why: None },
+        settings: None,
+    };
+    let (root, cx) = open(cx, launch);
+    root.update_in(cx, |root, _, cx| {
+        root.quit_choice = Some(service::QuitChoice::Ask);
+        cx.notify();
+    });
+    redraw(cx);
+    (root, cx)
+}
+
+#[gpui::test]
+fn quit_everything_uses_the_danger_style(cx: &mut TestAppContext) {
+    let (_, cx) = quit_fixture(cx);
+    let error = cx.update(|_, cx| cx.global::<Appearance>().theme.error);
+    assert_eq!(
+        crate::ui::test_support::fills_at(cx, "quit:everything"),
+        [error]
+    );
+}
+
+#[gpui::test]
+fn quit_dialog_uses_a_real_checkbox_and_a_footer(cx: &mut TestAppContext) {
+    let (root, cx) = quit_fixture(cx);
+    let checkbox = cx.debug_bounds("check:glyph").expect("CheckRow is drawn");
+    let remember = cx.debug_bounds("quit:remember").unwrap();
+    assert!(remember.contains(&checkbox.center()));
+    click(cx, "quit:remember");
+    assert!(root.read_with(cx, |root, _| root.quit_remember));
+    assert!(cx.debug_bounds("check:mark").is_some());
+    let buttons =
+        ["quit:cancel", "quit:keep", "quit:everything"].map(|id| cx.debug_bounds(id).unwrap());
+    for pair in buttons.windows(2) {
+        assert_eq!(pair[0].center().y, pair[1].center().y);
+        assert!(pair[0].right() < pair[1].left());
+    }
+    assert!(remember.bottom() < buttons[0].top());
+}
+
+#[gpui::test]
+fn project_chooser_marks_the_choice_without_a_text_glyph(cx: &mut TestAppContext) {
+    let fake = FakeAgmend::start(console(vec![]));
+    let folder = fake.dir.path().join("new-folder");
+    let (root, cx) = open(cx, empty_launch(&fake));
+    let other = serde_json::json!({"tenant":"tenant01","project":"project2","name":"other","role":"member"});
+    membership_fixture(
+        &root,
+        cx,
+        &folder,
+        serde_json::json!([membership("admin"), other]),
+    );
+    pick(&root, cx, &folder);
+    wait_until(cx, |cx| cx.debug_bounds("live:project-choice:0").is_some());
+    let selected_fill = cx.update(|_, cx| cx.global::<Appearance>().theme.element_selected);
+    click(cx, "live:project-choice:0");
+    assert_eq!(
+        crate::ui::test_support::fills_at(cx, "live:project-choice:0"),
+        [selected_fill]
+    );
+    let label = cx.debug_bounds("live:project-choice:0:label").unwrap();
+    click(cx, "live:project-choice:1");
+    assert_eq!(
+        cx.debug_bounds("live:project-choice:0:label").unwrap().size,
+        label.size
+    );
+    assert_eq!(
+        crate::ui::test_support::fills_at(cx, "live:project-choice:1"),
+        [selected_fill]
+    );
+    assert_ne!(
+        crate::ui::test_support::fills_at(cx, "live:project-choice:0"),
+        [selected_fill]
+    );
+    click(cx, "live:project-choice:0");
+    assert_eq!(
+        cx.debug_bounds("live:project-choice:0:label").unwrap().size,
+        label.size
+    );
+}
+
 fn joined_folder(dir: &std::path::Path) {
     std::fs::create_dir_all(dir).unwrap();
     assert!(
