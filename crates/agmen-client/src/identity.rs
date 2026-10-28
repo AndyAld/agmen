@@ -14,6 +14,7 @@
 //! case-insensitive file system, where a committed `.AGMEN/identity.json`
 //! beside a committed `.gitignore` naming `.agmen/` passes check-ignore.
 
+use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::{self, Read as _};
@@ -21,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
-use agmen_proto::{IdentityId, ProjectId, TenantId, Topics};
+use agmen_proto::{IdentityId, ProjectId, RoleName, Sha256Hex, TenantId, Topics};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
@@ -40,9 +41,10 @@ const WALK_MAX: usize = 64;
 /// The largest identity file read; a real one is a few hundred bytes.
 const MAX_FILE_BYTES: u64 = 64 * 1024;
 
-/// What `.agmen/identity.json` holds: seven fields, all required, which
-/// `agmen join` writes from the hub's answers. Fields this version does not
-/// know are ignored, so a later version can add some.
+/// What `.agmen/identity.json` holds: seven required fields and three optional
+/// role fields, which `agmen join` writes from the hub's answers. Legacy files
+/// omit the role fields and retain the unfiltered tool list. Unknown fields
+/// are ignored, so a later version can add some.
 ///
 /// ```
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -74,6 +76,15 @@ pub struct IdentityFile {
     /// it (`AGMEN_PUBLIC_MQTT_URL`, ruling R57): `mqtt://`, `mqtts://` or
     /// `wss://`. Any other address fails to parse, so the file is refused.
     pub broker_url: Broker,
+    /// The opt-in role, absent for legacy identities.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<RoleName>,
+    /// The digest of the resolved role's source XML.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role_sha256: Option<Sha256Hex>,
+    /// The hub-capped verbs. Absence preserves legacy tool visibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verbs: Option<BTreeSet<String>>,
 }
 
 impl IdentityFile {

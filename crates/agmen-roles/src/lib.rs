@@ -23,7 +23,7 @@ mod schema;
 pub use compat::{BUILT_IN, RoleKind as Kind, Tier};
 pub use error::RoleError;
 pub use import::import_subagent;
-pub use layer::{Catalog, Layers, Resolved};
+pub use layer::{Catalog, Layer, Layers, Resolved};
 pub use render::{claude_tools, render_prompt};
 pub use schema::{
     EditScope, Prompt, Remove, Role, ToolClass, ToolSet, Worktree, WorktreeMode, parse,

@@ -79,6 +79,51 @@ async fn lists_tools() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn mcp_lists_only_role_tools() {
+    let recorder = Recorder::start().await;
+    let home = Home::new();
+    let catalog = agmen_roles::Layers::default().load().unwrap();
+    for (role, expected) in [
+        (
+            "reviewer",
+            vec![
+                "answer",
+                "ask",
+                "check_path",
+                "dm",
+                "found",
+                "inbox",
+                "lanes",
+                "post",
+                "review",
+                "state",
+            ],
+        ),
+        ("engineer", TOOLS.to_vec()),
+    ] {
+        let wt = Worktree::new(&home);
+        join_like_agmen(&wt, &recorder);
+        let mut file: serde_json::Value = serde_json::from_str(&identity_json(&recorder)).unwrap();
+        file["verbs"] = serde_json::to_value(&catalog.get(role).unwrap().verbs).unwrap();
+        std::fs::write(wt.path().join(".agmen/identity.json"), file.to_string()).unwrap();
+        let mcp = Mcp::start(options(&home, &wt.path())).await;
+        assert_eq!(mcp.tools().await, expected, "{role}");
+        mcp.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn legacy_identity_lists_twelve() {
+    let recorder = Recorder::start().await;
+    let home = Home::new();
+    let wt = Worktree::new(&home);
+    join_like_agmen(&wt, &recorder);
+    let mcp = Mcp::start(options(&home, &wt.path())).await;
+    assert_eq!(mcp.tools().await, TOOLS);
+    mcp.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn not_joined_answers_every_tool() {
     let home = Home::new();
     // Outside any git worktree, then in a worktree with no identity file.

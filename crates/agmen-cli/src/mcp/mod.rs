@@ -204,7 +204,19 @@ where
     T: IntoTransport<RoleServer, E, A>,
     E: std::error::Error + Send + Sync + 'static,
 {
-    let server = Server::new(options);
+    // Startup discovery does not read tokens or connect. Failures retain the
+    // legacy list and are reported through the usual trust path on tool calls.
+    let verbs = trusted(&options)
+        .await
+        .ok()
+        .and_then(|joined| joined.identity.verbs);
+    let mut tool_router = Server::tool_router();
+    // shortcut: a worktree joined while running keeps its startup tool list;
+    // the hub still enforces verbs. Revisit with a tools/list_changed refresh.
+    for name in tools::hidden_tools(verbs.as_ref()) {
+        tool_router.remove_route(name);
+    }
+    let server = Server::new(options, tool_router);
     // Connects now and keeps a session for the HEARTBEAT, so held claims
     // get it without a tool call.
     let heartbeat = Task::spawn(heartbeat(server.clone()));
@@ -312,14 +324,47 @@ impl Drop for Task {
     }
 }
 
+/// The worktree identity after the file trust and `--identity` checks.
+#[expect(
+    clippy::result_large_err,
+    reason = "gpui enables serde_json preserve_order workspace-wide, which grows CallToolResult"
+)]
+async fn trusted(options: &McpOptions) -> Result<Joined, CallToolResult> {
+    let cwd = options.cwd.clone();
+    let found = blocking(move || Ok(find_identity(&cwd)))
+        .await
+        .map_err(|err| failure(&err))?;
+    let joined = match found {
+        Ok(Some(joined)) => joined,
+        Ok(None) => return Err(text(NOT_JOINED)),
+        Err(err @ IdentityError::Untrusted { .. }) => {
+            tracing::warn!("{err}");
+            return Err(text(NOT_JOINED));
+        }
+        Err(err) => {
+            let err = anyhow::Error::new(err).context("loading .agmen/identity.json failed");
+            return Err(failure(&err));
+        }
+    };
+    let id = &joined.identity.identity_id;
+    if let Some(want) = &options.identity
+        && want != id
+    {
+        return Err(text(format!(
+            "not joined as {want}: this worktree's identity is {id}"
+        )));
+    }
+    Ok(joined)
+}
+
 impl Server {
-    fn new(options: McpOptions) -> Self {
+    fn new(options: McpOptions, tool_router: ToolRouter<Self>) -> Self {
         Self {
             shared: Arc::new(Shared {
                 options,
                 slot: Mutex::new(None),
             }),
-            tool_router: Self::tool_router(),
+            tool_router,
         }
     }
 
@@ -366,45 +411,11 @@ impl Server {
             };
             return Err(failure(&err));
         }
-        let joined = self.trusted().await?;
+        let joined = trusted(&self.shared.options).await?;
         let connected = self.connect(joined).await.map_err(|err| failure(&err))?;
         let live = connected.live.clone();
         *slot = Some(connected);
         Ok(live)
-    }
-
-    /// The worktree's identity file, once it passed the trust test and
-    /// names the identity `--identity` asks for.
-    #[expect(
-        clippy::result_large_err,
-        reason = "gpui enables serde_json preserve_order workspace-wide, which grows CallToolResult"
-    )]
-    async fn trusted(&self) -> Result<Joined, CallToolResult> {
-        let cwd = self.shared.options.cwd.clone();
-        let found = blocking(move || Ok(find_identity(&cwd)))
-            .await
-            .map_err(|err| failure(&err))?;
-        let joined = match found {
-            Ok(Some(joined)) => joined,
-            Ok(None) => return Err(text(NOT_JOINED)),
-            Err(err @ IdentityError::Untrusted { .. }) => {
-                tracing::warn!("{err}");
-                return Err(text(NOT_JOINED));
-            }
-            Err(err) => {
-                let err = anyhow::Error::new(err).context("loading .agmen/identity.json failed");
-                return Err(failure(&err));
-            }
-        };
-        let id = &joined.identity.identity_id;
-        if let Some(want) = &self.shared.options.identity
-            && want != id
-        {
-            return Err(text(format!(
-                "not joined as {want}: this worktree's identity is {id}"
-            )));
-        }
-        Ok(joined)
     }
 
     /// Loads the token of `joined`'s identity, connects its `<id>-mcp`

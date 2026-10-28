@@ -10,6 +10,7 @@ mod join;
 pub(crate) mod lanes;
 mod open;
 pub(crate) mod post;
+mod role;
 mod watch;
 
 use std::time::Duration;
@@ -144,6 +145,11 @@ enum Command {
     Invite(account::InviteArgs),
     /// Join this worktree to a project as a new identity of yours.
     Join(join::JoinArgs),
+    /// List, show or import local roles.
+    Role {
+        #[command(subcommand)]
+        command: role::RoleCommand,
+    },
     /// Revoke this worktree's identity and remove its identity file.
     Leave,
     /// Post a message with any verb.
@@ -242,6 +248,7 @@ impl Cli {
             Command::Project { command } => account::project(command).await,
             Command::Invite(args) => account::invite(args).await,
             Command::Join(args) => join::join(args).await,
+            Command::Role { command } => role::run(command).await,
             Command::Leave => join::leave().await,
             Command::Post(args) => post::post(args).await,
             Command::Ask(args) => post::ask(args).await,

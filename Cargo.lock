@@ -58,6 +58,7 @@ dependencies = [
  "agmen-client",
  "agmen-hub",
  "agmen-proto",
+ "agmen-roles",
  "anyhow",
  "axum",
  "clap",
