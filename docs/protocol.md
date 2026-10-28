@@ -248,3 +248,83 @@ Listener settings (agent, model, effort, caps, `accept_from`, which always inclu
 - Additive changes (new optional fields, new verbs) keep `v: 1`.
 - Breaking changes move to `agmen/v2/...` topics, and the hub bridges v1 clients for one release.
 - `agmen-proto` exports JSON Schema (schemars) and TS types (ts-rs) for the web console and the mod; CI fails if the committed schema drifts from the Rust types.
+
+## 10. Local daemon identity, readiness and service ownership
+
+The per-user Unix socket uses agmen-local's length-prefixed JSON frames. The
+first request remains `hello` with `{"api":1}`. Its result identifies the running
+process:
+
+```json
+{"api":1,"version":"0.1.0","build":"dev","exe":"/Applications/agmen.app/Contents/MacOS/agmend"}
+```
+
+`build` is the compile-time `AGMEN_BUILD` value, or `dev` when absent. `exe` comes
+from the running process's `current_exe()`, independent of the program configured
+for its next service start. The shared `HelloAnswer` requires `api`; `version`,
+`build` and `exe` are optional so older API 1 answers still parse. Clients must
+treat an absent version as unknown compatibility.
+
+After hello, a human caller can request `ready` with `{}`. A successful result
+means startup and store initialization completed:
+
+```json
+{"ready":true,"schemas":{"agmend.db":2,"identities/agent001/agmen.db":2}}
+```
+
+`schemas` contains the actual SQLite `user_version` of each existing store, keyed
+by its path relative to the daemon state directory. Absent identity stores have
+no entry. Startup preflights all existing stores before migrating any, and
+initializes existing identity stores before serving requests. Ready rechecks the
+schemas without migration, with a 10 s deadline, one active scan and at most 4096
+identity directory entries. It does not require hub or broker connectivity.
+Older daemons may reject this additive method. Hello alone does not prove store
+readiness. Callers must compare the complete schema map before rollback; an
+unknown schema or failed inspection does not establish rollback safety.
+
+Daemon and identity stores refuse newer schemas before migration or journal-mode
+changes and recheck versions under the migration lock. Schema inspection opens
+files only for reading. It reads SQLite's [documented database header and committed
+WAL frames](https://sqlite.org/fileformat2.html#walformat), validates WAL checksums
+and salts, and never opens a SQLite connection or creates sidecars. It therefore
+also reads a newer schema from an abandoned WAL without an SHM file. Uncommitted
+frames do not change the reported version. A scan reads pages of at most 64 KiB,
+at most one million WAL frames, and has at most 5 s within the caller's deadline.
+Concurrent changes get at most 501 snapshot attempts within that deadline.
+Header/file checks detect checkpoint, reset and replacement races. A hot rollback
+journal requires recovery and leaves compatibility unknown; inspection does not
+recover it, and `ready` reports it as an error. Opening a store is different:
+the daemon and identity stores let SQLite recover the journal (restoring the
+last committed state, never migrating), then refuse a newer schema under the
+migration lock before any migration or journal-mode change. Refusing instead
+would leave a store interrupted during its first creation unopenable. An
+inspection error must never be treated as proof of rollback safety.
+
+`agmend service status` retains its text results (`running`, `stopped`, or `not
+installed`, followed by a newline) and exit behavior. `agmend service status
+--json` instead prints one JSON object:
+
+```json
+{"state":"stopped","program":"/Applications/Old agmen.app/Contents/MacOS/agmend"}
+```
+
+`program` is the absolute configured path from the user plist's
+`ProgramArguments[0]` or the user unit's `ExecStart`, even when the executable no
+longer exists. It is null if the configuration file is absent. Status inspects at
+most 64 KiB of configuration, decodes XML or systemd escaping, and errors on
+malformed or ambiguous configuration. It does not infer ownership from the
+helper running the status command. Callers compare this path and their receipts
+before requesting a service change.
+
+`agmend service install --program <absolute-path>` validates an executable file
+and preserves the supplied spelling, including stable symlinks. Omitting
+`--program` uses `current_exe()`. Install refuses malformed existing configuration
+before replacing it. On macOS it boots out a loaded service before bootstrap. On
+Linux it checks the user manager and active state, then reloads, enables and
+restarts an active unit or starts an inactive one. Without a working systemd
+user manager, install fails before writing the unit and names foreground
+`agmend` as the fallback. The entire manager transition and matching-version
+hello plus ready handshake share a 120 s deadline. Each manager process has at
+most 10 s and 64 KiB per output stream. Installation reports success only after
+the running daemon matches the installing helper's release version and answers
+ready.

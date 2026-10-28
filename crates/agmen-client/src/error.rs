@@ -14,6 +14,20 @@ pub enum ClientError {
     /// The identity's SQLite file could not be opened, read or written.
     #[error("the local store failed")]
     Store(#[from] rusqlite::Error),
+    /// Read-only inspection cannot establish schema compatibility safely.
+    #[error("the local store schema cannot be inspected without writes; compatibility is unknown")]
+    StoreInspect(#[from] std::io::Error),
+    /// The main file or WAL changed during side-effect-free inspection.
+    #[error(
+        "the local store changed during schema inspection; compatibility is unknown, retry inspection"
+    )]
+    StoreChanged,
+    /// A rollback journal is present: a live writer or an interrupted
+    /// transaction that only SQLite's recovery can resolve.
+    #[error(
+        "the local store has a rollback journal awaiting recovery; compatibility is unknown until SQLite opens it"
+    )]
+    StoreJournal,
     /// The SQLite file would not switch to WAL mode.
     #[error("the local store is in journal mode {0:?}, not WAL")]
     StoreMode(String),

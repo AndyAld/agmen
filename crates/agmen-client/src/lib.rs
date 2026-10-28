@@ -27,6 +27,7 @@ pub use body::{
     read_hub_body_with_limit,
 };
 pub use cursor::{Advance, Cursors};
+pub use db::{preflight_schema, store_schema};
 pub use error::ClientError;
 pub use event::{ClientEvent, Me};
 pub use hub::{HubClient, HubUrlError, PAGE_LIMIT, Page, check_hub_url};

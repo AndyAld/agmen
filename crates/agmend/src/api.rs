@@ -44,7 +44,10 @@ pub(crate) async fn serve(stream: UnixStream, core: Arc<Core>) {
         };
         let id = request.id;
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-        let bounded = matches!(request.method.as_str(), "inbox" | "state" | "pending");
+        let bounded = matches!(
+            request.method.as_str(),
+            "inbox" | "state" | "pending" | "ready"
+        );
         let outcome = if let Some(refusal) = refuse(&request, greeted) {
             Err(refusal)
         } else {
@@ -81,26 +84,16 @@ pub(crate) async fn serve(stream: UnixStream, core: Arc<Core>) {
                     finite(deadline, core.identities.state(&caller, request.params)).await
                 }
                 Ok(caller) if request.method == "pending" => {
-                    #[derive(Deserialize)]
-                    #[serde(deny_unknown_fields)]
-                    struct Pending {}
-                    match params::<Pending>(request.params) {
-                        Err(error) => Err(error),
-                        Ok(_) => match caller {
-                            Caller::Human => {
-                                Err(bad_request("pending requires an identity caller"))
-                            }
-                            Caller::Identity(identity) => {
-                                finite(deadline, core.identities.pending(&identity)).await
-                            }
-                        },
-                    }
+                    finite(deadline, pending(&core, caller, request.params)).await
                 }
                 Ok(Caller::Identity(caller)) => {
                     identity_call(&core, &caller, &request.method, request.params).await
                 }
                 Ok(Caller::Human) if request.method == "hello" => {
                     hello(request.params).inspect(|_| greeted = true)
+                }
+                Ok(Caller::Human) if request.method == "ready" => {
+                    finite(deadline, ready(&core, request.params, deadline)).await
                 }
                 Ok(Caller::Human) if request.method == "console_watch" => {
                     // The watch keeps the connection; whatever it ends with is the
@@ -125,6 +118,46 @@ pub(crate) async fn serve(stream: UnixStream, core: Arc<Core>) {
             return;
         }
     }
+}
+
+async fn pending(core: &Core, caller: Caller, raw: Value) -> Result<Value, ApiError> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Pending {}
+    params::<Pending>(raw)?;
+    match caller {
+        Caller::Human => Err(bad_request("pending requires an identity caller")),
+        Caller::Identity(identity) => core.identities.pending(&identity).await,
+    }
+}
+
+async fn ready(core: &Core, raw: Value, deadline: tokio::time::Instant) -> Result<Value, ApiError> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Ready {}
+    params::<Ready>(raw)?;
+    let permit = core
+        .schema_scan
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|_| bad_request("store inspection stopped"))?;
+    let dir = core.state_dir.clone();
+    let scan_deadline = deadline.into_std();
+    let schemas = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        crate::state::schemas(&dir, scan_deadline)
+    })
+    .await
+    .map_err(|_| bad_request("reading store schemas failed"))?
+    .map_err(|error| ApiError {
+        code: ErrorCode::Version,
+        message: format!("{error:#}"),
+    })?;
+    Ok(json!(agmen_local::ReadyAnswer {
+        ready: true,
+        schemas
+    }))
 }
 
 async fn finite(
@@ -193,7 +226,7 @@ async fn identity_call(
             }
             core.identities.post(caller, envelope).await
         }
-        "hello" | "whoami" | "console_watch" | "console_snapshot" | "chat_history"
+        "hello" | "ready" | "whoami" | "console_watch" | "console_snapshot" | "chat_history"
         | "file_text" | "identity_mint" | "identity_list" => Err(forbidden()),
         other => Err(ApiError {
             code: ErrorCode::NotFound,
@@ -205,7 +238,14 @@ async fn identity_call(
 fn hello(raw: Value) -> Result<Value, ApiError> {
     let Hello { api } = params(raw)?;
     if api == API {
-        Ok(json!({ "api": API }))
+        let exe = std::env::current_exe()
+            .map_err(|error| bad_request(format!("locating running executable: {error}")))?;
+        Ok(json!(agmen_local::HelloAnswer {
+            api: API,
+            version: Some(env!("CARGO_PKG_VERSION").to_owned()),
+            build: Some(option_env!("AGMEN_BUILD").unwrap_or("dev").to_owned()),
+            exe: Some(exe),
+        }))
     } else {
         Err(ApiError {
             code: ErrorCode::Version,

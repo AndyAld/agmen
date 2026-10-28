@@ -13,19 +13,32 @@ use service::ServiceAction;
 
 const USAGE: &str = "usage: agmend [--help | -h]\n       agmend service <install | uninstall | status>\n\n\
                      Runs the agmen daemon in the foreground until Ctrl-C. \
-                     Leave it running while you use agmen-desktop.";
+                     Leave it running while you use agmen-desktop.\n\n\
+                     service install [--program <absolute-path>]\n\
+                     service status [--json]";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Command {
     Foreground,
     Help,
     Service(ServiceAction),
+    InstallProgram(std::path::PathBuf),
 }
 
 fn parse(args: &[OsString]) -> Result<Command, String> {
     match args {
         [] => Ok(Command::Foreground),
         [arg] if arg == "--help" || arg == "-h" => Ok(Command::Help),
+        [command, action, flag]
+            if command == "service" && action == "status" && flag == "--json" =>
+        {
+            Ok(Command::Service(ServiceAction::StatusJson))
+        }
+        [command, action, flag, program]
+            if command == "service" && action == "install" && flag == "--program" =>
+        {
+            Ok(Command::InstallProgram(program.into()))
+        }
         [command, action] if command == "service" => match action.to_str() {
             Some("install") => Ok(Command::Service(ServiceAction::Install)),
             Some("uninstall") => Ok(Command::Service(ServiceAction::Uninstall)),
@@ -38,7 +51,7 @@ fn parse(args: &[OsString]) -> Result<Command, String> {
 
 fn main() -> ExitCode {
     // One argument beyond a valid form is sufficient to reject excess input.
-    let args: Vec<_> = std::env::args_os().skip(1).take(4).collect();
+    let args: Vec<_> = std::env::args_os().skip(1).take(5).collect();
     match parse(&args) {
         Ok(Command::Foreground) => {}
         Ok(Command::Help) => {
@@ -46,16 +59,10 @@ fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         Ok(Command::Service(action)) => {
-            return match service::execute(action) {
-                Ok(message) => {
-                    print!("{message}");
-                    ExitCode::SUCCESS
-                }
-                Err(err) => {
-                    eprintln!("agmend: {err:#}");
-                    ExitCode::FAILURE
-                }
-            };
+            return service_exit(action, None);
+        }
+        Ok(Command::InstallProgram(program)) => {
+            return service_exit(ServiceAction::Install, Some(program));
         }
         Err(err) => {
             eprintln!("agmend: {err}\n{USAGE}");
@@ -90,6 +97,19 @@ fn main() -> ExitCode {
     };
     match runtime.block_on(run()) {
         Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("agmend: {err:#}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn service_exit(action: ServiceAction, program: Option<std::path::PathBuf>) -> ExitCode {
+    match service::execute(action, program) {
+        Ok(message) => {
+            print!("{message}");
+            ExitCode::SUCCESS
+        }
         Err(err) => {
             eprintln!("agmend: {err:#}");
             ExitCode::FAILURE
@@ -136,6 +156,31 @@ mod tests {
                 parse(&[OsString::from("service"), OsString::from(action)]),
                 Ok(Command::Service(expected))
             );
+        }
+    }
+
+    #[test]
+    fn service_options_parse() {
+        let args = |words: &[&str]| words.iter().map(OsString::from).collect::<Vec<_>>();
+        assert_eq!(
+            parse(&args(&["service", "status", "--json"])),
+            Ok(Command::Service(ServiceAction::StatusJson))
+        );
+        assert_eq!(
+            parse(&args(&[
+                "service",
+                "install",
+                "--program",
+                "/active/agmend"
+            ])),
+            Ok(Command::InstallProgram("/active/agmend".into()))
+        );
+        for words in [
+            vec!["service", "install", "--program"],
+            vec!["service", "install", "--program", "/active/agmend", "extra"],
+            vec!["service", "status", "--json", "extra"],
+        ] {
+            assert!(parse(&args(&words)).is_err());
         }
     }
 

@@ -43,13 +43,14 @@ use crate::hub::Hub;
 use crate::identities::Identities;
 use crate::local::Local;
 use crate::login::Credentials;
-use crate::state::Store;
 
 /// Shared context for all local API connections.
 #[derive(Debug)]
 pub(crate) struct Core {
     console: Arc<Console>,
     identities: Arc<Identities>,
+    state_dir: PathBuf,
+    schema_scan: Arc<Semaphore>,
 }
 
 /// The socket's file name in the state folder (agmen-client's, which the
@@ -218,7 +219,7 @@ impl Agmend {
         // bind is synchronous for compatibility. SQLite runs on a blocking
         // worker; the worker owns the lock even if this bounded wait expires.
         let opening = tokio::task::spawn_blocking(move || {
-            let result = Store::open(&database).map(|store| (bound, store));
+            let result = state::open_stores(&database).map(|store| (bound, store));
             // A timed-out caller has gone away; dropping the result closes
             // the database and releases the socket lock.
             if send.send(result).is_err() {
@@ -249,6 +250,8 @@ impl Agmend {
             bound,
             opening,
             core: Arc::new(Core {
+                state_dir: config.socket.with_file_name(""),
+                schema_scan: Arc::new(Semaphore::new(1)),
                 identities,
                 console: Arc::new(Console {
                     hub,

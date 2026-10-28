@@ -12,6 +12,167 @@ use serde_json::json;
 use support::{Client, Daemon, HANDLE, HUMAN, error, result};
 
 #[tokio::test]
+async fn hello_reports_version_and_exe() {
+    let daemon = Daemon::start().await;
+    let mut client = Client::connect(&daemon.home.socket()).await;
+    let answer = result(client.call("hello", json!({"api": 1})).await);
+    assert_eq!(answer["api"], 1);
+    assert_eq!(answer["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(answer["build"], option_env!("AGMEN_BUILD").unwrap_or("dev"));
+    assert_eq!(answer["exe"], json!(std::env::current_exe().unwrap()));
+}
+
+#[tokio::test]
+async fn ready_reports_store_schemas() {
+    let daemon = Daemon::start().await;
+    let mut client = daemon.client().await;
+    let answer = result(client.call("ready", json!({})).await);
+    assert_eq!(answer, json!({"ready": true, "schemas": {"agmend.db": 2}}));
+}
+
+#[tokio::test]
+async fn newer_schema_refused_without_writes_at_startup() {
+    let hub = support::fake_hub().await;
+    let home = support::Home::signed_in(&hub.url).await;
+    for identity in [false, true] {
+        let path = if identity {
+            home.database()
+                .parent()
+                .unwrap()
+                .join("identities/agent001/agmen.db")
+        } else {
+            home.database()
+        };
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.pragma_update(None, "user_version", 99).unwrap();
+        drop(conn);
+        let before = std::fs::read(&path).unwrap();
+        let error = Agmend::bind(home.config()).unwrap_err();
+        let error = anyhow::Error::new(error);
+        assert!(format!("{error:#}").contains("99"), "{error:#}");
+        if identity {
+            assert!(
+                format!("{error:#}").contains("identities/agent001/agmen.db"),
+                "{error:#}"
+            );
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        for suffix in ["-wal", "-shm", "-journal"] {
+            assert!(!std::path::PathBuf::from(format!("{}{suffix}", path.display())).exists());
+        }
+        assert!(!home.socket().exists());
+        if identity {
+            assert!(
+                !home.database().exists(),
+                "identity preflight precedes daemon migration"
+            );
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn ready_reports_identity_store_schemas_after_startup() {
+    let hub = support::fake_hub().await;
+    let home = support::Home::signed_in(&hub.url).await;
+    let identity = home.dir.path().join("identities/agent001/agmen.db");
+    std::fs::create_dir_all(identity.parent().unwrap()).unwrap();
+    drop(rusqlite::Connection::open(&identity).unwrap());
+    let daemon = Agmend::bind(home.config()).unwrap();
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(daemon.serve_until(async {
+        stopped.await.unwrap();
+    }));
+    let mut client = Client::connect(&home.socket()).await;
+    result(client.call("hello", json!({"api":1})).await);
+    let ready = result(client.call("ready", json!({})).await);
+    assert_eq!(
+        ready,
+        json!({"ready":true,"schemas":{"agmend.db":2,"identities/agent001/agmen.db":2}})
+    );
+    assert_eq!(
+        agmen_client::store_schema(&identity, std::time::Duration::from_secs(1)).unwrap(),
+        Some(2)
+    );
+    let invalid = error(client.call("ready", json!({"extra":true})).await);
+    assert_eq!(invalid.code, ErrorCode::BadRequest);
+    stop.send(()).unwrap();
+    task.await.unwrap();
+}
+
+#[tokio::test]
+async fn newer_wal_schema_refused_without_writes_at_startup() {
+    let hub = support::fake_hub().await;
+    let source = tempfile::tempdir().unwrap();
+    let original = source.path().join("future.db");
+    let conn = rusqlite::Connection::open(&original).unwrap();
+    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA user_version=99;")
+        .unwrap();
+    for identity in [false, true] {
+        for with_shm in [false, true] {
+            let home = support::Home::signed_in(&hub.url).await;
+            let path = if identity {
+                home.dir.path().join("identities/agent001/agmen.db")
+            } else {
+                home.database()
+            };
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let suffixes = if with_shm {
+                vec!["", "-wal", "-shm"]
+            } else {
+                vec!["", "-wal"]
+            };
+            let before: Vec<_> = suffixes
+                .iter()
+                .map(|suffix| {
+                    let bytes = std::fs::read(format!("{}{suffix}", original.display())).unwrap();
+                    let target = std::path::PathBuf::from(format!("{}{suffix}", path.display()));
+                    std::fs::write(&target, &bytes).unwrap();
+                    (target, bytes)
+                })
+                .collect();
+            let error = anyhow::Error::new(Agmend::bind(home.config()).unwrap_err());
+            let message = format!("{error:#}");
+            assert!(message.contains("99"), "{message}");
+            assert!(!home.socket().exists());
+            if identity {
+                assert!(!home.database().exists());
+            }
+            assert!(!std::path::PathBuf::from(format!("{}-journal", path.display())).exists());
+            assert_eq!(
+                std::fs::read_dir(path.parent().unwrap())
+                    .unwrap()
+                    .filter_map(Result::ok)
+                    .filter(|entry| entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(path.file_name().unwrap().to_str().unwrap()))
+                    .count(),
+                before.len()
+            );
+            for (target, bytes) in before {
+                assert_eq!(std::fs::read(target).unwrap(), bytes);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn startup_refuses_symlink_identity_directories() {
+    let hub = support::fake_hub().await;
+    let home = support::Home::signed_in(&hub.url).await;
+    let external = tempfile::tempdir().unwrap();
+    std::fs::create_dir(home.dir.path().join("identities")).unwrap();
+    std::os::unix::fs::symlink(external.path(), home.dir.path().join("identities/agent001"))
+        .unwrap();
+    let error = anyhow::Error::new(Agmend::bind(home.config()).unwrap_err());
+    assert!(format!("{error:#}").contains("symlink"));
+    assert!(!home.database().exists());
+    assert_eq!(std::fs::read_dir(external.path()).unwrap().count(), 0);
+}
+
+#[tokio::test]
 async fn socket_is_0600() {
     let daemon = Daemon::start().await;
     let mode = std::fs::metadata(daemon.home.socket())

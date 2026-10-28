@@ -11,7 +11,7 @@ pub mod frame;
 mod message;
 pub mod roles;
 
-pub use message::{API, ApiError, ErrorCode, Outcome, Request, Response};
+pub use message::{API, ApiError, ErrorCode, HelloAnswer, Outcome, ReadyAnswer, Request, Response};
 
 /// The largest frame body either side accepts or sends, in bytes.
 pub const MAX_FRAME: u32 = 16 * 1024 * 1024;

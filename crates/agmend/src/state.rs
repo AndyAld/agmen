@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use agmen_client::Broker;
 use agmen_proto::{
@@ -61,6 +61,14 @@ pub(crate) enum StoreError {
     Version(i64),
     #[error("daemon database invariant failed: {0}")]
     Invalid(&'static str),
+    #[error("identity store failed: {0}")]
+    Client(#[from] agmen_client::ClientError),
+    #[error("identity store {} failed: {source}", path.display())]
+    Identity {
+        path: std::path::PathBuf,
+        #[source]
+        source: Box<StoreError>,
+    },
     #[error("daemon database limit reached: {0}")]
     Full(&'static str),
     #[error("stream gap: expected {expected}, received {received}")]
@@ -70,6 +78,109 @@ pub(crate) enum StoreError {
 #[derive(Debug)]
 pub(crate) struct Store {
     conn: Connection,
+}
+
+/// How a schema check reads a store: strictly, or as the preflight of a
+/// caller that will open it with SQLite and recheck under the migration lock.
+type Inspect = fn(&Path, Duration) -> Result<Option<i64>, agmen_client::ClientError>;
+
+fn schema(path: &Path, deadline: Instant, inspect: Inspect) -> Result<Option<i64>, StoreError> {
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .ok_or(StoreError::Full("store inspection deadline"))?;
+    let version = inspect(path, remaining)?;
+    if let Some(version) = version
+        && !(0..=2).contains(&version)
+    {
+        return Err(StoreError::Version(version));
+    }
+    Ok(version)
+}
+
+/// Each identity store path under `dir`, whether or not the file exists yet.
+fn identity_stores(dir: &Path) -> Result<Vec<std::path::PathBuf>, StoreError> {
+    let entries = match fs::read_dir(dir.join("identities")) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut stores = Vec::new();
+    for (index, entry) in entries.enumerate() {
+        if index >= 4096 {
+            return Err(StoreError::Full("4096 identity stores"));
+        }
+        let entry = entry?;
+        if entry.file_type()?.is_symlink() {
+            return Err(StoreError::Invalid("identity store directory is a symlink"));
+        }
+        if entry.file_type()?.is_dir() {
+            stores.push(entry.path().join(agmen_client::STATE_DB));
+        }
+    }
+    Ok(stores)
+}
+
+fn identity_schema(
+    path: &Path,
+    deadline: Instant,
+    inspect: Inspect,
+) -> Result<Option<i64>, StoreError> {
+    schema(path, deadline, inspect).map_err(|source| StoreError::Identity {
+        path: path.to_owned(),
+        source: Box::new(source),
+    })
+}
+
+/// Read-only preflight of every daemon-owned SQLite store, including lazy sessions.
+pub(crate) fn schemas(dir: &Path, deadline: Instant) -> Result<BTreeMap<String, i64>, StoreError> {
+    let inspect: Inspect = agmen_client::store_schema;
+    let mut versions = BTreeMap::new();
+    if let Some(version) = schema(&dir.join("agmend.db"), deadline, inspect)? {
+        versions.insert("agmend.db".to_owned(), version);
+    }
+    for path in identity_stores(dir)? {
+        if let Some(version) = identity_schema(&path, deadline, inspect)? {
+            let relative = path
+                .strip_prefix(dir)
+                .map_err(|_| StoreError::Invalid("store outside state directory"))?;
+            let relative = relative
+                .to_str()
+                .ok_or(StoreError::Invalid("store path is not UTF-8"))?;
+            versions.insert(relative.to_owned(), version);
+        }
+    }
+    Ok(versions)
+}
+
+pub(crate) fn open_stores(path: &Path) -> Result<Store, StoreError> {
+    let dir = path
+        .parent()
+        .ok_or(StoreError::Invalid("database has no parent"))?;
+    // Refuse all newer stores before migrating even the first older store.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let inspect: Inspect = agmen_client::preflight_schema;
+    schema(path, deadline, inspect)?;
+    let identities = identity_stores(dir)?;
+    for identity in &identities {
+        identity_schema(identity, deadline, inspect)?;
+    }
+    let store = Store::open(path)?;
+    for identity in identities {
+        if Instant::now() >= deadline {
+            return Err(StoreError::Full("store initialization deadline"));
+        }
+        // An absent file stays absent: sessions create their store lazily.
+        if fs::symlink_metadata(&identity).is_err() {
+            continue;
+        }
+        drop(
+            agmen_client::Outbox::open(&identity).map_err(|source| StoreError::Identity {
+                path: identity,
+                source: Box::new(StoreError::Client(source)),
+            })?,
+        );
+    }
+    Ok(store)
 }
 
 // Canonical URL origins contain no fragment and IdentityId contains only
@@ -83,6 +194,11 @@ fn position_namespace(origin: &str, owner: Option<&IdentityId>) -> String {
 
 impl Store {
     pub(crate) fn open(path: &Path) -> Result<Self, StoreError> {
+        schema(
+            path,
+            Instant::now() + Duration::from_secs(5),
+            agmen_client::preflight_schema,
+        )?;
         let parent = path
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
@@ -103,13 +219,17 @@ impl Store {
         file.set_permissions(fs::Permissions::from_mode(0o600))?;
         let mut conn = Connection::open(path)?;
         conn.busy_timeout(Duration::from_secs(5))?;
-        let mode: String = conn.query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))?;
-        if !mode.eq_ignore_ascii_case("wal") {
-            return Err(StoreError::Invalid("WAL unavailable"));
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Exclusive)?;
+        let version: i64 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if !(0..=2).contains(&version) {
+            return Err(StoreError::Version(version));
         }
-        conn.pragma_update(None, "synchronous", "FULL")?;
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        match tx.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))? {
+        let mode: String = tx.query_row("PRAGMA journal_mode", [], |r| r.get(0))?;
+        let convert = !mode.eq_ignore_ascii_case("wal");
+        if convert {
+            tx.pragma_update(None, "locking_mode", "EXCLUSIVE")?;
+        }
+        match version {
             0 => {
                 tx.execute_batch(SCHEMA)?;
                 tx.pragma_update(None, "user_version", 2)?;
@@ -141,6 +261,19 @@ impl Store {
             other => return Err(StoreError::Version(other)),
         }
         tx.commit()?;
+        if convert {
+            // Keep the exclusive migration lock until journal conversion completes.
+            let mode: String = conn.query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))?;
+            if !mode.eq_ignore_ascii_case("wal") {
+                return Err(StoreError::Invalid("WAL unavailable"));
+            }
+            drop(conn);
+            conn = Connection::open(path)?;
+            conn.busy_timeout(Duration::from_secs(5))?;
+        }
+        conn.pragma_update(None, "synchronous", "FULL")?;
+        // Initialize WAL sidecars now, while the database and directory are private.
+        conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?;
         Ok(Self { conn })
     }
 
