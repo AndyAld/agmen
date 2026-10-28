@@ -139,7 +139,7 @@ impl Hub {
 
     /// Approves the device login `user_code` (as `agmen login` shows it,
     /// such as `BCDF-GHJK`) for `human`, standing in for the GitHub sign-in
-    /// and the confirm page. The CLI's next poll then gets tokens.
+    /// step. The CLI's next poll then gets tokens.
     ///
     /// # Errors
     ///

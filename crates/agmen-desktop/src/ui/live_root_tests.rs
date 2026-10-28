@@ -142,6 +142,15 @@ fn saved_login_offers_invite_and_successful_join_opens_project(cx: &mut TestAppC
     );
 }
 
+#[test]
+fn device_prompt_accepts_github_device_flow() {
+    let prompt = super::onboarding::device_prompt(b"Your code is BCDF-GHJK\nOpen https://github.com/login/device and enter the code. It expires in 15 minutes.\n");
+    assert_eq!(
+        prompt,
+        Some(("BCDF-GHJK".into(), "https://github.com/login/device".into()))
+    );
+}
+
 #[gpui::test]
 fn sign_in_shows_device_prompt_then_invite_without_network(cx: &mut TestAppContext) {
     let fake = FakeAgmend::start(console(vec![]));

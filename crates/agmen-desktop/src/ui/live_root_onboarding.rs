@@ -143,14 +143,15 @@ enum Event {
 }
 
 /// Parse only the CLI's public device prompt, never its tokens or other output.
-fn device_prompt(bytes: &[u8]) -> Option<(String, String)> {
+pub(super) fn device_prompt(bytes: &[u8]) -> Option<(String, String)> {
     let text = std::str::from_utf8(bytes).ok()?;
     let code = text
         .lines()
         .find_map(|line| line.strip_prefix("Your code is "))?;
     let url = text.lines().find_map(|line| {
-        line.strip_prefix("Open ")?
-            .split_once(" to confirm it.")
+        let rest = line.strip_prefix("Open ")?;
+        rest.split_once(" to confirm it.")
+            .or_else(|| rest.split_once(" and enter the code."))
             .map(|(url, _)| url)
     })?;
     let parsed = reqwest::Url::parse(url).ok()?;

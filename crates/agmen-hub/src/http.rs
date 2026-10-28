@@ -15,7 +15,7 @@ use serde_json::json;
 use sqlx::PgPool;
 use url::Url;
 
-use crate::auth::{self, GithubError, GithubOAuth};
+use crate::auth::{self, Github, GithubError};
 use crate::broker_tokens::{BrokerTokens, SigningKey, TokenError};
 use crate::config::Config;
 use crate::emqx::{EmqxAdmin, EmqxError};
@@ -59,7 +59,8 @@ struct Inner {
     pool: PgPool,
     tokens: BrokerTokens,
     emqx: EmqxAdmin,
-    github: GithubOAuth,
+    github: Github,
+    #[expect(dead_code, reason = "onboarding Task 2 uses this for invite links")]
     public_url: Url,
     public_mqtt_url: Url,
     ingest: IngestState,
@@ -87,6 +88,11 @@ impl Hub {
     /// # Ok(()) }
     /// ```
     pub async fn connect(config: &Config) -> Result<Self, HubError> {
+        if config.github.client_id == crate::DEFAULT_GITHUB_CLIENT_ID {
+            tracing::warn!(
+                "the default GitHub client id is a placeholder; configure a device-flow OAuth app before sign-in"
+            );
+        }
         let signing = SigningKey::from_pem_file(&config.jwt_signing_key).map_err(HubError::Keys)?;
         let extra = config
             .jwt_extra_keys
@@ -97,8 +103,7 @@ impl Hub {
         let tokens = BrokerTokens::new(signing, extra).map_err(HubError::Keys)?;
         let http = upstream_client().map_err(HubError::HttpClient)?;
         let emqx = EmqxAdmin::new(&config.emqx, http.clone()).map_err(HubError::Emqx)?;
-        let github =
-            GithubOAuth::new(&config.github, &config.public_url, http).map_err(HubError::Github)?;
+        let github = Github::new(&config.github, http).map_err(HubError::Github)?;
         let pool = db::connect(config.database_url.expose())
             .await
             .map_err(HubError::Database)?;
@@ -166,7 +171,7 @@ impl Hub {
         &self.inner.emqx
     }
 
-    pub(crate) fn github(&self) -> &GithubOAuth {
+    pub(crate) fn github(&self) -> &Github {
         &self.inner.github
     }
 
@@ -195,6 +200,8 @@ impl Hub {
 
     /// `path` (such as `v1/auth/device`) under the public URL, keeping any
     /// path prefix the public URL has.
+    // shortcut: retain the existing helper until Task 2 consumes it for invite links.
+    #[expect(dead_code, reason = "onboarding Task 2 uses this for invite links")]
     pub(crate) fn public_link(&self, path: &str) -> Url {
         public_link(&self.inner.public_url, path)
     }

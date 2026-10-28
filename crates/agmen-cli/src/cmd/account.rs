@@ -67,7 +67,7 @@ impl clap::builder::TypedValueParser for HubUrlParser {
 struct DeviceStart {
     device_code: String,
     user_code: String,
-    verification_uri_complete: String,
+    verification_uri: Url,
     expires_in: u64,
     interval: u64,
 }
@@ -89,8 +89,8 @@ pub(crate) async fn login(args: LoginArgs) -> Result<()> {
         .context("starting the device login failed")?;
     println!("Your code is {}", clean(&start.user_code));
     println!(
-        "Open {} to confirm it. It expires in {} minutes.",
-        clean(&start.verification_uri_complete),
+        "Open {} and enter the code. It expires in {} minutes.",
+        clean(start.verification_uri.as_str()),
         start.expires_in / 60
     );
     let mut interval = Duration::from_secs(start.interval.max(1));

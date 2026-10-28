@@ -32,15 +32,16 @@ impl fmt::Debug for Secret {
     }
 }
 
-/// The GitHub OAuth app the approve page signs people in with.
+/// Public OAuth app used for self-hosted GitHub device sign-in.
+pub const DEFAULT_GITHUB_CLIENT_ID: &str = "agmen-dev-self-host-placeholder";
+
+/// The public GitHub OAuth app used for device sign-in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GithubConfig {
     /// `AGMEN_GITHUB_CLIENT_ID`.
     pub client_id: String,
-    /// `AGMEN_GITHUB_CLIENT_SECRET`.
-    pub client_secret: Secret,
     /// `AGMEN_GITHUB_URL`, default `https://github.com`: where
-    /// `/login/oauth/authorize` and `/login/oauth/access_token` live.
+    /// `/login/device/code` and `/login/oauth/access_token` live.
     pub url: Url,
     /// `AGMEN_GITHUB_API_URL`, default `https://api.github.com`: where
     /// `/user` lives.
@@ -259,8 +260,6 @@ impl Config {
     /// let vars = HashMap::from([
     ///     ("AGMEN_DATABASE_URL", "postgres://localhost/agmen"),
     ///     ("AGMEN_PUBLIC_URL", "https://api.example.com"),
-    ///     ("AGMEN_GITHUB_CLIENT_ID", "id"),
-    ///     ("AGMEN_GITHUB_CLIENT_SECRET", "secret"),
     ///     ("AGMEN_EMQX_API_URL", "http://emqx:18083/api/v5"),
     ///     ("AGMEN_EMQX_API_KEY", "agmen-hub"),
     ///     ("AGMEN_EMQX_API_SECRET", "secret"),
@@ -294,8 +293,8 @@ impl Config {
             listen,
             public_url: url("AGMEN_PUBLIC_URL", required("AGMEN_PUBLIC_URL")?)?,
             github: GithubConfig {
-                client_id: required("AGMEN_GITHUB_CLIENT_ID")?,
-                client_secret: Secret::new(required("AGMEN_GITHUB_CLIENT_SECRET")?),
+                client_id: get("AGMEN_GITHUB_CLIENT_ID")
+                    .unwrap_or_else(|| DEFAULT_GITHUB_CLIENT_ID.to_owned()),
                 url: url(
                     "AGMEN_GITHUB_URL",
                     get("AGMEN_GITHUB_URL").unwrap_or_else(|| "https://github.com".to_owned()),
@@ -362,6 +361,46 @@ impl Config {
 mod tests {
     use super::*;
 
+    fn without_github(name: &str) -> Option<String> {
+        match name {
+            "AGMEN_DATABASE_URL" => Some("postgres://localhost/agmen".into()),
+            "AGMEN_PUBLIC_URL" => Some("https://hub.example".into()),
+            "AGMEN_EMQX_API_URL" => Some("http://emqx:18083/api/v5".into()),
+            "AGMEN_EMQX_API_KEY" | "AGMEN_EMQX_API_SECRET" => Some("x".into()),
+            "AGMEN_MQTT_URL" => Some("mqtt://emqx:1883".into()),
+            "AGMEN_JWT_SIGNING_KEY" => Some("/keys/hub.pem".into()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn github_client_id_defaults_to_the_shared_app() {
+        for (input, expected) in [
+            (None, DEFAULT_GITHUB_CLIENT_ID),
+            (Some(""), DEFAULT_GITHUB_CLIENT_ID),
+            (Some("Ov23liexample"), "Ov23liexample"),
+        ] {
+            let config = Config::from_lookup(|name| {
+                if name == "AGMEN_GITHUB_CLIENT_ID" {
+                    input.map(str::to_owned)
+                } else {
+                    without_github(name)
+                }
+            })
+            .unwrap();
+            assert_eq!(config.github.client_id, expected);
+        }
+    }
+
+    #[test]
+    fn client_secret_is_not_read() {
+        let config = Config::from_lookup(|name| {
+            assert_ne!(name, "AGMEN_GITHUB_CLIENT_SECRET");
+            without_github(name)
+        });
+        assert!(config.is_ok(), "{config:?}");
+    }
+
     #[test]
     fn missing_variable_is_named() {
         let err = Config::from_lookup(|_| None).unwrap_err();
@@ -425,10 +464,9 @@ mod tests {
                 "AGMEN_EMQX_API_URL" => Some("http://emqx:18083/api/v5".to_owned()),
                 "AGMEN_MQTT_URL" => Some("mqtt://emqx:1883".to_owned()),
                 "AGMEN_JWT_SIGNING_KEY" => Some("/keys/hub-1.pem".to_owned()),
-                "AGMEN_GITHUB_CLIENT_ID"
-                | "AGMEN_GITHUB_CLIENT_SECRET"
-                | "AGMEN_EMQX_API_KEY"
-                | "AGMEN_EMQX_API_SECRET" => Some("x".to_owned()),
+                "AGMEN_GITHUB_CLIENT_ID" | "AGMEN_EMQX_API_KEY" | "AGMEN_EMQX_API_SECRET" => {
+                    Some("x".to_owned())
+                }
                 _ => None,
             })
         };
@@ -457,10 +495,9 @@ mod tests {
                 "AGMEN_EMQX_API_URL" => Some("http://emqx:18083/api/v5".to_owned()),
                 "AGMEN_MQTT_URL" => Some("mqtt://emqx:1883".to_owned()),
                 "AGMEN_JWT_SIGNING_KEY" => Some("/keys/hub-1.pem".to_owned()),
-                "AGMEN_GITHUB_CLIENT_ID"
-                | "AGMEN_GITHUB_CLIENT_SECRET"
-                | "AGMEN_EMQX_API_KEY"
-                | "AGMEN_EMQX_API_SECRET" => Some("x".to_owned()),
+                "AGMEN_GITHUB_CLIENT_ID" | "AGMEN_EMQX_API_KEY" | "AGMEN_EMQX_API_SECRET" => {
+                    Some("x".to_owned())
+                }
                 _ => None,
             })
         };

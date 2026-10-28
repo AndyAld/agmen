@@ -1,25 +1,25 @@
 //! Who is calling: hub bearer tokens, their scopes, and the token endpoint.
 //!
-//! A human signs in through the RFC 8628 device flow (`device`), whose
-//! approve page signs them in with GitHub (`oauth`), and gets an access
-//! token (1 hour) and a refresh token (30 days, replaced on every use).
+//! A human signs in through the RFC 8628 device flow (`device`). The hub
+//! polls GitHub for approval, then issues an access token (1 hour) and a
+//! refresh token (30 days, replaced on every use).
 //! Minting an identity gives it an identity token that acts only as that
 //! identity. Tokens are random 32-byte values; the database keeps only
 //! their SHA-256.
 
 mod device;
-mod oauth;
+mod github;
 
 #[cfg(feature = "test-hooks")]
 pub(crate) use device::approve_as;
-pub use oauth::{GithubError, GithubId};
-pub(crate) use oauth::{GithubOAuth, account_by_login, is_human_handle};
+pub(crate) use github::{Github, account_by_login, is_human_handle};
+pub use github::{GithubError, GithubId};
 
 use axum::extract::{Form, FromRequestParts, State};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderValue, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::post;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use sqlx::{PgConnection, Postgres, Transaction};
@@ -38,11 +38,8 @@ const DEVICE_CODE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
 
 pub(crate) fn routes() -> Router<Hub> {
     Router::new()
-        .route("/v1/auth/device", post(device::start).get(device::form))
-        .route("/v1/auth/device/approve", post(device::approve))
+        .route("/v1/auth/device", post(device::start))
         .route("/v1/auth/token", post(token))
-        .route("/v1/auth/oauth/github/start", get(oauth::start))
-        .route("/v1/auth/oauth/github/callback", get(oauth::callback))
 }
 
 /// The authenticated caller of a request.
