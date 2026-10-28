@@ -1200,3 +1200,83 @@ async fn it_mint_racing_member_removal_leaves_no_live_identity() {
     })
     .await;
 }
+
+// An invite insert that waits on a lock after the membership check must not
+// outlive the member's removal, which deletes the member's unused invites.
+#[tokio::test]
+async fn it_invite_racing_member_removal_leaves_no_unused_invite() {
+    run(|ctx| async move {
+        let group = group(&ctx).await;
+        sqlx::query(
+            "UPDATE memberships SET role = 'admin' WHERE human_id = $1 AND project_id = $2",
+        )
+        .bind(&group.member_id)
+        .bind(&group.first.project)
+        .execute(&ctx.pool)
+        .await
+        .unwrap();
+        let ctx = Arc::new(ctx);
+        // A second connection holds the member's `humans` row, which the
+        // invite insert's foreign key on `created_by` needs, so that insert
+        // blocks until rollback.
+        let other = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&ctx.db_url)
+            .await
+            .unwrap();
+        let mut blocker = other.begin().await.unwrap();
+        sqlx::query("SELECT id FROM humans WHERE id = $1 FOR UPDATE")
+            .bind(&group.member_id)
+            .execute(&mut *blocker)
+            .await
+            .unwrap();
+
+        let create = tokio::spawn({
+            let ctx = Arc::clone(&ctx);
+            let token = group.member.clone();
+            let project = group.first.project.clone();
+            async move {
+                request(
+                    &ctx,
+                    reqwest::Method::POST,
+                    "/v1/invites",
+                    &token,
+                    Some(json!({"project": project, "role": "member"})),
+                )
+                .await
+            }
+        });
+        wait_lock_blocked(&ctx.pool, "INSERT INTO invites").await;
+        let removal = tokio::spawn({
+            let ctx = Arc::clone(&ctx);
+            let token = group.owner.clone();
+            let path = member_path(&group, "member");
+            async move { request(&ctx, reqwest::Method::DELETE, &path, &token, None).await }
+        });
+        // Whether the removal commits now (the bug) or waits for the create
+        // (the fix), the blocker's rollback lets the create finish.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        blocker.rollback().await.unwrap();
+        let create = tokio::time::timeout(Duration::from_secs(20), create)
+            .await
+            .unwrap()
+            .unwrap();
+        let removal = tokio::time::timeout(Duration::from_secs(90), removal)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let unused: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM invites WHERE created_by = $1 AND used_by IS NULL",
+        )
+        .bind(&group.member_id)
+        .fetch_one(&ctx.pool)
+        .await
+        .unwrap();
+        assert_eq!(removal.0, StatusCode::NO_CONTENT, "{}", removal.1);
+        // The create passed its membership check before the removal began.
+        assert_eq!(create.0, StatusCode::CREATED, "{}", create.1);
+        assert_eq!(unused, 0, "a removed member kept an unused invite");
+    })
+    .await;
+}
