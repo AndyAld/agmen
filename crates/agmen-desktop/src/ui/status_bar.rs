@@ -15,7 +15,7 @@ use super::tokens::{BORDER_WIDTH, SPACE_5, SPACE_10, SPACE_14, STATUS_BAR_HEIGHT
 use super::workspace::{OpenAlerts, ToggleRightDock};
 use crate::backend::{Link, Snapshot, StatusSummary};
 use crate::icons::UiIcon;
-use crate::keymap::{OpenSettings, ToggleCommandPalette};
+use crate::keymap::{OpenSettings, ToggleCommandPalette, ToggleTerminal};
 
 #[derive(Debug, IntoElement)]
 pub(crate) struct StatusBar {
@@ -129,7 +129,19 @@ fn buttons(icons: &[(&'static str, UiIcon)]) -> impl IntoElement {
         .flex_none()
         .items_center()
         .gap(SPACE_10)
-        .children(icons.iter().map(|(id, icon)| IconButton::new(*id, *icon)))
+        .children(icons.iter().map(|(id, icon)| {
+            let button = IconButton::new(*id, *icon);
+            match icon {
+                UiIcon::Terminal => button.on_click(|_, window, cx| {
+                    window.dispatch_action(Box::new(ToggleTerminal), cx);
+                }),
+                UiIcon::Bell => button.on_click(|_, window, cx| {
+                    window.dispatch_action(Box::new(OpenAlerts), cx);
+                }),
+                // shortcut: open the chat tab here once a chat action exists.
+                _ => button,
+            }
+        }))
         .child(
             IconButton::new("status-settings", UiIcon::Settings).on_click(|_, window, cx| {
                 window.dispatch_action(Box::new(OpenSettings), cx);
@@ -257,6 +269,54 @@ fn palette_trigger(palette_open: bool) -> impl IntoElement {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn status_bar_buttons_either_act_or_do_not_highlight(cx: &mut gpui::TestAppContext) {
+        use crate::keymap::ToggleTerminal;
+        use crate::ui::test_support::{click, draw, fills_at, redraw};
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let terminal = Rc::new(Cell::new(0));
+        let alerts = Rc::new(Cell::new(0));
+        let (terminal_seen, alerts_seen) = (terminal.clone(), alerts.clone());
+        let focus = cx.update(|cx| cx.focus_handle());
+        let tracked_focus = focus.clone();
+        let cx = draw(cx, move || {
+            let (terminal, alerts) = (terminal_seen.clone(), alerts_seen.clone());
+            div()
+                .track_focus(&tracked_focus)
+                .on_action(move |_: &ToggleTerminal, _, _| terminal.set(terminal.get() + 1))
+                .on_action(move |_: &OpenAlerts, _, _| alerts.set(alerts.get() + 1))
+                .child(buttons(&[
+                    ("status-terminal", UiIcon::Terminal),
+                    ("status-chat", UiIcon::Chat),
+                    ("status-bell", UiIcon::Bell),
+                ]))
+                .into_any_element()
+        });
+        cx.update(|window, cx| window.focus(&focus, cx));
+        for (selector, action) in [
+            ("status-terminal", Some(&terminal)),
+            ("status-chat", None),
+            ("status-bell", Some(&alerts)),
+        ] {
+            let before = fills_at(cx, selector);
+            let center = cx.debug_bounds(selector).unwrap().center();
+            cx.simulate_mouse_move(center, None, gpui::Modifiers::none());
+            redraw(cx);
+            click(cx, selector);
+            if let Some(action) = action {
+                assert_eq!(action.get(), 1, "{selector} must dispatch its action");
+            } else {
+                assert_eq!(
+                    fills_at(cx, selector),
+                    before,
+                    "{selector} must not highlight"
+                );
+            }
+        }
+    }
 
     #[test]
     fn link_label_words_each_state() {

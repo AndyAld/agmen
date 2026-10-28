@@ -130,7 +130,7 @@ impl Render for RemoveAgentDialog {
                     )
                     .child(
                         Button::new("remove-agent:confirm", "Remove")
-                            .style(ButtonStyle::Primary)
+                            .style(ButtonStyle::Danger)
                             .on_click(cx.listener(|this, _, _, cx| this.confirm(cx))),
                     ),
             )
@@ -140,6 +140,22 @@ impl Render for RemoveAgentDialog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn remove_agent_uses_the_danger_style(cx: &mut gpui::TestAppContext) {
+        crate::ui::test_support::init(cx);
+        let (_, cx) = cx.add_window_view(|_, _| {
+            dialog(Kept::Joined {
+                folder: "/r".into(),
+            })
+        });
+        crate::ui::test_support::redraw(cx);
+        let error = cx.update(|_, cx| cx.global::<crate::appearance::Appearance>().theme.error);
+        assert_eq!(
+            crate::ui::test_support::fills_at(cx, "remove-agent:confirm"),
+            [error]
+        );
+    }
 
     fn dialog(kept: Kept) -> RemoveAgentDialog {
         RemoveAgentDialog::new(
