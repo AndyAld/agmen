@@ -15,6 +15,7 @@
 #![warn(missing_docs)]
 
 mod api;
+mod budget;
 mod console;
 mod feed;
 mod git;
@@ -25,6 +26,7 @@ mod login;
 mod socket;
 mod sse;
 mod state;
+mod worktree;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

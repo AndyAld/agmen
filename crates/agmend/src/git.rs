@@ -9,7 +9,7 @@
 
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -19,8 +19,11 @@ use agmen_local::console::{
 use tokio::io::AsyncReadExt as _;
 use tokio::time::Instant;
 
-/// The longest one git call may take.
+/// The default limit for one git call.
 const CALL_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Retain this many stderr bytes, draining the rest within the call's deadline.
+const STDERR_BYTES: u64 = 64 * 1024;
 
 /// Why a git call gave no output.
 #[derive(Debug, thiserror::Error)]
@@ -33,8 +36,8 @@ pub(crate) enum GitError {
     Timeout(String),
     /// git exited with an error, such as `HEAD` in a repository with no
     /// commits.
-    #[error("git {0} failed")]
-    Failed(String),
+    #[error("git {command} failed: {stderr}")]
+    Failed { command: String, stderr: String },
 }
 
 /// What a git call printed.
@@ -64,11 +67,36 @@ impl Git {
     /// Runs `git <args>`, keeping at most `cap` bytes of its output; past
     /// the cap git is stopped and the output marked truncated.
     pub(crate) async fn run(&self, args: &[&OsStr], cap: usize) -> Result<Output, GitError> {
+        self.run_inner(args, cap, CALL_TIMEOUT, None).await
+    }
+
+    /// Runs one call with its own timeout and optional index path. The shared
+    /// deadline still applies; an absent index removes inherited `GIT_INDEX_FILE`.
+    // shortcut: L17 wires launcher calls and removes this expectation.
+    #[cfg_attr(not(test), expect(dead_code, reason = "wired by L17"))]
+    pub(crate) async fn run_with_options(
+        &self,
+        args: &[&OsStr],
+        cap: usize,
+        timeout: Duration,
+        index_file: Option<&Path>,
+    ) -> Result<Output, GitError> {
+        self.run_inner(args, cap, timeout, index_file).await
+    }
+
+    async fn run_inner(
+        &self,
+        args: &[&OsStr],
+        cap: usize,
+        timeout: Duration,
+        index_file: Option<&Path>,
+    ) -> Result<Output, GitError> {
         let what = args
             .first()
             .map(|a| a.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let mut child = tokio::process::Command::new("git")
+        let mut command = tokio::process::Command::new("git");
+        command
             .args(["-c", "core.quotepath=off", "-c", "core.fsmonitor=false"])
             .arg("--no-optional-locks")
             .args(args)
@@ -83,14 +111,21 @@ impl Git {
             .env("GIT_TERMINAL_PROMPT", "0")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .spawn()?;
-        let deadline = self.deadline.min(Instant::now() + CALL_TIMEOUT);
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        if let Some(index_file) = index_file {
+            command.env("GIT_INDEX_FILE", index_file);
+        }
+        let mut child = command.spawn()?;
+        let deadline = self.deadline.min(Instant::now() + timeout);
         let mut stdout = child
             .stdout
             .take()
-            .ok_or_else(|| GitError::Failed(what.clone()))?;
+            .ok_or_else(|| std::io::Error::other("git stdout pipe is missing"))?;
+        let mut stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| std::io::Error::other("git stderr pipe is missing"))?;
         let work = async {
             let mut out = Vec::new();
             let limit = u64::try_from(cap).unwrap_or(u64::MAX).saturating_add(1);
@@ -106,11 +141,41 @@ impl Git {
             let status = child.wait().await?;
             Ok((out, truncated, status.success()))
         };
+        let read_stderr = async {
+            let mut bytes = Vec::new();
+            (&mut stderr)
+                .take(STDERR_BYTES)
+                .read_to_end(&mut bytes)
+                .await?;
+            // Keep the pipe moving after the capture cap. Tokio uses an 8 KiB
+            // copy buffer; the enclosing timeout bounds the drain's duration.
+            tokio::io::copy(&mut stderr, &mut tokio::io::sink()).await?;
+            Ok::<_, std::io::Error>(bytes)
+        };
+        let work = async {
+            tokio::pin!(work, read_stderr);
+            tokio::select! {
+                result = &mut work => {
+                    let output = result?;
+                    // A truncated stdout is already a successful result. Do
+                    // not wait for stderr held by descendants of the killed git.
+                    let stderr = if output.1 { Vec::new() } else { read_stderr.await? };
+                    Ok::<_, std::io::Error>((output, stderr))
+                }
+                result = &mut read_stderr => {
+                    let stderr = result?;
+                    Ok((work.await?, stderr))
+                }
+            }
+        };
         match tokio::time::timeout_at(deadline, work).await {
             Err(_) => Err(GitError::Timeout(what)),
             Ok(Err(err)) => Err(err.into()),
-            Ok(Ok((_, _, false))) => Err(GitError::Failed(what)),
-            Ok(Ok((stdout, truncated, true))) => Ok(Output { stdout, truncated }),
+            Ok(Ok(((_, _, false), stderr))) => Err(GitError::Failed {
+                command: what,
+                stderr: String::from_utf8_lossy(&stderr).into_owned(),
+            }),
+            Ok(Ok(((stdout, truncated, true), _))) => Ok(Output { stdout, truncated }),
         }
     }
 
