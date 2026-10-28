@@ -1,4 +1,5 @@
-//! An agent's status glyph: ● working, ○ idle, ◐ reading, ◌ offline.
+//! An agent's status glyph: blue ◐ ◑ going back and forth while working,
+//! green ● online, a still blue ◐ reading, and a blank ○ offline.
 
 use gpui::{App, IntoElement, RenderOnce, Window};
 
@@ -6,16 +7,16 @@ use super::{Color, Label, LabelSize};
 use crate::backend::AgentStatus;
 
 /// One pending tick for the whole app, regardless of the number of dots.
-/// Rendering a reading dot renews it; without readers it stops after that tick.
+/// Rendering a working dot renews it; without one it stops after that tick.
 #[derive(Default)]
-struct ReadingAnimation {
+struct WorkingAnimation {
     second_half: bool,
     pending: bool,
 }
 
-impl gpui::Global for ReadingAnimation {}
+impl gpui::Global for WorkingAnimation {}
 
-fn reading_glyph(cx: &mut App) -> &'static str {
+fn working_glyph(cx: &mut App) -> &'static str {
     let reduce_motion = cx.reduce_motion();
     #[cfg(all(target_os = "macos", not(test)))]
     let reduce_motion = reduce_motion
@@ -23,10 +24,10 @@ fn reading_glyph(cx: &mut App) -> &'static str {
     if reduce_motion {
         return "◐";
     }
-    if !cx.has_global::<ReadingAnimation>() {
-        cx.set_global(ReadingAnimation::default());
+    if !cx.has_global::<WorkingAnimation>() {
+        cx.set_global(WorkingAnimation::default());
     }
-    let animation = cx.global_mut::<ReadingAnimation>();
+    let animation = cx.global_mut::<WorkingAnimation>();
     let glyph = if animation.second_half { "◑" } else { "◐" };
     if !animation.pending {
         animation.pending = true;
@@ -34,9 +35,9 @@ fn reading_glyph(cx: &mut App) -> &'static str {
             cx.background_executor()
                 .timer(std::time::Duration::from_millis(500))
                 .await;
-            // A single redraw request covers all reading dots in all windows.
+            // A single redraw request covers all working dots in all windows.
             cx.update(|cx| {
-                let animation = cx.global_mut::<ReadingAnimation>();
+                let animation = cx.global_mut::<WorkingAnimation>();
                 animation.pending = false;
                 animation.second_half = !animation.second_half;
                 cx.refresh_windows();
@@ -47,16 +48,15 @@ fn reading_glyph(cx: &mut App) -> &'static str {
     glyph
 }
 
-/// The glyph and color for `status`, from `STATUS` in console.py.
+/// The glyph and color for `status`, in the owner's legend: blank is offline
+/// (not connected), green is online (connected), and blue going back and
+/// forth is working. Reading keeps its blue and holds still.
 #[must_use]
 pub(crate) const fn status_glyph(status: AgentStatus) -> (&'static str, Color) {
     match status {
-        AgentStatus::Working => ("●", Color::Success),
-        AgentStatus::Idle => ("○", Color::Placeholder),
-        // Task 7: console.py has no offline; DIM (icon.muted) and a dotted
-        // ring keep it apart from idle's FAINT ○.
-        AgentStatus::Offline => ("◌", Color::Muted),
-        AgentStatus::Reading => ("◐", Color::Accent),
+        AgentStatus::Working | AgentStatus::Reading => ("◐", Color::Accent),
+        AgentStatus::Idle => ("●", Color::Success),
+        AgentStatus::Offline => ("○", Color::Muted),
     }
 }
 
@@ -81,8 +81,8 @@ impl StatusDot {
 impl RenderOnce for StatusDot {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let (mut glyph, color) = status_glyph(self.status);
-        if self.status == AgentStatus::Reading {
-            glyph = reading_glyph(cx);
+        if self.status == AgentStatus::Working {
+            glyph = working_glyph(cx);
         }
         #[cfg(test)]
         if let Some(drawn) = self.drawn {
@@ -100,12 +100,13 @@ mod tests {
 
     #[test]
     fn glyphs_match_mockup() {
-        assert_eq!(status_glyph(AgentStatus::Working), ("●", Color::Success));
-        assert_eq!(status_glyph(AgentStatus::Idle), ("○", Color::Placeholder));
+        // The owner's legend: blank is offline (not connected), green is
+        // online (connected), blue going back and forth is working.
+        assert_eq!(status_glyph(AgentStatus::Offline), ("○", Color::Muted));
+        assert_eq!(status_glyph(AgentStatus::Idle), ("●", Color::Success));
+        assert_eq!(status_glyph(AgentStatus::Working), ("◐", Color::Accent));
+        // Reading keeps its blue and holds still, so only working moves.
         assert_eq!(status_glyph(AgentStatus::Reading), ("◐", Color::Accent));
-        // Task 7: offline is dimmer than idle and drawn apart from it, so
-        // an offline agent does not read as reachable.
-        assert_eq!(status_glyph(AgentStatus::Offline), ("◌", Color::Muted));
     }
 
     #[gpui::test]
@@ -117,25 +118,25 @@ mod tests {
     }
 
     #[gpui::test]
-    fn reading_alternates_without_moving(cx: &mut TestAppContext) {
-        assert_reading_frames(cx);
+    fn working_alternates_without_moving(cx: &mut TestAppContext) {
+        assert_working_frames(cx);
     }
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn reading_bounds_match_with_core_text() {
+    fn working_bounds_match_with_core_text() {
         let mut cx = crate::ui::test_support::core_text_app();
-        assert_reading_frames(&mut cx);
+        assert_working_frames(&mut cx);
     }
 
-    fn assert_reading_frames(cx: &mut TestAppContext) {
+    fn assert_working_frames(cx: &mut TestAppContext) {
         use crate::ui::test_support::{draw, redraw};
         use std::{cell::Cell, rc::Rc, time::Duration};
 
         let glyph = Rc::new(Cell::new(""));
         let seen = glyph.clone();
         let cx = draw(cx, move || {
-            let mut dot = StatusDot::new(AgentStatus::Reading);
+            let mut dot = StatusDot::new(AgentStatus::Working);
             dot.drawn = Some(seen.clone());
             dot.into_any_element()
         });
@@ -155,7 +156,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn other_statuses_stay_still_while_reading_animates(cx: &mut TestAppContext) {
+    fn other_statuses_stay_still_while_working_animates(cx: &mut TestAppContext) {
         use gpui::{ParentElement as _, div};
         use std::{cell::Cell, rc::Rc, time::Duration};
 
@@ -176,23 +177,23 @@ mod tests {
                 }))
                 .into_any_element()
         });
-        assert_eq!(glyphs.each_ref().map(|g| g.get()), ["●", "○", "◌", "◐"]);
+        assert_eq!(glyphs.each_ref().map(|g| g.get()), ["◐", "●", "○", "◐"]);
         cx.run_until_parked();
         cx.executor().advance_clock(Duration::from_millis(500));
         cx.run_until_parked();
         crate::ui::test_support::redraw(cx);
-        assert_eq!(glyphs.each_ref().map(|g| g.get()), ["●", "○", "◌", "◑"]);
+        assert_eq!(glyphs.each_ref().map(|g| g.get()), ["◑", "●", "○", "◐"]);
     }
 
     #[gpui::test]
-    fn reduce_motion_keeps_reading_static(cx: &mut TestAppContext) {
+    fn reduce_motion_keeps_working_static(cx: &mut TestAppContext) {
         use std::{cell::Cell, rc::Rc, time::Duration};
 
         cx.update(|cx| cx.set_reduce_motion(true));
         let glyph = Rc::new(Cell::new(""));
         let seen = glyph.clone();
         let cx = crate::ui::test_support::draw(cx, move || {
-            let mut dot = StatusDot::new(AgentStatus::Reading);
+            let mut dot = StatusDot::new(AgentStatus::Working);
             dot.drawn = Some(seen.clone());
             dot.into_any_element()
         });
@@ -204,11 +205,11 @@ mod tests {
             crate::ui::test_support::redraw(cx);
             assert_eq!(glyph.get(), "◐");
         }
-        cx.update(|_, cx| assert!(!cx.has_global::<ReadingAnimation>()));
+        cx.update(|_, cx| assert!(!cx.has_global::<WorkingAnimation>()));
     }
 
     #[gpui::test]
-    fn many_readers_share_a_tick_and_stop_when_reduced(cx: &mut TestAppContext) {
+    fn many_working_dots_share_a_tick_and_stop_when_reduced(cx: &mut TestAppContext) {
         use gpui::{ParentElement as _, div};
         use std::{cell::Cell, rc::Rc, time::Duration};
 
@@ -217,7 +218,7 @@ mod tests {
         let cx = crate::ui::test_support::draw(cx, move || {
             div()
                 .children(seen.iter().map(|seen| {
-                    let mut dot = StatusDot::new(AgentStatus::Reading);
+                    let mut dot = StatusDot::new(AgentStatus::Working);
                     dot.drawn = Some(seen.clone());
                     dot
                 }))
@@ -236,6 +237,6 @@ mod tests {
         cx.executor().advance_clock(Duration::from_millis(500));
         cx.run_until_parked();
         crate::ui::test_support::redraw(cx);
-        cx.update(|_, cx| assert!(!cx.global::<ReadingAnimation>().pending));
+        cx.update(|_, cx| assert!(!cx.global::<WorkingAnimation>().pending));
     }
 }
