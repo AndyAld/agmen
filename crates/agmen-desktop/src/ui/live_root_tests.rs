@@ -112,7 +112,10 @@ fn saved_login_offers_invite_and_successful_join_opens_project(cx: &mut TestAppC
                     return Ok(helper_projects());
                 }
                 assert_eq!(program, std::path::Path::new("/injected/agmen"));
-                assert_eq!(args, ["join", "--stdin"].map(std::ffi::OsString::from));
+                assert_eq!(
+                    args,
+                    ["join", "--stdin", "--no-setup"].map(std::ffi::OsString::from)
+                );
                 assert_eq!(timeout, Duration::from_secs(120));
                 assert_eq!(cwd, Some(joined.as_path()));
                 assert_eq!(stdin, b"test-invite");
@@ -1753,7 +1756,7 @@ fn membership_fixture(
             } else if args == ["project", "create", "new-folder"].map(std::ffi::OsString::from) {
                 output.stdout = br#"{"project":"project1","name":"new-folder","tenant":"tenant01","role":"admin"}"#.to_vec();
             } else {
-                assert_eq!(args, ["join", "--project", "project1"].map(std::ffi::OsString::from));
+                assert_eq!(args, ["join", "--project", "project1", "--no-setup"].map(std::ffi::OsString::from));
                 joined_folder(&folder);
             }
             Ok(output)
@@ -1763,6 +1766,53 @@ fn membership_fixture(
 
 fn membership(role: &str) -> serde_json::Value {
     serde_json::json!({"tenant":"tenant01","project":"project1","name":"marked","role":role})
+}
+
+#[gpui::test]
+fn join_helpers_skip_setup(cx: &mut TestAppContext) {
+    for by_invite in [false, true] {
+        let fake = FakeAgmend::start(console(vec![]));
+        let folder = fake.dir.path().join("join-here");
+        let (root, cx) = open(cx, empty_launch(&fake));
+        membership_fixture(&root, cx, &folder, serde_json::json!([]));
+        let joined = folder.clone();
+        let called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = called.clone();
+        root.update_in(cx, |root, _, _| {
+            root.onboarding.helper = std::sync::Arc::new(move |_, args, _, _, _, _| {
+                if args == ["whoami", "--json"].map(std::ffi::OsString::from) {
+                    let mut out = helper_success();
+                    out.stdout = serde_json::json!({"projects": if by_invite { vec![] } else { vec![membership("member")] }}).to_string().into_bytes();
+                    return Ok(out);
+                }
+                let expected = if by_invite {
+                    vec!["join", "--stdin", "--no-setup"]
+                } else {
+                    vec!["join", "--project", "project1", "--no-setup"]
+                };
+                assert_eq!(args, expected.into_iter().map(std::ffi::OsString::from).collect::<Vec<_>>());
+                observed.store(true, std::sync::atomic::Ordering::SeqCst);
+                joined_folder(&joined);
+                Ok(helper_success())
+            });
+        });
+        pick(&root, cx, &folder);
+        if by_invite {
+            wait_until(cx, |cx| {
+                root.read_with(cx, |root, _| root.onboarding.task.is_none())
+            });
+            root.update_in(cx, |root, window, cx| {
+                root.onboarding
+                    .invite
+                    .update(cx, |input, cx| input.set_text("test-invite", window, cx));
+            });
+            click(cx, "live:join");
+        }
+        wait_until(cx, |cx| {
+            root.read_with(cx, |root, _| root.workspace().is_some())
+        });
+        assert!(called.load(std::sync::atomic::Ordering::SeqCst));
+    }
 }
 
 #[gpui::test]
@@ -2014,7 +2064,7 @@ fn created_project_can_retry_join_without_creating_again(cx: &mut TestAppContext
             } else {
                 assert_eq!(
                     args,
-                    ["join", "--project", "project1"].map(std::ffi::OsString::from)
+                    ["join", "--project", "project1", "--no-setup"].map(std::ffi::OsString::from)
                 );
                 if attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
                     out.status = std::process::ExitStatus::from_raw(1 << 8);
@@ -2149,7 +2199,7 @@ fn late_invite_join_resumes_membership_lookup_for_next_folder(cx: &mut TestAppCo
             .update(cx, |input, cx| input.set_text("test-invite", window, cx));
         root.onboarding.helper = std::sync::Arc::new(move |_, args, _, cwd, _, _| {
             let mut out = helper_success();
-            if args == ["join", "--stdin"].map(std::ffi::OsString::from) {
+            if args == ["join", "--stdin", "--no-setup"].map(std::ffi::OsString::from) {
                 wait.lock()
                     .unwrap()
                     .recv_timeout(Duration::from_secs(5))

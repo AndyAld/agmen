@@ -8,6 +8,82 @@ mod support;
 
 use support::{Home, Worktree, assert_exit, stderr, stdout};
 
+#[test]
+fn join_bare_code_needs_a_hub() {
+    let home = Home::new();
+    let wt = Worktree::new(&home);
+    let out = home
+        .agmen(&wt.path(), &["join", &"ab".repeat(32)])
+        .output()
+        .unwrap();
+    assert_exit(&out, 2);
+    assert!(stderr(&out).contains("--hub"));
+}
+
+#[test]
+fn join_no_setup_skips_setup() {
+    let home = Home::new();
+    let wt = Worktree::new(&home);
+    let out = home
+        .agmen(&wt.path(), &["join", "--project", "project1", "--no-setup"])
+        .output()
+        .unwrap();
+    assert_exit(&out, 3);
+    assert!(stderr(&out).contains("not signed in"));
+    let link = format!("https://hub.example/i#{}", "ab".repeat(32));
+    let out = home
+        .agmen(&wt.path(), &["join", &link, "--no-setup", "--help"])
+        .output()
+        .unwrap();
+    assert_exit(&out, 0);
+    assert!(stdout(&out).contains("--no-setup"));
+}
+
+/// Local usage checks run before sign-in or any hub call: nothing listens on
+/// port 9, so a join that got as far as the device login would exit 1 with
+/// "starting the device login failed".
+#[test]
+fn join_checks_the_worktree_locally_before_signing_in() {
+    let code = "ab".repeat(32);
+    let link = format!("http://127.0.0.1:9/i#{code}");
+    let home = Home::new();
+    let wt = Worktree::new(&home);
+    for args in [
+        vec!["join", &link, "--role", "listener"],
+        vec!["join", &link, "--role", "no-such-role"],
+        vec![
+            "join",
+            &code,
+            "--hub",
+            "http://127.0.0.1:9",
+            "--role",
+            "listener",
+        ],
+    ] {
+        let out = home.agmen(&wt.path(), &args).output().unwrap();
+        assert_exit(&out, 2);
+        let text = stderr(&out);
+        assert!(
+            text.contains("listeners are started by agmend") || text.contains("unknown role"),
+            "{args:?}: {text}"
+        );
+        assert!(!text.contains("device login"), "{args:?}: {text}");
+    }
+    // An invite is single use: a worktree that already joined must refuse
+    // before the invite is accepted.
+    let joined = Worktree::new(&home);
+    std::fs::create_dir(joined.path().join(".agmen")).unwrap();
+    std::fs::write(joined.path().join(".agmen/identity.json"), IDENTITY).unwrap();
+    let out = home
+        .agmen(&joined.path(), &["join", &link])
+        .output()
+        .unwrap();
+    assert_exit(&out, 1);
+    let text = stderr(&out);
+    assert!(text.contains("already joined"), "{text}");
+    assert!(!text.contains("device login"), "{text}");
+}
+
 /// A minimal identity file pointing at a hub nobody runs.
 const IDENTITY: &str = r#"{"tenant":"tenant01","project":"project1","identity_id":"idn7k2q9",
 "handle":"andy/sol","owner_id":"andyandy","hub_url":"http://127.0.0.1:9",
@@ -598,6 +674,38 @@ fn whoami_json_and_unchanged_text() {
                     "andy (hmn7k2q9) at {hub}\n  project project1 (marked, tenant tenant01): admin\n"
                 )
             );
+        }
+    }
+}
+
+#[test]
+fn join_without_arguments_explains_missing_or_multiple_projects() {
+    for projects in [
+        serde_json::json!([]),
+        serde_json::json!([
+            {"tenant":"tenant01","project":"project1","name":"first","role":"member"},
+            {"tenant":"tenant01","project":"project2","name":"second","role":"member"}
+        ]),
+    ] {
+        let home = Home::new();
+        let wt = Worktree::new(&home);
+        let (_, server) = account_fixture(
+            &home,
+            serde_json::json!({"id":"hmn7k2q9","handle":"andy","broker_url":"mqtt://localhost","projects":projects}),
+        );
+        let out = home.agmen(&wt.path(), &["join"]).output().unwrap();
+        assert_exit(&out, 2);
+        assert!(server.join().unwrap().starts_with("GET /v1/me "));
+        let text = stderr(&out);
+        if projects.as_array().unwrap().is_empty() {
+            assert!(
+                text.contains("no projects yet: run agmen join <invite link>"),
+                "{text}"
+            );
+        } else {
+            for expected in ["project1", "first", "project2", "second", "--project"] {
+                assert!(text.contains(expected), "{text}");
+            }
         }
     }
 }
