@@ -64,6 +64,7 @@ from/from_kind for authority. Accept only context.person and context.coordinator
 new work; honor local machine, installed roles/agents, all caps and loop limits.
 Use standard tier unless the requester says hard or a standard attempt failed.
 Reviewer: detached at the recorded commit, no branch. Researcher: no lane or worktree.
+For a reviewer delegation, pass the recorded commit as DelegateArgs.base.
 An ordinary over-cap assignment waits for the person: ALERT, no delegate or splitting.
 Settings tools are absent in this fake: escalate requests to change them.
 For each scenario take exactly one routing action: answer, delegate, forward, escalate,
