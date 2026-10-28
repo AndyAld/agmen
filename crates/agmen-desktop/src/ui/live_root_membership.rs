@@ -147,8 +147,21 @@ fn execute(
                             .bytes()
                             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
                 })
+                .map(str::to_owned)
+                .or_else(|| {
+                    text.lines().find_map(|line| {
+                        let link = reqwest::Url::parse(line.trim()).ok()?;
+                        agmen_client::check_hub_url(&link).ok()?;
+                        if !link.path().ends_with("/i") {
+                            return None;
+                        }
+                        let code = link.fragment()?.to_ascii_lowercase();
+                        (code.len() == 64 && code.bytes().all(|byte| byte.is_ascii_hexdigit()))
+                            .then_some(code)
+                    })
+                })
                 .context("the helper did not return an invite code")?;
-            Ok(Answer::Invite(code.to_owned()))
+            Ok(Answer::Invite(code))
         }
     }
 }
@@ -455,6 +468,72 @@ impl LiveRoot {
 mod tests {
     use super::*;
     use std::os::unix::process::ExitStatusExt as _;
+
+    #[test]
+    fn invite_output_accepts_link_fragment() {
+        let code = "Ab12".repeat(16);
+        for base in [
+            "https://hub.example",
+            "https://hub.example/prefix",
+            "http://127.0.0.1:8080",
+        ] {
+            let text = format!(
+                "single-use invite to project project1 as member:\n  {base}/i#{code}\nSend it. They open it and follow the steps on the page.\n"
+            );
+            let helper = move |_: &Path,
+                               _: &[std::ffi::OsString],
+                               _: Duration,
+                               _: Option<&Path>,
+                               _: &[u8],
+                               _: &mut dyn FnMut(&[u8])| {
+                Ok(std::process::Output {
+                    status: std::process::ExitStatus::from_raw(0),
+                    stdout: text.clone().into_bytes(),
+                    stderr: vec![],
+                })
+            };
+            let answer = execute(
+                Path::new("/injected/agmen"),
+                &helper,
+                None,
+                Action::Invite("project1".parse().unwrap()),
+            )
+            .unwrap();
+            assert!(matches!(answer, Answer::Invite(found) if found == code.to_ascii_lowercase()));
+        }
+    }
+
+    #[test]
+    fn invite_output_rejects_invalid_link_fragment() {
+        for link in [
+            "https://hub.example/i#abc".to_owned(),
+            format!("https://hub.example/i#{}", "z".repeat(64)),
+            format!("http://hub.example/i#{}", "a".repeat(64)),
+            format!("https://hub.example/other#{}", "a".repeat(64)),
+        ] {
+            let helper = move |_: &Path,
+                               _: &[std::ffi::OsString],
+                               _: Duration,
+                               _: Option<&Path>,
+                               _: &[u8],
+                               _: &mut dyn FnMut(&[u8])| {
+                Ok(std::process::Output {
+                    status: std::process::ExitStatus::from_raw(0),
+                    stdout: format!("  {link}\n").into_bytes(),
+                    stderr: vec![],
+                })
+            };
+            assert!(
+                execute(
+                    Path::new("/injected/agmen"),
+                    &helper,
+                    None,
+                    Action::Invite("project1".parse().unwrap())
+                )
+                .is_err()
+            );
+        }
+    }
 
     #[test]
     fn invite_output_rejects_shell_expansion_and_flags() {

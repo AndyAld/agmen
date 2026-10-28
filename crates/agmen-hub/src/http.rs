@@ -60,7 +60,6 @@ struct Inner {
     tokens: BrokerTokens,
     emqx: EmqxAdmin,
     github: Github,
-    #[expect(dead_code, reason = "onboarding Task 2 uses this for invite links")]
     public_url: Url,
     public_mqtt_url: Url,
     ingest: IngestState,
@@ -128,6 +127,7 @@ impl Hub {
     pub fn router(&self) -> Router {
         Router::new()
             .merge(health::routes())
+            .route("/i", get(crate::invite_page::page))
             .route("/v1/jwks", get(jwks))
             .merge(auth::routes())
             .route("/v1/me", get(me::me))
@@ -200,8 +200,6 @@ impl Hub {
 
     /// `path` (such as `v1/auth/device`) under the public URL, keeping any
     /// path prefix the public URL has.
-    // shortcut: retain the existing helper until Task 2 consumes it for invite links.
-    #[expect(dead_code, reason = "onboarding Task 2 uses this for invite links")]
     pub(crate) fn public_link(&self, path: &str) -> Url {
         public_link(&self.inner.public_url, path)
     }
@@ -233,10 +231,9 @@ pub(crate) fn public_link(base: &Url, path: &str) -> Url {
 async fn refuse_framing(mut response: Response) -> Response {
     let headers = response.headers_mut();
     headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
-    headers.insert(
-        header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static("frame-ancestors 'none'"),
-    );
+    headers
+        .entry(header::CONTENT_SECURITY_POLICY)
+        .or_insert(HeaderValue::from_static("frame-ancestors 'none'"));
     response
 }
 
