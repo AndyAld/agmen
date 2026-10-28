@@ -1,6 +1,7 @@
 //! User-service rendering and management with injected paths and processes.
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, ensure};
 
@@ -15,6 +16,7 @@ pub(super) enum ServiceAction {
     Install,
     Uninstall,
     Status,
+    StatusJson,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,13 +81,83 @@ enum Backend {
     Systemd,
 }
 
-pub(super) fn execute(action: ServiceAction) -> Result<String> {
+pub(super) fn execute(action: ServiceAction, program: Option<PathBuf>) -> Result<String> {
+    let deadline = Instant::now() + Duration::from_secs(120);
     let paths = ServicePaths {
         home: std::env::home_dir().context("locating service home")?,
-        executable: std::env::current_exe().context("locating agmend executable")?,
+        executable: program.map_or_else(
+            || std::env::current_exe().context("locating agmend executable"),
+            Ok,
+        )?,
         uid: rustix::process::getuid().as_raw(),
     };
-    manage(action, &paths, &mut run_process)
+    if action == ServiceAction::Install {
+        validate_program(&paths.executable)?;
+    }
+    let answer = manage(action, &paths, &mut |argv| {
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .context("service transition exceeded 120 s deadline")?;
+        run_process_for(argv, remaining.min(Duration::from_secs(10)))
+    })?;
+    if action == ServiceAction::Install {
+        wait_ready(
+            &agmen_client::agmend_socket()?,
+            env!("CARGO_PKG_VERSION"),
+            deadline,
+        )?;
+    }
+    Ok(answer)
+}
+
+fn validate_program(path: &Path) -> Result<PathBuf> {
+    use std::os::unix::fs::PermissionsExt as _;
+    validate_path(path).context("invalid service program")?;
+    let metadata = path.metadata().context("reading service program")?;
+    ensure!(
+        metadata.is_file() && metadata.permissions().mode() & 0o111 != 0,
+        "service program must be an executable file"
+    );
+    Ok(path.to_owned())
+}
+
+fn configured_program(backend: Backend, unit: &Unit) -> Result<Option<PathBuf>> {
+    use std::io::Read as _;
+    let metadata = match std::fs::metadata(&unit.path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("reading service configuration metadata"),
+    };
+    ensure!(
+        metadata.is_file(),
+        "service configuration must be a regular file"
+    );
+    ensure!(
+        metadata.len() <= MAX_UNIT_BYTES as u64,
+        "service configuration exceeds 64 KiB"
+    );
+    let mut file = match std::fs::File::open(&unit.path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("reading service configuration"),
+    };
+    let mut contents = String::new();
+    (&mut file)
+        .take(MAX_UNIT_BYTES as u64)
+        .read_to_string(&mut contents)
+        .context("reading service configuration")?;
+    ensure!(
+        file.metadata()?.len() == contents.len() as u64 && contents.len() as u64 == metadata.len(),
+        "service configuration changed while reading"
+    );
+    let program = match backend {
+        #[cfg(any(target_os = "macos", test))]
+        Backend::Launchd => launchd::program(&contents)?,
+        #[cfg(any(target_os = "linux", test))]
+        Backend::Systemd => systemd::program(&contents)?,
+    };
+    validate_path(&program).context("invalid configured service program")?;
+    Ok(Some(program))
 }
 
 fn manage(action: ServiceAction, paths: &ServicePaths, run: &mut Runner<'_>) -> Result<String> {
@@ -109,6 +181,17 @@ fn manage_backend(
         #[cfg(any(target_os = "linux", test))]
         Backend::Systemd => systemd::render(paths)?,
     };
+    let program = if matches!(action, ServiceAction::Install | ServiceAction::StatusJson) {
+        configured_program(backend, &unit)?
+    } else {
+        None
+    };
+    #[cfg(any(target_os = "linux", test))]
+    let active = if backend == Backend::Systemd && action == ServiceAction::Install {
+        systemd::active(run)?
+    } else {
+        false
+    };
     if action == ServiceAction::Install {
         #[cfg(any(target_os = "macos", test))]
         if backend == Backend::Launchd {
@@ -116,12 +199,24 @@ fn manage_backend(
         }
         write_unit(&unit).context("installing service unit")?;
     }
-    match backend {
+    let operation = if action == ServiceAction::StatusJson {
+        ServiceAction::Status
+    } else {
+        action
+    };
+    let answer = match backend {
         #[cfg(any(target_os = "macos", test))]
-        Backend::Launchd => launchd::manage(action, paths, &unit, run),
+        Backend::Launchd => launchd::manage(operation, paths, &unit, run),
         #[cfg(any(target_os = "linux", test))]
-        Backend::Systemd => systemd::manage(action, &unit, run),
+        Backend::Systemd => systemd::manage(operation, &unit, run, active),
+    }?;
+    if action == ServiceAction::StatusJson {
+        return Ok(format!(
+            "{}\n",
+            serde_json::json!({"state": answer.trim(), "program": program})
+        ));
     }
+    Ok(answer)
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -213,7 +308,94 @@ fn stderr_excerpt(stderr: &[u8]) -> String {
 
 const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 
+fn wait_ready(socket: &Path, version: &str, deadline: Instant) -> Result<()> {
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .context("service transition exceeded 120 s deadline")?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("starting readiness runtime")?;
+    runtime.block_on(async {
+        let operation = async {
+            let mut last = String::from("daemon has not answered");
+            // At most 1200 attempts within the shared 120 s transition deadline.
+            for _ in 0..1200 {
+                match tokio::time::timeout(Duration::from_secs(2), ready_handshake(socket, version))
+                    .await
+                {
+                    Ok(Ok(())) => return Ok(()),
+                    Ok(Err(error)) => last = format!("{error:#}"),
+                    Err(_) => last = "hello/ready handshake timed out".to_owned(),
+                }
+                let pause = Duration::from_millis(100);
+                if Instant::now()
+                    .checked_add(pause)
+                    .is_none_or(|next| next >= deadline)
+                {
+                    anyhow::bail!("service transition exceeded 120 s deadline: {last}");
+                }
+                tokio::time::sleep(pause).await;
+            }
+            anyhow::bail!("service never became ready: {last}")
+        };
+        tokio::time::timeout(remaining, operation)
+            .await
+            .context("service transition exceeded 120 s deadline while waiting for hello/ready")?
+    })
+}
+
+async fn ready_handshake(socket: &Path, version: &str) -> Result<()> {
+    use agmen_local::{API, HelloAnswer, Outcome, ReadyAnswer, Request, Response, frame};
+    let mut stream = tokio::net::UnixStream::connect(socket)
+        .await
+        .context("connecting to installed agmend")?;
+    ensure!(
+        stream.peer_cred()?.uid() == rustix::process::geteuid().as_raw(),
+        "installed agmend belongs to another user"
+    );
+    frame::write_async(
+        &mut stream,
+        &Request::new(1, "hello", serde_json::json!({"api":API})),
+    )
+    .await?;
+    let hello: Response = frame::read_async(&mut stream).await?;
+    ensure!(hello.id == 1, "hello response id mismatch");
+    let Outcome::Ok { result } = hello.outcome else {
+        anyhow::bail!("installed agmend refused hello");
+    };
+    let hello: HelloAnswer = serde_json::from_value(result)?;
+    ensure!(
+        hello.api == API && hello.version.as_deref() == Some(version),
+        "installed agmend version {:?} does not match {version}",
+        hello.version
+    );
+    frame::write_async(
+        &mut stream,
+        &Request::new(2, "ready", serde_json::json!({})),
+    )
+    .await?;
+    let ready: Response = frame::read_async(&mut stream).await?;
+    ensure!(ready.id == 2, "ready response id mismatch");
+    let Outcome::Ok { result } = ready.outcome else {
+        anyhow::bail!("installed agmend refused ready");
+    };
+    let ready: ReadyAnswer = serde_json::from_value(result)?;
+    ensure!(
+        ready.ready
+            && ready.schemas.contains_key("agmend.db")
+            && ready.schemas.values().all(|schema| *schema >= 0),
+        "installed agmend stores are not ready"
+    );
+    Ok(())
+}
+
+#[cfg(test)]
 fn run_process(argv: &[std::ffi::OsString]) -> Result<ProcessResult> {
+    run_process_for(argv, Duration::from_secs(10))
+}
+
+fn run_process_for(argv: &[std::ffi::OsString], timeout: Duration) -> Result<ProcessResult> {
     let (program, args) = argv
         .split_first()
         .context("empty service manager command")?;
@@ -257,8 +439,7 @@ fn run_process(argv: &[std::ffi::OsString]) -> Result<ProcessResult> {
                 stderr,
             })
         };
-        let result = match tokio::time::timeout(std::time::Duration::from_secs(10), operation).await
-        {
+        let result = match tokio::time::timeout(timeout, operation).await {
             Ok(result) => result,
             Err(_) => Err(anyhow::anyhow!("service process exceeded 10 s deadline")),
         };
@@ -480,7 +661,12 @@ mod management_tests {
             let paths = paths(&home);
             let responses = match backend {
                 Backend::Launchd => vec![result(113, ""), result(0, "")],
-                Backend::Systemd => vec![result(0, ""), result(0, ""), result(0, "")],
+                Backend::Systemd => vec![
+                    result(0, "LoadState=not-found\nActiveState=inactive\n"),
+                    result(0, ""),
+                    result(0, ""),
+                    result(0, ""),
+                ],
             };
             let (answer, calls) = exercise(backend, ServiceAction::Install, &paths, responses);
             assert!(answer.is_ok(), "{answer:?}");
@@ -520,6 +706,14 @@ mod management_tests {
                 Backend::Systemd => assert_eq!(
                     calls,
                     vec![
+                        words(&[
+                            "systemctl",
+                            "--user",
+                            "show",
+                            "agmend.service",
+                            "--property=LoadState",
+                            "--property=ActiveState"
+                        ]),
                         words(&["systemctl", "--user", "daemon-reload"]),
                         words(&["systemctl", "--user", "enable", "agmend.service"]),
                         words(&["systemctl", "--user", "start", "agmend.service"])
@@ -552,6 +746,376 @@ mod management_tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn running_systemd_install_restarts() {
+        let home = tempfile::tempdir().unwrap();
+        let mut calls = Vec::new();
+        let answer = manage_backend(
+            Backend::Systemd,
+            ServiceAction::Install,
+            &paths(&home),
+            &mut |argv| {
+                calls.push(argv.to_vec());
+                Ok(result(0, "LoadState=loaded\nActiveState=active\n"))
+            },
+        );
+        assert!(answer.is_ok(), "{answer:?}");
+        assert_eq!(
+            calls.last().unwrap(),
+            &words(&["systemctl", "--user", "restart", "agmend.service"])
+        );
+        assert!(
+            calls
+                .iter()
+                .any(|call| call.iter().any(|word| word == "show"))
+        );
+    }
+
+    #[test]
+    fn status_reports_missing_program_path() {
+        let home = tempfile::tempdir().unwrap();
+        for backend in [Backend::Launchd, Backend::Systemd] {
+            let paths = ServicePaths {
+                executable: "/missing/Old & Moved.app/agmend".into(),
+                ..paths(&home)
+            };
+            let unit = match backend {
+                Backend::Launchd => launchd::render(&paths),
+                Backend::Systemd => systemd::render(&paths),
+            }
+            .unwrap();
+            write_unit(&unit).unwrap();
+            assert_eq!(
+                configured_program(backend, &unit).unwrap(),
+                Some(paths.executable.clone())
+            );
+            let mut run = |_: &[OsString]| {
+                Ok(result(
+                    0,
+                    "state = waiting\nLoadState=loaded\nActiveState=inactive\n",
+                ))
+            };
+            let answer =
+                manage_backend(backend, ServiceAction::StatusJson, &paths, &mut run).unwrap();
+            let answer: serde_json::Value = serde_json::from_str(&answer).unwrap();
+            assert_eq!(
+                answer,
+                serde_json::json!({"state":"stopped", "program": paths.executable})
+            );
+            fs::remove_file(&unit.path).unwrap();
+            assert_eq!(configured_program(backend, &unit).unwrap(), None);
+        }
+    }
+
+    #[test]
+    fn status_rejects_malformed_program() {
+        let home = tempfile::tempdir().unwrap();
+        for (backend, contents) in [
+            (Backend::Launchd, "<plist><dict><key>ProgramArguments</key><array><string>relative</string></array></dict></plist>".to_owned()),
+            (Backend::Launchd, "<plist><dict><key>ProgramArguments</key><array><string>/ok</string></array><key>ProgramArguments</key><array><string>/bad</string></array></dict></plist>".to_owned()),
+            (Backend::Launchd, "<plist><dict><key>ProgramArguments</key><array><string>/bad</string></dict></plist>".to_owned()),
+            (Backend::Launchd, "<plist><dict><key>ProgramArguments<!--split-->Other</key><array><string>/bad</string></array></dict></plist>".to_owned()),
+            (Backend::Launchd, "<plist><dict>garbage<key>ProgramArguments</key><array><string>/bad</string></array></dict></plist>".to_owned()),
+            (Backend::Systemd, "[Service]\nExecStart=/ok\nExecStart=/other\n".to_owned()),
+            (Backend::Systemd, "[Service]\nExecStart=\"/unclosed\n".to_owned()),
+            (Backend::Systemd, "[Service]\nExecStart=/bad/%h\n".to_owned()),
+            (Backend::Systemd, "[Service]\nExecStart=relative\n".to_owned()),
+            (Backend::Systemd, "[Service]\nExecStart=\"/ok\"suffix\n".to_owned()),
+            (Backend::Systemd, "[Service]\nExecStart=/bad/\\x25h\n".to_owned()),
+            (Backend::Systemd, "x".repeat(65537)),
+        ] {
+            let paths = paths(&home);
+            let mut unit = match backend { Backend::Launchd => launchd::render(&paths), Backend::Systemd => systemd::render(&paths) }.unwrap();
+            unit.contents = contents;
+            fs::create_dir_all(unit.path.parent().unwrap()).unwrap();
+            fs::write(&unit.path, &unit.contents).unwrap();
+            assert!(configured_program(backend, &unit).is_err(), "{}", unit.contents);
+            let mut calls = 0;
+            assert!(manage_backend(backend, ServiceAction::Install, &paths, &mut |_| { calls += 1; Ok(result(0, "")) }).is_err());
+            assert_eq!(calls, 0);
+            assert_eq!(fs::read_to_string(&unit.path).unwrap(), unit.contents);
+            fs::remove_file(unit.path).unwrap();
+        }
+    }
+
+    #[test]
+    fn status_decodes_program_escaping() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = ServicePaths {
+            executable: "/opt/a & \"b\"/\\%n$HOME/é/agmend".into(),
+            ..paths(&home)
+        };
+        for backend in [Backend::Launchd, Backend::Systemd] {
+            let unit = match backend {
+                Backend::Launchd => launchd::render(&paths),
+                Backend::Systemd => systemd::render(&paths),
+            }
+            .unwrap();
+            write_unit(&unit).unwrap();
+            assert_eq!(
+                configured_program(backend, &unit).unwrap(),
+                Some(paths.executable.clone())
+            );
+        }
+        for (contents, expected) in [
+            (
+                r#"[Service]
+ExecStart="/opt/a\sb/\xC3\xA9/\u0061/\141/%%/$$/agmend" --flag
+"#,
+                "/opt/a b/é/a/a/%/$/agmend",
+            ),
+            (
+                "[Service]\nExecStart='/opt/a b/agmend'\n",
+                "/opt/a b/agmend",
+            ),
+        ] {
+            let mut unit = systemd::render(&paths).unwrap();
+            unit.contents = contents.to_owned();
+            write_unit(&unit).unwrap();
+            assert_eq!(
+                configured_program(Backend::Systemd, &unit).unwrap(),
+                Some(expected.into())
+            );
+        }
+    }
+
+    #[test]
+    fn status_json_reports_absent_program() {
+        let home = tempfile::tempdir().unwrap();
+        for (backend, response) in [
+            (Backend::Launchd, result(113, "")),
+            (
+                Backend::Systemd,
+                result(0, "LoadState=not-found\nActiveState=inactive\n"),
+            ),
+        ] {
+            let answer = exercise(
+                backend,
+                ServiceAction::StatusJson,
+                &paths(&home),
+                vec![response],
+            )
+            .0
+            .unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&answer).unwrap(),
+                serde_json::json!({"state":"not installed","program":null})
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_stable_program_spelling_is_preserved() {
+        let home = tempfile::tempdir().unwrap();
+        let target = home.path().join("Cellar/0.1/agmend");
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(&target, "executable fixture").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o700)).unwrap();
+        let stable = home.path().join("active");
+        std::os::unix::fs::symlink(target.parent().unwrap(), &stable).unwrap();
+        let program = stable.join("agmend");
+        assert_eq!(validate_program(&program).unwrap(), program);
+        let paths = ServicePaths {
+            executable: program.clone(),
+            ..paths(&home)
+        };
+        for backend in [Backend::Launchd, Backend::Systemd] {
+            manage_backend(backend, ServiceAction::Install, &paths, &mut |_| {
+                Ok(result(0, "LoadState=loaded\nActiveState=inactive\n"))
+            })
+            .unwrap();
+            let unit = match backend {
+                Backend::Launchd => launchd::render(&paths),
+                Backend::Systemd => systemd::render(&paths),
+            }
+            .unwrap();
+            assert_eq!(
+                configured_program(backend, &unit).unwrap(),
+                Some(program.clone())
+            );
+        }
+        assert!(validate_program(home.path()).is_err());
+        assert!(validate_program(Path::new("relative")).is_err());
+        assert!(validate_program(&home.path().join("absent")).is_err());
+    }
+
+    #[tokio::test]
+    async fn service_health_requires_matching_version_and_ready() {
+        use agmen_local::{Request, Response, frame};
+        use serde_json::json;
+        for (hello, ready) in [
+            (json!({"api":1,"version":"old"}), None),
+            (json!({"api":1}), None),
+            (json!({"api":2,"version":"new"}), None),
+            (
+                json!({"api":1,"version":"new"}),
+                Some(json!({"ready":false,"schemas":{"agmend.db":2}})),
+            ),
+            (
+                json!({"api":1,"version":"new"}),
+                Some(json!({"ready":true,"schemas":{}})),
+            ),
+            (
+                json!({"api":1,"version":"new"}),
+                Some(json!({"ready":true})),
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let socket = dir.path().join("s");
+            let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(1)))
+                    .unwrap();
+                stream
+                    .set_write_timeout(Some(Duration::from_secs(1)))
+                    .unwrap();
+                let request: Request = frame::read(&mut stream).unwrap();
+                frame::write(&mut stream, &Response::ok(request.id, hello)).unwrap();
+                if let Some(ready) = ready {
+                    let request: Request = frame::read(&mut stream).unwrap();
+                    assert_eq!(request.method, "ready");
+                    frame::write(&mut stream, &Response::ok(request.id, ready)).unwrap();
+                }
+            });
+            assert!(
+                tokio::time::timeout(Duration::from_secs(1), ready_handshake(&socket, "new"))
+                    .await
+                    .unwrap()
+                    .is_err()
+            );
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn readiness_uses_remaining_transition_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("absent");
+        let start = Instant::now();
+        let error = wait_ready(&socket, "new", start + Duration::from_millis(80)).unwrap_err();
+        assert!(format!("{error:#}").contains("deadline"));
+        assert!(start.elapsed() < Duration::from_secs(1));
+        assert!(wait_ready(&socket, "new", start).is_err());
+    }
+
+    #[test]
+    fn upgrade_running_daemon_reports_new_version() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        let home = tempfile::tempdir().unwrap();
+        let socket_dir = tempfile::tempdir().unwrap();
+        let socket = socket_dir.path().join("s");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let upgraded = Arc::new(AtomicBool::new(false));
+        let replacement = upgraded.clone();
+        let server = std::thread::spawn(move || {
+            for _ in 0..100 {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream.set_nonblocking(false).unwrap();
+                        stream
+                            .set_read_timeout(Some(Duration::from_secs(2)))
+                            .unwrap();
+                        let hello: agmen_local::Request =
+                            agmen_local::frame::read(&mut stream).unwrap();
+                        assert!(replacement.load(Ordering::Acquire));
+                        agmen_local::frame::write(
+                            &mut stream,
+                            &agmen_local::Response::ok(
+                                hello.id,
+                                serde_json::json!({"api":1,"version":"replacement"}),
+                            ),
+                        )
+                        .unwrap();
+                        let ready: agmen_local::Request =
+                            agmen_local::frame::read(&mut stream).unwrap();
+                        assert_eq!(ready.method, "ready");
+                        agmen_local::frame::write(
+                            &mut stream,
+                            &agmen_local::Response::ok(
+                                ready.id,
+                                serde_json::json!({"ready":true,"schemas":{"agmend.db":2}}),
+                            ),
+                        )
+                        .unwrap();
+                        return;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(20))
+                    }
+                    Err(error) => panic!("{error}"),
+                }
+            }
+            panic!("replacement never connected");
+        });
+        manage_backend(
+            Backend::Systemd,
+            ServiceAction::Install,
+            &paths(&home),
+            &mut |argv| {
+                if argv.iter().any(|word| word == "restart") {
+                    upgraded.store(true, Ordering::Release);
+                }
+                Ok(result(0, "LoadState=loaded\nActiveState=active\n"))
+            },
+        )
+        .unwrap();
+        wait_ready(
+            &socket,
+            "replacement",
+            Instant::now() + Duration::from_secs(2),
+        )
+        .unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn running_launchd_install_boots_out_then_bootstraps() {
+        let home = tempfile::tempdir().unwrap();
+        let (answer, calls) = exercise(
+            Backend::Launchd,
+            ServiceAction::Install,
+            &paths(&home),
+            vec![result(0, "state = running"), result(0, ""), result(0, "")],
+        );
+        assert!(answer.is_ok());
+        assert_eq!(
+            calls[1],
+            words(&["launchctl", "bootout", "gui/501/dev.agmen.agmend"])
+        );
+        assert_eq!(calls[2][1], "bootstrap");
+    }
+
+    #[test]
+    fn missing_user_manager_explains_fallback() {
+        let home = tempfile::tempdir().unwrap();
+        let error = manage_backend(
+            Backend::Systemd,
+            ServiceAction::Install,
+            &paths(&home),
+            &mut |_| {
+                Ok(ProcessResult {
+                    code: Some(1),
+                    stdout: vec![],
+                    stderr: b"Failed to connect to bus: No medium found".to_vec(),
+                })
+            },
+        )
+        .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("user manager"), "{message}");
+        assert!(
+            message.contains("foreground") && message.contains("agmend"),
+            "{message}"
+        );
+        assert!(!systemd::render(&paths(&home)).unwrap().path.exists());
     }
     #[test]
     fn service_uninstall_is_idempotent() {
@@ -728,7 +1292,12 @@ mod management_tests {
             let responses = if backend == Backend::Launchd {
                 vec![result(113, ""), result(1, "permission denied")]
             } else {
-                vec![result(0, ""), result(0, ""), result(1, "")]
+                vec![
+                    result(0, "LoadState=loaded\nActiveState=inactive\n"),
+                    result(0, ""),
+                    result(0, ""),
+                    result(1, ""),
+                ]
             };
             let error = exercise(backend, ServiceAction::Install, &paths, responses)
                 .0

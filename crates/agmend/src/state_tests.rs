@@ -219,6 +219,56 @@ fn state_rejects_future_schema() {
     assert!(matches!(Store::open(&path), Err(StoreError::Version(3))));
 }
 
+/// Copies `name` and its rollback journal from `source` into `target` while a
+/// write transaction is open: what a crash during that transaction leaves.
+fn crash_copy(source: &Path, target: &Path, name: &str) {
+    let path = source.join(name);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "PRAGMA journal_mode=DELETE; PRAGMA cache_size=1; CREATE TABLE pad(payload BLOB); BEGIN IMMEDIATE;",
+    )
+    .unwrap();
+    for _ in 0..40 {
+        conn.execute("INSERT INTO pad VALUES (zeroblob(4096))", [])
+            .unwrap();
+    }
+    conn.pragma_update(None, "user_version", 1).unwrap();
+    fs::create_dir_all(target).unwrap();
+    for suffix in ["", "-journal"] {
+        fs::copy(
+            format!("{}{suffix}", path.display()),
+            format!("{}{suffix}", target.join(name).display()),
+        )
+        .unwrap();
+    }
+    conn.execute_batch("ROLLBACK").unwrap();
+}
+
+#[test]
+fn startup_recovers_stores_left_with_hot_rollback_journals() {
+    let source = tempfile::tempdir().unwrap();
+    let identity_dir = source.path().join("identities/agent001");
+    fs::create_dir_all(&identity_dir).unwrap();
+    drop(Store::open(&source.path().join("agmend.db")).unwrap());
+    drop(agmen_client::Outbox::open(identity_dir.join(agmen_client::STATE_DB)).unwrap());
+    let state = tempfile::tempdir().unwrap();
+    crash_copy(source.path(), state.path(), "agmend.db");
+    crash_copy(
+        &identity_dir,
+        &state.path().join("identities/agent001"),
+        agmen_client::STATE_DB,
+    );
+    drop(open_stores(&state.path().join("agmend.db")).unwrap());
+    let versions = schemas(state.path(), Instant::now() + Duration::from_secs(5)).unwrap();
+    assert_eq!(
+        versions,
+        BTreeMap::from([
+            ("agmend.db".to_owned(), 2),
+            ("identities/agent001/agmen.db".to_owned(), 2),
+        ])
+    );
+}
+
 #[test]
 fn two_senders_with_same_id_both_deliver() {
     for assign in [false, true] {

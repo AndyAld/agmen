@@ -566,7 +566,7 @@ impl Daemon {
     pub async fn client(&self) -> Client {
         let mut client = Client::connect(&self.home.socket()).await;
         let hello = client.call("hello", json!({"api": 1})).await;
-        assert_eq!(hello.outcome, ok(json!({"api": 1})));
+        assert_eq!(result(hello)["api"], 1);
         client
     }
 }

@@ -5,6 +5,31 @@ use serde_json::Value;
 /// The local API version in every request's `v`.
 pub const API: u32 = 1;
 
+/// The running process's identity. Older API 1 daemons return only `api`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HelloAnswer {
+    /// Local API version, required even for older daemons.
+    pub api: u32,
+    /// Running daemon's release version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// Build identifier, or `dev` when no build identifier was embedded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build: Option<String>,
+    /// Running executable, independent of the configured service program.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exe: Option<std::path::PathBuf>,
+}
+
+/// Startup and store readiness, separate from process identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadyAnswer {
+    /// Startup and store initialization have completed.
+    pub ready: bool,
+    /// Actual SQLite user versions keyed by paths relative to the state directory.
+    pub schemas: std::collections::BTreeMap<String, i64>,
+}
+
 /// A request frame: `{ "v", "id", "method", "params", "as"? }`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Request {
@@ -126,6 +151,15 @@ impl Response {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn hello_answer_without_version_parses() -> Result<(), serde_json::Error> {
+        let old: HelloAnswer = serde_json::from_value(json!({"api":1}))?;
+        assert_eq!(old.api, 1);
+        assert!(old.version.is_none() && old.build.is_none() && old.exe.is_none());
+        assert!(serde_json::from_value::<HelloAnswer>(json!({"version":"1"})).is_err());
+        Ok(())
+    }
 
     #[test]
     fn local_error_codes_round_trip() -> Result<(), serde_json::Error> {

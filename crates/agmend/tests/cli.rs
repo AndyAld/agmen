@@ -51,6 +51,23 @@ fn help_prints_usage() {
     assert!(stdout.starts_with("usage: agmend"), "{stdout}");
 }
 
+#[test]
+fn service_install_preserves_explicit_stable_path() {
+    // A missing explicit target must reach validation, never the service manager.
+    let out = agmend(&[
+        "service",
+        "install",
+        "--program",
+        "/missing/agmen/active/agmend",
+    ]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(
+        String::from_utf8(out.stderr)
+            .unwrap()
+            .contains("service program")
+    );
+}
+
 /// Starts the daemon in a temporary state folder, sends it `signal`, and
 /// returns its exit status and stderr. The daemon logs when it listens and
 /// when it stops; a run that does neither within 10 s is killed.

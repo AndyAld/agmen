@@ -69,8 +69,103 @@ pub(super) fn manage(
             remove_unit(unit)?;
             Ok("uninstalled\n".to_owned())
         }
-        ServiceAction::Status => anyhow::bail!("status already handled"),
+        ServiceAction::Status | ServiceAction::StatusJson => {
+            anyhow::bail!("status already handled")
+        }
     }
+}
+
+pub(super) fn program(contents: &str) -> Result<std::path::PathBuf> {
+    use anyhow::ensure;
+    let document = roxmltree::Document::parse_with_options(
+        contents,
+        roxmltree::ParsingOptions {
+            // Apple's standard plist DOCTYPE is allowed; no external resolver is installed.
+            allow_dtd: true,
+            nodes_limit: 16384,
+            ..Default::default()
+        },
+    )
+    .context("malformed service plist")?;
+    let root = document.root_element();
+    container_text(root)?;
+    ensure!(
+        root.has_tag_name("plist"),
+        "service plist has no plist root"
+    );
+    let roots: Vec<_> = root
+        .children()
+        .filter(roxmltree::Node::is_element)
+        .collect();
+    ensure!(
+        roots.len() == 1 && roots[0].has_tag_name("dict"),
+        "service plist requires one dictionary"
+    );
+    container_text(roots[0])?;
+    let entries: Vec<_> = roots[0]
+        .children()
+        .filter(roxmltree::Node::is_element)
+        .collect();
+    ensure!(
+        entries.len().is_multiple_of(2),
+        "service plist dictionary lacks a value"
+    );
+    let mut keys = std::collections::BTreeSet::new();
+    let mut program = None;
+    for pair in entries.as_chunks::<2>().0 {
+        ensure!(
+            pair[0].has_tag_name("key") && !pair[0].children().any(|node| node.is_element()),
+            "invalid service plist key"
+        );
+        let key = xml_text(pair[0]);
+        ensure!(!key.is_empty(), "empty service plist key");
+        ensure!(
+            keys.insert(key.clone()),
+            "duplicate service plist key {key}"
+        );
+        ensure!(
+            key != "Program",
+            "service plist Program overrides ProgramArguments and is ambiguous"
+        );
+        if key == "ProgramArguments" {
+            container_text(pair[1])?;
+            ensure!(
+                pair[1].has_tag_name("array"),
+                "ProgramArguments is not an array"
+            );
+            let arguments: Vec<_> = pair[1]
+                .children()
+                .filter(roxmltree::Node::is_element)
+                .collect();
+            ensure!(!arguments.is_empty(), "ProgramArguments is empty");
+            for argument in &arguments {
+                ensure!(
+                    argument.has_tag_name("string")
+                        && !argument.children().any(|node| node.is_element()),
+                    "ProgramArguments contains a non-string"
+                );
+            }
+            program = Some(std::path::PathBuf::from(xml_text(arguments[0])));
+        }
+    }
+    program.context("service plist lacks ProgramArguments")
+}
+
+fn xml_text(node: roxmltree::Node<'_, '_>) -> String {
+    node.children()
+        .filter(|node| node.is_text())
+        .filter_map(|node| node.text())
+        .collect()
+}
+
+fn container_text(node: roxmltree::Node<'_, '_>) -> Result<()> {
+    anyhow::ensure!(
+        !node.children().any(
+            |child| child.is_text() && child.text().is_some_and(|text| !text.trim().is_empty())
+        ),
+        "service plist container contains non-whitespace text"
+    );
+    Ok(())
 }
 
 pub(super) fn render(paths: &ServicePaths) -> Result<Unit> {
