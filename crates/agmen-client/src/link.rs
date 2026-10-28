@@ -24,8 +24,6 @@
 //! through [`CurrentClient`].
 
 use std::collections::VecDeque;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use agmen_proto::{IdentityId, Stream, Timestamp, Topics};
@@ -40,7 +38,9 @@ use tokio::time::Instant;
 use crate::error::ClientError;
 use crate::event::ClientEvent;
 use crate::replay::Streams;
-use crate::session::{CLIENT_CAPACITY, CLOSE_WAIT, ClientKind, ONLINE, close_disconnect, emit};
+use crate::session::{
+    CLIENT_CAPACITY, CLOSE_WAIT, ClientKind, ONLINE, Presence, close_disconnect, emit,
+};
 use crate::state::StateSlot;
 use crate::token::{self, TokenSource};
 
@@ -158,8 +158,9 @@ pub(crate) struct LinkParts<T> {
     pub(crate) refresh_at: watch::Sender<Timestamp>,
     /// Told the outcome of the first connect, then dropped.
     pub(crate) ready: Option<oneshot::Sender<Result<(), ClientError>>>,
-    /// Set by `Session::close` before it queues DISCONNECT.
-    pub(crate) closing: Arc<AtomicBool>,
+    /// Set by `Session::close` or `Session::close_quietly` before queuing
+    /// DISCONNECT, including whether to send the will.
+    pub(crate) closing: watch::Sender<Option<Presence>>,
     /// The identity's `presence/{id}`, for a session that publishes
     /// presence.
     pub(crate) presence: Option<String>,
@@ -225,7 +226,7 @@ impl<T: TokenSource> Link<T> {
     }
 
     fn closing(&self) -> bool {
-        self.p.closing.load(Ordering::SeqCst)
+        self.p.closing.borrow().is_some()
     }
 
     async fn on_poll(
@@ -458,10 +459,10 @@ impl<T: TokenSource> Link<T> {
         self.p.eventloop = eventloop;
         self.p.client.send_replace(client);
         if self.closing() {
-            // Session::close may have queued its DISCONNECT on the old
-            // client. Queue it on the new one, which connects only to send
-            // it, so a presence session still leaves its will.
-            let (reason, properties) = close_disconnect(self.p.presence.is_some());
+            // Either close method may have queued DISCONNECT on the old
+            // client. Preserve its will choice on the new client too.
+            let (reason, properties) =
+                close_disconnect(*self.p.closing.borrow() == Some(Presence::Publish));
             let queued = self
                 .p
                 .client

@@ -12,12 +12,79 @@ mod support;
 
 use std::time::Duration;
 
-use agmen_client::{ClientEvent, ClientKind, OutboxState, Session};
+use agmen_client::{ClientEvent, ClientKind, OutboxState, Presence, Session};
 use agmen_proto::{Seq, Stream};
 use support::{
-    ShortTokens, close, connection, delivered, dm, fyi, messages_until, next_event, next_feed_seq,
-    recorded_on_feed, run, set_proxy_enabled,
+    EVENT_WAIT as WAIT, PresenceLog, ShortTokens, close, connection, delivered, disconnected, dm,
+    fyi, messages_until, next_event, next_feed_seq, recorded_on_feed, run, set_proxy_enabled,
 };
+
+async fn presence_payload(log: &PresenceLog, expected: &str) {
+    tokio::time::timeout(WAIT, async {
+        loop {
+            if log.seen().last().is_some_and(|payload| payload == expected) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("presence did not become {expected}: {:?}", log.seen()));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn it_mcp_session_can_publish_presence() {
+    run(|ctx| async move {
+        let who = ctx.identity().await;
+        let reader = ctx.identity().await;
+        let config = ctx
+            .config(ClientKind::Mcp, &who, &ctx.broker)
+            .with_presence(Presence::Publish);
+        let (session, events) = Session::connect(config).await.unwrap();
+        drop(events);
+        assert_eq!(session.presence(), Presence::Publish);
+        let log = PresenceLog::start(&ctx, &reader, &who.identity.id).await;
+        presence_payload(&log, r#"{"status":"online"}"#).await;
+        close(session).await;
+        presence_payload(&log, r#"{"status":"offline"}"#).await;
+        drop(log);
+        disconnected(&format!("{}-mcp", reader.identity.id)).await;
+        // A fresh subscriber must receive the retained offline value too.
+        let retained = PresenceLog::start(&ctx, &reader, &who.identity.id).await;
+        presence_payload(&retained, r#"{"status":"offline"}"#).await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn it_quiet_close_keeps_the_presence_online() {
+    run(|ctx| async move {
+        let who = ctx.identity().await;
+        let reader = ctx.identity().await;
+        let config = ctx
+            .config(ClientKind::Mcp, &who, &ctx.broker)
+            .with_presence(Presence::Publish);
+        let (session, events) = Session::connect(config).await.unwrap();
+        drop(events);
+        assert_eq!(session.presence(), Presence::Publish);
+        let log = PresenceLog::start(&ctx, &reader, &who.identity.id).await;
+        presence_payload(&log, r#"{"status":"online"}"#).await;
+        session.close_quietly().await.unwrap();
+        drop(log);
+        disconnected(&format!("{}-mcp", reader.identity.id)).await;
+        // Subscribe after closing to check the broker's retained value.
+        let retained = PresenceLog::start(&ctx, &reader, &who.identity.id).await;
+        presence_payload(&retained, r#"{"status":"online"}"#).await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let seen = retained.seen();
+        assert!(
+            seen.iter()
+                .all(|payload| payload == r#"{"status":"online"}"#),
+            "{seen:?}"
+        );
+    })
+    .await;
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn it_publish_recorded() {
