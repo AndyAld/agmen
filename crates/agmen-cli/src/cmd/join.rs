@@ -37,10 +37,13 @@ enum Kind {
 }
 
 #[derive(Debug, Args)]
-#[command(group = clap::ArgGroup::new("how").required(true).args(["invite", "project"]))]
+#[command(group = clap::ArgGroup::new("how").required(true).args(["invite", "project", "stdin"]))]
 pub(crate) struct JoinArgs {
     /// The invite code from agmen invite.
     invite: Option<String>,
+    /// Read the invite from stdin, at most 8 KiB within 5 seconds.
+    #[arg(long)]
+    stdin: bool,
     /// A project you already belong to, by id (agmen whoami lists them).
     #[arg(long, value_name = "ID")]
     project: Option<String>,
@@ -51,6 +54,15 @@ pub(crate) struct JoinArgs {
     /// The kind of identity.
     #[arg(long, value_enum, default_value = "agent")]
     kind: Kind,
+}
+
+impl JoinArgs {
+    async fn with_stdin(mut self) -> Result<Self> {
+        if self.stdin {
+            self.invite = Some(read_stdin_invite().await?);
+        }
+        Ok(self)
+    }
 }
 
 /// `POST /v1/invites/{code}/accept`'s answer.
@@ -78,6 +90,7 @@ struct Minted {
 
 /// `agmen join`.
 pub(crate) async fn join(args: JoinArgs) -> Result<()> {
+    let args = args.with_stdin().await?;
     let cwd = std::env::current_dir().context("reading the working directory")?;
     let root = git::toplevel(&cwd).await?;
     let file = root.join(IDENTITY_DIR).join(IDENTITY_FILE);
@@ -176,6 +189,40 @@ pub(crate) async fn join(args: JoinArgs) -> Result<()> {
     let (handle, id) = (clean(&identity.handle), &identity.identity_id);
     println!("joined project {} as {handle} ({id})", identity.project);
     Ok(())
+}
+
+async fn read_stdin_invite() -> Result<String> {
+    use std::io::Read as _;
+    let (send, receive) = tokio::sync::oneshot::channel();
+    std::thread::Builder::new()
+        .name("invite-stdin".into())
+        .spawn(move || {
+            let mut bytes = Vec::new();
+            let result = std::io::stdin()
+                .take(8193)
+                .read_to_end(&mut bytes)
+                .context("reading invite from stdin")
+                .and_then(|_| stdin_invite(&bytes));
+            drop(send.send(result));
+        })
+        .context("starting invite reader")?;
+    let invite = tokio::time::timeout(std::time::Duration::from_secs(5), receive)
+        .await
+        .context("reading invite from stdin exceeded 5 seconds")?
+        .context("invite reader stopped")??;
+    Ok(invite)
+}
+
+fn stdin_invite(bytes: &[u8]) -> Result<String> {
+    anyhow::ensure!(bytes.len() <= 8192, "stdin invite exceeds 8 KiB");
+    let text = std::str::from_utf8(bytes)
+        .context("stdin invite must be UTF-8")?
+        .trim();
+    anyhow::ensure!(
+        !text.is_empty() && !text.chars().any(char::is_whitespace),
+        "give one invite code on stdin"
+    );
+    Ok(text.to_owned())
 }
 
 /// Accepts invite `code` and returns its project. One already accepted by
@@ -330,6 +377,15 @@ pub(crate) async fn leave() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn protected_stdin_is_one_bounded_code() {
+        assert_eq!(stdin_invite(b"test-invite\n").unwrap(), "test-invite");
+        assert!(stdin_invite(b"").is_err());
+        assert!(stdin_invite(b"one\ntwo").is_err());
+        assert!(stdin_invite(&[b'a'; 8193]).is_err());
+        assert!(stdin_invite(&[255]).is_err());
+    }
 
     #[test]
     fn default_names() {
