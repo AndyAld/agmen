@@ -9,23 +9,23 @@ use agmen_proto::{IdentityId, MessageId};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     Anchor, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable, Hsla,
-    InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, TextRun, Window, anchored, canvas,
-    deferred, div, px,
+    InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, ScrollHandle,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, TextRun, Window,
+    anchored, canvas, deferred, div, px,
 };
 
-use super::components::{Chip, Color, IconButton, IconSize, Label, LabelSize};
+use super::components::{Chip, Color, IconButton, IconSize, Label, LabelSize, Menu, MenuRow};
 use super::ink_clip::InkClip;
 use super::model_picker::{ModelMenu, PickerEvent};
 use super::text_input::{TextInput, TextInputEvent};
 use super::tokens::{
-    AUTO_LINE_12, AUTO_LINE_13, BORDER_WIDTH, COMPOSER_INPUT_MIN_WIDTH, ICON_SM,
+    AUTO_LINE_12, AUTO_LINE_13, BORDER_WIDTH, COMPOSER_INPUT_MIN_WIDTH, DROPDOWN_WIDTH, ICON_SM,
     MODEL_PICKER_OFFSET, RADIUS_INPUT, SPACE_8, SPACE_10, SPACE_12, SPACE_14, TEXT_DEFAULT,
 };
 use crate::appearance::{Appearance, Fonts};
 use crate::backend::{BackendError, Draft, Snapshot};
 use crate::icons::UiIcon;
-use crate::keymap::Dismiss;
+use crate::keymap::{CompleteMention, Dismiss};
 
 /// The input's placeholder (node 384).
 const PLACEHOLDER: &str = "Ask or tell your listener · @ to mention someone else · ⏎ send";
@@ -75,8 +75,12 @@ fn mention_handle(text: &str) -> Option<&str> {
     if !rest.starts_with(token) {
         return None;
     }
-    let handle = token.trim_end_matches(|c: char| c.is_ascii_punctuation() && c != '/');
+    let handle = trim_handle_punctuation(token);
     (!handle.is_empty()).then_some(handle)
+}
+
+fn trim_handle_punctuation(token: &str) -> &str {
+    token.trim_end_matches(|c: char| c.is_ascii_punctuation() && c != '/')
 }
 
 pub(crate) struct Composer {
@@ -88,8 +92,19 @@ pub(crate) struct Composer {
     /// Task 7: whether the recipient is the snapshot's listener, which a
     /// new snapshot can bring, change or take away.
     follows_listener: bool,
-    /// Every agent in the roster, which an `@mention` can address.
+    /// Every person and agent in the project roster.
     agents: Vec<Target>,
+    /// An explicit audience, including Everyone, persists across sends.
+    picked_recipient: Option<Option<Target>>,
+    /// A picker click overrides an existing mention in this draft only.
+    picked_for_draft: bool,
+    audience_open: bool,
+    mention_selected: usize,
+    mention_scroll: ScrollHandle,
+    mentions_dismissed: bool,
+    /// The next input change is a completion's own edit, which keeps the
+    /// list closed.
+    completing: bool,
     addressing: Addressing,
     /// The model chip and its picker (Task 15); `None` draws no chip.
     models: Option<ModelMenu>,
@@ -115,6 +130,156 @@ impl std::fmt::Debug for Composer {
 impl EventEmitter<ComposerEvent> for Composer {}
 
 impl Composer {
+    fn mention_query<'a>(&self, cx: &'a App) -> Option<(std::ops::Range<usize>, &'a str)> {
+        if self.mentions_dismissed || self.audience_open {
+            return None;
+        }
+        let input = self.input.read(cx);
+        let cursor = input.completion_cursor()?;
+        let before = &input.text()[..cursor];
+        let start = before.rfind(char::is_whitespace).map_or(0, |at| {
+            at + before[at..].chars().next().map_or(0, char::len_utf8)
+        });
+        let prefix = before[start..].strip_prefix('@')?;
+        let end = input.text()[cursor..]
+            .find(char::is_whitespace)
+            .map_or(input.text().len(), |at| cursor + at);
+        let end = start + 1 + trim_handle_punctuation(&input.text()[start + 1..end]).len();
+        Some((start..end, prefix))
+    }
+
+    fn mention_candidates(&self, cx: &App) -> Vec<&Target> {
+        let Some((_, prefix)) = self.mention_query(cx) else {
+            return Vec::new();
+        };
+        self.agents
+            .iter()
+            .filter(|t| t.handle.starts_with(prefix))
+            .collect()
+    }
+
+    fn move_mention(&mut self, down: bool, cx: &mut Context<Self>) {
+        let count = self.mention_candidates(cx).len();
+        if count == 0 {
+            cx.propagate();
+            return;
+        }
+        self.mention_selected = if down {
+            (self.mention_selected + 1) % count
+        } else {
+            (self.mention_selected + count - 1) % count
+        };
+        self.mention_scroll.scroll_to_item(self.mention_selected);
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    fn complete_mention(
+        &mut self,
+        target: Option<&Target>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some((mut range, _)) = self.mention_query(cx) else {
+            return false;
+        };
+        let candidates = self.mention_candidates(cx);
+        let Some(target) = target.or_else(|| candidates.get(self.mention_selected).copied()) else {
+            return false;
+        };
+        let suffix = &self.input.read(cx).text()[range.end..];
+        let space = suffix.chars().next().map_or_else(
+            || " ".to_owned(),
+            |c| {
+                if c.is_whitespace() {
+                    range.end += c.len_utf8();
+                    c.to_string()
+                } else {
+                    String::new()
+                }
+            },
+        );
+        let text = format!("@{}{space}", target.handle);
+        self.completing = self.input.update(cx, |input, cx| {
+            input.replace_bytes(range, &text, window, cx)
+        });
+        self.mentions_dismissed = true;
+        self.picked_for_draft = false;
+        self.input.focus_handle(cx).focus(window, cx);
+        cx.notify();
+        true
+    }
+
+    fn target_menu(&self, mentions: bool, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let id = if mentions {
+            "composer:mentions"
+        } else {
+            "composer:audience"
+        };
+        let targets: Vec<Option<Target>> = if mentions {
+            self.mention_candidates(cx)
+                .into_iter()
+                .cloned()
+                .map(Some)
+                .collect()
+        } else {
+            std::iter::once(None)
+                .chain(self.agents.iter().cloned().map(Some))
+                .collect()
+        };
+        let rows = targets
+            .into_iter()
+            .enumerate()
+            .map(|(index, target)| {
+                let key = target.as_ref().map_or("everyone", |t| t.id.as_str());
+                let label = target
+                    .as_ref()
+                    .map_or("Everyone", |t| t.handle.as_str())
+                    .to_owned();
+                let checked = if mentions {
+                    index == self.mention_selected
+                } else {
+                    self.target(cx) == target.as_ref()
+                };
+                MenuRow::new(format!("{id}:{key}"))
+                    .picker()
+                    .checked(checked)
+                    .child(Label::new(label).code())
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if mentions {
+                            this.complete_mention(target.as_ref(), window, cx);
+                        } else {
+                            this.picked_recipient = Some(target.clone());
+                            this.picked_for_draft = true;
+                            this.reply = None;
+                            this.audience_open = false;
+                            this.input.focus_handle(cx).focus(window, cx);
+                            cx.notify();
+                        }
+                    }))
+            })
+            .collect::<Vec<_>>();
+        let entity = cx.entity().downgrade();
+        Menu::new(id)
+            .width(DROPDOWN_WIDTH)
+            .when(mentions, |menu| menu.track_scroll(&self.mention_scroll))
+            .place(Anchor::BottomLeft, MODEL_PICKER_OFFSET)
+            .children(rows)
+            .on_close(move |window, cx| {
+                entity
+                    .update(cx, |this, cx| {
+                        if mentions {
+                            this.mentions_dismissed = true;
+                        } else {
+                            this.audience_open = false;
+                        }
+                        this.input.focus_handle(cx).focus(window, cx);
+                        cx.notify();
+                    })
+                    .unwrap_or_default();
+            })
+    }
+
     /// A composer addressed to the snapshot's listener. Enter calls
     /// `on_send` with the draft; when it fails, the text comes back.
     pub(crate) fn new(
@@ -204,12 +369,28 @@ impl Composer {
             this.send(body, window, cx);
         });
         // The "to" chip follows an @mention as it is typed.
-        let edits = cx.observe(&input, |_, _, cx| cx.notify());
+        let edits = cx.observe(&input, |this, _, cx| {
+            if std::mem::take(&mut this.completing) {
+                cx.notify();
+                return;
+            }
+            this.mention_selected = 0;
+            this.mention_scroll.scroll_to_item(0);
+            this.mentions_dismissed = false;
+            cx.notify();
+        });
         Self {
             input,
             recipient,
             follows_listener: false,
             agents,
+            picked_recipient: None,
+            picked_for_draft: false,
+            audience_open: false,
+            mention_selected: 0,
+            mention_scroll: ScrollHandle::new(),
+            mentions_dismissed: false,
+            completing: false,
             addressing: Addressing::Chip,
             models,
             reply: None,
@@ -234,9 +415,15 @@ impl Composer {
     /// Unknown handles stay plain text, and the message goes to the
     /// recipient, or to the sender of the message it replies to.
     fn target_for(&self, text: &str) -> Option<&Target> {
+        if self.picked_for_draft {
+            return self.picked_recipient.as_ref().and_then(Option::as_ref);
+        }
         self.mentioned(text)
             .or(self.reply.as_ref().map(|(_, to)| to))
-            .or(self.recipient.as_ref())
+            .or(match &self.picked_recipient {
+                Some(picked) => picked.as_ref(),
+                None => self.recipient.as_ref(),
+            })
     }
 
     /// The roster agent an `@mention` at the start of `text` names; none
@@ -289,6 +476,7 @@ impl Composer {
                 .update(cx, |input, cx| input.set_text(body, window, cx));
         } else {
             self.reply = None;
+            self.picked_for_draft = false;
             if let Some(models) = self.models.as_mut().filter(|_| to_recipient) {
                 // Task 15: a "this message" choice ends with the message.
                 models.sent();
@@ -309,6 +497,7 @@ impl Composer {
         cx: &mut Context<Self>,
     ) {
         self.reply = Some((message, to));
+        self.picked_for_draft = false;
         self.input.focus_handle(cx).focus(window, cx);
         cx.notify();
     }
@@ -373,7 +562,20 @@ impl Composer {
     /// can open before the hub sends the roster; the roster's agents become
     /// what an `@mention` can address.
     pub(crate) fn set_snapshot(&mut self, snapshot: &Snapshot, cx: &mut Context<Self>) {
+        // A refresh keeps the highlighted identity, so Tab completes the
+        // row the person chose.
+        let selected = self
+            .mention_candidates(cx)
+            .get(self.mention_selected)
+            .map(|t| t.id.clone());
         self.agents = roster_targets(snapshot);
+        self.mention_selected = selected
+            .and_then(|id| self.mention_candidates(cx).iter().position(|t| t.id == id))
+            .unwrap_or(0);
+        self.mention_scroll.scroll_to_item(self.mention_selected);
+        if let Some(Some(picked)) = &self.picked_recipient {
+            self.picked_recipient = Some(self.agents.iter().find(|t| t.id == picked.id).cloned());
+        }
         if self.follows_listener {
             let listener = listener_target(snapshot);
             if listener.is_some() != self.recipient.is_some() {
@@ -534,6 +736,64 @@ impl Composer {
     }
 }
 
+impl Composer {
+    fn to_chip(
+        &self,
+        floor: Pixels,
+        replying: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let lead = if replying { "reply to" } else { "to" };
+        // C287: clipped at its sides only, as the model chip is.
+        InkClip::sides(
+            div()
+                .id("composer-to")
+                .debug_selector(|| "composer:to".into())
+                .relative()
+                .cursor_pointer()
+                .when(!self.audience_open && !replying, |this| {
+                    this.on_click(cx.listener(|this, _, window, cx| {
+                        this.audience_open = true;
+                        this.mentions_dismissed = true;
+                        this.close_model_picker(window, cx);
+                        this.input.focus_handle(cx).focus(window, cx);
+                        cx.notify();
+                    }))
+                })
+                // C260 and C278: preserve the lead and close mark or caret.
+                .min_w(floor)
+                .when(replying, |this| this.flex_shrink(REPLY_CHIP_SHRINK))
+                .child(
+                    Chip::new(self.target_label(cx))
+                        .compact()
+                        .code()
+                        .line_height(AUTO_LINE_12)
+                        .truncate()
+                        .color(Color::Accent)
+                        .leading(
+                            Label::new(lead)
+                                .size(LabelSize::Small)
+                                .color(Color::Placeholder),
+                        )
+                        .map(|chip| {
+                            if replying {
+                                chip.trailing(
+                                    IconButton::new("composer:cancel-reply", UiIcon::Close)
+                                        .size(IconSize::Small)
+                                        .color(Color::Placeholder)
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| this.cancel_reply(cx)),
+                                        ),
+                                )
+                            } else {
+                                chip.trailing(caret())
+                            }
+                        }),
+                ),
+        )
+    }
+}
+
 impl Focusable for Composer {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
         self.input.focus_handle(cx)
@@ -557,53 +817,11 @@ impl Render for Composer {
             self.close_model_picker(window, cx);
             None
         };
+        let audience_menu = self.audience_open.then(|| self.target_menu(false, cx));
+        let mention_menu =
+            (!self.mention_candidates(cx).is_empty()).then(|| self.target_menu(true, cx));
+        let to = chip_addressed.then(|| self.to_chip(floors.to, replying, cx));
         let theme = &cx.global::<Appearance>().theme;
-        let to = chip_addressed.then(|| {
-            // C287: clipped at its sides only, as the model chip is.
-            InkClip::sides(
-                div()
-                    .debug_selector(|| "composer:to".into())
-                    // C260 and C278: the handle gives way, then the chip
-                    // stops at its lead and its close mark or ▾, so the way
-                    // out of a reply stays whole.
-                    .min_w(floors.to)
-                    .when(replying, |this| {
-                        // C260: while replying, the handle gives way first,
-                        // then the model chip.
-                        this.flex_shrink(REPLY_CHIP_SHRINK)
-                    })
-                    .child(
-                        // C260: a narrow box cuts the handle, not the close
-                        // mark or the caret after it.
-                        Chip::new(self.target_label(cx))
-                            .compact()
-                            .code()
-                            // Node 378: 12 px mono on its 14 px line.
-                            .line_height(AUTO_LINE_12)
-                            .truncate()
-                            .color(Color::Accent)
-                            .leading(
-                                Label::new(lead)
-                                    .size(LabelSize::Small)
-                                    .color(Color::Placeholder),
-                            )
-                            .map(|chip| {
-                                if replying {
-                                    chip.trailing(
-                                        IconButton::new("composer:cancel-reply", UiIcon::Close)
-                                            .size(IconSize::Small)
-                                            .color(Color::Placeholder)
-                                            .on_click(
-                                                cx.listener(|this, _, _, cx| this.cancel_reply(cx)),
-                                            ),
-                                    )
-                                } else {
-                                    chip.trailing(caret())
-                                }
-                            }),
-                    ),
-            )
-        });
         div()
             .w_full()
             .flex_none()
@@ -613,8 +831,25 @@ impl Render for Composer {
             // goes no further (C87, C113), else ends a reply; src/keymap.rs
             // binds it.
             .key_context(crate::keymap::COMPOSER_CONTEXT)
+            .on_action(cx.listener(|this, _: &CompleteMention, window, cx| {
+                if !this.complete_mention(None, window, cx) {
+                    cx.propagate();
+                }
+            }))
+            .capture_action(cx.listener(|this, _: &super::text_input::Up, _, cx| {
+                this.move_mention(false, cx);
+            }))
+            .capture_action(cx.listener(|this, _: &super::text_input::Down, _, cx| {
+                this.move_mention(true, cx);
+            }))
             .on_action(cx.listener(|this, _: &Dismiss, window, cx| {
-                if this.models.as_ref().is_some_and(ModelMenu::is_open) {
+                if this.audience_open {
+                    this.audience_open = false;
+                    cx.notify();
+                } else if !this.mention_candidates(cx).is_empty() {
+                    this.mentions_dismissed = true;
+                    cx.notify();
+                } else if this.models.as_ref().is_some_and(ModelMenu::is_open) {
                     this.close_model_picker(window, cx);
                 } else if this.reply.is_some() {
                     this.cancel_reply(cx);
@@ -622,6 +857,13 @@ impl Render for Composer {
                     cx.propagate();
                 }
             }))
+            .relative()
+            .when_some(audience_menu, |this, menu| {
+                this.child(div().absolute().top_0().left_0().child(menu))
+            })
+            .when_some(mention_menu, |this, menu| {
+                this.child(div().absolute().top_0().left_0().child(menu))
+            })
             .pt(SPACE_8)
             .px(SPACE_14)
             .pb(SPACE_12)
@@ -676,15 +918,20 @@ fn listener_target(snapshot: &Snapshot) -> Option<Target> {
     })
 }
 
-/// Every agent in the snapshot's roster, as an `@mention` can address it.
+/// Every person and agent in the project's current roster.
 fn roster_targets(snapshot: &Snapshot) -> Vec<Target> {
     snapshot
         .roster
         .iter()
-        .flat_map(|group| &group.agents)
-        .map(|agent| Target {
-            id: agent.id.clone(),
-            handle: agent.handle.clone(),
+        .flat_map(|group| {
+            std::iter::once(Target {
+                id: group.id.clone(),
+                handle: group.person.clone(),
+            })
+            .chain(group.agents.iter().map(|agent| Target {
+                id: agent.id.clone(),
+                handle: agent.handle.clone(),
+            }))
         })
         .collect()
 }

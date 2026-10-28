@@ -75,6 +75,8 @@ actions!(
         /// Closes the composer's model picker when it is open, else ends
         /// its reply, so the next message goes to the recipient again.
         Dismiss,
+        /// Completes the highlighted roster mention.
+        CompleteMention,
     ]
 );
 
@@ -279,6 +281,7 @@ pub(crate) fn table() -> Vec<Binding> {
         // Tasks 13 and 15: the composer's model picker and reply; its
         // input binds no escape.
         bind("escape", Dismiss, Some(COMPOSER_CONTEXT)),
+        bind("tab", CompleteMention, Some(COMPOSER_CONTEXT)),
         // Tasks 14 and 19: take-over's menu and dialog and the kick-off
         // dialog close as Zed's modals do.
         bind("escape", Cancel, Some(SWITCH_MENU_CONTEXT)),
@@ -315,6 +318,7 @@ pub(crate) fn commands() -> Vec<Command> {
         window("pane: split right", Box::new(SplitRight)),
         window("pane: close active item", Box::new(CloseActiveTab)),
         window("composer: dismiss", Box::new(Dismiss)),
+        window("composer: complete mention", Box::new(CompleteMention)),
     ];
     let panes = [
         "workspace: activate pane 1",

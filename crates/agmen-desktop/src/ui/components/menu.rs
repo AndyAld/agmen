@@ -8,8 +8,8 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     Anchor, AnyElement, App, Bounds, Div, InteractiveElement, Interactivity, IntoElement,
-    ParentElement, Pixels, Point, RenderOnce, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Window, anchored, canvas, deferred, div,
+    ParentElement, Pixels, Point, RenderOnce, ScrollHandle, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Window, anchored, canvas, deferred, div,
 };
 
 use super::Card;
@@ -37,6 +37,7 @@ pub(crate) struct Menu {
     footer: Option<AnyElement>,
     on_close: Option<CloseHandler>,
     on_bounds: Option<BoundsHandler>,
+    scroll_handle: Option<ScrollHandle>,
 }
 
 impl std::fmt::Debug for Menu {
@@ -67,6 +68,7 @@ impl Menu {
             footer: None,
             on_close: None,
             on_bounds: None,
+            scroll_handle: None,
         }
     }
 
@@ -81,6 +83,13 @@ impl Menu {
     #[must_use]
     pub(crate) const fn max_height(mut self, height: Pixels) -> Self {
         self.max_height = height;
+        self
+    }
+
+    /// Lets the caller keep the highlighted row in the list's viewport.
+    #[must_use]
+    pub(crate) fn track_scroll(mut self, handle: &ScrollHandle) -> Self {
+        self.scroll_handle = Some(handle.clone());
         self
     }
 
@@ -184,6 +193,9 @@ impl RenderOnce for Menu {
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
+            .when_some(self.scroll_handle.as_ref(), |list, handle| {
+                list.track_scroll(handle)
+            })
             .flex()
             .flex_col()
             .p(SPACE_4)

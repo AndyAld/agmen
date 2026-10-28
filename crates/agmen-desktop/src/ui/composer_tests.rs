@@ -13,6 +13,361 @@ use crate::ui::tokens::{
 
 type Sent = Rc<RefCell<Vec<Draft>>>;
 
+fn open_live(
+    cx: &mut TestAppContext,
+) -> (
+    Entity<Composer>,
+    crate::backend::fake_agmend::FakeAgmend,
+    &mut VisualTestContext,
+) {
+    use crate::backend::fake_agmend::{FakeAgmend, PROJECT, console};
+    use crate::backend::{AgmendBackend, Backend, Link, Update};
+    let fake = FakeAgmend::start(console(vec![]));
+    let backend = Rc::new(AgmendBackend::connect(&fake.path(), PROJECT, None).unwrap());
+    let mut updates = backend.subscribe();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !matches!(updates.try_recv(), Ok(Update::Link(Link::Live))) {
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    init(cx);
+    cx.update(crate::keymap::bind_all);
+    let snapshot = backend.snapshot();
+    let (composer, cx) = cx.add_window_view(|window, cx| {
+        window.set_rem_size(MOCKUP_REM);
+        Composer::new(
+            &snapshot,
+            move |draft, _, _| backend.send(draft),
+            window,
+            cx,
+        )
+    });
+    composer.update_in(cx, |composer, window, cx| {
+        composer.focus_handle(cx).focus(window, cx)
+    });
+    redraw(cx);
+    (composer, fake, cx)
+}
+
+fn wait_posts(fake: &crate::backend::fake_agmend::FakeAgmend, count: usize) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while fake.posts().len() < count {
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+}
+
+#[gpui::test]
+fn composer_tab_completes_live_roster(cx: &mut TestAppContext) {
+    let (composer, fake, cx) = open_live(cx);
+    cx.simulate_input("@andy/f");
+    cx.simulate_keystrokes("tab");
+    composer.read_with(cx, |composer, cx| {
+        assert_eq!(composer.text(cx), "@andy/fx1 ")
+    });
+    assert!(fake.posts().is_empty());
+    cx.simulate_input("hello");
+    cx.simulate_keystrokes("enter");
+    wait_posts(&fake, 1);
+    assert_eq!(
+        fake.posts()[0].params["envelope"]["mentions"],
+        serde_json::json!(["idfx1abc"])
+    );
+}
+
+#[gpui::test]
+fn composer_picker_sends_to_live_person_and_everyone(cx: &mut TestAppContext) {
+    let (composer, fake, cx) = open_live(cx);
+    click(cx, "composer:to");
+    assert!(cx.debug_bounds("composer:audience").is_some());
+    click(cx, "composer:audience:idsean00");
+    composer.read_with(cx, |composer, cx| {
+        assert_eq!(composer.target_label(cx), "sean")
+    });
+    cx.simulate_input("hello sean");
+    cx.simulate_keystrokes("enter");
+    wait_posts(&fake, 1);
+    assert_eq!(
+        fake.posts()[0].params["envelope"]["mentions"],
+        serde_json::json!(["idsean00"])
+    );
+    composer.read_with(cx, |composer, cx| {
+        assert_eq!(composer.target_label(cx), "sean")
+    });
+    click(cx, "composer:to");
+    click(cx, "composer:audience:everyone");
+    cx.simulate_input("hello room");
+    cx.simulate_keystrokes("enter");
+    wait_posts(&fake, 2);
+    assert_eq!(
+        fake.posts()[1].params["envelope"]["mentions"],
+        serde_json::json!([])
+    );
+}
+
+#[gpui::test]
+fn composer_mentions_navigate_and_escape(cx: &mut TestAppContext) {
+    let (composer, _, cx) = open_live(cx);
+    cx.simulate_input("@sean");
+    redraw(cx);
+    assert!(cx.debug_bounds("composer:mentions").is_some());
+    cx.simulate_keystrokes("down tab");
+    composer.read_with(cx, |composer, cx| {
+        assert_eq!(composer.text(cx), "@sean/listen ")
+    });
+    cx.simulate_keystrokes("cmd-a");
+    cx.simulate_input("@sean");
+    cx.simulate_keystrokes("up tab");
+    composer.read_with(cx, |composer, cx| {
+        assert_eq!(composer.text(cx), "@sean/plan ")
+    });
+    cx.simulate_keystrokes("cmd-a");
+    cx.simulate_input("@sean");
+    cx.simulate_keystrokes("escape");
+    composer.read_with(cx, |composer, cx| assert_eq!(composer.text(cx), "@sean"));
+    redraw(cx);
+    assert!(cx.debug_bounds("composer:mentions").is_none());
+}
+
+#[gpui::test]
+fn composer_mentions_preserve_cursor_suffix_and_enter_sends(cx: &mut TestAppContext) {
+    let (composer, fake, cx) = open_live(cx);
+    cx.simulate_input("hi é @se tail");
+    cx.simulate_keystrokes("left left left left left tab");
+    composer.read_with(cx, |composer, cx| {
+        assert_eq!(composer.text(cx), "hi é @sean tail")
+    });
+    cx.simulate_input("hello ");
+    composer.read_with(cx, |composer, cx| {
+        assert_eq!(composer.text(cx), "hi é @sean hello tail")
+    });
+    cx.simulate_keystrokes("cmd-a");
+    cx.simulate_input("@sean");
+    cx.simulate_keystrokes("enter");
+    wait_posts(&fake, 1);
+    assert_eq!(fake.posts()[0].params["envelope"]["body"], "@sean");
+    assert_eq!(
+        fake.posts()[0].params["envelope"]["mentions"],
+        serde_json::json!(["idsean00"])
+    );
+}
+
+#[gpui::test]
+fn composer_picker_lists_agents_and_keeps_everyone_after_refresh(cx: &mut TestAppContext) {
+    let (composer, fake, cx) = open_live(cx);
+    click(cx, "composer:to");
+    for selector in [
+        "composer:audience:idandy00",
+        "composer:audience:idfx1abc",
+        "composer:audience:idlisten",
+        "composer:audience:idsean00",
+        "composer:audience:idseanl1",
+        "composer:audience:idseanp1",
+    ] {
+        assert!(cx.debug_bounds(selector).is_some(), "{selector}");
+    }
+    click(cx, "composer:audience:idfx1abc");
+    cx.simulate_input("agent message");
+    cx.simulate_keystrokes("enter");
+    wait_posts(&fake, 1);
+    assert_eq!(
+        fake.posts()[0].params["envelope"]["mentions"],
+        serde_json::json!(["idfx1abc"])
+    );
+    click(cx, "composer:to");
+    click(cx, "composer:audience:everyone");
+    composer.update(cx, |composer, cx| {
+        composer.set_snapshot(&crate::backend::live_snapshot(), cx)
+    });
+    composer.read_with(cx, |composer, cx| {
+        assert_eq!(composer.target_label(cx), EVERYONE)
+    });
+    click(cx, "composer:to");
+    cx.simulate_keystrokes("escape");
+    redraw(cx);
+    assert!(cx.debug_bounds("composer:audience").is_none());
+}
+
+#[gpui::test]
+fn composer_mentions_refresh_and_accept_clicks(cx: &mut TestAppContext) {
+    let (composer, _, cx) = open_live(cx);
+    cx.simulate_input("@new");
+    redraw(cx);
+    assert!(cx.debug_bounds("composer:mentions").is_none());
+    let mut snapshot = crate::backend::live_snapshot();
+    snapshot.roster.push(crate::backend::PersonGroup {
+        id: crate::backend::fake_agmend::ident("idnewperson"),
+        person: "newperson".into(),
+        you: false,
+        agents: vec![],
+    });
+    composer.update(cx, |composer, cx| composer.set_snapshot(&snapshot, cx));
+    click(cx, "composer:mentions:idnewperson");
+    composer.read_with(cx, |composer, cx| {
+        assert_eq!(composer.text(cx), "@newperson ");
+        assert_eq!(composer.target_label(cx), "newperson");
+    });
+}
+
+#[gpui::test]
+fn composer_picker_choice_wins_over_text_and_closes_outside(cx: &mut TestAppContext) {
+    let (composer, fake, cx) = open_live(cx);
+    cx.simulate_input("@andy/fx1 hello");
+    click(cx, "composer:to");
+    click(cx, "composer:audience:idsean00");
+    cx.simulate_keystrokes("enter");
+    wait_posts(&fake, 1);
+    assert_eq!(
+        fake.posts()[0].params["envelope"]["mentions"],
+        serde_json::json!(["idsean00"])
+    );
+    click(cx, "composer:to");
+    click(cx, "composer:send-hint");
+    assert!(cx.debug_bounds("composer:audience").is_none());
+    composer.read_with(cx, |composer, cx| {
+        assert_eq!(composer.target_label(cx), "sean")
+    });
+}
+
+#[gpui::test]
+fn composer_empty_query_and_unknown_handle(cx: &mut TestAppContext) {
+    let (composer, fake, cx) = open_live(cx);
+    cx.simulate_input("@");
+    redraw(cx);
+    assert!(cx.debug_bounds("composer:mentions:idandy00").is_some());
+    assert!(cx.debug_bounds("composer:mentions:idseanp1").is_some());
+    cx.simulate_keystrokes("tab");
+    composer.read_with(cx, |composer, cx| assert_eq!(composer.text(cx), "@andy "));
+    cx.simulate_keystrokes("cmd-a");
+    cx.simulate_input("@unknown");
+    redraw(cx);
+    assert!(cx.debug_bounds("composer:mentions").is_none());
+    cx.simulate_keystrokes("enter");
+    wait_posts(&fake, 1);
+    assert_eq!(
+        fake.posts()[0].params["envelope"]["mentions"],
+        serde_json::json!(["idlisten"])
+    );
+    composer.read_with(cx, |composer, cx| assert_eq!(composer.text(cx), ""));
+}
+
+#[gpui::test]
+fn composer_fresh_mention_overrides_standing_picker_choice(cx: &mut TestAppContext) {
+    let (composer, fake, cx) = open_live(cx);
+    click(cx, "composer:to");
+    click(cx, "composer:audience:everyone");
+    cx.simulate_input("hello room");
+    cx.simulate_keystrokes("enter");
+    wait_posts(&fake, 1);
+    cx.simulate_input("@andy/f");
+    cx.simulate_keystrokes("tab");
+    cx.simulate_input("hello agent");
+    cx.simulate_keystrokes("enter");
+    wait_posts(&fake, 2);
+    assert_eq!(
+        fake.posts()[1].params["envelope"]["mentions"],
+        serde_json::json!(["idfx1abc"])
+    );
+    composer.read_with(cx, |composer, cx| {
+        assert_eq!(composer.target_label(cx), EVERYONE)
+    });
+}
+
+#[gpui::test]
+fn composer_cancel_reply_keeps_standing_picker_choice(cx: &mut TestAppContext) {
+    let (composer, _, cx) = open_live(cx);
+    click(cx, "composer:to");
+    click(cx, "composer:audience:idsean00");
+    composer.update_in(cx, |composer, window, cx| {
+        composer.reply(
+            Target {
+                id: crate::backend::fake_agmend::ident("idfx1abc"),
+                handle: "andy/fx1".into(),
+            },
+            crate::backend::fake_agmend::message(1).client.id,
+            window,
+            cx,
+        );
+    });
+    composer.read_with(cx, |composer, cx| {
+        assert_eq!(composer.target_label(cx), "andy/fx1")
+    });
+    cx.simulate_keystrokes("escape");
+    composer.read_with(cx, |composer, cx| {
+        assert_eq!(composer.target_label(cx), "sean")
+    });
+}
+
+#[gpui::test]
+fn composer_keyboard_selection_stays_visible_in_long_roster(cx: &mut TestAppContext) {
+    let (composer, _, cx) = open_live(cx);
+    let mut snapshot = crate::backend::live_snapshot();
+    for index in 0..20 {
+        snapshot.roster.push(crate::backend::PersonGroup {
+            id: format!("longperson{index:02}").parse().unwrap(),
+            person: format!("longperson{index:02}"),
+            you: false,
+            agents: vec![],
+        });
+    }
+    composer.update(cx, |composer, cx| composer.set_snapshot(&snapshot, cx));
+    cx.simulate_input("@long");
+    for _ in 0..15 {
+        cx.simulate_keystrokes("down");
+    }
+    redraw(cx);
+    let menu = cx.debug_bounds("composer:mentions").unwrap();
+    let selected = cx.debug_bounds("composer:mentions:longperson15").unwrap();
+    assert!(
+        selected.top() >= menu.top() && selected.bottom() <= menu.bottom(),
+        "selected {selected:?} outside menu {menu:?}"
+    );
+    cx.simulate_keystrokes("tab");
+    composer.read_with(cx, |composer, cx| {
+        assert_eq!(composer.text(cx), "@longperson15 ")
+    });
+}
+
+#[gpui::test]
+fn composer_completion_preserves_punctuation_after_cursor(cx: &mut TestAppContext) {
+    let (composer, _, cx) = open_live(cx);
+    for punctuation in [",", ":", ")"] {
+        cx.simulate_keystrokes("cmd-a");
+        cx.simulate_input(&format!("@se{punctuation} tail"));
+        cx.simulate_keystrokes("home right right right tab");
+        composer.read_with(cx, |composer, cx| {
+            assert_eq!(composer.text(cx), format!("@sean{punctuation} tail"));
+        });
+        redraw(cx);
+        assert!(
+            cx.debug_bounds("composer:mentions").is_none(),
+            "{punctuation}"
+        );
+    }
+}
+
+#[gpui::test]
+fn composer_tab_without_suggestions_is_left_to_the_input(cx: &mut TestAppContext) {
+    let (composer, _, cx) = open_live(cx);
+    cx.simulate_input("hello");
+    cx.simulate_keystrokes("tab");
+    composer.read_with(cx, |composer, cx| assert_eq!(composer.text(cx), "hello\t"));
+}
+
+#[gpui::test]
+fn composer_snapshot_refresh_keeps_the_highlighted_mention(cx: &mut TestAppContext) {
+    let (composer, _, cx) = open_live(cx);
+    cx.simulate_input("@sean");
+    cx.simulate_keystrokes("down");
+    composer.update(cx, |composer, cx| {
+        composer.set_snapshot(&crate::backend::live_snapshot(), cx)
+    });
+    cx.simulate_keystrokes("tab");
+    composer.read_with(cx, |composer, cx| {
+        assert_eq!(composer.text(cx), "@sean/listen ")
+    });
+}
+
 /// The id of the roster agent with `handle`.
 fn agent_id(handle: &str) -> IdentityId {
     chat_snapshot()

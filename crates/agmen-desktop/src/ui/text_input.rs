@@ -169,6 +169,31 @@ impl TextInput {
         self.buffer.text()
     }
 
+    /// A caret ready for completion; selected or composing text stays intact.
+    pub(crate) fn completion_cursor(&self) -> Option<usize> {
+        (self.buffer.selection().is_empty() && self.buffer.marked().is_none())
+            .then(|| self.buffer.cursor())
+    }
+
+    /// Replaces a completion's byte range through the input's size limit;
+    /// `false` when the text would not fit and nothing changed.
+    pub(crate) fn replace_bytes(
+        &mut self,
+        range: Range<usize>,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(text) = self.fit(text, Some(range.clone())) else {
+            window.play_system_bell();
+            return false;
+        };
+        self.buffer.replace(Some(range), &text);
+        self.preferred_x = None;
+        self.changed(window, cx);
+        true
+    }
+
     /// Replaces all the text and puts the cursor at the end.
     pub(crate) fn set_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         let mut text = self.normalize(text);
