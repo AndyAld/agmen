@@ -119,16 +119,19 @@ impl Workspace {
         };
         // As a drag starts, a dock the window squeezes keeps the width it
         // draws at, so it never takes the room the dragged dock gives up.
+        // Letting go gives it back its own width.
         if !self.dock_dragged
             && let Some(drawn) = other
             && self
                 .wanted_width(other_side, cx)
                 .is_some_and(|wanted| drawn < wanted)
         {
-            match other_side {
-                DockSide::Left => self.left_dock.set_width(Some(drawn)),
-                DockSide::Right => self.right_dock.set_width(Some(drawn)),
-            }
+            let dock = match other_side {
+                DockSide::Left => &mut self.left_dock,
+                DockSide::Right => &mut self.right_dock,
+            };
+            self.dock_pinned = Some((other_side, dock.width()));
+            dock.set_width(Some(drawn));
         }
         let room = total - CENTER_MIN_WIDTH - other.unwrap_or_default();
         let width = side
@@ -153,10 +156,17 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Saves the widths once a drag that moved a dock ends.
-    fn end_dock_drag(&mut self, cx: &App) {
+    /// Saves the widths once a drag that moved a dock ends, after giving a
+    /// dock the drag pinned its own width back.
+    fn end_dock_drag(&mut self, cx: &mut Context<Self>) {
+        match self.dock_pinned.take() {
+            Some((DockSide::Left, width)) => self.left_dock.set_width(width),
+            Some((DockSide::Right, width)) => self.right_dock.set_width(width),
+            None => {}
+        }
         if std::mem::take(&mut self.dock_dragged) {
             self.save_dock_widths(cx);
+            cx.notify();
         }
     }
 

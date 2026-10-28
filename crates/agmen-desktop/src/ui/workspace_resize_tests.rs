@@ -355,7 +355,7 @@ fn the_dock_not_dragged_never_grows_during_a_drag(cx: &mut TestAppContext) {
     drag_to(cx, LEFT_HANDLE, 200.);
     assert_eq!(width(cx, "left-dock"), px(200.));
     assert_eq!(width(cx, "right-dock"), px(260.), "the right dock stays");
-    for (x, want) in [(272., 272.), (350., 350.), (480., 380.)] {
+    for (x, want) in [(480., 380.), (350., 350.), (272., 272.)] {
         move_to(cx, x);
         assert_eq!(width(cx, "left-dock"), px(want), "dragged to {x}");
         assert_eq!(width(cx, "right-dock"), px(260.), "dragged to {x}");
@@ -364,10 +364,16 @@ fn the_dock_not_dragged_never_grows_during_a_drag(cx: &mut TestAppContext) {
     let at = cx.update(|window, _| window.mouse_position());
     cx.simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
     redraw(cx);
-    assert_eq!(width(cx, "left-dock"), px(380.));
-    assert_eq!(width(cx, "right-dock"), px(260.), "no jump on letting go");
-    assert_eq!(saved(&file, "left_dock_width"), Some(380));
-    assert_eq!(saved(&file, "right_dock_width"), Some(260));
+    // Letting go gives the right dock back its saved 640, so it takes the
+    // room the window has: 1000 - 360 - 272.
+    assert_eq!(width(cx, "left-dock"), px(272.));
+    assert_eq!(width(cx, "right-dock"), px(368.), "the right dock fills in");
+    assert_eq!(saved(&file, "left_dock_width"), Some(272));
+    assert_eq!(
+        saved(&file, "right_dock_width"),
+        Some(640),
+        "its larger width is kept"
+    );
 }
 
 // Review of 1e1eeae, bug 1: the handles were drawn over every overlay and

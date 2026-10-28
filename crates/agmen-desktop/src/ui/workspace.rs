@@ -5,7 +5,7 @@ use std::rc::Rc;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, Styled as _, Subscription, Window, div,
+    ParentElement as _, Pixels, Render, Styled as _, Subscription, Window, div,
 };
 
 use super::agents_panel::{AgentsPanel, AgentsPanelEvent};
@@ -70,6 +70,9 @@ pub(crate) struct Workspace {
     /// A dock handle's drag has moved a dock since the mouse went down, so
     /// letting go saves the widths.
     dock_dragged: bool,
+    /// The dock a drag pinned at its drawn width, with the width it had
+    /// before; letting go puts that width back.
+    dock_pinned: Option<(DockSide, Option<Pixels>)>,
     agents_panel: Entity<AgentsPanel>,
     /// The center: the chat, and the tabs and splits its chips open.
     ///
@@ -169,6 +172,7 @@ impl Workspace {
             left_dock: Dock::new(left_width),
             right_dock: Dock::new(right_width),
             dock_dragged: false,
+            dock_pinned: None,
             agents_panel,
             selected_agent: None,
             left,
