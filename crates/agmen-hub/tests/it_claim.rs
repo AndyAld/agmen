@@ -6,7 +6,7 @@ mod support;
 use agmen_hub::{Config, GroupError, Hub, HubError, HubMode, Role};
 use reqwest::StatusCode;
 use serde_json::{Value, json};
-use support::{Ctx, DEV_KEY_1, TestHub, env, run, seed_project, topics};
+use support::{Ctx, DEV_KEY_1, TestHub, env, run, seed_human, seed_member, seed_project, topics};
 
 async fn claim(ctx: &Ctx, access: &str, token: &str) -> (StatusCode, Value) {
     let response = ctx
@@ -241,6 +241,35 @@ async fn it_many_tenants_refuse_self_host() {
             matches!(error, HubError::Group(GroupError::ManyTenants(2))),
             "{error:?}"
         );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn it_adopted_group_with_members_mints_no_claim_token() {
+    run(|ctx| async move {
+        // A database that was used before this hub: one tenant with a member
+        // and no hub_group row.
+        sqlx::query("DELETE FROM hub_group")
+            .execute(&ctx.pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM tenants")
+            .execute(&ctx.pool)
+            .await
+            .unwrap();
+        let project = seed_project(&ctx.pool).await;
+        let human = seed_human(&ctx.pool, 77, "veteran").await;
+        seed_member(&ctx.pool, &human, &project, "member").await;
+        let second = TestHub::start(&ctx.db_url, &ctx.github, DEV_KEY_1, &[]).await;
+        let (adopted, pending): (String, bool) =
+            sqlx::query_as("SELECT tenant_id, claim_hash IS NOT NULL FROM hub_group")
+                .fetch_one(&ctx.pool)
+                .await
+                .unwrap();
+        assert_eq!(adopted, project.tenant);
+        assert!(!pending, "start stored a claim token for a used group");
+        assert!(second.hub.mint_claim_token().await.unwrap().is_none());
     })
     .await;
 }

@@ -29,8 +29,14 @@ pub enum GroupError {
     Random(#[from] getrandom::Error),
 }
 
+/// The self-host group, and the name of the tenant if this call adopted it.
+pub(crate) struct Group {
+    pub(crate) tenant: TenantId,
+    pub(crate) adopted: Option<String>,
+}
+
 /// Selects the existing group, adopts the only tenant, or creates one.
-pub(crate) async fn ensure_group(pool: &PgPool, name: &str) -> Result<TenantId, GroupError> {
+pub(crate) async fn ensure_group(pool: &PgPool, name: &str) -> Result<Group, GroupError> {
     let mut tx = pool.begin().await?;
     // Serialize initialization even before a singleton row exists.
     sqlx::query("LOCK TABLE hub_group IN SHARE ROW EXCLUSIVE MODE")
@@ -39,6 +45,7 @@ pub(crate) async fn ensure_group(pool: &PgPool, name: &str) -> Result<TenantId, 
     let existing: Option<String> = sqlx::query_scalar("SELECT tenant_id FROM hub_group")
         .fetch_optional(&mut *tx)
         .await?;
+    let mut adopted = None;
     let tenant = match existing {
         Some(tenant) => tenant,
         None => {
@@ -56,9 +63,12 @@ pub(crate) async fn ensure_group(pool: &PgPool, name: &str) -> Result<TenantId, 
                     tenant
                 }
                 1 => {
-                    sqlx::query_scalar("SELECT id FROM tenants")
-                        .fetch_one(&mut *tx)
-                        .await?
+                    let (id, name): (String, String) =
+                        sqlx::query_as("SELECT id, name FROM tenants")
+                            .fetch_one(&mut *tx)
+                            .await?;
+                    adopted = Some(name);
+                    id
                 }
                 count => return Err(GroupError::ManyTenants(count)),
             };
@@ -73,7 +83,7 @@ pub(crate) async fn ensure_group(pool: &PgPool, name: &str) -> Result<TenantId, 
         .parse()
         .map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
     tx.commit().await?;
-    Ok(tenant)
+    Ok(Group { tenant, adopted })
 }
 
 /// The local, single-use secret and its one-hour deadline.
@@ -82,19 +92,23 @@ pub(crate) struct ClaimToken {
     pub(crate) expires_at: Timestamp,
 }
 
-/// Replaces any pending claim, unless the group already has an owner.
+/// Replaces any pending claim, unless the group has any member: only a group
+/// nobody has used is open to claiming, whatever the members' roles.
 pub(crate) async fn mint_claim_token(pool: &PgPool) -> Result<Option<ClaimToken>, GroupError> {
     let mut tx = pool.begin().await?;
     let tenant: String = sqlx::query_scalar("SELECT tenant_id FROM hub_group FOR UPDATE")
         .fetch_one(&mut *tx)
         .await?;
-    let owned: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM tenant_members WHERE tenant_id = $1 AND role = 'owner')",
-    )
-    .bind(&tenant)
-    .fetch_one(&mut *tx)
-    .await?;
-    if owned {
+    let used: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM tenant_members WHERE tenant_id = $1)")
+            .bind(&tenant)
+            .fetch_one(&mut *tx)
+            .await?;
+    if used {
+        // A token minted while the group was empty must not outlive its use.
+        sqlx::query("UPDATE hub_group SET claim_hash = NULL, claim_expires_at = NULL")
+            .execute(&mut *tx)
+            .await?;
         tx.commit().await?;
         return Ok(None);
     }

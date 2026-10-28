@@ -112,9 +112,17 @@ impl Hub {
             .await
             .map_err(HubError::Database)?;
         if config.mode == HubMode::SelfHost {
-            group::ensure_group(&pool, &config.group_name)
+            let group = group::ensure_group(&pool, &config.group_name)
                 .await
                 .map_err(HubError::Group)?;
+            if let Some(name) = &group.adopted {
+                tracing::info!(
+                    tenant = %group.tenant,
+                    name = %name,
+                    "adopted the database's only tenant as this self-host hub's group; \
+                     set AGMEN_HUB_MODE=hosted to keep tenants separate"
+                );
+            }
             if let Some(token) = group::mint_claim_token(&pool)
                 .await
                 .map_err(HubError::Group)?

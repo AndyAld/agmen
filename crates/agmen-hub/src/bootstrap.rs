@@ -230,7 +230,7 @@ impl Bootstrap {
         admin_login: Option<String>,
     ) -> Result<Bootstrapped, BootstrapError> {
         if self.mode == HubMode::SelfHost {
-            let group = group::ensure_group(pool, &self.tenant).await?;
+            let group = group::ensure_group(pool, &self.tenant).await?.tenant;
             let name: String = sqlx::query_scalar("SELECT name FROM tenants WHERE id = $1")
                 .bind(group.as_str())
                 .fetch_one(pool)
