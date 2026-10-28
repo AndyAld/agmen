@@ -1,6 +1,6 @@
 # 0009: Listener runtime and small-model default
 
-Status: proposed
+Status: accepted (Andy, 2026-10-27)
 Date: 2026-10-27
 
 ## Context
