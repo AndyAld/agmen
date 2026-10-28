@@ -54,6 +54,7 @@ pub(crate) use crate::keymap::{Quit, ToggleLeftDock, ToggleRightDock};
 pub(crate) struct Workspace {
     focus_handle: FocusHandle,
     snapshot: Rc<Snapshot>,
+    invite_people: bool,
     left_dock: Dock,
     right_dock: Dock,
     agents_panel: Entity<AgentsPanel>,
@@ -130,6 +131,7 @@ impl Workspace {
         Self {
             focus_handle: cx.focus_handle(),
             snapshot,
+            invite_people: false,
             pane_group,
             left_dock: Dock::new(LEFT_DOCK_WIDTH),
             right_dock: Dock::new(RIGHT_DOCK_WIDTH),
@@ -143,6 +145,13 @@ impl Workspace {
             _chat_refs: chat_refs,
             chat,
             _chat_changes: chat_changes,
+        }
+    }
+
+    pub(super) fn set_invite_people(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.invite_people != enabled {
+            self.invite_people = enabled;
+            cx.notify();
         }
     }
 
@@ -349,7 +358,7 @@ impl Render for Workspace {
         .bg(theme.background)
         .text_color(theme.text)
         .font_family(fonts.ui_family.clone())
-        .child(TitleBar::new(&self.snapshot))
+        .child(TitleBar::new(&self.snapshot).invite_people(self.invite_people))
         .child(body)
         .child(
             StatusBar::new(&self.snapshot, self.shows_listener_toggle(cx))

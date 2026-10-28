@@ -67,6 +67,12 @@ fn non_git_folder_says_so(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("live:choose-another").is_some());
 }
 
+fn helper_projects() -> std::process::Output {
+    let mut out = helper_success();
+    out.stdout = br#"{"projects":[]}"#.to_vec();
+    out
+}
+
 fn helper_success() -> std::process::Output {
     use std::os::unix::process::ExitStatusExt as _;
     std::process::Output {
@@ -102,6 +108,9 @@ fn saved_login_offers_invite_and_successful_join_opens_project(cx: &mut TestAppC
         root.onboarding.program = Some(PathBuf::from("/injected/agmen"));
         root.onboarding.helper =
             std::sync::Arc::new(move |program, args, timeout, cwd, stdin, _| {
+                if args == ["whoami", "--json"].map(std::ffi::OsString::from) {
+                    return Ok(helper_projects());
+                }
                 assert_eq!(program, std::path::Path::new("/injected/agmen"));
                 assert_eq!(args, ["join", "--stdin"].map(std::ffi::OsString::from));
                 assert_eq!(timeout, Duration::from_secs(120));
@@ -112,6 +121,9 @@ fn saved_login_offers_invite_and_successful_join_opens_project(cx: &mut TestAppC
             });
     });
     pick(&root, cx, &folder);
+    wait_until(cx, |cx| {
+        root.read_with(cx, |root, _| root.onboarding.task.is_none())
+    });
     assert!(cx.debug_bounds("live:invite-code").is_some());
     assert!(cx.debug_bounds("live:sign-in").is_none());
     root.update_in(cx, |root, window, cx| {
@@ -149,6 +161,7 @@ fn sign_in_shows_device_prompt_then_invite_without_network(cx: &mut TestAppConte
     root.update_in(cx, |root, _, _| {
         root.onboarding.program = Some(PathBuf::from("/injected/agmen"));
         root.onboarding.helper = std::sync::Arc::new(move |_, args, timeout, _, input, progress| {
+            if args == ["whoami", "--json"].map(std::ffi::OsString::from) { return Ok(helper_projects()); }
             assert_eq!(args, ["login", "--hub", "https://hub.example/"].map(std::ffi::OsString::from));
             assert_eq!(timeout, Duration::from_secs(120));
             assert!(input.is_empty());
@@ -321,7 +334,10 @@ fn late_join_does_not_replace_newly_selected_project(cx: &mut TestAppContext) {
         root.onboarding
             .invite
             .update(cx, |input, cx| input.set_text("test-invite", window, cx));
-        root.onboarding.helper = std::sync::Arc::new(move |_, _, _, _, _, _| {
+        root.onboarding.helper = std::sync::Arc::new(move |_, args, _, _, _, _| {
+            if args == ["whoami", "--json"].map(std::ffi::OsString::from) {
+                return Ok(helper_projects());
+            }
             wait.lock()
                 .unwrap()
                 .recv_timeout(Duration::from_secs(5))
@@ -372,7 +388,10 @@ fn late_login_signs_in_the_newly_selected_folder(cx: &mut TestAppContext) {
         root.onboarding.hub.update(cx, |input, cx| {
             input.set_text("https://hub.example/", window, cx)
         });
-        root.onboarding.helper = std::sync::Arc::new(move |_, _, _, _, _, _| {
+        root.onboarding.helper = std::sync::Arc::new(move |_, args, _, _, _, _| {
+            if args == ["whoami", "--json"].map(std::ffi::OsString::from) {
+                return Ok(helper_projects());
+            }
             wait.lock()
                 .unwrap()
                 .recv_timeout(Duration::from_secs(5))
@@ -1422,4 +1441,560 @@ fn quit_path_checks_daemon_ownership_and_persists_keep_running(cx: &mut TestAppC
         Some(true)
     );
     assert!(AgmendBackend::probe(&fake.path()).is_ok());
+}
+
+fn membership_fixture(
+    root: &Entity<LiveRoot>,
+    cx: &mut VisualTestContext,
+    folder: &std::path::Path,
+    projects: serde_json::Value,
+) {
+    std::fs::create_dir_all(folder).unwrap();
+    assert!(
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .arg(folder)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let login = folder.parent().unwrap().join("member-login.json");
+    std::fs::write(
+        &login,
+        r#"{"hub_url":"https://hub.example/","human_id":"andyandy","handle":"andy"}"#,
+    )
+    .unwrap();
+    root.update_in(cx, |root, _, _| {
+        root.onboarding.login_path = Some(login);
+        root.onboarding.program = Some(PathBuf::from("/injected/agmen"));
+        let folder = folder.to_owned();
+        root.onboarding.helper = std::sync::Arc::new(move |_, args, timeout, cwd, input, _| {
+            assert_eq!(timeout, Duration::from_secs(120));
+            assert_eq!(cwd, Some(folder.as_path()));
+            assert!(input.is_empty());
+            let mut output = helper_success();
+            if args == ["whoami", "--json"].map(std::ffi::OsString::from) {
+                output.stdout = serde_json::json!({"projects":projects}).to_string().into_bytes();
+            } else if args == ["project", "create", "new-folder"].map(std::ffi::OsString::from) {
+                output.stdout = br#"{"project":"project1","name":"new-folder","tenant":"tenant01","role":"admin"}"#.to_vec();
+            } else {
+                assert_eq!(args, ["join", "--project", "project1"].map(std::ffi::OsString::from));
+                joined_folder(&folder);
+            }
+            Ok(output)
+        });
+    });
+}
+
+fn membership(role: &str) -> serde_json::Value {
+    serde_json::json!({"tenant":"tenant01","project":"project1","name":"marked","role":role})
+}
+
+#[gpui::test]
+fn one_membership_auto_joins_and_opens(cx: &mut TestAppContext) {
+    let fake = FakeAgmend::start(console(vec![]));
+    let folder = fake.dir.path().join("new-folder");
+    let (root, cx) = open(cx, empty_launch(&fake));
+    membership_fixture(&root, cx, &folder, serde_json::json!([membership("admin")]));
+    pick(&root, cx, &folder);
+    wait_until(cx, |cx| {
+        root.read_with(cx, |root, _| root.workspace().is_some())
+    });
+    assert_eq!(
+        root.read_with(cx, |root, _| root.service_notice.clone()),
+        Some("Joined new-folder to marked".into())
+    );
+}
+
+#[gpui::test]
+fn several_memberships_offer_picker_and_join(cx: &mut TestAppContext) {
+    let fake = FakeAgmend::start(console(vec![]));
+    let folder = fake.dir.path().join("new-folder");
+    let (root, cx) = open(cx, empty_launch(&fake));
+    let other = serde_json::json!({"tenant":"tenant01","project":"project2","name":"other","role":"member"});
+    membership_fixture(
+        &root,
+        cx,
+        &folder,
+        serde_json::json!([membership("admin"), other]),
+    );
+    pick(&root, cx, &folder);
+    wait_until(cx, |cx| cx.debug_bounds("live:project-choice:0").is_some());
+    assert!(cx.debug_bounds("live:project-choice:1").is_some());
+    assert!(!folder.join(".agmen/identity.json").exists());
+    click(cx, "live:project-choice:0");
+    click(cx, "live:join-project");
+    wait_until(cx, |cx| {
+        root.read_with(cx, |root, _| root.workspace().is_some())
+    });
+}
+
+#[gpui::test]
+fn no_memberships_offer_create_and_invite_then_create_joins_and_opens(cx: &mut TestAppContext) {
+    let fake = FakeAgmend::start(console(vec![]));
+    let folder = fake.dir.path().join("new-folder");
+    let (root, cx) = open(cx, empty_launch(&fake));
+    membership_fixture(&root, cx, &folder, serde_json::json!([]));
+    pick(&root, cx, &folder);
+    wait_until(cx, |cx| cx.debug_bounds("live:create-project").is_some());
+    assert!(cx.debug_bounds("live:invite-code").is_some());
+    click(cx, "live:create-project");
+    wait_until(cx, |cx| {
+        root.read_with(cx, |root, _| root.workspace().is_some())
+    });
+    assert!(cx.debug_bounds("live:invite-people").is_some());
+}
+
+#[gpui::test]
+fn invite_people_admin_and_coordinator_get_code_and_copy_buttons_member_has_no_action(
+    cx: &mut TestAppContext,
+) {
+    for role in ["admin", "coordinator", "member"] {
+        let fake = FakeAgmend::start(console(vec![]));
+        let folder = fake.dir.path().join("new-folder");
+        let (root, cx) = open(cx, empty_launch(&fake));
+        membership_fixture(&root, cx, &folder, serde_json::json!([membership(role)]));
+        pick(&root, cx, &folder);
+        wait_until(cx, |cx| {
+            root.read_with(cx, |root, _| root.workspace().is_some())
+        });
+        if role == "member" {
+            assert!(cx.debug_bounds("live:invite-people").is_none());
+            continue;
+        }
+        root.update_in(cx, |root, _, _| {
+            root.onboarding.helper = std::sync::Arc::new(|_, args, _, _, _, _| {
+                assert_eq!(args, ["invite", "--project", "project1"].map(std::ffi::OsString::from));
+                let mut out = helper_success();
+                out.stdout = b"single-use invite to project project1 as member, open until tomorrow:\n  agmen join test-code\n".to_vec();
+                Ok(out)
+            });
+        });
+        click(cx, "live:invite-people");
+        wait_until(cx, |cx| cx.debug_bounds("live:invite-result").is_some());
+        assert!(cx.debug_bounds("live:copy-invite-code").is_some());
+        assert!(cx.debug_bounds("live:copy-invite-command").is_some());
+        // Clipboard writes are deliberately not exercised.
+    }
+}
+
+#[gpui::test]
+fn membership_lookup_failure_offers_retry_without_offering_create(cx: &mut TestAppContext) {
+    let fake = FakeAgmend::start(console(vec![]));
+    let folder = fake.dir.path().join("new-folder");
+    let (root, cx) = open(cx, empty_launch(&fake));
+    membership_fixture(&root, cx, &folder, serde_json::json!([]));
+    root.update_in(cx, |root, _, _| {
+        root.onboarding.helper = std::sync::Arc::new(|_, _, _, _, _, _| {
+            let mut out = helper_success();
+            out.stdout = b"broken JSON".to_vec();
+            Ok(out)
+        });
+    });
+    pick(&root, cx, &folder);
+    wait_until(cx, |cx| {
+        root.read_with(cx, |root, _| root.onboarding.task.is_none())
+    });
+    assert!(cx.debug_bounds("live:project-error").is_some());
+    assert!(cx.debug_bounds("live:create-project").is_none());
+    assert!(cx.debug_bounds("live:retry-projects").is_some());
+}
+
+#[gpui::test]
+fn expired_membership_login_returns_to_sign_in(cx: &mut TestAppContext) {
+    use std::os::unix::process::ExitStatusExt as _;
+    let fake = FakeAgmend::start(console(vec![]));
+    let folder = fake.dir.path().join("new-folder");
+    let (root, cx) = open(cx, empty_launch(&fake));
+    membership_fixture(&root, cx, &folder, serde_json::json!([]));
+    root.update_in(cx, |root, _, _| {
+        root.onboarding.helper = std::sync::Arc::new(|_, _, _, _, _, _| {
+            let mut out = helper_success();
+            out.status = std::process::ExitStatus::from_raw(3 << 8);
+            out.stderr = b"sign in again with agmen login".to_vec();
+            Ok(out)
+        });
+    });
+    pick(&root, cx, &folder);
+    wait_until(cx, |cx| {
+        root.read_with(cx, |root, _| root.onboarding.task.is_none())
+    });
+    assert!(cx.debug_bounds("live:sign-in").is_some());
+    assert!(cx.debug_bounds("live:project-error").is_some());
+}
+
+#[gpui::test]
+fn opening_an_already_joined_folder_loads_role_without_joining_again(cx: &mut TestAppContext) {
+    let fake = FakeAgmend::start(console(vec![]));
+    let folder = fake.dir.path().join("joined-folder");
+    let (root, cx) = open(cx, empty_launch(&fake));
+    membership_fixture(&root, cx, &folder, serde_json::json!([]));
+    joined_folder(&folder);
+    root.update_in(cx, |root, _, _| {
+        root.onboarding.helper = std::sync::Arc::new(|_, args, _, _, _, _| {
+            assert_eq!(args, ["whoami", "--json"].map(std::ffi::OsString::from));
+            let mut out = helper_success();
+            out.stdout = serde_json::json!({"projects":[membership("admin")]})
+                .to_string()
+                .into_bytes();
+            Ok(out)
+        });
+    });
+    pick(&root, cx, &folder);
+    wait_until(cx, |cx| cx.debug_bounds("live:invite-people").is_some());
+    assert!(root.read_with(cx, |root, _| root.workspace().is_some()));
+}
+
+#[gpui::test]
+fn project_from_settings_can_invite_without_a_folder(cx: &mut TestAppContext) {
+    let fake = FakeAgmend::start(console(vec![]));
+    let mut launch = empty_launch(&fake);
+    launch.project = ProjectChoice::Project(project());
+    let (root, cx) = open(cx, launch);
+    root.update_in(cx, |root, window, cx| {
+        root.onboarding.signed_in = true;
+        root.onboarding.program = Some(PathBuf::from("/injected/agmen"));
+        root.onboarding.helper = std::sync::Arc::new(|_, args, _, cwd, _, _| {
+            assert!(cwd.is_none());
+            assert_eq!(args, ["whoami", "--json"].map(std::ffi::OsString::from));
+            let mut out = helper_success();
+            out.stdout = serde_json::json!({"projects":[membership("admin")]})
+                .to_string()
+                .into_bytes();
+            Ok(out)
+        });
+        root.list_memberships(window, cx);
+    });
+    wait_until(cx, |cx| cx.debug_bounds("live:invite-people").is_some());
+}
+
+#[gpui::test]
+fn create_edits_name_and_tenant_protects_flags_and_keeps_folder_on_failure(
+    cx: &mut TestAppContext,
+) {
+    use std::os::unix::process::ExitStatusExt as _;
+    let fake = FakeAgmend::start(console(vec![]));
+    let folder = fake.dir.path().join("new-folder");
+    let (root, cx) = open(cx, empty_launch(&fake));
+    membership_fixture(&root, cx, &folder, serde_json::json!([]));
+    pick(&root, cx, &folder);
+    wait_until(cx, |cx| {
+        root.read_with(cx, |root, _| root.onboarding.task.is_none())
+    });
+    root.update_in(cx, |root, window, cx| {
+        assert_eq!(root.onboarding.project_name.read(cx).text(), "new-folder");
+        root.onboarding
+            .project_name
+            .update(cx, |input, cx| input.set_text("--help", window, cx));
+        root.onboarding
+            .tenant
+            .update(cx, |input, cx| input.set_text("tenant01", window, cx));
+        root.onboarding.helper = std::sync::Arc::new(|_, args, _, _, _, _| {
+            assert_eq!(
+                args,
+                ["project", "create", "--tenant", "tenant01", "--", "--help"]
+                    .map(std::ffi::OsString::from)
+            );
+            let mut out = helper_success();
+            out.status = std::process::ExitStatus::from_raw(1 << 8);
+            out.stderr = b"a project with that name already exists".to_vec();
+            Ok(out)
+        });
+    });
+    click(cx, "live:create-project");
+    wait_until(cx, |cx| {
+        root.read_with(cx, |root, _| root.onboarding.task.is_none())
+    });
+    assert!(root.read_with(cx, |root, _| {
+        root.service_error
+            .as_ref()
+            .is_some_and(|error| error.contains("already exists"))
+    }));
+    assert!(root.read_with(cx, |root, _| {
+        root.rejected.as_ref().is_some_and(|f| f.folder == folder)
+    }));
+    assert!(!folder.join(".agmen/identity.json").exists());
+}
+
+#[gpui::test]
+fn created_project_can_retry_join_without_creating_again(cx: &mut TestAppContext) {
+    use std::os::unix::process::ExitStatusExt as _;
+    let fake = FakeAgmend::start(console(vec![]));
+    let folder = fake.dir.path().join("new-folder");
+    let (root, cx) = open(cx, empty_launch(&fake));
+    membership_fixture(&root, cx, &folder, serde_json::json!([]));
+    pick(&root, cx, &folder);
+    wait_until(cx, |cx| {
+        root.read_with(cx, |root, _| root.onboarding.task.is_none())
+    });
+    let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let joined = folder.clone();
+    root.update_in(cx, |root, _, _| {
+        root.onboarding.helper = std::sync::Arc::new(move |_, args, _, _, _, _| {
+            let mut out = helper_success();
+            if args == ["project", "create", "new-folder"].map(std::ffi::OsString::from) {
+                out.stdout = serde_json::json!(membership("admin"))
+                    .to_string()
+                    .into_bytes();
+            } else {
+                assert_eq!(
+                    args,
+                    ["join", "--project", "project1"].map(std::ffi::OsString::from)
+                );
+                if attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    out.status = std::process::ExitStatus::from_raw(1 << 8);
+                    out.stderr = b"test join unavailable".to_vec();
+                } else {
+                    joined_folder(&joined);
+                }
+            }
+            Ok(out)
+        });
+    });
+    click(cx, "live:create-project");
+    wait_until(cx, |cx| {
+        root.read_with(cx, |root, _| root.onboarding.task.is_none())
+    });
+    assert!(cx.debug_bounds("live:create-project").is_none());
+    assert!(cx.debug_bounds("live:join-project").is_some());
+    click(cx, "live:join-project");
+    wait_until(cx, |cx| {
+        root.read_with(cx, |root, _| root.workspace().is_some())
+    });
+}
+
+#[gpui::test]
+fn switching_joined_projects_refreshes_membership_for_invites(cx: &mut TestAppContext) {
+    let fake = FakeAgmend::start(console(vec![]));
+    let first = fake.dir.path().join("first");
+    let second = fake.dir.path().join("second");
+    let (root, cx) = open(cx, empty_launch(&fake));
+    membership_fixture(&root, cx, &first, serde_json::json!([membership("admin")]));
+    pick(&root, cx, &first);
+    wait_until(cx, |cx| {
+        root.read_with(cx, |root, _| root.workspace().is_some())
+    });
+    joined_folder(&second);
+    let path = second.join(".agmen/identity.json");
+    let mut identity: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    identity["project"] = serde_json::json!("project2");
+    std::fs::write(path, identity.to_string()).unwrap();
+    root.update_in(cx, |root, _, _| {
+        root.onboarding.helper = std::sync::Arc::new(|_, args, _, _, _, _| {
+            assert_eq!(args, ["whoami", "--json"].map(std::ffi::OsString::from));
+            let mut member = membership("admin");
+            member["project"] = serde_json::json!("project2");
+            let mut out = helper_success();
+            out.stdout = serde_json::json!({"projects":[member]})
+                .to_string()
+                .into_bytes();
+            Ok(out)
+        });
+    });
+    root.update_in(cx, |root, window, cx| root.open_folder(second, window, cx));
+    wait_until(cx, |cx| {
+        root.read_with(cx, |root, _| {
+            root.launch.project == ProjectChoice::Project("project2".parse().unwrap())
+                && root.workspace().is_some()
+        }) && cx.debug_bounds("live:invite-people").is_some()
+    });
+}
+
+#[gpui::test]
+fn dismissing_pending_auto_join_does_not_reopen_folder(cx: &mut TestAppContext) {
+    let fake = FakeAgmend::start(console(vec![]));
+    let folder = fake.dir.path().join("new-folder");
+    let (root, cx) = open(cx, empty_launch(&fake));
+    membership_fixture(&root, cx, &folder, serde_json::json!([membership("admin")]));
+    let (release, wait) = std::sync::mpsc::sync_channel(1);
+    let wait = std::sync::Mutex::new(wait);
+    let started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let in_join = started.clone();
+    let joined = folder.clone();
+    root.update_in(cx, |root, _, _| {
+        root.onboarding.helper = std::sync::Arc::new(move |_, args, _, _, _, _| {
+            let mut out = helper_success();
+            if args == ["whoami", "--json"].map(std::ffi::OsString::from) {
+                out.stdout = serde_json::json!({"projects":[membership("admin")]})
+                    .to_string()
+                    .into_bytes();
+            } else {
+                in_join.store(true, std::sync::atomic::Ordering::SeqCst);
+                wait.lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(5))
+                    .unwrap();
+                joined_folder(&joined);
+            }
+            Ok(out)
+        });
+    });
+    pick(&root, cx, &folder);
+    wait_until(cx, |_| started.load(std::sync::atomic::Ordering::SeqCst));
+    click(cx, "live:keep-project");
+    release.send(()).unwrap();
+    wait_until(cx, |cx| {
+        root.read_with(cx, |root, _| {
+            root.onboarding.task.is_none()
+                && root._resolving.is_none()
+                && root._connecting.is_none()
+        })
+    });
+    assert!(root.read_with(cx, |root, _| root.workspace().is_none()));
+}
+
+#[gpui::test]
+fn late_invite_join_resumes_membership_lookup_for_next_folder(cx: &mut TestAppContext) {
+    let fake = FakeAgmend::start(console(vec![]));
+    let first = fake.dir.path().join("first");
+    let second = fake.dir.path().join("second");
+    let (root, cx) = open(cx, empty_launch(&fake));
+    membership_fixture(&root, cx, &first, serde_json::json!([]));
+    std::fs::create_dir(&second).unwrap();
+    assert!(
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .arg(&second)
+            .status()
+            .unwrap()
+            .success()
+    );
+    pick(&root, cx, &first);
+    wait_until(cx, |cx| {
+        root.read_with(cx, |root, _| root.onboarding.task.is_none())
+    });
+    let (release, wait) = std::sync::mpsc::sync_channel(1);
+    let wait = std::sync::Mutex::new(wait);
+    let old = first.clone();
+    let current = second.clone();
+    root.update_in(cx, |root, window, cx| {
+        root.onboarding
+            .invite
+            .update(cx, |input, cx| input.set_text("test-invite", window, cx));
+        root.onboarding.helper = std::sync::Arc::new(move |_, args, _, cwd, _, _| {
+            let mut out = helper_success();
+            if args == ["join", "--stdin"].map(std::ffi::OsString::from) {
+                wait.lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(5))
+                    .unwrap();
+                joined_folder(&old);
+            } else if args == ["whoami", "--json"].map(std::ffi::OsString::from) {
+                out.stdout = serde_json::json!({"projects":[membership("admin")]})
+                    .to_string()
+                    .into_bytes();
+            } else {
+                assert_eq!(cwd, Some(current.as_path()));
+                joined_folder(&current);
+            }
+            Ok(out)
+        });
+    });
+    click(cx, "live:join");
+    pick(&root, cx, &second);
+    release.send(()).unwrap();
+    wait_until(cx, |cx| {
+        root.read_with(cx, |root, _| root.workspace().is_some())
+    });
+    assert_eq!(
+        root.read_with(cx, |root, _| root.launch.root.clone()),
+        Some(second.canonicalize().unwrap())
+    );
+}
+
+#[gpui::test]
+fn late_login_does_not_lookup_or_join_non_git_folder(cx: &mut TestAppContext) {
+    let fake = FakeAgmend::start(console(vec![]));
+    let folder = fake.dir.path().join("plain");
+    std::fs::create_dir(&folder).unwrap();
+    let (root, cx) = open(cx, empty_launch(&fake));
+    pick(&root, cx, &folder);
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let called = calls.clone();
+    root.update_in(cx, |root, window, cx| {
+        root.onboarding.signed_in = true;
+        root.onboarding.program = Some(PathBuf::from("/injected/agmen"));
+        root.onboarding.helper = std::sync::Arc::new(move |_, _, _, _, _, _| {
+            called.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(helper_projects())
+        });
+        root.list_memberships(window, cx);
+    });
+    wait_until(cx, |cx| {
+        root.read_with(cx, |root, _| root.onboarding.task.is_none())
+    });
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[gpui::test]
+fn keeping_current_project_after_rejected_folder_restores_invite_action(cx: &mut TestAppContext) {
+    let fake = FakeAgmend::start(console(vec![]));
+    let folder = fake.dir.path().join("joined");
+    let plain = fake.dir.path().join("plain");
+    std::fs::create_dir(&plain).unwrap();
+    let (root, cx) = open(cx, empty_launch(&fake));
+    membership_fixture(&root, cx, &folder, serde_json::json!([membership("admin")]));
+    pick(&root, cx, &folder);
+    wait_until(cx, |cx| {
+        root.read_with(cx, |root, _| root.workspace().is_some())
+    });
+    root.update_in(cx, |root, window, cx| {
+        root.onboarding.helper = std::sync::Arc::new(|_, args, _, _, _, _| {
+            assert_eq!(args, ["whoami", "--json"].map(std::ffi::OsString::from));
+            let mut out = helper_success();
+            out.stdout = serde_json::json!({"projects":[membership("admin")]})
+                .to_string()
+                .into_bytes();
+            Ok(out)
+        });
+        root.open_folder(plain, window, cx);
+    });
+    wait_until(cx, |cx| cx.debug_bounds("live:not-git").is_some());
+    click(cx, "live:keep-project");
+    wait_until(cx, |cx| cx.debug_bounds("live:invite-people").is_some());
+}
+
+#[gpui::test]
+fn reopening_same_folder_during_auto_join_opens_without_joining_twice(cx: &mut TestAppContext) {
+    use std::os::unix::process::ExitStatusExt as _;
+    let fake = FakeAgmend::start(console(vec![]));
+    let folder = fake.dir.path().join("new-folder");
+    let (root, cx) = open(cx, empty_launch(&fake));
+    membership_fixture(&root, cx, &folder, serde_json::json!([membership("admin")]));
+    let (release, wait) = std::sync::mpsc::sync_channel(1);
+    let wait = std::sync::Mutex::new(wait);
+    let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let calls = attempts.clone();
+    let joined = folder.clone();
+    root.update_in(cx, |root, _, _| {
+        root.onboarding.helper = std::sync::Arc::new(move |_, args, _, _, _, _| {
+            let mut out = helper_success();
+            if args == ["whoami", "--json"].map(std::ffi::OsString::from) {
+                out.stdout = serde_json::json!({"projects":[membership("admin")]})
+                    .to_string()
+                    .into_bytes();
+            } else if calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                wait.lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(5))
+                    .unwrap();
+                joined_folder(&joined);
+            } else {
+                out.status = std::process::ExitStatus::from_raw(1 << 8);
+                out.stderr = b"this worktree is already joined".to_vec();
+            }
+            Ok(out)
+        });
+    });
+    pick(&root, cx, &folder);
+    wait_until(cx, |_| {
+        attempts.load(std::sync::atomic::Ordering::SeqCst) == 1
+    });
+    pick(&root, cx, &folder);
+    release.send(()).unwrap();
+    wait_until(cx, |cx| {
+        root.read_with(cx, |root, _| root.workspace().is_some())
+    });
+    assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
 }

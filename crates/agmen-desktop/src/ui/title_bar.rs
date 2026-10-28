@@ -6,11 +6,18 @@ use gpui::{
     RenderOnce, SharedString, Styled as _, Window, WindowControlArea, div,
 };
 
-use super::components::{Avatar, Chip, Color, IconButton, IconButtonStyle, IconSize, Label};
+use super::components::{
+    Avatar, Button, ButtonSize, ButtonStyle, Chip, Color, IconButton, IconButtonStyle, IconSize,
+    Label,
+};
 use super::format::listener_label;
 use super::tokens::{BORDER_WIDTH, SPACE_10, SPACE_12, TITLE_BAR_HEIGHT, TRAFFIC_LIGHTS_INSET};
 use crate::backend::Snapshot;
 use crate::icons::UiIcon;
+
+#[derive(Debug, Clone, PartialEq, Eq, gpui::Action)]
+#[action(namespace = project, no_json)]
+pub(crate) struct InvitePeople;
 
 /// Which platform's window chrome the title bar leaves room for or draws.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,6 +51,7 @@ pub(crate) struct TitleBar {
     listener: SharedString,
     me: SharedString,
     platform: PlatformStyle,
+    invite_people: bool,
 }
 
 impl TitleBar {
@@ -54,7 +62,13 @@ impl TitleBar {
             listener: listener_label(snapshot.listener.as_ref()).into(),
             me: snapshot.me.clone().into(),
             platform: PlatformStyle::current(),
+            invite_people: false,
         }
+    }
+
+    pub(crate) const fn invite_people(mut self, enabled: bool) -> Self {
+        self.invite_people = enabled;
+        self
     }
 
     /// Draws another platform's chrome, so tests on one OS can check all.
@@ -120,6 +134,20 @@ impl RenderOnce for TitleBar {
             .child(Label::new(self.project))
             .child(Chip::new(self.listener).dot(Color::Placeholder))
             .child(div().flex_1())
+            .when(self.invite_people, |bar| {
+                bar.child(
+                    div()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(
+                            Button::new("live:invite-people", "Invite people")
+                                .style(ButtonStyle::Subtle)
+                                .size(ButtonSize::Compact)
+                                .on_click(|_, window, cx| {
+                                    window.dispatch_action(Box::new(InvitePeople), cx)
+                                }),
+                        ),
+                )
+            })
             .child(
                 div()
                     .debug_selector(|| "title-avatar".into())

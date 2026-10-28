@@ -28,7 +28,7 @@ pub(super) struct RemoveRecent(pub(crate) PathBuf);
 pub(super) struct RejectedFolder {
     pub(super) folder: PathBuf,
     why: Option<String>,
-    is_git: bool,
+    pub(super) is_git: bool,
 }
 
 impl LiveRoot {
@@ -40,8 +40,8 @@ impl LiveRoot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.onboarding.generation = self.onboarding.generation.wrapping_add(1);
-        self.onboarding.device = None;
+        self.onboarding.change_folder(Some(&folder));
+        self.sync_invite_people(cx);
         // One resolver and one pending folder bound both work and memory.
         // A newer selection replaces the pending one and wins when git returns.
         if self._resolving.is_some() {
@@ -100,6 +100,23 @@ impl LiveRoot {
                         why,
                         is_git,
                     });
+                    let name = this
+                        .rejected
+                        .as_ref()
+                        .and_then(|f| f.folder.file_name())
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned();
+                    this.onboarding
+                        .project_name
+                        .update(cx, |input, cx| input.set_text(&name, window, cx));
+                    this.onboarding
+                        .tenant
+                        .update(cx, |input, cx| input.set_text("", window, cx));
+                    this.onboarding.projects = None;
+                    if is_git {
+                        this.list_memberships(window, cx);
+                    }
                     window.focus(&this.focus_handle, cx);
                     return;
                 }
@@ -260,7 +277,10 @@ impl LiveRoot {
     }
 
     fn dismiss_rejected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.onboarding.change_folder(None);
         self.rejected = None;
+        self.sync_invite_people(cx);
+        self.list_memberships(window, cx);
         window.focus(&self.focus_handle(cx), cx);
         cx.notify();
     }

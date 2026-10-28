@@ -25,6 +25,8 @@ use crate::service::{self, Check, Observation};
 #[path = "live_root_project.rs"]
 mod project_open;
 use project_open::{OpenRecent, RejectedFolder, RemoveRecent};
+#[path = "live_root_membership.rs"]
+mod membership;
 #[path = "live_root_onboarding.rs"]
 mod onboarding;
 
@@ -389,6 +391,15 @@ impl LiveRoot {
         window.focus(&workspace.focus_handle(cx), cx);
         self.state = LiveState::Open(workspace);
         self.remember(project.clone(), cx);
+        self.sync_invite_people(cx);
+        if let Some((joined, _, notice)) = self.onboarding.join_notice.take()
+            && self.launch.project == ProjectChoice::Project(joined)
+        {
+            self.service_notice = Some(notice);
+        }
+        if self.onboarding.projects.is_none() && self.onboarding.task.is_none() {
+            self.list_memberships(window, cx);
+        }
     }
 
     /// Writes the project that opened as the settings' last project, so a
@@ -714,12 +725,10 @@ impl Focusable for LiveRoot {
     }
 }
 
-impl Render for LiveRoot {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let dialog = self.quit_dialog(cx);
+impl LiveRoot {
+    fn shell(&self, cx: &mut Context<Self>) -> gpui::Div {
         let appearance = cx.global::<Appearance>();
-        window.set_rem_size(appearance.fonts.ui_size);
-        let shell = div()
+        div()
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
                 if this.quit_choice == Some(service::QuitChoice::Ask)
@@ -740,6 +749,19 @@ impl Render for LiveRoot {
             .text_color(appearance.theme.text)
             .font_family(appearance.fonts.ui_family.clone())
             .on_action(
+                cx.listener(|this, _: &super::title_bar::InvitePeople, window, cx| {
+                    if this.can_invite()
+                        && let ProjectChoice::Project(project) = &this.launch.project
+                    {
+                        this.start_membership(
+                            membership::Action::Invite(project.clone()),
+                            window,
+                            cx,
+                        );
+                    }
+                }),
+            )
+            .on_action(
                 cx.listener(|this, _: &crate::keymap::OpenProject, window, cx| {
                     this.prompt_project(window, cx)
                 }),
@@ -749,7 +771,15 @@ impl Render for LiveRoot {
             }))
             .on_action(
                 cx.listener(|this, action: &RemoveRecent, _, cx| this.remove_recent(&action.0, cx)),
-            );
+            )
+    }
+}
+
+impl Render for LiveRoot {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let dialog = self.quit_dialog(cx);
+        window.set_rem_size(cx.global::<Appearance>().fonts.ui_size);
+        let shell = self.shell(cx);
         if self.rejected.is_some() {
             let message = self.rejected_message(cx);
             return shell
@@ -765,6 +795,7 @@ impl Render for LiveRoot {
                 .into_any_element();
         }
         if let LiveState::Open(workspace) = &self.state {
+            let invites = self.invite_controls(cx);
             return shell
                 .debug_selector(|| self.state.selector().into())
                 .size_full()
@@ -788,6 +819,7 @@ impl Render for LiveRoot {
                     )
                 })
                 .child(workspace.clone())
+                .child(invites)
                 .children(dialog)
                 .into_any_element();
         }

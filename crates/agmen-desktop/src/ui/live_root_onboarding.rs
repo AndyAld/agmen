@@ -17,7 +17,7 @@ use super::LiveRoot;
 use crate::ui::components::{Button, ButtonStyle, Label};
 use crate::ui::text_input::{TextInput, TextInputEvent};
 
-type Helper = dyn Fn(
+pub(super) type Helper = dyn Fn(
         &Path,
         &[OsString],
         Duration,
@@ -39,6 +39,12 @@ pub(super) struct Onboarding {
     pub(super) helper: Arc<Helper>,
     pub(super) task: Option<Task<()>>,
     pub(super) device: Option<(String, String)>,
+    pub(super) projects: Option<Vec<super::membership::Membership>>,
+    pub(super) selected: Option<agmen_proto::ProjectId>,
+    pub(super) project_name: Entity<TextInput>,
+    pub(super) tenant: Entity<TextInput>,
+    pub(super) invite_code: Option<String>,
+    pub(super) join_notice: Option<(agmen_proto::ProjectId, PathBuf, String)>,
     _submits: [gpui::Subscription; 2],
 }
 
@@ -83,9 +89,30 @@ impl Onboarding {
             helper: Arc::new(crate::service::run_with_input),
             task: None,
             device: None,
+            projects: None,
+            selected: None,
+            project_name: cx.new(|cx| TextInput::new(cx).placeholder("Project name")),
+            tenant: cx.new(|cx| TextInput::new(cx).placeholder("Tenant id (optional)")),
+            invite_code: None,
+            join_notice: None,
             _submits: [hub_submit, invite_submit],
         }
     }
+    pub(super) fn change_folder(&mut self, folder: Option<&Path>) {
+        self.generation = self.generation.wrapping_add(1);
+        self.device = None;
+        self.invite_code = None;
+        self.selected = None;
+        if self
+            .join_notice
+            .as_ref()
+            .is_none_or(|(_, target, _)| Some(target.as_path()) != folder)
+        {
+            self.join_notice = None;
+            self.projects = None;
+        }
+    }
+
     fn request(&self, join: bool, cx: &gpui::App) -> anyhow::Result<(Vec<OsString>, Vec<u8>)> {
         if join {
             let code = self.invite.read(cx).text().trim();
@@ -152,7 +179,9 @@ impl LiveRoot {
                     )
             })
             .when(self.onboarding.signed_in, |this| {
-                this.child(Label::new("Invite code"))
+                this.child(self.project_controls(cx))
+                    .child(Label::new("Have an invite code?"))
+                    .child(Label::new("Invite code"))
                     .child(
                         div()
                             .debug_selector(|| "live:invite-code".into())
@@ -275,6 +304,9 @@ impl LiveRoot {
                             .as_ref()
                             .is_none_or(|rejected| rejected.folder != folder)
                     {
+                        if done {
+                            this.list_memberships(window, cx);
+                        }
                         return;
                     }
                     match event {
@@ -311,6 +343,7 @@ impl LiveRoot {
                 } else {
                     self.onboarding.login_revision = self.onboarding.login_revision.wrapping_add(1);
                     self.onboarding.signed_in = true;
+                    self.list_memberships(window, cx);
                 }
             }
             result => {
