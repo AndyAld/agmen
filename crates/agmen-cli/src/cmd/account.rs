@@ -25,10 +25,41 @@ const INVITE_SECS: std::ops::RangeInclusive<u64> = 3600..=30 * 24 * 3600;
 
 #[derive(Debug, Args)]
 pub(crate) struct LoginArgs {
-    /// The hub's base URL, http or https. Defaults to
+    /// The hub's base URL: https, or http on localhost or a loopback IP. Defaults to
     /// AGMEN_HUB, then to the hub you last signed in at.
-    #[arg(long, env = "AGMEN_HUB", value_name = "URL")]
+    #[arg(long, env = "AGMEN_HUB", value_name = "URL", value_parser = HubUrlParser)]
     hub: Option<Url>,
+}
+
+/// Keeps clap from echoing URL credentials in a validation error.
+#[derive(Debug, Clone)]
+struct HubUrlParser;
+
+impl clap::builder::TypedValueParser for HubUrlParser {
+    type Value = Url;
+
+    fn parse_ref(
+        &self,
+        _cmd: &clap::Command,
+        _arg: Option<&clap::Arg>,
+        value: &std::ffi::OsStr,
+    ) -> Result<Url, clap::Error> {
+        let invalid = || {
+            clap::Error::raw(
+                clap::error::ErrorKind::ValueValidation,
+                "invalid hub URL; use https",
+            )
+        };
+        let url: Url = value
+            .to_str()
+            .ok_or_else(invalid)?
+            .parse()
+            .map_err(|_| invalid())?;
+        agmen_client::check_hub_url(&url).map_err(|error| {
+            clap::Error::raw(clap::error::ErrorKind::ValueValidation, error.to_string())
+        })?;
+        Ok(url)
+    }
 }
 
 /// RFC 8628 section 3.2.
@@ -52,6 +83,7 @@ pub(crate) async fn login(args: LoginArgs) -> Result<()> {
                 Fail::usage("name the hub: agmen login --hub <url>, or set AGMEN_HUB")
             })?,
     };
+    agmen_client::check_hub_url(&hub)?;
     let start: DeviceStart = send(http()?.post(url(&hub, &["auth", "device"])))
         .await
         .context("starting the device login failed")?;
@@ -281,6 +313,41 @@ async fn default_project(human: &crate::client::Human) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hub_url_policy_argument_parser_accepts_safe_urls() {
+        use clap::builder::TypedValueParser as _;
+        for hub in [
+            "http://localhost",
+            "http://127.0.0.1",
+            "http://127.2.3.4",
+            "http://[::1]",
+            "https://hub.example",
+        ] {
+            assert_eq!(
+                HubUrlParser
+                    .parse_ref(
+                        &clap::Command::new("agmen"),
+                        None,
+                        std::ffi::OsStr::new(hub)
+                    )
+                    .unwrap(),
+                hub.parse::<Url>().unwrap()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn hub_url_policy_login() {
+        for hub in ["http://hub.example", "ftp://localhost"] {
+            let error = login(LoginArgs {
+                hub: Some(hub.parse().unwrap()),
+            })
+            .await
+            .unwrap_err();
+            assert!(error.to_string().contains("use https"), "{error:?}");
+        }
+    }
 
     #[test]
     fn expiries() {

@@ -14,6 +14,31 @@ const IDENTITY: &str = r#"{"tenant":"tenant01","project":"project1","identity_id
 "broker_url":"mqtt://127.0.0.1:9"}"#;
 
 #[test]
+fn hub_url_policy_cli_and_env() {
+    let home = Home::new();
+    for hub in [
+        "http://user:password@hub.example/private?secret=yes",
+        "ftp://localhost",
+    ] {
+        for from_env in [false, true] {
+            let mut cmd = home.agmen(home.path(), &["login"]);
+            if from_env {
+                cmd.env("AGMEN_HUB", hub);
+            } else {
+                cmd.args(["--hub", hub]);
+            }
+            let out = cmd.output().unwrap();
+            assert!(!out.status.success());
+            let text = stderr(&out);
+            assert!(text.contains("use https"), "{text}");
+            for hidden in ["password", "private", "secret=yes"] {
+                assert!(!text.contains(hidden), "{text}");
+            }
+        }
+    }
+}
+
+#[test]
 fn version_is_agmen_semver() {
     let home = Home::new();
     let out = home.agmen(home.path(), &["--version"]).output().unwrap();

@@ -10,6 +10,30 @@ const JSON: &str = r#"{"tenant":"tenant01","project":"project1","identity_id":"i
   "handle":"andy/sol","owner_id":"andyandy","hub_url":"https://hub.example.com",
   "broker_url":"wss://agmen.example.com/mqtt","role":"engineer"}"#;
 
+#[test]
+fn hub_url_policy_identity_file() {
+    let (_tmp, root) = repo();
+    let path = join(&root, &root);
+    for hub in [
+        "http://localhost",
+        "http://127.0.0.1",
+        "http://127.2.3.4",
+        "http://[::1]",
+        "https://hub.example",
+    ] {
+        fs::write(&path, JSON.replace("https://hub.example.com", hub)).unwrap();
+        assert_eq!(
+            find_identity(&root).unwrap().unwrap().identity.hub_url,
+            hub.parse::<Url>().unwrap()
+        );
+    }
+    for hub in ["http://hub.example", "ftp://localhost"] {
+        fs::write(&path, JSON.replace("https://hub.example.com", hub)).unwrap();
+        let error = find_identity(&root).expect_err("unsafe identity hub");
+        assert!(format!("{error:?}").contains("use https"), "{error:?}");
+    }
+}
+
 fn run_git(dir: &Path, args: &[&str]) {
     let status = Command::new("git")
         .args(args)

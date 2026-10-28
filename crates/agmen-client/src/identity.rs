@@ -68,6 +68,7 @@ pub struct IdentityFile {
     /// The person who owns it.
     pub owner_id: IdentityId,
     /// The hub that minted it. Its token is stored under this URL's origin.
+    #[serde(deserialize_with = "crate::hub::deserialize_hub_url")]
     pub hub_url: Url,
     /// The broker its sessions connect to, as the hub's `GET /v1/me` gave
     /// it (`AGMEN_PUBLIC_MQTT_URL`, ruling R57): `mqtt://`, `mqtts://` or

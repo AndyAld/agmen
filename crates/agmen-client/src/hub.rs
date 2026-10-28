@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use agmen_proto::{IdentityId, ProjectId, StampedEnvelope, Stream};
 use serde::Deserialize;
-use url::Url;
+use url::{Host, Url};
 
 use crate::body::{
     BodyReadError, MAX_HUB_RESPONSE_BYTES, MAX_PAGE_RESPONSE_BYTES, read_hub_body_with_limit,
@@ -19,6 +19,45 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The most messages the hub puts in one replay page (protocol 5.3).
 pub const PAGE_LIMIT: u32 = 500;
+
+/// A hub URL would send credentials over an unsupported transport.
+/// Only the host is retained, so errors cannot expose URL credentials.
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("the hub at {host} requires a secure connection; use https")]
+pub struct HubUrlError {
+    host: String,
+}
+
+/// Allows HTTPS, or HTTP to localhost or a loopback IP address.
+///
+/// # Errors
+///
+/// Returns [`HubUrlError`] for any other scheme or non-loopback HTTP host.
+pub fn check_hub_url(url: &Url) -> Result<(), HubUrlError> {
+    let loopback = match url.host() {
+        Some(Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        Some(Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    };
+    if url.scheme() == "https" || (url.scheme() == "http" && loopback) {
+        Ok(())
+    } else {
+        Err(HubUrlError {
+            host: url.host_str().unwrap_or("(no host)").to_owned(),
+        })
+    }
+}
+
+/// Validates hub URLs at saved-file boundaries using the shared rule.
+pub(crate) fn deserialize_hub_url<'de, D>(deserializer: D) -> Result<Url, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let url = Url::deserialize(deserializer)?;
+    check_hub_url(&url).map_err(serde::de::Error::custom)?;
+    Ok(url)
+}
 
 /// One page of a stream, as `GET /v1/projects/{p}/streams/{s}` answers.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -91,6 +130,7 @@ impl HubClient {
     ///
     /// # Errors
     ///
+    /// [`ClientError::HubUrl`] when the URL is unsafe, or
     /// [`ClientError::Http`] when the HTTP client cannot be built.
     pub fn new(
         base: Url,
@@ -98,7 +138,9 @@ impl HubClient {
         identity: IdentityId,
         token: impl Into<String>,
     ) -> Result<Self, ClientError> {
+        check_hub_url(&base)?;
         let http = reqwest::Client::builder()
+            .https_only(base.scheme() == "https")
             .redirect(reqwest::redirect::Policy::none())
             .timeout(REQUEST_TIMEOUT)
             .user_agent(concat!("agmen-client/", env!("CARGO_PKG_VERSION")))
@@ -199,5 +241,55 @@ impl HubClient {
 impl TokenSource for HubClient {
     async fn token(&self) -> Result<String, ClientError> {
         self.broker_token().await
+    }
+}
+
+#[cfg(test)]
+mod url_tests {
+    use super::*;
+
+    #[test]
+    fn hub_url_policy_errors_expose_only_host() {
+        for hub in [
+            "http://user:password@hub.example:8090/private?secret=yes#fragment",
+            "ftp://user:password@hub.example/private",
+        ] {
+            let error = check_hub_url(&hub.parse().unwrap()).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "the hub at hub.example requires a secure connection; use https"
+            );
+            assert_eq!(
+                format!("{error:?}"),
+                "HubUrlError { host: \"hub.example\" }"
+            );
+        }
+        assert!(check_hub_url(&"file:///private".parse().unwrap()).is_err());
+    }
+
+    #[test]
+    fn hub_url_policy_client() {
+        for (base, allowed) in [
+            ("http://hub.example", false),
+            ("http://192.168.1.1", false),
+            ("http://localhost.evil.example", false),
+            ("ftp://localhost", false),
+            ("http://localhost", true),
+            ("http://127.0.0.1", true),
+            ("http://127.42.3.4", true),
+            ("http://[::1]", true),
+            ("https://hub.example", true),
+        ] {
+            let result = HubClient::new(
+                base.parse().unwrap(),
+                "project1".parse().unwrap(),
+                "idn7k2q9".parse().unwrap(),
+                "token",
+            );
+            assert_eq!(result.is_ok(), allowed, "{base}: {result:?}");
+            if let Err(error) = result {
+                assert!(error.to_string().contains("use https"), "{error}");
+            }
+        }
     }
 }

@@ -29,7 +29,7 @@ pub use body::{
 pub use cursor::{Advance, Cursors};
 pub use error::ClientError;
 pub use event::{ClientEvent, Me};
-pub use hub::{HubClient, PAGE_LIMIT, Page};
+pub use hub::{HubClient, HubUrlError, PAGE_LIMIT, Page, check_hub_url};
 pub use identity::{
     IDENTITY_DIR, IDENTITY_FILE, IdentityError, IdentityFile, Joined, find_identity,
 };

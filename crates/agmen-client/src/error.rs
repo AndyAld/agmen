@@ -8,6 +8,9 @@ use crate::body::BodyReadError;
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ClientError {
+    /// The hub URL would expose credentials over an unsafe transport.
+    #[error(transparent)]
+    HubUrl(#[from] crate::HubUrlError),
     /// The identity's SQLite file could not be opened, read or written.
     #[error("the local store failed")]
     Store(#[from] rusqlite::Error),
