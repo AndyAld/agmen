@@ -60,6 +60,9 @@ struct Record {
     source: Source,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     role: Option<agmen_proto::RoleName>,
+    /// The layer that supplied the role at launch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    role_layer: Option<String>,
 }
 
 /// How the agent's folder came to be.
@@ -347,8 +350,10 @@ impl Managed {
                 .map_or_else(|| "5".into(), |n| n.to_string()),
             source: Source::Launched,
             role: identity.role.clone(),
+            role_layer: role.as_ref().map(|role| role.layer.to_string()),
         };
         let config_dir = self.agent_dir(&identity.identity_id);
+        let record_layer = record.role_layer.clone();
         let record_copy = record.clone();
         tokio::task::spawn_blocking(move || {
             std::fs::DirBuilder::new()
@@ -382,9 +387,11 @@ impl Managed {
         if let Err(error) = identities.post(&metadata, hello).await {
             tracing::warn!(code=?error.code,"managed agent HELLO is pending connection");
         }
-        Ok(
-            json!({"identity":identity.identity_id,"identity_id":identity.identity_id,"handle":handle,"worktree":worktree,"branch":branch,"state":"idle"}),
-        )
+        let mut answer = json!({"identity":identity.identity_id,"identity_id":identity.identity_id,"handle":handle,"worktree":worktree,"branch":branch,"state":"idle"});
+        if let Some(layer) = &record_layer {
+            answer["layer"] = json!(layer);
+        }
+        Ok(answer)
     }
 
     async fn mint(
@@ -474,6 +481,9 @@ impl Managed {
             })?;
             if role.kind == agmen_roles::Kind::Listener {
                 return Err(bad_request("listeners are started by the listener runtime, not agent_launch"));
+            }
+            if let Some(shadow) = shadowed_builtin(&catalog, &layers.builtin, role) {
+                return Err(bad_request(format!("role {name:?} uses the project-layer role {shadow:?}, which takes the name of a built-in role; project roles may not shadow built-in roles (use a personal role)")));
             }
             if agmen_roles::render_prompt(role).len() > MAX_ROLE_PROMPT_BYTES {
                 return Err(bad_request(format!("role {name:?} prompt exceeds 64 KiB")));
@@ -594,7 +604,7 @@ impl Managed {
             {
                 continue;
             }
-            let mut entry = json!({"identity":record.identity.identity_id,"project":record.identity.project,"handle":record.identity.handle,"state":worker.state,"model":record.model,"budget_usd":record.budget_usd,"spent_usd":worker.budget.spent().usd(),"worktree":record.worktree,"branch":record.branch,"source":record.source,"role":record.role});
+            let mut entry = json!({"identity":record.identity.identity_id,"project":record.identity.project,"handle":record.identity.handle,"state":worker.state,"model":record.model,"budget_usd":record.budget_usd,"spent_usd":worker.budget.spent().usd(),"worktree":record.worktree,"branch":record.branch,"source":record.source,"role":record.role,"layer":record.role_layer});
             if let Some(failure) = &worker.role_error {
                 entry["role_error"] = json!(failure);
             }
@@ -889,6 +899,32 @@ async fn run_worker(
             }
         }
     }
+}
+
+/// The first role in `role`'s inheritance chain that comes from the project
+/// layer under a built-in role's name. The project layer is whatever the
+/// repository's committers wrote, so it may not replace a built-in.
+fn shadowed_builtin<'a>(
+    catalog: &'a agmen_roles::Catalog,
+    builtin: &[(String, String)],
+    role: &'a agmen_roles::Resolved,
+) -> Option<&'a str> {
+    let mut current = Some(role);
+    // Role chains are short; the bound only guards a pathological one.
+    for _ in 0..16 {
+        let link = current?;
+        if link.layer == agmen_roles::Layer::Project
+            && builtin.iter().any(|(name, _)| *name == link.role.name)
+        {
+            return Some(&link.role.name);
+        }
+        current = link
+            .role
+            .extends
+            .as_deref()
+            .and_then(|parent| catalog.get(parent));
+    }
+    None
 }
 
 fn role_kind(role: &agmen_roles::Resolved) -> IdentityKind {

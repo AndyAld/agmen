@@ -333,6 +333,74 @@ fn custom_role(extends: &str, scope: &str, rule: &str) -> String {
 }
 
 #[tokio::test]
+async fn project_role_may_not_shadow_a_builtin() {
+    let (fixture, requests) = role_fixture().await;
+    let repo = fixture.dir.path().join("repo");
+    let roles = repo.join(".agmen/roles");
+    std::fs::create_dir(&roles).unwrap();
+    std::fs::write(roles.join("reviewer.xml"), "<role name=\"reviewer\" extends=\"base\" kind=\"agent\" tier=\"deep\" version=\"1\"><tools allow=\"read search edit shell\"/><edits scope=\"lanes\"/></role>").unwrap();
+    let failure = fixture
+        .daemon
+        .core
+        .managed
+        .launch(json!({"project":"project1","name":"worker","root":repo,"role":"reviewer"}))
+        .await
+        .unwrap_err();
+    assert_eq!(failure.code, agmen_local::ErrorCode::BadRequest);
+    assert!(failure.message.contains("project"), "{}", failure.message);
+    assert!(failure.message.contains("reviewer"));
+    assert!(failure.message.contains("built-in"));
+    assert!(requests.lock().unwrap().is_empty());
+    assert!(!repo.join(".worktrees").exists());
+}
+
+#[tokio::test]
+async fn project_role_extending_a_shadowed_builtin_is_refused() {
+    let (fixture, requests) = role_fixture().await;
+    let repo = fixture.dir.path().join("repo");
+    let roles = repo.join(".agmen/roles");
+    std::fs::create_dir(&roles).unwrap();
+    std::fs::write(roles.join("reviewer.xml"), "<role name=\"reviewer\" extends=\"base\" kind=\"agent\" tier=\"deep\" version=\"1\"><tools allow=\"read search edit shell\"/><edits scope=\"lanes\"/></role>").unwrap();
+    std::fs::write(
+        roles.join("custom.xml"),
+        custom_role("reviewer", "none", "x"),
+    )
+    .unwrap();
+    let failure = fixture
+        .daemon
+        .core
+        .managed
+        .launch(json!({"project":"project1","name":"worker","root":repo,"role":"custom"}))
+        .await
+        .unwrap_err();
+    assert_eq!(failure.code, agmen_local::ErrorCode::BadRequest);
+    assert!(failure.message.contains("reviewer"));
+    assert!(failure.message.contains("built-in"));
+    assert!(requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn personal_role_may_shadow_a_builtin_and_the_layer_is_reported() {
+    let (mut fixture, _) = role_fixture().await;
+    let personal = fixture.dir.path().join("personal-roles");
+    std::fs::create_dir(&personal).unwrap();
+    std::fs::write(personal.join("reviewer.xml"), "<role name=\"reviewer\" extends=\"base\" kind=\"agent\" tier=\"deep\" version=\"1\"><tools allow=\"read search\"/><verbs allow=\"REVIEW\"/><edits scope=\"none\"/><rules><rule>mine</rule></rules></role>").unwrap();
+    Arc::get_mut(&mut Arc::get_mut(&mut fixture.daemon.core).unwrap().managed)
+        .unwrap()
+        .personal_roles = Some(personal);
+    let managed = &fixture.daemon.core.managed;
+    let launched = managed
+        .launch(json!({"project":"project1","name":"worker","root":fixture.dir.path().join("repo"),"role":"reviewer"}))
+        .await
+        .unwrap();
+    assert_eq!(launched["layer"], "personal");
+    assert_eq!(
+        managed.list(json!({})).await.unwrap()["agents"][0]["layer"],
+        "personal"
+    );
+}
+
+#[tokio::test]
 async fn role_with_no_edits_gets_no_edit_tools_in_either_tier() {
     let (fixture, _) = role_fixture().await;
     let repo = fixture.dir.path().join("repo");
