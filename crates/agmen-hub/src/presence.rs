@@ -76,15 +76,16 @@ pub(crate) struct RosterEntry {
     pub(crate) handle: String,
     pub(crate) kind: IdentityKind,
     pub(crate) status: Status,
+    /// The role supplied at mint, never taken from a HELLO.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) role: Option<String>,
     /// The coding agent its latest HELLO named.
     #[serde(skip_serializing_if = "Option::is_none")]
     agent: Option<String>,
     /// The model its latest HELLO named.
     #[serde(skip_serializing_if = "Option::is_none")]
     model: Option<String>,
-    /// The listener that started it. Always `None` in the MVP: nothing
-    /// mints delegated workers before the roles-listener plan (rulings
-    /// R10, R15), so the identities table has no such column yet.
+    /// The listener that started it, supplied at mint.
     #[serde(skip_serializing_if = "Option::is_none")]
     delegated_by: Option<IdentityId>,
 }
@@ -102,6 +103,7 @@ impl RosterEntry {
             handle,
             kind,
             status,
+            role: None,
             agent: None,
             model: None,
             delegated_by: None,
@@ -335,11 +337,19 @@ impl Hub {
     /// handle, with its status and its latest HELLO's agent and model.
     pub(crate) async fn roster(&self, topics: &Topics) -> Result<Vec<RosterEntry>, RosterError> {
         let project = topics.project();
-        let members: Vec<(String, String, String)> = sqlx::query_as(
-            "SELECT id, kind, handle FROM identities
+        type RosterRow = (
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        );
+        let members: Vec<RosterRow> = sqlx::query_as(
+            "SELECT id, kind, handle, role, agent, delegated_by FROM identities
              WHERE project_id = $1 AND revoked_at IS NULL
              UNION ALL
-             SELECT h.id, 'human', h.handle FROM memberships m
+             SELECT h.id, 'human', h.handle, NULL::text, NULL::text, NULL::text FROM memberships m
              JOIN humans h ON h.id = m.human_id
              WHERE m.project_id = $1
              ORDER BY 3",
@@ -367,7 +377,7 @@ impl Hub {
         .collect();
         members
             .into_iter()
-            .map(|(id, kind, handle)| {
+            .map(|(id, kind, handle, role, minted_agent, delegated_by)| {
                 let (agent, model) = hellos.get(&id).cloned().unwrap_or_default();
                 let identity_id: IdentityId = id
                     .parse()
@@ -376,8 +386,13 @@ impl Hub {
                     .map_err(|err: serde::de::value::Error| RosterError::Stored(err.to_string()))?;
                 let status = self.presence().status(project, &identity_id);
                 Ok(RosterEntry {
-                    agent,
+                    role,
+                    agent: minted_agent.or(agent),
                     model,
+                    delegated_by: delegated_by
+                        .map(|id| id.parse())
+                        .transpose()
+                        .map_err(|err| RosterError::Stored(format!("{err}")))?,
                     ..RosterEntry::new(identity_id, handle, kind, status)
                 })
             })
