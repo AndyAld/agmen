@@ -28,6 +28,9 @@ const MAX_LOGIN_BYTES: u64 = 64 * 1024;
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum LoginError {
+    /// The hub URL would expose credentials over an unsafe transport.
+    #[error(transparent)]
+    HubUrl(#[from] crate::HubUrlError),
     /// Nobody is signed in, the stored tokens are missing or unreadable, or
     /// the hub no longer takes the refresh token.
     #[error("not signed in")]
@@ -105,6 +108,7 @@ impl From<BodyReadError> for LoginError {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Login {
     /// The hub they signed in at.
+    #[serde(deserialize_with = "crate::hub::deserialize_hub_url")]
     pub hub_url: Url,
     /// Their id at that hub.
     pub human_id: IdentityId,
@@ -234,6 +238,7 @@ pub async fn token_grant(
     hub: &Url,
     form: &[(&str, &str)],
 ) -> Result<HumanTokens, LoginError> {
+    crate::check_hub_url(hub)?;
     let mut url = hub.clone();
     if let Ok(mut path) = url.path_segments_mut() {
         path.pop_if_empty().extend(["v1", "auth", "token"]);
@@ -313,6 +318,7 @@ pub async fn human_tokens(
     store: &TokenStore,
     login: &Login,
 ) -> Result<HumanTokens, LoginError> {
+    crate::check_hub_url(&login.hub_url)?;
     let key = login.key().map_err(LoginError::Key)?;
     let reader = store.clone();
     let stored = tokio::task::spawn_blocking(move || reader.get(&key))

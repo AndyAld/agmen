@@ -204,6 +204,7 @@ impl Hub {
         build: impl FnOnce(RequestBuilder) -> RequestBuilder,
     ) -> Result<reqwest::Response, HubError> {
         let (login, token) = self.credentials.access().await?;
+        agmen_client::check_hub_url(&login.hub_url).map_err(LoginError::from)?;
         let mut url = url(&login.hub_url, project, segments);
         if !query.is_empty() {
             url.query_pairs_mut().extend_pairs(query);
@@ -395,6 +396,32 @@ async fn refusal_with_limit(response: reqwest::Response, limit: usize) -> HubErr
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn hub_url_policy_daemon() {
+        use agmen_client::{Login, TokenStore};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("login.json");
+        for base in ["http://hub.example", "ftp://localhost"] {
+            let login = Login {
+                hub_url: base.parse().unwrap(),
+                human_id: "hmn7k2q9".parse().unwrap(),
+                handle: "andy".into(),
+            };
+            std::fs::write(&path, serde_json::to_vec(&login).unwrap()).unwrap();
+            let http = Hub::http().unwrap();
+            let hub = Hub::new(
+                http.clone(),
+                Credentials::new(
+                    path.clone(),
+                    TokenStore::Dir(dir.path().join("tokens")),
+                    http,
+                ),
+            );
+            let error = hub.head(&"project1".parse().unwrap()).await.unwrap_err();
+            assert!(chain(&error).contains("use https"), "{error:?}");
+        }
+    }
 
     #[tokio::test]
     async fn replay_page_body_boundaries() {

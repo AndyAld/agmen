@@ -128,6 +128,7 @@ impl std::fmt::Debug for Api {
 
 impl Api {
     pub(crate) fn new(base: Url, token: impl Into<String>) -> Result<Self> {
+        agmen_client::check_hub_url(&base)?;
         Ok(Self {
             http: http()?,
             base,
@@ -152,6 +153,24 @@ impl Api {
         body: &B,
     ) -> Result<T> {
         send(self.request(Method::POST, segments).json(body)).await
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn hub_url_policy_api() {
+    for hub in [
+        "http://localhost",
+        "http://127.0.0.1",
+        "http://127.2.3.4",
+        "http://[::1]",
+        "https://hub.example",
+    ] {
+        Api::new(hub.parse().unwrap(), "token").unwrap();
+    }
+    for hub in ["http://hub.example", "ftp://localhost"] {
+        let error = Api::new(hub.parse().unwrap(), "token").unwrap_err();
+        assert!(error.to_string().contains("use https"), "{error}");
     }
 }
 

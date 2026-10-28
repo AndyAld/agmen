@@ -7,6 +7,51 @@ use axum::routing::post;
 
 use super::*;
 
+#[test]
+fn hub_url_policy_saved_login() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("login.json");
+    for hub in [
+        "http://localhost",
+        "http://127.0.0.1",
+        "http://127.2.3.4",
+        "http://[::1]",
+        "https://hub.example",
+    ] {
+        let expected = login(hub.parse().unwrap());
+        std::fs::write(&path, serde_json::to_vec(&expected).unwrap()).unwrap();
+        assert_eq!(Login::read(&path).unwrap(), Some(expected));
+    }
+    for hub in [
+        "http://user:password@hub.example/private?secret=yes",
+        "ftp://localhost",
+    ] {
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&login(hub.parse().unwrap())).unwrap(),
+        )
+        .unwrap();
+        let error = Login::read(&path).expect_err("unsafe saved hub");
+        let text = format!("{error:?}");
+        assert!(text.contains("use https"), "{text}");
+        assert!(!text.contains("password"), "{text}");
+    }
+}
+
+#[tokio::test]
+async fn hub_url_policy_token_grant() {
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(100))
+        .build()
+        .unwrap();
+    for hub in ["http://hub.example", "ftp://localhost"] {
+        let error = token_grant(&http, &hub.parse().unwrap(), &[])
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("use https"), "{error:?}");
+    }
+}
+
 /// A token endpoint that answers `status` with `body` and counts calls.
 async fn token_endpoint(status: StatusCode, body: &'static str) -> (Url, Arc<AtomicUsize>) {
     let calls = Arc::new(AtomicUsize::new(0));
