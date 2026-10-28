@@ -157,6 +157,7 @@ struct Live {
     project: String,
     managed: Vec<ManagedAgent>,
     agent_error: Option<String>,
+    agent_notice: Option<String>,
     agent_read_error: Option<String>,
     me: Me,
     roster: Vec<RosterEntry>,
@@ -204,6 +205,7 @@ impl Live {
             (Paging::Failed(why), true) => Older::Failed(why.clone()),
             (Paging::Idle, true) => Older::More,
         };
+        snapshot.agent_notice.clone_from(&self.agent_notice);
         snapshot.agent_error = self
             .agent_error
             .clone()
@@ -726,6 +728,7 @@ impl AgmendBackend {
                 roster: console.roster,
                 managed: Vec::new(),
                 agent_error: None,
+                agent_notice: None,
                 agent_read_error: None,
                 local,
                 held,
@@ -1130,7 +1133,11 @@ fn serve_jobs(shared: &Shared, queue: &Receiver<Job>, mut conn: Option<Conn>) {
                             Fail::Lost(why) => RequestError::Down(why),
                         })
                     });
-                shared.lock().agent_error = result.err().map(|error| error.to_string());
+                {
+                    let mut live = shared.lock();
+                    live.agent_notice = result.as_ref().ok().and_then(context_notice);
+                    live.agent_error = result.err().map(|error| error.to_string());
+                }
                 refresh_agents(shared, &mut conn);
                 shared.lock().publish_snapshot();
             }
@@ -1199,6 +1206,20 @@ fn serve_jobs(shared: &Shared, queue: &Receiver<Job>, mut conn: Option<Conn>) {
                 drop(reply.send(answer));
             }
         }
+    }
+}
+
+/// The line Start or Attach's answer earns when agmend began a fresh
+/// session instead of resuming the folder's last one.
+fn context_notice(answer: &Value) -> Option<String> {
+    match answer.get("context").and_then(Value::as_str)? {
+        "skipped_others" => {
+            Some("Started fresh: its last session included messages from other people.".into())
+        }
+        "skipped_unreadable" => {
+            Some("Started fresh: its last session could not be checked.".into())
+        }
+        _ => None,
     }
 }
 
@@ -1605,6 +1626,7 @@ pub(super) fn snapshot_from(console: ConsoleSnapshot) -> Snapshot {
         managed_agents: BTreeMap::new(),
         managed_work: BTreeMap::new(),
         agent_error: None,
+        agent_notice: None,
         me: me.handle,
         me_id: me.id,
         agents: BTreeMap::new(),

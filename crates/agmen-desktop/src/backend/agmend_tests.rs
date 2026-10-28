@@ -1313,3 +1313,32 @@ fn agent_menu_actions_reach_agmend_with_the_project() {
         ]
     );
 }
+
+#[test]
+fn start_that_skipped_previous_context_says_so() {
+    let fake = FakeAgmend::start(console(vec![]));
+    fake.edit(|state| state.agent_answer = json!({"state": "idle", "context": "skipped_others"}));
+    let (backend, mut updates) = live_backend(&fake);
+    backend
+        .act(Action::StartAgent {
+            identity: ident("idmanaged"),
+            root: Some("/work/sol".into()),
+        })
+        .unwrap();
+    wait_for(&mut updates, |update| {
+        matches!(update, Update::Snapshot(snapshot)
+        if snapshot.agent_notice.as_deref()
+            == Some("Started fresh: its last session included messages from other people."))
+    });
+    fake.edit(|state| state.agent_answer = json!({"state": "idle", "context": "resumed"}));
+    backend
+        .act(Action::StartAgent {
+            identity: ident("idmanaged"),
+            root: None,
+        })
+        .unwrap();
+    wait_for(
+        &mut updates,
+        |update| matches!(update, Update::Snapshot(snapshot) if snapshot.agent_notice.is_none()),
+    );
+}

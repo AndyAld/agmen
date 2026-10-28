@@ -61,6 +61,7 @@ fn base(project: &str) -> Result<Snapshot, BackendError> {
         managed_agents: BTreeMap::new(),
         managed_work: BTreeMap::new(),
         agent_error: None,
+        agent_notice: None,
         listener: Some(listener),
         agents: BTreeMap::from([(fx1.id.clone(), fx1)]),
         status: StatusSummary {

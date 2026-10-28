@@ -255,3 +255,17 @@ fn menu_items_emit_their_actions_and_close_the_menu(cx: &mut TestAppContext) {
         );
     }
 }
+
+#[gpui::test]
+fn a_notice_shows_under_new_agent(cx: &mut TestAppContext) {
+    let (panel, cx, _) = menu_panel(cx, &[]);
+    assert!(cx.debug_bounds("agents:notice").is_none());
+    panel.update(cx, |panel, cx| {
+        panel.set_notice(
+            Some("Started fresh: its last session included messages from other people.".into()),
+            cx,
+        )
+    });
+    redraw(cx);
+    assert!(cx.debug_bounds("agents:notice").is_some());
+}

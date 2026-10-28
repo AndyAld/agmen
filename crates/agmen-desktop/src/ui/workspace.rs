@@ -120,6 +120,7 @@ impl Workspace {
         let agents_panel = cx.new(|_| AgentsPanel::new(snapshot.roster.clone()));
         agents_panel.update(cx, |panel, cx| {
             panel.set_listener(snapshot.listener_id().cloned(), cx);
+            panel.set_notice(snapshot.agent_notice.clone(), cx);
             panel.set_managed(
                 snapshot.managed_agents.clone(),
                 snapshot.agent_error.clone(),

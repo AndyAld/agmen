@@ -5,8 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, Context, EventEmitter, FontWeight, IntoElement, ParentElement as _, Render,
-    Styled as _, Window, div,
+    AnyElement, Context, EventEmitter, FontWeight, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, Styled as _, Window, div,
 };
 
 use super::components::{
@@ -77,6 +77,8 @@ pub(crate) struct AgentsPanel {
     listener: Option<IdentityId>,
     /// The agent whose menu is open.
     menu: Option<IdentityId>,
+    /// A line about the last agent action that is not an error.
+    notice: Option<String>,
 }
 
 impl EventEmitter<AgentsPanelEvent> for AgentsPanel {}
@@ -91,10 +93,19 @@ impl AgentsPanel {
             selected: None,
             listener: None,
             menu: None,
+            notice: None,
         }
     }
 
     /// Tells the panel which agent is the person's listener.
+    /// Shows `notice` under New Agent…, such as a Start that began fresh.
+    pub(crate) fn set_notice(&mut self, notice: Option<String>, cx: &mut Context<Self>) {
+        if self.notice != notice {
+            self.notice = notice;
+            cx.notify();
+        }
+    }
+
     pub(crate) fn set_listener(&mut self, listener: Option<IdentityId>, cx: &mut Context<Self>) {
         self.listener = listener;
         cx.notify();
@@ -360,6 +371,11 @@ impl Render for AgentsPanel {
                     .style(ButtonStyle::Plain)
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(AgentsPanelEvent::NewAgent))),
             )
+            .children(self.notice.clone().map(|notice| {
+                div()
+                    .debug_selector(|| "agents:notice".into())
+                    .child(Label::new(notice).color(Color::Muted).wrap())
+            }))
             .children(
                 self.error
                     .clone()

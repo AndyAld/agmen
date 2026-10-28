@@ -194,6 +194,8 @@ pub(crate) struct FakeState {
     pub(crate) posts: Vec<Request>,
     pub(crate) agent_requests: Vec<Request>,
     pub(crate) managed_state: Option<String>,
+    /// What agent actions other than `agent_list` answer; `{}` when null.
+    pub(crate) agent_answer: Value,
     pub(crate) snapshots_served: usize,
     /// Task 8: each `console_snapshot`'s params.
     pub(crate) snapshot_params: Vec<Value>,
@@ -392,7 +394,12 @@ fn managed_response(request: Request, state: &Mutex<FakeState>) -> Response {
             _ => Some("offline".into()),
         };
         state.agent_requests.push(request);
-        Response::ok(id, json!({}))
+        let answer = if state.agent_answer.is_null() {
+            json!({})
+        } else {
+            state.agent_answer.clone()
+        };
+        Response::ok(id, answer)
     }
 }
 

@@ -606,6 +606,9 @@ pub(crate) struct Snapshot {
     /// Where each managed agent works, as agmend lists it.
     pub(crate) managed_work: BTreeMap<IdentityId, ManagedWork>,
     pub(crate) agent_error: Option<String>,
+    /// A plain line about the last agent action that is not an error, such
+    /// as a Start that skipped the previous context.
+    pub(crate) agent_notice: Option<String>,
     pub(crate) roster: Vec<PersonGroup>,
     /// The person's own listener; `None` when the project has none for
     /// them (Task 7), and the Listener panel says so.
