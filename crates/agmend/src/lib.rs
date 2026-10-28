@@ -46,8 +46,6 @@ use crate::state::Store;
 #[derive(Debug)]
 pub(crate) struct Core {
     console: Arc<Console>,
-    #[expect(dead_code, reason = "pending API consumes the store in B T5")]
-    store: Arc<std::sync::Mutex<Store>>,
     identities: Arc<Identities>,
 }
 
@@ -242,12 +240,12 @@ impl Agmend {
             credentials,
             store.clone(),
             config.socket.with_file_name(""),
+            hub.clone(),
         ));
         Ok(Self {
             bound,
             opening,
             core: Arc::new(Core {
-                store,
                 identities,
                 console: Arc::new(Console {
                     hub,
@@ -270,15 +268,30 @@ impl Agmend {
     /// Accepts connections until the future is dropped, one task each.
     /// Dropping it removes the socket and releases the lock.
     pub async fn serve(self) {
+        self.serve_until(std::future::pending()).await;
+    }
+
+    /// Serves until `shutdown` resolves, then joins daemon-owned collectors
+    /// and sessions, waiting at most 5 s per task and 10 s in total.
+    pub async fn serve_until(self, shutdown: impl std::future::Future<Output = ()>) {
         if let Err(error) = self.opening.await {
             tracing::warn!(%error, "daemon state opener failed");
             return;
         }
         let slots = Arc::new(Semaphore::new(MAX_CONNECTIONS));
         let mut tasks = JoinSet::new();
+        let identities = self.core.identities.clone();
+        tasks.spawn(async move {
+            identities.supervise().await;
+        });
+        tokio::pin!(shutdown);
         loop {
             while tasks.try_join_next().is_some() {}
-            let stream = match self.bound.listener.accept().await {
+            let accepted = tokio::select! {
+                () = &mut shutdown => break,
+                accepted = self.bound.listener.accept() => accepted,
+            };
+            let stream = match accepted {
                 Ok((stream, _)) => stream,
                 Err(err) => {
                     // Out of file descriptors, most likely; wait for some
@@ -302,5 +315,8 @@ impl Agmend {
                 drop(slot);
             });
         }
+        tasks.abort_all();
+        while tasks.join_next().await.is_some() {}
+        self.core.identities.shutdown().await;
     }
 }

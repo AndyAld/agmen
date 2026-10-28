@@ -14,7 +14,7 @@ use std::time::Duration;
 use agmen_client::{LoginError, Page};
 use agmen_local::console::RosterEntry;
 use agmen_local::{ApiError, ErrorCode};
-use agmen_proto::{ClientEnvelope, DeliveryReply, NackReason, ProjectId, Seq, Stream};
+use agmen_proto::{ClientEnvelope, DeliveryReply, IdentityId, NackReason, ProjectId, Seq, Stream};
 use reqwest::{Method, RequestBuilder, StatusCode};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -33,6 +33,8 @@ const READ_TIMEOUT: Duration = Duration::from_secs(45);
 /// Why a hub call failed.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum HubError {
+    #[error("invalid hub response: {0}")]
+    Invalid(&'static str),
     /// The person's sign-in could not be had.
     #[error(transparent)]
     Login(#[from] LoginError),
@@ -103,9 +105,10 @@ impl From<HubError> for ApiError {
                 ErrorCode::Hub,
                 format!("the hub refused the message: {reason} (retry after {ms} ms)"),
             ),
-            HubError::Refused { .. } | HubError::Http(_) | HubError::Nack { .. } => {
-                (ErrorCode::Hub, chain(&err))
-            }
+            HubError::Invalid(_)
+            | HubError::Refused { .. }
+            | HubError::Http(_)
+            | HubError::Nack { .. } => (ErrorCode::Hub, chain(&err)),
         };
         Self { code, message }
     }
@@ -213,6 +216,23 @@ impl Hub {
         json(response).await
     }
 
+    async fn get_bounded<T: DeserializeOwned>(
+        &self,
+        project: &ProjectId,
+        segments: &[&str],
+        query: &[(&str, &str)],
+    ) -> Result<T, HubError> {
+        let response = self
+            .send(Method::GET, project, segments, query, |r| {
+                r.timeout(REQUEST_TIMEOUT)
+            })
+            .await?;
+        if !response.status().is_success() {
+            return Err(refusal(response).await);
+        }
+        body_json(response).await
+    }
+
     /// The feed's head seq (`state?key=head`).
     pub(crate) async fn head(&self, project: &ProjectId) -> Result<u64, HubError> {
         let answer: StateAnswer<Head> = self.get(project, &["state"], &[("key", "head")]).await?;
@@ -240,6 +260,50 @@ impl Hub {
             &[("after", &after), ("limit", &limit)],
         )
         .await
+    }
+
+    pub(crate) async fn inbox(
+        &self,
+        project: &ProjectId,
+        identity: &IdentityId,
+        after: u64,
+        limit: u32,
+    ) -> Result<Page, HubError> {
+        self.stream_page(project, &Stream::Inbox(identity.clone()), after, limit)
+            .await
+    }
+
+    pub(crate) async fn stream_page(
+        &self,
+        project: &ProjectId,
+        stream: &Stream,
+        after: u64,
+        limit: u32,
+    ) -> Result<Page, HubError> {
+        let page: Page = self
+            .get_bounded(
+                project,
+                &["streams", &stream.to_string()],
+                &[("after", &after.to_string()), ("limit", &limit.to_string())],
+            )
+            .await?;
+        if page.messages.len() > limit as usize
+            || page
+                .messages
+                .iter()
+                .any(|m| &m.stream != stream || m.seq.0 <= after)
+        {
+            return Err(HubError::Invalid("replay bounds or stream"));
+        }
+        Ok(page)
+    }
+
+    pub(crate) async fn state(
+        &self,
+        project: &ProjectId,
+        key: &str,
+    ) -> Result<serde_json::Value, HubError> {
+        self.get_bounded(project, &["state"], &[("key", key)]).await
     }
 
     /// Posts `envelope` as the person; the stream and seq it was recorded
@@ -328,13 +392,52 @@ async fn json<T: DeserializeOwned>(response: reqwest::Response) -> Result<T, Hub
     }
 }
 
+async fn body_json<T: DeserializeOwned>(mut response: reqwest::Response) -> Result<T, HubError> {
+    const MAX_BODY: usize = 16 * 1024 * 1024;
+    let mut bytes = Vec::new();
+    for _ in 0..=MAX_BODY {
+        let Some(chunk) = response.chunk().await.map_err(HubError::Http)? else {
+            return serde_json::from_slice(&bytes).map_err(|_| HubError::Invalid("JSON"));
+        };
+        if chunk.len() > MAX_BODY.saturating_sub(bytes.len()) {
+            return Err(HubError::Invalid("body exceeds 16 MiB"));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Err(HubError::Invalid("too many body chunks"))
+}
+
 /// A failed answer as [`HubError::Refused`].
 async fn refusal(response: reqwest::Response) -> HubError {
     let status = response.status().as_u16();
     // A body that does not parse leaves only the status.
-    let code = response
-        .json::<ErrorBody>()
+    let code = body_json::<ErrorBody>(response)
         .await
         .map_or_else(|_| String::new(), |body| body.error);
     HubError::Refused { status, code }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn oversized_success_and_refusal_bodies_are_bounded() {
+        let body = serde_json::json!({"error":"x".repeat(16 * 1024 * 1024)}).to_string();
+        let response = axum::http::Response::builder()
+            .status(200)
+            .body(body.clone())
+            .unwrap();
+        assert!(matches!(
+            body_json::<serde_json::Value>(response.into()).await,
+            Err(HubError::Invalid("body exceeds 16 MiB"))
+        ));
+        let response = axum::http::Response::builder()
+            .status(403)
+            .body(body)
+            .unwrap();
+        assert!(
+            matches!(refusal(response.into()).await,HubError::Refused { status:403,code } if code.is_empty())
+        );
+    }
 }

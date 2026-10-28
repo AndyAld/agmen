@@ -43,6 +43,8 @@ pub(crate) async fn serve(stream: UnixStream, core: Arc<Core>) {
             }
         };
         let id = request.id;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        let bounded = matches!(request.method.as_str(), "inbox" | "state" | "pending");
         let outcome = if let Some(refusal) = refuse(&request, greeted) {
             Err(refusal)
         } else {
@@ -57,6 +59,43 @@ pub(crate) async fn serve(stream: UnixStream, core: Arc<Core>) {
             };
             match caller {
                 Err(error) => Err(error),
+                Ok(caller) if request.method == "watch" => {
+                    if let Err(error) = core
+                        .identities
+                        .watch(&caller, id, request.params, reader, &mut writer)
+                        .await
+                    {
+                        // A terminal error is best effort; a blocked reader is closed.
+                        let _written = tokio::time::timeout(
+                            std::time::Duration::from_secs(10),
+                            answer(&mut writer, id, Err(error)),
+                        )
+                        .await;
+                    }
+                    return;
+                }
+                Ok(caller) if request.method == "inbox" => {
+                    finite(deadline, core.identities.inbox(&caller, request.params)).await
+                }
+                Ok(caller) if request.method == "state" => {
+                    finite(deadline, core.identities.state(&caller, request.params)).await
+                }
+                Ok(caller) if request.method == "pending" => {
+                    #[derive(Deserialize)]
+                    #[serde(deny_unknown_fields)]
+                    struct Pending {}
+                    match params::<Pending>(request.params) {
+                        Err(error) => Err(error),
+                        Ok(_) => match caller {
+                            Caller::Human => {
+                                Err(bad_request("pending requires an identity caller"))
+                            }
+                            Caller::Identity(identity) => {
+                                finite(deadline, core.identities.pending(&identity)).await
+                            }
+                        },
+                    }
+                }
                 Ok(Caller::Identity(caller)) => {
                     identity_call(&core, &caller, &request.method, request.params).await
                 }
@@ -75,10 +114,29 @@ pub(crate) async fn serve(stream: UnixStream, core: Arc<Core>) {
                 Ok(Caller::Human) => call(console, &request.method, request.params).await,
             }
         };
-        if !answer(&mut writer, id, outcome).await {
+        let written = if bounded {
+            tokio::time::timeout_at(deadline, answer(&mut writer, id, outcome))
+                .await
+                .unwrap_or(false)
+        } else {
+            answer(&mut writer, id, outcome).await
+        };
+        if !written {
             return;
         }
     }
+}
+
+async fn finite(
+    deadline: tokio::time::Instant,
+    operation: impl std::future::Future<Output = Result<Value, ApiError>>,
+) -> Result<Value, ApiError> {
+    tokio::time::timeout_at(deadline, operation)
+        .await
+        .map_err(|_| ApiError {
+            code: ErrorCode::Hub,
+            message: "local operation timed out".into(),
+        })?
 }
 
 /// Why `request` cannot run, if it cannot.
@@ -135,11 +193,6 @@ async fn identity_call(
             }
             core.identities.post(caller, envelope).await
         }
-        // The scoped read handlers land in B T5.
-        "inbox" | "watch" | "state" | "pending" => Err(ApiError {
-            code: ErrorCode::NotFound,
-            message: format!("agmend has no method {method:?}"),
-        }),
         "hello" | "whoami" | "console_watch" | "console_snapshot" | "chat_history"
         | "file_text" | "identity_mint" | "identity_list" => Err(forbidden()),
         other => Err(ApiError {

@@ -734,3 +734,35 @@ fn origin_and_project_isolate_pending_and_positions() {
             .is_empty()
     );
 }
+
+#[test]
+fn owner_position_namespaces_preserve_project_quota() {
+    let (_dir, mut store, who) = setup();
+    let other: IdentityId = "other001".parse().unwrap();
+    for seq in 0..256 {
+        let mut event = message(1);
+        event.stream = Stream::Inbox(format!("stream{seq:03}").parse().unwrap());
+        let owner = if seq % 2 == 0 { &who.owner_id } else { &other };
+        store
+            .ingest_for_owner(ORIGIN, &who.project, &event, Some(owner))
+            .unwrap();
+    }
+    assert_eq!(
+        store
+            .positions_for_owner(ORIGIN, &who.owner_id, &who.project)
+            .unwrap()
+            .len(),
+        128
+    );
+    assert_eq!(
+        store
+            .positions_for_owner(ORIGIN, &other, &who.project)
+            .unwrap()
+            .len(),
+        128
+    );
+    assert!(matches!(
+        store.ingest_for_owner(ORIGIN, &who.project, &message(1), Some(&other)),
+        Err(StoreError::Full("256 stream positions"))
+    ));
+}

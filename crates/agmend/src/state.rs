@@ -72,14 +72,15 @@ pub(crate) struct Store {
     conn: Connection,
 }
 
-// These methods are consumed by B T2 and B T5, after the durable store lands.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "store operations are wired to identity calls in later plan tasks"
+// Canonical URL origins contain no fragment and IdentityId contains only
+// lowercase ASCII letters and digits. This key never leaves the database.
+fn position_namespace(origin: &str, owner: Option<&IdentityId>) -> String {
+    owner.map_or_else(
+        || origin.to_owned(),
+        |owner| format!("{origin}#owner={owner}"),
     )
-)]
+}
+
 impl Store {
     pub(crate) fn open(path: &Path) -> Result<Self, StoreError> {
         let parent = path
@@ -143,6 +144,10 @@ impl Store {
         Ok(Self { conn })
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "identity registration lands in B T3")
+    )]
     pub(crate) fn register(&mut self, identity: &ManagedIdentity) -> Result<(), StoreError> {
         let origin = identity.hub_url.origin().ascii_serialization();
         let tx = self
@@ -211,15 +216,38 @@ impl Store {
         Ok(result)
     }
 
+    pub(crate) fn positions_for_owner(
+        &self,
+        origin: &str,
+        owner: &IdentityId,
+        project: &ProjectId,
+    ) -> Result<BTreeMap<Stream, u64>, StoreError> {
+        // B T5 is the first production ingester. Unattributed test-era positions
+        // must not be inherited by a different login; catch up from zero instead.
+        self.positions(&position_namespace(origin, Some(owner)), project)
+    }
+
+    #[cfg(test)]
     pub(crate) fn ingest(
         &mut self,
         origin: &str,
         project: &ProjectId,
         message: &StampedEnvelope,
     ) -> Result<(), StoreError> {
+        self.ingest_for_owner(origin, project, message, None)
+    }
+
+    pub(crate) fn ingest_for_owner(
+        &mut self,
+        origin: &str,
+        project: &ProjectId,
+        message: &StampedEnvelope,
+        owner: Option<&IdentityId>,
+    ) -> Result<(), StoreError> {
         let seq = i64::try_from(message.seq.0)
             .map_err(|_| StoreError::Invalid("sequence exceeds SQLite integer"))?;
         let raw = serde_json::to_string(message)?;
+        let position_origin = position_namespace(origin, owner);
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -227,7 +255,7 @@ impl Store {
         let previous: Option<i64> = tx
             .query_row(
                 "SELECT seq FROM positions WHERE origin=?1 AND project=?2 AND stream=?3",
-                params![origin, project.as_str(), stream],
+                params![position_origin, project.as_str(), stream],
                 |r| r.get(0),
             )
             .optional()?;
@@ -243,17 +271,19 @@ impl Store {
         }
         if previous.is_none() {
             let count: i64 = tx.query_row(
-                "SELECT count(*) FROM positions WHERE origin=?1 AND project=?2",
-                params![origin, project.as_str()],
+                "SELECT count(*) FROM positions WHERE project=?2 AND (origin=?1 OR substr(origin,1,length(?3))=?3)",
+                params![origin, project.as_str(),format!("{origin}#owner=")],
                 |r| r.get(0),
             )?;
             if count >= 256 {
                 return Err(StoreError::Full("256 stream positions"));
             }
         }
-        let mut stmt = tx.prepare("SELECT identity FROM identities WHERE origin=?1 AND project=?2 ORDER BY identity LIMIT 64")?;
-        let identities =
-            stmt.query_map(params![origin, project.as_str()], |r| r.get::<_, String>(0))?;
+        let mut stmt = tx.prepare("SELECT identity FROM identities WHERE origin=?1 AND project=?2 AND (?3 IS NULL OR owner=?3) ORDER BY identity LIMIT 64")?;
+        let identities = stmt.query_map(
+            params![origin, project.as_str(), owner.map(IdentityId::as_str)],
+            |r| r.get::<_, String>(0),
+        )?;
         for row in identities {
             let id = row?
                 .parse::<IdentityId>()
@@ -308,7 +338,7 @@ impl Store {
         }
         drop(stmt);
         tx.execute("INSERT INTO positions VALUES (?1,?2,?3,?4) ON CONFLICT(origin,project,stream) DO UPDATE SET seq=excluded.seq",
-            params![origin, project.as_str(), stream, seq])?;
+            params![position_origin, project.as_str(), stream, seq])?;
         tx.commit()?;
         Ok(())
     }
