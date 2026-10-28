@@ -979,10 +979,15 @@ async fn read_pid(pid_file: &Path) -> Option<Pid> {
     std::str::from_utf8(&bytes).ok().and_then(parse_pid)
 }
 
+/// How long `ps` may take. A loaded machine (several builds at once) has
+/// taken over 2 s, and a `ps` that times out leaves a stale pid file
+/// blocking Start.
+const PS_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// When `pid` started, from `ps -o etime=`.
 async fn started(pid: Pid) -> Option<std::time::SystemTime> {
     let output = tokio::time::timeout(
-        Duration::from_secs(2),
+        PS_TIMEOUT,
         tokio::process::Command::new("/bin/ps")
             .args(["-o", "etime=", "-p", &pid.as_raw_nonzero().to_string()])
             .env("LC_ALL", "C")
