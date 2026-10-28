@@ -25,6 +25,12 @@ pub(super) struct Incoming {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct BatchId(u64);
 
+impl BatchId {
+    pub(super) fn get(self) -> u64 {
+        self.0
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct Batch {
     pub(super) batch_id: BatchId,
