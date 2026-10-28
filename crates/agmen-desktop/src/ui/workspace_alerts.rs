@@ -39,6 +39,9 @@ impl Workspace {
         let workspace = cx.entity().downgrade();
         Some(
             div()
+                // Over the docks' drag handles, so a click on the toast
+                // stays on it.
+                .occlude()
                 .absolute()
                 .top(TOAST_TOP)
                 .right(SPACE_16)

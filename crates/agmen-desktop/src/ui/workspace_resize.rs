@@ -6,7 +6,7 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, AppContext as _, Context, CursorStyle, Div, DragMoveEvent, InteractiveElement as _,
     IntoElement, MouseButton, MouseDownEvent, MouseUpEvent, Pixels, Render,
-    StatefulInteractiveElement as _, Styled as _, Window, deferred, div, px,
+    StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
 
 use super::Workspace;
@@ -81,17 +81,26 @@ impl Workspace {
         }
     }
 
+    /// The width `side` would draw at with room to spare, `None` when it
+    /// is closed.
+    fn wanted_width(&self, side: DockSide, cx: &App) -> Option<Pixels> {
+        let width = match side {
+            DockSide::Left => self.left_dock.width().unwrap_or(LEFT_DOCK_WIDTH),
+            DockSide::Right => self
+                .right_dock
+                .width()
+                .unwrap_or_else(|| self.right_dock_default_width(cx)),
+        };
+        self.is_dock_open(side).then(|| side.clamp_width(width))
+    }
+
     /// The open docks' widths in a body `total` wide.
     pub(super) fn dock_widths(&self, total: Pixels, cx: &App) -> (Option<Pixels>, Option<Pixels>) {
-        let left = self
-            .is_dock_open(DockSide::Left)
-            .then(|| self.left_dock.width().unwrap_or(LEFT_DOCK_WIDTH));
-        let right = self.is_dock_open(DockSide::Right).then(|| {
-            self.right_dock
-                .width()
-                .unwrap_or_else(|| self.right_dock_default_width(cx))
-        });
-        fit(left, right, total)
+        fit(
+            self.wanted_width(DockSide::Left, cx),
+            self.wanted_width(DockSide::Right, cx),
+            total,
+        )
     }
 
     /// Sets `side`'s width from a drag to `wanted`, in a body `total`
@@ -104,10 +113,23 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let (left, right) = self.dock_widths(total, cx);
-        let other = match side {
-            DockSide::Left => right,
-            DockSide::Right => left,
+        let (other_side, other) = match side {
+            DockSide::Left => (DockSide::Right, right),
+            DockSide::Right => (DockSide::Left, left),
         };
+        // As a drag starts, a dock the window squeezes keeps the width it
+        // draws at, so it never takes the room the dragged dock gives up.
+        if !self.dock_dragged
+            && let Some(drawn) = other
+            && self
+                .wanted_width(other_side, cx)
+                .is_some_and(|wanted| drawn < wanted)
+        {
+            match other_side {
+                DockSide::Left => self.left_dock.set_width(Some(drawn)),
+                DockSide::Right => self.right_dock.set_width(Some(drawn)),
+            }
+        }
         let room = total - CENTER_MIN_WIDTH - other.unwrap_or_default();
         let width = side
             .clamp_width(wanted)
@@ -155,14 +177,20 @@ impl Workspace {
         }
     }
 
-    /// The drag handle on `side`'s inner border, for the dock's own
-    /// (relative) box: 6 px wide, centered on the border, drawn over the
-    /// center so the half past the dock still takes the mouse.
-    pub(super) fn dock_resize_handle(side: DockSide, cx: &Context<Self>) -> impl IntoElement {
-        // Insets count from inside the border, so the border's middle is
-        // half a border further out.
-        let offset = -(BORDER_WIDTH + RESIZE_HANDLE_WIDTH) / 2.;
-        let handle = div()
+    /// The drag handle on the inner border of `side`, a dock `width` wide,
+    /// for the body's (relative) box: 6 px wide and centered on the border.
+    /// The body draws it after both docks and the center, so both halves
+    /// take the mouse, and before every overlay (palette, dialogs, toast,
+    /// popups), which the workspace and its parents draw later, so those
+    /// stay on top.
+    pub(super) fn dock_resize_handle(
+        side: DockSide,
+        width: Pixels,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        // From the body's edge to the handle's near edge.
+        let inset = width - (BORDER_WIDTH + RESIZE_HANDLE_WIDTH) / 2.;
+        div()
             .id(match side {
                 DockSide::Left => "left-dock-resize",
                 DockSide::Right => "right-dock-resize",
@@ -175,8 +203,8 @@ impl Workspace {
             .top_0()
             .bottom_0()
             .w(RESIZE_HANDLE_WIDTH)
-            .when(side == DockSide::Left, |handle| handle.right(offset))
-            .when(side == DockSide::Right, |handle| handle.left(offset))
+            .when(side == DockSide::Left, |handle| handle.left(inset))
+            .when(side == DockSide::Right, |handle| handle.right(inset))
             .cursor(CursorStyle::ResizeColumn)
             .occlude()
             .on_drag(DraggedDock(side), |dock, _, _, cx| {
@@ -194,8 +222,7 @@ impl Workspace {
                         cx.stop_propagation();
                     }
                 }),
-            );
-        deferred(handle)
+            )
     }
 
     /// Registers, on the body that holds the docks, the drag that resizes

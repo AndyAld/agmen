@@ -6,6 +6,7 @@ use gpui::{
 use super::super::Workspace;
 use crate::appearance::DesktopSettings;
 use crate::backend::{Backend as _, FixtureBackend, Screen, chat_snapshot};
+use crate::ui::dock::DockSide;
 use crate::ui::test_support::{click, init, redraw};
 use crate::ui::tokens::{BORDER_WIDTH, LEFT_DOCK_WIDTH, PLAN_PANEL_WIDTH, RIGHT_DOCK_WIDTH};
 
@@ -63,6 +64,11 @@ fn handle_center(cx: &mut VisualTestContext, handle: &'static str) -> Point<Pixe
 /// Presses on `handle` and moves the mouse to `x`, without letting go.
 fn drag_to(cx: &mut VisualTestContext, handle: &'static str, x: f32) -> Point<Pixels> {
     let start = handle_center(cx, handle);
+    drag_from(cx, start, x)
+}
+
+/// Presses at `start` and moves the mouse to `x`, without letting go.
+fn drag_from(cx: &mut VisualTestContext, start: Point<Pixels>, x: f32) -> Point<Pixels> {
     cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
     // The first move past gpui's threshold starts the drag.
     cx.simulate_mouse_move(
@@ -325,4 +331,126 @@ fn the_plan_panel_keeps_its_wider_default_until_resized(cx: &mut TestAppContext)
     assert_eq!(width(cx, "right-dock"), px(400.));
     double_click(cx, RIGHT_HANDLE);
     assert_eq!(width(cx, "right-dock"), PLAN_PANEL_WIDTH);
+}
+
+/// Moves the pressed mouse on to `x`, in a drag already under way.
+fn move_to(cx: &mut VisualTestContext, x: f32) {
+    let y = cx.update(|window, _| window.mouse_position().y);
+    cx.simulate_mouse_move(point(px(x), y), MouseButton::Left, Modifiers::none());
+    redraw(cx);
+}
+
+// Review of 1e1eeae, bug 2: in a window too narrow for both saved widths,
+// narrowing the left dock let the right dock take the space, which then
+// locked the left dock at its minimum.
+#[gpui::test]
+fn the_dock_not_dragged_never_grows_during_a_drag(cx: &mut TestAppContext) {
+    let (_home, file) = settings_home(
+        cx,
+        "[desktop]\nleft_dock_width = 480\nright_dock_width = 640\n",
+    );
+    let (_, cx) = open(cx, 1000.);
+    assert_eq!(width(cx, "left-dock"), px(380.));
+    assert_eq!(width(cx, "right-dock"), px(260.));
+    drag_to(cx, LEFT_HANDLE, 200.);
+    assert_eq!(width(cx, "left-dock"), px(200.));
+    assert_eq!(width(cx, "right-dock"), px(260.), "the right dock stays");
+    for (x, want) in [(272., 272.), (350., 350.), (480., 380.)] {
+        move_to(cx, x);
+        assert_eq!(width(cx, "left-dock"), px(want), "dragged to {x}");
+        assert_eq!(width(cx, "right-dock"), px(260.), "dragged to {x}");
+        assert!(center_width(cx) >= px(360.), "dragged to {x}");
+    }
+    let at = cx.update(|window, _| window.mouse_position());
+    cx.simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+    redraw(cx);
+    assert_eq!(width(cx, "left-dock"), px(380.));
+    assert_eq!(width(cx, "right-dock"), px(260.), "no jump on letting go");
+    assert_eq!(saved(&file, "left_dock_width"), Some(380));
+    assert_eq!(saved(&file, "right_dock_width"), Some(260));
+}
+
+// Review of 1e1eeae, bug 1: the handles were drawn over every overlay and
+// took their clicks.
+#[gpui::test]
+fn a_palette_row_over_a_handle_takes_the_click(cx: &mut TestAppContext) {
+    // The 600 px palette centered in 1000 px spans the left handle at 272.
+    let (workspace, cx) = open(cx, 1000.);
+    cx.update(|_, cx| crate::keymap::bind_all(cx));
+    workspace.update_in(cx, |w, window, cx| w.focus_handle.focus(window, cx));
+    let handle_x = handle_center(cx, LEFT_HANDLE).x;
+    cx.simulate_keystrokes("cmd-shift-p");
+    cx.simulate_input("toggle left dock");
+    redraw(cx);
+    let row = cx
+        .debug_bounds("palette-row:0")
+        .expect("the palette lists a row");
+    assert!(row.left() < handle_x && handle_x < row.right());
+    let at = point(handle_x, row.center().y);
+    cx.simulate_click(at, Modifiers::none());
+    redraw(cx);
+    workspace.read_with(cx, |w, _| {
+        assert!(!w.is_dock_open(DockSide::Left), "the row ran");
+    });
+    assert!(cx.debug_bounds("command-palette").is_none());
+}
+
+/// Opens the New Agent dialog in a window 900 wide, where its 440 px card
+/// spans the left handle at 272, and gives the handle's middle.
+fn open_new_agent(
+    cx: &mut TestAppContext,
+) -> (Entity<Workspace>, &mut VisualTestContext, Point<Pixels>) {
+    let (workspace, cx) = open(cx, 900.);
+    let handle = handle_center(cx, LEFT_HANDLE);
+    workspace.update(cx, |w, cx| w.open_new_agent(cx));
+    redraw(cx);
+    let card = cx.debug_bounds("new-agent:card").unwrap();
+    assert!(card.left() < handle.x && handle.x < card.right());
+    (workspace, cx, handle)
+}
+
+#[gpui::test]
+fn a_modal_field_over_a_handle_takes_the_click(cx: &mut TestAppContext) {
+    let (workspace, cx, handle) = open_new_agent(cx);
+    let field = cx.debug_bounds("new-agent:model").unwrap();
+    let workspace_focus = workspace.read_with(cx, |w, _| w.focus_handle.clone());
+    let before = cx.update(|window, cx| window.focused(cx));
+    assert!(
+        before.is_none_or(|focus| focus == workspace_focus),
+        "no field has the focus yet"
+    );
+    cx.simulate_click(point(handle.x, field.center().y), Modifiers::none());
+    redraw(cx);
+    let focused = cx.update(|window, cx| window.focused(cx));
+    assert!(
+        focused.is_some_and(|focus| focus != workspace_focus),
+        "the model field took the focus"
+    );
+    assert!(cx.debug_bounds("new-agent").is_some(), "the dialog stays");
+}
+
+#[gpui::test]
+fn a_drag_at_a_handle_under_a_modal_changes_nothing(cx: &mut TestAppContext) {
+    let (_home, file) = settings_home(cx, "# agmen settings\n");
+    let (_, cx, handle) = open_new_agent(cx);
+    let before = std::fs::read_to_string(&file).unwrap();
+    let end = drag_from(cx, handle, 400.);
+    cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::none());
+    redraw(cx);
+    assert_eq!(width(cx, "left-dock"), LEFT_DOCK_WIDTH);
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
+}
+
+#[gpui::test]
+fn the_toast_over_a_handle_takes_the_click(cx: &mut TestAppContext) {
+    let (_, cx) = open_screen(cx, Screen::NeedsYou);
+    let handle = handle_center(cx, RIGHT_HANDLE);
+    let toast = cx.debug_bounds("toast").expect("the screen shows a toast");
+    assert!(toast.left() < handle.x && handle.x < toast.right());
+    cx.simulate_click(point(handle.x, toast.center().y), Modifiers::none());
+    redraw(cx);
+    assert!(
+        cx.debug_bounds("toast").is_none(),
+        "the click opened the alert"
+    );
 }

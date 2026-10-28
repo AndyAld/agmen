@@ -337,6 +337,7 @@ impl Workspace {
         // The workspace fills the window, so its body is the window wide.
         let (left_width, right_width) = self.dock_widths(window.viewport_size().width, cx);
         let mut body = Self::dock_resize_listeners(div(), cx)
+            .relative()
             .flex()
             .flex_row()
             .flex_1()
@@ -345,7 +346,6 @@ impl Workspace {
             body = body.child(
                 div()
                     .debug_selector(|| "left-dock".into())
-                    .relative()
                     .w(width)
                     .flex_none()
                     .h_full()
@@ -361,8 +361,7 @@ impl Workspace {
                             .flex_col()
                             .child(LeftDockTabs(self.left.tab))
                             .child(self.left_dock_content()),
-                    )
-                    .child(Self::dock_resize_handle(DockSide::Left, cx)),
+                    ),
             );
         }
         body = body.child(
@@ -378,7 +377,6 @@ impl Workspace {
             body = body.child(
                 div()
                     .debug_selector(|| "right-dock".into())
-                    .relative()
                     .w(width)
                     .flex_none()
                     .h_full()
@@ -392,11 +390,19 @@ impl Workspace {
                             .h_full()
                             .overflow_hidden()
                             .children(panel),
-                    )
-                    .child(Self::dock_resize_handle(DockSide::Right, cx)),
+                    ),
             );
         }
-        body
+        // The palette does not cover the window, so a press beside it that
+        // closes it must not start a resize too; dialogs dim the whole
+        // window, which covers the handles.
+        if self.is_palette_open() {
+            return body;
+        }
+        let handles = [(DockSide::Left, left_width), (DockSide::Right, right_width)];
+        body.children(handles.into_iter().filter_map(|(side, width)| {
+            width.map(|width| Self::dock_resize_handle(side, width, cx))
+        }))
     }
 }
 
