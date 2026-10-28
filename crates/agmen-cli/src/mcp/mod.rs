@@ -2,8 +2,9 @@
 //! starts, and OpenCode or Codex can (docs/mcp-setup.md). It acts as the
 //! identity of the git worktree it runs in, through one persistent
 //! `<id>-mcp` broker session (ADR-0002) whose outbox keeps sending what the
-//! hub has not answered yet. That session publishes no presence (ruling
-//! R65): `agmen watch` does.
+//! hub has not answered yet. It publishes presence while no `agmen watch`
+//! runs for the identity (amends R65), so an agent alone stays online.
+//! Managed agents leave presence to agmend's watch sessions.
 //!
 //! The identity is loaded when the server starts and, until one is
 //! connected, again on each tool call. Each load runs the trust test on
@@ -28,14 +29,14 @@
 
 mod tools;
 
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use agmen_client::{
-    ClientError, ClientEvent, ClientKind, Events, IdentityError, Joined, Session, SessionConfig,
-    TokenStore, find_identity,
+    ClientError, ClientEvent, ClientKind, Events, IdentityError, Joined, Presence, Session,
+    SessionConfig, TokenStore, find_identity,
 };
 use agmen_proto::IdentityId;
 use anyhow::Context as _;
@@ -45,7 +46,7 @@ use rmcp::model::{CallToolResult, ContentBlock};
 use rmcp::service::ServerInitializeError;
 use rmcp::transport::IntoTransport;
 use rmcp::{RoleServer, ServiceExt as _};
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{Mutex, Notify, RwLock};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
@@ -54,6 +55,7 @@ use crate::cmd::claim::heartbeat_envelope;
 use crate::joined::{Agent, Via, client_error};
 use crate::output::{Code, Fail, NOT_JOINED, clean, clean_lines, explain};
 use crate::paths;
+use crate::watch_lock::watch_running;
 
 /// How often the claims this identity holds get a HEARTBEAT.
 const HEARTBEAT_EVERY: Duration = Duration::from_secs(5 * 60);
@@ -64,6 +66,8 @@ const HEARTBEAT_MIN: Duration = Duration::from_secs(1);
 const RECONNECT_FIRST: Duration = Duration::from_secs(1);
 /// How long a tool waits for the hub to record what it sent.
 const ANSWER_WAIT: Duration = Duration::from_secs(5);
+/// How often an MCP session checks whether a watch took over presence.
+const PRESENCE_RECHECK: Duration = Duration::from_secs(60);
 
 /// `agmen mcp`'s arguments.
 #[derive(Debug, Args)]
@@ -78,7 +82,9 @@ pub(crate) struct McpArgs {
 /// goes away.
 pub(crate) async fn run(args: McpArgs) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("reading the working directory")?;
-    let mut options = McpOptions::new(cwd, TokenStore::from_env(), paths::state_base()?);
+    let managed = std::env::var("AGMEN_MANAGED").is_ok_and(|value| value == "1");
+    let mut options =
+        McpOptions::new(cwd, TokenStore::from_env(), paths::state_base()?).with_managed(managed);
     if let Some(identity) = args.identity {
         options = options.with_identity(identity);
     }
@@ -116,6 +122,8 @@ pub struct McpOptions {
     heartbeat: Duration,
     answer_wait: Duration,
     session_expiry: Option<Duration>,
+    presence_recheck: Duration,
+    managed: bool,
 }
 
 impl McpOptions {
@@ -137,6 +145,8 @@ impl McpOptions {
             heartbeat: HEARTBEAT_EVERY,
             answer_wait: ANSWER_WAIT,
             session_expiry: None,
+            presence_recheck: PRESENCE_RECHECK,
+            managed: false,
         }
     }
 
@@ -152,6 +162,42 @@ impl McpOptions {
     pub fn with_heartbeat(mut self, every: Duration) -> Self {
         self.heartbeat = every.max(HEARTBEAT_MIN);
         self
+    }
+
+    /// Checks for a watch every `every` (at least 1 s) instead of every
+    /// minute, handing presence to it while it runs and taking it back after.
+    pub fn with_presence_recheck(mut self, every: Duration) -> Self {
+        self.presence_recheck = every.max(Duration::from_secs(1));
+        self
+    }
+
+    /// Leaves presence to agmend when `managed` is true, even without a
+    /// watch lock. Defaults to false; the binary reads `AGMEN_MANAGED` once.
+    pub fn with_managed(mut self, managed: bool) -> Self {
+        self.managed = managed;
+        self
+    }
+
+    async fn presence(&self, state_dir: &Path) -> anyhow::Result<Presence> {
+        if self.managed || watch_running(state_dir).await? {
+            Ok(Presence::Skip)
+        } else {
+            Ok(Presence::Publish)
+        }
+    }
+
+    /// The presence to connect with. A lock file that cannot be probed (a
+    /// filesystem without locks, an odd entry named `watch.lock`) must not
+    /// keep the tools from connecting, and with no way to tell whether a
+    /// watch runs, publishing could clash with it, so the session skips.
+    async fn connect_presence(&self, state_dir: &Path) -> Presence {
+        self.presence(state_dir).await.unwrap_or_else(|err| {
+            tracing::warn!(
+                error = format!("{err:#}"),
+                "cannot tell whether agmen watch runs; not publishing presence"
+            );
+            Presence::Skip
+        })
     }
 
     /// Waits up to `wait` for the hub to record what a tool sends; past it
@@ -241,6 +287,9 @@ struct Shared {
     options: McpOptions,
     /// The connected identity; `None` until one connects.
     slot: Mutex<Option<Connected>>,
+    /// Read-locked for the length of a tool call and write-locked by a
+    /// presence handoff. Lock it before `slot`.
+    calls: RwLock<()>,
 }
 
 /// The identity's broker session while it runs, and what the tools need.
@@ -266,23 +315,41 @@ impl Live {
     }
 }
 
-/// A connected identity and the task that reads its session's events.
+/// The recheck task survives a failed handoff; tools and heartbeat can
+/// reconnect an empty connection without losing its task handle.
 #[derive(Debug)]
 struct Connected {
+    connection: Option<Connection>,
+    presence: Task,
+}
+
+#[derive(Debug)]
+struct Connection {
     live: Arc<Live>,
     pump: Task,
 }
 
 impl Connected {
+    async fn close(self, quietly: bool) -> Result<(), ClientError> {
+        self.presence.stop().await;
+        match self.connection {
+            Some(connection) => connection.close(quietly).await,
+            None => Ok(()),
+        }
+    }
+}
+
+impl Connection {
     /// Stops the pump, then sends DISCONNECT, so the broker keeps the
     /// session for the next start.
     ///
     /// # Errors
     ///
     /// The error that stopped the session earlier, if one did.
-    async fn close(self) -> Result<(), ClientError> {
+    async fn close(self, quietly: bool) -> Result<(), ClientError> {
         self.pump.stop().await;
         match Arc::try_unwrap(self.live) {
+            Ok(live) if quietly => live.session.close_quietly().await,
             Ok(live) => live.session.close().await,
             Err(_) => {
                 // A tool call that outlived its client still holds it; the
@@ -363,6 +430,7 @@ impl Server {
             shared: Arc::new(Shared {
                 options,
                 slot: Mutex::new(None),
+                calls: RwLock::new(()),
             }),
             tool_router,
         }
@@ -375,7 +443,15 @@ impl Server {
         F: FnOnce(Arc<Live>) -> Fut,
         Fut: Future<Output = anyhow::Result<String>>,
     {
-        match self.live().await {
+        // Held while the tool runs, so a presence handoff (which takes the
+        // write side) never closes a session a tool is using. Tools share
+        // it, so they still run at the same time.
+        let _call = self.shared.calls.read().await;
+        let live = {
+            let mut slot = self.shared.slot.lock().await;
+            self.live(&mut slot).await
+        };
+        match live {
             Ok(live) => match work(live).await {
                 Ok(answer) => text(answer),
                 Err(err) => failure(&err),
@@ -395,33 +471,75 @@ impl Server {
         clippy::result_large_err,
         reason = "gpui enables serde_json preserve_order workspace-wide, which grows CallToolResult"
     )]
-    async fn live(&self) -> Result<Arc<Live>, CallToolResult> {
-        let mut slot = self.shared.slot.lock().await;
+    async fn live(&self, slot: &mut Option<Connected>) -> Result<Arc<Live>, CallToolResult> {
         if let Some(connected) = slot.as_ref()
-            && !connected.live.stopped.load(Ordering::SeqCst)
+            && let Some(connection) = &connected.connection
+            && !connection.live.stopped.load(Ordering::SeqCst)
         {
-            return Ok(connected.live.clone());
+            return Ok(connection.live.clone());
         }
-        if let Some(stopped) = slot.take() {
+        if slot
+            .as_ref()
+            .is_some_and(|connected| connected.connection.is_some())
+            && let Some(stopped) = slot.take()
+        {
             // The session stopped on its own: say why once, and connect
             // again on the next call.
-            let err = match stopped.close().await {
+            let err = match stopped.close(false).await {
                 Err(err) => client_error(err, "the broker session stopped"),
                 Ok(()) => anyhow::anyhow!("the broker session stopped"),
             };
             return Err(failure(&err));
         }
         let joined = trusted(&self.shared.options).await?;
-        let connected = self.connect(joined).await.map_err(|err| failure(&err))?;
-        let live = connected.live.clone();
-        *slot = Some(connected);
+        let connection = self
+            .shared
+            .connect(joined)
+            .await
+            .map_err(|err| failure(&err))?;
+        let live = connection.live.clone();
+        match slot {
+            Some(connected) => connected.connection = Some(connection),
+            None => {
+                *slot = Some(Connected {
+                    connection: Some(connection),
+                    presence: Task::spawn(recheck_presence(
+                        Arc::downgrade(&self.shared),
+                        self.shared.options.presence_recheck,
+                    )),
+                });
+            }
+        }
         Ok(live)
     }
 
+    /// Closes the connected identity's session, if one is connected.
+    async fn shut_down(&self) {
+        let connected = self.shared.slot.lock().await.take();
+        if let Some(connected) = connected {
+            // A watch that started since the last recheck owns presence by
+            // now; firing this session's will would show the identity
+            // offline for as long as that watch runs.
+            let quietly = match &connected.connection {
+                Some(connection) if connection.live.session.presence() == Presence::Publish => {
+                    watch_running(&connection.live.agent.state_dir)
+                        .await
+                        .unwrap_or(false)
+                }
+                _ => false,
+            };
+            if let Err(err) = connected.close(quietly).await {
+                tracing::warn!(error = %err, "the broker session had failed");
+            }
+        }
+    }
+}
+
+impl Shared {
     /// Loads the token of `joined`'s identity, connects its `<id>-mcp`
     /// session and starts the task that reads its events.
-    async fn connect(&self, joined: Joined) -> anyhow::Result<Connected> {
-        let options = &self.shared.options;
+    async fn connect(&self, joined: Joined) -> anyhow::Result<Connection> {
+        let options = &self.options;
         let agent = Agent::load(joined, options.tokens.clone(), &options.state_base).await?;
         let mut config = SessionConfig::new(
             ClientKind::Mcp,
@@ -433,6 +551,8 @@ impl Server {
         if let Some(expiry) = options.session_expiry {
             config = config.with_session_expiry(expiry);
         }
+        // Probe immediately before every connect, including reconnects.
+        let config = config.with_presence(options.connect_presence(&agent.state_dir).await);
         let (session, events) = Session::connect(config)
             .await
             .map_err(|err| client_error(err, "connecting to the broker failed"))?;
@@ -446,16 +566,106 @@ impl Server {
             stopped,
             wait: options.answer_wait,
         });
-        Ok(Connected { live, pump })
+        Ok(Connection { live, pump })
     }
+}
 
-    /// Closes the connected identity's session, if one is connected.
-    async fn shut_down(&self) {
-        let connected = self.shared.slot.lock().await.take();
-        if let Some(connected) = connected
-            && let Err(err) = connected.close().await
-        {
-            tracing::warn!(error = %err, "the broker session had failed");
+/// Rechecks until the server stops this task or its weak reference expires.
+async fn recheck_presence(shared: Weak<Shared>, every: Duration) {
+    loop {
+        tokio::time::sleep(every).await;
+        let Some(shared) = shared.upgrade() else {
+            return;
+        };
+        if shared.options.managed {
+            return;
+        }
+        // Look first without the write lock, which holds every tool call
+        // back; most rechecks find nothing to hand over.
+        match handoff_due(&shared).await {
+            Due::Ended => return,
+            Due::No => continue,
+            Due::Yes => {}
+        }
+        // Waits for the tool calls under way (each is bounded) and holds
+        // later ones until the handoff is done.
+        let _handoff = shared.calls.write().await;
+        let mut slot = shared.slot.lock().await;
+        let Some(connected) = slot.as_mut() else {
+            return;
+        };
+        if let Some(connection) = &connected.connection {
+            if connection.live.stopped.load(Ordering::SeqCst) {
+                // Preserve the existing one-error-then-reconnect path.
+                continue;
+            }
+            let Some(desired) = probe(&shared.options, connection).await else {
+                continue;
+            };
+            if desired == connection.live.session.presence() {
+                continue;
+            }
+            if let Some(connection) = connected.connection.take()
+                && let Err(err) = connection.close(desired == Presence::Skip).await
+            {
+                // shortcut: a quiet DISCONNECT timeout can leave one stale
+                // offline flag until the watch next publishes presence.
+                // Revisit on a report of a wrongly offline agent with a watch running.
+                tracing::warn!(error = %err, "closing the session for a presence handoff failed");
+            }
+        }
+        let joined = match trusted(&shared.options).await {
+            Ok(joined) => joined,
+            Err(answer) => {
+                tracing::warn!("presence reconnect: {}", result_text(&answer));
+                continue;
+            }
+        };
+        match shared.connect(joined).await {
+            Ok(connection) => connected.connection = Some(connection),
+            Err(err) => tracing::warn!(error = %err, "reconnecting for presence failed"),
+        }
+    }
+}
+
+/// Whether [`recheck_presence`] has anything to do.
+enum Due {
+    /// The server has no session left to look after.
+    Ended,
+    No,
+    Yes,
+}
+
+async fn handoff_due(shared: &Shared) -> Due {
+    let slot = shared.slot.lock().await;
+    let Some(connected) = slot.as_ref() else {
+        return Due::Ended;
+    };
+    let Some(connection) = &connected.connection else {
+        // A failed handoff left no session; reconnect.
+        return Due::Yes;
+    };
+    if connection.live.stopped.load(Ordering::SeqCst) {
+        // Left to the next tool call or heartbeat, which report why.
+        return Due::No;
+    }
+    match probe(&shared.options, connection).await {
+        Some(desired) if desired != connection.live.session.presence() => Due::Yes,
+        _ => Due::No,
+    }
+}
+
+/// The presence `connection` should have now, or `None` when the lock
+/// cannot be probed (then the session keeps what it has).
+async fn probe(options: &McpOptions, connection: &Connection) -> Option<Presence> {
+    match options.presence(&connection.live.agent.state_dir).await {
+        Ok(presence) => Some(presence),
+        Err(err) => {
+            tracing::warn!(
+                error = format!("{err:#}"),
+                "checking for agmen watch failed"
+            );
+            None
         }
     }
 }
@@ -487,7 +697,8 @@ async fn heartbeat(server: Server) {
     let mut retry = RECONNECT_FIRST.min(every);
     let mut due = Instant::now() + every;
     loop {
-        let wait = match server.live().await {
+        let mut slot = server.shared.slot.lock().await;
+        let wait = match server.live(&mut slot).await {
             Ok(live) => {
                 if Instant::now() >= due {
                     send_heartbeat(&live).await;
@@ -508,6 +719,7 @@ async fn heartbeat(server: Server) {
             // Not joined: no news, and nothing to beat for.
             Err(_) => every,
         };
+        drop(slot);
         tokio::time::sleep(wait).await;
     }
 }
@@ -554,4 +766,93 @@ fn result_text(result: &CallToolResult) -> String {
         .filter_map(|block| block.as_text().map(|text| text.text.as_str()))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn managed_sessions_never_publish_presence() {
+        let dir = tempfile::tempdir().unwrap();
+        let options = McpOptions::new(dir.path(), TokenStore::Dir(dir.path().into()), dir.path())
+            .with_managed(true);
+        assert_eq!(
+            options.presence(dir.path()).await.unwrap(),
+            agmen_client::Presence::Skip
+        );
+        let watch = crate::watch_lock::WatchLock::hold(dir.path())
+            .await
+            .unwrap();
+        assert_eq!(
+            options.presence(dir.path()).await.unwrap(),
+            agmen_client::Presence::Skip
+        );
+        drop(watch);
+        assert_eq!(
+            options.presence(dir.path()).await.unwrap(),
+            agmen_client::Presence::Skip
+        );
+    }
+
+    #[tokio::test]
+    async fn unmanaged_presence_follows_the_watch_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let options = McpOptions::new(dir.path(), TokenStore::Dir(dir.path().into()), dir.path());
+        assert_eq!(
+            options.presence(dir.path()).await.unwrap(),
+            agmen_client::Presence::Publish
+        );
+        let watch = crate::watch_lock::WatchLock::hold(dir.path())
+            .await
+            .unwrap();
+        assert_eq!(
+            options.presence(dir.path()).await.unwrap(),
+            agmen_client::Presence::Skip
+        );
+        drop(watch);
+        assert_eq!(
+            options.presence(dir.path()).await.unwrap(),
+            agmen_client::Presence::Publish
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unusable_lock_file_does_not_stop_the_connect() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(crate::watch_lock::LOCK_FILE)).unwrap();
+        let options = McpOptions::new(dir.path(), TokenStore::Dir(dir.path().into()), dir.path());
+        assert!(options.presence(dir.path()).await.is_err());
+        // Cannot tell whether a watch runs, so publish nothing.
+        assert_eq!(options.connect_presence(dir.path()).await, Presence::Skip);
+    }
+
+    #[test]
+    fn presence_recheck_clamps_to_one_second() {
+        let options = McpOptions::new("/unused", TokenStore::Dir("/unused".into()), "/unused");
+        assert_eq!(options.presence_recheck, Duration::from_secs(60));
+        assert_eq!(
+            options
+                .clone()
+                .with_presence_recheck(Duration::ZERO)
+                .presence_recheck,
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            options
+                .with_presence_recheck(Duration::from_secs(2))
+                .presence_recheck,
+            Duration::from_secs(2)
+        );
+    }
+
+    #[tokio::test]
+    async fn presence_recheck_ends_when_shared_is_gone() {
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            recheck_presence(std::sync::Weak::new(), Duration::from_secs(1)),
+        )
+        .await
+        .expect("the recheck stops when the server is gone");
+    }
 }

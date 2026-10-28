@@ -94,6 +94,6 @@ A tool that sends answers one of:
 - `queued id=<id> (not yet recorded)`: the hub has not answered within 5 seconds. The message stays in the identity's outbox and agmen keeps sending it.
 - `rejected: <reason>`: the hub refused it for good. Do not send it again unchanged.
 
-While it runs, the server sends a HEARTBEAT every 5 minutes for the claims this worktree holds, so their leases do not run out. It does not mark the identity online; `agmen watch` (which the Claude Code plugin runs) does that.
+While it runs, the server sends a HEARTBEAT every 5 minutes for the claims this worktree holds, so their leases do not run out. It marks the identity online while no `agmen watch` runs for it, so an agent alone stays online (amends R65); managed agents leave presence to agmend.
 
 Logs go to stderr. Set `AGMEN_LOG=debug` for more.

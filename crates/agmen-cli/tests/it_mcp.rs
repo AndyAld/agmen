@@ -8,6 +8,7 @@
 
 mod support;
 
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use agmen_cli::McpOptions;
@@ -17,6 +18,247 @@ use agmen_proto::{Mention, Payload, StampedEnvelope, Stream};
 use serde_json::json;
 use support::mcp::{Mcp, text_of};
 use support::{Ingest, Member, WAIT, assert_exit, run, stdout};
+use tokio::io::{AsyncBufReadExt as _, BufReader, Lines};
+use tokio::process::{Child, ChildStdout};
+
+/// This harness has no shared watch helper; keep this child in its test's home.
+struct Watch {
+    child: Child,
+    _lines: Lines<BufReader<ChildStdout>>,
+}
+
+impl Watch {
+    async fn start(who: &Member) -> Self {
+        let mut child =
+            tokio::process::Command::from(who.home.agmen(&who.wt.path(), &["watch", "--json"]))
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap();
+        let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+        tokio::time::timeout(WAIT, async {
+            loop {
+                let line = lines
+                    .next_line()
+                    .await
+                    .unwrap()
+                    .expect("watch stays running");
+                let event: ClientEvent = serde_json::from_str(&line).unwrap();
+                if event == (ClientEvent::Connection { connected: true }) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("watch connects within WAIT");
+        Self {
+            child,
+            _lines: lines,
+        }
+    }
+
+    async fn stop(mut self) {
+        #[cfg(unix)]
+        {
+            let status = tokio::process::Command::new("/bin/kill")
+                .args(["-INT", &self.child.id().unwrap().to_string()])
+                .status()
+                .await
+                .unwrap();
+            assert!(status.success());
+            let status = tokio::time::timeout(WAIT, self.child.wait())
+                .await
+                .expect("watch stops within WAIT")
+                .unwrap();
+            assert!(status.success());
+        }
+        #[cfg(not(unix))]
+        self.child.kill().await.unwrap();
+    }
+}
+
+async fn roster_entry(mcp: &Mcp, who: &Member) -> serde_json::Value {
+    let text = mcp.text("state", json!({ "key": "roster" })).await;
+    let roster: Vec<serde_json::Value> = serde_json::from_str(
+        text.strip_prefix("state/roster: ")
+            .expect("a retained roster"),
+    )
+    .unwrap();
+    roster
+        .into_iter()
+        .find(|entry| entry["identity_id"] == who.identity.identity_id.as_str())
+        .expect("the roster names the identity")
+}
+
+async fn wait_status(mcp: &Mcp, who: &Member, status: &str, within: Duration) {
+    tokio::time::timeout(within, async {
+        loop {
+            if roster_entry(mcp, who).await["status"] == status {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "{} never became {status} within {within:?}",
+            who.identity.handle
+        )
+    });
+}
+
+async fn stays(mcp: &Mcp, who: &Member, entry: &serde_json::Value, within: Duration) {
+    let until = Instant::now() + within;
+    while Instant::now() < until {
+        assert_eq!(&roster_entry(mcp, who).await, entry);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn it_mcp_publishes_presence_without_watch() {
+    run(Ingest::On, |ctx| async move {
+        let sol = ctx.member(Role::Member, "sol", "agent").await;
+        let luna = ctx.member(Role::Member, "luna", "agent").await;
+        let observer = Mcp::start(options(&luna)).await;
+        let mcp = Mcp::start(options(&sol)).await;
+        wait_status(&mcp, &sol, "online", WAIT).await;
+        mcp.stop().await;
+        wait_status(&observer, &sol, "offline", WAIT).await;
+        observer.stop().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn it_mcp_hands_presence_to_watch() {
+    run(Ingest::On, |ctx| async move {
+        let sol = ctx.member(Role::Member, "sol", "agent").await;
+        let luna = ctx.member(Role::Member, "luna", "agent").await;
+        let observer = Mcp::start(options(&luna)).await;
+        let mcp = Mcp::start(options(&sol).with_presence_recheck(Duration::from_secs(1))).await;
+        wait_status(&mcp, &sol, "online", WAIT).await;
+        let watch = Watch::start(&sol).await;
+        let entry = roster_entry(&observer, &sol).await;
+        stays(&observer, &sol, &entry, Duration::from_secs(3)).await;
+        mcp.stop().await;
+        assert_eq!(roster_entry(&observer, &sol).await["status"], "online");
+        stays(&observer, &sol, &entry, Duration::from_secs(2)).await;
+        watch.stop().await;
+        wait_status(&observer, &sol, "offline", WAIT).await;
+        observer.stop().await;
+    })
+    .await;
+}
+
+/// A watch that starts after the mcp's last recheck owns presence by the time
+/// the mcp exits, so the exit must not fire its offline will.
+#[tokio::test(flavor = "multi_thread")]
+async fn it_mcp_exit_leaves_a_new_watchs_presence_online() {
+    run(Ingest::On, |ctx| async move {
+        let sol = ctx.member(Role::Member, "sol", "agent").await;
+        let luna = ctx.member(Role::Member, "luna", "agent").await;
+        let observer = Mcp::start(options(&luna)).await;
+        // The default recheck (a minute) never fires in this test.
+        let mcp = Mcp::start(options(&sol)).await;
+        wait_status(&mcp, &sol, "online", WAIT).await;
+        let watch = Watch::start(&sol).await;
+        mcp.stop().await;
+        let entry = roster_entry(&observer, &sol).await;
+        assert_eq!(entry["status"], "online");
+        stays(&observer, &sol, &entry, Duration::from_secs(3)).await;
+        watch.stop().await;
+        wait_status(&observer, &sol, "offline", WAIT).await;
+        observer.stop().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn it_mcp_takes_presence_back_when_watch_stops() {
+    run(Ingest::On, |ctx| async move {
+        let sol = ctx.member(Role::Member, "sol", "agent").await;
+        let luna = ctx.member(Role::Member, "luna", "agent").await;
+        let observer = Mcp::start(options(&luna)).await;
+        let watch = Watch::start(&sol).await;
+        wait_status(&observer, &sol, "online", WAIT).await;
+        let mcp = Mcp::start(options(&sol).with_presence_recheck(Duration::from_secs(1))).await;
+        mcp.text("state", json!({ "key": "roster" })).await;
+        watch.stop().await;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        wait_status(
+            &observer,
+            &sol,
+            "offline",
+            deadline.saturating_duration_since(Instant::now()),
+        )
+        .await;
+        wait_status(
+            &observer,
+            &sol,
+            "online",
+            deadline.saturating_duration_since(Instant::now()),
+        )
+        .await;
+        mcp.stop().await;
+        wait_status(&observer, &sol, "offline", WAIT).await;
+        observer.stop().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn it_managed_mcp_leaves_presence_to_agmend() {
+    run(Ingest::On, |ctx| async move {
+        let sol = ctx.member(Role::Member, "sol", "agent").await;
+        let luna = ctx.member(Role::Member, "luna", "agent").await;
+        let observer = Mcp::start(options(&luna)).await;
+        // agmend keeps its Watch state elsewhere and never holds watch.lock.
+        let daemon_state = tempfile::tempdir().unwrap();
+        for online in [false, true] {
+            let daemon = if online {
+                let config = SessionConfig::new(
+                    ClientKind::Watch,
+                    sol.identity.topics(),
+                    hub_client(&ctx.base, &sol),
+                    sol.identity.broker_url.clone(),
+                    daemon_state.path(),
+                )
+                .with_session_expiry(Duration::ZERO);
+                let (session, events) = Session::connect(config).await.unwrap();
+                Some((session, events))
+            } else {
+                None
+            };
+            wait_status(
+                &observer,
+                &sol,
+                if online { "online" } else { "offline" },
+                WAIT,
+            )
+            .await;
+            let before = roster_entry(&observer, &sol).await;
+            let mcp = Mcp::start(
+                options(&sol)
+                    .with_managed(true)
+                    .with_presence_recheck(Duration::from_secs(1)),
+            )
+            .await;
+            mcp.text("state", json!({ "key": "roster" })).await;
+            stays(&observer, &sol, &before, Duration::from_secs(3)).await;
+            mcp.stop().await;
+            stays(&observer, &sol, &before, Duration::from_secs(2)).await;
+            if let Some((session, _events)) = daemon {
+                session.close().await.unwrap();
+            }
+        }
+        wait_status(&observer, &sol, "offline", WAIT).await;
+        observer.stop().await;
+    })
+    .await;
+}
 
 /// Options for `who`'s worktree, home and state.
 fn options(who: &Member) -> McpOptions {

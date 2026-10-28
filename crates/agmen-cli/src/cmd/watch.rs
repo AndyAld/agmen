@@ -19,6 +19,7 @@ use clap::Args;
 
 use crate::joined::{agent, client_error, envelope};
 use crate::output::{clean, message_line, println_flush};
+use crate::watch_lock::WatchLock;
 
 #[derive(Debug, Args)]
 pub(crate) struct WatchArgs {
@@ -39,6 +40,7 @@ pub(crate) async fn watch(args: WatchArgs) -> Result<()> {
     if println_flush(&first).is_err() {
         return Ok(());
     }
+    let _watch = WatchLock::try_hold(&agent.state_dir).await;
     let config = SessionConfig::new(
         ClientKind::Watch,
         agent.topics(),

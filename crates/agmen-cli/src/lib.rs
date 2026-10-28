@@ -22,6 +22,7 @@ mod open;
 mod output;
 mod paths;
 mod setup;
+mod watch_lock;
 
 use std::process::ExitCode;
 
