@@ -360,3 +360,45 @@ fn service_check_reuses_healthy_foreign_socket_without_manager_calls() {
         }
     );
 }
+#[test]
+fn helper_accepts_protected_stdin_and_reports_stdout() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut reported = Vec::new();
+    let output = super::run_with_input(
+        std::path::Path::new("/bin/cat"),
+        &[],
+        std::time::Duration::from_secs(2),
+        Some(dir.path()),
+        b"test-invite",
+        &mut |bytes| reported = bytes.to_vec(),
+    )
+    .unwrap();
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"test-invite");
+    assert_eq!(reported, b"test-invite");
+}
+
+#[test]
+fn helper_input_and_runtime_are_bounded() {
+    assert!(
+        super::run_with_input(
+            std::path::Path::new("/bin/cat"),
+            &[],
+            std::time::Duration::from_secs(1),
+            None,
+            &[0; 8193],
+            &mut |_| {}
+        )
+        .is_err()
+    );
+    let error = super::run_with_input(
+        std::path::Path::new("/bin/sleep"),
+        &["2".into()],
+        std::time::Duration::from_millis(1),
+        None,
+        &[],
+        &mut |_| {},
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("deadline"));
+}

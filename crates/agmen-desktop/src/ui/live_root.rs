@@ -22,6 +22,12 @@ use crate::bundle::Bundle;
 use crate::project::ProjectChoice;
 use crate::service::{self, Check, Observation};
 
+#[path = "live_root_project.rs"]
+mod project_open;
+use project_open::{OpenRecent, RejectedFolder, RemoveRecent};
+#[path = "live_root_onboarding.rs"]
+mod onboarding;
+
 /// Where a live launch connects and what it opens.
 #[derive(Debug, Clone)]
 pub(crate) struct LiveLaunch {
@@ -87,11 +93,9 @@ impl Wording {
         match state {
             LiveState::NoProject => Self {
                 heading: "No agmen project here".into(),
-                body: "Run agmen join with your invite in the project's folder, then start \
-                       agmen-desktop from that folder. After that it opens the last project \
-                       it opened."
+                body: "Open a project folder, or run agmen join with your invite in a folder to join a project."
                     .into(),
-                command: Some("agmen join <invite>"),
+                command: Some("agmen join <invite code>"),
                 note: match project {
                     ProjectChoice::None { why } => why.clone(),
                     ProjectChoice::Project(_) => None,
@@ -165,24 +169,64 @@ pub(crate) struct LiveRoot {
     service_notice: Option<String>,
     service_error: Option<String>,
     cli_install: Option<Entity<super::cli_install::CliInstall>>,
+    recents: Vec<PathBuf>,
+    rejected: Option<RejectedFolder>,
+    _picking: Option<Task<()>>,
+    _resolving: Option<Task<()>>,
+    pending_folder: Option<PathBuf>,
+    onboarding: onboarding::Onboarding,
 }
 
 impl LiveRoot {
     /// Tries the launch's project at once.
-    pub(crate) fn new(launch: LiveLaunch, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(
+        launch: LiveLaunch,
+        initial_path: Option<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let stored = launch
+            .settings
+            .as_deref()
+            .map(DesktopSettings::load)
+            .transpose();
+        let (recents, error) = match stored {
+            Ok(settings) => (settings.unwrap_or_default().recent_projects, None),
+            Err(error) => (
+                Vec::new(),
+                Some(format!("Reading recent projects failed: {error}")),
+            ),
+        };
+        let bundle = std::env::current_exe()
+            .ok()
+            .and_then(|exe| crate::bundle::locate(&exe));
+        let onboarding = onboarding::Onboarding::new(
+            bundle.as_ref().map(|bundle| bundle.agmen.clone()),
+            window,
+            cx,
+        );
         let mut root = Self {
             launch,
             state: LiveState::NoProject,
             focus_handle: cx.focus_handle(),
             _connecting: None,
-            bundle: std::env::current_exe()
-                .ok()
-                .and_then(|exe| crate::bundle::locate(&exe)),
+            bundle,
             service_notice: None,
-            service_error: None,
+            service_error: error,
             cli_install: super::cli_install::CliInstall::for_app(cx),
+            recents,
+            rejected: None,
+            _picking: None,
+            _resolving: None,
+            pending_folder: None,
+            onboarding,
         };
-        root.connect(window, cx);
+        root.refresh_project_menu(cx);
+        if let Some(path) = initial_path {
+            root.open_folder(path, window, cx);
+        } else {
+            root.connect(window, cx);
+        }
         root
     }
 
@@ -317,23 +361,31 @@ impl LiveRoot {
         let workspace = cx.new(|cx| Workspace::live(snapshot, window, cx));
         window.focus(&workspace.focus_handle(cx), cx);
         self.state = LiveState::Open(workspace);
-        self.remember(project.clone());
+        self.remember(project.clone(), cx);
     }
 
     /// Writes the project that opened as the settings' last project, so a
     /// launch from outside a joined folder opens it again.
-    fn remember(&self, project: ProjectId) {
+    fn remember(&mut self, project: ProjectId, cx: &mut Context<Self>) {
+        if let Some(root) = &self.launch.root {
+            self.recents.retain(|path| path != root);
+            self.recents.insert(0, root.clone());
+            self.recents.truncate(10);
+        }
+        self.refresh_project_menu(cx);
         let Some(path) = &self.launch.settings else {
             return;
         };
         let saved = DesktopSettings::load(path).and_then(|mut settings| {
             settings.last_project = Some(project);
+            settings.recent_projects.clone_from(&self.recents);
             settings.save(path)
         });
         if let Err(err) = saved {
             // The window is open; only the next launch outside the folder
             // loses the project, so say so and go on.
             eprintln!("agmen-desktop: not remembering the project: {err}");
+            self.service_error = Some(format!("Saving the project failed: {err}"));
         }
     }
 
@@ -408,6 +460,12 @@ impl LiveRoot {
                     .weight(FontWeight::SEMIBOLD),
             )
             .child(Label::new(wording.body).wrap())
+            .when(matches!(self.state, LiveState::NoProject | LiveState::Refused(_)), |this| {
+                this.child(Button::new("live:open-project", "Open Project…")
+                    .style(ButtonStyle::Primary)
+                    .on_click(cx.listener(|this, _, window, cx| this.prompt_project(window, cx))))
+            })
+            .when(matches!(self.state, LiveState::NoProject), |this| this.child(self.recent_list(cx)))
             .when_some(self.bundle.as_ref().filter(|_| matches!(self.state, LiveState::NeedsService(Check::Missing | Check::Stopped | Check::Moved { .. } | Check::Skewed { .. }))), |this, bundle| {
                 let command = service::command(bundle);
                 this.child(Label::new(format!("agmen will add a login item that starts agmend, the agmen background service, from {}. macOS may show a Background Items Added notice.", bundle.app.display())).wrap())
@@ -451,8 +509,41 @@ impl Focusable for LiveRoot {
 
 impl Render for LiveRoot {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let appearance = cx.global::<Appearance>();
+        window.set_rem_size(appearance.fonts.ui_size);
+        let shell = div()
+            .size_full()
+            .relative()
+            .bg(appearance.theme.background)
+            .text_color(appearance.theme.text)
+            .font_family(appearance.fonts.ui_family.clone())
+            .on_action(
+                cx.listener(|this, _: &crate::keymap::OpenProject, window, cx| {
+                    this.prompt_project(window, cx)
+                }),
+            )
+            .on_action(cx.listener(|this, action: &OpenRecent, window, cx| {
+                this.open_folder(action.0.clone(), window, cx)
+            }))
+            .on_action(
+                cx.listener(|this, action: &RemoveRecent, _, cx| this.remove_recent(&action.0, cx)),
+            );
+        if self.rejected.is_some() {
+            let message = self.rejected_message(cx);
+            return shell
+                .track_focus(&self.focus_handle)
+                .when_some(
+                    match &self.state {
+                        LiveState::Open(workspace) => Some(workspace.clone()),
+                        _ => None,
+                    },
+                    |this, workspace| this.child(workspace),
+                )
+                .child(message)
+                .into_any_element();
+        }
         if let LiveState::Open(workspace) = &self.state {
-            return div()
+            return shell
                 .debug_selector(|| self.state.selector().into())
                 .size_full()
                 .flex()
@@ -460,23 +551,38 @@ impl Render for LiveRoot {
                 .when_some(self.service_notice.clone(), |this, notice| {
                     this.child(Label::new(notice).color(Color::Placeholder))
                 })
+                .when_some(self.service_error.clone(), |this, error| {
+                    this.child(
+                        div()
+                            .debug_selector(|| "live:project-error".into())
+                            .child(Label::new(error).wrap().color(Color::Error)),
+                    )
+                })
+                .when(self._resolving.is_some(), |this| {
+                    this.child(
+                        div()
+                            .debug_selector(|| "live:checking-folder".into())
+                            .child(Label::new("Checking project folder…")),
+                    )
+                })
                 .child(workspace.clone())
                 .into_any_element();
         }
         let message = self.message(cx);
-        let appearance = cx.global::<Appearance>();
-        // Text sizes are rems, as in the workspace.
-        window.set_rem_size(appearance.fonts.ui_size);
-        div()
+        shell
             .track_focus(&self.focus_handle)
             .size_full()
             .flex()
             .flex_col()
-            .bg(appearance.theme.background)
-            .text_color(appearance.theme.text)
-            .font_family(appearance.fonts.ui_family.clone())
             // The window's buttons sit here; the title bar is see-through.
             .child(div().h(TITLE_BAR_HEIGHT).flex_none())
+            .when(self._resolving.is_some(), |this| {
+                this.child(
+                    div()
+                        .debug_selector(|| "live:checking-folder".into())
+                        .child(Label::new("Checking project folder…")),
+                )
+            })
             .child(
                 div()
                     .flex_1()

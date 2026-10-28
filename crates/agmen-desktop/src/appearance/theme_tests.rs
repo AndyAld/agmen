@@ -457,6 +457,7 @@ fn last_project_keeps_the_appearance() {
     let project: agmen_proto::ProjectId = "project1".parse().unwrap();
     DesktopSettings {
         last_project: Some(project.clone()),
+        ..DesktopSettings::default()
     }
     .save(&path)
     .unwrap();
@@ -785,6 +786,7 @@ fn desktop_settings_unchanged_leave_the_file_alone() {
     fs::write(&path, HAND_WRITTEN).unwrap();
     DesktopSettings {
         last_project: Some("project1".parse().unwrap()),
+        ..DesktopSettings::default()
     }
     .save(&path)
     .unwrap();
@@ -799,6 +801,7 @@ fn desktop_settings_change_keeps_comments_and_order() {
     let project: agmen_proto::ProjectId = "project2".parse().unwrap();
     DesktopSettings {
         last_project: Some(project.clone()),
+        ..DesktopSettings::default()
     }
     .save(&path)
     .unwrap();

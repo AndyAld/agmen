@@ -2,7 +2,7 @@
 //! the terminal UI reads too (spec 9.4).
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use agmen_proto::ProjectId;
 use serde::{Deserialize, Serialize};
@@ -162,12 +162,14 @@ pub(crate) struct DesktopSettings {
     /// The project the last live launch opened, which a launch outside a
     /// joined folder opens again.
     pub(crate) last_project: Option<ProjectId>,
+    /// Checkout roots, most recently opened first. At most ten are kept.
+    pub(crate) recent_projects: Vec<PathBuf>,
 }
 
 /// The table that holds [`DesktopSettings`].
 const DESKTOP_TABLE: &str = "desktop";
 /// The `[desktop]` keys this version writes.
-const DESKTOP_KEYS: &[&str] = &["last_project"];
+const DESKTOP_KEYS: &[&str] = &["last_project", "recent_projects"];
 
 impl DesktopSettings {
     /// Reads the `[desktop]` table of `path`; a missing file or table gives
@@ -184,12 +186,26 @@ impl DesktopSettings {
         let Some(value) = table.remove(DESKTOP_TABLE) else {
             return Ok(Self::default());
         };
-        value
-            .try_into()
-            .map_err(|err: toml::de::Error| AppearanceError::Parse {
-                path: path.to_owned(),
-                message: err.to_string(),
-            })
+        let mut settings: Self =
+            value
+                .try_into()
+                .map_err(|err: toml::de::Error| AppearanceError::Parse {
+                    path: path.to_owned(),
+                    message: err.to_string(),
+                })?;
+        let mut seen = std::collections::HashSet::new();
+        for path in &mut settings.recent_projects {
+            // Finder file URLs and launch paths can name the same folder
+            // through different symlinks. Keep missing folders removable.
+            if let Ok(canonical) = path.canonicalize() {
+                *path = canonical;
+            }
+        }
+        settings
+            .recent_projects
+            .retain(|path| seen.insert(path.clone()));
+        settings.recent_projects.truncate(10);
+        Ok(settings)
     }
 
     /// Replaces the `[desktop]` keys this version owns in `path`, keeping
@@ -252,6 +268,13 @@ impl DesktopSettings {
             )));
         };
         for key in DESKTOP_KEYS {
+            // Keep old hand-written files unchanged when only last_project changes.
+            if *key == "recent_projects"
+                && self.recent_projects.is_empty()
+                && table.get(key).is_none()
+            {
+                continue;
+            }
             match ours.get(*key) {
                 Some(value) => {
                     // toml's text for one value is toml_edit's input.

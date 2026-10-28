@@ -23,6 +23,7 @@ mod service;
 mod spike;
 mod ui;
 
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use anyhow::{Context as _, Result};
@@ -35,7 +36,7 @@ use appearance::{Appearance, SystemMode};
 
 use ui::{Quit, Workspace};
 
-const USAGE: &str = "usage: agmen-desktop [--version | --fixture | --screen <name> | --list-screens | --view <name> | --spike list [--autoscroll] | --spike notify]";
+const USAGE: &str = "usage: agmen-desktop [<path> | --version | --fixture | --screen <name> | --list-screens | --view <name> | --spike list [--autoscroll] | --spike notify]";
 
 /// The views `--view` can show alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,6 +66,8 @@ enum Launch {
     Version,
     /// The normal app window, live through agmend (Task 7).
     App,
+    /// An explicit folder, opened through the same path as the picker.
+    OpenProject(PathBuf),
     /// The app window on the fixture's chat, as a plain launch opened it
     /// before agmend's local API existed.
     Fixture,
@@ -81,11 +84,26 @@ enum Launch {
 }
 
 impl Launch {
+    /// Resolve in the sender, before a running app with another cwd sees argv.
+    fn forwarded_args(&self, args: &[String]) -> Result<Vec<String>> {
+        match self {
+            Self::OpenProject(path) if path.is_relative() => Ok(vec![
+                std::env::current_dir()
+                    .context("reading the folder to forward")?
+                    .join(path)
+                    .to_string_lossy()
+                    .into_owned(),
+            ]),
+            _ => Ok(args.to_vec()),
+        }
+    }
+
     fn parse(args: &[String]) -> Result<Self> {
         match args {
             [] => Ok(Self::App),
             [flag] if flag == "--version" => Ok(Self::Version),
             [flag] if flag == "--fixture" => Ok(Self::Fixture),
+            [path] if !path.starts_with('-') => Ok(Self::OpenProject(PathBuf::from(path))),
             [flag, name, rest @ ..] if flag == "--spike" && name == "list" => match rest {
                 [] => Ok(Self::ListSpike { autoscroll: false }),
                 [a] if a == "--autoscroll" => {
@@ -130,6 +148,7 @@ impl Launch {
             Self::Fixture => Some(backend::Screen::Chat),
             Self::Screen(screen) => Some(*screen),
             Self::App
+            | Self::OpenProject(_)
             | Self::Version
             | Self::ListSpike { .. }
             | Self::NotifySpike
@@ -141,7 +160,7 @@ impl Launch {
     /// Whether this launch is the person's app, which runs once: spikes
     /// and screenshot screens run beside it.
     const fn takes_instance_lock(&self) -> bool {
-        matches!(self, Self::App | Self::Fixture)
+        matches!(self, Self::App | Self::OpenProject(_) | Self::Fixture)
     }
 }
 
@@ -176,7 +195,11 @@ fn main() -> Result<()> {
         let dir = std::env::home_dir()
             .context("no home folder")?
             .join("Library/Application Support/agmen");
-        match instance::acquire(&dir, &args).context("checking for a running agmen-desktop")? {
+        // The first instance may have a different working folder.
+        let forwarded_args = launch.forwarded_args(&args)?;
+        match instance::acquire(&dir, &forwarded_args)
+            .context("checking for a running agmen-desktop")?
+        {
             instance::Instance::Primary(listener) => Some(listener),
             instance::Instance::Secondary => return Ok(()),
         }
@@ -184,30 +207,44 @@ fn main() -> Result<()> {
         None
     };
     let platform = Rc::new(gpui_macos::MacPlatform::new(false));
-    Application::with_platform(platform)
-        .with_assets(assets::Assets)
-        .run(move |cx: &mut App| {
-            if launch == Launch::NotifySpike {
-                notify::notify("spike", "agmen", "adam/coord needs you", cx);
-                // Leave time for the background post before quitting.
-                cx.spawn(async |cx| {
-                    cx.background_executor()
-                        .timer(std::time::Duration::from_secs(3))
-                        .await;
-                    cx.update(|cx| cx.quit());
-                })
-                .detach();
-                return;
+    let app = Application::with_platform(platform).with_assets(assets::Assets);
+    let (mut opened, mut files) = futures::channel::mpsc::channel(10);
+    app.on_open_urls(move |urls| {
+        if let Some(path) = file_open_path(&urls)
+            && let Err(error) = opened.try_send(path)
+        {
+            eprintln!("agmen-desktop: file open queue is unavailable: {error}");
+        }
+    });
+    app.run(move |cx: &mut App| {
+        if launch == Launch::NotifySpike {
+            notify::notify("spike", "agmen", "adam/coord needs you", cx);
+            // Leave time for the background post before quitting.
+            cx.spawn(async |cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(3))
+                    .await;
+                cx.update(|cx| cx.quit());
+            })
+            .detach();
+            return;
+        }
+        if let Some(listener) = listener {
+            watch_instance(listener, cx);
+        }
+        if let Err(err) = open_main_window(&launch, cx) {
+            // The run loop owns the process from here, so report and exit 1.
+            eprintln!("agmen-desktop: {err:#}");
+            std::process::exit(1);
+        }
+        cx.spawn(async move |cx| {
+            use futures::StreamExt as _;
+            while let Some(path) = files.next().await {
+                cx.update(|cx| open_in_live_window(path, cx));
             }
-            if let Some(listener) = listener {
-                watch_instance(listener, cx);
-            }
-            if let Err(err) = open_main_window(&launch, cx) {
-                // The run loop owns the process from here, so report and exit 1.
-                eprintln!("agmen-desktop: {err:#}");
-                std::process::exit(1);
-            }
-        });
+        })
+        .detach();
+    });
     Ok(())
 }
 
@@ -242,11 +279,43 @@ fn watch_instance(listener: instance::Listener, cx: &mut App) {
             if let Some(forwarded) = listener.try_recv()
                 && forwarded.focus
             {
-                cx.update(|cx| cx.activate(true));
+                cx.update(|cx| {
+                    if let Some(path) = forwarded_folder(&forwarded.args) {
+                        open_in_live_window(path, cx);
+                    }
+                    cx.activate(true);
+                });
             }
         }
     })
     .detach();
+}
+
+/// The folder a second launch forwarded. Any same-user process can write to
+/// the instance socket, so only an absolute folder argument opens anything.
+fn forwarded_folder(args: &[String]) -> Option<PathBuf> {
+    match Launch::parse(args) {
+        Ok(Launch::OpenProject(path)) if path.is_absolute() => Some(path),
+        _ => None,
+    }
+}
+
+/// GPUI supplies file URLs for Dock folder drops. Use the first local file.
+fn file_open_path(urls: &[String]) -> Option<PathBuf> {
+    urls.iter()
+        .take(10)
+        .find_map(|url| reqwest::Url::parse(url).ok()?.to_file_path().ok())
+}
+
+fn open_in_live_window(path: PathBuf, cx: &mut App) {
+    if let Some(window) = cx
+        .windows()
+        .into_iter()
+        .find_map(|window| window.downcast::<ui::LiveRoot>())
+        && let Err(error) = window.update(cx, |root, window, cx| root.open_folder(path, window, cx))
+    {
+        eprintln!("agmen-desktop: opening the folder failed: {error}");
+    }
 }
 
 fn window_options(cx: &App) -> WindowOptions {
@@ -347,12 +416,16 @@ fn open_dev_view(
 /// Task 7: where a plain launch connects and which project it opens: the
 /// working folder's `.agmen/identity.json`, else the last project in
 /// `~/.config/agmen/settings.toml`.
-fn live_launch() -> Result<ui::LiveLaunch> {
+fn live_launch(explicit: bool) -> Result<ui::LiveLaunch> {
     let socket = agmen_client::agmend_socket().context("finding agmend's socket")?;
     let settings =
         std::env::home_dir().map(|home| appearance::agmen_settings_path(&home.join(".config")));
     let cwd = std::env::current_dir().context("reading the working folder")?;
-    let (project, root) = project::choose_project(&cwd, settings.as_deref());
+    let (project, root) = if explicit {
+        (project::ProjectChoice::None { why: None }, None)
+    } else {
+        project::choose_project(&cwd, settings.as_deref())
+    };
     Ok(ui::LiveLaunch {
         socket,
         project,
@@ -384,12 +457,16 @@ fn open_main_window(launch: &Launch, cx: &mut App) -> Result<()> {
 
     let options = window_options(cx);
     let window = match launch {
-        Launch::App => {
-            let launch = live_launch()?;
+        Launch::App | Launch::OpenProject(_) => {
+            let path = match launch {
+                Launch::OpenProject(path) => Some(path.clone()),
+                _ => None,
+            };
+            let launch = live_launch(path.is_some())?;
             // Task 13: live alerts chime and post notifications.
             cx.set_global(ui::AlarmHandle::system());
             cx.open_window(options, |window, cx| {
-                let root = cx.new(|cx| ui::LiveRoot::new(launch, window, cx));
+                let root = cx.new(|cx| ui::LiveRoot::new(launch, path, window, cx));
                 window.focus(&root.focus_handle(cx), cx);
                 root
             })
@@ -489,6 +566,50 @@ mod tests {
         );
         assert!(Launch::parse(&args(&["--spike", "nope"])).is_err());
         assert!(Launch::parse(&args(&["--bogus"])).is_err());
+    }
+
+    #[test]
+    fn open_project_launch_argument() {
+        let launch = Launch::parse(&args(&["/tmp/a project"]));
+        assert!(launch.is_ok(), "a folder is a live launch: {launch:?}");
+        let launch = launch.unwrap();
+        assert!(launch.takes_instance_lock());
+        assert_eq!(launch.fixture_screen(), None);
+    }
+
+    #[test]
+    fn relative_launch_is_absolute_before_instance_forwarding() {
+        let dir = tempfile::tempdir().unwrap();
+        let instance::Instance::Primary(listener) = instance::acquire(dir.path(), &[]).unwrap()
+        else {
+            panic!("expected primary");
+        };
+        let original = args(&["relative-folder"]);
+        let launch = Launch::parse(&original).unwrap();
+        let forwarded = launch.forwarded_args(&original).unwrap();
+        assert!(std::path::Path::new(&forwarded[0]).is_absolute());
+        assert!(matches!(
+            instance::acquire(dir.path(), &forwarded).unwrap(),
+            instance::Instance::Secondary
+        ));
+        let received = listener
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        assert_eq!(
+            Launch::parse(&received.args).unwrap(),
+            Launch::OpenProject(std::env::current_dir().unwrap().join("relative-folder"))
+        );
+    }
+
+    #[test]
+    fn forwarded_folder_must_be_absolute() {
+        assert_eq!(
+            forwarded_folder(&args(&["/tmp/a project"])),
+            Some(PathBuf::from("/tmp/a project"))
+        );
+        assert_eq!(forwarded_folder(&args(&["relative-folder"])), None);
+        assert_eq!(forwarded_folder(&args(&["--fixture"])), None);
+        assert_eq!(forwarded_folder(&args(&[])), None);
     }
 
     #[test]

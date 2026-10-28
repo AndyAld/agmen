@@ -7,6 +7,15 @@
     <key>CFBundleDisplayName</key><string>agmen</string>
     <key>CFBundleExecutable</key><string>agmen-desktop</string>
     <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key><string>Project folder</string>
+            <key>CFBundleTypeRole</key><string>Viewer</string>
+            <key>LSHandlerRank</key><string>Alternate</string>
+            <key>LSItemContentTypes</key><array><string>public.folder</string></array>
+        </dict>
+    </array>
     <key>CFBundleShortVersionString</key><string>@VERSION@</string>
     <key>CFBundleVersion</key><string>@BUILD@</string>
     <key>LSMinimumSystemVersion</key><string>@MIN_MACOS@</string>

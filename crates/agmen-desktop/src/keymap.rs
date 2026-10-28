@@ -21,6 +21,8 @@ actions!(
         ToggleRightDock,
         /// Quits the app.
         Quit,
+        /// Opens a project folder in the current window.
+        OpenProject,
         /// Shows the Project panel, or hides the dock when it already shows
         /// it (Zed's `project_panel::ToggleFocus`).
         ToggleProjectPanel,
@@ -233,6 +235,7 @@ pub(crate) fn table() -> Vec<Binding> {
         bind("cmd-c", input::Copy, text),
         // Quit works in every window, the dev views too.
         bind("cmd-q", Quit, None),
+        bind("cmd-o", OpenProject, None),
         bind(TOGGLE_PALETTE_KEYS, ToggleCommandPalette, ws),
         bind("cmd-b", ToggleLeftDock, ws),
         // Zed shows ⌘R for the right dock; the hint takes the first binding.
@@ -295,6 +298,7 @@ pub(crate) fn commands() -> Vec<Command> {
         scope: Scope::Window,
     };
     let mut commands = vec![
+        window("agmen: open project…", Box::new(OpenProject)),
         window("agmen: spawn worker\u{2026}", Box::new(SpawnWorker)),
         window(
             "agmen: open agent in terminal here",

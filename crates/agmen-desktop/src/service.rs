@@ -1,9 +1,10 @@
 //! Consented setup of the bundled per-user background service.
 
 use std::ffi::OsString;
-use std::io::{Read as _, Seek as _};
+use std::io::{Read as _, Seek as _, Write as _};
+use std::os::unix::fs::FileExt as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
 use agmen_client::InstallReceipt;
@@ -359,23 +360,50 @@ fn install_with_timeout(
 
 /// Runs a helper with bounded disk output, polling and reaping on timeout.
 pub(crate) fn run(program: &Path, args: &[OsString], timeout: Duration) -> Result<Output> {
+    run_with_input(program, args, timeout, None, &[], &mut |_| {})
+}
+
+/// The same bounded runner, with protected stdin and live stdout for device login.
+pub(crate) fn run_with_input(
+    program: &Path,
+    args: &[OsString],
+    timeout: Duration,
+    cwd: Option<&Path>,
+    input: &[u8],
+    progress: &mut dyn FnMut(&[u8]),
+) -> Result<Output> {
+    ensure!(input.len() <= 8192, "helper stdin exceeds 8 KiB");
     let scratch = tempfile::tempdir().context("creating helper output directory")?;
     let mut stdout = tempfile::tempfile_in(scratch.path()).context("creating helper stdout")?;
     let mut stderr = tempfile::tempfile_in(scratch.path()).context("creating helper stderr")?;
-    let mut child = Command::new(program)
-        .args(args)
-        .stdin(Stdio::null())
+    let mut stdin = tempfile::tempfile_in(scratch.path()).context("creating helper stdin")?;
+    stdin.write_all(input)?;
+    stdin.rewind()?;
+    let mut command = Command::new(program);
+    command.args(args).stdin(stdin);
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+    let mut child = command
         .stdout(stdout.try_clone()?)
         .stderr(stderr.try_clone()?)
         .spawn()
         .context("starting bundled helper")?;
     let deadline = Instant::now() + timeout.min(TRANSITION);
+    let mut reported = 0;
     let result = (|| -> Result<_> {
         for _ in 0..6001 {
             ensure!(
                 stdout.metadata()?.len() <= MAX_OUTPUT && stderr.metadata()?.len() <= MAX_OUTPUT,
                 "helper output exceeds 64 KiB"
             );
+            let length = stdout.metadata()?.len().min(MAX_OUTPUT) as usize;
+            if length != reported {
+                let mut bytes = vec![0; length];
+                let count = stdout.read_at(&mut bytes, 0)?;
+                progress(&bytes[..count]);
+                reported = count;
+            }
             if let Some(status) = child.try_wait()? {
                 return Ok(status);
             }
@@ -406,6 +434,7 @@ pub(crate) fn run(program: &Path, args: &[OsString], timeout: Duration) -> Resul
         out.len() <= MAX_OUTPUT as usize && err.len() <= MAX_OUTPUT as usize,
         "helper output exceeds 64 KiB"
     );
+    progress(&out);
     Ok(Output {
         status,
         stdout: out,
