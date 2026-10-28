@@ -59,6 +59,7 @@ fn base(project: &str) -> Result<Snapshot, BackendError> {
         me_id: id("andy")?,
         roster,
         managed_agents: BTreeMap::new(),
+        managed_work: BTreeMap::new(),
         agent_error: None,
         listener: Some(listener),
         agents: BTreeMap::from([(fx1.id.clone(), fx1)]),
@@ -322,7 +323,12 @@ impl Backend for FixtureBackend {
 
     fn act(&self, action: Action) -> Result<(), BackendError> {
         match action {
-            Action::LaunchAgent { .. } | Action::StopAgent(_) => {
+            Action::LaunchAgent { .. }
+            | Action::StopAgent(_)
+            | Action::StartAgent { .. }
+            | Action::AttachAgent { .. }
+            | Action::DetachAgent(_)
+            | Action::RemoveAgent { .. } => {
                 Err(BackendError::Unsupported("managed agents in fixture"))
             }
             Action::Apply(id) => self.set_change(&id, |_| ChangeState::Applied),

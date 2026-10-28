@@ -169,6 +169,24 @@ pub(crate) enum Action {
         budget_cents: u32,
     },
     StopAgent(IdentityId),
+    /// Brings an offline agent back on its previous sessions. `root` is
+    /// the folder of an agent joined by hand, when the app knows it or the
+    /// person picked it.
+    StartAgent {
+        identity: IdentityId,
+        root: Option<std::path::PathBuf>,
+    },
+    /// Opens Claude Code on the agent's owner session in Terminal.
+    AttachAgent {
+        identity: IdentityId,
+        root: Option<std::path::PathBuf>,
+    },
+    DetachAgent(IdentityId),
+    /// Revokes and forgets the agent, keeping its folder and branch.
+    RemoveAgent {
+        identity: IdentityId,
+        root: Option<std::path::PathBuf>,
+    },
     Apply(ChangeId),
     Cancel(ChangeId),
     Undo(ChangeId),
@@ -568,6 +586,15 @@ pub(crate) use take_over::{
     TerminalScreen, can_take_over,
 };
 
+/// A managed agent's folder and branch, which Remove keeps.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ManagedWork {
+    pub(crate) worktree: Option<String>,
+    pub(crate) branch: Option<String>,
+    /// A folder the person joined by hand, which agmend adopted.
+    pub(crate) joined: bool,
+}
+
 /// Everything the window shows at one moment.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Snapshot {
@@ -576,6 +603,8 @@ pub(crate) struct Snapshot {
     pub(crate) me: String,
     pub(crate) me_id: IdentityId,
     pub(crate) managed_agents: BTreeMap<IdentityId, String>,
+    /// Where each managed agent works, as agmend lists it.
+    pub(crate) managed_work: BTreeMap<IdentityId, ManagedWork>,
     pub(crate) agent_error: Option<String>,
     pub(crate) roster: Vec<PersonGroup>,
     /// The person's own listener; `None` when the project has none for

@@ -59,6 +59,7 @@ pub(crate) use needs_you::AlarmHandle;
 // dialog.
 mod add_agent_dialog;
 mod new_agent_dialog;
+mod remove_agent_dialog;
 mod switch_menu;
 mod terminal_view;
 

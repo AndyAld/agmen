@@ -120,6 +120,17 @@ pub(crate) fn click(cx: &mut VisualTestContext, selector: &'static str) {
     redraw(cx);
 }
 
+/// Right-clicks the middle of the element with debug selector `selector`.
+pub(crate) fn right_click(cx: &mut VisualTestContext, selector: &'static str) {
+    redraw(cx);
+    let bounds = cx
+        .debug_bounds(selector)
+        .unwrap_or_else(|| panic!("nothing is drawn with selector {selector}"));
+    cx.simulate_mouse_down(bounds.center(), gpui::MouseButton::Right, Modifiers::none());
+    cx.simulate_mouse_up(bounds.center(), gpui::MouseButton::Right, Modifiers::none());
+    redraw(cx);
+}
+
 /// A view under a reference [`ButtonStyle::Plain`] button, found as
 /// `want-plain`, to compare a view's button with.
 pub(crate) struct PlainButtonHost {

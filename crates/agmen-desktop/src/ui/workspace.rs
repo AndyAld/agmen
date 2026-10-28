@@ -45,6 +45,9 @@ mod plan_wiring;
 // Task 12 Step 1b: where a reference chip opens.
 #[path = "workspace_refs.rs"]
 mod ref_routes;
+// The agent menu's Start, Attach, Detach and Remove.
+#[path = "workspace_agent_actions.rs"]
+mod agent_actions;
 pub(super) use ref_routes::{RefRoute, route};
 
 // Task 18: the actions moved to src/keymap.rs with their bindings.
@@ -57,6 +60,8 @@ pub(crate) struct Workspace {
     invite_people: bool,
     new_agent: Option<Entity<super::new_agent_dialog::NewAgentDialog>>,
     new_agent_events: Option<Subscription>,
+    remove_agent: Option<Entity<super::remove_agent_dialog::RemoveAgentDialog>>,
+    remove_agent_events: Option<Subscription>,
     left_dock: Dock,
     right_dock: Dock,
     agents_panel: Entity<AgentsPanel>,
@@ -114,6 +119,7 @@ impl Workspace {
         let snapshot = Rc::new(snapshot);
         let agents_panel = cx.new(|_| AgentsPanel::new(snapshot.roster.clone()));
         agents_panel.update(cx, |panel, cx| {
+            panel.set_listener(snapshot.listener_id().cloned(), cx);
             panel.set_managed(
                 snapshot.managed_agents.clone(),
                 snapshot.agent_error.clone(),
@@ -124,6 +130,10 @@ impl Workspace {
             AgentsPanelEvent::Selected(id) => this.select_agent(id, cx),
             AgentsPanelEvent::NewAgent => this.open_new_agent(cx),
             AgentsPanelEvent::Stop(id) => this.stop_managed_agent(id, cx),
+            AgentsPanelEvent::Start(id) => this.start_agent(id, cx),
+            AgentsPanelEvent::Attach(id) => this.attach_agent(id, cx),
+            AgentsPanelEvent::Detach(id) => this.detach_agent(id, cx),
+            AgentsPanelEvent::Remove(id) => this.ask_remove(id, cx),
         });
         let chat = cx.new(|cx| ChatView::new(Rc::clone(&snapshot), window, cx));
         // Task 13: the status bar's counts and the toast redraw on any change;
@@ -145,6 +155,8 @@ impl Workspace {
             invite_people: false,
             new_agent: None,
             new_agent_events: None,
+            remove_agent: None,
+            remove_agent_events: None,
             pane_group,
             left_dock: Dock::new(LEFT_DOCK_WIDTH),
             right_dock: Dock::new(RIGHT_DOCK_WIDTH),
@@ -432,6 +444,7 @@ impl Render for Workspace {
         .children(self.alert_toast(cx))
         .children(overlay)
         .children(self.new_agent.clone())
+        .children(self.remove_agent.clone())
     }
 }
 

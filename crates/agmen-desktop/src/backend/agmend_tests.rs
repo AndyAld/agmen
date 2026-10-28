@@ -1237,3 +1237,79 @@ fn managed_status_polling_is_not_starved_by_other_jobs() {
         Some("running")
     );
 }
+
+#[test]
+fn agent_menu_actions_reach_agmend_with_the_project() {
+    let fake = FakeAgmend::start(console(vec![]));
+    fake.edit(|state| state.managed_state = Some("offline".into()));
+    let (backend, mut updates) = live_backend(&fake);
+    wait_for(&mut updates, |update| {
+        matches!(update, Update::Snapshot(snapshot)
+        if snapshot.managed_work.get(&ident("idmanaged")).is_some_and(|work| {
+            work.branch.as_deref() == Some("agent/worker-1234") && !work.joined
+        }))
+    });
+    backend
+        .act(Action::StartAgent {
+            identity: ident("idmanaged"),
+            root: Some("/work/sol".into()),
+        })
+        .unwrap();
+    wait_for(&mut updates, |update| {
+        matches!(update, Update::Snapshot(snapshot)
+        if snapshot.managed_agents.get(&ident("idmanaged")).is_some_and(|s| s == "idle"))
+    });
+    backend
+        .act(Action::AttachAgent {
+            identity: ident("idmanaged"),
+            root: None,
+        })
+        .unwrap();
+    wait_for(&mut updates, |update| {
+        matches!(update, Update::Snapshot(snapshot)
+        if snapshot.managed_agents.get(&ident("idmanaged")).is_some_and(|s| s == "attached"))
+    });
+    backend
+        .act(Action::DetachAgent(ident("idmanaged")))
+        .unwrap();
+    wait_for(&mut updates, |update| {
+        matches!(update, Update::Snapshot(snapshot)
+        if snapshot.managed_agents.get(&ident("idmanaged")).is_some_and(|s| s == "idle"))
+    });
+    backend
+        .act(Action::RemoveAgent {
+            identity: ident("idmanaged"),
+            root: None,
+        })
+        .unwrap();
+    wait_for(&mut updates, |update| {
+        matches!(update, Update::Snapshot(snapshot)
+        if !snapshot.managed_agents.contains_key(&ident("idmanaged")))
+    });
+    let requests: Vec<(String, Value)> = fake
+        .state
+        .lock()
+        .unwrap()
+        .agent_requests
+        .iter()
+        .map(|request| (request.method.clone(), request.params.clone()))
+        .collect();
+    assert_eq!(
+        requests,
+        vec![
+            (
+                "agent_start".into(),
+                json!({"identity": "idmanaged", "project": PROJECT, "root": "/work/sol"})
+            ),
+            (
+                "agent_attach".into(),
+                json!({"identity": "idmanaged", "project": PROJECT})
+            ),
+            ("agent_detach".into(), json!({"identity": "idmanaged"})),
+            (
+                "agent_remove".into(),
+                json!({"identity": "idmanaged", "project": PROJECT})
+            ),
+        ]
+    );
+}

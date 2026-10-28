@@ -50,7 +50,8 @@ use serde_json::{Value, json};
 use super::agmend_local;
 use super::{
     Action, AgentRow, AgentStatus, Backend, BackendError, Draft, FileText, FileTextReply, GitFacts,
-    Link, ListenerInfo, Older, PersonGroup, Snapshot, StatusSummary, Update, WorktreeInfo,
+    Link, ListenerInfo, ManagedWork, Older, PersonGroup, Snapshot, StatusSummary, Update,
+    WorktreeInfo,
 };
 
 /// The most messages held per project; the oldest go first (the plan's
@@ -227,9 +228,18 @@ impl Live {
             snapshot
                 .managed_agents
                 .insert(agent.identity.clone(), agent.state.label().into());
+            snapshot.managed_work.insert(
+                agent.identity.clone(),
+                ManagedWork {
+                    worktree: agent.worktree.clone(),
+                    branch: agent.branch.clone().filter(|branch| !branch.is_empty()),
+                    joined: agent.source.as_deref() == Some("joined"),
+                },
+            );
             if let Some(group) = snapshot.roster.iter_mut().find(|group| group.you) {
                 let status = match agent.state {
-                    ManagedState::Running => AgentStatus::Working,
+                    // Someone works in it interactively.
+                    ManagedState::Running | ManagedState::Attached => AgentStatus::Working,
                     ManagedState::Idle => AgentStatus::Idle,
                     ManagedState::Offline => AgentStatus::Offline,
                 };
@@ -478,6 +488,13 @@ struct ManagedAgent {
     project: String,
     handle: String,
     state: ManagedState,
+    #[serde(default)]
+    worktree: Option<String>,
+    #[serde(default)]
+    branch: Option<String>,
+    /// `launched` or `joined`; older daemons leave it out.
+    #[serde(default)]
+    source: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
@@ -486,6 +503,8 @@ enum ManagedState {
     Running,
     Idle,
     Offline,
+    /// An interactive Claude Code holds the agent's owner session.
+    Attached,
 }
 impl ManagedState {
     const fn label(self) -> &'static str {
@@ -493,11 +512,22 @@ impl ManagedState {
             Self::Running => "running",
             Self::Idle => "idle",
             Self::Offline => "offline",
+            Self::Attached => "attached",
         }
     }
 }
 
 impl AgmendBackend {
+    /// An agent action's params: the agent, this project, and the folder
+    /// of an agent joined by hand when there is one.
+    fn agent_target(&self, identity: &IdentityId, root: Option<std::path::PathBuf>) -> Value {
+        let mut params = json!({"identity": identity, "project": self.shared.project});
+        if let Some(root) = root {
+            params["root"] = json!(root);
+        }
+        params
+    }
+
     fn queue_agent(&self, method: &'static str, params: Value) -> Result<(), BackendError> {
         self.jobs
             .try_send(Job::Agent { method, params })
@@ -811,6 +841,18 @@ impl Backend for AgmendBackend {
             }
             Action::StopAgent(identity) => {
                 self.queue_agent("agent_stop", json!({"identity": identity}))
+            }
+            Action::StartAgent { identity, root } => {
+                self.queue_agent("agent_start", self.agent_target(&identity, root))
+            }
+            Action::AttachAgent { identity, root } => {
+                self.queue_agent("agent_attach", self.agent_target(&identity, root))
+            }
+            Action::DetachAgent(identity) => {
+                self.queue_agent("agent_detach", json!({"identity": identity}))
+            }
+            Action::RemoveAgent { identity, root } => {
+                self.queue_agent("agent_remove", self.agent_target(&identity, root))
             }
             // As in the fixture: an alert's action is an answer to its sender.
             Action::AnswerAlert { alert, choice } => {
@@ -1561,6 +1603,7 @@ pub(super) fn snapshot_from(console: ConsoleSnapshot) -> Snapshot {
         listener: listener.map(listener_info),
         roster: groups,
         managed_agents: BTreeMap::new(),
+        managed_work: BTreeMap::new(),
         agent_error: None,
         me: me.handle,
         me_id: me.id,
