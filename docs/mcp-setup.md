@@ -4,7 +4,7 @@
 
 Before any client can use it:
 
-1. Install `agmen` on your `PATH`, sign in with `agmen login --hub <url>`, and join the project in the worktree: `agmen join <invite>` (or `agmen join --project <id>` when you are already a member).
+1. Install `agmen` on your `PATH`, sign in with `agmen login --hub <url>`, and join the project in the worktree: `agmen join <invite link>` (or `agmen join --project <id>` when you are already a member).
 2. Run `agmen setup` after joining to write your installed agents' entries. This version supports Claude Code. Use `--agent claude` to select it, or `--no-plugin` to use its MCP config without installing the plugin.
 
 Outside a joined worktree every tool answers `not joined: run agmen join <invite> in this worktree`, and nothing connects to the hub or the broker. The same happens when the identity file fails the trust test: it must sit at the worktree root as `.agmen/identity.json` (exactly those names, no symbolic links), and git must ignore it. `agmen join` sets that up. An identity file that came with the repository is never used, since it could send your token to another hub.

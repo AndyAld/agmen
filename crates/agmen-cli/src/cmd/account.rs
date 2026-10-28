@@ -179,7 +179,7 @@ pub(crate) async fn whoami(json: bool) -> Result<()> {
         human.login.hub_url
     );
     if me.projects.is_empty() {
-        println!("no projects yet: accept an invite with agmen join <invite>");
+        println!("no projects yet: accept an invite with agmen join <invite link>");
     }
     for project in &me.projects {
         println!(
@@ -298,6 +298,7 @@ pub(crate) async fn invite(args: InviteArgs) -> Result<()> {
         clean(&created.expires_at)
     );
     println!("  {}", clean(created.link.as_str()));
+    println!("They run: agmen join {}", clean(created.link.as_str()));
     if blocking(move || Ok(crate::open::copy_text(created.link.as_str()))).await? {
         println!("(copied to the clipboard)");
     }

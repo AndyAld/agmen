@@ -275,6 +275,289 @@ async fn it_login_declined_on_github() {
     .await;
 }
 
+async fn invite_link(ctx: &support::Ctx) -> String {
+    let admin = ctx.hub.seed_human(&ctx.topics, Role::Admin).await.unwrap();
+    let home = Home::new();
+    home.sign_in(&ctx.base, &admin);
+    let out = home
+        .run(
+            home.path(),
+            &["invite", "--project", ctx.topics.project().as_str()],
+        )
+        .await;
+    assert_exit(&out, 0);
+    stdout(&out)
+        .lines()
+        .find_map(|line| line.strip_prefix("  "))
+        .unwrap()
+        .to_owned()
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn it_join_link_signs_in_accepts_and_sets_up() {
+    run(Ingest::On, |ctx| async move {
+        let link = invite_link(&ctx).await;
+        let home = Home::new();
+        home.fake_program("claude", "if [ \"$2\" = list ]; then printf '[]\\n'; fi");
+        let wt = Worktree::new(&home);
+        let mut child = spawn(home.agmen(&wt.path(), &["join", &link, "--handle", "sol"]));
+        let mut lines = Lines::new(&mut child);
+        let first = lines.next().await.expect("join shows a device code");
+        let code = first.strip_prefix("Your code is ").unwrap();
+        ctx.github.approve(code, 9001, "Newbie");
+        let text = tokio::time::timeout(WAIT, async {
+            let mut text = first;
+            for _ in 0..100 {
+                let Some(line) = lines.next().await else {
+                    return text;
+                };
+                text.push('\n');
+                text.push_str(&line);
+            }
+            panic!("join printed more than 100 lines");
+        })
+        .await
+        .unwrap();
+        let status = tokio::time::timeout(WAIT, child.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(status.success(), "{text}");
+        assert_eq!(wt.identity().handle, "newbie/sol");
+        let login: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(home.login_file()).unwrap()).unwrap();
+        assert_eq!(login["hub_url"], ctx.base.as_str());
+        for expected in [
+            "joined project",
+            "Claude Code: installed the agmen plugin",
+            "Next: start your agent",
+        ] {
+            assert!(text.contains(expected), "{text}");
+        }
+        assert!(
+            std::fs::read_to_string(home.path().join("calls/claude.log"))
+                .unwrap()
+                .contains("plugin install agmen --marketplace agmen-dev/agmen --scope user --yes")
+        );
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn it_join_reuses_the_sign_in_for_the_same_hub() {
+    run(Ingest::On, |ctx| async move {
+        let link = invite_link(&ctx).await;
+        let other = ctx.hub.seed_project().await.unwrap();
+        let person = ctx.hub.seed_human(&other, Role::Member).await.unwrap();
+        let home = Home::new();
+        home.sign_in(&ctx.base, &person);
+        let wt = Worktree::new(&home);
+        let out = home
+            .run(&wt.path(), &["join", &link, "--handle", "sol"])
+            .await;
+        assert_exit(&out, 0);
+        assert!(!stdout(&out).contains("Your code is"));
+    })
+    .await;
+}
+
+/// A failed plugin install falls back to `.mcp.json` and the join still
+/// succeeds with its identity in place.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn it_join_plugin_failure_falls_back_to_mcp_json() {
+    run(Ingest::On, |ctx| async move {
+        let link = invite_link(&ctx).await;
+        let other = ctx.hub.seed_project().await.unwrap();
+        let person = ctx.hub.seed_human(&other, Role::Member).await.unwrap();
+        let home = Home::new();
+        home.fake_program("claude", "echo broken >&2; exit 1");
+        home.sign_in(&ctx.base, &person);
+        let wt = Worktree::new(&home);
+        let out = home
+            .run(&wt.path(), &["join", &link, "--handle", "sol"])
+            .await;
+        assert_exit(&out, 0);
+        assert_eq!(wt.identity().handle, format!("{}/sol", person.handle));
+        let text = stdout(&out);
+        assert!(text.contains("plugin install failed"), "{text}");
+        assert!(text.contains("wrote .mcp.json instead"), "{text}");
+        assert!(text.contains("Next: start your agent"), "{text}");
+    })
+    .await;
+}
+
+/// An invite for a project the person already belongs to is refused with
+/// the way on, and no identity is minted.
+#[tokio::test(flavor = "multi_thread")]
+async fn it_join_link_for_a_project_you_belong_to_points_to_project() {
+    run(Ingest::On, |ctx| async move {
+        let link = invite_link(&ctx).await;
+        let person = ctx.hub.seed_human(&ctx.topics, Role::Member).await.unwrap();
+        let home = Home::new();
+        home.sign_in(&ctx.base, &person);
+        let wt = Worktree::new(&home);
+        let out = home.run(&wt.path(), &["join", &link]).await;
+        assert_exit(&out, 1);
+        assert!(
+            stderr(&out).contains("agmen join --project"),
+            "{}",
+            stderr(&out)
+        );
+        assert!(!wt.path().join(".agmen/identity.json").exists());
+    })
+    .await;
+}
+
+/// A link to another hub signs in there and says it replaced the old
+/// sign-in. `localhost` and `127.0.0.1` are two origins for one test hub.
+#[tokio::test(flavor = "multi_thread")]
+async fn it_join_link_to_another_hub_says_it_signed_you_out() {
+    run(Ingest::On, |ctx| async move {
+        let link = invite_link(&ctx).await;
+        let (hub, code) = link.split_once("/i#").unwrap();
+        let mut hub: url::Url = hub.parse().unwrap();
+        hub.set_host(Some("localhost")).unwrap();
+        let link = format!("{}/i#{code}", hub.as_str().trim_end_matches('/'));
+        let other = ctx.hub.seed_project().await.unwrap();
+        let person = ctx.hub.seed_human(&other, Role::Member).await.unwrap();
+        let home = Home::new();
+        home.sign_in(&ctx.base, &person);
+        let wt = Worktree::new(&home);
+        let mut child = spawn(home.agmen(
+            &wt.path(),
+            &["join", &link, "--handle", "sol", "--no-setup"],
+        ));
+        let mut lines = Lines::new(&mut child);
+        let first = lines.next().await.expect("join shows a device code");
+        let code = first.strip_prefix("Your code is ").unwrap();
+        ctx.github.approve(code, 9002, "Visitor");
+        let mut text = first;
+        while let Some(line) = tokio::time::timeout(WAIT, lines.next()).await.unwrap() {
+            text.push('\n');
+            text.push_str(&line);
+        }
+        let status = tokio::time::timeout(WAIT, child.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(status.success(), "{text}");
+        assert!(
+            text.contains(&format!(
+                "signed out of {}: agmen keeps one sign-in per machine",
+                ctx.base
+            )),
+            "{text}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn it_join_outside_a_worktree_points_to_the_clone() {
+    run(Ingest::On, |ctx| async move {
+        ctx.hub
+            .set_repo_url(
+                &ctx.topics,
+                &"https://github.com/agmen-dev/agmen".parse().unwrap(),
+            )
+            .await
+            .unwrap();
+        let link = invite_link(&ctx).await;
+        let other = ctx.hub.seed_project().await.unwrap();
+        let person = ctx.hub.seed_human(&other, Role::Member).await.unwrap();
+        let home = Home::new();
+        home.sign_in(&ctx.base, &person);
+        let out = home.run(home.path(), &["join", &link]).await;
+        assert_exit(&out, 1);
+        assert!(stderr(&out).contains("git clone https://github.com/agmen-dev/agmen"));
+        assert!(stderr(&out).contains(&format!("agmen join --project {}", ctx.topics.project())));
+        assert!(!home.path().join(".agmen/identity.json").exists());
+        let wt = Worktree::new(&home);
+        let out = home.run(&wt.path(), &["join", &link]).await;
+        assert_exit(&out, 1);
+        assert!(stderr(&out).contains("already used"));
+        assert!(stderr(&out).contains("agmen join --project <id>"));
+        let out = home
+            .run(
+                &wt.path(),
+                &[
+                    "join",
+                    "--project",
+                    ctx.topics.project().as_str(),
+                    "--handle",
+                    "sol",
+                ],
+            )
+            .await;
+        assert_exit(&out, 0);
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn it_join_without_arguments_uses_the_only_project() {
+    run(Ingest::On, |ctx| async move {
+        let person = ctx.hub.seed_human(&ctx.topics, Role::Member).await.unwrap();
+        let home = Home::new();
+        home.sign_in(&ctx.base, &person);
+        let wt = Worktree::new(&home);
+        let out = home.run(&wt.path(), &["join", "--handle", "sol"]).await;
+        assert_exit(&out, 0);
+        assert_eq!(wt.identity().project, *ctx.topics.project());
+        let other = ctx.hub.seed_project().await.unwrap();
+        let admin = ctx.hub.seed_human(&other, Role::Admin).await.unwrap();
+        let admin_home = Home::new();
+        admin_home.sign_in(&ctx.base, &admin);
+        let out = admin_home
+            .run(
+                admin_home.path(),
+                &["invite", "--project", other.project().as_str()],
+            )
+            .await;
+        assert_exit(&out, 0);
+        let link = stdout(&out)
+            .lines()
+            .find_map(|line| line.strip_prefix("  "))
+            .unwrap()
+            .to_owned();
+        let wt2 = Worktree::new(&home);
+        let out = home
+            .run(&wt2.path(), &["join", &link, "--handle", "luna"])
+            .await;
+        assert_exit(&out, 0);
+        let wt3 = Worktree::new(&home);
+        let out = home.run(&wt3.path(), &["join"]).await;
+        assert_exit(&out, 2);
+        let text = stderr(&out);
+        assert!(text.contains(ctx.topics.project().as_str()), "{text}");
+        assert!(text.contains(other.project().as_str()), "{text}");
+        assert!(text.contains("--project"), "{text}");
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn it_join_bare_code_uses_the_signed_in_hub() {
+    run(Ingest::On, |ctx| async move {
+        let link = invite_link(&ctx).await;
+        let code = link.split_once('#').unwrap().1;
+        let other = ctx.hub.seed_project().await.unwrap();
+        let person = ctx.hub.seed_human(&other, Role::Member).await.unwrap();
+        let home = Home::new();
+        home.sign_in(&ctx.base, &person);
+        let wt = Worktree::new(&home);
+        let out = home
+            .run(&wt.path(), &["join", code, "--handle", "sol", "--no-setup"])
+            .await;
+        assert_exit(&out, 0);
+        assert_eq!(wt.identity().project, *ctx.topics.project());
+        assert!(stdout(&out).contains("agent setup skipped: run agmen setup"));
+    })
+    .await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn it_invite_and_join() {
     run(Ingest::On, |ctx| async move {
@@ -291,10 +574,9 @@ async fn it_invite_and_join() {
         assert_exit(&out, 0);
         let text = stdout(&out);
         assert!(!text.contains("copied"));
-        let prefix = format!("  {}i#", ctx.base);
-        let code = text
+        let link = text
             .lines()
-            .find_map(|line| line.strip_prefix(&prefix))
+            .find_map(|line| line.strip_prefix("They run: agmen join "))
             .expect("an invite link with the code in its fragment")
             .to_owned();
 
@@ -305,7 +587,7 @@ async fn it_invite_and_join() {
         home.sign_in(&ctx.base, &newcomer);
         let wt = Worktree::new(&home);
         let out = home
-            .run(&wt.path(), &["join", &code, "--handle", "sol"])
+            .run(&wt.path(), &["join", &link, "--handle", "sol"])
             .await;
         assert_exit(&out, 0);
         let identity = wt.identity();
@@ -325,7 +607,7 @@ async fn it_invite_and_join() {
 
         // The code works once; a second worktree of a member joins by project.
         let wt2 = Worktree::new(&home);
-        let out = home.run(&wt2.path(), &["join", &code]).await;
+        let out = home.run(&wt2.path(), &["join", &link]).await;
         assert_exit(&out, 1);
         assert!(stderr(&out).contains("already used"), "{}", stderr(&out));
         let out = home

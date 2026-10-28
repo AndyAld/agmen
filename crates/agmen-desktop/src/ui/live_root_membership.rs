@@ -96,6 +96,7 @@ fn execute(
             "join".into(),
             "--project".into(),
             project.project.as_str().into(),
+            "--no-setup".into(),
         ])?;
         ensure!(
             matches!(crate::project::choose_folder(working).0, ProjectChoice::Project(id) if id == project.project),

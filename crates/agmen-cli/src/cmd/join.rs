@@ -16,14 +16,75 @@ use anyhow::{Context as _, Result, bail};
 use clap::{Args, ValueEnum};
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
+use url::Url;
 
-use crate::client::{Human, blocking, delete_token, human, refusal, send, set_token};
-use crate::git;
+use crate::client::{
+    Human, blocking, delete_token, human, human_at, read_login, refusal, same_hub, send, set_token,
+};
 use crate::joined::joined;
 use crate::output::{Fail, clean};
+use crate::{git, setup};
 
 /// The longest name after `<handle>/` (the hub's rule).
 const MAX_NAME: usize = 32;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Invite {
+    Link { hub: Url, code: String },
+    Code(String),
+}
+
+pub(crate) fn parse_invite(text: &str) -> Result<Invite, Fail> {
+    if text.len() > 8192 {
+        return Err(Fail::usage("invite exceeds 8 KiB"));
+    }
+    let text = text.trim();
+    let text = text
+        .strip_prefix('<')
+        .and_then(|s| s.strip_suffix('>'))
+        .unwrap_or(text);
+    let is_code = |s: &str| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit());
+    if is_code(text) {
+        return Ok(Invite::Code(text.to_ascii_lowercase()));
+    }
+    if text.is_empty() || text.chars().any(char::is_whitespace) {
+        return Err(Fail::usage("give one invite link or a 64-hex invite code"));
+    }
+    let mut hub =
+        Url::parse(text).map_err(|_| Fail::usage("give an invite link or a 64-hex invite code"))?;
+    if hub.scheme() != "https"
+        && !(hub.scheme() == "http"
+            && matches!(hub.host_str(), Some("localhost" | "127.0.0.1" | "[::1]")))
+    {
+        return Err(Fail::usage(
+            "invite links must be https, or http on localhost, 127.0.0.1 or [::1]",
+        ));
+    }
+    if !hub.username().is_empty() || hub.password().is_some() {
+        return Err(Fail::usage("invite links must not contain credentials"));
+    }
+    if hub.query().is_some() {
+        return Err(Fail::usage("invite links must not contain a query"));
+    }
+    if hub.path_segments().and_then(Iterator::last) != Some("i") {
+        return Err(Fail::usage("invite links must end in /i"));
+    }
+    let code = hub
+        .fragment()
+        .ok_or_else(|| Fail::usage("invite link is missing its invite code fragment"))?;
+    if !is_code(code) {
+        return Err(Fail::usage(
+            "invite code fragment must contain 64 hex characters",
+        ));
+    }
+    let code = code.to_ascii_lowercase();
+    hub.set_fragment(None);
+    hub.path_segments_mut()
+        .map_err(|()| Fail::usage("invite link must name a hub"))?
+        .pop()
+        .push("");
+    Ok(Invite::Link { hub, code })
+}
 
 /// The kind of identity to mint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize)]
@@ -36,13 +97,16 @@ enum Kind {
 }
 
 #[derive(Debug, Args)]
-#[command(group = clap::ArgGroup::new("how").required(true).args(["invite", "project", "stdin"]))]
+#[command(group = clap::ArgGroup::new("how").args(["invite", "project", "stdin"]))]
 pub(crate) struct JoinArgs {
-    /// The invite code from agmen invite.
+    /// The invite link or code from agmen invite.
     invite: Option<String>,
     /// Read the invite from stdin, at most 8 KiB within 5 seconds.
     #[arg(long)]
     stdin: bool,
+    /// The hub for a bare invite code.
+    #[arg(long, env = "AGMEN_HUB", value_name = "URL")]
+    hub: Option<Url>,
     /// A project you already belong to, by id (agmen whoami lists them).
     #[arg(long, value_name = "ID")]
     project: Option<String>,
@@ -56,6 +120,9 @@ pub(crate) struct JoinArgs {
     /// Resolve a local role; its kind determines the identity kind.
     #[arg(long, value_name = "NAME", conflicts_with = "kind")]
     role: Option<String>,
+    /// Skip agent setup; run agmen setup later.
+    #[arg(long)]
+    no_setup: bool,
 }
 
 impl JoinArgs {
@@ -101,6 +168,8 @@ impl JoinArgs {
 #[derive(Debug, Deserialize)]
 struct Accepted {
     project: String,
+    name: String,
+    repo_url: Option<agmen_proto::RepoUrl>,
 }
 
 #[derive(Debug, Serialize)]
@@ -179,8 +248,193 @@ impl Minted {
 pub(crate) async fn join(args: JoinArgs) -> Result<()> {
     let args = args.with_stdin().await?;
     let cwd = std::env::current_dir().context("reading the working directory")?;
-    let root = git::toplevel(&cwd).await?;
-    let (kind, role) = args.permissions(&root).await?;
+    // Every local check runs here, before sign-in or any hub call: an invite
+    // is single use, so a join that fails after accepting it costs the person
+    // their link.
+    let invite = args.invite.as_deref().map(parse_invite).transpose()?;
+    let hub = match &invite {
+        Some(Invite::Link { hub, .. }) => Some(hub.clone()),
+        Some(Invite::Code(_)) => Some(match &args.hub {
+            Some(hub) => hub.clone(),
+            None => read_login().await?.map(|login| login.hub_url).ok_or_else(|| {
+                Fail::usage("a bare invite code needs --hub <url> (or AGMEN_HUB); use an invite link instead")
+            })?,
+        }),
+        None => None,
+    };
+    let root = match git::toplevel(&cwd).await {
+        Ok(root) => Some(root),
+        // An invite is accepted first and then points to the clone.
+        Err(_) if invite.is_some() => None,
+        Err(err) => return Err(err),
+    };
+    let local = match root {
+        Some(root) => {
+            check_not_joined(&root).await?;
+            let permissions = args.permissions(&root).await?;
+            Some((root, permissions))
+        }
+        None => None,
+    };
+    let (human, root, permissions, project, name) = if let (Some(invite), Some(hub)) = (invite, hub)
+    {
+        let (Invite::Link { code, .. } | Invite::Code(code)) = invite;
+        let human = sign_in(&hub).await?;
+        let accepted = accept(&human, &code).await?;
+        let Some((root, permissions)) = local else {
+            eprintln!(
+                "joined project {} ({}). This folder is not a clone of its repository.",
+                clean(&accepted.name),
+                clean(&accepted.project)
+            );
+            if let Some(repo) = &accepted.repo_url {
+                eprintln!("  git clone {}", clean(repo.as_str()));
+            }
+            bail!(
+                "then, inside the clone: agmen join --project {}",
+                clean(&accepted.project)
+            );
+        };
+        (human, root, permissions, accepted.project, accepted.name)
+    } else {
+        let (root, permissions) = local.context("agmen join runs inside a git worktree")?;
+        let human = human().await?;
+        let (project, name) = member_project(&human, args.project.as_deref()).await?;
+        (human, root, permissions, project, name)
+    };
+    let identity = mint_identity(&human, &root, &project, &args, permissions)
+        .await
+        .inspect_err(|_| {
+            if args.invite.is_some() {
+                eprintln!(
+                    "the invite is used up; to finish in this folder: agmen join --project {}",
+                    clean(&project)
+                );
+            }
+        })?;
+    println!(
+        "joined project {} ({}) as {} ({}) at {}",
+        clean(&name),
+        identity.project,
+        clean(&identity.handle),
+        identity.identity_id,
+        clean(identity.hub_url.as_str())
+    );
+    if args.no_setup {
+        println!("agent setup skipped: run agmen setup");
+    } else {
+        run_setup(&root, &identity).await;
+    }
+    println!("Next: start your agent in this folder; it has the agmen tools.");
+    Ok(())
+}
+
+/// The signed-in person for `hub`: the saved sign-in when it is for that hub
+/// and works, else a device login there. Another hub's sign-in is replaced,
+/// and the person is told.
+async fn sign_in(hub: &Url) -> Result<Human> {
+    if let Some(human) = human_at(hub).await? {
+        return Ok(human);
+    }
+    let old = read_login().await?;
+    let human = tokio::time::timeout(
+        std::time::Duration::from_secs(900),
+        super::account::device_login(hub),
+    )
+    .await
+    .context("signing in exceeded 900 seconds")??;
+    if let Some(old) = old
+        && !same_hub(&old.hub_url, hub)
+    {
+        println!(
+            "signed out of {}: agmen keeps one sign-in per machine",
+            clean(old.hub_url.as_str())
+        );
+    }
+    Ok(human)
+}
+
+/// The project `agmen join` without a link picks: `--project`, else the only one.
+async fn member_project(human: &Human, wanted: Option<&str>) -> Result<(String, String)> {
+    let me = human
+        .api
+        .me()
+        .await
+        .context("reading who is signed in failed")?;
+    let project = match wanted {
+        Some(id) => me
+            .projects
+            .iter()
+            .find(|p| p.project == id)
+            .with_context(|| {
+                format!("you are not a member of project {id}; ask its admin for an invite")
+            })?,
+        None => match me.projects.as_slice() {
+            [] => {
+                return Err(Fail::usage("no projects yet: run agmen join <invite link>").into());
+            }
+            [project] => project,
+            projects => {
+                let mut message = String::from("choose a project with --project <id>:");
+                for project in projects {
+                    message.push_str(&format!(
+                        "\n  {} ({})",
+                        clean(&project.project),
+                        clean(&project.name)
+                    ));
+                }
+                return Err(Fail::usage(message).into());
+            }
+        },
+    };
+    Ok((project.project.clone(), project.name.clone()))
+}
+
+/// Sets up the agents in `root`. A failure is reported and never fails the
+/// join: the identity is already written and `agmen setup` can be rerun.
+async fn run_setup(root: &Path, identity: &IdentityFile) {
+    let result = async {
+        let plugin = blocking(|| setup::plugin_choice(false)).await?;
+        setup::run(root, identity, None, plugin).await
+    }
+    .await;
+    match result {
+        Ok(changes) => {
+            if changes.is_empty() {
+                println!("no agents found: install one, then run agmen setup");
+            }
+            for change in changes {
+                if let setup::Outcome::Failed(why) = &change.outcome {
+                    eprintln!("agent setup failed: {}; run agmen setup", clean(why));
+                } else {
+                    println!("{}", clean(&change.to_string()));
+                }
+            }
+        }
+        Err(err) => eprintln!(
+            "agent setup failed: {}; run agmen setup",
+            clean(&format!("{err:#}"))
+        ),
+    }
+}
+
+/// Mints and writes this worktree's identity using an existing project membership.
+#[expect(
+    dead_code,
+    reason = "the plan's agmen host up and agmen init call it; join itself resolves the role earlier"
+)]
+pub(crate) async fn join_here(
+    human: &Human,
+    root: &Path,
+    project: &str,
+    args: &JoinArgs,
+) -> Result<IdentityFile> {
+    let permissions = args.permissions(root).await?;
+    mint_identity(human, root, project, args, permissions).await
+}
+
+/// Refuses a worktree that already has an identity file.
+async fn check_not_joined(root: &Path) -> Result<()> {
     let file = root.join(IDENTITY_DIR).join(IDENTITY_FILE);
     let existing = file.clone();
     let present = blocking(move || {
@@ -201,12 +455,17 @@ pub(crate) async fn join(args: JoinArgs) -> Result<()> {
             file.display()
         );
     }
-    let human = human().await?;
-    let project = match (&args.invite, args.project) {
-        (Some(code), _) => accept(&human, code).await?,
-        (None, Some(project)) => project,
-        (None, None) => return Err(Fail::usage("give an invite code or --project <id>").into()),
-    };
+    Ok(())
+}
+
+async fn mint_identity(
+    human: &Human,
+    root: &Path,
+    project: &str,
+    args: &JoinArgs,
+    (kind, role): (Kind, Option<agmen_proto::RoleSpec>),
+) -> Result<IdentityFile> {
+    check_not_joined(root).await?;
     let me = human
         .api
         .me()
@@ -224,16 +483,16 @@ pub(crate) async fn join(args: JoinArgs) -> Result<()> {
             .strip_prefix(&format!("{}/", me.handle))
             .unwrap_or(name)
             .to_owned(),
-        None => default_name(&root),
+        None => default_name(root),
     };
     let handle = format!("{}/{name}", me.handle);
     let request = Mint {
         handle: &handle,
-        project: &project,
+        project,
         kind,
         role,
     };
-    let minted = request.send(&human).await?;
+    let minted = request.send(human).await?;
     minted.report_verb_changes(request.role.as_ref())?;
     let identity = IdentityFile {
         tenant: minted.tenant.parse().context("the hub's tenant id")?,
@@ -250,11 +509,11 @@ pub(crate) async fn join(args: JoinArgs) -> Result<()> {
     let key = TokenKey::new(&identity.hub_url, &identity.identity_id).context("the hub URL")?;
     // The exclude goes first: once the file exists, every command applies
     // the trust test, which needs git to ignore it.
-    let exclude = git::exclude_file(&root).await?;
+    let exclude = git::exclude_file(root).await?;
     blocking(move || git::add_exclude(&exclude, ".agmen/")).await?;
     set_token(key, minted.token).await?;
-    write_identity(&root, &identity).await?;
-    let check_root = root.clone();
+    write_identity(root, &identity).await?;
+    let check_root = root.to_owned();
     let trusted = blocking(move || {
         find_identity(&check_root).context("the new identity file fails the trust test")
     })
@@ -265,9 +524,7 @@ pub(crate) async fn join(args: JoinArgs) -> Result<()> {
             root.display()
         );
     }
-    let (handle, id) = (clean(&identity.handle), &identity.identity_id);
-    println!("joined project {} as {handle} ({id})", identity.project);
-    Ok(())
+    Ok(identity)
 }
 
 async fn read_stdin_invite() -> Result<String> {
@@ -306,14 +563,16 @@ fn stdin_invite(bytes: &[u8]) -> Result<String> {
 
 /// Accepts invite `code` and returns its project. One already accepted by
 /// someone else, expired or unknown fails with what the hub said.
-async fn accept(human: &Human, code: &str) -> Result<String> {
+async fn accept(human: &Human, code: &str) -> Result<Accepted> {
     let request = human
         .api
         .request(Method::POST, &["invites", code, "accept"]);
     match send::<Accepted>(request).await {
-        Ok(accepted) => Ok(accepted.project),
+        Ok(accepted) => Ok(accepted),
         Err(err) => Err(match refusal(&err).map(|r| r.code.as_str()) {
-            Some("invite_used") => anyhow::anyhow!("the invite was already used"),
+            Some("invite_used") => anyhow::anyhow!(
+                "the invite was already used; if you used it, run agmen join --project <id> in your clone (agmen whoami lists your projects)"
+            ),
             Some("invite_expired") => anyhow::anyhow!("the invite has expired; ask for a new one"),
             Some("not_found") => anyhow::anyhow!("no such invite; check the code"),
             Some("already_member") => anyhow::anyhow!(
@@ -429,6 +688,61 @@ pub(crate) async fn leave() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invite_links_and_codes_parse() {
+        let code = "ab".repeat(32);
+        for (text, base) in [
+            (
+                format!("https://api.getagmen.ai/i#{code}"),
+                "https://api.getagmen.ai/",
+            ),
+            (
+                format!("  <https://h.example/hub/i#{code}>\n"),
+                "https://h.example/hub/",
+            ),
+            (
+                format!("https://h.example/i#{}", code.to_uppercase()),
+                "https://h.example/",
+            ),
+            (
+                format!("http://127.0.0.1:8080/i#{code}"),
+                "http://127.0.0.1:8080/",
+            ),
+            (
+                format!("http://localhost:8080/i#{code}"),
+                "http://localhost:8080/",
+            ),
+            (format!("http://[::1]:8080/i#{code}"), "http://[::1]:8080/"),
+        ] {
+            let Invite::Link { hub, code: parsed } = parse_invite(&text).unwrap() else {
+                panic!("expected a link");
+            };
+            assert_eq!(hub.as_str(), base);
+            assert_eq!(parsed, code);
+        }
+        assert!(
+            matches!(parse_invite(&format!(" <{}> ", code.to_uppercase())).unwrap(), Invite::Code(parsed) if parsed == code)
+        );
+        for (text, problem) in [
+            (format!("http://h.example/i#{code}"), "must be https"),
+            ("https://h.example/i".into(), "fragment"),
+            ("https://h.example/i#abc".into(), "64"),
+            (format!("https://h.example/x#{code}"), "/i"),
+            (format!("https://h.example/i?c=1#{code}"), "query"),
+            (String::new(), "invite"),
+            ("x".repeat(9 * 1024), "8 KiB"),
+            (
+                format!("https://user:pass@h.example/i#{code}"),
+                "credentials",
+            ),
+            (format!("https://h.example/i/#{}", code), "/i"),
+        ] {
+            let err = parse_invite(&text).unwrap_err();
+            assert_eq!(err.code, crate::output::Code::Usage);
+            assert!(err.message.contains(problem), "{}", err.message);
+        }
+    }
 
     #[test]
     fn protected_stdin_is_one_bounded_code() {

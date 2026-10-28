@@ -281,6 +281,40 @@ pub(crate) async fn human() -> Result<Human> {
     Ok(Human { login, api })
 }
 
+/// Whether two hub URLs name one hub: the same origin and path, where a
+/// trailing slash does not count (`url` ignores it too).
+pub(crate) fn same_hub(a: &Url, b: &Url) -> bool {
+    a.origin() == b.origin() && a.path().trim_end_matches('/') == b.path().trim_end_matches('/')
+}
+
+/// Reuses a working sign-in only for the same hub origin and path.
+pub(crate) async fn human_at(hub: &Url) -> Result<Option<Human>> {
+    let Some(login) = read_login().await? else {
+        return Ok(None);
+    };
+    if !same_hub(&login.hub_url, hub) {
+        return Ok(None);
+    }
+    let result: Result<Human> = async {
+        let human = human().await?;
+        human.api.me().await?;
+        Ok(human)
+    }
+    .await;
+    match result {
+        Ok(human) => Ok(Some(human)),
+        Err(err)
+            if err
+                .downcast_ref::<Fail>()
+                .is_some_and(|f| f.code == crate::output::Code::NotLoggedIn)
+                || refusal(&err).is_some_and(|r| r.status == 401) =>
+        {
+            Ok(None)
+        }
+        Err(err) => Err(err),
+    }
+}
+
 /// `GET /v1/me`'s answer (ruling R56).
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct Me {
@@ -344,6 +378,20 @@ pub(crate) async fn blocking<R: Send + 'static>(
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn same_hub_ignores_a_trailing_slash_only() {
+        let url = |text: &str| Url::parse(text).unwrap();
+        for (a, b, same) in [
+            ("https://h.example", "https://h.example/", true),
+            ("https://h.example/hub", "https://h.example/hub/", true),
+            ("https://h.example/hub", "https://h.example/other/", false),
+            ("https://h.example/", "https://h.example:8443/", false),
+            ("https://h.example/", "http://h.example/", false),
+        ] {
+            assert_eq!(same_hub(&url(a), &url(b)), same, "{a} {b}");
+        }
+    }
 
     #[tokio::test]
     async fn normal_hub_answers_keep_their_behavior() {

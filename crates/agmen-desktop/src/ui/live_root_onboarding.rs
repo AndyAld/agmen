@@ -121,7 +121,7 @@ impl Onboarding {
                 "Enter one invite code (at most 8 KiB)."
             );
             Ok((
-                vec!["join".into(), "--stdin".into()],
+                vec!["join".into(), "--stdin".into(), "--no-setup".into()],
                 code.as_bytes().to_vec(),
             ))
         } else {
