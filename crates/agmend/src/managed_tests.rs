@@ -1469,3 +1469,36 @@ async fn an_attached_session_that_read_others_messages_is_not_resumed_headless()
     assert!(!runs[0].resume);
     managed.shutdown().await;
 }
+
+#[tokio::test]
+async fn attach_over_a_running_batch_leaves_the_budget_for_runs_after_it() {
+    let fixture = Fixture::new().await;
+    fixture.runner.mode.store(2, Ordering::SeqCst);
+    fixture.launch().await;
+    let managed = &fixture.daemon.core.managed;
+    enqueue_from(&fixture, 1, "owner001", "agent001").await;
+    managed.tick().await;
+    for _ in 0..200 {
+        if !fixture.runner.runs.lock().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    managed
+        .attach_claude(json!({"identity":"agent001"}))
+        .await
+        .unwrap();
+    // Like Stop, the person's own cancel does not reserve the budget.
+    assert_eq!(
+        managed.list(json!({})).await.unwrap()["agents"][0]["spent_usd"],
+        "0.000000"
+    );
+    fixture.runner.mode.store(0, Ordering::SeqCst);
+    let spec = fixture.runner.attaches.lock().unwrap()[0].clone();
+    std::fs::write(&spec.pid_file, exited_pid().to_string()).unwrap();
+    batch(managed, "agent001").await;
+    enqueue_from(&fixture, 2, "owner001", "agent001").await;
+    batch(managed, "agent001").await;
+    assert_eq!(fixture.runner.runs.lock().unwrap().len(), 2);
+    managed.shutdown().await;
+}

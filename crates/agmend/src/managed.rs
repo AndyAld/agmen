@@ -642,6 +642,11 @@ async fn run_worker(
     if held.state == "offline" {
         return;
     }
+    // Attach cancelled it: like Stop, the person's own cancel does not
+    // reserve the rest of the budget, which would end every later run.
+    if held.state == "attached" && matches!(result, Err(RunError::Cancelled)) {
+        return;
+    }
     // Attach cancels a batch and keeps its own state.
     if held.state == "running" {
         held.state = "idle";
