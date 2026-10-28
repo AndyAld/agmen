@@ -2,6 +2,8 @@
 
 Status: written 2026-10-25. Supersedes the ordering in [m0-m1.md](m0-m1.md); tasks below point into that plan where its detail still holds.
 
+Checkboxes record code and recorded check results, not a fresh test run. Interactive checks and the S1 restart check remain open where noted.
+
 **Goal:** Claude Code sessions on several machines coordinate one effort through a Claude Code plugin: typed posts and DMs with confirmed delivery, wake-ups when an idle session gets an assignment or DM, and atomic claims with a lane edit guard. Senders are authenticated by the broker and stamped by the hub.
 
 **Scope decisions (Adam, 2026-10-25):**
@@ -52,6 +54,8 @@ Same as [m0-m1.md Global Constraints](m0-m1.md#global-constraints), with these c
 
 ### Task 1: Workspace scaffold, dev stack, CI gate
 
+- [x] Workspace, dev stack and CI gate definitions implemented.
+
 As [m0-m1 Task 1](m0-m1.md#task-1-workspace-scaffold-dev-stack-ci-gate), with these changes:
 
 - Crates: `agmen-proto`, `agmen-client`, `agmen-cli`, `agmen-hub`.
@@ -85,7 +89,7 @@ Token shape to test (ES256, `kid` from the JWKS, `sub` = `username` = identity i
 
 Topics are written in full with `eq` (no `${username}` placeholders), so an id can never widen a rule. The JWT must also be bound to the client ids `<sub>-mcp` and `<sub>-watch`; test whether a payload claim check on `${clientid}` can enforce the prefix, and record the result.
 
-- [ ] **Step 1: Write the failing tests** against the compose broker:
+- [x] **Step 1: Write the failing tests** against the compose broker:
 
 ```rust
 #[tokio::test] async fn it_publish_to_own_up_allowed()         // A publishes to up/A; hub-role subscriber receives it
@@ -101,12 +105,16 @@ Topics are written in full with `eq` (no `${username}` placeholders), so an id c
 #[tokio::test] async fn it_websocket_listener()                // first test over ws://localhost:8083/mqtt
 ```
 
-- [ ] **Step 2:** Run `cargo nextest run -p s1-emqx --profile it` and record which tests fail.
+- [x] **Step 2:** Run `cargo nextest run -p s1-emqx --profile it` and record which tests fail.
 - [ ] **Step 3:** Adjust `emqx.conf` until every test passes, or a test proves a requirement EMQX cannot meet on a single node.
-- [ ] **Step 4:** Write ADR-0002: the license position (single node, BSL community terms, internal use; commercial license needed before outside teams or clustering), the claims and config, the results table, and the WSS-behind-HAProxy check from m0-m1 Task 2 Step 4 against port 8083.
-- [ ] **Step 5:** Commit: `Spike S1: EMQX JWT identity and ACL tests`
+- [x] **Step 4:** Write ADR-0002: the license position (single node, BSL community terms, internal use; commercial license needed before outside teams or clustering), the claims and config, the results table, and the WSS-behind-HAProxy check from m0-m1 Task 2 Step 4 against port 8083.
+- [x] **Step 5:** Commit: `Spike S1: EMQX JWT identity and ACL tests`
+
+Step 3 stays open: [ADR-0002 Results](../adr/0002-broker-emqx.md#results) records the replacement `it_offline_session_replays_after_restart` as pending against a real restart.
 
 ### Task 3: Spike S2, rumqttc v5 against EMQX
+
+- [x] Client spike implemented and results recorded in ADR-0003.
 
 As [m0-m1 Task 3](m0-m1.md#task-3-spike-s2-rumqttc-v5-client-behavior), against EMQX. S1 found that rumqttc 0.25.1's TLS features pull `rustls-webpki` 0.102.8 with five advisories and the unmaintained `rustls-pemfile`, and that 0.25.1, released 2025-11-21, was still its newest release (ADR-0002, ADR-0003). If a test cannot pass with rumqttc, try `rumqttc-next` 0.34.0, then `mqtt5` 0.48.2 (m0-m1 Task 3 Step 4); the chosen client must pass `cargo deny check` with its TLS and WebSocket features on and no advisory ignores (ADR-0003). Plus one test:
 
@@ -117,6 +125,8 @@ As [m0-m1 Task 3](m0-m1.md#task-3-spike-s2-rumqttc-v5-client-behavior), against 
 Commit: `Spike S2: MQTT 5 client against EMQX`
 
 ### Task 4: Spike S5, gapless per-stream numbering
+
+- [x] Numbering implementation and concurrency tests present; results recorded in ADR-0004.
 
 Unchanged: [m0-m1 Task 4](m0-m1.md#task-4-spike-s5-gapless-per-stream-numbering).
 
@@ -129,9 +139,11 @@ As [m0-m1 Task 5](m0-m1.md#task-5-spike-s4-claude-code-mod-streams-a-child-proce
 - **Context:** `$.session.append` adds the line as a meta row; check that the model reads it as data.
 - **Guard:** a `tool.call` handler on Edit, Write and NotebookEdit denies paths under `forbidden/` and denies on any thrown error.
 
-- [ ] Tests (`register.test.tsx`): `wakeup_on_dm_when_idle`, `no_wakeup_for_own_message`, `guard_denies_forbidden_path`, `guard_denies_on_error`.
-- [ ] Interactive check in `claude --plugin-dir mods/agmen-claude` on Claude Code 2.1.310; record the results and the version in ADR-0005.
-- [ ] Commit: `Spike S4: mod wake-ups, context rows, and edit guard`
+- [x] Tests (`register.test.tsx`): `wakeup_on_dm_when_idle`, `no_wakeup_for_own_message`, `guard_denies_forbidden_path`, `guard_denies_on_error`.
+- [ ] Run [ADR-0006's two-session interactive check](../adr/0006-claude-code-plugin.md#results); record the results and the versions there. It replaces ADR-0005's spike check.
+- [x] Commit: `Spike S4: mod wake-ups, context rows, and edit guard`
+
+These spike tests are recorded in [ADR-0005 Results](../adr/0005-mod-streaming.md#results) at commit `d6a173a`; Task 14 replaces the spike module with the installed plugin. The interactive check remains pending.
 
 (Spike S6, the Windows local API, is dropped for the MVP because there is no daemon. Unix and Windows both work, since `mcp` and `watch` talk to EMQX directly.)
 
@@ -141,11 +153,15 @@ As [m0-m1 Task 5](m0-m1.md#task-5-spike-s4-claude-code-mod-streams-a-child-proce
 
 ### Task 6: agmen-proto
 
-As [m0-m1 Task 7](m0-m1.md#task-7-agmen-proto-envelope-verbs-topics-schema-export). The MVP implements HELLO, BYE, FYI, ASK, ANSWER, ACK, STATUS, ROLLCALL, ALERT, DM, CLAIM, GRANT, DENY, HEARTBEAT, RELEASE, ASSIGN, FOUND, ITEM and DONE. The other verbs exist as types only. Add tests `claim_requires_valid_until` and `done_requires_item_and_commit`.
+- [x] Protocol types, validation, schema export and tests implemented.
+
+As [m0-m1 Task 8](m0-m1.md#task-8-agmen-proto-envelope-verbs-topics-schema-export). The MVP implements HELLO, BYE, FYI, ASK, ANSWER, ACK, STATUS, ROLLCALL, ALERT, DM, CLAIM, GRANT, DENY, HEARTBEAT, RELEASE, ASSIGN, FOUND, ITEM and DONE. The other verbs exist as types only. Add tests `claim_requires_valid_until` and `done_requires_item_and_commit`.
 
 ### Task 7: Hub auth, identities, JWKS, broker tokens
 
-As [m0-m1 Task 8](m0-m1.md#task-8-hub-data-model-auth-identities-broker-credentials), with these changes:
+- [x] Hub auth, identity, JWKS and broker-token code and tests implemented.
+
+As [m0-m1 Task 9](m0-m1.md#task-9-hub-data-model-auth-identities-broker-credentials), with these changes:
 
 - **Login:** GitHub only for the MVP, through the device flow (`agmen login` prints a code and URL). Google and PKCE loopback come later.
 - **No dynsec.** Replace `Dynsec` with `BrokerTokens`: `fn mint(&self, identity: &Identity, ttl: Duration) -> Result<String, TokenError>` signs an ES256 JWT with the ADR-0002 claims, and `GET /v1/jwks` serves the public keys (two keys during rotation). `pub struct EmqxAdmin` has `async fn kick(&self, client_id: &str) -> Result<(), EmqxError>`.
@@ -165,15 +181,19 @@ Commit: `Add hub auth, identities, JWKS, and broker tokens`
 
 ### Task 8: Hub ingest, sweeper, ACK and NACK
 
-As [m0-m1 Task 9](m0-m1.md#task-9-hub-ingest-sweeper-ack-and-nack). The hub's MQTT client subscribes with `$share/hub/agmen/v1/+/+/up/+` and authenticates with its own JWT, which allows subscribing to `up/+` and publishing everywhere else under `agmen/v1/`.
+- [x] Ingest, sweeper, delivery replies and tests implemented.
+
+As [m0-m1 Task 10](m0-m1.md#task-10-hub-ingest-sweeper-ack-and-nack). The hub's MQTT client subscribes with `$share/hub/agmen/v1/+/+/up/+` and authenticates with its own JWT, which allows subscribing to `up/+` and publishing everywhere else under `agmen/v1/`.
 
 ### Task 9: Hub replay and presence
 
-As [m0-m1 Task 10](m0-m1.md#task-10-hub-replay-presence-roster).
+- [x] Replay, presence, roster and tests implemented.
+
+As [m0-m1 Task 11](m0-m1.md#task-11-hub-replay-presence-roster).
 
 ### Task 10: Hub ledger: lanes, items, claims, DONE check
 
-**Files:** `crates/agmen-hub/migrations/0004_ledger.sql`, `crates/agmen-hub/src/{lanes.rs,items.rs,claims.rs}`, `crates/agmen-hub/tests/it_ledger.rs`
+**Files:** `crates/agmen-hub/migrations/0004_ledger.{up,down}.sql`, `crates/agmen-hub/src/{lanes.rs,items.rs,claims.rs}`, `crates/agmen-hub/tests/it_ledger.rs`
 
 **Produces:**
 
@@ -182,7 +202,7 @@ As [m0-m1 Task 10](m0-m1.md#task-10-hub-replay-presence-roster).
 - Verbs: CLAIM gives GRANT or DENY (`held_by`, `expired`, `not_in_lane`, `closed`). A lease is 30 minutes, renewed by HEARTBEAT; a sweeper task expires stale claims and posts RELEASE `lease_expired`. FOUND gives ITEM with the next key. ASSIGN (coordinator) goes to the assignee's inbox. DONE gets its `changes` checked against the sender's claimed lanes; the hub posts an ALERT to coordinators listing out-of-lane paths.
 - Lane matching uses `globset` with gitignore semantics. A path in no lane is allowed and reported as `unowned`.
 
-- [ ] **Step 1: Write the failing tests:**
+- [x] **Step 1: Write the failing tests:**
 
 ```rust
 #[tokio::test] async fn it_twenty_claims_one_grant()       // 20 identities CLAIM B-1 at once: exactly one GRANT, 19 DENY held_by
@@ -195,7 +215,9 @@ As [m0-m1 Task 10](m0-m1.md#task-10-hub-replay-presence-roster).
 ```
 
 - [ ] **Step 2:** Run them (expect FAIL), implement, run the tests and the gate.
-- [ ] **Step 3:** Commit: `Add hub ledger: lanes, items, claims, and DONE checks`
+- [x] **Step 3:** Commit: `Add hub ledger: lanes, items, claims, and DONE checks`
+
+The ledger implementation is present. Step 2 stays open until its test and full gate results are recorded.
 
 ---
 
@@ -203,14 +225,18 @@ As [m0-m1 Task 10](m0-m1.md#task-10-hub-replay-presence-roster).
 
 ### Task 11: agmen-client
 
-As [m0-m1 Task 11](m0-m1.md#task-11-agmen-client-session-outbox-cursors), with these changes:
+- [x] Client session, outbox, cursors and tests implemented.
+
+As [m0-m1 Task 12](m0-m1.md#task-12-agmen-client-session-outbox-cursors), with these changes:
 
 - `SessionConfig` takes a token source (`async fn token() -> Result<String, ClientError>`) and reconnects with a fresh token before `exp`.
 - Outbox and cursors live in one SQLite file per identity, which two processes open at once (WAL, `busy_timeout` 5 s). Add the test `two_processes_share_file`: the outbox writer and the cursor writer in separate threads with separate connections both make progress.
 
 ### Task 12: agmen CLI
 
-As [m0-m1 Task 13](m0-m1.md#task-13-agmen-cli), without agmend: the CLI talks to the hub over HTTP and to EMQX through `agmen-client`.
+- [x] CLI commands and tests implemented.
+
+As [m0-m1 Task 14](m0-m1.md#task-14-agmen-cli), without agmend: the CLI talks to the hub over HTTP and to EMQX through `agmen-client`.
 
 - Commands: `login`, `logout`, `whoami`, `join <invite> [--handle <name>]` (mints `<human>/<name>`, writes `.agmen/identity.json`, adds `.agmen/` to `.git/info/exclude`), `leave`, `post <verb>`, `ask`, `answer`, `dm`, `inbox`, `watch [--json]`, `claim <item>`, `release <item>`, `heartbeat`, `done <item> --commit <sha>` (fills `changes` from `git diff --name-status --no-renames <base_sha_at_claim>...<commit>` and `branch` from `git rev-parse`), `found <title>`, `assign <item> <identity>`, `lanes [set <file>]`, `items`, `check-path <path>...`.
 - `watch --json` writes one `ClientEvent` per line, plus `{"kind":"self","identity_id":...}` first, so the mod knows which messages are its own.
@@ -218,7 +244,9 @@ As [m0-m1 Task 13](m0-m1.md#task-13-agmen-cli), without agmend: the CLI talks to
 
 ### Task 13: `agmen mcp`
 
-As [m0-m1 Task 14](m0-m1.md#task-14-agmen-mcp-server), with the identity resolved from the working directory (`--identity` is an optional override). Tools: `post`, `ask`, `answer`, `dm`, `inbox`, `state`, `claim`, `release`, `done`, `found`, `lanes`, `check_path`. Outside a joined worktree, every tool answers `not joined: run agmen join <invite> in this worktree` (not an MCP error). The MCP server sends HEARTBEAT for held claims every 5 minutes while it runs.
+- [x] MCP tools, worktree identity resolution, heartbeat and tests implemented.
+
+As [m0-m1 Task 15](m0-m1.md#task-15-agmen-mcp-server), with the identity resolved from the working directory (`--identity` is an optional override). Tools: `post`, `ask`, `answer`, `dm`, `inbox`, `state`, `claim`, `release`, `done`, `found`, `lanes`, `check_path`. Outside a joined worktree, every tool answers `not joined: run agmen join <invite> in this worktree` (not an MCP error). The MCP server sends HEARTBEAT for held claims every 5 minutes while it runs.
 
 ### Task 14: Claude Code plugin
 
@@ -234,7 +262,7 @@ As [m0-m1 Task 14](m0-m1.md#task-14-agmen-mcp-server), with the identity resolve
 - **Command:** `/agmen` with `join`, `inbox`, `claim`, `done`, `dm`, `lanes`. Each runs `agmen ...` through `$.process.run` and shows the result.
 - **Skill:** `skills/agmen/SKILL.md` covers when to post, how to claim before editing, what DONE needs, and that `rejected:` results must not be retried unchanged.
 
-- [ ] **Step 1: Write the failing tests** (`claude plugin test`, terminal and desktop surfaces) against a scripted fake `agmen` on `PATH`:
+- [x] **Step 1: Write the failing tests** (`claude plugin test`, terminal and desktop surfaces) against a scripted fake `agmen` on `PATH`:
 
 ```ts
 inert_when_not_joined          // no .agmen/identity.json: no spawn, no guard denials
@@ -248,9 +276,9 @@ guard_denies_on_error          // check-path exits 1 or hangs past 2 s: Edit den
 guard_allows_in_lane           // allowed:true: Edit proceeds
 ```
 
-- [ ] **Step 2:** Run `claude plugin validate mods/agmen-claude`, `tsc -p mods/agmen-claude` and `claude plugin test mods/agmen-claude` (expect FAIL), then implement until all pass.
+- [x] **Step 2:** Run `claude plugin validate mods/agmen-claude`, `tsc -p mods/agmen-claude` and `claude plugin test mods/agmen-claude` (expect FAIL), then implement until all pass.
 - [ ] **Step 3:** Interactive check on a real hub from compose: two worktrees, two sessions. One DMs the other while it is idle, and the other wakes and answers.
-- [ ] **Step 4:** Commit: `Add the agmen Claude Code plugin`
+- [x] **Step 4:** Commit: `Add the agmen Claude Code plugin`
 
 ---
 
@@ -258,24 +286,28 @@ guard_allows_in_lane           // allowed:true: Edit proceeds
 
 ### Task 15: MVP end-to-end exit tests
 
-As [m0-m1 Task 15](m0-m1.md#task-15-m1-end-to-end-exit-tests), using two temp homes and two worktrees instead of two agmend instances, plus:
+- [x] Two-machine exit tests and the plugin CLI contract test implemented.
+
+As [m0-m1 Task 16](m0-m1.md#task-16-m1-end-to-end-exit-tests), using two temp homes and two worktrees instead of two agmend instances, plus:
 
 ```rust
 #[tokio::test] async fn it_claim_race_two_machines()   // both machines CLAIM B-1 at once: one GRANT, one DENY held_by
 #[tokio::test] async fn it_done_reaches_coordinator()  // claim, commit, `agmen done`; coord's watch yields DONE with branch@commit and changes
 ```
 
-### Task 16: Deploy on the GroupDrive cluster
+### Task 16: Deploy on the hosted cluster
 
-As [m0-m1 Task 16](m0-m1.md#task-16-minimal-deploy-on-the-groupdrive-cluster), with EMQX in place of Mosquitto:
+Use agmen's own cluster, registry, secret store and domain, separate from GroupDrive's, as described in [README Deployment](../../README.md#deployment). The manifests live in the separate `agmen-kubernetes` repository and are synced by ArgoCD in agmen's cluster; do not add cluster manifests here. [m0-m1 Task 17](m0-m1.md#task-17-minimal-deploy-on-the-groupdrive-cluster) supplies the earlier deploy outline; this task supersedes its GroupDrive cluster and manifest-copy instructions, with EMQX in place of Mosquitto:
 
-- One EMQX StatefulSet replica (single node keeps the BSL community terms; no clustering) on Ceph RBD, pinned `emqx/emqx` tag from ADR-0001. Config from a ConfigMap; the hub's EMQX API key comes from Vault through VSO.
+- One EMQX StatefulSet replica (single node keeps the BSL community terms; no clustering) on a persistent volume, pinned `emqx/emqx` tag from ADR-0001. Config from a ConfigMap; the hub's EMQX API key comes from the cluster's secret store through a Kubernetes Secret.
 - `mqtt-ws.` ingress points at EMQX 8083. The dashboard (18083) gets no ingress.
 - The hub serves `/v1/jwks` inside the cluster; EMQX fetches it by the Service name.
+- Verify with `scripts/cluster-check.sh --api-host <api-host> --mqtt-host <mqtt-ws-host>`: current-context namespace and workload readiness, hub Secret key names, effective EMQX `durable_sessions.enable = false` (R71), and ingress DNS and HTTPS. It needs `kubectl`, `curl`, GNU `timeout` (or `gtimeout`), and read access plus `pods/exec` for the config query. Then run `scripts/smoke-deployed.sh https://<api-host> wss://<mqtt-ws-host>/mqtt`: `/healthz`, `/v1/jwks`, unauthenticated `/v1/me` returning 401, and the MQTT WSS upgrade. Both require explicit hosts, bound network calls, and stop at the first failure. Run them after deploy; neither changes resources or context.
+- Record the first deploy in ADR-0008 (`docs/adr/0008-first-deploy.md`).
 
 ### Task 17: Dogfood
 
-One real multi-agent round with Adam's team on the plugin instead of ntfy. Install with `cargo install --locked --git https://git.groupdrive.xyz/groupdrive/agmen agmen-cli`, then `claude plugin marketplace add https://git.groupdrive.xyz/groupdrive/agmen.git` and `/plugin install agmen@agmen`. Record a retro ADR measured against design 1 "What success looks like": no lost DONE, no spoofed message, no claim race settled by hand.
+One real multi-agent round with Adam's team on the plugin instead of ntfy. Install with `cargo install --locked --git https://github.com/agmen-dev/agmen agmen-cli`, then `claude plugin marketplace add https://github.com/agmen-dev/agmen.git` and `/plugin install agmen@agmen`. Record ADR-0020, the dogfood retro, measured against design 1 "What success looks like": no lost DONE, no spoofed message, no claim race settled by hand.
 
 ## Spec coverage
 

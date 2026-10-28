@@ -1,7 +1,9 @@
 # 0005: Claude Code mod streams a child process, wakes the session, guards edits
 
-Status: proposed (the interactive check below is pending)
+Status: superseded by 0006
 Date: 2026-10-25
+
+[ADR-0006](0006-claude-code-plugin.md) replaces this spike with the installed plugin. Its pending two-session check covers wake-up, context as data and the edit guard (`docs/adr/0006-claude-code-plugin.md:108`, steps 4 to 6). It stands in for this ADR's interactive check. The spike's results and original steps below remain as history.
 
 ## Context
 
@@ -49,7 +51,7 @@ The tests in `hooks/register.test.tsx`, each run against the engine's test kit w
 
 Mutation check: removing the busy flag fails `wakeup_waits_for_turn_end`, removing the `to_me` check fails `no_wakeup_for_own_message`, and removing `.catch` fails `guard_denies_on_error`.
 
-**Interactive check: pending** (ruling R24: it needs a person at a live session and spends model budget). Since Task 14 the mod runs `agmen watch`, not `fake-watch`, so [ADR-0006](0006-claude-code-plugin.md)'s check takes the place of this one; these steps still run against the spike's module from commit `d6a173a`. Steps, from the repository root:
+**Interactive check: superseded by ADR-0006** (ruling R24: it needs a person at a live session and spends model budget). Since Task 14 the mod runs `agmen watch`, not `fake-watch`, so [ADR-0006](0006-claude-code-plugin.md)'s pending check takes the place of this one; these steps still run against the spike's module from commit `d6a173a`. Historical steps, from the repository root:
 
 1. `cargo build -p s4-fake-watch`, then make a scratch project with a link into the protected folder:
    `mkdir -p /tmp/s4/forbidden /tmp/s4/src && ln -s forbidden /tmp/s4/alias && cd /tmp/s4 && git init -q`
