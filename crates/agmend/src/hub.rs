@@ -66,6 +66,8 @@ pub(crate) enum HubError {
         status: u16,
         /// The hub's error code; empty when the body named none.
         code: String,
+        /// The hub's `error_description`; empty when the body named none.
+        description: String,
     },
     /// The hub did not record a posted message.
     #[error("the hub refused the message: {reason}")]
@@ -116,6 +118,12 @@ impl From<HubError> for ApiError {
             ),
             HubError::Refused { status: 403, .. } => (ErrorCode::Unauthorized, err.to_string()),
             HubError::Refused { status: 404, .. } => (ErrorCode::NotFound, err.to_string()),
+            // A rejected role spec: the description says which part.
+            HubError::Refused {
+                status: 422,
+                description,
+                ..
+            } if !description.is_empty() => (ErrorCode::Hub, format!("{err}: {description}")),
             HubError::Nack {
                 reason,
                 retry_after_ms: Some(ms),
@@ -152,6 +160,8 @@ fn chain(err: &dyn std::error::Error) -> String {
 #[derive(Debug, Deserialize)]
 struct ErrorBody {
     error: String,
+    #[serde(default)]
+    error_description: String,
 }
 
 /// `GET state?key=`'s answer.
@@ -498,13 +508,19 @@ async fn refusal(response: reqwest::Response) -> HubError {
 async fn refusal_with_limit(response: reqwest::Response, limit: usize) -> HubError {
     let status = response.status().as_u16();
     // A body that does not parse leaves only the status.
-    let code = match read_hub_body_with_limit(response, limit).await {
-        Ok(bytes) => serde_json::from_slice::<ErrorBody>(&bytes)
-            .map_or_else(|_| String::new(), |body| body.error),
-        Err(BodyReadError::Http(_)) => String::new(),
+    let (code, description) = match read_hub_body_with_limit(response, limit).await {
+        Ok(bytes) => serde_json::from_slice::<ErrorBody>(&bytes).map_or_else(
+            |_| (String::new(), String::new()),
+            |body| (body.error, body.error_description),
+        ),
+        Err(BodyReadError::Http(_)) => (String::new(), String::new()),
         Err(error) => return HubError::Body(error),
     };
-    HubError::Refused { status, code }
+    HubError::Refused {
+        status,
+        code,
+        description,
+    }
 }
 
 #[cfg(test)]

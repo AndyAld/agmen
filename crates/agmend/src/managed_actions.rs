@@ -99,6 +99,8 @@ struct Stored {
     budget_usd: String,
     #[serde(default)]
     source: Source,
+    #[serde(default)]
+    role: Option<agmen_proto::RoleName>,
 }
 
 impl Stored {
@@ -134,6 +136,7 @@ impl Stored {
                 model: self.model,
                 budget_usd: self.budget_usd,
                 source: self.source,
+                role: self.role,
             },
             migrated,
         ))
@@ -531,6 +534,7 @@ impl Managed {
             model: Some(JOINED_MODEL.into()),
             budget_usd: JOINED_BUDGET_USD.into(),
             source: Source::Joined,
+            role: None,
         };
         self.save_record(&record).await?;
         let mcp = self.agent_dir(&target.identity).join("mcp.json");

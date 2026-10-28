@@ -1,12 +1,12 @@
 //! Human-authorized Claude Code workers and their durable pending batches.
-// shortcut: this launch subset defers Task 5 role layering, CLI worker/budget/
+// shortcut: this launch subset defers Task 5 CLI worker/budget/
 // activity commands, prune API and service installation. Add those surfaces
 // when the listener launcher is implemented. A process-per-batch launcher also
 // defers the 95-percent mid-run wrap-up signal until streaming input is enabled.
 
 use std::collections::BTreeMap;
 use std::io::Write as _;
-use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
+use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
@@ -23,10 +23,11 @@ use crate::budget::{Budget, Money, Step};
 use crate::console::{bad_request, params};
 use crate::hub::Hub;
 use crate::identities::Identities;
-use crate::launch::{RunError, RunSpec, Runner};
+use crate::launch::{RoleRun, RunError, RunSpec, Runner};
 use crate::state::ManagedIdentity;
 
 const MAX_AGENTS: usize = 64;
+const MAX_ROLE_PROMPT_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -36,6 +37,13 @@ pub(crate) struct Launch {
     root: Option<PathBuf>,
     model: Option<String>,
     budget_usd: Option<serde_json::Number>,
+    role: Option<String>,
+}
+
+/// The branch and folder a launch created for its worker.
+struct Placement {
+    branch: String,
+    worktree: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -50,6 +58,8 @@ struct Record {
     budget_usd: String,
     #[serde(default)]
     source: Source,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    role: Option<agmen_proto::RoleName>,
 }
 
 /// How the agent's folder came to be.
@@ -75,6 +85,7 @@ struct Worker {
     last_run: Option<tokio::time::Instant>,
     /// The interactive Claude Code while the state is `attached`.
     attached: Option<Attached>,
+    role_error: Option<String>,
 }
 
 impl Worker {
@@ -89,6 +100,7 @@ impl Worker {
             task: None,
             last_run: None,
             attached: None,
+            role_error: None,
         }
     }
 }
@@ -113,6 +125,7 @@ pub(crate) struct Managed {
     runner: Arc<dyn Runner>,
     state_dir: PathBuf,
     claude_home: Option<PathBuf>,
+    personal_roles: Option<PathBuf>,
     roots: Mutex<BTreeMap<ProjectId, PathBuf>>,
     workers: Mutex<BTreeMap<IdentityId, Arc<Mutex<Worker>>>>,
     launching: Mutex<()>,
@@ -128,6 +141,7 @@ impl Managed {
         runner: Arc<dyn Runner>,
         state_dir: PathBuf,
         claude_home: Option<PathBuf>,
+        personal_roles: Option<PathBuf>,
     ) -> Self {
         Self {
             hub,
@@ -135,6 +149,7 @@ impl Managed {
             runner,
             state_dir,
             claude_home,
+            personal_roles,
             roots: Mutex::new(BTreeMap::new()),
             workers: Mutex::new(BTreeMap::new()),
             launching: Mutex::new(()),
@@ -244,6 +259,17 @@ impl Managed {
                 "checkout is not joined to this project and owner",
             ));
         }
+        let (worker_root, _) = crate::worktree::worktree_root(&joined.root)
+            .await
+            .map_err(error)?;
+        let repo = worker_root
+            .parent()
+            .ok_or_else(|| error("worker root has no main checkout"))?
+            .to_owned();
+        let role = match &launch.role {
+            Some(name) => Some(self.resolve_role(&repo, name).await?),
+            None => None,
+        };
         let branch = format!(
             "agent/{}-{}",
             launch.name,
@@ -252,21 +278,17 @@ impl Managed {
         let worktree = crate::worktree::create(&joined.root, "HEAD", &branch)
             .await
             .map_err(error)?;
-        let (worker_root, _) = crate::worktree::worktree_root(&joined.root)
-            .await
-            .map_err(error)?;
-        let repo = worker_root
-            .parent()
-            .ok_or_else(|| error("worker root has no main checkout"))?
-            .to_owned();
         let result = self
             .complete_launch(
                 launch,
                 joined,
                 login,
-                branch.clone(),
-                worktree.clone(),
+                Placement {
+                    branch: branch.clone(),
+                    worktree: worktree.clone(),
+                },
                 agmen,
+                role,
             )
             .await;
         match result {
@@ -288,10 +310,11 @@ impl Managed {
         launch: Launch,
         joined: agmen_client::Joined,
         login: agmen_client::Login,
-        branch: String,
-        worktree: PathBuf,
+        placement: Placement,
         agmen: PathBuf,
+        role: Option<agmen_roles::Resolved>,
     ) -> Result<Value, ApiError> {
+        let Placement { branch, worktree } = placement;
         let (worker_root, _) = crate::worktree::worktree_root(&joined.root)
             .await
             .map_err(error)?;
@@ -299,16 +322,20 @@ impl Managed {
             .parent()
             .ok_or_else(|| error("worker root has no main checkout"))?
             .to_owned();
-        let identity = self.mint(&launch, &joined, &login).await?;
+        let identity = self.mint(&launch, &joined, &login, role.as_ref()).await?;
         let handle = identity.handle.clone();
         write_identity(&worktree, &identity).await?;
-        let metadata = metadata_for(&identity);
+        let mut metadata = metadata_for(&identity);
+        if let Some(role) = &role {
+            metadata.kind = role_kind(role);
+            self.write_role_prompt(&identity.identity_id, role).await?;
+        }
         let identities = self
             .identities()
             .ok_or_else(|| error("identity service stopped"))?;
         identities.register(metadata.clone()).await?;
         let record = Record {
-            identity: metadata,
+            identity: metadata.clone(),
             repo,
             worktree: worktree.clone(),
             branch: branch.clone(),
@@ -319,6 +346,7 @@ impl Managed {
                 .budget_usd
                 .map_or_else(|| "5".into(), |n| n.to_string()),
             source: Source::Launched,
+            role: identity.role.clone(),
         };
         let config_dir = self.agent_dir(&identity.identity_id);
         let record_copy = record.clone();
@@ -351,7 +379,7 @@ impl Managed {
         drop(workers);
         // HELLO goes through the same durable identity outbox as agent chat.
         let hello = actions::hello(model, branch.clone())?;
-        if let Err(error) = identities.post(&metadata_for(&identity), hello).await {
+        if let Err(error) = identities.post(&metadata, hello).await {
             tracing::warn!(code=?error.code,"managed agent HELLO is pending connection");
         }
         Ok(
@@ -364,12 +392,28 @@ impl Managed {
         launch: &Launch,
         joined: &agmen_client::Joined,
         login: &agmen_client::Login,
+        role: Option<&agmen_roles::Resolved>,
     ) -> Result<IdentityFile, ApiError> {
         let handle = format!("{}/{}", login.handle, launch.name);
-        let minted = self
-            .hub
-            .mint_identity(&json!({"handle":handle,"project":launch.project,"kind":"agent"}))
-            .await?;
+        let mut body = json!({"handle":handle,"project":launch.project,"kind":"agent"});
+        let spec = role
+            .map(|role| {
+                Ok::<_, ApiError>(agmen_proto::RoleSpec {
+                    role: role.role.name.parse().map_err(error)?,
+                    verbs: role.verbs.clone(),
+                    edits: role.edits.clone().into(),
+                    role_sha256: role.sha256.parse().map_err(error)?,
+                })
+            })
+            .transpose()?;
+        if let (Some(role), Some(spec)) = (role, &spec) {
+            body["kind"] = serde_json::to_value(role_kind(role)).map_err(error)?;
+            body["role"] = json!(spec.role);
+            body["verbs"] = json!(spec.verbs);
+            body["edits"] = json!(spec.edits);
+            body["role_sha256"] = json!(spec.role_sha256);
+        }
+        let minted = self.hub.mint_identity(&body).await?;
         #[derive(Deserialize)]
         struct Minted {
             id: IdentityId,
@@ -377,6 +421,7 @@ impl Managed {
             tenant: agmen_proto::TenantId,
             project: ProjectId,
             token: String,
+            verbs: Option<std::collections::BTreeSet<String>>,
         }
         let minted: Minted = serde_json::from_value(minted).map_err(error)?;
         if minted.handle != handle
@@ -384,6 +429,9 @@ impl Managed {
             || minted.tenant != joined.identity.tenant
         {
             return Err(error("hub minted a different identity than requested"));
+        }
+        if spec.is_some() && minted.verbs.is_none() {
+            return Err(error("hub omitted the role's capped verbs"));
         }
         let identity = IdentityFile {
             tenant: minted.tenant,
@@ -393,15 +441,129 @@ impl Managed {
             owner_id: login.human_id.clone(),
             hub_url: login.hub_url.clone(),
             broker_url: joined.identity.broker_url.clone(),
-            role: None,
-            role_sha256: None,
-            verbs: None,
+            role: spec.as_ref().map(|spec| spec.role.clone()),
+            role_sha256: spec.as_ref().map(|spec| spec.role_sha256.clone()),
+            verbs: spec.and(minted.verbs),
         };
         self.hub
             .credentials()
             .set_token(&identity.hub_url, &identity.identity_id, minted.token)
             .await?;
         Ok(identity)
+    }
+
+    async fn resolve_role(
+        &self,
+        repo: &Path,
+        name: &str,
+    ) -> Result<agmen_roles::Resolved, ApiError> {
+        let layers = agmen_roles::Layers {
+            project: Some(repo.to_owned()),
+            personal: self.personal_roles.clone(),
+            ..agmen_roles::Layers::default()
+        };
+        let name = name.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let catalog = layers.load().map_err(|failure| {
+                let names = layers.builtin.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>().join(", ");
+                bad_request(format!("role {name:?} could not load: {failure}; available built-in names: {names}; local names unavailable"))
+            })?;
+            let role = catalog.get(&name).ok_or_else(|| {
+                let names = catalog.iter().map(|role| role.role.name.as_str()).collect::<Vec<_>>().join(", ");
+                bad_request(format!("unknown role {name:?}; available names: {names}"))
+            })?;
+            if role.kind == agmen_roles::Kind::Listener {
+                return Err(bad_request("listeners are started by the listener runtime, not agent_launch"));
+            }
+            if agmen_roles::render_prompt(role).len() > MAX_ROLE_PROMPT_BYTES {
+                return Err(bad_request(format!("role {name:?} prompt exceeds 64 KiB")));
+            }
+            Ok(role.clone())
+        }).await.map_err(error)?
+    }
+
+    async fn write_role_prompt(
+        &self,
+        id: &IdentityId,
+        role: &agmen_roles::Resolved,
+    ) -> Result<RoleRun, ApiError> {
+        let prompt = agmen_roles::render_prompt(role);
+        if prompt.len() > MAX_ROLE_PROMPT_BYTES {
+            return Err(bad_request(format!(
+                "role {:?} prompt exceeds 64 KiB",
+                role.role.name
+            )));
+        }
+        let dir = self.state_dir.join("agents").join(id.as_str());
+        let prompt_file = dir.join("role-prompt.md");
+        let path = prompt_file.clone();
+        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(&dir)?;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+            let mut fresh = tempfile::NamedTempFile::new_in(&dir)?;
+            fresh
+                .as_file()
+                .set_permissions(std::fs::Permissions::from_mode(0o600))?;
+            fresh.write_all(prompt.as_bytes())?;
+            fresh.as_file().sync_all()?;
+            fresh.persist(path)?;
+            Ok(())
+        })
+        .await
+        .map_err(error)?
+        .map_err(error)?;
+        Ok(RoleRun {
+            tools: agmen_roles::claude_tools(role).join(","),
+            prompt_file,
+        })
+    }
+
+    fn run_spec(
+        &self,
+        held: &Worker,
+        prompt: String,
+        (session_id, resume): (String, bool),
+        owner_only: bool,
+        role: Option<RoleRun>,
+    ) -> RunSpec {
+        RunSpec {
+            cwd: held.record.worktree.clone(),
+            prompt,
+            session_id,
+            resume,
+            model: held.record.model.clone(),
+            budget_remaining: held.budget.remaining_usd(),
+            mcp_config: self
+                .agent_dir(&held.record.identity.identity_id)
+                .join("mcp.json"),
+            owner_handle: held
+                .record
+                .identity
+                .handle
+                .split('/')
+                .next()
+                .unwrap_or_default()
+                .into(),
+            owner_id: held.record.identity.owner_id.clone(),
+            owner_only,
+            role,
+        }
+    }
+
+    /// The role's tools and a freshly written prompt file for the next batch,
+    /// or `None` for an agent launched without a role. A role that no longer
+    /// resolves is an error: the batch must not run unrestricted.
+    async fn batch_role(&self, record: &Record) -> Result<Option<RoleRun>, ApiError> {
+        let Some(name) = &record.role else {
+            return Ok(None);
+        };
+        let role = self.resolve_role(&record.repo, name.as_str()).await?;
+        self.write_role_prompt(&record.identity.identity_id, &role)
+            .await
+            .map(Some)
     }
 
     pub(crate) async fn list(&self, raw: Value) -> Result<Value, ApiError> {
@@ -425,7 +587,11 @@ impl Managed {
             {
                 continue;
             }
-            agents.push(json!({"identity":record.identity.identity_id,"project":record.identity.project,"handle":record.identity.handle,"state":worker.state,"model":record.model,"budget_usd":record.budget_usd,"spent_usd":worker.budget.spent().usd(),"worktree":record.worktree,"branch":record.branch,"source":record.source}));
+            let mut entry = json!({"identity":record.identity.identity_id,"project":record.identity.project,"handle":record.identity.handle,"state":worker.state,"model":record.model,"budget_usd":record.budget_usd,"spent_usd":worker.budget.spent().usd(),"worktree":record.worktree,"branch":record.branch,"source":record.source,"role":record.role});
+            if let Some(failure) = &worker.role_error {
+                entry["role_error"] = json!(failure);
+            }
+            agents.push(entry);
         }
         Ok(json!({"agents":agents}))
     }
@@ -560,6 +726,15 @@ impl Managed {
             {
                 continue;
             }
+            let role = match self.batch_role(&held.record).await {
+                Ok(role) => role,
+                Err(failure) => {
+                    held.role_error = Some(failure.message);
+                    held.state = "offline";
+                    continue;
+                }
+            };
+            held.role_error = None;
             let rows = match identities.launch_pending(&held.record.identity).await {
                 Ok(rows) => rows,
                 Err(error) => {
@@ -588,27 +763,7 @@ impl Managed {
                     continue;
                 }
             };
-            let spec = RunSpec {
-                cwd: held.record.worktree.clone(),
-                prompt,
-                session_id,
-                resume,
-                model: held.record.model.clone(),
-                budget_remaining: held.budget.remaining_usd(),
-                mcp_config: self
-                    .agent_dir(&held.record.identity.identity_id)
-                    .join("mcp.json"),
-                owner_handle: held
-                    .record
-                    .identity
-                    .handle
-                    .split('/')
-                    .next()
-                    .unwrap_or_default()
-                    .into(),
-                owner_id: held.record.identity.owner_id.clone(),
-                owner_only,
-            };
+            let spec = self.run_spec(&held, prompt, (session_id, resume), owner_only, role);
             held.last_run = Some(tokio::time::Instant::now());
             held.state = "running";
             let (stop, stopped) = oneshot::channel();
@@ -726,6 +881,13 @@ async fn run_worker(
                 tracing::warn!(code=?error.code,"batch failure report failed");
             }
         }
+    }
+}
+
+fn role_kind(role: &agmen_roles::Resolved) -> IdentityKind {
+    match role.kind {
+        agmen_roles::Kind::Coordinator => IdentityKind::Coordinator,
+        _ => IdentityKind::Agent,
     }
 }
 

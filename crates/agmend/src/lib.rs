@@ -282,6 +282,7 @@ impl Agmend {
             config.runner,
             config.socket.with_file_name(""),
             config.claude_home,
+            config.personal_roles.clone(),
         ));
         Ok(Self {
             bound,
