@@ -595,8 +595,17 @@ fn dm(seq: u64, who: &str) -> serde_json::Value {
 }
 
 async fn wait_position(daemon: &Daemon, stream: &str, seq: u64) {
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        for _ in 0..500 {
+    wait_position_within(daemon, stream, seq, std::time::Duration::from_secs(5)).await;
+}
+
+/// How long the tests that push megabytes through the collector may wait: a
+/// machine running several builds has taken over 5 s for them.
+const HEAVY: std::time::Duration = std::time::Duration::from_secs(30);
+
+async fn wait_position_within(daemon: &Daemon, stream: &str, seq: u64, bound: std::time::Duration) {
+    tokio::time::timeout(bound, async {
+        // Polls every 10 ms; the timeout above is the bound.
+        loop {
             let connection = rusqlite::Connection::open(daemon.home.database()).unwrap();
             let found =
                 connection.query_row("SELECT seq FROM positions WHERE stream=?1", [stream], |r| {
@@ -607,10 +616,9 @@ async fn wait_position(daemon: &Daemon, stream: &str, seq: u64) {
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-        panic!("position did not reach {stream}:{seq}");
     })
     .await
-    .expect("collector within 5 s");
+    .unwrap_or_else(|_| panic!("position did not reach {stream}:{seq} within {bound:?}"));
 }
 
 async fn qualifying_pending(daemon: &Daemon) {
@@ -749,7 +757,7 @@ async fn pending_frame_cap_keeps_undelivered_tail() {
         message["body"] = json!("\"".repeat(30_000));
         daemon.hub.state.inject(message);
     }
-    wait_position(&daemon, "inbox:agent001", 300).await;
+    wait_position_within(&daemon, "inbox:agent001", 300, HEAVY).await;
     let mut client = daemon.client().await;
     let first = result(agent(&mut client, "pending", json!({})).await);
     let first = first.as_array().unwrap();
@@ -843,8 +851,8 @@ async fn watch_slow_reader_closes() {
             .state
             .inject(support::stamped(seq, &"x".repeat(32_000)));
     }
-    wait_position(&daemon, "feed", 600).await;
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    wait_position_within(&daemon, "feed", 600, HEAVY).await;
+    tokio::time::timeout(HEAVY, async {
         for _ in 0..605 {
             match client.try_read().await {
                 Err(_) => return,
