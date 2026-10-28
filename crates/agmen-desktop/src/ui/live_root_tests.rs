@@ -14,6 +14,117 @@ fn project() -> ProjectId {
     "project1".parse().unwrap()
 }
 
+#[test]
+fn bare_binary_keeps_todays_agmend_down_screen() {
+    let wording = Wording::of(&LiveState::AgmendDown, &ProjectChoice::Project(project()));
+    assert_eq!(wording.command, Some("agmend service install"));
+}
+
+#[gpui::test]
+fn stopped_foreign_service_keeps_bundle_diagnosis_and_retry(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let launch = LiveLaunch {
+        socket: dir.path().join("agmend.sock"),
+        root: None,
+        project: ProjectChoice::None { why: None },
+        settings: None,
+    };
+    let (root, cx) = open(cx, launch);
+    let app = dir.path().join("Applications/agmen.app");
+    let foreign = dir.path().join("missing-shell/agmend");
+    cx.update(|window, cx| {
+        root.update(cx, |root, cx| {
+            root.bundle = Some(Bundle {
+                agmend: app.join("Contents/MacOS/agmend"),
+                agmen: app.join("Contents/MacOS/agmen"),
+                app,
+            });
+            root.connected(
+                Ok((
+                    Observation {
+                        check: Check::Elsewhere {
+                            exe: foreign.clone(),
+                        },
+                        running: false,
+                    },
+                    None,
+                )),
+                window,
+                cx,
+            );
+        })
+    });
+    redraw(cx);
+    root.read_with(cx, |root, _| {
+        assert!(matches!(
+            root.state(),
+            LiveState::NeedsService(Check::Elsewhere { .. })
+        ));
+        let wording = Wording::of(root.state(), &root.launch.project);
+        assert!(wording.body.contains(&foreign.display().to_string()));
+        assert!(wording.body.contains("stopped"));
+        assert_eq!(wording.command, None);
+    });
+    assert!(cx.debug_bounds("live:retry").is_some());
+    assert!(cx.debug_bounds("live:setup-service").is_none());
+    assert!(cx.debug_bounds("live:copy-service-command").is_none());
+}
+
+#[test]
+fn bundled_service_screen_offers_setup_and_switch() {
+    let wording = Wording::of(
+        &LiveState::NeedsService(Check::Missing),
+        &ProjectChoice::None { why: None },
+    );
+    assert_eq!(wording.heading, "Set up agmend");
+    assert_eq!(wording.command, None);
+    let wording = Wording::of(
+        &LiveState::NeedsService(Check::TemporaryBundle),
+        &ProjectChoice::None { why: None },
+    );
+    assert_eq!(wording.heading, "Move to Applications");
+    assert!(wording.body.contains("relaunch"));
+}
+
+#[gpui::test]
+fn bundled_agmend_down_offers_in_app_setup_without_starting_service(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let app = dir.path().join("Applications/agmen.app");
+    let agmend = app.join("Contents/MacOS/agmend");
+    std::fs::create_dir_all(agmend.parent().unwrap()).unwrap();
+    std::fs::write(&agmend, "must not execute before consent").unwrap();
+    let launch = LiveLaunch {
+        socket: dir.path().join("agmend.sock"),
+        root: None,
+        project: ProjectChoice::None { why: None },
+        settings: None,
+    };
+    let (root, cx) = open(cx, launch);
+    root.update(cx, |root, cx| {
+        root.bundle = Some(Bundle {
+            app,
+            agmend: agmend.clone(),
+            agmen: dir.path().join("agmen"),
+        });
+        root.state = LiveState::NeedsService(Check::Missing);
+        cx.notify();
+    });
+    redraw(cx);
+    assert!(cx.debug_bounds("live:setup-service").is_some());
+    assert!(cx.debug_bounds("live:copy-service-command").is_some());
+    assert!(cx.debug_bounds("live:command").is_some());
+    root.read_with(cx, |root, _| {
+        let wording = Wording::of(root.state(), &root.launch.project);
+        assert_eq!(wording.command, None);
+        assert!(wording.note.unwrap().contains("agmend.log"));
+    });
+    assert_eq!(
+        std::fs::read_to_string(agmend).unwrap(),
+        "must not execute before consent"
+    );
+    assert!(!dir.path().join("Library/LaunchAgents").exists());
+}
+
 /// A live window on `launch`, drawn once.
 fn open(cx: &mut TestAppContext, launch: LiveLaunch) -> (Entity<LiveRoot>, &mut VisualTestContext) {
     init(cx);

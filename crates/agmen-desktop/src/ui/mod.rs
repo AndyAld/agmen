@@ -22,6 +22,7 @@ mod inline_flow;
 mod left_dock;
 mod listener_panel;
 // Task 7: the live window, before and after agmend answers.
+pub(crate) mod cli_install;
 mod live_root;
 mod message;
 mod palette;

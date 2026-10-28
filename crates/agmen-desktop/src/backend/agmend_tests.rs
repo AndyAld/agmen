@@ -86,6 +86,77 @@ fn live_backend(fake: &FakeAgmend) -> (AgmendBackend, UnboundedReceiver<Update>)
 // The tests.
 
 #[test]
+fn each_connection_reads_readiness_once() {
+    let fake = FakeAgmend::start(console(vec![]));
+    let backend = AgmendBackend::connect_with(&fake.path(), PROJECT, None, FAST).unwrap();
+    until(|| !fake.state.lock().unwrap().watchers.is_empty());
+    assert_eq!(fake.state.lock().unwrap().ready_calls, 2);
+    drop(backend);
+}
+
+#[test]
+fn reconnect_refuses_changed_identity_and_unready_stores() {
+    let fake = FakeAgmend::start(console(vec![]));
+    let expected = AgmendBackend::probe(&fake.path()).unwrap().0;
+    fake.edit(|state| state.not_ready = true);
+    assert!(matches!(
+        open_for_request(&fake.path(), &expected),
+        Err(RequestError::Refused(_))
+    ));
+    fake.edit(|state| {
+        state.not_ready = false;
+        state.hello_answer =
+            Some(json!({"api": 1, "version": env!("CARGO_PKG_VERSION"), "exe": "/new/agmend"}));
+    });
+    assert!(matches!(
+        open_for_request(&fake.path(), &expected),
+        Err(RequestError::Refused(_))
+    ));
+    fake.edit(|state| state.hello_answer = Some(json!({"api": 1, "version": "newer"})));
+    assert!(matches!(
+        open_for_request(&fake.path(), &expected),
+        Err(RequestError::Refused(_))
+    ));
+}
+
+#[test]
+fn probe_keeps_unknown_release_for_service_upgrade() {
+    let fake = FakeAgmend::start(console(vec![]));
+    fake.edit(|state| state.hello_answer = Some(json!({"api": 1})));
+    let (hello, ready) = AgmendBackend::probe(&fake.path()).unwrap();
+    assert_eq!(hello.version, None);
+    assert_eq!(ready, None);
+    assert_eq!(fake.state.lock().unwrap().ready_calls, 0);
+}
+
+#[test]
+fn desktop_keeps_hello_identity() {
+    let fake = FakeAgmend::start(console(vec![]));
+    let backend = AgmendBackend::connect_with(&fake.path(), PROJECT, None, FAST).unwrap();
+    assert_eq!(backend.identity().api, agmen_local::API);
+    assert_eq!(
+        backend.identity().version.as_deref(),
+        Some(env!("CARGO_PKG_VERSION"))
+    );
+    assert!(backend.readiness().ready);
+}
+
+#[test]
+fn hello_answer_without_version_parses() {
+    let hello: agmen_local::HelloAnswer = serde_json::from_value(json!({"api": 1})).unwrap();
+    assert_eq!(hello.version, None);
+    assert_eq!(hello.exe, None);
+}
+
+#[test]
+fn desktop_waits_for_ready() {
+    let fake = FakeAgmend::start(console(vec![]));
+    fake.state.lock().unwrap().not_ready = true;
+    assert!(AgmendBackend::connect_with(&fake.path(), PROJECT, None, FAST).is_err());
+    assert_eq!(fake.state.lock().unwrap().snapshots_served, 0);
+}
+
+#[test]
 fn snapshot_maps_roster_into_person_groups() {
     let s = snapshot_from(console(vec![message(1), message(2)]));
     assert_eq!(s.project, PROJECT);

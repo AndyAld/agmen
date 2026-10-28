@@ -7,6 +7,7 @@ mod backend;
 mod bundle;
 // Task 13: the urgent-alert chime.
 mod chime;
+mod cli_link;
 mod icons;
 #[cfg(unix)]
 mod instance;
@@ -18,6 +19,7 @@ mod plan;
 mod project;
 mod refs;
 mod roles;
+mod service;
 mod spike;
 mod ui;
 

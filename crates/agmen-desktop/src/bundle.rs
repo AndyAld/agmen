@@ -16,10 +16,6 @@ pub(crate) fn in_app_bundle(exe: &Path) -> bool {
 
 /// The bundle and its two helpers; service setup consumes these in Task 6.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "Task 6 consumes bundled helper paths")
-)]
 pub(crate) struct Bundle {
     pub app: PathBuf,
     pub agmend: PathBuf,
@@ -27,10 +23,6 @@ pub(crate) struct Bundle {
 }
 
 /// Locates only the desktop executable's bundle with regular helper files.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "Task 6 consumes bundled helper paths")
-)]
 pub(crate) fn locate(exe: &Path) -> Option<Bundle> {
     if !in_app_bundle(exe) || exe.file_name()? != "agmen-desktop" {
         return None;

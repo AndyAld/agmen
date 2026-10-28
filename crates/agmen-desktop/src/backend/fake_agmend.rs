@@ -164,6 +164,9 @@ pub(crate) fn console_with_checkout(messages: Vec<StampedEnvelope>) -> ConsoleSn
 
 #[derive(Debug, Default)]
 pub(crate) struct FakeState {
+    pub(crate) ready_calls: usize,
+    pub(crate) hello_answer: Option<Value>,
+    pub(crate) not_ready: bool,
     pub(crate) snapshot: Option<ConsoleSnapshot>,
     /// Sent to every watch before a snapshot is answered, as if they
     /// arrived while agmend read the hub.
@@ -338,21 +341,34 @@ fn push(state: &mut FakeState, event: &ConsoleEvent) {
         .retain_mut(|(stream, id)| frame::write(stream, &Response::ok(*id, value.clone())).is_ok());
 }
 
+fn hello_response(id: u64, stream: &UnixStream, state: &Mutex<FakeState>) -> Option<Response> {
+    let mut state = state.lock().unwrap();
+    if !state.watchers.is_empty() && state.drop_hellos_while_watching > 0 {
+        state.drop_hellos_while_watching -= 1;
+        drop(stream.shutdown(std::net::Shutdown::Both));
+        return None;
+    }
+    Some(match &state.hello_error {
+        Some(why) => Response::err(id, ErrorCode::Hub, why.clone()),
+        None => Response::ok(id, state.hello_answer.clone().unwrap_or_else(|| json!({"api": 1, "version": env!("CARGO_PKG_VERSION"), "build": "test", "exe": "/fake/agmend"}))),
+    })
+}
+
 fn serve(mut stream: UnixStream, state: &Mutex<FakeState>) {
     while let Ok(request) = frame::read::<Request>(&mut stream) {
         let id = request.id;
         let answer = match request.method.as_str() {
-            "hello" => {
+            "hello" => match hello_response(id, &stream, state) {
+                Some(response) => response,
+                None => return,
+            },
+            "ready" => {
                 let mut state = state.lock().unwrap();
-                if !state.watchers.is_empty() && state.drop_hellos_while_watching > 0 {
-                    state.drop_hellos_while_watching -= 1;
-                    drop(stream.shutdown(std::net::Shutdown::Both));
-                    return;
-                }
-                match &state.hello_error {
-                    Some(why) => Response::err(id, ErrorCode::Hub, why.clone()),
-                    None => Response::ok(id, json!({"api": 1})),
-                }
+                state.ready_calls += 1;
+                Response::ok(
+                    id,
+                    json!({"ready": !state.not_ready, "schemas": {"agmend.db": 2}}),
+                )
             }
             "whoami" => Response::ok(id, json!({"id": "idandy00", "handle": "andy"})),
             "console_snapshot" => {

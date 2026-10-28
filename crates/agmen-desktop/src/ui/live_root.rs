@@ -18,7 +18,9 @@ use super::components::{Button, ButtonStyle, Color, Label, LabelSize};
 use super::tokens::{LAUNCH_STATE_WIDTH, SPACE_10, SPACE_16, TITLE_BAR_HEIGHT};
 use crate::appearance::{Appearance, DesktopSettings};
 use crate::backend::{AgmendBackend, Backend, BackendError, BackendHandle};
+use crate::bundle::Bundle;
 use crate::project::ProjectChoice;
+use crate::service::{self, Check, Observation};
 
 /// Where a live launch connects and what it opens.
 #[derive(Debug, Clone)]
@@ -43,6 +45,7 @@ pub(crate) enum LiveState {
     Connecting,
     /// Nothing answers at agmend's socket.
     AgmendDown,
+    NeedsService(Check),
     /// agmend answered and refused, or its socket is not the person's own;
     /// the text says why.
     Refused(String),
@@ -57,6 +60,7 @@ impl LiveState {
             Self::NoProject => "live:no-project",
             Self::Connecting => "live:connecting",
             Self::AgmendDown => "live:agmend-down",
+            Self::NeedsService(_) => "live:needs-service",
             Self::Refused(_) => "live:refused",
             Self::Open(_) => "live:open",
         }
@@ -123,6 +127,19 @@ impl Wording {
                 note: None,
                 retry: true,
             },
+            LiveState::NeedsService(check) => Self {
+                heading: check.action().unwrap_or("Check agmend").into(),
+                body: match check {
+                    Check::TemporaryBundle => "Move to Applications, then relaunch agmen from the moved app before setting up agmend.".into(),
+                    Check::Moved { configured } => format!("The service points to a missing executable at {}. Set up agmend from this app with your consent.", configured.display()),
+                    Check::Skewed { running, ours, .. } => format!("agmend version {} is incompatible with this app's version {ours}. Switching replaces the configured service program with this app's agmend.", running.as_deref().unwrap_or("unknown")),
+                    Check::Elsewhere { exe } => format!("The service at {} is stopped or unavailable. Its installation owns this same-version service, so agmen will keep its configured path. Repair or start it through that installation, then Retry.", exe.display()),
+                    _ => "agmen needs agmend, the agmen background service, to open your projects.".into(),
+                },
+                command: None,
+                note: Some(format!("Log: {}", service::log_path().display())),
+                retry: true,
+            },
             // Never drawn: the workspace is.
             LiveState::Open(_) => Self {
                 heading: String::new(),
@@ -144,6 +161,10 @@ pub(crate) struct LiveRoot {
     focus_handle: FocusHandle,
     /// The connect under way, dropped with the window.
     _connecting: Option<Task<()>>,
+    bundle: Option<Bundle>,
+    service_notice: Option<String>,
+    service_error: Option<String>,
+    cli_install: Option<Entity<super::cli_install::CliInstall>>,
 }
 
 impl LiveRoot {
@@ -154,6 +175,12 @@ impl LiveRoot {
             state: LiveState::NoProject,
             focus_handle: cx.focus_handle(),
             _connecting: None,
+            bundle: std::env::current_exe()
+                .ok()
+                .and_then(|exe| crate::bundle::locate(&exe)),
+            service_notice: None,
+            service_error: None,
+            cli_install: super::cli_install::CliInstall::for_app(cx),
         };
         root.connect(window, cx);
         root
@@ -182,23 +209,45 @@ impl LiveRoot {
     /// workers, and gpui's test scheduler runs background tasks on the
     /// test thread, where the window could never draw Connecting first.
     fn connect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let ProjectChoice::Project(project) = &self.launch.project else {
+        if matches!(self.launch.project, ProjectChoice::None { .. }) && self.bundle.is_none() {
             self.state = LiveState::NoProject;
             return;
-        };
+        }
         let socket = self.launch.socket.clone();
-        let project = project.clone();
+        let project = self.launch.project.clone();
         let root = self.launch.root.clone();
+        let bundle = self.bundle.clone();
         let (done, result) = futures::channel::oneshot::channel();
         let spawned = std::thread::Builder::new()
             .name("agmend-connect".into())
             .spawn(move || {
                 // The window closed meanwhile; the backend drops here.
-                drop(done.send(AgmendBackend::connect(
-                    &socket,
-                    project.as_str(),
-                    root.as_deref(),
-                )));
+                let connected = (|| {
+                    let mut observed = service::check(bundle.as_ref(), &socket, &mut service::run)
+                        .map_err(|error| BackendError::Agmend(error.to_string()))?;
+                    if !observed.check.can_connect() || (bundle.is_some() && !observed.running) {
+                        return Ok((observed, None));
+                    }
+                    let backend = match project {
+                        ProjectChoice::Project(project) => {
+                            match AgmendBackend::connect(&socket, project.as_str(), root.as_deref())
+                            {
+                                Ok(backend) => Some(backend),
+                                Err(BackendError::NotConnected) if bundle.is_some() => {
+                                    observed.running = false;
+                                    if observed.check == Check::Ready {
+                                        observed.check = Check::Stopped;
+                                    }
+                                    None
+                                }
+                                Err(error) => return Err(error),
+                            }
+                        }
+                        ProjectChoice::None { .. } => None,
+                    };
+                    Ok((observed, backend))
+                })();
+                drop(done.send(connected));
             });
         if let Err(err) = spawned {
             self.state = LiveState::Refused(format!("starting the agmend link failed: {err}"));
@@ -218,18 +267,14 @@ impl LiveRoot {
     /// Opens the workspace on the connected backend, or shows why not.
     fn connected(
         &mut self,
-        result: Result<AgmendBackend, BackendError>,
+        result: Result<(Observation, Option<AgmendBackend>), BackendError>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self._connecting = None;
         cx.notify();
-        let ProjectChoice::Project(project) = &self.launch.project else {
-            self.state = LiveState::NoProject;
-            return;
-        };
-        let backend = match result {
-            Ok(backend) => backend,
+        let (observed, backend) = match result {
+            Ok(result) => result,
             Err(BackendError::NotConnected) => {
                 self.state = LiveState::AgmendDown;
                 return;
@@ -238,6 +283,32 @@ impl LiveRoot {
                 self.state = LiveState::Refused(err.to_string());
                 return;
             }
+        };
+        let check = observed.check;
+        self.service_notice = match &check {
+            Check::Elsewhere { exe } => Some(format!("This app uses agmend at {}.", exe.display())),
+            _ => None,
+        };
+        if !check.can_connect() || (self.bundle.is_some() && !observed.running) {
+            self.state = LiveState::NeedsService(check);
+            return;
+        }
+        let Some(backend) = backend else {
+            self.state = LiveState::NoProject;
+            return;
+        };
+        if !backend.readiness().ready
+            || (self.bundle.is_some()
+                && backend.identity().version.as_deref() != Some(env!("CARGO_PKG_VERSION")))
+        {
+            self.state = LiveState::Refused(
+                "agmend changed while connecting; Retry to check its service".into(),
+            );
+            return;
+        }
+        let ProjectChoice::Project(project) = &self.launch.project else {
+            self.state = LiveState::NoProject;
+            return;
         };
         let backend: Rc<dyn Backend> = Rc::new(backend);
         let snapshot = backend.snapshot();
@@ -275,6 +346,52 @@ impl LiveRoot {
         cx.notify();
     }
 
+    fn setup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(bundle) = self.bundle.clone() else {
+            return;
+        };
+        if matches!(self.state, LiveState::NeedsService(Check::TemporaryBundle)) {
+            cx.open_url("file:///Applications");
+            return;
+        }
+        let previous = match &self.state {
+            LiveState::NeedsService(check) if check.action().is_some() => check.clone(),
+            _ => return,
+        };
+        let (done, result) = futures::channel::oneshot::channel();
+        let spawned = std::thread::Builder::new()
+            .name("agmend-setup".into())
+            .spawn(move || {
+                drop(done.send(service::install(&bundle, &mut service::run)));
+            });
+        if let Err(error) = spawned {
+            self.service_error = Some(format!("Starting service setup failed: {error}"));
+            cx.notify();
+            return;
+        }
+        self.service_error = None;
+        self.state = LiveState::Connecting;
+        self._connecting = Some(cx.spawn_in(window, async move |this, cx| {
+            let result = result.await;
+            drop(this.update_in(cx, |this, window, cx| {
+                this._connecting = None;
+                match result {
+                    Ok(Ok(())) => this.connect(window, cx),
+                    result => {
+                        this.service_error = Some(match result {
+                            Ok(Err(error)) => error.to_string(),
+                            Err(error) => format!("Service setup stopped: {error}"),
+                            Ok(Ok(())) => String::new(),
+                        });
+                        this.state = LiveState::NeedsService(previous);
+                    }
+                }
+                cx.notify();
+            }));
+        }));
+        cx.notify();
+    }
+
     fn message(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let wording = Wording::of(&self.state, &self.launch.project);
         let selector = self.state.selector();
@@ -291,6 +408,17 @@ impl LiveRoot {
                     .weight(FontWeight::SEMIBOLD),
             )
             .child(Label::new(wording.body).wrap())
+            .when_some(self.bundle.as_ref().filter(|_| matches!(self.state, LiveState::NeedsService(Check::Missing | Check::Stopped | Check::Moved { .. } | Check::Skewed { .. }))), |this, bundle| {
+                let command = service::command(bundle);
+                this.child(Label::new(format!("agmen will add a login item that starts agmend, the agmen background service, from {}. macOS may show a Background Items Added notice.", bundle.app.display())).wrap())
+                    .child(div().debug_selector(|| "live:command".into()).child(Label::new(command.clone()).code().wrap()))
+                    .child(Button::new("live:copy-service-command", "Copy command").on_click(move |_, _, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(command.clone()))))
+            })
+            .when_some(self.service_error.clone(), |this, error| this.child(Label::new(error).wrap().color(Color::Error)))
+            .when_some(self.service_notice.clone(), |this, notice| this.child(Label::new(notice).wrap()))
+            .when_some(match &self.state { LiveState::NeedsService(check) => check.action(), _ => None }, |this, action| {
+                this.child(Button::new("live:setup-service", action).style(ButtonStyle::Primary).on_click(cx.listener(|this, _, window, cx| this.setup(window, cx))))
+            })
             .when_some(wording.command, |this, command| {
                 this.child(
                     div()
@@ -308,6 +436,7 @@ impl LiveRoot {
                         .on_click(cx.listener(|this, _, window, cx| this.retry(window, cx))),
                 )
             })
+            .when_some(self.cli_install.clone(), |this, view| this.child(view))
     }
 }
 
@@ -326,6 +455,11 @@ impl Render for LiveRoot {
             return div()
                 .debug_selector(|| self.state.selector().into())
                 .size_full()
+                .flex()
+                .flex_col()
+                .when_some(self.service_notice.clone(), |this, notice| {
+                    this.child(Label::new(notice).color(Color::Placeholder))
+                })
                 .child(workspace.clone())
                 .into_any_element();
         }

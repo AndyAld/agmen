@@ -33,7 +33,9 @@ use std::time::Duration;
 use agmen_local::console::{
     ConsoleEvent, ConsoleSnapshot, FileTextEntry, GitFactsEntry, LocalData, Me, RosterEntry, Status,
 };
-use agmen_local::{API, ApiError, ErrorCode, Outcome, Request, Response, frame};
+use agmen_local::{
+    API, ApiError, ErrorCode, HelloAnswer, Outcome, ReadyAnswer, Request, Response, frame,
+};
 use agmen_proto::{
     Body, ClientEnvelope, IdentityKind, MAX_BODY_BYTES, Mention, MessageId, Payload, Seq,
     StampedEnvelope, Stream, Timestamp,
@@ -77,6 +79,8 @@ const BACKOFF: Timing = Timing {
 /// The live backend. Dropping it ends the watch and both threads.
 #[derive(Debug)]
 pub(crate) struct AgmendBackend {
+    hello: HelloAnswer,
+    ready: ReadyAnswer,
     shared: Arc<Shared>,
     jobs: SyncSender<Job>,
     /// Dropped with the backend, which wakes the watch thread from its
@@ -86,6 +90,7 @@ pub(crate) struct AgmendBackend {
 
 #[derive(Debug)]
 struct Shared {
+    identity: HelloAnswer,
     socket: PathBuf,
     project: String,
     /// Task 8: the person's checkout of the project, which agmend reads
@@ -384,6 +389,31 @@ enum Job {
 }
 
 impl AgmendBackend {
+    /// Reads identity before enforcing compatibility, for the setup screen.
+    pub(crate) fn probe(socket: &Path) -> Result<(HelloAnswer, Option<ReadyAnswer>), BackendError> {
+        let mut conn = Conn::connect(socket)?;
+        conn.stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .map_err(io_failed)?;
+        conn.stream
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .map_err(io_failed)?;
+        let hello = parse::<HelloAnswer>(conn.call("hello", json!({"api": API}))?)?;
+        let ready =
+            if hello.version.as_deref() == Some(env!("CARGO_PKG_VERSION")) && hello.api == API {
+                Some(parse::<ReadyAnswer>(conn.call("ready", json!({}))?)?)
+            } else {
+                None
+            };
+        Ok((hello, ready))
+    }
+    pub(crate) fn identity(&self) -> &HelloAnswer {
+        &self.hello
+    }
+
+    pub(crate) fn readiness(&self) -> &ReadyAnswer {
+        &self.ready
+    }
     /// Connects to agmend at `socket` and opens `project`'s chat, with the
     /// local data of the checkout at `root` when the window found one.
     ///
@@ -407,6 +437,19 @@ impl AgmendBackend {
         timing: Timing,
     ) -> Result<Self, BackendError> {
         let mut conn = Conn::open(socket)?;
+        let hello = conn
+            .hello
+            .clone()
+            .ok_or_else(|| BackendError::Agmend("missing daemon identity".into()))?;
+        let ready = conn
+            .ready
+            .clone()
+            .ok_or_else(|| BackendError::Agmend("missing daemon readiness".into()))?;
+        if !ready.ready {
+            return Err(BackendError::Agmend(
+                "agmend stores are not ready; retry after startup".into(),
+            ));
+        }
         let mut console = match conn.call("console_snapshot", checkout_params(project, root)) {
             Ok(value) => parse::<ConsoleSnapshot>(value)?,
             // agmend is up but the hub is not: open on who the person is,
@@ -430,6 +473,7 @@ impl AgmendBackend {
         let mut held = Held::default();
         held.merge(console.messages, console.older);
         let shared = Arc::new(Shared {
+            identity: hello.clone(),
             socket: socket.to_owned(),
             project: project.to_owned(),
             root: root.map(Path::to_owned),
@@ -467,6 +511,8 @@ impl AgmendBackend {
             .spawn(move || watch_loop(&watcher, &watch_jobs, &stopped, timing))
             .map_err(spawn_failed)?;
         Ok(Self {
+            hello,
+            ready,
             shared,
             jobs,
             _stop: stop,
@@ -704,6 +750,11 @@ fn watch_once(shared: &Shared, jobs: &SyncSender<Job>) -> Link {
 /// when the backend was dropped meanwhile.
 fn open_watch(shared: &Shared) -> Result<Option<UnixStream>, BackendError> {
     let mut conn = Conn::open(&shared.socket)?;
+    if conn.hello.as_ref() != Some(&shared.identity) {
+        return Err(BackendError::Agmend(
+            "agmend identity changed; Retry to check service ownership".into(),
+        ));
+    }
     // With the checkout, so agmend sends its changes (Task 8 review fix 3).
     let request = Request::new(conn.next_id, "console_watch", shared.checkout_params());
     frame::write(&mut conn.stream, &request).map_err(lost)?;
@@ -949,11 +1000,11 @@ fn request(
 ) -> Result<Value, RequestError> {
     let (mut open, reused) = match conn.take() {
         Some(open) => (open, true),
-        None => (open_for_request(&shared.socket)?, false),
+        None => (open_for_request(&shared.socket, &shared.identity)?, false),
     };
     let mut result = open.call(method, params.clone());
     if reused && matches!(result, Err(Fail::Lost(_))) {
-        open = open_for_request(&shared.socket)?;
+        open = open_for_request(&shared.socket, &shared.identity)?;
         result = open.call(method, params);
     }
     match result {
@@ -971,13 +1022,17 @@ fn request(
 
 /// A greeted connection, with a refused `hello` (an API version mismatch,
 /// say) told apart from a socket that failed.
-fn open_for_request(socket: &Path) -> Result<Conn, RequestError> {
-    let mut conn = Conn::connect(socket).map_err(|err| RequestError::Down(err.to_string()))?;
-    match conn.call("hello", json!({ "api": API })) {
-        Ok(_) => Ok(conn),
-        Err(Fail::Refused(error)) => Err(RequestError::Refused(error.message)),
-        Err(Fail::Lost(why)) => Err(RequestError::Down(why)),
+fn open_for_request(socket: &Path, expected: &HelloAnswer) -> Result<Conn, RequestError> {
+    let conn = Conn::open(socket).map_err(|error| match error {
+        BackendError::NotConnected => RequestError::Down(error.to_string()),
+        _ => RequestError::Refused(error.to_string()),
+    })?;
+    if conn.hello.as_ref() != Some(expected) {
+        return Err(RequestError::Refused(
+            "agmend identity changed; Retry to check service ownership".into(),
+        ));
     }
+    Ok(conn)
 }
 
 // Connections.
@@ -985,6 +1040,8 @@ fn open_for_request(socket: &Path) -> Result<Conn, RequestError> {
 /// A connection to agmend that has said `hello`.
 #[derive(Debug)]
 struct Conn {
+    hello: Option<HelloAnswer>,
+    ready: Option<ReadyAnswer>,
     stream: UnixStream,
     next_id: u64,
 }
@@ -1019,7 +1076,26 @@ impl Conn {
     /// Checks the socket is the person's own, connects and says `hello`.
     fn open(socket: &Path) -> Result<Self, BackendError> {
         let mut conn = Self::connect(socket)?;
-        conn.call("hello", json!({ "api": API }))?;
+        let hello: HelloAnswer = parse(conn.call("hello", json!({ "api": API }))?)?;
+        if hello.api != API {
+            return Err(BackendError::Agmend(format!(
+                "agmend API {} does not match {API}",
+                hello.api
+            )));
+        }
+        if hello.version.as_deref() != Some(env!("CARGO_PKG_VERSION")) {
+            return Err(BackendError::Agmend(format!(
+                "agmend version {:?} does not match {}; switch services with consent",
+                hello.version,
+                env!("CARGO_PKG_VERSION")
+            )));
+        }
+        let ready: ReadyAnswer = parse(conn.call("ready", json!({}))?)?;
+        if !ready.ready {
+            return Err(BackendError::Agmend("agmend stores are not ready".into()));
+        }
+        conn.ready = Some(ready);
+        conn.hello = Some(hello);
         Ok(conn)
     }
 
@@ -1033,7 +1109,12 @@ impl Conn {
         stream
             .set_write_timeout(Some(REQUEST_TIMEOUT))
             .map_err(io_failed)?;
-        Ok(Self { stream, next_id: 1 })
+        Ok(Self {
+            stream,
+            next_id: 1,
+            hello: None,
+            ready: None,
+        })
     }
 
     fn call(&mut self, method: &str, params: Value) -> Result<Value, Fail> {

@@ -186,6 +186,7 @@ struct Browse {
 /// `terminal-font`, `terminal-size`, `density`; pages as
 /// `settings-page:{slug}`.
 pub(crate) struct SettingsView {
+    cli_install: Option<Entity<super::cli_install::CliInstall>>,
     sources: SettingsSources,
     settings: AgmenSettings,
     pub(super) page: Page,
@@ -235,6 +236,7 @@ impl SettingsView {
         fonts.sort();
         fonts.dedup();
         let mut view = Self {
+            cli_install: super::cli_install::CliInstall::for_app(cx),
             sources,
             settings,
             page: Page::Appearance,
@@ -1078,6 +1080,16 @@ impl Render for SettingsView {
                 (*title, *slug)
             });
         let body: Vec<AnyElement> = match self.page {
+            Page::General => self.cli_install.as_ref().map_or_else(
+                || {
+                    vec![
+                        Label::new("Open agmen.app to install the agmen command.")
+                            .wrap()
+                            .into_any_element(),
+                    ]
+                },
+                |offer| vec![offer.clone().into_any_element()],
+            ),
             Page::Appearance => self.appearance_page(cx),
             Page::About => Self::about_page(),
             _ => vec![
