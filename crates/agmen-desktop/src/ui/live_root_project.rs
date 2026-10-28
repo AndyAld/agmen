@@ -363,5 +363,6 @@ pub(super) fn project_menus(recents: &[PathBuf]) -> Vec<Menu> {
             MenuItem::action("Open Project…", OpenProject),
             MenuItem::submenu(Menu::new("Open Recent").items(recent_items)),
         ]),
+        Menu::new("Project").items([MenuItem::action("New Agent…", crate::keymap::NewAgent)]),
     ]
 }

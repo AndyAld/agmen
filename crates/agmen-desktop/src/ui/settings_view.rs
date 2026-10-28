@@ -58,7 +58,7 @@ impl SettingsSources {
         }
     }
 
-    fn settings_path(&self) -> PathBuf {
+    pub(super) fn settings_path(&self) -> PathBuf {
         agmen_settings_path(&self.config)
     }
 }
@@ -188,6 +188,7 @@ struct Browse {
 pub(crate) struct SettingsView {
     cli_install: Option<Entity<super::cli_install::CliInstall>>,
     start_at_login: bool,
+    agent_model: Entity<TextInput>,
     login_task: Option<gpui::Task<()>>,
     sources: SettingsSources,
     settings: AgmenSettings,
@@ -245,7 +246,13 @@ impl SettingsView {
                     false
                 }
             };
+        let default_model = crate::appearance::DesktopSettings::load(&sources.settings_path())
+            .ok()
+            .and_then(|settings| settings.default_agent_model)
+            .unwrap_or_else(|| "sonnet".into());
+        let agent_model = cx.new(|cx| TextInput::new(cx).placeholder(default_model));
         let mut view = Self {
+            agent_model,
             cli_install: super::cli_install::CliInstall::for_app(cx),
             start_at_login,
             login_task: None,
@@ -1097,6 +1104,31 @@ impl SettingsView {
         cx.notify();
     }
 
+    fn save_agent_model(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let model = self.agent_model.read(cx).text().trim().to_owned();
+        let model = if model.is_empty() {
+            "sonnet".into()
+        } else {
+            model
+        };
+        let path = self.sources.settings_path();
+        let result = crate::appearance::DesktopSettings::load(&path).and_then(|mut settings| {
+            settings.default_agent_model = Some(model.clone());
+            settings.save(&path)
+        });
+        match result {
+            Ok(()) => {
+                self.error = None;
+                self.agent_model.update(cx, |input, cx| {
+                    input.set_text("", window, cx);
+                    input.set_placeholder(model, cx);
+                });
+            }
+            Err(error) => self.error = Some(error.to_string()),
+        }
+        cx.notify();
+    }
+
     fn general_page(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut body = vec![setting(
             "Start agmen in the background when you log in",
@@ -1105,6 +1137,19 @@ impl SettingsView {
         ).child(Toggle::new("start-at-login", self.start_at_login)
             .on_change(Self::handler(cx, |this, enabled, cx| this.change_login(enabled, cx))))
             .into_any_element()];
+        body.push(
+            setting(
+                "Default agent model",
+                "Used when launching a new Claude Code agent.",
+                cx,
+            )
+            .child(InputFrame::new().child(self.agent_model.clone()))
+            .child(
+                Button::new("default-agent-model:save", "Save")
+                    .on_click(cx.listener(|this, _, window, cx| this.save_agent_model(window, cx))),
+            )
+            .into_any_element(),
+        );
         if self.login_task.is_some() {
             body.push(Label::new("Changing login item…").into_any_element());
         }

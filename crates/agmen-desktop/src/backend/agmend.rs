@@ -37,8 +37,8 @@ use agmen_local::{
     API, ApiError, ErrorCode, HelloAnswer, Outcome, ReadyAnswer, Request, Response, frame,
 };
 use agmen_proto::{
-    Body, ClientEnvelope, IdentityKind, MAX_BODY_BYTES, Mention, MessageId, Payload, Seq,
-    StampedEnvelope, Stream, Timestamp,
+    Body, ClientEnvelope, IdentityId, IdentityKind, MAX_BODY_BYTES, Mention, MessageId, Payload,
+    Seq, StampedEnvelope, Stream, Timestamp,
 };
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use futures::channel::oneshot;
@@ -132,6 +132,9 @@ impl Shared {
 #[derive(Debug)]
 struct Live {
     project: String,
+    managed: Vec<ManagedAgent>,
+    agent_error: Option<String>,
+    agent_read_error: Option<String>,
     me: Me,
     roster: Vec<RosterEntry>,
     local: LocalData,
@@ -178,6 +181,57 @@ impl Live {
             (Paging::Failed(why), true) => Older::Failed(why.clone()),
             (Paging::Idle, true) => Older::More,
         };
+        snapshot.agent_error = self
+            .agent_error
+            .clone()
+            .or_else(|| self.agent_read_error.clone());
+        if self
+            .managed
+            .iter()
+            .any(|agent| agent.project == self.project)
+            && !snapshot.roster.iter().any(|group| group.you)
+        {
+            snapshot.roster.push(PersonGroup {
+                id: self.me.id.clone(),
+                person: self.me.handle.clone(),
+                you: true,
+                agents: Vec::new(),
+            });
+        }
+        for agent in &self.managed {
+            if agent.project != self.project {
+                continue;
+            }
+            snapshot
+                .managed_agents
+                .insert(agent.identity.clone(), agent.state.label().into());
+            if let Some(group) = snapshot.roster.iter_mut().find(|group| group.you) {
+                let status = match agent.state {
+                    ManagedState::Running => AgentStatus::Working,
+                    ManagedState::Idle => AgentStatus::Idle,
+                    ManagedState::Offline => AgentStatus::Offline,
+                };
+                if let Some(row) = group.agents.iter_mut().find(|row| row.id == agent.identity) {
+                    row.status = status;
+                } else {
+                    group.agents.push(AgentRow {
+                        id: agent.identity.clone(),
+                        handle: agent.handle.clone(),
+                        name: agent
+                            .handle
+                            .rsplit('/')
+                            .next()
+                            .unwrap_or(&agent.handle)
+                            .to_owned(),
+                        role: "engineer".into(),
+                        harness: "claude".into(),
+                        status,
+                        depth: 1,
+                        item: None,
+                    });
+                }
+            }
+        }
         snapshot.newer = self.held.newer;
         snapshot.waiting = self.held.waiting;
         snapshot
@@ -372,14 +426,22 @@ const PAGE: u32 = 500;
 /// A job for the request thread.
 #[derive(Debug)]
 enum Job {
+    Agent {
+        method: &'static str,
+        params: Value,
+    },
     /// A snapshot for the watch in the given generation.
-    Snapshot { generation: u64 },
+    Snapshot {
+        generation: u64,
+    },
     Post {
         draft: Draft,
         envelope: Box<ClientEnvelope>,
     },
     /// Final review fix 1: the page before the oldest held message.
-    History { before: Seq },
+    History {
+        before: Seq,
+    },
     /// Task 8: one file's text, for a file view that opened.
     FileText {
         worktree: String,
@@ -388,7 +450,41 @@ enum Job {
     },
 }
 
+#[derive(Debug, PartialEq, Eq, serde::Deserialize)]
+struct ManagedAgent {
+    identity: IdentityId,
+    project: String,
+    handle: String,
+    state: ManagedState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum ManagedState {
+    Running,
+    Idle,
+    Offline,
+}
+impl ManagedState {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Idle => "idle",
+            Self::Offline => "offline",
+        }
+    }
+}
+
 impl AgmendBackend {
+    fn queue_agent(&self, method: &'static str, params: Value) -> Result<(), BackendError> {
+        self.jobs
+            .try_send(Job::Agent { method, params })
+            .map_err(|error| match error {
+                TrySendError::Full(_) => BackendError::Agmend("agent request queue is full".into()),
+                TrySendError::Disconnected(_) => BackendError::NotConnected,
+            })
+    }
+
     pub(crate) fn shutdown_owned(
         socket: &Path,
         exe: &Path,
@@ -537,6 +633,9 @@ impl AgmendBackend {
                 project: console.project,
                 me: console.me,
                 roster: console.roster,
+                managed: Vec::new(),
+                agent_error: None,
+                agent_read_error: None,
                 local,
                 held,
                 paging: Paging::Idle,
@@ -628,6 +727,20 @@ impl Backend for AgmendBackend {
     fn act(&self, action: Action) -> Result<(), BackendError> {
         let unsupported = |what| Err(BackendError::Unsupported(what));
         match action {
+            Action::LaunchAgent {
+                name,
+                model,
+                budget_cents,
+            } => {
+                let mut params = json!({"project": self.shared.project, "name": name, "model": model, "budget_usd": f64::from(budget_cents) / 100.0});
+                if let Some(root) = &self.shared.root {
+                    params["root"] = json!(root);
+                }
+                self.queue_agent("agent_launch", params)
+            }
+            Action::StopAgent(identity) => {
+                self.queue_agent("agent_stop", json!({"identity": identity}))
+            }
             // As in the fixture: an alert's action is an answer to its sender.
             Action::AnswerAlert { alert, choice } => {
                 let sender = self
@@ -877,8 +990,37 @@ fn on_event(shared: &Shared, jobs: &SyncSender<Job>, event: ConsoleEvent) -> Res
 
 fn serve_jobs(shared: &Shared, queue: &Receiver<Job>, mut conn: Option<Conn>) {
     // Ends when the backend and the watch thread have both gone.
-    for job in queue {
+    let interval = Duration::from_secs(2);
+    let mut next_poll = std::time::Instant::now() + interval;
+    loop {
+        if shared.lock().closed {
+            return;
+        }
+        if std::time::Instant::now() >= next_poll {
+            refresh_agents(shared, &mut conn);
+            next_poll = std::time::Instant::now() + interval;
+        }
+        let job = match queue
+            .recv_timeout(next_poll.saturating_duration_since(std::time::Instant::now()))
+        {
+            Ok(job) => job,
+            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) => return,
+        };
         match job {
+            Job::Agent { method, params } => {
+                // Launch is not idempotent: never retry after losing its answer.
+                let result =
+                    open_for_request(&shared.socket, &shared.identity).and_then(|mut fresh| {
+                        fresh.call(method, params).map_err(|error| match error {
+                            Fail::Refused(error) => RequestError::Refused(error.message),
+                            Fail::Lost(why) => RequestError::Down(why),
+                        })
+                    });
+                shared.lock().agent_error = result.err().map(|error| error.to_string());
+                refresh_agents(shared, &mut conn);
+                shared.lock().publish_snapshot();
+            }
             Job::Snapshot { generation } => {
                 let answer = request(
                     shared,
@@ -945,6 +1087,34 @@ fn serve_jobs(shared: &Shared, queue: &Receiver<Job>, mut conn: Option<Conn>) {
             }
         }
     }
+}
+
+fn refresh_agents(shared: &Shared, conn: &mut Option<Conn>) {
+    #[derive(serde::Deserialize)]
+    struct Agents {
+        agents: Vec<ManagedAgent>,
+    }
+    let result = request(shared, conn, "agent_list", json!({})).and_then(|value| {
+        parse::<Agents>(value).map_err(|error| RequestError::Refused(error.to_string()))
+    });
+    let mut live = shared.lock();
+    match result {
+        Ok(answer) => {
+            if live.managed == answer.agents && live.agent_read_error.is_none() {
+                return;
+            }
+            live.managed = answer.agents;
+            live.agent_read_error = None;
+        }
+        Err(error) => {
+            let why = format!("Reading managed agents: {error}");
+            if live.agent_read_error.as_ref() == Some(&why) {
+                return;
+            }
+            live.agent_read_error = Some(why);
+        }
+    }
+    live.publish_snapshot();
 }
 
 /// `chat_history`'s answer (agmend's console.rs `History`).
@@ -1276,6 +1446,8 @@ pub(super) fn snapshot_from(console: ConsoleSnapshot) -> Snapshot {
         project,
         listener: listener.map(listener_info),
         roster: groups,
+        managed_agents: BTreeMap::new(),
+        agent_error: None,
         me: me.handle,
         me_id: me.id,
         agents: BTreeMap::new(),

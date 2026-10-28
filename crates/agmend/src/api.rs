@@ -12,7 +12,7 @@ use tokio::net::UnixStream;
 use tokio::net::unix::OwnedWriteHalf;
 
 use crate::Core;
-use crate::console::{Console, bad_request, params};
+use crate::console::{bad_request, params};
 use crate::identities::{Caller, forbidden, unauthorized};
 use agmen_proto::{ClientEnvelope, ProjectId};
 
@@ -28,6 +28,7 @@ struct Shutdown {}
 
 /// Serves `stream` until the peer hangs up or breaks the framing.
 pub(crate) async fn serve(stream: UnixStream, core: Arc<Core>) {
+    core.managed.attach(&core.identities).await;
     // shortcut: Unix-only local API; revisit when S6 Windows IPC is approved.
     let console = &core.console;
     let (mut reader, mut writer) = stream.into_split();
@@ -56,8 +57,7 @@ pub(crate) async fn serve(stream: UnixStream, core: Arc<Core>) {
         let outcome = if let Some(refusal) = refuse(&request, greeted) {
             Err(refusal)
         } else {
-            let token = extract_token(&mut request.params);
-            let caller = match token {
+            let caller = match extract_token(&mut request.params) {
                 Ok(ref token) => {
                     core.identities
                         .authorize(request.as_.as_ref(), token.as_deref())
@@ -102,10 +102,8 @@ pub(crate) async fn serve(stream: UnixStream, core: Arc<Core>) {
                     shutting_down = result.is_ok();
                     result
                 }
-                Ok(Caller::Human) if request.method == "ready" => {
-                    finite(deadline, ready(&core, request.params, deadline)).await
-                }
                 Ok(Caller::Human) if request.method == "console_watch" => {
+                    core.managed.remember_root(&request.params).await;
                     // The watch keeps the connection; whatever it ends with is the
                     // last frame.
                     if let Err(error) = console.watch(id, request.params, reader, &mut writer).await
@@ -114,7 +112,7 @@ pub(crate) async fn serve(stream: UnixStream, core: Arc<Core>) {
                     }
                     return;
                 }
-                Ok(Caller::Human) => call(console, &request.method, request.params).await,
+                Ok(Caller::Human) => call(&core, &request.method, request.params, deadline).await,
             }
         };
         let written = if bounded {
@@ -241,7 +239,8 @@ async fn identity_call(
             core.identities.post(caller, envelope).await
         }
         "shutdown" | "hello" | "ready" | "whoami" | "console_watch" | "console_snapshot"
-        | "chat_history" | "file_text" | "identity_mint" | "identity_list" => Err(forbidden()),
+        | "chat_history" | "file_text" | "identity_mint" | "identity_list" | "agent_launch"
+        | "agent_stop" | "agent_list" => Err(forbidden()),
         other => Err(ApiError {
             code: ErrorCode::NotFound,
             message: format!("agmend has no method {other:?}"),
@@ -268,10 +267,23 @@ fn hello(raw: Value) -> Result<Value, ApiError> {
     }
 }
 
-async fn call(console: &Console, method: &str, raw: Value) -> Result<Value, ApiError> {
+async fn call(
+    core: &Arc<Core>,
+    method: &str,
+    raw: Value,
+    deadline: tokio::time::Instant,
+) -> Result<Value, ApiError> {
+    let console = &core.console;
     match method {
+        "ready" => finite(deadline, ready(core, raw, deadline)).await,
+        "agent_launch" => core.managed.launch(raw).await,
+        "agent_stop" => core.managed.stop(raw).await,
+        "agent_list" => core.managed.list(raw).await,
         "whoami" => console.whoami().await,
-        "console_snapshot" => console.snapshot(raw).await,
+        "console_snapshot" => {
+            core.managed.remember_root(&raw).await;
+            console.snapshot(raw).await
+        }
         "chat_history" => console.history(raw).await,
         "post" => console.post(raw).await,
         "file_text" => console.file_text(raw).await,

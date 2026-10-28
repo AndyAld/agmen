@@ -163,6 +163,12 @@ pub(crate) struct Draft {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub(crate) enum Action {
+    LaunchAgent {
+        name: String,
+        model: String,
+        budget_cents: u32,
+    },
+    StopAgent(IdentityId),
     Apply(ChangeId),
     Cancel(ChangeId),
     Undo(ChangeId),
@@ -569,6 +575,8 @@ pub(crate) struct Snapshot {
     /// The person's handle, such as `andy`.
     pub(crate) me: String,
     pub(crate) me_id: IdentityId,
+    pub(crate) managed_agents: BTreeMap<IdentityId, String>,
+    pub(crate) agent_error: Option<String>,
     pub(crate) roster: Vec<PersonGroup>,
     /// The person's own listener; `None` when the project has none for
     /// them (Task 7), and the Listener panel says so.

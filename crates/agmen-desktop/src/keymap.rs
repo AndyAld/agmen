@@ -23,6 +23,8 @@ actions!(
         Quit,
         /// Opens a project folder in the current window.
         OpenProject,
+        /// Launches a managed agent in its own worktree.
+        NewAgent,
         /// Shows the Project panel, or hides the dock when it already shows
         /// it (Zed's `project_panel::ToggleFocus`).
         ToggleProjectPanel,

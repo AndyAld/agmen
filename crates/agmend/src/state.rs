@@ -1,6 +1,6 @@
 //! Durable daemon metadata, pending notifications and receive positions.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::fs::{self, OpenOptions};
 use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::Path;
@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use agmen_client::Broker;
 use agmen_proto::{
-    IdentityId, IdentityKind, Payload, ProjectId, StampedEnvelope, Stream, TenantId,
+    IdentityId, IdentityKind, MessageId, Payload, ProjectId, StampedEnvelope, Stream, TenantId,
 };
 use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
@@ -78,6 +78,7 @@ pub(crate) enum StoreError {
 #[derive(Debug)]
 pub(crate) struct Store {
     conn: Connection,
+    own_ids: BTreeMap<(String, IdentityId), VecDeque<MessageId>>,
 }
 
 /// How a schema check reads a store: strictly, or as the preflight of a
@@ -309,13 +310,12 @@ impl Store {
         conn.pragma_update(None, "synchronous", "FULL")?;
         // Initialize WAL sidecars now, while the database and directory are private.
         conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn,
+            own_ids: BTreeMap::new(),
+        })
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "identity registration lands in B T3")
-    )]
     pub(crate) fn register(&mut self, identity: &ManagedIdentity) -> Result<(), StoreError> {
         let origin = identity.hub_url.origin().ascii_serialization();
         let tx = self
@@ -447,27 +447,27 @@ impl Store {
                 return Err(StoreError::Full("256 stream positions"));
             }
         }
-        let mut stmt = tx.prepare("SELECT identity FROM identities WHERE origin=?1 AND project=?2 AND (?3 IS NULL OR owner=?3) ORDER BY identity LIMIT 64")?;
+        let mut remember = None;
+        let mut stmt = tx.prepare("SELECT identity,owner FROM identities WHERE origin=?1 AND project=?2 AND (?3 IS NULL OR owner=?3) ORDER BY identity LIMIT 64")?;
         let identities = stmt.query_map(
             params![origin, project.as_str(), owner.map(IdentityId::as_str)],
-            |r| r.get::<_, String>(0),
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
         )?;
         for row in identities {
-            let id = row?
+            let (id, owner) = row?;
+            let id = id
                 .parse::<IdentityId>()
                 .map_err(|_| StoreError::Invalid("stored identity"))?;
-            if message.from == id
-                || matches!(&message.stream, Stream::Inbox(recipient) if recipient != &id)
-            {
+            if message.from == id {
+                remember = Some(id);
                 continue;
             }
-            let qualifies = message.mentioned.contains(&id)
-                || match &message.client.payload {
-                    Payload::Dm {} => message.client.to.contains(&id),
-                    Payload::Assign { to, .. } => to == &id,
-                    _ => false,
-                };
-            if !qualifies {
+            if !addressed_to(
+                message,
+                &id,
+                &owner,
+                self.own_ids.get(&(origin.to_owned(), id.clone())),
+            )? {
                 continue;
             }
             let needs_receipt =
@@ -508,6 +508,30 @@ impl Store {
         tx.execute("INSERT INTO positions VALUES (?1,?2,?3,?4) ON CONFLICT(origin,project,stream) DO UPDATE SET seq=excluded.seq",
             params![position_origin, project.as_str(), stream, seq])?;
         tx.commit()?;
+        if let Some(id) = remember {
+            self.remember_own(origin, &id, &message.client.id)?;
+        }
+        Ok(())
+    }
+
+    /// Watches receive delivery IDs even when an outgoing ASK has no feed copy.
+    pub(crate) fn remember_own(
+        &mut self,
+        origin: &str,
+        identity: &IdentityId,
+        id: &MessageId,
+    ) -> Result<(), StoreError> {
+        let key = (origin.to_owned(), identity.clone());
+        if self.own_ids.len() >= 64 && !self.own_ids.contains_key(&key) {
+            return Err(StoreError::Full("64 own-message trackers"));
+        }
+        let ids = self.own_ids.entry(key).or_default();
+        if !ids.contains(id) {
+            if ids.len() == 1000 {
+                ids.pop_front();
+            }
+            ids.push_back(id.clone());
+        }
         Ok(())
     }
 
@@ -552,6 +576,28 @@ impl Store {
         tx.commit()?;
         Ok(result)
     }
+}
+
+/// Reuse the client's R31 routing rules, also implemented by the plugin.
+fn addressed_to(
+    message: &StampedEnvelope,
+    id: &IdentityId,
+    owner: &str,
+    own_ids: Option<&VecDeque<MessageId>>,
+) -> Result<bool, StoreError> {
+    if matches!(&message.stream, Stream::Inbox(recipient) if recipient != id) {
+        return Ok(false);
+    }
+    let me = agmen_client::Me {
+        identity_id: id.clone(),
+        handle: String::new(),
+        owner_id: owner
+            .parse()
+            .map_err(|_| StoreError::Invalid("stored owner identity"))?,
+    };
+    Ok(me.is_for_me(message, |reply| {
+        own_ids.is_some_and(|own| own.contains(reply))
+    }))
 }
 
 #[cfg(test)]

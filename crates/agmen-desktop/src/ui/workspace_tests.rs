@@ -461,3 +461,33 @@ fn selecting_another_persons_live_agent_shows_the_listener_panel(cx: &mut TestAp
     assert!(cx.debug_bounds("agent-panel:none").is_none());
     workspace.read_with(cx, |w, _| assert!(w.selected_agent.is_none()));
 }
+
+#[gpui::test]
+fn new_agent_action_opens_name_model_and_budget_dialog(cx: &mut TestAppContext) {
+    let (_, cx) = open(cx);
+    cx.dispatch_action(crate::keymap::NewAgent);
+    redraw(cx);
+    assert!(cx.debug_bounds("new-agent").is_some());
+    assert!(cx.debug_bounds("new-agent:name").is_some());
+    assert!(cx.debug_bounds("new-agent:model").is_some());
+    assert!(cx.debug_bounds("new-agent:budget").is_some());
+    click(cx, "new-agent:cancel");
+    assert!(cx.debug_bounds("new-agent").is_none());
+}
+
+#[gpui::test]
+fn managed_stop_button_calls_backend(cx: &mut TestAppContext) {
+    let (backend, _) =
+        crate::ui::plan_test_support::plan_globals(cx, crate::backend::Screen::Plan, None);
+    let mut snapshot = chat_snapshot();
+    let identity = fixture_id("andy/fx1");
+    snapshot
+        .managed_agents
+        .insert(identity.clone(), "running".into());
+    let (_, cx) = cx.add_window_view(|window, cx| Workspace::new(snapshot, window, cx));
+    click(cx, "agent:andy/fx1:stop");
+    assert_eq!(
+        *backend.acts.borrow(),
+        vec![crate::backend::Action::StopAgent(identity)]
+    );
+}

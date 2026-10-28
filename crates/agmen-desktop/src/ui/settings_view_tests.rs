@@ -778,3 +778,23 @@ fn general_offers_optional_start_at_login(cx: &mut TestAppContext) {
     redraw(cx);
     assert!(cx.debug_bounds("start-at-login").is_some());
 }
+
+#[gpui::test]
+fn general_settings_saves_default_agent_model(cx: &mut TestAppContext) {
+    init(cx);
+    let home = Home::new();
+    let (view, cx) = cx.add_window_view(|_, cx| SettingsView::new(home.sources(), cx));
+    view.update_in(cx, |view, window, cx| {
+        view.page = Page::General;
+        view.agent_model
+            .update(cx, |input, cx| input.set_text("opus", window, cx));
+    });
+    click(cx, "default-agent-model:save");
+    assert_eq!(
+        crate::appearance::DesktopSettings::load(&home.settings_path())
+            .unwrap()
+            .default_agent_model
+            .as_deref(),
+        Some("opus")
+    );
+}

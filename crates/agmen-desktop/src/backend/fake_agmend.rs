@@ -190,6 +190,8 @@ pub(crate) struct FakeState {
     /// slow hub makes agmend wait.
     pub(crate) snapshot_delay: Duration,
     pub(crate) posts: Vec<Request>,
+    pub(crate) agent_requests: Vec<Request>,
+    pub(crate) managed_state: Option<String>,
     pub(crate) snapshots_served: usize,
     /// Task 8: each `console_snapshot`'s params.
     pub(crate) snapshot_params: Vec<Value>,
@@ -355,6 +357,26 @@ fn hello_response(id: u64, stream: &UnixStream, state: &Mutex<FakeState>) -> Opt
     })
 }
 
+fn managed_response(request: Request, state: &Mutex<FakeState>) -> Response {
+    let id = request.id;
+    let mut state = state.lock().unwrap();
+    if request.method == "agent_list" {
+        let agents = state.managed_state.as_ref().map(|status| json!({"identity": "idmanaged", "project": PROJECT, "handle": "andy/worker", "state": status})).into_iter().collect::<Vec<_>>();
+        Response::ok(id, json!({"agents": agents}))
+    } else {
+        state.managed_state = Some(
+            if request.method == "agent_launch" {
+                "idle"
+            } else {
+                "offline"
+            }
+            .into(),
+        );
+        state.agent_requests.push(request);
+        Response::ok(id, json!({}))
+    }
+}
+
 fn serve(mut stream: UnixStream, state: &Mutex<FakeState>) -> Option<()> {
     while let Ok(request) = frame::read::<Request>(&mut stream) {
         if request.method == "shutdown" {
@@ -395,6 +417,7 @@ fn serve(mut stream: UnixStream, state: &Mutex<FakeState>) -> Option<()> {
                     None => Response::err(id, ErrorCode::Hub, "the hub cannot be reached"),
                 }
             }
+            "agent_launch" | "agent_stop" | "agent_list" => managed_response(request, state),
             "post" => {
                 let mut state = state.lock().unwrap();
                 state.posts.push(request.clone());

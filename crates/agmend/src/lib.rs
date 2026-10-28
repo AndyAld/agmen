@@ -21,9 +21,11 @@ mod feed;
 mod git;
 mod hub;
 mod identities;
+mod launch;
 mod listener;
 mod local;
 mod login;
+mod managed;
 mod socket;
 mod sse;
 mod state;
@@ -49,6 +51,7 @@ use crate::login::Credentials;
 pub(crate) struct Core {
     console: Arc<Console>,
     identities: Arc<Identities>,
+    managed: Arc<managed::Managed>,
     state_dir: PathBuf,
     schema_scan: Arc<Semaphore>,
     shutdown: tokio::sync::Notify,
@@ -129,6 +132,7 @@ pub struct Config {
     roster_every: Duration,
     local_every: Duration,
     personal_roles: Option<PathBuf>,
+    runner: Arc<dyn launch::Runner>,
 }
 
 impl Config {
@@ -147,6 +151,7 @@ impl Config {
             roster_every: ROSTER_EVERY,
             local_every: LOCAL_EVERY,
             personal_roles: None,
+            runner: Arc::new(launch::ClaudeRunner::default()),
         }
     }
 
@@ -261,6 +266,11 @@ impl Agmend {
             config.socket.with_file_name(""),
             hub.clone(),
         ));
+        let managed = Arc::new(managed::Managed::new(
+            hub.clone(),
+            config.runner,
+            config.socket.with_file_name(""),
+        ));
         Ok(Self {
             bound,
             opening,
@@ -269,6 +279,7 @@ impl Agmend {
                 schema_scan: Arc::new(Semaphore::new(1)),
                 shutdown: tokio::sync::Notify::new(),
                 identities,
+                managed,
                 console: Arc::new(Console {
                     hub,
                     feeds,
@@ -296,6 +307,7 @@ impl Agmend {
     /// Serves until `shutdown` resolves, then joins daemon-owned collectors
     /// and sessions, waiting at most 5 s per task and 10 s in total.
     pub async fn serve_until(self, shutdown: impl std::future::Future<Output = ()>) {
+        self.core.managed.attach(&self.core.identities).await;
         if let Err(error) = self.opening.await {
             tracing::warn!(%error, "daemon state opener failed");
             return;
@@ -305,6 +317,10 @@ impl Agmend {
         let identities = self.core.identities.clone();
         tasks.spawn(async move {
             identities.supervise().await;
+        });
+        let managed = self.core.managed.clone();
+        tasks.spawn(async move {
+            managed.supervise().await;
         });
         tokio::pin!(shutdown);
         loop {
@@ -340,6 +356,14 @@ impl Agmend {
         }
         tasks.abort_all();
         while tasks.join_next().await.is_some() {}
-        self.core.identities.shutdown().await;
+        if tokio::time::timeout(Duration::from_secs(10), async {
+            self.core.managed.shutdown().await;
+            self.core.identities.shutdown().await;
+        })
+        .await
+        .is_err()
+        {
+            tracing::warn!("daemon shutdown reached its ten second deadline");
+        }
     }
 }

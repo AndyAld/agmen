@@ -35,6 +35,138 @@ fn setup() -> (tempfile::TempDir, Store, ManagedIdentity) {
 }
 
 #[test]
+fn pending_routes_plugin_input_shapes() {
+    let cases = [
+        (
+            "ASK",
+            json!({}),
+            "feed",
+            json!(["agent001"]),
+            "sender01",
+            true,
+        ),
+        (
+            "ASK",
+            json!({}),
+            "feed",
+            json!(["other001"]),
+            "sender01",
+            false,
+        ),
+        (
+            "GRANT",
+            json!({"item":"B-1","lease_until":"2026-10-28T12:00:00Z"}),
+            "inbox:agent001",
+            json!([]),
+            "sender01",
+            true,
+        ),
+        (
+            "DENY",
+            json!({"item":"B-1","reason":"held_by"}),
+            "inbox:agent001",
+            json!([]),
+            "sender01",
+            true,
+        ),
+        (
+            "GRANT",
+            json!({"item":"B-1","lease_until":"2026-10-28T12:00:00Z"}),
+            "feed",
+            json!([]),
+            "sender01",
+            false,
+        ),
+        (
+            "ALERT",
+            json!({"need":"owner request"}),
+            "feed",
+            json!([]),
+            "owner001",
+            true,
+        ),
+        (
+            "ALERT",
+            json!({"need":"other request"}),
+            "feed",
+            json!([]),
+            "sender01",
+            false,
+        ),
+    ];
+    for (verb, data, stream, to, from, expected) in cases {
+        let (_dir, mut store, who) = setup();
+        let mut raw = serde_json::to_value(message(1)).unwrap();
+        raw["verb"] = json!(verb);
+        raw["data"] = data;
+        raw["stream"] = json!(stream);
+        raw["to"] = to;
+        raw["from"] = json!(from);
+        let event = serde_json::from_value(raw).unwrap();
+        store.ingest(ORIGIN, &who.project, &event).unwrap();
+        assert_eq!(
+            !store
+                .drain(ORIGIN, &who.identity_id, 500, usize::MAX)
+                .unwrap()
+                .is_empty(),
+            expected,
+            "{verb} {stream} {from}"
+        );
+    }
+}
+
+#[test]
+fn pending_routes_answers_to_own_messages_only() {
+    let (_dir, mut store, who) = setup();
+    let mut own = message(1);
+    own.from = who.identity_id.clone();
+    own.client.payload = Payload::Ask { of: None };
+    own.client.to.clear();
+    store.ingest(ORIGIN, &who.project, &own).unwrap();
+    let mut answer = message(2);
+    answer.client.payload = Payload::Answer {};
+    answer.client.to.clear();
+    answer.client.reply_to = Some(own.client.id.clone());
+    store.ingest(ORIGIN, &who.project, &answer).unwrap();
+    assert_eq!(
+        store
+            .drain(ORIGIN, &who.identity_id, 500, usize::MAX)
+            .unwrap()
+            .len(),
+        1
+    );
+    answer.seq = agmen_proto::Seq(3);
+    answer.client.id = "00000000000000000000000003".parse().unwrap();
+    answer.client.reply_to = Some("00000000000000000000000099".parse().unwrap());
+    store.ingest(ORIGIN, &who.project, &answer).unwrap();
+    assert!(
+        store
+            .drain(ORIGIN, &who.identity_id, 500, usize::MAX)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn pending_answer_uses_delivery_id_without_an_own_feed_copy() {
+    let (_dir, mut store, who) = setup();
+    let own = "00000000000000000000000099".parse().unwrap();
+    store.remember_own(ORIGIN, &who.identity_id, &own).unwrap();
+    let mut answer = message(1);
+    answer.client.payload = Payload::Answer {};
+    answer.client.to.clear();
+    answer.client.reply_to = Some(own);
+    store.ingest(ORIGIN, &who.project, &answer).unwrap();
+    assert_eq!(
+        store
+            .drain(ORIGIN, &who.identity_id, 500, usize::MAX)
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
 fn state_opens_private_database() {
     let dir = tempfile::tempdir().unwrap();
     let parent = dir.path().join("private");

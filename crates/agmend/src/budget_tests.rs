@@ -176,3 +176,27 @@ fn large_cap_threshold_math_does_not_overflow() {
         .unwrap();
     assert_eq!(steps, [Step::Warn, Step::WrapUp, Step::Stop]);
 }
+
+#[test]
+fn remaining_budget_saturates_and_exhaustion_is_exact() {
+    let mut budget = Budget::new(money("1"));
+    assert_eq!(budget.remaining_usd(), "1.000000");
+    assert!(!budget.exhausted());
+    budget.observe_total_cost_usd("0.999999", |_| {}).unwrap();
+    assert_eq!(budget.remaining_usd(), "0.000001");
+    assert!(!budget.exhausted());
+    budget.observe_total_cost_usd("1.5", |_| {}).unwrap();
+    assert_eq!(budget.remaining_usd(), "0.000000");
+    assert!(budget.exhausted());
+}
+
+#[test]
+fn batch_costs_accumulate_across_resumed_processes() {
+    let mut budget = Budget::new(money("2"));
+    let mut steps = Vec::new();
+    budget.add_cost_usd("1", |step| steps.push(step)).unwrap();
+    assert_eq!(budget.remaining_usd(), "1.000000");
+    budget.add_cost_usd("1", |step| steps.push(step)).unwrap();
+    assert!(budget.exhausted());
+    assert_eq!(steps, [Step::Warn, Step::WrapUp, Step::Stop]);
+}

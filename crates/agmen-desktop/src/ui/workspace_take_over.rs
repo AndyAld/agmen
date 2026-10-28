@@ -60,6 +60,9 @@ impl Workspace {
             self.agents_panel
                 .update(cx, |panel, cx| panel.set_roster(roster, cx));
         }
+        self.agents_panel.update(cx, |panel, cx| {
+            panel.set_managed(chat.managed_agents.clone(), chat.agent_error.clone(), cx)
+        });
         self.snapshot = chat;
         cx.notify();
     }

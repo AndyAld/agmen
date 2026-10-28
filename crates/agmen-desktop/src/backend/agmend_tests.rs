@@ -1052,3 +1052,107 @@ fn shutdown_owned_refuses_foreign_executable() {
     );
     assert!(AgmendBackend::probe(&fake.path()).is_ok());
 }
+
+#[test]
+fn managed_agent_actions_use_local_launch_and_stop() {
+    let fake = FakeAgmend::start(console(vec![]));
+    let (backend, mut updates) = live_backend(&fake);
+    backend
+        .act(Action::LaunchAgent {
+            name: "worker".into(),
+            model: "sonnet".into(),
+            budget_cents: 500,
+        })
+        .unwrap();
+    wait_for(&mut updates, |update| {
+        matches!(update, Update::Snapshot(snapshot)
+        if snapshot.managed_agents.contains_key(&ident("idmanaged")))
+    });
+    assert_eq!(
+        fake.state.lock().unwrap().agent_requests[0].method,
+        "agent_launch"
+    );
+    assert_eq!(
+        fake.state.lock().unwrap().agent_requests[0].params,
+        json!({"project": PROJECT, "name": "worker", "model": "sonnet", "budget_usd": 5.0})
+    );
+    backend.act(Action::StopAgent(ident("idmanaged"))).unwrap();
+    wait_for(&mut updates, |update| {
+        matches!(update, Update::Snapshot(snapshot)
+        if snapshot.managed_agents.get(&ident("idmanaged")).is_some_and(|s| s == "offline"))
+    });
+    let requests = &fake.state.lock().unwrap().agent_requests;
+    assert_eq!(requests[1].method, "agent_stop");
+    assert_eq!(requests[1].params, json!({"identity": "idmanaged"}));
+}
+
+#[test]
+fn managed_agent_polling_updates_running_and_offline_states() {
+    let fake = FakeAgmend::start(console(vec![]));
+    let (backend, mut updates) = live_backend(&fake);
+    fake.edit(|state| state.managed_state = Some("running".into()));
+    wait_for(&mut updates, |update| {
+        matches!(update, Update::Snapshot(snapshot)
+        if snapshot.managed_agents.get(&ident("idmanaged")).is_some_and(|state| state == "running"))
+    });
+    assert!(
+        backend
+            .snapshot()
+            .roster
+            .iter()
+            .flat_map(|group| &group.agents)
+            .any(|agent| agent.id == ident("idmanaged") && agent.status == AgentStatus::Working)
+    );
+    fake.edit(|state| state.managed_state = Some("offline".into()));
+    wait_for(&mut updates, |update| {
+        matches!(update, Update::Snapshot(snapshot)
+        if snapshot.managed_agents.get(&ident("idmanaged")).is_some_and(|state| state == "offline"))
+    });
+}
+
+#[test]
+fn managed_agents_remain_stoppable_without_hub_roster() {
+    let mut snapshot = console(vec![]);
+    snapshot.roster.clear();
+    let fake = FakeAgmend::start(snapshot);
+    fake.edit(|state| state.managed_state = Some("idle".into()));
+    let (backend, mut updates) = live_backend(&fake);
+    wait_for(&mut updates, |update| {
+        matches!(update, Update::Snapshot(snapshot)
+        if snapshot.managed_agents.contains_key(&ident("idmanaged")))
+    });
+    assert!(backend.snapshot().roster.iter().any(|group| {
+        group.you
+            && group
+                .agents
+                .iter()
+                .any(|agent| agent.id == ident("idmanaged"))
+    }));
+}
+
+#[test]
+fn managed_status_polling_is_not_starved_by_other_jobs() {
+    let fake = FakeAgmend::start(console(vec![]));
+    let (backend, _updates) = live_backend(&fake);
+    fake.edit(|state| state.managed_state = Some("running".into()));
+    for _ in 0..60 {
+        let (reply, _result) = futures::channel::oneshot::channel();
+        backend
+            .jobs
+            .try_send(Job::FileText {
+                worktree: "worker".into(),
+                path: "src/main.rs".into(),
+                reply,
+            })
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(
+        backend
+            .snapshot()
+            .managed_agents
+            .get(&ident("idmanaged"))
+            .map(String::as_str),
+        Some("running")
+    );
+}

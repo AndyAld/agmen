@@ -97,3 +97,36 @@ fn person_chevrons_keep_their_width(cx: &mut TestAppContext) {
         assert_eq!(lead.size.width, crate::ui::tokens::ICON_SM, "{person}");
     }
 }
+
+#[gpui::test]
+fn new_agent_and_stop_emit_actions(cx: &mut TestAppContext) {
+    init(cx);
+    let (panel, cx) = cx.add_window_view(|_, _| AgentsPanel::new(chat_snapshot().roster));
+    panel.update(cx, |panel, cx| {
+        panel.set_managed(
+            std::collections::BTreeMap::from([(
+                crate::backend::fixture_id("andy/fx1"),
+                "running".into(),
+            )]),
+            None,
+            cx,
+        )
+    });
+    let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let seen = events.clone();
+    cx.update(|_, cx| {
+        cx.subscribe(&panel, move |_, event: &AgentsPanelEvent, _| {
+            seen.borrow_mut().push(event.clone());
+        })
+        .detach();
+    });
+    click(cx, "agents:new");
+    click(cx, "agent:andy/fx1:stop");
+    assert_eq!(
+        *events.borrow(),
+        vec![
+            AgentsPanelEvent::NewAgent,
+            AgentsPanelEvent::Stop(crate::backend::fixture_id("andy/fx1"))
+        ]
+    );
+}

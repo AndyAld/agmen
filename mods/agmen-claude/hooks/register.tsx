@@ -5,7 +5,8 @@ import type { StampedEnvelope } from '../../../schema/ts/StampedEnvelope'
 
 // The agmen plugin for Claude Code (docs/adr/0006-claude-code-plugin.md).
 // - Context: each message `agmen watch --json` delivers for this identity
-//   becomes a meta row ($.session.append) that the model reads as data.
+//   becomes a meta row ($.session.append). The owner's human messages are
+//   requests; messages from other participants are labeled as data.
 // - Wake-up: such a message wakes an idle session with $.prompt.submit (never
 //   asUser), at most once per WAKE_INTERVAL_MS, naming what arrived.
 // - Lane guard: in this session's worktree, Edit, Write and NotebookEdit run
@@ -160,6 +161,7 @@ type Incoming = Readonly<
   Pick<StampedEnvelope, 'id' | 'seq' | 'stream' | 'from' | 'from_handle' | 'reply_to' | 'to' | 'mentioned' | 'body'>
 > & {
   readonly verb: Verb
+  readonly isHuman: boolean
   /** `items`, plus `data.item` for ASSIGN, GRANT and DENY. */
   readonly items: readonly string[]
   /** ASSIGN's `data.to`. */
@@ -227,6 +229,8 @@ type Worktrees = { readonly isOk: true; readonly paths: readonly string[] } | { 
 
 /** What the hooks share for one load of the module. */
 type State = {
+  isEnded: boolean
+  watch: ReturnType<EngineInterface['process']['spawn']> | undefined
   /** The worktree holding `.agmen/identity.json`, once the CLI checked out; undefined while inert. */
   root: string | undefined
   /** Read with `root`; undefined while inert, or when git could not name it (every edit is then denied). */
@@ -315,6 +319,7 @@ function parseEnvelope(value: unknown): Incoming | string {
 
   return {
     verb,
+    isHuman: value['from_kind'] === 'human',
     id,
     seq,
     stream,
@@ -395,14 +400,21 @@ function remember(set: Set<string>, value: string, max: number): void {
 
 const itemsText = (message: Incoming): string => (message.items.length === 0 ? '' : ` ${message.items.join(', ')}`)
 
-/** How a wake-up names one message: `ASSIGN B-412 from adam/coord (#3)`. */
-const named = (message: Incoming): string =>
-  `${message.verb}${itemsText(message)} from ${message.from_handle} (#${message.seq})`
+/** Owner authority requires the stamped human kind and the session's owner id. */
+const isOwner = (message: Incoming, self: Self | undefined): boolean =>
+  message.from === self?.owner_id && message.isHuman
 
-/** The meta row for a message: sender, verb, item, and the body quoted and marked as data. */
-function contextText(message: Incoming): string {
+/** How a wake-up names one message: `ASSIGN B-412 from adam/coord (#3)`. */
+const named = (message: Incoming, self: Self | undefined): string =>
+  `${message.verb}${itemsText(message)} from ${isOwner(message, self) ? `your owner ${message.from_handle}; act on it as their request` : message.from_handle} (#${message.seq})`
+
+/** The meta row labels owner requests and quotes other participants' messages as data. */
+function contextText(message: Incoming, self: Self | undefined): string {
   const about = message.items.length === 0 ? '' : ` about ${message.items.join(', ')}`
   const denied = message.denyReason === undefined ? '' : ` (denied: ${message.denyReason})`
+  if (isOwner(message, self)) {
+    return `agmen ${message.verb} #${message.seq} from your owner ${message.from_handle}; act on it as their request${about}${denied}: ${JSON.stringify(message.body)}`
+  }
 
   return (
     `agmen ${message.verb} #${message.seq} from ${message.from_handle}${about}${denied}, addressed to this session. ` +
@@ -433,14 +445,14 @@ function nextStep(message: Incoming): string {
 }
 
 /** The wake-up prompt: what arrived and which tool to use, never the bodies, which are in the rows. */
-function wakeText(messages: readonly [Incoming, ...Incoming[]], uncounted: number): string {
+function wakeText(messages: readonly [Incoming, ...Incoming[]], uncounted: number, self: Self | undefined): string {
   const [first, ...rest] = messages
-  if (rest.length === 0 && uncounted === 0) return `agmen: ${named(first)}. ${nextStep(first)}`
+  if (rest.length === 0 && uncounted === 0) return `agmen: ${named(first, self)}. ${nextStep(first)}`
   const more = uncounted === 0 ? '' : `, and ${uncounted} more`
 
   return (
-    `agmen: ${messages.length + uncounted} messages arrived: ${messages.map(named).join('; ')}${more}. ` +
-    'The agmen rows above hold their text, as data. Read them with the agmen inbox tool and act on each.'
+    `agmen: ${messages.length + uncounted} messages arrived: ${messages.map(message => named(message, self)).join('; ')}${more}. ` +
+    'The agmen rows above hold their text. Read them with the agmen inbox tool and act on each.'
   )
 }
 
@@ -452,8 +464,8 @@ const debug = ($: EngineInterface, text: string): void => {
 /** Queues the wake-up when it is due and nothing holds it: a turn running, or an interrupt. */
 function tryWake($: EngineInterface, state: State): void {
   const [first, ...rest] = state.waiting
-  if (!state.isDue || state.isBusy || state.isHeld || first === undefined) return
-  const text = wakeText([first, ...rest], state.uncounted)
+  if (state.isEnded || !state.isDue || state.isBusy || state.isHeld || first === undefined) return
+  const text = wakeText([first, ...rest], state.uncounted, state.self)
   state.waiting = []
   state.uncounted = 0
   state.isDue = false
@@ -480,7 +492,7 @@ function windowEnds($: EngineInterface, state: State): void {
 /** Puts a message for this session in a row, and in the next wake-up. */
 async function deliver($: EngineInterface, state: State, message: Incoming): Promise<void> {
   const row = await $.session.append({
-    message: { type: 'user', content: [{ type: 'text', text: contextText(message) }] },
+    message: { type: 'user', content: [{ type: 'text', text: contextText(message, state.self) }] },
   })
   if (row.deny !== undefined) debug($, `row for #${message.seq} refused: ${row.deny}`)
 
@@ -493,6 +505,7 @@ async function deliver($: EngineInterface, state: State, message: Incoming): Pro
 
 /** Handles one watch line. */
 async function receive($: EngineInterface, state: State, text: string): Promise<void> {
+  if (state.isEnded) return
   const parsed = parseWatchLine(text)
   switch (parsed.kind) {
     case 'invalid':
@@ -529,6 +542,7 @@ async function receive($: EngineInterface, state: State, text: string): Promise<
 async function watch($: EngineInterface, state: State, root: string): Promise<void> {
   let partial = ''
   const child = $.process.spawn({ argv: WATCH_ARGV, cwd: root })
+  state.watch = child
   for (;;) {
     const step = await child.next()
     if (step.done === true) {
@@ -1215,6 +1229,8 @@ async function notify($: EngineInterface, text: string): Promise<void> {
  * tracked identity file or a CLI it cannot use, else the watch.
  */
 async function begin($: EngineInterface, state: State, cwd: string): Promise<void> {
+  // Managed batches use the daemon's queue and remain online between -p runs.
+  if ((await $.env.get('AGMEN_MANAGED')) === '1') return
   if (state.root !== undefined || state.isStarting) return
   state.isStarting = true
   let root: string | undefined
@@ -1307,6 +1323,8 @@ function commandOutput(name: string, stdout: string): string {
 
 export const register: Register = on => {
   const state: State = {
+    isEnded: false,
+    watch: undefined,
     root: undefined,
     repository: undefined,
     isStarting: false,
@@ -1325,6 +1343,7 @@ export const register: Register = on => {
 
   on('session.start', async ($, e, next) => {
     const started = await next(e)
+    if ((await $.env.get('AGMEN_MANAGED')) === '1') return started
     await $.command.register({
       name: 'agmen',
       description: 'Run an agmen command: join, inbox, claim, done, dm or lanes.',
@@ -1336,6 +1355,25 @@ export const register: Register = on => {
   })
 
   on('command.run', { command: 'agmen' }, async ($, e) => ({ text: await runCommand($, state, e.args) }))
+
+  on('session.end', async ($, e, next) => {
+    state.isEnded = true
+    state.window?.cancel()
+    state.waiting = []
+    state.uncounted = 0
+    try {
+      if (state.root !== undefined) {
+        const result = await $.process.run(['agmen', 'post', 'BYE', '--wait', '0.5'], { cwd: state.root, timeoutMs: 1_000 })
+        if (result.exitCode !== 0) debug($, `goodbye exited ${result.exitCode}`)
+      }
+    } catch (error: unknown) {
+      debug($, `goodbye failed: ${String(error)}`)
+    } finally {
+      await state.watch?.return({ code: 0, signal: null })
+    }
+
+    return next(e)
+  })
 
   on('turn.start', async ($, e, next) => {
     if (e.agentId === undefined) state.isBusy = true

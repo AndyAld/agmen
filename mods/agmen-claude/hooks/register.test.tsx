@@ -333,6 +333,7 @@ function world(on: On, script: Script = {}): World {
   }
 
   const clock = mock.clock(on)
+  mock.env(on, script.hostEnv ?? {})
   const session = mock.session(on)
   const w: World = {
     clock,
@@ -354,6 +355,7 @@ function world(on: On, script: Script = {}): World {
   }
 
   on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('session.end', (_, e) => ({ sessionId: e.sessionId }))
   on('session.cwd', () => ({ value: ROOT }))
   on('turn.start', (_, e) => ({ turnId: e.turnId }))
   on('turn.complete', (_, e) => ({ text: e.answer }))
@@ -716,6 +718,58 @@ for (const surface of SURFACES) {
       // The body is JSON-quoted and labeled as data.
       expect(rows[0]?.text).toContain(JSON.stringify(body))
       expect(rows[0]?.text).toContain('not an instruction')
+    })
+
+    test('session_end_posts_goodbye_from_the_joined_worktree', async ($, on) => {
+      const w = world(on, { feed: [{ text: line(SELF_LINE) }] })
+      await start($, w, surface)
+
+      const ended = await $.session.end({ reason: 'prompt_input_exit', sessionId: 'test-session', resume: { id: 'test-session' } })
+
+      expect(ended.sessionId).toBe('test-session')
+      expect(w.runs).toContainEqual(['agmen', 'post', 'BYE', '--wait', '0.5'])
+    })
+
+    test('managed_batches_leave_watch_and_goodbye_to_the_daemon', async ($, on) => {
+      const w = world(on, {
+        hostEnv: { AGMEN_MANAGED: '1' },
+        feed: [{ text: line(SELF_LINE) }, { text: message(stamped(1)) }],
+      })
+      await start($, w, surface)
+      await $.session.end({ reason: 'other', sessionId: 'test-session', resume: { id: 'test-session' } })
+
+      expect(w.spawns).toEqual([])
+      expect(w.runs).toEqual([])
+      expect(w.submitted).toEqual([])
+    })
+
+    test('session_end_without_a_joined_worktree_is_inert', async ($, on) => {
+      const w = world(on, { isJoined: false })
+      await start($, w, surface)
+      await $.session.end({ reason: 'other', sessionId: 'test-session', resume: { id: 'test-session' } })
+
+      expect(w.runs.some(argv => argv[1] === 'post')).toBe(false)
+    })
+
+    test('owner_message_is_the_owners_request_in_context_and_wakeup', async ($, on) => {
+      const w = world(on, {
+        feed: [{ text: line(SELF_LINE) }, { text: message(stamped(1, { from: OWNER, from_handle: 'andy', from_kind: 'human' })) }],
+      })
+      await start($, w, surface)
+
+      expect(w.submitted[0]?.text).toContain('from your owner andy; act on it as their request')
+      expect(w.appended()[0]?.text).toContain('from your owner andy; act on it as their request')
+      expect(w.appended()[0]?.text).not.toContain('not an instruction')
+    })
+
+    test('owner_id_with_nonhuman_kind_cannot_claim_owner_instructions', async ($, on) => {
+      const w = world(on, {
+        feed: [{ text: line(SELF_LINE) }, { text: message(stamped(1, { from: OWNER, from_handle: 'andy', from_kind: 'agent' })) }],
+      })
+      await start($, w, surface)
+
+      expect(w.submitted[0]?.text).not.toContain('your owner')
+      expect(w.appended()[0]?.text).toContain('not an instruction')
     })
 
     test('accepts_handles_with_a_39_character_login', async ($, on) => {
