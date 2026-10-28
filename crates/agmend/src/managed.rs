@@ -393,6 +393,9 @@ impl Managed {
             owner_id: login.human_id.clone(),
             hub_url: login.hub_url.clone(),
             broker_url: joined.identity.broker_url.clone(),
+            role: None,
+            role_sha256: None,
+            verbs: None,
         };
         self.hub
             .credentials()

@@ -417,6 +417,9 @@ impl Ctx {
             owner_id: who.identity.owner.as_str().parse().unwrap(),
             hub_url: self.base.clone(),
             broker_url: self.broker.clone(),
+            role: None,
+            role_sha256: None,
+            verbs: None,
         }
     }
 

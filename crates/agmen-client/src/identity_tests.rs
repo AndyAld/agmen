@@ -11,6 +11,53 @@ const JSON: &str = r#"{"tenant":"tenant01","project":"project1","identity_id":"i
   "broker_url":"wss://agmen.example.com/mqtt","role":"engineer"}"#;
 
 #[test]
+fn identity_without_role_fields_still_parses() {
+    let mut json: serde_json::Value = serde_json::from_str(JSON).unwrap();
+    json.as_object_mut().unwrap().remove("role");
+    let identity: IdentityFile = serde_json::from_value(json).unwrap();
+    assert!(identity.role.is_none());
+    assert!(identity.role_sha256.is_none());
+    assert!(identity.verbs.is_none());
+}
+
+#[test]
+fn role_fields_round_trip() {
+    let mut json: serde_json::Value = serde_json::from_str(JSON).unwrap();
+    json["role_sha256"] = "a".repeat(64).into();
+    json["verbs"] = serde_json::json!(["ASK", "REVIEW"]);
+    let identity: IdentityFile = serde_json::from_value(json.clone()).unwrap();
+    assert_eq!(identity.role.as_ref().unwrap().as_str(), "engineer");
+    let encoded = serde_json::to_value(&identity).unwrap();
+    for key in ["role", "role_sha256", "verbs"] {
+        assert_eq!(encoded[key], json[key]);
+    }
+    assert_eq!(
+        serde_json::from_value::<IdentityFile>(encoded).unwrap(),
+        identity
+    );
+}
+
+#[test]
+fn legacy_identity_serializes_without_role_fields() {
+    let mut json: serde_json::Value = serde_json::from_str(JSON).unwrap();
+    json.as_object_mut().unwrap().remove("role");
+    json["hub_url"] = "https://hub.example.com/".into();
+    let bytes = serde_json::to_vec_pretty(&json).unwrap();
+    let identity: IdentityFile = serde_json::from_slice(&bytes).unwrap();
+    let encoded = serde_json::to_value(&identity).unwrap();
+    for key in ["role", "role_sha256", "verbs"] {
+        assert!(encoded.get(key).is_none());
+    }
+    assert_eq!(encoded, json);
+    let canonical = serde_json::to_vec_pretty(&identity).unwrap();
+    assert_eq!(
+        serde_json::to_vec_pretty(&serde_json::from_slice::<IdentityFile>(&canonical).unwrap())
+            .unwrap(),
+        canonical
+    );
+}
+
+#[test]
 fn hub_url_policy_identity_file() {
     let (_tmp, root) = repo();
     let path = join(&root, &root);
