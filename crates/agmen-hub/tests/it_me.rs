@@ -75,6 +75,15 @@ async fn it_me_answers_the_signed_in_human() {
                 "id": andy.id.as_str(),
                 "handle": andy.handle,
                 "broker_url": PUBLIC_MQTT_URL,
+                "groups": ({
+                    let mut groups = vec![
+                        json!({ "tenant": alpha.tenant, "name": format!("tenant {}", alpha.tenant), "role": "admin" }),
+                        json!({ "tenant": zeta.tenant, "name": format!("tenant {}", zeta.tenant), "role": "member" }),
+                    ];
+                    groups.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str())
+                        .then_with(|| a["tenant"].as_str().cmp(&b["tenant"].as_str())));
+                    groups
+                }),
                 "projects": [
                     { "tenant": alpha.tenant, "project": alpha.project, "name": "alpha", "role": "admin" },
                     { "tenant": zeta.tenant, "project": zeta.project, "name": "zeta", "role": "coordinator" },

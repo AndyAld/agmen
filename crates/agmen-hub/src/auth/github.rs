@@ -316,25 +316,79 @@ pub(super) async fn upsert_human(
 /// Makes `human` an admin of every project whose unclaimed first admin is
 /// GitHub account `github_id`, and marks those rows claimed. Matching the id
 /// and never the login keeps a later holder of a renamed login out (ruling
-/// R39). One statement, so a row is claimed only with its membership.
+/// R39). One transaction claims rows with their project and tenant memberships.
 async fn claim_bootstrap_admin(hub: &Hub, human: &str, github_id: &str) -> Result<(), ApiError> {
-    let claimed = sqlx::query(
+    use sqlx::Acquire as _;
+
+    use crate::db::TenantRole;
+    use crate::tenants::join_tenant;
+
+    let mut tx = hub.pool().begin().await?;
+    let claimed: Vec<(String, String)> = sqlx::query_as(
         "WITH claimed AS (
              UPDATE bootstrap_admins SET claimed_by = $1, claimed_at = now()
              WHERE github_id = $2 AND claimed_by IS NULL
              RETURNING project_id
+         ), joined AS (
+             INSERT INTO memberships (human_id, project_id, role)
+             SELECT $1, project_id, 'admin' FROM claimed
+             ON CONFLICT (human_id, project_id) DO UPDATE SET role = 'admin'
+             RETURNING project_id
          )
-         INSERT INTO memberships (human_id, project_id, role)
-         SELECT $1, project_id, 'admin' FROM claimed
-         ON CONFLICT (human_id, project_id) DO UPDATE SET role = 'admin'",
+         SELECT p.id, p.tenant_id FROM joined j JOIN projects p ON p.id = j.project_id
+         ORDER BY p.tenant_id, p.id",
     )
     .bind(human)
     .bind(github_id)
-    .execute(hub.pool())
-    .await?
-    .rows_affected();
-    if claimed > 0 {
-        tracing::info!(human, github_id, projects = claimed, "claimed first admin");
+    .fetch_all(&mut *tx)
+    .await?;
+    let tenants: std::collections::BTreeSet<_> = claimed.iter().map(|(_, tenant)| tenant).collect();
+    for tenant in tenants {
+        let owner: Option<String> = sqlx::query_scalar(
+            "SELECT human_id FROM tenant_members WHERE tenant_id = $1 AND role = 'owner' FOR UPDATE",
+        )
+        .bind(tenant)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if owner.is_some() {
+            join_tenant(&mut tx, tenant, human, TenantRole::Admin).await?;
+        } else {
+            // An absent owner row cannot be locked. A savepoint lets a losing
+            // concurrent claim retry once as admin without losing memberships.
+            let mut attempt = tx.begin().await?;
+            let result = async {
+                join_tenant(&mut attempt, tenant, human, TenantRole::Owner).await?;
+                // Joining preserves existing roles. Only a bootstrap claim may
+                // promote an existing member to this tenant's vacant ownership.
+                sqlx::query(
+                    "UPDATE tenant_members SET role = 'owner'
+                     WHERE tenant_id = $1 AND human_id = $2 AND role <> 'owner'",
+                )
+                .bind(tenant)
+                .bind(human)
+                .execute(&mut *attempt)
+                .await?;
+                Ok::<(), sqlx::Error>(())
+            }
+            .await;
+            match result {
+                Ok(()) => attempt.commit().await?,
+                Err(err) if is_unique_violation(&err) => {
+                    attempt.rollback().await?;
+                    join_tenant(&mut tx, tenant, human, TenantRole::Admin).await?;
+                }
+                Err(err) => return Err(err.into()),
+            }
+        }
+    }
+    tx.commit().await?;
+    if !claimed.is_empty() {
+        tracing::info!(
+            human,
+            github_id,
+            projects = claimed.len(),
+            "claimed first admin"
+        );
     }
     Ok(())
 }

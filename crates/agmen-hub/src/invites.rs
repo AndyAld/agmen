@@ -218,6 +218,13 @@ pub(crate) async fn accept(
         .bind(&hash)
         .execute(&mut *tx)
         .await?;
+    crate::tenants::join_tenant(
+        &mut tx,
+        &tenant,
+        human.as_str(),
+        crate::db::TenantRole::Member,
+    )
+    .await?;
     tx.commit().await?;
     tracing::info!(human = %human, %project, role = role.as_str(), "invite accepted");
     hub.presence().roster_changed(&topics);
