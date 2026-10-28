@@ -78,7 +78,7 @@ async fn fake_batch_uses_cwd_and_returns_cost() {
         timeout: std::time::Duration::from_secs(2),
         shell: Arc::new(TestShell {
             calls: std::sync::atomic::AtomicUsize::new(0),
-            output: "/usr/bin:/bin".into(),
+            output: format!("{LOGIN_PATH_MARKER}\n/usr/bin:/bin\n"),
         }),
         ..ClaudeRunner::default()
     };
@@ -105,7 +105,7 @@ async fn timeout_kills_the_fake_process_group() {
         timeout: std::time::Duration::from_millis(200),
         shell: Arc::new(TestShell {
             calls: std::sync::atomic::AtomicUsize::new(0),
-            output: "/usr/bin:/bin".into(),
+            output: format!("{LOGIN_PATH_MARKER}\n/usr/bin:/bin\n"),
         }),
         ..ClaudeRunner::default()
     };
@@ -127,7 +127,7 @@ async fn cancellation_stops_a_fake_run() {
         timeout: std::time::Duration::from_secs(2),
         shell: Arc::new(TestShell {
             calls: std::sync::atomic::AtomicUsize::new(0),
-            output: "/usr/bin:/bin".into(),
+            output: format!("{LOGIN_PATH_MARKER}\n/usr/bin:/bin\n"),
         }),
         ..ClaudeRunner::default()
     };
@@ -153,7 +153,7 @@ async fn invalid_or_failed_result_is_an_error() {
             timeout: std::time::Duration::from_secs(2),
             shell: Arc::new(TestShell {
                 calls: std::sync::atomic::AtomicUsize::new(0),
-                output: "/usr/bin:/bin".into(),
+                output: format!("{LOGIN_PATH_MARKER}\n/usr/bin:/bin\n"),
             }),
             ..ClaudeRunner::default()
         };
@@ -194,7 +194,7 @@ async fn failed_exit_preserves_paid_cost() {
         timeout: std::time::Duration::from_secs(2),
         shell: Arc::new(TestShell {
             calls: std::sync::atomic::AtomicUsize::new(0),
-            output: "/usr/bin:/bin".into(),
+            output: format!("{LOGIN_PATH_MARKER}\n/usr/bin:/bin\n"),
         }),
         ..ClaudeRunner::default()
     };
@@ -211,7 +211,7 @@ async fn missing_program_reports_zero_cost_instead_of_reserving_the_budget() {
         timeout: std::time::Duration::from_secs(2),
         shell: Arc::new(TestShell {
             calls: std::sync::atomic::AtomicUsize::new(0),
-            output: "/usr/bin:/bin".into(),
+            output: format!("{LOGIN_PATH_MARKER}\n/usr/bin:/bin\n"),
         }),
         ..ClaudeRunner::default()
     };
@@ -267,7 +267,7 @@ async fn login_path_is_cached_and_used_for_claude_and_helper_resolution() {
     std::fs::copy(&claude, &agmen).unwrap();
     let shell = Arc::new(TestShell {
         calls: std::sync::atomic::AtomicUsize::new(0),
-        output: format!("startup noise\n{}", bin.display()),
+        output: format!("startup noise\n{LOGIN_PATH_MARKER}\n{}\n", bin.display()),
     });
     let runner = ClaudeRunner {
         shell: shell.clone(),
@@ -320,7 +320,7 @@ async fn claude_child_receives_login_path_and_group_is_removed_after_stop() {
         program,
         shell: Arc::new(TestShell {
             calls: std::sync::atomic::AtomicUsize::new(0),
-            output: path.clone(),
+            output: format!("{LOGIN_PATH_MARKER}\n{path}\n"),
         }),
         ..ClaudeRunner::default()
     };
@@ -350,10 +350,16 @@ async fn claude_child_receives_login_path_and_group_is_removed_after_stop() {
 
 #[tokio::test]
 async fn invalid_login_path_fails_without_spawning_claude_and_is_retried() {
-    for output in ["", "\n"] {
+    for output in [
+        "".to_owned(),
+        "\n".to_owned(),
+        "noise\n".to_owned(),
+        format!("{LOGIN_PATH_MARKER}\n"),
+        format!("{LOGIN_PATH_MARKER}\n\nlogout noise\n"),
+    ] {
         let shell = Arc::new(TestShell {
             calls: std::sync::atomic::AtomicUsize::new(0),
-            output: output.into(),
+            output,
         });
         let runner = ClaudeRunner {
             shell: shell.clone(),
@@ -369,7 +375,7 @@ async fn invalid_login_path_fails_without_spawning_claude_and_is_retried() {
     }
     let shell = Arc::new(TestShell {
         calls: std::sync::atomic::AtomicUsize::new(0),
-        output: "noise\n".into(),
+        output: format!("{LOGIN_PATH_MARKER}\nnoise\n"),
     });
     let runner = ClaudeRunner {
         shell: shell.clone(),
@@ -428,4 +434,42 @@ fn unplaceable_peer_counts_as_a_worker_only_while_one_runs() {
     assert!(runner.contains_peer(gone_pid));
     assert!(runner.contains_peer(0));
     assert!(!runner.contains_peer(i32::try_from(std::process::id()).unwrap()));
+}
+
+#[tokio::test]
+async fn login_probe_uses_path_after_last_marker_ignoring_startup_and_logout_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let program = fake(dir.path(), "unused");
+    let runner = ClaudeRunner {
+        program: program.clone(),
+        shell: Arc::new(TestShell {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            output: format!(
+                "startup noise\n__AGMEN_LOGIN_PATH_8F3C21__\n/old\nmore noise\n__AGMEN_LOGIN_PATH_8F3C21__\n{}\nlogout noise\n",
+                dir.path().display()
+            ),
+        }),
+        ..ClaudeRunner::default()
+    };
+    let environment = runner.environment().await.unwrap();
+    assert_eq!(environment.path, dir.path().as_os_str());
+    assert_eq!(environment.claude, program);
+}
+
+#[tokio::test]
+async fn missing_agmen_error_names_the_missing_executable_directly() {
+    let dir = tempfile::tempdir().unwrap();
+    let program = fake(dir.path(), "unused");
+    let runner = ClaudeRunner {
+        program,
+        executable: dir.path().join("agmend"),
+        shell: Arc::new(TestShell {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            output: format!("__AGMEN_LOGIN_PATH_8F3C21__\n{}\n", dir.path().display()),
+        }),
+        ..ClaudeRunner::default()
+    };
+    let error = runner.mcp_command().await.unwrap_err();
+    assert_eq!(error.to_string(), "agmen executable was not found");
+    assert_eq!(error.reported_cost(), Some("0"));
 }

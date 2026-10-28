@@ -22,6 +22,7 @@ use tokio::sync::oneshot;
 use crate::budget::Money;
 
 const OUTPUT_CAP: u64 = 4 * 1024 * 1024;
+const LOGIN_PATH_MARKER: &str = "__AGMEN_LOGIN_PATH_8F3C21__";
 
 #[derive(Debug, Clone)]
 pub(crate) struct RunSpec {
@@ -108,6 +109,8 @@ pub(crate) enum RunError {
     Spawn(std::io::Error),
     #[error("Claude Code is not installed or not on your login PATH")]
     NotInstalled,
+    #[error("agmen executable was not found")]
+    AgmenNotInstalled,
     #[error("could not resolve login PATH: {0}")]
     LoginPath(String),
     #[error("Claude Code process I/O failed: {0}")]
@@ -125,7 +128,9 @@ impl RunError {
         match self {
             Self::Failed { total_cost_usd } => Some(total_cost_usd),
             // Nothing ran, so nothing was spent.
-            Self::Spawn(_) | Self::NotInstalled | Self::LoginPath(_) => Some("0"),
+            Self::Spawn(_) | Self::NotInstalled | Self::AgmenNotInstalled | Self::LoginPath(_) => {
+                Some("0")
+            }
             _ => None,
         }
     }
@@ -181,7 +186,10 @@ impl ShellRunner for LoginShell {
             let shell = std::env::var_os("SHELL").unwrap_or_else(|| "/bin/zsh".into());
             let mut command = tokio::process::Command::new(shell);
             command
-                .args(["-lic", "printf %s \"$PATH\""])
+                .args([
+                    "-lic",
+                    &format!("printf '\\n%s\\n%s\\n' '{LOGIN_PATH_MARKER}' \"$PATH\""),
+                ])
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null())
@@ -241,9 +249,13 @@ impl ClaudeRunner {
                     .map_err(|_| "login shell exceeded 10 seconds".to_owned())??;
                 let text =
                     String::from_utf8(bytes).map_err(|_| "login PATH is not UTF-8".to_owned())?;
-                let path = text
-                    .lines()
-                    .last()
+                let lines: Vec<_> = text.lines().collect();
+                let marker = lines
+                    .iter()
+                    .rposition(|line| *line == LOGIN_PATH_MARKER)
+                    .ok_or_else(|| "login shell returned no PATH marker".to_owned())?;
+                let path = lines
+                    .get(marker + 1)
                     .filter(|p| !p.is_empty())
                     .ok_or_else(|| "login shell returned an empty PATH".to_owned())?;
                 Ok(OsString::from(path))
@@ -304,8 +316,7 @@ impl Runner for ClaudeRunner {
     fn mcp_command(&self) -> Pin<Box<dyn Future<Output = Result<PathBuf, RunError>> + Send + '_>> {
         Box::pin(async {
             let environment = self.environment().await?;
-            resolve_helper(&self.executable, &environment.path)
-                .ok_or_else(|| RunError::LoginPath("agmen executable was not found".into()))
+            resolve_helper(&self.executable, &environment.path).ok_or(RunError::AgmenNotInstalled)
         })
     }
 

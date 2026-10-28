@@ -548,6 +548,7 @@ async fn mixed_queue_runs_owner_batch_before_default_batch() {
             assert_eq!(runs.len(), batch + 1);
             let run = &runs[batch];
             assert_eq!(run.owner_only, batch == 0);
+            assert!(!run.resume, "each tier's first batch starts a session");
             let messages: Vec<Value> = serde_json::from_str(&run.prompt).unwrap();
             assert_eq!(messages.len(), 1);
             assert_eq!(
@@ -558,4 +559,86 @@ async fn mixed_queue_runs_owner_batch_before_default_batch() {
         worker.lock().await.last_run = None;
     }
     fixture.daemon.core.managed.shutdown().await;
+}
+
+#[tokio::test]
+async fn permission_tiers_start_and_resume_only_their_own_persisted_sessions() {
+    let fixture = Fixture::new().await;
+    fixture.runner.mode.store(1, Ordering::SeqCst);
+    fixture.launch().await;
+    let worker = fixture
+        .daemon
+        .core
+        .managed
+        .workers
+        .lock()
+        .await
+        .values()
+        .next()
+        .unwrap()
+        .clone();
+    let record_path = fixture
+        .daemon
+        .core
+        .managed
+        .state_dir
+        .join("managed/agent001/agent.json");
+    let record: Value = serde_json::from_slice(&std::fs::read(record_path).unwrap()).unwrap();
+    for (index, owner) in [true, false, true, false].into_iter().enumerate() {
+        let seq = index + 1;
+        let sender = if owner { "owner001" } else { "sender01" };
+        let message = serde_json::from_value(json!({"v":1,"id":format!("01JBX6Q4T7W3C2M8Y9K5P{seq:05}"),"verb":"FYI","data":{},"body":"tier request","sent_at":"2026-10-25T16:04:11Z","stream":"feed","seq":seq,"from":sender,"from_handle":"owner","from_kind":"human","mentioned":["agent001"],"hub_at":"2026-10-25T16:04:12Z"})).unwrap();
+        fixture.daemon.core.identities.enqueue_test(message).await;
+        worker.lock().await.last_run = None;
+        fixture.daemon.core.managed.tick().await;
+        for _ in 0..200 {
+            if worker
+                .lock()
+                .await
+                .task
+                .as_ref()
+                .is_some_and(tokio::task::JoinHandle::is_finished)
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert_eq!(fixture.runner.runs.lock().unwrap().len(), seq);
+    }
+    fixture.daemon.core.managed.shutdown().await;
+    let runs = fixture.runner.runs.lock().unwrap();
+    assert_ne!(runs[0].session_id, runs[1].session_id);
+    for (index, run) in runs.iter().enumerate() {
+        assert_eq!(run.owner_only, index % 2 == 0);
+        assert_eq!(run.resume, index >= 2);
+        assert_eq!(run.session_id, runs[index % 2].session_id);
+        let field = if run.owner_only {
+            "owner_session_id"
+        } else {
+            "others_session_id"
+        };
+        assert_eq!(record[field], run.session_id);
+    }
+}
+
+#[tokio::test]
+async fn managed_record_persists_two_distinct_session_ids() {
+    let fixture = Fixture::new().await;
+    fixture.launch().await;
+    let path = fixture
+        .daemon
+        .core
+        .managed
+        .state_dir
+        .join("managed/agent001/agent.json");
+    let bytes = std::fs::read(path).unwrap();
+    fixture.daemon.core.managed.shutdown().await;
+    let value: Value = serde_json::from_slice(&bytes).unwrap();
+    let owner = value["owner_session_id"].as_str().unwrap();
+    let others = value["others_session_id"].as_str().unwrap();
+    assert_eq!(owner.len(), 36);
+    assert_eq!(others.len(), 36);
+    assert_ne!(owner, others);
+    let restored: super::Record = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(serde_json::to_value(restored).unwrap(), value);
 }

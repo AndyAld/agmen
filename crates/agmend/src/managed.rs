@@ -44,7 +44,8 @@ struct Record {
     repo: PathBuf,
     worktree: PathBuf,
     branch: String,
-    session_id: String,
+    owner_session_id: String,
+    others_session_id: String,
     model: Option<String>,
     budget_usd: String,
 }
@@ -57,7 +58,8 @@ struct Worker {
     record: Record,
     budget: Budget,
     state: &'static str,
-    resumed: bool,
+    owner_resumed: bool,
+    others_resumed: bool,
     stop: Option<oneshot::Sender<()>>,
     task: Option<tokio::task::JoinHandle<()>>,
     last_run: Option<tokio::time::Instant>,
@@ -263,7 +265,8 @@ impl Managed {
             repo,
             worktree: worktree.clone(),
             branch: branch.clone(),
-            session_id: crate::launch::new_session_id().map_err(error)?,
+            owner_session_id: crate::launch::new_session_id().map_err(error)?,
+            others_session_id: crate::launch::new_session_id().map_err(error)?,
             model: launch.model.or_else(|| Some("sonnet".into())),
             budget_usd: launch
                 .budget_usd
@@ -303,7 +306,8 @@ impl Managed {
                 record,
                 budget,
                 state: "idle",
-                resumed: false,
+                owner_resumed: false,
+                others_resumed: false,
                 stop: None,
                 task: None,
                 last_run: None,
@@ -537,11 +541,20 @@ impl Managed {
                     continue;
                 }
             };
+            let owner_only = rows.iter().all(|row| {
+                row.from == held.record.identity.owner_id && row.from_kind == IdentityKind::Human
+            });
+            // Keep untrusted conversation history out of bypassPermissions batches.
+            let (session_id, resume) = if owner_only {
+                (held.record.owner_session_id.clone(), held.owner_resumed)
+            } else {
+                (held.record.others_session_id.clone(), held.others_resumed)
+            };
             let spec = RunSpec {
                 cwd: held.record.worktree.clone(),
                 prompt,
-                session_id: held.record.session_id.clone(),
-                resume: held.resumed,
+                session_id,
+                resume,
                 model: held.record.model.clone(),
                 budget_remaining: held.budget.remaining_usd(),
                 mcp_config: self
@@ -558,12 +571,13 @@ impl Managed {
                     .unwrap_or_default()
                     .into(),
                 owner_id: held.record.identity.owner_id.clone(),
-                owner_only: rows.iter().all(|row| {
-                    row.from == held.record.identity.owner_id
-                        && row.from_kind == IdentityKind::Human
-                }),
+                owner_only,
             };
-            held.resumed = true;
+            if owner_only {
+                held.owner_resumed = true;
+            } else {
+                held.others_resumed = true;
+            }
             held.last_run = Some(tokio::time::Instant::now());
             held.state = "running";
             let (stop, stopped) = oneshot::channel();
