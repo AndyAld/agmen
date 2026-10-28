@@ -27,6 +27,61 @@ fn managed(snapshot: &mut Snapshot, handle: &str, state: &str) {
         .insert(fixture_id(handle), state.into());
 }
 
+#[gpui::test]
+fn own_agent_row_keeps_its_harness_label(cx: &mut TestAppContext) {
+    let (_, _, cx) = open(cx, |s| managed(s, "andy/fx1", "running"));
+    redraw(cx);
+    let parts = [
+        "agent:andy/fx1:harness",
+        "agent:andy/fx1:state",
+        "agent:andy/fx1:stop",
+        "agent:andy/fx1:more",
+    ];
+    let bounds = parts.map(|part| cx.debug_bounds(part).expect(part));
+    for pair in bounds.windows(2) {
+        assert!(pair[0].size.width > gpui::px(0.));
+        assert!(pair[0].right() < pair[1].left(), "no gap: {pair:?}");
+    }
+    let handle = cx.debug_bounds("left-dock:resize").unwrap();
+    assert!(bounds[3].right() <= handle.left());
+    assert_eq!(bounds[3].size.width, bounds[3].size.height);
+}
+
+#[gpui::test]
+fn row_buttons_show_hover_inside_a_hovered_row(cx: &mut TestAppContext) {
+    // The row fills with element_hover under the pointer, and so did the
+    // buttons in it: Stop and `…` showed no feedback (B1).
+    let (_, _, cx) = open(cx, |s| managed(s, "andy/fx1", "running"));
+    redraw(cx);
+    let hover = cx.update(|_, cx| {
+        cx.global::<crate::appearance::Appearance>()
+            .theme
+            .element_hover
+    });
+    let name = cx.debug_bounds("agent:andy/fx1:state").unwrap().left() - gpui::px(80.);
+    let row = cx.debug_bounds("agent:andy/fx1").unwrap();
+    cx.simulate_mouse_move(
+        gpui::point(name, row.center().y),
+        None,
+        gpui::Modifiers::none(),
+    );
+    redraw(cx);
+    assert_eq!(
+        crate::ui::test_support::fills_at(cx, "agent:andy/fx1"),
+        [hover]
+    );
+    for button in ["agent:andy/fx1:stop", "agent:andy/fx1:more"] {
+        let center = cx.debug_bounds(button).unwrap().center();
+        cx.simulate_mouse_move(center, None, gpui::Modifiers::none());
+        redraw(cx);
+        let fills = crate::ui::test_support::fills_at(cx, button);
+        assert!(
+            fills.last().is_some_and(|fill| *fill != hover),
+            "{button} hovers in the row's own fill: {fills:?}"
+        );
+    }
+}
+
 /// Gives `handle`'s worktree a folder on disk, as agmend lists it.
 fn folder(snapshot: &mut Snapshot, handle: &str, root: &str) {
     let id = fixture_id(handle);

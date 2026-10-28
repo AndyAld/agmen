@@ -23,6 +23,10 @@ pub(crate) enum IconButtonStyle {
     Ghost,
     /// On a surface fill, as the right dock's close button.
     Filled,
+    /// The bare icon at the end of a `ListItem`, which fills with
+    /// `element_hover` under the pointer: this one steps to
+    /// `element_selected`, so it shows inside the hovered row.
+    InRow,
     /// A Windows or Linux caption button: as tall as the title bar and 36 px
     /// wide, square cornered, as Zed draws them.
     Caption,
@@ -37,6 +41,7 @@ fn hover_fill(style: IconButtonStyle, theme: &Theme) -> Hsla {
         IconButtonStyle::Ghost | IconButtonStyle::Filled | IconButtonStyle::Caption => {
             theme.element_hover
         }
+        IconButtonStyle::InRow => theme.element_selected,
     }
 }
 
@@ -123,7 +128,11 @@ impl IconButton {
 impl RenderOnce for IconButton {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = &cx.global::<Appearance>().theme;
-        let hover = hover_fill(self.style, theme);
+        let hover = match self.style {
+            // The fill the button rests on, so its hover must differ from it.
+            IconButtonStyle::Filled => theme.hover_over(theme.elevated_surface),
+            _ => hover_fill(self.style, theme),
+        };
         let selected_fill = theme.element_selected;
         let color = if self.selected {
             Color::Default
@@ -157,7 +166,10 @@ impl RenderOnce for IconButton {
                     // the button.
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             })
-            .hover(move |style| style.bg(hover))
+            .when(
+                self.on_click.is_some() || self.control_area.is_some(),
+                |this| this.hover(move |style| style.bg(hover)),
+            )
             .when_some(self.control_area, |this, area| {
                 this.window_control_area(area)
             })
@@ -220,5 +232,32 @@ mod tests {
         });
         // Mockup check V63: the dock's collapse button is 17 by 20.
         assert_eq!(size, gpui::size(px(17.), px(20.)));
+    }
+
+    #[gpui::test]
+    fn filled_icon_button_hover_is_visible_when_the_theme_hover_equals_the_surface(
+        cx: &mut TestAppContext,
+    ) {
+        let cx = crate::ui::test_support::draw(cx, || {
+            IconButton::new("filled", UiIcon::ChevronRight)
+                .style(IconButtonStyle::Filled)
+                .on_click(|_, _, _| {})
+                .into_any_element()
+        });
+        cx.update(|_, cx| {
+            let theme = &mut cx.global_mut::<Appearance>().theme;
+            theme.element_hover = theme.elevated_surface;
+        });
+        cx.simulate_mouse_move(
+            gpui::point(px(900.), px(900.)),
+            None,
+            gpui::Modifiers::none(),
+        );
+        crate::ui::test_support::redraw(cx);
+        let rest = crate::ui::test_support::fills_at(cx, "filled");
+        let center = cx.debug_bounds("filled").unwrap().center();
+        cx.simulate_mouse_move(center, None, gpui::Modifiers::none());
+        crate::ui::test_support::redraw(cx);
+        assert_ne!(crate::ui::test_support::fills_at(cx, "filled"), rest);
     }
 }

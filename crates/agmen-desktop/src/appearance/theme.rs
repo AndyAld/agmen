@@ -81,6 +81,19 @@ impl Theme {
         a: 1.,
     };
 
+    /// The fill a control resting on `rest` takes under the pointer:
+    /// `element_hover`, or `element_selected` where the theme's hover is the
+    /// resting fill itself, as Andy's Gruvbox sets it equal to the elevated
+    /// surface (V76), so a hover would not show.
+    #[must_use]
+    pub(crate) fn hover_over(&self, rest: Hsla) -> Hsla {
+        if self.element_hover == rest {
+            self.element_selected
+        } else {
+            self.element_hover
+        }
+    }
+
     /// A role's color, from the theme's player palette so it stays readable
     /// in light and dark themes. Unknown roles get the muted text color.
     pub(crate) fn role_color(&self, role: &str) -> Hsla {

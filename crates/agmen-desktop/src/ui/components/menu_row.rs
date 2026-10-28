@@ -114,8 +114,8 @@ impl ParentElement for MenuRow {
 /// pickers select the hovered row and fill it with `ghost_element.selected`
 /// (the switch menu's hovered row, node 1812, has it too). A checked picker
 /// row has none, as it keeps its selected fill. Zed's `element_hover`
-/// would vanish here: Andy's Gruvbox and the built-in theme give it the
-/// menu's own `elevated_surface`.
+/// can vanish here: imported themes such as Andy's Gruvbox can give it
+/// the menu's own `elevated_surface`.
 fn hover_fill(theme: &Theme, look: Look, checked: bool) -> Option<Hsla> {
     match look {
         Look::Menu => Some(theme.element_selected),
@@ -249,8 +249,7 @@ mod tests {
 
     #[gpui::test]
     fn picker_hover_shows_on_the_menu_and_keeps_the_checked_fill(cx: &mut TestAppContext) {
-        // The built-in theme, like Andy's Gruvbox, has element_hover equal
-        // to the menu's elevated_surface.
+        // Picker hover must stay visible on the menu's elevated_surface.
         crate::ui::test_support::init(cx);
         let theme = cx.update(|cx| cx.global::<Appearance>().theme.clone());
         assert_eq!(hover_fill(&theme, Look::Picker, true), None);

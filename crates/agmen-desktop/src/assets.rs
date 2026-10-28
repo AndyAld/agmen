@@ -24,6 +24,7 @@ static FILES: &[(&str, &[u8])] = lucide![
     "copy",
     "corner-down-left",
     "diff",
+    "ellipsis",
     "file",
     "folder",
     "folder-open",

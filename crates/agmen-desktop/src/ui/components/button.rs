@@ -67,7 +67,7 @@ fn hover(style: ButtonStyle, theme: &Theme) -> Hover {
         | ButtonStyle::Tinted
         | ButtonStyle::Plain
         | ButtonStyle::Subtle
-        | ButtonStyle::Inset => Hover::Fill(theme.element_hover),
+        | ButtonStyle::Inset => Hover::Fill(theme.hover_over(fill(style, theme))),
         // An alert's own actions: Andy's theme hovers in the surface's own
         // color, so the border lightens instead (Zed's outlined buttons
         // show their state on the border too).
@@ -607,5 +607,42 @@ mod tests {
         });
         crate::ui::test_support::click(cx, "wait");
         assert!(!clicked.get());
+    }
+
+    #[gpui::test]
+    fn button_hover_is_visible_when_the_theme_hover_equals_the_surface(cx: &mut TestAppContext) {
+        // Andy's Gruvbox sets element.hover to the elevated surface (V76),
+        // so a plain fill change would not show.
+        let styles = [
+            ButtonStyle::Outlined,
+            ButtonStyle::Plain,
+            ButtonStyle::Subtle,
+        ];
+        let cx = crate::ui::test_support::draw(cx, move || {
+            div()
+                .children(styles.map(|style| {
+                    Button::new(format!("{style:?}"), "Stop")
+                        .style(style)
+                        .on_click(|_, _, _| {})
+                }))
+                .into_any_element()
+        });
+        cx.update(|_, cx| {
+            let theme = &mut cx.global_mut::<Appearance>().theme;
+            theme.element_hover = theme.elevated_surface;
+        });
+        let away = gpui::point(px(900.), px(900.));
+        cx.simulate_mouse_move(away, None, gpui::Modifiers::none());
+        for style in styles {
+            let id: &'static str = Box::leak(format!("{style:?}").into_boxed_str());
+            crate::ui::test_support::redraw(cx);
+            let rest = crate::ui::test_support::fills_at(cx, id);
+            let center = cx.debug_bounds(id).unwrap().center();
+            cx.simulate_mouse_move(center, None, gpui::Modifiers::none());
+            crate::ui::test_support::redraw(cx);
+            let hovered = crate::ui::test_support::fills_at(cx, id);
+            assert_ne!(hovered, rest, "{style:?} shows no hover");
+            cx.simulate_mouse_move(away, None, gpui::Modifiers::none());
+        }
     }
 }
