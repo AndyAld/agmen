@@ -282,7 +282,7 @@ pub(crate) async fn human() -> Result<Human> {
 }
 
 /// `GET /v1/me`'s answer (ruling R56).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct Me {
     pub(crate) id: IdentityId,
     pub(crate) handle: String,
@@ -291,7 +291,7 @@ pub(crate) struct Me {
 }
 
 /// One project in [`Me`].
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct Membership {
     pub(crate) tenant: String,
     pub(crate) project: String,

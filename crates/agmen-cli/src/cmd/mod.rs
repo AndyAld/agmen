@@ -130,7 +130,16 @@ enum Command {
     /// Sign out: forget your tokens on this machine.
     Logout,
     /// Show who is signed in, their projects and roles, and this worktree's identity.
-    Whoami,
+    Whoami {
+        /// Print the hub membership response as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Manage projects as a tenant administrator.
+    Project {
+        #[command(subcommand)]
+        command: account::ProjectCommand,
+    },
     /// Make a single-use invite to a project (admins and coordinators).
     Invite(account::InviteArgs),
     /// Join this worktree to a project as a new identity of yours.
@@ -229,7 +238,8 @@ impl Cli {
             Command::InstallReceipt(args) => install_receipt::run(args),
             Command::Login(args) => account::login(args).await,
             Command::Logout => account::logout().await,
-            Command::Whoami => account::whoami().await,
+            Command::Whoami { json } => account::whoami(json).await,
+            Command::Project { command } => account::project(command).await,
             Command::Invite(args) => account::invite(args).await,
             Command::Join(args) => join::join(args).await,
             Command::Leave => join::leave().await,

@@ -251,3 +251,142 @@ fn local_read_errors_keep_their_wording() {
         "{err}"
     );
 }
+
+/// A bounded local HTTP fixture, using only a temporary login and token store.
+fn account_fixture(
+    home: &Home,
+    body: serde_json::Value,
+) -> (String, std::thread::JoinHandle<String>) {
+    use std::io::{Read as _, Write as _};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let hub = format!("http://{}/", listener.local_addr().unwrap());
+    let file = home.login_file();
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(
+        &file,
+        serde_json::json!({"hub_url":hub,"human_id":"hmn7k2q9","handle":"andy"}).to_string(),
+    )
+    .unwrap();
+    let key =
+        agmen_client::TokenKey::new(&hub.parse().unwrap(), &"hmn7k2q9".parse().unwrap()).unwrap();
+    home.tokens()
+        .set(
+            &key,
+            r#"{"access_token":"test","refresh_token":"test","expires_at":"2099-01-01T00:00:00Z"}"#,
+        )
+        .unwrap();
+    let server = std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            match listener.accept() {
+                Ok((mut conn, _)) => {
+                    conn.set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                        .unwrap();
+                    let mut request = Vec::new();
+                    let mut buf = [0; 4096];
+                    for _ in 0..32 {
+                        let n = conn.read(&mut buf).unwrap();
+                        request.extend_from_slice(&buf[..n]);
+                        if let Some(end) = request.windows(4).position(|s| s == b"\r\n\r\n") {
+                            let headers =
+                                String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+                            let len = headers
+                                .lines()
+                                .find_map(|line| line.strip_prefix("content-length: "))
+                                .map_or(0, |s| s.parse::<usize>().unwrap());
+                            if request.len() >= end + 4 + len {
+                                break;
+                            }
+                        }
+                    }
+                    let body = body.to_string();
+                    write!(conn, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+                    return String::from_utf8(request).unwrap();
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(5))
+                }
+                Err(e) => panic!("{e}"),
+            }
+        }
+        String::new()
+    });
+    (hub, server)
+}
+
+#[test]
+fn whoami_json_and_unchanged_text() {
+    let me = serde_json::json!({"id":"hmn7k2q9","handle":"andy","broker_url":"mqtt://localhost","projects":[{"tenant":"tenant01","project":"project1","name":"marked","role":"admin"}]});
+    for json in [true, false] {
+        let home = Home::new();
+        let (hub, server) = account_fixture(&home, me.clone());
+        let args = if json {
+            vec!["whoami", "--json"]
+        } else {
+            vec!["whoami"]
+        };
+        let out = home.agmen(home.path(), &args).output().unwrap();
+        assert_exit(&out, 0);
+        assert!(server.join().unwrap().starts_with("GET /v1/me "));
+        if json {
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&stdout(&out)).unwrap(),
+                me
+            );
+        } else {
+            assert_eq!(
+                stdout(&out),
+                format!(
+                    "andy (hmn7k2q9) at {hub}\n  project project1 (marked, tenant tenant01): admin\n"
+                )
+            );
+        }
+    }
+}
+
+#[test]
+fn project_create_posts_name_and_optional_tenant() {
+    for tenant in [None, Some("tenant01")] {
+        let home = Home::new();
+        let (_, server) = account_fixture(
+            &home,
+            serde_json::json!({"tenant":"tenant01","project":"project1","name":"marked","role":"admin"}),
+        );
+        let mut args = vec!["project", "create", "marked"];
+        if let Some(tenant) = tenant {
+            args.extend(["--tenant", tenant]);
+        }
+        let out = home.agmen(home.path(), &args).output().unwrap();
+        assert_exit(&out, 0);
+        let request = server.join().unwrap();
+        assert!(request.starts_with("POST /v1/projects "), "{request}");
+        let body: serde_json::Value =
+            serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(body["name"], "marked");
+        assert_eq!(body.get("tenant").and_then(|v| v.as_str()), tenant);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&stdout(&out)).unwrap()["project"],
+            "project1"
+        );
+    }
+}
+
+#[test]
+fn project_create_accepts_bootstrap_name_starting_with_hyphen() {
+    let home = Home::new();
+    let (_, server) = account_fixture(
+        &home,
+        serde_json::json!({"tenant":"tenant01","project":"project1","name":"--help","role":"admin"}),
+    );
+    let out = home
+        .agmen(home.path(), &["project", "create", "--", "--help"])
+        .output()
+        .unwrap();
+    assert_exit(&out, 0);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&stdout(&out)).unwrap()["name"],
+        "--help"
+    );
+    assert!(server.join().unwrap().contains("\"name\":\"--help\""));
+}

@@ -153,13 +153,17 @@ pub(crate) async fn logout() -> Result<()> {
 }
 
 /// `agmen whoami`.
-pub(crate) async fn whoami() -> Result<()> {
+pub(crate) async fn whoami(json: bool) -> Result<()> {
     let human = human().await?;
     let me = human
         .api
         .me()
         .await
         .context("reading who is signed in failed")?;
+    if json {
+        println!("{}", serde_json::to_string(&me)?);
+        return Ok(());
+    }
     println!(
         "{} ({}) at {}",
         clean(&me.handle),
@@ -359,4 +363,34 @@ mod tests {
             assert!(parse_expiry(bad).is_err(), "{bad}");
         }
     }
+}
+
+/// Project management commands.
+#[derive(Debug, clap::Subcommand)]
+pub(crate) enum ProjectCommand {
+    /// Create a project in a tenant where you administer a project.
+    Create {
+        name: String,
+        /// Required when you administer projects in several tenants.
+        #[arg(long)]
+        tenant: Option<agmen_proto::TenantId>,
+    },
+}
+
+pub(crate) async fn project(command: ProjectCommand) -> Result<()> {
+    let ProjectCommand::Create { name, tenant } = command;
+    let human = human().await?;
+    #[derive(Serialize)]
+    struct Request {
+        name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tenant: Option<agmen_proto::TenantId>,
+    }
+    let created: crate::client::Membership = human
+        .api
+        .post(&["projects"], &Request { name, tenant })
+        .await
+        .context("creating the project failed")?;
+    println!("{}", serde_json::to_string(&created)?);
+    Ok(())
 }
