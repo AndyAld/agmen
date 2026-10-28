@@ -427,7 +427,7 @@ async fn it_join_link_to_another_hub_says_it_signed_you_out() {
         let wt = Worktree::new(&home);
         let mut child = spawn(home.agmen(
             &wt.path(),
-            &["join", &link, "--handle", "sol", "--no-setup"],
+            &["join", &link, "--yes", "--handle", "sol", "--no-setup"],
         ));
         let mut lines = Lines::new(&mut child);
         let first = lines.next().await.expect("join shows a device code");
@@ -450,6 +450,56 @@ async fn it_join_link_to_another_hub_says_it_signed_you_out() {
             )),
             "{text}"
         );
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn it_join_link_to_another_hub_with_yes_signs_in_there() {
+    run(Ingest::On, |ctx| async move {
+        let link = invite_link(&ctx).await;
+        let (hub, code) = link.split_once("/i#").unwrap();
+        let mut hub: url::Url = hub.parse().unwrap();
+        hub.set_host(Some("localhost")).unwrap();
+        let link = format!("{}/i#{code}", hub.as_str().trim_end_matches('/'));
+        let other = ctx.hub.seed_project().await.unwrap();
+        let person = ctx.hub.seed_human(&other, Role::Member).await.unwrap();
+        let home = Home::new();
+        home.sign_in(&ctx.base, &person);
+        let before = std::fs::read(home.login_file()).unwrap();
+        let wt = Worktree::new(&home);
+        let mut child = spawn(home.agmen(
+            &wt.path(),
+            &["join", &link, "--yes", "--handle", "sol", "--no-setup"],
+        ));
+        let mut lines = Lines::new(&mut child);
+        let first = lines.next().await.expect("join shows a device code");
+        let code = first.strip_prefix("Your code is ").unwrap();
+        assert_eq!(std::fs::read(home.login_file()).unwrap(), before);
+        ctx.github.approve(code, 9003, "Visitor");
+        let text = tokio::time::timeout(WAIT, async {
+            let mut text = first;
+            for _ in 0..100 {
+                let Some(line) = lines.next().await else {
+                    return text;
+                };
+                text.push('\n');
+                text.push_str(&line);
+            }
+            panic!("join printed more than 100 lines");
+        })
+        .await
+        .unwrap();
+        let status = tokio::time::timeout(WAIT, child.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(status.success(), "{text}");
+        let login: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(home.login_file()).unwrap()).unwrap();
+        assert_eq!(login["hub_url"], hub.as_str());
+        assert_eq!(wt.identity().hub_url, hub);
+        assert_eq!(wt.identity().handle, "visitor/sol");
     })
     .await;
 }

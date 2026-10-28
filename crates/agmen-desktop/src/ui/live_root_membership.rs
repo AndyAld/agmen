@@ -52,15 +52,36 @@ struct HelperFailure {
     message: String,
 }
 
+/// Keep the hub-switch refusal readable without the terminal's recovery commands.
+pub(super) fn join_refusal(output: &std::process::Output) -> Option<&str> {
+    if output.status.code() != Some(2) {
+        return None;
+    }
+    let message = std::str::from_utf8(&output.stderr).ok()?.lines().next()?;
+    let (hub, saved) = message
+        .strip_prefix("This invite is for ")?
+        .split_once(". You are signed in to ")?;
+    let saved = saved.strip_suffix(". Sign in to that hub first.")?;
+    for origin in [hub, saved] {
+        agmen_client::check_hub_url(&reqwest::Url::parse(origin).ok()?).ok()?;
+    }
+    Some(message)
+}
+
 fn successful(output: std::process::Output) -> anyhow::Result<Vec<u8>> {
     if !output.status.success() {
         let text = String::from_utf8_lossy(&output.stderr);
         return Err(HelperFailure {
             signed_out: output.status.code() == Some(3),
-            message: format!(
-                "Bundled agmen exited with {}: {}",
-                output.status,
-                text.trim()
+            message: join_refusal(&output).map_or_else(
+                || {
+                    format!(
+                        "Bundled agmen exited with {}: {}",
+                        output.status,
+                        text.trim()
+                    )
+                },
+                str::to_owned,
             ),
         }
         .into());
@@ -469,6 +490,33 @@ impl LiveRoot {
 mod tests {
     use super::*;
     use std::os::unix::process::ExitStatusExt as _;
+
+    #[test]
+    fn join_refusal_only_simplifies_the_hub_switch_exit() {
+        let message = "This invite is for https://other.example. You are signed in to https://saved.example. Sign in to that hub first.";
+        for (code, text, simplified) in [
+            (2, format!("{message}\nRerun with --yes\n"), true),
+            (1, message.to_owned(), false),
+            (3, message.to_owned(), false),
+            (2, "give an invite link or a 64-hex invite code".into(), false),
+            (2, "This invite is for invalid. You are signed in to https://saved.example. Sign in to that hub first.".into(), false),
+        ] {
+            let output = std::process::Output {
+                status: std::process::ExitStatus::from_raw(code << 8),
+                stdout: vec![],
+                stderr: text.as_bytes().to_vec(),
+            };
+            assert_eq!(join_refusal(&output), simplified.then_some(message));
+            let error = successful(output).unwrap_err();
+            let failure = error.downcast_ref::<HelperFailure>().unwrap();
+            assert_eq!(failure.signed_out, code == 3);
+            if simplified {
+                assert_eq!(failure.message, message);
+            } else {
+                assert!(failure.message.contains(&text));
+            }
+        }
+    }
 
     #[test]
     fn invite_output_accepts_link_fragment() {
