@@ -357,7 +357,9 @@ impl LiveRoot {
                             self.onboarding.signed_in = false;
                         }
                         let text = String::from_utf8_lossy(&output.stderr);
-                        if text.trim().is_empty() {
+                        if join && let Some(message) = super::membership::join_refusal(&output) {
+                            message.to_owned()
+                        } else if text.trim().is_empty() {
                             format!("Bundled agmen exited with {}", output.status)
                         } else {
                             text.into_owned()

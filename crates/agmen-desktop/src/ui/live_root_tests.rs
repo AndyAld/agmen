@@ -155,6 +155,49 @@ fn device_prompt_accepts_github_device_flow() {
 }
 
 #[gpui::test]
+fn join_other_hub_refusal_shows_origins_without_device_login(cx: &mut TestAppContext) {
+    use std::os::unix::process::ExitStatusExt as _;
+
+    let fake = FakeAgmend::start(console(vec![]));
+    let folder = fake.dir.path().join("join-here");
+    let (root, cx) = open(cx, empty_launch(&fake));
+    membership_fixture(&root, cx, &folder, serde_json::json!([]));
+    pick(&root, cx, &folder);
+    wait_until(cx, |cx| {
+        root.read_with(cx, |root, _| root.onboarding.task.is_none())
+    });
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed = calls.clone();
+    let message = "This invite is for https://other.example. You are signed in to https://hub.example. Sign in to that hub first.";
+    root.update_in(cx, |root, window, cx| {
+        root.onboarding.invite.update(cx, |input, cx| {
+            input.set_text(&format!("https://other.example/i#{}", "ab".repeat(32)), window, cx);
+        });
+        root.onboarding.helper = std::sync::Arc::new(move |_, args, _, _, _, _| {
+            assert_eq!(args, ["join", "--stdin", "--no-setup"].map(std::ffi::OsString::from));
+            observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(std::process::Output {
+                status: std::process::ExitStatus::from_raw(2 << 8),
+                stdout: vec![],
+                stderr: format!("{message}\nRerun with --yes or sign in with agmen login --hub https://other.example.\n").into_bytes(),
+            })
+        });
+    });
+    click(cx, "live:join");
+    wait_until(cx, |cx| {
+        root.read_with(cx, |root, _| root.onboarding.task.is_none())
+    });
+    root.read_with(cx, |root, _| {
+        assert_eq!(root.service_error.as_deref(), Some(message));
+        assert!(root.onboarding.device.is_none());
+        assert!(root.onboarding.signed_in);
+        assert!(root.workspace().is_none());
+    });
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(cx.debug_bounds("live:device-code").is_none());
+}
+
+#[gpui::test]
 fn sign_in_shows_device_prompt_then_invite_without_network(cx: &mut TestAppContext) {
     let fake = FakeAgmend::start(console(vec![]));
     let folder = fake.dir.path().join("sign-in-here");
