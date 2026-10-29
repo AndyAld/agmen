@@ -57,6 +57,7 @@ version = "0.1.0"
 dependencies = [
  "agmen-client",
  "agmen-hub",
+ "agmen-local",
  "agmen-proto",
  "agmen-roles",
  "anyhow",
