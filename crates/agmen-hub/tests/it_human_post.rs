@@ -27,9 +27,19 @@ async fn post(
     project: &str,
     body: Vec<u8>,
 ) -> (StatusCode, Option<String>, Value) {
-    let resp = ctx
-        .http
-        .post(ctx.hub.url(&format!("/v1/projects/{project}/messages")))
+    let url = ctx.hub.url(&format!("/v1/projects/{project}/messages"));
+    post_to(&ctx.http, url, token, body).await
+}
+
+/// [`post`] without the context, so a spawned task can send it.
+async fn post_to(
+    http: &reqwest::Client,
+    url: reqwest::Url,
+    token: &str,
+    body: Vec<u8>,
+) -> (StatusCode, Option<String>, Value) {
+    let resp = http
+        .post(url)
         .bearer_auth(token)
         .header("content-type", "application/json")
         .body(body)
@@ -183,17 +193,27 @@ async fn it_human_post_runs_ingest_checks() {
 async fn it_human_post_is_rate_limited() {
     run(|ctx| async move {
         let (project, _, token) = room(&ctx).await;
-        let mut limited = None;
+        // Sent at once, so the burst of 30 runs out before the bucket
+        // refills, however slow each post is on this machine.
+        let url = ctx
+            .hub
+            .url(&format!("/v1/projects/{}/messages", project.project));
+        let mut posts = tokio::task::JoinSet::new();
         for _ in 0..40 {
-            let (status, retry_after, reply) =
-                post(&ctx, &token, &project.project, fyi(&ulid(), "spam")).await;
-            if status == StatusCode::TOO_MANY_REQUESTS {
-                limited = Some((retry_after, reply));
-                break;
-            }
-            assert_eq!(status, StatusCode::OK, "{reply}");
+            let (http, url, token) = (ctx.http.clone(), url.clone(), token.clone());
+            let body = fyi(&ulid(), "spam");
+            posts.spawn(async move { post_to(&http, url, &token, body).await });
         }
-        let (retry_after, nack) = limited.expect("40 quick posts were never limited");
+        let mut limited = None;
+        while let Some(joined) = posts.join_next().await {
+            let (status, retry_after, reply) = joined.unwrap();
+            if status == StatusCode::TOO_MANY_REQUESTS {
+                limited.get_or_insert((retry_after, reply));
+            } else {
+                assert_eq!(status, StatusCode::OK, "{reply}");
+            }
+        }
+        let (retry_after, nack) = limited.expect("40 posts at once were never limited");
         assert_eq!(nack["reason"], "rate_limited");
         assert_eq!(nack["retryable"], true);
         assert!(nack["retry_after_ms"].as_u64().unwrap() > 0, "{nack}");
