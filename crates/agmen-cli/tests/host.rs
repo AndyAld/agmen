@@ -21,14 +21,14 @@ if [ "$1" = "compose" ]; then
   sub=""
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --project-directory | -f | --file)
+      --project-directory | -f | --file | --profile)
         shift
         if [ "$#" -eq 0 ]; then
           exit 1
         fi
         shift
         ;;
-      --project-directory=* | -f=* | --file=*)
+      --project-directory=* | -f=* | --file=* | --profile=*)
         shift
         ;;
       -*)
@@ -40,6 +40,12 @@ if [ "$1" = "compose" ]; then
         ;;
     esac
   done
+fi
+if [ "$sub" = "stop" ] && [ "$*" = "stop ngrok" ]; then
+  if [ -f "$HOME/fake/ngrok-stop-error" ]; then
+    /bin/cat "$HOME/fake/ngrok-stop-error" >&2
+    exit 1
+  fi
 fi
 if [ -n "$sub" ] && [ -e "$HOME/fake/fail-$sub" ]; then
   exit 1
@@ -869,7 +875,7 @@ async fn ngrok_up(home: &Home, token: &str) -> Output {
 #[tokio::test]
 async fn ngrok_when_no_tailscale() {
     let home = Home::new();
-    let token = "FakeNgrokToken_".repeat(2);
+    let token = String::from("FakeNgrokToken_").repeat(2);
     let out = ngrok_up(&home, &token).await;
     assert_exit(&out, 1);
     let pairs = env_pairs(&host_dir(&home));
@@ -889,6 +895,198 @@ async fn ngrok_when_no_tailscale() {
     assert_eq!(starts.len(), 2, "{log}");
     assert!(starts[0].ends_with("180 ngrok"), "{log}");
     assert!(starts[1].ends_with("180"), "{log}");
+}
+
+#[tokio::test]
+async fn ngrok_runs_without_the_inspector() {
+    let home = Home::new();
+    install_docker(&home);
+    write_fake(&home, "ps.json", RUNNING_PS.as_bytes());
+    let stub = hub_stub().await;
+    assert_exit(&up_with_stub(&home, &stub, &[]).await, 0);
+    let compose = fs::read_to_string(host_dir(&home).join("compose.yaml")).unwrap();
+    assert!(
+        compose.contains(r#"command: ["http", "--inspect=false", "http://hub:8080"]"#),
+        "{compose}"
+    );
+}
+
+#[tokio::test]
+async fn switching_from_ngrok_to_tailscale_stops_ngrok_and_forgets_its_token() {
+    for next in ["tailscale", "url"] {
+        let home = Home::new();
+        install_docker(&home);
+        install_tailscale(&home, "Running");
+        write_fake(&home, "ps.json", RUNNING_PS.as_bytes());
+        let stub = hub_stub().await;
+        assert_exit(&up_with_stub(&home, &stub, &[]).await, 0);
+        let dir = host_dir(&home);
+        let mut env = fs::read_to_string(dir.join(".env"))
+            .unwrap()
+            .replace("AGMEN_TUNNEL=url\n", "AGMEN_TUNNEL=ngrok\n")
+            .replace("COMPOSE_PROFILES=\n", "COMPOSE_PROFILES=ngrok\n");
+        env.push_str("AGMEN_NGROK_AUTHTOKEN=FakeStoredNgrokToken_12345\n");
+        fs::write(dir.join(".env"), env).unwrap();
+        fs::write(home.path().join("calls/docker.log"), "").unwrap();
+
+        let out = if next == "tailscale" {
+            run(tunnel_command(&home, stub.port, &["--tunnel", "tailscale"])).await
+        } else {
+            up_with_stub(&home, &stub, &[]).await
+        };
+        assert_exit(&out, if next == "tailscale" { 1 } else { 0 });
+        let log = docker_log(&home);
+        let stop = log
+            .find("--profile ngrok stop ngrok")
+            .expect("ngrok stopped");
+        let remove = log
+            .find("--profile ngrok rm -f ngrok")
+            .expect("ngrok removed");
+        let start = log.find(" up -d").expect("stack started");
+        assert!(stop < remove && remove < start, "{log}");
+        let pairs = env_pairs(&dir);
+        assert_eq!(env_value(&pairs, "AGMEN_TUNNEL"), next);
+        assert_eq!(env_value(&pairs, "COMPOSE_PROFILES"), "");
+        assert!(pairs.iter().all(|(key, _)| key != "AGMEN_NGROK_AUTHTOKEN"));
+    }
+}
+
+#[tokio::test]
+async fn switching_from_tailscale_to_ngrok_turns_our_funnel_off() {
+    use axum::{Json, Router, routing::get};
+
+    for next in ["ngrok", "url"] {
+        let home = Home::new();
+        install_docker(&home);
+        install_tailscale(&home, "Running");
+        write_fake(&home, "ps.json", RUNNING_PS.as_bytes());
+        let stub = hub_stub().await;
+        assert_exit(&up_with_stub(&home, &stub, &[]).await, 0);
+        let dir = host_dir(&home);
+        // The new hub port differs, so cleanup must read the old stored port.
+        let old_port = if stub.port == 7080 { 7081 } else { 7080 };
+        fs::write(
+            dir.join(".env"),
+            format!("AGMEN_TUNNEL=tailscale\nAGMEN_HOST_PORT={old_port}\n"),
+        )
+        .unwrap();
+        write_fake(&home, "funnel-status.json", own_funnel(old_port).as_bytes());
+        let app = Router::new().route(
+            "/api/tunnels",
+            get(|| async {
+                Json(serde_json::json!({"tunnels": [{"public_url": "https://127.0.0.1:9"}]}))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        write_fake(
+            &home,
+            "port",
+            listener.local_addr().unwrap().to_string().as_bytes(),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let out = if next == "ngrok" {
+            let mut cmd = tunnel_command(&home, stub.port, &["--tunnel", "ngrok"]);
+            cmd.env("NGROK_AUTHTOKEN", "FakeNewNgrokToken_12345");
+            run(cmd).await
+        } else {
+            up_with_stub(&home, &stub, &[]).await
+        };
+        server.abort();
+        assert_exit(&out, if next == "ngrok" { 1 } else { 0 });
+        assert!(
+            home.path().join("calls/tailscale.log").exists(),
+            "the old Funnel was not inspected"
+        );
+        assert!(tailscale_log(&home).contains("funnel --https=443 off"));
+        let pairs = env_pairs(&dir);
+        assert_eq!(env_value(&pairs, "AGMEN_TUNNEL"), next);
+        assert_eq!(env_value(&pairs, "AGMEN_HOST_PORT"), stub.port.to_string());
+    }
+}
+
+#[tokio::test]
+async fn stop_cleans_up_both_tunnels_whatever_is_stored() {
+    for stored in [Some("ngrok"), Some("tailscale"), Some("url"), None] {
+        for ngrok_error in [
+            None,
+            Some("no such service: ngrok"),
+            Some("engine unavailable"),
+        ] {
+            let home = Home::new();
+            install_docker(&home);
+            install_tailscale(&home, "Running");
+            write_fake(&home, "ps.json", RUNNING_PS.as_bytes());
+            let stub = hub_stub().await;
+            assert_exit(&up_with_stub(&home, &stub, &[]).await, 0);
+            let mut env = format!("AGMEN_HOST_PORT={}\n", stub.port);
+            if let Some(stored) = stored {
+                env.push_str(&format!("AGMEN_TUNNEL={stored}\n"));
+            }
+            fs::write(host_dir(&home).join(".env"), env).unwrap();
+            write_fake(
+                &home,
+                "funnel-status.json",
+                own_funnel(stub.port).as_bytes(),
+            );
+            if let Some(error) = ngrok_error {
+                write_fake(&home, "ngrok-stop-error", error.as_bytes());
+            }
+            let out = run(command(&home, &["host", "stop"], false)).await;
+            assert_exit(
+                &out,
+                if ngrok_error == Some("engine unavailable") {
+                    1
+                } else {
+                    0
+                },
+            );
+            assert!(docker_log(&home).contains("--profile ngrok stop ngrok"));
+            assert!(tailscale_log(&home).contains("funnel --https=443 off"));
+            assert!(!stderr(&out).contains("no such service"));
+        }
+    }
+}
+
+#[tokio::test]
+async fn stop_says_nothing_about_funnel_for_a_host_without_tailscale() {
+    for tailscale in [false, true] {
+        let home = Home::new();
+        install_docker(&home);
+        write_fake(&home, "ps.json", RUNNING_PS.as_bytes());
+        let stub = hub_stub().await;
+        assert_exit(&up_with_stub(&home, &stub, &[]).await, 0);
+        if tailscale {
+            install_tailscale(&home, "Running");
+        }
+        let out = run(command(&home, &["host", "stop"], false)).await;
+        assert_exit(&out, 0);
+        let err = stderr(&out);
+        assert!(
+            !err.contains("warning") && !err.contains("note") && !err.contains("Tailscale"),
+            "{err}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_failed_ngrok_cleanup_stops_the_switch_and_keeps_the_env() {
+    let home = Home::new();
+    install_docker(&home);
+    write_fake(&home, "ps.json", RUNNING_PS.as_bytes());
+    let stub = hub_stub().await;
+    assert_exit(&up_with_stub(&home, &stub, &[]).await, 0);
+    let dir = host_dir(&home);
+    let mut env = fs::read_to_string(dir.join(".env"))
+        .unwrap()
+        .replace("AGMEN_TUNNEL=url\n", "AGMEN_TUNNEL=ngrok\n");
+    env.push_str("AGMEN_NGROK_AUTHTOKEN=FakeStoredNgrokToken_12345\n");
+    fs::write(dir.join(".env"), &env).unwrap();
+    write_fake(&home, "ngrok-stop-error", b"engine unavailable");
+    let out = up_with_stub(&home, &stub, &[]).await;
+    assert_exit(&out, 1);
+    assert_eq!(fs::read_to_string(dir.join(".env")).unwrap(), env);
+    assert!(!docker_log(&home).contains("rm -f ngrok"));
+    assert!(!stderr(&out).contains("FakeStoredNgrokToken"));
 }
 
 #[tokio::test]
@@ -972,7 +1170,7 @@ async fn stop_turns_funnel_off() {
 #[tokio::test]
 async fn ngrok_token_never_on_argv() {
     let home = Home::new();
-    let token = "FakePrivateToken_".repeat(2);
+    let token = String::from("FakePrivateToken_").repeat(2);
     let out = ngrok_up(&home, &token).await;
     assert_exit(&out, 1);
     assert!(!docker_log(&home).contains(&token));
@@ -1088,7 +1286,7 @@ async fn terminal_token_input(input: &[u8]) -> (Home, Vec<u8>, i32) {
 #[cfg(target_os = "macos")]
 #[tokio::test]
 async fn terminal_ngrok_token_is_not_echoed() {
-    let token = "FakePastedToken_".repeat(2);
+    let token = String::from("FakePastedToken_").repeat(2);
     let (home, bytes, code) = terminal_token_input(format!("{token}\n").as_bytes()).await;
     assert_eq!(
         code, 1,

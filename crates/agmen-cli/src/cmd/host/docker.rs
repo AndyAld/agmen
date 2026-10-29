@@ -51,6 +51,7 @@ enum Overflow {
 struct Captured {
     status: ExitStatus,
     stdout: Vec<u8>,
+    stderr: Vec<u8>,
 }
 
 /// One service line from `docker compose ps --format json`.
@@ -95,6 +96,46 @@ impl Compose {
     /// As [`Self::up`].
     pub(crate) async fn stop(&self) -> Result<()> {
         self.succeeded(&["stop"], SHORT_LIMIT, "stop").await
+    }
+
+    /// Stops ngrok even when its profile is inactive, within 30 seconds.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::up`], except a missing ngrok service is ignored.
+    pub(crate) async fn stop_ngrok(&self) -> Result<()> {
+        match self
+            .captured(
+                &["--profile", "ngrok", "stop", "ngrok"],
+                SHORT_LIMIT,
+                Overflow::KeepEnd,
+            )
+            .await
+        {
+            Ok(output)
+                if output.status.success()
+                    || String::from_utf8_lossy(&output.stderr)
+                        .contains("no such service: ngrok") =>
+            {
+                Ok(())
+            }
+            Ok(output) => bail!("docker compose stop exited {}", exit_code(output.status)),
+            Err(err) => Err(map_timeout("stop", err)),
+        }
+    }
+
+    /// Removes the stopped ngrok container, within 30 seconds.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::up`].
+    pub(crate) async fn remove_ngrok(&self) -> Result<()> {
+        self.succeeded(
+            &["--profile", "ngrok", "rm", "-f", "ngrok"],
+            SHORT_LIMIT,
+            "rm",
+        )
+        .await
     }
 
     /// `restart <service>`, bounded at 30 seconds.
@@ -356,7 +397,7 @@ async fn captured(mut cmd: Command, limit: Duration, overflow: Overflow) -> Resu
     let stdout = child.stdout.take().context("docker stdout was not piped")?;
     let stderr = child.stderr.take().context("docker stderr was not piped")?;
     let result = tokio::time::timeout(limit, async {
-        let (status, stdout, _stderr) = tokio::try_join!(
+        let (status, stdout, stderr) = tokio::try_join!(
             async { child.wait().await.context("waiting for docker") },
             async {
                 match overflow {
@@ -364,10 +405,14 @@ async fn captured(mut cmd: Command, limit: Duration, overflow: Overflow) -> Resu
                     Overflow::KeepEnd => read_end(stdout).await,
                 }
             },
-            // Dropped, and a long `up` writes pull progress here: never fail on its size.
+            // A long `up` writes pull progress here: never fail on its size.
             read_end(stderr),
         )?;
-        Ok(Captured { status, stdout })
+        Ok(Captured {
+            status,
+            stdout,
+            stderr,
+        })
     })
     .await;
     match result {

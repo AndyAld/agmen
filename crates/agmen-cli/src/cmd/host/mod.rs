@@ -141,6 +141,20 @@ async fn up(args: UpArgs) -> Result<()> {
         let token = tunnel::ngrok_token(&env).await?;
         env.set("AGMEN_NGROK_AUTHTOKEN", &token)?;
     }
+    match env.get("AGMEN_TUNNEL") {
+        Some("ngrok") if tunnel != Tunnel::Ngrok => {
+            let compose = Compose::new(path.clone());
+            compose.stop_ngrok().await?;
+            compose.remove_ngrok().await?;
+            env.remove("AGMEN_NGROK_AUTHTOKEN");
+        }
+        Some("tailscale") if tunnel != Tunnel::Tailscale => {
+            funnel_off_stored_port(&env)
+                .await
+                .context("turning off the old Tailscale Funnel (or run tailscale funnel reset and set AGMEN_TUNNEL in .env)")?;
+        }
+        _ => {}
+    }
     env.set("AGMEN_TUNNEL", tunnel.name())?;
     env.set(
         "COMPOSE_PROFILES",
@@ -338,30 +352,37 @@ async fn stop(args: NameArgs) -> Result<()> {
     if !dir.is_dir() {
         return Err(missing_host(args.name.as_str()).into());
     }
-    Compose::new(dir.clone()).stop().await?;
+    let compose = Compose::new(dir.clone());
+    let ngrok = compose.stop_ngrok().await;
+    let stopped = compose.stop().await;
     let env = HostEnv::load(&dir.join(".env"))?.unwrap_or_default();
-    if env.get("AGMEN_TUNNEL") == Some("tailscale") {
-        let port = env
-            .get("AGMEN_HOST_PORT")
-            .and_then(|text| text.parse().ok());
-        // Only the mapping `up` made is turned off: another one on 443 is not ours.
-        let result = match port {
-            Some(port) => tunnel::funnel_off(port).await,
-            None => Err(anyhow::anyhow!("the stored host port is missing")),
-        };
-        match result {
-            Ok(true) => {}
-            Ok(false) => {
-                eprintln!("note: Funnel on 443 does not proxy to this hub, so it was left as it is")
-            }
-            Err(err) => eprintln!(
-                "warning: {}; free Funnel with tailscale funnel reset",
-                clean(&format!("{err:#}"))
-            ),
+    // The cleanup always runs, but only a Tailscale host hears about its outcome:
+    // a host on ngrok or a URL has no Funnel, and Tailscale may not be installed.
+    let tailscale = env.get("AGMEN_TUNNEL") == Some("tailscale");
+    match funnel_off_stored_port(&env).await {
+        Ok(true) => {}
+        Ok(false) if tailscale => {
+            eprintln!("note: Funnel on 443 does not proxy to this hub, so it was left as it is")
         }
+        Err(err) if tailscale => eprintln!(
+            "warning: {}; free Funnel with tailscale funnel reset",
+            clean(&format!("{err:#}"))
+        ),
+        Ok(false) | Err(_) => {}
     }
+    ngrok?;
+    stopped?;
     println!("stopped; the data stays in Docker volumes; agmen host up starts it again");
     Ok(())
+}
+
+async fn funnel_off_stored_port(env: &HostEnv) -> Result<bool> {
+    let port = env
+        .get("AGMEN_HOST_PORT")
+        .and_then(|text| text.parse().ok())
+        .context("the stored host port is missing")?;
+    // Only the mapping `up` made is turned off: another one on 443 is not ours.
+    tunnel::funnel_off(port).await
 }
 
 async fn logs(args: LogsArgs) -> Result<()> {

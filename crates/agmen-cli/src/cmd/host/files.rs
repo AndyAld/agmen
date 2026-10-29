@@ -126,6 +126,11 @@ impl HostEnv {
         Ok(())
     }
 
+    /// Removes `key`, including its value, when it is present.
+    pub(crate) fn remove(&mut self, key: &str) {
+        self.pairs.remove(key);
+    }
+
     /// Sets `key` to 32 random bytes as 64 hex characters when it is absent.
     ///
     /// # Errors
