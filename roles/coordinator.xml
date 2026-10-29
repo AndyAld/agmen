@@ -10,6 +10,7 @@
   <verbs allow="ASSIGN RULING LEND ROLLCALL PROPOSAL DECISION" />
   <edits scope="none" />
   <worktree mode="none" />
+  <launches roles="engineer reviewer tester researcher planner" />
 
   <rules topic="Board">
     <rule>Assign each item to one agent whose role and lanes fit it. Check the board for an existing claim first.</rule>

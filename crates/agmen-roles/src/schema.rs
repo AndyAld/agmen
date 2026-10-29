@@ -159,6 +159,8 @@ pub struct Role {
     pub edits: Option<EditScope>,
     /// Worktree declaration.
     pub worktree: Option<Worktree>,
+    /// Roles this file may launch. `None` when `<launches>` is absent.
+    pub launches: Option<BTreeSet<String>>,
     /// Prompt fragments.
     pub prompt: Prompt,
 }
@@ -180,6 +182,25 @@ pub(crate) fn valid_name(name: &str) -> bool {
         && name
             .bytes()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+}
+
+/// A launch list names at most this many roles. One more word is an error.
+const MAX_LAUNCH_ROLES: usize = 64;
+
+fn launch_roles(value: &str) -> Result<BTreeSet<String>, RoleError> {
+    let mut names = BTreeSet::new();
+    for (index, name) in value.split_whitespace().enumerate() {
+        if index >= MAX_LAUNCH_ROLES {
+            return Err(RoleError::Schema(format!(
+                "launches lists at most {MAX_LAUNCH_ROLES} roles"
+            )));
+        }
+        if !valid_name(name) {
+            return Err(RoleError::Schema(format!("invalid launch role {name}")));
+        }
+        names.insert(name.to_owned());
+    }
+    Ok(names)
 }
 
 fn attributes(node: roxmltree::Node<'_, '_>, allowed: &[&str]) -> Result<(), RoleError> {
@@ -209,6 +230,7 @@ fn validate(root: roxmltree::Node<'_, '_>) -> Result<(), RoleError> {
             "verbs" => &["allow"],
             "edits" => &["scope", "globs"],
             "worktree" => &["mode", "name", "at", "remove"],
+            "launches" => &["roles"],
             _ => return Err(RoleError::Schema(format!("unknown element {tag}"))),
         };
         if node.tag_name().namespace().is_some() || (tag != "rules" && !seen.insert(tag)) {
@@ -348,6 +370,9 @@ pub(crate) fn parse_inner(xml: &str, check_name: bool) -> Result<Role, RoleError
         verbs_declared: verbs.is_some(),
         edits,
         worktree: child("worktree").map(worktree).transpose()?,
+        launches: child("launches")
+            .map(|node| launch_roles(node.attribute("roles").unwrap_or_default()))
+            .transpose()?,
         prompt: Prompt {
             elements: root
                 .children()

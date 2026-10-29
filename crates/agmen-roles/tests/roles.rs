@@ -525,3 +525,258 @@ fn claude_tools_maps_all_adapter_classes() {
         ]
     );
 }
+
+#[test]
+fn launches_parses_and_resolves() {
+    let xml = r#"<role name="custom" extends="base" kind="agent" tier="small"><launches roles="tester reviewer"/></role>"#;
+    let parsed = parse(xml).unwrap();
+    let expected = set(["reviewer", "tester"].map(String::from));
+    assert_eq!(parsed.launches.as_ref(), Some(&expected));
+    let (_dir, layers) = layer(xml);
+    let role = layers.load().unwrap().get("custom").unwrap().clone();
+    assert_eq!(role.role.launches.as_ref(), Some(&expected));
+    assert_eq!(role.launches, expected);
+}
+
+#[test]
+fn no_launches_means_none() {
+    let parsed = parse(include_str!("../../../roles/reviewer.xml")).unwrap();
+    assert_eq!(parsed.launches, None);
+    let catalog = Layers::default().load().unwrap();
+    let reviewer = catalog.get("reviewer").unwrap();
+    assert_eq!(reviewer.role.launches, None);
+    assert!(reviewer.launches.is_empty());
+}
+
+#[test]
+fn launches_inherit_and_may_only_narrow() {
+    let (_dir, layers) = layer(r#"<role name="custom" extends="engineer"/>"#);
+    let role = layers.load().unwrap().get("custom").unwrap().clone();
+    assert_eq!(role.role.launches, None);
+    assert_eq!(role.launches, set(["reviewer", "tester"].map(String::from)));
+
+    let (_dir, layers) =
+        layer(r#"<role name="custom" extends="engineer"><launches roles="reviewer"/></role>"#);
+    let role = layers.load().unwrap().get("custom").unwrap().clone();
+    assert_eq!(role.launches, set(["reviewer".to_owned()]));
+
+    let (_dir, layers) =
+        layer(r#"<role name="custom" extends="engineer"><launches roles="engineer"/></role>"#);
+    assert!(matches!(
+        layers.load(),
+        Err(RoleError::Widening(name)) if name == "custom"
+    ));
+}
+
+#[test]
+fn launches_rejects_bad_names_and_attributes() {
+    let engineer = parse(r#"<role name="custom"><launches roles="Engineer"/></role>"#);
+    assert!(
+        matches!(&engineer, Err(RoleError::Schema(msg)) if msg.contains("Engineer")),
+        "{engineer:?}"
+    );
+    let path = parse(r#"<role name="custom"><launches roles="../x"/></role>"#);
+    assert!(
+        matches!(&path, Err(RoleError::Schema(msg)) if msg.contains("../x")),
+        "{path:?}"
+    );
+    let extra = parse(r#"<role name="custom"><launches roles="reviewer" extra="1"/></role>"#);
+    assert!(
+        matches!(&extra, Err(RoleError::Schema(msg)) if msg.contains("extra")),
+        "{extra:?}"
+    );
+}
+
+#[test]
+fn builtin_launch_lists() {
+    let catalog = Layers::default().load().unwrap();
+    let launches = |name: &str| catalog.get(name).unwrap().launches.clone();
+    assert_eq!(
+        launches("coordinator"),
+        set(["engineer", "planner", "researcher", "reviewer", "tester"].map(String::from))
+    );
+    assert_eq!(
+        launches("engineer"),
+        set(["reviewer", "tester"].map(String::from))
+    );
+    assert_eq!(launches("planner"), set(["researcher".to_owned()]));
+    for name in ["base", "listener", "researcher", "reviewer", "tester"] {
+        assert!(launches(name).is_empty(), "{name}");
+    }
+}
+
+#[test]
+fn launches_accepts_empty_repeated_and_unchecked_names() {
+    let launches = |body: &str| {
+        parse(&format!(r#"<role name="custom">{body}</role>"#))
+            .unwrap()
+            .launches
+    };
+    // An empty or missing `roles` declares a list of nothing, so a child can narrow to nothing.
+    assert_eq!(launches(r#"<launches roles=""/>"#), Some(BTreeSet::new()));
+    assert_eq!(launches("<launches/>"), Some(BTreeSet::new()));
+    assert_eq!(
+        launches(r#"<launches roles="tester  tester reviewer"/>"#),
+        Some(set(["reviewer", "tester"].map(String::from)))
+    );
+    // Names are checked for shape only: a list may hold a role the catalog lacks, the role's own
+    // name, or a coordinator or listener role.
+    assert_eq!(
+        launches(r#"<launches roles="no-such-role custom coordinator listener"/>"#),
+        Some(set(
+            ["no-such-role", "custom", "coordinator", "listener"].map(String::from)
+        ))
+    );
+    let (_dir, layers) = layer(
+        r#"<role name="custom" extends="base" kind="agent" tier="standard"><launches roles="no-such-role custom coordinator"/></role>"#,
+    );
+    let catalog = layers.load().unwrap();
+    assert_eq!(
+        catalog.get("custom").unwrap().launches,
+        set(["coordinator", "custom", "no-such-role"].map(String::from))
+    );
+}
+
+#[test]
+fn launches_rejects_child_elements_repeats_and_more_than_64_names() {
+    for xml in [
+        r#"<role name="custom"><launches roles="reviewer"><rule/></launches></role>"#,
+        r#"<role name="custom"><launches roles="reviewer"/><launches roles="tester"/></role>"#,
+        r#"<role name="custom"><rules><launches roles="reviewer"/></rules></role>"#,
+    ] {
+        let parsed = parse(xml);
+        assert!(
+            matches!(&parsed, Err(RoleError::Schema(_))),
+            "{xml}: {parsed:?}"
+        );
+    }
+    let named = |count: usize| {
+        let names = (0..count)
+            .map(|n| format!("r{n:02}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        parse(&format!(
+            r#"<role name="custom"><launches roles="{names}"/></role>"#
+        ))
+    };
+    assert_eq!(
+        named(64).unwrap().launches.map(|names| names.len()),
+        Some(64)
+    );
+    let over = named(65);
+    assert!(
+        matches!(&over, Err(RoleError::Schema(msg)) if msg.contains("64")),
+        "{over:?}"
+    );
+}
+
+#[test]
+fn launches_narrow_through_a_chain_of_three() {
+    // base, engineer {reviewer, tester}, middle, custom: the nearest list above a role bounds it.
+    let nothing = r#"<launches roles=""/>"#;
+    let reviewer = r#"<launches roles="reviewer"/>"#;
+    for (middle, custom, expected) in [
+        ("", "", Ok(vec!["reviewer", "tester"])),
+        ("", reviewer, Ok(vec!["reviewer"])),
+        (reviewer, "", Ok(vec!["reviewer"])),
+        (reviewer, reviewer, Ok(vec!["reviewer"])),
+        (nothing, "", Ok(vec![])),
+        (reviewer, nothing, Ok(vec![])),
+        // Engineer's wider list is two levels up, but middle's is the nearest, so custom may not use it.
+        (
+            reviewer,
+            r#"<launches roles="reviewer tester"/>"#,
+            Err("custom"),
+        ),
+        (nothing, reviewer, Err("custom")),
+        (r#"<launches roles="reviewer planner"/>"#, "", Err("middle")),
+    ] {
+        let (dir, layers) = layer(&format!(
+            r#"<role name="custom" extends="middle">{custom}</role>"#
+        ));
+        std::fs::write(
+            dir.path().join("middle.xml"),
+            format!(r#"<role name="middle" extends="engineer">{middle}</role>"#),
+        )
+        .unwrap();
+        match expected {
+            Ok(names) => assert_eq!(
+                layers.load().unwrap().get("custom").unwrap().launches,
+                set(names.into_iter().map(String::from)),
+                "{middle} then {custom}"
+            ),
+            Err(widened) => assert!(
+                matches!(layers.load(), Err(RoleError::Widening(name)) if name == widened),
+                "{middle} then {custom}"
+            ),
+        }
+    }
+}
+
+#[test]
+fn an_override_replaces_the_builtin_launch_list() {
+    let root = tempfile::tempdir().unwrap();
+    let personal = tempfile::tempdir().unwrap();
+    let project_roles = root.path().join(".agmen/roles");
+    std::fs::create_dir_all(&project_roles).unwrap();
+    let engineer = |roles: &str| {
+        format!(
+            r#"<role name="engineer" extends="base" kind="agent" tier="standard"><launches roles="{roles}"/></role>"#
+        )
+    };
+    let layers = Layers {
+        project: Some(root.path().to_owned()),
+        personal: Some(personal.path().to_owned()),
+        ..Layers::default()
+    };
+    let launches = || {
+        layers
+            .load()
+            .unwrap()
+            .get("engineer")
+            .unwrap()
+            .launches
+            .clone()
+    };
+    // The override extends base, not the built-in it replaces, so nothing is checked against the
+    // built-in's list, as for tools and edits.
+    std::fs::write(
+        project_roles.join("engineer.xml"),
+        engineer("planner reviewer tester"),
+    )
+    .unwrap();
+    assert_eq!(
+        launches(),
+        set(["planner", "reviewer", "tester"].map(String::from))
+    );
+    std::fs::write(personal.path().join("engineer.xml"), engineer("reviewer")).unwrap();
+    assert_eq!(launches(), set(["reviewer".to_owned()]));
+    // A role that extends engineer now narrows the winning file's list.
+    std::fs::write(
+        personal.path().join("custom.xml"),
+        r#"<role name="custom" extends="engineer"><launches roles="tester"/></role>"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        layers.load(),
+        Err(RoleError::Widening(name)) if name == "custom"
+    ));
+}
+
+#[test]
+fn builtin_launch_lists_name_only_existing_agent_roles() {
+    let catalog = Layers::default().load().unwrap();
+    let mut listed = 0;
+    for parent in catalog.iter() {
+        for child in &parent.launches {
+            listed += 1;
+            assert_eq!(
+                catalog.get(child).map(|role| role.kind),
+                Some(Kind::Agent),
+                "{} lists {child}",
+                parent.role.name
+            );
+        }
+    }
+    assert!(listed > 0, "no built-in launch list was checked");
+}

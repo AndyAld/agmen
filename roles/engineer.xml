@@ -9,6 +9,7 @@
   <verbs allow="CLAIM HEARTBEAT RELEASE DONE PUSH_REQUEST LEND" />
   <edits scope="lanes" />
   <worktree mode="branch" name="{type}/{item}-{slug}" remove="after-merge" />
+  <launches roles="reviewer tester" />
 
   <rules>
     <rule>Claim before you edit. Edit only inside your lanes.</rule>

@@ -11,6 +11,7 @@
   <verbs allow="PROPOSAL PLAN" />
   <edits scope="paths" globs="docs/** .agmen/**" />
   <worktree mode="branch" name="plan/{slug}" remove="after-merge" />
+  <launches roles="researcher" />
 
   <rules topic="Planning">
     <rule>Find out what the people want before you propose how. Ask one question at a time and say why the answer changes the plan.</rule>

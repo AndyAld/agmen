@@ -296,6 +296,7 @@ fn sources(specs: &[RoleSpec]) -> Result<crate::layer::Sources, RoleError> {
                 Edits::Paths(globs) => crate::EditScope::Paths(globs.clone()),
             }),
             worktree: None,
+            launches: None,
             prompt: Prompt::default(),
         };
         // Preserve the legacy first-definition-wins lookup order.
