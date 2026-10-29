@@ -194,6 +194,8 @@ pub(crate) struct FakeState {
     pub(crate) posts: Vec<Request>,
     pub(crate) agent_requests: Vec<Request>,
     pub(crate) managed_state: Option<String>,
+    /// An optional `agent_list` answer; unset keeps the managed_state default.
+    pub(crate) agent_list_answer: Option<Value>,
     /// What agent actions other than `agent_list` answer; `{}` when null.
     pub(crate) agent_answer: Value,
     pub(crate) snapshots_served: usize,
@@ -384,6 +386,9 @@ fn managed_response(request: Request, state: &Mutex<FakeState>) -> Response {
     let id = request.id;
     let mut state = state.lock().unwrap();
     if request.method == "agent_list" {
+        if let Some(answer) = &state.agent_list_answer {
+            return Response::ok(id, answer.clone());
+        }
         let agents = state.managed_state.as_ref().map(|status| json!({"identity": "idmanaged", "project": PROJECT, "handle": "andy/worker", "state": status, "worktree": "/repo/.worktrees/agent/worker-1234", "branch": "agent/worker-1234", "source": "launched"})).into_iter().collect::<Vec<_>>();
         Response::ok(id, json!({"agents": agents}))
     } else {

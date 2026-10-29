@@ -48,9 +48,9 @@ use serde_json::{Value, json};
 
 use super::agmend_local;
 use super::{
-    Action, AgentRow, AgentStatus, Backend, BackendError, Draft, FileText, FileTextReply, GitFacts,
-    Link, ListenerInfo, ManagedWork, Older, PersonGroup, Snapshot, StatusSummary, Update,
-    WorktreeInfo,
+    Action, AgentInfo, AgentRow, AgentStatus, Backend, BackendError, Draft, FileText,
+    FileTextReply, GitFacts, Link, ListenerInfo, ManagedWork, Older, PersonGroup, Snapshot,
+    StatusSummary, Update, WorktreeInfo,
 };
 
 /// The most messages held per project; the oldest go first (the plan's
@@ -229,21 +229,22 @@ impl Live {
             snapshot
                 .managed_agents
                 .insert(agent.identity.clone(), agent.state.label().into());
-            snapshot.managed_work.insert(
-                agent.identity.clone(),
-                ManagedWork {
-                    worktree: agent.worktree.clone(),
-                    branch: agent.branch.clone().filter(|branch| !branch.is_empty()),
-                    joined: agent.source.as_deref() == Some("joined"),
-                },
-            );
+            let work = ManagedWork {
+                worktree: agent.worktree.clone(),
+                branch: agent.branch.clone().filter(|branch| !branch.is_empty()),
+                joined: agent.source.as_deref() == Some("joined"),
+            };
+            let status = match agent.state {
+                // Someone works in it interactively.
+                ManagedState::Running | ManagedState::Attached => AgentStatus::Working,
+                ManagedState::Idle => AgentStatus::Idle,
+                ManagedState::Offline => AgentStatus::Offline,
+            };
+            snapshot
+                .agents
+                .insert(agent.identity.clone(), agent_info(agent, status, &work));
+            snapshot.managed_work.insert(agent.identity.clone(), work);
             if let Some(group) = snapshot.roster.iter_mut().find(|group| group.you) {
-                let status = match agent.state {
-                    // Someone works in it interactively.
-                    ManagedState::Running | ManagedState::Attached => AgentStatus::Working,
-                    ManagedState::Idle => AgentStatus::Idle,
-                    ManagedState::Offline => AgentStatus::Offline,
-                };
                 if let Some(row) = group.agents.iter_mut().find(|row| row.id == agent.identity) {
                     row.status = status;
                 } else {
@@ -489,6 +490,14 @@ struct ManagedAgent {
     project: String,
     handle: String,
     state: ManagedState,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    budget_usd: Option<String>,
+    #[serde(default)]
+    spent_usd: Option<String>,
+    #[serde(default)]
+    role: Option<String>,
     #[serde(default)]
     worktree: Option<String>,
     #[serde(default)]
@@ -886,7 +895,25 @@ impl Backend for AgmendBackend {
             Action::ApproveSpec { .. } => unsupported("approving a spec"),
             Action::ApproveShare => unsupported("approving your share"),
             Action::KickOff => unsupported("kicking off a plan"),
-            Action::SpawnWorker { .. } => unsupported("starting a worker"),
+            Action::SpawnWorker { agent } => {
+                if agent != "claude" {
+                    return unsupported("starting a worker on that agent");
+                }
+                let name = {
+                    let live = self.shared.lock();
+                    (1..=99).map(|n| format!("worker-{n}")).find(|name| {
+                        !live.managed.iter().any(|managed| {
+                            managed.project == self.shared.project
+                                && managed.handle.rsplit('/').next() == Some(name.as_str())
+                        })
+                    })
+                }
+                .ok_or(BackendError::Unsupported("too many workers"))?;
+                let mut params = self.shared.checkout_params();
+                params["name"] = json!(name);
+                params["role"] = json!("engineer");
+                self.queue_agent("agent_launch", params)
+            }
         }
     }
 
@@ -1219,6 +1246,48 @@ fn context_notice(answer: &Value) -> Option<String> {
             Some("Started fresh: its last session could not be checked.".into())
         }
         _ => None,
+    }
+}
+
+/// A USD string from agmend as dollars. A missing, unparsable, negative or
+/// non-finite value is 0.0, so an older or malformed reply stays readable
+/// (the desktop has no logging to report it to).
+fn usd(amount: Option<&str>) -> f64 {
+    amount
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .unwrap_or(0.0)
+}
+
+/// What the agent panels show for one managed agent of this project.
+fn agent_info(agent: &ManagedAgent, status: AgentStatus, work: &ManagedWork) -> AgentInfo {
+    AgentInfo {
+        id: agent.identity.clone(),
+        handle: agent.handle.clone(),
+        role: agent.role.clone().unwrap_or_default(),
+        role_label: agent.role.clone().unwrap_or_default(),
+        harness_label: "Claude Code".into(),
+        model: agent.model.clone().unwrap_or_default(),
+        state: agent.state.label().into(),
+        status,
+        branch: work.branch.clone().unwrap_or_default(),
+        worktree_state: work.worktree.clone().unwrap_or_default(),
+        spent_usd: usd(agent.spent_usd.as_deref()),
+        budget_usd: usd(agent.budget_usd.as_deref()),
+        // These fields have no live source yet.
+        delegated_by: None,
+        tools: Vec::new(),
+        tools_lossy: false,
+        edits: String::new(),
+        verbs: Vec::new(),
+        refused: Vec::new(),
+        base: String::new(),
+        cleanup: String::new(),
+        since_launch_minutes: 0,
+        working_minutes: 0,
+        tokens_in: 0,
+        tokens_out: 0,
+        cache_read: 0,
     }
 }
 
