@@ -257,6 +257,25 @@ async fn import_refuses_an_existing_name() {
 }
 
 #[tokio::test]
+async fn import_clears_saved_by() {
+    let home = Home::new();
+    let path = input(
+        &home,
+        r#"<agent-template name="plain" saved-by="andy/sol"/>"#,
+    );
+    let out = home
+        .run(
+            home.path(),
+            &["templates", "import", path.to_str().unwrap()],
+        )
+        .await;
+    assert_exit(&out, 0);
+    let xml = std::fs::read_to_string(home.path().join(".config/agmen/templates/plain.agent.xml"))
+        .unwrap();
+    assert!(!xml.contains("saved-by"), "{xml}");
+}
+
+#[tokio::test]
 async fn import_rejects_a_bad_file() {
     let home = Home::new();
     let path = input(

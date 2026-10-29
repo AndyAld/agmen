@@ -3,6 +3,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(unix)]
 use agmen_proto::IdentityId;
@@ -342,14 +343,7 @@ pub(crate) fn write_personal(
         path
     };
     fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    let mut temporary = target.as_os_str().to_owned();
-    temporary.push(".tmp");
-    let temporary = PathBuf::from(temporary);
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temporary)
-        .with_context(|| format!("creating {}", temporary.display()))?;
+    let (mut file, temporary) = create_temporary(&target)?;
     let result: Result<PathBuf> = (|| {
         file.write_all(xml.as_bytes())
             .with_context(|| format!("writing {}", temporary.display()))?;
@@ -368,6 +362,32 @@ pub(crate) fn write_personal(
     })
 }
 
+/// Create a temp file next to `target` under a name no other run uses: the process id
+/// and a counter keep a stale file from an earlier or crashed run from blocking the write.
+fn create_temporary(target: &Path) -> Result<(File, PathBuf)> {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    const ATTEMPTS: u32 = 16;
+    let mut last = None;
+    for _ in 0..ATTEMPTS {
+        let mut name = target.as_os_str().to_owned();
+        name.push(format!(
+            ".{}-{}.tmp",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let path = PathBuf::from(name);
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => return Ok((file, path)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => last = Some(error),
+            Err(error) => {
+                return Err(error).with_context(|| format!("creating {}", path.display()));
+            }
+        }
+    }
+    Err(last.context("no temporary file name was tried")?)
+        .with_context(|| format!("creating a temporary file beside {}", target.display()))
+}
+
 fn read_import(path: &Path) -> Result<Template> {
     let mut bytes = Vec::new();
     File::open(path)
@@ -379,7 +399,12 @@ fn read_import(path: &Path) -> Result<Template> {
         return Err(Fail::usage("template file exceeds 32 KiB").into());
     }
     let xml = std::str::from_utf8(&bytes).context("template file is not UTF-8")?;
-    parse_template(xml).with_context(|| format!("parsing {}", path.display()))
+    let mut template =
+        parse_template(xml).with_context(|| format!("parsing {}", path.display()))?;
+    // A file the person imports is theirs. A `saved-by` from the file would let the agent it
+    // names replace the template later (`Overwrite::IfSavedBy`).
+    template.set_saved_by(None);
+    Ok(template)
 }
 
 fn import_summary(template: &Template, catalog: &TemplateCatalog, roles: &Catalog) -> String {
@@ -633,11 +658,12 @@ mod tests {
             write_personal(dir.path(), &catalog, &template, Overwrite::Replace).unwrap_err();
         assert!(error.to_string().contains("replacing"), "{error:#}");
         assert!(path.is_dir());
-        assert!(!dir.path().join("plain.agent.xml.tmp").exists());
+        // Only the folder that blocked the rename is left, no temp file.
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[test]
-    fn write_personal_refuses_unloaded_files_and_temp_links() {
+    fn write_personal_refuses_an_unloaded_file() {
         let dir = tempfile::tempdir().unwrap();
         let catalog = TemplateLayers::default().load();
         let template = parse_template(r#"<agent-template name="plain"/>"#).unwrap();
@@ -645,12 +671,64 @@ mod tests {
         std::fs::write(&path, "broken").unwrap();
         assert!(write_personal(dir.path(), &catalog, &template, Overwrite::Replace).is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "broken");
-        std::fs::remove_file(&path).unwrap();
-        let tmp = dir.path().join("plain.agent.xml.tmp");
-        std::fs::write(&tmp, "reserved").unwrap();
-        assert!(write_personal(dir.path(), &catalog, &template, Overwrite::Refuse).is_err());
-        assert_eq!(std::fs::read_to_string(&tmp).unwrap(), "reserved");
-        assert!(!path.exists());
+    }
+
+    #[test]
+    fn an_imported_file_cannot_be_replaced_by_the_agent_it_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("input.xml");
+        std::fs::write(
+            &input,
+            r#"<agent-template name="plain" saved-by="andy/sol"/>"#,
+        )
+        .unwrap();
+        let personal = dir.path().join("personal");
+        let imported = read_import(&input).unwrap();
+        assert_eq!(imported.saved_by(), None);
+        write_personal(
+            &personal,
+            &TemplateLayers::default().load(),
+            &imported,
+            Overwrite::Refuse,
+        )
+        .unwrap();
+        let catalog = TemplateLayers {
+            personal: Some(personal.clone()),
+            ..Default::default()
+        }
+        .load();
+        let agent =
+            parse_template(r#"<agent-template name="plain" saved-by="andy/sol"/>"#).unwrap();
+        let error = write_personal(
+            &personal,
+            &catalog,
+            &agent,
+            Overwrite::IfSavedBy("andy/sol".into()),
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("was not saved by andy/sol"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_stale_temp_file_does_not_block_a_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = TemplateLayers::default().load();
+        let template = parse_template(r#"<agent-template name="plain"/>"#).unwrap();
+        // What an older run, or one that crashed, may have left behind.
+        let stale = dir.path().join("plain.agent.xml.tmp");
+        std::fs::write(&stale, "stale").unwrap();
+        let path = write_personal(dir.path(), &catalog, &template, Overwrite::Refuse).unwrap();
+        assert_eq!(path, dir.path().join("plain.agent.xml"));
+        assert_eq!(
+            parse_template(&std::fs::read_to_string(&path).unwrap()).unwrap(),
+            template
+        );
+        assert_eq!(std::fs::read_to_string(&stale).unwrap(), "stale");
+        // Our own temp file is gone: only the target and the stale file remain.
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
     }
 
     #[test]
