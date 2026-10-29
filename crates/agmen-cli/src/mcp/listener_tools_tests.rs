@@ -157,7 +157,10 @@ async fn template_list_shows_built_in_and_personal_templates() {
         .await
         .unwrap();
     assert!(
-        text.starts_with("name\tkind\tlayer\tdescription\n"),
+        text.starts_with(&format!(
+            "{}name\tkind\tlayer\tdescription\n",
+            crate::output::CHAT_FENCE
+        )),
         "{text}"
     );
     assert!(text.contains("claude\tagent\tbuiltin\t"), "{text}");
