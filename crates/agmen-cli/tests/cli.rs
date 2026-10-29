@@ -511,18 +511,190 @@ fn setup_needs_a_joined_worktree() {
 
 #[cfg(unix)]
 #[test]
-fn setup_refuses_an_agent_it_cannot_set_up_yet() {
+fn setup_writes_cursor_mcp_json() {
+    use std::os::unix::fs::PermissionsExt as _;
     let home = Home::new();
+    home.fake_program("cursor-agent", "exit 99");
+    let wt = setup_worktree(&home);
+    let out = home.agmen(&wt.path(), &["setup"]).output().unwrap();
+    assert_exit(&out, 0);
+    assert!(
+        stdout(&out).contains("Cursor: wrote .cursor/mcp.json"),
+        "{}",
+        stdout(&out)
+    );
+    assert!(
+        stdout(&out).lines().any(|line| line
+            == "lane guard: only the Claude Code plugin blocks edits outside your lanes; other agents should call check_path before editing"),
+        "{}",
+        stdout(&out)
+    );
+    assert_eq!(
+        std::fs::metadata(wt.path().join(".cursor"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o755
+    );
+    let path = wt.path().join(".cursor/mcp.json");
+    let text = std::fs::read_to_string(&path).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(
+        value,
+        serde_json::json!({"mcpServers":{"agmen":{"command":"agmen","args":["mcp"]}}})
+    );
+    let exclude = std::fs::read_to_string(wt.path().join(".git/info/exclude")).unwrap();
+    assert!(exclude.lines().any(|line| line == ".cursor/mcp.json"));
+    let out = home.agmen(&wt.path(), &["setup"]).output().unwrap();
+    assert_exit(&out, 0);
+    assert!(stdout(&out).contains("Cursor: already set up"));
+    assert_eq!(std::fs::read_to_string(path).unwrap(), text);
+    assert_eq!(
+        std::fs::read_to_string(wt.path().join(".git/info/exclude")).unwrap(),
+        exclude
+    );
+    assert!(!home.path().join("calls/cursor-agent.log").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn setup_writes_gemini_settings_and_keeps_others() {
+    let home = Home::new();
+    home.fake_program("gemini", "exit 99");
+    let wt = setup_worktree(&home);
+    let dir = wt.path().join(".gemini");
+    std::fs::create_dir(&dir).unwrap();
+    let path = dir.join("settings.json");
+    std::fs::write(&path, r#"{"theme":"x"}"#).unwrap();
+    let out = home.agmen(&wt.path(), &["setup"]).output().unwrap();
+    assert_exit(&out, 0);
+    assert!(
+        stdout(&out).contains("Gemini CLI: wrote .gemini/settings.json"),
+        "{}",
+        stdout(&out)
+    );
+    assert!(
+        stdout(&out).lines().any(|line| line
+            == "lane guard: only the Claude Code plugin blocks edits outside your lanes; other agents should call check_path before editing"),
+        "{}",
+        stdout(&out)
+    );
+    let text = std::fs::read_to_string(&path).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(value["theme"], "x");
+    assert_eq!(
+        value["mcpServers"]["agmen"],
+        serde_json::json!({"command":"agmen","args":["mcp"]})
+    );
+    let exclude = std::fs::read_to_string(wt.path().join(".git/info/exclude")).unwrap();
+    assert!(exclude.lines().any(|line| line == ".gemini/settings.json"));
+    let out = home.agmen(&wt.path(), &["setup"]).output().unwrap();
+    assert_exit(&out, 0);
+    assert!(stdout(&out).contains("Gemini CLI: already set up"));
+    assert_eq!(std::fs::read_to_string(path).unwrap(), text);
+    assert_eq!(
+        std::fs::read_to_string(wt.path().join(".git/info/exclude")).unwrap(),
+        exclude
+    );
+    assert!(!home.path().join("calls/gemini.log").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn setup_skips_a_cursor_folder_that_is_a_file() {
+    let home = Home::new();
+    home.fake_program("cursor", "exit 99");
+    home.fake_program("gemini", "exit 99");
+    let wt = setup_worktree(&home);
+    std::fs::write(wt.path().join(".cursor"), "not a folder\n").unwrap();
+    let target = home.path().join("outside-gemini");
+    std::fs::create_dir(&target).unwrap();
+    std::os::unix::fs::symlink(&target, wt.path().join(".gemini")).unwrap();
+    let out = home.agmen(&wt.path(), &["setup"]).output().unwrap();
+    assert_exit(&out, 0);
+    assert!(
+        stdout(&out).contains("Cursor: skipped:"),
+        "{}",
+        stdout(&out)
+    );
+    assert!(
+        stdout(&out).contains("Gemini CLI: skipped:"),
+        "{}",
+        stdout(&out)
+    );
+    assert!(!stdout(&out).contains("wrote"));
+    assert_eq!(
+        std::fs::read_to_string(wt.path().join(".cursor")).unwrap(),
+        "not a folder\n"
+    );
+    assert!(!target.join("settings.json").exists());
+    assert_eq!(
+        std::fs::read_to_string(wt.path().join(".git/info/exclude")).unwrap(),
+        ".agmen/\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn setup_preserves_tracked_and_unreadable_cursor_and_gemini_configs() {
+    for (program, rel, label) in [
+        ("cursor", ".cursor/mcp.json", "Cursor"),
+        ("gemini", ".gemini/settings.json", "Gemini CLI"),
+    ] {
+        for (original, tracked) in [
+            ("{}".to_owned(), true),
+            ("// comment\n{}".to_owned(), false),
+            ("[]".to_owned(), false),
+            (" ".repeat(1024 * 1024 + 1), false),
+        ] {
+            let home = Home::new();
+            home.fake_program(program, "exit 99");
+            let wt = setup_worktree(&home);
+            let path = wt.path().join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, &original).unwrap();
+            if tracked {
+                wt.git(&home, &["add", rel]);
+            }
+            let out = home.agmen(&wt.path(), &["setup"]).output().unwrap();
+            assert_exit(&out, 0);
+            assert!(
+                stdout(&out).contains(&format!("{label}: skipped:")),
+                "{}",
+                stdout(&out)
+            );
+            assert!(!stdout(&out).contains("wrote"));
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+            assert_eq!(
+                std::fs::read_to_string(wt.path().join(".git/info/exclude")).unwrap(),
+                ".agmen/\n"
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn setup_agent_flag_picks_cursor_or_gemini() {
+    let home = Home::new();
+    home.fake_program("cursor", "exit 99");
+    home.fake_program("gemini", "exit 99");
+    let wt = setup_worktree(&home);
     let out = home
-        .agmen(home.path(), &["setup", "--agent", "cursor"])
+        .agmen(&wt.path(), &["setup", "--agent", "gemini"])
         .output()
         .unwrap();
-    assert_exit(&out, 2);
-    assert!(
-        stderr(&out).contains("possible values: claude, codex, opencode"),
-        "{}",
-        stderr(&out)
-    );
+    assert_exit(&out, 0);
+    assert!(wt.path().join(".gemini/settings.json").is_file());
+    assert!(!wt.path().join(".cursor").exists());
+    assert!(!stdout(&out).contains("Cursor:"));
+    let out = home
+        .agmen(&wt.path(), &["setup", "--agent", "cursor"])
+        .output()
+        .unwrap();
+    assert_exit(&out, 0);
+    assert!(wt.path().join(".cursor/mcp.json").is_file());
 }
 
 #[cfg(unix)]
