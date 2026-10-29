@@ -28,3 +28,15 @@ impl<S> Core<S> {
         self.claim_lease
     }
 }
+
+/// Why a core operation could not finish.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum CoreError {
+    /// The store failed.
+    #[error(transparent)]
+    Store(#[from] crate::StoreError),
+    /// A stored value is not one the core can use.
+    #[error("a stored value is invalid: {0}")]
+    Stored(String),
+}

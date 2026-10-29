@@ -2,7 +2,9 @@
 
 use std::future::Future;
 
-use agmen_proto::Seq;
+use agmen_proto::{IdentityId, IdentityKind, LaneName, ProjectId, Seq};
+
+use crate::lanes::{LaneHolder, LaneRow, ResolvedLane};
 
 /// Why a storage operation could not complete.
 #[derive(Debug, thiserror::Error)]
@@ -46,7 +48,65 @@ pub trait Store: Send + Sync + 'static {
 }
 
 /// Queries shared by a reader and an open transaction.
-pub trait Reads: Send {}
+pub trait Reads: Send {
+    /// The project's lanes, ordered by name.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] if the lanes cannot be read or a stored name
+    /// is not a lane name.
+    fn lane_globs(
+        &mut self,
+        project: &ProjectId,
+    ) -> impl Future<Output = Result<Vec<(LaneName, Vec<String>)>, StoreError>> + Send;
+
+    /// Live claims on items that name a lane, oldest claim first.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] if the claims cannot be read or a stored id
+    /// is malformed.
+    fn lane_holders(
+        &mut self,
+        project: &ProjectId,
+    ) -> impl Future<Output = Result<Vec<LaneHolder>, StoreError>> + Send;
+
+    /// The live identity's kind and stored edit scope.
+    ///
+    /// `Ok(None)` means the identity is missing or revoked.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] if the identity cannot be read or its kind is
+    /// not a known kind.
+    fn live_edit_scope(
+        &mut self,
+        project: &ProjectId,
+        id: &IdentityId,
+    ) -> impl Future<Output = Result<Option<(IdentityKind, Option<serde_json::Value>)>, StoreError>> + Send;
+
+    /// Active lends to `to`, as the lane and its path globs.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] if the lends cannot be read or a stored lane
+    /// name is malformed.
+    fn lends_to(
+        &mut self,
+        project: &ProjectId,
+        to: &IdentityId,
+    ) -> impl Future<Output = Result<Vec<(LaneName, Vec<String>)>, StoreError>> + Send;
+
+    /// Every lane of `project`, ordered by name, as the list route shows them.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] if the lanes cannot be read.
+    fn lane_list(
+        &mut self,
+        project: &ProjectId,
+    ) -> impl Future<Output = Result<Vec<LaneRow>, StoreError>> + Send;
+}
 
 /// Reads and writes within one atomic transaction.
 ///
@@ -78,4 +138,29 @@ pub trait StoreTx: Reads {
     ///
     /// Returns [`StoreError`] if the backend cannot commit the transaction.
     fn commit(self) -> impl Future<Output = Result<(), StoreError>> + Send;
+
+    /// Replaces the project's lanes with `lanes` under one new version.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] if the project cannot be locked or the rows
+    /// cannot be written.
+    fn replace_lanes(
+        &mut self,
+        project: &ProjectId,
+        lanes: &[ResolvedLane],
+    ) -> impl Future<Output = Result<(), StoreError>> + Send;
+
+    /// The id of a live identity named by id or by handle.
+    ///
+    /// `Ok(None)` means no live identity has that id or handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] if the lookup fails.
+    fn resolve_owner(
+        &mut self,
+        project: &ProjectId,
+        handle: &str,
+    ) -> impl Future<Output = Result<Option<IdentityId>, StoreError>> + Send;
 }
