@@ -303,6 +303,8 @@ Not in this plan:
 
 **Depends on:** Task 8 (and so L21-W).
 
+**Binding if this task lets an agent launch a template** (integrally-dc, 2026-10-29, after the security review of templates Task 8): every node's permission-related options are clamped to the launching agent's own permission mode, whatever the template or the templates it names say (templates design, review decision 3). Test: an agent launches a team whose node names a person's template with `permission-mode` `bypassPermissions`, and the child runs in the agent's mode. If `launch` takes only a role and no template, this guard waits for the first task that adds templates to it.
+
 **Files:**
 - Modify: `crates/agmen-cli/src/mcp/mod.rs` (`run` `:102` to `115`; `McpOptions` gains `launch: Option<LaunchCredential>` and `with_launch`), `crates/agmen-cli/src/mcp/tools.rs` (two tools; the startup filter beside `hidden_tools` at `:47` to `65`)
 - Test: `tools.rs` unit tests, `crates/agmen-cli/tests/mcp.rs`
