@@ -94,17 +94,20 @@ fn http_url(name: &'static str, value: &str) -> Result<Url, ConfigError> {
         })
 }
 
-/// `value` as an https URL with a host, or [`ConfigError::Invalid`] naming
-/// variable `name`.
+/// `value` as an https URL with a host and no credentials, or
+/// [`ConfigError::Invalid`] naming variable `name`.
 fn https_url(name: &'static str, value: &str) -> Result<Url, ConfigError> {
     Url::parse(value)
         .ok()
         .filter(|url| {
-            url.scheme() == "https" && url.host_str().is_some_and(|host| !host.is_empty())
+            url.scheme() == "https"
+                && url.host_str().is_some_and(|host| !host.is_empty())
+                && url.username().is_empty()
+                && url.password().is_none()
         })
         .ok_or(ConfigError::Invalid {
             name,
-            what: "https URL",
+            what: "https URL without credentials",
         })
 }
 
@@ -289,7 +292,7 @@ impl std::str::FromStr for HubMode {
 pub struct PaddleConfig {
     /// `AGMEN_PADDLE_API_URL`, default `https://api.paddle.com`.
     /// Sandbox hubs set `https://sandbox-api.paddle.com`. Only https URLs
-    /// are accepted.
+    /// without credentials are accepted.
     pub api_url: Url,
     /// `AGMEN_PADDLE_API_KEY`.
     pub api_key: Secret,
@@ -338,20 +341,33 @@ fn hosted_settings(
             .unwrap_or(DEFAULT_PADDLE_API_URL),
     )?;
     let required = |name: &'static str| get(name).ok_or(ConfigError::Missing(name));
-    Ok(Some(HostedConfig {
-        paddle: PaddleConfig {
-            api_url,
-            api_key: Secret::new(required("AGMEN_PADDLE_API_KEY")?),
-            webhook_secret: Secret::new(required("AGMEN_PADDLE_WEBHOOK_SECRET")?),
-        },
-        catalog: Catalog {
-            team_base: required("AGMEN_PADDLE_PRICE_TEAM_BASE")?,
-            team_seat: required("AGMEN_PADDLE_PRICE_TEAM_SEAT")?,
-            business_10: required("AGMEN_PADDLE_PRICE_BUSINESS_10")?,
-            business_25: required("AGMEN_PADDLE_PRICE_BUSINESS_25")?,
-            business_50: required("AGMEN_PADDLE_PRICE_BUSINESS_50")?,
-        },
-    }))
+    let paddle = PaddleConfig {
+        api_url,
+        api_key: Secret::new(required("AGMEN_PADDLE_API_KEY")?),
+        webhook_secret: Secret::new(required("AGMEN_PADDLE_WEBHOOK_SECRET")?),
+    };
+    let catalog = Catalog {
+        team_base: required("AGMEN_PADDLE_PRICE_TEAM_BASE")?,
+        team_seat: required("AGMEN_PADDLE_PRICE_TEAM_SEAT")?,
+        business_10: required("AGMEN_PADDLE_PRICE_BUSINESS_10")?,
+        business_25: required("AGMEN_PADDLE_PRICE_BUSINESS_25")?,
+        business_50: required("AGMEN_PADDLE_PRICE_BUSINESS_50")?,
+    };
+    let prices = [
+        ("AGMEN_PADDLE_PRICE_TEAM_BASE", &catalog.team_base),
+        ("AGMEN_PADDLE_PRICE_TEAM_SEAT", &catalog.team_seat),
+        ("AGMEN_PADDLE_PRICE_BUSINESS_10", &catalog.business_10),
+        ("AGMEN_PADDLE_PRICE_BUSINESS_25", &catalog.business_25),
+        ("AGMEN_PADDLE_PRICE_BUSINESS_50", &catalog.business_50),
+    ];
+    for (index, (first, price)) in prices.iter().enumerate() {
+        for (second, other) in prices.iter().skip(index + 1) {
+            if price == other {
+                return Err(ConfigError::DuplicatePriceIds { first, second });
+            }
+        }
+    }
+    Ok(Some(HostedConfig { paddle, catalog }))
 }
 
 /// `AGMEN_RETENTION_DAYS` in self-host mode. Hosted mode ignores the variable:
@@ -441,6 +457,14 @@ pub enum ConfigError {
         name: &'static str,
         /// What it should hold.
         what: &'static str,
+    },
+    /// Two Paddle prices use the same id, so the catalog is ambiguous.
+    #[error("{first} and {second} must name distinct Paddle price ids")]
+    DuplicatePriceIds {
+        /// The first variable.
+        first: &'static str,
+        /// The other variable with the same id.
+        second: &'static str,
     },
 }
 
@@ -1038,6 +1062,70 @@ mod tests {
             ),
             "{missing_hook}"
         );
+    }
+
+    #[test]
+    fn paddle_url_with_userinfo_is_refused_without_echoing_it() {
+        let username = runtime_secret("url-user");
+        let password = runtime_secret("url-password");
+        for url in [
+            format!("https://{username}:{password}@api.paddle.com"),
+            format!("https://{username}@api.paddle.com"),
+            format!("https://:{password}@api.paddle.com"),
+            format!("https://{username}:@api.paddle.com"),
+            format!("https://%75{username}:%70{password}@api.paddle.com"),
+        ] {
+            let Err(error) = Config::from_lookup(|name| match name {
+                "AGMEN_PADDLE_API_URL" => Some(url.clone()),
+                _ => hosted_setting(name),
+            }) else {
+                panic!("Paddle API URL with userinfo must be refused");
+            };
+            assert!(matches!(
+                error,
+                ConfigError::Invalid {
+                    name: "AGMEN_PADDLE_API_URL",
+                    ..
+                }
+            ));
+            for rendered in [error.to_string(), format!("{error:?}")] {
+                assert!(rendered.contains("AGMEN_PADDLE_API_URL"));
+                assert!(!rendered.contains(&username), "username appeared in error");
+                assert!(!rendered.contains(&password), "password appeared in error");
+                assert!(!rendered.contains(&url), "URL appeared in error");
+            }
+        }
+    }
+
+    #[test]
+    fn duplicate_price_ids_are_refused() {
+        let names = [
+            "AGMEN_PADDLE_PRICE_TEAM_BASE",
+            "AGMEN_PADDLE_PRICE_TEAM_SEAT",
+            "AGMEN_PADDLE_PRICE_BUSINESS_10",
+            "AGMEN_PADDLE_PRICE_BUSINESS_25",
+            "AGMEN_PADDLE_PRICE_BUSINESS_50",
+        ];
+        for (index, first) in names.iter().enumerate() {
+            for second in names.iter().skip(index + 1) {
+                let Err(error) = Config::from_lookup(|name| {
+                    if name == *second {
+                        hosted_setting(first)
+                    } else {
+                        hosted_setting(name)
+                    }
+                }) else {
+                    panic!("duplicate Paddle price ids must be refused");
+                };
+                let message = error.to_string();
+                assert!(message.contains(first), "{message}");
+                assert!(message.contains(second), "{message}");
+                assert!(
+                    !message.contains(&hosted_setting(first).unwrap()),
+                    "price id appeared in error"
+                );
+            }
+        }
     }
 
     #[test]

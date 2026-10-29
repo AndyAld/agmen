@@ -30,6 +30,12 @@ use crate::{db, events, health, human_post, identities, invites, items, lanes, m
 /// How long the hub waits for GitHub or EMQX to answer.
 const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(10);
 
+const ADOPTED_GROUP_MESSAGE: &str = "adopted the database's only tenant as this self-host hub's group; \
+     set AGMEN_HUB_MODE=hosted to keep tenants separate; \
+     hosted mode also requires AGMEN_PADDLE_API_KEY, AGMEN_PADDLE_WEBHOOK_SECRET, \
+     AGMEN_PADDLE_PRICE_TEAM_BASE, AGMEN_PADDLE_PRICE_TEAM_SEAT, \
+     AGMEN_PADDLE_PRICE_BUSINESS_10, AGMEN_PADDLE_PRICE_BUSINESS_25 and AGMEN_PADDLE_PRICE_BUSINESS_50";
+
 /// Why the hub could not start.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -128,8 +134,7 @@ impl Hub {
                 tracing::info!(
                     tenant = %group.tenant,
                     name = %name,
-                    "adopted the database's only tenant as this self-host hub's group; \
-                     set AGMEN_HUB_MODE=hosted to keep tenants separate"
+                    "{ADOPTED_GROUP_MESSAGE}"
                 );
             }
             if let Some(token) = group::mint_claim_token(&pool)
@@ -433,6 +438,48 @@ pub(crate) fn error_chain(err: &dyn std::error::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hub_mode_messages_name_the_paddle_settings() {
+        let messages = [
+            (
+                GroupError::ManyTenants(2).to_string(),
+                "a self-host hub has one group, but the database has 2 tenants; set AGMEN_HUB_MODE=hosted",
+            ),
+            (
+                ADOPTED_GROUP_MESSAGE.to_owned(),
+                "adopted the database's only tenant as this self-host hub's group; set AGMEN_HUB_MODE=hosted to keep tenants separate",
+            ),
+            (
+                crate::BootstrapError::OtherGroup {
+                    group: "agmen".to_owned(),
+                }
+                .to_string(),
+                "this self-host hub has one group, \"agmen\"; use --tenant \"agmen\" or set AGMEN_HUB_MODE=hosted",
+            ),
+        ];
+        let mut missing = Vec::new();
+        for (message, existing) in messages {
+            assert!(message.starts_with(existing), "{message}");
+            for setting in [
+                "AGMEN_PADDLE_API_KEY",
+                "AGMEN_PADDLE_WEBHOOK_SECRET",
+                "AGMEN_PADDLE_PRICE_TEAM_BASE",
+                "AGMEN_PADDLE_PRICE_TEAM_SEAT",
+                "AGMEN_PADDLE_PRICE_BUSINESS_10",
+                "AGMEN_PADDLE_PRICE_BUSINESS_25",
+                "AGMEN_PADDLE_PRICE_BUSINESS_50",
+            ] {
+                if !message.contains(setting) {
+                    missing.push((existing, setting));
+                }
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "messages omit Paddle settings: {missing:?}"
+        );
+    }
 
     #[test]
     fn public_link_keeps_a_path_prefix() {

@@ -95,7 +95,9 @@ Copied from the spec. Every task's requirements include these.
   - `Config.hosted: Option<HostedConfig>` (`Some` exactly when `mode` is `Hosted`), `Config.retention_days: Option<u32>`.
   - Env: `AGMEN_PADDLE_API_URL` (default `https://api.paddle.com`; sandbox `https://sandbox-api.paddle.com`), `AGMEN_PADDLE_API_KEY`, `AGMEN_PADDLE_WEBHOOK_SECRET`, `AGMEN_PADDLE_PRICE_TEAM_BASE`, `AGMEN_PADDLE_PRICE_TEAM_SEAT`, `AGMEN_PADDLE_PRICE_BUSINESS_10`, `AGMEN_PADDLE_PRICE_BUSINESS_25`, `AGMEN_PADDLE_PRICE_BUSINESS_50`, `AGMEN_RETENTION_DAYS` (self-host only, 1 to 36500; unset or empty means no limit, since self-host's compose passes `${AGMEN_RETENTION_DAYS:-}`; ignored in hosted mode, where the plan decides).
 
-Rules the tests pin (spec values): seats paid are 4 for a trial, `4 + extra_seats` for Team, the step for Business; quota is 5,000 for a trial, `10_000 + 1_000 * extra_seats` for Team, `50_000 * step / 10` for Business (50,000, 125,000, 250,000), and 0 when not writable; retention is 90 days for trial and Team, 365 for Business. Read-only lasts 14 days after `TrialEnded` and `AwaitingPayment`, 90 after `PaymentFailed` and `Canceled`. `apply` ignores an event whose `occurred_at` is before `last_event_at`, and anything on `Deleted`. `Active(plan)` and `Paid` restore any state but `Deleted` to `Active`; `PastDue` keeps the first `past_due_since`; `Canceled` on `Active` or `PastDue` goes read-only (`Canceled`); `PastDue` and `Canceled` on a trial change nothing.
+Rules the tests pin (spec values): seats paid are 4 for a trial, `4 + extra_seats` for Team, the step for Business; quota is 5,000 for a trial, `10_000 + 1_000 * extra_seats` for Team, `50_000 * step / 10` for Business (50,000, 125,000, 250,000), and 0 when not writable; retention is 90 days for trial and Team, 365 for Business. Read-only lasts 14 days after `TrialEnded` and `AwaitingPayment`, 90 after `PaymentFailed` and `Canceled`. `apply` ignores an event whose `occurred_at` is before `last_event_at`, and anything on `Deleted`. `Active(plan)` restores any state but `Deleted` to `Active`. Paid restores a record that holds a plan to Active; a Paid event for a record with no plan waits for the plan event. `PastDue` keeps the first `past_due_since`; `Canceled` on `Active` or `PastDue` goes read-only (`Canceled`); `PastDue` and `Canceled` on a trial change nothing.
+
+Callers run `tick(now)` before `apply`, using the returned record.
 
 - [ ] **Step 1: Write the failing tests** in `billing/plan_tests.rs` (wired with `#[cfg(test)] #[path = "plan_tests.rs"] mod tests;`) and `config.rs`:
 
@@ -121,9 +123,9 @@ Rules the tests pin (spec values): seats paid are 4 for a trial, `4 + extra_seat
 #[test] fn retention_days_bounded()                      // "30" -> Some(30); unset -> None; "" -> None; "0", "36501", "x" -> Invalid{name:"AGMEN_RETENTION_DAYS"}
 ```
 
-- [ ] **Step 2: Run them to verify they fail.** Run: `cargo nextest run -p agmen-hub --locked -E 'test(/plan_tests|config::tests/)'`. Expected: FAIL to compile (`billing` module missing).
+- [ ] **Step 2: Run them to verify they fail.** Run: `cargo nextest run -p agmen-hub --locked -E 'test(/billing::plan::tests|config::tests/)'`. Expected: FAIL to compile (`billing` module missing).
 - [ ] **Step 3: Implement** the types and functions above. `plan.rs` is pure (no I/O, time passed in); timestamps are `agmen_proto::Timestamp` (jiff). Config reads the Paddle variables only when `mode` is `Hosted`, so a self-hosted hub never builds a Paddle client.
-- [ ] **Step 4: Run the tests to verify they pass.** Run: `cargo nextest run -p agmen-hub --locked -E 'test(/plan_tests|config::tests/)'`, then the gate. Expected: PASS, gate clean.
+- [ ] **Step 4: Run the tests to verify they pass.** Run: `cargo nextest run -p agmen-hub --locked -E 'test(/billing::plan::tests|config::tests/)'`, then the gate. Expected: PASS, gate clean.
 - [ ] **Step 5: Commit:**
 
 ```bash

@@ -213,7 +213,7 @@ pub enum BillingEvent {
 /// What a [`PlanRecord::tick`] changed, for the caller to post or delete.
 ///
 /// `apply` does not produce effects. Its caller posts any alert itself.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum PlanEffect {
     /// Tell the owner the trial ends on `ends_at`. `day` is 5 or 7.
@@ -230,7 +230,7 @@ pub enum PlanEffect {
 }
 
 /// One group's plan, as the hub stores it. Passive data: the clocks are methods.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PlanRecord {
     /// Trial, active, past due, read-only, or deleted.
     pub state: PlanState,
@@ -426,6 +426,9 @@ impl PlanRecord {
     }
 
     /// Apply one provider event that occurred at `occurred_at`.
+    ///
+    /// Callers should run `tick(now)` first and apply the event to the returned
+    /// record.
     ///
     /// An event older than [`Self::last_event_at`] is ignored, and so is every
     /// event once the group is deleted. `PastDue` and `Canceled` do not change

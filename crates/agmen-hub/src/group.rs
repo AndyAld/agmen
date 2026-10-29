@@ -18,7 +18,10 @@ use crate::tenants::join_tenant;
 pub enum GroupError {
     /// A database without a selected group has more than one tenant.
     #[error(
-        "a self-host hub has one group, but the database has {0} tenants; set AGMEN_HUB_MODE=hosted"
+        "a self-host hub has one group, but the database has {0} tenants; set AGMEN_HUB_MODE=hosted; \
+         hosted mode also requires AGMEN_PADDLE_API_KEY, AGMEN_PADDLE_WEBHOOK_SECRET, \
+         AGMEN_PADDLE_PRICE_TEAM_BASE, AGMEN_PADDLE_PRICE_TEAM_SEAT, \
+         AGMEN_PADDLE_PRICE_BUSINESS_10, AGMEN_PADDLE_PRICE_BUSINESS_25 and AGMEN_PADDLE_PRICE_BUSINESS_50"
     )]
     ManyTenants(i64),
     /// A group query failed.
