@@ -86,15 +86,40 @@ impl fmt::Display for Fail {
 
 impl std::error::Error for Fail {}
 
+/// A failure whose `summary` is one line and whose `detail` is printed
+/// under that line. `detail` is already split into lines.
+#[derive(Debug)]
+pub(crate) struct CommandFailed {
+    pub(crate) summary: String,
+    pub(crate) detail: String,
+}
+
+impl fmt::Display for CommandFailed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.summary)
+    }
+}
+
+impl std::error::Error for CommandFailed {}
+
 /// What a failed command says and the exit code it ends with: a
-/// [`Fail`]'s message and code, else the error chain and 3 when the hub
-/// refused the token (401) or the identity it speaks for is revoked (403
-/// `identity_revoked`), else 1. The text goes through the sanitizer, since
-/// hub refusals carry the hub's own text (ruling R63); the CLI prints it to
-/// stderr and `agmen mcp` answers with it.
+/// [`Fail`]'s message and code, a [`CommandFailed`] summary with its detail
+/// under it, else the error chain and 3 when the hub refused the token (401)
+/// or the identity it speaks for is revoked (403 `identity_revoked`), else 1.
+/// The text goes through the sanitizer, since hub refusals carry the hub's
+/// own text (ruling R63); the CLI prints it to stderr and `agmen mcp`
+/// answers with it.
 pub(crate) fn explain(err: &anyhow::Error) -> (String, u8) {
     if let Some(fail) = err.downcast_ref::<Fail>() {
         return (clean_lines(&fail.message), fail.code.exit_code());
+    }
+    if let Some(failed) = err.downcast_ref::<CommandFailed>() {
+        let summary_text = format!("agmen: {}", failed.summary);
+        let summary = clean(&summary_text);
+        if failed.detail.is_empty() {
+            return (summary.into_owned(), 1);
+        }
+        return (format!("{summary}\n{}", clean_lines(&failed.detail)), 1);
     }
     let text = clean(&format!("agmen: {err:#}")).into_owned();
     match refusal(err) {

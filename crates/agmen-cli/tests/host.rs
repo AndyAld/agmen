@@ -7,10 +7,10 @@ mod support;
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::time::Duration;
 
-use support::{Home, assert_exit, stderr};
+use support::{Home, assert_exit, stderr, stdout};
 use tokio::task::JoinHandle;
 
 /// Fake `docker`. `fake_program` supplies the shebang and the call log.
@@ -48,6 +48,9 @@ if [ "$sub" = "stop" ] && [ "$*" = "stop ngrok" ]; then
   fi
 fi
 if [ -n "$sub" ] && [ -e "$HOME/fake/fail-$sub" ]; then
+  if [ -f "$HOME/fake/stderr-$sub" ]; then
+    /bin/cat "$HOME/fake/stderr-$sub" >&2 || exit 1
+  fi
   exit 1
 fi
 case "$sub" in
@@ -68,6 +71,18 @@ case "$sub" in
     if [ -f "$HOME/fake/hub.log" ]; then
       /bin/cat "$HOME/fake/hub.log" || exit 1
     fi
+    # `--follow` stays up so a closed stdout can stop the reader.
+    for arg in "$@"; do
+      if [ "$arg" = "--follow" ]; then
+        i=0
+        while [ "$i" -lt 300 ]; do
+          printf 'tick %s\n' "$i" || exit 0
+          i=$((i + 1))
+          sleep 0.2 || exit 0
+        done
+        break
+      fi
+    done
     ;;
   up)
     if [ -f "$HOME/fake/up-noise" ]; then
@@ -132,6 +147,13 @@ async fn hub_stub() -> HubStub {
 
 fn install_docker(home: &Home) {
     home.fake_program("docker", DOCKER);
+}
+
+/// A host directory with a compose file, so `status` and `logs` treat it as a host.
+fn write_compose(home: &Home) {
+    let dir = host_dir(home);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("compose.yaml"), "name: agmen-agmen\n").unwrap();
 }
 
 fn write_fake(home: &Home, name: &str, bytes: &[u8]) {
@@ -484,6 +506,7 @@ async fn stop_runs_compose_stop() {
 async fn logs_passes_service_and_tail() {
     let home = Home::new();
     install_docker(&home);
+    write_compose(&home);
     let out = run(command(
         &home,
         &["host", "logs", "--tail", "50", "hub"],
@@ -561,7 +584,7 @@ async fn a_docker_in_the_working_directory_is_never_run() {
 async fn a_docker_only_in_the_working_directory_counts_as_missing() {
     let home = Home::new();
     let (work, marker) = plant_docker(&home);
-    fs::create_dir_all(host_dir(&home)).unwrap();
+    write_compose(&home);
     for path in [".", ":"] {
         for args in [
             &["host", "up", "--public-url", "https://hub.example.com"][..],
@@ -587,7 +610,7 @@ async fn a_docker_only_in_the_working_directory_counts_as_missing() {
 #[tokio::test]
 async fn status_stop_and_logs_name_the_install_link_without_docker() {
     let home = Home::new();
-    fs::create_dir_all(host_dir(&home)).unwrap();
+    write_compose(&home);
     for sub in ["status", "stop", "logs"] {
         let mut cmd = command(&home, &["host", sub], false);
         narrow_path(&mut cmd);
@@ -1446,4 +1469,227 @@ async fn stop_leaves_a_different_443_mapping_alone() {
             "{status}"
         );
     }
+}
+
+fn env_secret(dir: &Path) -> String {
+    fs::read_to_string(dir.join(".env"))
+        .unwrap()
+        .lines()
+        .find_map(|line| line.strip_prefix("AGMEN_POSTGRES_PASSWORD="))
+        .unwrap()
+        .to_owned()
+}
+
+#[tokio::test]
+async fn up_failure_shows_dockers_last_error_lines_cleaned() {
+    let home = Home::new();
+    install_docker(&home);
+    write_fake(&home, "ps.json", RUNNING_PS.as_bytes());
+    let stub = hub_stub().await;
+    assert_exit(&up_with_stub(&home, &stub, &[]).await, 0);
+    let secret = env_secret(&host_dir(&home));
+    assert!(secret.len() >= 8, "{secret}");
+
+    let mut stderr_up = String::new();
+    for i in 0..25 {
+        if i == 10 {
+            stderr_up.push_str(&format!("leak {secret}\n"));
+        } else {
+            stderr_up.push_str(&format!("early-{i:02}\n"));
+        }
+    }
+    stderr_up.push_str("pull \u{1b}[31mdenied\u{1b}[0m\n");
+    stderr_up.push_str(&format!("AGMEN_POSTGRES_PASSWORD={secret}\n"));
+    write_fake(&home, "fail-up", b"");
+    write_fake(&home, "stderr-up", stderr_up.as_bytes());
+    let out = run(command(
+        &home,
+        &["host", "up", "--public-url", "https://hub.example.com"],
+        false,
+    ))
+    .await;
+    assert_exit(&out, 1);
+    let err = stderr(&out);
+    let failure = err
+        .find("docker compose up exited 1")
+        .unwrap_or_else(|| panic!("{err}"));
+    let denied = err.find("denied").unwrap_or_else(|| panic!("{err}"));
+    assert!(failure < denied, "{err}");
+    assert!(err.contains("early-07"), "{err}");
+    assert!(!err.contains("early-06"), "{err}");
+    assert!(err.contains("leak"), "{err}");
+    assert!(!err.contains(&secret), "{err}");
+    assert!(!err.contains("AGMEN_POSTGRES_PASSWORD"), "{err}");
+    assert!(!stdout(&out).contains(&secret), "{}", stdout(&out));
+    assert!(
+        err.bytes()
+            .all(|byte| byte == b'\n' || !byte.is_ascii_control()),
+        "{err:?}"
+    );
+
+    let mut long = String::from("LONG_START");
+    long.push_str(&"x".repeat(6_000));
+    long.push_str("VISIBLE_TAIL\n");
+    write_fake(&home, "stderr-up", long.as_bytes());
+    let out = run(command(
+        &home,
+        &["host", "up", "--public-url", "https://hub.example.com"],
+        false,
+    ))
+    .await;
+    assert_exit(&out, 1);
+    let err = stderr(&out);
+    assert!(err.contains("VISIBLE_TAIL"), "{err}");
+    assert!(!err.contains("LONG_START"), "{err}");
+    assert!(err.len() < 6_000, "{}", err.len());
+}
+
+#[tokio::test]
+async fn host_logs_are_cleaned_and_long_lines_cut() {
+    let home = Home::new();
+    install_docker(&home);
+    write_compose(&home);
+    let mut raw = b"ok \x1b[31mred\x1b[0m line\n".to_vec();
+    raw.extend(vec![b'B'; 5_000]);
+    raw.extend(b"END\n");
+    write_fake(&home, "hub.log", &raw);
+    let out = run(command(&home, &["host", "logs"], false)).await;
+    assert_exit(&out, 0);
+    let text = stdout(&out);
+    assert!(text.contains("ok [31mred[0m line"), "{text}");
+    assert!(text.contains("(truncated)"), "{text}");
+    assert!(text.contains(&"B".repeat(100)), "{text}");
+    assert!(!text.contains("END"), "{text}");
+    assert!(
+        text.bytes()
+            .all(|byte| byte == b'\n' || !byte.is_ascii_control()),
+        "{text:?}"
+    );
+}
+
+#[tokio::test]
+async fn host_logs_follow_stops_quietly_when_stdout_closes() {
+    let home = Home::new();
+    install_docker(&home);
+    write_compose(&home);
+    write_fake(&home, "hub.log", b"hello\n");
+    let mut child = command(&home, &["host", "logs", "--follow"], false)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    let mut err_pipe = child.stderr.take().unwrap();
+    drop(child.stdout.take().unwrap());
+    let waited = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::task::spawn_blocking(move || child.wait()),
+    )
+    .await;
+    let Ok(Ok(Ok(status))) = waited else {
+        if Command::new("kill").arg(pid.to_string()).status().is_err() {
+            eprintln!("could not kill {pid}");
+        }
+        panic!("follow did not stop: {waited:?}");
+    };
+    let mut err_text = String::new();
+    std::io::Read::read_to_string(&mut err_pipe, &mut err_text).unwrap();
+    assert_eq!(status.code(), Some(0), "{err_text}");
+    assert!(!err_text.contains("exited"), "{err_text}");
+}
+
+#[tokio::test]
+async fn port_zero_is_a_usage_error() {
+    let home = Home::new();
+    let out = run(command(
+        &home,
+        &[
+            "host",
+            "up",
+            "--port",
+            "0",
+            "--public-url",
+            "https://hub.example.com",
+        ],
+        false,
+    ))
+    .await;
+    assert_exit(&out, 2);
+    assert!(stderr(&out).contains("1 to 65535"), "{}", stderr(&out));
+    assert!(!host_dir(&home).exists());
+}
+
+#[tokio::test]
+async fn public_url_with_userinfo_or_dollar_is_a_usage_error() {
+    let home = Home::new();
+    for url in [
+        "https://user:secret@hub.example.com",
+        "https://user@hub.example.com",
+    ] {
+        let out = run(command(&home, &["host", "up", "--public-url", url], false)).await;
+        assert_exit(&out, 2);
+        let err = stderr(&out);
+        assert!(
+            err.contains("username") || err.contains("password"),
+            "{url}: {err}"
+        );
+    }
+    for url in [
+        "https://hub.example.com/a$b",
+        "https://hub.example.com/$HOME",
+    ] {
+        let out = run(command(&home, &["host", "up", "--public-url", url], false)).await;
+        assert_exit(&out, 2);
+        assert!(stderr(&out).contains('$'), "{url}: {}", stderr(&out));
+    }
+    assert!(!host_dir(&home).join(".env").exists());
+    assert!(!home.path().join("calls/docker.log").exists());
+}
+
+#[tokio::test]
+async fn status_and_logs_without_a_host_exit_3() {
+    let home = Home::new();
+    install_docker(&home);
+    let missing = "no host named agmen: run agmen host up";
+    for args in [&["host", "status"][..], &["host", "logs"][..]] {
+        let out = run(command(&home, args, false)).await;
+        assert_exit(&out, 3);
+        assert!(stderr(&out).contains(missing), "{}", stderr(&out));
+    }
+    fs::create_dir_all(host_dir(&home)).unwrap();
+    for args in [&["host", "status"][..], &["host", "logs"][..]] {
+        let out = run(command(&home, args, false)).await;
+        assert_exit(&out, 3);
+        assert!(stderr(&out).contains(missing), "{}", stderr(&out));
+    }
+    assert!(!home.path().join("calls/docker.log").exists());
+}
+
+#[tokio::test]
+async fn env_comments_and_blank_lines_are_ignored() {
+    let home = Home::new();
+    install_docker(&home);
+    write_fake(&home, "ps.json", RUNNING_PS.as_bytes());
+    let stub = hub_stub().await;
+    assert_exit(&up_with_stub(&home, &stub, &[]).await, 0);
+    let dir = host_dir(&home);
+    let secret = env_secret(&dir);
+    let body = fs::read_to_string(dir.join(".env")).unwrap();
+    let edited = format!("# comment\n\n# AGMEN_PUBLIC_URL=https://evil.example\n{body}");
+    fs::write(dir.join(".env"), &edited).unwrap();
+
+    let out = run(command(&home, &["host", "status"], false)).await;
+    assert_exit(&out, 0);
+    let text = stdout(&out);
+    assert!(
+        text.contains(&format!("http://127.0.0.1:{}", stub.port)),
+        "{text}"
+    );
+    assert!(!text.contains("evil.example"), "{text}");
+
+    assert_exit(&up_with_stub(&home, &stub, &[]).await, 0);
+    let rewritten = fs::read_to_string(dir.join(".env")).unwrap();
+    assert!(rewritten.contains("# comment"), "{rewritten}");
+    assert!(rewritten.contains("\n\n"), "{rewritten}");
+    assert_eq!(env_secret(&dir), secret);
 }

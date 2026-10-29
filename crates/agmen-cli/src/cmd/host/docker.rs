@@ -11,7 +11,19 @@ use serde::Deserialize;
 use tokio::io::{AsyncRead, AsyncReadExt as _};
 use tokio::process::{Child, Command};
 
+use crate::output::{CommandFailed, clean, println_flush};
+
 const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
+/// Last lines of docker's stderr kept on a failed compose command.
+const ERROR_LINE_CAP: usize = 20;
+/// Those lines, joined, stay within this many bytes.
+const ERROR_BYTE_CAP: usize = 4 * 1024;
+/// A log line longer than this is cut and marked.
+const LOG_LINE_MAX: usize = 4 * 1024;
+const TRUNCATED: &str = " (truncated)";
+/// Env values shorter than this are left in a docker error. A port, `url`,
+/// or the host name would otherwise vanish from the line that explains it.
+const REDACT_MIN: usize = 8;
 const SHORT_LIMIT: Duration = Duration::from_secs(30);
 const UP_LIMIT: Duration = Duration::from_secs(240);
 const KILL_LIMIT: Duration = Duration::from_secs(5);
@@ -82,7 +94,9 @@ impl Compose {
     /// # Errors
     ///
     /// When docker cannot be started, times out, or exits non-zero. The
-    /// message names the exit code and does not include docker's output.
+    /// message names the exit code. A non-zero exit also carries the last 20
+    /// lines of stderr, at most 4 KiB, for the caller to print under it.
+    /// Values from `.env` are not included.
     pub(crate) async fn up(&self, services: &[&str]) -> Result<()> {
         let mut args = vec!["up", "-d", "--wait", "--wait-timeout", "180"];
         args.extend(services);
@@ -210,12 +224,52 @@ impl Compose {
         Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
 
-    /// `logs`, inheriting stdio. Not bounded: `--follow` stays open until docker exits.
+    /// `logs`, each line cleaned and cut at 4 KiB. Not bounded: `--follow`
+    /// stays open until docker exits, Ctrl-C, or the reader's pipe closes.
     ///
     /// # Errors
     ///
-    /// When docker cannot be started or exits non-zero.
+    /// When docker cannot be started or exits non-zero. A closed pipe or
+    /// Ctrl-C while following stops the command without an error.
     pub(crate) async fn logs(&self, service: Option<&str>, follow: bool, tail: u32) -> Result<()> {
+        let mut child = self.spawn_logs(service, follow, tail)?;
+        let stdout = child.stdout.take().context("docker stdout was not piped")?;
+        let stderr = child.stderr.take().context("docker stderr was not piped")?;
+        let copying = async {
+            tokio::try_join!(copy_cleaned(stdout, false), copy_cleaned(stderr, true))?;
+            Ok(())
+        };
+        let outcome: Result<()> = if follow {
+            tokio::select! {
+                result = copying => result,
+                () = interrupt() => {
+                    stop_child(&mut child).await;
+                    return Ok(());
+                }
+            }
+        } else {
+            copying.await
+        };
+        if let Err(err) = outcome {
+            stop_child(&mut child).await;
+            if err.is::<Closed>() {
+                return Ok(());
+            }
+            return Err(err);
+        }
+        let status = child.wait().await.context("waiting for docker")?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(CommandFailed {
+                summary: format!("docker compose logs exited {}", exit_code(status)),
+                detail: String::new(),
+            }
+            .into())
+        }
+    }
+
+    fn spawn_logs(&self, service: Option<&str>, follow: bool, tail: u32) -> Result<Child> {
         let tail_text = tail.to_string();
         let mut cmd = self.command()?;
         cmd.arg("logs");
@@ -226,15 +280,17 @@ impl Compose {
         if let Some(service) = service {
             cmd.arg(service);
         }
-        cmd.stdin(Stdio::inherit())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .kill_on_drop(true);
-        let status = cmd.status().await.context("waiting for docker")?;
-        if status.success() {
-            Ok(())
-        } else {
-            bail!("docker compose logs exited {}", exit_code(status));
+        cmd.spawn().context("starting docker")
+    }
+
+    fn failed(&self, verb: &str, output: &Captured) -> CommandFailed {
+        CommandFailed {
+            summary: format!("docker compose {verb} exited {}", exit_code(output.status)),
+            detail: stderr_detail(&self.dir, &output.stderr),
         }
     }
 
@@ -257,20 +313,17 @@ impl Compose {
     async fn stdout(&self, args: &[&str], verb: &str, overflow: Overflow) -> Result<Vec<u8>> {
         match self.captured(args, SHORT_LIMIT, overflow).await {
             Ok(output) if output.status.success() => Ok(output.stdout),
-            Ok(output) => {
-                bail!("docker compose {verb} exited {}", exit_code(output.status))
-            }
+            Ok(output) => Err(self.failed(verb, &output).into()),
             Err(err) => Err(map_timeout(verb, err)),
         }
     }
 
     async fn succeeded(&self, args: &[&str], limit: Duration, verb: &str) -> Result<()> {
-        // The output is dropped, and `up` prints image pull progress, so never fail on its size.
+        // `up` prints image pull progress, so never fail on its size. On failure
+        // the stderr tail is attached; on success it is dropped.
         match self.captured(args, limit, Overflow::KeepEnd).await {
             Ok(output) if output.status.success() => Ok(()),
-            Ok(output) => {
-                bail!("docker compose {verb} exited {}", exit_code(output.status))
-            }
+            Ok(output) => Err(self.failed(verb, &output).into()),
             Err(err) => Err(map_timeout(verb, err)),
         }
     }
@@ -406,6 +459,7 @@ async fn captured(mut cmd: Command, limit: Duration, overflow: Overflow) -> Resu
                 }
             },
             // A long `up` writes pull progress here: never fail on its size.
+            // Only a non-zero exit keeps a tail of this, and never a value from `.env`.
             read_end(stderr),
         )?;
         Ok(Captured {
@@ -495,6 +549,163 @@ fn exit_code(status: ExitStatus) -> String {
         .map_or_else(|| "signal".to_owned(), |code| code.to_string())
 }
 
+/// Stdout or stderr has no reader left.
+#[derive(Debug)]
+struct Closed;
+
+impl fmt::Display for Closed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("the log pipe is closed")
+    }
+}
+
+impl std::error::Error for Closed {}
+
+async fn interrupt() {
+    if tokio::signal::ctrl_c().await.is_err() {
+        std::future::pending::<()>().await;
+    }
+}
+
+async fn copy_cleaned(mut pipe: impl AsyncRead + Unpin, to_stderr: bool) -> Result<()> {
+    let mut buf = [0u8; 8 * 1024];
+    let mut line = Vec::new();
+    let mut over = false;
+    loop {
+        let read = pipe.read(&mut buf).await.context("reading docker logs")?;
+        if read == 0 {
+            break;
+        }
+        for &byte in &buf[..read] {
+            if byte == b'\n' {
+                emit_log_line(&line, over, to_stderr)?;
+                line.clear();
+                over = false;
+                continue;
+            }
+            if line.len() >= LOG_LINE_MAX {
+                over = true;
+                continue;
+            }
+            line.push(byte);
+        }
+    }
+    if !line.is_empty() || over {
+        emit_log_line(&line, over, to_stderr)?;
+    }
+    Ok(())
+}
+
+fn emit_log_line(raw: &[u8], over: bool, to_stderr: bool) -> Result<()> {
+    let shown = format_log_line(raw, over);
+    write_log_line(&shown, to_stderr).map_err(|err| match err.kind() {
+        std::io::ErrorKind::BrokenPipe => anyhow::Error::new(Closed),
+        _ => anyhow::Error::new(err).context("writing logs"),
+    })
+}
+
+fn format_log_line(raw: &[u8], over: bool) -> String {
+    let text = String::from_utf8_lossy(raw);
+    let cleaned = clean(&text);
+    if !over {
+        return cleaned.into_owned();
+    }
+    let budget = LOG_LINE_MAX.saturating_sub(TRUNCATED.len());
+    let end = cleaned.floor_char_boundary(budget.min(cleaned.len()));
+    format!("{}{TRUNCATED}", &cleaned[..end])
+}
+
+fn write_log_line(line: &str, to_stderr: bool) -> std::io::Result<()> {
+    if to_stderr {
+        use std::io::Write as _;
+        let mut out = std::io::stderr().lock();
+        out.write_all(line.as_bytes())?;
+        out.write_all(b"\n")?;
+        out.flush()
+    } else {
+        println_flush(line)
+    }
+}
+
+/// The last [`ERROR_LINE_CAP`] lines of `bytes`, each cleaned, cut to their
+/// last [`ERROR_BYTE_CAP`] bytes. A line that is itself a line of `.env`, and
+/// any value from that file of at least [`REDACT_MIN`] bytes, is left out.
+///
+/// The match runs on the cleaned text and the byte cap comes last, so what is
+/// checked is what is printed: a control character inside a value cannot hide
+/// it from the match and then vanish, and the cap cannot cut one in half.
+fn stderr_detail(dir: &Path, bytes: &[u8]) -> String {
+    // shortcut: exact match only. A value that docker quotes, re-encodes, wraps over
+    // two lines or splits with an escape sequence (its printable part stays), and
+    // a value under REDACT_MIN bytes, still print. Revisit if docker is seen
+    // echoing env values.
+    let (exact, values) = env_redaction(dir);
+    let text = String::from_utf8_lossy(bytes);
+    let lines: Vec<&str> = text.lines().collect();
+    let start = lines.len().saturating_sub(ERROR_LINE_CAP);
+    let mut kept: Vec<String> = Vec::new();
+    for line in &lines[start..] {
+        let cleaned = clean(line);
+        if exact.iter().any(|item| *item == *cleaned) {
+            continue;
+        }
+        kept.push(redact_line(&cleaned, &values));
+    }
+    last_bytes(&kept.join("\n"), ERROR_BYTE_CAP).to_owned()
+}
+
+fn last_bytes(text: &str, max: usize) -> &str {
+    if text.len() <= max {
+        return text;
+    }
+    let mut start = text.len() - max;
+    while start < text.len() && !text.is_char_boundary(start) {
+        start += 1;
+    }
+    &text[start..]
+}
+
+fn redact_line(line: &str, values: &[String]) -> String {
+    let mut ordered: Vec<&str> = values.iter().map(String::as_str).collect();
+    ordered.sort_by_key(|value| std::cmp::Reverse(value.len()));
+    let mut out = line.to_owned();
+    for value in ordered {
+        if out.contains(value) {
+            out = out.replace(value, "");
+        }
+    }
+    out
+}
+
+fn env_redaction(dir: &Path) -> (Vec<String>, Vec<String>) {
+    let Ok(bytes) = std::fs::read(dir.join(".env")) else {
+        return (Vec::new(), Vec::new());
+    };
+    // Same ceiling as `HostEnv::load`. A larger file is not one we wrote.
+    if bytes.len() > 64 * 1024 {
+        return (Vec::new(), Vec::new());
+    }
+    let Ok(text) = String::from_utf8(bytes) else {
+        return (Vec::new(), Vec::new());
+    };
+    let mut exact = Vec::new();
+    let mut values = Vec::new();
+    for raw in text.lines() {
+        // Cleaned like the stderr text it is matched against in `stderr_detail`.
+        let line = clean(raw);
+        exact.push(line.to_string());
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        if key.is_empty() || key.starts_with('#') || value.len() < REDACT_MIN {
+            continue;
+        }
+        values.push(value.to_owned());
+    }
+    (exact, values)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -523,5 +734,54 @@ mod tests {
             read_pipe(at_cap.as_slice()).await.unwrap().len(),
             MAX_OUTPUT_BYTES
         );
+    }
+
+    /// 64 hex characters, as `host up` generates.
+    const SECRET: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    fn host_dir_with_secret() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".env"),
+            format!("AGMEN_POSTGRES_PASSWORD={SECRET}\nAGMEN_HOST_PORT=7080\n"),
+        )
+        .unwrap();
+        dir
+    }
+
+    #[test]
+    fn stderr_detail_hides_a_secret_split_by_a_character_cleaning_drops() {
+        let dir = host_dir_with_secret();
+        let (head, tail) = SECRET.split_at(32);
+        for gap in ["\u{7}", "\r", "\0", "\u{202e}"] {
+            let raw = format!("bad value {head}{gap}{tail} for key\n");
+            let shown = stderr_detail(dir.path(), raw.as_bytes());
+            assert!(!shown.contains(SECRET), "{gap:?}: {shown}");
+            assert!(shown.starts_with("bad value "), "{gap:?}: {shown}");
+        }
+    }
+
+    #[test]
+    fn stderr_detail_hides_a_secret_the_byte_cap_would_cut_in_half() {
+        let dir = host_dir_with_secret();
+        // The last 4 KiB of this line starts 30 characters into the secret.
+        let raw = format!("{SECRET}{}\n", "x".repeat(ERROR_BYTE_CAP - 34));
+        let shown = stderr_detail(dir.path(), raw.as_bytes());
+        assert!(shown.bytes().all(|byte| byte == b'x'), "{shown}");
+    }
+
+    #[test]
+    fn stderr_detail_matches_env_text_that_holds_a_control_character() {
+        // A hand-edited `.env` can hold a tab. The stderr line is cleaned before
+        // the match, so the file's text is cleaned too.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".env"),
+            "AGMEN_NOTE=a\tb\nAGMEN_TOKEN=abcd\tefgh\n",
+        )
+        .unwrap();
+        let raw = "first\nAGMEN_NOTE=a\tb\nbad token abcd\tefgh here\nlast\n";
+        let shown = stderr_detail(dir.path(), raw.as_bytes());
+        assert_eq!(shown, "first\nbad token  here\nlast");
     }
 }
