@@ -6,8 +6,12 @@
 //! routes in `groups.rs` and `agmen-hub paddle-catalog` call it. The webhook
 //! handler does not: it reads what Paddle sends. A checkout or portal URL is
 //! returned only when it is https, has no userinfo, and its host is
-//! `paddle.com`, a host under it (sandbox hosts included), or the configured
-//! API host's registrable domain.
+//! `paddle.com`, a host under it (sandbox hosts included), the configured
+//! API host's registrable domain, or, when the hub sets it with
+//! [`PaddleClient::with_public_url`], the registrable domain of the hub's
+//! public URL. That last rule is there because Paddle's default payment link is
+//! a page on the hub's own site and `checkout.url` is that link plus
+//! `?_ptxn=...`.
 //!
 //! # What the Paddle docs say
 //!
@@ -250,6 +254,7 @@ pub struct PaddleClient {
     http: reqwest::Client,
     base: Url,
     api_key: Secret,
+    public_url: Option<Url>,
 }
 
 impl PaddleClient {
@@ -279,7 +284,21 @@ impl PaddleClient {
             http,
             base: config.api_url.clone(),
             api_key: config.api_key.clone(),
+            public_url: None,
         })
+    }
+
+    /// Also accepts checkout and portal links on the registrable domain of
+    /// `public_url`, the hub's own public URL.
+    ///
+    /// Paddle's default payment link is a page on the hub's site, and a checkout
+    /// URL is that link plus `?_ptxn=...`, so a hub whose site is not under
+    /// the Paddle API host's domain needs this. The https and no-userinfo rules
+    /// still apply.
+    #[must_use]
+    pub fn with_public_url(mut self, public_url: &Url) -> Self {
+        self.public_url = Some(public_url.clone());
+        self
     }
 
     /// Starts a checkout for `tenant` and returns the page to send the buyer to.
@@ -315,7 +334,7 @@ impl PaddleClient {
             .call(Method::POST, url, Some(&checkout_body(tenant, items)))
             .await?;
         let checkout = checkout_url(&response)?;
-        accept_return_url(&checkout, &self.base)?;
+        accept_return_url(&checkout, &self.base, self.public_url.as_ref())?;
         Ok(checkout)
     }
 
@@ -370,7 +389,7 @@ impl PaddleClient {
             "/data/urls/general/overview",
             "the portal overview link",
         )?;
-        accept_return_url(&overview, &self.base)?;
+        accept_return_url(&overview, &self.base, self.public_url.as_ref())?;
         Ok(overview)
     }
 
@@ -624,19 +643,26 @@ fn url_at(response: &Value, pointer: &str, what: &str) -> Result<Url, PaddleErro
 /// Whether `url` may be sent to a buyer.
 ///
 /// The scheme is `https`, there is no userinfo, and the host is `paddle.com`,
-/// a host under it, or the registrable domain of `api`'s host.
-fn return_url_allowed(url: &Url, api: &Url) -> bool {
+/// a host under it, the registrable domain of `api`'s host, or the registrable
+/// domain of the hub's `public` URL (Paddle's default payment link is a page on
+/// the hub's own site).
+fn return_url_allowed(url: &Url, api: &Url, public: Option<&Url>) -> bool {
     if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
         return false;
     }
-    let (Some(host), Some(api_host)) = (url.host_str(), api.host_str()) else {
+    let Some(host) = url.host_str() else {
         return false;
     };
-    host_is_paddle(host) || same_registrable_domain(host, api_host)
+    host_is_paddle(host)
+        || [Some(api), public]
+            .into_iter()
+            .flatten()
+            .filter_map(Url::host_str)
+            .any(|own| same_registrable_domain(host, own))
 }
 
-fn accept_return_url(url: &Url, api: &Url) -> Result<(), PaddleError> {
-    if return_url_allowed(url, api) {
+fn accept_return_url(url: &Url, api: &Url, public: Option<&Url>) -> Result<(), PaddleError> {
+    if return_url_allowed(url, api, public) {
         return Ok(());
     }
     let host = url.host_str().unwrap_or("").to_owned();
@@ -652,9 +678,9 @@ fn host_is_paddle(host: &str) -> bool {
     host == "paddle.com" || host.ends_with(".paddle.com")
 }
 
-fn same_registrable_domain(host: &str, api_host: &str) -> bool {
+fn same_registrable_domain(host: &str, own_host: &str) -> bool {
     let host = registrable_domain(host);
-    !host.is_empty() && host == registrable_domain(api_host)
+    !host.is_empty() && host == registrable_domain(own_host)
 }
 
 fn normalized_host(host: &str) -> String {
@@ -667,7 +693,8 @@ fn normalized_host(host: &str) -> String {
 /// IP. A multi-part public suffix such as `co.uk` is not special-cased, so an
 /// API host under one would allow every host under that suffix. Production API
 /// hosts are `api.paddle.com` and `sandbox-api.paddle.com`; revisit if
-/// `AGMEN_PADDLE_API_URL` ever names a host under a multi-part suffix.
+/// `AGMEN_PADDLE_API_URL` or `AGMEN_PUBLIC_URL` ever names a host under a
+/// multi-part suffix.
 fn registrable_domain(host: &str) -> String {
     let host = normalized_host(host);
     if host.is_empty() || host.parse::<std::net::IpAddr>().is_ok() {

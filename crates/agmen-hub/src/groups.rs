@@ -943,8 +943,8 @@ pub(crate) struct CreatedGroup {
 /// trial gets a Paddle checkout link, or null when Paddle did not answer
 /// or returned a URL the hub will not send. A new group is under its Paddle
 /// limit, so that call is refused only when the hub tracks 10,000 busy groups.
-/// The answer is then 429 `rate_limited`, Paddle is not called, and the group
-/// already exists.
+/// The answer is then still 201 with a null `checkout_url`, and Paddle is not
+/// called: the group already exists.
 pub(crate) async fn create(
     State(hub): State<Hub>,
     caller: Caller,
@@ -959,27 +959,30 @@ pub(crate) async fn create(
     let mut made = insert_group(&mut tx, &human, &request, repo_url, now).await?;
     tx.commit().await?;
     if made.trial_ends_at.is_none() {
-        made.checkout_url = checkout_for_new_group(&hub, &made.tenant).await?;
+        made.checkout_url = checkout_for_new_group(&hub, &made.tenant).await;
     }
     Ok((StatusCode::CREATED, Json(made)))
 }
 
-async fn checkout_for_new_group(hub: &Hub, tenant: &str) -> Result<Option<String>, ApiError> {
+async fn checkout_for_new_group(hub: &Hub, tenant: &str) -> Option<String> {
     let Ok(tenant_id) = tenant.parse::<TenantId>() else {
         tracing::warn!(
             tenant,
             "new group id is not a tenant id, so it has no checkout link"
         );
-        return Ok(None);
+        return None;
     };
-    match start_checkout(hub, &tenant_id, Plan::Team { extra_seats: 0 }).await {
-        Ok(url) => Ok(Some(url)),
-        Err(err) if err.is_rate_limited() => Err(err),
-        Err(err) => {
-            tracing::warn!(error = %error_chain(&err), "new group has no checkout link");
-            Ok(None)
-        }
-    }
+    new_group_checkout(start_checkout(hub, &tenant_id, Plan::Team { extra_seats: 0 }).await)
+}
+
+/// The checkout link of a new group, or `None` for any failure, including a
+/// saturated Paddle limiter: the group is already stored, so the answer stays 201.
+fn new_group_checkout(started: Result<String, ApiError>) -> Option<String> {
+    started
+        .inspect_err(|err| {
+            tracing::warn!(error = %error_chain(err), "new group has no checkout link");
+        })
+        .ok()
 }
 
 fn checked_name(name: &str) -> Result<(), ApiError> {
@@ -1296,6 +1299,20 @@ mod tests {
 
     fn at(value: &str) -> Timestamp {
         value.parse().unwrap()
+    }
+
+    #[test]
+    fn a_new_group_without_a_checkout_link_is_still_created() {
+        use std::time::Duration;
+        // The limiter refuses only when 10,000 busy tenants are tracked.
+        let busy = ApiError::rate_limited(Duration::from_secs(7));
+        assert_eq!(new_group_checkout(Err(busy)), None);
+        let bad_url = ApiError::new(StatusCode::BAD_GATEWAY, "paddle_bad_url", "x");
+        assert_eq!(new_group_checkout(Err(bad_url)), None);
+        assert_eq!(
+            new_group_checkout(Ok("https://x.test/c".to_owned())),
+            Some("https://x.test/c".to_owned())
+        );
     }
 
     #[test]
