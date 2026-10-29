@@ -701,3 +701,142 @@ fn undo_cannot_remove_a_coordinator() {
     ));
     assert_eq!(load(&path, &project()).unwrap(), with_coordinator);
 }
+
+fn saved(settings: &ListenerSettings) -> (tempfile::TempDir, std::path::PathBuf) {
+    let (dir, path) = file();
+    save(&path, &project(), settings).unwrap();
+    (dir, path)
+}
+
+fn effort(level: Option<&str>) -> ListenerSettings {
+    ListenerSettings {
+        effort: level.map(str::to_owned),
+        ..ListenerSettings::default()
+    }
+}
+
+fn waits_for(from: &ListenerSettings, to: ListenerSettings, field: Field) {
+    let (_dir, path) = saved(from);
+    let original = std::fs::read(&path).unwrap();
+    let mut changes = Changes::default();
+    let Applied::Pending { widens, .. } = changes
+        .propose(&path, &project(), "person01", &[], to)
+        .unwrap()
+    else {
+        panic!("{field:?} change should wait for the owner");
+    };
+    assert_eq!(widens, [field]);
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+}
+
+fn applies_now(from: &ListenerSettings, to: ListenerSettings) {
+    let (_dir, path) = saved(from);
+    let mut changes = Changes::default();
+    let Applied::Now { undo } = changes
+        .propose(&path, &project(), "person01", &[], to.clone())
+        .unwrap()
+    else {
+        panic!("narrowing should apply now");
+    };
+    assert_eq!(load(&path, &project()).unwrap(), to);
+    changes.undo(&path, &project(), &undo).unwrap();
+    assert_eq!(load(&path, &project()).unwrap(), *from);
+}
+
+#[test]
+fn reviews_off_waits_for_apply() {
+    let off = ListenerSettings {
+        reviews: Reviews::Off,
+        ..ListenerSettings::default()
+    };
+    waits_for(&ListenerSettings::default(), off, Field::Reviews);
+}
+
+#[test]
+fn reviews_on_applies_now() {
+    let off = ListenerSettings {
+        reviews: Reviews::Off,
+        ..ListenerSettings::default()
+    };
+    applies_now(&off, ListenerSettings::default());
+}
+
+#[test]
+fn model_change_waits_for_apply_in_both_directions() {
+    // No model-to-tier order exists in agmen-roles, so no change is provably lower.
+    let named = |model: &str| ListenerSettings {
+        model: model.into(),
+        ..ListenerSettings::default()
+    };
+    waits_for(
+        &named("claude-haiku-5-5"),
+        named("claude-opus-5-5"),
+        Field::Model,
+    );
+    waits_for(
+        &named("claude-opus-5-5"),
+        named("claude-haiku-5-5"),
+        Field::Model,
+    );
+}
+
+#[test]
+fn effort_raised_waits_for_apply() {
+    waits_for(&effort(Some("low")), effort(Some("high")), Field::Effort);
+    waits_for(&effort(Some("xhigh")), effort(Some("max")), Field::Effort);
+}
+
+#[test]
+fn effort_lowered_applies_now() {
+    applies_now(&effort(Some("high")), effort(Some("low")));
+    applies_now(&effort(Some("high")), effort(Some("high")));
+    applies_now(&effort(None), effort(None));
+}
+
+#[test]
+fn effort_without_a_provable_order_waits_for_apply() {
+    waits_for(&effort(None), effort(Some("low")), Field::Effort);
+    waits_for(&effort(Some("low")), effort(None), Field::Effort);
+    waits_for(&effort(Some("low")), effort(Some("turbo")), Field::Effort);
+    waits_for(&effort(Some("turbo")), effort(Some("low")), Field::Effort);
+}
+
+#[test]
+fn a_field_classify_does_not_know_waits_for_apply() {
+    // Simulates a field added to `ListenerSettings` without a classification:
+    // the carry step forgets max_workers, so the probe still differs from `after`.
+    fn forgets_max_workers(to: &mut ListenerSettings, from: &ListenerSettings) {
+        let kept = to.max_workers;
+        carry_classified(to, from);
+        to.max_workers = kept;
+    }
+    let (_dir, path) = saved(&ListenerSettings::default());
+    let original = std::fs::read(&path).unwrap();
+    let narrower = ListenerSettings {
+        max_workers: 2,
+        ..ListenerSettings::default()
+    };
+    let mut changes = Changes::default();
+    let Applied::Pending { widens, .. } = changes
+        .propose_with(
+            forgets_max_workers,
+            &path,
+            &project(),
+            "person01",
+            &[],
+            narrower.clone(),
+        )
+        .unwrap()
+    else {
+        panic!("an unclassified difference must wait for the owner");
+    };
+    assert_eq!(widens, [Field::Unclassified]);
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    // The real carry step knows every field, so the same change narrows.
+    assert!(matches!(
+        changes
+            .propose(&path, &project(), "person01", &[], narrower)
+            .unwrap(),
+        Applied::Now { .. }
+    ));
+}

@@ -651,6 +651,20 @@ impl Changes {
         coordinators: &[&str],
         after: ListenerSettings,
     ) -> Result<Applied, SettingsError> {
+        self.propose_with(carry_classified, path, project, person, coordinators, after)
+    }
+
+    /// `propose` with the step that names the classified fields injectable, so a
+    /// test can stand in for a field nobody classified.
+    fn propose_with(
+        &mut self,
+        carry: fn(&mut ListenerSettings, &ListenerSettings),
+        path: &Path,
+        project: &ProjectId,
+        person: &str,
+        coordinators: &[&str],
+        after: ListenerSettings,
+    ) -> Result<Applied, SettingsError> {
         validate(path, project, &after)?;
         let before = load(path, project)?;
         if before
@@ -660,7 +674,7 @@ impl Changes {
         {
             return Err(SettingsError::CoordinatorRemoval);
         }
-        let direction = direction(&before, &after, person, coordinators);
+        let direction = direction(&before, &after, person, coordinators, carry);
         let id = ChangeId(
             crate::launch::new_session_id()
                 .map_err(|err| io(Path::new("/dev/urandom"), err))?
@@ -707,6 +721,8 @@ impl Changes {
         Ok(applied)
     }
 
+    // shortcut: the caller must run `check_request` (batch and person) before
+    // `decide`; this store does not know who is asking. L21's wiring task adds it.
     pub(super) fn decide(
         &mut self,
         path: &Path,
@@ -737,6 +753,8 @@ impl Changes {
         Ok(())
     }
 
+    // shortcut: the caller must run `check_request` (batch and person) before
+    // `undo`; this store does not know who is asking. L21's wiring task adds it.
     pub(super) fn undo(
         &mut self,
         path: &Path,
@@ -858,6 +876,7 @@ fn direction(
     after: &ListenerSettings,
     person: &str,
     coordinators: &[&str],
+    carry: fn(&mut ListenerSettings, &ListenerSettings),
 ) -> Direction {
     let before_accept: Vec<_> = before.accept_from.iter().map(String::as_str).collect();
     let after_accept: Vec<_> = after.accept_from.iter().map(String::as_str).collect();
@@ -881,10 +900,78 @@ fn direction(
         push_approval: PushApproval::Required,
         state: AgentState::Stopped,
     };
-    classify(
+    let direction = classify(
         &snapshot(before, &before_accept, &before_roles),
         &snapshot(after, &after_accept, &after_roles),
-    )
+    );
+    let own = [
+        (Field::Model, after.model != before.model),
+        (Field::Effort, effort_raises(&before.effort, &after.effort)),
+        (
+            Field::Reviews,
+            before.reviews == Reviews::On && after.reviews == Reviews::Off,
+        ),
+        (
+            Field::Unclassified,
+            differs_unclassified(before, after, carry),
+        ),
+    ];
+    let mut fields = match direction {
+        Direction::Narrow => Vec::new(),
+        Direction::Widen(fields) => fields,
+    };
+    fields.extend(
+        own.into_iter()
+            .filter_map(|(f, widens)| widens.then_some(f)),
+    );
+    if fields.is_empty() {
+        Direction::Narrow
+    } else {
+        Direction::Widen(fields)
+    }
+}
+
+/// Copies every field `direction` judges. Add a new `ListenerSettings` field
+/// here only together with its widening rule in `direction`.
+fn carry_classified(to: &mut ListenerSettings, from: &ListenerSettings) {
+    to.model.clone_from(&from.model);
+    to.effort.clone_from(&from.effort);
+    to.per_delegation = from.per_delegation;
+    to.daily = from.daily;
+    to.max_workers = from.max_workers;
+    to.listener_daily = from.listener_daily;
+    to.accept_from.clone_from(&from.accept_from);
+    to.worker_roles.clone_from(&from.worker_roles);
+    to.reviews = from.reviews;
+}
+
+/// Fail closed: a field that differs but is not carried above has no rule, so
+/// the change waits for the owner instead of applying as a narrowing.
+fn differs_unclassified(
+    before: &ListenerSettings,
+    after: &ListenerSettings,
+    carry: fn(&mut ListenerSettings, &ListenerSettings),
+) -> bool {
+    let mut probe = before.clone();
+    carry(&mut probe, after);
+    probe != *after
+}
+
+/// Claude Code's `--effort` words, lowest first (the desktop's `Effort` order).
+const EFFORT_LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+
+/// True unless both levels are known and the new one is not higher. No level
+/// means the agent's own default, so it cannot be shown to be lower or equal.
+fn effort_raises(before: &Option<String>, after: &Option<String>) -> bool {
+    let rank = |level: &str| EFFORT_LEVELS.iter().position(|known| *known == level);
+    match (before.as_deref(), after.as_deref()) {
+        (None, None) => false,
+        (Some(before), Some(after)) => match (rank(before), rank(after)) {
+            (Some(before), Some(after)) => after > before,
+            _ => before != after,
+        },
+        _ => true,
+    }
 }
 
 pub(super) fn check_request(
