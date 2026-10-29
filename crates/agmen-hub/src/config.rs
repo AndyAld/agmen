@@ -7,6 +7,8 @@ use std::time::Duration;
 
 use url::Url;
 
+use crate::billing::Catalog;
+
 /// A secret value: a password, client secret or a URL that embeds one. Its
 /// `Debug` output is redacted, so a logged config never shows it.
 #[derive(Clone, PartialEq, Eq, Hash, Default)]
@@ -73,6 +75,13 @@ impl GithubConfig {
     }
 }
 
+/// `AGMEN_PADDLE_API_URL`'s default. Sandbox hubs set
+/// `https://sandbox-api.paddle.com` instead.
+const DEFAULT_PADDLE_API_URL: &str = "https://api.paddle.com";
+
+/// The most days `AGMEN_RETENTION_DAYS` may name.
+const MAX_RETENTION_DAYS: u32 = 36_500;
+
 /// `value` as an http or https URL, or [`ConfigError::Invalid`] naming
 /// variable `name`.
 fn http_url(name: &'static str, value: &str) -> Result<Url, ConfigError> {
@@ -82,6 +91,20 @@ fn http_url(name: &'static str, value: &str) -> Result<Url, ConfigError> {
         .ok_or(ConfigError::Invalid {
             name,
             what: "http or https URL",
+        })
+}
+
+/// `value` as an https URL with a host, or [`ConfigError::Invalid`] naming
+/// variable `name`.
+fn https_url(name: &'static str, value: &str) -> Result<Url, ConfigError> {
+    Url::parse(value)
+        .ok()
+        .filter(|url| {
+            url.scheme() == "https" && url.host_str().is_some_and(|host| !host.is_empty())
+        })
+        .ok_or(ConfigError::Invalid {
+            name,
+            what: "https URL",
         })
 }
 
@@ -258,6 +281,101 @@ impl std::str::FromStr for HubMode {
     }
 }
 
+/// Paddle Billing API access for a hosted hub.
+///
+/// `api_key` and `webhook_secret` are [`Secret`]s, so [`Config`]'s `Debug`
+/// output stays redacted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaddleConfig {
+    /// `AGMEN_PADDLE_API_URL`, default `https://api.paddle.com`.
+    /// Sandbox hubs set `https://sandbox-api.paddle.com`. Only https URLs
+    /// are accepted.
+    pub api_url: Url,
+    /// `AGMEN_PADDLE_API_KEY`.
+    pub api_key: Secret,
+    /// `AGMEN_PADDLE_WEBHOOK_SECRET`.
+    pub webhook_secret: Secret,
+}
+
+/// Hosted-mode settings. Present on [`Config`] exactly when [`HubMode`] is
+/// [`HubMode::Hosted`], so a self-hosted hub never builds a Paddle client.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostedConfig {
+    /// Paddle API access.
+    pub paddle: PaddleConfig,
+    /// The five Paddle price ids.
+    pub catalog: Catalog,
+}
+
+fn hub_mode(get: &impl Fn(&'static str) -> Option<String>) -> Result<HubMode, ConfigError> {
+    get("AGMEN_HUB_MODE").map_or(Ok(HubMode::default()), |mode| mode.parse())
+}
+
+fn configured_group_name(
+    get: &impl Fn(&'static str) -> Option<String>,
+) -> Result<String, ConfigError> {
+    let name = get("AGMEN_GROUP_NAME").unwrap_or_else(|| "agmen".to_owned());
+    if crate::db::is_display_name(&name) {
+        Ok(name)
+    } else {
+        Err(ConfigError::Invalid {
+            name: "AGMEN_GROUP_NAME",
+            what: "name of 1 to 64 characters without controls or surrounding whitespace",
+        })
+    }
+}
+
+fn hosted_settings(
+    get: &impl Fn(&'static str) -> Option<String>,
+) -> Result<Option<HostedConfig>, ConfigError> {
+    if hub_mode(get)? != HubMode::Hosted {
+        return Ok(None);
+    }
+    let api_url = https_url(
+        "AGMEN_PADDLE_API_URL",
+        get("AGMEN_PADDLE_API_URL")
+            .as_deref()
+            .unwrap_or(DEFAULT_PADDLE_API_URL),
+    )?;
+    let required = |name: &'static str| get(name).ok_or(ConfigError::Missing(name));
+    Ok(Some(HostedConfig {
+        paddle: PaddleConfig {
+            api_url,
+            api_key: Secret::new(required("AGMEN_PADDLE_API_KEY")?),
+            webhook_secret: Secret::new(required("AGMEN_PADDLE_WEBHOOK_SECRET")?),
+        },
+        catalog: Catalog {
+            team_base: required("AGMEN_PADDLE_PRICE_TEAM_BASE")?,
+            team_seat: required("AGMEN_PADDLE_PRICE_TEAM_SEAT")?,
+            business_10: required("AGMEN_PADDLE_PRICE_BUSINESS_10")?,
+            business_25: required("AGMEN_PADDLE_PRICE_BUSINESS_25")?,
+            business_50: required("AGMEN_PADDLE_PRICE_BUSINESS_50")?,
+        },
+    }))
+}
+
+/// `AGMEN_RETENTION_DAYS` in self-host mode. Hosted mode ignores the variable:
+/// the plan decides how long messages are kept.
+fn self_host_retention(
+    get: &impl Fn(&'static str) -> Option<String>,
+) -> Result<Option<u32>, ConfigError> {
+    if hub_mode(get)? != HubMode::SelfHost {
+        return Ok(None);
+    }
+    let Some(value) = get("AGMEN_RETENTION_DAYS") else {
+        return Ok(None);
+    };
+    value
+        .parse::<u32>()
+        .ok()
+        .filter(|days| (1..=MAX_RETENTION_DAYS).contains(days))
+        .map(Some)
+        .ok_or(ConfigError::Invalid {
+            name: "AGMEN_RETENTION_DAYS",
+            what: "number of days from 1 to 36500, or empty for no limit",
+        })
+}
+
 /// Everything the hub needs to start.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -282,6 +400,14 @@ pub struct Config {
     /// `AGMEN_MQTT_WS_UPSTREAM`, optional private `ws://host[:port]/path`
     /// broker listener. Enables `GET /mqtt` on the hub's own origin.
     pub mqtt_ws_upstream: Option<Url>,
+    /// Paddle settings. `Some` exactly when `mode` is [`HubMode::Hosted`].
+    pub hosted: Option<HostedConfig>,
+    /// `AGMEN_RETENTION_DAYS`, self-host only: how many days of message
+    /// history to keep, from 1 to 36500. Unset or empty means no limit.
+    /// Self-host's compose file passes the variable through even when it is
+    /// empty, so an empty value is normal. Ignored in hosted mode, where the
+    /// plan's retention decides. Nothing prunes yet (hosted Task 9).
+    pub retention_days: Option<u32>,
     /// `AGMEN_PUBLIC_MQTT_URL`, default `AGMEN_MQTT_URL`, or the public
     /// hub URL with scheme `wss` and `mqtt` appended when proxying: the broker
     /// address clients connect to, which `GET /v1/me` serves as
@@ -362,6 +488,8 @@ impl Config {
     /// assert_eq!(config.public_mqtt_url.as_str(), "mqtt://emqx:1883");
     /// assert_eq!(config.mode, agmen_hub::HubMode::SelfHost);
     /// assert_eq!(config.group_name, "agmen");
+    /// assert!(config.hosted.is_none());
+    /// assert_eq!(config.retention_days, None);
     /// # Ok(()) }
     /// ```
     pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Self, ConfigError> {
@@ -377,17 +505,8 @@ impl Config {
         };
         let mut config = Self {
             database_url: Secret::new(required("AGMEN_DATABASE_URL")?),
-            mode: get("AGMEN_HUB_MODE").map_or(Ok(HubMode::default()), |mode| mode.parse())?,
-            group_name: {
-                let name = get("AGMEN_GROUP_NAME").unwrap_or_else(|| "agmen".to_owned());
-                if !crate::db::is_display_name(&name) {
-                    return Err(ConfigError::Invalid {
-                        name: "AGMEN_GROUP_NAME",
-                        what: "name of 1 to 64 characters without controls or surrounding whitespace",
-                    });
-                }
-                name
-            },
+            mode: hub_mode(&get)?,
+            group_name: configured_group_name(&get)?,
             listen,
             public_url: url("AGMEN_PUBLIC_URL", required("AGMEN_PUBLIC_URL")?)?,
             github: GithubConfig {
@@ -424,6 +543,8 @@ impl Config {
                 }
             },
             mqtt_ws_upstream: mqtt_ws_upstream(get("AGMEN_MQTT_WS_UPSTREAM"))?,
+            hosted: hosted_settings(&get)?,
+            retention_days: self_host_retention(&get)?,
             // After `mqtt`, so a bad AGMEN_MQTT_URL is reported by its name.
             public_mqtt_url: public_broker_url(&match get("AGMEN_PUBLIC_MQTT_URL") {
                 Some(value) => value,
@@ -620,12 +741,19 @@ mod tests {
             (Some("self-host"), HubMode::SelfHost),
             (Some("hosted"), HubMode::Hosted),
         ] {
+            // Hosted mode requires Paddle settings; the other cases must not.
+            let base = if value == Some("hosted") {
+                hosted_setting
+            } else {
+                without_github
+            };
             let config = Config::from_lookup(|name| match name {
                 "AGMEN_HUB_MODE" => value.map(str::to_owned),
-                _ => without_github(name),
+                _ => base(name),
             })
             .unwrap();
             assert_eq!(config.mode, expected);
+            assert_eq!(config.hosted.is_some(), expected == HubMode::Hosted);
         }
         for value in ["selfhost", "Hosted", " hosted "] {
             assert!(matches!(
@@ -855,5 +983,188 @@ mod tests {
     fn secrets_are_redacted_in_debug() {
         let secret = Secret::new(format!("pw-{}", "x".repeat(12)));
         assert_eq!(format!("{secret:?}"), "Secret(<redacted>)");
+    }
+
+    /// A value built at runtime, so the test source never holds a Paddle key.
+    fn runtime_secret(label: &str) -> String {
+        format!("runtime-{label}-{}", "z".repeat(24))
+    }
+
+    fn hosted_setting(name: &str) -> Option<String> {
+        match name {
+            "AGMEN_HUB_MODE" => Some("hosted".to_owned()),
+            "AGMEN_PADDLE_API_KEY" => Some(runtime_secret("api")),
+            "AGMEN_PADDLE_WEBHOOK_SECRET" => Some(runtime_secret("hook")),
+            "AGMEN_PADDLE_PRICE_TEAM_BASE" => Some("pri_team_base".to_owned()),
+            "AGMEN_PADDLE_PRICE_TEAM_SEAT" => Some("pri_team_seat".to_owned()),
+            "AGMEN_PADDLE_PRICE_BUSINESS_10" => Some("pri_business_10".to_owned()),
+            "AGMEN_PADDLE_PRICE_BUSINESS_25" => Some("pri_business_25".to_owned()),
+            "AGMEN_PADDLE_PRICE_BUSINESS_50" => Some("pri_business_50".to_owned()),
+            _ => without_github(name),
+        }
+    }
+
+    #[test]
+    fn hosted_needs_paddle_settings() {
+        let missing_key = Config::from_lookup(|name| match name {
+            "AGMEN_HUB_MODE" => Some("hosted".to_owned()),
+            _ => without_github(name),
+        })
+        .unwrap_err();
+        assert!(
+            matches!(missing_key, ConfigError::Missing("AGMEN_PADDLE_API_KEY")),
+            "{missing_key}"
+        );
+
+        let only_key = Config::from_lookup(|name| match name {
+            "AGMEN_PADDLE_API_KEY" => None,
+            _ => hosted_setting(name),
+        })
+        .unwrap_err();
+        assert!(
+            matches!(only_key, ConfigError::Missing("AGMEN_PADDLE_API_KEY")),
+            "{only_key}"
+        );
+
+        let missing_hook = Config::from_lookup(|name| match name {
+            "AGMEN_PADDLE_WEBHOOK_SECRET" => None,
+            _ => hosted_setting(name),
+        })
+        .unwrap_err();
+        assert!(
+            matches!(
+                missing_hook,
+                ConfigError::Missing("AGMEN_PADDLE_WEBHOOK_SECRET")
+            ),
+            "{missing_hook}"
+        );
+    }
+
+    #[test]
+    fn self_host_ignores_paddle_settings() {
+        for mode in [None, Some("self-host")] {
+            let config = Config::from_lookup(|name| match name {
+                "AGMEN_HUB_MODE" => mode.map(str::to_owned),
+                "AGMEN_PADDLE_API_URL" => Some("http://api.paddle.com".to_owned()),
+                "AGMEN_PADDLE_API_KEY" => Some(runtime_secret("api")),
+                "AGMEN_PADDLE_WEBHOOK_SECRET" => Some(runtime_secret("hook")),
+                "AGMEN_PADDLE_PRICE_TEAM_BASE" => Some("pri_team_base".to_owned()),
+                "AGMEN_PADDLE_PRICE_TEAM_SEAT" => Some("pri_team_seat".to_owned()),
+                "AGMEN_PADDLE_PRICE_BUSINESS_10" => Some("pri_business_10".to_owned()),
+                "AGMEN_PADDLE_PRICE_BUSINESS_25" => Some("pri_business_25".to_owned()),
+                "AGMEN_PADDLE_PRICE_BUSINESS_50" => Some("pri_business_50".to_owned()),
+                _ => without_github(name),
+            })
+            .unwrap();
+            assert!(config.hosted.is_none(), "{mode:?}");
+            assert_eq!(config.mode, HubMode::SelfHost);
+        }
+    }
+
+    #[test]
+    fn retention_days_bounded() {
+        let with_days = |value: Option<&str>| {
+            Config::from_lookup(|name| match name {
+                "AGMEN_RETENTION_DAYS" => value.map(str::to_owned),
+                _ => without_github(name),
+            })
+        };
+        assert_eq!(with_days(Some("30")).unwrap().retention_days, Some(30));
+        assert_eq!(with_days(Some("1")).unwrap().retention_days, Some(1));
+        assert_eq!(
+            with_days(Some("36500")).unwrap().retention_days,
+            Some(36_500)
+        );
+        assert_eq!(with_days(None).unwrap().retention_days, None);
+        assert_eq!(with_days(Some("")).unwrap().retention_days, None);
+        for bad in ["0", "36501", "x"] {
+            assert!(
+                matches!(
+                    with_days(Some(bad)),
+                    Err(ConfigError::Invalid {
+                        name: "AGMEN_RETENTION_DAYS",
+                        ..
+                    })
+                ),
+                "{bad}"
+            );
+        }
+
+        for value in ["30", "x"] {
+            let hosted = Config::from_lookup(|name| match name {
+                "AGMEN_RETENTION_DAYS" => Some(value.to_owned()),
+                _ => hosted_setting(name),
+            })
+            .unwrap();
+            assert_eq!(hosted.retention_days, None, "{value}");
+            assert!(hosted.hosted.is_some(), "{value}");
+        }
+    }
+
+    #[test]
+    fn hosted_config_debug_hides_secrets() {
+        let api_key = runtime_secret("api");
+        let webhook = runtime_secret("hook");
+        let config = Config::from_lookup(|name| match name {
+            "AGMEN_PADDLE_API_KEY" => Some(api_key.clone()),
+            "AGMEN_PADDLE_WEBHOOK_SECRET" => Some(webhook.clone()),
+            _ => hosted_setting(name),
+        })
+        .unwrap();
+        let rendered = format!("{config:?}");
+        assert!(
+            rendered.contains("api_key: Secret(<redacted>)"),
+            "api key was not redacted"
+        );
+        assert!(
+            rendered.contains("webhook_secret: Secret(<redacted>)"),
+            "webhook secret was not redacted"
+        );
+        assert!(!rendered.contains(&api_key), "api key appeared in Debug");
+        assert!(
+            !rendered.contains(&webhook),
+            "webhook secret appeared in Debug"
+        );
+    }
+
+    #[test]
+    fn paddle_api_url_must_be_https() {
+        let with_url = |url: Option<&str>| {
+            Config::from_lookup(|name| match name {
+                "AGMEN_PADDLE_API_URL" => url.map(str::to_owned),
+                _ => hosted_setting(name),
+            })
+        };
+        let api_url = |url: Option<&str>| {
+            with_url(url)
+                .unwrap()
+                .hosted
+                .expect("hosted settings")
+                .paddle
+                .api_url
+        };
+        assert_eq!(api_url(None).as_str(), "https://api.paddle.com/");
+        assert_eq!(api_url(Some("")).as_str(), "https://api.paddle.com/");
+        assert_eq!(
+            api_url(Some("https://sandbox-api.paddle.com")).as_str(),
+            "https://sandbox-api.paddle.com/"
+        );
+        for bad in [
+            "http://api.paddle.com",
+            "http://sandbox-api.paddle.com",
+            "not a url",
+            "mqtt://api.paddle.com:443",
+        ] {
+            assert!(
+                matches!(
+                    with_url(Some(bad)),
+                    Err(ConfigError::Invalid {
+                        name: "AGMEN_PADDLE_API_URL",
+                        ..
+                    })
+                ),
+                "{bad}"
+            );
+        }
     }
 }
