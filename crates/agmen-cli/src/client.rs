@@ -7,7 +7,7 @@
 use std::time::Duration;
 
 use agmen_client::{BodyReadError, LoginError, TokenKey, TokenStore, read_hub_body};
-use agmen_proto::IdentityId;
+use agmen_proto::{IdentityId, Timestamp};
 use anyhow::{Context as _, Result};
 use reqwest::{Method, RequestBuilder};
 use serde::de::DeserializeOwned;
@@ -311,12 +311,25 @@ pub(crate) struct Me {
     pub(crate) groups: Vec<Group>,
 }
 
-/// One group in [`Me`]. Hosted-only fields are ignored on input.
+/// One group in [`Me`].
+///
+/// A hub sends `state` for a group that has a plan record, and
+/// `trial_ends_at` while that state is `trial`. A group with neither leaves
+/// both absent, and `agmen whoami --json` omits them.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct Group {
     pub(crate) tenant: String,
     pub(crate) name: String,
     pub(crate) role: String,
+    /// The group's plan state, such as `trial` or `read_only`. Absent for a
+    /// group with no plan record, which is every self-host group: the hub
+    /// never sends `self_host`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) state: Option<String>,
+    /// When the trial ends. Present only while `state` is `trial`; absent or
+    /// null otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) trial_ends_at: Option<Timestamp>,
 }
 
 /// One project in [`Me`].
@@ -338,8 +351,7 @@ fn me_groups_accept_unknown_fields_and_omit_empty_groups() {
     let mut expected = basic.clone();
     expected["groups"] = serde_json::json!([group]);
     let mut input = expected.clone();
-    input["groups"][0]["state"] = "trial".into();
-    input["groups"][0]["trial_ends_at"] = "2026-11-01T00:00:00Z".into();
+    input["groups"][0]["billing_note"] = "ignored".into();
     let me: Me = serde_json::from_value(input).unwrap();
     assert_eq!(serde_json::to_value(me).unwrap(), expected);
 }
@@ -389,6 +401,45 @@ pub(crate) async fn blocking<R: Send + 'static>(
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn group_reads_hosted_fields() {
+        let group: Group = serde_json::from_value(serde_json::json!({
+            "tenant": "t1",
+            "name": "andy/acme",
+            "role": "owner",
+            "state": "trial",
+            "trial_ends_at": "2026-11-05T00:00:00Z",
+        }))
+        .unwrap();
+        assert_eq!(group.state.as_deref(), Some("trial"));
+        let ends: agmen_proto::Timestamp = "2026-11-05T00:00:00Z".parse().unwrap();
+        assert_eq!(group.trial_ends_at, Some(ends));
+    }
+
+    #[test]
+    fn group_without_hosted_fields_serializes_unchanged() {
+        let input = serde_json::json!({"tenant": "t1", "name": "andy/acme", "role": "owner"});
+        let group: Group = serde_json::from_value(input.clone()).unwrap();
+        let output = serde_json::to_value(group).unwrap();
+        assert_eq!(output, input);
+        assert!(output.get("state").is_none());
+        assert!(output.get("trial_ends_at").is_none());
+    }
+
+    #[test]
+    fn group_null_trial_end_reads_as_none() {
+        let group: Group = serde_json::from_value(serde_json::json!({
+            "tenant": "t1",
+            "name": "andy/acme",
+            "role": "owner",
+            "trial_ends_at": null,
+        }))
+        .unwrap();
+        assert_eq!(group.trial_ends_at, None);
+        let output = serde_json::to_value(group).unwrap();
+        assert!(output.get("trial_ends_at").is_none());
+    }
 
     #[test]
     fn same_hub_ignores_a_trailing_slash_only() {

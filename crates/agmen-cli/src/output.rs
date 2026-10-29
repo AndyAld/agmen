@@ -74,7 +74,24 @@ impl Fail {
     }
 
     pub(crate) fn rejected(reason: impl fmt::Display) -> Self {
-        Self::new(Code::Rejected, format!("rejected: {reason}"))
+        let reason = reason.to_string();
+        let mut message = format!("rejected: {reason}");
+        if let Some(hint) = rejection_hint(&reason) {
+            message.push('\n');
+            message.push_str(hint);
+        }
+        Self::new(Code::Rejected, message)
+    }
+}
+
+/// The plain-words line under `rejected: <reason>`, when `reason` is one
+/// the CLI explains. A quota or read-only refusal gets a line. Every other
+/// reason, including an empty string and `unknown`, does not.
+pub(crate) fn rejection_hint(reason: &str) -> Option<&'static str> {
+    match reason {
+        "quota_exceeded" => Some("the group used today's message quota; it resets at 00:00 UTC"),
+        "read_only" => Some("the group is read-only until its owner pays: agmen group billing"),
+        _ => None,
     }
 }
 
@@ -350,5 +367,65 @@ mod tests {
         assert_eq!(clean("a\tb\u{7}c\u{85}d\u{2028}e"), "abcde");
         assert_eq!(body_text(""), "");
         assert_eq!(clean_lines("one\u{1b}\n    | two"), "one\n    | two");
+    }
+
+    #[test]
+    fn quota_hint() {
+        let hint = rejection_hint("quota_exceeded").unwrap();
+        assert!(hint.contains("00:00 UTC"), "{hint}");
+        assert_eq!(rejection_hint("schema"), None);
+    }
+
+    #[test]
+    fn read_only_hint() {
+        let hint = rejection_hint("read_only").unwrap();
+        assert!(hint.contains("agmen group billing"), "{hint}");
+        assert_eq!(rejection_hint("unknown"), None);
+        assert_eq!(rejection_hint(""), None);
+    }
+
+    #[test]
+    fn rejected_adds_the_hint_on_its_own_line() {
+        let quota = Fail::rejected("quota_exceeded");
+        assert_eq!(quota.code, Code::Rejected);
+        assert_eq!(
+            quota.message,
+            "rejected: quota_exceeded\nthe group used today's message quota; it resets at 00:00 UTC"
+        );
+        let read_only = Fail::rejected(agmen_proto::NackReason::ReadOnly);
+        assert_eq!(read_only.code, Code::Rejected);
+        assert_eq!(
+            read_only.message,
+            "rejected: read_only\nthe group is read-only until its owner pays: agmen group billing"
+        );
+    }
+
+    #[test]
+    fn rejected_without_a_hint_is_unchanged() {
+        for reason in [
+            "forbidden_verb",
+            "body_too_large",
+            agmen_proto::NackReason::Unknown.as_str(),
+        ] {
+            let fail = Fail::rejected(reason);
+            assert_eq!(fail.code, Code::Rejected);
+            assert_eq!(fail.message, format!("rejected: {reason}"));
+        }
+        let unknown = Fail::rejected(agmen_proto::NackReason::Unknown);
+        assert_eq!(unknown.message, "rejected: unknown");
+    }
+
+    #[test]
+    fn explain_prints_both_lines() {
+        let err: anyhow::Error = Fail::rejected("read_only").into();
+        let (text, code) = explain(&err);
+        assert_eq!(
+            text.lines().collect::<Vec<_>>(),
+            [
+                "rejected: read_only",
+                "the group is read-only until its owner pays: agmen group billing",
+            ]
+        );
+        assert_eq!(code, Code::Rejected.exit_code());
     }
 }
