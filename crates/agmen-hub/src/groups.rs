@@ -81,6 +81,9 @@ pub enum SetPlanError {
     /// No tenant has that id.
     #[error("no such tenant")]
     NoTenant,
+    /// The group has a Paddle customer or subscription, so Paddle owns its plan.
+    #[error("this group is billed through Paddle; change its plan there")]
+    PaddleBilled,
     /// Connecting, migrating, or a query failed.
     #[error("database error")]
     Database(#[from] sqlx::Error),
@@ -406,7 +409,7 @@ fn map_tenant_insert(err: sqlx::Error) -> ApiError {
     ApiError::Database(err)
 }
 
-/// Sets `tenant` to an active `plan` with no Paddle ids.
+/// Sets `tenant`, which Paddle does not bill, to an active `plan`.
 ///
 /// `plan` is `team`, `business-10`, `business-25`, or `business-50`. Connects
 /// to `database_url`, runs migrations, and closes the pool before returning.
@@ -415,8 +418,10 @@ fn map_tenant_insert(err: sqlx::Error) -> ApiError {
 ///
 /// [`SetPlanError::BadTenant`] when `tenant` is not a tenant id,
 /// [`SetPlanError::BadPlan`] when `plan` is not one of those four names,
-/// [`SetPlanError::NoTenant`] when no tenant has that id, and
-/// [`SetPlanError::Database`] when connecting or a query fails.
+/// [`SetPlanError::NoTenant`] when no tenant has that id,
+/// [`SetPlanError::PaddleBilled`] when the group has a Paddle customer or
+/// subscription, and [`SetPlanError::Database`] when connecting or a query
+/// fails.
 ///
 /// # Examples
 ///
@@ -472,15 +477,19 @@ async fn write_operator_plan(
     if found.is_none() {
         return Err(SetPlanError::NoTenant);
     }
-    store_plan(&mut tx, tenant, record).await?;
-    sqlx::query(
-        "UPDATE tenant_plans
-         SET paddle_customer_id = NULL, paddle_subscription_id = NULL
-         WHERE tenant_id = $1",
+    // Overwriting a Paddle-billed plan would orphan its subscription: later
+    // webhooks could no longer find the group.
+    let billed: Option<bool> = sqlx::query_scalar(
+        "SELECT paddle_customer_id IS NOT NULL OR paddle_subscription_id IS NOT NULL
+         FROM tenant_plans WHERE tenant_id = $1",
     )
     .bind(tenant.as_str())
-    .execute(&mut *tx)
+    .fetch_optional(&mut *tx)
     .await?;
+    if billed == Some(true) {
+        return Err(SetPlanError::PaddleBilled);
+    }
+    store_plan(&mut tx, tenant, record).await?;
     tx.commit().await?;
     Ok(())
 }

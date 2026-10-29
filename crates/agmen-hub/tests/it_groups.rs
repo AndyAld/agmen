@@ -653,6 +653,46 @@ async fn it_set_plan_sets_an_active_plan_and_refuses_unknown_tenant() {
 }
 
 #[tokio::test]
+async fn it_set_plan_refuses_a_group_billed_through_paddle() {
+    run_hosted(|ctx| async move {
+        let token = login(&ctx, 4243, "andy").await;
+        let made = create_named(&ctx, &token, "acme").await;
+        let tenant = made["tenant"].as_str().unwrap();
+        sqlx::query(
+            "UPDATE tenant_plans
+             SET paddle_customer_id = 'ctm_test', paddle_subscription_id = 'sub_test'
+             WHERE tenant_id = $1",
+        )
+        .bind(tenant)
+        .execute(&ctx.pool)
+        .await
+        .unwrap();
+        assert!(matches!(
+            agmen_hub::apply_operator_plan(ctx.db_url.as_str(), tenant, "team").await,
+            Err(SetPlanError::PaddleBilled)
+        ));
+        // The refusal kept the plan and both Paddle ids.
+        let row: (String, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT state, paddle_customer_id, paddle_subscription_id
+             FROM tenant_plans WHERE tenant_id = $1",
+        )
+        .bind(tenant)
+        .fetch_one(&ctx.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            row,
+            (
+                "trial".to_owned(),
+                Some("ctm_test".to_owned()),
+                Some("sub_test".to_owned())
+            )
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn it_hosted_groups_migration_keeps_tenants_and_reverses() {
     // Unlike run(), this database starts without the current migrations.
     let db = TestDb::create().await;
