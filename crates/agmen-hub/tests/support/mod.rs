@@ -241,9 +241,18 @@ where
     F: FnOnce(Ctx) -> Fut,
     Fut: Future<Output = ()> + Send + 'static,
 {
+    run_hosted_with_paddle(|ctx, _paddle| body(ctx)).await;
+}
+
+/// [`run_hosted`] with access to the fake Paddle signer.
+pub async fn run_hosted_with_paddle<F, Fut>(body: F)
+where
+    F: FnOnce(Ctx, Arc<fake_paddle::FakePaddle>) -> Fut,
+    Fut: Future<Output = ()> + Send + 'static,
+{
     let db = TestDb::create().await;
     let github = FakeGithub::start().await.unwrap();
-    let paddle = fake_paddle::FakePaddle::start().await.unwrap();
+    let paddle = Arc::new(fake_paddle::FakePaddle::start().await.unwrap());
     let hub = TestHub::start_hosted(&db.url, &github, &paddle, DEV_KEY_1, &[]).await;
     let pool = PgPoolOptions::new()
         .max_connections(2)
@@ -257,7 +266,7 @@ where
         hub,
         http: http_client(),
     };
-    let outcome = tokio::spawn(body(ctx)).await;
+    let outcome = tokio::spawn(body(ctx, Arc::clone(&paddle))).await;
     pool.close().await;
     db.drop_db().await;
     drop(paddle);

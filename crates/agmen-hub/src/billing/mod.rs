@@ -9,6 +9,7 @@ mod catalog;
 pub(crate) mod clock;
 mod paddle;
 mod plan;
+pub(crate) mod webhook;
 
 pub use catalog::{Catalog, LineItem};
 pub use clock::PlanClockError;
