@@ -186,6 +186,8 @@ dependencies = [
  "futures-core",
  "getrandom 0.4.3",
  "globset",
+ "hyper",
+ "hyper-util",
  "jiff",
  "jsonwebtoken",
  "regex",

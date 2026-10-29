@@ -327,6 +327,9 @@ impl TestHub {
                 share_group: new_id(),
             },
             public_mqtt_url: Url::parse(PUBLIC_MQTT_URL).unwrap(),
+            mqtt_ws_upstream: std::env::var("AGMEN_IT_MQTT_WS")
+                .ok()
+                .map(|value| Url::parse(&value).unwrap()),
             secrets: agmen_hub::HubSecrets::Given {
                 jwt_signing_key: jwt_key(signing),
                 emqx_api_secret: Secret::new(env("AGMEN_IT_EMQX_API_SECRET")),

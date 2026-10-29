@@ -73,6 +73,7 @@ struct Inner {
     github: Github,
     public_url: Url,
     public_mqtt_url: Url,
+    mqtt_ws_upstream: Option<Url>,
     ingest: IngestState,
     presence: PresenceState,
     events: Slots,
@@ -148,6 +149,7 @@ impl Hub {
                 github,
                 public_url: config.public_url.clone(),
                 public_mqtt_url: config.public_mqtt_url.clone(),
+                mqtt_ws_upstream: config.mqtt_ws_upstream.clone(),
                 ingest: IngestState::default(),
                 presence: PresenceState::default(),
                 events: Slots::default(),
@@ -163,6 +165,13 @@ impl Hub {
             Router::new().route("/v1/claim", post(group::claim))
         } else {
             Router::new()
+        };
+        let router = match &self.inner.mqtt_ws_upstream {
+            Some(upstream) => router.merge(crate::mqtt_proxy::router(
+                upstream.clone(),
+                crate::mqtt_proxy::MAX_PROXIED_CONNECTIONS,
+            )),
+            None => router,
         };
         router
             .merge(health::routes())
@@ -288,7 +297,7 @@ pub(crate) fn public_link(base: &Url, path: &str) -> Url {
 /// Forbids every browser from showing a hub response inside a frame, so no
 /// other site can overlay the approve button and trick a click (ruling
 /// R38). Set on every response, so a page added later cannot miss it.
-async fn refuse_framing(mut response: Response) -> Response {
+pub(super) async fn refuse_framing(mut response: Response) -> Response {
     let headers = response.headers_mut();
     headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
     headers

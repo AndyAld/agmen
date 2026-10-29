@@ -39,6 +39,7 @@ mod items;
 mod lanes;
 mod me;
 mod mqtt;
+mod mqtt_proxy;
 mod numbering;
 mod presence;
 mod projects;
