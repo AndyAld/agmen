@@ -1,7 +1,7 @@
 use agmen_roles::{
     AgentSpec, AgentTemplate, MAX_NODES, MAX_OPTIONS, MAX_REFERENCES, MAX_TEMPLATE_BYTES, Named,
     NodeAgent, PackRef, Reference, RoleError, Template, TemplateError, TemplateOption,
-    agents_started, parse_template,
+    agents_started, parse_template, to_xml,
 };
 
 #[test]
@@ -625,4 +625,144 @@ fn count_product_does_not_overflow() {
     // 64 to the 32nd power does not fit in a u32. The product saturates and the
     // cap still reports too many agents.
     expect_schema(&nested_counts(&["64"; 32]), "64 agents");
+}
+
+#[test]
+fn round_trips() {
+    let inline = r#"<team-template name="mix" saved-by="ada"><description>A mix.</description><node count="2"><agent-template><agent kind="codex" model="gpt-5.4" effort="low"/><role name="engineer"/><prompt>Go.</prompt></agent-template><node template="rust-reviewer" count="0"/></node></team-template>"#;
+    for xml in [
+        include_str!("fixtures/templates/rust-reviewer.agent.xml"),
+        include_str!("fixtures/templates/eng-team.team.xml"),
+        inline,
+        r#"<agent-template name="plain"/>"#,
+    ] {
+        let template = parse_template(xml).expect("parse");
+        assert_eq!(
+            parse_template(&to_xml(&template)).expect("round trip"),
+            template
+        );
+    }
+}
+
+#[test]
+fn markup_in_text_round_trips() {
+    let template = Template::Agent(Named {
+        name: "plain".into(),
+        saved_by: None,
+        template: AgentTemplate {
+            description: Some(r#"a < b & "c" ]]> 'd'"#.into()),
+            prompt: Some("</prompt><options>".into()),
+            ..AgentTemplate::default()
+        },
+    });
+    let xml = to_xml(&template);
+    assert_eq!(parse_template(&xml).expect("round trip"), template);
+    let doc = roxmltree::Document::parse(&xml).expect("xml");
+    assert!(
+        doc.descendants().all(|node| !node.has_tag_name("options")),
+        "{xml}"
+    );
+}
+
+#[test]
+fn writes_the_spec_shape() {
+    let template = parse_template(r#"<agent-template name="plain"/>"#).expect("empty");
+    assert_eq!(
+        to_xml(&template),
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<agent-template name=\"plain\" version=\"1\" />\n"
+    );
+}
+
+#[test]
+fn carriage_return_in_text_round_trips() {
+    // A parser turns a raw carriage return into a newline, so only a character
+    // reference keeps it.
+    let template = parse_template(&agent_xml(
+        "<description>a&#13;b</description><prompt>c&#13;&#10;d</prompt>",
+    ))
+    .expect("character references");
+    let Template::Agent(named) = &template else {
+        panic!("expected an agent template");
+    };
+    assert_eq!(named.template.description.as_deref(), Some("a\rb"));
+    assert_eq!(named.template.prompt.as_deref(), Some("c\r\nd"));
+    assert_eq!(
+        parse_template(&to_xml(&template)).expect("round trip"),
+        template
+    );
+}
+
+#[test]
+fn quote_heavy_text_round_trips_within_the_limit() {
+    // 10 KiB of quotes and apostrophes is a valid prompt. Written back as
+    // &quot; and &apos; it would be 60 KB and the parser would refuse it.
+    let prompt = "'\"".repeat(5 * 1024);
+    let template =
+        parse_template(&agent_xml(&format!("<prompt>{prompt}</prompt>"))).expect("valid prompt");
+    let xml = to_xml(&template);
+    assert!(xml.len() <= MAX_TEMPLATE_BYTES, "{} bytes", xml.len());
+    assert_eq!(parse_template(&xml).expect("round trip"), template);
+}
+
+#[test]
+fn attribute_whitespace_is_written_as_references() {
+    // A parser turns a raw tab, newline or carriage return in an attribute into
+    // a space. Written as references they reach the parser, which refuses
+    // control characters in saved-by, so nothing changes silently.
+    let template = Template::Agent(Named {
+        name: "plain".into(),
+        saved_by: Some("a\nb\tc\rd".into()),
+        template: AgentTemplate::default(),
+    });
+    let xml = to_xml(&template);
+    assert!(xml.contains(r#"saved-by="a&#10;b&#9;c&#13;d""#), "{xml}");
+    expect_schema(&xml, "saved-by");
+}
+
+#[test]
+fn greater_than_is_escaped_only_where_xml_needs_it() {
+    let template = parse_template(&agent_xml(
+        "<prompt>a &gt; b ]&gt; c ]]&gt; d ]]]&gt;</prompt>",
+    ))
+    .expect("text");
+    let xml = to_xml(&template);
+    assert!(
+        xml.contains("<prompt>a > b ]> c ]]&gt; d ]]]&gt;</prompt>"),
+        "{xml}"
+    );
+    assert_eq!(parse_template(&xml).expect("round trip"), template);
+}
+
+#[test]
+fn markup_in_attribute_values_round_trips() {
+    let template = parse_template(
+        r#"<agent-template name="plain"><skills><skill name="s" pack="git@host:a&amp;b/&quot;x&quot;&lt;y&gt;&apos;z@abcdef1"/></skills><options><option name="a" value="&lt;&amp;&quot;&apos;&gt;"/></options></agent-template>"#,
+    )
+    .expect("markup in attributes");
+    let Template::Agent(named) = &template else {
+        panic!("expected an agent template");
+    };
+    assert_eq!(named.template.options[0].value, r#"<&"'>"#);
+    assert_eq!(
+        parse_template(&to_xml(&template)).expect("round trip"),
+        template
+    );
+}
+
+#[test]
+fn entities_and_cdata_in_text_round_trip() {
+    let template = parse_template(TEXT_XML).expect("text");
+    assert_eq!(
+        parse_template(&to_xml(&template)).expect("round trip"),
+        template
+    );
+}
+
+#[test]
+fn stripped_options_are_not_written() {
+    let mut template = parse_template(TEAM_WITH_OPTIONS).expect("team with options");
+    assert!(to_xml(&template).contains("<option"));
+    template.strip_options();
+    let xml = to_xml(&template);
+    assert!(!xml.contains("<option"), "{xml}");
 }

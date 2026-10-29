@@ -20,6 +20,7 @@ mod layer;
 mod render;
 mod schema;
 mod template;
+mod template_xml;
 
 pub use compat::{BUILT_IN, RoleKind as Kind, Tier};
 pub use error::RoleError;
@@ -35,3 +36,4 @@ pub use template::{
     NodeAgent, PackRef, Reference, TeamTemplate, Template, TemplateError, TemplateKind,
     TemplateOption, agents_started, parse_template,
 };
+pub use template_xml::to_xml;
