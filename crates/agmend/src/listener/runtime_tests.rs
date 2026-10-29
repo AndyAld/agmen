@@ -1797,3 +1797,54 @@ async fn listener_stop_preserves_another_logins_intent() {
     assert_eq!(error.code, ErrorCode::Forbidden);
     assert!(path.exists());
 }
+
+#[tokio::test]
+async fn listener_stop_clears_an_unreadable_intent() {
+    let f = Fixture::new(FAKE).await;
+    let path = f.dir.path().join("listener/project1/intent.json");
+    for bytes in [b"not json".to_vec(), vec![b' '; 64 * 1024 + 1]] {
+        f.start().await;
+        std::fs::write(&path, &bytes).unwrap();
+        f.stop().await;
+        assert!(!path.exists());
+        assert_eq!(
+            f.human("listener_status", json!({})).await.unwrap()[0]["state"],
+            "stopped"
+        );
+        // After a daemon restart no entry exists, and stop still clears it.
+        f.listeners().entries.lock().await.clear();
+        std::fs::write(&path, &bytes).unwrap();
+        f.stop().await;
+        assert!(!path.exists());
+    }
+}
+
+#[tokio::test]
+async fn listener_stop_refuses_a_directory_or_symlink_intent() {
+    use std::os::unix::fs::symlink;
+    let f = Fixture::new(FAKE).await;
+    f.start().await;
+    f.stop().await;
+    f.listeners().entries.lock().await.clear();
+    let path = f.dir.path().join("listener/project1/intent.json");
+    let target = f.dir.path().join("target.json");
+    std::fs::write(&target, b"keep").unwrap();
+    for make in [
+        (|path: &Path, _: &Path| std::fs::create_dir(path).unwrap()) as fn(&Path, &Path),
+        |path, target| symlink(target, path).unwrap(),
+    ] {
+        make(&path, &target);
+        let error = f
+            .human("listener_stop", json!({"project":"project1"}))
+            .await
+            .unwrap_err();
+        assert!(error.message.contains("not a regular file"));
+        assert!(std::fs::symlink_metadata(&path).is_ok());
+        assert_eq!(std::fs::read(&target).unwrap(), b"keep");
+        if path.is_dir() {
+            std::fs::remove_dir(&path).unwrap();
+        } else {
+            std::fs::remove_file(&path).unwrap();
+        }
+    }
+}

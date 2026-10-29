@@ -392,20 +392,18 @@ impl Listeners {
                                 return Err(forbidden());
                             }
                         }
-                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                        Err(_) => return Err(failure("reading listener intent failed")),
+                        // A missing, corrupt or oversized intent names no owner, and
+                        // readopt skips it, so stop may clear it below.
+                        Err(_) => {}
                     }
                 }
-                let path = self
-                    .state_dir
-                    .join("listener")
-                    .join(project.as_str())
-                    .join("intent.json");
-                match tokio::fs::remove_file(path).await {
-                    Ok(()) => {}
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(_) => return Err(failure("removing listener intent failed")),
-                }
+                remove_intent(
+                    self.state_dir
+                        .join("listener")
+                        .join(project.as_str())
+                        .join("intent.json"),
+                )
+                .await?;
                 Ok(json!({}))
             }
             "listener_set" => {
@@ -1510,6 +1508,28 @@ fn read_intent(path: &Path) -> std::io::Result<Intent> {
         return Err(std::io::Error::other("listener intent is too large"));
     }
     serde_json::from_slice(&bytes).map_err(std::io::Error::other)
+}
+
+// Removes a regular file only. It never follows a symlink, and it refuses a
+// directory or symlink, because the person (not agmend) put that there.
+async fn remove_intent(path: PathBuf) -> Result<(), ApiError> {
+    tokio::task::spawn_blocking(move || match std::fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.is_file() => std::fs::remove_file(&path)
+            .or_else(|error| {
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    Ok(())
+                } else {
+                    Err(error)
+                }
+            })
+            .map_err(|_| "removing listener intent failed"),
+        Ok(_) => Err("listener intent is not a regular file; remove it by hand"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err("reading listener intent failed"),
+    })
+    .await
+    .map_err(|_| failure("listener intent worker failed"))?
+    .map_err(failure)
 }
 
 async fn write_intent(path: PathBuf, intent: Intent) -> Result<(), ApiError> {
