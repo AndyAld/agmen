@@ -147,20 +147,64 @@ async fn it_state_roster_matches_the_retained_topic() {
             )
             .await;
             say(&ctx, &room.andy_token, p).await;
-            let retained = retained_until(&mut observer, &topic, |roster| {
-                roster
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .any(|e| e["identity_id"] == room.sol.id && e["status"] == "online")
-            })
-            .await;
-
-            let (status, body) = state(&ctx, &room.andy_token, p, Some("roster")).await;
-            assert_eq!(status, StatusCode::OK, "{body}");
-            assert_eq!(body["key"], "roster");
-            assert_eq!(body["value"], retained, "HTTP differs from the topic");
-            assert_eq!(body["as_of_seq"], 1, "the feed holds one message");
+            // The topic is the head. Wait until a head's etag matches a GET
+            // whose array already shows sol online.
+            let deadline = tokio::time::Instant::now() + WAIT;
+            let mut last = None;
+            let mut matched = false;
+            for _ in 0..1_000 {
+                let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if left.is_zero() {
+                    break;
+                }
+                let Some(publish) = observer.recv_on(&topic, left).await else {
+                    break;
+                };
+                let retained: Value = serde_json::from_slice(&publish.payload).unwrap();
+                let mut url = ctx.hub.url(&format!("/v1/projects/{p}/state"));
+                url.query_pairs_mut().append_pair("key", "roster");
+                let resp = ctx
+                    .http
+                    .get(url)
+                    .bearer_auth(&room.andy_token)
+                    .send()
+                    .await
+                    .unwrap();
+                let status = resp.status();
+                let etag = resp
+                    .headers()
+                    .get(reqwest::header::ETAG)
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_owned);
+                let body: Value = resp.json().await.unwrap_or(Value::Null);
+                let entries = body["value"].as_array();
+                let sol_online = entries.is_some_and(|entries| {
+                    entries.iter().any(|entry| {
+                        entry["identity_id"] == room.sol.id && entry["status"] == "online"
+                    })
+                });
+                let quoted = etag.as_deref().unwrap_or("");
+                let bare = quoted.trim_matches('"');
+                if sol_online && retained["etag"] == bare {
+                    assert_eq!(status, StatusCode::OK, "{body}");
+                    assert_eq!(body["key"], "roster");
+                    assert_eq!(body["as_of_seq"], 1, "the feed holds one message");
+                    let entries = entries.unwrap();
+                    let online = entries
+                        .iter()
+                        .filter(|entry| entry["status"] == "online")
+                        .count();
+                    assert_eq!(quoted, format!("\"{bare}\""));
+                    assert_eq!(
+                        retained,
+                        json!({ "count": entries.len(), "online": online, "etag": bare })
+                    );
+                    matched = true;
+                    break;
+                }
+                last = Some(json!({ "retained": retained, "body": body, "etag": etag }));
+            }
+            assert!(matched, "{topic} never matched HTTP; last seen: {last:?}");
 
             sol.disconnect().await;
             observer.disconnect().await;

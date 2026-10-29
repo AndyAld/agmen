@@ -1,14 +1,14 @@
-//! Presence and the retained roster (protocol section 2).
+//! Presence and the roster head (protocol section 2).
 //!
 //! Each identity publishes its retained `presence/{id}` (`online` or
 //! `away`), and its last will sets `offline`. The hub reads every
 //! project's presence on a plain (not shared) subscription, so each hub
 //! instance sees all of it, and the broker hands it the retained
 //! messages again after every reconnect. From presence, each identity's
-//! latest HELLO and the identities table it builds `state/roster`: every
-//! live identity and human member of the project with its status, and
-//! publishes it retained, so a client learns who is there from one
-//! subscription without waking anyone.
+//! latest HELLO and the identities table it builds the roster: every
+//! live identity and human member of the project with its status. It
+//! publishes a small head on `state/roster`, retained. The full array is
+//! `GET /v1/projects/{p}/state?key=roster`, so no agent has to be woken.
 //!
 //! [`Hub::on_recorded`] is ingest's hook into this: a HELLO changes the
 //! roster, a BYE sets its sender offline, and a ROLLCALL gets the hub's
@@ -17,17 +17,15 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Mutex, PoisonError};
 
-use agmen_proto::{
-    IdentityId, IdentityKind, MAX_HELLO_FIELD_BYTES, MessageId, ProjectId, Topics, Verb,
-};
+use agmen_proto::{IdentityId, IdentityKind, MessageId, ProjectId, Topics, Verb};
 use rumqttc_next::{AsyncClient, Publish, PublishOptions, QoS};
-use serde::de::IntoDeserializer as _;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
 use crate::http::{Hub, error_chain};
 use crate::ingest::project_exists;
 use crate::mqtt::MessagingError;
+use crate::roster::roster_head;
 
 /// The hub's subscription to every project's presence (ADR-0002).
 pub(crate) const PRESENCE_FILTER: &str = "agmen/v1/+/+/presence/+";
@@ -38,9 +36,6 @@ const ROSTER_KEY: &str = "roster";
 /// The largest presence payload the hub reads; `{"status":"online"}` is 19
 /// bytes, and anything far bigger is not a presence message.
 const MAX_PRESENCE_BYTES: usize = 1024;
-
-/// The retained `state/{key}` payload limit (protocol section 8).
-const MAX_STATE_BYTES: usize = 4 * 1024;
 
 /// What the hub publishes on `presence/{id}` for a BYE, and what a last
 /// will says.
@@ -69,7 +64,7 @@ struct PresenceMessage {
     status: Status,
 }
 
-/// One identity in `state/roster`.
+/// One identity in the roster (`GET /v1/projects/{p}/state?key=roster`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct RosterEntry {
     pub(crate) identity_id: IdentityId,
@@ -92,6 +87,7 @@ pub(crate) struct RosterEntry {
 
 impl RosterEntry {
     /// An entry with no HELLO details and no `delegated_by`.
+    #[cfg(test)]
     pub(crate) const fn new(
         identity_id: IdentityId,
         handle: String,
@@ -109,15 +105,33 @@ impl RosterEntry {
             delegated_by: None,
         }
     }
-}
 
-/// Why the roster could not be built.
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum RosterError {
-    #[error("database error")]
-    Database(#[from] sqlx::Error),
-    #[error("a stored identity is invalid: {0}")]
-    Stored(String),
+    /// An entry with the mint row and the latest HELLO filled in.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one argument per roster column, so the private fields stay private"
+    )]
+    pub(crate) fn complete(
+        identity_id: IdentityId,
+        handle: String,
+        kind: IdentityKind,
+        status: Status,
+        role: Option<String>,
+        agent: Option<String>,
+        model: Option<String>,
+        delegated_by: Option<IdentityId>,
+    ) -> Self {
+        Self {
+            identity_id,
+            handle,
+            kind,
+            status,
+            role,
+            agent,
+            model,
+            delegated_by,
+        }
+    }
 }
 
 /// What the presence task still has to publish.
@@ -158,9 +172,9 @@ struct View {
     present: HashMap<ProjectId, HashMap<IdentityId, Status>>,
     /// The projects, this hub's or not, that had a presence message. The
     /// first one of each of this hub's projects publishes its roster even
-    /// when it changes no status, since the retained roster may come from
-    /// before a reconnect or from another hub process. It holds at most one
-    /// entry per project with retained presence on the broker.
+    /// when it changes no status, since the retained roster head may come
+    /// from before a reconnect or from another hub process. It holds at
+    /// most one entry per project with retained presence on the broker.
     seen: HashSet<Topics>,
 }
 
@@ -332,81 +346,6 @@ impl Hub {
             _ => {}
         }
     }
-
-    /// `topics`' roster: every live identity and every human member, by
-    /// handle, with its status and its latest HELLO's agent and model.
-    pub(crate) async fn roster(&self, topics: &Topics) -> Result<Vec<RosterEntry>, RosterError> {
-        let project = topics.project();
-        type RosterRow = (
-            String,
-            String,
-            String,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-        );
-        let members: Vec<RosterRow> = sqlx::query_as(
-            "SELECT id, kind, handle, role, agent, delegated_by FROM identities
-             WHERE project_id = $1 AND revoked_at IS NULL
-             UNION ALL
-             SELECT h.id, 'human', h.handle, NULL::text, NULL::text, NULL::text FROM memberships m
-             JOIN humans h ON h.id = m.human_id
-             WHERE m.project_id = $1
-             ORDER BY 3",
-        )
-        .bind(project.as_str())
-        .fetch_all(self.pool())
-        .await?;
-        // Uses the messages_latest_hello index (0005_presence).
-        let hellos: HashMap<String, (Option<String>, Option<String>)> = sqlx::query_as(
-            "SELECT DISTINCT ON (from_id)
-                    from_id, envelope -> 'data' ->> 'agent', envelope -> 'data' ->> 'model'
-             FROM messages
-             WHERE project_id = $1 AND stream = 'feed' AND envelope ->> 'verb' = 'HELLO'
-             ORDER BY from_id, seq DESC",
-        )
-        .bind(project.as_str())
-        .fetch_all(self.pool())
-        .await?
-        .into_iter()
-        .map(
-            |(from, agent, model): (String, Option<String>, Option<String>)| {
-                (from, (agent.map(hello_field), model.map(hello_field)))
-            },
-        )
-        .collect();
-        members
-            .into_iter()
-            .map(|(id, kind, handle, role, minted_agent, delegated_by)| {
-                let (agent, model) = hellos.get(&id).cloned().unwrap_or_default();
-                let identity_id: IdentityId = id
-                    .parse()
-                    .map_err(|err| RosterError::Stored(format!("{err}")))?;
-                let kind = IdentityKind::deserialize(kind.as_str().into_deserializer())
-                    .map_err(|err: serde::de::value::Error| RosterError::Stored(err.to_string()))?;
-                let status = self.presence().status(project, &identity_id);
-                Ok(RosterEntry {
-                    role,
-                    agent: minted_agent.or(agent),
-                    model,
-                    delegated_by: delegated_by
-                        .map(|id| id.parse())
-                        .transpose()
-                        .map_err(|err| RosterError::Stored(format!("{err}")))?,
-                    ..RosterEntry::new(identity_id, handle, kind, status)
-                })
-            })
-            .collect()
-    }
-}
-
-/// `field` cut to [`MAX_HELLO_FIELD_BYTES`] at a character boundary. Ingest
-/// refuses a longer HELLO field, so this only trims one recorded before that
-/// limit, which could otherwise push the retained roster past the broker's
-/// packet limit.
-fn hello_field(mut field: String) -> String {
-    field.truncate(field.floor_char_boundary(MAX_HELLO_FIELD_BYTES));
-    field
 }
 
 /// The project topics and identity of `agmen/v1/{t}/{p}/presence/{id}`.
@@ -532,25 +471,18 @@ async fn flush(hub: &Hub, client: &AsyncClient) {
                 continue;
             }
         };
-        let payload = match serde_json::to_vec(&roster) {
+        let payload = match serde_json::to_vec(&roster_head(&roster)) {
             Ok(payload) => payload,
             Err(err) => {
-                tracing::error!(error = %err, "encoding the roster failed");
+                tracing::error!(error = %err, "encoding the roster head failed");
                 continue;
             }
         };
-        // shortcut: the roster goes out whole even past the 4 KiB state
-        // limit (about 25 identities); serve the full roster over
-        // `GET /projects/{p}/state?key=roster` and keep a small head here
-        // once projects grow past it.
-        if payload.len() > MAX_STATE_BYTES {
-            tracing::warn!(project = %topics.project(), bytes = payload.len(), "the roster is over the 4 KiB state limit");
-        }
         if let Err(err) = client
             .publish(topics.state(ROSTER_KEY), payload, retained.clone())
             .await
         {
-            tracing::warn!(project = %topics.project(), error = %err, "queueing the roster failed");
+            tracing::warn!(project = %topics.project(), error = %err, "queueing the roster head failed");
         }
     }
 }
@@ -606,17 +538,6 @@ mod tests {
         state.clear();
         assert_eq!(state.status(&project, &id), Status::Offline);
         assert!(!state.seen(&topics), "a connect starts over");
-    }
-
-    #[test]
-    fn hello_fields_are_cut_at_a_character_boundary() {
-        assert_eq!(hello_field("opus".to_owned()), "opus");
-        let long = "é".repeat(MAX_HELLO_FIELD_BYTES);
-        let cut = hello_field(long);
-        assert_eq!(cut.len(), MAX_HELLO_FIELD_BYTES);
-        assert_eq!(cut, "é".repeat(MAX_HELLO_FIELD_BYTES / 2));
-        let odd = format!("a{}", "é".repeat(MAX_HELLO_FIELD_BYTES));
-        assert_eq!(hello_field(odd).len(), MAX_HELLO_FIELD_BYTES - 1);
     }
 
     #[test]

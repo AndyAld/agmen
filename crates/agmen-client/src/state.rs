@@ -2,9 +2,9 @@
 //! through a clean `<id>-cli` connection ([`read_state`]), or through a
 //! session's own connection (`Session::read_state`, ruling R68). Also
 //! handle lookup in the roster. The payloads are bare JSON (ruling R51):
-//! `state/head` is `{feed_seq, rules_v, lanes_v, items_v, hub_at}`,
-//! `state/roster` an array of `{identity_id, handle, kind, status, agent?,
-//! model?, delegated_by?}`.
+//! `state/head` is `{feed_seq, rules_v, lanes_v, items_v, hub_at}`, and the
+//! retained `state/roster` is the head `{count, online, etag}`. The full
+//! roster array comes from [`crate::HubClient::roster`].
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
@@ -53,7 +53,10 @@ const CLIENT_CAPACITY: usize = 4;
 ///     file.identity_id.clone(),
 ///     "the identity's hub token",
 /// )?;
-/// let roster = read_state(&file, &hub, "roster").await?.unwrap_or_default();
+/// // The retained roster is a small head. The entries are over HTTP.
+/// let head = read_state(&file, &hub, "roster").await?.unwrap_or_default();
+/// println!("{} identities, {} online", head["count"], head["online"]);
+/// let roster = hub.roster().await?;
 /// match resolve_handle(&roster, "adam/coord")? {
 ///     Some(id) => println!("adam/coord is {id}"),
 ///     None => println!("no adam/coord in this project"),
@@ -374,10 +377,19 @@ struct RosterEntry {
 
 /// The id of the roster entry whose handle is exactly `handle` (`adam/coord`
 /// for an identity, `adam` for a person), or `None` when no entry has it.
-/// `roster` is the retained `state/roster` as [`read_state`] returns it.
+/// `roster` is the array [`crate::HubClient::roster`] returns.
+///
+/// ```no_run
+/// # async fn example(hub: agmen_client::HubClient) -> Result<(), Box<dyn std::error::Error>> {
+/// let roster = hub.roster().await?;
+/// let id = agmen_client::resolve_handle(&roster, "andy/sol")?;
+/// println!("{id:?}");
+/// # Ok(()) }
+/// ```
 ///
 /// ```
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// // The array below is the `value` `HubClient::roster` returns.
 /// let roster = serde_json::json!([
 ///     { "identity_id": "idn7k2q9", "handle": "andy/sol", "kind": "agent", "status": "online" },
 /// ]);

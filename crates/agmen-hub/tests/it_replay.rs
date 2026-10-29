@@ -396,28 +396,59 @@ fn status_of(roster: &[Value], id: &str) -> Option<String> {
     entry(roster, id).map(|entry| entry["status"].as_str().unwrap().to_owned())
 }
 
-/// Reads `state/roster` on `client` (subscribed to it) until `done` holds,
-/// and returns that roster; fails after `within`.
+/// How many roster heads one wait reads before it gives up.
+const MAX_ROSTER_HEADS: usize = 1_000;
+
+/// The roster array from `GET /v1/projects/{p}/state?key=roster` on `hub`.
+async fn roster_over_http(ctx: &Ctx, hub: &TestHub, token: &str, project: &str) -> Vec<Value> {
+    let mut url = hub.url(&format!("/v1/projects/{project}/state"));
+    url.query_pairs_mut().append_pair("key", "roster");
+    let resp = ctx.http.get(url).bearer_auth(token).send().await.unwrap();
+    let status = resp.status();
+    let body: Value = resp.json().await.unwrap_or(Value::Null);
+    assert_eq!(status, StatusCode::OK, "{body}");
+    body["value"]
+        .as_array()
+        .unwrap_or_else(|| panic!("roster value is not an array: {body}"))
+        .clone()
+}
+
+/// Waits for a retained roster head on `client`, then reads the roster array
+/// from `hub`. Returns that array once `done` holds. A miss waits for the
+/// next head. Gives up after `within` or [`MAX_ROSTER_HEADS`] heads.
 async fn roster_until(
+    ctx: &Ctx,
+    hub: &TestHub,
+    token: &str,
     client: &mut Client,
     topics: &Topics,
     within: Duration,
     done: impl Fn(&[Value]) -> bool,
 ) -> Vec<Value> {
     let topic = topics.state("roster");
+    let project = topics.project().as_str();
     let deadline = tokio::time::Instant::now() + within;
     let mut last = None;
-    loop {
+    for _ in 0..MAX_ROSTER_HEADS {
         let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() {
+            break;
+        }
         let Some(publish) = client.recv_on(&topic, left).await else {
-            panic!("the roster did not get there within {within:?}; last seen: {last:?}");
+            break;
         };
-        let roster: Vec<Value> = serde_json::from_slice(&publish.payload).unwrap();
+        let head: Value = serde_json::from_slice(&publish.payload).unwrap();
+        if !head.is_object() {
+            last = Some(head);
+            continue;
+        }
+        let roster = roster_over_http(ctx, hub, token, project).await;
         if done(&roster) {
             return roster;
         }
-        last = Some(roster);
+        last = Some(json!({ "head": head, "roster": roster }));
     }
+    panic!("the roster did not get there within {within:?}; last seen: {last:?}");
 }
 
 #[tokio::test]
@@ -432,17 +463,29 @@ async fn it_presence_last_will() {
             let mut observer = connect_with_will(&ctx, &room.project, &watcher).await;
             subscribe(&mut observer, &topics.state("roster")).await;
             let sol = appear(&ctx, &room.project, &room.sol, ONLINE).await;
-            roster_until(&mut observer, &topics, ROSTER_WAIT, |roster| {
-                status_of(roster, &room.sol.id).as_deref() == Some("online")
-            })
+            roster_until(
+                &ctx,
+                &ctx.hub,
+                &room.andy_token,
+                &mut observer,
+                &topics,
+                ROSTER_WAIT,
+                |roster| status_of(roster, &room.sol.id).as_deref() == Some("online"),
+            )
             .await;
 
             // Kill sol's socket: no DISCONNECT, so EMQX publishes its will.
             drop(sol);
             let killed = tokio::time::Instant::now();
-            let roster = roster_until(&mut observer, &topics, KEEP_ALIVE * 3 / 2, |roster| {
-                status_of(roster, &room.sol.id).as_deref() == Some("offline")
-            })
+            let roster = roster_until(
+                &ctx,
+                &ctx.hub,
+                &room.andy_token,
+                &mut observer,
+                &topics,
+                KEEP_ALIVE * 3 / 2,
+                |roster| status_of(roster, &room.sol.id).as_deref() == Some("offline"),
+            )
             .await;
             let took = killed.elapsed();
             assert!(took <= KEEP_ALIVE * 3 / 2, "offline after {took:?}");
@@ -471,9 +514,15 @@ async fn it_presence_roster_resent_by_a_new_hub() {
             let mut observer = connect_with_will(&ctx, &room.project, &watcher).await;
             subscribe(&mut observer, &topics.state("roster")).await;
             let sol = appear(&ctx, &room.project, &room.sol, ONLINE).await;
-            roster_until(&mut observer, &topics, ROSTER_WAIT, |roster| {
-                status_of(roster, &room.sol.id).as_deref() == Some("online")
-            })
+            roster_until(
+                &ctx,
+                &ctx.hub,
+                &room.andy_token,
+                &mut observer,
+                &topics,
+                ROSTER_WAIT,
+                |roster| status_of(roster, &room.sol.id).as_deref() == Some("online"),
+            )
             .await;
 
             // The hub stops, then sol dies while no hub is there: its will
@@ -497,9 +546,17 @@ async fn it_presence_roster_resent_by_a_new_hub() {
             // retained presence and sends the roster again.
             let fresh = TestHub::start(&ctx.db_url, &ctx.github, DEV_KEY_1, &[]).await;
             let messaging = fresh.start_messaging().await;
-            roster_until(&mut observer, &topics, ROSTER_WAIT, |roster| {
-                status_of(roster, &room.sol.id).as_deref() == Some("offline")
-            })
+            // Status lives in the hub process that read the will. The
+            // original hub's messaging is gone, so this read uses `fresh`.
+            roster_until(
+                &ctx,
+                &fresh,
+                &room.andy_token,
+                &mut observer,
+                &topics,
+                ROSTER_WAIT,
+                |roster| status_of(roster, &room.sol.id).as_deref() == Some("offline"),
+            )
             .await;
 
             observer.disconnect().await;
@@ -539,9 +596,15 @@ async fn it_presence_roster_fields_and_bye() {
             );
             assert_eq!(sol.publish(&up, &hello).await, PubAckReason::Success);
 
-            let roster = roster_until(&mut sol, &topics, ROSTER_WAIT, |roster| {
-                entry(roster, &room.sol.id).is_some_and(|entry| entry["model"] == "opus")
-            })
+            let roster = roster_until(
+                &ctx,
+                &ctx.hub,
+                &room.andy_token,
+                &mut sol,
+                &topics,
+                ROSTER_WAIT,
+                |roster| entry(roster, &room.sol.id).is_some_and(|entry| entry["model"] == "opus"),
+            )
             .await;
             assert_eq!(
                 entry(&roster, &room.sol.id).unwrap(),
@@ -566,9 +629,15 @@ async fn it_presence_roster_fields_and_bye() {
             // offline.
             let bye = envelope(&ulid(), "BYE", json!({}), json!({}));
             assert_eq!(sol.publish(&up, &bye).await, PubAckReason::Success);
-            roster_until(&mut sol, &topics, ROSTER_WAIT, |roster| {
-                status_of(roster, &room.sol.id).as_deref() == Some("offline")
-            })
+            roster_until(
+                &ctx,
+                &ctx.hub,
+                &room.andy_token,
+                &mut sol,
+                &topics,
+                ROSTER_WAIT,
+                |roster| status_of(roster, &room.sol.id).as_deref() == Some("offline"),
+            )
             .await;
             let presence = topics.presence(&room.sol.id.parse().unwrap());
             subscribe(&mut sol, &presence).await;
@@ -597,9 +666,15 @@ async fn it_roster_follows_mint_revoke_and_invite_accept() {
 
             // Minted and never connected, with no HELLO: listed, offline.
             let fresh = mint_ok(&ctx, &room.andy_token, "andy/fresh", &room.project).await;
-            let roster = roster_until(&mut observer, &topics, ROSTER_WAIT, |roster| {
-                entry(roster, &fresh.id).is_some()
-            })
+            let roster = roster_until(
+                &ctx,
+                &ctx.hub,
+                &room.andy_token,
+                &mut observer,
+                &topics,
+                ROSTER_WAIT,
+                |roster| entry(roster, &fresh.id).is_some(),
+            )
             .await;
             assert_eq!(
                 entry(&roster, &fresh.id).unwrap(),
@@ -619,9 +694,15 @@ async fn it_roster_follows_mint_revoke_and_invite_accept() {
                 .unwrap();
             assert_eq!(resp.status(), StatusCode::NO_CONTENT);
             support::unban_username(&ctx.http, &fresh.id).await;
-            let roster = roster_until(&mut observer, &topics, ROSTER_WAIT, |roster| {
-                entry(roster, &fresh.id).is_none()
-            })
+            let roster = roster_until(
+                &ctx,
+                &ctx.hub,
+                &room.andy_token,
+                &mut observer,
+                &topics,
+                ROSTER_WAIT,
+                |roster| entry(roster, &fresh.id).is_none(),
+            )
             .await;
             assert!(entry(&roster, &room.sol.id).is_some(), "{roster:?}");
 
@@ -647,9 +728,15 @@ async fn it_roster_follows_mint_revoke_and_invite_accept() {
                 .await
                 .unwrap();
             assert_eq!(resp.status(), StatusCode::OK);
-            let roster = roster_until(&mut observer, &topics, ROSTER_WAIT, |roster| {
-                entry(roster, &carol).is_some()
-            })
+            let roster = roster_until(
+                &ctx,
+                &ctx.hub,
+                &room.andy_token,
+                &mut observer,
+                &topics,
+                ROSTER_WAIT,
+                |roster| entry(roster, &carol).is_some(),
+            )
             .await;
             assert_eq!(entry(&roster, &carol).unwrap()["kind"], "human");
 
@@ -678,12 +765,20 @@ async fn it_rollcall_answered_by_hub() {
             subscribe(&mut sol, &topics.state("roster")).await;
             let bee_client = appear(&ctx, &room.project, &bee, ONLINE).await;
             let dee_client = appear(&ctx, &room.project, &dee, AWAY).await;
-            roster_until(&mut sol, &topics, ROSTER_WAIT, |roster| {
-                status_of(roster, &room.sol.id).as_deref() == Some("online")
-                    && status_of(roster, &bee.id).as_deref() == Some("online")
-                    && status_of(roster, &dee.id).as_deref() == Some("away")
-                    && status_of(roster, &cat.id).as_deref() == Some("offline")
-            })
+            roster_until(
+                &ctx,
+                &ctx.hub,
+                &room.andy_token,
+                &mut sol,
+                &topics,
+                ROSTER_WAIT,
+                |roster| {
+                    status_of(roster, &room.sol.id).as_deref() == Some("online")
+                        && status_of(roster, &bee.id).as_deref() == Some("online")
+                        && status_of(roster, &dee.id).as_deref() == Some("away")
+                        && status_of(roster, &cat.id).as_deref() == Some("offline")
+                },
+            )
             .await;
 
             let id = ulid();

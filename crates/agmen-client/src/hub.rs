@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use agmen_proto::{IdentityId, ProjectId, StampedEnvelope, Stream};
 use serde::Deserialize;
+use serde_json::Value;
 use url::{Host, Url};
 
 use crate::body::{
@@ -127,6 +128,12 @@ struct ErrorBody {
     error: String,
 }
 
+/// `GET /v1/projects/{p}/state`'s answer. Only `value` is used.
+#[derive(Debug, Deserialize)]
+struct StateAnswer {
+    value: Value,
+}
+
 impl HubClient {
     /// A client for `identity` in `project` at the hub at `base` (its
     /// `/v1` routes live under it), sending `token`.
@@ -181,6 +188,41 @@ impl HubClient {
             .append_pair("after", &after.to_string())
             .append_pair("limit", &PAGE_LIMIT.to_string());
         self.get(url, MAX_PAGE_RESPONSE_BYTES).await
+    }
+
+    /// The project's full roster: the `value` of
+    /// `GET /v1/projects/{p}/state?key=roster`, an array of entries ordered
+    /// by handle. The retained `state/roster` topic is only a small head.
+    ///
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// use agmen_client::HubClient;
+    ///
+    /// let hub = HubClient::new(
+    ///     "https://api.agmen.example".parse()?,
+    ///     "projectp1".parse()?,
+    ///     "idn7k2q9".parse()?,
+    ///     "the identity's hub token",
+    /// )?;
+    /// let roster = hub.roster().await?;
+    /// println!("{roster}");
+    /// # Ok(()) }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`ClientError::Http`] when the hub cannot be reached, and
+    /// [`ClientError::Hub`] when it refuses (403 `not_a_member` for a
+    /// caller that is not a member of the project).
+    /// [`ClientError::HubBodyTooLarge`] when its body exceeds
+    /// [`MAX_PAGE_RESPONSE_BYTES`], or
+    /// [`ClientError::BadAnswer`] when a success body is not valid JSON
+    /// or has no `value`.
+    pub async fn roster(&self) -> Result<Value, ClientError> {
+        let mut url = self.url(&["projects", self.project.as_str(), "state"]);
+        url.query_pairs_mut().append_pair("key", "roster");
+        let answer: StateAnswer = self.get(url, MAX_PAGE_RESPONSE_BYTES).await?;
+        Ok(answer.value)
     }
 
     /// A fresh broker token for this identity (1 hour).
@@ -294,5 +336,86 @@ mod url_tests {
                 assert!(error.to_string().contains("use https"), "{error}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod roster_tests {
+    use axum::extract::Query;
+    use axum::http::{HeaderMap, StatusCode, header};
+    use axum::response::IntoResponse;
+    use axum::routing::get;
+    use serde_json::json;
+
+    use super::*;
+
+    async fn state(
+        headers: HeaderMap,
+        Query(query): Query<Vec<(String, String)>>,
+    ) -> impl IntoResponse {
+        assert_eq!(query, [("key".to_owned(), "roster".to_owned())]);
+        if headers
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            != Some("Bearer ok")
+        {
+            return (
+                StatusCode::FORBIDDEN,
+                axum::Json(json!({"error": "not_a_member"})),
+            )
+                .into_response();
+        }
+        axum::Json(json!({
+            "key": "roster",
+            "as_of_seq": 1,
+            "value": [{
+                "identity_id": "idn7k2q9",
+                "handle": "andy/sol",
+                "kind": "agent",
+                "status": "online"
+            }],
+        }))
+        .into_response()
+    }
+
+    async fn fake_hub() -> String {
+        let app = axum::Router::new().route("/v1/projects/{p}/state", get(state));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        base
+    }
+
+    fn client(base: &str, token: &str) -> HubClient {
+        HubClient::new(
+            base.parse().unwrap(),
+            "project1".parse().unwrap(),
+            "idn7k2q9".parse().unwrap(),
+            token,
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn roster_returns_the_value() {
+        let base = fake_hub().await;
+        let roster = client(&base, "ok").roster().await.unwrap();
+        assert_eq!(
+            roster,
+            json!([{
+                "identity_id": "idn7k2q9",
+                "handle": "andy/sol",
+                "kind": "agent",
+                "status": "online"
+            }])
+        );
+        let refused = client(&base, "no").roster().await.unwrap_err();
+        assert!(
+            matches!(
+                refused,
+                ClientError::Hub { status: 403, ref code } if code == "not_a_member"
+            ),
+            "{refused:?}"
+        );
     }
 }

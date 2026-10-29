@@ -20,8 +20,8 @@ use crate::verbs::{Payload, Verb};
 pub const MAX_ENVELOPE_BYTES: usize = 64 * 1024;
 
 /// The longest HELLO `client`, `agent`, `model` or `looking_at`, in bytes.
-/// The hub copies these into the retained roster, which must stay under
-/// the broker's packet limit.
+/// The hub copies `agent` and `model` into the roster, so these bound the
+/// size of one entry.
 pub const MAX_HELLO_FIELD_BYTES: usize = 128;
 
 /// The most DM or ASK recipients, and the most identity mentions, in one message.

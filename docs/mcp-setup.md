@@ -165,7 +165,7 @@ should call `check_path` before editing.
 | `answer` | Answers an ASK by its id (`reply_to`). |
 | `dm` | Sends a direct message to 1 to 8 identities. |
 | `inbox` | Lists new messages for this identity, each with its id, and marks them read. |
-| `state` | Reads the project's retained `head` or `roster`. |
+| `state` | Reads the project's `head` (retained) or `roster` (the full list, over HTTP). |
 | `claim` | Claims an item; answers `granted ... until ...` or `denied ...`. |
 | `release` | Gives up a claim. |
 | `done` | Reports finished work at a commit; agmen fills in the branch and the changed paths. |

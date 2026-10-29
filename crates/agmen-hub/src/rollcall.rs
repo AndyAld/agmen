@@ -4,13 +4,15 @@
 //!
 //! `data.summary` is one line, `"<n> online: <handle>, <handle> (away)"`,
 //! or `"Nobody is online."`; the body lists the same identities with their
-//! kinds and ids. Clients that need the list as data read `state/roster`.
+//! kinds and ids. Clients that need the list as data read
+//! `GET /projects/{p}/state?key=roster`.
 
 use agmen_proto::{Body, IdentityId, IdentityKind, MessageId, Payload, ProtoError, Stream, Topics};
 
 use crate::http::Hub;
 use crate::ingest::{HubPost, PostError};
-use crate::presence::{RosterEntry, RosterError, Status};
+use crate::presence::{RosterEntry, Status};
+use crate::roster::RosterError;
 
 /// The most identities one answer lists; past it the summary ends with
 /// "and N more", which keeps the body far below its 32 KiB limit.

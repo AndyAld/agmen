@@ -1241,6 +1241,69 @@ async fn it_handles_resolve_through_the_roster() {
     .await;
 }
 
+/// 30 roster entries, more than the 4 KiB a retained `state/{key}` may hold:
+/// `agmen dm` of the last handle, in handle order, exits 0. The retained topic
+/// is only a head, so the lookup goes over HTTP.
+#[tokio::test(flavor = "multi_thread")]
+async fn it_handles_resolve_past_25() {
+    run(Ingest::On, |ctx| async move {
+        let sol = ctx.member(Role::Member, "sol", "agent").await;
+        let http = reqwest::Client::new();
+        let project = ctx.topics.project().as_str();
+        // A long `agent` name makes each entry big enough that 30 of them
+        // pass 4 KiB.
+        let agent = format!("claude-code/2.1.310 {}", "x".repeat(100));
+        // The member is one human and one agent. 28 more agents make 30.
+        // `z27` sorts after `sol`, so it is the 30th handle.
+        let mut handles = vec![sol.human.handle.clone(), sol.identity.handle.clone()];
+        for n in 0..28 {
+            let handle = format!("{}/z{n:02}", sol.human.handle);
+            let resp = http
+                .post(ctx.base.join("v1/identities").unwrap())
+                .bearer_auth(&sol.human.access_token)
+                .json(&serde_json::json!({
+                    "handle": &handle,
+                    "project": project,
+                    "kind": "agent",
+                    "agent": &agent,
+                }))
+                .send()
+                .await
+                .unwrap();
+            let status = resp.status();
+            if status != reqwest::StatusCode::CREATED {
+                let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+                panic!("mint answered {status}: {}", body["error"]);
+            }
+            // The body holds the new identity token. Do not print it.
+            let _ = resp.bytes().await.unwrap();
+            handles.push(handle);
+        }
+        handles.sort();
+        assert_eq!(handles.len(), 30);
+        let target = &handles[29];
+        assert!(target.ends_with("/z27"), "{target}");
+        // The premise: the full roster is past the retained limit.
+        let resp = http
+            .get(
+                ctx.base
+                    .join(&format!("v1/projects/{project}/state?key=roster"))
+                    .unwrap(),
+            )
+            .bearer_auth(&sol.human.access_token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        let bytes = serde_json::to_vec(&body["value"]).unwrap().len();
+        assert!(bytes > 4 * 1024, "the roster is {bytes} bytes");
+        let out = sol.run(&["dm", target, "hi"]).await;
+        assert_exit(&out, 0);
+    })
+    .await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn it_claim_and_done_fill_changes() {
     run(Ingest::On, |ctx| async move {
