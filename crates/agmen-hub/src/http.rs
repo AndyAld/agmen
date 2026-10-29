@@ -1,6 +1,7 @@
 //! The hub's HTTP API (axum): shared state, routes, and how errors become
 //! responses.
 
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -26,6 +27,10 @@ use crate::ingest::IngestState;
 use crate::presence::PresenceState;
 use crate::self_config::{self, SelfConfigError};
 use crate::{db, events, health, human_post, identities, invites, items, lanes, me, replay, state};
+
+/// How long a client has to finish sending one HTTP request head before the
+/// hub drops the connection.
+pub const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How long the hub waits for GitHub or EMQX to answer.
 const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(10);
@@ -95,7 +100,13 @@ impl Hub {
     /// let config = agmen_hub::Config::from_env()?;
     /// let hub = agmen_hub::Hub::connect(&config).await?;
     /// let listener = tokio::net::TcpListener::bind(config.listen).await?;
-    /// axum::serve(listener, hub.router()).await?;
+    /// agmen_hub::serve(
+    ///     listener,
+    ///     hub.router(),
+    ///     agmen_hub::HEADER_READ_TIMEOUT,
+    ///     std::future::pending(),
+    /// )
+    /// .await;
     /// # Ok(()) }
     /// ```
     pub async fn connect(config: &Config) -> Result<Self, HubError> {
@@ -274,6 +285,86 @@ impl Hub {
     }
 }
 
+/// Serves `router` on `listener` until `shutdown` resolves, giving every
+/// connection `header_read_timeout` to transmit a complete request head and
+/// draining in-flight requests on shutdown.
+///
+/// # Examples
+///
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let config = agmen_hub::Config::from_env()?;
+/// let hub = agmen_hub::Hub::connect(&config).await?;
+/// let listener = tokio::net::TcpListener::bind(config.listen).await?;
+/// agmen_hub::serve(
+///     listener,
+///     hub.router(),
+///     agmen_hub::HEADER_READ_TIMEOUT,
+///     std::future::pending(),
+/// )
+/// .await;
+/// # Ok(()) }
+/// ```
+pub async fn serve(
+    mut listener: tokio::net::TcpListener,
+    router: Router,
+    header_read_timeout: Duration,
+    shutdown: impl Future<Output = ()> + Send,
+) {
+    let mut http = hyper::server::conn::http1::Builder::new();
+    http.timer(hyper_util::rt::TokioTimer::new())
+        .header_read_timeout(header_read_timeout);
+    let (signal_tx, signal_rx) = tokio::sync::watch::channel(());
+    let mut connections = tokio::task::JoinSet::new();
+    let mut shutdown = std::pin::pin!(shutdown);
+
+    loop {
+        tokio::select! {
+            (io, _remote_addr) = axum::serve::Listener::accept(&mut listener) => {
+                let http = http.clone();
+                let service = hyper_util::service::TowerToHyperService::new(router.clone());
+                let signal_tx = signal_tx.clone();
+                connections.spawn(async move {
+                    let mut conn = std::pin::pin!(
+                        http.serve_connection(hyper_util::rt::TokioIo::new(io), service)
+                            .with_upgrades()
+                    );
+                    tokio::select! {
+                        result = conn.as_mut() => {
+                            if let Err(err) = result {
+                                tracing::trace!(error = %err, "failed to serve connection");
+                            }
+                            return;
+                        }
+                        () = signal_tx.closed() => {
+                            conn.as_mut().graceful_shutdown();
+                        }
+                    }
+                    if let Err(err) = conn.await {
+                        tracing::trace!(error = %err, "failed to serve connection");
+                    }
+                });
+            }
+            Some(joined) = connections.join_next(), if !connections.is_empty() => {
+                if let Err(err) = joined {
+                    tracing::error!(error = %err, "connection task failed");
+                }
+            }
+            () = &mut shutdown => {
+                break;
+            }
+        }
+    }
+
+    drop(listener);
+    drop(signal_rx);
+    while let Some(joined) = connections.join_next().await {
+        if let Err(err) = joined {
+            tracing::error!(error = %err, "connection task failed");
+        }
+    }
+}
+
 /// The HTTP client for GitHub and EMQX. No redirects: OAuth token exchanges
 /// must not follow them, and EMQX never sends them. GitHub's API refuses
 /// requests without a User-Agent.
@@ -431,20 +522,5 @@ pub(crate) fn error_chain(err: &dyn std::error::Error) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn public_link_keeps_a_path_prefix() {
-        let root = Url::parse("https://api.example.com").unwrap();
-        assert_eq!(
-            public_link(&root, "v1/auth/device").as_str(),
-            "https://api.example.com/v1/auth/device"
-        );
-        let prefixed = Url::parse("https://example.com/hub/").unwrap();
-        assert_eq!(
-            public_link(&prefixed, "v1/jwks").as_str(),
-            "https://example.com/hub/v1/jwks"
-        );
-    }
-}
+#[path = "http_tests.rs"]
+mod tests;
