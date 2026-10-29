@@ -46,7 +46,6 @@ mod mqtt_proxy;
 mod numbering;
 mod presence;
 mod projects;
-mod refs;
 mod replay;
 mod retention;
 mod roles;
@@ -64,6 +63,7 @@ mod test_github;
 mod test_hooks;
 mod usage;
 
+pub use agmen_core::HUB_IDENTITY;
 pub use auth::{GithubError, GithubId};
 pub use billing::{
     BillingEvent, BusinessStep, Catalog, LineItem, MAX_OWNED_GROUPS, PAID_READ_ONLY_DAYS,
@@ -84,7 +84,7 @@ pub use group::GroupError;
 pub use groups::{SetPlanError, apply_operator_plan};
 pub use http::{HEADER_READ_TIMEOUT, Hub, HubError, serve};
 pub use identities::{BROKER_TOKEN_TTL, CLIENT_ID_SUFFIXES, HumanId, Identity};
-pub use ingest::{HUB_IDENTITY, HubPost, IngestError, PostError, Posted};
+pub use ingest::{HubPost, IngestError, PostError, Posted};
 pub use mqtt::{Messaging, MessagingError};
 pub use numbering::{NumberingError, next_seq};
 pub use retention::RetentionError;

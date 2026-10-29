@@ -18,19 +18,32 @@
 
 mod core;
 mod identity;
+mod ids;
 mod lanes;
+mod limiter;
 #[cfg(feature = "testing")]
 mod mem_store;
+mod refs;
+mod roster;
+mod routing;
 mod store;
 
 pub use core::{Core, CoreError};
 pub use identity::{cap_verbs, is_child_name};
+pub use ids::{HUB_IDENTITY, envelope_hash, hub_identity, hub_now, message_id, new_message_id};
 pub use lanes::{
     EditRule, LaneError, LaneHolder, LaneList, LaneRow, LaneSpec, LaneSpecError, Lanes, Lends,
-    MAX_ACTIVE_LENDS, MAX_CHECK_PATHS, MAX_LEND_DURATION, MAX_LOADED_LENDS, NOT_A_REPO_PATH,
-    PathCheck, ReplaceError, ResolvedLane, Stray, check_lane_specs, judge_scoped, repo_path,
-    scope_globs, stray_body, stray_body_with, validate_edits,
+    MAX_ACTIVE_LENDS, MAX_CHECK_PATHS, MAX_GLOBS, MAX_GLOBS_PER_LANE, MAX_LANES, MAX_LEND_DURATION,
+    MAX_LOADED_LENDS, NOT_A_REPO_PATH, PathCheck, ReplaceError, ResolvedLane, Stray,
+    check_lane_specs, judge_scoped, repo_path, scope_globs, stray_body, stray_body_with,
+    validate_edits,
 };
+pub use limiter::{BURST, MAX_TRACKED, RATE_PER_SEC, RateLimiter};
 #[cfg(feature = "testing")]
 pub use mem_store::{MEM_MAX_ROWS, MemStore, MemTx};
-pub use store::{Reads, Store, StoreError, StoreTx};
+pub use refs::{MAX_REFS_PER_MESSAGE, candidate_item_keys, stamp_refs};
+pub use roster::{Member, MemberRole, Roster, Sender};
+pub use routing::{
+    Parent, ack_stream, expand_mentions, fan_out, may_send, mentioned, needs_roster, route,
+};
+pub use store::{Reads, Store, StoreError, StoreTx, parse_kind};

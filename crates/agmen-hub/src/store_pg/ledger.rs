@@ -1,18 +1,15 @@
 //! Lane SQL. The statements are the ones the hub used before the rules moved
 //! into `agmen-core`.
 
-use agmen_core::{LaneHolder, LaneRow, MAX_LOADED_LENDS, ResolvedLane};
+use agmen_core::{
+    LaneHolder, LaneRow, MAX_GLOBS as GLOB_CAP, MAX_GLOBS_PER_LANE as GLOBS_PER_LANE_CAP,
+    MAX_LANES as LANE_ROW_CAP, MAX_LOADED_LENDS, ResolvedLane, parse_kind,
+};
 use agmen_proto::{IdentityId, IdentityKind, LaneName, ProjectId};
 use sqlx::{PgExecutor, Postgres, Transaction};
 
 use crate::claims::LedgerError;
 
-/// `check_lane_specs` refuses more lanes than this.
-const LANE_ROW_CAP: usize = 64;
-/// `check_lane_specs` refuses more globs on one lane than this.
-const GLOBS_PER_LANE_CAP: usize = 32;
-/// `check_lane_specs` refuses more globs in one project than this.
-const GLOB_CAP: usize = 256;
 /// Live claims one path check will read.
 const HOLDER_ROW_CAP: usize = 100_000;
 
@@ -201,7 +198,12 @@ where
     let Some((kind, edits)) = row else {
         return Ok(None);
     };
-    Ok(Some((parse_kind(&kind)?, edits)))
+    Ok(Some((
+        parse_kind(&kind)
+            // Preserve the ledger's stored-value error text.
+            .map_err(|_| stored(format!("unknown identity kind {kind}")))?,
+        edits,
+    )))
 }
 
 /// Replaces the project's lanes under one new version. The project lock is
@@ -245,15 +247,4 @@ pub(crate) async fn replace_lanes(
         .await?;
     }
     Ok(())
-}
-
-fn parse_kind(kind: &str) -> Result<IdentityKind, LedgerError> {
-    match kind {
-        "human" => Ok(IdentityKind::Human),
-        "agent" => Ok(IdentityKind::Agent),
-        "coordinator" => Ok(IdentityKind::Coordinator),
-        "listener" => Ok(IdentityKind::Listener),
-        "hub" => Ok(IdentityKind::Hub),
-        _ => Err(stored(format!("unknown identity kind {kind}"))),
-    }
 }

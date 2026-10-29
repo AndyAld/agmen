@@ -21,6 +21,22 @@ pub enum StoreError {
     Backend(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
+/// A kind as the tables and stamped envelopes spell it.
+///
+/// # Errors
+///
+/// Returns [`StoreError::Stored`] for an unknown kind, preserving its spelling.
+pub fn parse_kind(kind: &str) -> Result<IdentityKind, StoreError> {
+    Ok(match kind {
+        "human" => IdentityKind::Human,
+        "agent" => IdentityKind::Agent,
+        "coordinator" => IdentityKind::Coordinator,
+        "listener" => IdentityKind::Listener,
+        "hub" => IdentityKind::Hub,
+        other => return Err(StoreError::Stored(format!("unknown kind {other:?}"))),
+    })
+}
+
 /// A backend that supplies readers and transactions.
 ///
 /// The core never holds a reader and a transaction at the same time. A
@@ -163,4 +179,27 @@ pub trait StoreTx: Reads {
         project: &ProjectId,
         handle: &str,
     ) -> impl Future<Output = Result<Option<IdentityId>, StoreError>> + Send;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stored_kinds_match_the_protocol() {
+        for (text, kind) in [
+            ("human", IdentityKind::Human),
+            ("agent", IdentityKind::Agent),
+            ("coordinator", IdentityKind::Coordinator),
+            ("listener", IdentityKind::Listener),
+            ("hub", IdentityKind::Hub),
+        ] {
+            assert_eq!(parse_kind(text).unwrap(), kind);
+        }
+        for text in ["", "Agent", "other", "a\"b"] {
+            let error = parse_kind(text).unwrap_err();
+            assert!(matches!(error, StoreError::Stored(_)));
+            assert_eq!(error.to_string(), format!("unknown kind {text:?}"));
+        }
+    }
 }

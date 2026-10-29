@@ -1,6 +1,7 @@
 use agmen_proto::Body;
 
 use super::*;
+use crate::{MAX_GLOBS, MAX_GLOBS_PER_LANE, MAX_LANES};
 
 #[test]
 fn scoped_reasons_name_the_authorization_cause() {

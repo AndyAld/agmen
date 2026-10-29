@@ -28,7 +28,7 @@ use crate::core::{Core, CoreError};
 use crate::store::{Reads, Store, StoreError, StoreTx};
 
 /// The most lanes one project may have.
-const MAX_LANES: usize = 64;
+pub const MAX_LANES: usize = 64;
 /// The most active grants per project, lane and recipient.
 pub const MAX_ACTIVE_LENDS: i64 = 16;
 /// A grant may last at most seven days from acceptance.
@@ -36,10 +36,10 @@ pub const MAX_LEND_DURATION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// A recipient can have grants in at most every lane in the project.
 pub const MAX_LOADED_LENDS: i64 = 64 * MAX_ACTIVE_LENDS;
 /// The most globs one lane may have.
-const MAX_GLOBS_PER_LANE: usize = 32;
+pub const MAX_GLOBS_PER_LANE: usize = 32;
 /// The most globs a project's lanes may have together, which bounds the
 /// overlap check's pairs.
-const MAX_GLOBS: usize = 256;
+pub const MAX_GLOBS: usize = 256;
 /// The longest glob, in bytes.
 const MAX_GLOB_BYTES: usize = 256;
 /// The most paths one check-path call may ask about.

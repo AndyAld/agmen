@@ -7,18 +7,21 @@
 //! ledger verb the ledger's work and the hub's answer; the sweeper publishes
 //! the outbox. A refused message gets a NACK and leaves nothing behind.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use agmen_proto::{
-    Body, ClientEnvelope, DeliveryReply, IdentityId, IdentityKind, ItemKey, LaneName, Mention,
-    MessageId, NackReason, Payload, ProjectId, Ref, Seq, Severity, StampedEnvelope, Stream,
-    Timestamp, Topics, Verb, validate,
+use agmen_core::{
+    Member, Parent, RateLimiter, Roster, Sender, ack_stream, candidate_item_keys, envelope_hash,
+    hub_identity, hub_now, may_send, mentioned, message_id, needs_roster, new_message_id,
+    parse_kind, route, stamp_refs,
 };
-use serde::Deserialize;
-use sha2::{Digest, Sha256};
+use agmen_proto::{
+    Body, ClientEnvelope, DeliveryReply, IdentityId, IdentityKind, ItemKey, LaneName, MessageId,
+    NackReason, Payload, ProjectId, Ref, Seq, StampedEnvelope, Stream, Timestamp, Topics, Verb,
+    validate,
+};
 use sqlx::{PgExecutor, PgPool, Postgres, Transaction};
 use tokio::sync::{Notify, watch};
 
@@ -30,25 +33,12 @@ use crate::numbering::{NumberingError, lock_head, next_seq};
 use crate::secrets_scan::find_secret;
 use crate::usage::{Gate, Taken, post_owner_alert, take_quota, with_thousands, write_gate};
 
-/// The hub's own identity id, stamped as `from` on what it posts. It holds a
-/// `0`, which the id alphabet the hub mints from leaves out, so no minted
-/// human or identity can ever have it.
-pub const HUB_IDENTITY: &str = "agmenhub0";
-
 /// The hub's handle (protocol section 1).
 const HUB_HANDLE: &str = "hub";
 
 /// Leaves 16 KiB for topic and MQTT framing below the client's 96 KiB cap.
 const MAX_STAMPED_ENVELOPE_BYTES: usize = 80 * 1024;
 
-/// Publishes per second each sender may sustain (protocol section 8).
-const RATE_PER_SEC: f64 = 10.0;
-/// Publishes a sender may make at once after a quiet spell.
-const BURST: f64 = 30.0;
-/// The most senders the rate limiter tracks. Past it, senders whose bucket
-/// has refilled are forgotten; if every tracked sender is still busy, new
-/// senders get `hub_busy` until one calms down.
-const MAX_TRACKED: usize = 10_000;
 /// What a `hub_busy` NACK tells the client to wait.
 const BUSY_RETRY_MS: u64 = 1_000;
 
@@ -98,7 +88,7 @@ pub enum PostError {
     Store(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
-/// A message the hub posts as itself: `from` is [`HUB_IDENTITY`],
+/// A message the hub posts as itself: `from` is [`crate::HUB_IDENTITY`],
 /// `from_kind` is `hub`, and it takes the same numbering and sweeper as a
 /// client's message, without the rate limit (ruling R34).
 #[derive(Debug, Clone, PartialEq)]
@@ -285,7 +275,7 @@ impl Hub {
             return Err(NackReason::ReadOnly.into());
         }
         let roster = if needs_roster(verb, &env) {
-            Roster::load(pool, topics).await?
+            load_roster(pool, topics).await?
         } else {
             Roster::default()
         };
@@ -600,11 +590,11 @@ async fn post_hub(
         return Err(PostError::NoStreams);
     }
     let hub_at = hub_now();
-    let id = new_message_id(hub_at)?;
+    let id = new_message_id(hub_at).map_err(PostError::Random)?;
     let mut mentioned: BTreeSet<IdentityId> = post.mentioned.into_iter().collect();
     let mut refs = Vec::new();
     if verb == Verb::Alert {
-        let roster = Roster::load(&mut **tx, topics)
+        let roster = load_roster(&mut **tx, topics)
             .await
             .map_err(PostError::store)?;
         let mut coordinators = roster.coordinators().cloned().peekable();
@@ -654,38 +644,6 @@ impl PostError {
     fn store(err: impl std::error::Error + Send + Sync + 'static) -> Self {
         Self::Store(Box::new(err))
     }
-}
-
-/// [`HUB_IDENTITY`] as an id.
-#[expect(clippy::expect_used, reason = "a constant checked by a unit test")]
-pub(crate) fn hub_identity() -> IdentityId {
-    HUB_IDENTITY
-        .parse()
-        .expect("HUB_IDENTITY is a valid identity id")
-}
-
-/// The hub's clock, in whole milliseconds as the protocol shows `hub_at`.
-fn hub_now() -> Timestamp {
-    let now = Timestamp::now();
-    Timestamp::from_millisecond(now.as_millisecond()).unwrap_or(now)
-}
-
-/// The `id` of a raw publish, read on its own so even a publish that fails
-/// to parse can be NACKed.
-fn message_id(raw: &[u8]) -> Option<MessageId> {
-    #[derive(Deserialize)]
-    struct IdOnly {
-        id: MessageId,
-    }
-    serde_json::from_slice::<IdOnly>(raw)
-        .ok()
-        .map(|only| only.id)
-}
-
-/// SHA-256 of the envelope as the hub parsed it, so a resend that differs
-/// only in key order or spacing still matches.
-fn envelope_hash(env: &ClientEnvelope) -> Result<Vec<u8>, serde_json::Error> {
-    Ok(Sha256::digest(serde_json::to_vec(env)?).to_vec())
 }
 
 /// The `stream_heads` key of one project's stream: `<project_id>/<stream>`.
@@ -771,18 +729,6 @@ fn stored(what: impl fmt::Display) -> StoreError {
     StoreError::Stored(what.to_string())
 }
 
-/// A kind as the tables and stamped envelopes spell it.
-fn parse_kind(kind: &str) -> Result<IdentityKind, StoreError> {
-    Ok(match kind {
-        "human" => IdentityKind::Human,
-        "agent" => IdentityKind::Agent,
-        "coordinator" => IdentityKind::Coordinator,
-        "listener" => IdentityKind::Listener,
-        "hub" => IdentityKind::Hub,
-        other => return Err(stored(format!("unknown kind {other:?}"))),
-    })
-}
-
 fn parse_id(id: &str) -> Result<IdentityId, StoreError> {
     id.parse().map_err(stored)
 }
@@ -796,17 +742,6 @@ pub(crate) async fn project_exists(pool: &PgPool, topics: &Topics) -> Result<boo
         .bind(topics.tenant().as_str())
         .fetch_one(pool)
         .await
-}
-
-/// Who sent a publish.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Sender {
-    id: IdentityId,
-    kind: IdentityKind,
-    handle: String,
-    /// The human who owns an identity; `None` for a human.
-    owner: Option<IdentityId>,
-    verbs: Option<Vec<String>>,
 }
 
 /// The live identity `from` in `topics`' project, or a human who is a
@@ -833,7 +768,7 @@ async fn load_sender(
         }
         return Ok(Some(Sender {
             id: from.clone(),
-            kind: parse_kind(&kind)?,
+            kind: parse_kind(&kind).map_err(stored)?,
             handle,
             owner: Some(parse_id(&owner)?),
             verbs,
@@ -859,37 +794,6 @@ async fn load_sender(
     }))
 }
 
-/// Whether `kind` may send `verb`, from the "Sent by" column of protocol
-/// section 4. Checks that need more than the kind (claim holder, lane
-/// owner, the PUSH_REQUEST's owner) belong to the verbs' own handling.
-///
-/// - "coordinator" there means the `coordinator` kind. A listener with the
-///   coordinator role uses its stored permissions for ASSIGN.
-/// - This table is the fallback for NULL verbs. REVIEW and PLAN require
-///   explicit stored permissions and stay closed in this legacy table.
-/// - GRANT, DENY, ITEM and STATE are the hub's own (ruling R34).
-pub(crate) const fn may_send(kind: IdentityKind, verb: Verb) -> bool {
-    agmen_proto::kind_may_send(kind, verb)
-}
-
-/// One live member of a project: a non-revoked identity or a human
-/// member.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Member {
-    pub(crate) id: IdentityId,
-    pub(crate) handle: String,
-    kind: IdentityKind,
-    /// The owning human of an identity.
-    owner: Option<IdentityId>,
-    /// A human's membership role.
-    role: Option<Role>,
-    pub(crate) identity_role: Option<String>,
-}
-
-/// A project's live members.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct Roster(pub(crate) Vec<Member>);
-
 type MemberRow = (
     String,
     String,
@@ -899,70 +803,36 @@ type MemberRow = (
     Option<String>,
 );
 
-impl Roster {
-    async fn load(db: impl PgExecutor<'_>, topics: &Topics) -> Result<Self, StoreError> {
-        let rows: Vec<MemberRow> = sqlx::query_as(
-            "SELECT id, kind, handle, owner_human_id, NULL::text, role FROM identities
+/// A project's live members, with membership and mint roles from storage.
+async fn load_roster(db: impl PgExecutor<'_>, topics: &Topics) -> Result<Roster, StoreError> {
+    let rows: Vec<MemberRow> = sqlx::query_as(
+        "SELECT id, kind, handle, owner_human_id, NULL::text, role FROM identities
              WHERE project_id = $1 AND revoked_at IS NULL
              UNION ALL
              SELECT m.human_id, 'human', h.handle, NULL, m.role, NULL::text
              FROM memberships m JOIN humans h ON h.id=m.human_id WHERE m.project_id = $1",
-        )
-        .bind(topics.project().as_str())
-        .fetch_all(db)
-        .await?;
-        rows.into_iter()
-            .map(|(id, kind, handle, owner, role, identity_role)| {
-                Ok(Member {
-                    id: parse_id(&id)?,
-                    handle,
-                    kind: parse_kind(&kind)?,
-                    identity_role,
-                    owner: owner.as_deref().map(parse_id).transpose()?,
-                    role: role
-                        .as_deref()
-                        .map(str::parse::<Role>)
-                        .transpose()
-                        .map_err(stored)?,
-                })
+    )
+    .bind(topics.project().as_str())
+    .fetch_all(db)
+    .await?;
+    rows.into_iter()
+        .map(|(id, kind, handle, owner, role, identity_role)| {
+            Ok(Member {
+                id: parse_id(&id)?,
+                handle,
+                kind: parse_kind(&kind).map_err(stored)?,
+                identity_role,
+                owner: owner.as_deref().map(parse_id).transpose()?,
+                role: role
+                    .as_deref()
+                    .map(str::parse::<Role>)
+                    .transpose()
+                    .map_err(stored)?
+                    .map(Into::into),
             })
-            .collect::<Result<_, StoreError>>()
-            .map(Self)
-    }
-
-    fn get(&self, id: &IdentityId) -> Option<&Member> {
-        self.0.iter().find(|member| &member.id == id)
-    }
-
-    /// coordinators(project) of ruling R35: the live `coordinator`
-    /// identities and the humans whose membership role is coordinator.
-    /// Admins are not included until the user decides.
-    fn coordinators(&self) -> impl Iterator<Item = &IdentityId> {
-        self.0
-            .iter()
-            .filter(|member| {
-                member.kind == IdentityKind::Coordinator
-                    || (member.kind == IdentityKind::Human
-                        && member.role == Some(Role::Coordinator))
-            })
-            .map(|member| &member.id)
-    }
-}
-
-/// Whether handling `env` needs the project's members.
-fn needs_roster(verb: Verb, env: &ClientEnvelope) -> bool {
-    !env.mentions.is_empty()
-        || !env.to.is_empty()
-        || matches!(
-            verb,
-            Verb::Fyi
-                | Verb::Ask
-                | Verb::Answer
-                | Verb::Alert
-                | Verb::Done
-                | Verb::Review
-                | Verb::Assign
-        )
+        })
+        .collect::<Result<_, StoreError>>()
+        .map(Roster)
 }
 
 /// The same known-target lookup for client messages and hub ALERTs.
@@ -977,7 +847,7 @@ async fn load_refs(
             .bind(topics.project().as_str())
             .fetch_all(&mut *db)
             .await?;
-    let candidates = crate::refs::candidate_item_keys(body);
+    let candidates = candidate_item_keys(body);
     let keys: Vec<String> = sqlx::query_scalar(
         "SELECT key FROM items WHERE project_id=$1 AND key = ANY($2) ORDER BY key",
     )
@@ -989,63 +859,7 @@ async fn load_refs(
         .iter()
         .map(|key| key.parse().map_err(stored))
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(crate::refs::stamp_refs(body, roster, &lanes, &keys))
-}
-
-/// What `mentions` expand to (protocol section 3): `all`, `agents` and
-/// `humans` expand to the project's live members of those kinds, an
-/// identity must be a live member, and the sender is left out.
-///
-/// # Errors
-///
-/// `forbidden_mention` for anything but identities from a kind other than
-/// human and coordinator, or an identity that is not a live member;
-/// `schema` for lane mentions, which remain reserved. Role mentions expand
-/// from stored mint roles, including identities currently offline.
-fn expand_mentions(
-    sender: &Sender,
-    mentions: &[Mention],
-    roster: &Roster,
-) -> Result<BTreeSet<IdentityId>, NackReason> {
-    let may_group = matches!(sender.kind, IdentityKind::Human | IdentityKind::Coordinator);
-    let mut out = BTreeSet::new();
-    for mention in mentions {
-        let pick: fn(&Member) -> bool = match mention {
-            Mention::Identity(id) => {
-                if roster.get(id).is_none() {
-                    return Err(NackReason::ForbiddenMention);
-                }
-                out.insert(id.clone());
-                continue;
-            }
-            _ if !may_group => return Err(NackReason::ForbiddenMention),
-            Mention::Lane(_) => return Err(NackReason::Schema),
-            Mention::Role(role) => {
-                out.extend(
-                    roster
-                        .0
-                        .iter()
-                        .filter(|member| member.identity_role.as_deref() == Some(role.as_str()))
-                        .map(|member| member.id.clone()),
-                );
-                continue;
-            }
-            Mention::All => |_| true,
-            Mention::Agents => {
-                |member| !matches!(member.kind, IdentityKind::Human | IdentityKind::Hub)
-            }
-            Mention::Humans => |member| member.kind == IdentityKind::Human,
-        };
-        out.extend(
-            roster
-                .0
-                .iter()
-                .filter(|member| pick(member))
-                .map(|member| member.id.clone()),
-        );
-    }
-    out.remove(&sender.id);
-    Ok(out)
+    Ok(stamp_refs(body, roster, &lanes, &keys))
 }
 
 /// A publish that passed the checks that need no roster.
@@ -1055,42 +869,6 @@ struct Admitted {
     verb: Verb,
     sender: Sender,
     hash: Vec<u8>,
-}
-
-/// The `mentioned` a message is stamped with (protocol section 3): its
-/// expanded mentions, the author of `reply_to` when a human, and for an
-/// ALERT the sender's owning human and the coordinators (protocol 4
-/// notifies them, and protocol 3 interrupts only through `mentioned`:
-/// ruling R35). Never the sender. Sorted by id.
-fn mentioned(
-    verb: Verb,
-    env: &ClientEnvelope,
-    sender: &Sender,
-    roster: &Roster,
-    parent: Option<&Parent>,
-) -> Result<Vec<IdentityId>, NackReason> {
-    let mut mentioned = expand_mentions(sender, &env.mentions, roster)?;
-    if let Some(parent) = parent
-        && (parent.from_kind == IdentityKind::Human || verb == Verb::Review)
-    {
-        mentioned.insert(parent.from.clone());
-    }
-    if verb == Verb::Alert {
-        mentioned.extend(sender.owner.iter().cloned());
-        mentioned.extend(roster.coordinators().cloned());
-    }
-    mentioned.remove(&sender.id);
-    Ok(mentioned.into_iter().collect())
-}
-
-/// The message a `reply_to` names, as the sender can see it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Parent {
-    from: IdentityId,
-    from_kind: IdentityKind,
-    verb: String,
-    /// Every stream it was stored in.
-    streams: BTreeSet<Stream>,
 }
 
 /// The message `reply_to` names in a stream `sender` reads: the feed or
@@ -1130,105 +908,13 @@ async fn find_parent(
     .await?;
     Ok(Some(Parent {
         from: parse_id(&from)?,
-        from_kind: parse_kind(&kind)?,
+        from_kind: parse_kind(&kind).map_err(stored)?,
         verb,
         streams: streams
             .iter()
             .map(|stream| stream.parse().map_err(stored))
             .collect::<Result<_, _>>()?,
     }))
-}
-
-/// The streams a message goes to (protocol section 4):
-///
-/// - DM, and ASK with `to` (ruling R28): each recipient's inbox, the
-///   sender's inbox and each owning human's inbox; never the feed.
-/// - ANSWER, DELEGATED and REVIEW: the streams of the message they reply
-///   to, so a reply in a private thread stays private; the feed when that
-///   message was in the feed or is unknown.
-/// - ASSIGN: the feed and the assignee's inbox.
-/// - HEARTBEAT: the sender's own inbox, so it is not in the feed (protocol
-///   4) and the ACK still names a copy.
-/// - FOUND with severity `security`: the inboxes of the sender and its
-///   owning human; the feed gets only the hub's ITEM.
-/// - Everything else: the feed.
-///
-/// # Errors
-///
-/// `schema` when a recipient or assignee is not a live member.
-fn route(
-    verb: Verb,
-    env: &ClientEnvelope,
-    sender: &Sender,
-    roster: &Roster,
-    parent: Option<&Parent>,
-) -> Result<BTreeSet<Stream>, NackReason> {
-    let feed = || BTreeSet::from([Stream::Feed]);
-    match verb {
-        Verb::Dm => fan_out(&env.to, sender, roster),
-        Verb::Ask if !env.to.is_empty() => fan_out(&env.to, sender, roster),
-        Verb::Answer | Verb::Delegated | Verb::Review => Ok(match parent {
-            Some(parent)
-                if !parent.streams.is_empty() && !parent.streams.contains(&Stream::Feed) =>
-            {
-                let mut streams = parent.streams.clone();
-                streams.insert(Stream::Inbox(sender.id.clone()));
-                streams
-            }
-            _ => feed(),
-        }),
-        Verb::Assign => {
-            let Payload::Assign { to, .. } = &env.payload else {
-                return Err(NackReason::Schema);
-            };
-            if roster.get(to).is_none() {
-                return Err(NackReason::Schema);
-            }
-            Ok(BTreeSet::from([Stream::Feed, Stream::Inbox(to.clone())]))
-        }
-        Verb::Heartbeat => Ok(BTreeSet::from([Stream::Inbox(sender.id.clone())])),
-        Verb::Found
-            if matches!(
-                env.payload,
-                Payload::Found {
-                    severity: Some(Severity::Security),
-                    ..
-                }
-            ) =>
-        {
-            fan_out(&[], sender, roster)
-        }
-        _ => Ok(feed()),
-    }
-}
-
-/// The inboxes of `to`, of the sender, and of every owning human of them.
-fn fan_out(
-    to: &[IdentityId],
-    sender: &Sender,
-    roster: &Roster,
-) -> Result<BTreeSet<Stream>, NackReason> {
-    let mut streams = BTreeSet::from([Stream::Inbox(sender.id.clone())]);
-    streams.extend(sender.owner.iter().cloned().map(Stream::Inbox));
-    for recipient in to {
-        let member = roster.get(recipient).ok_or(NackReason::Schema)?;
-        streams.insert(Stream::Inbox(recipient.clone()));
-        streams.extend(member.owner.iter().cloned().map(Stream::Inbox));
-    }
-    Ok(streams)
-}
-
-/// The copy an ACK reports (ruling R33a): the feed copy when there is one,
-/// else the sender's own inbox copy, else the first.
-fn ack_stream(streams: &BTreeSet<Stream>, from: &IdentityId) -> Option<Stream> {
-    let own = Stream::Inbox(from.clone());
-    if streams.contains(&Stream::Feed) {
-        Some(Stream::Feed)
-    } else if streams.contains(&own) {
-        Some(own)
-    } else {
-        streams.first().cloned()
-    }
 }
 
 /// Whether the store queues an ACK on `ack/{from}`.
@@ -1398,75 +1084,3 @@ async fn recorded_reply(
         seq: Seq(u64::try_from(seq).map_err(stored)?),
     }))
 }
-
-/// A fresh ULID (26 Crockford base32 digits: 48 bits of milliseconds, then
-/// 80 random bits) for a message the hub posts.
-fn new_message_id(now: Timestamp) -> Result<MessageId, PostError> {
-    const CROCKFORD: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
-    let millis = u128::try_from(now.as_millisecond()).unwrap_or(0) & ((1 << 48) - 1);
-    let mut random = [0_u8; 10];
-    getrandom::fill(&mut random).map_err(PostError::Random)?;
-    let value = random
-        .iter()
-        .fold(millis, |acc, byte| (acc << 8) | u128::from(*byte));
-    let text: String = (0..26_u32)
-        .rev()
-        .map(|digit| char::from(CROCKFORD[((value >> (5 * digit)) & 31) as usize]))
-        .collect();
-    text.parse().map_err(PostError::store)
-}
-
-/// A token bucket per sender: [`RATE_PER_SEC`] sustained, [`BURST`] at
-/// once.
-#[derive(Debug, Default)]
-struct RateLimiter {
-    buckets: HashMap<IdentityId, Bucket>,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct Bucket {
-    tokens: f64,
-    at: Instant,
-}
-
-impl Bucket {
-    fn refilled(self, now: Instant) -> f64 {
-        let elapsed = now.saturating_duration_since(self.at).as_secs_f64();
-        elapsed.mul_add(RATE_PER_SEC, self.tokens).min(BURST)
-    }
-}
-
-impl RateLimiter {
-    /// Takes one publish from `id`'s bucket. `Err(Some(wait))` says how
-    /// long until the next one is allowed; `Err(None)` means the limiter is
-    /// full of busy senders.
-    fn take(&mut self, id: &IdentityId, now: Instant) -> Result<(), Option<Duration>> {
-        if !self.buckets.contains_key(id) && self.buckets.len() >= MAX_TRACKED {
-            // A full bucket is the same as no bucket, so forgetting one
-            // changes no answer.
-            self.buckets
-                .retain(|_, bucket| bucket.refilled(now) < BURST);
-            if self.buckets.len() >= MAX_TRACKED {
-                return Err(None);
-            }
-        }
-        let bucket = self.buckets.entry(id.clone()).or_insert(Bucket {
-            tokens: BURST,
-            at: now,
-        });
-        bucket.tokens = bucket.refilled(now);
-        bucket.at = now;
-        if bucket.tokens >= 1.0 {
-            bucket.tokens -= 1.0;
-            Ok(())
-        } else {
-            Err(Some(Duration::from_secs_f64(
-                (1.0 - bucket.tokens) / RATE_PER_SEC,
-            )))
-        }
-    }
-}
-
-#[cfg(test)]
-#[path = "ingest_tests.rs"]
-mod tests;
