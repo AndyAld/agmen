@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
 use crate::auth::{Caller, issue_identity_token};
+use crate::billing::PlanState;
 use crate::db::{Role, is_unique_violation, new_id};
 use crate::emqx::EmqxError;
 use crate::http::{ApiError, Hub};
@@ -210,6 +211,32 @@ fn bad_role(message: &str) -> ApiError {
     ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "bad_role", message)
 }
 
+/// Share-locks the plan row of the group a member mints into and returns its
+/// stored state. No row for a non-member or a group without a plan.
+const LOCK_PLAN_FOR_MINT: &str = "SELECT tp.state
+     FROM memberships m
+     JOIN projects p ON p.id = m.project_id
+     JOIN tenant_plans tp ON tp.tenant_id = p.tenant_id
+     WHERE m.human_id = $1 AND m.project_id = $2
+     FOR SHARE OF tp";
+
+/// The refusal for a group whose plan is `deleted`: its deletion is under
+/// way, and an identity minted now would only be revoked again.
+fn refuse_deleted_group(state: Option<&str>) -> Result<(), ApiError> {
+    let state = state
+        .map(str::parse::<PlanState>)
+        .transpose()
+        .map_err(ApiError::stored)?;
+    if state == Some(PlanState::Deleted) {
+        return Err(ApiError::new(
+            StatusCode::GONE,
+            "group_deleted",
+            "the group is being deleted",
+        ));
+    }
+    Ok(())
+}
+
 /// `POST /v1/identities` (human token): mints an identity owned by the
 /// caller in a project they belong to. Its handle must be
 /// `<caller's handle>/<name>`.
@@ -223,11 +250,25 @@ pub(crate) async fn mint(
     Json(request): Json<MintRequest>,
 ) -> Result<(StatusCode, Json<Minted>), ApiError> {
     let human = caller.human()?;
+    // Locks run plan, then membership, then project (the foreign key), the
+    // order `billing::clock` takes them. The plan row is share-locked first,
+    // for a member only, so a stranger learns nothing about the group. The
+    // clock stores `deleted` under the row's exclusive lock, so a mint that
+    // reads another state commits before the clock's revoke round starts,
+    // and a later one is refused here: the deletion cannot be kept waiting
+    // by new identities. A group with no plan row (self-host, operator) has
+    // nothing to lock.
+    let mut tx = hub.pool().begin().await?;
+    let plan_state: Option<String> = sqlx::query_scalar(LOCK_PLAN_FOR_MINT)
+        .bind(human.as_str())
+        .bind(request.project.as_str())
+        .fetch_optional(&mut *tx)
+        .await?;
+    refuse_deleted_group(plan_state.as_deref())?;
     // The membership row stays share-locked until the commit. A member
     // removal deletes that row before it revokes identities, so it waits for
     // this mint and then revokes the identity, or finishes first and this
     // lookup finds no row.
-    let mut tx = hub.pool().begin().await?;
     let membership: Option<(String, String, String)> = sqlx::query_as(
         "SELECT h.handle, m.role, p.tenant_id
          FROM humans h
@@ -488,4 +529,35 @@ pub(crate) async fn ban_and_kick(hub: &Hub, id: &str, ban_until: Timestamp) -> O
         }
     }
     failed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_deleted_plan_refuses_a_mint_with_410() {
+        let Err(ApiError::Client { status, code, .. }) = refuse_deleted_group(Some("deleted"))
+        else {
+            panic!("a deleted plan must refuse");
+        };
+        assert_eq!(status, StatusCode::GONE);
+        assert_eq!(code, "group_deleted");
+    }
+
+    #[test]
+    fn every_other_plan_state_and_no_plan_row_may_mint() {
+        for state in ["trial", "active", "past_due", "read_only"] {
+            assert!(refuse_deleted_group(Some(state)).is_ok(), "{state}");
+        }
+        assert!(refuse_deleted_group(None).is_ok());
+    }
+
+    #[test]
+    fn an_unknown_stored_state_is_a_stored_error() {
+        assert!(matches!(
+            refuse_deleted_group(Some("paused")),
+            Err(ApiError::Stored(_))
+        ));
+    }
 }

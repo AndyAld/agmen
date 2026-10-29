@@ -42,7 +42,10 @@ const EVERY: Duration = Duration::from_secs(60);
 const RETRY_DELAY: Duration = Duration::from_secs(1);
 const SECS_PER_DAY: u64 = 86_400;
 
-/// Locks run in the order `mint` takes its locks (membership, then project).
+/// Locks run in the order `mint` takes its locks: plan, then membership,
+/// then project. Every path that takes more than one keeps that order.
+const LOCK_PLAN: &str = "SELECT count(*) FROM (
+         SELECT 1 FROM tenant_plans WHERE tenant_id = $1 FOR UPDATE) locked";
 const LOCK_MEMBERSHIPS: &str = "SELECT count(*) FROM (
          SELECT 1 FROM memberships
          WHERE project_id IN (SELECT id FROM projects WHERE tenant_id = $1) FOR UPDATE) locked";
@@ -392,11 +395,14 @@ async fn delete_messages(hub: &Hub, tenant: &TenantId) -> Result<(), PlanClockEr
 /// parents, and returns the ids of the projects it deleted.
 ///
 /// `mint` is the only way an identity appears, and it share-locks the
-/// member's `memberships` row and, through the foreign key, the project row.
-/// Locking both here, in that order, makes a mint that is not yet committed
-/// finish first and a later one fail. Then any identity still unrevoked was
-/// minted after the last [`revoke_and_ban`], so this returns `None` and
-/// deletes nothing, and the caller revokes and bans again.
+/// group's `tenant_plans` row, then the member's `memberships` row and,
+/// through the foreign key, the project row, and refuses a group whose plan
+/// is `deleted`. Locking all three here, in that order, makes a mint that is
+/// not yet committed finish first and a later one fail. Then any identity
+/// still unrevoked was minted after the last [`revoke_and_ban`], so this
+/// returns `None` and deletes nothing, and the caller revokes and bans again.
+/// Taking the plan lock first also keeps the final `DELETE FROM tenant_plans`
+/// from inverting the order against a mint.
 async fn delete_rows(hub: &Hub, tenant: &TenantId) -> Result<Option<Vec<String>>, PlanClockError> {
     // `stream_heads` is keyed by "<project_id>/<stream>". `left` compares
     // the prefix as text, where LIKE would treat `_` in an id as a wildcard.
@@ -422,7 +428,7 @@ async fn delete_rows(hub: &Hub, tenant: &TenantId) -> Result<Option<Vec<String>>
         "DELETE FROM tenants WHERE id = $1",
     ];
     let mut tx = hub.pool().begin().await?;
-    for lock in [LOCK_MEMBERSHIPS, LOCK_PROJECTS] {
+    for lock in [LOCK_PLAN, LOCK_MEMBERSHIPS, LOCK_PROJECTS] {
         sqlx::query(lock)
             .bind(tenant.as_str())
             .execute(&mut *tx)

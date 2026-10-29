@@ -13,7 +13,8 @@ use serde_json::{Value, json};
 use sqlx::{AssertSqlSafe, PgPool};
 use support::mqtt::{self, connect_ok};
 use support::{
-    Ctx, Project, broker_token, envelope, login, mint_ok, run_hosted, run_in_mode, ulid,
+    Ctx, Project, broker_token, envelope, login, member_with_token, mint, mint_ok, run_hosted,
+    run_in_mode, seed_project, ulid,
 };
 
 const DAY: u64 = 86_400;
@@ -736,6 +737,74 @@ async fn it_trial_grant_survives_deletion() {
             .await
             .unwrap();
         assert_eq!(grants, 1);
+    })
+    .await;
+}
+
+/// Once the plan is stored as `deleted`, a member cannot mint into the group,
+/// so new identities cannot keep a deletion waiting. Nothing is written.
+#[tokio::test]
+async fn it_mint_is_refused_in_a_group_being_deleted() {
+    run_hosted(|ctx| async move {
+        let group = group(&ctx, 4242, "andy", 1).await;
+        let project = group.project(0);
+        let identities = || async {
+            single_count(
+                &ctx.pool,
+                "SELECT count(*) FROM identities WHERE tenant_id = $1",
+                group.tenant.as_str(),
+            )
+            .await
+        };
+        let before = mint_ok(&ctx, &group.token, "andy/early", &project).await;
+        assert_eq!(identities().await, 1);
+
+        let now = now();
+        let (deleted, _) = PlanRecord::trial(ago(now, 21)).tick(now);
+        assert_eq!(deleted.state, PlanState::Deleted);
+        ctx.hub.hub.set_plan(&group.tenant, &deleted).await.unwrap();
+        let (status, body) = mint(
+            &ctx,
+            &group.token,
+            &json!({"handle": "andy/late", "project": project.project, "kind": "agent"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::GONE, "{body}");
+        assert_eq!(body["error"], "group_deleted", "{body}");
+        assert_eq!(identities().await, 1, "the refused mint left a row");
+        assert_eq!(
+            single_count(
+                &ctx.pool,
+                "SELECT count(*) FROM identities WHERE id = $1 AND revoked_at IS NULL",
+                &before.id
+            )
+            .await,
+            1
+        );
+    })
+    .await;
+}
+
+/// A group with no plan row mints as before.
+#[tokio::test]
+async fn it_self_host_mint_is_unaffected_by_the_plan_lock() {
+    run_in_mode(HubMode::SelfHost, |ctx| async move {
+        let project = seed_project(&ctx.pool).await;
+        let token = member_with_token(&ctx, &project, 4242, "andy", "member").await;
+        assert_eq!(
+            plan_state(&ctx, &project.tenant.parse().unwrap()).await,
+            None
+        );
+        let minted = mint_ok(&ctx, &token, "andy/sol", &project).await;
+        assert_eq!(
+            single_count(
+                &ctx.pool,
+                "SELECT count(*) FROM identities WHERE id = $1",
+                &minted.id
+            )
+            .await,
+            1
+        );
     })
     .await;
 }
