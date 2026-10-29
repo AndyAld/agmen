@@ -332,6 +332,24 @@ mod tests {
         assert!(!rendered.contains(":latest"));
     }
 
+    #[test]
+    fn compose_shares_the_hub_secret_group_with_emqx() {
+        let dockerfile = include_str!("../../../../agmen-hub/Dockerfile");
+        assert!(dockerfile.contains("USER 65532:65532"));
+        assert!(dockerfile.contains("--chown=65532:65532 /out/var/lib/agmen"));
+        let rendered = render_compose(&HostName::default());
+        let (_, hub) = rendered.split_once("\n  hub:\n").unwrap();
+        let (hub, emqx) = hub.split_once("\n  emqx:\n").unwrap();
+        let (emqx, _) = emqx.split_once("\n  ngrok:\n").unwrap();
+        // Neither service overrides its image's user, so the files the hub
+        // writes belong to group 65532 and EMQX joins that group.
+        assert!(!hub.contains("    user:"));
+        assert!(!hub.contains("group_add"));
+        assert!(emqx.contains("    group_add: [\"65532\"]\n"));
+        assert!(!emqx.contains("    user:"));
+        assert!(emqx.contains("broker-keys:/opt/emqx/etc/agmen:ro"));
+    }
+
     fn block<'a>(text: &'a str, header: &str) -> &'a str {
         let start = text
             .find(header)

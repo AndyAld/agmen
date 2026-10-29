@@ -16,6 +16,9 @@ use crate::config::{HubSecrets, Secret};
 use crate::db;
 
 const MAX_FILE_BYTES: u64 = 64 * 1024;
+/// The broker API key file's mode: the hub's group (which EMQX joins) reads
+/// it and nobody else does.
+const BROKER_KEY_MODE: u32 = 0o640;
 
 /// Why the hub's supplied or generated secrets could not be loaded.
 #[derive(Debug, thiserror::Error)]
@@ -129,20 +132,49 @@ fn generated(data_dir: &Path, api_key: &str) -> Result<Loaded, SelfConfigError> 
     let signing = SigningKey::from_pem("hub-1", &pem)?;
 
     let broker_dir = data_dir.join("broker");
-    fs::create_dir_all(&broker_dir).map_err(|source| io(&broker_dir, source))?;
-    // shortcut: world-readable so the EMQX container (uid 1000) can read the
-    // admin API secret; any local user on the host can too. Tighten to 0640
-    // with a group EMQX shares (and `broker/` at 0750) when the self-host
-    // compose file (Task 11) fixes the containers' users.
-    let api = read_or_create(&api_path, 0o644, || {
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    builder.mode(0o750);
+    builder
+        .create(&broker_dir)
+        .map_err(|source| io(&broker_dir, source))?;
+    // Compose gives EMQX the hub's group so it can read this shared volume.
+    // The modes are requests: the process umask can remove bits from them.
+    // shortcut: an existing file keeps its mode and only draws a warning, so a
+    // host that an earlier hub created at 0644 needs a manual chmod; add a
+    // migration if more than one such host exists.
+    let api = read_or_create(&api_path, BROKER_KEY_MODE, || {
         let secret = db::new_secret().map_err(|_| SelfConfigError::KeyGen)?;
         Ok(format!("{api_key}:{secret}:administrator\n").into_bytes())
     })?;
+    #[cfg(unix)]
+    warn_if_key_mode_differs(&api_path)?;
     let emqx_api_secret = parse_api_secret(&api_path, &api, api_key)?;
     Ok(Loaded {
         signing,
         emqx_api_secret,
     })
+}
+
+/// Logs a warning when the key file is not [`BROKER_KEY_MODE`]. The hub never
+/// changes the mode of a file that exists, so an earlier hub's 0644 stays,
+/// and a restrictive umask can leave a new file narrower than requested.
+#[cfg(unix)]
+fn warn_if_key_mode_differs(path: &Path) -> Result<(), SelfConfigError> {
+    let mode = fs::metadata(path)
+        .map_err(|source| io(path, source))?
+        .permissions()
+        .mode()
+        & 0o777;
+    if mode != BROKER_KEY_MODE {
+        tracing::warn!(
+            path = %path.display(),
+            mode = %format_args!("{mode:04o}"),
+            "the broker API key file is not mode {BROKER_KEY_MODE:04o}: a wider mode lets other users read it, a narrower one stops EMQX reading it through its group; run chmod {BROKER_KEY_MODE:04o} on it as the volume's owner"
+        );
+    }
+    Ok(())
 }
 
 fn read_existing(path: &Path) -> Result<Option<Vec<u8>>, SelfConfigError> {
@@ -180,15 +212,12 @@ fn read_or_create(
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
-    options.mode(0o600);
+    options.mode(mode);
     let mut file = options
         .open(&temporary)
         .map_err(|source| io(&temporary, source))?;
     let result = (|| {
         file.write_all(&contents)
-            .map_err(|source| io(&temporary, source))?;
-        #[cfg(unix)]
-        file.set_permissions(fs::Permissions::from_mode(mode))
             .map_err(|source| io(&temporary, source))?;
         #[cfg(not(unix))]
         let _ = mode;

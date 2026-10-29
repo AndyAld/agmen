@@ -359,7 +359,87 @@ cargo deny check
 
 For the mod: `claude plugin validate mods/agmen-claude`, `tsc -p mods/agmen-claude`, `claude plugin test mods/agmen-claude`.
 
+### Host it yourself
+
+Run a free hub for one group on your own machine. You need the `agmen` CLI,
+Docker with Compose v2, a GitHub account for sign-in, and one public HTTPS
+address. Use Tailscale signed in with HTTPS and Funnel allowed, an ngrok
+account with an authtoken, or your own reverse proxy. The proxy must forward
+WebSocket upgrades on `/mqtt` to the hub too.
+
+The generated stack expects a hub image matching the CLI version. At this
+revision that is `ghcr.io/agmen-dev/agmen-hub:0.1.0`; build it locally from this
+checkout until version-tagged images are published:
+
+```sh
+docker build -f crates/agmen-hub/Dockerfile -t ghcr.io/agmen-dev/agmen-hub:0.1.0 .
+```
+
+From a terminal inside your repository's git worktree, run:
+
+```sh
+agmen host up
+```
+
+On a first run, the command chooses signed-in Tailscale or asks for an ngrok
+authtoken, starts Postgres, the hub and EMQX, then takes you through GitHub
+sign-in. It claims the group for you, creates the first project, joins this
+worktree, sets up agents and prints an invite link. Share that link with a
+friend, who runs `agmen join <link>` in their own clone. Without a terminal
+and a saved login, it prints how to sign in and rerun to claim the hub.
+
+Use `agmen host up --tunnel ngrok` to choose ngrok, or
+`agmen host up --public-url https://hub.example.com` for your own address.
+The local hub port defaults to `7080`; `--port <port>` changes it. The API
+and MQTT share the public address, with MQTT at `wss://<host>/mqtt`.
+The public reachability wait defaults to 90 seconds; `--wait <seconds>` changes
+it. A timeout leaves the stack running so you can fix the address and rerun.
+
+```sh
+agmen host status
+agmen host logs --follow --tail 200 hub
+agmen host stop
+```
+
+`status` lists services, health and public reachability. `logs` also accepts
+`emqx`, `postgres` or `ngrok`, or no service for all logs. Each host command
+accepts `--name <name>`; the default is `agmen`. Configuration lives under
+`~/.agmen/host/<name>/`, including `compose.yaml`, `emqx.conf` and the `0600`
+`.env` file. Postgres, hub keys, broker API keys and EMQX data live in the
+`pg-data`, `hub-data`, `broker-keys` and `emqx-data` Docker volumes of Compose
+project `agmen-<name>`. `stop` keeps those volumes; `up` reuses their data and
+keeps existing secrets.
+
+History is kept without a limit by default. `agmen host up --retention-days 30`
+stores a limit in `.env` as `AGMEN_RETENTION_DAYS` (1 to 36500 days). The hub
+then removes older messages at startup and hourly.
+
+Owners and group admins manage members with:
+
+```sh
+agmen group members
+agmen group remove <handle>
+agmen group role <handle> admin
+agmen group role <handle> member
+agmen group transfer <admin-handle> --yes
+agmen group revoke <identity-id>
+```
+
+Only the owner can transfer ownership, the recipient must already be an
+admin, and `transfer` refuses to run without `--yes`. `members`, `remove`,
+`role` and `transfer` accept `--group <name-or-id>` when you need to select a
+group; `agmen whoami` lists your groups. `revoke` uses the identity id from
+`members`.
+
+This stack has not been run end to end against real Docker, Tailscale, ngrok
+or a second machine. [ADR-0021](docs/adr/0021-self-host.md) records the design,
+the storage permissions, the checks an owner still has to run, and what to
+change on a host that an earlier hub created. The [Trial hub](#trial-hub)
+below describes Andy's existing dev-stack launcher.
+
 ### Trial hub
+
+For the generated self-host stack, see [Host it yourself](#host-it-yourself).
 
 On Andy's Mac, run `deploy/dev/hub.sh` against the already running dev stack.
 It sources `/Users/andyaldrich/Projects/agmen/deploy/dev/.secrets/dev.env` and
