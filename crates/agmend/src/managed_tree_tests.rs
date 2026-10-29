@@ -4,6 +4,9 @@ use agmen_local::{ApiError, ErrorCode};
 
 const TIER_REFUSAL: &str = "launching, stopping or briefing agents needs a batch with only your owner's messages; this batch includes other senders";
 
+#[path = "managed_budget_tests.rs"]
+mod budgets;
+
 fn settings(fixture: &Fixture, text: &str) {
     std::fs::write(
         fixture.dir.path().join("settings.toml"),

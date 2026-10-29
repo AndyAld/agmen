@@ -38,6 +38,7 @@ pub(crate) struct RunSpec {
     pub(crate) resume: bool,
     pub(crate) model: Option<String>,
     pub(crate) budget_remaining: String,
+    pub(crate) cap_budget: bool,
     pub(crate) mcp_config: PathBuf,
     pub(crate) owner_handle: String,
     pub(crate) owner_id: agmen_proto::IdentityId,
@@ -78,11 +79,11 @@ impl RunSpec {
             }
             .into(),
         ]);
+        args.extend(["--output-format".into(), "json".into()]);
+        if self.cap_budget {
+            args.extend(["--max-budget-usd".into(), self.budget_remaining.clone()]);
+        }
         args.extend([
-            "--output-format".into(),
-            "json".into(),
-            "--max-budget-usd".into(),
-            self.budget_remaining.clone(),
             "--strict-mcp-config".into(),
             "--mcp-config".into(),
             self.mcp_config.to_string_lossy().into_owned(),

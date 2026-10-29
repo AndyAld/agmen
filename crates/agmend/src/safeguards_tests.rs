@@ -152,3 +152,40 @@ fn config_new_leaves_settings_path_unset() {
     );
     assert!(!path.exists());
 }
+
+#[test]
+fn known_keys_are_the_settings_fields() {
+    let value = serde_json::to_value(Safeguards::default()).unwrap();
+    let mut fields: Vec<&str> = value
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    fields.sort_unstable();
+    let mut known = super::KNOWN_KEYS.to_vec();
+    known.sort_unstable();
+    assert_eq!(known, fields);
+}
+
+#[test]
+fn unknown_keys_are_named_and_capped_while_known_keys_stay_quiet() {
+    let (_dir, path) = file();
+    let mut text = String::from("[agents]\nmax_agents = 3\nbudgets = false\n");
+    for n in 0..20 {
+        text.push_str(&format!("extra_{n:02} = true\n"));
+    }
+    std::fs::write(&path, text).unwrap();
+    let (settings, warning) = super::load_report(Some(&path)).unwrap();
+    assert_eq!(settings.max_agents, 3);
+    assert!(!settings.budgets);
+    let warning = warning.unwrap();
+    let named: Vec<&str> = warning.split("; ").collect();
+    assert_eq!(named.len(), super::MAX_UNKNOWN_REPORTED);
+    assert_eq!(named[0], "unknown setting extra_00 in [agents], ignored");
+    assert_eq!(named[15], "unknown setting extra_15 in [agents], ignored");
+    assert!(!warning.contains("extra_16"));
+    assert!(!warning.contains("max_agents"));
+    std::fs::write(&path, "[agents]\nmax_agents = 3\n").unwrap();
+    assert_eq!(super::load_report(Some(&path)).unwrap().1, None);
+}

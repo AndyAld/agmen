@@ -161,11 +161,17 @@ impl Stored {
 #[derive(Debug, Deserialize)]
 struct SavedStatus {
     spent_usd: String,
+    #[serde(default = "zero_usd")]
+    children_spent_usd: String,
+}
+
+fn zero_usd() -> String {
+    "0".into()
 }
 
 /// One record read from disk: the record, its saved spend, and whether it
 /// must be saved again in the current format.
-type Loaded = (Record, Option<String>, bool);
+type Loaded = (Record, Option<SavedStatus>, bool);
 
 impl Managed {
     pub(super) fn agent_dir(&self, id: &IdentityId) -> PathBuf {
@@ -194,10 +200,24 @@ impl Managed {
                 continue;
             };
             let mut budget = Budget::new(cap);
-            if let Some(spent) = spent
-                && budget.observe_total_cost_usd(&spent, |_| {}).is_err()
-            {
-                tracing::warn!("an agent's saved spend is invalid; counting from zero");
+            // shortcut: reservations are not saved. Every loaded agent is
+            // offline and holds nothing in its parent until Start reserves its
+            // unspent cap again, and Start is refused if the parent has used
+            // that money meanwhile. Revisit if agents ever keep running across
+            // an agmend restart.
+            if let Some(spent) = spent {
+                if budget
+                    .observe_total_cost_usd(&spent.spent_usd, |_| {})
+                    .is_err()
+                {
+                    tracing::warn!("an agent's saved spend is invalid; counting from zero");
+                }
+                match Money::from_usd(&spent.children_spent_usd) {
+                    Ok(cost) => budget.charge_child(cost),
+                    Err(_) => tracing::warn!(
+                        "an agent's saved child spend is invalid; counting from zero"
+                    ),
+                }
             }
             // Start and Attach check the sessions before either tier resumes.
             let parent = record.parent.clone();
@@ -604,8 +624,12 @@ impl Managed {
         let identities = self
             .identities()
             .ok_or_else(|| error("identity service stopped"))?;
+        let _accounting = self.accounting.lock().await;
+        // Register before reserving: a failed register must not hold parent funds.
+        let record = worker.lock().await.record.clone();
+        identities.register(record.identity.clone()).await?;
+        self.reserve_on_start(worker).await?;
         let mut held = worker.lock().await;
-        identities.register(held.record.identity.clone()).await?;
         held.state = state;
         held.last_run = None;
         let record = held.record.clone();
@@ -949,8 +973,20 @@ pub(super) fn hello(model: Option<String>, branch: String) -> Result<ClientEnvel
 
 /// Saves the agent's lifetime spend so a restart keeps counting from it.
 pub(super) async fn save_spent(dir: &Path, spent: Money) {
+    write_status(dir, spent, Money::ZERO).await;
+}
+
+pub(super) async fn save_status(dir: &Path, spent: Money, children_spent: Money) {
+    if children_spent == Money::ZERO {
+        save_spent(dir, spent).await;
+    } else {
+        write_status(dir, spent, children_spent).await;
+    }
+}
+
+async fn write_status(dir: &Path, spent: Money, children_spent: Money) {
     let path = dir.join("status.json");
-    let value = json!({"spent_usd": spent.usd()});
+    let value = json!({"spent_usd": spent.usd(), "children_spent_usd": children_spent.usd()});
     match tokio::task::spawn_blocking(move || replace_private_json(&path, &value)).await {
         Ok(Ok(())) => {}
         Ok(Err(error)) => tracing::warn!(%error, "saving an agent's spend failed"),
@@ -1009,14 +1045,7 @@ async fn verify_folder(
             joined.identity.identity_id
         )));
     }
-    if joined.identity.project != *project
-        || joined.identity.owner_id != login.human_id
-        || joined.identity.hub_url.origin() != login.hub_url.origin()
-    {
-        return Err(bad_request(
-            "checkout is not joined to this project and owner",
-        ));
-    }
+    super::check_project(&joined.identity, project, login)?;
     Ok(joined)
 }
 
@@ -1245,7 +1274,6 @@ fn read_record(dir: &Path) -> anyhow::Result<Option<Loaded>> {
     let (record, migrated) = serde_json::from_slice::<Stored>(&bytes)?.into_record()?;
     let spent = read_bounded(&dir.join("status.json"))
         .ok()
-        .and_then(|bytes| serde_json::from_slice::<SavedStatus>(&bytes).ok())
-        .map(|status| status.spent_usd);
+        .and_then(|bytes| serde_json::from_slice::<SavedStatus>(&bytes).ok());
     Ok(Some((record, spent, migrated)))
 }

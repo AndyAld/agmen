@@ -130,7 +130,7 @@ impl Managed {
     /// Serializes admission and registration for human and child launches.
     pub(super) async fn launch_at(
         self: &Arc<Self>,
-        launch: Launch,
+        mut launch: Launch,
         root: PathBuf,
         parent: Option<Record>,
         brief: Option<String>,
@@ -145,11 +145,7 @@ impl Managed {
             Some(parent) => Some(self.tree_caller(&parent.identity).await?),
             None => None,
         };
-        let settings_file = self.settings_file.clone();
-        let safeguards =
-            tokio::task::spawn_blocking(move || crate::safeguards::load(settings_file.as_deref()))
-                .await
-                .map_err(error)??;
+        let safeguards = self.read_safeguards(true).await?;
         let login = self.hub.credentials().login().await.map_err(error)?;
         let depth = self
             .admit(parent.as_ref(), &login.human_id, &safeguards)
@@ -163,14 +159,7 @@ impl Managed {
             .map_err(error)?
             .map_err(error)?
             .ok_or_else(|| bad_request("checkout has no trusted agmen identity"))?;
-        if joined.identity.project != launch.project
-            || joined.identity.owner_id != login.human_id
-            || joined.identity.hub_url.origin() != login.hub_url.origin()
-        {
-            return Err(bad_request(
-                "checkout is not joined to this project and owner",
-            ));
-        }
+        super::check_project(&joined.identity, &launch.project, &login)?;
         // A child starts from its parent's worktree, which the parent can
         // write to. Take nothing for the child from a file or a git pointer
         // there that no longer says what agmend recorded at the parent's launch.
@@ -196,42 +185,56 @@ impl Managed {
             ));
         }
         let role = self.launch_role(&repo, &launch, parent.as_ref()).await?;
+        let _accounting = self.accounting.lock().await;
         let branch = format!(
             "agent/{}-{}",
             launch.name,
             &crate::launch::new_session_id().map_err(error)?[..8]
         );
-        let worktree = crate::worktree::create(&joined.root, "HEAD", &branch)
-            .await
-            .map_err(error)?;
-        let result = self
-            .complete_launch(
-                launch,
-                joined,
-                login,
-                Placement {
-                    branch: branch.clone(),
-                    worktree: worktree.clone(),
-                    parent,
-                    depth,
-                    brief,
+        let reservation = self
+            .reserve_child_budget(&mut launch, parent.as_ref(), &safeguards)
+            .await?;
+        let result = async {
+            let worktree = crate::worktree::create(&joined.root, "HEAD", &branch)
+                .await
+                .map_err(error)?;
+            let result = self
+                .complete_launch(
+                    launch,
+                    joined,
+                    login,
+                    Placement {
+                        branch: branch.clone(),
+                        worktree: worktree.clone(),
+                        parent,
+                        depth,
+                        brief,
+                        shared_budget: reservation.is_some(),
+                    },
+                    agmen,
+                    role,
+                )
+                .await;
+            match result {
+                Ok(result) => Ok(result),
+                Err(failure) => match crate::worktree::remove(&repo, &worktree, &branch).await {
+                    Ok(()) => Err(failure),
+                    Err(cleanup) => Err(error(format!(
+                        "{}; retained {} on branch {} because safe cleanup failed: {cleanup:#}",
+                        failure.message,
+                        worktree.display(),
+                        branch
+                    ))),
                 },
-                agmen,
-                role,
-            )
-            .await;
-        match result {
-            Ok(result) => Ok(result),
-            Err(failure) => match crate::worktree::remove(&repo, &worktree, &branch).await {
-                Ok(()) => Err(failure),
-                Err(cleanup) => Err(error(format!(
-                    "{}; retained {} on branch {} because safe cleanup failed: {cleanup:#}",
-                    failure.message,
-                    worktree.display(),
-                    branch
-                ))),
-            },
+            }
         }
+        .await;
+        if result.is_err()
+            && let Some(reservation) = reservation
+        {
+            reservation.rollback().await;
+        }
+        result
     }
 
     async fn launch_role(
