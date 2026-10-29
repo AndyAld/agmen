@@ -139,6 +139,32 @@ pub(crate) fn message_line_with_id(message: &StampedEnvelope) -> String {
     )
 }
 
+/// [`message_line_with_id`] with the body cut to at most `max_body` bytes at a
+/// character boundary, ending with a note that `inbox` has the rest. Also says
+/// whether the body was cut.
+pub(crate) fn message_line_with_id_capped(
+    message: &StampedEnvelope,
+    max_body: usize,
+) -> (String, bool) {
+    let body = message.client.body.as_str();
+    let cut = body.len() > max_body;
+    let kept = if cut {
+        &body[..body.floor_char_boundary(max_body)]
+    } else {
+        body
+    };
+    let mut line = format!(
+        "{} (id {}): {}",
+        message_head(message),
+        message.client.id,
+        body_text(kept)
+    );
+    if cut {
+        line.push_str("\u{2026} (truncated; call inbox for the rest)");
+    }
+    (line, cut)
+}
+
 /// `#<seq> <stream> <VERB> from <handle> [about <items>]`, every
 /// hub-supplied string through [`clean`].
 fn message_head(message: &StampedEnvelope) -> String {
