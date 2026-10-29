@@ -1,12 +1,15 @@
-//! Probes for the cluster: `GET /livez` (the process answers) and
-//! `GET /healthz` (the database answers too, so the hub can serve).
+//! Probes for the cluster: `GET /livez` (the process answers),
+//! `GET /healthz` (the database answers too, so the hub can serve), and
+//! `GET /statusz` (the database and broker connection answer).
 
 use std::time::Duration;
 
-use axum::Router;
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{StatusCode, header};
+use axum::response::{IntoResponse as _, Response};
 use axum::routing::get;
+use axum::{Json, Router};
+use serde_json::json;
 use sqlx::PgPool;
 
 use crate::http::Hub;
@@ -20,6 +23,7 @@ pub(crate) fn routes() -> Router<Hub> {
     Router::new()
         .route("/livez", get(livez))
         .route("/healthz", get(healthz))
+        .route("/statusz", get(statusz))
 }
 
 /// `GET /livez`: 200 `ok` while the process can answer at all.
@@ -35,6 +39,27 @@ async fn healthz(State(hub): State<Hub>) -> (StatusCode, &'static str) {
     } else {
         (StatusCode::SERVICE_UNAVAILABLE, "database unavailable")
     }
+}
+
+/// `GET /statusz`: 200 when the database and broker connection are up,
+/// 503 otherwise, with each part's status in the body.
+async fn statusz(State(hub): State<Hub>) -> Response {
+    let database = database_ready(hub.pool()).await;
+    let broker = hub.broker_up();
+    let status = if database && broker {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (
+        status,
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(json!({
+            "database": if database { "ok" } else { "down" },
+            "broker": if broker { "ok" } else { "down" },
+        })),
+    )
+        .into_response()
 }
 
 async fn database_ready(pool: &PgPool) -> bool {

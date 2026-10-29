@@ -32,6 +32,7 @@ fn feed_message(seq: u64) -> StampedEnvelope {
 #[derive(Debug, Clone, Default)]
 struct FakeHub {
     feed: Arc<Mutex<Vec<StampedEnvelope>>>,
+    pruned_through: Arc<Mutex<u64>>,
     pages: Arc<Mutex<u32>>,
     gate: Arc<tokio::sync::Mutex<()>>,
 }
@@ -46,7 +47,11 @@ async fn page(
     let feed = hub.feed.lock().unwrap();
     let messages: Vec<_> = feed.iter().filter(|m| m.seq.0 > after).cloned().collect();
     let head = feed.last().map_or(0, |m| m.seq.0);
-    Json(json!({ "messages": messages, "next_after": null, "head": head }))
+    let pruned_through = *hub.pruned_through.lock().unwrap();
+    Json(json!({
+        "messages": messages, "next_after": null, "head": head,
+        "pruned_through": pruned_through,
+    }))
 }
 
 /// The link's side of delivery, a running replayer, and the events.
@@ -134,6 +139,41 @@ impl Harness {
         }
         seqs
     }
+}
+
+#[tokio::test]
+async fn replay_skips_pruned_seqs() {
+    let mut h = start().await;
+    *h.fake.feed.lock().unwrap() = (7..=8).map(feed_message).collect();
+    *h.fake.pruned_through.lock().unwrap() = 6;
+    assert_eq!(h.cursors.last(&Stream::Feed).unwrap(), 0);
+    h.streams.on_head(br#"{"feed_seq":8}"#).await.unwrap();
+    assert_eq!(h.delivered().await, [7, 8]);
+    assert_eq!(h.cursors.last(&Stream::Feed).unwrap(), 8);
+}
+
+#[test]
+fn skip_to_never_lowers() {
+    let dir = tempfile::tempdir().unwrap();
+    let cursors = Cursors::open(dir.path().join("identity.db")).unwrap();
+    for seq in 1..=9 {
+        assert_eq!(cursors.advance(&Stream::Feed, seq).unwrap(), Advance::Next);
+    }
+    cursors.mark_read(&Stream::Feed, 4).unwrap();
+    cursors.skip_to(&Stream::Feed, 5).unwrap();
+    assert_eq!(cursors.last(&Stream::Feed).unwrap(), 9);
+    cursors.skip_to(&Stream::Feed, 12).unwrap();
+    assert_eq!(cursors.last(&Stream::Feed).unwrap(), 12);
+    assert_eq!(cursors.read_cursor(&Stream::Feed).unwrap(), 4);
+    assert!(cursors.skip_to(&Stream::Feed, u64::MAX).is_err());
+    assert_eq!(cursors.last(&Stream::Feed).unwrap(), 12);
+}
+
+#[test]
+fn page_without_pruned_through_parses() {
+    let page: crate::hub::Page =
+        serde_json::from_str(r#"{"messages":[],"next_after":null,"head":0}"#).unwrap();
+    assert_eq!(page.pruned_through, 0);
 }
 
 #[tokio::test]
