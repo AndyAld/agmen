@@ -754,3 +754,108 @@ async fn it_concurrent_resend_at_the_limit_gets_ack() {
     })
     .await;
 }
+
+async fn invite_code(ctx: &Ctx, room: &Room) -> String {
+    let response = ctx
+        .http
+        .post(ctx.hub.url("/v1/invites"))
+        .bearer_auth(&room.owner.access_token)
+        .json(&json!({"project": room.topics.project(), "role": "member"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body: Value = response.json().await.unwrap();
+    body["code"].as_str().unwrap().to_owned()
+}
+
+async fn accept(ctx: &Ctx, token: &str, code: &str) -> (StatusCode, Value) {
+    let response = ctx
+        .http
+        .post(ctx.hub.url(&format!("/v1/invites/{code}/accept")))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    (status, response.json().await.unwrap_or(Value::Null))
+}
+
+#[tokio::test]
+async fn it_read_only_refuses_invite_accept() {
+    run_hosted(|ctx| async move {
+        let room = room(&ctx).await;
+        let used_code = invite_code(&ctx, &room).await;
+        let open_code = invite_code(&ctx, &room).await;
+        let first = login(&ctx, 7001, "first").await;
+        let (status, body) = accept(&ctx, &first, &used_code).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        ctx.hub
+            .hub
+            .set_plan(
+                room.topics.tenant(),
+                &PlanRecord::awaiting_payment(Timestamp::now()),
+            )
+            .await
+            .unwrap();
+        // A dead invite still answers first.
+        let second = login(&ctx, 7002, "second").await;
+        let (status, body) = accept(&ctx, &second, &used_code).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"], "invite_used");
+        // A live invite on a read-only group is refused as read-only, not as a full group.
+        let (status, body) = accept(&ctx, &second, &open_code).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(body["error"], "group_read_only");
+        assert_eq!(
+            body["error_description"],
+            "the group is read-only until its owner pays: agmen group billing"
+        );
+        let unused: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM invites WHERE code_hash IS NOT NULL AND project_id = $1 AND used_by IS NULL")
+                .bind(room.topics.project().as_str())
+                .fetch_one(&ctx.pool)
+                .await
+                .unwrap();
+        assert_eq!(unused, 1);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn it_seats_report_used_today() {
+    run_hosted(|ctx| async move {
+        let room = room(&ctx).await;
+        let seats = || async {
+            let response = ctx
+                .http
+                .get(
+                    ctx.hub
+                        .url(&format!("/v1/tenants/{}/seats", room.topics.tenant())),
+                )
+                .bearer_auth(&room.owner.access_token)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            response.json::<Value>().await.unwrap()
+        };
+        assert_eq!(seats().await["used_today"].as_u64(), Some(0));
+        // Another UTC day does not count.
+        ctx.hub
+            .hub
+            .set_usage(room.topics.tenant(), -1, 999)
+            .await
+            .unwrap();
+        assert_eq!(seats().await["used_today"].as_u64(), Some(0));
+        ctx.hub
+            .hub
+            .set_usage(room.topics.tenant(), 0, 1_234)
+            .await
+            .unwrap();
+        let body = seats().await;
+        assert_eq!(body["used_today"].as_u64(), Some(1_234), "{body}");
+        assert_eq!(body["quota"].as_u64(), Some(5_000), "{body}");
+    })
+    .await;
+}
