@@ -22,8 +22,11 @@ use crate::usage::post_owner_alert;
 const PAGE_SIZE: i64 = 100;
 /// Pages one pass reads at most.
 const MAX_PAGES: u32 = 100;
-/// Tenants one pass changes or fails to delete at most.
+/// Tenants one pass changes or fails at most.
 const MAX_TENANTS: usize = 100;
+/// Times one deletion revokes and bans again because an identity was minted
+/// while it ran.
+const MAX_REVOKE_ROUNDS: u32 = 5;
 /// Identities one group may have when it is deleted.
 const MAX_IDENTITIES: i64 = 10_000;
 /// Message rows one delete statement removes.
@@ -32,11 +35,19 @@ const MESSAGE_BATCH: i64 = 10_000;
 const MAX_MESSAGE_BATCHES: u32 = 1_000;
 /// Projects whose roster is republished after a deletion.
 const MAX_ROSTER_PROJECTS: i64 = 1_000;
-/// Failed passes in a row before the task gives up.
+/// Failed passes in a row before the task gives up. Only a pass-level failure
+/// (the candidate query) counts; a failed group does not.
 const MAX_FAILURES: u32 = 10;
 const EVERY: Duration = Duration::from_secs(60);
 const RETRY_DELAY: Duration = Duration::from_secs(1);
 const SECS_PER_DAY: u64 = 86_400;
+
+/// Locks run in the order `mint` takes its locks (membership, then project).
+const LOCK_MEMBERSHIPS: &str = "SELECT count(*) FROM (
+         SELECT 1 FROM memberships
+         WHERE project_id IN (SELECT id FROM projects WHERE tenant_id = $1) FOR UPDATE) locked";
+const LOCK_PROJECTS: &str =
+    "SELECT count(*) FROM (SELECT 1 FROM projects WHERE tenant_id = $1 FOR UPDATE) locked";
 
 // shortcut: SQL picks a superset by the earliest offset and Rust decides; store a
 // next_deadline_at column if candidate scans show in clock latency
@@ -157,9 +168,10 @@ impl Hub {
 
 /// Runs the clock for every group with something due at `now` and returns
 /// how many it changed. One pass looks at most at [`MAX_PAGES`] pages of
-/// [`PAGE_SIZE`] candidates and stops after [`MAX_TENANTS`] changed groups.
-/// A group whose deletion the broker refuses does not stop the others; the
-/// pass returns that failure after them. Self-host hubs return 0 without a query.
+/// [`PAGE_SIZE`] candidates and stops after [`MAX_TENANTS`] changed or failed
+/// groups. A group that fails is logged and skipped (see [`tenant_outcome`]);
+/// only a failed candidate query fails the pass. Self-host hubs return 0
+/// without a query.
 pub(crate) async fn tick_plans(hub: &Hub, now: Timestamp) -> Result<usize, PlanClockError> {
     if hub.mode() != HubMode::Hosted {
         return Ok(0);
@@ -167,7 +179,6 @@ pub(crate) async fn tick_plans(hub: &Hub, now: Timestamp) -> Result<usize, PlanC
     let cutoffs = Cutoffs::at(now);
     let mut after = String::new();
     let mut handled = 0;
-    let mut broker_failure = None;
     'pages: for _ in 0..MAX_PAGES {
         let page: Vec<String> = sqlx::query_scalar(CANDIDATES)
             .bind(&after)
@@ -178,15 +189,8 @@ pub(crate) async fn tick_plans(hub: &Hub, now: Timestamp) -> Result<usize, PlanC
             .fetch_all(hub.pool())
             .await?;
         for tenant in &page {
-            match tick_one(hub, tenant, now).await {
-                Ok(true) => handled += 1,
-                Ok(false) => {}
-                Err(err @ PlanClockError::Broker { .. }) => {
-                    tracing::warn!(error = %error_chain(&err), "deleting a group failed; the next pass retries");
-                    broker_failure.get_or_insert(err);
-                    handled += 1;
-                }
-                Err(err) => return Err(err),
+            if tenant_outcome(tenant, tick_one(hub, tenant, now).await) {
+                handled += 1;
             }
             if handled >= MAX_TENANTS {
                 break 'pages;
@@ -199,7 +203,7 @@ pub(crate) async fn tick_plans(hub: &Hub, now: Timestamp) -> Result<usize, PlanC
             _ => break,
         }
     }
-    broker_failure.map_or(Ok(handled), Err)
+    Ok(handled)
 }
 
 /// Ticks one group under its plan row lock, then carries out the effects
@@ -244,6 +248,22 @@ async fn tick_one(hub: &Hub, tenant: &str, now: Timestamp) -> Result<bool, PlanC
     Ok(counted)
 }
 
+/// What one pass does with the result of ticking one group, and whether the
+/// group counts toward the pass limit. A group that fails (a stuck deletion,
+/// a broker refusal, a bad row) is logged and skipped, and still counts: its
+/// stored state makes the next pass retry it. Returning the failure would end
+/// the pass for every group after it, and ten such passes in a row end the
+/// whole hub (`main` exits when messaging stops).
+fn tenant_outcome(tenant: &str, result: Result<bool, PlanClockError>) -> bool {
+    match result {
+        Ok(counted) => counted,
+        Err(err) => {
+            tracing::warn!(tenant, error = %error_chain(&err), "plan clock failed for a group; the next pass retries");
+            true
+        }
+    }
+}
+
 /// Posts the trial reminder. A failure is logged: the record already counts
 /// the reminder as sent.
 async fn remind(hub: &Hub, tenant: &TenantId, ends_at: Timestamp) -> Result<(), PlanClockError> {
@@ -264,8 +284,42 @@ async fn remind(hub: &Hub, tenant: &TenantId, ends_at: Timestamp) -> Result<(), 
 /// Deletes `tenant`: revokes, bans and kicks every identity (stopping if the
 /// broker fails, before any row goes), then removes every row that names the
 /// group or its projects. Keeps `trial_grants` and everything per person.
-/// Repeating it for a group that is gone does nothing.
+/// Repeating it for a group that is gone does nothing. An identity minted
+/// while it runs is revoked and banned in a further round, at most
+/// [`MAX_REVOKE_ROUNDS`] (see [`delete_rows`]).
 pub(crate) async fn delete_group(hub: &Hub, tenant: &TenantId) -> Result<(), PlanClockError> {
+    let mut projects = None;
+    for _ in 0..MAX_REVOKE_ROUNDS {
+        revoke_and_ban(hub, tenant).await?;
+        delete_messages(hub, tenant).await?;
+        projects = delete_rows(hub, tenant).await?;
+        if projects.is_some() {
+            break;
+        }
+    }
+    let Some(projects) = projects else {
+        return Err(PlanClockError::Database(sqlx::Error::Decode(
+            format!("identities kept appearing after {MAX_REVOKE_ROUNDS} revoke rounds").into(),
+        )));
+    };
+    for project in projects {
+        match project.parse::<ProjectId>() {
+            // The roster query finds nothing, so the retained head becomes empty.
+            Ok(project) => hub
+                .presence()
+                .roster_changed(&Topics::new(tenant.clone(), project)),
+            Err(err) => {
+                tracing::error!(%tenant, %project, error = %err, "a stored project id is invalid; its roster was not published")
+            }
+        }
+    }
+    tracing::info!(%tenant, "deleted group");
+    Ok(())
+}
+
+/// Revokes every identity of the group, then bans and kicks each one. Stops
+/// with [`PlanClockError::Broker`] if the broker fails, before any row goes.
+async fn revoke_and_ban(hub: &Hub, tenant: &TenantId) -> Result<(), PlanClockError> {
     let pool = hub.pool();
     let known: i64 = sqlx::query_scalar("SELECT count(*) FROM identities WHERE tenant_id = $1")
         .bind(tenant.as_str())
@@ -301,20 +355,6 @@ pub(crate) async fn delete_group(hub: &Hub, tenant: &TenantId) -> Result<(), Pla
             failed,
         });
     }
-    delete_messages(hub, tenant).await?;
-    let projects = delete_rows(hub, tenant).await?;
-    for project in projects {
-        match project.parse::<ProjectId>() {
-            // The roster query finds nothing, so the retained head becomes empty.
-            Ok(project) => hub
-                .presence()
-                .roster_changed(&Topics::new(tenant.clone(), project)),
-            Err(err) => {
-                tracing::error!(%tenant, %project, error = %err, "a stored project id is invalid; its roster was not published")
-            }
-        }
-    }
-    tracing::info!(%tenant, identities = revoked.len(), "deleted group");
     Ok(())
 }
 
@@ -350,7 +390,14 @@ async fn delete_messages(hub: &Hub, tenant: &TenantId) -> Result<(), PlanClockEr
 
 /// Deletes every other row of the group in one transaction, children before
 /// parents, and returns the ids of the projects it deleted.
-async fn delete_rows(hub: &Hub, tenant: &TenantId) -> Result<Vec<String>, PlanClockError> {
+///
+/// `mint` is the only way an identity appears, and it share-locks the
+/// member's `memberships` row and, through the foreign key, the project row.
+/// Locking both here, in that order, makes a mint that is not yet committed
+/// finish first and a later one fail. Then any identity still unrevoked was
+/// minted after the last [`revoke_and_ban`], so this returns `None` and
+/// deletes nothing, and the caller revokes and bans again.
+async fn delete_rows(hub: &Hub, tenant: &TenantId) -> Result<Option<Vec<String>>, PlanClockError> {
     // `stream_heads` is keyed by "<project_id>/<stream>". `left` compares
     // the prefix as text, where LIKE would treat `_` in an id as a wildcard.
     const DELETES: [&str; 18] = [
@@ -375,6 +422,21 @@ async fn delete_rows(hub: &Hub, tenant: &TenantId) -> Result<Vec<String>, PlanCl
         "DELETE FROM tenants WHERE id = $1",
     ];
     let mut tx = hub.pool().begin().await?;
+    for lock in [LOCK_MEMBERSHIPS, LOCK_PROJECTS] {
+        sqlx::query(lock)
+            .bind(tenant.as_str())
+            .execute(&mut *tx)
+            .await?;
+    }
+    let unrevoked: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM identities WHERE tenant_id = $1 AND revoked_at IS NULL",
+    )
+    .bind(tenant.as_str())
+    .fetch_one(&mut *tx)
+    .await?;
+    if unrevoked > 0 {
+        return Ok(None);
+    }
     let projects: Vec<String> =
         sqlx::query_scalar("SELECT id FROM projects WHERE tenant_id = $1 ORDER BY id LIMIT $2")
             .bind(tenant.as_str())
@@ -388,7 +450,7 @@ async fn delete_rows(hub: &Hub, tenant: &TenantId) -> Result<Vec<String>, PlanCl
             .await?;
     }
     tx.commit().await?;
-    Ok(projects)
+    Ok(Some(projects))
 }
 
 #[cfg(test)]
@@ -405,6 +467,23 @@ mod tests {
             reminder_text("andy/acme", at("2026-11-05T00:00:00Z")),
             "Your agmen hosted trial of andy/acme ends on 2026-11-05T00:00:00Z. Run agmen group billing to keep going."
         );
+    }
+
+    #[test]
+    fn a_failed_group_does_not_stop_the_pass() {
+        let broker = PlanClockError::Broker {
+            tenant: "acmeacme".into(),
+            failed: 1,
+        };
+        let database = PlanClockError::Database(sqlx::Error::Decode(
+            format!("a group has more than {MAX_IDENTITIES} identities").into(),
+        ));
+        // A failed group counts toward the pass limit, so stuck groups
+        // cannot make one pass do unbounded work.
+        assert!(tenant_outcome("acmeacme", Err(broker)));
+        assert!(tenant_outcome("acmeacme", Err(database)));
+        assert!(tenant_outcome("acmeacme", Ok(true)));
+        assert!(!tenant_outcome("acmeacme", Ok(false)));
     }
 
     #[test]

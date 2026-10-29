@@ -633,6 +633,50 @@ async fn it_delete_retries_after_a_broker_failure() {
     .await;
 }
 
+/// A mint that commits while the delete runs: its identity is revoked and
+/// banned in a further round, and the delete finishes.
+#[tokio::test]
+async fn it_delete_group_catches_an_identity_minted_during_the_delete() {
+    run_hosted(|ctx| async move {
+        let group = group(&ctx, 4242, "andy", 1).await;
+        let late = ulid().to_lowercase();
+        // `mint` holds the project row (a foreign key share lock) from its
+        // insert to its commit; this transaction does the same.
+        let mut tx = ctx.pool.begin().await.unwrap();
+        sqlx::query(
+            "INSERT INTO identities (id, tenant_id, project_id, kind, handle, owner_human_id)
+             VALUES ($1, $2, $3, 'agent', $4 || '/late', $4)",
+        )
+        .bind(&late)
+        .bind(group.tenant.as_str())
+        .bind(&group.projects[0])
+        .bind(&group.owner)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        let hub = ctx.hub.hub.clone();
+        let tenant = group.tenant.clone();
+        let deleting = tokio::spawn(async move { hub.delete_group(&tenant).await });
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        tx.commit().await.unwrap();
+        deleting.await.unwrap().unwrap();
+        let after = walk(
+            &ctx.pool,
+            &group.tenant,
+            &group.projects,
+            std::slice::from_ref(&late),
+        )
+        .await;
+        assert!(
+            after.values().all(|rows| *rows == 0),
+            "rows left after delete_group: {}",
+            walk_report(&after)
+        );
+        support::unban_username(&ctx.http, &late).await;
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn it_other_groups_untouched() {
     run_hosted(|ctx| async move {
