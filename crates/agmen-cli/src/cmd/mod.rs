@@ -5,6 +5,7 @@
 mod account;
 mod chat;
 pub(crate) mod claim;
+mod group;
 mod host;
 pub(crate) mod inbox;
 mod install_receipt;
@@ -143,6 +144,8 @@ enum Command {
         #[command(subcommand)]
         command: account::ProjectCommand,
     },
+    /// Manage a group's members, roles and identities.
+    Group(group::GroupArgs),
     /// Make a single-use invite to a project (admins and coordinators).
     Invite(account::InviteArgs),
     /// Join this worktree to a project as a new identity of yours.
@@ -259,6 +262,7 @@ impl Cli {
             Command::Logout => account::logout().await,
             Command::Whoami { json } => account::whoami(json).await,
             Command::Project { command } => account::project(command).await,
+            Command::Group(args) => group::run(args).await,
             Command::Invite(args) => account::invite(args).await,
             Command::Join(args) => join::join(args).await,
             Command::Setup { agent, no_plugin } => {
