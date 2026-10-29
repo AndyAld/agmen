@@ -90,15 +90,14 @@ together, so change them together.
 **The `broker/` directory.** The hub's `0750` request applies only when the
 hub creates the directory. In Compose, `/var/lib/agmen/broker` is the mount
 point of the `broker-keys` volume, so it already exists when the hub starts.
-The Dockerfile makes it with a plain `mkdir -p` (expected mode `0755`) and
-copies it with `--chown=65532:65532`. Docker copies an image directory into a
-new empty volume
+The Dockerfile makes it with `mkdir -p` and `chmod 0750`, and copies it with
+`--chown=65532:65532`; `compose_shares_the_hub_secret_group_with_emqx` checks
+both lines. Docker copies an image directory into a new empty volume
 ([Docker's volume documentation](https://docs.docker.com/engine/storage/volumes/#mounting-a-volume-over-existing-data)).
 Whether the volume root also takes the directory's owner and mode is Docker
 behavior this record has not verified. If it does, `broker/` in a fresh volume
-is `65532:65532` with mode `0755`: other users could list it but not read the
-key. A `0750` mount point would need `-m 0750` on that `mkdir`, an image change
-this decision does not make.
+is `65532:65532` with mode `0750`. A volume created by an older image keeps
+the mode it was created with.
 
 **Umask.** Creation modes are requests, and the process umask can only remove
 bits from them. A hub run under `umask 077` writes the key as `0600` (and a

@@ -337,6 +337,9 @@ mod tests {
         let dockerfile = include_str!("../../../../agmen-hub/Dockerfile");
         assert!(dockerfile.contains("USER 65532:65532"));
         assert!(dockerfile.contains("--chown=65532:65532 /out/var/lib/agmen"));
+        // The broker-keys volume copies this directory's mode when it is
+        // first created, so only the hub's user and group can list it.
+        assert!(dockerfile.contains("chmod 0750 /out/var/lib/agmen/broker"));
         let rendered = render_compose(&HostName::default());
         let (_, hub) = rendered.split_once("\n  hub:\n").unwrap();
         let (hub, emqx) = hub.split_once("\n  emqx:\n").unwrap();
