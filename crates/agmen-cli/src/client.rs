@@ -309,6 +309,10 @@ pub(crate) struct Me {
     pub(crate) projects: Vec<Membership>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) groups: Vec<Group>,
+    /// Owner notices from a hosted hub. Absent when there are none, so
+    /// `agmen whoami --json` stays unchanged for a hub that sends none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) notices: Vec<String>,
 }
 
 /// One group in [`Me`].
@@ -425,6 +429,27 @@ mod tests {
         assert_eq!(output, input);
         assert!(output.get("state").is_none());
         assert!(output.get("trial_ends_at").is_none());
+    }
+
+    #[test]
+    fn me_without_notices_serializes_byte_for_byte_as_before() {
+        let text = r#"{"id":"hmn7k2q9","handle":"andy","broker_url":"mqtt://localhost","projects":[{"tenant":"tenant01","project":"project1","name":"marked","role":"admin"}],"groups":[{"tenant":"tenant01","name":"andy/acme","role":"owner","state":"trial","trial_ends_at":"2026-11-05T00:00:00Z"}]}"#;
+        let me: Me = serde_json::from_str(text).unwrap();
+        assert!(me.notices.is_empty());
+        assert_eq!(serde_json::to_string(&me).unwrap(), text);
+
+        // An empty list from the hub is the same as none.
+        let empty = text.replacen(r#""groups""#, r#""notices":[],"groups""#, 1);
+        let me: Me = serde_json::from_str(&empty).unwrap();
+        assert_eq!(serde_json::to_string(&me).unwrap(), text);
+    }
+
+    #[test]
+    fn me_notices_come_last_and_round_trip() {
+        let text = r#"{"id":"hmn7k2q9","handle":"andy","broker_url":"mqtt://localhost","projects":[],"notices":["Your trial ends soon. Run agmen group billing."]}"#;
+        let me: Me = serde_json::from_str(text).unwrap();
+        assert_eq!(me.notices.len(), 1);
+        assert_eq!(serde_json::to_string(&me).unwrap(), text);
     }
 
     #[test]

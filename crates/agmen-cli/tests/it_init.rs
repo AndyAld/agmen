@@ -14,6 +14,7 @@ use support::{Ctx, Home, Ingest, Worktree, assert_exit, run, run_hosted, stderr,
 const REQUEST_LIMIT: Duration = Duration::from_secs(10);
 const CLI_LIMIT: Duration = Duration::from_secs(45);
 const TRIAL_SECONDS: i64 = 7 * 24 * 60 * 60;
+const FOUR_DAYS: Duration = Duration::from_secs(4 * 24 * 60 * 60);
 
 async fn signed_in(ctx: &Ctx) -> (Home, SeededHuman) {
     let human = ctx.hub.seed_human(&ctx.topics, Role::Member).await.unwrap();
@@ -157,6 +158,32 @@ async fn it_init_adds_project_to_own_group() {
             group["tenant"].as_str().unwrap()
         );
         assert!(stdout(&out).contains("trial ends "));
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn it_init_prints_notices_once() {
+    run_hosted(Ingest::Off, |ctx| async move {
+        let (home, human) = signed_in(&ctx).await;
+        let group = create_group(&ctx, &human, "acme").await;
+        // Day 5 of the trial: the hub sends the owner a notice naming
+        // `agmen group billing`.
+        ctx.hub
+            .set_plan(
+                &group["tenant"].as_str().unwrap().parse().unwrap(),
+                &agmen_hub::PlanRecord::trial(Timestamp::now() - FOUR_DAYS),
+            )
+            .await
+            .unwrap();
+        let wt = Worktree::new(&home);
+        let out = init(&ctx, &home, &wt, &[]).await;
+        assert_exit(&out, 0);
+        // `agmen init` ends by running `agmen invite`, which has its own
+        // notice line. The owner must still see each notice once.
+        assert!(stdout(&out).contains("/i#"), "{}", stdout(&out));
+        let err = stderr(&out);
+        assert_eq!(err.matches("agmen group billing").count(), 1, "{err}");
     })
     .await;
 }

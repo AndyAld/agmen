@@ -15,6 +15,7 @@
 )]
 
 pub mod mcp;
+mod paddle;
 
 use std::future::Future;
 use std::hash::{BuildHasher, Hasher, RandomState};
@@ -167,7 +168,7 @@ where
     F: FnOnce(Ctx) -> Fut,
     Fut: Future<Output = ()> + Send + 'static,
 {
-    run_in_mode(agmen_hub::HubMode::SelfHost, ingest, body).await;
+    run_in_mode(agmen_hub::HubMode::SelfHost, ingest, None, body).await;
 }
 
 /// Runs the same isolated harness as [`run`] with hosted group creation enabled.
@@ -176,11 +177,43 @@ where
     F: FnOnce(Ctx) -> Fut,
     Fut: Future<Output = ()> + Send + 'static,
 {
-    run_in_mode(agmen_hub::HubMode::Hosted, ingest, body).await;
+    run_in_mode(agmen_hub::HubMode::Hosted, ingest, None, body).await;
 }
 
-async fn run_in_mode<F, Fut>(mode: agmen_hub::HubMode, ingest: Ingest, body: F)
+/// [`run_hosted`] with a fake Paddle. The fake stays up until `body` returns.
+/// Its API is the fake's http base. Buyer links are that same host over https.
+pub async fn run_hosted_paddle<F, Fut>(ingest: Ingest, body: F)
 where
+    F: FnOnce(Ctx) -> Fut,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    let paddle = paddle::FakePaddle::start()
+        .await
+        .expect("start the fake Paddle");
+    let hosted = agmen_hub::HostedConfig {
+        paddle: agmen_hub::PaddleConfig {
+            api_url: paddle.base().clone(),
+            api_key: agmen_hub::Secret::new(paddle.api_key()),
+            webhook_secret: agmen_hub::Secret::new(paddle.webhook_secret()),
+        },
+        catalog: agmen_hub::Catalog {
+            team_base: "pri_team_base".to_owned(),
+            team_seat: "pri_team_seat".to_owned(),
+            business_10: "pri_business_10".to_owned(),
+            business_25: "pri_business_25".to_owned(),
+            business_50: "pri_business_50".to_owned(),
+        },
+    };
+    // Hold the fake across the body. Dropping its task handle would detach it.
+    run_in_mode(agmen_hub::HubMode::Hosted, ingest, Some(hosted), body).await;
+}
+
+async fn run_in_mode<F, Fut>(
+    mode: agmen_hub::HubMode,
+    ingest: Ingest,
+    hosted: Option<agmen_hub::HostedConfig>,
+    body: F,
+) where
     F: FnOnce(Ctx) -> Fut,
     Fut: Future<Output = ()> + Send + 'static,
 {
@@ -216,6 +249,7 @@ where
     })
     .expect("build the hub config");
     config.mode = mode;
+    config.hosted = hosted;
     let hub = Hub::connect(&config).await.expect("start the hub");
     let router = hub.router();
     let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
