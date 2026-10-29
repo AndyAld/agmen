@@ -105,6 +105,10 @@ struct Stored {
     role_sha256: Option<agmen_proto::Sha256Hex>,
     #[serde(default)]
     role_layer: Option<String>,
+    #[serde(default)]
+    role_commit: Option<String>,
+    #[serde(default)]
+    verbs: Option<std::collections::BTreeSet<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     parent: Option<IdentityId>,
     #[serde(default = "root_depth")]
@@ -149,6 +153,8 @@ impl Stored {
                 role: self.role,
                 role_sha256: self.role_sha256,
                 role_layer: self.role_layer,
+                role_commit: self.role_commit,
+                verbs: self.verbs,
                 parent: self.parent,
                 depth: self.depth,
                 shared_budget: self.shared_budget,
@@ -419,6 +425,7 @@ impl Managed {
                 (metadata_for(&joined.identity), joined.root, branch)
             }
         };
+        self.refuse_live_descendants(&identity.identity_id).await?;
         // A record's identity file may already be gone; one that is there
         // must be this identity's before it is deleted.
         let present = tokio::fs::try_exists(identity_file(&folder))
@@ -432,14 +439,15 @@ impl Managed {
             };
         // An attached Claude Code, or one left open across a restart, is
         // ended: its identity is about to be revoked.
-        let known = match &existing {
-            Some(worker) => worker
+        let known = if let Some(worker) = &existing {
+            worker
                 .lock()
                 .await
                 .attached
                 .as_ref()
-                .and_then(|attached| attached.pid),
-            None => None,
+                .and_then(|attached| attached.pid)
+        } else {
+            None
         };
         end_interactive(
             &self.agent_dir(&identity.identity_id).join("attach.pid"),
@@ -460,6 +468,16 @@ impl Managed {
         if let Some(joined) = joined {
             delete_identity_file(&joined.root).await?;
         }
+        self.forget_removed_worker(&identity).await?;
+        Ok(json!({
+            "identity": identity.identity_id,
+            "removed": true,
+            "kept": {"folder": folder, "branch": branch},
+        }))
+    }
+
+    /// Cleanup runs only after the hub revoked the identity.
+    async fn forget_removed_worker(&self, identity: &ManagedIdentity) -> Result<(), ApiError> {
         // The hub has revoked it, so a credential left behind no longer
         // works. The Keychain refuses agmend a delete of one that another
         // program saved, such as the CLI's `agmen join`.
@@ -477,7 +495,7 @@ impl Managed {
         }
         self.identities()
             .ok_or_else(|| error("identity service stopped"))?
-            .forget(&identity)
+            .forget(identity)
             .await?;
         let dir = self.agent_dir(&identity.identity_id);
         match tokio::fs::remove_dir_all(&dir).await {
@@ -489,11 +507,7 @@ impl Managed {
         let mut tree = self.tree.lock().await;
         self.workers.lock().await.remove(&identity.identity_id);
         tree.remove(&identity.identity_id);
-        Ok(json!({
-            "identity": identity.identity_id,
-            "removed": true,
-            "kept": {"folder": folder, "branch": branch},
-        }))
+        Ok(())
     }
 
     /// The offline agent `target` names, read from memory or adopted from a
@@ -579,6 +593,8 @@ impl Managed {
             role: None,
             role_sha256: None,
             role_layer: None,
+            role_commit: None,
+            verbs: joined.identity.verbs.clone(),
             parent: None,
             depth: root_depth(),
             shared_budget: false,

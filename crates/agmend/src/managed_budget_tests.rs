@@ -130,6 +130,57 @@ async fn stopped_child_returns_its_unspent_reservation() {
 }
 
 #[tokio::test]
+async fn subtree_stop_returns_each_reservation_once_and_keeps_spend() {
+    let (fixture, _) = tree_fixture().await;
+    budget_root(&fixture, 10.0).await;
+    budget_child(&fixture, "k1", 6.0).await.unwrap();
+    grandchild(&fixture, "kid00001", "k2", 3.0).await;
+    grandchild(&fixture, "kid00002", "k3", 1.0).await;
+    child_quarter_of(&fixture, "kid00003").await;
+    for _ in 0..3 {
+        let answer = worker_call(&fixture, "agent_stop", json!({"identity":"kid00001"}))
+            .await
+            .unwrap();
+        assert_eq!(
+            answer["stopped"],
+            json!(["kid00003", "kid00002", "kid00001"])
+        );
+        for id in ["agent001", "kid00001", "kid00002"] {
+            assert_eq!(reserved(&fixture, id).await, "0.000000", "{id}");
+            assert_eq!(
+                listed(&fixture, id).await["children_spent_usd"],
+                "0.250000",
+                "{id}"
+            );
+        }
+    }
+    assert_eq!(listed(&fixture, "agent001").await["state"], "idle");
+    worker_call(&fixture, "agent_remove", json!({"identity":"kid00001"}))
+        .await
+        .unwrap();
+    assert_eq!(reserved(&fixture, "agent001").await, "0.000000");
+}
+
+#[tokio::test]
+async fn parent_stop_without_subtree_keeps_child_caps() {
+    let (fixture, _) = tree_fixture().await;
+    budget_root(&fixture, 5.0).await;
+    budget_child(&fixture, "k1", 3.0).await.unwrap();
+    grandchild(&fixture, "kid00001", "k2", 1.0).await;
+    worker_call(
+        &fixture,
+        "agent_stop",
+        json!({"identity":"kid00001","subtree":false}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(listed(&fixture, "kid00002").await["state"], "idle");
+    assert_eq!(listed(&fixture, "kid00002").await["budget_usd"], "1.000000");
+    assert_eq!(reserved(&fixture, "agent001").await, "1.000000");
+    assert_eq!(reserved(&fixture, "kid00001").await, "1.000000");
+}
+
+#[tokio::test]
 async fn starting_a_shared_child_reserves_again() {
     let (fixture, _) = tree_fixture().await;
     budget_root(&fixture, 2.0).await;
@@ -289,7 +340,27 @@ async fn invalid_table_is_reported_in_the_list() {
     );
     for seq in 1..=2 {
         enqueue(&fixture, seq, "agent001").await;
-        batch(&fixture.daemon.core.managed, "agent001").await;
+        let managed = &fixture.daemon.core.managed;
+        let worker = worker_of(managed, "agent001").await;
+        worker.lock().await.last_run = None;
+        managed.tick().await;
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            for _ in 0..2000 {
+                if worker
+                    .lock()
+                    .await
+                    .task
+                    .as_ref()
+                    .is_none_or(tokio::task::JoinHandle::is_finished)
+                {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            panic!("invalid-table batch did not finish");
+        })
+        .await
+        .unwrap();
     }
     assert_eq!(fixture.runner.runs.lock().unwrap().len(), 1);
     let restored = restarted(&fixture).await;
@@ -393,9 +464,13 @@ async fn grandchild_spend_is_charged_to_each_shared_ancestor() {
         assert_eq!(row["tree_spent_usd"], "0.250000");
         assert_eq!(row["reserved_usd"], reserved);
     }
-    worker_call(&fixture, "agent_stop", json!({"identity":"kid00001"}))
-        .await
-        .unwrap();
+    worker_call(
+        &fixture,
+        "agent_stop",
+        json!({"identity":"kid00001","subtree":false}),
+    )
+    .await
+    .unwrap();
     assert_eq!(
         listed(&fixture, "agent001").await["reserved_usd"],
         "0.750000"
@@ -503,9 +578,13 @@ async fn stopping_a_grandchild_returns_funds_through_its_offline_parent() {
     )
     .await
     .unwrap();
-    worker_call(&fixture, "agent_stop", json!({"identity":"kid00001"}))
-        .await
-        .unwrap();
+    worker_call(
+        &fixture,
+        "agent_stop",
+        json!({"identity":"kid00001","subtree":false}),
+    )
+    .await
+    .unwrap();
     assert_eq!(
         listed(&fixture, "agent001").await["reserved_usd"],
         "1.000000"
@@ -758,9 +837,13 @@ async fn stopping_an_offline_intermediate_again_keeps_its_live_children_reserved
     grandchild(&fixture, "kid00001", "k2", 1.0).await;
     assert_eq!(reserved(&fixture, "agent001").await, "3.000000");
     for _ in 0..3 {
-        worker_call(&fixture, "agent_stop", json!({"identity":"kid00001"}))
-            .await
-            .unwrap();
+        worker_call(
+            &fixture,
+            "agent_stop",
+            json!({"identity":"kid00001","subtree":false}),
+        )
+        .await
+        .unwrap();
         // k2 still runs on funds that k1 holds in the root.
         assert_eq!(reserved(&fixture, "agent001").await, "1.000000");
         assert_eq!(reserved(&fixture, "kid00001").await, "1.000000");
@@ -775,9 +858,13 @@ async fn stopping_an_offline_intermediate_again_keeps_its_live_children_reserved
     .unwrap();
     assert_eq!(reserved(&fixture, "agent001").await, "1.500000");
     for _ in 0..2 {
-        worker_call(&fixture, "agent_stop", json!({"identity":"kid00001"}))
-            .await
-            .unwrap();
+        worker_call(
+            &fixture,
+            "agent_stop",
+            json!({"identity":"kid00001","subtree":false}),
+        )
+        .await
+        .unwrap();
         assert_eq!(reserved(&fixture, "agent001").await, "1.000000");
     }
     worker_call(&fixture, "agent_stop", json!({"identity":"kid00002"}))
@@ -1119,8 +1206,11 @@ async fn model_run(seed: u64) {
                 launch_under(&managed, &target, (launches, amount), &mut parents).await
             }
             2..=4 => {
-                let stopped = managed.stop(json!({"identity":target})).await;
-                format!("stop {target}: {}", stopped.is_ok())
+                let subtree = dice.below(2) == 0;
+                let stopped = managed
+                    .stop(json!({"identity":target,"subtree":subtree}))
+                    .await;
+                format!("stop {target}, subtree {subtree}: {}", stopped.is_ok())
             }
             5 | 6 => {
                 let started = managed.start(json!({"identity":target})).await;

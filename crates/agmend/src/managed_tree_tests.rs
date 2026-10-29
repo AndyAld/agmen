@@ -7,6 +7,12 @@ const TIER_REFUSAL: &str = "launching, stopping or briefing agents needs a batch
 #[path = "managed_budget_tests.rs"]
 mod budgets;
 
+#[path = "managed_stop_tests.rs"]
+mod stop;
+
+#[path = "managed_child_security_tests.rs"]
+mod security;
+
 fn settings(fixture: &Fixture, text: &str) {
     std::fs::write(
         fixture.dir.path().join("settings.toml"),
@@ -251,7 +257,7 @@ async fn parent_dm_from_an_others_tier_batch_keeps_the_child_in_the_others_tier(
 
 #[tokio::test]
 async fn brief_reaches_the_child_as_a_dm_from_the_parent() {
-    let (mut fixture, _) = tree_fixture().await;
+    let (mut fixture, _) = tree_fixture_with_verbs(json!(["FYI", "DM"])).await;
     Arc::get_mut(&mut Arc::get_mut(&mut fixture.daemon.core).unwrap().managed)
         .unwrap()
         .identities
@@ -264,7 +270,12 @@ async fn brief_reaches_the_child_as_a_dm_from_the_parent() {
         .publisher = Some(Arc::new(move |sender, envelope| {
         messages.lock().unwrap().push(envelope.clone());
         captured.lock().unwrap().push((sender, envelope));
-        Box::pin(async { Ok(OutboxState::Pending { attempts: 0 }) })
+        Box::pin(async {
+            Ok(OutboxState::Recorded {
+                stream: "inbox:kid00001".parse().unwrap(),
+                seq: agmen_proto::Seq(1),
+            })
+        })
     }));
     fixture
         .daemon
@@ -736,7 +747,7 @@ async fn stopped_worker_has_no_tree_authority() {
 
 #[tokio::test]
 async fn failed_brief_does_not_leave_a_registered_child() {
-    let (mut fixture, _) = tree_fixture().await;
+    let (mut fixture, _) = tree_fixture_with_verbs(json!(["FYI", "DM"])).await;
     Arc::get_mut(&mut Arc::get_mut(&mut fixture.daemon.core).unwrap().managed)
         .unwrap()
         .identities
@@ -763,6 +774,15 @@ async fn failed_brief_does_not_leave_a_registered_child() {
         .await;
     root(&fixture).await;
     let before = git_state(&fixture);
+    std::fs::create_dir_all(
+        fixture
+            .daemon
+            .core
+            .managed
+            .state_dir
+            .join("identities/kid00001"),
+    )
+    .unwrap();
     let error = child_call(
         &fixture,
         "agent001",
@@ -773,6 +793,15 @@ async fn failed_brief_does_not_leave_a_registered_child() {
     .unwrap_err();
     assert!(error.message.contains("brief outbox failed"));
     assert_discarded(&fixture, "kid00001", &before).await;
+    assert!(
+        !fixture
+            .daemon
+            .core
+            .managed
+            .state_dir
+            .join("identities/kid00001")
+            .exists()
+    );
 }
 
 /// The checkout's worktrees and branches, to compare around a failed launch.
@@ -910,6 +939,15 @@ async fn a_full_store_after_the_mint_leaves_no_identity_behind() {
     let (fixture, mints) = tree_fixture().await;
     root(&fixture).await;
     let before = git_state(&fixture);
+    std::fs::create_dir_all(
+        fixture
+            .daemon
+            .core
+            .managed
+            .state_dir
+            .join("identities/kid00001"),
+    )
+    .unwrap();
     let template = worker_of(&fixture.daemon.core.managed, "agent001")
         .await
         .lock()
@@ -936,6 +974,15 @@ async fn a_full_store_after_the_mint_leaves_no_identity_behind() {
     );
     assert_eq!(mints.lock().unwrap().len(), 2);
     assert_discarded(&fixture, "kid00001", &before).await;
+    assert!(
+        !fixture
+            .daemon
+            .core
+            .managed
+            .state_dir
+            .join("identities/kid00001")
+            .exists()
+    );
 }
 
 /// The same goes for the git pointer in a parent's worktree: a child made

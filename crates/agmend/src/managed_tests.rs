@@ -1294,6 +1294,10 @@ async fn restarted(fixture: &Fixture) -> Arc<Managed> {
 }
 
 async fn tree_fixture() -> (Fixture, Arc<Mutex<Vec<Value>>>) {
+    tree_fixture_with_verbs(json!(["FYI"])).await
+}
+
+async fn tree_fixture_with_verbs(verbs: Value) -> (Fixture, Arc<Mutex<Vec<Value>>>) {
     let (mut fixture, requests) = role_fixture().await;
     fixture.hub.abort();
     let _stopped = tokio::time::timeout(std::time::Duration::from_secs(1), &mut fixture.hub)
@@ -1303,6 +1307,7 @@ async fn tree_fixture() -> (Fixture, Arc<Mutex<Vec<Value>>>) {
     let revoked = fixture.revoked.clone();
     let app = axum::Router::new().route("/v1/identities", axum::routing::post(move |axum::Json(body): axum::Json<Value>| {
         let captured = captured.clone();
+        let verbs = verbs.clone();
         async move {
             let id = {
                 let mut requests = captured.lock().unwrap();
@@ -1313,7 +1318,7 @@ async fn tree_fixture() -> (Fixture, Arc<Mutex<Vec<Value>>>) {
                 }
                 if body["handle"] == "owner/worker" { "agent001".to_owned() } else { format!("kid{:05}", requests.len() - 1) }
             };
-            axum::Json(json!({"id":id,"handle":body["handle"],"tenant":"tenant01","project":"project1","token":"fake-agent-token","verbs":["FYI"]})).into_response()
+            axum::Json(json!({"id":id,"handle":body["handle"],"tenant":"tenant01","project":"project1","token":"fake-agent-token","verbs":verbs})).into_response()
         }
     })).route("/v1/projects/{project}/state", axum::routing::get(|| async { axum::Json(json!({"value":[]})) }))
     .route("/v1/identities/{id}", axum::routing::delete(move |axum::extract::Path(id): axum::extract::Path<String>| async move {
@@ -1329,6 +1334,19 @@ async fn tree_fixture() -> (Fixture, Arc<Mutex<Vec<Value>>>) {
     let roles = fixture.dir.path().join("repo/.agmen/roles");
     std::fs::create_dir(&roles).unwrap();
     std::fs::write(roles.join("chain.xml"), "<role name=\"chain\" extends=\"base\" kind=\"agent\" tier=\"standard\" version=\"1\"><summary>c</summary><launches roles=\"chain\"/></role>").unwrap();
+    let repo = fixture.dir.path().join("repo");
+    git(&repo, &["add", "-f", ".agmen/roles/chain.xml"]);
+    git(
+        &repo,
+        &[
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-m",
+            "reviewed roles",
+        ],
+    );
+    git(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
     let settings = fixture.dir.path().join("settings.toml");
     std::fs::write(&settings, "[agents]\n").unwrap();
     Arc::get_mut(&mut Arc::get_mut(&mut fixture.daemon.core).unwrap().managed)

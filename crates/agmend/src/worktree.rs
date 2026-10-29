@@ -53,7 +53,8 @@ async fn branch_ref(repo: &Path, branch: &str) -> Result<String> {
     Ok(name)
 }
 
-async fn commit(repo: &Path, revision: &str) -> Result<String> {
+/// The commit `revision` names in `repo`.
+pub(crate) async fn commit(repo: &Path, revision: &str) -> Result<String> {
     let revision = format!("{revision}^{{commit}}");
     let out = call(
         repo,
@@ -391,6 +392,65 @@ async fn checked_worktree(repo: &Path, path: &Path, branch: &str) -> Result<Path
         bail!("path is not a linked worktree for the requested branch");
     }
     Ok(path)
+}
+
+/// Takes back a worktree and branch that `create` just made at `start`, when
+/// nothing has used them: no change in the tree, and the branch still at
+/// `start`. `remove` also asks whether the tip is merged, which a child's
+/// branch is not when its parent has commits the main checkout lacks. This
+/// branch added no commit, so deleting it loses nothing. The branch goes with
+/// `update-ref -d` and its tip, so one that moved since is not deleted. A
+/// change, or a moved branch, keeps both.
+pub(crate) async fn remove_unused(
+    repo: &Path,
+    path: &Path,
+    branch: &str,
+    start: &str,
+) -> Result<()> {
+    let path = checked_worktree(repo, path, branch).await?;
+    let reference = branch_ref(repo, branch).await?;
+    let status = call(
+        &path,
+        &[
+            "status".as_ref(),
+            "--porcelain=v1".as_ref(),
+            "-z".as_ref(),
+            "--untracked-files=all".as_ref(),
+        ],
+        None,
+    )
+    .await?;
+    if !status.stdout.is_empty() {
+        bail!("the new worktree has changes; kept worktree and branch");
+    }
+    if commit(repo, &reference).await? != start {
+        bail!("the new branch has moved; kept worktree and branch");
+    }
+    call(
+        repo,
+        &[
+            "worktree".as_ref(),
+            "remove".as_ref(),
+            "--".as_ref(),
+            path.as_os_str(),
+        ],
+        None,
+    )
+    .await?;
+    call(
+        repo,
+        &[
+            "update-ref".as_ref(),
+            "-d".as_ref(),
+            "--".as_ref(),
+            reference.as_ref(),
+            start.as_ref(),
+        ],
+        None,
+    )
+    .await
+    .context("worktree removed but the branch could not be deleted")?;
+    Ok(())
 }
 
 /// Keeps dirty work with a WIP ref, and refuses branches unmerged into repo HEAD.

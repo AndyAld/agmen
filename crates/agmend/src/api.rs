@@ -271,13 +271,7 @@ async fn identity_call(
 ) -> Result<Value, ApiError> {
     match method {
         "child_launch" => core.managed.launch_child(caller, raw).await,
-        "child_stop" => {
-            core.managed.check_tree_caller(caller).await?;
-            Err(ApiError {
-                code: ErrorCode::NotFound,
-                message: "agmend has no method \"child_stop\"".into(),
-            })
-        }
+        "child_stop" => core.managed.stop_child(caller, raw).await,
         "post" => {
             #[derive(Deserialize)]
             #[serde(deny_unknown_fields)]

@@ -46,6 +46,7 @@ struct Placement {
     depth: u32,
     brief: Option<ClientEnvelope>,
     shared_budget: bool,
+    role_commit: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,6 +70,12 @@ struct Record {
     /// The layer that supplied the role at launch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     role_layer: Option<String>,
+    /// The reviewed project-role commit for a child, independent of its worktree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    role_commit: Option<String>,
+    /// Hub-granted verbs, pinned at mint rather than read from an agent's files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    verbs: Option<std::collections::BTreeSet<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     parent: Option<IdentityId>,
     #[serde(default = "root_depth")]
@@ -331,8 +338,9 @@ impl Managed {
             worktree,
             parent,
             depth,
-            mut brief,
+            brief,
             shared_budget,
+            role_commit,
         } = placement;
         write_identity(&worktree, identity).await?;
         let mut metadata = metadata_for(identity);
@@ -366,6 +374,8 @@ impl Managed {
             role: identity.role.clone(),
             role_sha256: identity.role_sha256.clone(),
             role_layer: role.as_ref().map(|role| role.layer.to_string()),
+            role_commit,
+            verbs: identity.verbs.clone(),
             parent: parent
                 .as_ref()
                 .map(|parent| parent.identity.identity_id.clone()),
@@ -404,9 +414,14 @@ impl Managed {
         if let Err(error) = identities.post(&metadata, hello).await {
             tracing::warn!(code=?error.code,"managed agent HELLO is pending connection");
         }
-        if let (Some(parent), Some(message)) = (&parent, brief.as_mut()) {
-            message.to = vec![identity.identity_id.clone()];
-            identities.post(&parent.identity, message.clone()).await?;
+        if let (Some(parent), Some(message)) = (&parent, brief) {
+            tree::deliver_brief(
+                &identities,
+                &parent.identity,
+                &identity.identity_id,
+                message,
+            )
+            .await?;
         }
         self.insert_worker(worker).await?;
         let mut answer = json!({"identity":identity.identity_id,"identity_id":identity.identity_id,"handle":identity.handle,"worktree":worktree,"branch":branch,"state":"idle"});
@@ -614,7 +629,7 @@ impl Managed {
         let Some(name) = &record.role else {
             return Ok(None);
         };
-        let role = self.resolve_role(&record.repo, name.as_str()).await?;
+        let role = self.record_role(record, name.as_str()).await?;
         if record.role_sha256.as_ref().map(|sha| sha.as_str()) != Some(role.sha256.as_str()) {
             return Err(error(format!(
                 "role {name} changed since launch; relaunch the agent to use it"
@@ -680,31 +695,12 @@ impl Managed {
         Ok(answer)
     }
 
-    pub(crate) async fn stop(&self, raw: Value) -> Result<Value, ApiError> {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Stop {
-            identity: IdentityId,
-        }
-        let Stop { identity } = params(raw)?;
-        let worker = self
-            .workers
-            .lock()
-            .await
-            .get(&identity)
-            .cloned()
-            .ok_or_else(|| bad_request("agent is not managed by this daemon"))?;
-        let login = self.hub.credentials().login().await.map_err(error)?;
-        {
-            let worker = worker.lock().await;
-            if worker.record.identity.owner_id != login.human_id
-                || worker.record.identity.hub_url.origin() != login.hub_url.origin()
-            {
-                return Err(crate::identities::forbidden());
-            }
-        }
-        self.stop_worker(worker).await?;
-        Ok(json!({"identity":identity,"state":"offline"}))
+    pub(crate) async fn stop(self: &Arc<Self>, raw: Value) -> Result<Value, ApiError> {
+        let tree::Stop { identity, subtree } = params(raw)?;
+        let stopped = self
+            .stop_tree(identity.clone(), subtree.unwrap_or(true))
+            .await?;
+        Ok(json!({"identity":identity,"state":"offline","stopped":stopped}))
     }
 
     pub(crate) async fn agent_budget(&self, raw: Value) -> Result<Value, ApiError> {
@@ -771,7 +767,15 @@ impl Managed {
     }
 
     async fn stop_worker(&self, worker: Arc<Mutex<Worker>>) -> Result<(), ApiError> {
-        let (task, identity, already_offline) = {
+        // An outer subtree deadline can cancel this future while it owns the
+        // batch handle. Dropping a JoinHandle alone would detach the batch.
+        struct AbortBatchOnDrop(tokio::task::AbortHandle);
+        impl Drop for AbortBatchOnDrop {
+            fn drop(&mut self) {
+                self.0.abort();
+            }
+        }
+        let (task, _abort_batch, identity, already_offline) = {
             let _accounting = self.accounting.lock().await;
             let mut worker = worker.lock().await;
             let already_offline = worker.state == "offline";
@@ -791,9 +795,12 @@ impl Managed {
             worker.reserved_from_parent = worker.reserved_from_parent.saturating_sub(released);
             let record = worker.record.clone();
             let task = worker.task.take();
+            let abort_batch = task
+                .as_ref()
+                .map(|task| AbortBatchOnDrop(task.abort_handle()));
             drop(worker);
             self.release_to_parent(&record, released).await;
-            (task, record.identity, already_offline)
+            (task, abort_batch, record.identity, already_offline)
         };
         if already_offline {
             return Ok(());
@@ -1231,6 +1238,9 @@ mod tree;
 
 #[path = "managed_budgets.rs"]
 mod budgets;
+
+#[path = "managed_roles.rs"]
+mod roles;
 
 #[cfg(test)]
 #[path = "managed_tests.rs"]
