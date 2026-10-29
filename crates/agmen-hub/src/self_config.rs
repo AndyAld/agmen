@@ -130,6 +130,10 @@ fn generated(data_dir: &Path, api_key: &str) -> Result<Loaded, SelfConfigError> 
 
     let broker_dir = data_dir.join("broker");
     fs::create_dir_all(&broker_dir).map_err(|source| io(&broker_dir, source))?;
+    // shortcut: world-readable so the EMQX container (uid 1000) can read the
+    // admin API secret; any local user on the host can too. Tighten to 0640
+    // with a group EMQX shares (and `broker/` at 0750) when the self-host
+    // compose file (Task 11) fixes the containers' users.
     let api = read_or_create(&api_path, 0o644, || {
         let secret = db::new_secret().map_err(|_| SelfConfigError::KeyGen)?;
         Ok(format!("{api_key}:{secret}:administrator\n").into_bytes())
