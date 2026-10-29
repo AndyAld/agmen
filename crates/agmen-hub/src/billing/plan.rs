@@ -193,8 +193,9 @@ pub enum Retention {
 /// A billing notification, in the order the provider emitted it.
 ///
 /// [`PlanRecord::apply`] is the only reader. It ignores anything older than
-/// the record's last event, anything that arrives after deletion, and
-/// `PastDue` or `Canceled` while the group is still on a trial.
+/// the record's last event, anything that arrives after deletion, `PastDue` or
+/// `Canceled` while the group is still on a trial, and `Paid` while the record
+/// holds no plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum BillingEvent {
@@ -204,7 +205,8 @@ pub enum BillingEvent {
     PastDue,
     /// The subscription was canceled.
     Canceled,
-    /// A payment succeeded. Restores the group's current plan.
+    /// A payment succeeded. Restores the group's current plan. A record with
+    /// no plan ignores it, because only [`BillingEvent::Active`] names one.
     Paid,
 }
 
@@ -427,7 +429,10 @@ impl PlanRecord {
     ///
     /// An event older than [`Self::last_event_at`] is ignored, and so is every
     /// event once the group is deleted. `PastDue` and `Canceled` do not change
-    /// a trial. `Active` and `Paid` restore any other state to active. A
+    /// a trial. `Active` restores any other state to active, and so does
+    /// `Paid` for a record that holds a plan. A record with no plan ignores
+    /// `Paid`, without recording it, so the checkout's `Active(plan)` still
+    /// lands when the payment event is stamped later but arrives first. A
     /// repeated `PastDue` keeps the first `past_due_since`. `Canceled` moves
     /// an active or past-due group to read-only.
     #[must_use]
@@ -441,6 +446,11 @@ impl PlanRecord {
         if self.state == PlanState::Trial
             && matches!(event, BillingEvent::PastDue | BillingEvent::Canceled)
         {
+            return self.clone();
+        }
+        // Active with no plan is writable, yet has 0 seats, a 0 quota and no
+        // clock to read-only or deletion. Only Active(plan) names a plan.
+        if self.plan.is_none() && event == BillingEvent::Paid {
             return self.clone();
         }
         let mut next = self.clone();

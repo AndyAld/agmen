@@ -281,6 +281,42 @@ fn trial_ignores_past_due_and_cancel() {
 }
 
 #[test]
+fn paid_without_a_plan_waits_for_the_plan() {
+    let t0 = at("2026-11-02T15:04:05Z");
+    let team = Plan::Team { extra_seats: 2 };
+    let t1 = after(t0, 1);
+    let t2 = t1 + Duration::from_millis(5);
+
+    // A trial, an ended trial and a group awaiting payment hold no plan, so a
+    // payment has nothing to restore.
+    let trial = PlanRecord::trial(t0);
+    let (ended, _) = trial.tick(after(t0, 8));
+    for record in [trial.clone(), ended, PlanRecord::awaiting_payment(t0)] {
+        assert_eq!(
+            record.apply(BillingEvent::Paid, t2),
+            record,
+            "{:?}",
+            record.state
+        );
+    }
+
+    // One checkout sends `Active(plan)` and `Paid`. The payment can arrive
+    // first even though it is stamped later, and the plan must still land.
+    let paid_first = trial
+        .apply(BillingEvent::Paid, t2)
+        .apply(BillingEvent::Active(team), t1);
+    let activated_first = trial
+        .apply(BillingEvent::Active(team), t1)
+        .apply(BillingEvent::Paid, t2);
+    for record in [paid_first, activated_first] {
+        assert_eq!(record.state, PlanState::Active);
+        assert_eq!(record.plan, Some(team));
+        assert_eq!(record.seats_paid(), 6);
+        assert_eq!(record.daily_quota(), 12_000);
+    }
+}
+
+#[test]
 fn cancel_goes_read_only_for_90_days() {
     let t1 = at("2026-12-01T15:04:05Z");
     let team = Plan::Team { extra_seats: 1 };
