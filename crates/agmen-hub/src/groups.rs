@@ -29,7 +29,7 @@ use crate::identities::HumanId;
 use crate::ingest::{HubPost, PostError};
 use crate::projects::create_project;
 use crate::tenants::{join_tenant, require_group_admin, tenant_role};
-use crate::usage::refuse_read_only;
+use crate::usage::{post_owner_alert, refuse_read_only};
 
 const GROUP_LIMIT: &str = "you already own 3 groups, the most one account can own";
 
@@ -50,6 +50,10 @@ const NO_SUBSCRIPTION: &str =
 const OWNER_ONLY: &str = "only the owner can change billing";
 const NOT_HOSTED: &str = "this hub is not agmen hosted";
 const NO_SEAT_PLAN: &str = "this group has no seat plan";
+const SEATS_BELOW_JOINED: &str = "a member joined while seats were changing";
+const SEATS_BELOW_STORED: &str =
+    "paid seats are below the members in the group, and Paddle could not be restored";
+const SEAT_REVERT_ALERT: &str = "Paddle lowered this group's paid seats below its members, and the previous seats could not be restored. Add seats so everyone still fits.";
 
 const SECS_PER_DAY: u64 = 86_400;
 
@@ -513,7 +517,7 @@ pub(crate) async fn set_seats(
         (Some(_), None) => Err(no_subscription(SUBSCRIPTION_PENDING)),
         (Some((_, subscription)), Some(current)) => {
             let plan = seat_change_plan(current, request.paid)?;
-            replace_subscription(&hub, &tenant_id, &subscription, plan).await
+            replace_subscription(&hub, &tenant_id, &subscription, current, plan).await
         }
     }
 }
@@ -531,13 +535,15 @@ pub(crate) async fn set_plan_route(
     let seats = requested_seats(&request, &record)?;
     checked_paid(seats, seats_used(hub.pool(), &tenant_id).await?)?;
     let plan = plan_from_choice(&request.plan, seats)?;
-    match paddle_ids(hub.pool(), &tenant_id).await? {
-        None => {
+    match (paddle_ids(hub.pool(), &tenant_id).await?, record.plan) {
+        (None, Some(_)) => Err(no_subscription(BILLED_OUTSIDE)),
+        (Some(_), None) => Err(no_subscription(SUBSCRIPTION_PENDING)),
+        (None, None) => {
             let url = start_checkout(&hub, &tenant_id, plan).await?;
             Ok(Json(Billed::Checkout { checkout_url: url }))
         }
-        Some((_, subscription)) => {
-            replace_subscription(&hub, &tenant_id, &subscription, plan).await
+        (Some((_, subscription)), Some(current)) => {
+            replace_subscription(&hub, &tenant_id, &subscription, current, plan).await
         }
     }
 }
@@ -553,6 +559,7 @@ pub(crate) async fn portal(
         return Err(no_subscription(NO_SUBSCRIPTION));
     };
     let (paddle, _) = billing_parts(&hub)?;
+    hub.take_billing_call(&tenant_id)?;
     let url = paddle.portal_url(&customer, &subscription).await?;
     Ok(Json(Portal {
         portal_url: url.as_str().to_owned(),
@@ -607,7 +614,6 @@ fn checked_paid(paid: u32, used: u32) -> Result<(), ApiError> {
     if paid > MAX_PAID_SEATS {
         return Err(seats_over_50());
     }
-    // shortcut: seat count checked before the Paddle call, not under the plan lock; recheck under the lock and alert the owner if invites race seat removals in practice
     if paid < used {
         return Err(ApiError::conflict("seats_in_use", SEATS_IN_USE));
     }
@@ -716,23 +722,29 @@ fn billing_parts(hub: &Hub) -> Result<(&PaddleClient, &Catalog), ApiError> {
 
 async fn start_checkout(hub: &Hub, tenant: &TenantId, plan: Plan) -> Result<String, ApiError> {
     let (paddle, catalog) = billing_parts(hub)?;
+    hub.take_billing_call(tenant)?;
     let url = paddle
         .create_checkout(tenant, &catalog.items_for(plan))
         .await?;
     Ok(url.as_str().to_owned())
 }
 
+/// Changes the subscription to `plan` and stores what Paddle answers.
+/// `previous` is the plan the group had when the request began: the seat race
+/// puts it back, whatever the plan row says by then.
 async fn replace_subscription(
     hub: &Hub,
     tenant: &TenantId,
     subscription: &str,
+    previous: Plan,
     plan: Plan,
 ) -> Result<Json<Billed>, ApiError> {
     let (paddle, catalog) = billing_parts(hub)?;
+    hub.take_billing_call(tenant)?;
     let items = paddle
         .update_items(subscription, &catalog.items_for(plan))
         .await?;
-    let record = store_returned_plan(hub, catalog, tenant, &items).await?;
+    let record = store_returned_plan(hub, catalog, tenant, subscription, previous, &items).await?;
     Ok(Json(stored_billed(&record)))
 }
 
@@ -743,6 +755,8 @@ async fn store_returned_plan(
     hub: &Hub,
     catalog: &Catalog,
     tenant: &TenantId,
+    subscription: &str,
+    previous: Plan,
     items: &[LineItem],
 ) -> Result<PlanRecord, ApiError> {
     let Some(plan) = catalog.plan_of(items) else {
@@ -757,21 +771,115 @@ async fn store_returned_plan(
         ));
     };
     let mut tx = hub.pool().begin().await?;
+    let Some(record) = locked_plan(&mut tx, tenant).await? else {
+        return Err(no_seat_plan());
+    };
+    if plan_seats(plan) < seats_used(&mut *tx, tenant).await? {
+        tx.rollback().await?;
+        return refuse_dropped_seats(hub, catalog, tenant, subscription, previous, plan).await;
+    }
+    let record = assign_plan(&mut tx, tenant, record, plan).await?;
+    tx.commit().await?;
+    Ok(record)
+}
+
+async fn locked_plan(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant: &TenantId,
+) -> Result<Option<PlanRecord>, ApiError> {
     let locked: Option<String> =
         sqlx::query_scalar("SELECT tenant_id FROM tenant_plans WHERE tenant_id = $1 FOR UPDATE")
             .bind(tenant.as_str())
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut **tx)
             .await?;
     if locked.is_none() {
-        return Err(no_seat_plan());
+        return Ok(None);
     }
-    let Some(mut record) = load_plan(&mut *tx, tenant).await? else {
+    Ok(load_plan(&mut **tx, tenant).await?)
+}
+
+async fn assign_plan(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant: &TenantId,
+    mut record: PlanRecord,
+    plan: Plan,
+) -> Result<PlanRecord, ApiError> {
+    record.plan = Some(plan);
+    store_plan(tx, tenant, &record).await?;
+    Ok(record)
+}
+
+fn plan_seats(plan: Plan) -> u32 {
+    match plan {
+        Plan::Team { extra_seats } => TEAM_INCLUDED_SEATS.saturating_add(extra_seats),
+        Plan::Business(step) => step.seats(),
+    }
+}
+
+fn seats_below_used(description: &'static str) -> ApiError {
+    ApiError::conflict("seats_below_used", description)
+}
+
+/// The paid count fell below the members after Paddle accepted the change.
+/// One attempt puts the previous items back. The plan row is not locked
+/// across that call.
+async fn refuse_dropped_seats(
+    hub: &Hub,
+    catalog: &Catalog,
+    tenant: &TenantId,
+    subscription: &str,
+    previous: Plan,
+    applied: Plan,
+) -> Result<PlanRecord, ApiError> {
+    let (paddle, _) = match billing_parts(hub) {
+        Ok(parts) => parts,
+        Err(error) => {
+            tracing::error!(
+                %tenant,
+                error = %error_chain(&error),
+                "could not restore Paddle seats after a join raced a seat drop"
+            );
+            return keep_paddle_truth(hub, tenant, applied).await;
+        }
+    };
+    match paddle
+        .update_items(subscription, &catalog.items_for(previous))
+        .await
+    {
+        Ok(_) => {
+            tracing::warn!(%tenant, "restored Paddle seats after a join raced a seat drop");
+            Err(seats_below_used(SEATS_BELOW_JOINED))
+        }
+        Err(error) => {
+            tracing::error!(
+                %tenant,
+                error = %error_chain(&error),
+                "could not restore Paddle seats after a join raced a seat drop"
+            );
+            keep_paddle_truth(hub, tenant, applied).await
+        }
+    }
+}
+
+async fn keep_paddle_truth(
+    hub: &Hub,
+    tenant: &TenantId,
+    applied: Plan,
+) -> Result<PlanRecord, ApiError> {
+    let mut tx = hub.pool().begin().await?;
+    let Some(record) = locked_plan(&mut tx, tenant).await? else {
         return Err(no_seat_plan());
     };
-    record.plan = Some(plan);
-    store_plan(&mut tx, tenant, &record).await?;
+    assign_plan(&mut tx, tenant, record, applied).await?;
     tx.commit().await?;
-    Ok(record)
+    if let Err(error) = post_owner_alert(hub, tenant, SEAT_REVERT_ALERT).await {
+        tracing::warn!(
+            %tenant,
+            error = %error_chain(&error),
+            "seat revert alert was not posted"
+        );
+    }
+    Err(seats_below_used(SEATS_BELOW_STORED))
 }
 
 /// Refuses when `human` already owns [`MAX_OWNED_GROUPS`] groups.
@@ -832,7 +940,11 @@ pub(crate) struct CreatedGroup {
 /// `POST /v1/groups`. Hosted only. One transaction creates the tenant, its
 /// plan, the trial grant when this GitHub account has none, the owner
 /// membership, and the first project. After that commit, a group with no
-/// trial gets a Paddle checkout link, or null when Paddle did not answer.
+/// trial gets a Paddle checkout link, or null when Paddle did not answer
+/// or returned a URL the hub will not send. A new group is under its Paddle
+/// limit, so that call is refused only when the hub tracks 10,000 busy groups.
+/// The answer is then 429 `rate_limited`, Paddle is not called, and the group
+/// already exists.
 pub(crate) async fn create(
     State(hub): State<Hub>,
     caller: Caller,
@@ -847,24 +959,25 @@ pub(crate) async fn create(
     let mut made = insert_group(&mut tx, &human, &request, repo_url, now).await?;
     tx.commit().await?;
     if made.trial_ends_at.is_none() {
-        made.checkout_url = checkout_for_new_group(&hub, &made.tenant).await;
+        made.checkout_url = checkout_for_new_group(&hub, &made.tenant).await?;
     }
     Ok((StatusCode::CREATED, Json(made)))
 }
 
-async fn checkout_for_new_group(hub: &Hub, tenant: &str) -> Option<String> {
+async fn checkout_for_new_group(hub: &Hub, tenant: &str) -> Result<Option<String>, ApiError> {
     let Ok(tenant_id) = tenant.parse::<TenantId>() else {
         tracing::warn!(
             tenant,
             "new group id is not a tenant id, so it has no checkout link"
         );
-        return None;
+        return Ok(None);
     };
     match start_checkout(hub, &tenant_id, Plan::Team { extra_seats: 0 }).await {
-        Ok(url) => Some(url),
+        Ok(url) => Ok(Some(url)),
+        Err(err) if err.is_rate_limited() => Err(err),
         Err(err) => {
             tracing::warn!(error = %error_chain(&err), "new group has no checkout link");
-            None
+            Ok(None)
         }
     }
 }

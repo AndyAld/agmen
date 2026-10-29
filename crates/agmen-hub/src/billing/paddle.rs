@@ -2,9 +2,12 @@
 //!
 //! The client creates a checkout, changes a subscription's items, opens the
 //! customer portal and makes sure the five-price catalog exists. Every request
-//! carries `Authorization: Bearer <key>` and `Paddle-Version: 1`. Nothing in
-//! the hub calls it yet except `agmen-hub paddle-catalog`: the webhook handler
-//! (hosted Task 6) and the billing routes (hosted Task 7) build on it.
+//! carries `Authorization: Bearer <key>` and `Paddle-Version: 1`. The billing
+//! routes in `groups.rs` and `agmen-hub paddle-catalog` call it. The webhook
+//! handler does not: it reads what Paddle sends. A checkout or portal URL is
+//! returned only when it is https, has no userinfo, and its host is
+//! `paddle.com`, a host under it (sandbox hosts included), or the configured
+//! API host's registrable domain.
 //!
 //! # What the Paddle docs say
 //!
@@ -177,6 +180,13 @@ pub enum PaddleError {
     /// Paddle answered, but not in a shape this client can use.
     #[error("Paddle answered in an unexpected shape: {0}")]
     Shape(String),
+    /// A checkout or portal URL the hub will not send on. `host` is the host
+    /// only: no userinfo, path, or query.
+    #[error("Paddle returned a URL on an unexpected host")]
+    BadUrl {
+        /// The URL's host.
+        host: String,
+    },
 }
 
 fn shape(message: impl Into<String>) -> PaddleError {
@@ -280,9 +290,10 @@ impl PaddleClient {
     ///
     /// # Errors
     ///
-    /// [`PaddleError::Http`] or [`PaddleError::Refused`] when the call fails, and
+    /// [`PaddleError::Http`] or [`PaddleError::Refused`] when the call fails,
     /// [`PaddleError::Shape`] when `checkout.url` is missing, null or not a URL
-    /// (the usual cause is no default payment link in the Paddle dashboard).
+    /// (the usual cause is no default payment link in the Paddle dashboard),
+    /// and [`PaddleError::BadUrl`] when the URL is not one the hub will send.
     ///
     /// # Examples
     ///
@@ -303,7 +314,9 @@ impl PaddleClient {
         let response = self
             .call(Method::POST, url, Some(&checkout_body(tenant, items)))
             .await?;
-        checkout_url(&response)
+        let checkout = checkout_url(&response)?;
+        accept_return_url(&checkout, &self.base)?;
+        Ok(checkout)
     }
 
     /// Replaces a subscription's items and returns the items it now has.
@@ -341,8 +354,9 @@ impl PaddleClient {
     ///
     /// # Errors
     ///
-    /// [`PaddleError::Http`] or [`PaddleError::Refused`] when the call fails, and
-    /// [`PaddleError::Shape`] when the overview link is missing or not a URL.
+    /// [`PaddleError::Http`] or [`PaddleError::Refused`] when the call fails,
+    /// [`PaddleError::Shape`] when the overview link is missing or not a URL,
+    /// and [`PaddleError::BadUrl`] when the link is not one the hub will send.
     pub async fn portal_url(
         &self,
         customer_id: &str,
@@ -351,11 +365,13 @@ impl PaddleClient {
         let url = endpoint(&self.base, &["customers", customer_id, "portal-sessions"])?;
         let body = json!({"subscription_ids": [subscription_id]});
         let response = self.call(Method::POST, url, Some(&body)).await?;
-        url_at(
+        let overview = url_at(
             &response,
             "/data/urls/general/overview",
             "the portal overview link",
-        )
+        )?;
+        accept_return_url(&overview, &self.base)?;
+        Ok(overview)
     }
 
     /// Finds or creates the two products and five prices, and returns their ids.
@@ -603,6 +619,71 @@ fn url_at(response: &Value, pointer: &str, what: &str) -> Result<Url, PaddleErro
         .and_then(Value::as_str)
         .ok_or_else(|| shape(format!("{what} is missing")))?;
     Url::parse(text).map_err(|_| shape(format!("{what} is not a URL")))
+}
+
+/// Whether `url` may be sent to a buyer.
+///
+/// The scheme is `https`, there is no userinfo, and the host is `paddle.com`,
+/// a host under it, or the registrable domain of `api`'s host.
+fn return_url_allowed(url: &Url, api: &Url) -> bool {
+    if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
+        return false;
+    }
+    let (Some(host), Some(api_host)) = (url.host_str(), api.host_str()) else {
+        return false;
+    };
+    host_is_paddle(host) || same_registrable_domain(host, api_host)
+}
+
+fn accept_return_url(url: &Url, api: &Url) -> Result<(), PaddleError> {
+    if return_url_allowed(url, api) {
+        return Ok(());
+    }
+    let host = url.host_str().unwrap_or("").to_owned();
+    tracing::error!(
+        host = host.as_str(),
+        "Paddle returned a URL the hub will not send"
+    );
+    Err(PaddleError::BadUrl { host })
+}
+
+fn host_is_paddle(host: &str) -> bool {
+    let host = normalized_host(host);
+    host == "paddle.com" || host.ends_with(".paddle.com")
+}
+
+fn same_registrable_domain(host: &str, api_host: &str) -> bool {
+    let host = registrable_domain(host);
+    !host.is_empty() && host == registrable_domain(api_host)
+}
+
+fn normalized_host(host: &str) -> String {
+    host.trim_end_matches('.').to_ascii_lowercase()
+}
+
+/// The registrable domain of `host`.
+///
+/// shortcut: the last two labels, or the whole host when it is one label or an
+/// IP. A multi-part public suffix such as `co.uk` is not special-cased, so an
+/// API host under one would allow every host under that suffix. Production API
+/// hosts are `api.paddle.com` and `sandbox-api.paddle.com`; revisit if
+/// `AGMEN_PADDLE_API_URL` ever names a host under a multi-part suffix.
+fn registrable_domain(host: &str) -> String {
+    let host = normalized_host(host);
+    if host.is_empty() || host.parse::<std::net::IpAddr>().is_ok() {
+        return host;
+    }
+    // A host is at most 253 characters, so 127 labels is the ceiling.
+    let labels: Vec<&str> = host
+        .split('.')
+        .filter(|label| !label.is_empty())
+        .take(127)
+        .collect();
+    match labels.as_slice() {
+        [] => String::new(),
+        [only] => (*only).to_owned(),
+        [.., left, right] => format!("{left}.{right}"),
+    }
 }
 
 fn checkout_url(response: &Value) -> Result<Url, PaddleError> {

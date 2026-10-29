@@ -2,11 +2,11 @@
 //! responses.
 
 use std::future::Future;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
-use agmen_proto::MAX_ENVELOPE_BYTES;
+use agmen_proto::{MAX_ENVELOPE_BYTES, TenantId};
 use axum::extract::DefaultBodyLimit;
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -18,7 +18,7 @@ use sqlx::PgPool;
 use url::Url;
 
 use crate::auth::{self, Github, GithubError};
-use crate::billing::{PaddleClient, PaddleError};
+use crate::billing::{BillingLimiter, PaddleClient, PaddleError};
 use crate::broker_tokens::{BrokerTokens, TokenError};
 use crate::config::{Config, HostedConfig, HubMode};
 use crate::emqx::{EmqxAdmin, EmqxError};
@@ -97,6 +97,7 @@ struct Inner {
     events: Slots,
     claim_lease: Duration,
     retention_days: Option<u32>,
+    billing_calls: Mutex<BillingLimiter>,
 }
 
 impl Hub {
@@ -191,6 +192,7 @@ impl Hub {
                 events: Slots::default(),
                 claim_lease: config.claim_lease,
                 retention_days: config.retention_days,
+                billing_calls: Mutex::default(),
             }),
         })
     }
@@ -307,6 +309,16 @@ impl Hub {
 
     pub(crate) fn paddle(&self) -> Option<&PaddleClient> {
         self.inner.paddle.as_ref()
+    }
+
+    /// Takes one Paddle call from `tenant`'s bucket, or 429 `rate_limited`.
+    pub(crate) fn take_billing_call(&self, tenant: &TenantId) -> Result<(), ApiError> {
+        self.inner
+            .billing_calls
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take(tenant, Instant::now())
+            .map_err(ApiError::rate_limited)
     }
 
     pub(crate) fn emqx(&self) -> &EmqxAdmin {
@@ -475,6 +487,7 @@ pub(crate) enum ApiError {
         status: StatusCode,
         code: &'static str,
         description: String,
+        retry_after: Option<Duration>,
     },
     #[error("database error")]
     Database(#[from] sqlx::Error),
@@ -502,7 +515,30 @@ impl ApiError {
             status,
             code,
             description: description.into(),
+            retry_after: None,
         }
+    }
+
+    /// 429 `rate_limited` with `Retry-After` of `wait`, rounded up to seconds.
+    pub(crate) fn rate_limited(wait: Duration) -> Self {
+        let secs = retry_after_secs(wait);
+        Self::Client {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            code: "rate_limited",
+            description: "too many billing changes; try again later".to_owned(),
+            retry_after: Some(Duration::from_secs(secs)),
+        }
+    }
+
+    /// Whether this is a 429 `rate_limited` answer.
+    pub(crate) fn is_rate_limited(&self) -> bool {
+        matches!(
+            self,
+            Self::Client {
+                code: "rate_limited",
+                ..
+            }
+        )
     }
 
     pub(crate) fn unauthorized() -> Self {
@@ -539,18 +575,27 @@ impl ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let (status, code, description) = match self {
+        // Match a reference so the log can print this error before the fields move.
+        let (status, code, description, retry_after) = match &self {
             Self::Client {
                 status,
                 code,
                 description,
-            } => (status, code, description),
+                retry_after,
+            } => (*status, *code, description.clone(), *retry_after),
+            Self::Paddle(PaddleError::BadUrl { .. }) => (
+                StatusCode::BAD_GATEWAY,
+                "paddle_bad_url",
+                "Paddle returned a URL the hub will not send".to_owned(),
+                None,
+            ),
             Self::Emqx(_) | Self::Github(_) | Self::Paddle(_) => {
                 tracing::error!(error = %error_chain(&self), "upstream call failed");
                 (
                     StatusCode::BAD_GATEWAY,
                     "upstream_unavailable",
                     self.to_string(),
+                    None,
                 )
             }
             Self::Database(_) | Self::Random(_) | Self::Stored(_) | Self::Token(_) => {
@@ -559,6 +604,7 @@ impl IntoResponse for ApiError {
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "server_error",
                     "internal error".to_owned(),
+                    None,
                 )
             }
         };
@@ -572,8 +618,21 @@ impl IntoResponse for ApiError {
                 .headers_mut()
                 .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
         }
+        if status == StatusCode::TOO_MANY_REQUESTS
+            && let Some(wait) = retry_after
+            && let Ok(value) = HeaderValue::from_str(&wait.as_secs().max(1).to_string())
+        {
+            response.headers_mut().insert(header::RETRY_AFTER, value);
+        }
         response
     }
+}
+
+/// `wait` in whole seconds, rounded up, at least 1.
+fn retry_after_secs(wait: Duration) -> u64 {
+    u64::try_from(wait.as_millis().div_ceil(1000))
+        .unwrap_or(u64::MAX)
+        .max(1)
 }
 
 /// `err` and up to 16 of its sources, joined with ": ".

@@ -115,6 +115,15 @@ impl FakePaddle {
         &self.base
     }
 
+    /// The https origin of checkout and portal links this fake returns.
+    ///
+    /// The API itself stays on [`Self::base`]'s http listener. Buyer links use
+    /// the same host over https, which is an allowed host for that API.
+    #[must_use]
+    pub fn link_base(&self) -> String {
+        https_base(&self.base)
+    }
+
     /// The API key generated for this server.
     #[must_use]
     pub fn api_key(&self) -> &str {
@@ -262,10 +271,18 @@ fn customer_portal_id(path: &str) -> Option<&str> {
     (!customer_id.is_empty() && !customer_id.contains('/')).then_some(customer_id)
 }
 
+fn https_base(base: &Url) -> String {
+    let mut url = base.clone();
+    match url.set_scheme("https") {
+        Ok(()) => url.to_string(),
+        Err(()) => base.to_string(),
+    }
+}
+
 fn create_transaction(state: &mut FakeState, body: &Value) -> Response {
     let n = state.fresh_number();
     let id = format!("txn_{n}");
-    let checkout_url = format!("{}checkout/{id}", state.base);
+    let checkout_url = format!("{}checkout/{id}", https_base(&state.base));
     (
         StatusCode::CREATED,
         Json(json!({
@@ -324,7 +341,7 @@ fn update_subscription(state: &mut FakeState, sub_id: &str, body: &Value) -> Res
 
 fn create_portal_session(state: &mut FakeState, customer_id: &str) -> Response {
     let n = state.fresh_number();
-    let overview = format!("{}portal/{customer_id}", state.base);
+    let overview = format!("{}portal/{customer_id}", https_base(&state.base));
     (
         StatusCode::CREATED,
         Json(json!({

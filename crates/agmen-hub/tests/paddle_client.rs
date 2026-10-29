@@ -71,7 +71,7 @@ async fn checkout_sends_items_and_tenant() {
         ])
     );
     assert_eq!(body["custom_data"], json!({"agmen_tenant": "tenant01"}));
-    assert_eq!(url.as_str(), format!("{}checkout/txn_1", fake.base()));
+    assert_eq!(url.as_str(), format!("{}checkout/txn_1", fake.link_base()));
 }
 
 #[tokio::test]
@@ -136,7 +136,7 @@ async fn update_with_no_items_sends_nothing() {
 async fn portal_url_from_session() {
     let (fake, client) = start().await;
     let url = client.portal_url("ctm_1", "sub_1").await.unwrap();
-    assert_eq!(url.as_str(), format!("{}portal/ctm_1", fake.base()));
+    assert_eq!(url.as_str(), format!("{}portal/ctm_1", fake.link_base()));
     let requests = fake.requests();
     assert_eq!(requests.len(), 1);
     let (method, path, body) = &requests[0];
