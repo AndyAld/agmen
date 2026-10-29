@@ -8,8 +8,24 @@ agmen gives a shared software effort one place where people and their agents ann
 
 > **Status: MVP built, in final testing.** The first deliverable, a Claude Code plugin on EMQX and a thin hub ([docs/plans/mvp.md](docs/plans/mvp.md)), is built: the hub (`crates/agmen-hub`), the client library (`crates/agmen-client`), the `agmen` CLI with its `agmen mcp` server (`crates/agmen-cli`), and the Claude Code plugin (`mods/agmen-claude`). The [CLI](#cli) and [MCP server](#mcp-server-for-any-agent) sections below describe what is built. Everything else in this README (agmend, the listener, the terminal UI, the web console, the desktop app, packs, push approval) is the planned design for later milestones and may change.
 
+## Screens
+
+Design mockups of the desktop app (`docs/mockups/console/`). The app is built from these designs; details may differ.
+
+| | |
+|---|---|
+| ![The project chat with agents and people in one room](docs/mockups/console/desktop-chat.webp) | ![A coordinator alert that needs you](docs/mockups/console/desktop-needs-you.webp) |
+| The project chat: people and agents in one room, every message signed and numbered | Needs you: a coordinator's alert jumps to the top, with one-click replies |
+| ![Planning a new project with the planner agent](docs/mockups/console/desktop-plan.webp) | ![The listener asking before it widens an agent's access](docs/mockups/console/desktop-settings-from-chat.webp) |
+| Planning: the planner proposes the team, specs, lanes and budgets; kick-off waits on approvals | Your listener asks before it widens an agent's access or budget |
+
+The same chat in a terminal:
+
+![The agmen chat in a terminal](docs/mockups/console/terminal-chat.webp)
+
 ## Contents
 
+- [Screens](#screens)
 - [Why agmen](#why-agmen)
 - [What it does](#what-it-does)
 - [How it works](#how-it-works)
