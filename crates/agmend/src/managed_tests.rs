@@ -2554,6 +2554,187 @@ async fn prune_confirm_preserves_new_commits_after_an_older_wip() {
     );
 }
 
+/// Agent branches in `git worktree list` order, the order prune walks.
+fn agent_branches_in_list_order(repo: &std::path::Path) -> Vec<String> {
+    String::from_utf8(listing(repo, &["worktree", "list", "--porcelain"]))
+        .unwrap()
+        .lines()
+        .filter_map(|line| line.strip_prefix("branch refs/heads/agent/"))
+        .map(|name| format!("agent/{name}"))
+        .collect()
+}
+
+// The limit is an argument here, not the 256 a real call uses, so the split
+// runs on a few real worktrees. The 256, 512 and 513 boundaries are pinned on
+// the pure split in `managed_actions::batch_tests`.
+#[tokio::test(flavor = "current_thread")]
+async fn prune_checks_up_to_the_limit_and_leaves_the_rest_untouched() {
+    const LIMIT: usize = 3;
+    const AGENTS: usize = 5;
+    let fixture = prune_fixture().await;
+    let repo = fixture.dir.path().join("repo");
+    let mut agents = Vec::with_capacity(AGENTS);
+    let mut others = Vec::with_capacity(AGENTS);
+    for index in 0..AGENTS {
+        let branch = format!("agent/n{index}");
+        let path = prune_tree(&fixture, &branch, false).await;
+        agents.push((branch, path));
+        // Git lists linked trees by path, so this one sits between two agent
+        // trees. It is not an agent tree and must not use up the limit.
+        let other = repo.join(format!(".worktrees/agent/n{index}-other"));
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                &format!("feature/n{index}"),
+                other.to_str().unwrap(),
+                "main",
+            ],
+        );
+        others.push(other);
+    }
+    let order = agent_branches_in_list_order(&repo);
+    assert_eq!(order.len(), AGENTS);
+    let (checked, over) = order.split_at(LIMIT);
+    // The worktree command log is a thread-local: start it after the setup.
+    crate::worktree::COMMANDS.with_borrow_mut(Vec::clear);
+    let out = fixture
+        .daemon
+        .core
+        .managed
+        .prune_up_to(json!({"project":"project1"}), LIMIT)
+        .await
+        .unwrap();
+    let listed: Vec<_> = over
+        .iter()
+        .map(|branch| json!({"branch":branch,"reason":"over the per-call limit"}))
+        .collect();
+    assert_eq!(out, json!({"removed":checked,"kept":listed}));
+    for (branch, path) in &agents {
+        assert_eq!(path.exists(), over.contains(branch), "{branch}");
+    }
+    assert!(others.iter().all(|path| path.exists()));
+    for branch in over {
+        let path = &agents.iter().find(|(name, _)| name == branch).unwrap().1;
+        let reference = format!("refs/heads/{branch}");
+        crate::worktree::COMMANDS.with_borrow(|log| {
+            assert!(
+                log.iter().flatten().all(|arg| {
+                    let arg = arg.as_os_str();
+                    arg != path.as_os_str()
+                        && arg != std::ffi::OsStr::new(branch)
+                        && arg != std::ffi::OsStr::new(&reference)
+                }),
+                "{branch}"
+            );
+        });
+    }
+    let left = listing(
+        &repo,
+        &[
+            "for-each-ref",
+            "--format=%(refname:short)",
+            "refs/heads/agent/",
+        ],
+    );
+    let left = String::from_utf8(left).unwrap();
+    assert_eq!(left.lines().collect::<Vec<_>>(), over);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn prune_counts_managed_and_unavailable_trees_toward_the_limit() {
+    const LIMIT: usize = 2;
+    let fixture = prune_fixture().await;
+    let repo = fixture.dir.path().join("repo");
+    let launched = fixture.launch().await;
+    fixture
+        .daemon
+        .core
+        .managed
+        .stop(json!({"identity":"agent001"}))
+        .await
+        .unwrap();
+    let managed = launched["branch"].as_str().unwrap();
+    let gone = prune_tree(&fixture, "agent/a-gone", false).await;
+    std::fs::remove_dir_all(&gone).unwrap();
+    let mut spare = Vec::new();
+    for index in 0..2 {
+        spare.push(prune_tree(&fixture, &format!("agent/x{index}"), false).await);
+    }
+    // Git lists linked trees by path (it did not before 2.11.1), so the two
+    // that cannot be removed come first and fill the limit.
+    assert_eq!(
+        agent_branches_in_list_order(&repo),
+        ["agent/a-gone", managed, "agent/x0", "agent/x1"]
+    );
+    let out = fixture
+        .daemon
+        .core
+        .managed
+        .prune_up_to(json!({"project":"project1"}), LIMIT)
+        .await
+        .unwrap();
+    assert_eq!(
+        out,
+        json!({
+            "removed": [],
+            "kept": [
+                {"branch": "agent/a-gone", "reason": "worktree is unavailable"},
+                {"branch": managed, "reason": "managed"},
+                {"branch": "agent/x0", "reason": "over the per-call limit"},
+                {"branch": "agent/x1", "reason": "over the per-call limit"},
+            ]
+        })
+    );
+    // Both spare trees could have been removed, and neither was.
+    assert!(spare.iter().all(|path| path.exists()));
+    assert!(std::path::Path::new(launched["worktree"].as_str().unwrap()).exists());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn prune_counts_what_it_cannot_list_and_the_next_call_reaches_it() {
+    const LIMIT: usize = 2;
+    const AGENTS: usize = 5;
+    let fixture = prune_fixture().await;
+    let repo = fixture.dir.path().join("repo");
+    for index in 0..AGENTS {
+        prune_tree(&fixture, &format!("agent/n{index}"), false).await;
+    }
+    let order = agent_branches_in_list_order(&repo);
+    assert_eq!(order.len(), AGENTS);
+    let over = |branches: &[String]| -> Vec<Value> {
+        branches
+            .iter()
+            .map(|branch| json!({"branch":branch,"reason":"over the per-call limit"}))
+            .collect()
+    };
+    let prune = || {
+        fixture
+            .daemon
+            .core
+            .managed
+            .prune_up_to(json!({"project":"project1"}), LIMIT)
+    };
+    // Two checked and removed, two listed over the limit, one only counted.
+    let first = prune().await.unwrap();
+    assert_eq!(
+        first,
+        json!({"removed":&order[..2],"kept":over(&order[2..4]),"unlisted":1})
+    );
+    // The two that were listed get checked now, and one is left to list.
+    let second = prune().await.unwrap();
+    assert_eq!(
+        second,
+        json!({"removed":&order[2..4],"kept":over(&order[4..])})
+    );
+    // Nothing is over the limit any more, so the answer has no extra field.
+    let third = prune().await.unwrap();
+    assert_eq!(third, json!({"removed":&order[4..],"kept":[]}));
+    assert!(listing(&repo, &["for-each-ref", "refs/heads/agent/"]).is_empty());
+}
+
 #[tokio::test]
 async fn agent_budget_serializes_with_record_removal() {
     let fixture = Fixture::new().await;
