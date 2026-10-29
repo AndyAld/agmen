@@ -274,7 +274,6 @@ pub(crate) async fn run(command: TemplateCommand) -> Result<()> {
 pub(crate) enum Overwrite {
     Refuse,
     Replace,
-    #[cfg_attr(not(test), expect(dead_code, reason = "used by the Task 8 MCP writer"))]
     IfSavedBy(String),
 }
 
@@ -360,6 +359,67 @@ pub(crate) fn write_personal(
             temporary.display()
         )),
     })
+}
+
+/// Save `xml` into `personal` for the agent `handle`.
+///
+/// `root` is the worktree whose project templates are visible. The file's
+/// `saved-by` is `handle`, whatever the XML said. Any option is refused.
+/// A handle longer than 64 bytes, and XML that would exceed 32 KiB once
+/// serialized, are refused before a file is written.
+pub(crate) fn save_for_agent(
+    xml: &str,
+    handle: &str,
+    root: &Path,
+    personal: &Path,
+) -> Result<String> {
+    /// The schema cap. Agent handles can be longer than this.
+    const MAX_SAVED_BY_BYTES: usize = 64;
+    if xml.len() > MAX_TEMPLATE_BYTES {
+        return Err(Fail::usage("template file exceeds 32 KiB").into());
+    }
+    if handle.len() > MAX_SAVED_BY_BYTES {
+        // The agent cannot shorten its own handle, so say whose value is too long.
+        return Err(Fail::usage(format!(
+            "template_save cannot record you as saved-by: your handle is {} bytes and saved-by holds at most {MAX_SAVED_BY_BYTES}",
+            handle.len()
+        ))
+        .into());
+    }
+    let mut template = parse_template(xml)
+        .map_err(|error| Fail::usage(format!("invalid template: {}", clean(&error.to_string()))))?;
+    if let Some(name) = template
+        .option_names()
+        .first()
+        .map(|name| (*name).to_owned())
+    {
+        return Err(Fail::usage(format!(
+            "template_save refuses option {name}: agents cannot save options until agent profiles say which are safe"
+        ))
+        .into());
+    }
+    template.set_saved_by(Some(handle.to_owned()));
+    if to_xml(&template).len() > MAX_TEMPLATE_BYTES {
+        return Err(Fail::usage("template file exceeds 32 KiB").into());
+    }
+    let catalog = TemplateLayers {
+        project: Some(root.to_path_buf()),
+        personal: Some(personal.to_path_buf()),
+        ..Default::default()
+    }
+    .load();
+    let path = write_personal(
+        personal,
+        &catalog,
+        &template,
+        Overwrite::IfSavedBy(handle.to_owned()),
+    )?;
+    Ok(format!(
+        "saved {} ({}) to {}",
+        template.name(),
+        template.kind(),
+        clean(&path.display().to_string())
+    ))
 }
 
 /// Create a temp file next to `target` under a name no other run uses: the process id
@@ -873,5 +933,210 @@ mod tests {
         let value = json!({"path":json_path(Some(&path))});
         assert_eq!(value["path"], "bad\u{fffd}.xml");
         assert_eq!(json!({"path":json_path(None)})["path"], Value::Null);
+    }
+
+    #[test]
+    fn agent_save_stamps_saved_by() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let answer = save_for_agent(
+            r#"<agent-template name="x1" saved-by="someone-else"/>"#,
+            "andy/sol",
+            root.path(),
+            dir.path(),
+        )
+        .unwrap();
+        assert!(answer.starts_with("saved x1 (agent) to "), "{answer}");
+        let xml = std::fs::read_to_string(dir.path().join("x1.agent.xml")).unwrap();
+        assert!(!xml.contains("someone-else"), "{xml}");
+        assert_eq!(parse_template(&xml).unwrap().saved_by(), Some("andy/sol"));
+    }
+
+    #[test]
+    fn agent_save_refuses_options() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let error = save_for_agent(
+            r#"<agent-template name="x1"><options><option name="permission-mode" value="bypassPermissions"/></options></agent-template>"#,
+            "andy/sol",
+            root.path(),
+            dir.path(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("permission-mode"), "{error}");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn agent_can_replace_its_own_template() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        save_for_agent(
+            r#"<agent-template name="x1"><description>one</description></agent-template>"#,
+            "andy/sol",
+            root.path(),
+            dir.path(),
+        )
+        .unwrap();
+        save_for_agent(
+            r#"<agent-template name="x1"><description>two</description></agent-template>"#,
+            "andy/sol",
+            root.path(),
+            dir.path(),
+        )
+        .unwrap();
+        let parsed =
+            parse_template(&std::fs::read_to_string(dir.path().join("x1.agent.xml")).unwrap())
+                .unwrap();
+        assert_eq!(description(&parsed), Some("two"));
+        assert_eq!(parsed.saved_by(), Some("andy/sol"));
+    }
+
+    #[test]
+    fn agent_save_refuses_a_handle_over_64_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let error = save_for_agent(
+            r#"<agent-template name="x1"/>"#,
+            &"h".repeat(65),
+            root.path(),
+            dir.path(),
+        )
+        .unwrap_err();
+        let text = error.to_string();
+        assert!(text.contains("saved-by") && text.contains("64"), "{text}");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+
+        let handle = "h".repeat(64);
+        save_for_agent(
+            r#"<agent-template name="x1"/>"#,
+            &handle,
+            root.path(),
+            dir.path(),
+        )
+        .unwrap();
+        let saved = std::fs::read_to_string(dir.path().join("x1.agent.xml")).unwrap();
+        assert_eq!(
+            parse_template(&saved).unwrap().saved_by(),
+            Some(handle.as_str())
+        );
+    }
+
+    #[test]
+    fn agent_save_checks_size_before_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let huge = format!(
+            "<agent-template name=\"x1\"/>{}",
+            "a".repeat(MAX_TEMPLATE_BYTES)
+        );
+        let error = save_for_agent(&huge, "andy/sol", root.path(), dir.path()).unwrap_err();
+        assert!(error.to_string().contains("32 KiB"), "{error}");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+
+        let prompt = "<".repeat(9_000);
+        let xml = format!(
+            "<agent-template name=\"x1\"><prompt><![CDATA[{prompt}]]></prompt></agent-template>"
+        );
+        assert!(xml.len() <= MAX_TEMPLATE_BYTES, "{}", xml.len());
+        let error = save_for_agent(&xml, "andy/sol", root.path(), dir.path()).unwrap_err();
+        assert!(error.to_string().contains("32 KiB"), "{error}");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn agent_save_cannot_replace_a_persons_template() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mine.agent.xml");
+        let original = r#"<agent-template name="mine"/>"#;
+        std::fs::write(&path, original).unwrap();
+        let error = save_for_agent(
+            r#"<agent-template name="mine"><description>new</description></agent-template>"#,
+            "andy/sol",
+            root.path(),
+            dir.path(),
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("was not saved by andy/sol"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn agent_save_cannot_replace_another_agents_template() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        save_for_agent(
+            r#"<agent-template name="x1"/>"#,
+            "andy/sol",
+            root.path(),
+            dir.path(),
+        )
+        .unwrap();
+        let path = dir.path().join("x1.agent.xml");
+        let original = std::fs::read_to_string(&path).unwrap();
+        let error = save_for_agent(
+            r#"<agent-template name="x1"><description>mine now</description></agent-template>"#,
+            "andy/luna",
+            root.path(),
+            dir.path(),
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("was not saved by andy/luna"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn agent_save_refuses_a_name_with_a_path() {
+        let base = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        // Not created: a refused save must not make the directory either.
+        let personal = base.path().join("personal");
+        for name in ["../x1", "a/b", ".."] {
+            let xml = format!(r#"<agent-template name="{name}"/>"#);
+            let error = save_for_agent(&xml, "andy/sol", root.path(), &personal).unwrap_err();
+            assert!(
+                error.to_string().contains("invalid name"),
+                "{name}: {error}"
+            );
+        }
+        assert_eq!(std::fs::read_dir(base.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn agent_save_refuses_options_inside_a_team_node() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let error = save_for_agent(
+            r#"<team-template name="eng"><node><agent-template><options><option name="permission-mode" value="bypassPermissions"/></options></agent-template></node></team-template>"#,
+            "andy/sol",
+            root.path(),
+            dir.path(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("permission-mode"), "{error}");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn agent_save_writes_a_team_template() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let answer = save_for_agent(
+            r#"<team-template name="eng" saved-by="someone-else"><node template="claude"/></team-template>"#,
+            "andy/sol",
+            root.path(),
+            dir.path(),
+        )
+        .unwrap();
+        assert!(answer.starts_with("saved eng (team) to "), "{answer}");
+        let saved = std::fs::read_to_string(dir.path().join("eng.team.xml")).unwrap();
+        assert_eq!(parse_template(&saved).unwrap().saved_by(), Some("andy/sol"));
     }
 }

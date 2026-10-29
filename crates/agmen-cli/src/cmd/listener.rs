@@ -20,6 +20,7 @@ enum ListenerCommand {
     Start {
         #[arg(long)]
         project: Option<ProjectId>,
+        /// Applies only to the listener being started. `agmen listener set --model` saves it.
         #[arg(long)]
         model: Option<String>,
     },

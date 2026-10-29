@@ -1,4 +1,4 @@
-//! The role-filtered tools `agmen mcp` serves, with fourteen for legacy or
+//! The role-filtered tools `agmen mcp` serves, with sixteen for legacy or
 //! unjoined worktrees and an additional review tool for roles with REVIEW.
 //! Each is a thin layer over what the
 //! matching `agmen` command does (`crate::cmd`), sending through the
@@ -272,6 +272,14 @@ pub(crate) struct FoundParams {
 pub(crate) struct CheckPathParams {
     /// The paths (at most 500), absolute or relative to where agmen mcp runs.
     paths: Vec<String>,
+}
+
+/// `template_save`'s arguments.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TemplateSaveParams {
+    /// The template's XML, at most 32 KiB.
+    xml: String,
 }
 
 /// `recorded #<seq> (<stream>)`.
@@ -561,6 +569,47 @@ impl Server {
         })
         .await
     }
+
+    #[tool(
+        description = "List the agent and team templates you can launch: name, kind, layer, description."
+    )]
+    async fn template_list(&self) -> CallToolResult {
+        let templates_dir = self.shared.options.templates_dir.clone();
+        self.respond_with_pending(move |live: Arc<Live>| async move {
+            let personal = match templates_dir {
+                Some(dir) => dir,
+                None => crate::cmd::templates::personal_dir()?,
+            };
+            let catalog =
+                crate::cmd::templates::catalog(Some(live.agent.root.clone()), personal).await?;
+            Ok(crate::cmd::templates::list_text(&catalog))
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Save an agent or team template to your person's personal templates. Options are refused; the template records you as saved-by."
+    )]
+    async fn template_save(
+        &self,
+        Parameters(params): Parameters<TemplateSaveParams>,
+    ) -> CallToolResult {
+        let templates_dir = self.shared.options.templates_dir.clone();
+        self.respond_with_pending(move |live: Arc<Live>| async move {
+            let personal = match templates_dir {
+                Some(dir) => dir,
+                None => crate::cmd::templates::personal_dir()?,
+            };
+            let root = live.agent.root.clone();
+            let handle = live.agent.identity.handle.clone();
+            let xml = params.xml;
+            crate::client::blocking(move || {
+                crate::cmd::templates::save_for_agent(&xml, &handle, &root, &personal)
+            })
+            .await
+        })
+        .await
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -624,6 +673,25 @@ mod tests {
             ] {
                 assert!(!hidden.contains(&always));
             }
+        }
+    }
+
+    /// The template tools hang on no verb, so no built-in role loses them here. The listener
+    /// role never reaches this server: agmend starts it with `agmen mcp --listener`, whose own
+    /// tool set (`listener_tools.rs`) has `template_list` and no `template_save`.
+    #[test]
+    fn template_tools_are_visible_to_every_built_in_role() {
+        let roles = agmen_roles::Layers::default().load().unwrap();
+        assert!(roles.get("listener").is_some() && roles.get("engineer").is_some());
+        let template_tools = ["template_list", "template_save"];
+        for role in roles.iter() {
+            let hidden = hidden_tools(Some(&role.verbs));
+            for tool in template_tools {
+                assert!(!hidden.contains(&tool), "{} hides {tool}", role.role.name);
+            }
+        }
+        for tool in template_tools {
+            assert!(!hidden_tools(None).contains(&tool), "legacy hides {tool}");
         }
     }
 

@@ -99,6 +99,8 @@ async fn mcp_lists_only_role_tools() {
                 "read_chat",
                 "review",
                 "state",
+                "template_list",
+                "template_save",
             ],
         ),
         ("engineer", TOOLS.to_vec()),

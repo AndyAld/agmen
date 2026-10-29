@@ -1,6 +1,6 @@
 //! Listener tools use agmend's checked local socket and never load joined state.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use agmen_proto::{IdentityId, MessageId, Payload};
@@ -331,6 +331,26 @@ impl Server {
             .await,
         )
     }
+    #[tool(
+        description = "List the agent and team templates you can launch: name, kind, layer, description."
+    )]
+    async fn template_list(&self, Parameters(_args): Parameters<Empty>) -> CallToolResult {
+        text(list_templates().await)
+    }
+}
+
+async fn list_templates() -> Result<String> {
+    let personal = crate::cmd::templates::personal_dir()?;
+    let cwd = std::env::current_dir().context("reading the working directory")?;
+    list_templates_in(personal, &cwd).await
+}
+
+/// The listener has no worktree, so `cwd` stands in for one. Outside a checkout there is no
+/// project layer, and the built-in and personal templates still list.
+async fn list_templates_in(personal: PathBuf, cwd: &Path) -> Result<String> {
+    let project = crate::git::toplevel(cwd).await.ok();
+    let catalog = crate::cmd::templates::catalog(project, personal).await?;
+    Ok(crate::cmd::templates::list_text(&catalog))
 }
 
 // Clean strings before JSON escapes could hide terminal control characters.
