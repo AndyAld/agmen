@@ -139,7 +139,6 @@ impl Compose {
     /// # Errors
     ///
     /// When docker fails or the address is not a socket address.
-    #[expect(dead_code, reason = "tunnel setup reads the published ngrok port")]
     pub(crate) async fn port(&self, service: &str, port: u16) -> Result<SocketAddr> {
         let text = port.to_string();
         let output = self.output(&["port", service, &text], "port").await?;
@@ -252,16 +251,21 @@ impl Compose {
 /// ships its own `docker`; never run that (`setup` filters `PATH` the same
 /// way for the agent programs).
 fn find_docker() -> Option<PathBuf> {
+    find_program("docker")
+}
+
+/// Finds a host executable using the same absolute PATH rule as Docker.
+pub(super) fn find_program(name: &str) -> Option<PathBuf> {
     // shortcut: Windows looks for docker.exe only; add a Windows host test before relying on it
     let file = if cfg!(windows) {
-        "docker.exe"
+        format!("{name}.exe")
     } else {
-        "docker"
+        name.to_owned()
     };
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path)
         .filter(|dir| dir.is_absolute())
-        .map(|dir| dir.join(file))
+        .map(|dir| dir.join(&file))
         .find(|candidate| is_executable_file(candidate))
 }
 
