@@ -27,6 +27,7 @@ use crate::identities::HumanId;
 use crate::ingest::{HubPost, PostError};
 use crate::projects::create_project;
 use crate::tenants::{join_tenant, require_group_admin, tenant_role};
+use crate::usage::refuse_read_only;
 
 const GROUP_LIMIT: &str = "you already own 3 groups, the most one account can own";
 
@@ -230,15 +231,17 @@ pub(crate) async fn seats_used(
 
 /// Locks the tenant's plan row, then lets `human` take a seat.
 ///
-/// A human who already belongs to the group takes no seat. A group with no
-/// plan row is not seat-limited (a hosted bootstrap tenant has none). When
+/// A group whose ticked plan is not writable answers 403 `group_read_only`
+/// first. A human who already belongs to the group takes no seat. A group with
+/// no plan row is not seat-limited (a hosted bootstrap tenant has none). When
 /// every paid seat is taken, the invite stays unused: this commits the
 /// `no_seat_alerted_at` update and returns 403 `no_free_seat`. The alert
 /// posts after that commit, at most once an hour.
 ///
 /// # Errors
 ///
-/// 403 `no_free_seat` when the group is full, or a query error.
+/// 403 `group_read_only` when the group cannot write, 403 `no_free_seat` when
+/// the group is full, or a query error.
 pub(crate) async fn ensure_free_seat<'a>(
     hub: &Hub,
     mut tx: Transaction<'a, Postgres>,
@@ -254,6 +257,16 @@ pub(crate) async fn ensure_free_seat<'a>(
     if locked.is_none() {
         return Ok(tx);
     }
+    let tenant_id: TenantId = tenant.parse().map_err(ApiError::stored)?;
+    let Some(record) = load_plan(&mut *tx, &tenant_id).await? else {
+        return Ok(tx);
+    };
+    // Before the seat check: a read-only record has no paid seats and would
+    // otherwise answer a misleading `no_free_seat`.
+    let (record, _) = record.tick(Timestamp::now());
+    if !record.writable() {
+        return Err(refuse_read_only());
+    }
     let member: Option<String> = sqlx::query_scalar(
         "SELECT human_id FROM tenant_members WHERE tenant_id = $1 AND human_id = $2",
     )
@@ -264,11 +277,7 @@ pub(crate) async fn ensure_free_seat<'a>(
     if member.is_some() {
         return Ok(tx);
     }
-    let tenant_id: TenantId = tenant.parse().map_err(ApiError::stored)?;
     let used = seats_used(&mut *tx, &tenant_id).await?;
-    let Some(record) = load_plan(&mut *tx, &tenant_id).await? else {
-        return Ok(tx);
-    };
     if used < record.seats_paid() {
         return Ok(tx);
     }
@@ -397,14 +406,21 @@ pub(crate) async fn seats(
         return Err(ApiError::not_found("this group has no seat plan"));
     };
     let used = seats_used(hub.pool(), &tenant_id).await?;
+    let used_today: i32 = sqlx::query_scalar(
+        "SELECT coalesce((SELECT messages FROM tenant_usage
+         WHERE tenant_id = $1 AND day = (now() AT TIME ZONE 'UTC')::date), 0)",
+    )
+    .bind(tenant_id.as_str())
+    .fetch_one(hub.pool())
+    .await?;
+    let used_today = u32::try_from(used_today).map_err(ApiError::stored)?;
     Ok(Json(Seats {
         used,
         paid: record.seats_paid(),
         plan: plan_name(record.plan),
         state: record.state.as_str(),
         quota: record.daily_quota(),
-        // shortcut: hosted Task 4 counts the day's posts; until then used_today is 0
-        used_today: 0,
+        used_today,
     }))
 }
 
