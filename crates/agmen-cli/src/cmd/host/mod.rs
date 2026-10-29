@@ -2,6 +2,7 @@
 
 mod docker;
 mod files;
+mod tunnel;
 
 use std::time::Duration;
 
@@ -11,6 +12,7 @@ use url::Url;
 
 use self::docker::{Compose, check_docker};
 use self::files::{EMQX_CONF, HostEnv, HostName, render_compose};
+use self::tunnel::{Tunnel, TunnelKind};
 use crate::output::{Code, Fail, clean};
 use crate::paths::{host_dir, host_dir_path};
 
@@ -60,10 +62,13 @@ struct UpArgs {
     /// Public https URL of this hub.
     #[arg(long, value_name = "URL")]
     public_url: Option<String>,
+    /// Tunnel to use when no public URL is supplied.
+    #[arg(long, value_enum)]
+    tunnel: Option<TunnelKind>,
     /// Local port published to the hub's port 8080.
     #[arg(long, default_value_t = 7080)]
     port: u16,
-    /// Seconds a later reachability check may wait. This command polls health on its own.
+    /// Seconds to wait for the public URL to answer after the stack starts.
     #[arg(long, default_value_t = 90)]
     wait: u64,
     /// Days of history the hub keeps, from 1 to 36500. Omit it to keep everything.
@@ -120,16 +125,29 @@ pub(crate) async fn run(args: HostArgs) -> Result<()> {
 }
 
 async fn up(args: UpArgs) -> Result<()> {
-    // `--wait` bounds the public reachability check added with tunnels.
-    tracing::debug!(
-        wait_secs = args.wait,
-        "host up polls the local health URL on its own"
-    );
-    let public_url = require_public_url(args.public_url)?;
+    let public_url = args.public_url.map(parse_public_url).transpose()?;
     check_docker().await?;
+    let path = host_dir_path(args.name.host_name().as_str())?;
+    let mut env = HostEnv::load(&path.join(".env"))?.unwrap_or_default();
+    let tunnel = tunnel::choose(public_url, args.tunnel, &env).await?;
+    let mut public_url = match &tunnel {
+        Tunnel::Url(url) => url.clone(),
+        Tunnel::Tailscale => tunnel::prepare_tailscale(args.port).await?,
+        // Compose requires a URL even for the initial, ngrok-only start.
+        // The hub starts only after the agent supplies its public URL.
+        Tunnel::Ngrok => Url::parse("https://localhost").context("parsing the startup URL")?,
+    };
+    if tunnel == Tunnel::Ngrok {
+        let token = tunnel::ngrok_token(&env).await?;
+        env.set("AGMEN_NGROK_AUTHTOKEN", &token)?;
+    }
+    env.set("AGMEN_TUNNEL", tunnel.name())?;
+    env.set(
+        "COMPOSE_PROFILES",
+        if tunnel == Tunnel::Ngrok { "ngrok" } else { "" },
+    )?;
     ensure_port_free(args.name.host_name().as_str(), args.port).await?;
     let dir = host_dir(args.name.host_name().as_str())?;
-    let mut env = HostEnv::load(&dir.join(".env"))?.unwrap_or_default();
     fill_env(
         &mut env,
         args.name.host_name(),
@@ -138,18 +156,27 @@ async fn up(args: UpArgs) -> Result<()> {
         args.retention_days,
     )?;
     write_stack(&dir, args.name.host_name(), &env)?;
-    let compose = Compose::new(dir);
+    let compose = Compose::new(dir.clone());
+    if tunnel == Tunnel::Ngrok {
+        compose.up(&["ngrok"]).await?;
+        public_url = tunnel::wait_ngrok(&compose).await?;
+        env.set("AGMEN_PUBLIC_URL", public_url.as_str())?;
+        env.write(&dir.join(".env"))?;
+    }
     if let Err(err) = compose.up(&[]).await {
         print_hub_logs(&compose).await;
         return Err(err);
     }
-    wait_healthy(args.port).await
+    wait_healthy(args.port).await?;
+    if tunnel == Tunnel::Tailscale {
+        // The stack can take minutes to start; check 443 again before taking it.
+        tunnel::prepare_tailscale(args.port).await?;
+        tunnel::tailscale(&["funnel", "--bg", "--yes", &args.port.to_string()]).await?;
+    }
+    wait_public(&public_url, &tunnel, args.port, args.wait).await
 }
 
-fn require_public_url(text: Option<String>) -> Result<Url> {
-    let Some(text) = text else {
-        return Err(Fail::usage("pass --public-url <https url>").into());
-    };
+fn parse_public_url(text: String) -> Result<Url> {
     let url = match Url::parse(&text) {
         Ok(url) => url,
         Err(_err) => {
@@ -223,7 +250,6 @@ fn fill_env(
     if env.get("AGMEN_GROUP_NAME").is_none() {
         env.set("AGMEN_GROUP_NAME", name.as_str())?;
     }
-    env.set("AGMEN_TUNNEL", "url")?;
     if let Some(days) = retention_days {
         env.set("AGMEN_RETENTION_DAYS", &days.to_string())?;
     }
@@ -312,7 +338,28 @@ async fn stop(args: NameArgs) -> Result<()> {
     if !dir.is_dir() {
         return Err(missing_host(args.name.as_str()).into());
     }
-    Compose::new(dir).stop().await?;
+    Compose::new(dir.clone()).stop().await?;
+    let env = HostEnv::load(&dir.join(".env"))?.unwrap_or_default();
+    if env.get("AGMEN_TUNNEL") == Some("tailscale") {
+        let port = env
+            .get("AGMEN_HOST_PORT")
+            .and_then(|text| text.parse().ok());
+        // Only the mapping `up` made is turned off: another one on 443 is not ours.
+        let result = match port {
+            Some(port) => tunnel::funnel_off(port).await,
+            None => Err(anyhow::anyhow!("the stored host port is missing")),
+        };
+        match result {
+            Ok(true) => {}
+            Ok(false) => {
+                eprintln!("note: Funnel on 443 does not proxy to this hub, so it was left as it is")
+            }
+            Err(err) => eprintln!(
+                "warning: {}; free Funnel with tailscale funnel reset",
+                clean(&format!("{err:#}"))
+            ),
+        }
+    }
     println!("stopped; the data stays in Docker volumes; agmen host up starts it again");
     Ok(())
 }
@@ -348,6 +395,39 @@ async fn probe_livez(url: &str) -> Result<()> {
     } else {
         bail!("status {}", response.status())
     }
+}
+
+async fn wait_public(url: &Url, tunnel: &Tunnel, port: u16, wait: u64) -> Result<()> {
+    let livez = format!("{}/livez", url.as_str().trim_end_matches('/'));
+    let budget = Duration::from_secs(wait);
+    let start = tokio::time::Instant::now();
+    loop {
+        let remaining = budget.saturating_sub(start.elapsed());
+        if tokio::time::timeout(remaining, probe_livez(&livez))
+            .await
+            .is_ok_and(|result| result.is_ok())
+        {
+            return Ok(());
+        }
+        let remaining = budget.saturating_sub(start.elapsed());
+        if remaining.is_zero() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(2).min(remaining)).await;
+    }
+    let hint = match tunnel {
+        Tunnel::Tailscale => {
+            "Tailscale Funnel can take up to 15 minutes to reach a new machine's public DNS."
+                .to_owned()
+        }
+        Tunnel::Url(_) => format!(
+            "check that your proxy sends {url} to 127.0.0.1:{port}, including WebSocket upgrades on /mqtt."
+        ),
+        Tunnel::Ngrok => String::new(),
+    };
+    bail!(
+        "the hub runs, but {url} does not answer yet. {hint} Run agmen host up again; nothing is lost."
+    )
 }
 
 fn one_line(text: &str) -> String {

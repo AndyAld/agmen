@@ -729,3 +729,523 @@ async fn up_does_not_fail_on_more_than_a_mebibyte_of_docker_output() {
     let out = up_with_stub(&home, &stub, &[]).await;
     assert_exit(&out, 0);
 }
+
+/// `fake_program` supplies the shebang and argument log.
+const TAILSCALE: &str = r#"
+if [ -e "$HOME/fake/tailscale-missing" ]; then
+  exit 127
+fi
+case "$*" in
+  'status --json')
+    /bin/cat "$HOME/fake/tailscale-status.json" || exit 1
+    ;;
+  'funnel status --json')
+    if [ -e "$HOME/fake/funnel-seen" ] && [ -e "$HOME/fake/funnel-status-later.json" ]; then
+      /bin/cat "$HOME/fake/funnel-status-later.json" || exit 1
+    else
+      : > "$HOME/fake/funnel-seen"
+      /bin/cat "$HOME/fake/funnel-status.json" || exit 1
+    fi
+    ;;
+  'funnel --https=443 off')
+    if [ -e "$HOME/fake/funnel-off-fails" ]; then
+      exit 1
+    fi
+    ;;
+  *) ;;
+esac
+exit 0
+"#;
+
+fn install_tailscale(home: &Home, state: &str) {
+    home.fake_program("tailscale", TAILSCALE);
+    let status =
+        serde_json::json!({"BackendState": state, "Self": {"DNSName": "box.tail1234.ts.net."}});
+    write_fake(home, "tailscale-status.json", status.to_string().as_bytes());
+    write_fake(home, "funnel-status.json", b"{}");
+}
+
+fn tunnel_command(home: &Home, port: u16, extra: &[&str]) -> Command {
+    let port = port.to_string();
+    let mut args = vec!["host", "up", "--port", &port, "--wait", "1"];
+    args.extend_from_slice(extra);
+    let mut cmd = command(home, &args, false);
+    cmd.env_remove("NGROK_AUTHTOKEN");
+    cmd
+}
+
+fn tailscale_log(home: &Home) -> String {
+    fs::read_to_string(home.path().join("calls/tailscale.log")).unwrap()
+}
+
+async fn tailscale_up(home: &Home, stub: &HubStub) -> Output {
+    install_docker(home);
+    install_tailscale(home, "Running");
+    write_fake(home, "ps.json", RUNNING_PS.as_bytes());
+    run(tunnel_command(home, stub.port, &[])).await
+}
+
+#[tokio::test]
+async fn tailscale_preferred_when_signed_in() {
+    let home = Home::new();
+    let stub = hub_stub().await;
+    let out = tailscale_up(&home, &stub).await;
+    assert_exit(&out, 1);
+    let pairs = env_pairs(&host_dir(&home));
+    assert_eq!(env_value(&pairs, "AGMEN_TUNNEL"), "tailscale");
+    assert_eq!(
+        env_value(&pairs, "AGMEN_PUBLIC_URL").trim_end_matches('/'),
+        "https://box.tail1234.ts.net"
+    );
+    assert!(tailscale_log(&home).contains(&format!("funnel --bg --yes {}", stub.port)));
+    assert!(
+        stderr(&out).contains("up to 15 minutes"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[tokio::test]
+async fn funnel_busy_is_refused() {
+    for foreground in [false, true] {
+        let home = Home::new();
+        install_docker(&home);
+        install_tailscale(&home, "Running");
+        let web = serde_json::json!({"Web": {"box.tail1234.ts.net:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:3000"}}}}});
+        let status = if foreground {
+            serde_json::json!({"Foreground": {"session": web}})
+        } else {
+            web
+        };
+        write_fake(&home, "funnel-status.json", status.to_string().as_bytes());
+        let out = run(tunnel_command(&home, 7080, &[])).await;
+        assert_exit(&out, 1);
+        for hint in [
+            "3000",
+            "tailscale funnel reset",
+            "agmend host mode",
+            "agmend host init --tailscale-serve",
+        ] {
+            assert!(stderr(&out).contains(hint), "{}", stderr(&out));
+        }
+        assert!(!tailscale_log(&home).contains("funnel --bg"));
+        assert!(!tailscale_log(&home).contains("funnel reset"));
+    }
+}
+
+#[tokio::test]
+async fn tailscale_stopped_is_not_used() {
+    let home = Home::new();
+    install_docker(&home);
+    install_tailscale(&home, "Stopped");
+    let out = run(tunnel_command(&home, 7080, &[])).await;
+    assert_exit(&out, 2);
+    assert!(!tailscale_log(&home).contains("funnel --bg"));
+}
+
+async fn ngrok_up(home: &Home, token: &str) -> Output {
+    use axum::{Json, Router, routing::get};
+    install_docker(home);
+    install_tailscale(home, "Stopped");
+    write_fake(home, "tailscale-missing", b"");
+    write_fake(home, "ps.json", RUNNING_PS.as_bytes());
+    let stub = hub_stub().await;
+    let app = Router::new().route("/api/tunnels", get(|| async {
+        Json(serde_json::json!({"tunnels": [{"public_url": "http://a"}, {"public_url": "https://able-otter-123.ngrok-free.app"}]}))
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    write_fake(home, "port", addr.to_string().as_bytes());
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let mut cmd = tunnel_command(home, stub.port, &[]);
+    cmd.env("NGROK_AUTHTOKEN", token);
+    let out = run(cmd).await;
+    server.abort();
+    out
+}
+
+#[tokio::test]
+async fn ngrok_when_no_tailscale() {
+    let home = Home::new();
+    let token = "FakeNgrokToken_".repeat(2);
+    let out = ngrok_up(&home, &token).await;
+    assert_exit(&out, 1);
+    let pairs = env_pairs(&host_dir(&home));
+    assert_eq!(env_value(&pairs, "AGMEN_TUNNEL"), "ngrok");
+    assert!(env_value(&pairs, "AGMEN_NGROK_AUTHTOKEN") == token);
+    assert_eq!(env_value(&pairs, "COMPOSE_PROFILES"), "ngrok");
+    assert_eq!(
+        env_value(&pairs, "AGMEN_PUBLIC_URL").trim_end_matches('/'),
+        "https://able-otter-123.ngrok-free.app"
+    );
+    assert_eq!(mode(&host_dir(&home).join(".env")), 0o600);
+    let log = docker_log(&home);
+    let starts: Vec<_> = log
+        .lines()
+        .filter(|line| line.contains(" up -d --wait --wait-timeout 180"))
+        .collect();
+    assert_eq!(starts.len(), 2, "{log}");
+    assert!(starts[0].ends_with("180 ngrok"), "{log}");
+    assert!(starts[1].ends_with("180"), "{log}");
+}
+
+#[tokio::test]
+async fn no_tunnel_lists_three_options() {
+    let home = Home::new();
+    install_docker(&home);
+    install_tailscale(&home, "Stopped");
+    write_fake(&home, "tailscale-missing", b"");
+    let out = run(tunnel_command(&home, 7080, &[])).await;
+    assert_exit(&out, 2);
+    for option in ["Tailscale", "ngrok", "--public-url"] {
+        assert!(stderr(&out).contains(option), "{}", stderr(&out));
+    }
+}
+
+#[tokio::test]
+async fn up_stops_when_public_url_unreachable() {
+    let home = Home::new();
+    install_docker(&home);
+    write_fake(&home, "ps.json", RUNNING_PS.as_bytes());
+    let stub = hub_stub().await;
+    let mut cmd = command(
+        &home,
+        &[
+            "host",
+            "up",
+            "--port",
+            &stub.port.to_string(),
+            "--public-url",
+            "https://127.0.0.1:9",
+            "--wait",
+            "2",
+        ],
+        false,
+    );
+    cmd.env_remove("NGROK_AUTHTOKEN");
+    let start = std::time::Instant::now();
+    let out = run(cmd).await;
+    assert_exit(&out, 1);
+    assert!(start.elapsed() < Duration::from_secs(10));
+    for hint in [
+        "https://127.0.0.1:9",
+        "agmen host up again",
+        "including WebSocket upgrades on /mqtt",
+        "nothing is lost",
+    ] {
+        assert!(stderr(&out).contains(hint), "{}", stderr(&out));
+    }
+    assert!(
+        !docker_log(&home)
+            .lines()
+            .any(|line| line.ends_with(" stop") || line.ends_with(" down"))
+    );
+}
+
+#[tokio::test]
+async fn stop_turns_funnel_off() {
+    let home = Home::new();
+    let stub = hub_stub().await;
+    assert_exit(&tailscale_up(&home, &stub).await, 1);
+    write_fake(
+        &home,
+        "funnel-status.json",
+        own_funnel(stub.port).as_bytes(),
+    );
+    let out = run(command(&home, &["host", "stop"], false)).await;
+    assert_exit(&out, 0);
+    assert!(tailscale_log(&home).contains("funnel --https=443 off"));
+    write_fake(&home, "funnel-off-fails", b"");
+    let out = run(command(&home, &["host", "stop"], false)).await;
+    assert_exit(&out, 0);
+    assert!(stderr(&out).contains("warning"), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("tailscale funnel reset"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(!tailscale_log(&home).contains("funnel reset"));
+}
+
+#[tokio::test]
+async fn ngrok_token_never_on_argv() {
+    let home = Home::new();
+    let token = "FakePrivateToken_".repeat(2);
+    let out = ngrok_up(&home, &token).await;
+    assert_exit(&out, 1);
+    assert!(!docker_log(&home).contains(&token));
+    assert!(!stderr(&out).contains(&token));
+    assert!(!String::from_utf8_lossy(&out.stdout).contains(&token));
+    assert!(host_dir(&home).join(".env").exists());
+}
+
+#[tokio::test]
+async fn foreground_conflict_is_not_hidden_by_a_matching_background_proxy() {
+    let home = Home::new();
+    install_docker(&home);
+    install_tailscale(&home, "Running");
+    write_fake(&home, "ps.json", RUNNING_PS.as_bytes());
+    let stub = hub_stub().await;
+    let target = format!("http://127.0.0.1:{}", stub.port);
+    let status = serde_json::json!({
+        "Web": {"box.tail1234.ts.net:443": {"Handlers": {"/": {"Proxy": target}}}},
+        "Foreground": {"session": {"Web": {"box.tail1234.ts.net:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:3000"}}}}}}
+    });
+    write_fake(&home, "funnel-status.json", status.to_string().as_bytes());
+    let out = run(tunnel_command(&home, stub.port, &[])).await;
+    assert_exit(&out, 1);
+    assert!(
+        stderr(&out).contains("already serves http://127.0.0.1:3000"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(!tailscale_log(&home).contains("funnel --bg"));
+    assert!(!docker_log(&home).contains(" up -d"));
+}
+
+#[cfg(target_os = "macos")]
+async fn terminal_token_input(input: &[u8]) -> (Home, Vec<u8>, i32) {
+    use std::process::Stdio;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let home = Home::new();
+    install_docker(&home);
+    install_tailscale(&home, "Stopped");
+    write_fake(&home, "tailscale-missing", b"");
+    write_fake(&home, "ps.json", RUNNING_PS.as_bytes());
+    write_fake(&home, "fail-up", b"");
+    // script owns a fresh PTY, so the user's terminal is never changed.
+    // macOS sets the PENDIN state bit on returning to canonical mode.
+    let mut cmd = Command::new("/usr/bin/script");
+    cmd.args([
+        "-q",
+        "/dev/null",
+        "/bin/sh",
+        "-c",
+        r#"before=$(/bin/stty -g) || exit 99; "$@"; result=$?; after=$(/bin/stty -g) || exit 99; printf 'terminal-before=%s\nterminal-after=%s\nterminal-restored\n' "$before" "$after"; exit "$result""#,
+        "sh",
+        env!("CARGO_BIN_EXE_agmen"),
+        "host",
+        "up",
+        "--tunnel",
+        "ngrok",
+    ]);
+    home.apply_env(&mut cmd);
+    cmd.current_dir(home.path()).env_remove("NGROK_AUTHTOKEN");
+    let mut child = tokio::process::Command::from(cmd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    let mut bytes = Vec::new();
+    let prompt = b"your-authtoken: ";
+    tokio::time::timeout(Duration::from_secs(10), async {
+        for _ in 0..4096 {
+            bytes.push(stdout.read_u8().await.unwrap());
+            if bytes.ends_with(prompt) {
+                return;
+            }
+        }
+        panic!("token prompt exceeds 4096 bytes");
+    })
+    .await
+    .unwrap();
+    stdin.write_all(input).await.unwrap();
+    let mut stdout = stdout.take(65536);
+    let (status, _) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::try_join!(child.wait(), stdout.read_to_end(&mut bytes))
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    let text = String::from_utf8_lossy(&bytes);
+    let settings = |label: &str| {
+        text.lines()
+            .find_map(|line| line.strip_prefix(label))
+            .expect("the shell must inspect the terminal after CLI exit")
+            .split(':')
+            .map(|field| {
+                if let Some(flags) = field.strip_prefix("lflag=") {
+                    // sys/termios.h defines PENDIN as transient state 0x20000000.
+                    let flags = u64::from_str_radix(flags, 16).unwrap() & !0x20000000;
+                    format!("lflag={flags:x}")
+                } else {
+                    field.to_owned()
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(settings("terminal-before="), settings("terminal-after="));
+    (home, bytes, status.code().unwrap())
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn terminal_ngrok_token_is_not_echoed() {
+    let token = "FakePastedToken_".repeat(2);
+    let (home, bytes, code) = terminal_token_input(format!("{token}\n").as_bytes()).await;
+    assert_eq!(
+        code, 1,
+        "CLI must fail on fake Docker and restore the terminal"
+    );
+    assert!(
+        !String::from_utf8_lossy(&bytes).contains(&token),
+        "terminal echoed the token"
+    );
+    assert!(String::from_utf8_lossy(&bytes).contains("terminal-restored"));
+    assert!(env_value(&env_pairs(&host_dir(&home)), "AGMEN_NGROK_AUTHTOKEN") == token);
+    assert!(!docker_log(&home).contains(&token));
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn cancelled_terminal_token_restores_settings() {
+    let (home, bytes, code) = terminal_token_input(b"\x03").await;
+    assert!(
+        String::from_utf8_lossy(&bytes).contains("terminal-restored"),
+        "cancellation skipped the terminal restoration check"
+    );
+    assert_eq!(
+        code, 2,
+        "Ctrl+C must cancel token entry and restore the terminal"
+    );
+    assert!(!host_dir(&home).join(".env").exists());
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn invalid_terminal_token_restores_settings() {
+    for input in [b"short\n".to_vec(), vec![b'a'; 256]] {
+        let (home, bytes, code) = terminal_token_input(&input).await;
+        assert_eq!(code, 2);
+        assert!(String::from_utf8_lossy(&bytes).contains("terminal-restored"));
+        assert!(!host_dir(&home).join(".env").exists());
+    }
+}
+
+#[tokio::test]
+async fn unusable_tailscale_status_falls_back() {
+    for status in [
+        b"not json".as_slice(),
+        br#"{"BackendState":"Running","Self":{"DNSName":""}}"#,
+        br#"{"BackendState":"NeedsLogin"}"#,
+    ] {
+        let home = Home::new();
+        install_docker(&home);
+        install_tailscale(&home, "Running");
+        write_fake(&home, "tailscale-status.json", status);
+        let out = run(tunnel_command(&home, 7080, &[])).await;
+        assert_exit(&out, 2);
+        assert!(stderr(&out).contains("ngrok"), "{}", stderr(&out));
+        assert!(!tailscale_log(&home).contains("funnel"));
+    }
+}
+
+#[tokio::test]
+async fn stored_public_url_is_reused() {
+    let home = Home::new();
+    install_docker(&home);
+    install_tailscale(&home, "Running");
+    write_fake(&home, "ps.json", RUNNING_PS.as_bytes());
+    let stub = hub_stub().await;
+    assert_exit(&up_with_stub(&home, &stub, &["--tunnel", "ngrok"]).await, 0);
+    let mut cmd = tunnel_command(&home, stub.port, &[]);
+    cmd.env("AGMEN_HOST_ALLOW_HTTP", "1");
+    assert_exit(&run(cmd).await, 0);
+    assert!(!home.path().join("calls/tailscale.log").exists());
+    assert_eq!(
+        env_value(&env_pairs(&host_dir(&home)), "COMPOSE_PROFILES"),
+        ""
+    );
+}
+
+#[tokio::test]
+async fn stored_ngrok_token_wins_over_environment() {
+    let home = Home::new();
+    let stored = "FakeStoredToken_".repeat(2);
+    fs::create_dir_all(host_dir(&home)).unwrap();
+    fs::write(
+        host_dir(&home).join(".env"),
+        format!("AGMEN_TUNNEL=ngrok\nAGMEN_NGROK_AUTHTOKEN={stored}\n"),
+    )
+    .unwrap();
+    let out = ngrok_up(&home, &"FakeEnvironmentToken_".repeat(2)).await;
+    assert_exit(&out, 1);
+    assert!(env_value(&env_pairs(&host_dir(&home)), "AGMEN_NGROK_AUTHTOKEN") == stored);
+    assert!(!docker_log(&home).contains(&stored));
+    assert!(!stderr(&out).contains(&stored));
+}
+
+fn own_funnel(port: u16) -> String {
+    serde_json::json!({"Web": {"box.tail1234.ts.net:443": {"Handlers": {"/": {"Proxy": format!("http://127.0.0.1:{port}")}}}}})
+        .to_string()
+}
+
+#[tokio::test]
+async fn other_443_entries_are_refused() {
+    let busy = [
+        serde_json::json!({"Web": {"box.tail1234.ts.net:443": {"Handlers": {"/docs": {"Proxy": "http://127.0.0.1:3000"}}}}}),
+        serde_json::json!({"Web": {"box.tail1234.ts.net:443": {"Handlers": {"/": {"Path": "/srv/site"}}}}}),
+        serde_json::json!({"Web": {"box.tail1234.ts.net:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:7080"}, "/docs": {"Text": "hi"}}}}}),
+        serde_json::json!({"Web": {"box.tail1234.ts.net:443": "odd"}}),
+        serde_json::json!({"TCP": {"443": {"TCPForward": "127.0.0.1:2222"}}}),
+        serde_json::json!({"Foreground": {"s": {"Web": {"box.tail1234.ts.net:443": {"Handlers": {"/docs": {"Text": "hi"}}}}}}}),
+    ];
+    for status in busy {
+        let home = Home::new();
+        install_docker(&home);
+        install_tailscale(&home, "Running");
+        write_fake(&home, "funnel-status.json", status.to_string().as_bytes());
+        let out = run(tunnel_command(&home, 7080, &[])).await;
+        assert_exit(&out, 1);
+        assert!(
+            stderr(&out).contains("already serves"),
+            "{status}: {}",
+            stderr(&out)
+        );
+        assert!(!tailscale_log(&home).contains("funnel --bg"), "{status}");
+        assert!(!docker_log(&home).contains(" up -d"), "{status}");
+    }
+}
+
+#[tokio::test]
+async fn funnel_is_checked_again_before_it_is_enabled() {
+    let home = Home::new();
+    let stub = hub_stub().await;
+    install_docker(&home);
+    install_tailscale(&home, "Running");
+    write_fake(&home, "ps.json", RUNNING_PS.as_bytes());
+    let other = serde_json::json!({"Web": {"box.tail1234.ts.net:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:3000"}}}}});
+    write_fake(
+        &home,
+        "funnel-status-later.json",
+        other.to_string().as_bytes(),
+    );
+    let out = run(tunnel_command(&home, stub.port, &[])).await;
+    assert_exit(&out, 1);
+    assert!(stderr(&out).contains("3000"), "{}", stderr(&out));
+    assert!(!tailscale_log(&home).contains("funnel --bg"));
+}
+
+#[tokio::test]
+async fn stop_leaves_a_different_443_mapping_alone() {
+    let home = Home::new();
+    let stub = hub_stub().await;
+    assert_exit(&tailscale_up(&home, &stub).await, 1);
+    let other = serde_json::json!({"Web": {"box.tail1234.ts.net:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:8080"}}}}});
+    for status in [other.to_string(), "{}".to_owned(), "not json".to_owned()] {
+        write_fake(&home, "funnel-status.json", status.as_bytes());
+        let out = run(command(&home, &["host", "stop"], false)).await;
+        assert_exit(&out, 0);
+        assert!(
+            !tailscale_log(&home).contains("--https=443 off"),
+            "{status}"
+        );
+    }
+}
