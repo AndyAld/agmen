@@ -1,0 +1,57 @@
+# Written by agmen host up on every run. Secrets are in .env (mode 0600).
+name: agmen-{{name}}
+
+services:
+  postgres:
+    image: postgres:16.15
+    environment:
+      POSTGRES_USER: agmen
+      POSTGRES_DB: agmen
+      POSTGRES_PASSWORD: ${AGMEN_POSTGRES_PASSWORD:?run agmen host up}
+    volumes: ["pg-data:/var/lib/postgresql/data"]
+    healthcheck: { test: ["CMD-SHELL", "pg_isready -U agmen -d agmen"], interval: 2s, timeout: 5s, retries: 30 }
+    restart: unless-stopped
+
+  hub:
+    image: ghcr.io/agmen-dev/agmen-hub:{{version}}
+    environment:
+      AGMEN_HUB_MODE: self-host
+      AGMEN_GROUP_NAME: ${AGMEN_GROUP_NAME:?run agmen host up}
+      AGMEN_DATABASE_URL: postgres://agmen:${AGMEN_POSTGRES_PASSWORD}@postgres:5432/agmen
+      AGMEN_PUBLIC_URL: ${AGMEN_PUBLIC_URL:?run agmen host up}
+      AGMEN_DATA_DIR: /var/lib/agmen
+      AGMEN_EMQX_API_URL: http://emqx:18083/api/v5
+      AGMEN_MQTT_URL: mqtt://emqx:1883
+      AGMEN_MQTT_WS_UPSTREAM: ws://emqx:8083/mqtt
+      AGMEN_RETENTION_DAYS: ${AGMEN_RETENTION_DAYS:-}
+    ports: ["127.0.0.1:${AGMEN_HOST_PORT:?run agmen host up}:8080"]
+    volumes: ["hub-data:/var/lib/agmen", "broker-keys:/var/lib/agmen/broker"]
+    depends_on: { postgres: { condition: service_healthy } }
+    healthcheck: { test: ["CMD", "/usr/local/bin/agmen-hub", "health"], interval: 2s, timeout: 5s, retries: 30 }
+    restart: unless-stopped
+
+  emqx:
+    image: emqx/emqx:6.3.2
+    environment:
+      EMQX_NODE__COOKIE: ${AGMEN_EMQX_NODE_COOKIE:?run agmen host up}
+      EMQX_DASHBOARD__DEFAULT_PASSWORD: ${AGMEN_EMQX_DASHBOARD_PASSWORD:?run agmen host up}
+    volumes: ["./emqx.conf:/opt/emqx/etc/emqx.conf:ro", "broker-keys:/opt/emqx/etc/agmen:ro", "emqx-data:/opt/emqx/data"]
+    # After the hub: EMQX reads the hub's JWKS and the API key file the hub writes.
+    depends_on: { hub: { condition: service_healthy } }
+    healthcheck: { test: ["CMD", "/opt/emqx/bin/emqx", "ctl", "status"], interval: 5s, timeout: 5s, retries: 20 }
+    restart: unless-stopped
+
+  ngrok:
+    image: ngrok/ngrok:3.39.13-alpine
+    profiles: ["ngrok"]
+    command: ["http", "http://hub:8080"]
+    environment:
+      NGROK_AUTHTOKEN: ${AGMEN_NGROK_AUTHTOKEN:-}
+    ports: ["127.0.0.1::4040"]
+    restart: unless-stopped
+
+volumes:
+  pg-data:
+  hub-data:
+  broker-keys:
+  emqx-data:
