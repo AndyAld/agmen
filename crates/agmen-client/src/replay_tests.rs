@@ -152,6 +152,18 @@ async fn replay_skips_pruned_seqs() {
     assert_eq!(h.cursors.last(&Stream::Feed).unwrap(), 8);
 }
 
+#[tokio::test]
+async fn a_pruned_through_past_the_page_never_skips_its_messages() {
+    // A buggy hub that claims more was pruned than it still serves must not
+    // push the cursor past messages on the page.
+    let mut h = start().await;
+    *h.fake.feed.lock().unwrap() = (7..=8).map(feed_message).collect();
+    *h.fake.pruned_through.lock().unwrap() = 20;
+    h.streams.on_head(br#"{"feed_seq":8}"#).await.unwrap();
+    assert_eq!(h.delivered().await, [7, 8]);
+    assert_eq!(h.cursors.last(&Stream::Feed).unwrap(), 8);
+}
+
 #[test]
 fn skip_to_never_lowers() {
     let dir = tempfile::tempdir().unwrap();

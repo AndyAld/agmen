@@ -325,9 +325,17 @@ impl Replayer {
             let (cursors, key) = (self.cursors.clone(), stream.clone());
             let after = blocking(move || cursors.last(&key)).await?;
             let page = self.hub.page(stream, after).await?;
-            if page.pruned_through > after {
+            // Never past the head or the page's first message: a hub that
+            // claims more was pruned than it serves must not skip real ones.
+            let pruned = page
+                .messages
+                .first()
+                .map_or(page.head, |first| first.seq.0.saturating_sub(1))
+                .min(page.head)
+                .min(page.pruned_through);
+            if pruned > after {
                 let (cursors, key) = (self.cursors.clone(), stream.clone());
-                blocking(move || cursors.skip_to(&key, page.pruned_through)).await?;
+                blocking(move || cursors.skip_to(&key, pruned)).await?;
             }
             for message in page.messages {
                 if message.stream != *stream
