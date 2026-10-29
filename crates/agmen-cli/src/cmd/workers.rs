@@ -68,11 +68,11 @@ fn daemon_error(error: AgmendError) -> anyhow::Error {
     }
 }
 
-async fn connect() -> Result<Agmend> {
+pub(super) async fn connect() -> Result<Agmend> {
     Agmend::connect_default().await.map_err(daemon_error)
 }
 
-async fn call(daemon: &mut Agmend, method: &str, params: Value) -> Result<Value> {
+pub(super) async fn call(daemon: &mut Agmend, method: &str, params: Value) -> Result<Value> {
     daemon.call(method, params).await.map_err(daemon_error)
 }
 

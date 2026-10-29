@@ -1,0 +1,1 @@
+<agent-template name="claude" version="1"><description>Claude Code as plain claude runs it.</description><agent kind="claude" /></agent-template>
