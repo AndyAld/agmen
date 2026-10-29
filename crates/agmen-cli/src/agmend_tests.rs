@@ -137,6 +137,38 @@ async fn version_mismatch_is_reported() {
     );
 }
 
+/// agmend answers `ready` with the Version code when a store's schema is one
+/// it does not support (`crates/agmend/src/api.rs`, `ready`). That is not a
+/// local API mismatch, so after hello the code is a plain refusal and
+/// agmend's own message reaches the person.
+#[tokio::test]
+async fn a_version_code_after_hello_is_a_refusal_with_agmends_message() {
+    let schema = "daemon database schema 9 is unsupported (expected 2)";
+    let fake = Fake::start(move |n, request| {
+        if n == 0 {
+            Some(hello_response(request.id))
+        } else {
+            Some(Response::err(request.id, ErrorCode::Version, schema))
+        }
+    })
+    .await;
+    let mut client = Agmend::connect(fake.path()).await.unwrap();
+    let err = client.call("ready", json!({})).await.unwrap_err();
+    match &err {
+        AgmendError::Refused { code, message } => {
+            assert_eq!(*code, ErrorCode::Version);
+            assert_eq!(message, schema);
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(err.to_string().contains(schema), "{err}");
+    let again = client.call("ready", json!({})).await.unwrap_err();
+    assert!(
+        matches!(again, AgmendError::Refused { .. }),
+        "a refusal leaves the connection open: {again:?}"
+    );
+}
+
 #[tokio::test]
 async fn missing_socket_is_not_running() {
     let dir = tempfile::tempdir().unwrap();

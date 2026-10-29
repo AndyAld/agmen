@@ -106,11 +106,11 @@ impl Agmend {
     /// # Errors
     ///
     /// [`AgmendError::Timeout`] when agmend does not answer in time,
-    /// [`AgmendError::Refused`] when agmend returns an error,
-    /// [`AgmendError::Version`] when that error is a version mismatch, and
-    /// [`AgmendError::Protocol`] or [`AgmendError::Frame`] when the frames
-    /// are not a matching answer. A timeout, a frame error, or a mismatched
-    /// id closes the socket. A refusal leaves it open.
+    /// [`AgmendError::Refused`] when agmend returns an error (whatever its
+    /// code, including `Version`, which `ready` uses for a store schema agmend
+    /// cannot read), and [`AgmendError::Protocol`] or [`AgmendError::Frame`]
+    /// when the frames are not a matching answer. A timeout, a frame error, or
+    /// a mismatched id closes the socket. A refusal leaves it open.
     pub(crate) async fn call(&mut self, method: &str, params: Value) -> Result<Value, AgmendError> {
         let request = Request::new(self.alloc_id()?, method, params);
         exchange(&mut self.stream, request, self.call_timeout).await
@@ -187,7 +187,7 @@ pub(crate) enum AgmendError {
     /// The socket is missing, or nothing is listening.
     #[error("agmend is not running: open the agmen app or run agmend service install")]
     NotRunning,
-    /// agmend speaks a different local API than this client.
+    /// agmend's answer to hello shows a different local API than this client.
     #[error(
         "agmend speaks local API {daemon}; this client speaks {client}. Update the older one so both speak the same local API"
     )]
@@ -203,7 +203,9 @@ pub(crate) enum AgmendError {
         /// `connect`, or the method that was waiting.
         method: String,
     },
-    /// agmend returned an error frame other than a version mismatch.
+    /// agmend returned an error frame, with agmend's own code and message.
+    /// Hello's `Version` code becomes [`AgmendError::Version`]; on any other
+    /// call it stays here.
     #[error("agmend refused the call ({code:?}): {message}")]
     Refused {
         /// agmend's error code.
@@ -235,7 +237,17 @@ async fn open(socket: &Path, call_timeout: Duration) -> Result<Agmend, AgmendErr
         Request::new(1, "hello", json!({ "api": API })),
         remaining,
     )
-    .await?;
+    .await
+    .map_err(|err| match err {
+        // Only hello's Version code means the two sides speak different local
+        // APIs. After hello, agmend also uses it for a store schema it cannot
+        // read (`ready`), so a call keeps agmend's message as a refusal.
+        AgmendError::Refused {
+            code: ErrorCode::Version,
+            message,
+        } => version_mismatch(&message),
+        other => other,
+    })?;
     Ok(Agmend {
         stream,
         hello: parse_hello(result)?,
@@ -312,9 +324,6 @@ async fn exchange(
     };
     match response.outcome {
         Outcome::Ok { result } => Ok(result),
-        Outcome::Err { error } if error.code == ErrorCode::Version => {
-            Err(version_mismatch(&error.message))
-        }
         Outcome::Err { error } => Err(AgmendError::Refused {
             code: error.code,
             message: error.message,
