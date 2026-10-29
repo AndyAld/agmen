@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use support::fake_paddle::FakePaddle;
 use support::{
     Ctx, Project, count, envelope, login, member_with_token, mint_ok, run_hosted_with_paddle,
-    run_in_mode, topics, ulid,
+    run_hosted_with_public_url, run_in_mode, topics, ulid,
 };
 
 const SECS_PER_DAY: u64 = 86_400;
@@ -1477,6 +1477,59 @@ async fn it_paddle_urls_the_hub_will_not_send_are_refused() {
         assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
         assert_eq!(body["error"], "paddle_bad_url");
         assert!(!body.to_string().contains("evil.example"), "{body}");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn it_checkout_links_on_the_public_domain_are_returned() {
+    run_hosted_with_public_url("https://app.getagmen.ai", |ctx, paddle| async move {
+        let (token, project) = group(&ctx, "acme").await;
+        let tenant = project.tenant.as_str();
+        // Paddle's default payment link is a page on the hub's site.
+        let link = "https://getagmen.ai/checkout?_ptxn=txn_1";
+        paddle.fail_next(200, json!({"data": {"checkout": {"url": link}}}));
+        let (status, body) = put_seats(&ctx, &token, tenant, 5).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["checkout_url"], link, "{body}");
+        // A link on a lookalike host is still refused.
+        paddle.fail_next(
+            200,
+            json!({"data": {"checkout": {"url": "https://evil-getagmen.ai/checkout?_ptxn=txn_2"}}}),
+        );
+        let (status, body) = put_seats(&ctx, &token, tenant, 5).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+        assert_eq!(body["error"], "paddle_bad_url");
+        // The group creation path returns the link too.
+        paddle.fail_next(200, json!({"data": {"checkout": {"url": link}}}));
+        let (status, created) = call(
+            &ctx,
+            &token,
+            reqwest::Method::POST,
+            "/v1/groups",
+            Some(json!({"name": "beta", "project": "web"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        assert_eq!(created["checkout_url"], link, "{created}");
+        // The portal link gets the same rule.
+        set_active(&ctx, &project, Plan::Team { extra_seats: 0 }).await;
+        seed_subscription(&ctx, &project).await;
+        let portal = "https://billing.getagmen.ai/portal";
+        paddle.fail_next(
+            200,
+            json!({"data": {"urls": {"general": {"overview": portal}}}}),
+        );
+        let (status, body) = call(
+            &ctx,
+            &token,
+            reqwest::Method::POST,
+            &format!("/v1/tenants/{tenant}/portal"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["portal_url"], portal, "{body}");
     })
     .await;
 }

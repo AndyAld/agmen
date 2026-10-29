@@ -145,7 +145,10 @@ impl Hub {
         let paddle = config
             .hosted
             .as_ref()
-            .map(|hosted| PaddleClient::new(&hosted.paddle, http.clone()))
+            .map(|hosted| {
+                PaddleClient::new(&hosted.paddle, http.clone())
+                    .map(|client| client.with_public_url(&config.public_url))
+            })
             .transpose()
             .map_err(HubError::Paddle)?;
         let github = Github::new(&config.github, http).map_err(HubError::Github)?;
@@ -528,17 +531,6 @@ impl ApiError {
             description: "too many billing changes; try again later".to_owned(),
             retry_after: Some(Duration::from_secs(secs)),
         }
-    }
-
-    /// Whether this is a 429 `rate_limited` answer.
-    pub(crate) fn is_rate_limited(&self) -> bool {
-        matches!(
-            self,
-            Self::Client {
-                code: "rate_limited",
-                ..
-            }
-        )
     }
 
     pub(crate) fn unauthorized() -> Self {

@@ -218,7 +218,7 @@ fn return_urls_allow_https_on_paddle_or_the_api_domain() {
         ("https://127.0.0.1:9/checkout/txn_1", "http://127.0.0.1:9/"),
     ] {
         assert!(
-            return_url_allowed(&Url::parse(url).unwrap(), &Url::parse(api).unwrap()),
+            return_url_allowed(&Url::parse(url).unwrap(), &Url::parse(api).unwrap(), None),
             "{url} with {api}"
         );
     }
@@ -236,13 +236,13 @@ fn return_urls_reject_http_other_hosts_and_userinfo() {
     ] {
         let parsed = Url::parse(url).unwrap();
         assert!(
-            !return_url_allowed(&parsed, &api),
+            !return_url_allowed(&parsed, &api, None),
             "{url} host {:?}",
             parsed.host_str()
         );
     }
     let leaked = Url::parse("https://user:secret@evil.example/checkout?token=abc").unwrap();
-    match accept_return_url(&leaked, &api) {
+    match accept_return_url(&leaked, &api, None) {
         Err(PaddleError::BadUrl { host }) => {
             assert_eq!(host, "evil.example");
             assert!(
@@ -267,7 +267,7 @@ fn return_urls_ignore_case_ports_and_a_trailing_dot() {
     ] {
         let parsed = Url::parse(url).unwrap();
         assert!(
-            return_url_allowed(&parsed, &api),
+            return_url_allowed(&parsed, &api, None),
             "{url} host {:?}",
             parsed.host_str()
         );
@@ -301,7 +301,7 @@ fn return_urls_reject_lookalike_and_hidden_hosts() {
     ] {
         let parsed = Url::parse(url).unwrap();
         assert!(
-            !return_url_allowed(&parsed, &api),
+            !return_url_allowed(&parsed, &api, None),
             "{url} host {:?}",
             parsed.host_str()
         );
@@ -348,13 +348,95 @@ fn return_urls_follow_the_api_hosts_domain_and_nothing_wider() {
     ] {
         let api = Url::parse(api).unwrap();
         for url in allowed {
-            assert!(return_url_allowed(&Url::parse(url).unwrap(), &api), "{url}");
-        }
-        for url in refused {
             assert!(
-                !return_url_allowed(&Url::parse(url).unwrap(), &api),
+                return_url_allowed(&Url::parse(url).unwrap(), &api, None),
                 "{url}"
             );
         }
+        for url in refused {
+            assert!(
+                !return_url_allowed(&Url::parse(url).unwrap(), &api, None),
+                "{url}"
+            );
+        }
+    }
+}
+
+#[test]
+fn return_urls_allow_the_hubs_public_domain() {
+    let api = Url::parse("https://api.paddle.com/").unwrap();
+    let public = Url::parse("https://app.getagmen.ai/").unwrap();
+    for url in [
+        // Paddle's default payment link plus `?_ptxn=...`.
+        "https://getagmen.ai/checkout?_ptxn=x",
+        "https://app.getagmen.ai/checkout?_ptxn=x",
+        "https://pay.getagmen.ai/checkout?_ptxn=x",
+        "https://GETAGMEN.AI./checkout?_ptxn=x",
+        // Paddle's own hosts stay allowed.
+        "https://checkout.paddle.com/checkout/txn_1",
+    ] {
+        assert!(
+            return_url_allowed(&Url::parse(url).unwrap(), &api, Some(&public)),
+            "{url}"
+        );
+    }
+    // Without the public URL the same link is refused.
+    let link = Url::parse("https://getagmen.ai/checkout?_ptxn=x").unwrap();
+    assert!(!return_url_allowed(&link, &api, None));
+}
+
+#[test]
+fn return_urls_refuse_lookalikes_of_the_hubs_public_domain() {
+    let api = Url::parse("https://api.paddle.com/").unwrap();
+    let public = Url::parse("https://app.getagmen.ai/").unwrap();
+    for url in [
+        "https://evil-getagmen.ai/checkout?_ptxn=x",
+        "https://evilgetagmen.ai/checkout?_ptxn=x",
+        "https://getagmen.ai.evil.example/checkout?_ptxn=x",
+        "https://getagmen.ai@evil.example/checkout?_ptxn=x",
+        "http://getagmen.ai/checkout?_ptxn=x",
+        "https://user:pass@getagmen.ai/checkout?_ptxn=x",
+        "https://getagmen.example/checkout?_ptxn=x",
+    ] {
+        let parsed = Url::parse(url).unwrap();
+        assert!(
+            !return_url_allowed(&parsed, &api, Some(&public)),
+            "{url} host {:?}",
+            parsed.host_str()
+        );
+    }
+    let leaked = Url::parse("https://evil-getagmen.ai/checkout?token=abc").unwrap();
+    assert!(matches!(
+        accept_return_url(&leaked, &api, Some(&public)),
+        Err(PaddleError::BadUrl { host }) if host == "evil-getagmen.ai"
+    ));
+}
+
+#[test]
+fn a_public_ip_or_one_label_host_allows_only_itself() {
+    let api = Url::parse("https://api.paddle.com/").unwrap();
+    for (public, allowed, refused) in [
+        (
+            "http://127.0.0.1:8080/",
+            "https://127.0.0.1:9/x",
+            "https://127.0.0.2/x",
+        ),
+        (
+            "http://localhost:8080/",
+            "https://localhost/x",
+            "https://evil.localhost/x",
+        ),
+    ] {
+        let public = Url::parse(public).unwrap();
+        assert!(return_url_allowed(
+            &Url::parse(allowed).unwrap(),
+            &api,
+            Some(&public)
+        ));
+        assert!(!return_url_allowed(
+            &Url::parse(refused).unwrap(),
+            &api,
+            Some(&public)
+        ));
     }
 }

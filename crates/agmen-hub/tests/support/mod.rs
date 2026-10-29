@@ -250,10 +250,28 @@ where
     F: FnOnce(Ctx, Arc<fake_paddle::FakePaddle>) -> Fut,
     Fut: Future<Output = ()> + Send + 'static,
 {
+    run_hosted_at(None, body).await;
+}
+
+/// [`run_hosted_with_paddle`] for a hub whose configured public URL is
+/// `public_url`. The hub still listens on its ephemeral port.
+pub async fn run_hosted_with_public_url<F, Fut>(public_url: &str, body: F)
+where
+    F: FnOnce(Ctx, Arc<fake_paddle::FakePaddle>) -> Fut,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    run_hosted_at(Some(Url::parse(public_url).unwrap()), body).await;
+}
+
+async fn run_hosted_at<F, Fut>(public_url: Option<Url>, body: F)
+where
+    F: FnOnce(Ctx, Arc<fake_paddle::FakePaddle>) -> Fut,
+    Fut: Future<Output = ()> + Send + 'static,
+{
     let db = TestDb::create().await;
     let github = FakeGithub::start().await.unwrap();
     let paddle = Arc::new(fake_paddle::FakePaddle::start().await.unwrap());
-    let hub = TestHub::start_hosted(&db.url, &github, &paddle, DEV_KEY_1, &[]).await;
+    let hub = TestHub::start_hosted_at(&db.url, &github, &paddle, DEV_KEY_1, &[], public_url).await;
     let pool = PgPoolOptions::new()
         .max_connections(2)
         .connect(&db.url)
@@ -367,10 +385,26 @@ impl TestHub {
         signing: &str,
         extra: &[&str],
     ) -> Self {
+        Self::start_hosted_at(db_url, github, paddle, signing, extra, None).await
+    }
+
+    /// [`TestHub::start_hosted`] with the hub's configured public URL set to
+    /// `public_url` when it is given.
+    pub async fn start_hosted_at(
+        db_url: &str,
+        github: &FakeGithub,
+        paddle: &fake_paddle::FakePaddle,
+        signing: &str,
+        extra: &[&str],
+        public_url: Option<Url>,
+    ) -> Self {
         let hosted = hosted_config(paddle);
         Self::start_configured(db_url, github, signing, extra, move |config| {
             config.mode = HubMode::Hosted;
             config.hosted = Some(hosted);
+            if let Some(public_url) = public_url {
+                config.public_url = public_url;
+            }
         })
         .await
     }
