@@ -1,5 +1,5 @@
 //! Hosted groups: creating a tenant and its first project, the one trial
-//! per GitHub account, and the three-group ownership limit.
+//! per GitHub account, the three-group ownership limit, and paid seats.
 //!
 //! `checkout_url` stays null until hosted Task 7. This module does not call
 //! Paddle.
@@ -7,9 +7,11 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use agmen_proto::{RepoUrl, TenantId, Timestamp};
+use agmen_proto::{
+    Body, IdentityId, Needs, Payload, RepoUrl, Stream, TenantId, Timestamp, Topics, Urgency,
+};
 use axum::Json;
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use sqlx::{PgExecutor, Postgres, Transaction};
@@ -20,12 +22,15 @@ use crate::billing::{
     TRIAL_REMINDER_OFFSETS_DAYS,
 };
 use crate::db::{self, TenantRole, new_id};
-use crate::http::{ApiError, Hub};
+use crate::http::{ApiError, Hub, error_chain};
 use crate::identities::HumanId;
+use crate::ingest::{HubPost, PostError};
 use crate::projects::create_project;
-use crate::tenants::join_tenant;
+use crate::tenants::{join_tenant, require_group_admin, tenant_role};
 
 const GROUP_LIMIT: &str = "you already own 3 groups, the most one account can own";
+
+const NO_FREE_SEAT: &str = "the group has no free seat; its owner or a group admin can add one with: agmen group seats add 1";
 
 const SECS_PER_DAY: u64 = 86_400;
 
@@ -146,7 +151,6 @@ fn trial_notice(name: &str, record: &PlanRecord, now: Timestamp) -> Option<Strin
 /// # Errors
 ///
 /// When a query fails or a stored value is outside the plan rules.
-#[expect(dead_code, reason = "hosted Task 6 reads one plan through load_plan")]
 pub(crate) async fn load_plan(
     db: impl PgExecutor<'_>,
     tenant: &TenantId,
@@ -213,7 +217,6 @@ pub(crate) async fn store_plan(
 /// # Errors
 ///
 /// When a query fails or the count does not fit in `u32`.
-#[expect(dead_code, reason = "hosted Task 3 counts seats with seats_used")]
 pub(crate) async fn seats_used(
     db: impl PgExecutor<'_>,
     tenant: &TenantId,
@@ -223,6 +226,194 @@ pub(crate) async fn seats_used(
         .fetch_one(db)
         .await?;
     u32::try_from(count).map_err(decode)
+}
+
+/// Locks the tenant's plan row, then lets `human` take a seat.
+///
+/// A human who already belongs to the group takes no seat. A group with no
+/// plan row is not seat-limited (a hosted bootstrap tenant has none). When
+/// every paid seat is taken, the invite stays unused: this commits the
+/// `no_seat_alerted_at` update and returns 403 `no_free_seat`. The alert
+/// posts after that commit, at most once an hour.
+///
+/// # Errors
+///
+/// 403 `no_free_seat` when the group is full, or a query error.
+pub(crate) async fn ensure_free_seat<'a>(
+    hub: &Hub,
+    mut tx: Transaction<'a, Postgres>,
+    tenant: &str,
+    human: &HumanId,
+    topics: &Topics,
+) -> Result<Transaction<'a, Postgres>, ApiError> {
+    let locked: Option<String> =
+        sqlx::query_scalar("SELECT tenant_id FROM tenant_plans WHERE tenant_id = $1 FOR UPDATE")
+            .bind(tenant)
+            .fetch_optional(&mut *tx)
+            .await?;
+    if locked.is_none() {
+        return Ok(tx);
+    }
+    let member: Option<String> = sqlx::query_scalar(
+        "SELECT human_id FROM tenant_members WHERE tenant_id = $1 AND human_id = $2",
+    )
+    .bind(tenant)
+    .bind(human.as_str())
+    .fetch_optional(&mut *tx)
+    .await?;
+    if member.is_some() {
+        return Ok(tx);
+    }
+    let tenant_id: TenantId = tenant.parse().map_err(ApiError::stored)?;
+    let used = seats_used(&mut *tx, &tenant_id).await?;
+    let Some(record) = load_plan(&mut *tx, &tenant_id).await? else {
+        return Ok(tx);
+    };
+    if used < record.seats_paid() {
+        return Ok(tx);
+    }
+    refuse_full(hub, tx, tenant, human, topics).await?;
+    Err(no_free_seat())
+}
+
+fn no_free_seat() -> ApiError {
+    ApiError::forbidden("no_free_seat", NO_FREE_SEAT)
+}
+
+/// Commits the hourly alert stamp. The caller still answers 403.
+async fn refuse_full(
+    hub: &Hub,
+    mut tx: Transaction<'_, Postgres>,
+    tenant: &str,
+    human: &HumanId,
+    topics: &Topics,
+) -> Result<(), ApiError> {
+    let claimed = claim_seat_alert(&mut tx, tenant).await?;
+    let handle: Option<String> = sqlx::query_scalar("SELECT handle FROM humans WHERE id = $1")
+        .bind(human.as_str())
+        .fetch_optional(&mut *tx)
+        .await?;
+    let owner: Option<String> = sqlx::query_scalar(
+        "SELECT human_id FROM tenant_members WHERE tenant_id = $1 AND role = 'owner'",
+    )
+    .bind(tenant)
+    .fetch_optional(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    if claimed {
+        warn_on_alert(alert_owner(hub, topics, owner.as_deref(), handle.as_deref()).await);
+    }
+    Ok(())
+}
+
+async fn claim_seat_alert(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant: &str,
+) -> Result<bool, sqlx::Error> {
+    let claimed: Option<String> = sqlx::query_scalar(
+        "UPDATE tenant_plans SET no_seat_alerted_at = now()
+         WHERE tenant_id = $1
+           AND (no_seat_alerted_at IS NULL OR no_seat_alerted_at <= now() - interval '1 hour')
+         RETURNING tenant_id",
+    )
+    .bind(tenant)
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(claimed.is_some())
+}
+
+async fn alert_owner(
+    hub: &Hub,
+    topics: &Topics,
+    owner: Option<&str>,
+    handle: Option<&str>,
+) -> Result<(), PostError> {
+    let (Some(owner), Some(handle)) = (owner, handle) else {
+        return Err(PostError::Store(Box::new(std::io::Error::other(
+            "no-seat alert is missing the owner or the person's handle",
+        ))));
+    };
+    let owner_id: IdentityId = owner.parse().map_err(store_post)?;
+    let body =
+        Body::try_from(format!("{handle} could not join: {NO_FREE_SEAT}")).map_err(store_post)?;
+    hub.post_as_hub(
+        topics,
+        HubPost {
+            payload: Payload::Alert {
+                need: format!("a seat for {handle}"),
+                urgency: Urgency::Normal,
+                needs: Needs::Anyone,
+                actions: Vec::new(),
+            },
+            body,
+            reply_to: None,
+            items: Vec::new(),
+            lane: None,
+            mentioned: vec![owner_id.clone()],
+            streams: vec![Stream::Inbox(owner_id)],
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+fn store_post(err: impl std::error::Error + Send + Sync + 'static) -> PostError {
+    PostError::Store(Box::new(err))
+}
+
+fn warn_on_alert(result: Result<(), PostError>) {
+    if let Err(err) = result {
+        tracing::warn!(error = %error_chain(&err), "no-seat alert was not posted");
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct Seats {
+    used: u32,
+    paid: u32,
+    plan: Option<String>,
+    state: &'static str,
+    quota: u32,
+    used_today: u32,
+}
+
+/// `GET /v1/tenants/{tenant}/seats`. Hosted only. Owner or group admin.
+pub(crate) async fn seats(
+    State(hub): State<Hub>,
+    Path(tenant): Path<String>,
+    caller: Caller,
+) -> Result<Json<Seats>, ApiError> {
+    if hub.mode() != crate::config::HubMode::Hosted {
+        return Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "not_hosted",
+            "this hub is not agmen hosted",
+        ));
+    }
+    let human = caller.human()?;
+    require_group_admin(tenant_role(hub.pool(), &tenant, &human).await?)?;
+    let tenant_id: TenantId = tenant.parse().map_err(ApiError::stored)?;
+    let Some(record) = load_plan(hub.pool(), &tenant_id).await? else {
+        return Err(ApiError::not_found("this group has no seat plan"));
+    };
+    let used = seats_used(hub.pool(), &tenant_id).await?;
+    Ok(Json(Seats {
+        used,
+        paid: record.seats_paid(),
+        plan: plan_name(record.plan),
+        state: record.state.as_str(),
+        quota: record.daily_quota(),
+        // shortcut: hosted Task 4 counts the day's posts; until then used_today is 0
+        used_today: 0,
+    }))
+}
+
+fn plan_name(plan: Option<Plan>) -> Option<String> {
+    match plan {
+        None => None,
+        Some(Plan::Team { .. }) => Some("team".to_owned()),
+        Some(Plan::Business(step)) => Some(format!("business-{}", step.seats())),
+    }
 }
 
 /// Refuses when `human` already owns [`MAX_OWNED_GROUPS`] groups.
