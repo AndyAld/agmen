@@ -1048,3 +1048,123 @@ fn oversized_file_with_a_multibyte_char_at_the_limit_says_too_large() {
         catalog.problems()[0].message
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn project_templates_folder_links_are_problems() {
+    let outside = tempfile::tempdir().unwrap();
+    template_file(
+        outside.path(),
+        "evil.xml",
+        r#"<agent-template name="evil"/>"#,
+    );
+    let layers = |root: &std::path::Path| agmen_roles::TemplateLayers {
+        builtin: vec![],
+        project: Some(root.into()),
+        personal: None,
+    };
+
+    // The folder is a link to a folder outside the checkout.
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join(".agmen")).unwrap();
+    std::os::unix::fs::symlink(outside.path(), root.path().join(".agmen/templates")).unwrap();
+    let catalog = layers(root.path()).load();
+    assert!(catalog.get("evil").is_none());
+    assert_eq!(catalog.problems().len(), 1);
+    assert!(
+        catalog.problems()[0]
+            .message
+            .contains("project templates folder is a link, skipped"),
+        "{:?}",
+        catalog.problems()
+    );
+
+    // The folder is a link to another folder inside the checkout.
+    let root = tempfile::tempdir().unwrap();
+    template_file(
+        &root.path().join("elsewhere"),
+        "inside.xml",
+        r#"<agent-template name="inside"/>"#,
+    );
+    std::fs::create_dir(root.path().join(".agmen")).unwrap();
+    std::os::unix::fs::symlink(
+        root.path().join("elsewhere"),
+        root.path().join(".agmen/templates"),
+    )
+    .unwrap();
+    let catalog = layers(root.path()).load();
+    assert!(catalog.get("inside").is_none());
+    assert_eq!(catalog.problems().len(), 1);
+    assert!(catalog.problems()[0].message.contains("is a link"));
+
+    // A link higher up makes the folder resolve outside the checkout.
+    let root = tempfile::tempdir().unwrap();
+    let agmen = tempfile::tempdir().unwrap();
+    template_file(
+        &agmen.path().join("templates"),
+        "evil.xml",
+        r#"<agent-template name="evil"/>"#,
+    );
+    std::os::unix::fs::symlink(agmen.path(), root.path().join(".agmen")).unwrap();
+    let catalog = layers(root.path()).load();
+    assert!(catalog.get("evil").is_none());
+    assert_eq!(catalog.problems().len(), 1);
+    assert!(
+        catalog.problems()[0]
+            .message
+            .contains("resolves outside the checkout, skipped"),
+        "{:?}",
+        catalog.problems()
+    );
+
+    // No folder at all is not a problem.
+    let root = tempfile::tempdir().unwrap();
+    assert!(layers(root.path()).load().problems().is_empty());
+}
+
+#[test]
+fn c1_controls_and_del_are_written_as_references() {
+    // U+009B is the 8-bit CSI. XML allows it, and some terminals act on it.
+    let template = parse_template(&agent_xml(
+        "<description>a&#155;b&#127;c&#128;d&#159;e</description><prompt>&#155;</prompt>",
+    ))
+    .expect("C1 references are legal XML");
+    let Template::Agent(named) = &template else {
+        panic!("expected an agent template");
+    };
+    assert_eq!(
+        named.template.description.as_deref(),
+        Some("a\u{9b}b\u{7f}c\u{80}d\u{9f}e")
+    );
+    let xml = to_xml(&template);
+    assert!(
+        !xml.chars().any(|c| ('\u{7f}'..='\u{9f}').contains(&c)),
+        "{xml:?}"
+    );
+    assert!(xml.contains("&#155;") && xml.contains("&#127;"), "{xml}");
+    assert_eq!(parse_template(&xml).expect("round trip"), template);
+
+    // Attribute values are escaped the same way, even for a hand-built template
+    // that the parser would refuse.
+    let mut hand_built = AgentTemplate::default();
+    hand_built.agent.model = Some("m\u{9b}\u{7f}".into());
+    let xml = to_xml(&Template::Agent(Named {
+        name: "plain".into(),
+        saved_by: None,
+        template: hand_built,
+    }));
+    assert!(
+        !xml.chars().any(|c| ('\u{7f}'..='\u{9f}').contains(&c)),
+        "{xml:?}"
+    );
+    assert!(xml.contains("m&#155;&#127;"), "{xml}");
+}
+
+#[test]
+fn other_c0_controls_cannot_be_parsed_in_any_form() {
+    // These cannot reach to_xml through a parsed template.
+    for text in ["&#27;", "\u{1b}", "&#0;", "&#8;", "&#127;&#27;"] {
+        let xml = agent_xml(&format!("<description>a{text}b</description>"));
+        assert!(parse_template(&xml).is_err(), "{text:?} was accepted");
+    }
+}

@@ -214,24 +214,62 @@ impl TemplateLayers {
             );
         }
         if let Some(root) = &self.project {
-            let dir = root.join(".agmen/templates");
-            match (fs::canonicalize(root), fs::canonicalize(&dir)) {
-                (Ok(root), Ok(dir)) if dir.starts_with(&root) => {
-                    load_dir(&mut catalog, &dir, Layer::Project, false)
-                }
-                (Err(error), _) | (_, Err(error))
-                    if error.kind() != std::io::ErrorKind::NotFound =>
-                {
-                    catalog.problem(Layer::Project, Some(dir), error)
-                }
-                _ => {}
-            }
+            load_project(&mut catalog, root);
         }
         if let Some(dir) = &self.personal {
             load_dir(&mut catalog, dir, Layer::Personal, true);
         }
         catalog
     }
+}
+
+/// Read `<root>/.agmen/templates`, refusing a folder that is a link or that
+/// resolves outside the checkout.
+fn load_project(catalog: &mut TemplateCatalog, root: &Path) {
+    let dir = root.join(".agmen/templates");
+    match fs::symlink_metadata(&dir) {
+        Ok(meta) if meta.is_symlink() => {
+            catalog.problem(
+                Layer::Project,
+                Some(dir),
+                "project templates folder is a link, skipped",
+            );
+            return;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => {
+            catalog.problem(Layer::Project, Some(dir), error);
+            return;
+        }
+        Ok(_) => {}
+    }
+    match (fs::canonicalize(root), fs::canonicalize(&dir)) {
+        (Ok(root), Ok(real)) if real.starts_with(&root) => {
+            load_dir(catalog, &real, Layer::Project, false);
+        }
+        (Ok(_), Ok(_)) => catalog.problem(
+            Layer::Project,
+            Some(dir),
+            "project templates folder resolves outside the checkout, skipped",
+        ),
+        (Err(error), _) | (_, Err(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
+        (Err(error), _) | (_, Err(error)) => catalog.problem(Layer::Project, Some(dir), error),
+    }
+}
+
+/// Whether `file` is the file `before` described, so a link swapped in after
+/// the check is not read.
+#[cfg(unix)]
+fn same_file(before: &fs::Metadata, file: &File) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    file.metadata()
+        .is_ok_and(|now| now.dev() == before.dev() && now.ino() == before.ino())
+}
+
+#[cfg(not(unix))]
+fn same_file(_before: &fs::Metadata, _file: &File) -> bool {
+    // shortcut: no device and inode check off unix; add one if templates load from a project on Windows.
+    true
 }
 
 fn load_dir(catalog: &mut TemplateCatalog, dir: &Path, layer: Layer, follow: bool) {
@@ -279,9 +317,9 @@ fn load_dir(catalog: &mut TemplateCatalog, dir: &Path, layer: Layer, follow: boo
         } else {
             fs::symlink_metadata(&path)
         };
-        match meta {
+        let checked = match meta {
             Ok(meta) if meta.is_symlink() && !follow => continue,
-            Ok(meta) if meta.is_file() => {}
+            Ok(meta) if meta.is_file() => meta,
             Ok(_) => {
                 catalog.problem(layer, Some(path), "not a regular file");
                 continue;
@@ -290,10 +328,13 @@ fn load_dir(catalog: &mut TemplateCatalog, dir: &Path, layer: Layer, follow: boo
                 catalog.problem(layer, Some(path), error);
                 continue;
             }
-        }
+        };
         // Read bytes, so a multibyte char cut at the limit still reports the size.
         let mut bytes = Vec::new();
         match File::open(&path).and_then(|file| {
+            if !follow && !same_file(&checked, &file) {
+                return Err(std::io::Error::other("file changed after it was checked"));
+            }
             file.take((MAX_TEMPLATE_BYTES + 1) as u64)
                 .read_to_end(&mut bytes)
         }) {
@@ -310,5 +351,24 @@ fn load_dir(catalog: &mut TemplateCatalog, dir: &Path, layer: Layer, follow: boo
                 Err(error) => catalog.problem(layer, Some(path), error),
             },
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_file_swapped_after_the_check_is_not_the_checked_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.xml");
+        std::fs::write(&path, "one").unwrap();
+        let before = fs::symlink_metadata(&path).unwrap();
+        assert!(same_file(&before, &File::open(&path).unwrap()));
+        // A different file now sits at the path: another inode.
+        let other = dir.path().join("b.xml");
+        std::fs::write(&other, "two").unwrap();
+        std::fs::rename(&other, &path).unwrap();
+        assert!(!same_file(&before, &File::open(&path).unwrap()));
     }
 }

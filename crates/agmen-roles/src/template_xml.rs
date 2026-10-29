@@ -267,10 +267,27 @@ fn write_inline_agent(out: &mut String, agent: &AgentTemplate, level: u32) {
 /// tab, newline or carriage return into a space, so each is written as a character
 /// reference.
 fn escape_attr(value: &str) -> String {
-    escape(value)
+    let escaped = escape(value)
         .replace('\t', "&#9;")
         .replace('\n', "&#10;")
-        .replace('\r', "&#13;")
+        .replace('\r', "&#13;");
+    let mut out = String::with_capacity(escaped.len());
+    for c in escaped.chars() {
+        push_char(&mut out, c);
+    }
+    out
+}
+
+/// Push `c`, or a numeric reference for DEL and the C1 controls (U+007F to U+009F).
+/// XML allows them, but a terminal may act on a raw one (U+009B is the 8-bit CSI), and
+/// an exported file is printed. The other C0 controls cannot be written in XML 1.0 at
+/// all, and the parser refuses them, so a template it produced holds none.
+fn push_char(out: &mut String, c: char) {
+    if ('\u{7f}'..='\u{9f}').contains(&c) {
+        emit(out, format_args!("&#{};", u32::from(c)));
+    } else {
+        out.push(c);
+    }
 }
 
 /// Escape element text. A parser turns a raw carriage return into a newline, so it is
@@ -287,7 +304,7 @@ fn escape_text(text: &str) -> String {
             '<' => out.push_str("&lt;"),
             '>' if brackets >= 2 => out.push_str("&gt;"),
             '\r' => out.push_str("&#13;"),
-            _ => out.push(c),
+            _ => push_char(&mut out, c),
         }
         brackets = if c == ']' {
             brackets.saturating_add(1)
