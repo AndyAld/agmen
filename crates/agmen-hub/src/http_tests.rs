@@ -81,6 +81,7 @@ fn test_hub(mqtt_ws_upstream: Option<Url>) -> Hub {
             tokens,
             emqx,
             github,
+            paddle: None,
             public_url: Url::parse("https://hub.example").unwrap(),
             public_mqtt_url: Url::parse("wss://hub.example/mqtt").unwrap(),
             mqtt_ws_upstream,

@@ -18,6 +18,7 @@ use sqlx::PgPool;
 use url::Url;
 
 use crate::auth::{self, Github, GithubError};
+use crate::billing::{PaddleClient, PaddleError};
 use crate::broker_tokens::{BrokerTokens, TokenError};
 use crate::config::{Config, HubMode};
 use crate::emqx::{EmqxAdmin, EmqxError};
@@ -66,6 +67,9 @@ pub enum HubError {
     /// The GitHub settings are unusable.
     #[error("the GitHub settings are unusable")]
     Github(#[source] GithubError),
+    /// The Paddle settings are unusable.
+    #[error("the Paddle settings are unusable")]
+    Paddle(#[source] PaddleError),
 }
 
 /// The running hub's shared state. Cheap to clone.
@@ -82,6 +86,7 @@ struct Inner {
     tokens: BrokerTokens,
     emqx: EmqxAdmin,
     github: Github,
+    paddle: Option<PaddleClient>,
     public_url: Url,
     public_mqtt_url: Url,
     mqtt_ws_upstream: Option<Url>,
@@ -133,6 +138,12 @@ impl Hub {
         let http = upstream_client().map_err(HubError::HttpClient)?;
         let emqx = EmqxAdmin::new(&config.emqx, loaded.emqx_api_secret, http.clone())
             .map_err(HubError::Emqx)?;
+        let paddle = config
+            .hosted
+            .as_ref()
+            .map(|hosted| PaddleClient::new(&hosted.paddle, http.clone()))
+            .transpose()
+            .map_err(HubError::Paddle)?;
         let github = Github::new(&config.github, http).map_err(HubError::Github)?;
         let pool = db::connect(config.database_url.expose())
             .await
@@ -163,6 +174,7 @@ impl Hub {
                 tokens,
                 emqx,
                 github,
+                paddle,
                 public_url: config.public_url.clone(),
                 public_mqtt_url: config.public_mqtt_url.clone(),
                 mqtt_ws_upstream: config.mqtt_ws_upstream.clone(),
@@ -255,6 +267,13 @@ impl Hub {
 
     pub(crate) fn tokens(&self) -> &BrokerTokens {
         &self.inner.tokens
+    }
+
+    // shortcut: unused until hosted Task 7 calls checkout, seat changes and the
+    // portal; drop the expectation there.
+    #[expect(dead_code, reason = "hosted Task 7 calls the client")]
+    pub(crate) fn paddle(&self) -> Option<&PaddleClient> {
+        self.inner.paddle.as_ref()
     }
 
     pub(crate) fn emqx(&self) -> &EmqxAdmin {
