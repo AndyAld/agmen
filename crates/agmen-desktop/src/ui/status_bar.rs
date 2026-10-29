@@ -9,11 +9,11 @@ use gpui::{
 
 use super::chat::AlertCounts;
 use super::components::{
-    Badge, Button, ButtonSize, ButtonStyle, Color, IconButton, Label, LabelSize,
+    Badge, Button, ButtonSize, ButtonStyle, Color, IconButton, Label, LabelSize, StatusItem,
 };
 use super::format::{counted, counted_capped, spend_today, status_listener_label};
 use super::left_dock::PanelButtons;
-use super::tokens::{BORDER_WIDTH, SPACE_5, SPACE_10, SPACE_14, STATUS_BAR_HEIGHT};
+use super::tokens::{BORDER_WIDTH, SPACE_10, SPACE_14, STATUS_BAR_HEIGHT};
 use super::workspace::{OpenAlerts, ToggleRightDock};
 use crate::backend::{Link, Snapshot, StatusSummary};
 use crate::icons::UiIcon;
@@ -109,21 +109,6 @@ pub(crate) fn link_label(link: &Link, was_live: bool) -> (SharedString, Color) {
     }
 }
 
-/// A glyph and its count, as "● 9 online".
-fn item(glyph: &'static str, color: Color, label: String) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_none()
-        .items_center()
-        .gap(SPACE_5)
-        .child(Label::new(glyph).size(LabelSize::Small).color(color))
-        .child(
-            Label::new(label)
-                .size(LabelSize::Small)
-                .color(Color::Placeholder),
-        )
-}
-
 /// The right-side buttons; the gear opens Settings.
 fn buttons(icons: &[(&'static str, UiIcon)]) -> impl IntoElement {
     div()
@@ -182,42 +167,34 @@ impl RenderOnce for StatusBar {
             // reason; the long reason gives way before the counts.
             .when_some(self.link, |this, (text, color)| {
                 this.child(
-                    div()
-                        .debug_selector(|| "status-link".into())
-                        .flex()
-                        .min_w_0()
-                        .items_center()
-                        .gap(SPACE_5)
-                        .child(Label::new("●").size(LabelSize::Small).color(color.clone()))
-                        .child(
-                            Label::new(text)
-                                .size(LabelSize::Small)
-                                .color(color)
-                                .truncate(),
-                        ),
+                    StatusItem::new("status-link", "●", color.clone(), text)
+                        .label_color(color)
+                        .truncate(),
                 )
             })
-            .child(item(
+            .child(StatusItem::new(
+                "status-online",
                 "●",
                 Color::Success,
                 counted(s.online, "online", "online"),
             ))
             // Task 13: the count opens the chat at the alert (node 456).
             .child(
-                Button::new(
+                StatusItem::new(
                     "status-alerts",
+                    "⚠",
+                    Color::Warning,
                     counted_capped(self.alerts.alerts, "alert", "alerts"),
                 )
-                .style(ButtonStyle::Plain)
-                .size(ButtonSize::Compact)
-                .leading(Label::new("⚠").size(LabelSize::Small).color(Color::Warning))
+                .button()
                 .when(self.alerts.alerts > 0, |this| {
                     this.on_click(|_, window, cx| {
                         window.dispatch_action(Box::new(OpenAlerts), cx);
                     })
                 }),
             )
-            .child(item(
+            .child(StatusItem::new(
+                "status-worktrees",
                 "⎇",
                 Color::Placeholder,
                 counted(s.worktrees, "worktree", "worktrees"),
@@ -269,6 +246,36 @@ fn palette_trigger(palette_open: bool) -> impl IntoElement {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn the_link_status_truncates(cx: &mut gpui::TestAppContext) {
+        use crate::ui::test_support::{draw, redraw};
+        let cx = draw(cx, || {
+            div()
+                .w(gpui::px(1300.))
+                .child(
+                    StatusBar::new(&crate::backend::chat_snapshot(), false).link(Some((
+                        format!("offline: {}", "connection refused ".repeat(100)).into(),
+                        Color::Error,
+                    ))),
+                )
+                .into_any_element()
+        });
+        redraw(cx);
+        let link = cx.debug_bounds("status-link").unwrap();
+        let glyph = cx
+            .debug_bounds("status-link:glyph")
+            .expect("StatusItem glyph");
+        let label = cx
+            .debug_bounds("status-link:label")
+            .expect("StatusItem label");
+        let online = cx.debug_bounds("status-online").expect("online count");
+        assert!(link.size.width > glyph.size.width);
+        assert!(label.size.width < gpui::px(500.));
+        assert!(label.right() <= link.right());
+        assert!(link.right() <= online.left());
+        assert!(cx.debug_bounds("palette-trigger").unwrap().right() <= gpui::px(1300.));
+    }
 
     #[gpui::test]
     fn alerts_count_hovers_takes_focus_and_opens_alerts(cx: &mut gpui::TestAppContext) {

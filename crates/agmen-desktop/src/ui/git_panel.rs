@@ -12,8 +12,11 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _, Window, div,
 };
 
+#[cfg(test)]
+use super::components::{Badge, count_badge};
 use super::components::{
-    Badge, Color, Dot, EmptyState, Icon, IconSize, Indent, Label, LabelSize, ListItem, Tooltip,
+    Color, Dot, EmptyState, Icon, IconSize, Indent, Label, LabelSize, ListItem, SectionHeader,
+    Tooltip,
 };
 use super::format::clock;
 use super::project_panel::NO_WORKTREES;
@@ -138,12 +141,6 @@ fn branch_item(branch: &str) -> &str {
     }
     let end = kind.len() + 1 + letters + dash + digits;
     branch.get(..end).unwrap_or(branch)
-}
-
-/// A section's count: mono 11 in text.placeholder on a count chip (V94,
-/// V114, node 5113).
-fn count_badge(text: impl Into<SharedString>) -> Badge {
-    Badge::new(text, Color::Placeholder).count()
 }
 
 /// A row's trailing detail, such as `+2 −5` or an author: console.py's mono
@@ -311,25 +308,12 @@ impl GitPanel {
         cx.notify();
     }
 
-    fn section_row(&self, section: GitSection, cx: &mut Context<Self>) -> ListItem {
-        let chevron = if self.folded.contains(&section) {
-            UiIcon::ChevronRight
-        } else {
-            UiIcon::ChevronDown
-        };
+    fn section_row(&self, section: GitSection, cx: &mut Context<Self>) -> SectionHeader {
         let slug = section.slug();
-        let count = div()
-            .debug_selector(move || format!("git-count:{slug}"))
-            .child(count_badge(self.badge(section)));
-        ListItem::new(format!("git-section:{slug}"), Indent::Group)
-            .leading(Icon::new(chevron).size(IconSize::Small).color(Color::Muted))
-            .child(
-                Label::new(section.title())
-                    .size(LabelSize::Small)
-                    .color(Color::Muted)
-                    .weight(FontWeight::SEMIBOLD),
-            )
-            .child(count)
+        SectionHeader::new(format!("git-section:{slug}"), section.title())
+            .open(!self.folded.contains(&section))
+            .count(self.badge(section))
+            .count_selector(format!("git-count:{slug}"))
             .on_click(cx.listener(move |this, _, _, cx| this.toggle_section(section, cx)))
     }
 

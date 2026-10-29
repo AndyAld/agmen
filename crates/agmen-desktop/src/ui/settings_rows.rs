@@ -5,8 +5,8 @@
 use std::path::Path;
 
 use gpui::{
-    AnyElement, App, Context, Div, FontWeight, InteractiveElement as _, IntoElement,
-    ParentElement as _, SharedString, Styled as _, div,
+    AnyElement, App, Context, Div, InteractiveElement as _, IntoElement, ParentElement as _,
+    SharedString, Styled as _, div,
 };
 
 use super::{ICON_PREVIEW_NAMES, SettingsView};
@@ -15,12 +15,10 @@ use crate::appearance::{
     ThemeOrigin,
 };
 use crate::icons::FileIcons;
-use crate::ui::components::{
-    Button, Color, DetailRow, Label, LabelSize, Segmented, Stepper, WordWrap,
-};
+use crate::ui::components::{Button, DetailRow, Segmented, SettingText, Stepper};
 use crate::ui::tokens::{
-    AUTO_LINE_11, BORDER_WIDTH, ICON_PREVIEW, RADIUS_MD, SETTING_LABEL_WIDTH, SPACE_3, SPACE_6,
-    SPACE_8, SPACE_10, SPACE_12, SPACE_16,
+    BORDER_WIDTH, ICON_PREVIEW, RADIUS_MD, SETTING_LABEL_WIDTH, SPACE_6, SPACE_8, SPACE_10,
+    SPACE_12, SPACE_16,
 };
 
 /// A font family as the list shows it: Zed's dotted names by their fonts.
@@ -185,33 +183,10 @@ pub(super) fn setting(label: &'static str, hint: &'static str, cx: &App) -> Div 
         .border_color(super::super::rule_color(cx))
         .child(
             div()
-                .debug_selector(|| format!("setting-text:{label}"))
                 .w(SETTING_LABEL_WIDTH)
                 .flex_none()
-                .flex()
-                .flex_col()
-                .gap(SPACE_3)
-                .child(
-                    Label::new(label)
-                        .weight(FontWeight::MEDIUM)
-                        .color(Color::TextMuted),
-                )
-                .child(hint_words(label, hint)),
+                .child(SettingText::new(label, hint)),
         )
-}
-
-/// A setting's hint. Tests find word `i` as `"setting-hint:{label}:{i}"`.
-fn hint_words(label: &'static str, text: &'static str) -> WordWrap {
-    // V131: gpui's wrapper breaks before any '/', so the Theme hint's
-    // "~/.config/zed/themes" could start a line with "/". The hint breaks
-    // only at spaces and keeps the path whole, where the mockup's node
-    // 8104 breaks after "~/.config/zed/" (a kept difference, Task 17).
-    // The mockup's 11 px hint advances 13 px a line (node 8095).
-    WordWrap::new(format!("setting-hint:{label}"), text)
-        .size(LabelSize::Small)
-        .line_height(AUTO_LINE_11)
-        .color(Color::Placeholder)
-        .w_full()
 }
 
 /// The control column of a setting.

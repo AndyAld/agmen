@@ -2,12 +2,26 @@
 //! node 8684; console.py `git_section`), titled with a [`SectionHeading`].
 
 use gpui::{
-    App, ClickEvent, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce,
-    SharedString, Window,
+    App, ClickEvent, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
+    RenderOnce, SharedString, Window, div,
 };
 
-use super::{Badge, ClickHandler, Color, Icon, IconSize, Indent, ListItem, SectionHeading};
+use super::{Badge, ClickHandler, Color, Icon, IconSize, Indent, Label, ListItem, SectionHeading};
 use crate::icons::UiIcon;
+
+/// Uppercase section headings or case-preserving names in either font.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum SectionTitleStyle {
+    #[default]
+    Heading,
+    Name,
+    Code,
+}
+
+/// Mono small text on the section's count chip.
+pub(crate) fn count_badge(text: impl Into<SharedString>) -> Badge {
+    Badge::new(text, Color::Placeholder).count()
+}
 
 /// A foldable section in a dock tree: chevron, heading and a count chip.
 /// Tests find it by its id and its count as `"{id}:count"`.
@@ -17,6 +31,8 @@ pub(crate) struct SectionHeader {
     title: SharedString,
     open: bool,
     count: Option<SharedString>,
+    count_selector: Option<SharedString>,
+    title_style: SectionTitleStyle,
     on_click: Option<ClickHandler>,
 }
 
@@ -37,6 +53,8 @@ impl SectionHeader {
             title: title.into(),
             open: true,
             count: None,
+            count_selector: None,
+            title_style: SectionTitleStyle::Heading,
             on_click: None,
         }
     }
@@ -52,6 +70,19 @@ impl SectionHeader {
     #[must_use]
     pub(crate) fn count(mut self, count: impl Into<SharedString>) -> Self {
         self.count = Some(count.into());
+        self
+    }
+
+    /// Keeps an existing count selector when migrating a tree header.
+    #[must_use]
+    pub(crate) fn count_selector(mut self, selector: impl Into<SharedString>) -> Self {
+        self.count_selector = Some(selector.into());
+        self
+    }
+
+    #[must_use]
+    pub(crate) const fn title_style(mut self, style: SectionTitleStyle) -> Self {
+        self.title_style = style;
         self
     }
 
@@ -72,15 +103,30 @@ impl RenderOnce for SectionHeader {
         } else {
             UiIcon::ChevronRight
         };
-        let count_selector = format!("{}:count", self.id);
+        let count_selector = self
+            .count_selector
+            .map_or_else(|| format!("{}:count", self.id), |s| s.to_string());
+        let title_selector = format!("{}:title", self.id);
+        let title = match self.title_style {
+            SectionTitleStyle::Heading => SectionHeading::new(&self.title).into_any_element(),
+            SectionTitleStyle::Name | SectionTitleStyle::Code => {
+                let label = Label::new(self.title).weight(FontWeight::MEDIUM);
+                if self.title_style == SectionTitleStyle::Code {
+                    label.code()
+                } else {
+                    label
+                }
+                .into_any_element()
+            }
+        };
         let mut row = ListItem::new(self.id, Indent::Group)
             .leading(Icon::new(chevron).size(IconSize::Small).color(Color::Muted))
-            .child(SectionHeading::new(&self.title));
+            .child(div().debug_selector(|| title_selector).child(title));
         if let Some(count) = self.count {
             row = row.child(
                 gpui::div()
                     .debug_selector(|| count_selector)
-                    .child(Badge::new(count, Color::Placeholder).count()),
+                    .child(count_badge(count)),
             );
         }
         match self.on_click {

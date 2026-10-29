@@ -23,6 +23,23 @@ fn panel(cx: &mut TestAppContext) -> (Entity<GitPanel>, &mut VisualTestContext) 
 }
 
 #[gpui::test]
+fn git_section_headers_share_the_section_header_line_height(cx: &mut TestAppContext) {
+    use crate::ui::tokens::AUTO_LINE_11;
+    let (_, cx) = panel(cx);
+    redraw(cx);
+    for selector in ["git-section:changes:title", "git-section:commits:title"] {
+        assert_eq!(
+            cx.debug_bounds(selector)
+                .expect("SectionHeader title")
+                .size
+                .height,
+            AUTO_LINE_11
+        );
+    }
+    assert!(include_str!("git_panel.rs").contains("SectionHeader::new("));
+}
+
+#[gpui::test]
 fn scope_chip_scopes_the_git_panel(cx: &mut TestAppContext) {
     // The merge of Tasks 11 and 12: the chip switches which worktree's
     // changes and commits the panel shows.

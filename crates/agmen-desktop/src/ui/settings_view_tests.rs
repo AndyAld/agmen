@@ -780,6 +780,51 @@ fn general_offers_optional_start_at_login(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn general_settings_controls_start_in_the_control_column(cx: &mut TestAppContext) {
+    use crate::ui::tokens::{SETTING_LABEL_WIDTH, SPACE_16};
+    let home = Home::new();
+    let (view, cx) = open(cx, &home);
+    view.update(cx, |view, cx| {
+        view.page = Page::General;
+        view.host_status = Some(HostStatus {
+            configured: true,
+            state: HostState::Failed,
+            public_url: Some("https://hub.example/".into()),
+            last_error: Some("Postgres unavailable".into()),
+        });
+        cx.notify();
+    });
+    redraw(cx);
+    for (setting, control) in [
+        (
+            "setting:Start agmen in the background when you log in",
+            "start-at-login",
+        ),
+        ("setting:Your hub", "host:status"),
+        ("setting:Default agent model", "default-agent-model:field"),
+        ("setting:agmen command", "cli-install:controls"),
+    ] {
+        let row = cx.debug_bounds(setting).expect("the setting row");
+        let control = cx.debug_bounds(control).expect("the control");
+        assert_eq!(control.left() - row.left(), SETTING_LABEL_WIDTH + SPACE_16);
+    }
+    let field = cx.debug_bounds("default-agent-model:field").unwrap();
+    let save = cx.debug_bounds("default-agent-model:save").unwrap();
+    let input = view.read_with(cx, |view, cx| {
+        view.agent_model.read(cx).last_bounds.unwrap()
+    });
+    assert!(
+        input.size.width >= gpui::px(100.),
+        "model input: {input:?}; field: {field:?}; Save: {save:?}"
+    );
+    assert!(input.left() >= field.left() && input.right() < save.left());
+    assert!(
+        save.right() <= field.right(),
+        "Save: {save:?}; field: {field:?}"
+    );
+}
+
+#[gpui::test]
 fn general_shows_host_error_and_restart(cx: &mut TestAppContext) {
     use crate::backend::HostSocket;
     use crate::backend::fake_agmend::{FakeAgmend, console};

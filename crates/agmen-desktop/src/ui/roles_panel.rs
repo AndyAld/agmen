@@ -3,15 +3,18 @@
 
 use std::path::Path;
 
+#[cfg(test)]
+use gpui::FontWeight;
+
 use gpui::{
-    App, AppContext as _, Context, Entity, EventEmitter, FontWeight, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, RenderOnce, SharedString, Styled as _, Window, div,
+    App, AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, RenderOnce, SharedString, Styled as _, Window, div,
 };
 
 use super::code_view::CodeView;
 use super::components::{
-    Breadcrumb, Button, ButtonStyle, Color, Dot, EmptyState, Icon, IconSize, Indent, KvRow,
-    KvSection, Label, LabelSize, ListItem,
+    Breadcrumb, Button, ButtonStyle, Color, Dot, EmptyState, Indent, KvRow, KvSection, Label,
+    LabelSize, ListItem, SectionHeader, SectionTitleStyle,
 };
 use super::dock::RightDockHeader;
 use super::syntax::Language;
@@ -134,26 +137,16 @@ impl Render for RolesPanel {
         let mut rows = Vec::new();
         for (layer, title, slug) in LAYERS {
             rows.push(
-                ListItem::new(format!("role-layer:{slug}"), Indent::Group)
-                    .leading(
-                        Icon::new(UiIcon::ChevronDown)
-                            .size(IconSize::Small)
-                            .color(Color::Muted),
-                    )
-                    .child({
-                        let selector = format!("role-layer:{slug}:title");
-                        let label = Label::new(title).weight(FontWeight::MEDIUM);
-                        // A folder path is code, as console.py draws it.
-                        let label = if layer == RoleLayer::BuiltIn {
-                            label
-                        } else {
-                            label.code()
-                        };
-                        div().debug_selector(|| selector).child(label)
-                    }),
+                SectionHeader::new(format!("role-layer:{slug}"), title)
+                    .title_style(if layer == RoleLayer::BuiltIn {
+                        SectionTitleStyle::Name
+                    } else {
+                        SectionTitleStyle::Code
+                    })
+                    .into_any_element(),
             );
             for role in self.roles.iter().filter(|r| r.layer == layer) {
-                rows.push(self.role_row(role, cx));
+                rows.push(self.role_row(role, cx).into_any_element());
             }
         }
         div().w_full().flex().flex_col().py(SPACE_6).children(rows)

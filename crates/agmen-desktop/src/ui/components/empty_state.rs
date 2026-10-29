@@ -2,8 +2,8 @@
 //! "No worktrees yet", where a live panel has no data.
 
 use gpui::{
-    App, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce, SharedString,
-    Styled as _, Window, div,
+    App, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, RenderOnce,
+    SharedString, Styled as _, Window, div,
 };
 
 use super::{Color, Label, LabelSize};
@@ -14,6 +14,7 @@ use crate::ui::tokens::{SPACE_10, SPACE_14};
 pub(crate) struct EmptyState {
     selector: &'static str,
     text: SharedString,
+    padding: (Pixels, Pixels),
 }
 
 impl EmptyState {
@@ -22,7 +23,15 @@ impl EmptyState {
         Self {
             selector,
             text: text.into(),
+            padding: (SPACE_14, SPACE_10),
         }
+    }
+
+    /// Replaces the panel inset, such as the code view's 16 px padding.
+    #[must_use]
+    pub(crate) const fn padding(mut self, horizontal: Pixels, vertical: Pixels) -> Self {
+        self.padding = (horizontal, vertical);
+        self
     }
 }
 
@@ -32,8 +41,8 @@ impl RenderOnce for EmptyState {
         div()
             .debug_selector(|| selector.into())
             .w_full()
-            .px(SPACE_14)
-            .py(SPACE_10)
+            .px(self.padding.0)
+            .py(self.padding.1)
             .child(
                 Label::new(self.text)
                     .size(LabelSize::Small)
