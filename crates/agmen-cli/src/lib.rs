@@ -12,6 +12,7 @@
 
 #![warn(missing_docs)]
 
+mod agmend;
 mod claims;
 mod client;
 mod cmd;
