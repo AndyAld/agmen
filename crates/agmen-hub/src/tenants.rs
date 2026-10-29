@@ -382,6 +382,10 @@ pub(crate) async fn transfer(
     let target = target.ok_or_else(|| {
         ApiError::conflict("not_a_group_admin", "the new owner must be a group admin")
     })?;
+    // The receiver would own this group too. Same lock as create, so a
+    // transfer cannot put them over three while one of their creates is in flight.
+    let receiver = HumanId::from_stored(target.clone());
+    crate::groups::check_owner_limit(&mut tx, &receiver).await?;
     sqlx::query("UPDATE tenant_members SET role = 'admin' WHERE tenant_id = $1 AND human_id = $2")
         .bind(&tenant)
         .bind(human.as_str())
