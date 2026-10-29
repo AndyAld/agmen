@@ -6,3 +6,4 @@ mod git_read;
 mod policy;
 mod process;
 mod queue;
+mod settings;
