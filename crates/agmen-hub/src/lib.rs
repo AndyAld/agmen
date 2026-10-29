@@ -47,6 +47,7 @@ mod replay;
 mod roles;
 mod rollcall;
 mod secrets_scan;
+mod self_config;
 mod state;
 mod sweeper;
 mod tenants;
@@ -61,7 +62,7 @@ pub use broker_tokens::{BrokerTokens, SigningKey, TokenError};
 pub use claims::LeaseSweepError;
 pub use config::{
     Config, ConfigError, DEFAULT_CLAIM_LEASE, DEFAULT_GITHUB_CLIENT_ID, EmqxConfig, GithubConfig,
-    HubMode, MqttConfig, Secret,
+    HubMode, HubSecrets, MqttConfig, Secret,
 };
 pub use db::{Role, TenantRole, UnknownRole};
 pub use emqx::{EmqxAdmin, EmqxError};
@@ -72,6 +73,7 @@ pub use ingest::{HUB_IDENTITY, HubPost, IngestError, PostError, Posted};
 pub use mqtt::{Messaging, MessagingError};
 pub use numbering::{NumberingError, next_seq};
 pub use roles::cap_verbs;
+pub use self_config::SelfConfigError;
 #[cfg(feature = "test-hooks")]
 pub use test_github::{FAKE_GITHUB_CLIENT_ID, FakeGithub};
 #[cfg(feature = "test-hooks")]

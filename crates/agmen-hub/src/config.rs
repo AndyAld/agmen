@@ -99,10 +99,25 @@ fn github_api_url(value: Option<String>) -> Result<Url, ConfigError> {
 pub struct EmqxConfig {
     /// `AGMEN_EMQX_API_URL`, the API base such as `http://emqx:18083/api/v5`.
     pub api_url: Url,
-    /// `AGMEN_EMQX_API_KEY`.
+    /// `AGMEN_EMQX_API_KEY`, default `agmen-hub`.
     pub api_key: String,
-    /// `AGMEN_EMQX_API_SECRET`.
-    pub api_secret: Secret,
+}
+
+/// Supplied secrets or a directory in which the hub generates and keeps them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HubSecrets {
+    /// Both `AGMEN_JWT_SIGNING_KEY` and `AGMEN_EMQX_API_SECRET` are supplied.
+    Given {
+        /// ES256 PKCS#8 PEM file; its stem is the signing key id.
+        jwt_signing_key: PathBuf,
+        /// Secret for the EMQX REST API key.
+        emqx_api_secret: Secret,
+    },
+    /// Neither secret is supplied; keep generated secrets in `AGMEN_DATA_DIR`.
+    Generated {
+        /// Contains `jwt/hub-1.pem` and `broker/api-keys.txt`.
+        data_dir: PathBuf,
+    },
 }
 
 /// The broker connection the hub ingests and publishes through
@@ -236,9 +251,9 @@ pub struct Config {
     /// `broker_url` (ruling R57). In a cluster it differs from the hub's
     /// own connection, such as `wss://agmen.example.com/mqtt`.
     pub public_mqtt_url: Url,
-    /// `AGMEN_JWT_SIGNING_KEY`: the ES256 private key (PKCS#8 PEM) that
-    /// signs broker tokens. Its key id is the file name without `.pem`.
-    pub jwt_signing_key: PathBuf,
+    /// Supplied signing key and EMQX secret, or generated secrets kept in
+    /// `AGMEN_DATA_DIR` when both variables are unset.
+    pub secrets: HubSecrets,
     /// `AGMEN_JWT_EXTRA_KEYS`, comma separated, optional: more private keys
     /// published in `/v1/jwks` but never used to sign. During a rotation
     /// this holds the next key (published at least 60 s before the switch)
@@ -292,14 +307,16 @@ impl Config {
     ///     ("AGMEN_DATABASE_URL", "postgres://localhost/agmen"),
     ///     ("AGMEN_PUBLIC_URL", "https://api.example.com"),
     ///     ("AGMEN_EMQX_API_URL", "http://emqx:18083/api/v5"),
-    ///     ("AGMEN_EMQX_API_KEY", "agmen-hub"),
-    ///     ("AGMEN_EMQX_API_SECRET", "secret"),
     ///     ("AGMEN_MQTT_URL", "mqtt://emqx:1883"),
-    ///     ("AGMEN_JWT_SIGNING_KEY", "/keys/hub-2.pem"),
-    ///     ("AGMEN_JWT_EXTRA_KEYS", "/keys/hub-1.pem"),
+    ///     ("AGMEN_DATA_DIR", "/var/lib/agmen"),
+    ///     ("AGMEN_JWT_EXTRA_KEYS", "/keys/hub-2.pem"),
     /// ]);
     /// let config = agmen_hub::Config::from_lookup(|name| vars.get(name).map(|v| v.to_string()))?;
     /// assert_eq!(config.listen.port(), 8080);
+    /// assert_eq!(config.emqx.api_key, "agmen-hub");
+    /// assert_eq!(config.secrets, agmen_hub::HubSecrets::Generated {
+    ///     data_dir: "/var/lib/agmen".into(),
+    /// });
     /// assert_eq!(config.github.api_url.as_str(), "https://api.github.com/");
     /// assert_eq!(config.jwt_extra_keys.len(), 1);
     /// assert_eq!(config.mqtt.client_id(), "agmen-hub-main");
@@ -347,8 +364,7 @@ impl Config {
             },
             emqx: EmqxConfig {
                 api_url: url("AGMEN_EMQX_API_URL", required("AGMEN_EMQX_API_URL")?)?,
-                api_key: required("AGMEN_EMQX_API_KEY")?,
-                api_secret: Secret::new(required("AGMEN_EMQX_API_SECRET")?),
+                api_key: get("AGMEN_EMQX_API_KEY").unwrap_or_else(|| "agmen-hub".to_owned()),
             },
             mqtt: {
                 let (host, port) = mqtt_addr(&required("AGMEN_MQTT_URL")?)?;
@@ -375,7 +391,17 @@ impl Config {
                 Some(value) => value,
                 None => required("AGMEN_MQTT_URL")?,
             })?,
-            jwt_signing_key: required("AGMEN_JWT_SIGNING_KEY")?.into(),
+            secrets: match (get("AGMEN_JWT_SIGNING_KEY"), get("AGMEN_EMQX_API_SECRET")) {
+                (Some(key), Some(secret)) => HubSecrets::Given {
+                    jwt_signing_key: key.into(),
+                    emqx_api_secret: Secret::new(secret),
+                },
+                (None, None) => HubSecrets::Generated {
+                    data_dir: required("AGMEN_DATA_DIR")?.into(),
+                },
+                (Some(_), None) => return Err(ConfigError::Missing("AGMEN_EMQX_API_SECRET")),
+                (None, Some(_)) => return Err(ConfigError::Missing("AGMEN_JWT_SIGNING_KEY")),
+            },
             jwt_extra_keys: get("AGMEN_JWT_EXTRA_KEYS")
                 .map(|list| {
                     list.split(',')
@@ -404,6 +430,53 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn secrets_come_from_env_or_data_dir() {
+        let config = |key: Option<&str>, secret: Option<&str>, data: Option<&str>| {
+            Config::from_lookup(|name| match name {
+                "AGMEN_JWT_SIGNING_KEY" => key.map(str::to_owned),
+                "AGMEN_EMQX_API_SECRET" => secret.map(str::to_owned),
+                "AGMEN_DATA_DIR" => data.map(str::to_owned),
+                "AGMEN_EMQX_API_KEY" => None,
+                "AGMEN_JWT_EXTRA_KEYS" => Some("/keys/old.pem".to_owned()),
+                _ => without_github(name),
+            })
+        };
+        let given = config(Some("/keys/hub.pem"), Some("provided"), Some("/unused")).unwrap();
+        assert_eq!(
+            given.secrets,
+            HubSecrets::Given {
+                jwt_signing_key: PathBuf::from("/keys/hub.pem"),
+                emqx_api_secret: Secret::new("provided"),
+            }
+        );
+        assert_eq!(given.emqx.api_key, "agmen-hub");
+        assert!(!format!("{:?}", given.secrets).contains("provided"));
+        for empty in [None, Some("")] {
+            let generated = config(empty, empty, Some("/data")).unwrap();
+            assert_eq!(
+                generated.secrets,
+                HubSecrets::Generated {
+                    data_dir: PathBuf::from("/data")
+                }
+            );
+            assert_eq!(generated.emqx.api_key, "agmen-hub");
+            assert_eq!(generated.jwt_extra_keys, given.jwt_extra_keys);
+            assert!(matches!(
+                config(empty, empty, empty),
+                Err(ConfigError::Missing("AGMEN_DATA_DIR"))
+            ));
+            assert!(matches!(
+                config(Some("/keys/hub.pem"), empty, Some("/data")),
+                Err(ConfigError::Missing("AGMEN_EMQX_API_SECRET"))
+            ));
+            assert!(matches!(
+                config(empty, Some("provided"), Some("/data")),
+                Err(ConfigError::Missing("AGMEN_JWT_SIGNING_KEY"))
+            ));
+        }
+    }
 
     #[test]
     fn hub_mode_parses() {

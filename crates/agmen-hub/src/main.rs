@@ -26,12 +26,14 @@ use anyhow::{Context as _, bail};
 use tracing_subscriber::EnvFilter;
 
 const USAGE: &str = "usage: agmen-hub [serve]
+       agmen-hub health
        agmen-hub bootstrap --tenant <name> --project <name> (--admin-github <login> | --admin-github-id <id>) [--repo-url <url>]";
 
 /// What the command line asks for.
 #[derive(Debug, PartialEq, Eq)]
 enum Command {
     Serve,
+    Health,
     Bootstrap {
         tenant: String,
         project: String,
@@ -44,15 +46,19 @@ enum Command {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     install_crypto_provider()?;
-    tracing_subscriber::fmt()
-        .with_ansi(std::io::stderr().is_terminal())
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .with_writer(std::io::stderr)
-        .init();
-    match parse_args(std::env::args_os().skip(1))? {
+    let command = parse_args(std::env::args_os().skip(1))?;
+    if command != Command::Health {
+        tracing_subscriber::fmt()
+            .with_ansi(std::io::stderr().is_terminal())
+            .with_env_filter(
+                EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+            )
+            .with_writer(std::io::stderr)
+            .init();
+    }
+    match command {
         Command::Serve => serve().await,
+        Command::Health => health(std::env::var("AGMEN_LISTEN").ok()).await,
         Command::Bootstrap {
             tenant,
             project,
@@ -86,6 +92,7 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> anyhow::Result<Comman
         .into_iter();
     let command = match args.next().as_deref() {
         None | Some("serve") => Command::Serve,
+        Some("health") => Command::Health,
         Some("-h" | "--help" | "help") => return Ok(Command::Help),
         Some("bootstrap") => {
             let (mut tenant, mut project, mut login, mut id) = (None, None, None, None);
@@ -132,6 +139,30 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> anyhow::Result<Comman
         bail!("unexpected argument {extra:?}\n{USAGE}");
     }
     Ok(command)
+}
+
+async fn health(listen: Option<String>) -> anyhow::Result<()> {
+    let listen = listen
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "0.0.0.0:8080".to_owned())
+        .parse::<std::net::SocketAddr>()
+        .context("AGMEN_LISTEN is not a socket address")?;
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .build()
+        .context("building the health check client")?;
+    let status = http
+        .get(format!("http://127.0.0.1:{}/healthz", listen.port()))
+        .send()
+        .await
+        .context("checking the hub's health")?
+        .status();
+    if status != reqwest::StatusCode::OK {
+        bail!("health check returned {status}");
+    }
+    Ok(())
 }
 
 async fn serve() -> anyhow::Result<()> {
@@ -240,6 +271,58 @@ async fn shutdown() {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn health_checks_only_the_loopback_healthz_status() {
+        for status in [
+            reqwest::StatusCode::OK,
+            reqwest::StatusCode::NO_CONTENT,
+            reqwest::StatusCode::FOUND,
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let router = axum::Router::new().route(
+                "/healthz",
+                axum::routing::get(move || async move { status }),
+            );
+            let server = tokio::spawn(async move {
+                axum::serve(listener, router).await.unwrap();
+            });
+            let result = health(Some(format!("[::]:{port}"))).await;
+            server.abort();
+            assert!(server.await.unwrap_err().is_cancelled());
+            assert_eq!(result.is_ok(), status == reqwest::StatusCode::OK);
+            if let Err(error) = result {
+                assert!(error.to_string().contains(&status.to_string()));
+            }
+        }
+        assert!(health(Some("invalid".to_owned())).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn health_times_out_after_three_seconds() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let router = axum::Router::new().route(
+            "/healthz",
+            axum::routing::get(|| async {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                reqwest::StatusCode::OK
+            }),
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let start = std::time::Instant::now();
+        let result = health(Some(addr.to_string())).await;
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+        let error = result.unwrap_err();
+        assert!(error.downcast_ref::<reqwest::Error>().unwrap().is_timeout());
+        assert!(start.elapsed() >= std::time::Duration::from_secs(3));
+        assert!(start.elapsed() < std::time::Duration::from_secs(5));
+    }
+
     fn parse(args: &[&str]) -> anyhow::Result<Command> {
         parse_args(args.iter().map(OsString::from))
     }
@@ -281,6 +364,8 @@ mod tests {
 
     #[test]
     fn commands() {
+        assert_eq!(parse(&["health"]).unwrap(), Command::Health);
+        assert!(parse(&["health", "x"]).is_err());
         assert_eq!(parse(&[]).unwrap(), Command::Serve);
         assert_eq!(parse(&["serve"]).unwrap(), Command::Serve);
         assert_eq!(parse(&["--help"]).unwrap(), Command::Help);
