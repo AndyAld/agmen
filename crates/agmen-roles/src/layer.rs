@@ -78,6 +78,8 @@ pub struct Resolved {
     pub edits: EditScope,
     /// Effective worktree policy.
     pub worktree: Worktree,
+    /// Roles this role may launch: the nearest declared list, or empty.
+    pub launches: BTreeSet<String>,
     /// Effective model tier.
     pub tier: Tier,
     /// Lowercase SHA-256 of source XML concatenated ancestor first.
@@ -254,6 +256,10 @@ pub(crate) fn edits_narrow(child: &EditScope, parent: &EditScope) -> bool {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one inheritance walk checks every permission, including launches"
+)]
 pub(crate) fn resolve(name: &str, sources: &Sources) -> Result<Resolved, RoleError> {
     let chain = inheritance_chain(name, sources)?;
     let kind = chain.iter().find_map(|(r, _)| r.kind);
@@ -267,6 +273,7 @@ pub(crate) fn resolve(name: &str, sources: &Sources) -> Result<Resolved, RoleErr
     let mut verbs: BTreeSet<String> = BTreeSet::new();
     let mut edits = EditScope::None;
     let mut worktree = Worktree::default();
+    let mut launches = BTreeSet::new();
     let mut prompt = Vec::new();
     let mut stripped = Vec::new();
     let mut hash = Sha256::new();
@@ -293,10 +300,13 @@ pub(crate) fn resolve(name: &str, sources: &Sources) -> Result<Resolved, RoleErr
             }
             _ => role.edits.clone().unwrap_or_else(|| edits.clone()),
         };
+        // The nearest `<launches>` wins. A child of a non-base role may only narrow it.
+        let next_launches = role.launches.clone().unwrap_or_else(|| launches.clone());
         if previous.is_some_and(|p| p.name != "base")
             && (!next_tools.is_subset(&tools)
                 || !next_verbs.is_subset(&verbs)
                 || !edits_narrow(&next_edits, &edits)
+                || !next_launches.is_subset(&launches)
                 || role
                     .kind
                     .is_some_and(|k| inherited_kind.is_some_and(|p| p != k)))
@@ -312,6 +322,7 @@ pub(crate) fn resolve(name: &str, sources: &Sources) -> Result<Resolved, RoleErr
             inherited_kind = Some(k);
         }
         edits = next_edits;
+        launches = next_launches;
         if let Some(w) = &role.worktree {
             worktree = w.clone();
         }
@@ -337,6 +348,7 @@ pub(crate) fn resolve(name: &str, sources: &Sources) -> Result<Resolved, RoleErr
     role.verbs_declared = true;
     role.edits = Some(edits.clone());
     role.worktree = Some(worktree.clone());
+    // `launches` stays the file's declaration. `Resolved.launches` is the effective list.
     role.prompt.elements = prompt;
     Ok(Resolved {
         layer: Layer::Builtin,
@@ -347,6 +359,7 @@ pub(crate) fn resolve(name: &str, sources: &Sources) -> Result<Resolved, RoleErr
         verbs,
         edits,
         worktree,
+        launches,
         sha256: hash
             .finalize()
             .iter()
