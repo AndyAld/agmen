@@ -74,6 +74,8 @@ Use `args = ["mcp", "--identity", "<id>"]` to pin the identity, and set `cwd` to
 | Tool | What it does |
 | --- | --- |
 | `post` | Posts a message with any protocol verb (`verb`, `body`, optional `data`, `to`, `reply_to`, `items`, `lane`, `mentions`). |
+| `chat` | Posts an FYI as this identity (`text`, optional `reply_to`); @ tokens become mentions. |
+| `read_chat` | Reads the feed before an optional `before` seq, oldest first (`limit` defaults to 30, at most 100). Refused in agmend-managed sessions. |
 | `ask` | Asks the room, or 1 to 8 identities with `to`. |
 | `answer` | Answers an ASK by its id (`reply_to`). |
 | `dm` | Sends a direct message to 1 to 8 identities. |

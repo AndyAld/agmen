@@ -17,10 +17,11 @@ use url::Url;
 /// The answer every tool gives outside a joined worktree.
 pub const NOT_JOINED: &str = "not joined: run agmen join <invite> in this worktree";
 
-/// The twelve tools, sorted.
-pub const TOOLS: [&str; 12] = [
+/// The fourteen tools, sorted.
+pub const TOOLS: [&str; 14] = [
     "answer",
     "ask",
+    "chat",
     "check_path",
     "claim",
     "dm",
@@ -29,6 +30,7 @@ pub const TOOLS: [&str; 12] = [
     "inbox",
     "lanes",
     "post",
+    "read_chat",
     "release",
     "state",
 ];
@@ -110,6 +112,8 @@ pub fn every_tool_call() -> Vec<(&'static str, Value)> {
     use serde_json::json;
     vec![
         ("post", json!({ "verb": "FYI", "body": "hi" })),
+        ("chat", json!({ "text": "hi" })),
+        ("read_chat", json!({})),
         ("ask", json!({ "body": "which way?" })),
         (
             "answer",

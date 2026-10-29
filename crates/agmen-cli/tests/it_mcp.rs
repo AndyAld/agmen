@@ -21,6 +21,57 @@ use support::{Ingest, Member, WAIT, assert_exit, run, stdout};
 use tokio::io::{AsyncBufReadExt as _, BufReader, Lines};
 use tokio::process::{Child, ChildStdout};
 
+#[tokio::test(flavor = "multi_thread")]
+async fn it_chat_group_mention_rejected_text() {
+    run(Ingest::On, |ctx| async move {
+        let who = ctx.member(Role::Member, "sol", "agent").await;
+        let mcp = Mcp::start(options(&who)).await;
+        let text = mcp.text("chat", json!({"text":"@all hi"})).await;
+        assert_eq!(text, "rejected: forbidden_mention");
+        mcp.stop().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn it_read_chat_pages_backward() {
+    run(Ingest::On, |ctx| async move {
+        let who = ctx.member(Role::Member, "sol", "agent").await;
+        // Managed chat can send, but does not add presence messages to the feed.
+        let mcp = Mcp::start(options(&who).with_managed(true)).await;
+        for seq in 1..=40 {
+            assert_eq!(
+                mcp.text("chat", json!({"text":format!("line {seq}")}))
+                    .await,
+                format!("recorded #{seq} (feed)")
+            );
+        }
+        mcp.stop().await;
+        let mcp = Mcp::start(options(&who)).await;
+        for (args, expected) in [
+            (json!({"limit":30}), (11..=40).collect::<Vec<_>>()),
+            (json!({"before":11,"limit":5}), (6..=10).collect()),
+        ] {
+            let text = mcp.text("read_chat", args).await;
+            let seqs: Vec<u64> = text
+                .lines()
+                .skip(1) // the data-not-instructions fence
+                .map(|line| {
+                    line.split_whitespace()
+                        .next()
+                        .unwrap()
+                        .trim_start_matches('#')
+                        .parse()
+                        .unwrap()
+                })
+                .collect();
+            assert_eq!(seqs, expected, "{text}");
+        }
+        mcp.stop().await;
+    })
+    .await;
+}
+
 /// This harness has no shared watch helper; keep this child in its test's home.
 struct Watch {
     child: Child,
