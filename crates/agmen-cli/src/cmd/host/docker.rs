@@ -583,28 +583,31 @@ fn write_log_line(line: &str, to_stderr: bool) -> std::io::Result<()> {
     }
 }
 
-/// The last [`ERROR_LINE_CAP`] lines of `bytes`, at most [`ERROR_BYTE_CAP`],
-/// each cleaned. A line that is itself a line of `.env`, and any value from
-/// that file of at least [`REDACT_MIN`] bytes, is left out.
+/// The last [`ERROR_LINE_CAP`] lines of `bytes`, each cleaned, cut to their
+/// last [`ERROR_BYTE_CAP`] bytes. A line that is itself a line of `.env`, and
+/// any value from that file of at least [`REDACT_MIN`] bytes, is left out.
+///
+/// The match runs on the cleaned text and the byte cap comes last, so what is
+/// checked is what is printed: a control character inside a value cannot hide
+/// it from the match and then vanish, and the cap cannot cut one in half.
 fn stderr_detail(dir: &Path, bytes: &[u8]) -> String {
+    // shortcut: exact match only. A value that docker quotes, re-encodes, wraps over
+    // two lines or splits with an escape sequence (its printable part stays), and
+    // a value under REDACT_MIN bytes, still print. Revisit if docker is seen
+    // echoing env values.
     let (exact, values) = env_redaction(dir);
     let text = String::from_utf8_lossy(bytes);
     let lines: Vec<&str> = text.lines().collect();
     let start = lines.len().saturating_sub(ERROR_LINE_CAP);
-    let joined = lines[start..].join("\n");
-    let mut out = String::new();
-    for line in last_bytes(&joined, ERROR_BYTE_CAP).lines() {
-        if exact.iter().any(|item| item == line) {
+    let mut kept: Vec<String> = Vec::new();
+    for line in &lines[start..] {
+        let cleaned = clean(line);
+        if exact.iter().any(|item| *item == *cleaned) {
             continue;
         }
-        let redacted = redact_line(line, &values);
-        let cleaned = clean(&redacted);
-        if !out.is_empty() {
-            out.push('\n');
-        }
-        out.push_str(&cleaned);
+        kept.push(redact_line(&cleaned, &values));
     }
-    out
+    last_bytes(&kept.join("\n"), ERROR_BYTE_CAP).to_owned()
 }
 
 fn last_bytes(text: &str, max: usize) -> &str {
@@ -643,8 +646,10 @@ fn env_redaction(dir: &Path) -> (Vec<String>, Vec<String>) {
     };
     let mut exact = Vec::new();
     let mut values = Vec::new();
-    for line in text.lines() {
-        exact.push(line.to_owned());
+    for raw in text.lines() {
+        // Cleaned like the stderr text it is matched against in `stderr_detail`.
+        let line = clean(raw);
+        exact.push(line.to_string());
         let Some((key, value)) = line.split_once('=') else {
             continue;
         };
@@ -685,5 +690,54 @@ mod tests {
             read_pipe(at_cap.as_slice()).await.unwrap().len(),
             MAX_OUTPUT_BYTES
         );
+    }
+
+    /// 64 hex characters, as `host up` generates.
+    const SECRET: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    fn host_dir_with_secret() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".env"),
+            format!("AGMEN_POSTGRES_PASSWORD={SECRET}\nAGMEN_HOST_PORT=7080\n"),
+        )
+        .unwrap();
+        dir
+    }
+
+    #[test]
+    fn stderr_detail_hides_a_secret_split_by_a_character_cleaning_drops() {
+        let dir = host_dir_with_secret();
+        let (head, tail) = SECRET.split_at(32);
+        for gap in ["\u{7}", "\r", "\0", "\u{202e}"] {
+            let raw = format!("bad value {head}{gap}{tail} for key\n");
+            let shown = stderr_detail(dir.path(), raw.as_bytes());
+            assert!(!shown.contains(SECRET), "{gap:?}: {shown}");
+            assert!(shown.starts_with("bad value "), "{gap:?}: {shown}");
+        }
+    }
+
+    #[test]
+    fn stderr_detail_hides_a_secret_the_byte_cap_would_cut_in_half() {
+        let dir = host_dir_with_secret();
+        // The last 4 KiB of this line starts 30 characters into the secret.
+        let raw = format!("{SECRET}{}\n", "x".repeat(ERROR_BYTE_CAP - 34));
+        let shown = stderr_detail(dir.path(), raw.as_bytes());
+        assert!(shown.bytes().all(|byte| byte == b'x'), "{shown}");
+    }
+
+    #[test]
+    fn stderr_detail_matches_env_text_that_holds_a_control_character() {
+        // A hand-edited `.env` can hold a tab. The stderr line is cleaned before
+        // the match, so the file's text is cleaned too.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".env"),
+            "AGMEN_NOTE=a\tb\nAGMEN_TOKEN=abcd\tefgh\n",
+        )
+        .unwrap();
+        let raw = "first\nAGMEN_NOTE=a\tb\nbad token abcd\tefgh here\nlast\n";
+        let shown = stderr_detail(dir.path(), raw.as_bytes());
+        assert_eq!(shown, "first\nbad token  here\nlast");
     }
 }
