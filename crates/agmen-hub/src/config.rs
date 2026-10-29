@@ -193,6 +193,39 @@ fn public_broker_url(value: &str) -> Result<Url, ConfigError> {
     })
 }
 
+fn mqtt_ws_upstream(value: Option<String>) -> Result<Option<Url>, ConfigError> {
+    value
+        .map(|value| {
+            Url::parse(&value)
+                .ok()
+                .filter(|url| {
+                    url.scheme() == "ws"
+                        && url.host_str().is_some()
+                        && url.username().is_empty()
+                        && url.password().is_none()
+                        && url.fragment().is_none()
+                })
+                .ok_or(ConfigError::Invalid {
+                    name: "AGMEN_MQTT_WS_UPSTREAM",
+                    what: "ws://host[:port]/path URL without credentials or a fragment",
+                })
+        })
+        .transpose()
+}
+
+fn proxy_broker_url(public_url: &Url) -> Result<Url, ConfigError> {
+    let invalid = || ConfigError::Invalid {
+        name: "AGMEN_PUBLIC_MQTT_URL",
+        what: "wss URL; set an https AGMEN_PUBLIC_URL",
+    };
+    if public_url.scheme() != "https" {
+        return Err(invalid());
+    }
+    let mut broker = crate::http::public_link(public_url, "mqtt");
+    broker.set_scheme("wss").map_err(|()| invalid())?;
+    Ok(broker)
+}
+
 /// How long a claim lasts without a HEARTBEAT (protocol section 8).
 pub const DEFAULT_CLAIM_LEASE: Duration = Duration::from_secs(30 * 60);
 
@@ -246,7 +279,11 @@ pub struct Config {
     pub emqx: EmqxConfig,
     /// The broker connection for ingest and the sweeper.
     pub mqtt: MqttConfig,
-    /// `AGMEN_PUBLIC_MQTT_URL`, default `AGMEN_MQTT_URL`: the broker
+    /// `AGMEN_MQTT_WS_UPSTREAM`, optional private `ws://host[:port]/path`
+    /// broker listener. Enables `GET /mqtt` on the hub's own origin.
+    pub mqtt_ws_upstream: Option<Url>,
+    /// `AGMEN_PUBLIC_MQTT_URL`, default `AGMEN_MQTT_URL`, or the public
+    /// hub URL with scheme `wss` and `mqtt` appended when proxying: the broker
     /// address clients connect to, which `GET /v1/me` serves as
     /// `broker_url` (ruling R57). In a cluster it differs from the hub's
     /// own connection, such as `wss://agmen.example.com/mqtt`.
@@ -338,7 +375,7 @@ impl Config {
             })?,
             None => SocketAddr::from(([0, 0, 0, 0], 8080)),
         };
-        Ok(Self {
+        let mut config = Self {
             database_url: Secret::new(required("AGMEN_DATABASE_URL")?),
             mode: get("AGMEN_HUB_MODE").map_or(Ok(HubMode::default()), |mode| mode.parse())?,
             group_name: {
@@ -386,6 +423,7 @@ impl Config {
                     share_group: name("AGMEN_MQTT_SHARE_GROUP", "hub")?,
                 }
             },
+            mqtt_ws_upstream: mqtt_ws_upstream(get("AGMEN_MQTT_WS_UPSTREAM"))?,
             // After `mqtt`, so a bad AGMEN_MQTT_URL is reported by its name.
             public_mqtt_url: public_broker_url(&match get("AGMEN_PUBLIC_MQTT_URL") {
                 Some(value) => value,
@@ -423,13 +461,108 @@ impl Config {
                     })?,
                 None => DEFAULT_CLAIM_LEASE,
             },
-        })
+        };
+        if config.mqtt_ws_upstream.is_some() && get("AGMEN_PUBLIC_MQTT_URL").is_none() {
+            config.public_mqtt_url = proxy_broker_url(&config.public_url)?;
+        }
+        Ok(config)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn public_mqtt_url_follows_the_proxy() {
+        let config = |public: &str, upstream: Option<&str>, explicit: Option<&str>| {
+            Config::from_lookup(|name| match name {
+                "AGMEN_PUBLIC_URL" => Some(public.to_owned()),
+                "AGMEN_MQTT_WS_UPSTREAM" => upstream.map(str::to_owned),
+                "AGMEN_PUBLIC_MQTT_URL" => explicit.map(str::to_owned),
+                _ => without_github(name),
+            })
+        };
+        for (public, expected) in [
+            (
+                "https://box.tail1234.ts.net",
+                "wss://box.tail1234.ts.net/mqtt",
+            ),
+            ("https://example.com/hub/", "wss://example.com/hub/mqtt"),
+            ("https://example.com/hub", "wss://example.com/hub/mqtt"),
+            (
+                "https://example.com:9443/hub/",
+                "wss://example.com:9443/hub/mqtt",
+            ),
+        ] {
+            assert_eq!(
+                config(public, Some("ws://emqx:8083/mqtt"), None)
+                    .unwrap()
+                    .public_mqtt_url
+                    .as_str(),
+                expected
+            );
+        }
+        assert!(matches!(
+            config("http://x", Some("ws://emqx:8083/mqtt"), None),
+            Err(ConfigError::Invalid {
+                name: "AGMEN_PUBLIC_MQTT_URL",
+                what: "wss URL; set an https AGMEN_PUBLIC_URL",
+            })
+        ));
+        assert!(matches!(
+            config("https://x", Some("http://emqx:8083/mqtt"), None),
+            Err(ConfigError::Invalid {
+                name: "AGMEN_MQTT_WS_UPSTREAM",
+                ..
+            })
+        ));
+        assert_eq!(
+            config(
+                "http://x",
+                Some("ws://emqx:8083/mqtt"),
+                Some("wss://other/mqtt")
+            )
+            .unwrap()
+            .public_mqtt_url
+            .as_str(),
+            "wss://other/mqtt"
+        );
+        assert_eq!(
+            config("http://x", None, None)
+                .unwrap()
+                .public_mqtt_url
+                .as_str(),
+            "mqtt://emqx:1883"
+        );
+    }
+
+    #[test]
+    fn upstream_must_be_ws() {
+        for upstream in [
+            "wss://emqx:8083/mqtt",
+            "http://emqx:8083/mqtt",
+            "mqtt://emqx:1883",
+            "garbage",
+            "ws:///",
+            "ws://user:password@emqx/mqtt",
+            "ws://emqx/mqtt#fragment",
+        ] {
+            assert!(
+                matches!(
+                    Config::from_lookup(|name| match name {
+                        "AGMEN_MQTT_WS_UPSTREAM" => Some(upstream.to_owned()),
+                        _ => without_github(name),
+                    }),
+                    Err(ConfigError::Invalid {
+                        name: "AGMEN_MQTT_WS_UPSTREAM",
+                        ..
+                    })
+                ),
+                "accepted {upstream}"
+            );
+        }
+    }
 
     #[test]
     fn secrets_come_from_env_or_data_dir() {
