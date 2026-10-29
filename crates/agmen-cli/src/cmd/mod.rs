@@ -13,6 +13,7 @@ pub(crate) mod lanes;
 mod open;
 pub(crate) mod post;
 mod role;
+mod templates;
 mod watch;
 #[cfg(unix)]
 mod workers;
@@ -176,6 +177,11 @@ enum Command {
         #[command(subcommand)]
         command: role::RoleCommand,
     },
+    /// List, export, import or save agent and team templates.
+    Templates {
+        #[command(subcommand)]
+        command: templates::TemplateCommand,
+    },
     /// Revoke this worktree's identity and remove its identity file.
     Leave,
     /// Post a message with any verb.
@@ -304,6 +310,7 @@ impl Cli {
                 Ok(())
             }
             Command::Role { command } => role::run(command).await,
+            Command::Templates { command } => templates::run(command).await,
             Command::Leave => join::leave().await,
             Command::Post(args) => post::post(args).await,
             Command::Chat(args) => chat::chat(args).await,
