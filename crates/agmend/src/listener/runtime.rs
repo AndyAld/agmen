@@ -202,13 +202,13 @@ struct Start {
     coordinator: bool,
 }
 
+// Only "running, not stopped by the person". The model lives in the settings
+// file, so a later `listener set --model` wins after a restart. An intent
+// written with a `model` key by an earlier build still reads; the key is ignored.
 #[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 struct Intent {
     project: ProjectId,
     root: PathBuf,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    model: Option<String>,
     identity_id: IdentityId,
 }
 #[derive(Deserialize)]
@@ -599,7 +599,6 @@ impl Listeners {
             Intent {
                 project: request.project.clone(),
                 root: request.root,
-                model: request.model,
                 identity_id: identity.identity_id.clone(),
             },
         )
@@ -964,7 +963,7 @@ impl Listeners {
                     Start {
                         project: intent.project,
                         root: intent.root,
-                        model: intent.model,
+                        model: None,
                         coordinator: false,
                     },
                     &login,

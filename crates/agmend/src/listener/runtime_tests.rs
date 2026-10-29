@@ -1581,6 +1581,45 @@ async fn listener_readopts_after_restart() {
 }
 
 #[tokio::test]
+async fn readopt_keeps_the_model_set_after_start() {
+    let mut f = Fixture::new(FAKE).await;
+    f.human(
+        "listener_start",
+        json!({"project":"project1","root":f.repo(),"model":"model-a"}),
+    )
+    .await
+    .unwrap();
+    f.human(
+        "listener_set",
+        json!({"project":"project1","model":"model-b"}),
+    )
+    .await
+    .unwrap();
+    let intent =
+        std::fs::read_to_string(f.dir.path().join("listener/project1/intent.json")).unwrap();
+    assert!(!intent.contains("model"));
+    let (core, task, stop) = restart_fixture(&mut f).await;
+    let model = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let rows = core
+                .listeners
+                .human_call("listener_status", json!({}))
+                .await
+                .unwrap();
+            if let Some(row) = rows.as_array().unwrap().first() {
+                return row["model"].clone();
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(model, "model-b");
+    stop.send(()).unwrap();
+    task.await.unwrap();
+}
+
+#[tokio::test]
 async fn listener_stopped_by_person_stays_stopped_after_restart() {
     let mut f = Fixture::new(&format!("printf 'spawn\\n' >>spawns\n{FAKE}")).await;
     f.start().await;
