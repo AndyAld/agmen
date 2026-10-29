@@ -5,6 +5,7 @@
 mod account;
 mod chat;
 pub(crate) mod claim;
+mod host;
 pub(crate) mod inbox;
 mod install_receipt;
 mod join;
@@ -195,6 +196,8 @@ enum Command {
     CheckPath(lanes::CheckPathArgs),
     /// Serve this worktree's identity to an agent as MCP tools on stdin and stdout.
     Mcp(crate::mcp::McpArgs),
+    /// Run a self-hosted hub on this machine.
+    Host(host::HostArgs),
 }
 
 /// How long a publishing command waits for the hub to record the message.
@@ -294,6 +297,7 @@ impl Cli {
             Command::Items => lanes::items().await,
             Command::CheckPath(args) => lanes::check_path(args).await,
             Command::Mcp(args) => crate::mcp::run(args).await,
+            Command::Host(args) => host::run(args).await,
         }
     }
 }
