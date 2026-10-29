@@ -13,7 +13,7 @@ use gpui::{
 };
 
 use super::code_view::{Line, cell_width, layout_lines, styled_line};
-use super::components::{Breadcrumb, Button, ButtonStyle, Color, Label};
+use super::components::{Breadcrumb, Button, ButtonStyle, EmptyState};
 use super::syntax::Language;
 use super::tokens::{DIFF_TINT, DIFF_TINT_COLUMNS, MONO_CELL_HEIGHT, SPACE_8, SPACE_16};
 use crate::appearance::Appearance;
@@ -229,10 +229,8 @@ impl Render for DiffView {
             .font_family(fonts.code_family.clone())
             .text_size(fonts.code_size);
         if self.rows.is_empty() {
-            return body.p(SPACE_16).child(
-                div()
-                    .debug_selector(|| "diff-empty".into())
-                    .child(Label::new("No changes to show").color(Color::Placeholder)),
+            return body.child(
+                EmptyState::new("diff-empty", "No changes to show").padding(SPACE_16, SPACE_16),
             );
         }
         let (rows, headers) = (self.rows.clone(), self.headers.clone());

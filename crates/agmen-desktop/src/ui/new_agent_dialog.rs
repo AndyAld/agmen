@@ -1,6 +1,6 @@
 //! Launch a managed Claude Code agent through the local backend.
 
-use super::components::{Button, DialogFooter, InputFrame, Label, Modal};
+use super::components::{Button, DialogFooter, Field, InputFrame, Label, Modal};
 use super::text_input::TextInput;
 use crate::backend::{Action, BackendHandle};
 use gpui::{
@@ -96,23 +96,26 @@ impl Render for NewAgentDialog {
         Modal::small("new-agent")
             .on_dismiss(cx.listener(|_, _, _, cx| cx.emit(Closed)))
             .title(Label::title("New Agent"))
-            .child(Label::new("Name"))
             .child(
-                div()
-                    .debug_selector(|| "new-agent:name".into())
-                    .child(InputFrame::new().child(self.name.clone())),
+                Field::new("new-agent:name-field", "Name").child(
+                    div()
+                        .debug_selector(|| "new-agent:name".into())
+                        .child(InputFrame::new().child(self.name.clone())),
+                ),
             )
-            .child(Label::new("Model"))
             .child(
-                div()
-                    .debug_selector(|| "new-agent:model".into())
-                    .child(InputFrame::new().child(self.model.clone())),
+                Field::new("new-agent:model-field", "Model").child(
+                    div()
+                        .debug_selector(|| "new-agent:model".into())
+                        .child(InputFrame::new().child(self.model.clone())),
+                ),
             )
-            .child(Label::new("Budget (USD)"))
             .child(
-                div()
-                    .debug_selector(|| "new-agent:budget".into())
-                    .child(InputFrame::new().child(self.budget.clone())),
+                Field::new("new-agent:budget-field", "Budget (USD)").child(
+                    div()
+                        .debug_selector(|| "new-agent:budget".into())
+                        .child(InputFrame::new().child(self.budget.clone())),
+                ),
             )
             .error(self.error.clone())
             .footer(

@@ -17,8 +17,8 @@ use self::rows::{
     browse_row, controls, density_row, font_label, icon_preview, row, setting, size_stepper, tilde,
 };
 use super::components::{
-    Breadcrumb, Button, ButtonStyle, Color, Dropdown, Icon, IconSize, Indent, InputFrame, Label,
-    LabelSize, Link, ListItem, Segmented, Toggle,
+    Breadcrumb, Button, ButtonStyle, Color, Dropdown, EmptyState, Field, Icon, IconSize, Indent,
+    InputFrame, Label, LabelSize, Link, ListItem, Segmented, SettingText, Toggle,
 };
 use super::text_input::{TextInput, TextInputEvent};
 use super::tokens::{
@@ -1025,7 +1025,8 @@ impl SettingsView {
                     .color(Color::Placeholder)
                     .wrap(),
                 )
-                .child(InputFrame::new().child(browse.search.clone()))
+                .child(Field::new("theme-search:field", "Search themes")
+                    .child(InputFrame::new().child(browse.search.clone())))
                 .when(!browse.query.is_empty(), |this| {
                     this.child(
                         Label::new(format!("Matching \u{201c}{}\u{201d}", browse.query))
@@ -1058,21 +1059,8 @@ impl SettingsView {
             out.push(
                 div()
                     .debug_selector(|| selector)
-                    .flex()
-                    .flex_col()
-                    .gap(SPACE_6)
                     .py(SPACE_12)
-                    .child(
-                        Label::new(*title)
-                            .weight(FontWeight::MEDIUM)
-                            .color(Color::TextMuted),
-                    )
-                    .child(
-                        Label::new(*text)
-                            .size(LabelSize::Small)
-                            .color(Color::Placeholder)
-                            .wrap(),
-                    )
+                    .child(SettingText::new(title, text).preserve_lines())
                     .into_any_element(),
             );
         }
@@ -1198,8 +1186,10 @@ impl SettingsView {
             "Start agmen in the background when you log in",
             "Adds this app's agmend as a login item. macOS may show a Background Items Added notice. Turning this off removes this app's login item.",
             cx,
-        ).child(Toggle::new("start-at-login", self.start_at_login)
-            .on_change(Self::handler(cx, |this, enabled, cx| this.change_login(enabled, cx))))
+        ).child(controls()
+            .child(Toggle::new("start-at-login", self.start_at_login)
+                .on_change(Self::handler(cx, |this, enabled, cx| this.change_login(enabled, cx))))
+            .when(self.login_task.is_some(), |this| this.child(Label::new("Changing login item…"))))
             .into_any_element()];
         let host = self.host_status.as_ref().filter(|status| status.configured);
         let configured = host.is_some()
@@ -1214,55 +1204,80 @@ impl SettingsView {
                 None => "Checking status…",
             };
             body.push(
-                div()
-                    .debug_selector(|| "host:status".into())
-                    .child(Label::new(format!("Your hub: {status}")))
-                    .children(
-                        host.and_then(|host| host.public_url.clone())
-                            .map(Label::new),
-                    )
-                    .children(
-                        host.and_then(|host| host.last_error.clone())
-                            .or_else(|| self.host_error.clone())
-                            .map(|error| {
-                                div()
-                                    .debug_selector(|| "host:error".into())
-                                    .child(Label::new(error).color(Color::Error).wrap())
-                            }),
-                    )
+                setting("Your hub", "", cx)
                     .child(
-                        Button::new("host:restart", "Restart")
-                            .disabled(self.host_task.is_some())
-                            .on_click(cx.listener(|this, _, _, cx| this.refresh_host(true, cx))),
+                        controls()
+                            .child(
+                                div()
+                                    .debug_selector(|| "host:status".into())
+                                    .child(Label::new(status)),
+                            )
+                            .children(
+                                host.and_then(|host| host.public_url.clone())
+                                    .map(Label::new),
+                            )
+                            .children(
+                                host.and_then(|host| host.last_error.clone())
+                                    .or_else(|| self.host_error.clone())
+                                    .map(|error| {
+                                        div()
+                                            .debug_selector(|| "host:error".into())
+                                            .child(Label::new(error).color(Color::Error).wrap())
+                                    }),
+                            )
+                            .child(
+                                Button::new("host:restart", "Restart")
+                                    .disabled(self.host_task.is_some())
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.refresh_host(true, cx)),
+                                    ),
+                            ),
                     )
                     .into_any_element(),
             );
         }
         body.push(
-            setting(
-                "Default agent model",
-                "Used when launching a new Claude Code agent.",
-                cx,
-            )
-            .child(InputFrame::new().child(self.agent_model.clone()))
-            .child(
-                Button::new("default-agent-model:save", "Save")
-                    .on_click(cx.listener(|this, _, window, cx| this.save_agent_model(window, cx))),
-            )
-            .into_any_element(),
+            setting("Default agent model", "", cx)
+                .child(
+                    controls().child(
+                        Field::new("default-agent-model:field", "Model")
+                            .hint("Used when launching a new Claude Code agent.")
+                            .child(
+                                row()
+                                    .w_full()
+                                    .child(
+                                        div().flex_1().min_w_0().child(
+                                            InputFrame::new().child(self.agent_model.clone()),
+                                        ),
+                                    )
+                                    .child(
+                                        Button::new("default-agent-model:save", "Save").on_click(
+                                            cx.listener(|this, _, window, cx| {
+                                                this.save_agent_model(window, cx)
+                                            }),
+                                        ),
+                                    ),
+                            ),
+                    ),
+                )
+                .into_any_element(),
         );
-        if self.login_task.is_some() {
-            body.push(Label::new("Changing login item…").into_any_element());
-        }
-        if let Some(offer) = &self.cli_install {
-            body.push(offer.clone().into_any_element());
+        let cli = if let Some(offer) = &self.cli_install {
+            offer.clone().into_any_element()
         } else {
-            body.push(
-                Label::new("Open agmen.app to install the agmen command.")
-                    .wrap()
-                    .into_any_element(),
-            );
-        }
+            Label::new("Open agmen.app to install the agmen command.")
+                .wrap()
+                .into_any_element()
+        };
+        body.push(
+            setting("agmen command", "", cx)
+                .child(
+                    controls()
+                        .debug_selector(|| "cli-install:controls".into())
+                        .child(cli),
+                )
+                .into_any_element(),
+        );
         body
     }
 }
@@ -1316,11 +1331,7 @@ impl Render for SettingsView {
             Page::Appearance => self.appearance_page(cx),
             Page::About => Self::about_page(),
             _ => vec![
-                div()
-                    .debug_selector(|| "settings-placeholder".into())
-                    .py(SPACE_12)
-                    .child(Label::new("Comes with agmend.").color(Color::Placeholder))
-                    .into_any_element(),
+                EmptyState::new("settings-placeholder", "Comes with agmend.").into_any_element(),
             ],
         };
         let path = self.sources.settings_path();

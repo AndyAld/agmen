@@ -24,6 +24,7 @@ mod dot;
 mod dropdown;
 // Task 7: the live panels' empty states.
 mod empty_state;
+mod field;
 mod icon;
 mod icon_button;
 mod input_frame;
@@ -35,7 +36,9 @@ mod list_item;
 mod menu;
 mod progress;
 mod segmented;
+mod setting_text;
 mod status_dot;
+mod status_item;
 mod stepper;
 mod tab;
 mod toggle;
@@ -53,6 +56,8 @@ pub(crate) use {model_tag::ModelTag, radio::Radio};
 mod check_row;
 mod modal;
 mod section_header;
+#[cfg(test)]
+pub(crate) use section_header::count_badge;
 mod table_card;
 
 pub(crate) use avatar::Avatar;
@@ -67,6 +72,7 @@ pub(crate) use detail_row::DetailRow;
 pub(crate) use dialog_footer::DialogFooter;
 pub(crate) use dot::Dot;
 pub(crate) use empty_state::EmptyState;
+pub(crate) use field::Field;
 pub(crate) use icon::{Icon, IconSize};
 pub(crate) use icon_button::{ClickHandler, IconButton, IconButtonStyle};
 pub(crate) use input_frame::InputFrame;
@@ -77,7 +83,9 @@ pub(crate) use link::Link;
 pub(crate) use list_item::{Indent, ListItem};
 pub(crate) use menu::Menu;
 pub(crate) use progress::ProgressBar;
+pub(crate) use setting_text::SettingText;
 pub(crate) use status_dot::StatusDot;
+pub(crate) use status_item::StatusItem;
 pub(crate) use tab::Tab;
 pub(crate) use tool_card::ToolCard;
 pub(crate) use tooltip::Tooltip;
@@ -86,7 +94,7 @@ pub(crate) use word_wrap::WordWrap;
 pub(crate) use {
     check_row::{CheckMark, CheckRow, CheckState},
     modal::Modal,
-    section_header::SectionHeader,
+    section_header::{SectionHeader, SectionTitleStyle},
     table_card::TableCard,
 };
 pub(crate) use {dropdown::Dropdown, segmented::Segmented, stepper::Stepper, toggle::Toggle};

@@ -27,6 +27,8 @@ mod listener_panel;
 pub(crate) mod cli_install;
 mod live_root;
 mod message;
+#[cfg(test)]
+mod molecule_tests;
 mod palette;
 mod palette_filter;
 mod pane;

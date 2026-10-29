@@ -162,6 +162,8 @@ fn sized(
 pub(crate) struct Button {
     id: ElementId,
     label: SharedString,
+    label_color: Option<Color>,
+    truncate: bool,
     style: ButtonStyle,
     size: ButtonSize,
     weight: Option<FontWeight>,
@@ -188,6 +190,8 @@ impl Button {
         Self {
             id: id.into(),
             label: label.into(),
+            label_color: None,
+            truncate: false,
             style: ButtonStyle::Outlined,
             size: ButtonSize::Default,
             weight: None,
@@ -202,6 +206,20 @@ impl Button {
     #[must_use]
     pub(crate) const fn style(mut self, style: ButtonStyle) -> Self {
         self.style = style;
+        self
+    }
+
+    /// Overrides the enabled label's color, as a status item can.
+    #[must_use]
+    pub(crate) fn label_color(mut self, color: Color) -> Self {
+        self.label_color = Some(color);
+        self
+    }
+
+    /// Lets the button and its label shrink within their row.
+    #[must_use]
+    pub(crate) const fn truncate(mut self) -> Self {
+        self.truncate = true;
         self
     }
 
@@ -314,7 +332,10 @@ impl RenderOnce for Button {
             styled
         };
         let (styled, text) = sized(styled, self.size, self.style);
-        let label = Label::new(self.label).size(text);
+        let styled = styled.when(self.truncate, |this| this.flex_shrink_1().min_w_0());
+        let label = Label::new(self.label)
+            .size(text)
+            .when(self.truncate, Label::truncate);
         let label = if self.size == ButtonSize::Medium {
             label.line_height(AUTO_LINE_12)
         } else {
@@ -357,6 +378,10 @@ impl RenderOnce for Button {
                     | ButtonStyle::Plain
                     | ButtonStyle::Secondary
                     | ButtonStyle::Bordered => label.color(Color::Default),
+                };
+                let label = match (self.disabled, self.label_color) {
+                    (false, Some(color)) => label.color(color),
+                    _ => label,
                 };
                 match self.weight {
                     Some(weight) => label.weight(weight),

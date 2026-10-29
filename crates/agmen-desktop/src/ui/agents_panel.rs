@@ -5,13 +5,13 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, ClickEvent, Context, EventEmitter, FontWeight, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, Styled as _, Window, div,
+    AnyElement, ClickEvent, Context, EventEmitter, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, Styled as _, Window, div,
 };
 
 use super::components::{
-    Button, ButtonStyle, Color, Icon, IconButton, IconButtonStyle, IconSize, Indent, Label,
-    LabelSize, ListItem, Menu, MenuRow, StatusDot,
+    Button, ButtonStyle, Color, IconButton, IconButtonStyle, Indent, Label, LabelSize, ListItem,
+    Menu, MenuRow, SectionHeader, SectionTitleStyle, StatusDot,
 };
 use super::format::title_case;
 use super::tokens::{SPACE_4, SPACE_6};
@@ -195,21 +195,16 @@ impl AgentsPanel {
             .flat_map(|group| &group.agents)
     }
 
-    fn person_row(&self, group: &PersonGroup, cx: &mut Context<Self>) -> ListItem {
+    fn person_row(&self, group: &PersonGroup, cx: &mut Context<Self>) -> SectionHeader {
         let person = group.person.clone();
-        let chevron = if self.folded.contains(&person) {
-            UiIcon::ChevronRight
-        } else {
-            UiIcon::ChevronDown
-        };
         let name = if group.you {
             format!("{} (you)", group.person)
         } else {
             group.person.clone()
         };
-        ListItem::new(format!("person:{person}"), Indent::Group)
-            .leading(Icon::new(chevron).size(IconSize::Small).color(Color::Muted))
-            .child(Label::new(name).weight(FontWeight::MEDIUM))
+        SectionHeader::new(format!("person:{person}"), name)
+            .title_style(SectionTitleStyle::Name)
+            .open(!self.folded.contains(&person))
             .on_click(cx.listener(move |this, _, _, cx| this.toggle_fold(&person, cx)))
     }
 
