@@ -82,14 +82,15 @@ fn bad_role_files_are_errors() {
 
 #[test]
 fn kind_cap_matches_the_hub() {
-    use agmen_proto::Verb;
+    use agmen_proto::{IdentityKind, Verb};
     assert!(kind_may_send(RoleKind::Agent, Verb::Claim));
     assert!(!kind_may_send(RoleKind::Agent, Verb::Ruling));
     assert!(kind_may_send(RoleKind::Coordinator, Verb::Assign));
     assert!(kind_may_send(RoleKind::Listener, Verb::Delegated));
     assert!(!kind_may_send(RoleKind::Listener, Verb::Claim));
-    // The hub takes REVIEW from no kind yet (ingest.rs may_send).
+    // NULL verbs fall back to the kind table, which refuses REVIEW; a role's mint ceiling allows it (D15)
     assert!(!kind_may_send(RoleKind::Agent, Verb::Review));
+    assert!(agmen_proto::kind_ceiling(IdentityKind::Agent, Verb::Review));
 }
 
 #[test]
