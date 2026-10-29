@@ -205,7 +205,8 @@ pub(crate) struct StateParams {
     key: Option<StateKey>,
 }
 
-/// The retained `state/<key>` topics the `state` tool reads.
+/// What the `state` tool reads. `head` is the retained topic. `roster` is
+/// the full array from `GET /v1/projects/{p}/state?key=roster`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 enum StateKey {
@@ -406,7 +407,7 @@ impl Server {
     async fn ask(&self, Parameters(params): Parameters<AskParams>) -> CallToolResult {
         self.respond_with_pending(move |live: Arc<Live>| async move {
             let of = match params.of {
-                Some(of) => live.agent.resolve(live.via(), &[of]).await?.pop(),
+                Some(of) => live.agent.resolve(&[of]).await?.pop(),
                 None => None,
             };
             let out = Outgoing {
@@ -465,19 +466,21 @@ impl Server {
     }
 
     #[tool(
-        description = "Read the project's retained state as JSON: head (stream heads and \
-        versions) or roster (who is in the project and online)."
+        description = "Read project state as JSON: head (retained stream heads and versions) \
+        or roster (who is in the project, the full array)."
     )]
     async fn state(&self, Parameters(params): Parameters<StateParams>) -> CallToolResult {
         self.respond_with_pending(move |live: Arc<Live>| async move {
-            let key = params.key.unwrap_or_default().as_str();
-            let value = live
-                .agent
-                .read_state(live.via(), key)
-                .await
-                .map_err(|err| client_error(err, "reading the project's state failed"))?;
+            let key = params.key.unwrap_or_default();
+            // The roster is the full array over HTTP; the retained topic is
+            // only its head. Both keep the tool's one error text.
+            let value = match key {
+                StateKey::Roster => live.agent.hub.roster().await.map(Some),
+                StateKey::Head => live.agent.read_state(live.via(), key.as_str()).await,
+            }
+            .map_err(|err| client_error(err, "reading the project's state failed"))?;
             let shown = value.map_or_else(|| "nothing retained".to_owned(), |v| v.to_string());
-            Ok(format!("state/{key}: {}", clean(&shown)))
+            Ok(format!("state/{}: {}", key.as_str(), clean(&shown)))
         })
         .await
     }

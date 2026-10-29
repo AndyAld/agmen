@@ -557,9 +557,15 @@ impl Session {
     /// connection, so it never makes the broker drop a one-shot command of
     /// the same identity. Reads on one session run one at a time.
     ///
+    /// The retained `state/roster` is a small head, `{count, online, etag}`.
+    /// The full array for [`crate::resolve_handle`] comes from
+    /// [`crate::HubClient::roster`].
+    ///
     /// ```no_run
-    /// # async fn example(session: agmen_client::Session) -> Result<(), Box<dyn std::error::Error>> {
-    /// let roster = session.read_state("roster").await?.unwrap_or_default();
+    /// # async fn example(session: agmen_client::Session, hub: agmen_client::HubClient) -> Result<(), Box<dyn std::error::Error>> {
+    /// let head = session.read_state("roster").await?.unwrap_or_default();
+    /// println!("{} identities", head["count"]);
+    /// let roster = hub.roster().await?;
     /// match agmen_client::resolve_handle(&roster, "adam/coord")? {
     ///     Some(id) => println!("adam/coord is {id}"),
     ///     None => println!("no adam/coord in this project"),

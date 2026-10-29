@@ -1,9 +1,9 @@
 //! The identity this worktree acts as: its trusted identity file (rulings
 //! R42 to R42b, through agmen-client's `find_identity`), its token, and
-//! what every command that speaks for it shares: retained state and handle
-//! lookup (rulings R60 and R68), envelopes, and publishing that waits for
-//! the hub's answer, through a one-shot `<id>-cli` session (the CLI) or a
-//! session the caller holds open (`agmen mcp`).
+//! what every command that speaks for it shares: retained state, handle
+//! lookup over HTTP (rulings R60 and R68), envelopes, and publishing that
+//! waits for the hub's answer, through a one-shot `<id>-cli` session (the
+//! CLI) or a session the caller holds open (`agmen mcp`).
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -156,26 +156,27 @@ impl Agent {
     }
 
     /// The ids of `names`, each a handle (`adam/coord`) or an id, looked up
-    /// in the retained roster (ruling R60), which is read the way `via`
-    /// says. A name no roster entry has is used as an id when it is one.
+    /// in the roster [`HubClient::roster`] returns (ruling R60). A name no
+    /// roster entry has is used as an id when it is one.
     ///
     /// # Errors
     ///
-    /// A usage failure naming the first name that is neither.
-    pub(crate) async fn resolve(&self, via: Via<'_>, names: &[String]) -> Result<Vec<IdentityId>> {
+    /// A usage failure naming the first name that is neither, or the
+    /// client's error when the roster cannot be read.
+    pub(crate) async fn resolve(&self, names: &[String]) -> Result<Vec<IdentityId>> {
         if names.is_empty() {
             return Ok(Vec::new());
         }
         let roster = self
-            .read_state(via, "roster")
+            .hub
+            .roster()
             .await
             .map_err(|err| client_error(err, "reading the project's roster failed"))?;
         names
             .iter()
             .map(|name| {
-                if let Some(roster) = &roster
-                    && let Some(id) =
-                        resolve_handle(roster, name).context("the project's roster is not valid")?
+                if let Some(id) =
+                    resolve_handle(&roster, name).context("the project's roster is not valid")?
                 {
                     return Ok(id);
                 }
@@ -188,11 +189,11 @@ impl Agent {
 
     /// `mentions` as the wire takes them: `all`, `agents`, `humans`, lanes
     /// and `role:<name>` as they are, handles and ids through
-    /// [`Agent::resolve`] with `via`.
-    pub(crate) async fn mentions(&self, via: Via<'_>, mentions: &[String]) -> Result<Vec<Mention>> {
+    /// [`Agent::resolve`].
+    pub(crate) async fn mentions(&self, mentions: &[String]) -> Result<Vec<Mention>> {
         let (mut out, names) = mention_tokens(mentions.iter().map(String::as_str));
         out.extend(
-            self.resolve(via, &names)
+            self.resolve(&names)
                 .await?
                 .into_iter()
                 .map(Mention::Identity),

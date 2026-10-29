@@ -1,13 +1,15 @@
-//! `GET /v1/projects/{p}/state?key=roster|head` (protocol section 6): the
-//! JSON the hub publishes retained on `state/{key}`, over HTTP. agmend has
-//! no broker session for the person, and a roster past the 4 KiB state
-//! limit still arrives whole here.
+//! `GET /v1/projects/{p}/state?key=roster|head` (protocol section 6).
+//! `roster` answers the full array in `value` and, for that key only, sets
+//! `ETag` to the head's etag. The retained `state/roster` topic holds only
+//! that head (`{count, online, etag}`). `head` answers the JSON the hub
+//! publishes retained on `state/head`.
 //!
-//! The answer is `{key, as_of_seq, value}`. `value` is what the topic
-//! carries, built by the code that publishes it: [`Hub::roster`] for
-//! `roster` (presence.rs) and [`state_head`] for `head` (sweeper.rs). The
-//! topics are published when something changes; this builds the value at
-//! request time, so it is at least as fresh as the topic.
+//! The answer is `{key, as_of_seq, value}`. `value` is built by the code
+//! that publishes the topic: [`Hub::roster`] for `roster`
+//! ([`crate::roster`]) and [`state_head`] for `head` (sweeper.rs). For
+//! `roster`, `value` is the full array, not the retained head. The topics
+//! are published when something changes; this builds the value at request
+//! time, so it is at least as fresh as the topic.
 //!
 //! `as_of_seq` is the feed seq the value reflects. For `head` it is the
 //! payload's own `feed_seq`. For `roster` it is the feed's head read just
@@ -23,17 +25,18 @@
 //! `lanes`, `round` and `packs` are not served yet.
 
 use agmen_proto::Topics;
+use axum::Json;
 use axum::extract::rejection::QueryRejection;
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
-use axum::{Json, response::IntoResponse};
+use axum::http::{HeaderValue, StatusCode, header};
+use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::auth::Caller;
 use crate::http::{ApiError, Hub};
 use crate::lanes::member_of;
-use crate::presence::RosterError;
+use crate::roster::{RosterError, roster_head};
 use crate::sweeper::state_head;
 
 /// The query string: the `state/` key.
@@ -56,7 +59,7 @@ pub(crate) async fn get(
     Path(project): Path<String>,
     caller: Caller,
     query: Result<Query<StateQuery>, QueryRejection>,
-) -> Result<impl IntoResponse, ApiError> {
+) -> Result<Response, ApiError> {
     let (project, _) = member_of(&hub, caller, &project).await?;
     let invalid = |description: String| {
         ApiError::new(StatusCode::BAD_REQUEST, "invalid_request", description)
@@ -76,13 +79,16 @@ pub(crate) async fn get(
         tenant.parse().map_err(ApiError::stored)?,
         project.as_str().parse().map_err(ApiError::stored)?,
     );
-    let snapshot = if key == "head" {
+    let (snapshot, etag) = if key == "head" {
         let head = state_head(&hub, &topics).await?;
-        Snapshot {
-            key,
-            as_of_seq: head.feed_seq,
-            value: serde_json::to_value(&head).map_err(ApiError::stored)?,
-        }
+        (
+            Snapshot {
+                key,
+                as_of_seq: head.feed_seq,
+                value: serde_json::to_value(&head).map_err(ApiError::stored)?,
+            },
+            None,
+        )
     } else {
         // The head first: the roster built next reflects at least it.
         let as_of_seq = state_head(&hub, &topics).await?.feed_seq;
@@ -90,11 +96,23 @@ pub(crate) async fn get(
             RosterError::Database(err) => ApiError::Database(err),
             err @ RosterError::Stored(_) => ApiError::stored(err),
         })?;
-        Snapshot {
-            key,
-            as_of_seq,
-            value: serde_json::to_value(&roster).map_err(ApiError::stored)?,
-        }
+        // The same array this response returns, so the header matches the
+        // retained head once that publish uses this roster.
+        let head = roster_head(&roster);
+        let etag =
+            HeaderValue::from_str(&format!("\"{}\"", head.etag)).map_err(ApiError::stored)?;
+        (
+            Snapshot {
+                key,
+                as_of_seq,
+                value: serde_json::to_value(&roster).map_err(ApiError::stored)?,
+            },
+            Some(etag),
+        )
     };
-    Ok(Json(snapshot))
+    let mut response = Json(snapshot).into_response();
+    if let Some(etag) = etag {
+        response.headers_mut().insert(header::ETAG, etag);
+    }
+    Ok(response)
 }

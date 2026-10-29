@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use agmen_client::{ClientError, ClientEvent, ClientKind, Session, read_state, resolve_handle};
 use agmen_proto::{ClientEnvelope, IdentityId, Timestamp};
-use serde_json::{Value, json};
+use serde_json::json;
 use support::{
     Ctx, PresenceLog, ShortTokens, TestIdentity, close, delivered, disconnected, kick,
     new_message_id, run, subscribed_to, subscriptions,
@@ -36,17 +36,19 @@ fn hello() -> ClientEnvelope {
     ClientEnvelope::from_json(&serde_json::to_vec(&raw).unwrap()).unwrap()
 }
 
-/// Reads the retained roster as `reader` until it gives `id` `status`;
-/// panics after 20 s.
+/// How many roster reads `roster_status` makes before it gives up.
+const ROSTER_POLLS: usize = 100;
+
+/// Reads the roster over HTTP as `reader` until it gives `id` `status`;
+/// panics after 20 s or [`ROSTER_POLLS`] reads.
 async fn roster_status(ctx: &Ctx, reader: &TestIdentity, id: &IdentityId, status: &str) {
-    let (file, hub) = (ctx.identity_file(reader), ctx.hub_client(reader));
+    let hub = ctx.hub_client(reader);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     let mut last = None;
-    loop {
-        let roster = read_state(&file, &hub, "roster").await.unwrap();
-        let entry = roster.as_ref().and_then(|roster| {
-            roster
-                .as_array()?
+    for _ in 0..ROSTER_POLLS {
+        let roster = hub.roster().await.unwrap();
+        let entry = roster.as_array().and_then(|entries| {
+            entries
                 .iter()
                 .find(|entry| entry["identity_id"] == id.as_str())
                 .cloned()
@@ -61,9 +63,10 @@ async fn roster_status(ctx: &Ctx, reader: &TestIdentity, id: &IdentityId, status
             tokio::time::Instant::now() < deadline,
             "{id} is not {status} in the roster; last read: {last:?}"
         );
-        last = roster;
+        last = Some(roster);
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
+    panic!("{id} is not {status} after {ROSTER_POLLS} reads; last read: {last:?}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -86,15 +89,26 @@ async fn it_read_state_roster_and_head() {
         // read_state connects as the same `-cli` client id.
         close(session).await;
 
-        let mut roster = Value::Null;
+        let mut head = None;
         for _ in 0..ROSTER_READS {
             if let Some(state) = read_state(&file, &hub, "roster").await.unwrap() {
-                roster = state;
+                head = Some(state);
                 break;
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
-        let entries = roster.as_array().expect("the hub published the roster");
+        let head = head.expect("the hub published the roster head");
+        assert!(head["count"].as_u64().is_some(), "{head}");
+        assert!(head["online"].as_u64().is_some(), "{head}");
+        let etag = head["etag"].as_str().expect("etag");
+        assert_eq!(etag.len(), 16, "{head}");
+        assert!(
+            etag.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "{head}"
+        );
+        let roster = hub.roster().await.unwrap();
+        let entries = roster.as_array().expect("the roster is an array");
         assert!(
             entries
                 .iter()
@@ -242,14 +256,20 @@ async fn it_session_reads_state_on_its_own_connection() {
         let greeting = hello();
         mcp.publish(greeting.clone()).await.unwrap();
         delivered(&mut events, &greeting.id).await;
-        let mut roster = Value::Null;
+        let mut head = None;
         for _ in 0..ROSTER_READS {
             if let Some(state) = mcp.read_state("roster").await.unwrap() {
-                roster = state;
+                head = Some(state);
                 break;
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
+        let head = head.expect("the hub published the roster head");
+        assert!(
+            head["count"].is_number() && head["etag"].is_string(),
+            "{head}"
+        );
+        let roster = ctx.hub_client(&who).roster().await.unwrap();
         assert_eq!(
             resolve_handle(&roster, &who.identity.handle).unwrap(),
             Some(id.clone()),
@@ -272,7 +292,12 @@ async fn it_session_reads_state_on_its_own_connection() {
         let head = watch.read_state("head").await.unwrap().expect("state/head");
         assert_eq!(head["feed_seq"], 1, "{head}");
         let roster = watch.read_state("roster").await.unwrap();
-        assert!(roster.is_some());
+        assert!(
+            roster
+                .as_ref()
+                .is_some_and(|head| head["count"].is_number() && head["etag"].is_string()),
+            "{roster:?}"
+        );
         let mut want = vec![
             ctx.topics.ack(&id),
             ctx.topics.feed(),

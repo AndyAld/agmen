@@ -6,7 +6,7 @@
 //!
 //! The session publishes the identity's retained presence on every
 //! connect, with a last will that sets it offline (agmen-client), so the
-//! retained roster shows the identity online while watch runs. The hub
+//! roster shows the identity online while watch runs. The hub
 //! lists the identity in that roster from the moment it is minted, so
 //! handle lookups (rulings R51 and R60) never wait for a HELLO. Watch still
 //! posts one HELLO per process, after the first connect, to name its client

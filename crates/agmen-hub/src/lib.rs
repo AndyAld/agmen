@@ -9,8 +9,9 @@
 //! the broker, ingests every client publish ([`Hub::ingest`]) and runs the
 //! sweeper that publishes what ingest stored; [`Hub::post_as_hub`] posts the
 //! hub's own messages. The hub also serves replay of every stream and a
-//! member's chat as server-sent events, keeps
-//! each project's retained `state/roster` from presence, and answers
+//! member's chat as server-sent events, keeps each project's retained
+//! `state/roster` head from presence (the full roster is
+//! `GET /v1/projects/{p}/state?key=roster`), and answers
 //! ROLLCALL. The ledger (lanes, items and claims, design 6.5) answers
 //! CLAIM, FOUND and DONE as they are ingested, serves lanes, items and path
 //! checks over HTTP, and [`Hub::run_lease_sweeper`] releases claims whose
@@ -49,6 +50,7 @@ mod refs;
 mod replay;
 mod roles;
 mod rollcall;
+mod roster;
 mod secrets_scan;
 mod self_config;
 mod state;
