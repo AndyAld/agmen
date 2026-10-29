@@ -319,7 +319,6 @@ impl TestHub {
             emqx: EmqxConfig {
                 api_url: Url::parse(&env("AGMEN_IT_EMQX_API")).unwrap(),
                 api_key: env("AGMEN_IT_EMQX_API_KEY"),
-                api_secret: Secret::new(env("AGMEN_IT_EMQX_API_SECRET")),
             },
             mqtt: MqttConfig {
                 host,
@@ -328,7 +327,10 @@ impl TestHub {
                 share_group: new_id(),
             },
             public_mqtt_url: Url::parse(PUBLIC_MQTT_URL).unwrap(),
-            jwt_signing_key: jwt_key(signing),
+            secrets: agmen_hub::HubSecrets::Given {
+                jwt_signing_key: jwt_key(signing),
+                emqx_api_secret: Secret::new(env("AGMEN_IT_EMQX_API_SECRET")),
+            },
             jwt_extra_keys: extra.iter().map(|name| jwt_key(name)).collect(),
             claim_lease: lease,
         };

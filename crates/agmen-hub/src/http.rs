@@ -17,13 +17,14 @@ use sqlx::PgPool;
 use url::Url;
 
 use crate::auth::{self, Github, GithubError};
-use crate::broker_tokens::{BrokerTokens, SigningKey, TokenError};
+use crate::broker_tokens::{BrokerTokens, TokenError};
 use crate::config::{Config, HubMode};
 use crate::emqx::{EmqxAdmin, EmqxError};
 use crate::events::Slots;
 use crate::group::{self, GroupError};
 use crate::ingest::IngestState;
 use crate::presence::PresenceState;
+use crate::self_config::{self, SelfConfigError};
 use crate::{db, events, health, human_post, identities, invites, items, lanes, me, replay, state};
 
 /// How long the hub waits for GitHub or EMQX to answer.
@@ -33,6 +34,9 @@ const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(10);
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum HubError {
+    /// Loading supplied secrets or creating the self-host secrets failed.
+    #[error("loading the hub secrets failed")]
+    SelfConfig(#[source] SelfConfigError),
     /// Initializing the self-host group failed.
     #[error("initializing the self-host group failed")]
     Group(#[source] GroupError),
@@ -99,16 +103,18 @@ impl Hub {
                 "the default GitHub client id is a placeholder; configure a device-flow OAuth app before sign-in"
             );
         }
-        let signing = SigningKey::from_pem_file(&config.jwt_signing_key).map_err(HubError::Keys)?;
+        let loaded = self_config::load(&config.secrets, &config.emqx.api_key)
+            .map_err(HubError::SelfConfig)?;
         let extra = config
             .jwt_extra_keys
             .iter()
-            .map(SigningKey::from_pem_file)
+            .map(|path| self_config::load_signing_key(path))
             .collect::<Result<Vec<_>, _>>()
-            .map_err(HubError::Keys)?;
-        let tokens = BrokerTokens::new(signing, extra).map_err(HubError::Keys)?;
+            .map_err(HubError::SelfConfig)?;
+        let tokens = BrokerTokens::new(loaded.signing, extra).map_err(HubError::Keys)?;
         let http = upstream_client().map_err(HubError::HttpClient)?;
-        let emqx = EmqxAdmin::new(&config.emqx, http.clone()).map_err(HubError::Emqx)?;
+        let emqx = EmqxAdmin::new(&config.emqx, loaded.emqx_api_secret, http.clone())
+            .map_err(HubError::Emqx)?;
         let github = Github::new(&config.github, http).map_err(HubError::Github)?;
         let pool = db::connect(config.database_url.expose())
             .await

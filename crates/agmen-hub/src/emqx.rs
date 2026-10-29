@@ -61,12 +61,16 @@ struct ErrorBody {
 
 impl EmqxAdmin {
     /// A client for the API at `config.api_url` that sends requests
-    /// through `http`.
+    /// through `http`, authenticated with `api_secret`.
     ///
     /// # Errors
     ///
     /// [`EmqxError::BadApiUrl`] when the URL cannot take path segments.
-    pub fn new(config: &EmqxConfig, http: reqwest::Client) -> Result<Self, EmqxError> {
+    pub fn new(
+        config: &EmqxConfig,
+        api_secret: Secret,
+        http: reqwest::Client,
+    ) -> Result<Self, EmqxError> {
         if config.api_url.cannot_be_a_base() {
             return Err(EmqxError::BadApiUrl(config.api_url.to_string()));
         }
@@ -74,7 +78,7 @@ impl EmqxAdmin {
             http,
             api_url: config.api_url.clone(),
             api_key: config.api_key.clone(),
-            api_secret: config.api_secret.clone(),
+            api_secret,
         })
     }
 
