@@ -1,0 +1,8 @@
+<team-template name="eng-team" version="1">
+  <description>A coordinator with two engineers; each engineer can start reviewers.</description>
+  <node template="coordinator-opus">
+    <node template="rust-engineer" count="2">
+      <node template="rust-reviewer" count="0" />
+    </node>
+  </node>
+</team-template>

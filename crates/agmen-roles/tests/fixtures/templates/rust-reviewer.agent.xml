@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<agent-template name="rust-reviewer" version="1">
+  <description>Reviews Rust DONEs with the house rules.</description>
+  <agent kind="claude" model="claude-sonnet-5-5" effort="high" />
+  <role name="reviewer" />
+  <skills>
+    <skill name="rust-review" pack="github:groupdrive/agmen-rust@1a2b3c4" />
+    <skill name="cc-skill-coding-standards" />
+  </skills>
+  <mcp>
+    <server name="docs" pack="github:groupdrive/agmen-rust@1a2b3c4" />
+  </mcp>
+  <budget usd="5.00" />
+  <prompt>Review the DONE you are given.</prompt>
+  <options>
+    <option name="context-window" value="1m" />
+  </options>
+</agent-template>
