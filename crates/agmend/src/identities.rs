@@ -1,6 +1,7 @@
 //! Per-request local caller authentication and identity session publishing.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Read as _;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
@@ -9,7 +10,7 @@ use std::time::Duration;
 use agmen_client::{ClientEvent, ClientKind, HubClient, Me, OutboxState, Session, SessionConfig};
 use agmen_local::{ApiError, ErrorCode};
 use agmen_proto::{ClientEnvelope, IdentityId, ProjectId, StampedEnvelope, Stream, Topics};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::io::AsyncReadExt as _;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -94,12 +95,30 @@ pub(crate) enum Caller {
 }
 
 // This record deliberately has no Debug implementation: it holds a credential.
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct LocalCredential {
     origin: String,
     owner_id: IdentityId,
     local_token: String,
+}
+
+// shortcut: L21 passes the token to the listener and managed runs
+#[cfg_attr(not(test), expect(dead_code, reason = "wired by L21"))]
+pub(crate) struct LocalToken(String);
+
+impl std::fmt::Debug for LocalToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("LocalToken(<redacted>)")
+    }
+}
+
+// shortcut: L21 passes the token to the listener and managed runs
+#[cfg_attr(not(test), expect(dead_code, reason = "wired by L21"))]
+impl LocalToken {
+    pub(crate) fn expose(&self) -> &str {
+        &self.0
+    }
 }
 
 #[derive(Debug)]
@@ -145,12 +164,97 @@ impl std::fmt::Debug for Identities {
 }
 
 impl Identities {
+    // shortcut: L21 passes the token to the listener and managed runs
+    #[cfg_attr(not(test), expect(dead_code, reason = "wired by L21"))]
+    pub(crate) async fn local_token(
+        &self,
+        id: &IdentityId,
+    ) -> Result<Option<LocalToken>, ApiError> {
+        tokio::time::timeout(DEADLINE, async {
+            let login = self.credentials.login().await.map_err(|_| unauthorized())?;
+            let origin = login.hub_url.origin().ascii_serialization();
+            let rows = self.managed(origin.clone(), login.human_id.clone()).await?;
+            if !rows.iter().any(|row| row.identity_id == *id) {
+                return Ok(None);
+            }
+            let namespace = Url::parse("https://agmend.invalid").map_err(|_| unauthorized())?;
+            let Some(raw) = self.credentials.token(&namespace, id).await? else {
+                return Ok(None);
+            };
+            let credential: LocalCredential =
+                serde_json::from_str(&raw).map_err(|_| unauthorized())?;
+            if credential.origin != origin
+                || credential.owner_id != login.human_id
+                || !valid_token(&credential.local_token)
+            {
+                return Err(unauthorized());
+            }
+            Ok(Some(LocalToken(credential.local_token)))
+        })
+        .await
+        .map_err(|_| unauthorized())?
+    }
+
     pub(crate) async fn register(&self, identity: ManagedIdentity) -> Result<(), ApiError> {
         let key = (
             identity.hub_url.origin().ascii_serialization(),
             identity.identity_id.clone(),
         );
-        store_work(self.store.clone(), move |store| store.register(&identity)).await?;
+        // A row from an earlier run holds waiting messages and receipts that
+        // a failed token must not erase, so only a row this call adds is
+        // rolled back.
+        let already_registered = self
+            .managed(key.0.clone(), identity.owner_id.clone())
+            .await?
+            .iter()
+            .any(|row| row.identity_id == identity.identity_id);
+        let row = identity.clone();
+        store_work(self.store.clone(), move |store| store.register(&row)).await?;
+        let issued = tokio::time::timeout(DEADLINE, async {
+            let namespace = Url::parse("https://agmend.invalid").map_err(|_| unauthorized())?;
+            if let Some(raw) = self
+                .credentials
+                .token(&namespace, &identity.identity_id)
+                .await?
+                && serde_json::from_str::<LocalCredential>(&raw).is_ok()
+            {
+                return Ok(());
+            }
+            let token = tokio::task::spawn_blocking(|| {
+                let mut bytes = [0_u8; 32];
+                std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+                Ok::<String, std::io::Error>(
+                    bytes.iter().map(|byte| format!("{byte:02x}")).collect(),
+                )
+            })
+            .await
+            .map_err(|_| hub_error("local identity token worker failed"))?
+            .map_err(|_| hub_error("generating local identity token failed"))?;
+            let credential = LocalCredential {
+                origin: key.0.clone(),
+                owner_id: identity.owner_id.clone(),
+                local_token: token,
+            };
+            let raw = serde_json::to_string(&credential)
+                .map_err(|_| hub_error("encoding local identity credential failed"))?;
+            self.credentials
+                .set_token(&namespace, &identity.identity_id, raw)
+                .await
+        })
+        .await
+        .unwrap_or_else(|_| Err(hub_error("local identity token storage timed out")));
+        if let Err(error) = issued {
+            if already_registered {
+                return Err(error);
+            }
+            let origin = key.0;
+            let id = identity.identity_id;
+            store_work(self.store.clone(), move |store| {
+                store.unregister(&origin, &id)
+            })
+            .await?;
+            return Err(error);
+        }
         self.launched.lock().await.insert(key);
         Ok(())
     }
@@ -168,7 +272,23 @@ impl Identities {
         store_work(self.store.clone(), move |store| {
             store.unregister(&origin, &id)
         })
-        .await
+        .await?;
+        let namespace = Url::parse("https://agmend.invalid").map_err(|_| unauthorized())?;
+        if !matches!(
+            tokio::time::timeout(
+                DEADLINE,
+                self.credentials
+                    .delete_token(&namespace, &identity.identity_id)
+            )
+            .await,
+            Ok(Ok(()))
+        ) {
+            tracing::warn!(
+                identity = %identity.identity_id,
+                "the forgotten identity's local credential was not deleted"
+            );
+        }
+        Ok(())
     }
 
     pub(crate) async fn close_identity(&self, identity: &ManagedIdentity) {
@@ -237,6 +357,15 @@ impl Identities {
         tokio::time::timeout(DEADLINE, async {
             let login = self.credentials.login().await.map_err(|_| unauthorized())?;
             let origin = login.hub_url.origin().ascii_serialization();
+            let rows = self.managed(origin.clone(), login.human_id.clone()).await?;
+            let caller = rows
+                .into_iter()
+                .find(|row| {
+                    row.identity_id == *id
+                        && row.owner_id == login.human_id
+                        && row.hub_url.origin().ascii_serialization() == origin
+                })
+                .ok_or_else(unauthorized)?;
             let namespace = Url::parse("https://agmend.invalid").map_err(|_| unauthorized())?;
             let raw = self
                 .credentials
@@ -251,15 +380,6 @@ impl Identities {
             {
                 return Err(unauthorized());
             }
-            let rows = self.managed(origin.clone(), login.human_id.clone()).await?;
-            let caller = rows
-                .into_iter()
-                .find(|row| {
-                    row.identity_id == *id
-                        && row.owner_id == login.human_id
-                        && row.hub_url.origin().ascii_serialization() == origin
-                })
-                .ok_or_else(unauthorized)?;
             Ok(Caller::Identity(caller))
         })
         .await
@@ -1129,6 +1249,43 @@ mod tests {
     }
 
     impl Fixture {
+        fn local_key(&self) -> TokenKey {
+            TokenKey::new(
+                &"https://agmend.invalid".parse().unwrap(),
+                &self.who.identity_id,
+            )
+            .unwrap()
+        }
+
+        fn local_path(&self) -> PathBuf {
+            let name: String = self
+                .local_key()
+                .as_str()
+                .bytes()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            self._dir.path().join("tokens").join(format!("tok-{name}"))
+        }
+
+        fn unregistered() -> Self {
+            let fixture = Self::new(None);
+            fixture.tokens.delete(&fixture.local_key()).unwrap();
+            fixture
+                .daemon
+                .core
+                .identities
+                .store
+                .store
+                .lock()
+                .unwrap()
+                .unregister(
+                    &fixture.who.hub_url.origin().ascii_serialization(),
+                    &fixture.who.identity_id,
+                )
+                .unwrap();
+            fixture
+        }
+
         fn new(publisher: Option<Publisher>) -> Self {
             let dir = tempfile::tempdir().unwrap();
             let tokens = TokenStore::Dir(dir.path().join("tokens"));
@@ -1221,6 +1378,187 @@ mod tests {
 
     fn envelope() -> Value {
         json!({"v":1,"id":"01JBX6Q4T7W3C2M8Y9K5N0P1RS","verb":"FYI","data":{},"body":"hello","sent_at":"2026-10-27T12:00:00Z"})
+    }
+
+    #[tokio::test]
+    async fn local_token_issued_on_register() {
+        let fixture = Fixture::unregistered();
+        let identities = &fixture.daemon.core.identities;
+        identities.register(fixture.who.clone()).await.unwrap();
+        let token = identities
+            .local_token(&fixture.who.identity_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(valid_token(token.expose()));
+        let caller = identities
+            .authorize(Some(&fixture.who.identity_id), Some(token.expose()))
+            .await
+            .unwrap();
+        assert!(matches!(caller, Caller::Identity(row) if row == fixture.who));
+    }
+
+    #[tokio::test]
+    async fn wrong_or_missing_token_is_refused() {
+        let fixture = Fixture::unregistered();
+        let identities = &fixture.daemon.core.identities;
+        identities.register(fixture.who.clone()).await.unwrap();
+        let token = identities
+            .local_token(&fixture.who.identity_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let wrong = if token.expose().starts_with('a') {
+            "b".repeat(64)
+        } else {
+            "a".repeat(64)
+        };
+        for supplied in [Some(wrong.as_str()), None] {
+            let refusal = identities
+                .authorize(Some(&fixture.who.identity_id), supplied)
+                .await
+                .unwrap_err();
+            assert_eq!(refusal, unauthorized());
+        }
+    }
+
+    #[tokio::test]
+    async fn register_twice_keeps_the_token() {
+        let fixture = Fixture::unregistered();
+        let identities = &fixture.daemon.core.identities;
+        identities.register(fixture.who.clone()).await.unwrap();
+        let first = identities
+            .local_token(&fixture.who.identity_id)
+            .await
+            .unwrap()
+            .unwrap();
+        identities.register(fixture.who.clone()).await.unwrap();
+        let second = identities
+            .local_token(&fixture.who.identity_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(first.expose() == second.expose());
+    }
+
+    #[tokio::test]
+    async fn forget_removes_the_token() {
+        let fixture = Fixture::unregistered();
+        let identities = &fixture.daemon.core.identities;
+        identities.register(fixture.who.clone()).await.unwrap();
+        let token = identities
+            .local_token(&fixture.who.identity_id)
+            .await
+            .unwrap()
+            .unwrap();
+        identities.forget(&fixture.who).await.unwrap();
+        assert!(
+            identities
+                .local_token(&fixture.who.identity_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(fixture.tokens.get(&fixture.local_key()).unwrap().is_none());
+        assert_eq!(
+            identities
+                .authorize(Some(&fixture.who.identity_id), Some(token.expose()))
+                .await
+                .unwrap_err(),
+            unauthorized()
+        );
+        // Forgetting an identity with no credential is also harmless.
+        identities.forget(&fixture.who).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn local_token_debug_is_redacted() {
+        let fixture = Fixture::new(None);
+        let token = fixture
+            .daemon
+            .core
+            .identities
+            .local_token(&fixture.who.identity_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(format!("{token:?}"), "LocalToken(<redacted>)");
+    }
+
+    #[tokio::test]
+    async fn failed_store_rolls_back_register() {
+        let fixture = Fixture::unregistered();
+        let identities = &fixture.daemon.core.identities;
+        // The read finds no credential, but the file store cannot open its
+        // temporary write path because a directory occupies it.
+        let mut temporary = fixture.local_path().into_os_string();
+        temporary.push(".tmp");
+        std::fs::create_dir(PathBuf::from(temporary)).unwrap();
+        assert!(identities.register(fixture.who.clone()).await.is_err());
+        let rows = identities
+            .managed(
+                fixture.who.hub_url.origin().ascii_serialization(),
+                fixture.who.owner_id.clone(),
+            )
+            .await
+            .unwrap();
+        assert!(rows.is_empty());
+        assert!(identities.launched.lock().await.is_empty());
+        assert!(fixture.tokens.get(&fixture.local_key()).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn failed_store_keeps_a_row_that_was_already_registered() {
+        let fixture = Fixture::new(None);
+        let identities = &fixture.daemon.core.identities;
+        // A row from an earlier run whose credential is gone: issuing a new
+        // one fails, and the failure must not erase the row it did not add.
+        fixture.tokens.delete(&fixture.local_key()).unwrap();
+        let mut temporary = fixture.local_path().into_os_string();
+        temporary.push(".tmp");
+        std::fs::create_dir(PathBuf::from(temporary)).unwrap();
+        assert!(identities.register(fixture.who.clone()).await.is_err());
+        let rows = identities
+            .managed(
+                fixture.who.hub_url.origin().ascii_serialization(),
+                fixture.who.owner_id.clone(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows, vec![fixture.who.clone()]);
+    }
+
+    #[tokio::test]
+    async fn forgotten_identity_leftover_local_token_is_refused() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let fixture = Fixture::new(None);
+        let identities = &fixture.daemon.core.identities;
+        let token = identities
+            .local_token(&fixture.who.identity_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let directory = fixture._dir.path().join("tokens");
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let forgotten = identities.forget(&fixture.who).await;
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        forgotten.unwrap();
+        assert!(fixture.tokens.get(&fixture.local_key()).unwrap().is_some());
+        assert!(
+            identities
+                .local_token(&fixture.who.identity_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            identities
+                .authorize(Some(&fixture.who.identity_id), Some(token.expose()))
+                .await
+                .unwrap_err(),
+            unauthorized()
+        );
     }
 
     #[tokio::test]
