@@ -13,6 +13,11 @@ path = "src/main.rs"
 [lints]
 workspace = true
 
+[features]
+# Config::test_programs, so a test can point launches at a fake claude.
+# Never enabled in the agmend binary.
+test-hooks = []
+
 [dependencies]
 agmen-client = { version = "0.1.0", path = "../agmen-client" }
 agmen-local = { version = "0.1.0", path = "../agmen-local", features = ["tokio"] }

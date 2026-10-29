@@ -207,6 +207,9 @@ pub(crate) struct ClaudeRunner {
     opener: PathBuf,
     /// Extra environment for the opener; tests point it at their folder.
     opener_env: Vec<(OsString, OsString)>,
+    /// When set, `mcp_command` returns this path. Tests only.
+    #[cfg(feature = "test-hooks")]
+    test_agmen: Option<PathBuf>,
 }
 
 impl Default for ClaudeRunner {
@@ -220,8 +223,51 @@ impl Default for ClaudeRunner {
             groups: Arc::default(),
             opener: "/usr/bin/open".into(),
             opener_env: Vec::new(),
+            #[cfg(feature = "test-hooks")]
+            test_agmen: None,
         }
     }
+}
+
+#[cfg(feature = "test-hooks")]
+impl ClaudeRunner {
+    /// A runner for tests: `claude` is the program, `path` is the PATH a
+    /// fixed shell result reports (no login shell), and `mcp_command`
+    /// answers `agmen`.
+    pub(crate) fn for_tests(claude: PathBuf, agmen: PathBuf, path: OsString) -> Self {
+        Self {
+            program: claude,
+            shell: Arc::new(FixedShell { path }),
+            test_agmen: Some(agmen),
+            ..Self::default()
+        }
+    }
+}
+
+/// A shell result that is already known, so tests never run `zsh -lic`.
+#[cfg(feature = "test-hooks")]
+#[derive(Debug)]
+struct FixedShell {
+    path: OsString,
+}
+
+#[cfg(feature = "test-hooks")]
+impl ShellRunner for FixedShell {
+    fn run(&self) -> ShellFuture {
+        let result = fixed_path(&self.path);
+        Box::pin(async move { result })
+    }
+}
+
+#[cfg(feature = "test-hooks")]
+fn fixed_path(path: &OsStr) -> Result<Vec<u8>, String> {
+    let Some(path) = path.to_str() else {
+        return Err("test PATH is not UTF-8".to_owned());
+    };
+    if path.is_empty() || path.contains('\n') {
+        return Err("test PATH is empty or contains a newline".to_owned());
+    }
+    Ok(format!("{LOGIN_PATH_MARKER}\n{path}\n").into_bytes())
 }
 
 type ShellFuture = Pin<Box<dyn Future<Output = Result<Vec<u8>, String>> + Send>>;
@@ -461,6 +507,12 @@ impl Runner for ClaudeRunner {
 
     fn mcp_command(&self) -> Pin<Box<dyn Future<Output = Result<PathBuf, RunError>> + Send + '_>> {
         Box::pin(async {
+            // Tests name the agmen binary. A login PATH lookup stays the
+            // production path, and it still runs only when no test path is set.
+            #[cfg(feature = "test-hooks")]
+            if let Some(agmen) = &self.test_agmen {
+                return Ok(agmen.clone());
+            }
             let environment = self.environment().await?;
             resolve_helper(&self.executable, &environment.path).ok_or(RunError::AgmenNotInstalled)
         })
