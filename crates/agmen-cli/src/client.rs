@@ -322,6 +322,16 @@ pub(crate) struct Me {
     pub(crate) handle: String,
     pub(crate) broker_url: String,
     pub(crate) projects: Vec<Membership>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) groups: Vec<Group>,
+}
+
+/// One group in [`Me`]. Hosted-only fields are ignored on input.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(crate) struct Group {
+    pub(crate) tenant: String,
+    pub(crate) name: String,
+    pub(crate) role: String,
 }
 
 /// One project in [`Me`].
@@ -331,6 +341,22 @@ pub(crate) struct Membership {
     pub(crate) project: String,
     pub(crate) name: String,
     pub(crate) role: String,
+}
+
+#[cfg(test)]
+#[test]
+fn me_groups_accept_unknown_fields_and_omit_empty_groups() {
+    let basic = serde_json::json!({"id":"human001", "handle":"andy", "broker_url":"mqtt://localhost", "projects":[]});
+    let me: Me = serde_json::from_value(basic.clone()).unwrap();
+    assert_eq!(serde_json::to_value(me).unwrap(), basic);
+    let group = serde_json::json!({"tenant":"tenant01", "name":"agmen", "role":"owner"});
+    let mut expected = basic.clone();
+    expected["groups"] = serde_json::json!([group]);
+    let mut input = expected.clone();
+    input["groups"][0]["state"] = "trial".into();
+    input["groups"][0]["trial_ends_at"] = "2026-11-01T00:00:00Z".into();
+    let me: Me = serde_json::from_value(input).unwrap();
+    assert_eq!(serde_json::to_value(me).unwrap(), expected);
 }
 
 impl Api {

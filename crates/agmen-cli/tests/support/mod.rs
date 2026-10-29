@@ -125,6 +125,7 @@ pub enum Ingest {
 pub struct Ctx {
     pub hub: Hub,
     pub github: agmen_hub::FakeGithub,
+    pub db: PgPool,
     /// The hub's base URL.
     pub base: Url,
     pub topics: Topics,
@@ -201,9 +202,15 @@ where
     let router = hub.router();
     let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     let topics = hub.seed_project().await.expect("seed a project");
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&db.url)
+        .await
+        .expect("connect to the test database");
     let mut ctx = Ctx {
         hub,
         github,
+        db: pool.clone(),
         base,
         topics: topics.clone(),
         messaging: None,
@@ -214,6 +221,7 @@ where
     // The body owns the hub's messaging, so the hub publishes nothing once
     // it has ended.
     let outcome = tokio::spawn(body(ctx)).await;
+    pool.close().await;
     clean_up(&db.url, &topics).await;
     db.drop_db().await;
     if let Err(err) = outcome {

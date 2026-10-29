@@ -157,7 +157,6 @@ impl Compose {
     /// # Errors
     ///
     /// As [`Self::up`].
-    #[expect(dead_code, reason = "tunnel setup restarts the hub")]
     pub(crate) async fn restart(&self, service: &str) -> Result<()> {
         self.succeeded(&["restart", service], SHORT_LIMIT, "restart")
             .await
@@ -607,6 +606,9 @@ fn emit_log_line(raw: &[u8], over: bool, to_stderr: bool) -> Result<()> {
 fn format_log_line(raw: &[u8], over: bool) -> String {
     let text = String::from_utf8_lossy(raw);
     let cleaned = clean(&text);
+    if cleaned.contains("claim_token=") {
+        return "hub claim token omitted".to_owned();
+    }
     if !over {
         return cleaned.into_owned();
     }
@@ -646,7 +648,7 @@ fn stderr_detail(dir: &Path, bytes: &[u8]) -> String {
     let mut kept: Vec<String> = Vec::new();
     for line in &lines[start..] {
         let cleaned = clean(line);
-        if exact.iter().any(|item| *item == *cleaned) {
+        if cleaned.contains("claim_token=") || exact.iter().any(|item| *item == *cleaned) {
             continue;
         }
         kept.push(redact_line(&cleaned, &values));

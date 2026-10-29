@@ -8,6 +8,8 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use support::{Home, assert_exit, stderr, stdout};
@@ -112,6 +114,7 @@ const STOPPED_PS: &str = "{\"Service\":\"hub\",\"State\":\"exited\",\"Health\":\
 struct HubStub {
     port: u16,
     server: JoinHandle<()>,
+    device_requests: Arc<AtomicUsize>,
 }
 
 impl Drop for HubStub {
@@ -123,11 +126,20 @@ impl Drop for HubStub {
 async fn hub_stub() -> HubStub {
     use axum::Router;
     use axum::http::StatusCode;
-    use axum::routing::get;
+    use axum::routing::{get, post};
 
+    let device_requests = Arc::new(AtomicUsize::new(0));
+    let requested = device_requests.clone();
     let app = Router::new()
         .route("/healthz", get(|| async { StatusCode::OK }))
-        .route("/livez", get(|| async { StatusCode::OK }));
+        .route("/livez", get(|| async { StatusCode::OK }))
+        .route(
+            "/v1/auth/device",
+            post(move || async move {
+                requested.fetch_add(1, Ordering::SeqCst);
+                StatusCode::INTERNAL_SERVER_ERROR
+            }),
+        );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let server = tokio::spawn(async move {
@@ -138,7 +150,11 @@ async fn hub_stub() -> HubStub {
     let addr = format!("127.0.0.1:{port}");
     for _ in 0..50 {
         if tokio::net::TcpStream::connect(&addr).await.is_ok() {
-            return HubStub { port, server };
+            return HubStub {
+                port,
+                server,
+                device_requests,
+            };
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
@@ -238,6 +254,349 @@ async fn up_with_stub(home: &Home, stub: &HubStub, extra: &[&str]) -> Output {
     owned.extend(extra.iter().map(|arg| (*arg).to_owned()));
     let args: Vec<&str> = owned.iter().map(String::as_str).collect();
     run(command(home, &args, true)).await
+}
+
+#[tokio::test]
+async fn up_off_terminal_without_login_says_how_to_claim() {
+    let home = Home::new();
+    install_docker(&home);
+    write_fake(&home, "ps.json", RUNNING_PS.as_bytes());
+    let stub = hub_stub().await;
+    let mut cmd = command(
+        &home,
+        &[
+            "host",
+            "up",
+            "--port",
+            &stub.port.to_string(),
+            "--public-url",
+            &format!("http://127.0.0.1:{}", stub.port),
+        ],
+        true,
+    );
+    cmd.stdin(Stdio::null());
+    let out = run(cmd).await;
+    assert_exit(&out, 0);
+    let text = stdout(&out);
+    assert!(
+        text.contains(&format!("agmen login --hub http://127.0.0.1:{}", stub.port)),
+        "{text}"
+    );
+    assert!(text.contains("agmen host up again"), "{text}");
+    assert_eq!(stub.device_requests.load(Ordering::SeqCst), 0);
+}
+
+#[derive(Default)]
+struct OnboardState {
+    owned: bool,
+    failures: std::collections::VecDeque<(u16, &'static str)>,
+    claims: usize,
+    project: Option<serde_json::Value>,
+    identities: usize,
+    invites: usize,
+}
+
+async fn onboard_stub(
+    home: &Home,
+    failures: &[(u16, &'static str)],
+) -> (HubStub, Arc<std::sync::Mutex<OnboardState>>) {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse as _;
+    use axum::{Json, Router};
+    use serde_json::json;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let base = format!("http://127.0.0.1:{port}/");
+    let state = Arc::new(std::sync::Mutex::new(OnboardState {
+        failures: failures.iter().copied().collect(),
+        ..OnboardState::default()
+    }));
+    let shared = state.clone();
+    let app = Router::new().fallback(move |request: axum::extract::Request| {
+        let shared = shared.clone();
+        let base = base.clone();
+        async move {
+            let path = request.uri().path().to_owned();
+            let bytes = axum::body::to_bytes(request.into_body(), 8192).await.unwrap();
+            let body: serde_json::Value = if bytes.is_empty() { json!(null) } else { serde_json::from_slice(&bytes).unwrap() };
+            let mut state = shared.lock().unwrap();
+            let json = match path.as_str() {
+                "/healthz" | "/livez" => return StatusCode::OK.into_response(),
+                "/v1/me" => json!({
+                    "id":"human001", "handle":"andy", "broker_url":"mqtt://localhost:1883",
+                    "groups": if state.owned { json!([{"tenant":"tenant01", "name":"agmen", "role":"owner"}]) } else { json!([]) },
+                    "projects": if state.project.is_some() { json!([{"tenant":"tenant01", "project":"project1", "name":"widgets", "role":"admin"}]) } else { json!([]) },
+                }),
+                "/v1/claim" => {
+                    state.claims += 1;
+                    assert!(state.claims <= 2);
+                    if let Some((status, code)) = state.failures.pop_front() {
+                        return (StatusCode::from_u16(status).unwrap(), Json(json!({"error":code, "error_description":body["token"]}))).into_response();
+                    }
+                    state.owned = true;
+                    json!({"tenant":"tenant01", "name":"agmen", "role":"owner"})
+                }
+                "/v1/projects" => {
+                    assert!(state.project.is_none());
+                    state.project = Some(body.clone());
+                    return (StatusCode::CREATED, Json(json!({"tenant":"tenant01", "project":"project1", "name":body["name"], "role":"admin", "repo_url":body.get("repo_url")}))).into_response();
+                }
+                "/v1/identities" => {
+                    state.identities += 1;
+                    json!({"id":"agent001", "handle":body["handle"], "tenant":"tenant01", "project":"project1", "token":"stub-identity-token"})
+                }
+                "/v1/invites" => {
+                    state.invites += 1;
+                    json!({"link":format!("{base}i#stub-invite-{}", state.invites), "project":"project1", "expires_at":"2026-11-01T00:00:00Z"})
+                }
+                _ => panic!("unexpected request to {path}"),
+            };
+            Json(json).into_response()
+        }
+    });
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let hub: url::Url = format!("http://127.0.0.1:{port}").parse().unwrap();
+    let login = home.login_file();
+    fs::create_dir_all(login.parent().unwrap()).unwrap();
+    fs::write(
+        login,
+        json!({"hub_url":hub, "human_id":"human001", "handle":"andy"}).to_string(),
+    )
+    .unwrap();
+    home.tokens()
+        .set(
+            &agmen_client::TokenKey::new(&hub, &"human001".parse().unwrap()).unwrap(),
+            &json!({
+                "access_token":"stub-access-token", "refresh_token":"stub-refresh-token",
+                "expires_at":agmen_proto::Timestamp::now() + jiff::SignedDuration::from_secs(3000),
+            })
+            .to_string(),
+        )
+        .unwrap();
+    (
+        HubStub {
+            port,
+            server,
+            device_requests: Arc::new(AtomicUsize::new(0)),
+        },
+        state,
+    )
+}
+
+#[tokio::test]
+async fn up_onboards_project_and_reuses_identity() {
+    for safe in [true, false] {
+        let home = Home::new();
+        install_docker(&home);
+        home.fake_program("cursor", "exit 0");
+        write_fake(&home, "ps.json", RUNNING_PS.as_bytes());
+        let token = String::from("abcd0123").repeat(8);
+        write_fake(
+            &home,
+            "hub.log",
+            format!("claim_token={token}\n").as_bytes(),
+        );
+        let (stub, state) = onboard_stub(&home, &[]).await;
+        let wt = support::Worktree::new(&home);
+        let secret = ["ghp", "s3cret"].join("_");
+        let origin = if safe {
+            "https://github.com/acme/widgets.git".to_owned()
+        } else {
+            format!("https://andy:{secret}@github.com/acme/widgets.git")
+        };
+        wt.git(&home, &["remote", "add", "origin", &origin]);
+        let mut cmd = command(
+            &home,
+            &[
+                "host",
+                "up",
+                "--port",
+                &stub.port.to_string(),
+                "--public-url",
+                &format!("http://127.0.0.1:{}", stub.port),
+                "--project",
+                "widgets",
+                "--handle",
+                "sol",
+            ],
+            true,
+        );
+        cmd.current_dir(wt.path()).stdin(Stdio::null());
+        let out = run(cmd).await;
+        assert_exit(&out, 0);
+        assert!(stdout(&out).contains("joined project widgets (project1) as andy/sol (agent001)"));
+        assert!(stdout(&out).contains("/i#stub-invite-1"));
+        let identity = fs::read(wt.path().join(".agmen/identity.json")).unwrap();
+        let setup = fs::read(wt.path().join(".cursor/mcp.json")).unwrap();
+        let mut again = command(
+            &home,
+            &[
+                "host",
+                "up",
+                "--port",
+                &stub.port.to_string(),
+                "--public-url",
+                &format!("http://127.0.0.1:{}", stub.port),
+            ],
+            true,
+        );
+        again.current_dir(wt.path()).stdin(Stdio::null());
+        let again = run(again).await;
+        assert_exit(&again, 0);
+        assert!(stdout(&again).contains("/i#stub-invite-2"));
+        assert_eq!(
+            fs::read(wt.path().join(".agmen/identity.json")).unwrap(),
+            identity
+        );
+        assert_eq!(fs::read(wt.path().join(".cursor/mcp.json")).unwrap(), setup);
+        for output in [stdout(&out), stderr(&out), stdout(&again), stderr(&again)] {
+            assert!(!output.contains(&secret));
+            assert!(!output.contains(&token));
+        }
+        let state = state.lock().unwrap();
+        assert_eq!(state.claims, 1);
+        assert_eq!(state.identities, 1);
+        assert_eq!(state.invites, 2);
+        let project = state.project.as_ref().unwrap();
+        assert_eq!(project["name"], "widgets");
+        if safe {
+            assert_eq!(project["repo_url"], origin);
+        } else {
+            assert!(project.get("repo_url").is_none());
+            assert!(stdout(&out).contains("the project has no repository URL:"));
+        }
+    }
+}
+
+#[tokio::test]
+async fn up_claim_retries_once_and_hides_tokens() {
+    for (failures, missing, exit, claims, restarts) in [
+        (vec![(403, "bad_claim_token")], false, 0, 2, 1),
+        (vec![(410, "claim_expired")], false, 0, 2, 1),
+        (vec![], true, 0, 1, 1),
+        (
+            vec![(403, "bad_claim_token"), (403, "bad_claim_token")],
+            false,
+            1,
+            2,
+            1,
+        ),
+        (vec![(500, "unexpected")], false, 1, 1, 0),
+        (vec![(409, "already_claimed")], false, 1, 1, 0),
+    ] {
+        let home = Home::new();
+        install_docker(&home);
+        write_fake(&home, "ps.json", RUNNING_PS.as_bytes());
+        let token = String::from("abcd0123").repeat(8);
+        write_fake(
+            &home,
+            "hub.log",
+            if missing {
+                "no token".to_owned()
+            } else {
+                format!("claim_token={token}\n")
+            }
+            .as_bytes(),
+        );
+        write_fake(
+            &home,
+            "hub2.log",
+            format!("claim_token={token}\n").as_bytes(),
+        );
+        let (stub, state) = onboard_stub(&home, &failures).await;
+        let out = up_with_stub(&home, &stub, &[]).await;
+        assert_exit(&out, exit);
+        for output in [stdout(&out), stderr(&out)] {
+            assert!(!output.contains(&token));
+        }
+        assert_eq!(state.lock().unwrap().claims, claims);
+        assert_eq!(docker_log(&home).matches("restart hub").count(), restarts);
+        if exit == 0 {
+            assert!(stdout(&out).contains("inside a clone of your repository"));
+        } else if failures[0].1 == "already_claimed" {
+            assert!(stderr(&out).contains("already has an owner"));
+        }
+    }
+}
+
+#[tokio::test]
+async fn up_reports_git_execution_failure_after_claim() {
+    let home = Home::new();
+    install_docker(&home);
+    write_fake(&home, "ps.json", RUNNING_PS.as_bytes());
+    write_fake(
+        &home,
+        "hub.log",
+        format!("claim_token={}\n", "a".repeat(64)).as_bytes(),
+    );
+    let (stub, _) = onboard_stub(&home, &[]).await;
+    let wt = support::Worktree::new(&home);
+    fs::remove_file(home.path().join("bin/git")).unwrap();
+    fs::create_dir_all(home.path().join("calls")).unwrap();
+    let mut cmd = command(
+        &home,
+        &[
+            "host",
+            "up",
+            "--port",
+            &stub.port.to_string(),
+            "--public-url",
+            &format!("http://127.0.0.1:{}", stub.port),
+        ],
+        true,
+    );
+    cmd.current_dir(wt.path()).stdin(Stdio::null());
+    narrow_path(&mut cmd);
+    let out = run(cmd).await;
+    assert_exit(&out, 1);
+    assert!(stderr(&out).contains("git rev-parse could not run"));
+    assert!(!stdout(&out).contains("inside a clone"));
+}
+
+#[tokio::test]
+async fn up_failed_start_keeps_claim_token_out_of_diagnostics() {
+    let home = Home::new();
+    install_docker(&home);
+    write_fake(&home, "fail-up", b"");
+    let token = String::from("abcd0123").repeat(8);
+    write_fake(
+        &home,
+        "stderr-up",
+        format!("hub-1 | warn claim_token={token}\n").as_bytes(),
+    );
+    write_fake(
+        &home,
+        "hub.log",
+        format!("hub-1 | warn claim_token={token}\n").as_bytes(),
+    );
+    let out = run(command(
+        &home,
+        &["host", "up", "--public-url", "https://hub.example"],
+        false,
+    ))
+    .await;
+    assert_exit(&out, 1);
+    assert!(!stdout(&out).contains(&token));
+    assert!(!stderr(&out).contains(&token));
+}
+
+#[tokio::test]
+async fn logs_keeps_claim_tokens_off_the_terminal() {
+    let home = Home::new();
+    install_docker(&home);
+    write_compose(&home);
+    let token = String::from("abcd0123").repeat(8);
+    write_fake(
+        &home,
+        "hub.log",
+        format!("ready\nclaim_token={token}\nstill ready\n").as_bytes(),
+    );
+    let out = run(command(&home, &["host", "logs", "hub"], false)).await;
+    assert_exit(&out, 0);
+    assert!(stdout(&out).contains("ready"));
+    assert!(!stdout(&out).contains(&token));
+    assert!(!stderr(&out).contains(&token));
 }
 
 #[tokio::test]

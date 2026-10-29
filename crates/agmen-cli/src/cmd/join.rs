@@ -129,6 +129,21 @@ pub(crate) struct JoinArgs {
 }
 
 impl JoinArgs {
+    /// Join an existing project in process, using the usual agent defaults.
+    pub(crate) fn with_handle(handle: Option<String>) -> Self {
+        Self {
+            invite: None,
+            stdin: false,
+            yes: false,
+            hub: None,
+            project: None,
+            handle,
+            kind: Kind::Agent,
+            role: None,
+            no_setup: false,
+        }
+    }
+
     async fn with_stdin(mut self) -> Result<Self> {
         if self.stdin {
             self.invite = Some(read_stdin_invite().await?);
@@ -471,7 +486,7 @@ async fn member_project(human: &Human, wanted: Option<&str>) -> Result<(String, 
 
 /// Sets up the agents in `root`. A failure is reported and never fails the
 /// join: the identity is already written and `agmen setup` can be rerun.
-async fn run_setup(root: &Path, identity: &IdentityFile) {
+pub(super) async fn run_setup(root: &Path, identity: &IdentityFile) {
     let result = async {
         let plugin = blocking(|| setup::plugin_choice(false)).await?;
         setup::run(root, identity, None, plugin).await
@@ -498,10 +513,6 @@ async fn run_setup(root: &Path, identity: &IdentityFile) {
 }
 
 /// Mints and writes this worktree's identity using an existing project membership.
-#[expect(
-    dead_code,
-    reason = "the plan's agmen host up and agmen init call it; join itself resolves the role earlier"
-)]
 pub(crate) async fn join_here(
     human: &Human,
     root: &Path,
