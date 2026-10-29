@@ -7,6 +7,7 @@
 mod body;
 mod cursor;
 mod db;
+mod device;
 mod error;
 mod event;
 mod hub;
@@ -29,6 +30,7 @@ pub use body::{
 };
 pub use cursor::{Advance, Cursors};
 pub use db::{preflight_schema, store_schema};
+pub use device::{DeviceStart, device_start, device_wait, signed_in_as};
 pub use error::ClientError;
 pub use event::{ClientEvent, Me};
 pub use hub::{HubClient, HubUrlError, PAGE_LIMIT, Page, check_hub_url};
@@ -39,7 +41,9 @@ pub use install_receipt::{
     InstallReceipt, ReceiptError, install_receipt_path, read_install_receipt,
     read_install_receipt_at,
 };
-pub use login::{HumanTokens, Login, LoginError, human_tokens, store_tokens, token_grant};
+pub use login::{
+    HumanTokens, Login, LoginError, human_tokens, save_login, store_tokens, token_grant,
+};
 pub use outbox::{Outbox, OutboxState};
 pub use paths::{AGMEND_SOCKET, PathError, agmend_socket, config_dir, login_file, state_dir};
 pub use session::{Broker, ClientKind, Events, Presence, STATE_DB, Session, SessionConfig};

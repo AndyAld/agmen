@@ -1,25 +1,17 @@
 //! `agmen login`, `logout`, `whoami` and `invite`: the signed-in person.
 
-use std::time::Duration;
-
-use agmen_client::find_identity;
-use anyhow::{Context as _, Result, bail};
+use agmen_client::{LoginError, device_start, device_wait, find_identity};
+use anyhow::{Context as _, Result, anyhow};
 use clap::{Args, ValueEnum};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::client::{
-    Api, Human, Login, blocking, forget_login, http, human, read_login, refusal, save_login, send,
-    token_grant, url,
+    Api, Human, Login, blocking, forget_login, http, human, login_error, read_login, refusal,
+    save_login,
 };
 use crate::output::{Fail, clean};
 
-/// RFC 8628 section 3.4.
-const DEVICE_CODE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
-/// RFC 8628 section 3.5: a `slow_down` adds this to the interval.
-const SLOW_DOWN: Duration = Duration::from_secs(5);
-/// The most polls one login makes, whatever the hub says about expiry.
-const MAX_POLLS: u32 = 720;
 /// The shortest and longest invite: 1 hour and 30 days (ruling R58).
 const INVITE_SECS: std::ops::RangeInclusive<u64> = 3600..=30 * 24 * 3600;
 
@@ -62,16 +54,6 @@ impl clap::builder::TypedValueParser for HubUrlParser {
     }
 }
 
-/// RFC 8628 section 3.2.
-#[derive(Debug, Deserialize)]
-struct DeviceStart {
-    device_code: String,
-    user_code: String,
-    verification_uri: Url,
-    expires_in: u64,
-    interval: u64,
-}
-
 /// `agmen login`.
 pub(crate) async fn login(args: LoginArgs) -> Result<()> {
     let hub = match args.hub {
@@ -90,9 +72,12 @@ pub(crate) async fn login(args: LoginArgs) -> Result<()> {
 
 /// Signs in with the hub's device flow and returns the freshly saved login.
 pub(crate) async fn device_login(hub: &Url) -> Result<Human> {
+    // First, so the refusal reads as it always has, without a context line.
     agmen_client::check_hub_url(hub)?;
-    let start: DeviceStart = send(http()?.post(url(hub, &["auth", "device"])))
+    let http = http()?;
+    let start = device_start(&http, hub)
         .await
+        .map_err(login_error)
         .context("starting the device login failed")?;
     println!("Your code is {}", clean(&start.user_code));
     println!(
@@ -100,42 +85,21 @@ pub(crate) async fn device_login(hub: &Url) -> Result<Human> {
         clean(start.verification_uri.as_str()),
         start.expires_in / 60
     );
-    blocking(move || Ok(crate::open::open_url(&start.verification_uri))).await?;
-    let mut interval = Duration::from_secs(start.interval.max(1));
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(start.expires_in);
-    let mut tokens = None;
-    for _ in 0..MAX_POLLS {
-        tokio::time::sleep(interval).await;
-        if tokio::time::Instant::now() > deadline {
-            break;
-        }
-        let grant = token_grant(
-            hub,
-            &[
-                ("grant_type", DEVICE_CODE_GRANT),
-                ("device_code", &start.device_code),
-            ],
-        )
-        .await;
-        match grant {
-            Ok(granted) => {
-                tokens = Some(granted);
-                break;
+    let page = start.verification_uri.clone();
+    blocking(move || Ok(crate::open::open_url(&page))).await?;
+    let tokens = device_wait(&http, hub, &start)
+        .await
+        .map_err(|err| match err {
+            LoginError::Declined => {
+                anyhow!("the sign-in was declined on GitHub; run agmen login again")
             }
-            Err(err) => match refusal(&err).map(|r| r.code.as_str()) {
-                Some("authorization_pending") => {}
-                Some("slow_down") => interval += SLOW_DOWN,
-                Some("expired_token") => break,
-                Some("access_denied") if refusal(&err).is_some_and(|r| r.status == 400) => {
-                    bail!("the sign-in was declined on GitHub; run agmen login again");
-                }
-                _ => return Err(err.context("signing in failed")),
-            },
-        }
-    }
-    let Some(tokens) = tokens else {
-        bail!("the code expired before it was confirmed; run agmen login again");
-    };
+            LoginError::Expired => {
+                anyhow!("the code expired before it was confirmed; run agmen login again")
+            }
+            err => login_error(err).context("signing in failed"),
+        })?;
+    // The CLI keeps its own `Api::me`: the `Human` it returns needs the
+    // `Api` anyway, and its error text is unchanged.
     let api = Api::new(hub.clone(), tokens.access_token())?;
     let me = api.me().await.context("reading who signed in failed")?;
     let login = Login {
