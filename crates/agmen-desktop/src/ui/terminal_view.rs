@@ -13,13 +13,13 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, Bounds, Context, EventEmitter, FocusHandle, Focusable, FontWeight, Hsla,
     InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, RenderOnce, Rgba,
-    SharedString, Size, StatefulInteractiveElement as _, Styled as _, StyledText, TextRun,
-    WeakEntity, Window, anchored, canvas, deferred, div, font, point, px, size,
+    SharedString, Size, Styled as _, StyledText, TextRun, WeakEntity, Window, anchored, canvas,
+    deferred, div, font, point, px, size,
 };
 
 use super::add_agent_dialog::{AddAgentDialog, AgentDialog};
 use super::components::{
-    Button, ButtonSize, ButtonStyle, Chip, Color, Icon, Label, LabelSize, Menu, Modal,
+    Button, ButtonSize, ButtonStyle, Chip, ChipButton, Color, Icon, Label, LabelSize, Menu, Modal,
 };
 use super::switch_menu::{SwitchMenu, place_menu};
 use super::tokens::{
@@ -424,38 +424,32 @@ impl TerminalView {
     }
 
     /// The agent chip, `claude ▾`: it opens the menu.
-    fn agent_chip(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn agent_chip(
+        &self,
+        menu: Option<AnyElement>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         let anchors = self.anchors.clone();
         let open = self.menu_open;
-        div()
-            .id("terminal:agent")
-            .debug_selector(|| "terminal:agent".into())
-            .relative()
-            .flex_none()
-            .cursor_pointer()
-            // While open, the menu's mouse down out closes it; a click here
-            // too would reopen it (review C81).
-            .when(!open, |this| {
-                this.on_click(cx.listener(|this, _, _, cx| this.set_menu_open(true, cx)))
-            })
-            .child(
-                Chip::new(self.take_over.harness.clone())
-                    .picker()
-                    .code()
-                    .weight(FontWeight::BOLD)
-                    .color(Color::Default)
-                    .trailing(
-                        Label::new("▾")
-                            .size(LabelSize::XSmall)
-                            .color(Color::Placeholder),
-                    ),
-            )
-            .child(bounds_probe(move |bounds| {
-                anchors.set(Anchors {
-                    chip: Some(bounds),
-                    ..anchors.get()
-                });
-            }))
+        ChipButton::new(
+            "terminal:agent",
+            Chip::new(self.take_over.harness.clone())
+                .picker()
+                .code()
+                .weight(FontWeight::BOLD)
+                .color(Color::Default),
+        )
+        .flex_none()
+        .caret(true)
+        .open(open)
+        .on_toggle(cx.processor(|this, open, _, cx| this.set_menu_open(open, cx)))
+        .menu(menu)
+        .on_bounds(move |bounds| {
+            anchors.set(Anchors {
+                chip: Some(bounds),
+                ..anchors.get()
+            });
+        })
     }
 
     /// The head row, with the open `menu` hanging from it.
@@ -504,7 +498,7 @@ impl TerminalView {
             .pr(SPACE_10)
             .bg(cx.global::<Appearance>().theme.elevated_surface)
             .child(Icon::new(UiIcon::Terminal).color(Color::Accent))
-            .child(self.agent_chip(cx))
+            .child(self.agent_chip(menu, cx))
             .child(
                 div()
                     .flex_1()
@@ -539,13 +533,11 @@ impl TerminalView {
                     ..anchors.get()
                 });
             }))
-            .children(menu)
     }
 
-    /// The switch menu, a child of the head: `place_menu` picks its side
-    /// and room from the last frame's chip and head, and the head's place
-    /// in this frame's layout sets where it draws, so a resize never leaves
-    /// it at the head's old place. `None` until both were drawn once.
+    /// The switch menu: `place_menu` picks its side and room from the last
+    /// frame's chip and head. The chip's current place sets where it draws,
+    /// so a resize follows the chip. `None` until both were drawn once.
     fn menu(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let anchors = self.anchors.get();
         let (chip, head) = (anchors.chip?, anchors.head?);
@@ -556,12 +548,12 @@ impl TerminalView {
         );
         let height = anchors.menu.unwrap_or(SWITCH_MENU_HEIGHT);
         let place = place_menu(chip, head, size(SWITCH_MENU_WIDTH, height), area);
-        // From the head's top left: under the chip, at the head's bottom
+        // From the chip's top left: under the chip, at the head's bottom
         // or top edge. Cut to its side's room, the menu fits, so gpui's
         // snap into the window never moves it over the chip.
         let offset = point(
-            place.position.x - head.left(),
-            place.position.y - head.top(),
+            place.position.x - chip.left(),
+            place.position.y - chip.top(),
         );
         let worker = self.worker.clone();
         let view = cx.entity().downgrade();
@@ -613,8 +605,7 @@ impl TerminalView {
                     });
                 }
             });
-        // The head centers its children; at the head's top left, the
-        // offset counts from there.
+        // The offset counts from the chip's top left.
         Some(
             div()
                 .absolute()

@@ -962,6 +962,7 @@ impl LiveRoot {
         let appearance = cx.global::<Appearance>();
         div()
             .track_focus(&self.focus_handle)
+            .on_key_down(super::focus_tab)
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
                 if this.quit_choice == Some(service::QuitChoice::Ask)
                     && event.keystroke.key == "enter"

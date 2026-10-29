@@ -4,8 +4,8 @@
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, FontWeight, IntoElement, ParentElement as _, Pixels, RenderOnce, SharedString,
-    Styled as _, Window, div,
+    AnyElement, App, Div, FontWeight, IntoElement, ParentElement as _, Pixels, RenderOnce,
+    SharedString, Styled as _, Window, div,
 };
 
 use super::{Color, Label, LabelSize};
@@ -282,6 +282,14 @@ impl Chip {
 
 impl RenderOnce for Chip {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        self.surface(cx)
+    }
+}
+
+impl Chip {
+    /// Shares the chip's surface with its interactive wrapper, so hover
+    /// changes the fill rather than painting behind an opaque chip.
+    pub(super) fn surface(self, cx: &App) -> Div {
         let theme = &cx.global::<Appearance>().theme;
         let label = Label::new(self.label).color(self.color);
         let label = if self.code {

@@ -154,6 +154,9 @@ impl RenderOnce for Dropdown {
             .hover(move |style| style.bg(hover))
             .focus_visible(move |style| style.border_color(focus))
             .when_some(on_toggle.clone(), |this, handler| {
+                // shortcut: duplicates ChipButton's open guard and Escape
+                // handling to retain the dropdown's fixed field geometry;
+                // share it when ChipButton supports this field layout.
                 // While open, the menu's mouse down out closes it. A click
                 // handler here too would reopen it on mouse up, after the
                 // caller has re-rendered closed.

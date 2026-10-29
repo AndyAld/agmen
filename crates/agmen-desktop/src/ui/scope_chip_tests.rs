@@ -7,6 +7,21 @@ use super::*;
 use crate::backend::{chat_snapshot, fixture_id};
 use crate::ui::test_support::{click, init, redraw};
 
+#[gpui::test]
+fn scope_renders_through_chip_button_and_opens(cx: &mut TestAppContext) {
+    init(cx);
+    let snapshot = chat_snapshot();
+    let options = ScopeOption::for_worktrees(&snapshot.worktrees, &snapshot.agents);
+    let (_, cx) = cx.add_window_view(|_, _| ScopeChip::new(options));
+    redraw(cx);
+    assert!(cx.debug_bounds("chip-button:scope-chip").is_some());
+    click(cx, "scope-chip");
+    let menu = cx.debug_bounds("scope-chip:menu").unwrap();
+    let chip = cx.debug_bounds("scope-chip").unwrap();
+    assert_eq!(menu.left(), chip.left());
+    assert_eq!(menu.top() - chip.bottom(), SPACE_8 + SPACE_2);
+}
+
 #[test]
 fn options_take_each_owners_role() {
     // Review C188: the role colors the dot; a worktree whose owner has no

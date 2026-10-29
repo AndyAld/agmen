@@ -12,6 +12,7 @@ mod breadcrumb;
 mod button;
 mod card;
 mod chip;
+mod chip_button;
 mod color;
 #[cfg(test)]
 mod control_harness;
@@ -57,6 +58,7 @@ pub(crate) use breadcrumb::Breadcrumb;
 pub(crate) use button::{Button, ButtonSize, ButtonStyle};
 pub(crate) use card::Card;
 pub(crate) use chip::Chip;
+pub(crate) use chip_button::ChipButton;
 pub(crate) use color::Color;
 pub(crate) use detail_row::DetailRow;
 pub(crate) use dot::Dot;

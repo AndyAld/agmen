@@ -1,6 +1,40 @@
 use super::*;
 use crate::appearance::Appearance;
 
+#[gpui::test]
+fn terminal_agent_renders_through_chip_button_and_opens(cx: &mut gpui::TestAppContext) {
+    use crate::backend::{Backend as _, FixtureBackend, Screen, fixture_id};
+    use crate::ui::test_support::{click, init, redraw};
+    init(cx);
+    let snapshot = FixtureBackend::for_screen(Screen::ChatTerminal)
+        .unwrap()
+        .snapshot();
+    let fx1 = fixture_id("andy/fx1");
+    let take_over = snapshot.take_overs[&fx1].clone();
+    let (_, cx) = cx.add_window_view(|_, cx| {
+        TerminalView::new(
+            fx1,
+            "andy/fx1",
+            "worker",
+            take_over,
+            snapshot.installed_agents,
+            snapshot.agent_scans,
+            cx,
+        )
+    });
+    redraw(cx);
+    assert!(cx.debug_bounds("chip-button:terminal:agent").is_some());
+    click(cx, "terminal:agent");
+    for _ in 0..3 {
+        cx.run_until_parked();
+        redraw(cx);
+    }
+    let menu = cx.debug_bounds("switch-menu").unwrap();
+    let chip = cx.debug_bounds("terminal:agent").unwrap();
+    assert_eq!(menu.left(), chip.left());
+    assert!(menu.bottom() <= chip.top() || menu.top() >= chip.bottom());
+}
+
 fn cell(ch: char, fg: TermColor, bold: bool) -> TermCell {
     TermCell {
         ch,

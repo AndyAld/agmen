@@ -454,6 +454,7 @@ impl Render for Workspace {
         }))
         .relative()
         .track_focus(&self.focus_handle)
+        .on_key_down(super::focus_tab)
         .key_context(crate::keymap::WORKSPACE_CONTEXT)
         .on_action(cx.listener(|this, _: &ToggleLeftDock, _, cx| {
             this.toggle_dock(DockSide::Left, cx);
