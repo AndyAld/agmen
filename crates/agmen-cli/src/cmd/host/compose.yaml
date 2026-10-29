@@ -32,6 +32,8 @@ services:
 
   emqx:
     image: emqx/emqx:6.3.2
+    # Match the group owning the hub-generated broker API key (hub Dockerfile).
+    group_add: ["65532"]
     environment:
       EMQX_NODE__COOKIE: ${AGMEN_EMQX_NODE_COOKIE:?run agmen host up}
       EMQX_DASHBOARD__DEFAULT_PASSWORD: ${AGMEN_EMQX_DASHBOARD_PASSWORD:?run agmen host up}

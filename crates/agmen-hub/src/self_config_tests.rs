@@ -52,7 +52,8 @@ fn generated_files_have_their_modes() {
     for (path, mode) in [
         ("jwt", 0o700),
         ("jwt/hub-1.pem", 0o600),
-        ("broker/api-keys.txt", 0o644),
+        ("broker", 0o750),
+        ("broker/api-keys.txt", 0o640),
     ] {
         assert_eq!(
             fs::metadata(dir.path().join(path))
@@ -64,6 +65,79 @@ fn generated_files_have_their_modes() {
             "{path}"
         );
     }
+}
+
+/// Runs `run` and returns its result with everything it logged.
+#[cfg(unix)]
+fn logged<T>(run: impl FnOnce() -> T) -> (T, String) {
+    use std::io::{self, Write};
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone)]
+    struct Buffer(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for Buffer {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let buffer = Buffer(Arc::default());
+    let writer = buffer.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    let result = tracing::subscriber::with_default(subscriber, run);
+    let log = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
+    (result, log)
+}
+
+#[cfg(unix)]
+#[test]
+fn an_existing_key_file_with_another_mode_keeps_it_and_is_reported() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = HubSecrets::Generated {
+        data_dir: dir.path().to_owned(),
+    };
+    let first = load(&secrets, "agmen-hub").unwrap();
+    let api_path = dir.path().join("broker/api-keys.txt");
+    // 0644 is what a hub from before the tightening left behind; 0600 is
+    // what a restrictive umask would have made.
+    for mode in [0o644, 0o600] {
+        fs::set_permissions(&api_path, fs::Permissions::from_mode(mode)).unwrap();
+        let (second, log) = logged(|| load(&secrets, "agmen-hub").unwrap());
+        assert_eq!(second.emqx_api_secret, first.emqx_api_secret);
+        assert_eq!(
+            fs::metadata(&api_path).unwrap().permissions().mode() & 0o777,
+            mode
+        );
+        assert!(log.contains("WARN"), "{log}");
+        assert!(log.contains(&format!("mode={mode:04o}")), "{log}");
+        assert!(log.contains("chmod 0640"), "{log}");
+        assert!(log.contains(&api_path.display().to_string()), "{log}");
+        assert!(!log.contains(second.emqx_api_secret.expose()), "{log}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_new_key_file_is_not_reported() {
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = HubSecrets::Generated {
+        data_dir: dir.path().to_owned(),
+    };
+    let (_, first) = logged(|| load(&secrets, "agmen-hub").unwrap());
+    let (_, second) = logged(|| load(&secrets, "agmen-hub").unwrap());
+    assert!(!first.contains("api-keys.txt"), "{first}");
+    assert!(!second.contains("api-keys.txt"), "{second}");
 }
 
 #[test]
