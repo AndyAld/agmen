@@ -239,7 +239,19 @@ fn desktop_waits_for_ready() {
 
 #[test]
 fn snapshot_maps_roster_into_person_groups() {
-    let s = snapshot_from(console(vec![message(1), message(2)]));
+    let fake = FakeAgmend::start(console(vec![message(1), message(2)]));
+    fake.edit(|state| {
+        state.agent_list_answer = Some(json!({"agents": [{
+            "identity": "idfx1abc", "project": PROJECT,
+            "handle": "andy/fx1", "state": "running"
+        }]}));
+    });
+    let (backend, mut updates) = live_backend(&fake);
+    wait_for(&mut updates, |update| {
+        matches!(update, Update::Snapshot(snapshot)
+        if snapshot.managed_agents.contains_key(&ident("idfx1abc")))
+    });
+    let s = backend.snapshot();
     assert_eq!(s.project, PROJECT);
     assert_eq!(s.me, "andy");
     assert_eq!(s.me_id, ident("idandy00"));
@@ -277,8 +289,9 @@ fn snapshot_maps_roster_into_person_groups() {
     // Four of the six are online.
     assert_eq!(s.status.online, 4);
 
+    assert_eq!(s.agents.keys().collect::<Vec<_>>(), [&ident("idfx1abc")]);
+    assert_eq!(s.agents[&ident("idfx1abc")].handle, "andy/fx1");
     // Nothing without a live source is filled.
-    assert!(s.agents.is_empty());
     assert!(s.worktrees.is_empty());
     assert!(s.roles.is_empty());
     assert!(s.models.is_empty());
@@ -286,6 +299,166 @@ fn snapshot_maps_roster_into_person_groups() {
     assert!(s.plan.is_none());
     assert!(s.listener.as_ref().unwrap().details.is_none());
     assert_eq!(s.status.worktrees, 0);
+}
+
+#[test]
+fn agent_panel_shows_spend_against_cap() {
+    let fake = FakeAgmend::start(console(vec![]));
+    fake.edit(|state| {
+        state.agent_list_answer = Some(json!({"agents": [{
+            "identity": "idmanaged", "project": PROJECT,
+            "handle": "andy/worker", "state": "running",
+            "model": "claude-sonnet-5-5", "role": "engineer",
+            "budget_usd": "5", "spent_usd": "1.25",
+            "worktree": "/repo/.worktrees/agent/worker-1234",
+            "branch": "agent/worker-1234", "source": "launched"
+        }]}));
+    });
+    let (backend, mut updates) = live_backend(&fake);
+    wait_for(&mut updates, |update| {
+        matches!(update, Update::Snapshot(snapshot)
+        if snapshot.managed_agents.contains_key(&ident("idmanaged")))
+    });
+    let snapshot = backend.snapshot();
+    let agent = &snapshot.agents[&ident("idmanaged")];
+    assert_eq!(agent.id, ident("idmanaged"));
+    assert_eq!(agent.handle, "andy/worker");
+    assert_eq!(agent.model, "claude-sonnet-5-5");
+    assert_eq!(agent.role, "engineer");
+    assert_eq!(agent.role_label, "engineer");
+    assert_eq!(agent.harness_label, "Claude Code");
+    assert_eq!(agent.state, "running");
+    assert_eq!(agent.status, AgentStatus::Working);
+    assert_eq!(agent.branch, "agent/worker-1234");
+    assert_eq!(
+        agent.worktree_state,
+        snapshot.managed_work[&agent.id]
+            .worktree
+            .as_deref()
+            .unwrap()
+    );
+    assert_eq!(agent.spent_usd, 1.25);
+    assert_eq!(agent.budget_usd, 5.0);
+    assert!(agent.delegated_by.is_none());
+    assert!(agent.tools.is_empty());
+    assert!(!agent.tools_lossy);
+    assert!(agent.verbs.is_empty());
+    assert!(agent.refused.is_empty());
+    assert!(agent.edits.is_empty());
+    assert!(agent.base.is_empty());
+    assert!(agent.cleanup.is_empty());
+    assert_eq!(agent.since_launch_minutes, 0);
+    assert_eq!(agent.working_minutes, 0);
+    assert_eq!(agent.tokens_in, 0);
+    assert_eq!(agent.tokens_out, 0);
+    assert_eq!(agent.cache_read, 0);
+
+    // A spend-only change must publish a new snapshot too.
+    fake.edit(|state| {
+        state.agent_list_answer.as_mut().unwrap()["agents"][0]["spent_usd"] = json!("2.50");
+    });
+    wait_for(&mut updates, |update| {
+        matches!(update, Update::Snapshot(snapshot)
+        if snapshot.agents.get(&ident("idmanaged")).is_some_and(|agent| agent.spent_usd == 2.5))
+    });
+    assert_eq!(
+        backend.snapshot().agents[&ident("idmanaged")].spent_usd,
+        2.5
+    );
+}
+
+#[test]
+fn older_agent_list_without_spend_still_parses() {
+    let fake = FakeAgmend::start(console(vec![]));
+    fake.edit(|state| {
+        state.agent_list_answer = Some(json!({"agents": [{
+            "identity": "idmanaged", "project": PROJECT,
+            "handle": "andy/worker", "state": "offline"
+        }]}));
+    });
+    let (backend, mut updates) = live_backend(&fake);
+    wait_for(&mut updates, |update| {
+        matches!(update, Update::Snapshot(snapshot)
+        if snapshot.managed_agents.contains_key(&ident("idmanaged")))
+    });
+    let snapshot = backend.snapshot();
+    assert!(snapshot.agent_error.is_none());
+    let agent = &snapshot.agents[&ident("idmanaged")];
+    assert!(agent.model.is_empty());
+    assert!(agent.role.is_empty());
+    assert!(agent.role_label.is_empty());
+    assert!(agent.branch.is_empty());
+    assert!(agent.worktree_state.is_empty());
+    assert_eq!(agent.spent_usd, 0.0);
+    assert_eq!(agent.budget_usd, 0.0);
+    assert_eq!(agent.state, "offline");
+    assert_eq!(agent.status, AgentStatus::Offline);
+}
+
+#[test]
+fn agent_list_invalid_dollars_show_zero() {
+    let fake = FakeAgmend::start(console(vec![]));
+    fake.edit(|state| {
+        let agents: Vec<_> = ["not-usd", "NaN", "inf", "1e999", "-5"]
+            .into_iter()
+            .enumerate()
+            .map(|(i, amount)| {
+                json!({
+                    "identity": format!("idmoney{i}"), "project": PROJECT,
+                    "handle": format!("andy/worker-{i}"), "state": "idle",
+                    "budget_usd": amount, "spent_usd": amount
+                })
+            })
+            .collect();
+        state.agent_list_answer = Some(json!({"agents": agents}));
+    });
+    let (backend, mut updates) = live_backend(&fake);
+    wait_for(
+        &mut updates,
+        |update| matches!(update, Update::Snapshot(snapshot) if snapshot.managed_agents.len() == 5),
+    );
+    let snapshot = backend.snapshot();
+    assert_eq!(snapshot.agents.len(), 5);
+    for agent in snapshot.agents.values() {
+        assert_eq!(agent.spent_usd, 0.0);
+        assert_eq!(agent.budget_usd, 0.0);
+    }
+}
+
+#[test]
+fn agent_panel_only_lists_this_projects_managed_agents() {
+    let fake = FakeAgmend::start(console(vec![]));
+    fake.edit(|state| {
+        state.agent_list_answer = Some(json!({"agents": [
+            {"identity": "idfx1abc", "project": PROJECT,
+             "handle": "andy/fx1", "state": "idle", "role": "reviewer"},
+            {"identity": "idmanaged", "project": PROJECT,
+             "handle": "andy/joined", "state": "attached", "source": "joined"},
+            {"identity": "idother0", "project": "another-project",
+             "handle": "andy/other", "state": "running"}
+        ]}));
+    });
+    let (backend, mut updates) = live_backend(&fake);
+    wait_for(
+        &mut updates,
+        |update| matches!(update, Update::Snapshot(snapshot) if snapshot.managed_agents.len() == 2),
+    );
+    let snapshot = backend.snapshot();
+    assert_eq!(
+        snapshot.agents.keys().collect::<Vec<_>>(),
+        [&ident("idfx1abc"), &ident("idmanaged")]
+    );
+    assert_eq!(snapshot.agents[&ident("idfx1abc")].state, "idle");
+    assert_eq!(
+        snapshot.agents[&ident("idfx1abc")].status,
+        AgentStatus::Idle
+    );
+    assert_eq!(snapshot.agents[&ident("idfx1abc")].role, "reviewer");
+    assert_eq!(snapshot.agents[&ident("idmanaged")].state, "attached");
+    assert_eq!(
+        snapshot.agents[&ident("idmanaged")].status,
+        AgentStatus::Working
+    );
 }
 
 #[test]
@@ -935,9 +1108,6 @@ fn unsupported_actions_say_so() {
         },
         Action::ApproveShare,
         Action::KickOff,
-        Action::SpawnWorker {
-            agent: "claude".into(),
-        },
     ];
     for action in actions {
         let result = backend.act(action.clone());
@@ -952,6 +1122,119 @@ fn unsupported_actions_say_so() {
             .act(Action::SnoozeAlert(message(1).client.id))
             .is_ok()
     );
+}
+
+#[test]
+fn spawn_other_agent_is_unsupported() {
+    let fake = FakeAgmend::start(console(vec![]));
+    let (backend, _updates) = live_backend(&fake);
+    let result = backend.act(Action::SpawnWorker {
+        agent: "codex".into(),
+    });
+    assert!(matches!(
+        result,
+        Err(BackendError::Unsupported("starting a worker on that agent"))
+    ));
+    assert!(fake.state.lock().unwrap().agent_requests.is_empty());
+}
+
+#[test]
+fn spawn_worker_launches_claude() {
+    for occupied in [false, true] {
+        let fake = FakeAgmend::start(console(vec![]));
+        fake.edit(|state| {
+            let agents = if occupied {
+                vec![json!({"identity": "idmanaged", "project": PROJECT,
+                    "handle": "andy/worker-1", "state": "offline"})]
+            } else {
+                vec![]
+            };
+            state.agent_list_answer = Some(json!({"agents": agents}));
+        });
+        let root = occupied.then(|| Path::new(ROOT));
+        let backend = AgmendBackend::connect_with(&fake.path(), PROJECT, root, FAST).unwrap();
+        let mut updates = backend.subscribe();
+        wait_for(&mut updates, is_live);
+        if occupied {
+            wait_for(&mut updates, |update| {
+                matches!(update, Update::Snapshot(snapshot)
+                if snapshot.managed_agents.contains_key(&ident("idmanaged")))
+            });
+        }
+        backend
+            .act(Action::SpawnWorker {
+                agent: "claude".into(),
+            })
+            .unwrap();
+        until(|| !fake.state.lock().unwrap().agent_requests.is_empty());
+        let state = fake.state.lock().unwrap();
+        assert_eq!(state.agent_requests.len(), 1);
+        let request = &state.agent_requests[0];
+        assert_eq!(request.method, "agent_launch");
+        let mut expected = json!({"project": PROJECT,
+            "name": if occupied { "worker-2" } else { "worker-1" }, "role": "engineer"});
+        if occupied {
+            expected["root"] = json!(ROOT);
+        }
+        assert_eq!(request.params, expected);
+        assert!(request.params.get("model").is_none());
+        assert!(request.params.get("budget_usd").is_none());
+    }
+}
+
+#[test]
+fn spawn_worker_uses_the_first_free_name_in_this_project() {
+    let fake = FakeAgmend::start(console(vec![]));
+    fake.edit(|state| {
+        state.agent_list_answer = Some(json!({"agents": [
+            {"identity": "idworker1", "project": PROJECT,
+             "handle": "andy/worker-1", "state": "idle"},
+            {"identity": "idworker3", "project": PROJECT,
+             "handle": "andy/worker-3", "state": "offline"},
+            {"identity": "idother0", "project": "another-project",
+             "handle": "andy/worker-2", "state": "running"}
+        ]}));
+    });
+    let (backend, mut updates) = live_backend(&fake);
+    wait_for(
+        &mut updates,
+        |update| matches!(update, Update::Snapshot(snapshot) if snapshot.managed_agents.len() == 2),
+    );
+    backend
+        .act(Action::SpawnWorker {
+            agent: "claude".into(),
+        })
+        .unwrap();
+    until(|| !fake.state.lock().unwrap().agent_requests.is_empty());
+    let state = fake.state.lock().unwrap();
+    assert_eq!(state.agent_requests.len(), 1);
+    assert_eq!(state.agent_requests[0].params["name"], "worker-2");
+}
+
+#[test]
+fn spawn_worker_refuses_when_all_99_names_are_taken() {
+    let fake = FakeAgmend::start(console(vec![]));
+    fake.edit(|state| {
+        let agents: Vec<_> = (1..=99)
+            .map(|n| {
+                json!({"identity": format!("idwork{n:03}"), "project": PROJECT,
+                "handle": format!("andy/worker-{n}"), "state": "offline"})
+            })
+            .collect();
+        state.agent_list_answer = Some(json!({"agents": agents}));
+    });
+    let (backend, mut updates) = live_backend(&fake);
+    wait_for(
+        &mut updates,
+        |update| matches!(update, Update::Snapshot(snapshot) if snapshot.managed_agents.len() == 99),
+    );
+    assert!(matches!(
+        backend.act(Action::SpawnWorker {
+            agent: "claude".into()
+        }),
+        Err(BackendError::Unsupported("too many workers"))
+    ));
+    assert!(fake.state.lock().unwrap().agent_requests.is_empty());
 }
 
 // Task 8: roles, worktrees, git facts and file text from agmend.
