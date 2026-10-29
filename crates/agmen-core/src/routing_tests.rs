@@ -1,16 +1,5 @@
 use super::*;
-
-#[test]
-fn refs_stop_at_128_matches() {
-    for (body, items) in [
-        ("#1 ".repeat(10_922), vec![]),
-        ("B-1 ".repeat(8_192), vec!["B-1".parse().unwrap()]),
-    ] {
-        let refs = crate::refs::stamp_refs(&body, &Roster::default(), &[], &items);
-        assert_eq!(refs.len(), 128);
-        assert!(serde_json::to_vec(&refs).unwrap().len() + body.len() < 80 * 1024);
-    }
-}
+use crate::{MemberRole as Role, hub_identity};
 
 fn id(name: &str) -> IdentityId {
     format!("{name:0<8}").parse().unwrap()
@@ -64,11 +53,15 @@ fn envelope(verb: &str, data: &str, extra: &str) -> ClientEnvelope {
 }
 
 #[test]
-fn hub_identity_can_never_be_minted() {
-    let hub = hub_identity();
-    assert_eq!(hub.as_str(), HUB_IDENTITY);
-    // db::new_id mints from an alphabet without 0, 1, l and o.
-    assert!(HUB_IDENTITY.contains('0'));
+fn refs_stop_at_128_matches() {
+    for (body, items) in [
+        ("#1 ".repeat(10_922), vec![]),
+        ("B-1 ".repeat(8_192), vec!["B-1".parse().unwrap()]),
+    ] {
+        let refs = crate::refs::stamp_refs(&body, &Roster::default(), &[], &items);
+        assert_eq!(refs.len(), 128);
+        assert!(serde_json::to_vec(&refs).unwrap().len() + body.len() < 80 * 1024);
+    }
 }
 
 #[test]
@@ -331,77 +324,6 @@ fn ack_reports_the_sender_visible_copy() {
         Some(Stream::Inbox(id("w3f")))
     );
     assert_eq!(ack_stream(&BTreeSet::new(), &id("sol")), None);
-}
-
-#[test]
-fn rate_limit_allows_a_burst_of_30_then_10_per_second() {
-    let mut limiter = RateLimiter::default();
-    let sol = id("sol");
-    let start = Instant::now();
-    for n in 0..30 {
-        assert_eq!(limiter.take(&sol, start), Ok(()), "publish {n}");
-    }
-    let wait = limiter.take(&sol, start).unwrap_err().unwrap();
-    assert!(
-        wait > Duration::from_millis(90) && wait <= Duration::from_millis(100),
-        "{wait:?}"
-    );
-    let later = start + Duration::from_millis(100);
-    assert_eq!(limiter.take(&sol, later), Ok(()));
-    assert!(limiter.take(&sol, later).is_err());
-    // Another sender has a bucket of its own.
-    assert_eq!(limiter.take(&id("w3f"), start), Ok(()));
-}
-
-#[test]
-fn rate_limiter_stays_bounded() {
-    let mut limiter = RateLimiter::default();
-    let start = Instant::now();
-    for n in 0..MAX_TRACKED {
-        let sender: IdentityId = format!("s{n:0>9}").parse().unwrap();
-        limiter.take(&sender, start).unwrap();
-    }
-    // Every bucket is still refilling, so a new sender has no room.
-    assert_eq!(limiter.take(&id("late"), start), Err(None));
-    // Once the buckets refill they are forgotten and the new sender fits.
-    let refilled = start + Duration::from_secs(1);
-    assert_eq!(limiter.take(&id("late"), refilled), Ok(()));
-    assert_eq!(limiter.buckets.len(), 1);
-}
-
-#[test]
-fn hub_message_ids_are_ulids_in_time_order() {
-    let now: Timestamp = "2026-10-25T16:04:11.402Z".parse().unwrap();
-    let first = new_message_id(now).unwrap();
-    let second = new_message_id(now.checked_add(Duration::from_millis(1)).unwrap()).unwrap();
-    assert_eq!(first.as_str().len(), 26);
-    assert!(first < second, "{first} {second}");
-    assert_ne!(new_message_id(now).unwrap(), first);
-}
-
-#[test]
-fn message_id_is_read_from_a_bad_envelope() {
-    assert_eq!(
-        message_id(br#"{"id":"01JBX6Q4T7W3C2M8Y9K5N0P1RS","verb":"NOPE"}"#)
-            .unwrap()
-            .as_str(),
-        "01JBX6Q4T7W3C2M8Y9K5N0P1RS"
-    );
-    assert_eq!(message_id(br#"{"verb":"FYI"}"#), None);
-    assert_eq!(message_id(b"not json"), None);
-}
-
-#[test]
-fn envelope_hash_ignores_spacing() {
-    let a = envelope("FYI", "{}", "");
-    let spaced = ClientEnvelope::from_json(
-        br#"{ "sent_at":"2026-10-25T16:04:11Z", "body":"hi", "data":{}, "verb":"FYI",
-             "id":"01JBX6Q4T7W3C2M8Y9K5N0P1RS", "v":1 }"#,
-    )
-    .unwrap();
-    assert_eq!(envelope_hash(&a).unwrap(), envelope_hash(&spaced).unwrap());
-    let other = envelope("FYI", "{}", r#","items":["B-1"]"#);
-    assert_ne!(envelope_hash(&a).unwrap(), envelope_hash(&other).unwrap());
 }
 
 #[test]

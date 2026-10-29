@@ -110,6 +110,16 @@ impl fmt::Display for Role {
     }
 }
 
+impl From<Role> for agmen_core::MemberRole {
+    fn from(role: Role) -> Self {
+        match role {
+            Role::Member => Self::Member,
+            Role::Coordinator => Self::Coordinator,
+            Role::Admin => Self::Admin,
+        }
+    }
+}
+
 /// A person's role in a tenant (`tenant_members.role`), lowest rights first.
 ///
 /// ```
@@ -184,6 +194,23 @@ impl FromStr for Role {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn member_roles_keep_the_stored_names() {
+        for (role, expected) in [
+            (Role::Member, agmen_core::MemberRole::Member),
+            (Role::Coordinator, agmen_core::MemberRole::Coordinator),
+            (Role::Admin, agmen_core::MemberRole::Admin),
+        ] {
+            let converted = agmen_core::MemberRole::from(role);
+            assert_eq!(converted, expected);
+            assert_eq!(converted.as_str(), role.as_str());
+            assert_eq!(
+                serde_json::to_string(&converted).unwrap(),
+                serde_json::to_string(&role).unwrap()
+            );
+        }
+    }
 
     #[test]
     fn ids_fit_the_protocol_alphabet() {

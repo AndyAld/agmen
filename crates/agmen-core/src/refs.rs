@@ -4,10 +4,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use agmen_proto::{ItemKey, Ref, RefKind};
 
-use crate::ingest::Roster;
+use crate::roster::Roster;
 
 /// The most references stamped on one message, in body order.
-pub(crate) const MAX_REFS_PER_MESSAGE: usize = 128;
+pub const MAX_REFS_PER_MESSAGE: usize = 128;
 
 fn token_char(c: char) -> bool {
     c.is_alphanumeric() || matches!(c, '_' | '/' | '-' | '@' | '#')
@@ -15,7 +15,8 @@ fn token_char(c: char) -> bool {
 
 /// Only whole item-key words can need a database lookup. Deduplicate them
 /// before applying the cap so repeated words use one query parameter.
-pub(crate) fn candidate_item_keys(body: &str) -> Vec<String> {
+#[must_use]
+pub fn candidate_item_keys(body: &str) -> Vec<String> {
     let mut keys = BTreeSet::new();
     for word in body.split(|c| !token_char(c)) {
         if let Ok(key) = word.parse::<ItemKey>() {
@@ -30,12 +31,8 @@ pub(crate) fn candidate_item_keys(body: &str) -> Vec<String> {
 
 /// Stamps known names in body order. Tokens consume whole words so a known
 /// name inside a longer handle, lane, item or role never becomes a link.
-pub(crate) fn stamp_refs(
-    body: &str,
-    roster: &Roster,
-    lanes: &[String],
-    items: &[ItemKey],
-) -> Vec<Ref> {
+#[must_use]
+pub fn stamp_refs(body: &str, roster: &Roster, lanes: &[String], items: &[ItemKey]) -> Vec<Ref> {
     let handles: BTreeMap<&str, &str> = roster
         .0
         .iter()
