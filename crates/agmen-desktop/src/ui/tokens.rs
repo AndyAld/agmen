@@ -167,6 +167,8 @@ pub(crate) const CHANGE_VALUE_MIN_WIDTH: Pixels = px(48.);
 pub(crate) const ICON_SM: Pixels = px(12.);
 /// The dock collapse glyph (mockup node 391, V63).
 pub(crate) const ICON_GLYPH: Pixels = px(13.);
+/// The minimum square target for a bare icon button.
+pub(crate) const ICON_BUTTON_SIZE: Pixels = px(20.);
 /// The filled dock button around it: 17 by 20.
 pub(crate) const DOCK_BUTTON: gpui::Size<Pixels> = gpui::Size {
     width: px(17.),
@@ -312,6 +314,8 @@ pub(crate) const BUTTON_TINT: f32 = 0.15;
 /// 7120); a fill change would vanish on the card's `elevated_surface`, which
 /// is the theme's `element_hover`.
 pub(crate) const BUTTON_HOVER_OPACITY: f32 = 0.85;
+/// Disabled buttons dim their surface and all their contents together.
+pub(crate) const BUTTON_DISABLED_OPACITY: f32 = 0.5;
 
 // Task 18: the command palette (node 11473).
 /// The palette's width.
@@ -352,6 +356,17 @@ pub(crate) const SHADOW_BLUR: Pixels = px(30. / 2.);
 #[must_use]
 pub(crate) fn drop_shadow(offset_y: Pixels, blur: Pixels) -> BoxShadow {
     BoxShadow::new(px(0.), offset_y, tint(Theme::SHADOW.into(), SHADOW_ALPHA)).blur_radius(blur)
+}
+
+/// A keyboard focus ring drawn inside a control's own bounds, so focusing it
+/// never changes its size or moves its content.
+#[must_use]
+pub(crate) fn focus_ring(color: Hsla) -> Vec<BoxShadow> {
+    vec![
+        BoxShadow::new(px(0.), px(0.), color)
+            .spread_radius(BORDER_WIDTH)
+            .inset(),
+    ]
 }
 
 // Task 13: needs you (the alert row, the banner and the toast).

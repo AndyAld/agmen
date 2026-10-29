@@ -760,10 +760,24 @@ impl Composer {
                     .map(|chip| {
                         if replying {
                             chip.trailing(
-                                IconButton::new("composer:cancel-reply", UiIcon::Close)
-                                    .size(IconSize::Small)
-                                    .color(Color::Placeholder)
-                                    .on_click(cx.listener(|this, _, _, cx| this.cancel_reply(cx))),
+                                // Keep the glyph slot, the chip's gaps and its height;
+                                // the target overflows the slot into the chip's padding.
+                                div()
+                                    .w(ICON_SM)
+                                    .h(ICON_SM)
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(
+                                        IconButton::new("composer:cancel-reply", UiIcon::Close)
+                                            .size(IconSize::Small)
+                                            .color(Color::Placeholder)
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.cancel_reply(cx);
+                                                this.input.focus_handle(cx).focus(window, cx);
+                                            })),
+                                    ),
                             )
                         } else {
                             chip
@@ -850,6 +864,7 @@ impl Render for Composer {
                     this.close_model_picker(window, cx);
                 } else if this.reply.is_some() {
                     this.cancel_reply(cx);
+                    this.input.focus_handle(cx).focus(window, cx);
                 } else {
                     cx.propagate();
                 }

@@ -37,6 +37,7 @@ impl Workspace {
     pub(super) fn alert_toast(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let toast = self.chat.read(cx).toast()?.clone();
         let workspace = cx.entity().downgrade();
+        let dismiss = self.chat.downgrade();
         Some(
             div()
                 // Over the docks' drag handles, so a click on the toast
@@ -45,12 +46,21 @@ impl Workspace {
                 .absolute()
                 .top(TOAST_TOP)
                 .right(SPACE_16)
-                .child(AlertToast::new(toast).on_click(move |alert, _, cx| {
-                    // A toast outlives its workspace only while the window closes.
-                    workspace
-                        .update(cx, |workspace, cx| workspace.open_alert(&alert, cx))
-                        .unwrap_or_default();
-                }))
+                .child(
+                    AlertToast::new(toast)
+                        .on_click(move |alert, _, cx| {
+                            // A toast outlives its workspace only while the window closes.
+                            workspace
+                                .update(cx, |workspace, cx| workspace.open_alert(&alert, cx))
+                                .unwrap_or_default();
+                        })
+                        .on_dismiss(move |_, cx| {
+                            // The chat can close before the toast's final frame is released.
+                            dismiss
+                                .update(cx, |chat, cx| chat.dismiss_toast(cx))
+                                .unwrap_or_default();
+                        }),
+                )
                 .into_any_element(),
         )
     }

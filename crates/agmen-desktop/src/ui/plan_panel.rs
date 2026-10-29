@@ -10,18 +10,18 @@
 
 use gpui::{
     Action, AnyElement, App, Entity, FontWeight, InteractiveElement as _, IntoElement,
-    ParentElement as _, Pixels, RenderOnce, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Window, div,
+    ParentElement as _, Pixels, RenderOnce, StatefulInteractiveElement as _, Styled as _, Window,
+    div,
 };
 
 use super::components::{
-    Badge, Button, ButtonSize, ButtonStyle, CheckRow, Color, Dot, Label, LabelSize, SectionHeading,
-    StatusDot, TableCard,
+    Badge, Button, ButtonSize, ButtonStyle, CheckRow, Color, Dot, Indent, Label, LabelSize,
+    ListItem, SectionHeading, StatusDot, TableCard,
 };
 use super::dock::RightDockHeader;
 use super::plan_model::PlanModel;
 use super::tokens::{
-    SPACE_8, SPACE_12, SPACE_14, TEAM_HANDLE_COLUMN, TEAM_HARNESS_COLUMN, TEAM_LANE_COLUMN,
+    SPACE_12, SPACE_14, TEAM_HANDLE_COLUMN, TEAM_HARNESS_COLUMN, TEAM_LANE_COLUMN,
     TEAM_OWNER_COLUMN, TEAM_ROLE_COLUMN,
 };
 use crate::appearance::Appearance;
@@ -232,19 +232,12 @@ fn spec_row(spec: &SpecState, has_text: bool) -> impl IntoElement {
     } else {
         Color::Default
     });
-    let row = div()
-        .id(SharedString::from(selector.clone()))
-        .debug_selector(|| selector)
-        .w_full()
-        .flex()
-        .items_center()
-        .gap(SPACE_8)
+    let row = ListItem::new(selector, Indent::Page)
         .child(path)
-        .child(div().flex_1())
-        .child(Label::new(state).size(LabelSize::Small).color(state_color));
+        .end(Label::new(state).size(LabelSize::Small).color(state_color));
     if has_text {
         let open = spec.path.clone();
-        row.cursor_pointer().on_click(move |_, window, cx| {
+        row.on_click(move |_, window, cx| {
             window.dispatch_action(Box::new(OpenSpec(open.clone())), cx);
         })
     } else {

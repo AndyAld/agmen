@@ -12,16 +12,17 @@ use agmen_proto::MessageId;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce,
-    StatefulInteractiveElement as _, Styled as _, Window, div,
+    Styled as _, Window, div,
 };
 
-use super::components::{Card, ChangeHandler, Color, GlyphDisc, Label, LabelSize};
+use super::components::{Card, ChangeHandler, Color, GlyphDisc, IconButton, Label, LabelSize};
 use super::needs_you::Toast;
 use super::tokens::{
     BORDER_WIDTH, GLYPH_DISC, POPOVER_SHADOW_BLUR, POPOVER_SHADOW_OFFSET, RADIUS_XL, SPACE_4,
     SPACE_8, SPACE_10, SPACE_12, TINT_ALERT_EDGE, TOAST_WIDTH, drop_shadow, tint,
 };
 use crate::appearance::Appearance;
+use crate::icons::UiIcon;
 
 /// How many lines of the alert's text the toast shows.
 const BODY_LINES: usize = 2;
@@ -31,6 +32,7 @@ const BODY_LINES: usize = 2;
 pub(crate) struct AlertToast {
     toast: Toast,
     on_click: Option<ChangeHandler<MessageId>>,
+    on_dismiss: Option<ChangeHandler<()>>,
 }
 
 impl std::fmt::Debug for AlertToast {
@@ -47,6 +49,7 @@ impl AlertToast {
         Self {
             toast,
             on_click: None,
+            on_dismiss: None,
         }
     }
 
@@ -57,6 +60,13 @@ impl AlertToast {
         handler: impl Fn(MessageId, &mut Window, &mut App) + 'static,
     ) -> Self {
         self.on_click = Some(Rc::new(handler));
+        self
+    }
+
+    /// Dismisses the toast without opening its alert.
+    #[must_use]
+    pub(crate) fn on_dismiss(mut self, handler: impl Fn(&mut Window, &mut App) + 'static) -> Self {
+        self.on_dismiss = Some(Rc::new(move |(), window, cx| handler(window, cx)));
         self
     }
 }
@@ -88,7 +98,15 @@ impl RenderOnce for AlertToast {
                             .color(Color::Placeholder),
                     )
                     .child(div().flex_1())
-                    .child(Label::new("now").size(LabelSize::Small).color(Color::Muted)),
+                    .child(Label::new("now").size(LabelSize::Small).color(Color::Muted))
+                    .when_some(self.on_dismiss, |this, handler| {
+                        this.child(IconButton::new("toast:dismiss", UiIcon::Close).on_click(
+                            move |_, window, cx| {
+                                cx.stop_propagation();
+                                handler((), window, cx);
+                            },
+                        ))
+                    }),
             )
             .child(
                 part("toast:title").child(
@@ -114,15 +132,13 @@ impl RenderOnce for AlertToast {
             });
         let alert = self.toast.alert;
         div()
-            .id("toast")
             .debug_selector(|| "toast".into())
             .flex_none()
-            .when_some(self.on_click, |this, handler| {
-                this.cursor_pointer().on_click(move |_, window, cx| {
-                    handler(alert.clone(), window, cx);
+            .child(card.when_some(self.on_click, |card, handler| {
+                card.on_click("toast", move |_, window, cx| {
+                    handler(alert.clone(), window, cx)
                 })
-            })
-            .child(card)
+            }))
     }
 }
 
@@ -174,6 +190,24 @@ mod tests {
             card.size.height > px(80.) && card.size.height < px(130.),
             "{card:?}"
         );
+    }
+
+    #[gpui::test]
+    fn toast_hovers_takes_focus_and_still_opens_its_alert(cx: &mut TestAppContext) {
+        use crate::ui::test_support::{assert_control_feedback, draw_with_tab, press};
+        let opened = Rc::new(RefCell::new(Vec::new()));
+        let seen = opened.clone();
+        let cx = draw_with_tab(cx, move || {
+            let seen = seen.clone();
+            AlertToast::new(toast())
+                .on_click(move |id, _, _| seen.borrow_mut().push(id))
+                .into_any_element()
+        });
+        assert_control_feedback(cx, "toast", "toast", 1);
+        press(cx, "enter");
+        press(cx, "space");
+        click(cx, "toast");
+        assert_eq!(*opened.borrow(), vec![toast().alert; 3]);
     }
 
     #[gpui::test]

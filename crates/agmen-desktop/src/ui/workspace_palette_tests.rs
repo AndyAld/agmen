@@ -155,6 +155,31 @@ fn escape_closes_the_palette(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn closing_the_palette_from_a_focused_row_restores_workspace_shortcuts(cx: &mut TestAppContext) {
+    use crate::ui::test_support::press;
+    for key in ["escape", "cmd-shift-p"] {
+        let (workspace, cx) = open(cx);
+        cx.simulate_keystrokes("cmd-shift-p");
+        redraw(cx);
+        cx.update(|window, cx| window.focus_next(cx));
+        press(cx, "left");
+        assert!(
+            !cx.update(|window, _| {
+                window
+                    .context_stack()
+                    .iter()
+                    .any(|context| context.contains(crate::keymap::TEXT_INPUT_CONTEXT))
+            }),
+            "the row takes focus"
+        );
+        press(cx, key);
+        assert!(shown(&workspace, cx).is_none());
+        cx.simulate_keystrokes("cmd-b");
+        workspace.read_with(cx, |w, _| assert!(!w.is_dock_open(DockSide::Left), "{key}"));
+    }
+}
+
+#[gpui::test]
 fn agents_and_roles_open_from_the_palette(cx: &mut TestAppContext) {
     let (workspace, cx) = open(cx);
     cx.simulate_keystrokes("cmd-shift-p");

@@ -10,7 +10,9 @@ use gpui::{
 use super::{Color, Icon, IconSize};
 use crate::appearance::{Appearance, Theme};
 use crate::icons::UiIcon;
-use crate::ui::tokens::{DOCK_BUTTON, RADIUS_SM, WINDOW_BUTTON_WIDTH};
+use crate::ui::tokens::{
+    BUTTON_HOVER_OPACITY, DOCK_BUTTON, ICON_BUTTON_SIZE, RADIUS_SM, WINDOW_BUTTON_WIDTH, focus_ring,
+};
 
 /// What a click does.
 pub(crate) type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
@@ -134,6 +136,7 @@ impl RenderOnce for IconButton {
             _ => hover_fill(self.style, theme),
         };
         let selected_fill = theme.element_selected;
+        let focus = theme.text_accent;
         let color = if self.selected {
             Color::Default
         } else {
@@ -152,6 +155,9 @@ impl RenderOnce for IconButton {
             .items_center()
             .justify_center()
             .when(!caption, |this| this.rounded(RADIUS_SM))
+            .when(self.style == IconButtonStyle::Ghost, |this| {
+                this.size(ICON_BUTTON_SIZE)
+            })
             .when(self.style == IconButtonStyle::Filled, |this| {
                 this.bg(theme.elevated_surface)
                     .w(DOCK_BUTTON.width)
@@ -168,7 +174,13 @@ impl RenderOnce for IconButton {
             })
             .when(
                 self.on_click.is_some() || self.control_area.is_some(),
-                |this| this.hover(move |style| style.bg(hover)),
+                |this| {
+                    this.hover(move |style| style.bg(hover)).active(|style| {
+                        style
+                            .bg(hover)
+                            .opacity(BUTTON_HOVER_OPACITY * BUTTON_HOVER_OPACITY)
+                    })
+                },
             )
             .when_some(self.control_area, |this, area| {
                 this.window_control_area(area)
@@ -176,6 +188,8 @@ impl RenderOnce for IconButton {
             .when_some(self.on_click, |this, handler| {
                 // Caption buttons keep the arrow, as native ones do.
                 this.when(!caption, |this| this.cursor_pointer())
+                    .tab_index(0)
+                    .focus_visible(move |style| style.bg(hover).shadow(focus_ring(focus)))
                     .on_click(handler)
             })
             .child(Icon::new(self.icon).color(color).size(self.size))

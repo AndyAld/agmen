@@ -3,9 +3,11 @@
 
 use gpui::prelude::Refineable as _;
 use gpui::{
-    AnyElement, App, IntoElement, ParentElement, RenderOnce, StyleRefinement, Styled, Window, div,
+    AnyElement, App, ClickEvent, ElementId, InteractiveElement as _, IntoElement, ParentElement,
+    RenderOnce, StatefulInteractiveElement as _, StyleRefinement, Styled, Window, div,
 };
 
+use super::ClickHandler;
 use crate::appearance::Appearance;
 use crate::ui::tokens::{
     BORDER_WIDTH, RADIUS_LG, SHADOW_BLUR, SHADOW_OFFSET_Y, SPACE_6, SPACE_10, SPACE_12, drop_shadow,
@@ -18,6 +20,7 @@ use crate::ui::tokens::{
 pub(crate) struct Card {
     style: StyleRefinement,
     children: Vec<AnyElement>,
+    on_click: Option<(ElementId, ClickHandler)>,
 }
 
 impl std::fmt::Debug for Card {
@@ -34,11 +37,23 @@ impl Card {
         Self {
             style: StyleRefinement::default(),
             children: Vec::new(),
+            on_click: None,
         }
     }
 }
 
 impl Card {
+    /// Makes the card's own surface a focusable control, as an alert toast.
+    #[must_use]
+    pub(crate) fn on_click(
+        mut self,
+        id: impl Into<ElementId>,
+        handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_click = Some((id.into(), Box::new(handler)));
+        self
+    }
+
     /// Lifts the card above the window with the mockup's drop shadow, as
     /// the command palette (node 11473): 10 px down, blurred 30 px
     /// ([`SHADOW_BLUR`] says how gpui takes that).
@@ -76,7 +91,27 @@ impl RenderOnce for Card {
             .bg(theme.elevated_surface);
         // The caller's styles win over the defaults.
         card.style().refine(&self.style);
-        card.children(self.children)
+        let mut card = card.children(self.children);
+        if let Some((id, handler)) = self.on_click {
+            let rest = card
+                .style()
+                .background
+                .as_ref()
+                .and_then(gpui::Fill::color)
+                .and_then(|background| background.as_solid())
+                .unwrap_or(theme.elevated_surface);
+            let hover = theme.hover_over(rest);
+            let focus = theme.text_accent;
+            card.id(id)
+                .tab_index(0)
+                .cursor_pointer()
+                .hover(move |style| style.bg(hover))
+                .focus_visible(move |style| style.border_color(focus))
+                .on_click(handler)
+                .into_any_element()
+        } else {
+            card.into_any_element()
+        }
     }
 }
 

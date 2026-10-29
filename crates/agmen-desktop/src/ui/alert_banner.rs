@@ -3,7 +3,7 @@
 //! 5704), or "Answered" once the last one is answered (frame "Desktop ·
 //! needs you (answered)", node 6257). Each draws its rule inside, so it is
 //! 37 or 35 px tall as drawn (V61). A click on the Answered banner
-//! dismisses it; the mockup draws no close mark there.
+//! dismisses it; a close button also lets keyboard users dismiss it.
 
 use std::rc::Rc;
 
@@ -15,7 +15,7 @@ use gpui::{
 };
 
 use super::components::{
-    Button, ButtonStyle, ChangeHandler, Chip, Color, GlyphDisc, Label, LabelSize,
+    Button, ButtonStyle, ChangeHandler, Chip, Color, GlyphDisc, IconButton, Label, LabelSize,
 };
 use super::needs_you::Banner;
 use super::tokens::{
@@ -141,17 +141,27 @@ impl RenderOnce for AlertBanner {
                     )
                     .into_any_element()
             }
-            Banner::Answered { message } => base
-                .id("banner")
-                .h(ANSWERED_BANNER_HEIGHT)
-                .when_some(self.on_dismiss, |this, handler| {
-                    this.cursor_pointer()
-                        .on_click(move |_, window, cx| handler(window, cx))
-                })
-                .child(GlyphDisc::icon(UiIcon::Check, Color::Success))
-                .child(title("Answered"))
-                .child(Label::new(message).truncate())
-                .into_any_element(),
+            Banner::Answered { message } => {
+                let on_dismiss = self.on_dismiss.clone();
+                base.id("banner")
+                    .h(ANSWERED_BANNER_HEIGHT)
+                    .when_some(self.on_dismiss, |this, handler| {
+                        this.cursor_pointer()
+                            .on_click(move |_, window, cx| handler(window, cx))
+                    })
+                    .child(GlyphDisc::icon(UiIcon::Check, Color::Success))
+                    .child(title("Answered"))
+                    .child(Label::new(message).truncate())
+                    .when_some(on_dismiss, |this, handler| {
+                        this.child(IconButton::new("banner:dismiss", UiIcon::Close).on_click(
+                            move |_, window, cx| {
+                                cx.stop_propagation();
+                                handler(window, cx);
+                            },
+                        ))
+                    })
+                    .into_any_element()
+            }
         }
     }
 }
@@ -330,6 +340,35 @@ mod tests {
         });
         click(cx, "banner");
         assert_eq!(heard.get(), 1);
+    }
+
+    #[gpui::test]
+    fn answered_close_hovers_takes_focus_and_dismisses_once(cx: &mut TestAppContext) {
+        use crate::ui::test_support::{assert_control_feedback, draw_with_tab, press};
+        let dismissed = Rc::new(std::cell::Cell::new(0));
+        let seen = dismissed.clone();
+        let cx = draw_with_tab(cx, move || {
+            let seen = seen.clone();
+            div()
+                .w(px(828.))
+                .child(
+                    AlertBanner::new(answered()).on_dismiss(move |_, _| seen.set(seen.get() + 1)),
+                )
+                .into_any_element()
+        });
+        assert_control_feedback(cx, "banner:dismiss", "banner:dismiss", 1);
+        press(cx, "enter");
+        assert_eq!(dismissed.get(), 1);
+        press(cx, "space");
+        assert_eq!(dismissed.get(), 2);
+        click(cx, "banner:dismiss");
+        assert_eq!(dismissed.get(), 3, "close must not bubble to the banner");
+        click(cx, "banner");
+        assert_eq!(
+            dismissed.get(),
+            4,
+            "the existing banner click must still dismiss"
+        );
     }
 
     #[gpui::test]

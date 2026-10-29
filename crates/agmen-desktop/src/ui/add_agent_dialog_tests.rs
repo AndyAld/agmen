@@ -63,6 +63,37 @@ fn titles_follow_the_dialog() {
 }
 
 #[gpui::test]
+fn vendor_link_hovers_takes_focus_and_opens_the_vendor_url(cx: &mut TestAppContext) {
+    use crate::ui::test_support::{draw_with_tab, press, redraw};
+    let cx = draw_with_tab(cx, || {
+        AddAgentDialog::new(AgentDialog::Add("grok".into()), Some(agent("grok")))
+            .source_row()
+            .into_any_element()
+    });
+    let center = cx.debug_bounds("add-agent:link").unwrap().center();
+    let away = gpui::point(px(900.), px(900.));
+    cx.simulate_mouse_move(away, None, gpui::Modifiers::none());
+    redraw(cx);
+    assert!(cx.update(|window, _| window.painted_underlines().is_empty()));
+    cx.simulate_mouse_move(center, None, gpui::Modifiers::none());
+    redraw(cx);
+    assert!(!cx.update(|window, _| window.painted_underlines().is_empty()));
+    cx.simulate_mouse_move(away, None, gpui::Modifiers::none());
+    press(cx, "tab");
+    assert!(!cx.update(|window, _| window.painted_underlines().is_empty()));
+    press(cx, "enter");
+    assert_eq!(
+        cx.opened_url().as_deref(),
+        Some("https://github.com/xai-org/grok-build")
+    );
+    click(cx, "add-agent:link");
+    assert_eq!(
+        cx.opened_url().as_deref(),
+        Some("https://github.com/xai-org/grok-build")
+    );
+}
+
+#[gpui::test]
 fn copy_prompt_writes_clipboard(cx: &mut TestAppContext) {
     // GPUI's test clipboard, never the system one.
     let copied = Rc::new(Cell::new(false));

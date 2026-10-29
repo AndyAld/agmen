@@ -222,7 +222,7 @@ impl Pane {
                         SharedString::from(format!("pane-{}:show-ledger", self.number)),
                         "Show ledger",
                     )
-                    .style(ButtonStyle::Subtle)
+                    .style(ButtonStyle::Plain)
                     .selected(on)
                     .on_click(move |_, _, cx| {
                         chat.update(cx, |chat, cx| chat.set_show_ledger(!on, cx));

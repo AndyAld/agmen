@@ -147,6 +147,119 @@ fn clicking_the_alert_count_opens_the_chat_at_the_alert(cx: &mut TestAppContext)
 }
 
 #[gpui::test]
+fn toast_close_hovers_takes_focus_and_dismisses_without_opening_chat(cx: &mut TestAppContext) {
+    use crate::ui::test_support::press;
+    let (workspace, cx) = open(cx, Screen::NeedsYou);
+    let settings = TabItem::Settings(Default::default());
+    let active = settings.clone();
+    workspace.update(cx, |w, cx| {
+        w.pane_group
+            .update(cx, |group, cx| group.open(settings, cx));
+    });
+    workspace.update_in(cx, |w, window, cx| w.focus_handle.focus(window, cx));
+    redraw(cx);
+    let center = cx
+        .debug_bounds("toast:dismiss")
+        .expect("toast close")
+        .center();
+    cx.simulate_mouse_move(center, None, gpui::Modifiers::none());
+    redraw(cx);
+    let before = crate::ui::test_support::fills_at(cx, "toast:dismiss");
+    cx.simulate_mouse_move(
+        gpui::point(gpui::px(900.), gpui::px(900.)),
+        None,
+        gpui::Modifiers::none(),
+    );
+    redraw(cx);
+    assert_ne!(
+        crate::ui::test_support::fills_at(cx, "toast:dismiss"),
+        before
+    );
+    // Walk the bounded focus order until the close shows its focus fill.
+    let mut focused = false;
+    for _ in 0..64 {
+        // Shift-Tab can leave text inputs; plain Tab belongs to completion there.
+        press(cx, "shift-tab");
+        if !crate::ui::test_support::fills_at(cx, "toast:dismiss").is_empty() {
+            focused = true;
+            break;
+        }
+    }
+    assert!(focused, "Tab must reach the toast close");
+    press(cx, "enter");
+    assert!(cx.debug_bounds("toast").is_none());
+    assert_eq!(
+        workspace.read_with(cx, |w, cx| w.pane_group.read(cx).active_item(cx)),
+        Some(active)
+    );
+}
+
+#[gpui::test]
+fn a_toast_that_times_out_while_focused_leaves_focus_and_shortcuts_working(
+    cx: &mut TestAppContext,
+) {
+    use crate::ui::test_support::press;
+    let (workspace, cx) = open(cx, Screen::NeedsYou);
+    cx.update(|_, cx| crate::keymap::bind_all(cx));
+    workspace.update_in(cx, |w, window, cx| w.focus_handle.focus(window, cx));
+    redraw(cx);
+    let rest = crate::ui::test_support::painted_at(cx, "toast")
+        .iter()
+        .map(|quad| quad.border_color)
+        .collect::<Vec<_>>();
+    let mut focused = false;
+    for _ in 0..64 {
+        press(cx, "shift-tab");
+        let now = crate::ui::test_support::painted_at(cx, "toast")
+            .iter()
+            .map(|quad| quad.border_color)
+            .collect::<Vec<_>>();
+        if now != rest {
+            focused = true;
+            break;
+        }
+    }
+    assert!(focused, "the toast takes focus");
+    let chat = workspace.read_with(cx, |w, _| w.chat.clone());
+    chat.update(cx, |chat, cx| chat.dismiss_toast(cx));
+    redraw(cx);
+    assert!(cx.debug_bounds("toast").is_none());
+    let open = workspace.read_with(cx, |w, _| {
+        w.is_dock_open(crate::ui::workspace::DockSide::Left)
+    });
+    cx.simulate_keystrokes("cmd-b");
+    assert_ne!(
+        workspace.read_with(cx, |w, _| w
+            .is_dock_open(crate::ui::workspace::DockSide::Left)),
+        open,
+        "a shortcut after the toast went"
+    );
+    press(cx, "tab");
+    assert!(
+        cx.update(|window, cx| window.focused(cx).is_some()),
+        "Tab after the toast went lands on a control"
+    );
+}
+
+#[gpui::test]
+fn clicking_toast_close_dismisses_without_opening_chat(cx: &mut TestAppContext) {
+    let (workspace, cx) = open(cx, Screen::NeedsYou);
+    let settings = TabItem::Settings(Default::default());
+    let active = settings.clone();
+    workspace.update(cx, |w, cx| {
+        w.pane_group
+            .update(cx, |group, cx| group.open(settings, cx));
+    });
+    redraw(cx);
+    click(cx, "toast:dismiss");
+    assert!(cx.debug_bounds("toast").is_none());
+    assert_eq!(
+        workspace.read_with(cx, |w, cx| w.pane_group.read(cx).active_item(cx)),
+        Some(active)
+    );
+}
+
+#[gpui::test]
 fn large_counts_read_99_plus(cx: &mut TestAppContext) {
     let bar = |needs_you: usize| {
         move || {

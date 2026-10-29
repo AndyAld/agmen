@@ -536,3 +536,31 @@ fn closing_new_agent_returns_focus_to_the_workspace(cx: &mut TestAppContext) {
         );
     });
 }
+
+#[gpui::test]
+fn closing_new_agent_returns_focus_to_the_composer_that_had_it(cx: &mut TestAppContext) {
+    use super::Workspace;
+    use crate::backend::chat_snapshot;
+    init(cx);
+    cx.update(crate::keymap::bind_all);
+    let (workspace, cx) =
+        cx.add_window_view(|window, cx| Workspace::new(chat_snapshot(), window, cx));
+    redraw(cx);
+    let in_input = |cx: &mut gpui::VisualTestContext| {
+        cx.update(|window, _| {
+            window
+                .context_stack()
+                .iter()
+                .any(|context| context.contains(crate::keymap::TEXT_INPUT_CONTEXT))
+        })
+    };
+    super::test_support::click(cx, "composer:input");
+    assert!(in_input(cx), "the composer has focus");
+    workspace.update(cx, |w, cx| w.open_new_agent(cx));
+    redraw(cx);
+    redraw(cx);
+    super::test_support::click(cx, "new-agent:cancel");
+    redraw(cx);
+    redraw(cx);
+    assert!(in_input(cx), "focus went back to the composer");
+}

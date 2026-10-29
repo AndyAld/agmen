@@ -31,6 +31,33 @@ fn sel(env: &StampedEnvelope, part: &str) -> &'static str {
     Box::leak(format!("{}:{part}", env.client.id.as_str()).into_boxed_str())
 }
 
+#[gpui::test]
+fn terminal_chip_hovers_takes_focus_and_still_takes_over(cx: &mut TestAppContext) {
+    use crate::ui::test_support::{assert_control_feedback, draw_with_tab, press};
+    let (messages, context) = chat();
+    let env = messages[6].clone();
+    let worker = env.from.clone();
+    let selector = sel(&env, "open-in-terminal");
+    let surface: &'static str = Box::leak(format!("chip-button:{selector}").into_boxed_str());
+    let actions = Rc::new(RefCell::new(Vec::new()));
+    let seen = actions.clone();
+    let cx = draw_with_tab(cx, move || {
+        let seen = seen.clone();
+        MessageRow::new(6, context.clone())
+            .on_action(move |action, _, _| seen.borrow_mut().push(action))
+            .take_over_chip(&env, env.client.id.as_str())
+            .into_any_element()
+    });
+    assert_control_feedback(cx, selector, surface, 1);
+    press(cx, "enter");
+    press(cx, "space");
+    click(cx, selector);
+    assert_eq!(actions.borrow().len(), 3);
+    for action in actions.borrow().iter() {
+        assert!(matches!(action, Action::TakeOver(id) if *id == worker));
+    }
+}
+
 #[test]
 fn verb_badge_colors() {
     let (messages, c) = chat();

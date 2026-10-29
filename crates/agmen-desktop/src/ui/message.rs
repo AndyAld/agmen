@@ -10,14 +10,16 @@ use agmen_proto::{IdentityId, IdentityKind, Mention, Payload, StampedEnvelope, V
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
-    RenderOnce, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
+    RenderOnce, Styled as _, Window, div,
 };
 
 use super::alert_row;
 use super::ask_card::AskCard;
 use super::change_card::ChangeCard;
 use super::chat_context::ChatContext;
-use super::components::{Avatar, Badge, ChangeHandler, Chip, Color, Label, LabelSize, ModelTag};
+use super::components::{
+    Avatar, Badge, ChangeHandler, Chip, ChipButton, Color, Label, LabelSize, ModelTag,
+};
 use super::format::title_case;
 use super::needs_you::AlertLook;
 use super::ref_chip::RefEvent;
@@ -348,41 +350,38 @@ impl MessageRow {
     /// accent tint.
     fn take_over_chip(&self, env: &StampedEnvelope, id: &str) -> impl IntoElement {
         let selector = format!("{id}:open-in-terminal");
-        let element_id = SharedString::from(selector.clone());
         let worker = env.from.clone();
-        div()
-            .id(element_id)
-            .debug_selector(|| selector)
-            .flex()
-            .flex_none()
-            .when_some(self.on_action.clone(), |this, handler| {
-                this.cursor_pointer().on_click(move |_, window, cx| {
-                    handler(Action::TakeOver(worker.clone()), window, cx);
-                })
+        ChipButton::new(
+            selector,
+            Chip::new("Open in terminal")
+                .inline()
+                .tinted(Color::Accent)
+                .outline(Color::Accent)
+                // Node 300: the glyph (node 301) on its 12 px line and
+                // the label and key (node 302, SF 11) on their 13 px
+                // one make the chip 17 px.
+                .line_height(AUTO_LINE_11)
+                .leading(
+                    Label::new(">_")
+                        .code()
+                        .size(LabelSize::XSmall)
+                        .line_height(AUTO_LINE_10)
+                        .color(Color::Accent),
+                )
+                .trailing(
+                    Label::new(crate::keymap::open_in_terminal_hint())
+                        .size(LabelSize::Small)
+                        .line_height(AUTO_LINE_11)
+                        .color(Color::Accent),
+                ),
+        )
+        .flex()
+        .flex_none()
+        .when_some(self.on_action.clone(), |this, handler| {
+            this.on_toggle(move |_, window, cx| {
+                handler(Action::TakeOver(worker.clone()), window, cx);
             })
-            .child(
-                Chip::new("Open in terminal")
-                    .inline()
-                    .tinted(Color::Accent)
-                    .outline(Color::Accent)
-                    // Node 300: the glyph (node 301) on its 12 px line and
-                    // the label and key (node 302, SF 11) on their 13 px
-                    // one make the chip 17 px.
-                    .line_height(AUTO_LINE_11)
-                    .leading(
-                        Label::new(">_")
-                            .code()
-                            .size(LabelSize::XSmall)
-                            .line_height(AUTO_LINE_10)
-                            .color(Color::Accent),
-                    )
-                    .trailing(
-                        Label::new(crate::keymap::open_in_terminal_hint())
-                            .size(LabelSize::Small)
-                            .line_height(AUTO_LINE_11)
-                            .color(Color::Accent),
-                    ),
-            )
+        })
     }
 }
 
