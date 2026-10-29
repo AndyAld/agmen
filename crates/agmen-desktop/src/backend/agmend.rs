@@ -52,7 +52,8 @@ use super::agmend_local;
 use super::{
     Action, AgentInfo, AgentRow, AgentStatus, Backend, BackendError, ChangeCard, ChangeId,
     ChangeRow, ChangeState, Draft, FileText, FileTextReply, GitFacts, Link, ListenerDetails,
-    ListenerInfo, ManagedWork, Older, PersonGroup, Snapshot, StatusSummary, Update, WorktreeInfo,
+    ListenerField, ListenerInfo, ManagedWork, Older, PersonGroup, Snapshot, StatusSummary, Update,
+    WorktreeInfo,
 };
 
 /// The most messages held per project; the oldest go first (the plan's
@@ -2148,6 +2149,31 @@ fn listener_with_details(row: &RosterEntry, entry: &ListenerEntry) -> ListenerIn
         agent: harness_of(row),
         state,
         details: Some(ListenerDetails {
+            unreported: [
+                (ListenerField::CanUse, entry.can_use.is_empty()),
+                (ListenerField::Never, entry.never.is_empty()),
+                (
+                    ListenerField::TakesWorkFrom,
+                    entry.takes_work_from.is_none(),
+                ),
+                (ListenerField::PerWorker, entry.per_delegation_usd.is_none()),
+                (
+                    ListenerField::WorkersToday,
+                    entry.workers_today_usd.is_none(),
+                ),
+                (ListenerField::WorkersCap, entry.workers_daily_usd.is_none()),
+                (
+                    ListenerField::WorkersRunning,
+                    entry.workers_running.is_none(),
+                ),
+                (ListenerField::WorkersMax, entry.max_workers.is_none()),
+                (ListenerField::TokensIn, entry.tokens_in.is_none()),
+                (ListenerField::TokensOut, entry.tokens_out.is_none()),
+                (ListenerField::Uptime, entry.uptime_minutes.is_none()),
+            ]
+            .into_iter()
+            .filter_map(|(field, absent)| absent.then_some(field))
+            .collect(),
             harness_label,
             role_label,
             can_use: entry.can_use.clone(),
