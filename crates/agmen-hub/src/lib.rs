@@ -67,8 +67,8 @@ mod usage;
 pub use auth::{GithubError, GithubId};
 pub use billing::{
     BillingEvent, BusinessStep, Catalog, LineItem, MAX_OWNED_GROUPS, PAID_READ_ONLY_DAYS,
-    PAST_DUE_GRACE_DAYS, PaddleClient, PaddleError, Plan, PlanEffect, PlanRecord, PlanState,
-    ReadOnlyCause, Retention, TEAM_INCLUDED_SEATS, TRIAL_DAYS, TRIAL_READ_ONLY_DAYS,
+    PAST_DUE_GRACE_DAYS, PaddleClient, PaddleError, Plan, PlanClockError, PlanEffect, PlanRecord,
+    PlanState, ReadOnlyCause, Retention, TEAM_INCLUDED_SEATS, TRIAL_DAYS, TRIAL_READ_ONLY_DAYS,
     TRIAL_REMINDER_OFFSETS_DAYS, UnknownPlanState, next_utc_midnight, sync_catalog,
 };
 pub use bootstrap::{AdminGithub, Bootstrap, BootstrapError, Bootstrapped};

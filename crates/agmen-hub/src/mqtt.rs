@@ -96,6 +96,9 @@ pub enum MessagingError {
     /// The retention task failed too many times in a row.
     #[error("retention stopped")]
     Retention(#[source] crate::retention::RetentionError),
+    /// The plan clock failed too many times in a row.
+    #[error("the plan clock stopped")]
+    PlanClock(#[source] crate::billing::PlanClockError),
     /// A task ended because another one it depends on ended.
     #[error("the {0} task stopped")]
     Stopped(&'static str),
@@ -105,7 +108,8 @@ pub enum MessagingError {
 }
 
 /// The running broker connection, ingest worker, presence task, sweeper
-/// and lease sweeper, plus retention when configured. Dropping it stops them all.
+/// and lease sweeper, plus retention when configured and the plan clock on
+/// hosted hubs. Dropping it stops them all.
 #[derive(Debug)]
 pub struct Messaging {
     tasks: JoinSet<Result<(), MessagingError>>,
@@ -138,7 +142,8 @@ impl Hub {
     /// `$share/<group>/agmen/v1/+/+/up/+` and `agmen/v1/+/+/presence/+`,
     /// and starts ingest, the presence task, the sweeper and the lease
     /// sweeper ([`Hub::run_lease_sweeper`]), plus [`Hub::run_retention`] for
-    /// hosted hubs and self-host hubs with a retention limit. It returns once both
+    /// hosted hubs and self-host hubs with a retention limit, and
+    /// [`Hub::run_plan_clock`] for hosted hubs. It returns once both
     /// subscriptions are granted, so nothing published to `up/` afterwards
     /// is missed. A failed, refused or unanswered connect step is retried
     /// with backoff, about two minutes in all: in the cluster EMQX reads
@@ -209,6 +214,14 @@ impl Hub {
             let hub = self.clone();
             tasks
                 .spawn(async move { hub.run_retention().await.map_err(MessagingError::Retention) });
+        }
+        if self.mode() == HubMode::Hosted {
+            let hub = self.clone();
+            tasks.spawn(async move {
+                hub.run_plan_clock()
+                    .await
+                    .map_err(MessagingError::PlanClock)
+            });
         }
         Ok(Messaging { tasks })
     }
