@@ -597,3 +597,84 @@ async fn it_plugin_contract_matches_the_cli() {
     })
     .await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn it_human_messages_swarm() {
+    const POLL: Duration = Duration::from_millis(50);
+    const QUIET: Duration = Duration::from_secs(2);
+
+    run(|ctx, sessions| async move {
+        use machines::daemon::Daemon;
+        use machines::fake_claude::FakeClaude;
+
+        let andy = ctx.member(Role::Member, "main", "agent").await;
+        let adam = ctx.member(Role::Coordinator, "main", "coordinator").await;
+        let daemon_andy = Daemon::start(&andy.home, FakeClaude::new()).await;
+        let daemon_adam = Daemon::start(&adam.home, FakeClaude::new()).await;
+        let sol = daemon_andy
+            .launch(
+                &sessions,
+                json!({"project": andy.identity.project, "name": "sol", "root": andy.wt.path(), "role": "engineer"}),
+            )
+            .await;
+        let coord = daemon_adam
+            .launch(
+                &sessions,
+                json!({"project": adam.identity.project, "name": "coord", "root": adam.wt.path(), "role": "coordinator"}),
+            )
+            .await;
+        let sol_id = sol["identity_id"].as_str().unwrap().parse().unwrap();
+        let coord_id = coord["identity_id"].as_str().unwrap().parse().unwrap();
+        // Stopped workers keep collecting messages without consuming batches.
+        for (daemon, identity) in [(&daemon_andy, &sol_id), (&daemon_adam, &coord_id)] {
+            daemon
+                .client()
+                .await
+                .call("agent_stop", json!({"identity": identity}))
+                .await
+                .unwrap();
+            assert!(daemon.pending(identity).await.is_empty());
+        }
+
+        let body = "stand by @all";
+        assert_exit(&andy.run(&["chat", body]).await, 0);
+        let mut messages = Vec::new();
+        for (daemon, identity) in [(&daemon_andy, &sol_id), (&daemon_adam, &coord_id)] {
+            let deadline = Instant::now() + WAIT;
+            let pending = loop {
+                let pending = daemon.pending(identity).await;
+                if !pending.is_empty() {
+                    break pending;
+                }
+                assert!(Instant::now() < deadline, "no chat pending for {identity}");
+                tokio::time::sleep(POLL).await;
+            };
+            assert_eq!(pending.len(), 1, "{pending:?}");
+            let message = pending.into_iter().next().unwrap();
+            assert_eq!(message.client.body.as_str(), body);
+            assert_eq!(message.from.as_str(), andy.human.id.as_str());
+            assert_eq!(message.from_handle, andy.human.handle);
+            assert_eq!(message.from_kind, agmen_proto::IdentityKind::Human);
+            assert_eq!(message.stream, Stream::Feed);
+            assert!(matches!(message.client.payload, Payload::Fyi {}));
+            assert!(message.mentioned.contains(identity), "{message:?}");
+            messages.push(message);
+        }
+        assert_eq!(messages[0].client.id, messages[1].client.id);
+        tokio::time::sleep(QUIET).await;
+        assert!(daemon_andy.pending(&sol_id).await.is_empty());
+        assert!(daemon_adam.pending(&coord_id).await.is_empty());
+        let feed = read(&adam, &Stream::Feed).await;
+        let chat: Vec<_> = feed
+            .iter()
+            .filter(|message| message.client.body.as_str() == body)
+            .collect();
+        assert_eq!(chat.len(), 1, "{feed:?}");
+        assert_eq!(chat[0].client.id, messages[0].client.id);
+        assert_eq!(daemon_andy.claude().runs(), 0);
+        assert_eq!(daemon_adam.claude().runs(), 0);
+        daemon_andy.stop().await;
+        daemon_adam.stop().await;
+    })
+    .await;
+}

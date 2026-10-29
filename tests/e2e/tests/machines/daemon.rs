@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use agmen_client::{ClientKind, HubClient, IdentityFile, TokenKey, TokenStore};
 use agmen_local::{ApiError, ErrorCode, Outcome, Request, Response, frame};
+use agmen_proto::{IdentityId, StampedEnvelope};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tokio::net::UnixStream;
@@ -17,6 +18,7 @@ use crate::support::{Home, WAIT};
 /// `sockaddr_un.sun_path` on macOS holds 104 bytes, and one of them is the
 /// trailing NUL, so the path itself stays under that.
 const MAX_SOCKET_BYTES: usize = 103;
+const POLL: Duration = Duration::from_millis(50);
 
 /// A running agmend bound for one [`Home`].
 #[derive(Debug)]
@@ -99,6 +101,81 @@ impl Daemon {
             .unwrap_or_else(|err| panic!("agent_launch: {err:?}"));
         track_agent(sessions, &self.tokens, &launched).await;
         launched
+    }
+
+    /// Drains the identity's pending queue using its local credential.
+    pub async fn pending(&self, identity: &IdentityId) -> Vec<StampedEnvelope> {
+        let namespace = "https://agmend.invalid".parse().unwrap();
+        let raw = self
+            .tokens
+            .get(&TokenKey::new(&namespace, identity).unwrap())
+            .unwrap()
+            .expect("the daemon registered the identity's local credential");
+        let credential: Value = serde_json::from_str(&raw).unwrap();
+        let mut client = self.client().await;
+        let mut request = Request::new(
+            client.next,
+            "pending",
+            json!({"local_token": credential["local_token"].as_str().unwrap()}),
+        );
+        request.as_ = Some(identity.clone());
+        let rows = client
+            .exchange(request)
+            .await
+            .unwrap_or_else(|err| panic!("pending for {identity}: {err:?}"));
+        serde_json::from_value(rows).expect("pending returns stamped messages")
+    }
+
+    /// Releases a worker and its broker session before pruning its folder.
+    pub async fn remove(&self, sessions: &Sessions, identity: &IdentityId) -> Value {
+        let removed = self
+            .client()
+            .await
+            .call("agent_remove", json!({"identity": identity}))
+            .await
+            .unwrap_or_else(|err| panic!("agent_remove: {err:?}"));
+        // Revocation bans the identity, so cleanup cannot reconnect with
+        // its saved token. The hub's kick must have removed its session.
+        let client_id = format!("{identity}-watch");
+        let deadline = tokio::time::Instant::now() + WAIT;
+        while tokio::time::timeout_at(deadline, super::emqx_client(&client_id))
+            .await
+            .expect("checking the revoked broker session within WAIT")
+            .is_some()
+        {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "revocation left the broker session {client_id}"
+            );
+            tokio::time::sleep(POLL).await;
+        }
+        sessions.0.lock().unwrap().remove(&client_id);
+        removed
+    }
+
+    /// Runs the CLI against this daemon through a short alias for `home`,
+    /// keeping the default socket path within macOS's Unix socket limit.
+    pub async fn run(&self, home: &Home, cwd: &Path, args: &[&str]) -> std::process::Output {
+        let alias = self._dir.path().join("home");
+        if !alias.exists() {
+            std::os::unix::fs::symlink(home.path(), &alias).unwrap();
+            let socket = home.state_base().join(agmen_client::AGMEND_SOCKET);
+            std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(&self.socket, socket).unwrap();
+        }
+        let mut command = home.agmen(cwd, args);
+        command
+            .env("HOME", &alias)
+            .env("XDG_STATE_HOME", alias.join("state"));
+        tokio::time::timeout(
+            WAIT,
+            tokio::process::Command::from(command)
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .expect("the CLI answered within WAIT")
+        .expect("running the CLI")
     }
 
     /// Asks agmend to shut down, then waits until it has exited.
@@ -197,9 +274,12 @@ impl Client {
     /// The daemon's error, or a hub-coded error when the socket fails or
     /// the answer does not arrive within [`WAIT`].
     pub async fn call(&mut self, method: &str, params: Value) -> Result<Value, ApiError> {
-        let id = self.next;
+        self.exchange(Request::new(self.next, method, params)).await
+    }
+
+    async fn exchange(&mut self, request: Request) -> Result<Value, ApiError> {
+        let id = request.id;
         self.next += 1;
-        let request = Request::new(id, method, params);
         let response = tokio::time::timeout(WAIT, read_response(&mut self.stream, &request, id))
             .await
             .unwrap_or_else(|_| {
