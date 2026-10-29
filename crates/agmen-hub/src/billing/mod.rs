@@ -6,10 +6,12 @@
 //! Nothing prunes stored messages yet (hosted Task 9).
 
 mod catalog;
+pub(crate) mod clock;
 mod paddle;
 mod plan;
 
 pub use catalog::{Catalog, LineItem};
+pub use clock::PlanClockError;
 pub use paddle::{PaddleClient, PaddleError, sync_catalog};
 pub use plan::{
     BillingEvent, BusinessStep, MAX_OWNED_GROUPS, PAID_READ_ONLY_DAYS, PAST_DUE_GRACE_DAYS, Plan,

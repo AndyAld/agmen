@@ -266,6 +266,26 @@ impl Hub {
         Ok(crate::retention::prune_once(self, now).await?)
     }
 
+    /// Runs one plan clock pass at `now`, returning the number of groups it
+    /// changed. Self-host hubs return 0 without a query.
+    ///
+    /// # Errors
+    ///
+    /// When a query, a deletion or the broker fails.
+    pub async fn tick_plans_at(&self, now: Timestamp) -> Result<usize, HookError> {
+        Ok(crate::billing::clock::tick_plans(self, now).await?)
+    }
+
+    /// Deletes `tenant` and everything it holds, as the plan clock does when
+    /// the read-only period ends. Repeating it for a group that is gone is fine.
+    ///
+    /// # Errors
+    ///
+    /// When a query or the broker fails.
+    pub async fn delete_group(&self, tenant: &TenantId) -> Result<(), HookError> {
+        Ok(crate::billing::clock::delete_group(self, tenant).await?)
+    }
+
     /// Approves the device login `user_code` (as `agmen login` shows it,
     /// such as `BCDF-GHJK`) for `human`, standing in for the GitHub sign-in
     /// step. The CLI's next poll then gets tokens.
