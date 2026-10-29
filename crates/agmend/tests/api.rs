@@ -405,6 +405,8 @@ async fn agent_cannot_mint() {
         "file_text",
         "host_status",
         "host_restart",
+        "agent_budget",
+        "prune",
     ] {
         assert_eq!(
             error(
@@ -1077,4 +1079,19 @@ async fn shutdown_owner_acknowledges_then_releases_socket_and_lock() {
     })
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn agent_budget_and_prune_validate_human_parameters() {
+    let daemon = Daemon::start().await;
+    let mut client = daemon.client().await;
+    for (method, params) in [
+        ("agent_budget", json!({"identity":"agent001","add_usd":0})),
+        ("prune", json!({})),
+    ] {
+        assert_eq!(
+            error(client.call(method, params).await).code,
+            ErrorCode::BadRequest
+        );
+    }
 }

@@ -808,7 +808,101 @@ impl Managed {
         None
     }
 
-    async fn save_record(&self, record: &Record) -> Result<(), ApiError> {
+    /// Removes only released agent worktrees, serializing against adoption,
+    /// launch and removal so an agent cannot acquire a tree during the scan.
+    pub(crate) async fn prune(&self, raw: Value) -> Result<Value, ApiError> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Prune {
+            project: ProjectId,
+            base: Option<String>,
+            confirm: Option<String>,
+        }
+        let request: Prune = params(raw)?;
+        let _launching = self.launching.lock().await;
+        let mut root = self.roots.lock().await.get(&request.project).cloned();
+        let mut held_branches = std::collections::BTreeSet::new();
+        let mut held_paths = std::collections::BTreeSet::new();
+        for worker in self.workers.lock().await.values() {
+            let worker = worker.lock().await;
+            if worker.record.identity.project == request.project && root.is_none() {
+                root = Some(worker.record.repo.clone());
+            }
+            held_branches.insert((worker.record.repo.clone(), worker.record.branch.clone()));
+            held_paths.insert(worker.record.worktree.clone());
+        }
+        let root = root
+            .ok_or_else(|| bad_request("open the project's checkout before pruning worktrees"))?;
+        let (worker_root, trees) = crate::worktree::worktree_root(&root).await.map_err(error)?;
+        if trees.len() > MAX_WORKTREES {
+            return Err(bad_request("prune supports at most 256 worktrees per call"));
+        }
+        let repo = worker_root
+            .parent()
+            .ok_or_else(|| error("worker root has no main checkout"))?
+            .to_owned();
+        let login = self.hub.credentials().login().await.map_err(error)?;
+        let project = request.project;
+        let checked = repo.clone();
+        let joined = tokio::task::spawn_blocking(move || find_identity(&checked))
+            .await
+            .map_err(error)?
+            .map_err(error)?
+            .ok_or_else(|| bad_request("checkout has no trusted agmen identity"))?;
+        if joined.identity.project != project
+            || joined.identity.owner_id != login.human_id
+            || joined.identity.hub_url.origin() != login.hub_url.origin()
+        {
+            return Err(bad_request(
+                "checkout is not joined to this project and owner",
+            ));
+        }
+        let base = request
+            .base
+            .or_else(|| trees.first()?.branch.clone())
+            .ok_or_else(|| {
+                bad_request("base is required when the main checkout has no current branch")
+            })?;
+        let mut removed = Vec::new();
+        let mut kept = Vec::new();
+        for tree in trees.into_iter().skip(1).take(MAX_WORKTREES) {
+            let Some(branch) = tree
+                .branch
+                .as_deref()
+                .and_then(|branch| branch.strip_prefix("refs/heads/agent/"))
+                .map(|name| format!("agent/{name}"))
+            else {
+                continue;
+            };
+            let reason = if held_branches.contains(&(repo.clone(), branch.clone()))
+                || held_paths.contains(&tree.path)
+            {
+                Some("managed".to_owned())
+            } else if tree.skip {
+                Some("worktree is unavailable".to_owned())
+            } else {
+                match crate::worktree::prune(
+                    &repo,
+                    &tree.path,
+                    &branch,
+                    &base,
+                    request.confirm.as_deref(),
+                )
+                .await
+                {
+                    Ok(reason) => reason.map(str::to_owned),
+                    Err(error) => Some(format!("{error:#}")),
+                }
+            };
+            match reason {
+                Some(reason) => kept.push(json!({"branch":branch,"reason":reason})),
+                None => removed.push(branch),
+            }
+        }
+        Ok(json!({"removed":removed,"kept":kept}))
+    }
+
+    pub(super) async fn save_record(&self, record: &Record) -> Result<(), ApiError> {
         let dir = self.agent_dir(&record.identity.identity_id);
         let value = serde_json::to_value(record).map_err(error)?;
         tokio::task::spawn_blocking(move || -> anyhow::Result<()> {

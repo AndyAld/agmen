@@ -1,6 +1,4 @@
 //! Private launcher worktree operations, using bounded T1 git calls.
-// shortcut: managed launch uses create/save_wip; expose prune after its local API is implemented.
-#![cfg_attr(not(test), expect(dead_code, reason = "prune API is deferred"))]
 
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
@@ -183,6 +181,10 @@ pub(crate) async fn create(repo: &Path, base: &str, branch: &str) -> Result<Path
 }
 
 /// Creates the Reviewer's checkout at a commit without attaching a branch.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "detached listener placement is deferred")
+)]
 pub(crate) async fn create_detached(repo: &Path, base: &str, path: &Path) -> Result<PathBuf> {
     let (root, trees) = worktree_root(repo).await?;
     let path = if path.is_absolute() {
@@ -469,6 +471,77 @@ pub(crate) async fn remove(repo: &Path, path: &Path, branch: &str) -> Result<()>
     Ok(())
 }
 
+/// Prunes one released agent worktree after checking the requested base.
+/// Dirty work always stays. Exact confirmation preserves an unmerged tip in
+/// WIP before removal. `None` means removed; `Some` explains why it stayed.
+pub(crate) async fn prune(
+    repo: &Path,
+    path: &Path,
+    branch: &str,
+    base: &str,
+    confirm: Option<&str>,
+) -> Result<Option<&'static str>> {
+    if !branch.starts_with("agent/") {
+        bail!("prune only removes agent/ branches");
+    }
+    let path = checked_worktree(repo, path, branch).await?;
+    let reference = branch_ref(repo, branch).await?;
+    let tip = commit(repo, &reference).await?;
+    let status = call(
+        &path,
+        &[
+            "status".as_ref(),
+            "--porcelain=v1".as_ref(),
+            "-z".as_ref(),
+            "--untracked-files=all".as_ref(),
+        ],
+        None,
+    )
+    .await?;
+    if !status.stdout.is_empty() {
+        save_wip(repo, &path, branch)
+            .await
+            .context("saving uncommitted work before keeping worktree")?;
+        return Ok(Some("uncommitted"));
+    }
+    match merged_state(repo, branch, base).await? {
+        Merged::No if confirm != Some(branch) => return Ok(Some("not merged")),
+        Merged::No | Merged::Cherry => {
+            save_wip(repo, &path, branch)
+                .await
+                .context("preserving branch before pruning worktree")?;
+        }
+        Merged::Ancestor => {}
+    }
+    call(
+        repo,
+        &[
+            "worktree".as_ref(),
+            "remove".as_ref(),
+            "--".as_ref(),
+            path.as_os_str(),
+        ],
+        None,
+    )
+    .await?;
+    // branch -d only accepts ancestry into HEAD/upstream. Prune also accepts
+    // the requested base, patch equivalence and an explicitly confirmed WIP.
+    // Compare the checked tip so a concurrently changed ref is never deleted.
+    call(
+        repo,
+        &[
+            "update-ref".as_ref(),
+            "-d".as_ref(),
+            reference.as_ref(),
+            tip.as_ref(),
+        ],
+        None,
+    )
+    .await
+    .context("worktree removed but branch changed; kept branch")?;
+    Ok(None)
+}
+
 /// Snapshots working files, including untracked files, with a private index.
 /// HEAD, the branch, the real index and working files stay untouched.
 pub(crate) async fn save_wip(repo: &Path, path: &Path, branch: &str) -> Result<String> {
@@ -516,7 +589,7 @@ pub(crate) async fn save_wip(repo: &Path, path: &Path, branch: &str) -> Result<S
             )
             .await?,
         )?;
-        if tree == head_tree {
+        if tree == head_tree && merged_state(repo, branch, previous).await? == Merged::Ancestor {
             return Ok(previous.clone());
         }
     }
@@ -551,6 +624,10 @@ pub(crate) async fn save_wip(repo: &Path, path: &Path, branch: &str) -> Result<S
 }
 
 /// Brief words as ASCII branch text, capped at 40 characters.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "brief-based branch naming is deferred")
+)]
 pub(crate) fn slug(brief: &str) -> String {
     let mut slug = String::with_capacity(SLUG_CHARS);
     // Read at most 4096 input characters, even for an untrusted brief.
@@ -574,7 +651,7 @@ pub(crate) fn slug(brief: &str) -> String {
 
 #[cfg(test)]
 thread_local! {
-    static COMMANDS: std::cell::RefCell<Vec<Vec<std::ffi::OsString>>> = const { std::cell::RefCell::new(Vec::new()) };
+    pub(crate) static COMMANDS: std::cell::RefCell<Vec<Vec<std::ffi::OsString>>> = const { std::cell::RefCell::new(Vec::new()) };
     static AFTER_ADD: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 

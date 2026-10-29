@@ -9,6 +9,10 @@ pub(crate) struct Money(u64);
 pub(crate) struct InvalidCost;
 
 impl Money {
+    pub(crate) fn checked_add(self, other: Self) -> Result<Self, InvalidCost> {
+        self.0.checked_add(other.0).map(Self).ok_or(InvalidCost)
+    }
+
     pub(crate) fn usd(self) -> String {
         format!("{}.{:06}", self.0 / 1_000_000, self.0 % 1_000_000)
     }

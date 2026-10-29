@@ -1,8 +1,6 @@
 //! Human-authorized Claude Code workers and their durable pending batches.
-// shortcut: this launch subset defers Task 5 CLI worker/budget/
-// activity commands, prune API and service installation. Add those surfaces
-// when the listener launcher is implemented. A process-per-batch launcher also
-// defers the 95-percent mid-run wrap-up signal until streaming input is enabled.
+// shortcut: activity commands and the 95-percent mid-run wrap-up signal
+// remain deferred until the process-per-batch runner supports streaming output.
 
 use std::collections::BTreeMap;
 use std::io::Write as _;
@@ -648,6 +646,57 @@ impl Managed {
         }
         self.stop_worker(worker).await?;
         Ok(json!({"identity":identity,"state":"offline"}))
+    }
+
+    pub(crate) async fn agent_budget(&self, raw: Value) -> Result<Value, ApiError> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Raise {
+            identity: IdentityId,
+            add_usd: serde_json::Number,
+        }
+        let Raise { identity, add_usd } = params(raw)?;
+        let invalid =
+            || bad_request("add_usd must be a positive decimal up to 1000, at least 0.000001 USD");
+        if !add_usd
+            .as_f64()
+            .is_some_and(|value| value > 0.0 && value <= 1000.0)
+        {
+            return Err(invalid());
+        }
+        let add = Money::from_usd(&add_usd.to_string()).map_err(|_| invalid())?;
+        if add == Money::from_usd("0").map_err(error)? {
+            return Err(invalid());
+        }
+        let _launching = self.launching.lock().await;
+        let worker = self
+            .workers
+            .lock()
+            .await
+            .get(&identity)
+            .cloned()
+            .ok_or_else(|| bad_request("agent is not managed by this daemon"))?;
+        let login = self.hub.credentials().login().await.map_err(error)?;
+        let mut worker = worker.lock().await;
+        if worker.record.identity.owner_id != login.human_id
+            || worker.record.identity.hub_url.origin() != login.hub_url.origin()
+        {
+            return Err(crate::identities::forbidden());
+        }
+        let cap = Money::from_usd(&worker.record.budget_usd)
+            .map_err(error)?
+            .checked_add(add)
+            .map_err(error)?;
+        let mut record = worker.record.clone();
+        record.budget_usd = cap.usd();
+        let mut budget = Budget::new(cap);
+        budget
+            .observe_total_cost_usd(&worker.budget.spent().usd(), |_| {})
+            .map_err(error)?;
+        self.save_record(&record).await?;
+        worker.record = record;
+        worker.budget = budget;
+        Ok(json!({"identity":identity,"budget_usd":cap.usd()}))
     }
 
     async fn stop_worker(&self, worker: Arc<Mutex<Worker>>) -> Result<(), ApiError> {

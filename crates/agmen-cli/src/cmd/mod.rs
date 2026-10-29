@@ -14,6 +14,8 @@ mod open;
 pub(crate) mod post;
 mod role;
 mod watch;
+#[cfg(unix)]
+mod workers;
 
 use std::time::Duration;
 
@@ -124,6 +126,21 @@ mod launch_tests {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Launch a managed agent in a new worktree.
+    #[cfg(unix)]
+    Launch(workers::LaunchArgs),
+    /// List managed agents, or stop one.
+    #[cfg(unix)]
+    Workers(workers::WorkersArgs),
+    /// Manage released agent worktrees.
+    #[cfg(unix)]
+    Worktree {
+        #[command(subcommand)]
+        command: workers::WorktreeCommand,
+    },
+    /// Raise a managed agent's budget.
+    #[cfg(unix)]
+    Budget(workers::BudgetArgs),
     /// Open a folder in the desktop app (defaults to the current folder).
     Open { path: Option<std::path::PathBuf> },
     /// Read the shell install receipt without changing ownership.
@@ -253,6 +270,14 @@ impl Cli {
             .into_command(interactive)
             .unwrap_or_else(|error| error.exit());
         match command {
+            #[cfg(unix)]
+            Command::Launch(args) => workers::launch(args).await,
+            #[cfg(unix)]
+            Command::Workers(args) => workers::workers(args).await,
+            #[cfg(unix)]
+            Command::Worktree { command } => workers::worktree(command).await,
+            #[cfg(unix)]
+            Command::Budget(args) => workers::budget(args).await,
             Command::Open { path } => open::run(path).await,
             Command::InstallReceipt(args) => install_receipt::run(args),
             Command::Login(args) => account::login(args).await,

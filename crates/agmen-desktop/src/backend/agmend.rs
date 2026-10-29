@@ -23,7 +23,6 @@
 //! `(stream, seq)`, which is also how a reconnect shows each message once.
 
 use std::collections::{BTreeMap, VecDeque};
-use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TrySendError};
@@ -1547,32 +1546,10 @@ impl Conn {
 /// [`BackendError::NotConnected`] when nothing is at `socket`, and
 /// [`BackendError::Agmend`] when it is not the person's own socket.
 pub(super) fn check_socket(socket: &Path, uid: u32) -> Result<(), BackendError> {
-    let shown = socket.display();
-    let meta = match std::fs::metadata(socket) {
-        Ok(meta) => meta,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            return Err(BackendError::NotConnected);
-        }
-        Err(err) => return Err(BackendError::Agmend(format!("cannot read {shown}: {err}"))),
-    };
-    if !meta.file_type().is_socket() {
-        return Err(BackendError::Agmend(format!(
-            "{shown} is not a socket, so it is not agmend's"
-        )));
-    }
-    if meta.uid() != uid {
-        return Err(BackendError::Agmend(format!(
-            "{shown} is owned by uid {}, not by you (uid {uid}); refusing to talk to it",
-            meta.uid()
-        )));
-    }
-    let mode = meta.mode() & 0o777;
-    if mode != 0o600 {
-        return Err(BackendError::Agmend(format!(
-            "{shown} has mode {mode:04o}, so other users can reach it; agmend's socket is 0600"
-        )));
-    }
-    Ok(())
+    agmen_client::check_agmend_socket_for(socket, uid).map_err(|error| match error {
+        agmen_client::AgmendSocketError::Missing => BackendError::NotConnected,
+        other => BackendError::Agmend(other.to_string()),
+    })
 }
 
 fn parse<T: DeserializeOwned>(value: Value) -> Result<T, BackendError> {

@@ -1,13 +1,10 @@
 //! Talks to a running agmend over its Unix socket.
 //!
 //! One connection sends `hello` once, then human calls and identity-scoped
-//! calls in order. Listener commands (L21) and worker commands (L17r) are
-//! the callers. Nothing in this crate calls it yet.
+//! calls in order. Worker commands call it; listener commands will follow.
 
 // shortcut: Windows named pipes replace this Unix socket when S6 lands (D36).
 #![cfg(unix)]
-// shortcut: L21 listener commands and L17r worker commands are the first callers.
-#![cfg_attr(not(test), expect(dead_code, reason = "used by L21 and L17r commands"))]
 
 use std::path::Path;
 use std::str::FromStr;
@@ -62,22 +59,19 @@ impl Agmend {
 
     /// Connects to [`agmen_client::agmend_socket`].
     ///
-    /// Tests do not call this: that path is the user's real agmend socket.
+    /// Checks ownership and mode before connecting. CLI tests isolate the home.
     ///
     /// # Errors
     ///
     /// As [`connect`](Self::connect), plus [`AgmendError::Io`] when the state
     /// folder cannot be named.
-    #[cfg_attr(
-        test,
-        expect(
-            dead_code,
-            reason = "tests use a temp socket and never the real agmend socket"
-        )
-    )]
     pub(crate) async fn connect_default() -> Result<Self, AgmendError> {
         let path = agmen_client::agmend_socket()
             .map_err(|err| AgmendError::Io(std::io::Error::other(err)))?;
+        agmen_client::check_agmend_socket(&path).map_err(|error| match error {
+            agmen_client::AgmendSocketError::Missing => AgmendError::NotRunning,
+            other => AgmendError::Socket(other),
+        })?;
         Self::connect(&path).await
     }
 
@@ -97,6 +91,7 @@ impl Agmend {
 
     /// The `hello` answer stored at connect.
     #[must_use]
+    #[cfg_attr(not(test), expect(dead_code, reason = "used by L21-CLI"))]
     pub(crate) fn hello(&self) -> &HelloAnswer {
         &self.hello
     }
@@ -126,6 +121,7 @@ impl Agmend {
     ///
     /// [`AgmendError::BadParams`] when `params` is not an object, and the same
     /// connection errors as [`call`](Self::call).
+    #[cfg_attr(not(test), expect(dead_code, reason = "used by L21-CLI"))]
     pub(crate) async fn call_as(
         &mut self,
         identity: &IdentityId,
@@ -184,6 +180,9 @@ impl FromStr for LocalToken {
 /// Why a connect or a call did not succeed.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum AgmendError {
+    /// The default socket failed the shared ownership or mode check.
+    #[error("{0}")]
+    Socket(#[source] agmen_client::AgmendSocketError),
     /// The socket is missing, or nothing is listening.
     #[error("agmend is not running: open the agmen app or run agmend service install")]
     NotRunning,

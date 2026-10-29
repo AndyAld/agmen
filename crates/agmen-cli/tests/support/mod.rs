@@ -354,9 +354,21 @@ pub struct Home {
 
 impl Home {
     pub fn new() -> Self {
-        let home = Self {
-            dir: tempfile::tempdir().unwrap(),
-        };
+        Self::from_dir(tempfile::tempdir().unwrap())
+    }
+
+    /// A home under a short base, for Unix socket path limits.
+    pub fn new_in(base: &Path) -> Self {
+        Self::from_dir(
+            tempfile::Builder::new()
+                .prefix("agw-")
+                .tempdir_in(base)
+                .unwrap(),
+        )
+    }
+
+    fn from_dir(dir: TempDir) -> Self {
+        let home = Self { dir };
         #[cfg(unix)]
         {
             for dir in ["/usr/bin", "/bin"] {
