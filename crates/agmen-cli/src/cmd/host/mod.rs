@@ -2,6 +2,7 @@
 
 mod docker;
 mod files;
+mod onboard;
 mod tunnel;
 
 use std::time::Duration;
@@ -74,6 +75,12 @@ struct UpArgs {
     /// Days of history the hub keeps, from 1 to 36500. Omit it to keep everything.
     #[arg(long, value_parser = clap::value_parser!(u32).range(1i64..=36_500i64))]
     retention_days: Option<u32>,
+    /// Name of the first project; defaults to the worktree folder's name.
+    #[arg(long, value_name = "NAME")]
+    project: Option<String>,
+    /// Name after your handle and a slash, as in agmen join --handle.
+    #[arg(long, value_name = "NAME")]
+    handle: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -187,7 +194,14 @@ async fn up(args: UpArgs) -> Result<()> {
         tunnel::prepare_tailscale(args.port).await?;
         tunnel::tailscale(&["funnel", "--bg", "--yes", &args.port.to_string()]).await?;
     }
-    wait_public(&public_url, &tunnel, args.port, args.wait).await
+    wait_public(&public_url, &tunnel, args.port, args.wait).await?;
+    onboard::onboard(
+        &public_url,
+        &compose,
+        args.project.as_deref(),
+        args.handle.as_deref(),
+    )
+    .await
 }
 
 fn parse_host_port(text: &str) -> Result<u16, String> {
@@ -313,7 +327,10 @@ async fn print_hub_logs(compose: &Compose) {
             for line in &lines[start..] {
                 // Log text comes from the container, so it is cleaned like any other
                 // hub-supplied string (ruling R63).
-                eprintln!("{}", clean(line));
+                let line = clean(line);
+                if !line.contains("claim_token=") {
+                    eprintln!("{line}");
+                }
             }
         }
         Err(err) => {
@@ -323,10 +340,14 @@ async fn print_hub_logs(compose: &Compose) {
 }
 
 async fn wait_healthy(port: u16) -> Result<()> {
-    let client = probe_client(Duration::from_secs(2))?;
     let url = format!("http://127.0.0.1:{port}/healthz");
+    wait_healthy_at(&url).await
+}
+
+async fn wait_healthy_at(url: &str) -> Result<()> {
+    let client = probe_client(Duration::from_secs(2))?;
     for attempt in 1..=HEALTH_TRIES {
-        match client.get(&url).send().await {
+        match client.get(url).send().await {
             Ok(response) if response.status() == reqwest::StatusCode::OK => return Ok(()),
             Ok(response) => {
                 tracing::debug!(status = %response.status(), attempt, "hub health");

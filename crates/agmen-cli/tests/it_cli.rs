@@ -18,6 +18,281 @@ use support::{Home, Ingest, Member, WAIT, Worktree, assert_exit, run, stderr, st
 use tokio::io::{AsyncBufReadExt as _, BufReader};
 use tokio::process::{Child, ChildStdout};
 
+#[cfg(unix)]
+async fn host_home(ctx: &support::Ctx) -> (Home, agmen_hub::SeededHuman) {
+    let human = ctx.hub.seed_human(&ctx.topics, Role::Member).await.unwrap();
+    for query in [
+        "DELETE FROM memberships WHERE human_id = $1",
+        "DELETE FROM tenant_members WHERE human_id = $1",
+    ] {
+        sqlx::query(query)
+            .bind(human.id.as_str())
+            .execute(&ctx.db)
+            .await
+            .unwrap();
+    }
+    let home = Home::new();
+    home.sign_in(&ctx.base, &human);
+    home.fake_program(
+        "docker",
+        r#"
+if [ "$1" = "version" ]; then
+	printf '1\n'
+	exit 0
+fi
+shift
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+	--project-directory | -f)
+		shift
+		shift
+		;;
+	*) break ;;
+	esac
+done
+case "$1" in
+version) printf '1\n' ;;
+ps) printf '{"Service":"hub","State":"running","Health":"healthy"}\n' ;;
+logs) /bin/cat "$HOME/fake/hub.log" ;;
+restart)
+	if [ -f "$HOME/fake/hub2.log" ]; then
+		/bin/mv "$HOME/fake/hub2.log" "$HOME/fake/hub.log"
+	fi
+	;;
+esac
+exit 0
+"#,
+    );
+    std::fs::create_dir(home.path().join("fake")).unwrap();
+    (home, human)
+}
+
+#[cfg(unix)]
+async fn host_clone(home: &Home, origin: &str) -> std::path::PathBuf {
+    let root = home.path().join("widgets");
+    std::fs::create_dir(&root).unwrap();
+    for args in [vec!["init", "-q"], vec!["remote", "add", "origin", origin]] {
+        let mut cmd = Command::new("git");
+        cmd.current_dir(&root).args(args);
+        home.apply_env(&mut cmd);
+        let out = tokio::time::timeout(
+            Duration::from_secs(10),
+            tokio::process::Command::from(cmd)
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(out.status.success());
+    }
+    std::fs::canonicalize(root).unwrap()
+}
+
+#[cfg(unix)]
+fn host_claim_log(home: &Home, file: &str, token: &str) {
+    std::fs::write(
+        home.path().join("fake").join(file),
+        format!("hub-1 | warn claim_token={token} expires_at=later\n"),
+    )
+    .unwrap();
+}
+
+#[cfg(unix)]
+async fn host_up(
+    ctx: &support::Ctx,
+    home: &Home,
+    root: &std::path::Path,
+    extra: &[&str],
+) -> std::process::Output {
+    let port = ctx.base.port().unwrap().to_string();
+    let mut args = vec![
+        "host",
+        "up",
+        "--public-url",
+        ctx.base.as_str(),
+        "--port",
+        &port,
+        "--handle",
+        "sol",
+    ];
+    args.extend_from_slice(extra);
+    let mut cmd = home.agmen(root, &args);
+    cmd.env("AGMEN_HOST_ALLOW_HTTP", "1").stdin(Stdio::null());
+    tokio::time::timeout(
+        Duration::from_secs(45),
+        tokio::process::Command::from(cmd)
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+}
+
+#[cfg(unix)]
+async fn host_me(ctx: &support::Ctx, human: &agmen_hub::SeededHuman) -> serde_json::Value {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap()
+        .get(ctx.base.join("v1/me").unwrap())
+        .bearer_auth(&human.access_token)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap()
+}
+
+#[cfg(unix)]
+async fn host_projects(ctx: &support::Ctx) -> Vec<(String, String, Option<String>)> {
+    sqlx::query_as("SELECT p.id, p.name, p.repo_url FROM projects p JOIN hub_group g ON p.tenant_id = g.tenant_id ORDER BY p.id")
+        .fetch_all(&ctx.db).await.unwrap()
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn it_host_up_claims_creates_project_and_invites() {
+    run(Ingest::Off, |ctx| async move {
+        let (home, human) = host_home(&ctx).await;
+        let root = host_clone(&home, "https://github.com/acme/widgets.git").await;
+        let token = ctx.hub.mint_claim_token().await.unwrap().unwrap();
+        host_claim_log(&home, "hub.log", &token);
+        let out = host_up(&ctx, &home, &root, &[]).await;
+        assert_exit(&out, 0);
+        assert_eq!(host_me(&ctx, &human).await["groups"][0]["role"], "owner");
+        let projects = host_projects(&ctx).await;
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].1, "widgets");
+        assert_eq!(
+            projects[0].2.as_deref(),
+            Some("https://github.com/acme/widgets.git")
+        );
+        let path = root.join(".agmen/identity.json");
+        let before = std::fs::read(&path).unwrap();
+        let identity: agmen_client::IdentityFile = serde_json::from_slice(&before).unwrap();
+        assert_eq!(identity.project.as_str(), projects[0].0);
+        assert!(identity.handle.ends_with("/sol"));
+        assert!(stdout(&out).contains("joined project widgets"));
+        assert!(stdout(&out).contains("/i#"));
+        assert!(!stdout(&out).contains(&token));
+        assert!(!stderr(&out).contains(&token));
+        let again = host_up(&ctx, &home, &root, &[]).await;
+        assert_exit(&again, 0);
+        assert_eq!(host_projects(&ctx).await, projects);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(stdout(&again).contains("/i#"));
+        let identities: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM identities WHERE project_id = $1")
+                .bind(&projects[0].0)
+                .fetch_one(&ctx.db)
+                .await
+                .unwrap();
+        assert_eq!(identities, 1);
+        let calls = std::fs::read_to_string(home.path().join("calls/docker.log")).unwrap();
+        assert!(!calls.contains("restart hub"));
+    })
+    .await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn it_host_up_keeps_tokens_out_of_repo_url() {
+    run(Ingest::Off, |ctx| async move {
+        let (home, _) = host_home(&ctx).await;
+        let secret = ["ghp", "s3cret"].join("_");
+        let root = host_clone(
+            &home,
+            &format!("https://andy:{secret}@github.com/acme/widgets.git"),
+        )
+        .await;
+        let token = ctx.hub.mint_claim_token().await.unwrap().unwrap();
+        host_claim_log(&home, "hub.log", &token);
+        let out = host_up(&ctx, &home, &root, &[]).await;
+        assert_exit(&out, 0);
+        let projects = host_projects(&ctx).await;
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].2, None);
+        assert!(stdout(&out).contains("the project has no repository URL:"));
+        for output in [stdout(&out), stderr(&out)] {
+            assert!(!output.contains(&secret));
+            assert!(!output.contains(&token));
+        }
+    })
+    .await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn it_host_up_mints_new_claim_when_stale() {
+    run(Ingest::Off, |ctx| async move {
+        let (home, human) = host_home(&ctx).await;
+        let root = host_clone(&home, "https://github.com/acme/widgets.git").await;
+        host_claim_log(&home, "hub.log", &"0".repeat(64));
+        let token = ctx.hub.mint_claim_token().await.unwrap().unwrap();
+        host_claim_log(&home, "hub2.log", &token);
+        let out = host_up(&ctx, &home, &root, &[]).await;
+        assert_exit(&out, 0);
+        assert_eq!(host_me(&ctx, &human).await["groups"][0]["role"], "owner");
+        let calls = std::fs::read_to_string(home.path().join("calls/docker.log")).unwrap();
+        assert_eq!(calls.matches("restart hub").count(), 1);
+        assert!(!stdout(&out).contains(&token));
+        assert!(!stderr(&out).contains(&token));
+    })
+    .await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn it_host_up_outside_git_stops_after_claim() {
+    run(Ingest::Off, |ctx| async move {
+        let (home, human) = host_home(&ctx).await;
+        let token = ctx.hub.mint_claim_token().await.unwrap().unwrap();
+        host_claim_log(&home, "hub.log", &token);
+        let out = host_up(&ctx, &home, home.path(), &[]).await;
+        assert_exit(&out, 0);
+        assert_eq!(host_me(&ctx, &human).await["groups"][0]["role"], "owner");
+        assert!(host_projects(&ctx).await.is_empty());
+        assert!(stdout(&out).contains("inside a clone of your repository"));
+        assert!(!home.path().join(".agmen/identity.json").exists());
+    })
+    .await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn it_host_up_refuses_a_claimed_hub() {
+    run(Ingest::Off, |ctx| async move {
+        let (owner_home, owner) = host_home(&ctx).await;
+        let (home, _) = host_home(&ctx).await;
+        let token = ctx.hub.mint_claim_token().await.unwrap().unwrap();
+        let response = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap()
+            .post(ctx.base.join("v1/claim").unwrap())
+            .bearer_auth(&owner.access_token)
+            .json(&serde_json::json!({"token": token}))
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+        host_claim_log(&home, "hub.log", &token);
+        let out = host_up(&ctx, &home, home.path(), &[]).await;
+        assert_exit(&out, 1);
+        assert!(stderr(&out).contains("already has an owner"));
+        assert!(!stdout(&out).contains(&token));
+        assert!(!stderr(&out).contains(&token));
+        assert!(host_projects(&ctx).await.is_empty());
+        assert!(owner_home.login_file().exists());
+    })
+    .await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn it_chat_one_shot_mentions() {
     run(Ingest::On, |ctx| async move {
