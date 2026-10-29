@@ -1490,3 +1490,332 @@ async fn it_leave_revokes_and_removes_the_identity() {
     })
     .await;
 }
+
+async fn make_owner(ctx: &support::Ctx, human: &str) {
+    let rows = sqlx::query(
+        "UPDATE tenant_members SET role = 'owner' WHERE tenant_id = $1 AND human_id = $2",
+    )
+    .bind(ctx.topics.tenant().as_str())
+    .bind(human)
+    .execute(&ctx.db)
+    .await
+    .unwrap()
+    .rows_affected();
+    assert_eq!(rows, 1);
+}
+
+async fn add_tenant(ctx: &support::Ctx, name: &str, human: &str, role: &str) -> String {
+    let id = support::new_id();
+    sqlx::query("INSERT INTO tenants (id, name) VALUES ($1, $2)")
+        .bind(&id)
+        .bind(name)
+        .execute(&ctx.db)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO tenant_members (tenant_id, human_id, role) VALUES ($1, $2, $3)")
+        .bind(&id)
+        .bind(human)
+        .bind(role)
+        .execute(&ctx.db)
+        .await
+        .unwrap();
+    id
+}
+
+async fn move_member(ctx: &support::Ctx, human: &str, tenant: &str, role: &str) {
+    sqlx::query("DELETE FROM tenant_members WHERE human_id = $1")
+        .bind(human)
+        .execute(&ctx.db)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO tenant_members (tenant_id, human_id, role) VALUES ($1, $2, $3)")
+        .bind(tenant)
+        .bind(human)
+        .bind(role)
+        .execute(&ctx.db)
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn it_group_controls() {
+    run(Ingest::Off, |ctx| async move {
+        let owner = ctx.member(Role::Admin, "own", "agent").await;
+        let member = ctx.member(Role::Member, "mem", "agent").await;
+        make_owner(&ctx, owner.human.id.as_str()).await;
+        let project = format!("project {}", ctx.topics.project().as_str());
+        let group = format!("tenant {}", ctx.topics.tenant().as_str());
+
+        let out = owner.run(&["group", "members"]).await;
+        assert_exit(&out, 0);
+        let text = stdout(&out);
+        let owner_line = format!("owner {} ({project})", owner.human.handle);
+        let member_line = format!("member {} ({project})", member.human.handle);
+        let owner_at = text.find(&owner_line).unwrap_or_else(|| panic!("{text}"));
+        let member_at = text.find(&member_line).unwrap_or_else(|| panic!("{text}"));
+        assert_eq!(
+            owner_at < member_at,
+            owner.human.handle < member.human.handle,
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!(
+                "  {} {}/own in {project}",
+                owner.identity.identity_id.as_str(),
+                owner.human.handle
+            )),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!(
+                "  {} {}/mem in {project}",
+                member.identity.identity_id.as_str(),
+                member.human.handle
+            )),
+            "{text}"
+        );
+
+        let out = owner
+            .run(&["group", "role", &member.human.handle, "admin"])
+            .await;
+        assert_exit(&out, 0);
+        assert_eq!(
+            stdout(&out).trim(),
+            format!("{} is now an admin of {group}", member.human.handle)
+        );
+        let out = owner.run(&["group", "members"]).await;
+        assert_exit(&out, 0);
+        assert!(
+            stdout(&out).contains(&format!("admin {} ({project})", member.human.handle)),
+            "{}",
+            stdout(&out)
+        );
+
+        let out = owner
+            .run(&["group", "transfer", &member.human.handle, "--yes"])
+            .await;
+        assert_exit(&out, 0);
+        assert_eq!(
+            stdout(&out).trim(),
+            format!("{} is now the owner of {group}", member.human.handle)
+        );
+        let out = member.run(&["group", "members"]).await;
+        assert_exit(&out, 0);
+        let text = stdout(&out);
+        assert!(
+            text.contains(&format!("owner {} ({project})", member.human.handle)),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!("admin {} ({project})", owner.human.handle)),
+            "{text}"
+        );
+        assert!(
+            !text.contains(&format!("owner {} ({project})", owner.human.handle)),
+            "{text}"
+        );
+
+        let out = owner.run(&["group", "remove", &member.human.handle]).await;
+        assert_exit(&out, 1);
+        assert!(
+            stderr(&out).contains("the owner cannot be removed; transfer ownership first"),
+            "{}",
+            stderr(&out)
+        );
+
+        let out = member.run(&["group", "remove", &owner.human.handle]).await;
+        assert_exit(&out, 0);
+        assert!(
+            stdout(&out).contains(&format!("removed {} from {group}", owner.human.handle)),
+            "{}",
+            stdout(&out)
+        );
+        let rows: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM tenant_members WHERE human_id = $1")
+                .bind(owner.human.id.as_str())
+                .fetch_one(&ctx.db)
+                .await
+                .unwrap();
+        assert_eq!(rows, 0);
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn it_group_member_cannot_change_roles() {
+    run(Ingest::Off, |ctx| async move {
+        let owner = ctx.member(Role::Admin, "own", "agent").await;
+        let member = ctx.member(Role::Member, "mem", "agent").await;
+        make_owner(&ctx, owner.human.id.as_str()).await;
+        let out = member
+            .run(&["group", "role", &owner.human.handle, "admin"])
+            .await;
+        assert_exit(&out, 1);
+        assert!(
+            stderr(&out).contains("only the group's owner or an admin can do that"),
+            "{}",
+            stderr(&out)
+        );
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn it_group_admin_cannot_demote_admin() {
+    run(Ingest::Off, |ctx| async move {
+        let owner = ctx.member(Role::Admin, "own", "agent").await;
+        let admin = ctx.member(Role::Admin, "ada", "agent").await;
+        let other = ctx.member(Role::Admin, "bea", "agent").await;
+        make_owner(&ctx, owner.human.id.as_str()).await;
+        let out = admin
+            .run(&["group", "role", &other.human.handle, "member"])
+            .await;
+        assert_exit(&out, 1);
+        assert!(
+            stderr(&out).contains("only the group's owner can do that"),
+            "{}",
+            stderr(&out)
+        );
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn it_group_revoke_identity() {
+    run(Ingest::Off, |ctx| async move {
+        let owner = ctx.member(Role::Admin, "own", "agent").await;
+        let member = ctx.member(Role::Member, "mem", "agent").await;
+        make_owner(&ctx, owner.human.id.as_str()).await;
+        let member_id = member.identity.identity_id.as_str();
+        let out = owner.run(&["group", "members"]).await;
+        assert_exit(&out, 0);
+        assert!(stdout(&out).contains(member_id), "{}", stdout(&out));
+
+        let out = owner.run(&["group", "revoke", member_id]).await;
+        assert_exit(&out, 0);
+        assert!(
+            stdout(&out).contains(&format!(
+                "revoked {member_id}; its agent is disconnected and cannot reconnect"
+            )),
+            "{}",
+            stdout(&out)
+        );
+        let revoked: bool =
+            sqlx::query_scalar("SELECT revoked_at IS NOT NULL FROM identities WHERE id = $1")
+                .bind(member_id)
+                .fetch_one(&ctx.db)
+                .await
+                .unwrap();
+        assert!(revoked);
+
+        let owner_id = owner.identity.identity_id.as_str();
+        let out = member.run(&["group", "revoke", owner_id]).await;
+        assert_exit(&out, 1);
+        assert!(
+            stderr(&out).contains(&format!(
+                "no identity {owner_id} that you can revoke (agmen group members lists them)"
+            )),
+            "{}",
+            stderr(&out)
+        );
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn it_group_flag_takes_id_or_name() {
+    run(Ingest::Off, |ctx| async move {
+        let owner = ctx.member(Role::Admin, "own", "agent").await;
+        make_owner(&ctx, owner.human.id.as_str()).await;
+        sqlx::query("UPDATE tenants SET name = 'alpha' WHERE id = $1")
+            .bind(ctx.topics.tenant().as_str())
+            .execute(&ctx.db)
+            .await
+            .unwrap();
+        let alpha_only = ctx.hub.seed_human(&ctx.topics, Role::Member).await.unwrap();
+        let beta = add_tenant(&ctx, "beta", owner.human.id.as_str(), "owner").await;
+        let beta_only = ctx.hub.seed_human(&ctx.topics, Role::Member).await.unwrap();
+        move_member(&ctx, beta_only.id.as_str(), &beta, "member").await;
+
+        let out = owner
+            .home
+            .run(owner.home.path(), &["group", "members"])
+            .await;
+        assert_exit(&out, 2);
+        assert!(
+            stderr(&out).contains("name the group: --group <name or id> (agmen whoami lists them)"),
+            "{}",
+            stderr(&out)
+        );
+
+        for flag in [beta.as_str(), "beta"] {
+            let out = owner
+                .home
+                .run(owner.home.path(), &["group", "members", "--group", flag])
+                .await;
+            assert_exit(&out, 0);
+            let text = stdout(&out);
+            assert!(
+                text.contains(&format!("member {}", beta_only.handle)),
+                "{flag}: {text}"
+            );
+            assert!(!text.contains(&alpha_only.handle), "{flag}: {text}");
+        }
+
+        let out = owner
+            .home
+            .run(owner.home.path(), &["group", "members", "--group", "gamma"])
+            .await;
+        assert_exit(&out, 2);
+        assert!(
+            stderr(&out).contains("no group gamma: agmen whoami lists yours"),
+            "{}",
+            stderr(&out)
+        );
+
+        // tenants.name is unique. The resolver still has to list two groups
+        // that share a stored name, so this test's database drops the check.
+        sqlx::query("ALTER TABLE tenants DROP CONSTRAINT IF EXISTS tenants_name_key")
+            .execute(&ctx.db)
+            .await
+            .unwrap();
+        let again = support::new_id();
+        sqlx::query("INSERT INTO tenants (id, name) VALUES ($1, 'beta')")
+            .bind(&again)
+            .execute(&ctx.db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO tenant_members (tenant_id, human_id, role) VALUES ($1, $2, 'member')",
+        )
+        .bind(&again)
+        .bind(owner.human.id.as_str())
+        .execute(&ctx.db)
+        .await
+        .unwrap();
+        let third = ctx.hub.seed_human(&ctx.topics, Role::Member).await.unwrap();
+        move_member(&ctx, third.id.as_str(), &again, "member").await;
+
+        let out = owner
+            .home
+            .run(owner.home.path(), &["group", "members", "--group", "beta"])
+            .await;
+        assert_exit(&out, 2);
+        let err = stderr(&out);
+        assert!(err.contains(&format!("({beta})")), "{err}");
+        assert!(err.contains(&format!("({again})")), "{err}");
+
+        let out = owner
+            .home
+            .run(
+                owner.home.path(),
+                &["group", "members", "--group", beta.as_str()],
+            )
+            .await;
+        assert_exit(&out, 0);
+        let text = stdout(&out);
+        assert!(text.contains(&beta_only.handle), "{text}");
+        assert!(!text.contains(&third.handle), "{text}");
+    })
+    .await;
+}

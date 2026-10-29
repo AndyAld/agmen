@@ -154,6 +154,14 @@ pub(crate) async fn whoami(json: bool) -> Result<()> {
             clean(&project.role)
         );
     }
+    for group in &me.groups {
+        println!(
+            "  group {} ({}): {}",
+            clean(&group.name),
+            clean(&group.tenant),
+            clean(&group.role)
+        );
+    }
     let cwd = std::env::current_dir().context("reading the working directory")?;
     match blocking(move || Ok(find_identity(&cwd))).await? {
         Ok(Some(joined)) => println!(

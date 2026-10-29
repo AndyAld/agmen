@@ -1766,3 +1766,217 @@ fn setup_does_not_count_a_project_scoped_plugin_as_installed() {
             .contains("plugin install agmen")
     );
 }
+
+#[test]
+fn group_usage_errors_exit_2() {
+    let home = Home::new();
+    let out = home
+        .agmen(home.path(), &["group", "role", "x", "owner"])
+        .output()
+        .unwrap();
+    assert_exit(&out, 2);
+    let err = stderr(&out);
+    assert!(
+        err.contains("invalid value") && err.contains("owner"),
+        "{err}"
+    );
+    assert!(!err.contains("unrecognized subcommand"), "{err}");
+
+    for args in [&["group", "remove"][..], &["group", "revoke"][..]] {
+        let out = home.agmen(home.path(), args).output().unwrap();
+        assert_exit(&out, 2);
+        let err = stderr(&out);
+        assert!(err.contains("required"), "{args:?}: {err}");
+        assert!(!err.contains("unrecognized subcommand"), "{args:?}: {err}");
+    }
+
+    // The confirmation names the group, so it is checked after /v1/me.
+    let home = Home::new();
+    let (_, server) = account_fixture(
+        &home,
+        serde_json::json!({
+            "id":"hmn7k2q9",
+            "handle":"andy",
+            "broker_url":"mqtt://localhost",
+            "projects":[],
+            "groups":[{"tenant":"tenant01","name":"acme","role":"owner"}]
+        }),
+    );
+    let out = home
+        .agmen(home.path(), &["group", "transfer", "sam"])
+        .output()
+        .unwrap();
+    assert_exit(&out, 2);
+    let err = stderr(&out);
+    assert!(
+        err.contains(
+            "this makes sam the owner of acme; only they can hand it back. Rerun with --yes"
+        ),
+        "{err}"
+    );
+    assert!(server.join().unwrap().starts_with("GET /v1/me "));
+}
+
+#[test]
+fn whoami_lists_groups() {
+    let home = Home::new();
+    let (hub, server) = account_fixture(
+        &home,
+        serde_json::json!({
+            "id":"hmn7k2q9",
+            "handle":"andy",
+            "broker_url":"mqtt://localhost",
+            "projects":[],
+            "groups":[
+                {"tenant":"tenant02","name":"be\u{001b}ta\r","role":"member"},
+                {"tenant":"tenant01","name":"acme","role":"owner"}
+            ]
+        }),
+    );
+    let out = home.agmen(home.path(), &["whoami"]).output().unwrap();
+    assert_exit(&out, 0);
+    assert!(server.join().unwrap().starts_with("GET /v1/me "));
+    let mut expected = format!("andy (hmn7k2q9) at {hub}\n");
+    expected.push_str("no projects yet: accept an invite with agmen join <invite link>\n");
+    expected.push_str("  group beta (tenant02): member\n");
+    expected.push_str("  group acme (tenant01): owner\n");
+    assert_eq!(stdout(&out), expected);
+}
+
+/// Serves `app` on a local port and signs `andy` in to it with a throwaway
+/// token. The caller aborts the returned task when the test is done.
+async fn serve_hub(home: &Home, app: axum::Router) -> tokio::task::JoinHandle<()> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let hub = format!("http://{}/", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let file = home.login_file();
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(
+        &file,
+        serde_json::json!({"hub_url":hub,"human_id":"hmn7k2q9","handle":"andy"}).to_string(),
+    )
+    .unwrap();
+    home.tokens()
+        .set(
+            &agmen_client::TokenKey::new(&hub.parse().unwrap(), &"hmn7k2q9".parse().unwrap())
+                .unwrap(),
+            r#"{"access_token":"test","refresh_token":"test","expires_at":"2099-01-01T00:00:00Z"}"#,
+        )
+        .unwrap();
+    server
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn group_role_and_transfer_say_what_changed() {
+    use axum::Json;
+    use axum::routing::{get, post, put};
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let (role_seen, transfer_seen) = (Arc::clone(&seen), Arc::clone(&seen));
+    let app = axum::Router::new()
+        .route(
+            "/v1/me",
+            get(|| async {
+                Json(serde_json::json!({
+                    "id":"hmn7k2q9",
+                    "handle":"andy",
+                    "broker_url":"mqtt://localhost",
+                    "projects":[],
+                    "groups":[{"tenant":"tenant01","name":"ac\u{001b}me","role":"owner"}]
+                }))
+            }),
+        )
+        .route(
+            "/v1/tenants/tenant01/members/sam/role",
+            put(move |Json(body): Json<Value>| async move {
+                role_seen.lock().unwrap().push(("role", body.clone()));
+                Json(serde_json::json!({"handle":"sam","role":body["role"]}))
+            }),
+        )
+        .route(
+            "/v1/tenants/tenant01/transfer",
+            post(move |Json(body): Json<Value>| async move {
+                transfer_seen
+                    .lock()
+                    .unwrap()
+                    .push(("transfer", body.clone()));
+                Json(serde_json::json!({"owner":body["to"]}))
+            }),
+        );
+    let home = Home::new();
+    let server = serve_hub(&home, app).await;
+    let mut said = Vec::new();
+    for args in [
+        &["group", "role", "sam", "admin"][..],
+        &["group", "role", "sam", "member"][..],
+        &["group", "transfer", "sam", "--yes"][..],
+    ] {
+        let out = home.run(home.path(), args).await;
+        assert_exit(&out, 0);
+        said.push(stdout(&out));
+    }
+    server.abort();
+    assert_eq!(
+        said,
+        [
+            "sam is now an admin of acme\n",
+            "sam is now a member of acme\n",
+            "sam is now the owner of acme\n",
+        ]
+    );
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [
+            ("role", json!({"role":"admin"})),
+            ("role", json!({"role":"member"})),
+            ("transfer", json!({"to":"sam"})),
+        ]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn group_members_sanitizes_peer_text() {
+    use axum::Json;
+    use axum::routing::get;
+
+    let app = axum::Router::new()
+        .route(
+            "/v1/me",
+            get(|| async {
+                Json(serde_json::json!({
+                    "id":"hmn7k2q9",
+                    "handle":"andy",
+                    "broker_url":"mqtt://localhost",
+                    "projects":[],
+                    "groups":[{"tenant":"tenant01","name":"ac\nme","role":"owner"}]
+                }))
+            }),
+        )
+        .route(
+            "/v1/tenants/tenant01/members",
+            get(|| async {
+                Json(serde_json::json!({
+                    "members":[{
+                        "human_id":"hmn7k2q9",
+                        "handle":"an\u{001b}dy",
+                        "role":"owner",
+                        "projects":[{"project":"project1","name":"mar\rked","role":"admin"}],
+                        "identities":[{
+                            "id":"idn7k2q9",
+                            "project":"project1",
+                            "handle":"an\u{001b}dy/sol"
+                        }]
+                    }]
+                }))
+            }),
+        );
+    let home = Home::new();
+    let server = serve_hub(&home, app).await;
+    let out = home.run(home.path(), &["group", "members"]).await;
+    server.abort();
+    assert_exit(&out, 0);
+    assert_eq!(
+        stdout(&out),
+        "owner andy (marked)\n  idn7k2q9 andy/sol in marked\n"
+    );
+}
