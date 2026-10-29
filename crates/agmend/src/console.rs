@@ -36,7 +36,7 @@ pub(crate) struct Console {
     pub(crate) local: Local,
     /// How often a watch with a checkout re-reads its local data.
     pub(crate) local_every: Duration,
-    /// Listener status. Change cards are published from the settings store.
+    /// Listener status and the change cards owned by this daemon.
     pub(crate) listeners: Arc<crate::listener::Listeners>,
     /// The settings file the listener caps are read from.
     pub(crate) settings_file: PathBuf,
@@ -418,11 +418,7 @@ impl Console {
     /// Status rows for `project`, or none when agmend cannot read them.
     /// One bad row is skipped so the chat snapshot still returns.
     async fn status_rows(&self, project: &ProjectId) -> Vec<StatusRow> {
-        let value = match self
-            .listeners
-            .human_call("listener_status", json!({"project": project}))
-            .await
-        {
+        let value = match self.listeners.status(json!({"project": project})).await {
             Ok(value) => value,
             Err(err) => {
                 tracing::debug!(
@@ -474,7 +470,7 @@ impl Console {
         let rows = self.status_rows(project).await;
         let caps = self.file_caps(project).await;
         let listener = listener_entry(&rows, caps.as_ref(), roster, me);
-        let mut changes = crate::listener::published_changes(&self.settings_file, project);
+        let mut changes = self.listeners.change_cards(project);
         if changes.len() > MAX_CHANGE_CARDS {
             changes.truncate(MAX_CHANGE_CARDS);
         }

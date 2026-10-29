@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex, Weak};
 use std::time::Duration;
 
+use agmen_local::console::SettingsChangeEntry;
 use agmen_local::{ApiError, ErrorCode};
 use agmen_proto::{
     ClientEnvelope, IdentityId, IdentityKind, MessageId, Payload, ProjectId, StampedEnvelope,
@@ -58,9 +59,12 @@ pub(crate) struct Listeners {
     restart_delay: Duration,
     now: Clock,
     entries: Mutex<BTreeMap<ProjectId, Listener>>,
+    // Start and stop may hold entries across I/O; status only needs live state.
+    statuses: StdMutex<StatusIndex>,
     changing: Mutex<()>,
     projects: Mutex<BTreeSet<ProjectId>>,
     changes: Arc<StdMutex<Changes>>,
+    cards: Arc<StdMutex<settings::Published>>,
     groups: Arc<StdMutex<BTreeSet<i32>>>,
     #[cfg(test)]
     created: Option<CreationHook>,
@@ -76,6 +80,14 @@ struct Listener {
     live: Arc<Mutex<Live>>,
     stop: Option<oneshot::Sender<()>>,
     task: Option<tokio::task::JoinHandle<()>>,
+}
+
+#[derive(Default)]
+struct StatusIndex {
+    entries: BTreeMap<ProjectId, Weak<Mutex<Live>>>,
+    // changing permits one start. A failed or cancelled start drops this live
+    // value, leaving the previous entry available through entries.
+    starting: Option<(ProjectId, Weak<Mutex<Live>>)>,
 }
 
 impl Drop for Listener {
@@ -260,6 +272,8 @@ struct Apply {
 
 impl Listeners {
     pub(crate) fn new(hub: Arc<Hub>, state_dir: PathBuf, settings_file: PathBuf) -> Self {
+        let changes = Changes::default();
+        let cards = changes.published();
         Self {
             hub,
             identities: OnceCell::new(),
@@ -275,9 +289,11 @@ impl Listeners {
             restart_delay: Duration::from_secs(5),
             now: Arc::new(jiff::Zoned::now),
             entries: Mutex::new(BTreeMap::new()),
+            statuses: StdMutex::new(StatusIndex::default()),
             changing: Mutex::new(()),
             projects: Mutex::new(BTreeSet::new()),
-            changes: Arc::new(StdMutex::new(Changes::default())),
+            changes: Arc::new(StdMutex::new(changes)),
+            cards,
             groups: Arc::default(),
             #[cfg(test)]
             created: None,
@@ -318,6 +334,48 @@ impl Listeners {
             .ok_or_else(|| failure("managed service stopped"))
     }
 
+    pub(crate) async fn status(&self, raw: Value) -> Result<Value, ApiError> {
+        let login = self
+            .hub
+            .credentials()
+            .login()
+            .await
+            .map_err(HubError::from)?;
+        let Status { project } = params(raw)?;
+        let entries = {
+            let statuses = self
+                .statuses
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut entries: BTreeMap<_, _> = statuses
+                .entries
+                .iter()
+                .filter(|(id, _)| project.as_ref().is_none_or(|project| project == *id))
+                .filter_map(|(id, live)| live.upgrade().map(|live| (id.clone(), live)))
+                .collect();
+            if let Some((id, live)) = &statuses.starting
+                && project.as_ref().is_none_or(|project| project == id)
+                && let Some(live) = live.upgrade()
+            {
+                entries.insert(id.clone(), live);
+            }
+            entries
+        };
+        let mut rows = Vec::new();
+        for live in entries.into_values() {
+            let mut live = live.lock().await;
+            if owns(&live.identity, &login) {
+                live.reset_day(&(self.now)());
+                rows.push(live.status());
+            }
+        }
+        Ok(json!(rows))
+    }
+
+    pub(crate) fn change_cards(&self, project: &ProjectId) -> Vec<SettingsChangeEntry> {
+        super::published_changes(&self.cards, &self.settings_file, project)
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "keep owner-authorized listener command dispatch together"
@@ -327,6 +385,9 @@ impl Listeners {
         method: &str,
         raw: Value,
     ) -> Result<Value, ApiError> {
+        if method == "listener_status" {
+            return self.status(raw).await;
+        }
         // Local API dispatch has already checked the owner's peer. Re-read the
         // login too so another owner's retained session cannot be controlled.
         let login = self
@@ -338,21 +399,6 @@ impl Listeners {
         let _changing = self.changing.lock().await;
         match method {
             "listener_start" => self.start(params(raw)?, &login).await,
-            "listener_status" => {
-                let Status { project } = params(raw)?;
-                let entries = self.entries.lock().await;
-                let mut rows = Vec::new();
-                for (id, entry) in entries.iter() {
-                    let mut live = entry.live.lock().await;
-                    if owns(&live.identity, &login)
-                        && project.as_ref().is_none_or(|project| project == id)
-                    {
-                        live.reset_day(&(self.now)());
-                        rows.push(live.status());
-                    }
-                }
-                Ok(json!(rows))
-            }
             "listener_stop" => {
                 let Project { project } = params(raw)?;
                 let mut entries = self.entries.lock().await;
@@ -583,6 +629,10 @@ impl Listeners {
             current: None,
             cap_alert: None,
         }));
+        self.statuses
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .starting = Some((request.project.clone(), Arc::downgrade(&live)));
         let running = self.spawn(&live, &launch).await?;
         // The collector is an ingester. Its broadcast is never a batch source.
         self.identities()?.project_channel(&request.project).await?;
@@ -614,6 +664,16 @@ impl Listeners {
             created: self.created.clone(),
         };
         let task = tokio::spawn(run(context, running, stopped).with_current_subscriber());
+        {
+            let mut statuses = self
+                .statuses
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            statuses
+                .entries
+                .insert(request.project.clone(), Arc::downgrade(&live));
+            statuses.starting = None;
+        }
         entries.insert(
             request.project,
             Listener {
@@ -1393,19 +1453,30 @@ async fn spawn(
     launch: &Launch,
     #[cfg(test)] created: Option<&CreationHook>,
 ) -> Result<Running, ApiError> {
-    let live = live.lock().await;
+    let (identity, root, prompt, model, day, cap, remaining) = {
+        let live = live.lock().await;
+        (
+            live.identity.clone(),
+            live.root.clone(),
+            live.prompt.clone(),
+            live.settings.model.clone(),
+            live.day,
+            live.settings.listener_daily,
+            live.remaining()?,
+        )
+    };
     let secret = identities
-        .local_token(&live.identity.identity_id)
+        .local_token(&identity.identity_id)
         .await?
         .ok_or_else(forbidden)?;
     let path = state_dir
         .join("listener")
-        .join(live.identity.project.as_str())
+        .join(identity.project.as_str())
         .join("mcp.json");
     let config = write_config(
         path,
         &launch.helper,
-        &live.identity.identity_id,
+        &identity.identity_id,
         &secret,
         #[cfg(test)]
         created.cloned(),
@@ -1413,12 +1484,12 @@ async fn spawn(
     .await?;
     let args = ListenerArgs {
         program: launch.program.clone(),
-        model: live.settings.model.clone(),
+        model: model.clone(),
         mcp_config: config.0.clone(),
-        prompt_file: live.prompt.clone(),
-        max_budget_usd: live.remaining()?,
+        prompt_file: prompt,
+        max_budget_usd: remaining,
     };
-    let process = ListenerProcess::spawn(&args, &live.root, &launch.env, launch.timeout)
+    let process = ListenerProcess::spawn(&args, &root, &launch.env, launch.timeout)
         .await
         .map_err(|_| failure("spawning listener process failed"))?;
     let pid = process
@@ -1434,9 +1505,9 @@ async fn spawn(
         process,
         _config: config,
         secret,
-        model: live.settings.model.clone(),
-        day: live.day,
-        cap: live.settings.listener_daily,
+        model,
+        day,
+        cap,
         _group: ListenerGroup {
             pid,
             groups: groups.clone(),

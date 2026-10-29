@@ -896,6 +896,9 @@ fn listener_caps_follow_the_project_table() {
 fn published_changes_follow_propose_decide_and_undo() {
     let (_dir, path) = file();
     let mut changes = Changes::default();
+    let published = changes.published();
+    let published_changes =
+        |path: &Path, project: &ProjectId| super::published_changes(&published, path, project);
     let Applied::Pending { apply, .. } = changes
         .propose(&path, &project(), "person01", &[], per_delegation(800))
         .unwrap()

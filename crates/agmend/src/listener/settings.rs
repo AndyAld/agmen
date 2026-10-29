@@ -5,7 +5,7 @@ use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use agmen_local::ErrorCode;
 use agmen_local::console::{SettingsChangeEntry, SettingsChangeRow, SettingsChangeState};
@@ -641,9 +641,14 @@ struct ProjectChanges {
 #[derive(Debug, Default)]
 pub(super) struct Changes {
     projects: HashMap<ProjectId, ProjectChanges>,
+    published: Arc<Mutex<Published>>,
 }
 
 impl Changes {
+    pub(super) fn published(&self) -> Arc<Mutex<Published>> {
+        self.published.clone()
+    }
+
     pub(super) fn propose(
         &mut self,
         path: &Path,
@@ -795,7 +800,7 @@ impl Changes {
     }
 
     fn publish(&self, path: &Path, project: &ProjectId) {
-        remember(path, project, self.cards_for(project));
+        remember(&self.published, path, project, self.cards_for(project));
     }
 
     fn cards_for(&self, project: &ProjectId) -> Vec<SettingsChangeEntry> {
@@ -870,10 +875,14 @@ pub(crate) fn listener_caps(path: &Path, project: &ProjectId) -> Option<Listener
 }
 
 /// Cards for `project` last published by a change on `path`. Empty when
-/// this process has not proposed, decided or undone one there.
+/// this store has not proposed, decided or undone one there.
 #[must_use]
-pub(crate) fn published_changes(path: &Path, project: &ProjectId) -> Vec<SettingsChangeEntry> {
-    let guard = published().lock().unwrap_or_else(PoisonError::into_inner);
+pub(crate) fn published_changes(
+    published: &Mutex<Published>,
+    path: &Path,
+    project: &ProjectId,
+) -> Vec<SettingsChangeEntry> {
+    let guard = published.lock().unwrap_or_else(PoisonError::into_inner);
     guard
         .by_path
         .get(path)
@@ -958,27 +967,24 @@ fn rows_between(before: &ListenerSettings, after: &ListenerSettings) -> Vec<Sett
     rows
 }
 
-// shortcut: `Listeners` holds `Changes` privately, so each mutation publishes
-// its cards here, keyed by the settings path, for the console to read. One
-// process-wide store: at most 64 paths, and each project keeps at most
-// MAX_CHANGES cards. It is right while one `Listeners` owns a settings file,
-// as in agmend; parallel tests use their own temp files. Replace it with an
-// accessor on `Listeners` when runtime.rs is free to change.
+// Each Changes/Listeners value owns its published cards. A separate short lock
+// lets console reads proceed while a writer holds history across file I/O.
+// Keep at most 64 paths, and at most MAX_CHANGES cards per project.
 const MAX_PUBLISHED_PATHS: usize = 64;
 
 #[derive(Debug, Default)]
-struct Published {
+pub(crate) struct Published {
     order: VecDeque<PathBuf>,
     by_path: HashMap<PathBuf, HashMap<ProjectId, Vec<SettingsChangeEntry>>>,
 }
 
-fn published() -> &'static Mutex<Published> {
-    static PUBLISHED: OnceLock<Mutex<Published>> = OnceLock::new();
-    PUBLISHED.get_or_init(|| Mutex::new(Published::default()))
-}
-
-fn remember(path: &Path, project: &ProjectId, cards: Vec<SettingsChangeEntry>) {
-    let mut guard = published().lock().unwrap_or_else(PoisonError::into_inner);
+fn remember(
+    published: &Mutex<Published>,
+    path: &Path,
+    project: &ProjectId,
+    cards: Vec<SettingsChangeEntry>,
+) {
+    let mut guard = published.lock().unwrap_or_else(PoisonError::into_inner);
     let path = path.to_path_buf();
     if let Some(index) = guard.order.iter().position(|item| item == &path) {
         if let Some(item) = guard.order.remove(index) {
