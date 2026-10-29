@@ -467,6 +467,20 @@ impl Managed {
         repo: &Path,
         name: &str,
     ) -> Result<agmen_roles::Resolved, ApiError> {
+        let role = self.resolve_any_role(repo, name).await?;
+        if role.kind == agmen_roles::Kind::Listener {
+            return Err(bad_request(
+                "listeners are started by the listener runtime, not agent_launch",
+            ));
+        }
+        Ok(role)
+    }
+
+    pub(crate) async fn resolve_any_role(
+        &self,
+        repo: &Path,
+        name: &str,
+    ) -> Result<agmen_roles::Resolved, ApiError> {
         let layers = agmen_roles::Layers {
             project: Some(repo.to_owned()),
             personal: self.personal_roles.clone(),
@@ -482,9 +496,6 @@ impl Managed {
                 let names = catalog.iter().map(|role| role.role.name.as_str()).collect::<Vec<_>>().join(", ");
                 bad_request(format!("unknown role {name:?}; available names: {names}"))
             })?;
-            if role.kind == agmen_roles::Kind::Listener {
-                return Err(bad_request("listeners are started by the listener runtime, not agent_launch"));
-            }
             if let Some(shadow) = shadowed_builtin(&catalog, &layers.builtin, role) {
                 return Err(bad_request(format!("role {name:?} uses the project-layer role {shadow:?}, which takes the name of a built-in role; project roles may not shadow built-in roles (use a personal role)")));
             }
@@ -495,7 +506,7 @@ impl Managed {
         }).await.map_err(error)?
     }
 
-    async fn write_role_prompt(
+    pub(crate) async fn write_role_prompt(
         &self,
         id: &IdentityId,
         role: &agmen_roles::Resolved,

@@ -3,6 +3,55 @@ use serde_json::json;
 
 const ORIGIN: &str = "https://hub.example";
 
+#[test]
+fn listener_filter_takes_persons_plain_chat() {
+    let (_dir, mut store, mut who) = setup();
+    who.kind = IdentityKind::Listener;
+    store.register(&who).unwrap();
+    for (seq, from, mentions) in [
+        (1, "owner001", vec![]),
+        (2, "sender01", vec![]),
+        (3, "owner001", vec!["other001"]),
+        (4, "sender01", vec!["owner001"]),
+    ] {
+        let mut raw = serde_json::to_value(message(seq)).unwrap();
+        raw["verb"] = json!("FYI");
+        raw["to"] = json!([]);
+        raw["from"] = json!(from);
+        raw["mentioned"] = json!(mentions);
+        store
+            .ingest(ORIGIN, &who.project, &serde_json::from_value(raw).unwrap())
+            .unwrap();
+    }
+    let rows = store
+        .drain(ORIGIN, &who.identity_id, 500, usize::MAX)
+        .unwrap();
+    assert_eq!(rows.iter().map(|m| m.seq.0).collect::<Vec<_>>(), [1, 4]);
+}
+
+#[test]
+fn agent_filter_is_unchanged() {
+    let (_dir, mut store, who) = setup();
+    for seq in 1..=4 {
+        let mut raw = serde_json::to_value(message(seq)).unwrap();
+        raw["verb"] = json!("FYI");
+        raw["to"] = json!([]);
+        raw["from"] = json!(if seq < 3 { "owner001" } else { "sender01" });
+        raw["mentioned"] = json!(match seq {
+            3 => vec!["owner001"],
+            4 => vec!["agent001"],
+            _ => vec![],
+        });
+        store
+            .ingest(ORIGIN, &who.project, &serde_json::from_value(raw).unwrap())
+            .unwrap();
+    }
+    let rows = store
+        .drain(ORIGIN, &who.identity_id, 500, usize::MAX)
+        .unwrap();
+    assert_eq!(rows.iter().map(|m| m.seq.0).collect::<Vec<_>>(), [4]);
+}
+
 fn identity() -> ManagedIdentity {
     ManagedIdentity {
         hub_url: ORIGIN.parse().unwrap(),
@@ -988,4 +1037,81 @@ fn unregister_forgets_the_identity_and_its_waiting_messages() {
             .unwrap()
             .is_empty()
     );
+}
+
+#[test]
+fn listener_filter_takes_persons_inbox() {
+    let (_dir, mut store, mut listener) = setup();
+    listener.kind = IdentityKind::Listener;
+    store.register(&listener).unwrap();
+    let mut event = message(1);
+    event.stream = Stream::Inbox(listener.owner_id.clone());
+    event.client.to = vec![listener.owner_id.clone()];
+    store.ingest(ORIGIN, &listener.project, &event).unwrap();
+    assert_eq!(
+        store
+            .drain(ORIGIN, &listener.identity_id, 500, usize::MAX)
+            .unwrap(),
+        [event]
+    );
+}
+
+#[test]
+fn listener_deduplicates_private_copies_across_drains_and_restart() {
+    for owner_first in [false, true] {
+        let (dir, mut store, mut listener) = setup();
+        listener.kind = IdentityKind::Listener;
+        store.register(&listener).unwrap();
+        let mut event = message(1);
+        event.client.to = vec![listener.identity_id.clone()];
+        let streams = if owner_first {
+            [listener.owner_id.clone(), listener.identity_id.clone()]
+        } else {
+            [listener.identity_id.clone(), listener.owner_id.clone()]
+        };
+        let mut received = Vec::new();
+        for stream in streams {
+            event.stream = Stream::Inbox(stream);
+            store.ingest(ORIGIN, &listener.project, &event).unwrap();
+            received.extend(
+                store
+                    .drain(ORIGIN, &listener.identity_id, 500, usize::MAX)
+                    .unwrap(),
+            );
+            drop(store);
+            store = Store::open(&dir.path().join("agmend.db")).unwrap();
+        }
+        assert_eq!(received.len(), 1);
+    }
+}
+
+#[test]
+fn listener_deduplicates_persons_assign_across_drains() {
+    for feed_first in [false, true] {
+        let (_dir, mut store, mut listener) = setup();
+        listener.kind = IdentityKind::Listener;
+        store.register(&listener).unwrap();
+        let mut event = message(1);
+        event.client.payload = Payload::Assign {
+            item: "B-1".parse().unwrap(),
+            to: listener.owner_id.clone(),
+        };
+        event.client.to.clear();
+        let streams = if feed_first {
+            [Stream::Feed, Stream::Inbox(listener.owner_id.clone())]
+        } else {
+            [Stream::Inbox(listener.owner_id.clone()), Stream::Feed]
+        };
+        let mut received = Vec::new();
+        for stream in streams {
+            event.stream = stream;
+            store.ingest(ORIGIN, &listener.project, &event).unwrap();
+            received.extend(
+                store
+                    .drain(ORIGIN, &listener.identity_id, 500, usize::MAX)
+                    .unwrap(),
+            );
+        }
+        assert_eq!(received.len(), 1);
+    }
 }

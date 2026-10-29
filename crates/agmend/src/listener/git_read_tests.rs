@@ -15,6 +15,7 @@ fn git_read_tools_fixed_args() {
             "--oneline",
             "-n",
             "50",
+            "--no-show-signature",
             "--end-of-options",
             "main..fix/x; rm -rf /"
         ]
@@ -24,7 +25,7 @@ fn git_read_tools_fixed_args() {
         if stat {
             expected.push("--stat");
         }
-        expected.extend(["--end-of-options", "HEAD"]);
+        expected.extend(["--no-show-signature", "--end-of-options", "HEAD"]);
         assert_eq!(
             argv(&GitRead::Show {
                 rev: "HEAD".into(),
@@ -61,7 +62,14 @@ fn git_read_tools_fixed_args() {
             n: None
         })
         .unwrap(),
-        ["log", "--oneline", "-n", "50", "--end-of-options"]
+        [
+            "log",
+            "--oneline",
+            "-n",
+            "50",
+            "--no-show-signature",
+            "--end-of-options"
+        ]
     );
 }
 

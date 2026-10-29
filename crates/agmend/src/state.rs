@@ -424,6 +424,10 @@ impl Store {
         self.ingest_for_owner(origin, project, message, None)
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "routing, deduplication, quota and position commit in one transaction"
+    )]
     pub(crate) fn ingest_for_owner(
         &mut self,
         origin: &str,
@@ -467,13 +471,20 @@ impl Store {
             }
         }
         let mut remember = None;
-        let mut stmt = tx.prepare("SELECT identity,owner FROM identities WHERE origin=?1 AND project=?2 AND (?3 IS NULL OR owner=?3) ORDER BY identity LIMIT 64")?;
+        let mut stmt = tx.prepare("SELECT identity,owner,metadata FROM identities WHERE origin=?1 AND project=?2 AND (?3 IS NULL OR owner=?3) ORDER BY identity LIMIT 64")?;
         let identities = stmt.query_map(
             params![origin, project.as_str(), owner.map(IdentityId::as_str)],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            },
         )?;
         for row in identities {
-            let (id, owner) = row?;
+            let (id, owner, metadata) = row?;
+            let identity: ManagedIdentity = serde_json::from_str(&metadata)?;
             let id = id
                 .parse::<IdentityId>()
                 .map_err(|_| StoreError::Invalid("stored identity"))?;
@@ -485,12 +496,13 @@ impl Store {
                 message,
                 &id,
                 &owner,
+                identity.kind,
                 self.own_ids.get(&(origin.to_owned(), id.clone())),
             )? {
                 continue;
             }
-            let needs_receipt =
-                matches!(&message.client.payload, Payload::Assign { to, .. } if to == &id);
+            let needs_receipt = identity.kind != IdentityKind::Listener
+                && matches!(&message.client.payload, Payload::Assign { to, .. } if to == &id);
             let seen: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM pending WHERE origin=?1 AND project=?2 AND identity=?3 AND sender=?4 AND id=?5) OR (?6 AND EXISTS(SELECT 1 FROM receipts WHERE origin=?1 AND project=?2 AND identity=?3 AND sender=?4 AND id=?5))",
                 params![origin, project.as_str(), id.as_str(), message.from.as_str(), message.client.id.as_str(), needs_receipt], |r| r.get(0))?;
             if !seen {
@@ -643,9 +655,27 @@ fn addressed_to(
     message: &StampedEnvelope,
     id: &IdentityId,
     owner: &str,
+    kind: IdentityKind,
     own_ids: Option<&VecDeque<MessageId>>,
 ) -> Result<bool, StoreError> {
-    if matches!(&message.stream, Stream::Inbox(recipient) if recipient != id) {
+    if kind == IdentityKind::Listener {
+        // Private fanout includes the owner; public messages have a feed copy.
+        // Choose one durable copy even if another arrives after a drain/restart.
+        let canonical = match &message.stream {
+            Stream::Feed => true,
+            Stream::Inbox(recipient) if recipient.as_str() == owner => {
+                !matches!(message.client.payload, Payload::Assign { .. })
+            }
+            Stream::Inbox(recipient) if recipient == id => matches!(
+                message.client.payload,
+                Payload::Grant { .. } | Payload::Deny { .. }
+            ),
+            Stream::Inbox(_) => false,
+        };
+        if !canonical {
+            return Ok(false);
+        }
+    } else if matches!(&message.stream, Stream::Inbox(recipient) if recipient != id) {
         return Ok(false);
     }
     let me = agmen_client::Me {
@@ -655,9 +685,13 @@ fn addressed_to(
             .parse()
             .map_err(|_| StoreError::Invalid("stored owner identity"))?,
     };
-    Ok(me.is_for_me(message, |reply| {
+    let addressed = me.is_for_me(message, |reply| {
         own_ids.is_some_and(|own| own.contains(reply))
-    }))
+    });
+    // shortcut: L21-DR supplies the listener's delegated worker ids here.
+    Ok(addressed
+        || (kind == IdentityKind::Listener
+            && crate::listener::includes(message, id, &me.owner_id, &[])))
 }
 
 #[cfg(test)]

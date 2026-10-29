@@ -407,6 +407,12 @@ async fn agent_cannot_mint() {
         "host_restart",
         "agent_budget",
         "prune",
+        "listener_start",
+        "listener_stop",
+        "listener_status",
+        "listener_set",
+        "settings_decide",
+        "settings_undo",
     ] {
         assert_eq!(
             error(

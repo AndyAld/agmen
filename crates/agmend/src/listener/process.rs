@@ -1,8 +1,5 @@
 //! Long-lived stream-json listener process and bounded turns.
 
-// shortcut: L21 wires this into the listener runtime
-#![cfg_attr(not(test), expect(dead_code, reason = "wired by L21"))]
-
 use std::collections::{BTreeMap, VecDeque};
 use std::ffi::OsString;
 use std::future::Future;
@@ -152,7 +149,7 @@ pub(super) struct Turn {
 
 #[derive(Debug)]
 pub(super) struct ListenerProcess {
-    child: Child,
+    pub(super) child: Child,
     group: Option<Pid>,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,

@@ -44,6 +44,7 @@ pub(crate) async fn serve_with_peer(
 ) {
     let peer = peer(&stream).map_err(|error| error.to_string());
     core.managed.attach(&core.identities).await;
+    core.listeners.attach(&core.identities, &core.managed).await;
     // shortcut: Unix-only local API; revisit when S6 Windows IPC is approved.
     let console = &core.console;
     let (mut reader, mut writer) = stream.into_split();
@@ -148,6 +149,17 @@ pub(crate) fn owner_peer_check(
 ) -> Result<(), ApiError> {
     // Identity-scoped chat uses its authenticated identity, never the human post.
     if (method == "post" && matches!(caller, Caller::Identity(_)))
+        || (matches!(caller, Caller::Identity(_))
+            && matches!(
+                method,
+                "git_log"
+                    | "git_show"
+                    | "git_diff"
+                    | "git_status"
+                    | "settings_get"
+                    | "settings_apply"
+                    | "roster"
+            ))
         || matches!(method, "hello" | "watch" | "inbox" | "state" | "pending")
     {
         return Ok(());
@@ -255,9 +267,15 @@ async fn authorize(
         .authorize(request.as_.as_ref(), token.as_deref())
         .await?;
     owner_peer_check(&core.managed, &caller, &request.method, || {
-        peer.as_ref()
+        let pid = peer
+            .as_ref()
             .copied()
-            .map_err(|error| std::io::Error::other(error.clone()))
+            .map_err(|error| std::io::Error::other(error.clone()))?;
+        if core.listeners.contains_peer(pid) {
+            Err(std::io::Error::other("listener peer"))
+        } else {
+            Ok(pid)
+        }
     })?;
     Ok(caller)
 }
@@ -281,14 +299,20 @@ async fn identity_call(
             if project.is_some_and(|project| project != caller.project) {
                 return Err(forbidden());
             }
-            core.identities.post(caller, envelope).await
+            if caller.kind == agmen_proto::IdentityKind::Listener {
+                core.listeners.post(caller, envelope).await
+            } else {
+                core.identities.post(caller, envelope).await
+            }
         }
+        "git_log" | "git_show" | "git_diff" | "git_status" | "settings_get" | "settings_apply"
+        | "roster" => core.listeners.identity_call(caller, method, raw).await,
         "shutdown" | "hello" | "ready" | "whoami" | "console_watch" | "console_snapshot"
         | "chat_history" | "file_text" | "identity_mint" | "identity_list" | "agent_launch"
         | "host_status" | "host_restart" | "agent_stop" | "agent_list" | "agent_start"
-        | "agent_attach" | "agent_detach" | "agent_remove" | "agent_budget" | "prune" => {
-            Err(forbidden())
-        }
+        | "agent_attach" | "agent_detach" | "agent_remove" | "agent_budget" | "prune"
+        | "listener_start" | "listener_stop" | "listener_status" | "listener_set"
+        | "settings_decide" | "settings_undo" => Err(forbidden()),
         other => Err(ApiError {
             code: ErrorCode::NotFound,
             message: format!("agmend has no method {other:?}"),
@@ -339,6 +363,8 @@ async fn call(
         "agent_remove" => core.managed.remove(raw).await,
         "agent_budget" => core.managed.agent_budget(raw).await,
         "prune" => core.managed.prune(raw).await,
+        "listener_start" | "listener_stop" | "listener_status" | "listener_set"
+        | "settings_decide" | "settings_undo" => core.listeners.human_call(method, raw).await,
         "whoami" => console.whoami().await,
         "console_snapshot" => {
             core.managed.remember_root(&raw).await;
