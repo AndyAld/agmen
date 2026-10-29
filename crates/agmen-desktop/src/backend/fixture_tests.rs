@@ -577,8 +577,10 @@ fn role_dots_take_their_built_in_ancestors_color() {
 
 #[test]
 fn refused_is_what_the_kind_could_send_but_the_role_cannot() {
-    // Ruling D12: Refused is the verbs the hub lets an agent send (its kind
-    // cap) minus the role's own; verbs the kind cap blocks drop out.
+    // Ruling D12, read through D15: Refused is the verbs the kind may keep
+    // when minted (the mint ceiling, `agmen_proto::kind_ceiling`, which adds
+    // REVIEW and PLAN for an agent) minus the role's own; verbs the ceiling
+    // blocks drop out. The reviewer keeps REVIEW, so only PLAN is new here.
     let s = chat();
     let info = s
         .roles
@@ -596,9 +598,25 @@ fn refused_is_what_the_kind_could_send_but_the_role_cannot() {
             "LEND",
             "DONE",
             "PROPOSAL",
+            "PLAN",
             "PUSH_REQUEST"
         ]
     );
+    // The ceiling gives a listener ASSIGN (the hub keeps it only for a
+    // coordinator listener); the role file never keeps it, and
+    // `kind_may_send` would not list it, so it shows as refused only
+    // through the ceiling.
+    let listener = s
+        .roles
+        .iter()
+        .find(|r| r.name == "listener")
+        .and_then(|r| r.info.clone())
+        .unwrap();
+    assert!(!agmen_proto::kind_may_send(
+        agmen_proto::IdentityKind::Listener,
+        agmen_proto::Verb::Assign
+    ));
+    assert!(listener.refused.iter().any(|verb| verb == "ASSIGN"));
 }
 
 #[test]

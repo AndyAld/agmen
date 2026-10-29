@@ -2,5 +2,5 @@
 //! the desktop read them the same way (Task 8).
 
 pub(crate) use agmen_local::roles::{
-    BUILT_IN, Edits, RoleKind, RoleSpec, Tier, kind_may_send, parse, resolve, words,
+    BUILT_IN, Edits, RoleKind, RoleSpec, Tier, parse, resolve, words,
 };

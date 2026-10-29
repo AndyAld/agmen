@@ -54,10 +54,18 @@ fn info(own: &RoleSpec, effective: &[RoleSpec], roster: &[PersonGroup]) -> Optio
         .chain(effective.iter().cloned())
         .collect();
     let resolved = roles::resolve(name, &specs).ok()?;
-    // Ruling D12: what the kind could send but this role cannot.
+    // Ruling D12, read through D15: what the kind could send but this role
+    // cannot. The kind's cap is the mint ceiling (`kind_ceiling`), the table
+    // the hub filters a role's verbs through, so REVIEW and PLAN count for an
+    // agent or coordinator and ASSIGN for a listener.
+    let kind = match resolved.kind {
+        roles::RoleKind::Agent => agmen_proto::IdentityKind::Agent,
+        roles::RoleKind::Coordinator => agmen_proto::IdentityKind::Coordinator,
+        roles::RoleKind::Listener => agmen_proto::IdentityKind::Listener,
+    };
     let refused = agmen_proto::Verb::ALL
         .iter()
-        .filter(|v| roles::kind_may_send(resolved.kind, **v))
+        .filter(|v| agmen_proto::kind_ceiling(kind, **v))
         .map(|v| v.as_str())
         .filter(|v| !resolved.verbs.iter().any(|own| own == v))
         .map(str::to_owned)
