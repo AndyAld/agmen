@@ -49,6 +49,13 @@ pub(super) enum Field {
     Lends,
     PushApproval,
     AgentState,
+    // The listener's own model, effort and reviews: judged by the settings
+    // store, not by `classify`.
+    Model,
+    Effort,
+    Reviews,
+    // A listener setting no one classified: widening until someone does.
+    Unclassified,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
