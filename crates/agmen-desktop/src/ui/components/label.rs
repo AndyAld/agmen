@@ -65,6 +65,15 @@ pub(crate) struct Label {
 }
 
 impl Label {
+    /// The shared page and dialog title style from the mockups.
+    #[must_use]
+    pub(crate) fn title(text: impl Into<SharedString>) -> Self {
+        Self::new(text)
+            .size(LabelSize::Title)
+            .weight(FontWeight::SEMIBOLD)
+            .color(Color::TextMuted)
+    }
+
     #[must_use]
     pub(crate) fn new(text: impl Into<SharedString>) -> Self {
         Self {

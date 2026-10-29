@@ -8,7 +8,6 @@
 //! the buttons as `kickoff:cancel` and `kickoff:go`, a refusal as
 //! `kickoff:error`.
 
-use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, Entity, FocusHandle, FontWeight, Hsla, InteractiveElement as _, IntoElement,
     ParentElement as _, RenderOnce, Styled as _, Window, div,
@@ -21,12 +20,14 @@ use jiff::tz::TimeZone;
 use crate::keymap::{Cancel, KICKOFF_CONTEXT};
 
 use super::components::{
-    Button, ButtonSize, ButtonStyle, Card, CheckMark, CheckState, Color, Label, LabelSize, Modal,
+    Button, Card, CheckMark, CheckState, Color, DialogFooter, Label, LabelSize, Modal,
     SectionHeading,
 };
+#[cfg(test)]
+use super::components::{ButtonSize, ButtonStyle};
 use super::format::clock;
 use super::plan_model::{ErrorSource, PlanModel};
-use super::tokens::{MODAL_TOP, MODAL_WIDTH, RADIUS_CARD, SPACE_3, SPACE_8};
+use super::tokens::{RADIUS_CARD, SPACE_3, SPACE_8};
 use crate::appearance::Appearance;
 use crate::backend::PlanInfo;
 use crate::local_time::LocalZone;
@@ -174,14 +175,17 @@ impl KickoffDialog {
 }
 
 impl KickoffDialog {
-    /// The dialog holds focus while open, as a Zed modal does, and gives it
-    /// back when it closes (`PlanModel::close_kickoff`).
+    /// Keep the return target when focus moves outside this dialog, while
+    /// leaving dialogs above it alone. Modal owns containment.
     fn hold_focus(&self, window: &mut Window, cx: &mut App) -> FocusHandle {
-        let focus = self.model.read(cx).dialog_focus().clone();
-        if !focus.contains_focused(window, cx) && !focus.is_focused(window) {
+        let _restore_focus = window.use_keyed_state("kickoff:restore-focus", cx, |window, cx| {
             let previous = window.focused(cx);
             self.model.update(cx, |m, _| m.remember_focus(previous));
-            window.focus(&focus, cx);
+        });
+        let focus = self.model.read(cx).dialog_focus().clone();
+        if !focus.contains_focused(window, cx) && Modal::is_topmost(&focus, window, cx) {
+            let previous = window.focused(cx);
+            self.model.update(cx, |m, _| m.remember_focus(previous));
         }
         focus
     }
@@ -227,47 +231,29 @@ impl RenderOnce for KickoffDialog {
                 escape.update(cx, |m, cx| m.close_kickoff(window, cx));
             })
             .child(
-                Modal::new("kickoff-dialog", MODAL_WIDTH, MODAL_TOP)
+                Modal::large("kickoff-dialog")
                     .on_dismiss(move |_, window, cx| {
                         dismiss.update(cx, |m, cx| m.close_kickoff(window, cx));
                     })
-                    .child(
-                        Label::new(title)
-                            .size(LabelSize::Title)
-                            .weight(FontWeight::SEMIBOLD)
-                            .color(Color::TextMuted),
-                    )
+                    .title(Label::title(title))
                     .children(boxes)
                     .child(SectionHeading::new("What happens"))
                     .children(bullets)
-                    .when_some(error, |this, error| {
-                        this.child(
-                            div().debug_selector(|| "kickoff:error".into()).child(
-                                Label::new(error).size(LabelSize::Small).color(Color::Error),
+                    .error(error)
+                    .error_selector("kickoff:error")
+                    .footer(
+                        DialogFooter::new(Button::new("kickoff:go", go).on_click(
+                            move |_, window, cx| {
+                                kick.update(cx, |m, cx| m.kick_off(window, cx));
+                            },
+                        ))
+                        .cancel(
+                            Button::new("kickoff:cancel", "Cancel").on_click(
+                                move |_, window, cx| {
+                                    cancel.update(cx, |m, cx| m.close_kickoff(window, cx));
+                                },
                             ),
-                        )
-                    })
-                    .child(
-                        div()
-                            .flex()
-                            .justify_end()
-                            .gap(SPACE_8)
-                            .child(
-                                Button::new("kickoff:cancel", "Cancel")
-                                    .style(ButtonStyle::Inset)
-                                    .size(ButtonSize::Large)
-                                    .on_click(move |_, window, cx| {
-                                        cancel.update(cx, |m, cx| m.close_kickoff(window, cx));
-                                    }),
-                            )
-                            .child(
-                                Button::new("kickoff:go", go)
-                                    .style(ButtonStyle::Primary)
-                                    .size(ButtonSize::Large)
-                                    .on_click(move |_, window, cx| {
-                                        kick.update(cx, |m, cx| m.kick_off(window, cx));
-                                    }),
-                            ),
+                        ),
                     ),
             )
     }

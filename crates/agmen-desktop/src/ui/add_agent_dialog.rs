@@ -8,17 +8,17 @@ use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, ClipboardItem, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
-    RenderOnce, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
+    App, ClipboardItem, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
 };
 
 use super::components::{
-    Button, ButtonSize, ButtonStyle, CodeText, Color, Icon, IconSize, Label, LabelSize,
-    SectionHeading,
+    Button, ButtonSize, ButtonStyle, CodeText, Color, DialogFooter, Icon, IconSize, Label,
+    LabelSize, Modal, SectionHeading,
 };
 use super::tokens::{
-    AUTO_LINE_11, AUTO_LINE_12, AUTO_LINE_13, BORDER_WIDTH, PROMPT_COLUMNS, RADIUS_CARD,
-    RADIUS_REF, SPACE_4, SPACE_8, SPACE_10, SPACE_12,
+    AUTO_LINE_11, AUTO_LINE_12, AUTO_LINE_13, BORDER_WIDTH, DIALOG_TOP, DIALOG_WIDTH,
+    PROMPT_COLUMNS, RADIUS_CARD, RADIUS_REF, SPACE_4, SPACE_8, SPACE_10, SPACE_12,
 };
 use crate::appearance::Appearance;
 use crate::backend::{AgentFound, InstalledAgent};
@@ -423,8 +423,19 @@ impl RenderOnce for PromptBox {
     }
 }
 
-impl RenderOnce for AddAgentDialog {
-    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+impl AddAgentDialog {
+    /// The terminal's modal uses the same content as the component fixtures.
+    pub(crate) fn into_modal(self) -> Modal {
+        let (title, body, footer) = self.parts();
+        Modal::large("add-agent-dialog")
+            .width(DIALOG_WIDTH)
+            .top(DIALOG_TOP)
+            .title(title)
+            .child(body)
+            .footer(footer)
+    }
+
+    fn parts(self) -> (gpui::Div, gpui::Div, DialogFooter) {
         let agent = self.agent.as_ref();
         let heading = if matches!(self.dialog, AgentDialog::Update(_)) {
             "Update it yourself"
@@ -440,30 +451,23 @@ impl RenderOnce for AddAgentDialog {
                 }
             }
         };
-        // The terminal hosts this in a `Modal` DIALOG_WIDTH wide.
-        div()
+        let title = div()
+            .debug_selector(|| "add-agent:title".into())
+            .flex()
+            .items_center()
+            .gap(SPACE_10)
+            .child(Label::title(title(&self.dialog, agent)))
+            .child(
+                CodeText::new(subtitle(&self.dialog, agent))
+                    .size(LabelSize::Small)
+                    .color(Color::Placeholder),
+            );
+        let body = div()
             .debug_selector(|| "add-agent".into())
+            .w_full()
             .flex()
             .flex_col()
             .gap(SPACE_12)
-            .child(
-                div()
-                    .debug_selector(|| "add-agent:title".into())
-                    .flex()
-                    .items_center()
-                    .gap(SPACE_10)
-                    .child(
-                        Label::new(title(&self.dialog, agent))
-                            .size(LabelSize::Title)
-                            .weight(FontWeight::SEMIBOLD)
-                            .color(Color::TextMuted),
-                    )
-                    .child(
-                        CodeText::new(subtitle(&self.dialog, agent))
-                            .size(LabelSize::Small)
-                            .color(Color::Placeholder),
-                    ),
-            )
             .child(SectionHeading::new(heading))
             .child(self.source_row())
             .when_some(prompt, |this, prompt| this.child(self.prompt_block(prompt)))
@@ -498,29 +502,26 @@ impl RenderOnce for AddAgentDialog {
                             .color(Color::Warning),
                     ),
                 )
-            })
-            .child(
-                div()
-                    .debug_selector(|| "add-agent:footer".into())
-                    .w_full()
-                    .flex()
-                    .justify_end()
-                    // Check again keeps its height beside the bordered Cancel.
-                    .items_center()
-                    .gap(SPACE_8)
-                    .child(
-                        Button::new("add-agent:cancel", "Cancel")
-                            .style(ButtonStyle::Inset)
-                            .size(ButtonSize::Large)
-                            .on_click(handler(self.on_cancel.clone())),
-                    )
-                    .child(
-                        Button::new("add-agent:check", "Check again")
-                            .style(ButtonStyle::Primary)
-                            .size(ButtonSize::Large)
-                            .on_click(handler(self.on_check.clone())),
-                    ),
-            )
+            });
+        let footer = DialogFooter::new(
+            Button::new("add-agent:check", "Check again").on_click(handler(self.on_check)),
+        )
+        .cancel(Button::new("add-agent:cancel", "Cancel").on_click(handler(self.on_cancel)))
+        .selector("add-agent:footer");
+        (title, body, footer)
+    }
+}
+
+impl RenderOnce for AddAgentDialog {
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        let (title, body, footer) = self.parts();
+        div()
+            .flex()
+            .flex_col()
+            .gap(SPACE_12)
+            .child(title)
+            .child(body)
+            .child(footer)
     }
 }
 

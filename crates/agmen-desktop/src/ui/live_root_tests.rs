@@ -31,6 +31,125 @@ fn quit_fixture(cx: &mut TestAppContext) -> (Entity<LiveRoot>, &mut VisualTestCo
 }
 
 #[gpui::test]
+fn quit_enter_keeps_the_dialog_open_when_saving_the_choice_fails(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (root, cx) = quit_fixture(cx);
+    root.update(cx, |root, cx| {
+        root.launch.settings = Some(dir.path().to_owned());
+        root.quit_remember = true;
+        cx.notify();
+    });
+    redraw(cx);
+    crate::ui::dialog_tests::press(cx, "enter");
+    root.read_with(cx, |root, _| {
+        assert!(
+            root.service_error
+                .as_ref()
+                .unwrap()
+                .starts_with("Saving the quit choice:")
+        );
+        assert_eq!(root.quit_choice, Some(service::QuitChoice::Ask));
+        assert!(!root.quit_approved);
+        assert!(root.quit_remember);
+    });
+    assert!(cx.debug_bounds("quit:dialog").is_some());
+}
+
+#[gpui::test]
+fn cancelling_quit_returns_focus_to_the_open_new_agent_dialog(cx: &mut TestAppContext) {
+    let (root, cx) = quit_fixture(cx);
+    root.update_in(cx, |root, window, cx| {
+        root.quit_choice = None;
+        let snapshot = crate::backend::FixtureBackend::for_screen(crate::backend::Screen::Chat)
+            .unwrap()
+            .snapshot();
+        let workspace = cx.new(|cx| Workspace::new(snapshot, window, cx));
+        workspace.update(cx, |workspace, cx| workspace.open_new_agent(cx));
+        root.state = LiveState::Open(workspace);
+        cx.notify();
+    });
+    redraw(cx);
+    let first = cx.update(|window, cx| window.focused(cx).unwrap());
+    crate::ui::dialog_tests::press(cx, "tab");
+    let second = cx.update(|window, cx| window.focused(cx).unwrap());
+    assert_ne!(first, second);
+    root.update(cx, |root, cx| {
+        root.quit_choice = Some(service::QuitChoice::Ask);
+        cx.notify();
+    });
+    redraw(cx);
+    click(cx, "quit:cancel");
+    assert!(cx.debug_bounds("new-agent").is_some());
+    cx.update(|window, _| assert!(first.is_focused(window)));
+    crate::ui::dialog_tests::press(cx, "tab");
+    cx.update(|window, _| assert!(second.is_focused(window)));
+    crate::ui::dialog_tests::press(cx, "shift-tab");
+    cx.update(|window, _| assert!(first.is_focused(window)));
+}
+
+#[gpui::test]
+fn quit_footer_keeps_cancel_keep_running_and_the_destructive_action_in_order(
+    cx: &mut TestAppContext,
+) {
+    let (_, cx) = quit_fixture(cx);
+    crate::ui::dialog_tests::assert_footer(
+        cx,
+        "quit:dialog:card",
+        &[
+            ("quit:cancel", ButtonStyle::Inset),
+            ("quit:keep", ButtonStyle::Primary),
+            ("quit:everything", ButtonStyle::Danger),
+        ],
+    );
+}
+
+#[gpui::test]
+fn open_project_footer_puts_choose_another_folder_rightmost(cx: &mut TestAppContext) {
+    let fake = FakeAgmend::start(console(vec![]));
+    let folder = fake.dir.path().join("plain");
+    std::fs::create_dir(&folder).unwrap();
+    let (root, cx) = open(cx, empty_launch(&fake));
+    pick(&root, cx, &folder);
+    crate::ui::dialog_tests::assert_footer(
+        cx,
+        "live:not-a-project:card",
+        &[
+            ("live:keep-project", ButtonStyle::Inset),
+            ("live:choose-another", ButtonStyle::Primary),
+        ],
+    );
+}
+
+#[gpui::test]
+fn invite_footer_has_close_as_its_cancel(cx: &mut TestAppContext) {
+    let (root, cx) = quit_fixture(cx);
+    root.update_in(cx, |root, window, cx| {
+        root.quit_choice = None;
+        root.launch.project = ProjectChoice::Project(project());
+        root.onboarding.projects =
+            Some(serde_json::from_value(serde_json::json!([membership("admin")])).unwrap());
+        root.onboarding.invite_code = Some("test-invite".into());
+        let snapshot = crate::backend::FixtureBackend::for_screen(crate::backend::Screen::Chat)
+            .unwrap()
+            .snapshot();
+        root.state = LiveState::Open(cx.new(|cx| Workspace::new(snapshot, window, cx)));
+        cx.notify();
+    });
+    crate::ui::dialog_tests::assert_footer(
+        cx,
+        "live:invite-result:card",
+        &[("live:close-invite", ButtonStyle::Inset)],
+    );
+    let dim = cx.debug_bounds("live:invite-result").unwrap();
+    assert_eq!(dim.origin, gpui::point(gpui::px(0.), gpui::px(0.)));
+    assert_eq!(dim.size, cx.update(|window, _| window.viewport_size()));
+    assert_eq!(
+        cx.debug_bounds("live:invite-result:card").unwrap().top(),
+        crate::ui::tokens::MODAL_TOP
+    );
+}
+
+#[gpui::test]
 fn quit_everything_uses_the_danger_style(cx: &mut TestAppContext) {
     let (_, cx) = quit_fixture(cx);
     let error = cx.update(|_, cx| cx.global::<Appearance>().theme.error);

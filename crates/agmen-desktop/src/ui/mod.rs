@@ -10,6 +10,8 @@ mod code_view;
 mod components;
 mod composer;
 mod dev_views;
+#[cfg(test)]
+mod dialog_tests;
 mod diff_view;
 mod dock;
 mod format;

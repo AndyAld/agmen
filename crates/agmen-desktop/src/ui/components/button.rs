@@ -325,7 +325,7 @@ impl RenderOnce for Button {
         let on_click = if self.disabled { None } else { self.on_click };
         styled
             .when_some(on_click, |this, handler| {
-                this.cursor_pointer().on_click(handler)
+                this.tab_index(0).cursor_pointer().on_click(handler)
             })
             .children(self.leading)
             .child({

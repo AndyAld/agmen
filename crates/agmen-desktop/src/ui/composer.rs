@@ -973,10 +973,10 @@ const SEND_HINT: &str = "⏎";
 /// font the composer sets on itself.
 #[derive(Debug, Clone, Copy)]
 struct Floors {
-    /// The "to" chip: its padding, gaps, lead label and close mark or ▾,
+    /// The "to" chip: its padding, gaps, lead label and close or chevron icon,
     /// with the handle cut to nothing (C260).
     to: Pixels,
-    /// The model chip: its padding, gaps, ◆ and ▾, with the model's name
+    /// The model chip: its padding, gaps, ◆ and chevron icon, with the model's name
     /// cut to nothing (C278).
     model: Pixels,
     /// The ⏎ hint, which keeps its width.
@@ -999,7 +999,7 @@ impl Floors {
     /// wide (what `box_probe` measures) at its floor,
     /// beside the "to" chip (when `with_to`), the input and the ⏎ at
     /// theirs (C278). Below that it hides rather than show a sliver with
-    /// neither ◆ nor ▾. A box not laid out yet shows it.
+    /// neither ◆ nor the chevron icon. A box not laid out yet shows it.
     fn model_fits(self, box_width: Option<Pixels>, with_to: bool) -> bool {
         let Some(box_width) = box_width else {
             return true;

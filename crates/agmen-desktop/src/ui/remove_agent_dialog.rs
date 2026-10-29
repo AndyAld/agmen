@@ -4,12 +4,9 @@
 use std::path::PathBuf;
 
 use agmen_proto::IdentityId;
-use gpui::{
-    Context, EventEmitter, IntoElement, ParentElement as _, Render, Styled as _, Window, div, px,
-};
+use gpui::{Context, EventEmitter, IntoElement, ParentElement as _, Render, Window};
 
-use super::components::{Button, ButtonStyle, Color, Label, LabelSize, Modal};
-use super::tokens::SPACE_12;
+use super::components::{Button, DialogFooter, Label, Modal};
 use crate::backend::{Action, BackendHandle};
 
 pub(crate) struct Closed;
@@ -106,33 +103,26 @@ impl RemoveAgentDialog {
 
 impl Render for RemoveAgentDialog {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        Modal::new("remove-agent", px(440.), px(80.))
+        Modal::small("remove-agent")
             .on_dismiss(cx.listener(|_, _, _, cx| cx.emit(Closed)))
-            .child(Label::new("Remove agent?").size(LabelSize::Title))
+            .title(Label::title("Remove agent?"))
             .children(
                 self.message()
                     .lines()
                     .map(|line| Label::new(line.to_owned()).wrap())
                     .collect::<Vec<_>>(),
             )
-            .children(
-                self.error
-                    .clone()
-                    .map(|error| Label::new(error).color(Color::Error).wrap()),
-            )
-            .child(
-                div()
-                    .flex()
-                    .gap(SPACE_12)
-                    .child(
-                        Button::new("remove-agent:cancel", "Cancel")
-                            .on_click(cx.listener(|_, _, _, cx| cx.emit(Closed))),
-                    )
-                    .child(
-                        Button::new("remove-agent:confirm", "Remove")
-                            .style(ButtonStyle::Danger)
-                            .on_click(cx.listener(|this, _, _, cx| this.confirm(cx))),
-                    ),
+            .error(self.error.clone())
+            .footer(
+                DialogFooter::new(
+                    Button::new("remove-agent:confirm", "Remove")
+                        .on_click(cx.listener(|this, _, _, cx| this.confirm(cx))),
+                )
+                .destructive(true)
+                .cancel(
+                    Button::new("remove-agent:cancel", "Cancel")
+                        .on_click(cx.listener(|_, _, _, cx| cx.emit(Closed))),
+                ),
             )
     }
 }

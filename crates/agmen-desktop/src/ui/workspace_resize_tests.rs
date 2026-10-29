@@ -421,15 +421,11 @@ fn a_modal_field_over_a_handle_takes_the_click(cx: &mut TestAppContext) {
     let field = cx.debug_bounds("new-agent:model").unwrap();
     let workspace_focus = workspace.read_with(cx, |w, _| w.focus_handle.clone());
     let before = cx.update(|window, cx| window.focused(cx));
-    assert!(
-        before.is_none_or(|focus| focus == workspace_focus),
-        "no field has the focus yet"
-    );
     cx.simulate_click(point(handle.x, field.center().y), Modifiers::none());
     redraw(cx);
     let focused = cx.update(|window, cx| window.focused(cx));
     assert!(
-        focused.is_some_and(|focus| focus != workspace_focus),
+        focused.is_some_and(|focus| focus != workspace_focus && Some(focus) != before),
         "the model field took the focus"
     );
     assert!(cx.debug_bounds("new-agent").is_some(), "the dialog stays");

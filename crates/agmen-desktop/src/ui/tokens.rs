@@ -259,6 +259,10 @@ pub(crate) const TEAM_OWNER_COLUMN: Pixels = px(32.);
 /// (node 10290).
 pub(crate) const MODAL_WIDTH: Pixels = px(620.);
 pub(crate) const MODAL_TOP: Pixels = px(150.);
+/// Compact confirmations and short forms.
+pub(crate) const DIALOG_SMALL_WIDTH: Pixels = px(440.);
+/// The quit confirmation, with three actions.
+pub(crate) const DIALOG_MEDIUM_WIDTH: Pixels = px(480.);
 
 /// `color` at `alpha` of its own opacity: the one way views derive a fill
 /// the theme has no token for.

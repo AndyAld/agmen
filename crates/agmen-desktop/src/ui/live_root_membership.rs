@@ -11,7 +11,7 @@ use gpui::{
 use serde::Deserialize;
 
 use super::{LiveRoot, ProjectChoice};
-use crate::ui::components::{Button, ButtonStyle, Indent, Label, ListItem, Modal};
+use crate::ui::components::{Button, ButtonStyle, DialogFooter, Indent, Label, ListItem, Modal};
 
 #[derive(Debug, Clone, Deserialize)]
 pub(super) struct Membership {
@@ -456,41 +456,37 @@ impl LiveRoot {
                 .filter(|_| self.can_invite()),
             |this, code| {
                 let command = format!("agmen join {code}");
-                this.child(
-                    Modal::new(
-                        "live:invite-result",
-                        crate::ui::tokens::LAUNCH_STATE_WIDTH,
-                        crate::ui::tokens::TITLE_BAR_HEIGHT,
-                    )
-                    .on_dismiss(cx.listener(|this, _, _, cx| {
-                        this.onboarding.invite_code = None;
-                        cx.notify();
-                    }))
-                    .child(Label::new(code.clone()).wrap())
-                    .child(Button::new("live:copy-invite-code", "Copy code").on_click(
-                        move |_, _, cx| {
-                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(code.clone()))
-                        },
-                    ))
-                    .child(Label::new(command.clone()).wrap())
-                    .child(
-                        Button::new("live:copy-invite-command", "Copy command").on_click(
+                this.absolute().top_0().left_0().size_full().child(
+                    Modal::small("live:invite-result")
+                        .on_dismiss(cx.listener(|this, _, _, cx| {
+                            this.onboarding.invite_code = None;
+                            cx.notify();
+                        }))
+                        .child(Label::new(code.clone()).wrap())
+                        .child(Button::new("live:copy-invite-code", "Copy code").on_click(
                             move |_, _, cx| {
-                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                    command.clone(),
-                                ))
+                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(code.clone()))
                             },
-                        ),
-                    )
-                    .child(Label::new("Each code works once."))
-                    .child(
-                        Button::new("live:close-invite", "Close").on_click(cx.listener(
-                            |this, _, _, cx| {
-                                this.onboarding.invite_code = None;
-                                cx.notify();
-                            },
+                        ))
+                        .child(Label::new(command.clone()).wrap())
+                        .child(
+                            Button::new("live:copy-invite-command", "Copy command").on_click(
+                                move |_, _, cx| {
+                                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                        command.clone(),
+                                    ))
+                                },
+                            ),
+                        )
+                        .child(Label::new("Each code works once."))
+                        .footer(DialogFooter::close(
+                            Button::new("live:close-invite", "Close").on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    this.onboarding.invite_code = None;
+                                    cx.notify();
+                                },
+                            )),
                         )),
-                    ),
                 )
             },
         )
