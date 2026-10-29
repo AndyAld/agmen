@@ -28,6 +28,7 @@ use crate::events::Wakes;
 use crate::http::{Hub, error_chain};
 use crate::numbering::{NumberingError, lock_head, next_seq};
 use crate::secrets_scan::find_secret;
+use crate::usage::{Gate, Taken, post_owner_alert, take_quota, with_thousands, write_gate};
 
 /// The hub's own identity id, stamped as `from` on what it posts. It holds a
 /// `0`, which the id alphabet the hub mints from leaves out, so no minted
@@ -277,6 +278,12 @@ impl Hub {
             sender,
             hash,
         } = admitted;
+        let gate = write_gate(self, topics.tenant())
+            .await
+            .map_err(StoreError::from)?;
+        if gate == Gate::ReadOnly && !matches!(verb, Verb::Release | Verb::Bye) {
+            return Err(NackReason::ReadOnly.into());
+        }
         let roster = if needs_roster(verb, &env) {
             Roster::load(pool, topics).await?
         } else {
@@ -346,6 +353,40 @@ impl Hub {
             ack,
         };
         let mut tx = pool.begin().await.map_err(StoreError::from)?;
+        let quota_warning = if let Gate::Quota { limit } = gate
+            && !matches!(verb, Verb::Heartbeat | Verb::Release | Verb::Bye)
+        {
+            match take_quota(&mut tx, topics.tenant(), limit)
+                .await
+                .map_err(StoreError::from)?
+            {
+                Taken::Exhausted => {
+                    // A copy of this message may have taken the last slot
+                    // while this one waited on the counter: answer as for a
+                    // resend instead of refusing a recorded message.
+                    drop(tx);
+                    if let Some(reply) = recorded_reply(pool, &sender.id, &id, &hash).await? {
+                        return Ok(Handled {
+                            reply,
+                            route: ReplyRoute::Caller,
+                        });
+                    }
+                    let now = Timestamp::now();
+                    let millis =
+                        crate::next_utc_midnight(now).as_millisecond() - now.as_millisecond();
+                    return Err(Refused::retry(
+                        NackReason::QuotaExceeded,
+                        Duration::from_millis(millis.unsigned_abs()),
+                    ));
+                }
+                Taken::Counted { messages, warn } => {
+                    debug_assert!(messages <= limit);
+                    warn.then_some(limit)
+                }
+            }
+        } else {
+            None
+        };
         if ledger.is_some() {
             // Ledger work locks item and claim rows, then posts to the feed.
             // Taking the feed's head first gives every ledger transaction
@@ -376,6 +417,24 @@ impl Hub {
                         })?;
                 }
                 tx.commit().await.map_err(StoreError::from)?;
+                if let Some(limit) = quota_warning {
+                    let alerted = async {
+                        let name: String = sqlx::query_scalar("SELECT name FROM tenants WHERE id = $1")
+                            .bind(topics.tenant().as_str())
+                            .fetch_one(pool)
+                            .await
+                            .map_err(|err| PostError::Store(Box::new(err)))?;
+                        let limit = with_thousands(limit);
+                        let body = format!(
+                            "{name} used 80% of today's {limit} messages; posts stop at {limit} until 00:00 UTC."
+                        );
+                        post_owner_alert(self, topics.tenant(), &body).await
+                    }
+                    .await;
+                    if let Err(err) = alerted {
+                        tracing::warn!(tenant = %topics.tenant(), error = %error_chain(&err), "posting the daily quota alert failed");
+                    }
+                }
                 self.ingest_state().stored(topics.project());
                 self.on_recorded(topics, verb, &sender.id, sender.kind, &id)
                     .await;

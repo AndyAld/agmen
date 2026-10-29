@@ -58,6 +58,7 @@ mod tenants;
 mod test_github;
 #[cfg(feature = "test-hooks")]
 mod test_hooks;
+mod usage;
 
 pub use auth::{GithubError, GithubId};
 pub use billing::{

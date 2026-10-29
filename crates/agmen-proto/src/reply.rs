@@ -68,6 +68,13 @@ pub enum NackReason {
     NotLaneOwner,
     /// A PUSH_REQUEST while push approval is `off`.
     NotRequired,
+    /// The group used its message quota for the UTC day.
+    QuotaExceeded,
+    /// The group is read-only until its owner pays.
+    ReadOnly,
+    /// A reason this client does not recognize; final and never sent by a hub.
+    #[serde(other)]
+    Unknown,
 }
 
 impl NackReason {
@@ -94,6 +101,9 @@ impl NackReason {
             Self::IdentityRevoked => "identity_revoked",
             Self::NotLaneOwner => "not_lane_owner",
             Self::NotRequired => "not_required",
+            Self::QuotaExceeded => "quota_exceeded",
+            Self::ReadOnly => "read_only",
+            Self::Unknown => "unknown",
         }
     }
 }
@@ -127,6 +137,25 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn new_reasons_are_final() {
+        for (reason, name) in [
+            (NackReason::QuotaExceeded, "quota_exceeded"),
+            (NackReason::ReadOnly, "read_only"),
+        ] {
+            assert!(!reason.is_retryable());
+            assert_eq!(reason.as_str(), name);
+        }
+    }
+
+    #[test]
+    fn unknown_nack_reason_parses() {
+        let reason: NackReason = serde_json::from_value(json!("some_future_reason")).unwrap();
+        assert_eq!(reason, NackReason::Unknown);
+        assert!(!reason.is_retryable());
+        assert_eq!(reason.as_str(), "unknown");
+    }
 
     #[test]
     fn reply_wire_shape() {
@@ -169,6 +198,9 @@ mod tests {
             NackReason::IdentityRevoked,
             NackReason::NotLaneOwner,
             NackReason::NotRequired,
+            NackReason::QuotaExceeded,
+            NackReason::ReadOnly,
+            NackReason::Unknown,
         ] {
             assert_eq!(
                 serde_json::to_value(reason).unwrap(),

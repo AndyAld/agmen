@@ -146,7 +146,6 @@ fn trial_notice(name: &str, record: &PlanRecord, now: Timestamp) -> Option<Strin
 /// # Errors
 ///
 /// When a query fails or a stored value is outside the plan rules.
-#[expect(dead_code, reason = "hosted Task 6 reads one plan through load_plan")]
 pub(crate) async fn load_plan(
     db: impl PgExecutor<'_>,
     tenant: &TenantId,

@@ -136,6 +136,21 @@
           "description": "A PUSH_REQUEST while push approval is `off`.",
           "type": "string",
           "const": "not_required"
+        },
+        {
+          "description": "The group used its message quota for the UTC day.",
+          "type": "string",
+          "const": "quota_exceeded"
+        },
+        {
+          "description": "The group is read-only until its owner pays.",
+          "type": "string",
+          "const": "read_only"
+        },
+        {
+          "description": "A reason this client does not recognize; final and never sent by a hub.",
+          "type": "string",
+          "const": "unknown"
         }
       ]
     },

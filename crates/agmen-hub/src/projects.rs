@@ -142,6 +142,10 @@ pub(crate) async fn create(
     tenants.sort();
     tenants.dedup();
     let tenant = project_tenant(&tenants, request.tenant.as_ref().map(TenantId::as_str))?;
+    let tenant_id = tenant.parse().map_err(ApiError::stored)?;
+    if crate::usage::write_gate(&hub, &tenant_id).await? == crate::usage::Gate::ReadOnly {
+        return Err(crate::usage::refuse_read_only());
+    }
     let project = create_project(&mut tx, &tenant, &request.name, repo_url, &human).await?;
     tx.commit().await?;
     Ok((
