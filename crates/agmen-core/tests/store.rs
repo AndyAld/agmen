@@ -1,6 +1,9 @@
 #![cfg(test)]
 
+use agmen_core::{ItemLock, Lapsed, NewItem, NewLend, ReleaseBy};
+use agmen_proto::Timestamp;
 use std::cell::Cell;
+use std::time::Duration;
 
 use agmen_core::{
     Core, LaneHolder, LaneRow, MEM_MAX_ROWS, MemStore, MessageRow, Reads, ResolvedLane, Roster,
@@ -36,6 +39,10 @@ async fn dropped_tx_records_nothing() -> Result<(), StoreError> {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the compile-only Send check implements every storage statement"
+)]
 fn tx_is_send_with_a_non_sync_state() {
     fn assert_send<T: Send>() {}
     assert_send::<OwnedMutexGuard<Cell<u8>>>();
@@ -91,6 +98,143 @@ fn tx_is_send_with_a_non_sync_state() {
     }
 
     impl StoreTx for NonSyncTx {
+        async fn lock_item(
+            &mut self,
+            _project: &ProjectId,
+            _item: &ItemKey,
+        ) -> Result<Option<ItemLock>, StoreError> {
+            Err(StoreError::Stored("compile-only transaction".into()))
+        }
+
+        async fn release_lapsed(
+            &mut self,
+            _project: &ProjectId,
+            _item: &ItemKey,
+        ) -> Result<Option<Lapsed>, StoreError> {
+            Err(StoreError::Stored("compile-only transaction".into()))
+        }
+
+        async fn active_claim(
+            &mut self,
+            _project: &ProjectId,
+            _item: &ItemKey,
+        ) -> Result<Option<(IdentityId, String)>, StoreError> {
+            Err(StoreError::Stored("compile-only transaction".into()))
+        }
+
+        async fn extend_claim(
+            &mut self,
+            _project: &ProjectId,
+            _item: &ItemKey,
+            _lease: Duration,
+        ) -> Result<Timestamp, StoreError> {
+            Err(StoreError::Stored("compile-only transaction".into()))
+        }
+
+        async fn insert_claim(
+            &mut self,
+            _project: &ProjectId,
+            _item: &ItemKey,
+            _from: &IdentityId,
+            _lease: Duration,
+        ) -> Result<Timestamp, StoreError> {
+            Err(StoreError::Stored("compile-only transaction".into()))
+        }
+
+        async fn renew_claims(
+            &mut self,
+            _project: &ProjectId,
+            _from: &IdentityId,
+            _items: &[ItemKey],
+            _lease: Duration,
+        ) -> Result<u64, StoreError> {
+            Err(StoreError::Stored("compile-only transaction".into()))
+        }
+
+        async fn release_claim(
+            &mut self,
+            _project: &ProjectId,
+            _item: &ItemKey,
+            _from: &IdentityId,
+            _by: ReleaseBy,
+        ) -> Result<u64, StoreError> {
+            Err(StoreError::Stored("compile-only transaction".into()))
+        }
+
+        async fn next_item_number(
+            &mut self,
+            _project: &ProjectId,
+            _prefix: &str,
+        ) -> Result<u64, StoreError> {
+            Err(StoreError::Stored("compile-only transaction".into()))
+        }
+
+        async fn insert_item(&mut self, _item: &NewItem<'_>) -> Result<(), StoreError> {
+            Err(StoreError::Stored("compile-only transaction".into()))
+        }
+
+        async fn assign_item(
+            &mut self,
+            _project: &ProjectId,
+            _item: &ItemKey,
+            _to: &IdentityId,
+        ) -> Result<u64, StoreError> {
+            Err(StoreError::Stored("compile-only transaction".into()))
+        }
+
+        async fn close_claim(
+            &mut self,
+            _project: &ProjectId,
+            _item: &ItemKey,
+            _holder: &IdentityId,
+        ) -> Result<u64, StoreError> {
+            Err(StoreError::Stored("compile-only transaction".into()))
+        }
+
+        async fn mark_done(
+            &mut self,
+            _project: &ProjectId,
+            _item: &ItemKey,
+        ) -> Result<(), StoreError> {
+            Err(StoreError::Stored("compile-only transaction".into()))
+        }
+
+        async fn lock_lane_owner(
+            &mut self,
+            _project: &ProjectId,
+            _lane: &LaneName,
+        ) -> Result<Option<Option<IdentityId>>, StoreError> {
+            Err(StoreError::Stored("compile-only transaction".into()))
+        }
+
+        async fn identity_live(
+            &mut self,
+            _project: &ProjectId,
+            _id: &IdentityId,
+        ) -> Result<bool, StoreError> {
+            Err(StoreError::Stored("compile-only transaction".into()))
+        }
+
+        async fn identity_edits(
+            &mut self,
+            _id: &IdentityId,
+        ) -> Result<Option<serde_json::Value>, StoreError> {
+            Err(StoreError::Stored("compile-only transaction".into()))
+        }
+
+        async fn active_lends(
+            &mut self,
+            _project: &ProjectId,
+            _lane: &LaneName,
+            _to: &IdentityId,
+        ) -> Result<u64, StoreError> {
+            Err(StoreError::Stored("compile-only transaction".into()))
+        }
+
+        async fn insert_lend(&mut self, _lend: &NewLend<'_>) -> Result<(), StoreError> {
+            Err(StoreError::Stored("compile-only transaction".into()))
+        }
+
         async fn insert_message(&mut self, _row: &MessageRow<'_>) -> Result<(), StoreError> {
             Ok(())
         }

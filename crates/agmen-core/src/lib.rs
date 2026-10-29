@@ -16,9 +16,11 @@
 
 #![warn(missing_docs)]
 
+mod claims;
 mod core;
 mod identity;
 mod ids;
+mod items;
 mod lanes;
 mod limiter;
 #[cfg(feature = "testing")]
@@ -29,15 +31,18 @@ mod roster;
 mod routing;
 mod store;
 
+#[doc(hidden)]
+pub use claims::lease_expired;
+pub use claims::{LedgerError, LedgerMessage, apply_ledger};
 pub use core::{Core, CoreError};
 pub use identity::{cap_verbs, is_child_name};
 pub use ids::{HUB_IDENTITY, envelope_hash, hub_identity, hub_now, message_id, new_message_id};
 pub use lanes::{
-    EditRule, LaneError, LaneHolder, LaneList, LaneRow, LaneSpec, LaneSpecError, Lanes, Lends,
-    MAX_ACTIVE_LENDS, MAX_CHECK_PATHS, MAX_GLOBS, MAX_GLOBS_PER_LANE, MAX_LANES, MAX_LEND_DURATION,
-    MAX_LOADED_LENDS, NOT_A_REPO_PATH, PathCheck, ReplaceError, ResolvedLane, Stray,
-    check_lane_specs, judge_scoped, repo_path, scope_globs, stray_body, stray_body_with,
-    validate_edits,
+    EditRule, LaneError, LaneHolder, LaneList, LaneRow, LaneSpec, LaneSpecError, Lanes, LendError,
+    Lends, MAX_ACTIVE_LENDS, MAX_CHECK_PATHS, MAX_GLOBS, MAX_GLOBS_PER_LANE, MAX_LANES,
+    MAX_LEND_DURATION, MAX_LOADED_LENDS, NOT_A_REPO_PATH, PathCheck, ReplaceError, ResolvedLane,
+    Stray, check_lane_specs, judge_scoped, lend, repo_path, scope_globs, stray_body,
+    stray_body_with, validate_edits,
 };
 pub use limiter::{BURST, MAX_TRACKED, RATE_PER_SEC, RateLimiter};
 #[cfg(feature = "testing")]
@@ -50,4 +55,7 @@ pub use roster::{Member, MemberRole, Roster, Sender};
 pub use routing::{
     Parent, ack_stream, expand_mentions, fan_out, may_send, mentioned, needs_roster, route,
 };
-pub use store::{MessageRow, Reads, Store, StoreError, StoreTx, parse_kind};
+pub use store::{
+    ItemLock, Lapsed, MessageRow, NewItem, NewLend, Reads, ReleaseBy, Store, StoreError, StoreTx,
+    parse_kind,
+};

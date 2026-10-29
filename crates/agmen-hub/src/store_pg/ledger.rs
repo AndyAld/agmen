@@ -1,11 +1,13 @@
 //! Lane SQL. The statements are the ones the hub used before the rules moved
 //! into `agmen-core`.
 
+use std::time::Duration;
+
 use agmen_core::{
     LaneHolder, LaneRow, MAX_GLOBS as GLOB_CAP, MAX_GLOBS_PER_LANE as GLOBS_PER_LANE_CAP,
-    MAX_LANES as LANE_ROW_CAP, MAX_LOADED_LENDS, ResolvedLane, parse_kind,
+    MAX_LANES as LANE_ROW_CAP, MAX_LOADED_LENDS, ResolvedLane, StoreError, parse_kind,
 };
-use agmen_proto::{IdentityId, IdentityKind, LaneName, ProjectId};
+use agmen_proto::{IdentityId, IdentityKind, ItemKey, LaneName, ProjectId, Severity, Timestamp};
 use sqlx::{PgExecutor, Postgres, Transaction};
 
 use crate::claims::LedgerError;
@@ -247,4 +249,338 @@ pub(crate) async fn replace_lanes(
         .await?;
     }
     Ok(())
+}
+
+pub(super) async fn lock_item(
+    tx: &mut Transaction<'_, Postgres>,
+    project: &ProjectId,
+    item: &ItemKey,
+) -> Result<Option<agmen_core::ItemLock>, StoreError> {
+    let row = sqlx::query_as(
+        "SELECT i.state, i.lane, i.assigned_to, l.owner_identity_id
+         FROM items i
+         LEFT JOIN lanes l ON l.project_id = i.project_id AND l.name = i.lane
+         WHERE i.project_id = $1 AND i.key = $2
+         FOR UPDATE OF i",
+    )
+    .bind(project.as_str())
+    .bind(item.as_str())
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(backend)?;
+    Ok(row)
+}
+
+pub(super) async fn release_lapsed(
+    tx: &mut Transaction<'_, Postgres>,
+    project: &ProjectId,
+    item: &ItemKey,
+) -> Result<Option<agmen_core::Lapsed>, StoreError> {
+    let row: Option<(String, String)> = sqlx::query_as(
+        "UPDATE claims c SET released_at = now() FROM identities h
+         WHERE c.project_id = $1 AND c.item_key = $2 AND c.released_at IS NULL
+           AND c.lease_until <= now() AND h.id = c.identity_id
+         RETURNING c.identity_id, h.handle",
+    )
+    .bind(project.as_str())
+    .bind(item.as_str())
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(backend)?;
+    row.map(|(holder, handle)| {
+        Ok(agmen_core::Lapsed {
+            holder: holder.parse().map_err(stored_value)?,
+            handle,
+        })
+    })
+    .transpose()
+}
+
+pub(super) async fn active_claim(
+    tx: &mut Transaction<'_, Postgres>,
+    project: &ProjectId,
+    item: &ItemKey,
+) -> Result<Option<(IdentityId, String)>, StoreError> {
+    let row: Option<(String, String)> = sqlx::query_as(
+        "SELECT c.identity_id, h.handle FROM claims c JOIN identities h ON h.id = c.identity_id
+         WHERE c.project_id = $1 AND c.item_key = $2 AND c.released_at IS NULL",
+    )
+    .bind(project.as_str())
+    .bind(item.as_str())
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(backend)?;
+    row.map(|(holder, handle)| Ok((holder.parse().map_err(stored_value)?, handle)))
+        .transpose()
+}
+
+pub(super) async fn extend_claim(
+    tx: &mut Transaction<'_, Postgres>,
+    project: &ProjectId,
+    item: &ItemKey,
+    lease: Duration,
+) -> Result<Timestamp, StoreError> {
+    let ms: i64 = sqlx::query_scalar(
+        "UPDATE claims SET lease_until = now() + $3 * interval '1 millisecond'
+                 WHERE project_id = $1 AND item_key = $2 AND released_at IS NULL
+                 RETURNING (extract(epoch FROM lease_until) * 1000)::bigint",
+    )
+    .bind(project.as_str())
+    .bind(item.as_str())
+    .bind(lease_ms(lease))
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(backend)?;
+    Timestamp::from_millisecond(ms).map_err(stored_value)
+}
+
+pub(super) async fn insert_claim(
+    tx: &mut Transaction<'_, Postgres>,
+    project: &ProjectId,
+    item: &ItemKey,
+    from: &IdentityId,
+    lease: Duration,
+) -> Result<Timestamp, StoreError> {
+    let ms: i64 = sqlx::query_scalar(
+        "INSERT INTO claims (project_id, item_key, identity_id, lease_until)
+                 VALUES ($1, $2, $3, now() + $4 * interval '1 millisecond')
+                 RETURNING (extract(epoch FROM lease_until) * 1000)::bigint",
+    )
+    .bind(project.as_str())
+    .bind(item.as_str())
+    .bind(from.as_str())
+    .bind(lease_ms(lease))
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(backend)?;
+    Timestamp::from_millisecond(ms).map_err(stored_value)
+}
+
+pub(super) async fn renew_claims(
+    tx: &mut Transaction<'_, Postgres>,
+    project: &ProjectId,
+    from: &IdentityId,
+    items: &[ItemKey],
+    lease: Duration,
+) -> Result<u64, StoreError> {
+    let keys: Vec<&str> = items.iter().map(ItemKey::as_str).collect();
+    let result = sqlx::query(
+        "UPDATE claims SET lease_until = now() + $4 * interval '1 millisecond'
+         WHERE project_id = $1 AND identity_id = $2 AND item_key = ANY($3)
+           AND released_at IS NULL AND lease_until > now()",
+    )
+    .bind(project.as_str())
+    .bind(from.as_str())
+    .bind(&keys)
+    .bind(lease_ms(lease))
+    .execute(&mut **tx)
+    .await
+    .map_err(backend)?;
+    Ok(result.rows_affected())
+}
+
+pub(super) async fn release_claim(
+    tx: &mut Transaction<'_, Postgres>,
+    project: &ProjectId,
+    item: &ItemKey,
+    from: &IdentityId,
+    by: agmen_core::ReleaseBy,
+) -> Result<u64, StoreError> {
+    let result = sqlx::query(
+        "UPDATE claims SET released_at = now()
+         WHERE project_id = $1 AND item_key = $2 AND released_at IS NULL
+           AND (identity_id = $3 OR $4)",
+    )
+    .bind(project.as_str())
+    .bind(item.as_str())
+    .bind(from.as_str())
+    .bind(by == agmen_core::ReleaseBy::Coordinator)
+    .execute(&mut **tx)
+    .await
+    .map_err(backend)?;
+    Ok(result.rows_affected())
+}
+
+pub(super) async fn next_item_number(
+    tx: &mut Transaction<'_, Postgres>,
+    project: &ProjectId,
+    prefix: &str,
+) -> Result<u64, StoreError> {
+    let n: i64 = sqlx::query_scalar(
+        "INSERT INTO item_counters (project_id, prefix, n) VALUES ($1, $2, 1)
+         ON CONFLICT (project_id, prefix) DO UPDATE SET n = item_counters.n + 1
+         RETURNING n",
+    )
+    .bind(project.as_str())
+    .bind(prefix)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(backend)?;
+    u64::try_from(n).map_err(stored_value)
+}
+
+pub(super) async fn insert_item(
+    tx: &mut Transaction<'_, Postgres>,
+    item: &agmen_core::NewItem<'_>,
+) -> Result<(), StoreError> {
+    sqlx::query(
+        "INSERT INTO items (project_id, key, title, lane, severity, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6)",
+    )
+    .bind(item.project.as_str())
+    .bind(item.key.as_str())
+    .bind(item.title)
+    .bind(item.lane.map(LaneName::as_str))
+    .bind(item.severity.map(severity_str))
+    .bind(item.created_by.as_str())
+    .execute(&mut **tx)
+    .await
+    .map_err(backend)?;
+    Ok(())
+}
+
+pub(super) async fn assign_item(
+    tx: &mut Transaction<'_, Postgres>,
+    project: &ProjectId,
+    item: &ItemKey,
+    to: &IdentityId,
+) -> Result<u64, StoreError> {
+    let result = sqlx::query(
+        "UPDATE items SET assigned_to = $3
+         WHERE project_id = $1 AND key = $2
+           AND EXISTS (SELECT 1 FROM identities WHERE id = $3 AND project_id = $1)",
+    )
+    .bind(project.as_str())
+    .bind(item.as_str())
+    .bind(to.as_str())
+    .execute(&mut **tx)
+    .await
+    .map_err(backend)?;
+    Ok(result.rows_affected())
+}
+
+pub(super) async fn close_claim(
+    tx: &mut Transaction<'_, Postgres>,
+    project: &ProjectId,
+    item: &ItemKey,
+    holder: &IdentityId,
+) -> Result<u64, StoreError> {
+    let result = sqlx::query(
+        "UPDATE claims SET released_at = now()
+         WHERE project_id = $1 AND item_key = $2 AND identity_id = $3
+           AND released_at IS NULL AND lease_until > now()",
+    )
+    .bind(project.as_str())
+    .bind(item.as_str())
+    .bind(holder.as_str())
+    .execute(&mut **tx)
+    .await
+    .map_err(backend)?;
+    Ok(result.rows_affected())
+}
+
+pub(super) async fn mark_done(
+    tx: &mut Transaction<'_, Postgres>,
+    project: &ProjectId,
+    item: &ItemKey,
+) -> Result<(), StoreError> {
+    sqlx::query("UPDATE items SET state = 'done' WHERE project_id = $1 AND key = $2")
+        .bind(project.as_str())
+        .bind(item.as_str())
+        .execute(&mut **tx)
+        .await
+        .map_err(backend)?;
+    Ok(())
+}
+
+pub(super) async fn lock_lane_owner(
+    tx: &mut Transaction<'_, Postgres>,
+    project: &ProjectId,
+    lane: &LaneName,
+) -> Result<Option<Option<IdentityId>>, StoreError> {
+    let row: Option<Option<String>> = sqlx::query_scalar(
+        "SELECT owner_identity_id FROM lanes WHERE project_id=$1 AND name=$2 FOR UPDATE",
+    )
+    .bind(project.as_str())
+    .bind(lane.as_str())
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(backend)?;
+    row.map(|owner| owner.map(|id| id.parse().map_err(stored_value)).transpose())
+        .transpose()
+}
+
+pub(super) async fn identity_live(
+    tx: &mut Transaction<'_, Postgres>,
+    project: &ProjectId,
+    id: &IdentityId,
+) -> Result<bool, StoreError> {
+    sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM identities WHERE id=$1 AND project_id=$2 AND revoked_at IS NULL)").bind(id.as_str()).bind(project.as_str())
+        .fetch_one(&mut **tx).await.map_err(backend)
+}
+
+pub(super) async fn identity_edits(
+    tx: &mut Transaction<'_, Postgres>,
+    id: &IdentityId,
+) -> Result<Option<serde_json::Value>, StoreError> {
+    let row: Option<Option<serde_json::Value>> =
+        sqlx::query_scalar("SELECT edits FROM identities WHERE id=$1")
+            .bind(id.as_str())
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(backend)?;
+    Ok(row.flatten())
+}
+
+pub(super) async fn active_lends(
+    tx: &mut Transaction<'_, Postgres>,
+    project: &ProjectId,
+    lane: &LaneName,
+    to: &IdentityId,
+) -> Result<u64, StoreError> {
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM lane_lends WHERE project_id=$1 AND lane=$2 AND to_id=$3 AND until_at > now()").bind(project.as_str()).bind(lane.as_str()).bind(to.as_str())
+        .fetch_one(&mut **tx).await.map_err(backend)?;
+    u64::try_from(count).map_err(stored_value)
+}
+
+pub(super) async fn insert_lend(
+    tx: &mut Transaction<'_, Postgres>,
+    lend: &agmen_core::NewLend<'_>,
+) -> Result<(), StoreError> {
+    sqlx::query(
+        "INSERT INTO lane_lends (project_id, lane, message_id, from_id, to_id, paths, until_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7::timestamptz)",
+    )
+    .bind(lend.project.as_str())
+    .bind(lend.lane.as_str())
+    .bind(lend.message_id.as_str())
+    .bind(lend.from.as_str())
+    .bind(lend.to.as_str())
+    .bind(lend.paths)
+    .bind(lend.until.to_string())
+    .execute(&mut **tx)
+    .await
+    .map_err(backend)?;
+    Ok(())
+}
+
+fn lease_ms(lease: Duration) -> i64 {
+    i64::try_from(lease.as_millis()).unwrap_or(i64::MAX)
+}
+
+const fn severity_str(severity: Severity) -> &'static str {
+    match severity {
+        Severity::Low => "low",
+        Severity::Med => "med",
+        Severity::High => "high",
+        Severity::Security => "security",
+    }
+}
+
+fn backend(err: sqlx::Error) -> StoreError {
+    StoreError::Backend(Box::new(err))
+}
+
+fn stored_value(what: impl std::fmt::Display) -> StoreError {
+    StoreError::Stored(format!("a stored value is invalid: {what}"))
 }

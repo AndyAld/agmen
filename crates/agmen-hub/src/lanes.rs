@@ -3,31 +3,21 @@
 //! paths outside the sender's claimed lanes.
 //!
 //! Glob rules, overlap, and path judgment live in `agmen_core`. This module
-//! keeps the HTTP handlers, the lane-file parser, and the ledger verbs that
-//! still run in the hub's transaction.
+//! keeps the HTTP handlers and lane-file parser.
 
 use agmen_core::{
-    Core, CoreError, EditRule, LaneList, LaneSpec, Lanes, Lends, MAX_ACTIVE_LENDS, MAX_CHECK_PATHS,
-    MAX_LEND_DURATION, NOT_A_REPO_PATH, PathCheck, ReplaceError, StoreError, Stray, judge_scoped,
-    repo_path, scope_globs, stray_body, stray_body_with,
+    Core, CoreError, LaneList, LaneSpec, MAX_CHECK_PATHS, PathCheck, ReplaceError, StoreError,
 };
-use agmen_proto::{
-    Body, Change, ClientEnvelope, EditScope, IdentityId, IdentityKind, ItemKey, NackReason, Needs,
-    Payload, ProjectId, Stream, Timestamp, Topics, Urgency,
-};
+use agmen_proto::{EditScope, IdentityId, IdentityKind, ProjectId};
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use serde::Deserialize;
-use sqlx::{Postgres, Transaction};
 
 use crate::auth::Caller;
-use crate::claims::{LedgerError, LedgerMessage};
 use crate::http::{ApiError, Hub};
 use crate::identities::Identity;
-use crate::ingest::{HubPost, post_alert};
-use crate::items::close_claimed;
-use crate::store_pg::{PgStore, PgTx};
+use crate::store_pg::PgStore;
 
 /// A `PUT` body: the whole lane list, as `{"lanes": [...]}` in JSON or
 /// `[[lanes]]` tables in TOML.
@@ -199,185 +189,6 @@ pub(crate) async fn check_path(
         None => Err(ApiError::not_found(
             "no live identity with that id in this project",
         )),
-    }
-}
-
-/// A LEND refusal is final; database errors remain retryable.
-#[derive(Debug)]
-pub(crate) enum LendError {
-    Refused(NackReason),
-    Database(sqlx::Error),
-}
-
-impl From<sqlx::Error> for LendError {
-    fn from(err: sqlx::Error) -> Self {
-        Self::Database(err)
-    }
-}
-
-/// Validates and stores a LEND in the message transaction. Locking its lane
-/// keeps replacement or ownership changes from racing the authorization.
-pub(crate) async fn lend(
-    tx: &mut Transaction<'_, Postgres>,
-    topics: &Topics,
-    sender: &IdentityId,
-    kind: IdentityKind,
-    env: &ClientEnvelope,
-) -> Result<(), LendError> {
-    let Payload::Lend {
-        lane,
-        paths,
-        to,
-        until,
-    } = &env.payload
-    else {
-        return Err(LendError::Refused(NackReason::Schema));
-    };
-    let owner: Option<Option<String>> = sqlx::query_scalar(
-        "SELECT owner_identity_id FROM lanes WHERE project_id=$1 AND name=$2 FOR UPDATE",
-    )
-    .bind(topics.project().as_str())
-    .bind(lane.as_str())
-    .fetch_optional(&mut **tx)
-    .await?;
-    let Some(owner) = owner else {
-        return Err(LendError::Refused(NackReason::Schema));
-    };
-    if kind != IdentityKind::Coordinator && owner.as_deref() != Some(sender.as_str()) {
-        return Err(LendError::Refused(NackReason::NotLaneOwner));
-    }
-    let live: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM identities WHERE id=$1 AND project_id=$2 AND revoked_at IS NULL)",
-    ).bind(to.as_str()).bind(topics.project().as_str()).fetch_one(&mut **tx).await?;
-    let now = Timestamp::now();
-    if !live || *until <= now || *until > now + MAX_LEND_DURATION || scope_globs(paths).is_err() {
-        return Err(LendError::Refused(NackReason::Schema));
-    }
-    // The lane row lock serializes this count with concurrent grants.
-    let active: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM lane_lends WHERE project_id=$1 AND lane=$2 AND to_id=$3 AND until_at > now()",
-    ).bind(topics.project().as_str()).bind(lane.as_str()).bind(to.as_str())
-        .fetch_one(&mut **tx).await?;
-    if active >= MAX_ACTIVE_LENDS {
-        return Err(LendError::Refused(NackReason::Schema));
-    }
-    sqlx::query(
-        "INSERT INTO lane_lends (project_id, lane, message_id, from_id, to_id, paths, until_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7::timestamptz)",
-    )
-    .bind(topics.project().as_str())
-    .bind(lane.as_str())
-    .bind(env.id.as_str())
-    .bind(sender.as_str())
-    .bind(to.as_str())
-    .bind(paths)
-    .bind(until.to_string())
-    .execute(&mut **tx)
-    .await?;
-    Ok(())
-}
-
-/// Checks a DONE ingest has just written in `tx`: closes the item and ends
-/// the sender's claim on it when the sender holds it, and when a changed path lies in a lane the sender holds
-/// no claim in (or is no repository path), posts an ALERT naming those
-/// paths to the coordinators, or to the sender's owner when the project has
-/// none (ruling R35).
-pub(crate) async fn check_done(
-    tx: &mut PgTx,
-    topics: &Topics,
-    msg: &LedgerMessage,
-    item: &ItemKey,
-    changes: &[Change],
-) -> Result<(), LedgerError> {
-    let project = topics.project().as_str();
-    // The lanes held before this DONE ends its claim, which counts.
-    let holders = crate::store_pg::lane_holders(&mut **tx.sqlx(), project).await?;
-    close_claimed(tx.sqlx(), project, item, &msg.from).await?;
-    let lanes = Lanes::compile(crate::store_pg::load_lanes(&mut **tx.sqlx(), project).await?)
-        .map_err(|err| LedgerError::Stored(err.to_string()))?;
-    let edits = load_edits(tx.sqlx(), msg).await?;
-    let lends =
-        Lends::compile(crate::store_pg::load_lends(&mut **tx.sqlx(), project, &msg.from).await?)
-            .map_err(|err| LedgerError::Stored(err.to_string()))?;
-    let strays = stray_changes(&lanes, &holders, msg, &edits, &lends, changes);
-    if strays.is_empty() {
-        return Ok(());
-    }
-    let body = stray_text(&msg.from_handle, item, &edits, &strays);
-    let alert = HubPost {
-        payload: Payload::Alert {
-            need: format!(
-                "{item}: DONE changed {} outside the claimed lanes",
-                plural(strays.len(), "path")
-            ),
-            urgency: Urgency::Normal,
-            needs: Needs::Anyone,
-            actions: Vec::new(),
-        },
-        body: Body::try_from(body)?,
-        reply_to: Some(msg.env.id.clone()),
-        items: vec![item.clone()],
-        lane: None,
-        mentioned: Vec::new(),
-        streams: vec![Stream::Feed],
-    };
-    let fallback = msg.from_owner.as_ref().unwrap_or(&msg.from);
-    post_alert(tx, topics, alert, fallback).await?;
-    Ok(())
-}
-
-async fn load_edits(
-    tx: &mut Transaction<'_, Postgres>,
-    msg: &LedgerMessage,
-) -> Result<EditRule, LedgerError> {
-    let edits: Option<serde_json::Value> =
-        sqlx::query_scalar("SELECT edits FROM identities WHERE id=$1")
-            .bind(msg.from.as_str())
-            .fetch_optional(&mut **tx)
-            .await?
-            .flatten();
-    if msg.from_kind == IdentityKind::Listener {
-        return Ok(EditRule::None);
-    }
-    EditRule::from_stored(edits).map_err(|err| LedgerError::Stored(err.to_string()))
-}
-
-fn stray_changes(
-    lanes: &Lanes,
-    holders: &[agmen_core::LaneHolder],
-    msg: &LedgerMessage,
-    edits: &EditRule,
-    lends: &Lends,
-    changes: &[Change],
-) -> Vec<Stray> {
-    changes
-        .iter()
-        .filter_map(|change| {
-            let check = judge_scoped(lanes, holders, &msg.from, edits, lends, change.path.clone());
-            (!check.allowed).then_some(Stray {
-                path: check.path,
-                lane: check.lane,
-            })
-        })
-        .collect()
-}
-
-fn stray_text(handle: &str, item: &ItemKey, edits: &EditRule, strays: &[Stray]) -> String {
-    if matches!(edits, EditRule::Lanes) {
-        return stray_body(handle, item, strays);
-    }
-    stray_body_with(handle, item, strays, |stray| match &stray.lane {
-        Some(lane) => lane.to_string(),
-        None if repo_path(&stray.path).is_some() => "outside edit scope".to_owned(),
-        None => NOT_A_REPO_PATH.to_owned(),
-    })
-}
-
-fn plural(n: usize, what: &str) -> String {
-    if n == 1 {
-        format!("1 {what}")
-    } else {
-        format!("{n} {what}s")
     }
 }
 

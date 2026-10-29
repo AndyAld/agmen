@@ -15,7 +15,8 @@ use std::collections::{BTreeSet, HashSet};
 use std::time::Duration;
 
 use agmen_proto::{
-    EditScope, IdentityId, IdentityKind, ItemKey, LaneName, MAX_BODY_BYTES, ProjectId,
+    Body, Change, ClientEnvelope, EditScope, IdentityId, IdentityKind, ItemKey, LaneName,
+    MAX_BODY_BYTES, NackReason, Needs, Payload, ProjectId, Stream, Timestamp, Topics, Urgency,
 };
 use globset::{Glob, GlobBuilder, GlobSet, GlobSetBuilder};
 use regex_automata::Anchored;
@@ -26,6 +27,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::{Core, CoreError};
 use crate::store::{Reads, Store, StoreError, StoreTx};
+use crate::{HubPost, LedgerError, LedgerMessage, NewLend, post_alert};
 
 /// The most lanes one project may have.
 pub const MAX_LANES: usize = 64;
@@ -1007,6 +1009,167 @@ async fn live_owner(
             "{lane}'s owner is not a live identity of this project"
         ))
     })
+}
+
+/// A LEND refusal is final; database errors remain retryable.
+#[derive(Debug)]
+pub enum LendError {
+    /// A final protocol refusal.
+    Refused(NackReason),
+    /// A retryable storage failure.
+    Store(StoreError),
+}
+
+impl From<StoreError> for LendError {
+    fn from(err: StoreError) -> Self {
+        Self::Store(err)
+    }
+}
+
+/// Validates and stores a LEND in the message transaction. Locking its lane
+/// keeps replacement or ownership changes from racing the authorization.
+///
+/// # Errors
+/// Returns a final [`LendError::Refused`] or retryable [`LendError::Store`].
+pub async fn lend<T: StoreTx>(
+    tx: &mut T,
+    topics: &Topics,
+    sender: &IdentityId,
+    kind: IdentityKind,
+    env: &ClientEnvelope,
+) -> Result<(), LendError> {
+    let Payload::Lend {
+        lane,
+        paths,
+        to,
+        until,
+    } = &env.payload
+    else {
+        return Err(LendError::Refused(NackReason::Schema));
+    };
+    let owner = tx.lock_lane_owner(topics.project(), lane).await?;
+    let Some(owner) = owner else {
+        return Err(LendError::Refused(NackReason::Schema));
+    };
+    if kind != IdentityKind::Coordinator && owner.as_ref() != Some(sender) {
+        return Err(LendError::Refused(NackReason::NotLaneOwner));
+    }
+    let live = tx.identity_live(topics.project(), to).await?;
+    let now = Timestamp::now();
+    if !live || *until <= now || *until > now + MAX_LEND_DURATION || scope_globs(paths).is_err() {
+        return Err(LendError::Refused(NackReason::Schema));
+    }
+    // The lane row lock serializes this count with concurrent grants.
+    let active = tx.active_lends(topics.project(), lane, to).await?;
+    if active >= MAX_ACTIVE_LENDS as u64 {
+        return Err(LendError::Refused(NackReason::Schema));
+    }
+    tx.insert_lend(&NewLend {
+        project: topics.project(),
+        lane,
+        message_id: &env.id,
+        from: sender,
+        to,
+        paths,
+        until: *until,
+    })
+    .await?;
+    Ok(())
+}
+
+/// Checks a DONE ingest has just written in `tx`: closes the item and ends
+/// the sender's claim on it when the sender holds it, and when a changed path lies in a lane the sender holds
+/// no claim in (or is no repository path), posts an ALERT naming those
+/// paths to the coordinators, or to the sender's owner when the project has
+/// none (ruling R35).
+pub(crate) async fn check_done<T: StoreTx>(
+    tx: &mut T,
+    topics: &Topics,
+    msg: &LedgerMessage,
+    item: &ItemKey,
+    changes: &[Change],
+) -> Result<(), LedgerError> {
+    let project = topics.project();
+    // The lanes held before this DONE ends its claim, which counts.
+    let holders = tx.lane_holders(project).await?;
+    crate::items::close_claimed(tx, project, item, &msg.from).await?;
+    let lanes = Lanes::compile(tx.lane_globs(project).await?)
+        .map_err(|err| LedgerError::Stored(err.to_string()))?;
+    let edits = load_edits(tx, msg).await?;
+    let lends = Lends::compile(tx.lends_to(project, &msg.from).await?)
+        .map_err(|err| LedgerError::Stored(err.to_string()))?;
+    let strays = stray_changes(&lanes, &holders, msg, &edits, &lends, changes);
+    if strays.is_empty() {
+        return Ok(());
+    }
+    let body = stray_text(&msg.from_handle, item, &edits, &strays);
+    let alert = HubPost {
+        payload: Payload::Alert {
+            need: format!(
+                "{item}: DONE changed {} outside the claimed lanes",
+                plural(strays.len(), "path")
+            ),
+            urgency: Urgency::Normal,
+            needs: Needs::Anyone,
+            actions: Vec::new(),
+        },
+        body: Body::try_from(body)?,
+        reply_to: Some(msg.env.id.clone()),
+        items: vec![item.clone()],
+        lane: None,
+        mentioned: Vec::new(),
+        streams: vec![Stream::Feed],
+    };
+    let fallback = msg.from_owner.as_ref().unwrap_or(&msg.from);
+    post_alert(tx, topics, alert, fallback).await?;
+    Ok(())
+}
+
+async fn load_edits<T: StoreTx>(tx: &mut T, msg: &LedgerMessage) -> Result<EditRule, LedgerError> {
+    let edits = tx.identity_edits(&msg.from).await?;
+    if msg.from_kind == IdentityKind::Listener {
+        return Ok(EditRule::None);
+    }
+    EditRule::from_stored(edits).map_err(|err| LedgerError::Stored(err.to_string()))
+}
+
+fn stray_changes(
+    lanes: &Lanes,
+    holders: &[LaneHolder],
+    msg: &LedgerMessage,
+    edits: &EditRule,
+    lends: &Lends,
+    changes: &[Change],
+) -> Vec<Stray> {
+    changes
+        .iter()
+        .filter_map(|change| {
+            let check = judge_scoped(lanes, holders, &msg.from, edits, lends, change.path.clone());
+            (!check.allowed).then_some(Stray {
+                path: check.path,
+                lane: check.lane,
+            })
+        })
+        .collect()
+}
+
+fn stray_text(handle: &str, item: &ItemKey, edits: &EditRule, strays: &[Stray]) -> String {
+    if matches!(edits, EditRule::Lanes) {
+        return stray_body(handle, item, strays);
+    }
+    stray_body_with(handle, item, strays, |stray| match &stray.lane {
+        Some(lane) => lane.to_string(),
+        None if repo_path(&stray.path).is_some() => "outside edit scope".to_owned(),
+        None => NOT_A_REPO_PATH.to_owned(),
+    })
+}
+
+fn plural(n: usize, what: &str) -> String {
+    if n == 1 {
+        format!("1 {what}")
+    } else {
+        format!("{n} {what}s")
+    }
 }
 
 #[cfg(test)]

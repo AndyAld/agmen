@@ -12,11 +12,11 @@ use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use agmen_core::{
-    AckCopy, Draft, Parent, RateLimiter, Reads, Roster, Sender, Store, StoreTx,
+    AckCopy, Draft, LedgerMessage, Parent, RateLimiter, Reads, Roster, Sender, Store, StoreTx,
     candidate_item_keys, envelope_hash, hub_now, may_send, mentioned, message_id, needs_roster,
     parse_kind, route, stamp_refs, write,
 };
-pub(crate) use agmen_core::{HubPost, PostError, Posted, post_alert, post_in};
+pub(crate) use agmen_core::{HubPost, PostError, Posted};
 use agmen_proto::{
     ClientEnvelope, DeliveryReply, IdentityId, IdentityKind, MessageId, NackReason, Payload,
     ProjectId, Seq, Stream, Timestamp, Topics, Verb, validate,
@@ -24,7 +24,6 @@ use agmen_proto::{
 use sqlx::PgPool;
 use tokio::sync::{Notify, watch};
 
-use crate::claims::LedgerMessage;
 use crate::events::Wakes;
 use crate::http::{Hub, error_chain};
 use crate::numbering::{NumberingError, lock_head};
@@ -335,18 +334,18 @@ impl Hub {
         match write(&mut tx, draft).await.map_err(StoreError::from) {
             Ok(recorded) => {
                 if let Some(lend) = &lend {
-                    crate::lanes::lend(tx.sqlx(), topics, &sender.id, sender.kind, lend)
+                    agmen_core::lend(&mut tx, topics, &sender.id, sender.kind, lend)
                         .await
                         .map_err(|err| match err {
-                            crate::lanes::LendError::Refused(reason) => Refused::from(reason),
-                            crate::lanes::LendError::Database(err) => Refused::internal(err),
+                            agmen_core::LendError::Refused(reason) => Refused::from(reason),
+                            agmen_core::LendError::Store(err) => Refused::internal(err),
                         })?;
                 }
                 // The ledger runs in the message's transaction: if it fails,
                 // nothing is recorded and the NACK `hub_busy` makes the
                 // client resend, which runs it again.
                 if let Some(ledger) = &ledger {
-                    self.apply_ledger(&mut tx, topics, ledger)
+                    agmen_core::apply_ledger(&mut tx, topics, ledger, self.claim_lease())
                         .await
                         .map_err(|err| {
                             Refused::internal(format!("ledger: {}", error_chain(&err)))

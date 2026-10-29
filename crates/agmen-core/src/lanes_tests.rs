@@ -3,6 +3,70 @@ use agmen_proto::Body;
 use super::*;
 use crate::{MAX_GLOBS, MAX_GLOBS_PER_LANE, MAX_LANES};
 
+#[tokio::test]
+async fn done_outside_lanes_alerts() {
+    use crate::claims::tests::{apply, item, message, setup};
+    use agmen_proto::{Change, Payload, Stream};
+
+    let (store, topics) = setup().await;
+    item(&store, &topics, false).await;
+    apply(
+        &store,
+        &topics,
+        &message(
+            "aaaaaaaa",
+            "a",
+            Payload::Done {
+                item: "B-1".parse().unwrap(),
+                branch: "fix".into(),
+                commit: "1234567".parse().unwrap(),
+                base_sha: "7654321".parse().unwrap(),
+                checks: Vec::new(),
+                changes: vec![Change {
+                    status: "M".into(),
+                    path: "ui/view.rs".into(),
+                }],
+            },
+        ),
+    )
+    .await;
+    let rows = store.recorded_messages().await.unwrap();
+    let alerts: Vec<_> = rows
+        .iter()
+        .filter(|row| {
+            row.stream == Stream::Feed && matches!(row.client.payload, Payload::Alert { .. })
+        })
+        .collect();
+    assert_eq!(alerts.len(), 1);
+    assert!(alerts[0].client.body.as_str().contains("ui/view.rs"));
+    assert_eq!(alerts[0].mentioned, vec!["cccccccc".parse().unwrap()]);
+}
+
+#[tokio::test]
+async fn lend_from_non_owner_is_refused() {
+    use crate::claims::tests::{LEASE, item, message, setup};
+    use crate::{LendError, Store, lend};
+    use agmen_proto::{IdentityKind, NackReason, Payload, Timestamp};
+
+    let (store, topics) = setup().await;
+    item(&store, &topics, true).await;
+    let msg = message(
+        "aaaaaaaa",
+        "a",
+        Payload::Lend {
+            lane: "L-UI".parse().unwrap(),
+            paths: vec!["ui/**".into()],
+            to: "bbbbbbbb".parse().unwrap(),
+            until: Timestamp::now() + LEASE,
+        },
+    );
+    let mut tx = store.begin().await.unwrap();
+    assert!(matches!(
+        lend(&mut tx, &topics, &msg.from, IdentityKind::Agent, &msg.env).await,
+        Err(LendError::Refused(NackReason::NotLaneOwner))
+    ));
+}
+
 #[test]
 fn scoped_reasons_name_the_authorization_cause() {
     let lanes = lanes(&[("L-UI", &["src/**"])]);

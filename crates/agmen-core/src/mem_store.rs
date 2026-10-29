@@ -1,22 +1,28 @@
 //! Bounded, serializable test storage with rollback on drop.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex as StdMutex, PoisonError};
 use std::time::Duration;
 
 #[cfg(test)]
 use agmen_proto::StampedEnvelope;
 use agmen_proto::{
-    IdentityId, IdentityKind, ItemKey, LaneName, MessageId, ProjectId, Seq, Stream, Timestamp,
-    Topics,
+    IdentityId, IdentityKind, ItemKey, LaneName, MessageId, ProjectId, Seq, Severity, Stream,
+    Timestamp, Topics,
 };
 use tokio::sync::{Mutex, MutexGuard, OwnedMutexGuard};
 
 use crate::lanes::{LaneHolder, LaneRow, ResolvedLane};
-use crate::{Member, MemberRole, MessageRow, Reads, Roster, Store, StoreError, StoreTx};
+use crate::{
+    ItemLock, Lapsed, Member, MemberRole, MessageRow, NewItem, NewLend, Reads, ReleaseBy, Roster,
+    Store, StoreError, StoreTx,
+};
 
 /// The maximum rows in each in-memory collection.
 pub const MEM_MAX_ROWS: usize = 100_000;
+
+/// The `item_counters.n` ceiling in the ledger schema.
+const MAX_ITEM_NUMBER: u64 = 999_999;
 
 /// A forgotten transaction must fail a waiting test instead of hanging it.
 const MEM_TX_WAIT: Duration = Duration::from_secs(5);
@@ -40,8 +46,40 @@ struct MemLane {
     v: i64,
 }
 
-type MemLendRow = (LaneName, Vec<String>);
-type MemLendsTo = BTreeMap<IdentityId, Vec<MemLendRow>>;
+#[derive(Debug, Clone)]
+struct MemClaim {
+    project: ProjectId,
+    item: ItemKey,
+    holder: IdentityId,
+    granted_at: Timestamp,
+    lease_until: Timestamp,
+    released: bool,
+}
+
+#[derive(Debug, Clone)]
+struct MemLend {
+    project: ProjectId,
+    lane: LaneName,
+    message_id: MessageId,
+    from: IdentityId,
+    to: IdentityId,
+    paths: Vec<String>,
+    until: Timestamp,
+}
+
+#[derive(Debug, Clone)]
+struct MemItem {
+    state: String,
+    lane: Option<LaneName>,
+    assigned_to: Option<IdentityId>,
+    // shortcut: retain finding details until Task 9 adds item-list reads.
+    #[expect(dead_code, reason = "item-list reads arrive in Task 9")]
+    title: String,
+    #[expect(dead_code, reason = "item-list reads arrive in Task 9")]
+    severity: Option<Severity>,
+    #[expect(dead_code, reason = "item-list reads arrive in Task 9")]
+    created_by: IdentityId,
+}
 
 #[derive(Debug, Clone, Default)]
 struct MemState {
@@ -49,10 +87,12 @@ struct MemState {
     identities: BTreeMap<ProjectId, BTreeMap<IdentityId, MemIdentity>>,
     lanes: BTreeMap<ProjectId, Vec<MemLane>>,
     holders: BTreeMap<ProjectId, Vec<LaneHolder>>,
-    lends: BTreeMap<ProjectId, MemLendsTo>,
+    lends: Vec<MemLend>,
+    claims: Vec<MemClaim>,
+    item_counters: BTreeMap<(ProjectId, String), u64>,
     messages: Vec<MemMessage>,
     outbox: Vec<(Topics, String, Vec<u8>)>,
-    items: BTreeMap<ProjectId, BTreeSet<ItemKey>>,
+    items: BTreeMap<ProjectId, BTreeMap<ItemKey, MemItem>>,
 }
 
 #[derive(Debug, Clone)]
@@ -126,23 +166,27 @@ impl MemStore {
         project: &ProjectId,
         item: &ItemKey,
     ) -> Result<(), StoreError> {
-        let mut state = self.locked().await?;
-        if state
+        let mut tx = self.begin().await?;
+        if tx
+            .working
             .items
             .get(project)
-            .is_some_and(|items| items.contains(item))
+            .is_some_and(|items| items.contains_key(item))
         {
             return Ok(());
         }
-        if row_count(state.items.values().map(BTreeSet::len)) >= MEM_MAX_ROWS {
-            return Err(full());
-        }
-        state
-            .items
-            .entry(project.clone())
-            .or_default()
-            .insert(item.clone());
-        Ok(())
+        tx.insert_item(&NewItem {
+            project,
+            key: item,
+            title: "seeded item",
+            lane: None,
+            severity: None,
+            created_by: &"aaaaaaaa"
+                .parse()
+                .map_err(|err: agmen_proto::ProtoError| StoreError::Stored(err.to_string()))?,
+        })
+        .await?;
+        tx.commit().await
     }
 
     #[cfg(test)]
@@ -335,7 +379,11 @@ impl Reads for &MemStore {
     async fn lane_holders(&mut self, project: &ProjectId) -> Result<Vec<LaneHolder>, StoreError> {
         fail(&self.failure, "lane_holders")?;
         let state = (*self).locked().await?;
-        Ok(holders_of(&state, project))
+        holders_of(
+            &state,
+            project,
+            *self.clock.lock().unwrap_or_else(PoisonError::into_inner),
+        )
     }
 
     async fn live_edit_scope(
@@ -355,7 +403,12 @@ impl Reads for &MemStore {
     ) -> Result<Vec<(LaneName, Vec<String>)>, StoreError> {
         fail(&self.failure, "lends_to")?;
         let state = (*self).locked().await?;
-        Ok(lends_of(&state, project, to))
+        Ok(lends_of(
+            &state,
+            project,
+            to,
+            *self.clock.lock().unwrap_or_else(PoisonError::into_inner),
+        ))
     }
 
     async fn lane_list(&mut self, project: &ProjectId) -> Result<Vec<LaneRow>, StoreError> {
@@ -382,6 +435,7 @@ impl Store for MemStore {
         Ok(MemTx {
             guard,
             working,
+            now: *self.clock.lock().unwrap_or_else(PoisonError::into_inner),
             failure: Arc::clone(&self.failure),
         })
     }
@@ -392,6 +446,7 @@ impl Store for MemStore {
 pub struct MemTx {
     guard: OwnedMutexGuard<MemState>,
     working: MemState,
+    now: Timestamp,
     failure: Arc<StdMutex<Option<&'static str>>>,
 }
 
@@ -429,7 +484,7 @@ impl Reads for MemTx {
 
     async fn lane_holders(&mut self, project: &ProjectId) -> Result<Vec<LaneHolder>, StoreError> {
         fail(&self.failure, "lane_holders")?;
-        Ok(holders_of(&self.working, project))
+        holders_of(&self.working, project, self.now)
     }
 
     async fn live_edit_scope(
@@ -447,7 +502,7 @@ impl Reads for MemTx {
         to: &IdentityId,
     ) -> Result<Vec<(LaneName, Vec<String>)>, StoreError> {
         fail(&self.failure, "lends_to")?;
-        Ok(lends_of(&self.working, project, to))
+        Ok(lends_of(&self.working, project, to, self.now))
     }
 
     async fn lane_list(&mut self, project: &ProjectId) -> Result<Vec<LaneRow>, StoreError> {
@@ -457,6 +512,378 @@ impl Reads for MemTx {
 }
 
 impl StoreTx for MemTx {
+    async fn lock_item(
+        &mut self,
+        project: &ProjectId,
+        item: &ItemKey,
+    ) -> Result<Option<ItemLock>, StoreError> {
+        fail(&self.failure, "lock_item")?;
+        Ok(self
+            .working
+            .items
+            .get(project)
+            .and_then(|items| items.get(item))
+            .map(|item| {
+                let owner = item.lane.as_ref().and_then(|name| {
+                    self.working
+                        .lanes
+                        .get(project)?
+                        .iter()
+                        .find(|lane| lane.name == *name)?
+                        .owner
+                        .as_ref()
+                });
+                (
+                    item.state.clone(),
+                    item.lane.as_ref().map(ToString::to_string),
+                    item.assigned_to.as_ref().map(ToString::to_string),
+                    owner.map(ToString::to_string),
+                )
+            }))
+    }
+
+    async fn release_lapsed(
+        &mut self,
+        project: &ProjectId,
+        item: &ItemKey,
+    ) -> Result<Option<Lapsed>, StoreError> {
+        fail(&self.failure, "release_lapsed")?;
+        let Some(claim) = self.working.claims.iter_mut().find(|claim| {
+            claim.project == *project
+                && claim.item == *item
+                && !claim.released
+                && claim.lease_until <= self.now
+        }) else {
+            return Ok(None);
+        };
+        let Some(identity) = self
+            .working
+            .identities
+            .get(project)
+            .and_then(|ids| ids.get(&claim.holder))
+        else {
+            return Ok(None);
+        };
+        claim.released = true;
+        Ok(Some(Lapsed {
+            holder: claim.holder.clone(),
+            handle: identity.handle.clone(),
+        }))
+    }
+
+    async fn active_claim(
+        &mut self,
+        project: &ProjectId,
+        item: &ItemKey,
+    ) -> Result<Option<(IdentityId, String)>, StoreError> {
+        fail(&self.failure, "active_claim")?;
+        Ok(self
+            .working
+            .claims
+            .iter()
+            .find(|claim| claim.project == *project && claim.item == *item && !claim.released)
+            .and_then(|claim| {
+                let identity = self.working.identities.get(project)?.get(&claim.holder)?;
+                Some((claim.holder.clone(), identity.handle.clone()))
+            }))
+    }
+
+    async fn extend_claim(
+        &mut self,
+        project: &ProjectId,
+        item: &ItemKey,
+        lease: Duration,
+    ) -> Result<Timestamp, StoreError> {
+        fail(&self.failure, "extend_claim")?;
+        let until = lease_until(self.now, lease)?;
+        let claim = self
+            .working
+            .claims
+            .iter_mut()
+            .find(|claim| claim.project == *project && claim.item == *item && !claim.released)
+            .ok_or_else(|| StoreError::Stored("no unreleased claim".into()))?;
+        claim.lease_until = until;
+        millisecond_reply(until)
+    }
+
+    async fn insert_claim(
+        &mut self,
+        project: &ProjectId,
+        item: &ItemKey,
+        from: &IdentityId,
+        lease: Duration,
+    ) -> Result<Timestamp, StoreError> {
+        fail(&self.failure, "insert_claim")?;
+        if self
+            .working
+            .claims
+            .iter()
+            .any(|claim| claim.project == *project && claim.item == *item && !claim.released)
+        {
+            return Err(StoreError::Duplicate);
+        }
+        if self.working.claims.len() >= MEM_MAX_ROWS {
+            return Err(full());
+        }
+        let until = lease_until(self.now, lease)?;
+        self.working.claims.push(MemClaim {
+            project: project.clone(),
+            item: item.clone(),
+            holder: from.clone(),
+            granted_at: self.now,
+            lease_until: until,
+            released: false,
+        });
+        millisecond_reply(until)
+    }
+
+    async fn renew_claims(
+        &mut self,
+        project: &ProjectId,
+        from: &IdentityId,
+        items: &[ItemKey],
+        lease: Duration,
+    ) -> Result<u64, StoreError> {
+        fail(&self.failure, "renew_claims")?;
+        let until = lease_until(self.now, lease)?;
+        let mut count = 0;
+        for claim in self.working.claims.iter_mut().take(MEM_MAX_ROWS) {
+            if claim.project == *project
+                && claim.holder == *from
+                && !claim.released
+                && claim.lease_until > self.now
+                && items.contains(&claim.item)
+            {
+                claim.lease_until = until;
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
+    async fn release_claim(
+        &mut self,
+        project: &ProjectId,
+        item: &ItemKey,
+        from: &IdentityId,
+        by: ReleaseBy,
+    ) -> Result<u64, StoreError> {
+        fail(&self.failure, "release_claim")?;
+        let mut count = 0;
+        for claim in self.working.claims.iter_mut().take(MEM_MAX_ROWS) {
+            if claim.project == *project
+                && claim.item == *item
+                && !claim.released
+                && (claim.holder == *from || by == ReleaseBy::Coordinator)
+            {
+                claim.released = true;
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
+    async fn next_item_number(
+        &mut self,
+        project: &ProjectId,
+        prefix: &str,
+    ) -> Result<u64, StoreError> {
+        fail(&self.failure, "next_item_number")?;
+        let key = (project.clone(), prefix.to_owned());
+        if !self.working.item_counters.contains_key(&key)
+            && self.working.item_counters.len() >= MEM_MAX_ROWS
+        {
+            return Err(full());
+        }
+        let counter = self.working.item_counters.entry(key).or_default();
+        *counter = counter
+            .checked_add(1)
+            .filter(|next| *next <= MAX_ITEM_NUMBER)
+            .ok_or_else(|| StoreError::Stored("item counter exhausted".into()))?;
+        Ok(*counter)
+    }
+
+    async fn insert_item(&mut self, item: &NewItem<'_>) -> Result<(), StoreError> {
+        fail(&self.failure, "insert_item")?;
+        if self
+            .working
+            .items
+            .get(item.project)
+            .is_some_and(|items| items.contains_key(item.key))
+        {
+            return Err(StoreError::Duplicate);
+        }
+        if row_count(self.working.items.values().map(BTreeMap::len)) >= MEM_MAX_ROWS {
+            return Err(full());
+        }
+        self.working
+            .items
+            .entry(item.project.clone())
+            .or_default()
+            .insert(
+                item.key.clone(),
+                MemItem {
+                    state: "open".into(),
+                    lane: item.lane.cloned(),
+                    assigned_to: None,
+                    title: item.title.to_owned(),
+                    severity: item.severity,
+                    created_by: item.created_by.clone(),
+                },
+            );
+        Ok(())
+    }
+
+    async fn assign_item(
+        &mut self,
+        project: &ProjectId,
+        item: &ItemKey,
+        to: &IdentityId,
+    ) -> Result<u64, StoreError> {
+        fail(&self.failure, "assign_item")?;
+        if !self
+            .working
+            .identities
+            .get(project)
+            .and_then(|ids| ids.get(to))
+            .is_some_and(|identity| identity.kind != IdentityKind::Human)
+        {
+            return Ok(0);
+        }
+        let Some(item) = self
+            .working
+            .items
+            .get_mut(project)
+            .and_then(|items| items.get_mut(item))
+        else {
+            return Ok(0);
+        };
+        item.assigned_to = Some(to.clone());
+        Ok(1)
+    }
+
+    async fn close_claim(
+        &mut self,
+        project: &ProjectId,
+        item: &ItemKey,
+        holder: &IdentityId,
+    ) -> Result<u64, StoreError> {
+        fail(&self.failure, "close_claim")?;
+        let mut count = 0;
+        for claim in self.working.claims.iter_mut().take(MEM_MAX_ROWS) {
+            if claim.project == *project
+                && claim.item == *item
+                && claim.holder == *holder
+                && !claim.released
+                && claim.lease_until > self.now
+            {
+                claim.released = true;
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
+    async fn mark_done(&mut self, project: &ProjectId, item: &ItemKey) -> Result<(), StoreError> {
+        fail(&self.failure, "mark_done")?;
+        if let Some(item) = self
+            .working
+            .items
+            .get_mut(project)
+            .and_then(|items| items.get_mut(item))
+        {
+            item.state = "done".into();
+        }
+        Ok(())
+    }
+
+    async fn lock_lane_owner(
+        &mut self,
+        project: &ProjectId,
+        lane: &LaneName,
+    ) -> Result<Option<Option<IdentityId>>, StoreError> {
+        fail(&self.failure, "lock_lane_owner")?;
+        Ok(self
+            .working
+            .lanes
+            .get(project)
+            .and_then(|lanes| lanes.iter().find(|row| row.name == *lane))
+            .map(|lane| lane.owner.clone()))
+    }
+
+    async fn identity_live(
+        &mut self,
+        project: &ProjectId,
+        id: &IdentityId,
+    ) -> Result<bool, StoreError> {
+        fail(&self.failure, "identity_live")?;
+        Ok(self
+            .working
+            .identities
+            .get(project)
+            .and_then(|ids| ids.get(id))
+            .is_some_and(|identity| identity.live && identity.kind != IdentityKind::Human))
+    }
+
+    async fn identity_edits(
+        &mut self,
+        id: &IdentityId,
+    ) -> Result<Option<serde_json::Value>, StoreError> {
+        fail(&self.failure, "identity_edits")?;
+        Ok(self
+            .working
+            .identities
+            .values()
+            .take(MEM_MAX_ROWS)
+            .find_map(|ids| ids.get(id))
+            .filter(|identity| identity.kind != IdentityKind::Human)
+            .and_then(|identity| identity.edits.clone()))
+    }
+
+    async fn active_lends(
+        &mut self,
+        project: &ProjectId,
+        lane: &LaneName,
+        to: &IdentityId,
+    ) -> Result<u64, StoreError> {
+        fail(&self.failure, "active_lends")?;
+        Ok(self
+            .working
+            .lends
+            .iter()
+            .filter(|lend| {
+                lend.project == *project
+                    && lend.lane == *lane
+                    && lend.to == *to
+                    && lend.until > self.now
+            })
+            .count() as u64)
+    }
+
+    async fn insert_lend(&mut self, lend: &NewLend<'_>) -> Result<(), StoreError> {
+        fail(&self.failure, "insert_lend")?;
+        if self.working.lends.iter().any(|row| {
+            row.project == *lend.project
+                && row.from == *lend.from
+                && row.message_id == *lend.message_id
+        }) {
+            return Err(StoreError::Duplicate);
+        }
+        if self.working.lends.len() >= MEM_MAX_ROWS {
+            return Err(full());
+        }
+        self.working.lends.push(MemLend {
+            project: lend.project.clone(),
+            lane: lend.lane.clone(),
+            message_id: lend.message_id.clone(),
+            from: lend.from.clone(),
+            to: lend.to.clone(),
+            paths: lend.paths.to_vec(),
+            until: lend.until,
+        });
+        Ok(())
+    }
+
     async fn insert_message(&mut self, row: &MessageRow<'_>) -> Result<(), StoreError> {
         fail(&self.failure, "insert_message")?;
         if self.working.messages.iter().any(|stored| {
@@ -578,7 +1005,7 @@ fn ref_targets_of(
         .items
         .get(project)
         .into_iter()
-        .flat_map(|items| items.iter())
+        .flat_map(|items| items.keys())
         .filter(|item| {
             candidates
                 .iter()
@@ -641,8 +1068,39 @@ fn lane_globs_of(state: &MemState, project: &ProjectId) -> Vec<(LaneName, Vec<St
     rows
 }
 
-fn holders_of(state: &MemState, project: &ProjectId) -> Vec<LaneHolder> {
-    state.holders.get(project).cloned().unwrap_or_default()
+fn holders_of(
+    state: &MemState,
+    project: &ProjectId,
+    now: Timestamp,
+) -> Result<Vec<LaneHolder>, StoreError> {
+    let mut claims: Vec<_> = state
+        .claims
+        .iter()
+        .enumerate()
+        .filter(|(_, claim)| {
+            claim.project == *project && !claim.released && claim.lease_until > now
+        })
+        .collect();
+    claims.sort_by_key(|(id, claim)| (claim.granted_at, *id));
+    let mut holders = state.holders.get(project).cloned().unwrap_or_default();
+    let live = claims.into_iter().filter_map(|(_, claim)| {
+        let lane = state.items.get(project)?.get(&claim.item)?.lane.clone()?;
+        let identity = state.identities.get(project)?.get(&claim.holder)?;
+        Some(LaneHolder {
+            lane,
+            identity: claim.holder.clone(),
+            handle: identity.handle.clone(),
+        })
+    });
+    for holder in live.take(MEM_MAX_ROWS) {
+        if holders.len() >= MEM_MAX_ROWS {
+            return Err(StoreError::Stored(format!(
+                "more than {MEM_MAX_ROWS} live lane claims"
+            )));
+        }
+        holders.push(holder);
+    }
+    Ok(holders)
 }
 
 fn live_scope_of(
@@ -662,13 +1120,33 @@ fn lends_of(
     state: &MemState,
     project: &ProjectId,
     to: &IdentityId,
+    now: Timestamp,
 ) -> Vec<(LaneName, Vec<String>)> {
-    state
+    let mut lends: Vec<_> = state
         .lends
-        .get(project)
-        .and_then(|by_to| by_to.get(to))
-        .cloned()
-        .unwrap_or_default()
+        .iter()
+        .filter(|lend| {
+            if lend.project != *project || lend.to != *to || lend.until <= now {
+                return false;
+            }
+            let owner = state
+                .lanes
+                .get(project)
+                .and_then(|lanes| lanes.iter().find(|lane| lane.name == lend.lane));
+            let from = state
+                .identities
+                .get(project)
+                .and_then(|ids| ids.get(&lend.from));
+            matches!((owner, from), (Some(lane), Some(from)) if from.live &&
+            (lane.owner.as_ref() == Some(&lend.from) || from.kind == IdentityKind::Coordinator))
+        })
+        .collect();
+    lends.sort_by(|a, b| (&a.lane, a.until, &a.message_id).cmp(&(&b.lane, b.until, &b.message_id)));
+    lends
+        .into_iter()
+        .take(crate::MAX_LOADED_LENDS as usize)
+        .map(|lend| (lend.lane.clone(), lend.paths.clone()))
+        .collect()
 }
 
 fn lane_list_of(state: &MemState, project: &ProjectId) -> Vec<LaneRow> {
@@ -720,6 +1198,8 @@ fn replace_project(
     if next > MEM_MAX_ROWS {
         return Err(full());
     }
+    // Postgres deletes every lane before insertion, cascading its lends.
+    state.lends.retain(|lend| lend.project != *project);
     if lanes.is_empty() {
         state.lanes.remove(project);
         return Ok(());
@@ -771,4 +1251,204 @@ fn resolve_handle(
         }
     }
     Ok(found)
+}
+
+fn lease_until(now: Timestamp, lease: Duration) -> Result<Timestamp, StoreError> {
+    let ms = i64::try_from(lease.as_millis()).unwrap_or(i64::MAX);
+    now.checked_add(Duration::from_millis(ms.unsigned_abs()))
+        .map_err(|err| StoreError::Stored(err.to_string()))
+}
+
+/// Matches Postgres's numeric-to-bigint rounding of epoch milliseconds.
+fn millisecond_reply(until: Timestamp) -> Result<Timestamp, StoreError> {
+    const NANOS_PER_MILLISECOND: i128 = 1_000_000;
+    let ns = until.as_nanosecond();
+    let ms = (ns + ns.signum() * (NANOS_PER_MILLISECOND / 2)) / NANOS_PER_MILLISECOND;
+    let ms = i64::try_from(ms).map_err(|err| StoreError::Stored(err.to_string()))?;
+    Timestamp::from_millisecond(ms).map_err(|err| StoreError::Stored(err.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::claims::tests::{LEASE, item, message, setup};
+    use agmen_proto::Payload;
+
+    #[tokio::test]
+    async fn lease_deadlines_keep_clock_precision() {
+        for operation in ["insert_claim", "extend_claim", "renew_claims"] {
+            let (store, topics) = setup().await;
+            item(&store, &topics, false).await;
+            let now: Timestamp = "2026-10-29T12:00:00.000900Z".parse().unwrap();
+            store.set_now(now);
+            let mut tx = store.begin().await.unwrap();
+            let key = "B-1".parse().unwrap();
+            let from = "aaaaaaaa".parse().unwrap();
+            let mut reply = tx
+                .insert_claim(topics.project(), &key, &from, LEASE)
+                .await
+                .unwrap();
+            match operation {
+                "extend_claim" => {
+                    reply = tx
+                        .extend_claim(topics.project(), &key, LEASE)
+                        .await
+                        .unwrap()
+                }
+                "renew_claims" => assert_eq!(
+                    tx.renew_claims(topics.project(), &from, std::slice::from_ref(&key), LEASE)
+                        .await
+                        .unwrap(),
+                    1
+                ),
+                _ => {}
+            }
+            assert_eq!(reply, "2026-10-29T12:01:00.001Z".parse().unwrap());
+            tx.commit().await.unwrap();
+            store.set_now(now + LEASE - Duration::from_micros(1));
+            let mut tx = store.begin().await.unwrap();
+            assert!(
+                tx.release_lapsed(topics.project(), &key)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "{operation}"
+            );
+            drop(tx);
+            store.set_now(now + LEASE);
+            let mut tx = store.begin().await.unwrap();
+            assert!(
+                tx.release_lapsed(topics.project(), &key)
+                    .await
+                    .unwrap()
+                    .is_some(),
+                "{operation}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn merged_lane_holders_are_capped() {
+        let (store, topics) = setup().await;
+        item(&store, &topics, false).await;
+        let mut tx = store.begin().await.unwrap();
+        tx.insert_claim(
+            topics.project(),
+            &"B-1".parse().unwrap(),
+            &"aaaaaaaa".parse().unwrap(),
+            LEASE,
+        )
+        .await
+        .unwrap();
+        let holder = LaneHolder {
+            lane: "L-UI".parse().unwrap(),
+            identity: "bbbbbbbb".parse().unwrap(),
+            handle: "b".into(),
+        };
+        tx.working.holders.insert(
+            topics.project().clone(),
+            vec![holder.clone(); MEM_MAX_ROWS - 1],
+        );
+        assert_eq!(
+            tx.lane_holders(topics.project()).await.unwrap().len(),
+            MEM_MAX_ROWS
+        );
+        tx.working
+            .holders
+            .get_mut(topics.project())
+            .unwrap()
+            .push(holder);
+        assert!(matches!(tx.lane_holders(topics.project()).await,
+            Err(StoreError::Stored(message)) if message == "more than 100000 live lane claims"));
+    }
+
+    #[tokio::test]
+    async fn lend_key_includes_sender() {
+        let (store, topics) = setup().await;
+        item(&store, &topics, true).await;
+        let mut tx = store.begin().await.unwrap();
+        let lane = "L-UI".parse().unwrap();
+        let id = crate::new_message_id(Timestamp::now()).unwrap();
+        for from in ["oooooooo", "cccccccc"] {
+            tx.insert_lend(&NewLend {
+                project: topics.project(),
+                lane: &lane,
+                message_id: &id,
+                from: &from.parse().unwrap(),
+                to: &"bbbbbbbb".parse().unwrap(),
+                paths: &["ui/**".into()],
+                until: Timestamp::now() + LEASE,
+            })
+            .await
+            .unwrap();
+        }
+        assert_eq!(
+            tx.active_lends(topics.project(), &lane, &"bbbbbbbb".parse().unwrap())
+                .await
+                .unwrap(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn replacing_lanes_invalidates_lends() {
+        let (store, topics) = setup().await;
+        item(&store, &topics, true).await;
+        let msg = message(
+            "oooooooo",
+            "o",
+            Payload::Lend {
+                lane: "L-UI".parse().unwrap(),
+                paths: vec!["ui/**".into()],
+                to: "bbbbbbbb".parse().unwrap(),
+                until: Timestamp::now() + LEASE,
+            },
+        );
+        let mut tx = store.begin().await.unwrap();
+        crate::lend(&mut tx, &topics, &msg.from, msg.from_kind, &msg.env)
+            .await
+            .unwrap();
+        assert_eq!(
+            tx.lends_to(topics.project(), &"bbbbbbbb".parse().unwrap())
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        tx.commit().await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        tx.replace_lanes(
+            topics.project(),
+            &[ResolvedLane {
+                name: "L-UI".parse().unwrap(),
+                globs: vec!["ui/**".into()],
+                owner: Some("oooooooo".parse().unwrap()),
+            }],
+        )
+        .await
+        .unwrap();
+        assert!(
+            tx.lends_to(topics.project(), &"bbbbbbbb".parse().unwrap())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn item_counter_matches_database_ceiling() {
+        let (store, topics) = setup().await;
+        let mut tx = store.begin().await.unwrap();
+        tx.working
+            .item_counters
+            .insert((topics.project().clone(), "B".into()), 999_998);
+        assert_eq!(
+            tx.next_item_number(topics.project(), "B").await.unwrap(),
+            999_999
+        );
+        assert!(matches!(
+            tx.next_item_number(topics.project(), "B").await,
+            Err(StoreError::Stored(_))
+        ));
+    }
 }

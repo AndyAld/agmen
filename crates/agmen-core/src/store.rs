@@ -1,14 +1,72 @@
 //! The backend boundary for coordination reads and atomic writes.
 
 use std::future::Future;
+use std::time::Duration;
 
 use agmen_proto::{
-    IdentityId, IdentityKind, ItemKey, LaneName, MessageId, ProjectId, Seq, Stream, Timestamp,
-    Topics,
+    IdentityId, IdentityKind, ItemKey, LaneName, MessageId, ProjectId, Seq, Severity, Stream,
+    Timestamp, Topics,
 };
 
 use crate::Roster;
 use crate::lanes::{LaneHolder, LaneRow, ResolvedLane};
+
+/// An item's state, lane, assignee and lane owner, in storage spelling.
+pub type ItemLock = (String, Option<String>, Option<String>, Option<String>);
+
+/// A claim released because its lease ran out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Lapsed {
+    /// The identity whose lease ended.
+    pub holder: IdentityId,
+    /// That identity's handle.
+    pub handle: String,
+}
+
+/// Who may release a claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReleaseBy {
+    /// Only the claim's holder.
+    Holder,
+    /// A coordinator may release any holder's claim.
+    Coordinator,
+}
+
+/// One item to insert after minting its key.
+#[derive(Debug, Clone, Copy)]
+pub struct NewItem<'a> {
+    /// The item's project.
+    pub project: &'a ProjectId,
+    /// The minted item key.
+    pub key: &'a ItemKey,
+    /// The finding's title, kept out of the ITEM reply.
+    pub title: &'a str,
+    /// The item's lane, when given.
+    pub lane: Option<&'a LaneName>,
+    /// The finding's severity, when given.
+    pub severity: Option<Severity>,
+    /// The finder.
+    pub created_by: &'a IdentityId,
+}
+
+/// One authorized temporary lane grant.
+#[derive(Debug, Clone, Copy)]
+pub struct NewLend<'a> {
+    /// The grant's project.
+    pub project: &'a ProjectId,
+    /// The lane being lent.
+    pub lane: &'a LaneName,
+    /// The recorded LEND's id.
+    pub message_id: &'a MessageId,
+    /// The lane owner or coordinator making the grant.
+    pub from: &'a IdentityId,
+    /// The borrower.
+    pub to: &'a IdentityId,
+    /// The allowed path globs.
+    pub paths: &'a [String],
+    /// The grant's expiration.
+    pub until: Timestamp,
+}
 
 /// One numbered copy to insert within a message transaction.
 #[derive(Debug, Clone, Copy)]
@@ -177,6 +235,183 @@ pub trait Reads: Send {
 /// Dropping a transaction without a successful [`commit`](Self::commit)
 /// records nothing. Numbering and head locks last until commit or drop.
 pub trait StoreTx: Reads {
+    /// Locks the item row, returning its state, lane, assignee and lane owner.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] when the lookup or lock fails.
+    fn lock_item(
+        &mut self,
+        project: &ProjectId,
+        item: &ItemKey,
+    ) -> impl Future<Output = Result<Option<ItemLock>, StoreError>> + Send;
+
+    /// Releases the unreleased claim when `lease_until <= now`.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] when the update fails.
+    fn release_lapsed(
+        &mut self,
+        project: &ProjectId,
+        item: &ItemKey,
+    ) -> impl Future<Output = Result<Option<Lapsed>, StoreError>> + Send;
+
+    /// The unreleased claim's holder and handle, including an expired lease.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] when reading the claim fails.
+    fn active_claim(
+        &mut self,
+        project: &ProjectId,
+        item: &ItemKey,
+    ) -> impl Future<Output = Result<Option<(IdentityId, String)>, StoreError>> + Send;
+
+    /// Extends the unreleased claim using the backend's clock.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] when the update or timestamp conversion fails.
+    fn extend_claim(
+        &mut self,
+        project: &ProjectId,
+        item: &ItemKey,
+        lease: Duration,
+    ) -> impl Future<Output = Result<Timestamp, StoreError>> + Send;
+
+    /// Inserts a claim using the backend's clock for the lease end.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] when the insert or timestamp conversion fails.
+    fn insert_claim(
+        &mut self,
+        project: &ProjectId,
+        item: &ItemKey,
+        from: &IdentityId,
+        lease: Duration,
+    ) -> impl Future<Output = Result<Timestamp, StoreError>> + Send;
+
+    /// Renews only `from`'s unreleased claims whose lease is still live.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] when the update fails.
+    fn renew_claims(
+        &mut self,
+        project: &ProjectId,
+        from: &IdentityId,
+        items: &[ItemKey],
+        lease: Duration,
+    ) -> impl Future<Output = Result<u64, StoreError>> + Send;
+
+    /// Releases a claim held by `from`, or any holder when `by` is coordinator.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] when the update fails.
+    fn release_claim(
+        &mut self,
+        project: &ProjectId,
+        item: &ItemKey,
+        from: &IdentityId,
+        by: ReleaseBy,
+    ) -> impl Future<Output = Result<u64, StoreError>> + Send;
+
+    /// Takes the next item number for a project and prefix, starting at one.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] when numbering fails.
+    fn next_item_number(
+        &mut self,
+        project: &ProjectId,
+        prefix: &str,
+    ) -> impl Future<Output = Result<u64, StoreError>> + Send;
+
+    /// Inserts the finding with its minted key.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] when insertion fails.
+    fn insert_item(
+        &mut self,
+        item: &NewItem<'_>,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send;
+
+    /// Assigns an existing item when `to` is a project identity, even if revoked.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] when the update fails.
+    fn assign_item(
+        &mut self,
+        project: &ProjectId,
+        item: &ItemKey,
+        to: &IdentityId,
+    ) -> impl Future<Output = Result<u64, StoreError>> + Send;
+
+    /// Releases `holder`'s claim only while its lease is live.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] when the update fails.
+    fn close_claim(
+        &mut self,
+        project: &ProjectId,
+        item: &ItemKey,
+        holder: &IdentityId,
+    ) -> impl Future<Output = Result<u64, StoreError>> + Send;
+
+    /// Marks the item done after its live claim is released.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] when the update fails.
+    fn mark_done(
+        &mut self,
+        project: &ProjectId,
+        item: &ItemKey,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send;
+
+    /// Locks the lane row; the outer option says whether the lane exists.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] when the lookup or lock fails.
+    fn lock_lane_owner(
+        &mut self,
+        project: &ProjectId,
+        lane: &LaneName,
+    ) -> impl Future<Output = Result<Option<Option<IdentityId>>, StoreError>> + Send;
+
+    /// Whether `id` is an unrevoked project identity.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] when the lookup fails.
+    fn identity_live(
+        &mut self,
+        project: &ProjectId,
+        id: &IdentityId,
+    ) -> impl Future<Output = Result<bool, StoreError>> + Send;
+
+    /// The stored edit scope by id, without a project or revocation filter.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] when the lookup fails.
+    fn identity_edits(
+        &mut self,
+        id: &IdentityId,
+    ) -> impl Future<Output = Result<Option<serde_json::Value>, StoreError>> + Send;
+
+    /// Counts grants to this borrower whose expiration is strictly after now.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] when the count fails.
+    fn active_lends(
+        &mut self,
+        project: &ProjectId,
+        lane: &LaneName,
+        to: &IdentityId,
+    ) -> impl Future<Output = Result<u64, StoreError>> + Send;
+
+    /// Inserts an authorized lane grant.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] when insertion fails.
+    fn insert_lend(
+        &mut self,
+        lend: &NewLend<'_>,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send;
+
     /// Inserts one copy, returning [`StoreError::Duplicate`] on a
     /// `(from, id, stream)` conflict.
     ///
