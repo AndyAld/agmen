@@ -307,6 +307,9 @@ impl TestHub {
         let (host, port) = mqtt::mqtt_addr();
         let config = Config {
             mode,
+            // Hosted Task 2 fills Paddle settings; this task's tests never read them.
+            hosted: None,
+            retention_days: None,
             group_name: "agmen".to_owned(),
             database_url: Secret::new(db_url),
             listen: addr,

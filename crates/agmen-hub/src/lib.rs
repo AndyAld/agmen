@@ -20,6 +20,7 @@
 #![warn(missing_docs)]
 
 mod auth;
+mod billing;
 mod bootstrap;
 mod broker_tokens;
 mod claims;
@@ -58,12 +59,18 @@ mod test_github;
 mod test_hooks;
 
 pub use auth::{GithubError, GithubId};
+pub use billing::{
+    BillingEvent, BusinessStep, Catalog, LineItem, MAX_OWNED_GROUPS, PAID_READ_ONLY_DAYS,
+    PAST_DUE_GRACE_DAYS, Plan, PlanEffect, PlanRecord, PlanState, ReadOnlyCause, Retention,
+    TEAM_INCLUDED_SEATS, TRIAL_DAYS, TRIAL_READ_ONLY_DAYS, TRIAL_REMINDER_OFFSETS_DAYS,
+    UnknownPlanState, next_utc_midnight,
+};
 pub use bootstrap::{AdminGithub, Bootstrap, BootstrapError, Bootstrapped};
 pub use broker_tokens::{BrokerTokens, SigningKey, TokenError};
 pub use claims::LeaseSweepError;
 pub use config::{
     Config, ConfigError, DEFAULT_CLAIM_LEASE, DEFAULT_GITHUB_CLIENT_ID, EmqxConfig, GithubConfig,
-    HubMode, HubSecrets, MqttConfig, Secret,
+    HostedConfig, HubMode, HubSecrets, MqttConfig, PaddleConfig, Secret,
 };
 pub use db::{Role, TenantRole, UnknownRole};
 pub use emqx::{EmqxAdmin, EmqxError};
