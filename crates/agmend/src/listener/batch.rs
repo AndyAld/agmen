@@ -1,8 +1,5 @@
 //! Stream-json listener batch encoding.
 
-// shortcut: L21 wires this into the listener runtime
-#![cfg_attr(not(test), expect(dead_code, reason = "wired by L21"))]
-
 use agmen_proto::{IdentityKind, MessageId, StampedEnvelope, Verb};
 use serde::Serialize;
 use serde_json::{Value, json};

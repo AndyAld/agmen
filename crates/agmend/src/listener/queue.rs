@@ -1,8 +1,5 @@
 //! Bounded listener input and post policy, without a runtime or clock.
 
-// shortcut: L21 wires the source, monotonic time and resolved thread roots.
-#![cfg_attr(not(test), expect(dead_code, reason = "wired by L21"))]
-
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -49,7 +46,7 @@ pub(super) struct Queue {
     listener: IdentityId,
     person: IdentityId,
     source: mpsc::Receiver<Incoming>,
-    pending: Vec<StampedEnvelope>,
+    pub(super) pending: Vec<StampedEnvelope>,
     last_batch: Option<Duration>,
     next_batch: u64,
     posts: HashMap<MessageId, u8>,
@@ -90,7 +87,7 @@ impl Queue {
             if message.from == self.person || workers.contains(&message.from) {
                 self.posts.remove(&incoming.thread);
             }
-            if self.includes(&message, workers) {
+            if includes(&message, &self.listener, &self.person, workers) {
                 self.pending.push(message);
             }
         }
@@ -113,34 +110,6 @@ impl Queue {
         })
     }
 
-    fn includes(&self, message: &StampedEnvelope, workers: &[IdentityId]) -> bool {
-        if message.from == self.listener {
-            return false;
-        }
-        let addressed = |id: &IdentityId| {
-            message.mentioned.contains(id)
-                || (matches!(message.client.payload, Payload::Dm {} | Payload::Ask { .. })
-                    && message.client.to.contains(id))
-                || matches!(&message.client.payload, Payload::Assign { to, .. } if to == id)
-        };
-        addressed(&self.listener)
-            || addressed(&self.person)
-            || (message.from == self.person
-                && matches!(
-                    message.client.payload,
-                    Payload::Fyi {} | Payload::Ask { .. } | Payload::Answer {} | Payload::Ack {}
-                )
-                && message.client.mentions.is_empty()
-                && message.mentioned.is_empty()
-                && message.client.to.is_empty()
-                && !matches!(message.client.payload, Payload::Ask { of: Some(_) }))
-            || (workers.contains(&message.from)
-                && matches!(
-                    message.client.payload.verb(),
-                    Some(Verb::Done | Verb::Status | Verb::Review | Verb::Alert)
-                ))
-    }
-
     /// Reserves one outgoing listener post before publishing. Rejected posts
     /// are dropped and logged without message bodies. Failed publishes keep
     /// the reservation conservatively. No eviction can reopen a capped thread.
@@ -160,6 +129,39 @@ impl Queue {
         }
         PostDecision::Allow
     }
+}
+
+pub(crate) fn includes(
+    message: &StampedEnvelope,
+    listener: &IdentityId,
+    person: &IdentityId,
+    workers: &[IdentityId],
+) -> bool {
+    if message.from == *listener {
+        return false;
+    }
+    let addressed = |id: &IdentityId| {
+        message.mentioned.contains(id)
+            || (matches!(message.client.payload, Payload::Dm {} | Payload::Ask { .. })
+                && message.client.to.contains(id))
+            || matches!(&message.client.payload, Payload::Assign { to, .. } if to == id)
+    };
+    addressed(listener)
+        || addressed(person)
+        || (message.from == *person
+            && matches!(
+                message.client.payload,
+                Payload::Fyi {} | Payload::Ask { .. } | Payload::Answer {} | Payload::Ack {}
+            )
+            && message.client.mentions.is_empty()
+            && message.mentioned.is_empty()
+            && message.client.to.is_empty()
+            && !matches!(message.client.payload, Payload::Ask { of: Some(_) }))
+        || (workers.contains(&message.from)
+            && matches!(
+                message.client.payload.verb(),
+                Some(Verb::Done | Verb::Status | Verb::Review | Verb::Alert)
+            ))
 }
 
 #[cfg(test)]

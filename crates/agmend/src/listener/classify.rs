@@ -1,8 +1,5 @@
 //! Pure settings direction policy for a listener or one of its role/agent targets.
 
-// shortcut: L21 resolves settings targets and wires classification into change cards.
-#![cfg_attr(not(test), expect(dead_code, reason = "wired by L21"))]
-
 use super::policy::{Settings, UsdCents};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

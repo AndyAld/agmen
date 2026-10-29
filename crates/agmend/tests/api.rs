@@ -430,6 +430,12 @@ async fn agent_cannot_mint() {
         "prune",
         "login_start",
         "login_status",
+        "listener_start",
+        "listener_stop",
+        "listener_status",
+        "listener_set",
+        "settings_decide",
+        "settings_undo",
     ] {
         assert_eq!(
             error(

@@ -55,6 +55,7 @@ pub(crate) struct Core {
     console: Arc<Console>,
     identities: Arc<Identities>,
     managed: Arc<managed::Managed>,
+    listeners: Arc<listener::Listeners>,
     state_dir: PathBuf,
     schema_scan: Arc<Semaphore>,
     shutdown: tokio::sync::Notify,
@@ -138,6 +139,7 @@ pub struct Config {
     personal_roles: Option<PathBuf>,
     runner: Arc<dyn launch::Runner>,
     claude_home: Option<PathBuf>,
+    listener_settings: PathBuf,
 }
 
 impl Config {
@@ -151,6 +153,7 @@ impl Config {
     ) -> Self {
         let socket = socket.into();
         Self {
+            listener_settings: socket.with_file_name("settings.toml"),
             host_log: socket.with_file_name("hub.log"),
             socket,
             login_file: login_file.into(),
@@ -179,6 +182,7 @@ impl Config {
         );
         if let Some(home) = std::env::home_dir() {
             config.host_log = home.join("Library/Logs/agmen/hub.log");
+            config.listener_settings = home.join(".config/agmen/settings.toml");
         }
         // Spec 3.5 and the desktop's settings use ~/.config/agmen on every
         // platform, not agmen-client's config folder.
@@ -303,6 +307,11 @@ impl Agmend {
             config.claude_home,
             config.personal_roles.clone(),
         ));
+        let listeners = Arc::new(listener::Listeners::new(
+            hub.clone(),
+            config.socket.with_file_name(""),
+            config.listener_settings,
+        ));
         Ok(Self {
             bound,
             opening,
@@ -313,6 +322,7 @@ impl Agmend {
                 shutdown: tokio::sync::Notify::new(),
                 identities,
                 managed,
+                listeners,
                 console: Arc::new(Console {
                     hub,
                     feeds,
@@ -341,6 +351,10 @@ impl Agmend {
     /// and sessions, waiting at most 5 s per task and 10 s in total.
     pub async fn serve_until(self, shutdown: impl std::future::Future<Output = ()>) {
         self.core.managed.attach(&self.core.identities).await;
+        self.core
+            .listeners
+            .attach(&self.core.identities, &self.core.managed)
+            .await;
         if let Err(error) = self.opening.await {
             tracing::warn!(%error, "daemon state opener failed");
             return;
@@ -396,6 +410,7 @@ impl Agmend {
         tasks.abort_all();
         while tasks.join_next().await.is_some() {}
         if tokio::time::timeout(Duration::from_secs(10), async {
+            self.core.listeners.shutdown().await;
             self.core.managed.shutdown().await;
             self.core.identities.shutdown().await;
         })

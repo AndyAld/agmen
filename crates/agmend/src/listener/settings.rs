@@ -1,8 +1,5 @@
 //! Listener settings storage and change cards, integrated by L21.
 
-// shortcut: L21 wires this into the listener runtime
-#![cfg_attr(not(test), expect(dead_code, reason = "wired by L21"))]
-
 use std::collections::{HashMap, VecDeque};
 use std::fs::{self, File};
 use std::io::{Read, Write};
@@ -183,7 +180,7 @@ pub(super) fn load(path: &Path, project: &ProjectId) -> Result<ListenerSettings,
     Ok(settings)
 }
 
-fn parse_money(key: &str, item: &Item) -> Result<UsdCents, SettingsError> {
+pub(super) fn parse_money(key: &str, item: &Item) -> Result<UsdCents, SettingsError> {
     let invalid = || {
         bad(
             key,
@@ -597,7 +594,7 @@ fn line_end(text: &str, after: usize) -> usize {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(super) struct ChangeId(String);
+pub(super) struct ChangeId(pub(super) String);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Applied {
@@ -636,7 +633,7 @@ struct ProjectChanges {
 }
 
 // shortcut: pending and undo share 256 entries per project; audit keeps 256 rows,
-// lost on agmend restart; revisit for the wiring task's durable store in state.rs.
+// lost on agmend restart; persist this history in state.rs when restart recovery is needed.
 #[derive(Debug, Default)]
 pub(super) struct Changes {
     projects: HashMap<ProjectId, ProjectChanges>,
@@ -721,8 +718,7 @@ impl Changes {
         Ok(applied)
     }
 
-    // shortcut: the caller must run `check_request` (batch and person) before
-    // `decide`; this store does not know who is asking. L21's wiring task adds it.
+    // The runtime authorizes the human before calling this store.
     pub(super) fn decide(
         &mut self,
         path: &Path,
@@ -753,8 +749,7 @@ impl Changes {
         Ok(())
     }
 
-    // shortcut: the caller must run `check_request` (batch and person) before
-    // `undo`; this store does not know who is asking. L21's wiring task adds it.
+    // The runtime authorizes the human before calling this store.
     pub(super) fn undo(
         &mut self,
         path: &Path,

@@ -1,8 +1,5 @@
 //! Bounded, fixed-argument listener git reads.
 
-// shortcut: L21 wires this into the listener runtime
-#![cfg_attr(not(test), expect(dead_code, reason = "wired by L21"))]
-
 use crate::git::{Git, GitError};
 
 pub(super) const GIT_READ_CAP: usize = 32 * 1024;
@@ -57,6 +54,7 @@ pub(super) fn argv(req: &GitRead) -> Result<Vec<String>, GitReadError> {
                 "--oneline".into(),
                 "-n".into(),
                 n.to_string(),
+                "--no-show-signature".into(),
                 "--end-of-options".into(),
             ];
             if let Some(range) = rev_range {
@@ -73,7 +71,11 @@ pub(super) fn argv(req: &GitRead) -> Result<Vec<String>, GitReadError> {
             if *stat {
                 args.push("--stat".into());
             }
-            args.extend(["--end-of-options".into(), rev.clone()]);
+            args.extend([
+                "--no-show-signature".into(),
+                "--end-of-options".into(),
+                rev.clone(),
+            ]);
             args
         }
         GitRead::Diff { base, head } => {

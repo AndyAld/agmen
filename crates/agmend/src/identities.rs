@@ -103,8 +103,6 @@ struct LocalCredential {
     local_token: String,
 }
 
-// shortcut: L21 passes the token to the listener and managed runs
-#[cfg_attr(not(test), expect(dead_code, reason = "wired by L21"))]
 pub(crate) struct LocalToken(String);
 
 impl std::fmt::Debug for LocalToken {
@@ -113,8 +111,6 @@ impl std::fmt::Debug for LocalToken {
     }
 }
 
-// shortcut: L21 passes the token to the listener and managed runs
-#[cfg_attr(not(test), expect(dead_code, reason = "wired by L21"))]
 impl LocalToken {
     pub(crate) fn expose(&self) -> &str {
         &self.0
@@ -164,8 +160,6 @@ impl std::fmt::Debug for Identities {
 }
 
 impl Identities {
-    // shortcut: L21 passes the token to the listener and managed runs
-    #[cfg_attr(not(test), expect(dead_code, reason = "wired by L21"))]
     pub(crate) async fn local_token(
         &self,
         id: &IdentityId,
@@ -386,7 +380,7 @@ impl Identities {
         .map_err(|_| unauthorized())?
     }
 
-    async fn managed(
+    pub(crate) async fn managed(
         &self,
         origin: String,
         owner: IdentityId,
@@ -467,6 +461,21 @@ impl Identities {
         serde_json::to_value(rows).map_err(|_| hub_error("encoding pending batch failed"))
     }
 
+    /// The listener reserves channel capacity before committing this drain.
+    pub(crate) async fn listener_pending(
+        &self,
+        caller: &ManagedIdentity,
+        limit: u32,
+        byte_budget: usize,
+    ) -> Result<Vec<StampedEnvelope>, ApiError> {
+        let origin = caller.hub_url.origin().ascii_serialization();
+        let identity = caller.identity_id.clone();
+        store_work(self.store.clone(), move |store| {
+            store.drain(&origin, &identity, limit, byte_budget)
+        })
+        .await
+    }
+
     /// Keeps a prompt below operating systems' per-argument size limit.
     pub(crate) async fn launch_pending(
         &self,
@@ -484,7 +493,7 @@ impl Identities {
         Ok(rows)
     }
 
-    async fn project_channel(
+    pub(crate) async fn project_channel(
         &self,
         project: &ProjectId,
     ) -> Result<broadcast::Sender<WatchEvent>, ApiError> {
