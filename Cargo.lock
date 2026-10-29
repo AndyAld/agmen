@@ -118,6 +118,7 @@ dependencies = [
  "agmen-proto",
  "getrandom 0.4.3",
  "globset",
+ "regex",
  "regex-automata",
  "serde",
  "serde_json",

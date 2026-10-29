@@ -1,22 +1,12 @@
 //! Hosted plan write gates, UTC daily usage, and owner alerts.
 
 use agmen_proto::{Body, IdentityId, Needs, Payload, Stream, TenantId, Timestamp, Topics, Urgency};
-use sqlx::{Postgres, Transaction};
 
 use crate::groups::load_plan;
 use crate::http::{ApiError, Hub};
 use crate::{HubMode, HubPost, PostError};
 
-/// Whether a tenant may write, with its hosted daily message limit when set.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Gate {
-    /// Operator-made tenants and self-host hubs have no quota or counting.
-    Open,
-    /// Writable hosted tenants count recorded messages against this limit.
-    Quota { limit: u32 },
-    /// Only RELEASE and BYE may be ingested until the owner pays.
-    ReadOnly,
-}
+pub(crate) use agmen_core::Gate;
 
 /// Reads and ticks a hosted plan without persisting the tick's effects.
 pub(crate) async fn write_gate(hub: &Hub, tenant: &TenantId) -> Result<Gate, sqlx::Error> {
@@ -34,58 +24,6 @@ pub(crate) async fn write_gate(hub: &Hub, tenant: &TenantId) -> Result<Gate, sql
     } else {
         Ok(Gate::ReadOnly)
     }
-}
-
-/// The result of taking one message from the tenant's daily quota.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Taken {
-    /// This transaction counted a message and may own today's owner warning.
-    Counted { messages: u32, warn: bool },
-    /// No message remains today; the counter was not changed.
-    Exhausted,
-}
-
-/// Takes the usage row before stream heads, counting only if `tx` commits.
-pub(crate) async fn take_quota(
-    tx: &mut Transaction<'_, Postgres>,
-    tenant: &TenantId,
-    limit: u32,
-) -> Result<Taken, sqlx::Error> {
-    if limit == 0 {
-        return Ok(Taken::Exhausted);
-    }
-    let messages: Option<i32> = sqlx::query_scalar(
-        "INSERT INTO tenant_usage (tenant_id, day, messages)
-         VALUES ($1, (now() AT TIME ZONE 'UTC')::date, 1)
-         ON CONFLICT (tenant_id, day) DO UPDATE
-         SET messages = tenant_usage.messages + 1
-         WHERE tenant_usage.messages < $2
-         RETURNING messages",
-    )
-    .bind(tenant.as_str())
-    .bind(i64::from(limit))
-    .fetch_optional(&mut **tx)
-    .await?;
-    let Some(messages) = messages else {
-        return Ok(Taken::Exhausted);
-    };
-    let messages = u32::try_from(messages).map_err(|err| sqlx::Error::Decode(Box::new(err)))?;
-    // The upsert holds this row until commit, including through this update.
-    // Bigint arithmetic keeps the threshold safe for every u32 limit.
-    let warn: Option<bool> = sqlx::query_scalar(
-        "UPDATE tenant_usage SET warned = true
-         WHERE tenant_id = $1 AND day = (now() AT TIME ZONE 'UTC')::date
-         AND NOT warned AND messages::bigint * 5 >= $2::bigint * 4
-         RETURNING warned",
-    )
-    .bind(tenant.as_str())
-    .bind(i64::from(limit))
-    .fetch_optional(&mut **tx)
-    .await?;
-    Ok(Taken::Counted {
-        messages,
-        warn: warn.is_some(),
-    })
 }
 
 /// Posts an ALERT mentioning the owner to at most 50 of the tenant's projects.

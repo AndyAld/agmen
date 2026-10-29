@@ -486,49 +486,7 @@ impl PlanRecord {
     }
 }
 
-/// The next UTC midnight strictly after `now`.
-///
-/// An instant that is already midnight resolves to the following day. Quota
-/// counters reset at that instant.
-///
-/// # Examples
-///
-/// ```
-/// use agmen_proto::Timestamp;
-/// use agmen_hub::next_utc_midnight;
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let almost: Timestamp = "2026-11-02T23:59:59Z".parse()?;
-/// let midnight: Timestamp = "2026-11-03T00:00:00Z".parse()?;
-/// assert_eq!(next_utc_midnight(almost), midnight);
-/// assert_eq!(next_utc_midnight(midnight).to_string(), "2026-11-04T00:00:00Z");
-/// # Ok(())
-/// # }
-/// ```
-#[must_use]
-pub fn next_utc_midnight(now: Timestamp) -> Timestamp {
-    let day = i64::try_from(SECS_PER_DAY).unwrap_or(i64::MAX);
-    let next_day = floor_second(now).div_euclid(day).saturating_add(1);
-    let next = next_day.saturating_mul(day);
-    match Timestamp::from_second(next) {
-        Ok(midnight) => midnight,
-        Err(_) => {
-            if next < 0 {
-                Timestamp::MIN
-            } else {
-                Timestamp::MAX
-            }
-        }
-    }
-}
-
-fn floor_second(now: Timestamp) -> i64 {
-    let second = now.as_second();
-    if now.subsec_nanosecond() < 0 {
-        second.saturating_sub(1)
-    } else {
-        second
-    }
-}
+pub use agmen_core::next_utc_midnight;
 
 fn add_days(instant: Timestamp, days: u32) -> Timestamp {
     let seconds = u64::from(days).saturating_mul(SECS_PER_DAY);

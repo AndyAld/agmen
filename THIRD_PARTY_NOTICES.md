@@ -8,7 +8,7 @@ The desktop app's bundled fonts (IBM Plex Sans and Lilex, SIL OFL 1.1), its Luci
 
 ## gitleaks rule regexes
 
-`crates/agmen-hub/src/secrets_scan.rs` copies the regexes of several gitleaks default rules (`config/gitleaks.toml` at commit 5f6ec56). gitleaks is MIT licensed:
+`crates/agmen-core/src/secrets_scan.rs` copies the regexes of several gitleaks default rules (`config/gitleaks.toml` at commit 5f6ec56). gitleaks is MIT licensed:
 
 ```text
 MIT License

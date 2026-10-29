@@ -3,12 +3,18 @@
 mod ledger;
 mod messages;
 
+pub(crate) use messages::project_exists;
+
 use std::time::Duration;
 
 use agmen_core::{
-    LaneHolder, LaneRow, MessageRow, Reads, ResolvedLane, Roster, Store, StoreError, StoreTx,
+    LaneHolder, LaneRow, MessageRow, Parent, QuotaTaken, Reads, ResolvedLane, Roster, Sender,
+    Store, StoreError, StoreTx,
 };
-use agmen_proto::{IdentityId, IdentityKind, ItemKey, LaneName, ProjectId, Seq, Timestamp, Topics};
+use agmen_proto::{
+    IdentityId, IdentityKind, ItemKey, LaneName, MessageId, ProjectId, Seq, Stream, TenantId,
+    Timestamp, Topics,
+};
 use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 
 use crate::claims::LedgerError;
@@ -39,6 +45,52 @@ impl PgTx {
 }
 
 impl Reads for PgReader<'_> {
+    async fn project_exists(&mut self, topics: &Topics) -> Result<bool, StoreError> {
+        messages::project_exists(self.0, topics)
+            .await
+            .map_err(|err| StoreError::Backend(Box::new(err)))
+    }
+    async fn sender(
+        &mut self,
+        topics: &Topics,
+        from: &IdentityId,
+    ) -> Result<Option<Sender>, StoreError> {
+        let mut db = self
+            .0
+            .acquire()
+            .await
+            .map_err(|err| StoreError::Backend(Box::new(err)))?;
+        messages::sender(&mut db, topics, from).await
+    }
+    async fn parent(
+        &mut self,
+        project: &ProjectId,
+        sender: &IdentityId,
+        reply_to: &MessageId,
+    ) -> Result<Option<Parent>, StoreError> {
+        let mut db = self
+            .0
+            .acquire()
+            .await
+            .map_err(|err| StoreError::Backend(Box::new(err)))?;
+        messages::parent(&mut db, project, sender, reply_to).await
+    }
+    async fn is_delegate(
+        &mut self,
+        project: &ProjectId,
+        worker: &IdentityId,
+        delegator: &IdentityId,
+    ) -> Result<bool, StoreError> {
+        messages::is_delegate(self.0, project, worker, delegator).await
+    }
+    async fn recorded(
+        &mut self,
+        from: &IdentityId,
+        id: &MessageId,
+    ) -> Result<Option<(Stream, Seq, Vec<u8>)>, StoreError> {
+        messages::recorded(self.0, from, id).await
+    }
+
     async fn roster(&mut self, project: &ProjectId) -> Result<Roster, StoreError> {
         messages::roster(self.0, project).await
     }
@@ -99,6 +151,42 @@ impl Reads for PgReader<'_> {
 }
 
 impl Reads for PgTx {
+    async fn project_exists(&mut self, topics: &Topics) -> Result<bool, StoreError> {
+        messages::project_exists(connection(&mut self.tx), topics)
+            .await
+            .map_err(|err| StoreError::Backend(Box::new(err)))
+    }
+    async fn sender(
+        &mut self,
+        topics: &Topics,
+        from: &IdentityId,
+    ) -> Result<Option<Sender>, StoreError> {
+        messages::sender(connection(&mut self.tx), topics, from).await
+    }
+    async fn parent(
+        &mut self,
+        project: &ProjectId,
+        sender: &IdentityId,
+        reply_to: &MessageId,
+    ) -> Result<Option<Parent>, StoreError> {
+        messages::parent(connection(&mut self.tx), project, sender, reply_to).await
+    }
+    async fn is_delegate(
+        &mut self,
+        project: &ProjectId,
+        worker: &IdentityId,
+        delegator: &IdentityId,
+    ) -> Result<bool, StoreError> {
+        messages::is_delegate(connection(&mut self.tx), project, worker, delegator).await
+    }
+    async fn recorded(
+        &mut self,
+        from: &IdentityId,
+        id: &MessageId,
+    ) -> Result<Option<(Stream, Seq, Vec<u8>)>, StoreError> {
+        messages::recorded(connection(&mut self.tx), from, id).await
+    }
+
     async fn roster(&mut self, project: &ProjectId) -> Result<Roster, StoreError> {
         messages::roster(connection(&mut self.tx), project).await
     }
@@ -172,6 +260,14 @@ impl Store for PgStore {
 }
 
 impl StoreTx for PgTx {
+    async fn take_quota(
+        &mut self,
+        tenant: &TenantId,
+        limit: u32,
+    ) -> Result<QuotaTaken, StoreError> {
+        messages::take_quota(self.sqlx(), tenant, limit).await
+    }
+
     async fn lock_item(
         &mut self,
         project: &ProjectId,

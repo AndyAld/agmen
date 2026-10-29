@@ -51,7 +51,6 @@ mod retention;
 mod roles;
 mod rollcall;
 mod roster;
-mod secrets_scan;
 mod self_config;
 mod state;
 mod store_pg;

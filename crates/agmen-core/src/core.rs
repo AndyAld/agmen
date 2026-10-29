@@ -1,19 +1,27 @@
 //! Shared coordination state and settings.
 
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+use crate::RateLimiter;
 
 /// Coordination logic backed by a store and a configured claim lease.
 #[derive(Debug, Clone)]
 pub struct Core<S> {
     store: S,
     claim_lease: Duration,
+    pub(crate) limiter: Arc<Mutex<RateLimiter>>,
 }
 
 impl<S> Core<S> {
     /// Builds a core over `store`, using `claim_lease` for new claims.
     #[must_use]
-    pub const fn new(store: S, claim_lease: Duration) -> Self {
-        Self { store, claim_lease }
+    pub fn new(store: S, claim_lease: Duration) -> Self {
+        Self {
+            store,
+            claim_lease,
+            limiter: Arc::new(Mutex::new(RateLimiter::default())),
+        }
     }
 
     /// The storage backend used by this core.

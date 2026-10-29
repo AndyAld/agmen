@@ -8,14 +8,14 @@ use std::time::Duration;
 use agmen_proto::StampedEnvelope;
 use agmen_proto::{
     IdentityId, IdentityKind, ItemKey, LaneName, MessageId, ProjectId, Seq, Severity, Stream,
-    Timestamp, Topics,
+    TenantId, Timestamp, Topics,
 };
 use tokio::sync::{Mutex, MutexGuard, OwnedMutexGuard};
 
 use crate::lanes::{LaneHolder, LaneRow, ResolvedLane};
 use crate::{
-    ItemLock, Lapsed, Member, MemberRole, MessageRow, NewItem, NewLend, Reads, ReleaseBy, Roster,
-    Store, StoreError, StoreTx,
+    ItemLock, Lapsed, Member, MemberRole, MessageRow, NewItem, NewLend, Parent, QuotaTaken, Reads,
+    ReleaseBy, Roster, Sender, Store, StoreError, StoreTx, next_utc_midnight,
 };
 
 /// The maximum rows in each in-memory collection.
@@ -36,6 +36,8 @@ struct MemIdentity {
     owner: Option<IdentityId>,
     role: Option<MemberRole>,
     identity_role: Option<String>,
+    verbs: Option<Vec<String>>,
+    delegated_by: Option<IdentityId>,
 }
 
 #[derive(Debug, Clone)]
@@ -84,6 +86,8 @@ struct MemItem {
 #[derive(Debug, Clone, Default)]
 struct MemState {
     heads: BTreeMap<String, Seq>,
+    projects: BTreeMap<ProjectId, TenantId>,
+    usage: BTreeMap<(TenantId, i64), (u32, bool)>,
     identities: BTreeMap<ProjectId, BTreeMap<IdentityId, MemIdentity>>,
     lanes: BTreeMap<ProjectId, Vec<MemLane>>,
     holders: BTreeMap<ProjectId, Vec<LaneHolder>>,
@@ -96,11 +100,6 @@ struct MemState {
 }
 
 #[derive(Debug, Clone)]
-// shortcut: keep complete rows for Task 7 resend reads and Task 9 replay.
-#[expect(
-    dead_code,
-    reason = "message query methods arrive with ingest and replay"
-)]
 struct MemMessage {
     from: IdentityId,
     id: MessageId,
@@ -123,6 +122,8 @@ pub struct MemStore {
     state: Arc<Mutex<MemState>>,
     clock: Arc<StdMutex<Timestamp>>,
     failure: Arc<StdMutex<Option<&'static str>>>,
+    #[cfg(test)]
+    hidden_recorded: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Default for MemStore {
@@ -131,11 +132,60 @@ impl Default for MemStore {
             state: Arc::new(Mutex::new(MemState::default())),
             clock: Arc::new(StdMutex::new(Timestamp::now())),
             failure: Arc::new(StdMutex::new(None)),
+            #[cfg(test)]
+            hidden_recorded: Arc::default(),
         }
     }
 }
 
 impl MemStore {
+    #[cfg(test)]
+    pub(crate) async fn seed_sender(
+        &self,
+        topics: &Topics,
+        sender: Sender,
+        delegated_by: Option<IdentityId>,
+    ) -> Result<(), StoreError> {
+        self.seed_live_identity(topics.project(), &sender.id, &sender.handle, sender.kind)
+            .await?;
+        let mut state = self.locked().await?;
+        if !state.projects.contains_key(topics.project()) && state.projects.len() >= MEM_MAX_ROWS {
+            return Err(full());
+        }
+        state
+            .projects
+            .insert(topics.project().clone(), topics.tenant().clone());
+        let identity = state
+            .identities
+            .get_mut(topics.project())
+            .and_then(|ids| ids.get_mut(&sender.id))
+            .expect("seeded sender exists");
+        identity.owner = sender.owner;
+        identity.verbs = sender.verbs;
+        identity.delegated_by = delegated_by;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn revoke_sender(&self, project: &ProjectId, from: &IdentityId) {
+        self.locked()
+            .await
+            .unwrap()
+            .identities
+            .get_mut(project)
+            .unwrap()
+            .get_mut(from)
+            .unwrap()
+            .live = false;
+    }
+
+    /// Simulates an initial dedupe read just before a competing copy commits.
+    #[cfg(test)]
+    pub(crate) fn hide_next_recorded(&self) {
+        self.hidden_recorded
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
     #[cfg(test)]
     pub(crate) async fn recorded_messages(&self) -> Result<Vec<StampedEnvelope>, StoreError> {
         let state = self.locked().await?;
@@ -214,6 +264,8 @@ impl MemStore {
                 owner: member.owner,
                 role: member.role,
                 identity_role: member.identity_role,
+                verbs: None,
+                delegated_by: None,
             },
         );
         Ok(())
@@ -227,7 +279,8 @@ impl MemStore {
     /// Fails the next call to method `op` with [`StoreError::Backend`].
     ///
     /// Replaces any pending fault. Other methods do not consume it, and a
-    /// rollback does not rearm a consumed fault.
+    /// rollback does not rearm a consumed fault. An existing duplicate message
+    /// takes precedence over an injected insert failure, as on a resend race.
     pub fn fail_next(&self, op: &'static str) {
         *self.failure.lock().unwrap_or_else(PoisonError::into_inner) = Some(op);
     }
@@ -271,6 +324,8 @@ impl MemStore {
                 owner: None,
                 role: None,
                 identity_role: None,
+                verbs: None,
+                delegated_by: None,
             },
         );
         Ok(())
@@ -351,6 +406,57 @@ impl MemStore {
 }
 
 impl Reads for &MemStore {
+    async fn project_exists(&mut self, topics: &Topics) -> Result<bool, StoreError> {
+        fail(&self.failure, "project_exists")?;
+        Ok((*self).locked().await?.projects.get(topics.project()) == Some(topics.tenant()))
+    }
+    async fn sender(
+        &mut self,
+        topics: &Topics,
+        from: &IdentityId,
+    ) -> Result<Option<Sender>, StoreError> {
+        fail(&self.failure, "sender")?;
+        Ok(sender_of(&*(*self).locked().await?, topics, from))
+    }
+    async fn parent(
+        &mut self,
+        project: &ProjectId,
+        sender: &IdentityId,
+        reply_to: &MessageId,
+    ) -> Result<Option<Parent>, StoreError> {
+        fail(&self.failure, "parent")?;
+        parent_of(&*(*self).locked().await?, project, sender, reply_to)
+    }
+    async fn is_delegate(
+        &mut self,
+        project: &ProjectId,
+        worker: &IdentityId,
+        delegator: &IdentityId,
+    ) -> Result<bool, StoreError> {
+        fail(&self.failure, "is_delegate")?;
+        Ok(is_delegate_of(
+            &*(*self).locked().await?,
+            project,
+            worker,
+            delegator,
+        ))
+    }
+    async fn recorded(
+        &mut self,
+        from: &IdentityId,
+        id: &MessageId,
+    ) -> Result<Option<(Stream, Seq, Vec<u8>)>, StoreError> {
+        fail(&self.failure, "recorded")?;
+        #[cfg(test)]
+        if self
+            .hidden_recorded
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Ok(None);
+        }
+        Ok(recorded_of(&*(*self).locked().await?, from, id))
+    }
+
     async fn roster(&mut self, project: &ProjectId) -> Result<Roster, StoreError> {
         fail(&self.failure, "roster")?;
         let state = (*self).locked().await?;
@@ -460,6 +566,45 @@ impl MemTx {
 }
 
 impl Reads for MemTx {
+    async fn project_exists(&mut self, topics: &Topics) -> Result<bool, StoreError> {
+        fail(&self.failure, "project_exists")?;
+        Ok(self.working.projects.get(topics.project()) == Some(topics.tenant()))
+    }
+    async fn sender(
+        &mut self,
+        topics: &Topics,
+        from: &IdentityId,
+    ) -> Result<Option<Sender>, StoreError> {
+        fail(&self.failure, "sender")?;
+        Ok(sender_of(&self.working, topics, from))
+    }
+    async fn parent(
+        &mut self,
+        project: &ProjectId,
+        sender: &IdentityId,
+        reply_to: &MessageId,
+    ) -> Result<Option<Parent>, StoreError> {
+        fail(&self.failure, "parent")?;
+        parent_of(&self.working, project, sender, reply_to)
+    }
+    async fn is_delegate(
+        &mut self,
+        project: &ProjectId,
+        worker: &IdentityId,
+        delegator: &IdentityId,
+    ) -> Result<bool, StoreError> {
+        fail(&self.failure, "is_delegate")?;
+        Ok(is_delegate_of(&self.working, project, worker, delegator))
+    }
+    async fn recorded(
+        &mut self,
+        from: &IdentityId,
+        id: &MessageId,
+    ) -> Result<Option<(Stream, Seq, Vec<u8>)>, StoreError> {
+        fail(&self.failure, "recorded")?;
+        Ok(recorded_of(&self.working, from, id))
+    }
+
     async fn roster(&mut self, project: &ProjectId) -> Result<Roster, StoreError> {
         fail(&self.failure, "roster")?;
         Ok(roster_of(&self.working, project))
@@ -512,6 +657,32 @@ impl Reads for MemTx {
 }
 
 impl StoreTx for MemTx {
+    async fn take_quota(
+        &mut self,
+        tenant: &TenantId,
+        limit: u32,
+    ) -> Result<QuotaTaken, StoreError> {
+        fail(&self.failure, "take_quota")?;
+        if limit == 0 {
+            return Ok(QuotaTaken::Exhausted);
+        }
+        let key = (tenant.clone(), next_utc_midnight(self.now).as_second());
+        if !self.working.usage.contains_key(&key) && self.working.usage.len() >= MEM_MAX_ROWS {
+            return Err(full());
+        }
+        let (messages, warned) = self.working.usage.entry(key).or_default();
+        if *messages >= limit {
+            return Ok(QuotaTaken::Exhausted);
+        }
+        *messages += 1;
+        let warn = !*warned && u64::from(*messages) * 5 >= u64::from(limit) * 4;
+        *warned |= warn;
+        Ok(QuotaTaken::Counted {
+            messages: *messages,
+            warn,
+        })
+    }
+
     async fn lock_item(
         &mut self,
         project: &ProjectId,
@@ -885,12 +1056,13 @@ impl StoreTx for MemTx {
     }
 
     async fn insert_message(&mut self, row: &MessageRow<'_>) -> Result<(), StoreError> {
-        fail(&self.failure, "insert_message")?;
+        let fault = fail(&self.failure, "insert_message");
         if self.working.messages.iter().any(|stored| {
             stored.from == *row.from && stored.id == *row.id && stored.stream == *row.stream
         }) {
             return Err(StoreError::Duplicate);
         }
+        fault?;
         if self.working.messages.len() >= MEM_MAX_ROWS {
             return Err(full());
         }
@@ -1266,6 +1438,92 @@ fn millisecond_reply(until: Timestamp) -> Result<Timestamp, StoreError> {
     let ms = (ns + ns.signum() * (NANOS_PER_MILLISECOND / 2)) / NANOS_PER_MILLISECOND;
     let ms = i64::try_from(ms).map_err(|err| StoreError::Stored(err.to_string()))?;
     Timestamp::from_millisecond(ms).map_err(|err| StoreError::Stored(err.to_string()))
+}
+
+fn sender_of(state: &MemState, topics: &Topics, from: &IdentityId) -> Option<Sender> {
+    if state.projects.get(topics.project()) != Some(topics.tenant()) {
+        return None;
+    }
+    let identity = state
+        .identities
+        .get(topics.project())?
+        .get(from)
+        .filter(|id| id.live)?;
+    Some(Sender {
+        id: from.clone(),
+        kind: identity.kind,
+        handle: identity.handle.clone(),
+        owner: identity.owner.clone(),
+        verbs: identity.verbs.clone(),
+    })
+}
+
+fn is_delegate_of(
+    state: &MemState,
+    project: &ProjectId,
+    worker: &IdentityId,
+    delegator: &IdentityId,
+) -> bool {
+    state
+        .identities
+        .get(project)
+        .and_then(|ids| ids.get(worker))
+        .is_some_and(|id| id.live && id.delegated_by.as_ref() == Some(delegator))
+}
+
+fn recorded_of(
+    state: &MemState,
+    from: &IdentityId,
+    id: &MessageId,
+) -> Option<(Stream, Seq, Vec<u8>)> {
+    state
+        .messages
+        .iter()
+        .find(|row| row.from == *from && row.id == *id && row.ack_row)
+        .map(|row| (row.stream.clone(), row.seq, row.payload_hash.clone()))
+}
+
+fn parent_of(
+    state: &MemState,
+    project: &ProjectId,
+    sender: &IdentityId,
+    reply_to: &MessageId,
+) -> Result<Option<Parent>, StoreError> {
+    let Some(row) = state
+        .messages
+        .iter()
+        .filter(|row| {
+            row.project == *project
+                && row.id == *reply_to
+                && (row.stream == Stream::Feed || row.stream == Stream::Inbox(sender.clone()))
+        })
+        .min_by_key(|row| (row.hub_at, row.stream.to_string(), row.seq))
+    else {
+        return Ok(None);
+    };
+    let value: serde_json::Value = serde_json::from_str(&row.envelope_json)
+        .map_err(|err| StoreError::Backend(Box::new(err)))?;
+    let kind = value
+        .get("from_kind")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| StoreError::Stored("missing from_kind".to_owned()))?;
+    let verb = value
+        .get("verb")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| StoreError::Stored("missing verb".to_owned()))?;
+    Ok(Some(Parent {
+        from: row.from.clone(),
+        from_kind: crate::parse_kind(kind)?,
+        verb: verb.to_owned(),
+        streams: state
+            .messages
+            .iter()
+            .filter(|copy| {
+                copy.project == *project && copy.from == row.from && copy.id == *reply_to
+            })
+            .map(|copy| copy.stream.clone())
+            .collect(),
+    }))
 }
 
 #[cfg(test)]
