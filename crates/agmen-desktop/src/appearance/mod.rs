@@ -22,8 +22,8 @@ pub(crate) use marketplace::{
     ThemeExtension, install_shared,
 };
 pub(crate) use settings::{
-    AgmenSettings, Density, DesktopSettings, IconThemeChoice, read_settings_table,
-    write_settings_table,
+    AgmenSettings, Density, DesktopSettings, IconThemeChoice, read_settings_doc,
+    write_settings_text,
 };
 pub(crate) use theme::{Theme, ThemeDirs, window_background};
 pub(crate) use zed::{Mode, read_jsonc};

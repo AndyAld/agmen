@@ -854,3 +854,119 @@ fn desktop_recents_and_quit_settings_survive_each_others_updates() {
     assert!(!text.contains("quit_keep_running"));
     assert!(!text.contains("start_at_login"));
 }
+
+#[test]
+fn appearance_save_keeps_comments_and_other_tables() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.toml");
+    let before_appearance = "# hand-edited agmen settings\n\
+[desktop]\n\
+# last active checkout\n\
+last_project = \"p1\"\n\
+\n\
+[keys]\n\
+vim_mode = false # modal editing\n\
+leader = \"space\"\n\
+\n";
+    let after_appearance = "\n\
+[listener.p1]\n\
+# triage model and daily cap\n\
+model = \"claude-haiku-5-5\"\n\
+\n\
+daily_usd = \"25.00\"\n\
+reviews = \"on\"\n";
+    let initial = format!(
+        "{before_appearance}[appearance]\n\
+follow_zed = false\n\
+theme = \"One Dark\" # night\n\
+added_later = 1\n\
+{after_appearance}"
+    );
+    fs::write(&path, &initial).unwrap();
+
+    let mut settings = AgmenSettings::load(&path).unwrap();
+    settings.theme = Some("Gruvbox Material Dark Hard".into());
+    settings.save(&path).unwrap();
+
+    let saved = fs::read_to_string(&path).unwrap();
+    let (prefix, rest) = saved
+        .split_once("[appearance]\n")
+        .expect("[appearance] header present");
+    let (appearance_block, listener_tail) = rest
+        .split_once("\n[listener.p1]\n")
+        .expect("[listener.p1] header present");
+    assert_eq!(prefix, before_appearance);
+    assert_eq!(
+        format!("\n[listener.p1]\n{listener_tail}"),
+        after_appearance
+    );
+    assert!(
+        appearance_block.contains("theme = \"Gruvbox Material Dark Hard\" # night\n"),
+        "{appearance_block}"
+    );
+    assert!(
+        appearance_block.contains("added_later = 1"),
+        "{appearance_block}"
+    );
+    assert_eq!(
+        AgmenSettings::load(&path).unwrap().theme.as_deref(),
+        Some("Gruvbox Material Dark Hard")
+    );
+}
+
+#[test]
+fn appearance_save_into_an_empty_file_writes_only_its_table() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.toml");
+    fs::write(&path, "").unwrap();
+
+    AgmenSettings::default().save(&path).unwrap();
+
+    let saved = fs::read_to_string(&path).unwrap();
+    let headers: Vec<&str> = saved.lines().filter(|line| line.starts_with('[')).collect();
+    assert_eq!(headers, ["[appearance]"], "{saved}");
+    assert_eq!(
+        AgmenSettings::load(&path).unwrap(),
+        AgmenSettings::default()
+    );
+}
+
+#[test]
+fn appearance_save_keeps_fonts_form_and_writes_new_fonts_as_a_table() {
+    let dir = tempfile::tempdir().unwrap();
+    let inline_path = dir.path().join("inline.toml");
+    fs::write(
+        &inline_path,
+        "[appearance]\nfollow_zed = false\nfonts = { ui_size = 14.0, future_key = true }\n",
+    )
+    .unwrap();
+    let mut settings = AgmenSettings::load(&inline_path).unwrap();
+    settings.fonts.ui_size = Some(16.0);
+    settings.save(&inline_path).unwrap();
+    let inline_text = fs::read_to_string(&inline_path).unwrap();
+    assert!(
+        !inline_text.contains("[appearance.fonts]"),
+        "inline fonts stay inline: {inline_text}"
+    );
+    let inline_doc: toml_edit::DocumentMut = inline_text.parse().unwrap();
+    assert!(inline_doc["appearance"]["fonts"].is_inline_table());
+    assert_eq!(
+        inline_doc["appearance"]["fonts"]["future_key"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        AgmenSettings::load(&inline_path).unwrap().fonts.ui_size,
+        Some(16.0)
+    );
+
+    let table_path = dir.path().join("table.toml");
+    let mut fresh = AgmenSettings::default();
+    fresh.fonts.code_size = Some(13.0);
+    fresh.save(&table_path).unwrap();
+    let table_text = fs::read_to_string(&table_path).unwrap();
+    assert!(
+        table_text.contains("\n[appearance.fonts]\ncode_size = 13.0\n"),
+        "new fonts are written as a normal table: {table_text}"
+    );
+    assert_eq!(AgmenSettings::load(&table_path).unwrap(), fresh);
+}
