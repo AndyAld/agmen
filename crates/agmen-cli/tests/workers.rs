@@ -198,6 +198,44 @@ async fn worktree_prune_prints_removed_and_kept() {
 }
 
 #[tokio::test]
+async fn worktree_prune_prints_the_unlisted_line() {
+    let home = Home::new_in(std::path::Path::new("/tmp"));
+    let wt = joined(&home);
+    let fake = Fake::start(
+        &home,
+        json!({
+            "removed": ["agent/done"],
+            "kept": [{"branch": "agent/later", "reason": "over the per-call limit"}],
+            "unlisted": 3
+        }),
+    );
+    let out = home.run(&wt.path(), &["worktree", "prune"]).await;
+    assert_exit(&out, 0);
+    assert_eq!(fake.request("prune").params, json!({"project":"project1"}));
+    assert_eq!(
+        stdout(&out),
+        "removed agent/done\nkept agent/later: over the per-call limit\n3 more agent worktrees over the per-call limit; prune again after these are handled\n"
+    );
+}
+
+#[tokio::test]
+async fn worktree_prune_prints_at_most_512_kept_lines() {
+    let home = Home::new_in(std::path::Path::new("/tmp"));
+    let wt = joined(&home);
+    let kept: Vec<Value> = (0..600)
+        .map(|index| json!({"branch": format!("agent/k{index:03}"), "reason": "uncommitted"}))
+        .collect();
+    let _fake = Fake::start(&home, json!({"removed": [], "kept": kept}));
+    let out = home.run(&wt.path(), &["worktree", "prune"]).await;
+    assert_exit(&out, 0);
+    let text = stdout(&out);
+    let lines: Vec<_> = text.lines().collect();
+    assert_eq!(lines.len(), 512);
+    assert_eq!(lines[0], "kept agent/k000: uncommitted");
+    assert_eq!(lines[511], "kept agent/k511: uncommitted");
+}
+
+#[tokio::test]
 async fn budget_add_sends_agent_budget() {
     let home = Home::new_in(std::path::Path::new("/tmp"));
     let fake = Fake::start(

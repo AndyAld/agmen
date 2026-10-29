@@ -63,8 +63,12 @@ enum Holder {
 }
 /// The largest `agent.json` or `status.json` agmend reads.
 const MAX_RECORD_BYTES: u64 = 64 * 1024;
-/// The most worktrees one folder lookup checks.
+/// The most worktrees one folder lookup checks. One prune call checks this
+/// many agent worktrees and lists this many more as over the limit.
 const MAX_WORKTREES: usize = 256;
+/// One `git worktree list` refuses output past 1 MiB, and each record is
+/// longer than one byte, so a parsed list cannot be longer than this.
+const MAX_LISTED_WORKTREES: usize = 1024 * 1024;
 /// What a hand-joined agent gets, as New Agent's defaults.
 const JOINED_MODEL: &str = "sonnet";
 const JOINED_BUDGET_USD: &str = "5";
@@ -811,6 +815,12 @@ impl Managed {
     /// Removes only released agent worktrees, serializing against adoption,
     /// launch and removal so an agent cannot acquire a tree during the scan.
     pub(crate) async fn prune(&self, raw: Value) -> Result<Value, ApiError> {
+        self.prune_up_to(raw, MAX_WORKTREES).await
+    }
+
+    /// [`Self::prune`] with the per-call limit as an argument, so a test can
+    /// run the limit split on a few real worktrees. No request field sets it.
+    pub(super) async fn prune_up_to(&self, raw: Value, limit: usize) -> Result<Value, ApiError> {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Prune {
@@ -834,9 +844,7 @@ impl Managed {
         let root = root
             .ok_or_else(|| bad_request("open the project's checkout before pruning worktrees"))?;
         let (worker_root, trees) = crate::worktree::worktree_root(&root).await.map_err(error)?;
-        if trees.len() > MAX_WORKTREES {
-            return Err(bad_request("prune supports at most 256 worktrees per call"));
-        }
+        let batch = prune_batch(&trees, limit);
         let repo = worker_root
             .parent()
             .ok_or_else(|| error("worker root has no main checkout"))?
@@ -865,15 +873,8 @@ impl Managed {
             })?;
         let mut removed = Vec::new();
         let mut kept = Vec::new();
-        for tree in trees.into_iter().skip(1).take(MAX_WORKTREES) {
-            let Some(branch) = tree
-                .branch
-                .as_deref()
-                .and_then(|branch| branch.strip_prefix("refs/heads/agent/"))
-                .map(|name| format!("agent/{name}"))
-            else {
-                continue;
-            };
+        for tree in batch.check {
+            let branch = tree.branch;
             let reason = if held_branches.contains(&(repo.clone(), branch.clone()))
                 || held_paths.contains(&tree.path)
             {
@@ -899,7 +900,11 @@ impl Managed {
                 None => removed.push(branch),
             }
         }
-        Ok(json!({"removed":removed,"kept":kept}))
+        // No git work here: an over-limit tree is only named.
+        for branch in batch.over_limit {
+            kept.push(json!({"branch":branch,"reason":"over the per-call limit"}));
+        }
+        Ok(prune_answer(removed, kept, batch.unlisted))
     }
 
     pub(super) async fn save_record(&self, record: &Record) -> Result<(), ApiError> {
@@ -916,6 +921,74 @@ impl Managed {
         .await
         .map_err(error)?
         .map_err(error)
+    }
+}
+
+/// An agent worktree among the first `limit` in list order.
+struct CheckedAgent {
+    path: PathBuf,
+    skip: bool,
+    branch: String,
+}
+
+/// Agent worktrees one prune call checks, lists as over the limit, or only counts.
+struct PruneBatch {
+    check: Vec<CheckedAgent>,
+    over_limit: Vec<String>,
+    unlisted: usize,
+}
+
+/// The branch name when `branch` is `refs/heads/agent/<name>`.
+fn agent_branch(branch: Option<&str>) -> Option<String> {
+    branch
+        .and_then(|branch| branch.strip_prefix("refs/heads/agent/"))
+        .map(|name| format!("agent/{name}"))
+}
+
+/// Splits the agent worktrees after the main checkout: the first `limit` in
+/// list order are checked, the next `limit` are listed as over the limit, and
+/// the rest are only counted.
+///
+/// Non-agent trees are skipped and do not count toward the limit. Managed and
+/// unavailable agent trees do, because the caller decides those later.
+fn prune_batch(trees: &[crate::git::ListedWorktree], limit: usize) -> PruneBatch {
+    let mut check = Vec::new();
+    let mut over_limit = Vec::new();
+    let mut unlisted = 0usize;
+    for tree in trees.iter().skip(1).take(MAX_LISTED_WORKTREES) {
+        let Some(branch) = agent_branch(tree.branch.as_deref()) else {
+            continue;
+        };
+        // shortcut: only the first `limit` (256) agent worktrees in list order
+        // are checked. If that many are kept for good (managed, dirty,
+        // unmerged), a later prune checks the same trees again and never
+        // reaches the rest. Revisit this if a project ever has that many live
+        // agent worktrees.
+        if check.len() < limit {
+            check.push(CheckedAgent {
+                path: tree.path.clone(),
+                skip: tree.skip,
+                branch,
+            });
+        } else if over_limit.len() < limit {
+            over_limit.push(branch);
+        } else {
+            unlisted += 1;
+        }
+    }
+    PruneBatch {
+        check,
+        over_limit,
+        unlisted,
+    }
+}
+
+/// `removed` and `kept`, plus `unlisted` when some agent worktrees were neither checked nor listed.
+fn prune_answer(removed: Vec<String>, kept: Vec<Value>, unlisted: usize) -> Value {
+    if unlisted == 0 {
+        json!({"removed": removed, "kept": kept})
+    } else {
+        json!({"removed": removed, "kept": kept, "unlisted": unlisted})
     }
 }
 
@@ -1233,4 +1306,126 @@ fn read_record(dir: &Path) -> anyhow::Result<Option<Loaded>> {
         .and_then(|bytes| serde_json::from_slice::<SavedStatus>(&bytes).ok())
         .map(|status| status.spent_usd);
     Ok(Some((record, spent, migrated)))
+}
+
+#[cfg(test)]
+mod batch_tests {
+    use super::{MAX_WORKTREES, prune_answer, prune_batch};
+
+    fn listed(branch: Option<&str>) -> crate::git::ListedWorktree {
+        crate::git::ListedWorktree {
+            path: std::path::Path::new("/wt").join(branch.unwrap_or("detached")),
+            head: None,
+            branch: branch.map(str::to_owned),
+            skip: false,
+        }
+    }
+
+    /// The main checkout, which is on an agent branch and still never checked,
+    /// then `agents` agent trees named `agent/a000` and up, each after a tree
+    /// on another branch: a count that included those would move every boundary.
+    fn checkout(agents: usize) -> Vec<crate::git::ListedWorktree> {
+        let mut trees = vec![listed(Some("refs/heads/agent/main-checkout"))];
+        for index in 0..agents {
+            trees.push(listed(Some(&format!("refs/heads/feature/f{index}"))));
+            trees.push(listed(Some(&format!("refs/heads/agent/a{index:03}"))));
+        }
+        trees
+    }
+
+    fn names(range: std::ops::Range<usize>) -> Vec<String> {
+        range.map(|index| format!("agent/a{index:03}")).collect()
+    }
+
+    #[test]
+    fn prune_batch_checks_256_lists_256_and_counts_the_rest() {
+        const CHECKED: usize = 256;
+        const LISTED: usize = 256;
+        const UNLISTED: usize = 4;
+        let mut trees = vec![listed(Some("refs/heads/main")), listed(None)];
+        trees.push(listed(Some("refs/heads/feature/keep")));
+        for index in 0..CHECKED {
+            trees.push(listed(Some(&format!("refs/heads/agent/c{index:03}"))));
+        }
+        for index in 0..LISTED {
+            trees.push(listed(Some(&format!("refs/heads/agent/o{index:03}"))));
+        }
+        trees.push(listed(Some("refs/heads/notes")));
+        for index in 0..UNLISTED {
+            trees.push(listed(Some(&format!("refs/heads/agent/u{index}"))));
+        }
+        let batch = prune_batch(&trees, MAX_WORKTREES);
+        assert_eq!(batch.check.len(), CHECKED);
+        assert_eq!(batch.check[0].branch, "agent/c000");
+        assert_eq!(batch.check[CHECKED - 1].branch, "agent/c255");
+        assert_eq!(batch.over_limit.len(), LISTED);
+        assert_eq!(batch.over_limit[0], "agent/o000");
+        assert_eq!(batch.over_limit[LISTED - 1], "agent/o255");
+        assert_eq!(batch.unlisted, UNLISTED);
+
+        let mut exactly = vec![listed(Some("refs/heads/main"))];
+        for index in 0..CHECKED {
+            exactly.push(listed(Some(&format!("refs/heads/agent/e{index}"))));
+        }
+        let exact = prune_batch(&exactly, MAX_WORKTREES);
+        assert_eq!(exact.check.len(), CHECKED);
+        assert!(exact.over_limit.is_empty());
+        assert_eq!(exact.unlisted, 0);
+
+        let mut one_over = exactly;
+        one_over.push(listed(Some("refs/heads/agent/extra")));
+        let over = prune_batch(&one_over, MAX_WORKTREES);
+        assert_eq!(over.check.len(), CHECKED);
+        assert_eq!(over.over_limit, vec!["agent/extra".to_owned()]);
+        assert_eq!(over.unlisted, 0);
+
+        let absent = prune_answer(vec![], vec![], 0);
+        assert!(absent.get("unlisted").is_none());
+        assert_eq!(
+            prune_answer(vec!["agent/a".to_owned()], vec![], UNLISTED)["unlisted"],
+            UNLISTED
+        );
+    }
+
+    #[test]
+    fn prune_batch_splits_at_every_boundary() {
+        // (agent trees, checked, listed over the limit, unlisted)
+        for (agents, checked, over, unlisted) in [
+            (0, 0, 0, 0),
+            (1, 1, 0, 0),
+            (255, 255, 0, 0),
+            (256, 256, 0, 0),
+            (257, 256, 1, 0),
+            (512, 256, 256, 0),
+            (513, 256, 256, 1),
+            (700, 256, 256, 188),
+        ] {
+            let batch = prune_batch(&checkout(agents), MAX_WORKTREES);
+            let case = format!("{agents} agent trees");
+            // A list's length and ends: the lists are contiguous and up to 256 long.
+            let ends = |list: &[String]| (list.len(), list.first().cloned(), list.last().cloned());
+            let first: Vec<_> = batch.check.iter().map(|tree| tree.branch.clone()).collect();
+            assert_eq!(ends(&first), ends(&names(0..checked)), "{case}");
+            let listed = ends(&batch.over_limit);
+            assert_eq!(listed, ends(&names(checked..checked + over)), "{case}");
+            assert_eq!(batch.unlisted, unlisted, "{case}");
+        }
+    }
+
+    #[test]
+    fn prune_batch_counts_unavailable_trees_and_keeps_every_path() {
+        let mut trees = checkout(MAX_WORKTREES + 1);
+        // Indexes 2 and 4 are the first two agent trees; 0 is the main checkout.
+        trees[2].skip = true;
+        trees[4].skip = true;
+        let batch = prune_batch(&trees, MAX_WORKTREES);
+        assert_eq!(batch.check.len(), MAX_WORKTREES);
+        assert!(batch.check[0].skip && batch.check[1].skip);
+        assert!(batch.check[2..].iter().all(|tree| !tree.skip));
+        assert_eq!(batch.over_limit, names(MAX_WORKTREES..MAX_WORKTREES + 1));
+        assert_eq!(
+            batch.check[1].path,
+            std::path::Path::new("/wt/refs/heads/agent/a001")
+        );
+    }
 }

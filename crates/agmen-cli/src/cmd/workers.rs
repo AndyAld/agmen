@@ -158,6 +158,9 @@ pub(crate) async fn workers(args: WorkersArgs) -> Result<()> {
     Ok(())
 }
 
+/// Checked agent worktrees plus the over-limit entries one prune lists.
+const MAX_KEPT_LINES: usize = 512;
+
 pub(crate) async fn worktree(command: WorktreeCommand) -> Result<()> {
     let WorktreeCommand::Prune {
         project: explicit,
@@ -197,17 +200,30 @@ pub(crate) async fn worktree(command: WorktreeCommand) -> Result<()> {
         .get("kept")
         .and_then(Value::as_array)
         .context("agmend's answer has no kept array")?;
+    let unlisted = match answer.get("unlisted") {
+        None => None,
+        Some(count) => Some(
+            count
+                .as_u64()
+                .context("agmend's unlisted count is not a number")?,
+        ),
+    };
     for branch in removed.iter().take(256) {
         let branch = branch
             .as_str()
             .context("agmend's removed branch is not a string")?;
         println!("removed {}", clean(branch));
     }
-    for entry in kept.iter().take(256) {
+    for entry in kept.iter().take(MAX_KEPT_LINES) {
         println!(
             "kept {}: {}",
             clean(field(entry, "branch")?),
             clean(field(entry, "reason")?)
+        );
+    }
+    if let Some(count) = unlisted {
+        println!(
+            "{count} more agent worktrees over the per-call limit; prune again after these are handled"
         );
     }
     Ok(())
