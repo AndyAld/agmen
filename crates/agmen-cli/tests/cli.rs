@@ -1501,6 +1501,34 @@ fn account_fixture(
 }
 
 #[test]
+fn chat_quota_nack_prints_the_hint() {
+    let home = Home::new();
+    let (_, server) = account_fixture(
+        &home,
+        serde_json::json!({
+            "verb": "NACK",
+            "id": "01JBX6Q4T7W3C2M8Y9K5N0P1RS",
+            "reason": "quota_exceeded",
+            "retryable": false,
+            "retry_after_ms": 1000
+        }),
+    );
+    let out = home
+        .agmen(home.path(), &["chat", "--project", "project1", "hello"])
+        .output()
+        .unwrap();
+    assert_exit(&out, 4);
+    let err = stderr(&out);
+    assert!(err.contains("rejected: quota_exceeded"), "{err}");
+    assert!(err.contains("00:00 UTC"), "{err}");
+    let request = server.join().unwrap();
+    assert!(
+        request.starts_with("POST /v1/projects/project1/messages "),
+        "{request}"
+    );
+}
+
+#[test]
 fn whoami_json_and_unchanged_text() {
     let me = serde_json::json!({"id":"hmn7k2q9","handle":"andy","broker_url":"mqtt://localhost","projects":[{"tenant":"tenant01","project":"project1","name":"marked","role":"admin"}]});
     for json in [true, false] {
