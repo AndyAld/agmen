@@ -44,7 +44,7 @@ services:
   ngrok:
     image: ngrok/ngrok:3.39.13-alpine
     profiles: ["ngrok"]
-    command: ["http", "http://hub:8080"]
+    command: ["http", "--inspect=false", "http://hub:8080"]
     environment:
       NGROK_AUTHTOKEN: ${AGMEN_NGROK_AUTHTOKEN:-}
     ports: ["127.0.0.1::4040"]
