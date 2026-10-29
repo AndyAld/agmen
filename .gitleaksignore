@@ -1,0 +1,3 @@
+# PEM header literals, not key material: the hub writes a key it generates at runtime, and a test checks the header.
+33de16bdaa86e365243f1d0a19bfcf9cefd38dcc:crates/agmen-hub/src/self_config.rs:private-key:207
+33de16bdaa86e365243f1d0a19bfcf9cefd38dcc:crates/agmen-hub/src/self_config_tests.rs:private-key:91
