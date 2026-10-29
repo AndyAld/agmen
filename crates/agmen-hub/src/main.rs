@@ -27,7 +27,8 @@ use tracing_subscriber::EnvFilter;
 
 const USAGE: &str = "usage: agmen-hub [serve]
        agmen-hub health
-       agmen-hub bootstrap --tenant <name> --project <name> (--admin-github <login> | --admin-github-id <id>) [--repo-url <url>]";
+       agmen-hub bootstrap --tenant <name> --project <name> (--admin-github <login> | --admin-github-id <id>) [--repo-url <url>]
+       agmen-hub set-plan --tenant <id> --plan team|business-10|business-25|business-50";
 
 /// What the command line asks for.
 #[derive(Debug, PartialEq, Eq)]
@@ -39,6 +40,10 @@ enum Command {
         project: String,
         admin: AdminGithub,
         repo_url: Option<RepoUrl>,
+    },
+    SetPlan {
+        tenant: String,
+        plan: String,
     },
     Help,
 }
@@ -65,6 +70,7 @@ async fn main() -> anyhow::Result<()> {
             admin,
             repo_url,
         } => bootstrap(tenant, project, admin, repo_url).await,
+        Command::SetPlan { tenant, plan } => set_plan(tenant, plan).await,
         Command::Help => {
             println!("{USAGE}");
             Ok(())
@@ -132,6 +138,32 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> anyhow::Result<Comman
                     .map(|url| url.parse().context("invalid --repo-url"))
                     .transpose()?,
             });
+        }
+        Some("set-plan") => {
+            let (mut tenant, mut plan) = (None, None);
+            while let Some(flag) = args.next() {
+                let slot = match flag.as_str() {
+                    "--tenant" => &mut tenant,
+                    "--plan" => &mut plan,
+                    _ => bail!("unknown option {flag:?}\n{USAGE}"),
+                };
+                let value = args
+                    .next()
+                    .with_context(|| format!("{flag} needs a value\n{USAGE}"))?;
+                if slot.replace(value).is_some() {
+                    bail!("{flag} is given twice");
+                }
+            }
+            let missing = |flag: &str| format!("set-plan needs {flag}\n{USAGE}");
+            let tenant = tenant.with_context(|| missing("--tenant"))?;
+            let plan = plan.with_context(|| missing("--plan"))?;
+            if !matches!(
+                plan.as_str(),
+                "team" | "business-10" | "business-25" | "business-50"
+            ) {
+                bail!("unknown plan {plan:?}");
+            }
+            return Ok(Command::SetPlan { tenant, plan });
         }
         Some(other) => bail!("unknown command {other:?}\n{USAGE}"),
     };
@@ -234,6 +266,26 @@ async fn bootstrap(
     println!(
         "{}",
         serde_json::to_string(&made).context("encoding the ids")?
+    );
+    Ok(())
+}
+
+async fn set_plan(tenant: String, plan: String) -> anyhow::Result<()> {
+    let database_url = std::env::var("AGMEN_DATABASE_URL")
+        .ok()
+        .filter(|url| !url.is_empty())
+        .context("AGMEN_DATABASE_URL is not set")?;
+    agmen_hub::apply_operator_plan(&database_url, &tenant, &plan)
+        .await
+        .context("setting the plan")?;
+    println!(
+        "{}",
+        serde_json::to_string(&serde_json::json!({
+            "tenant": tenant,
+            "plan": plan,
+            "state": "active",
+        }))
+        .context("encoding the plan")?
     );
     Ok(())
 }
@@ -405,6 +457,24 @@ mod tests {
                 repo_url: None,
             }
         );
+        assert_eq!(
+            parse(&["set-plan", "--tenant", "abcd1234", "--plan", "team"]).unwrap(),
+            Command::SetPlan {
+                tenant: "abcd1234".to_owned(),
+                plan: "team".to_owned(),
+            }
+        );
+        assert_eq!(
+            parse(&["set-plan", "--plan", "business-25", "--tenant", "abcd1234",]).unwrap(),
+            Command::SetPlan {
+                tenant: "abcd1234".to_owned(),
+                plan: "business-25".to_owned(),
+            }
+        );
+        let missing = parse(&["set-plan", "--plan", "team"]).unwrap_err();
+        assert!(missing.to_string().contains("--tenant"), "{missing:#}");
+        let bad = parse(&["set-plan", "--tenant", "abcd1234", "--plan", "free"]).unwrap_err();
+        assert!(bad.to_string().contains("free"), "{bad:#}");
     }
 
     #[test]

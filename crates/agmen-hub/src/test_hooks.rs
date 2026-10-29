@@ -5,7 +5,9 @@
 //! those through a browser sign-in with GitHub, and a test that wrote the
 //! rows itself would have to copy how the hub stores token hashes.
 
-use agmen_proto::Topics;
+use agmen_proto::{TenantId, Topics};
+
+use crate::billing::PlanRecord;
 
 use crate::auth::{approve_as, issue_human_tokens, issue_identity_token};
 use crate::db::{Role, TenantRole, new_id};
@@ -204,6 +206,18 @@ impl Hub {
             access_token: tokens.access_token,
             refresh_token: tokens.refresh_token,
         })
+    }
+
+    /// Overwrites the tenant's plan. Paddle ids already stored stay.
+    ///
+    /// # Errors
+    ///
+    /// When a query fails.
+    pub async fn set_plan(&self, tenant: &TenantId, record: &PlanRecord) -> Result<(), HookError> {
+        let mut tx = self.pool().begin().await?;
+        crate::groups::store_plan(&mut tx, tenant, record).await?;
+        tx.commit().await?;
+        Ok(())
     }
 
     /// Approves the device login `user_code` (as `agmen login` shows it,

@@ -180,6 +180,7 @@ impl Hub {
             .merge(auth::routes())
             .route("/v1/me", get(me::me))
             .route("/v1/projects", post(crate::projects::create))
+            .route("/v1/groups", post(crate::groups::create))
             .route("/v1/tenants/{tenant}/members", get(crate::tenants::list))
             .route(
                 "/v1/tenants/{tenant}/members/{handle}",
@@ -222,6 +223,10 @@ impl Hub {
 
     pub(crate) fn pool(&self) -> &PgPool {
         &self.inner.pool
+    }
+
+    pub(crate) fn mode(&self) -> HubMode {
+        self.inner.mode
     }
 
     pub(crate) fn set_broker_up(&self, up: bool) {

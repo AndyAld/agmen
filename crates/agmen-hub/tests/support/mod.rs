@@ -11,6 +11,7 @@
     reason = "each test binary uses a different subset of the helpers"
 )]
 
+pub mod fake_paddle;
 pub mod globs;
 pub mod mqtt;
 
@@ -23,8 +24,8 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use agmen_hub::{
-    Config, DEFAULT_CLAIM_LEASE, EmqxConfig, GithubConfig, Hub, HubMode, Messaging, MqttConfig,
-    Secret,
+    Catalog, Config, DEFAULT_CLAIM_LEASE, EmqxConfig, GithubConfig, HostedConfig, Hub, HubMode,
+    Messaging, MqttConfig, PaddleConfig, Secret,
 };
 use agmen_proto::Topics;
 use jiff::Timestamp;
@@ -129,7 +130,8 @@ pub struct TestDb {
 }
 
 impl TestDb {
-    async fn create() -> Self {
+    /// An empty database: the hub's migrations have not run on it.
+    pub async fn create() -> Self {
         let base = env("AGMEN_IT_PG");
         let admin = PgPoolOptions::new()
             .max_connections(1)
@@ -152,7 +154,7 @@ impl TestDb {
         }
     }
 
-    async fn drop_db(self) {
+    pub async fn drop_db(self) {
         sqlx::query(AssertSqlSafe(format!(
             "DROP DATABASE \"{}\" WITH (FORCE)",
             self.name
@@ -232,6 +234,38 @@ where
     }
 }
 
+/// [`run`] against a hosted hub whose Paddle settings point at a [`fake_paddle::FakePaddle`].
+/// The fake stays up until `body` returns.
+pub async fn run_hosted<F, Fut>(body: F)
+where
+    F: FnOnce(Ctx) -> Fut,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    let db = TestDb::create().await;
+    let github = FakeGithub::start().await.unwrap();
+    let paddle = fake_paddle::FakePaddle::start().await.unwrap();
+    let hub = TestHub::start_hosted(&db.url, &github, &paddle, DEV_KEY_1, &[]).await;
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&db.url)
+        .await
+        .expect("connect to the test database");
+    let ctx = Ctx {
+        db_url: db.url.clone(),
+        pool: pool.clone(),
+        github,
+        hub,
+        http: http_client(),
+    };
+    let outcome = tokio::spawn(body(ctx)).await;
+    pool.close().await;
+    db.drop_db().await;
+    drop(paddle);
+    if let Err(err) = outcome {
+        std::panic::resume_unwind(err.into_panic());
+    }
+}
+
 /// A client that exposes redirects to the test instead of following them.
 pub fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
@@ -262,11 +296,28 @@ impl Drop for TestHub {
     }
 }
 
+fn hosted_config(paddle: &fake_paddle::FakePaddle) -> HostedConfig {
+    HostedConfig {
+        paddle: PaddleConfig {
+            api_url: paddle.base().clone(),
+            api_key: Secret::new(paddle.api_key()),
+            webhook_secret: Secret::new(paddle.webhook_secret()),
+        },
+        catalog: Catalog {
+            team_base: "pri_team_base".to_owned(),
+            team_seat: "pri_team_seat".to_owned(),
+            business_10: "pri_business_10".to_owned(),
+            business_25: "pri_business_25".to_owned(),
+            business_50: "pri_business_50".to_owned(),
+        },
+    }
+}
+
 impl TestHub {
     /// Starts a hub on `db_url` that signs broker tokens with `signing` and
     /// also publishes `extra` in its JWKS.
     pub async fn start(db_url: &str, github: &FakeGithub, signing: &str, extra: &[&str]) -> Self {
-        Self::start_with_lease(db_url, github, signing, extra, DEFAULT_CLAIM_LEASE).await
+        Self::start_configured(db_url, github, signing, extra, |_| {}).await
     }
 
     /// [`TestHub::start`] with claims that last `lease`.
@@ -277,11 +328,15 @@ impl TestHub {
         extra: &[&str],
         lease: Duration,
     ) -> Self {
-        Self::start_with_mode_and_lease(db_url, github, signing, extra, HubMode::SelfHost, lease)
-            .await
+        Self::start_configured(db_url, github, signing, extra, |config| {
+            config.claim_lease = lease;
+        })
+        .await
     }
 
     /// [`TestHub::start`] in the requested hub mode.
+    ///
+    /// Does not fill Paddle settings. [`TestHub::start_hosted`] does.
     pub async fn start_in_mode(
         db_url: &str,
         github: &FakeGithub,
@@ -289,25 +344,44 @@ impl TestHub {
         extra: &[&str],
         mode: HubMode,
     ) -> Self {
-        Self::start_with_mode_and_lease(db_url, github, signing, extra, mode, DEFAULT_CLAIM_LEASE)
-            .await
+        Self::start_configured(db_url, github, signing, extra, |config| {
+            config.mode = mode;
+        })
+        .await
     }
 
-    async fn start_with_mode_and_lease(
+    /// [`TestHub::start`] in hosted mode, with Paddle settings taken from `paddle`.
+    pub async fn start_hosted(
+        db_url: &str,
+        github: &FakeGithub,
+        paddle: &fake_paddle::FakePaddle,
+        signing: &str,
+        extra: &[&str],
+    ) -> Self {
+        let hosted = hosted_config(paddle);
+        Self::start_configured(db_url, github, signing, extra, move |config| {
+            config.mode = HubMode::Hosted;
+            config.hosted = Some(hosted);
+        })
+        .await
+    }
+
+    /// Starts a hub and then applies `edit` to its config.
+    pub async fn start_configured(
         db_url: &str,
         github: &FakeGithub,
         signing: &str,
         extra: &[&str],
-        mode: HubMode,
-        lease: Duration,
+        edit: impl FnOnce(&mut Config),
     ) -> Self {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr: SocketAddr = listener.local_addr().unwrap();
         let base = Url::parse(&format!("http://{addr}")).unwrap();
         let (host, port) = mqtt::mqtt_addr();
-        let config = Config {
-            mode,
-            // Hosted Task 2 fills Paddle settings; this task's tests never read them.
+        let mut config = Config {
+            mode: HubMode::SelfHost,
+            // `start_hosted` fills Paddle settings. This default stays None,
+            // including `start_in_mode(Hosted)`, whose tests never read them.
             hosted: None,
             retention_days: None,
             group_name: "agmen".to_owned(),
@@ -338,8 +412,9 @@ impl TestHub {
                 emqx_api_secret: Secret::new(env("AGMEN_IT_EMQX_API_SECRET")),
             },
             jwt_extra_keys: extra.iter().map(|name| jwt_key(name)).collect(),
-            claim_lease: lease,
+            claim_lease: DEFAULT_CLAIM_LEASE,
         };
+        edit(&mut config);
         let hub = Hub::connect(&config).await.expect("start the hub");
         let router = hub.router();
         let server = tokio::spawn(async move {
@@ -351,6 +426,21 @@ impl TestHub {
             mqtt: config.mqtt,
             server,
         }
+    }
+
+    async fn start_with_mode_and_lease(
+        db_url: &str,
+        github: &FakeGithub,
+        signing: &str,
+        extra: &[&str],
+        mode: HubMode,
+        lease: Duration,
+    ) -> Self {
+        Self::start_configured(db_url, github, signing, extra, |config| {
+            config.mode = mode;
+            config.claim_lease = lease;
+        })
+        .await
     }
 
     /// Connects this hub to the dev EMQX and starts ingest and the
