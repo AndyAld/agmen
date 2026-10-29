@@ -1,16 +1,18 @@
-//! Hosted group creation, the one trial per GitHub account, and the
-//! three-group ownership limit.
+//! Hosted group creation, the one trial per GitHub account, the
+//! three-group ownership limit, and paid seats.
 #![cfg(test)]
 
 mod support;
 
 use std::time::Duration;
 
-use agmen_hub::{MIGRATOR, SetPlanError, TenantRole};
+use agmen_hub::{BusinessStep, MIGRATOR, Plan, PlanRecord, PlanState, SetPlanError, TenantRole};
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 use sqlx::postgres::PgPoolOptions;
-use support::{Ctx, Project, TestDb, login, mint_ok, run, run_hosted, seed_project};
+use support::{
+    Ctx, Project, TestDb, login, member_with_token, mint_ok, run, run_hosted, seed_project,
+};
 
 const GROUP_LIMIT: &str = "you already own 3 groups, the most one account can own";
 const SECS_PER_DAY: u64 = 86_400;
@@ -760,4 +762,540 @@ async fn migration_round_trip(pool: &sqlx::PgPool) {
     sqlx::raw_sql(up.sql.clone()).execute(pool).await.unwrap();
     assert_eq!(count(pool, "SELECT count(*) FROM tenant_plans").await, 0);
     assert_eq!(count(pool, "SELECT count(*) FROM trial_grants").await, 0);
+}
+
+const ADD_SEAT: &str = "agmen group seats add 1";
+
+struct Trial {
+    owner: String,
+    tenant: String,
+    project: String,
+}
+
+async fn trial(ctx: &Ctx) -> Trial {
+    let owner = login(ctx, 4242, "andy").await;
+    let body = create_named(ctx, &owner, "acme").await;
+    Trial {
+        owner,
+        tenant: body["tenant"].as_str().unwrap().to_owned(),
+        project: body["project"].as_str().unwrap().to_owned(),
+    }
+}
+
+async fn seats_of(ctx: &Ctx, token: &str, tenant: &str) -> (StatusCode, Value) {
+    let response = ctx
+        .http
+        .get(ctx.hub.url(&format!("/v1/tenants/{tenant}/seats")))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    (status, response.json().await.unwrap_or(Value::Null))
+}
+
+async fn create_invite(ctx: &Ctx, owner: &str, project: &str) -> String {
+    let response = ctx
+        .http
+        .post(ctx.hub.url("/v1/invites"))
+        .bearer_auth(owner)
+        .json(&json!({"project": project, "role": "member"}))
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let body: Value = response.json().await.unwrap_or(Value::Null);
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    body["code"].as_str().unwrap().to_owned()
+}
+
+async fn accept_code(ctx: &Ctx, token: &str, code: &str) -> (StatusCode, Value) {
+    let response = ctx
+        .http
+        .post(ctx.hub.url(&format!("/v1/invites/{code}/accept")))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    (status, response.json().await.unwrap_or(Value::Null))
+}
+
+fn accept_request(ctx: &Ctx, token: &str, code: &str) -> reqwest::RequestBuilder {
+    ctx.http
+        .post(ctx.hub.url(&format!("/v1/invites/{code}/accept")))
+        .bearer_auth(token)
+}
+
+/// Signs `handle` in and accepts a new invite. Returns that person's token.
+async fn join(ctx: &Ctx, owner: &str, project: &str, sub: u64, handle: &str) -> String {
+    let token = login(ctx, sub, handle).await;
+    let code = create_invite(ctx, owner, project).await;
+    let (status, body) = accept_code(ctx, &token, &code).await;
+    assert_eq!(status, StatusCode::OK, "{handle}: {body}");
+    token
+}
+
+fn assert_trial_full(body: &Value) {
+    assert_eq!(body["used"].as_u64(), Some(4), "{body}");
+    assert_eq!(body["paid"].as_u64(), Some(4), "{body}");
+    assert!(body["plan"].is_null(), "{body}");
+    assert_eq!(body["state"], "trial");
+    assert_eq!(body["quota"].as_u64(), Some(5_000), "{body}");
+    assert_eq!(body["used_today"].as_u64(), Some(0), "{body}");
+}
+
+fn assert_no_free_seat(status: StatusCode, body: &Value) {
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["error"], "no_free_seat");
+    let description = body["error_description"].as_str().unwrap_or("");
+    assert!(description.contains(ADD_SEAT), "{body}");
+}
+
+async fn unused_invites(ctx: &Ctx, project: &str) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM invites WHERE project_id = $1 AND used_by IS NULL")
+        .bind(project)
+        .fetch_one(&ctx.pool)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn it_trial_fills_four_seats() {
+    run_hosted(|ctx| async move {
+        let group = trial(&ctx).await;
+        for (sub, handle) in [(2_u64, "blair"), (3, "casey"), (4, "drew")] {
+            join(&ctx, &group.owner, &group.project, sub, handle).await;
+        }
+        let token = login(&ctx, 5, "erin").await;
+        let code = create_invite(&ctx, &group.owner, &group.project).await;
+        let (status, body) = accept_code(&ctx, &token, &code).await;
+        assert_no_free_seat(status, &body);
+        let (status, seats) = seats_of(&ctx, &group.owner, &group.tenant).await;
+        assert_eq!(status, StatusCode::OK, "{seats}");
+        assert_trial_full(&seats);
+        assert_eq!(unused_invites(&ctx, &group.project).await, 1);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn it_member_rejoins_without_a_seat() {
+    run_hosted(|ctx| async move {
+        let group = trial(&ctx).await;
+        let blair = join(&ctx, &group.owner, &group.project, 2, "blair").await;
+        join(&ctx, &group.owner, &group.project, 3, "casey").await;
+        join(&ctx, &group.owner, &group.project, 4, "drew").await;
+        let (status, seats) = seats_of(&ctx, &group.owner, &group.tenant).await;
+        assert_eq!(status, StatusCode::OK, "{seats}");
+        assert_trial_full(&seats);
+
+        let response = ctx
+            .http
+            .post(ctx.hub.url("/v1/projects"))
+            .bearer_auth(&group.owner)
+            .json(&json!({"name": "api", "tenant": group.tenant}))
+            .send()
+            .await
+            .unwrap();
+        let status = response.status();
+        let created: Value = response.json().await.unwrap_or(Value::Null);
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        let second = created["project"].as_str().unwrap();
+        let code = create_invite(&ctx, &group.owner, second).await;
+        let (status, body) = accept_code(&ctx, &blair, &code).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (status, seats) = seats_of(&ctx, &group.owner, &group.tenant).await;
+        assert_eq!(status, StatusCode::OK, "{seats}");
+        assert_trial_full(&seats);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn it_agents_take_no_seat() {
+    run_hosted(|ctx| async move {
+        let group = trial(&ctx).await;
+        let (status, before) = seats_of(&ctx, &group.owner, &group.tenant).await;
+        assert_eq!(status, StatusCode::OK, "{before}");
+        assert_eq!(before["used"].as_u64(), Some(1), "{before}");
+        let project = Project {
+            tenant: group.tenant.clone(),
+            project: group.project.clone(),
+        };
+        // An identity's handle is `<owner handle>/<name>`.
+        for handle in ["andy/ada", "andy/bea", "andy/cam"] {
+            mint_ok(&ctx, &group.owner, handle, &project).await;
+        }
+        let (status, after) = seats_of(&ctx, &group.owner, &group.tenant).await;
+        assert_eq!(status, StatusCode::OK, "{after}");
+        assert_eq!(after["used"], before["used"], "{after}");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn it_last_seat_race_one_wins() {
+    run_hosted(|ctx| async move {
+        let group = trial(&ctx).await;
+        join(&ctx, &group.owner, &group.project, 2, "blair").await;
+        join(&ctx, &group.owner, &group.project, 3, "casey").await;
+        let erin = login(&ctx, 5, "erin").await;
+        let fran = login(&ctx, 6, "fran").await;
+        let erin_code = create_invite(&ctx, &group.owner, &group.project).await;
+        let fran_code = create_invite(&ctx, &group.owner, &group.project).await;
+        // Two bare accepts only sometimes overlap, so a missing lock could
+        // pass. Hold the plan row from here instead: with the hub's own lock
+        // both accepts wait on it, and without that lock they run past it.
+        let mut held = ctx.pool.begin().await.unwrap();
+        sqlx::query("SELECT 1 FROM tenant_plans WHERE tenant_id = $1 FOR UPDATE")
+            .bind(&group.tenant)
+            .execute(&mut *held)
+            .await
+            .unwrap();
+        let sent = tokio::spawn(send_at_once(vec![
+            accept_request(&ctx, &erin, &erin_code),
+            accept_request(&ctx, &fran, &fran_code),
+        ]));
+        let mut waiting: i64 = 0;
+        for _ in 0..600 {
+            waiting = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_stat_activity
+                 WHERE datname = current_database() AND cardinality(pg_blocking_pids(pid)) > 0",
+            )
+            .fetch_one(&ctx.pool)
+            .await
+            .unwrap();
+            if waiting >= 2 || sent.is_finished() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(waiting, 2, "both accepts should wait on the plan row lock");
+        held.commit().await.unwrap();
+        let answers = sent.await.unwrap();
+        let mut won = 0;
+        let mut refused = 0;
+        for (status, body) in &answers {
+            if *status == StatusCode::OK {
+                won += 1;
+            } else {
+                assert_no_free_seat(*status, body);
+                refused += 1;
+            }
+        }
+        assert_eq!((won, refused), (1, 1), "{answers:?}");
+        let (status, seats) = seats_of(&ctx, &group.owner, &group.tenant).await;
+        assert_eq!(status, StatusCode::OK, "{seats}");
+        assert_trial_full(&seats);
+        assert_eq!(unused_invites(&ctx, &group.project).await, 1);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn it_no_seat_alerts_owner_once_an_hour() {
+    run_hosted(|ctx| async move {
+        let group = trial(&ctx).await;
+        for (sub, handle) in [(2_u64, "blair"), (3, "casey"), (4, "drew")] {
+            join(&ctx, &group.owner, &group.project, sub, handle).await;
+        }
+        for (sub, handle) in [(5_u64, "erin"), (6, "fran")] {
+            refused(&ctx, &group, sub, handle).await;
+        }
+        let alerts = owner_alerts(&ctx, &group).await;
+        assert_eq!(alerts.len(), 1, "{alerts:?}");
+        assert!(alerts[0].contains("erin"), "{alerts:?}");
+        assert!(alerts[0].contains(ADD_SEAT), "{alerts:?}");
+        assert!(!alerts[0].contains("fran"), "{alerts:?}");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn it_removed_member_frees_seat() {
+    run_hosted(|ctx| async move {
+        let group = trial(&ctx).await;
+        join(&ctx, &group.owner, &group.project, 2, "blair").await;
+        join(&ctx, &group.owner, &group.project, 3, "casey").await;
+        join(&ctx, &group.owner, &group.project, 4, "drew").await;
+        let (status, seats) = seats_of(&ctx, &group.owner, &group.tenant).await;
+        assert_eq!(status, StatusCode::OK, "{seats}");
+        assert_trial_full(&seats);
+
+        let response = ctx
+            .http
+            .delete(
+                ctx.hub
+                    .url(&format!("/v1/tenants/{}/members/drew", group.tenant)),
+            )
+            .bearer_auth(&group.owner)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let (status, seats) = seats_of(&ctx, &group.owner, &group.tenant).await;
+        assert_eq!(status, StatusCode::OK, "{seats}");
+        assert_eq!(seats["used"].as_u64(), Some(3), "{seats}");
+
+        join(&ctx, &group.owner, &group.project, 5, "erin").await;
+        let (status, seats) = seats_of(&ctx, &group.owner, &group.tenant).await;
+        assert_eq!(status, StatusCode::OK, "{seats}");
+        assert_trial_full(&seats);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn it_seats_admin_only() {
+    run_hosted(|ctx| async move {
+        let group = trial(&ctx).await;
+        let blair = join(&ctx, &group.owner, &group.project, 2, "blair").await;
+        let (status, body) = seats_of(&ctx, &blair, &group.tenant).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(body["error"], "group_admin_required");
+
+        let response = ctx
+            .http
+            .put(
+                ctx.hub
+                    .url(&format!("/v1/tenants/{}/members/blair/role", group.tenant)),
+            )
+            .bearer_auth(&group.owner)
+            .json(&json!({"role": "admin"}))
+            .send()
+            .await
+            .unwrap();
+        let status = response.status();
+        let changed: Value = response.json().await.unwrap_or(Value::Null);
+        assert_eq!(status, StatusCode::OK, "{changed}");
+        let (status, seats) = seats_of(&ctx, &blair, &group.tenant).await;
+        assert_eq!(status, StatusCode::OK, "{seats}");
+        assert_eq!(seats["used"].as_u64(), Some(2), "{seats}");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn it_seats_needs_a_human_in_the_group() {
+    run_hosted(|ctx| async move {
+        let group = trial(&ctx).await;
+        let stranger = login(&ctx, 9, "zed").await;
+        let (status, body) = seats_of(&ctx, &stranger, &group.tenant).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(body["error"], "group_admin_required");
+        let project = Project {
+            tenant: group.tenant.clone(),
+            project: group.project.clone(),
+        };
+        let agent = mint_ok(&ctx, &group.owner, "andy/bot", &project).await;
+        let (status, body) = seats_of(&ctx, &agent.token, &group.tenant).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(body["error"], "human_token_required");
+        let anonymous = ctx
+            .http
+            .get(ctx.hub.url(&format!("/v1/tenants/{}/seats", group.tenant)))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+        // A group that is not the caller's answers like any other group.
+        let (status, body) = seats_of(&ctx, &group.owner, "nosuchtenant").await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(body["error"], "group_admin_required");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn it_self_host_has_no_seat_limit() {
+    run(|ctx| async move {
+        let project = seed_project(&ctx.pool).await;
+        let admin = member_with_token(&ctx, &project, 1, "andy", "admin").await;
+        // `agmen-hub set-plan` can write a plan row on any database. Even
+        // with a four-seat trial on file, a self-host hub has no seat limit.
+        let tenant = project.tenant.parse().unwrap();
+        ctx.hub
+            .hub
+            .set_plan(&tenant, &PlanRecord::trial(jiff::Timestamp::now()))
+            .await
+            .unwrap();
+        for n in 0..10_u64 {
+            let handle = format!("member{n}");
+            join(&ctx, &admin, &project.project, 100 + n, &handle).await;
+        }
+        let (status, body) = seats_of(&ctx, &admin, &project.tenant).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert_eq!(body["error"], "not_hosted");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn it_group_without_a_plan_has_no_seat_limit() {
+    run_hosted(|ctx| async move {
+        // A group made by `agmen-hub bootstrap`, not `POST /v1/groups`, has
+        // no plan row. It is not seat-limited, and it has no seat count.
+        let project = seed_project(&ctx.pool).await;
+        let admin = member_with_token(&ctx, &project, 1, "andy", "admin").await;
+        for n in 0..6_u64 {
+            let handle = format!("member{n}");
+            join(&ctx, &admin, &project.project, 100 + n, &handle).await;
+        }
+        let (status, body) = seats_of(&ctx, &admin, &project.tenant).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert_eq!(body["error"], "not_found");
+        assert_eq!(
+            count(&ctx.pool, "SELECT count(*) FROM tenant_members").await,
+            7
+        );
+    })
+    .await;
+}
+
+fn active(plan: Plan) -> PlanRecord {
+    PlanRecord {
+        state: PlanState::Active,
+        plan: Some(plan),
+        trial_started_at: None,
+        past_due_since: None,
+        read_only_cause: None,
+        read_only_since: None,
+        reminders_sent: 0,
+        last_event_at: None,
+    }
+}
+
+#[tokio::test]
+async fn it_paid_plans_set_the_seat_count() {
+    run_hosted(|ctx| async move {
+        let group = trial(&ctx).await;
+        let tenant = group.tenant.parse().unwrap();
+        // Team has 4 seats and 2 more bought: 6.
+        let team = active(Plan::Team { extra_seats: 2 });
+        ctx.hub.hub.set_plan(&tenant, &team).await.unwrap();
+        for (sub, handle) in [
+            (2_u64, "blair"),
+            (3, "casey"),
+            (4, "drew"),
+            (5, "erin"),
+            (6, "fran"),
+        ] {
+            join(&ctx, &group.owner, &group.project, sub, handle).await;
+        }
+        let (status, seats) = seats_of(&ctx, &group.owner, &group.tenant).await;
+        assert_eq!(status, StatusCode::OK, "{seats}");
+        assert_eq!(seats["used"].as_u64(), Some(6), "{seats}");
+        assert_eq!(seats["paid"].as_u64(), Some(6), "{seats}");
+        assert_eq!(seats["plan"], "team");
+        assert_eq!(seats["state"], "active");
+        assert_eq!(seats["quota"].as_u64(), Some(12_000), "{seats}");
+        let gina = login(&ctx, 7, "gina").await;
+        let code = create_invite(&ctx, &group.owner, &group.project).await;
+        let (status, body) = accept_code(&ctx, &gina, &code).await;
+        assert_no_free_seat(status, &body);
+
+        // The refused invite is unused, so it works once a seat is added.
+        let business = active(Plan::Business(BusinessStep::Seats10));
+        ctx.hub.hub.set_plan(&tenant, &business).await.unwrap();
+        let (status, body) = accept_code(&ctx, &gina, &code).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (status, seats) = seats_of(&ctx, &group.owner, &group.tenant).await;
+        assert_eq!(status, StatusCode::OK, "{seats}");
+        assert_eq!(seats["used"].as_u64(), Some(7), "{seats}");
+        assert_eq!(seats["paid"].as_u64(), Some(10), "{seats}");
+        assert_eq!(seats["plan"], "business-10");
+        assert_eq!(seats["quota"].as_u64(), Some(50_000), "{seats}");
+    })
+    .await;
+}
+
+async fn owner_alerts(ctx: &Ctx, group: &Trial) -> Vec<String> {
+    let owner_id = me(ctx, &group.owner).await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    sqlx::query_scalar(
+        "SELECT envelope->>'body' FROM messages
+         WHERE project_id = $1 AND stream = $2 AND envelope->>'verb' = 'ALERT'
+         ORDER BY seq",
+    )
+    .bind(&group.project)
+    .bind(format!("inbox:{owner_id}"))
+    .fetch_all(&ctx.pool)
+    .await
+    .unwrap()
+}
+
+/// Signs `handle` in and has the full group refuse their invite.
+async fn refused(ctx: &Ctx, group: &Trial, sub: u64, handle: &str) {
+    let token = login(ctx, sub, handle).await;
+    let code = create_invite(ctx, &group.owner, &group.project).await;
+    let (status, body) = accept_code(ctx, &token, &code).await;
+    assert_no_free_seat(status, &body);
+}
+
+/// Makes the last no-seat alert look `minutes` old.
+async fn age_seat_alert(ctx: &Ctx, tenant: &str, minutes: i32) {
+    sqlx::query(
+        "UPDATE tenant_plans SET no_seat_alerted_at = now() - make_interval(mins => $2)
+         WHERE tenant_id = $1",
+    )
+    .bind(tenant)
+    .bind(minutes)
+    .execute(&ctx.pool)
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn it_no_seat_alert_repeats_after_an_hour() {
+    run_hosted(|ctx| async move {
+        let group = trial(&ctx).await;
+        for (sub, handle) in [(2_u64, "blair"), (3, "casey"), (4, "drew")] {
+            join(&ctx, &group.owner, &group.project, sub, handle).await;
+        }
+        refused(&ctx, &group, 5, "erin").await;
+        assert_eq!(owner_alerts(&ctx, &group).await.len(), 1);
+        // Fifty-nine minutes on, the hour is not over.
+        age_seat_alert(&ctx, &group.tenant, 59).await;
+        refused(&ctx, &group, 6, "fran").await;
+        assert_eq!(owner_alerts(&ctx, &group).await.len(), 1);
+        // Sixty-one minutes on, the next refusal alerts again.
+        age_seat_alert(&ctx, &group.tenant, 61).await;
+        refused(&ctx, &group, 7, "gina").await;
+        let sent = owner_alerts(&ctx, &group).await;
+        assert_eq!(sent.len(), 2, "{sent:?}");
+        assert!(sent[0].contains("erin"), "{sent:?}");
+        assert!(sent[1].contains("gina"), "{sent:?}");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn it_no_seat_alert_failure_keeps_the_403() {
+    run_hosted(|ctx| async move {
+        let group = trial(&ctx).await;
+        for (sub, handle) in [(2_u64, "blair"), (3, "casey"), (4, "drew")] {
+            join(&ctx, &group.owner, &group.project, sub, handle).await;
+        }
+        // With no owner row the hub has nobody to alert. That is logged, and
+        // the refused person still gets the same 403.
+        sqlx::query(
+            "UPDATE tenant_members SET role = 'admin' WHERE tenant_id = $1 AND role = 'owner'",
+        )
+        .bind(&group.tenant)
+        .execute(&ctx.pool)
+        .await
+        .unwrap();
+        refused(&ctx, &group, 5, "erin").await;
+        assert_eq!(unused_invites(&ctx, &group.project).await, 1);
+        let alerts: i64 = count(
+            &ctx.pool,
+            "SELECT count(*) FROM messages WHERE envelope->>'verb' = 'ALERT'",
+        )
+        .await;
+        assert_eq!(alerts, 0);
+    })
+    .await;
 }

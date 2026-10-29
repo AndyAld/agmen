@@ -204,6 +204,12 @@ pub(crate) async fn accept(
             "the invite has expired",
         ));
     }
+    // Hosted only, and only after the invite's own refusals. The plan row
+    // stays locked until this transaction commits, so two accepts of the
+    // last seat cannot both pass.
+    if hub.mode() == crate::config::HubMode::Hosted {
+        tx = crate::groups::ensure_free_seat(&hub, tx, &tenant, &human, &topics).await?;
+    }
     let joined = sqlx::query(
         "INSERT INTO memberships (human_id, project_id, role) VALUES ($1, $2, $3)
          ON CONFLICT (human_id, project_id) DO NOTHING",

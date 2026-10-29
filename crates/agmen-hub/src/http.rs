@@ -222,6 +222,7 @@ impl Hub {
                 "/v1/tenants/{tenant}/transfer",
                 post(crate::tenants::transfer),
             )
+            .route("/v1/tenants/{tenant}/seats", get(crate::groups::seats))
             .route("/v1/identities", post(identities::mint))
             .route("/v1/identities/{id}", delete(identities::revoke))
             .route(
