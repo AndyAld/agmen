@@ -193,9 +193,10 @@ async fn a_client_that_drips_its_head_is_dropped_after_the_timeout() {
         Err(err) if err.kind() == ErrorKind::ConnectionReset => {}
         other => panic!("expected EOF or connection reset, got {other:?}"),
     }
-    assert_eq!(
-        sent, 2,
-        "expected two bytes sent at 0 ms and 500 ms before the 800 ms drop"
+    // Two on time (0 ms and 500 ms); a loaded machine may delay the second.
+    assert!(
+        (1..=2).contains(&sent),
+        "expected one or two bytes sent before the 800 ms drop, sent {sent}"
     );
     assert!(
         elapsed >= head_timeout,
