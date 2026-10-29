@@ -184,7 +184,12 @@ async fn serve() -> anyhow::Result<()> {
     // HTTP serves before the broker connect: in the cluster EMQX verifies
     // the hub's own broker token against this hub's /v1/jwks, so on a cold
     // start it cannot accept the hub until that route answers.
-    let server = axum::serve(listener, hub.router()).with_graceful_shutdown(shutdown());
+    let server = agmen_hub::serve(
+        listener,
+        hub.router(),
+        agmen_hub::HEADER_READ_TIMEOUT,
+        shutdown(),
+    );
     let messaging = async {
         let mut messaging = hub
             .start_messaging(&config.mqtt)
@@ -194,7 +199,7 @@ async fn serve() -> anyhow::Result<()> {
         Err::<(), _>(anyhow::Error::new(failed).context("messaging stopped"))
     };
     tokio::select! {
-        served = server => served.context("serving HTTP"),
+        () = server => Ok(()),
         failed = messaging => failed,
     }
 }

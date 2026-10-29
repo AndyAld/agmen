@@ -68,7 +68,7 @@ pub use config::{
 pub use db::{Role, TenantRole, UnknownRole};
 pub use emqx::{EmqxAdmin, EmqxError};
 pub use group::GroupError;
-pub use http::{Hub, HubError};
+pub use http::{HEADER_READ_TIMEOUT, Hub, HubError, serve};
 pub use identities::{BROKER_TOKEN_TTL, CLIENT_ID_SUFFIXES, HumanId, Identity};
 pub use ingest::{HUB_IDENTITY, HubPost, IngestError, PostError, Posted};
 pub use mqtt::{Messaging, MessagingError};

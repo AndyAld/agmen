@@ -340,7 +340,13 @@ impl TestHub {
         let hub = Hub::connect(&config).await.expect("start the hub");
         let router = hub.router();
         let server = tokio::spawn(async move {
-            axum::serve(listener, router).await.unwrap();
+            agmen_hub::serve(
+                listener,
+                router,
+                agmen_hub::HEADER_READ_TIMEOUT,
+                std::future::pending(),
+            )
+            .await;
         });
         Self {
             base,
