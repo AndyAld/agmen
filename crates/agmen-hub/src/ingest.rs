@@ -7,52 +7,32 @@
 //! ledger verb the ledger's work and the hub's answer; the sweeper publishes
 //! the outbox. A refused message gets a NACK and leaves nothing behind.
 
-use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use agmen_core::{
-    Member, Parent, RateLimiter, Roster, Sender, ack_stream, candidate_item_keys, envelope_hash,
-    hub_identity, hub_now, may_send, mentioned, message_id, needs_roster, new_message_id,
-    parse_kind, route, stamp_refs,
+    AckCopy, Draft, Parent, RateLimiter, Reads, Roster, Sender, Store, StoreTx,
+    candidate_item_keys, envelope_hash, hub_now, may_send, mentioned, message_id, needs_roster,
+    parse_kind, route, stamp_refs, write,
 };
+pub(crate) use agmen_core::{HubPost, PostError, Posted, post_alert, post_in};
 use agmen_proto::{
-    Body, ClientEnvelope, DeliveryReply, IdentityId, IdentityKind, ItemKey, LaneName, MessageId,
-    NackReason, Payload, ProjectId, Ref, Seq, StampedEnvelope, Stream, Timestamp, Topics, Verb,
-    validate,
+    ClientEnvelope, DeliveryReply, IdentityId, IdentityKind, MessageId, NackReason, Payload,
+    ProjectId, Seq, Stream, Timestamp, Topics, Verb, validate,
 };
-use sqlx::{PgExecutor, PgPool, Postgres, Transaction};
+use sqlx::PgPool;
 use tokio::sync::{Notify, watch};
 
 use crate::claims::LedgerMessage;
-use crate::db::{Role, is_unique_violation};
 use crate::events::Wakes;
 use crate::http::{Hub, error_chain};
-use crate::numbering::{NumberingError, lock_head, next_seq};
+use crate::numbering::{NumberingError, lock_head};
 use crate::secrets_scan::find_secret;
 use crate::usage::{Gate, Taken, post_owner_alert, take_quota, with_thousands, write_gate};
 
-/// The hub's handle (protocol section 1).
-const HUB_HANDLE: &str = "hub";
-
-/// Leaves 16 KiB for topic and MQTT framing below the client's 96 KiB cap.
-const MAX_STAMPED_ENVELOPE_BYTES: usize = 80 * 1024;
-
 /// What a `hub_busy` NACK tells the client to wait.
 const BUSY_RETRY_MS: u64 = 1_000;
-
-/// The verbs the hub posts as numbered messages (ruling R34). ACK and NACK
-/// are delivery replies, and STATE goes to retained `state/` topics
-/// (protocol section 4), so none of them is stored.
-const HUB_VERBS: [Verb; 6] = [
-    Verb::Grant,
-    Verb::Deny,
-    Verb::Item,
-    Verb::Alert,
-    Verb::Release,
-    Verb::Status,
-];
 
 /// Why a publish could not be answered at all.
 #[derive(Debug, thiserror::Error)]
@@ -68,57 +48,6 @@ pub enum IngestError {
     /// The project could not be looked up.
     #[error("looking up the project failed")]
     Database(#[source] sqlx::Error),
-}
-
-/// Why the hub could not post as itself.
-#[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
-pub enum PostError {
-    /// The hub does not send this verb (ruling R34).
-    #[error("the hub does not send {0}")]
-    NotHubVerb(String),
-    /// The post names no stream to go to.
-    #[error("a hub post needs at least one stream")]
-    NoStreams,
-    /// The operating system's random source failed while minting the id.
-    #[error("minting a message id failed")]
-    Random(#[source] getrandom::Error),
-    /// Numbering or storing the message failed.
-    #[error("storing the hub's message failed")]
-    Store(#[source] Box<dyn std::error::Error + Send + Sync>),
-}
-
-/// A message the hub posts as itself: `from` is [`crate::HUB_IDENTITY`],
-/// `from_kind` is `hub`, and it takes the same numbering and sweeper as a
-/// client's message, without the rate limit (ruling R34).
-#[derive(Debug, Clone, PartialEq)]
-pub struct HubPost {
-    /// The verb and its data; one of GRANT, DENY, ITEM, ALERT, RELEASE
-    /// and STATUS.
-    pub payload: Payload,
-    /// The text.
-    pub body: Body,
-    /// The message this one answers.
-    pub reply_to: Option<MessageId>,
-    /// Items it is about.
-    pub items: Vec<ItemKey>,
-    /// The lane it is about.
-    pub lane: Option<LaneName>,
-    /// Who it interrupts. An ALERT also gets the project's coordinators
-    /// (ruling R35).
-    pub mentioned: Vec<IdentityId>,
-    /// Where it goes: the feed, inboxes, or both.
-    pub streams: Vec<Stream>,
-}
-
-/// Where a hub post was recorded.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct Posted {
-    /// The id the hub gave the message.
-    pub id: MessageId,
-    /// Each copy's stream and seq.
-    pub copies: Vec<(Stream, Seq)>,
 }
 
 /// Who sends the reply to a publish on `ack/{id}`.
@@ -275,7 +204,12 @@ impl Hub {
             return Err(NackReason::ReadOnly.into());
         }
         let roster = if needs_roster(verb, &env) {
-            load_roster(pool, topics).await?
+            self.core()
+                .store()
+                .reader()
+                .roster(topics.project())
+                .await
+                .map_err(StoreError::from)?
         } else {
             Roster::default()
         };
@@ -305,8 +239,15 @@ impl Hub {
             verb,
             Verb::Fyi | Verb::Ask | Verb::Answer | Verb::Alert | Verb::Done | Verb::Review
         ) {
-            let mut db = pool.acquire().await.map_err(StoreError::from)?;
-            load_refs(&mut db, topics, env.body.as_str(), &roster).await?
+            let candidates = candidate_item_keys(env.body.as_str());
+            let (lanes, keys) = self
+                .core()
+                .store()
+                .reader()
+                .ref_targets(topics.project(), &candidates)
+                .await
+                .map_err(StoreError::from)?;
+            stamp_refs(env.body.as_str(), &roster, &lanes, &keys)
         } else {
             Vec::new()
         };
@@ -342,11 +283,16 @@ impl Hub {
             hub_at,
             ack,
         };
-        let mut tx = pool.begin().await.map_err(StoreError::from)?;
+        let mut tx = self
+            .core()
+            .store()
+            .begin()
+            .await
+            .map_err(StoreError::from)?;
         let quota_warning = if let Gate::Quota { limit } = gate
             && !matches!(verb, Verb::Heartbeat | Verb::Release | Verb::Bye)
         {
-            match take_quota(&mut tx, topics.tenant(), limit)
+            match take_quota(tx.sqlx(), topics.tenant(), limit)
                 .await
                 .map_err(StoreError::from)?
             {
@@ -382,14 +328,14 @@ impl Hub {
             // Taking the feed's head first gives every ledger transaction
             // the lock order of a plain feed message (feed head first), so
             // two of them cannot deadlock.
-            lock_head(&mut tx, &head_key(topics, &Stream::Feed))
+            lock_head(tx.sqlx(), &head_key(topics, &Stream::Feed))
                 .await
                 .map_err(StoreError::from)?;
         }
-        match write(&mut tx, draft).await {
+        match write(&mut tx, draft).await.map_err(StoreError::from) {
             Ok(recorded) => {
                 if let Some(lend) = &lend {
-                    crate::lanes::lend(&mut tx, topics, &sender.id, sender.kind, lend)
+                    crate::lanes::lend(tx.sqlx(), topics, &sender.id, sender.kind, lend)
                         .await
                         .map_err(|err| match err {
                             crate::lanes::LendError::Refused(reason) => Refused::from(reason),
@@ -543,106 +489,9 @@ impl Hub {
     /// # Ok(()) }
     /// ```
     pub async fn post_as_hub(&self, topics: &Topics, post: HubPost) -> Result<Posted, PostError> {
-        let mut tx = self.pool().begin().await.map_err(PostError::store)?;
-        let posted = post_hub(&mut tx, topics, post, None).await?;
-        tx.commit().await.map_err(PostError::store)?;
+        let posted = self.core().post_as_hub(topics, post).await?;
         self.ingest_state().stored(topics.project());
         Ok(posted)
-    }
-}
-
-/// [`Hub::post_as_hub`] inside `tx`, which the caller commits.
-pub(crate) async fn post_in(
-    tx: &mut Transaction<'_, Postgres>,
-    topics: &Topics,
-    post: HubPost,
-) -> Result<Posted, PostError> {
-    post_hub(tx, topics, post, None).await
-}
-
-/// [`post_in`] for an ALERT meant for the coordinators: when the project
-/// has none, it mentions `fallback`, the owning human of the identity
-/// concerned, instead (ruling R35).
-pub(crate) async fn post_alert(
-    tx: &mut Transaction<'_, Postgres>,
-    topics: &Topics,
-    post: HubPost,
-    fallback: &IdentityId,
-) -> Result<Posted, PostError> {
-    post_hub(tx, topics, post, Some(fallback)).await
-}
-
-async fn post_hub(
-    tx: &mut Transaction<'_, Postgres>,
-    topics: &Topics,
-    post: HubPost,
-    fallback: Option<&IdentityId>,
-) -> Result<Posted, PostError> {
-    let verb = match &post.payload {
-        Payload::Unknown { verb, .. } => return Err(PostError::NotHubVerb(verb.clone())),
-        payload => payload.verb(),
-    };
-    let Some(verb) = verb.filter(|verb| HUB_VERBS.contains(verb)) else {
-        let name = post.payload.verb().map_or("?", Verb::as_str);
-        return Err(PostError::NotHubVerb(name.to_owned()));
-    };
-    if post.streams.is_empty() {
-        return Err(PostError::NoStreams);
-    }
-    let hub_at = hub_now();
-    let id = new_message_id(hub_at).map_err(PostError::Random)?;
-    let mut mentioned: BTreeSet<IdentityId> = post.mentioned.into_iter().collect();
-    let mut refs = Vec::new();
-    if verb == Verb::Alert {
-        let roster = load_roster(&mut **tx, topics)
-            .await
-            .map_err(PostError::store)?;
-        let mut coordinators = roster.coordinators().cloned().peekable();
-        if coordinators.peek().is_none() {
-            mentioned.extend(fallback.cloned());
-        }
-        mentioned.extend(coordinators);
-        refs = load_refs(&mut *tx, topics, post.body.as_str(), &roster)
-            .await
-            .map_err(PostError::store)?;
-    }
-    let client = ClientEnvelope {
-        v: 1,
-        id: id.clone(),
-        reply_to: post.reply_to,
-        to: Vec::new(),
-        mentions: Vec::new(),
-        items: post.items,
-        lane: post.lane,
-        body: post.body,
-        valid_until: None,
-        sent_at: hub_at,
-        payload: post.payload,
-    };
-    let hash = envelope_hash(&client).map_err(PostError::store)?;
-    let draft = Draft {
-        topics,
-        client,
-        from: hub_identity(),
-        from_handle: HUB_HANDLE.to_owned(),
-        from_kind: IdentityKind::Hub,
-        mentioned: mentioned.into_iter().collect(),
-        refs,
-        streams: post.streams.into_iter().collect(),
-        hash,
-        hub_at,
-        ack: AckCopy::None,
-    };
-    let recorded = write(tx, draft).await.map_err(PostError::store)?;
-    Ok(Posted {
-        id,
-        copies: recorded.copies,
-    })
-}
-
-impl PostError {
-    fn store(err: impl std::error::Error + Send + Sync + 'static) -> Self {
-        Self::Store(Box::new(err))
     }
 }
 
@@ -654,14 +503,6 @@ pub(crate) fn head_key(topics: &Topics, stream: &Stream) -> String {
 /// [`head_key`] from the project id alone.
 pub(crate) fn stream_key(project: &ProjectId, stream: &Stream) -> String {
     format!("{project}/{stream}")
-}
-
-/// The broker topic a copy in `stream` is published on.
-fn stream_topic(topics: &Topics, stream: &Stream) -> String {
-    match stream {
-        Stream::Feed => topics.feed(),
-        Stream::Inbox(id) => topics.inbox(id),
-    }
 }
 
 /// A NACK about to be sent.
@@ -710,19 +551,46 @@ impl From<StoreError> for Refused {
 /// Why storing or reading messages failed.
 #[derive(Debug, thiserror::Error)]
 enum StoreError {
-    #[error("the stamped envelope exceeds {MAX_STAMPED_ENVELOPE_BYTES} bytes without refs")]
+    #[error("the stamped envelope exceeds 81920 bytes without refs")]
     TooLarge,
     #[error("database error")]
     Database(#[from] sqlx::Error),
     #[error("numbering failed")]
     Numbering(#[from] NumberingError),
-    #[error("encoding a message failed")]
-    Encode(#[from] serde_json::Error),
     #[error("a stored value is invalid: {0}")]
     Stored(String),
+    #[error(transparent)]
+    Backend(Box<dyn std::error::Error + Send + Sync>),
     /// Another copy of the same `(from, id)` committed first.
     #[error("the message was already recorded")]
     Duplicate,
+}
+
+impl From<agmen_core::StoreError> for StoreError {
+    fn from(err: agmen_core::StoreError) -> Self {
+        match err {
+            agmen_core::StoreError::Duplicate => Self::Duplicate,
+            agmen_core::StoreError::Stored(message)
+                if message == "the stamped envelope exceeds 81920 bytes without refs" =>
+            {
+                Self::TooLarge
+            }
+            agmen_core::StoreError::Stored(message) => Self::Stored(
+                message
+                    .strip_prefix("a stored value is invalid: ")
+                    .unwrap_or(&message)
+                    .to_owned(),
+            ),
+            agmen_core::StoreError::Backend(source) => match source.downcast::<sqlx::Error>() {
+                Ok(err) => Self::Database(*err),
+                Err(source) => match source.downcast::<NumberingError>() {
+                    Ok(err) => Self::Numbering(*err),
+                    Err(source) => Self::Backend(source),
+                },
+            },
+            other => Self::Backend(Box::new(other)),
+        }
+    }
 }
 
 fn stored(what: impl fmt::Display) -> StoreError {
@@ -794,74 +662,6 @@ async fn load_sender(
     }))
 }
 
-type MemberRow = (
-    String,
-    String,
-    String,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-);
-
-/// A project's live members, with membership and mint roles from storage.
-async fn load_roster(db: impl PgExecutor<'_>, topics: &Topics) -> Result<Roster, StoreError> {
-    let rows: Vec<MemberRow> = sqlx::query_as(
-        "SELECT id, kind, handle, owner_human_id, NULL::text, role FROM identities
-             WHERE project_id = $1 AND revoked_at IS NULL
-             UNION ALL
-             SELECT m.human_id, 'human', h.handle, NULL, m.role, NULL::text
-             FROM memberships m JOIN humans h ON h.id=m.human_id WHERE m.project_id = $1",
-    )
-    .bind(topics.project().as_str())
-    .fetch_all(db)
-    .await?;
-    rows.into_iter()
-        .map(|(id, kind, handle, owner, role, identity_role)| {
-            Ok(Member {
-                id: parse_id(&id)?,
-                handle,
-                kind: parse_kind(&kind).map_err(stored)?,
-                identity_role,
-                owner: owner.as_deref().map(parse_id).transpose()?,
-                role: role
-                    .as_deref()
-                    .map(str::parse::<Role>)
-                    .transpose()
-                    .map_err(stored)?
-                    .map(Into::into),
-            })
-        })
-        .collect::<Result<_, StoreError>>()
-        .map(Roster)
-}
-
-/// The same known-target lookup for client messages and hub ALERTs.
-async fn load_refs(
-    db: &mut sqlx::PgConnection,
-    topics: &Topics,
-    body: &str,
-    roster: &Roster,
-) -> Result<Vec<Ref>, StoreError> {
-    let lanes: Vec<String> =
-        sqlx::query_scalar("SELECT name FROM lanes WHERE project_id=$1 ORDER BY name")
-            .bind(topics.project().as_str())
-            .fetch_all(&mut *db)
-            .await?;
-    let candidates = candidate_item_keys(body);
-    let keys: Vec<String> = sqlx::query_scalar(
-        "SELECT key FROM items WHERE project_id=$1 AND key = ANY($2) ORDER BY key",
-    )
-    .bind(topics.project().as_str())
-    .bind(&candidates)
-    .fetch_all(&mut *db)
-    .await?;
-    let keys = keys
-        .iter()
-        .map(|key| key.parse().map_err(stored))
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(stamp_refs(body, roster, &lanes, &keys))
-}
-
 /// A publish that passed the checks that need no roster.
 #[derive(Debug)]
 struct Admitted {
@@ -915,140 +715,6 @@ async fn find_parent(
             .map(|stream| stream.parse().map_err(stored))
             .collect::<Result<_, _>>()?,
     }))
-}
-
-/// Whether the store queues an ACK on `ack/{from}`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AckCopy {
-    /// A client's message: its ACK follows its copies.
-    Queue,
-    /// The hub's own message: nobody waits for an ACK.
-    None,
-}
-
-/// A message ready to be numbered and stored.
-#[derive(Debug)]
-struct Draft<'a> {
-    topics: &'a Topics,
-    client: ClientEnvelope,
-    from: IdentityId,
-    from_handle: String,
-    from_kind: IdentityKind,
-    mentioned: Vec<IdentityId>,
-    refs: Vec<Ref>,
-    streams: BTreeSet<Stream>,
-    hash: Vec<u8>,
-    hub_at: Timestamp,
-    ack: AckCopy,
-}
-
-/// Where a message was recorded.
-#[derive(Debug)]
-struct Recorded {
-    /// The copy the ACK reports.
-    ack: (Stream, Seq),
-    copies: Vec<(Stream, Seq)>,
-}
-
-/// Numbers and stores every copy of `draft` in `tx`, with one outbox row
-/// per copy and the ACK's outbox row; the caller commits. Streams are
-/// numbered in `BTreeSet` order, so two transactions lock `stream_heads`
-/// rows in the same order and cannot deadlock.
-async fn write(
-    tx: &mut Transaction<'_, Postgres>,
-    draft: Draft<'_>,
-) -> Result<Recorded, StoreError> {
-    let ack_at = ack_stream(&draft.streams, &draft.from)
-        .ok_or_else(|| stored("a message with no stream"))?;
-    let project = draft.topics.project().as_str();
-    let hub_at = draft.hub_at.to_string();
-    let mut copies = Vec::with_capacity(draft.streams.len());
-    for stream in &draft.streams {
-        let seq = next_seq(tx, &head_key(draft.topics, stream)).await?;
-        let seq = Seq(u64::try_from(seq).map_err(stored)?);
-        let mut stamped = StampedEnvelope {
-            client: draft.client.clone(),
-            stream: stream.clone(),
-            seq,
-            from: draft.from.clone(),
-            from_handle: draft.from_handle.clone(),
-            from_kind: draft.from_kind,
-            mentioned: draft.mentioned.clone(),
-            refs: draft.refs.clone(),
-            hub_at: draft.hub_at,
-        };
-        let mut json = serde_json::to_string(&stamped)?;
-        if json.len() > MAX_STAMPED_ENVELOPE_BYTES {
-            stamped.refs.clear();
-            json = serde_json::to_string(&stamped)?;
-            if json.len() > MAX_STAMPED_ENVELOPE_BYTES {
-                return Err(StoreError::TooLarge);
-            }
-        }
-        let inserted = sqlx::query(
-            "INSERT INTO messages
-                 (project_id, stream, seq, id, from_id, payload_hash, envelope, hub_at, ack_row)
-             VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::timestamptz, $9)",
-        )
-        .bind(project)
-        .bind(stream.to_string())
-        .bind(i64::try_from(seq.0).map_err(stored)?)
-        .bind(draft.client.id.as_str())
-        .bind(draft.from.as_str())
-        .bind(&draft.hash)
-        .bind(&json)
-        .bind(&hub_at)
-        .bind(*stream == ack_at)
-        .execute(&mut **tx)
-        .await;
-        match inserted {
-            Ok(_) => {}
-            Err(err) if is_unique_violation(&err) => return Err(StoreError::Duplicate),
-            Err(err) => return Err(err.into()),
-        }
-        enqueue(
-            tx,
-            draft.topics,
-            &stream_topic(draft.topics, stream),
-            json.as_bytes(),
-        )
-        .await?;
-        copies.push((stream.clone(), seq));
-    }
-    let ack = copies
-        .iter()
-        .find(|(stream, _)| *stream == ack_at)
-        .cloned()
-        .ok_or_else(|| stored("the ACK copy was not stored"))?;
-    if draft.ack == AckCopy::Queue {
-        let reply = DeliveryReply::Ack {
-            id: draft.client.id.clone(),
-            stream: ack.0.clone(),
-            seq: ack.1,
-        };
-        let topic = draft.topics.ack(&draft.from);
-        enqueue(tx, draft.topics, &topic, &serde_json::to_vec(&reply)?).await?;
-    }
-    Ok(Recorded { ack, copies })
-}
-
-async fn enqueue(
-    tx: &mut Transaction<'_, Postgres>,
-    topics: &Topics,
-    topic: &str,
-    payload: &[u8],
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "INSERT INTO publish_outbox (tenant_id, project_id, topic, payload)
-         VALUES ($1, $2, $3, $4)",
-    )
-    .bind(topics.tenant().as_str())
-    .bind(topics.project().as_str())
-    .bind(topic)
-    .bind(payload)
-    .execute(&mut **tx)
-    .await?;
-    Ok(())
 }
 
 /// The ACK a resend of `(from, id)` gets, or `conflict` when its hash

@@ -6,13 +6,14 @@ use agmen_proto::{Body, IdentityId, ItemKey, LaneName, Payload, Severity, Stream
 use axum::Json;
 use axum::extract::{Path, State};
 use serde::Serialize;
-use sqlx::{PgConnection, Postgres, Transaction};
+use sqlx::PgConnection;
 
 use crate::auth::Caller;
 use crate::claims::{LedgerError, LedgerMessage};
 use crate::http::{ApiError, Hub};
 use crate::ingest::{HubPost, post_in};
 use crate::lanes::member_of;
+use crate::store_pg::PgTx;
 
 /// The prefix of the keys FOUND mints: B for bug, as in `B-412`.
 const FOUND_PREFIX: &str = "B";
@@ -38,7 +39,7 @@ const fn severity_str(severity: Severity) -> &'static str {
 /// only the key and lane, so a security finding's title stays in the
 /// finder's inboxes (protocol 4).
 pub(crate) async fn found(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut PgTx,
     topics: &Topics,
     msg: &LedgerMessage,
     title: &str,
@@ -53,7 +54,7 @@ pub(crate) async fn found(
     )
     .bind(project)
     .bind(FOUND_PREFIX)
-    .fetch_one(&mut **tx)
+    .fetch_one(&mut **tx.sqlx())
     .await?;
     let key: ItemKey = format!("{FOUND_PREFIX}-{n}").parse()?;
     sqlx::query(
@@ -66,7 +67,7 @@ pub(crate) async fn found(
     .bind(lane.map(LaneName::as_str))
     .bind(severity.map(severity_str))
     .bind(msg.from.as_str())
-    .execute(&mut **tx)
+    .execute(&mut **tx.sqlx())
     .await?;
     let body = match lane {
         Some(lane) => format!("{key} ({lane})"),

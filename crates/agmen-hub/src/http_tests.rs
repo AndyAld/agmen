@@ -77,6 +77,10 @@ fn test_hub(mqtt_ws_upstream: Option<Url>) -> Hub {
         inner: Arc::new(Inner {
             mode: HubMode::SelfHost,
             broker_up: AtomicBool::new(false),
+            core: agmen_core::Core::new(
+                crate::store_pg::PgStore::new(pool.clone()),
+                DEFAULT_CLAIM_LEASE,
+            ),
             pool,
             tokens,
             emqx,

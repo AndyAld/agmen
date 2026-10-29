@@ -1,9 +1,12 @@
 //! Postgres storage adapter, reusing the hub's existing numbering SQL.
 
 mod ledger;
+mod messages;
 
-use agmen_core::{LaneHolder, LaneRow, Reads, ResolvedLane, Store, StoreError, StoreTx};
-use agmen_proto::{IdentityId, IdentityKind, LaneName, ProjectId, Seq};
+use agmen_core::{
+    LaneHolder, LaneRow, MessageRow, Reads, ResolvedLane, Roster, Store, StoreError, StoreTx,
+};
+use agmen_proto::{IdentityId, IdentityKind, ItemKey, LaneName, ProjectId, Seq, Topics};
 use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 
 use crate::claims::LedgerError;
@@ -36,6 +39,23 @@ impl PgTx {
 }
 
 impl Reads for PgReader<'_> {
+    async fn roster(&mut self, project: &ProjectId) -> Result<Roster, StoreError> {
+        messages::roster(self.0, project).await
+    }
+
+    async fn ref_targets(
+        &mut self,
+        project: &ProjectId,
+        candidates: &[String],
+    ) -> Result<(Vec<String>, Vec<ItemKey>), StoreError> {
+        let mut db = self
+            .0
+            .acquire()
+            .await
+            .map_err(|err| StoreError::Backend(Box::new(err)))?;
+        messages::ref_targets(&mut db, project, candidates).await
+    }
+
     async fn lane_globs(
         &mut self,
         project: &ProjectId,
@@ -79,6 +99,18 @@ impl Reads for PgReader<'_> {
 }
 
 impl Reads for PgTx {
+    async fn roster(&mut self, project: &ProjectId) -> Result<Roster, StoreError> {
+        messages::roster(connection(&mut self.tx), project).await
+    }
+
+    async fn ref_targets(
+        &mut self,
+        project: &ProjectId,
+        candidates: &[String],
+    ) -> Result<(Vec<String>, Vec<ItemKey>), StoreError> {
+        messages::ref_targets(connection(&mut self.tx), project, candidates).await
+    }
+
     async fn lane_globs(
         &mut self,
         project: &ProjectId,
@@ -140,6 +172,19 @@ impl Store for PgStore {
 }
 
 impl StoreTx for PgTx {
+    async fn insert_message(&mut self, row: &MessageRow<'_>) -> Result<(), StoreError> {
+        messages::insert_message(self.sqlx(), row).await
+    }
+
+    async fn enqueue_publish(
+        &mut self,
+        topics: &Topics,
+        topic: &str,
+        payload: &[u8],
+    ) -> Result<(), StoreError> {
+        messages::enqueue_publish(self.sqlx(), topics, topic, payload).await
+    }
+
     async fn lock_head(&mut self, key: &str) -> Result<(), StoreError> {
         crate::numbering::lock_head(self.sqlx(), key)
             .await

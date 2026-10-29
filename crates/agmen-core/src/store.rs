@@ -2,9 +2,36 @@
 
 use std::future::Future;
 
-use agmen_proto::{IdentityId, IdentityKind, LaneName, ProjectId, Seq};
+use agmen_proto::{
+    IdentityId, IdentityKind, ItemKey, LaneName, MessageId, ProjectId, Seq, Stream, Timestamp,
+    Topics,
+};
 
+use crate::Roster;
 use crate::lanes::{LaneHolder, LaneRow, ResolvedLane};
+
+/// One numbered copy to insert within a message transaction.
+#[derive(Debug, Clone, Copy)]
+pub struct MessageRow<'a> {
+    /// The project holding this copy.
+    pub project: &'a ProjectId,
+    /// The stream holding this copy.
+    pub stream: &'a Stream,
+    /// Its position in the stream.
+    pub seq: Seq,
+    /// The client or hub message id.
+    pub id: &'a MessageId,
+    /// The stamped sender.
+    pub from: &'a IdentityId,
+    /// Hash used to recognize resends.
+    pub payload_hash: &'a [u8],
+    /// The serialized stamped envelope.
+    pub envelope_json: &'a str,
+    /// The hub's receive time.
+    pub hub_at: Timestamp,
+    /// Whether a resend's ACK reports this copy.
+    pub ack_row: bool,
+}
 
 /// Why a storage operation could not complete.
 #[derive(Debug, thiserror::Error)]
@@ -65,6 +92,27 @@ pub trait Store: Send + Sync + 'static {
 
 /// Queries shared by a reader and an open transaction.
 pub trait Reads: Send {
+    /// Live identities and human members in storage order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when reading or parsing a member fails.
+    fn roster(
+        &mut self,
+        project: &ProjectId,
+    ) -> impl Future<Output = Result<Roster, StoreError>> + Send;
+
+    /// Known lane names and matching item keys, each sorted by name.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when reading or parsing targets fails.
+    fn ref_targets(
+        &mut self,
+        project: &ProjectId,
+        candidates: &[String],
+    ) -> impl Future<Output = Result<(Vec<String>, Vec<ItemKey>), StoreError>> + Send;
+
     /// The project's lanes, ordered by name.
     ///
     /// # Errors
@@ -129,6 +177,29 @@ pub trait Reads: Send {
 /// Dropping a transaction without a successful [`commit`](Self::commit)
 /// records nothing. Numbering and head locks last until commit or drop.
 pub trait StoreTx: Reads {
+    /// Inserts one copy, returning [`StoreError::Duplicate`] on a
+    /// `(from, id, stream)` conflict.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] if inserting the copy fails.
+    fn insert_message(
+        &mut self,
+        row: &MessageRow<'_>,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send;
+
+    /// Queues a publish in the same transaction as its message.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] if queuing the publish fails.
+    fn enqueue_publish(
+        &mut self,
+        topics: &Topics,
+        topic: &str,
+        payload: &[u8],
+    ) -> impl Future<Output = Result<(), StoreError>> + Send;
+
     /// Locks a key's head without taking a sequence number.
     ///
     /// Creates a missing head at zero, so its next sequence is still one.

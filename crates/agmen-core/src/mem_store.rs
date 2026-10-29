@@ -1,14 +1,19 @@
 //! Bounded, serializable test storage with rollback on drop.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex as StdMutex, PoisonError};
 use std::time::Duration;
 
-use agmen_proto::{IdentityId, IdentityKind, LaneName, ProjectId, Seq, Timestamp};
+#[cfg(test)]
+use agmen_proto::StampedEnvelope;
+use agmen_proto::{
+    IdentityId, IdentityKind, ItemKey, LaneName, MessageId, ProjectId, Seq, Stream, Timestamp,
+    Topics,
+};
 use tokio::sync::{Mutex, MutexGuard, OwnedMutexGuard};
 
 use crate::lanes::{LaneHolder, LaneRow, ResolvedLane};
-use crate::{Reads, Store, StoreError, StoreTx};
+use crate::{Member, MemberRole, MessageRow, Reads, Roster, Store, StoreError, StoreTx};
 
 /// The maximum rows in each in-memory collection.
 pub const MEM_MAX_ROWS: usize = 100_000;
@@ -22,6 +27,9 @@ struct MemIdentity {
     kind: IdentityKind,
     edits: Option<serde_json::Value>,
     live: bool,
+    owner: Option<IdentityId>,
+    role: Option<MemberRole>,
+    identity_role: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -42,6 +50,27 @@ struct MemState {
     lanes: BTreeMap<ProjectId, Vec<MemLane>>,
     holders: BTreeMap<ProjectId, Vec<LaneHolder>>,
     lends: BTreeMap<ProjectId, MemLendsTo>,
+    messages: Vec<MemMessage>,
+    outbox: Vec<(Topics, String, Vec<u8>)>,
+    items: BTreeMap<ProjectId, BTreeSet<ItemKey>>,
+}
+
+#[derive(Debug, Clone)]
+// shortcut: keep complete rows for Task 7 resend reads and Task 9 replay.
+#[expect(
+    dead_code,
+    reason = "message query methods arrive with ingest and replay"
+)]
+struct MemMessage {
+    from: IdentityId,
+    id: MessageId,
+    stream: Stream,
+    project: ProjectId,
+    seq: Seq,
+    payload_hash: Vec<u8>,
+    envelope_json: String,
+    hub_at: Timestamp,
+    ack_row: bool,
 }
 
 /// In-memory storage for backend-independent coordination tests.
@@ -67,6 +96,85 @@ impl Default for MemStore {
 }
 
 impl MemStore {
+    #[cfg(test)]
+    pub(crate) async fn recorded_messages(&self) -> Result<Vec<StampedEnvelope>, StoreError> {
+        let state = self.locked().await?;
+        state
+            .messages
+            .iter()
+            .map(|row| {
+                serde_json::from_str(&row.envelope_json)
+                    .map_err(|err| StoreError::Backend(Box::new(err)))
+            })
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn queued_publishes(&self) -> Result<Vec<(String, Vec<u8>)>, StoreError> {
+        Ok(self
+            .locked()
+            .await?
+            .outbox
+            .iter()
+            .map(|(_, topic, payload)| (topic.clone(), payload.clone()))
+            .collect())
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn seed_item(
+        &self,
+        project: &ProjectId,
+        item: &ItemKey,
+    ) -> Result<(), StoreError> {
+        let mut state = self.locked().await?;
+        if state
+            .items
+            .get(project)
+            .is_some_and(|items| items.contains(item))
+        {
+            return Ok(());
+        }
+        if row_count(state.items.values().map(BTreeSet::len)) >= MEM_MAX_ROWS {
+            return Err(full());
+        }
+        state
+            .items
+            .entry(project.clone())
+            .or_default()
+            .insert(item.clone());
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn seed_member(
+        &self,
+        project: &ProjectId,
+        member: Member,
+    ) -> Result<(), StoreError> {
+        let mut state = self.locked().await?;
+        if !state
+            .identities
+            .get(project)
+            .is_some_and(|ids| ids.contains_key(&member.id))
+            && identity_rows(&state) >= MEM_MAX_ROWS
+        {
+            return Err(full());
+        }
+        state.identities.entry(project.clone()).or_default().insert(
+            member.id,
+            MemIdentity {
+                handle: member.handle,
+                kind: member.kind,
+                edits: None,
+                live: true,
+                owner: member.owner,
+                role: member.role,
+                identity_role: member.identity_role,
+            },
+        );
+        Ok(())
+    }
+
     /// Sets the test clock, initially the time this store was created.
     pub fn set_now(&self, at: Timestamp) {
         *self.clock.lock().unwrap_or_else(PoisonError::into_inner) = at;
@@ -116,6 +224,9 @@ impl MemStore {
                 kind,
                 edits: None,
                 live: true,
+                owner: None,
+                role: None,
+                identity_role: None,
             },
         );
         Ok(())
@@ -196,6 +307,22 @@ impl MemStore {
 }
 
 impl Reads for &MemStore {
+    async fn roster(&mut self, project: &ProjectId) -> Result<Roster, StoreError> {
+        fail(&self.failure, "roster")?;
+        let state = (*self).locked().await?;
+        Ok(roster_of(&state, project))
+    }
+
+    async fn ref_targets(
+        &mut self,
+        project: &ProjectId,
+        candidates: &[String],
+    ) -> Result<(Vec<String>, Vec<ItemKey>), StoreError> {
+        fail(&self.failure, "ref_targets")?;
+        let state = (*self).locked().await?;
+        Ok(ref_targets_of(&state, project, candidates))
+    }
+
     async fn lane_globs(
         &mut self,
         project: &ProjectId,
@@ -278,6 +405,20 @@ impl MemTx {
 }
 
 impl Reads for MemTx {
+    async fn roster(&mut self, project: &ProjectId) -> Result<Roster, StoreError> {
+        fail(&self.failure, "roster")?;
+        Ok(roster_of(&self.working, project))
+    }
+
+    async fn ref_targets(
+        &mut self,
+        project: &ProjectId,
+        candidates: &[String],
+    ) -> Result<(Vec<String>, Vec<ItemKey>), StoreError> {
+        fail(&self.failure, "ref_targets")?;
+        Ok(ref_targets_of(&self.working, project, candidates))
+    }
+
     async fn lane_globs(
         &mut self,
         project: &ProjectId,
@@ -316,6 +457,46 @@ impl Reads for MemTx {
 }
 
 impl StoreTx for MemTx {
+    async fn insert_message(&mut self, row: &MessageRow<'_>) -> Result<(), StoreError> {
+        fail(&self.failure, "insert_message")?;
+        if self.working.messages.iter().any(|stored| {
+            stored.from == *row.from && stored.id == *row.id && stored.stream == *row.stream
+        }) {
+            return Err(StoreError::Duplicate);
+        }
+        if self.working.messages.len() >= MEM_MAX_ROWS {
+            return Err(full());
+        }
+        self.working.messages.push(MemMessage {
+            from: row.from.clone(),
+            id: row.id.clone(),
+            stream: row.stream.clone(),
+            project: row.project.clone(),
+            seq: row.seq,
+            payload_hash: row.payload_hash.to_vec(),
+            envelope_json: row.envelope_json.to_owned(),
+            hub_at: row.hub_at,
+            ack_row: row.ack_row,
+        });
+        Ok(())
+    }
+
+    async fn enqueue_publish(
+        &mut self,
+        topics: &Topics,
+        topic: &str,
+        payload: &[u8],
+    ) -> Result<(), StoreError> {
+        fail(&self.failure, "enqueue_publish")?;
+        if self.working.outbox.len() >= MEM_MAX_ROWS {
+            return Err(full());
+        }
+        self.working
+            .outbox
+            .push((topics.clone(), topic.to_owned(), payload.to_vec()));
+        Ok(())
+    }
+
     async fn lock_head(&mut self, key: &str) -> Result<(), StoreError> {
         fail(&self.failure, "lock_head")?;
         self.head(key)?;
@@ -366,6 +547,52 @@ fn fail(failure: &StdMutex<Option<&'static str>>, op: &'static str) -> Result<()
         ))));
     }
     Ok(())
+}
+
+fn roster_of(state: &MemState, project: &ProjectId) -> Roster {
+    Roster(
+        state
+            .identities
+            .get(project)
+            .into_iter()
+            .flat_map(|ids| ids.iter())
+            .filter(|(_, id)| id.live)
+            .map(|(id, identity)| Member {
+                id: id.clone(),
+                handle: identity.handle.clone(),
+                kind: identity.kind,
+                owner: identity.owner.clone(),
+                role: identity.role,
+                identity_role: identity.identity_role.clone(),
+            })
+            .collect(),
+    )
+}
+
+fn ref_targets_of(
+    state: &MemState,
+    project: &ProjectId,
+    candidates: &[String],
+) -> (Vec<String>, Vec<ItemKey>) {
+    let items = state
+        .items
+        .get(project)
+        .into_iter()
+        .flat_map(|items| items.iter())
+        .filter(|item| {
+            candidates
+                .iter()
+                .any(|candidate| candidate == item.as_str())
+        })
+        .cloned()
+        .collect();
+    (
+        lane_globs_of(state, project)
+            .into_iter()
+            .map(|(name, _)| name.to_string())
+            .collect(),
+        items,
+    )
 }
 
 fn full() -> StoreError {
