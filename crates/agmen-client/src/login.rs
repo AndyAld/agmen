@@ -93,6 +93,23 @@ pub enum LoginError {
     /// A blocking task (the file or the keychain) failed to run.
     #[error("a blocking task failed")]
     Join(#[source] tokio::task::JoinError),
+    /// The login file or its folder could not be written.
+    #[error("writing {}", path.display())]
+    Write {
+        /// The file, or the folder that could not be created.
+        path: PathBuf,
+        /// What failed.
+        #[source]
+        source: std::io::Error,
+    },
+    /// The person declined the sign-in at GitHub: the token endpoint
+    /// answered 400 `access_denied` to the device code.
+    #[error("the sign-in was declined")]
+    Declined,
+    /// The device code ran out before the person confirmed it: the token
+    /// endpoint answered `expired_token`, or the hub's `expires_in` passed.
+    #[error("the code expired before it was confirmed")]
+    Expired,
 }
 
 impl From<BodyReadError> for LoginError {
@@ -261,19 +278,24 @@ pub async fn token_grant(
             granted.expires_in,
         ));
     }
-    // A body that does not parse leaves only the status.
+    Err(refusal(status.as_u16(), bytes))
+}
+
+/// The refusal for a non-success answer of `status`, from its body. A
+/// body that cannot be read or does not parse leaves only the status.
+pub(crate) fn refusal(status: u16, bytes: Result<Vec<u8>, BodyReadError>) -> LoginError {
     let body = match bytes {
         // A malformed error body leaves only the status.
         Ok(bytes) => serde_json::from_slice::<ErrorBody>(&bytes).ok(),
         // Preserve status-only errors when the body cannot be read.
         Err(BodyReadError::Http(_)) => None,
-        Err(error) => return Err(error.into()),
+        Err(error) => return error.into(),
     };
-    Err(LoginError::Refused {
-        status: status.as_u16(),
+    LoginError::Refused {
+        status,
         code: body.as_ref().map(|b| b.error.clone()).unwrap_or_default(),
         description: body.map(|b| b.error_description).unwrap_or_default(),
-    })
+    }
 }
 
 /// Stores `tokens` as `login`'s, replacing any there.
@@ -293,6 +315,53 @@ pub async fn store_tokens(
         .await
         .map_err(LoginError::Join)?
         .map_err(LoginError::StoreWrite)
+}
+
+/// Saves `login` as the signed-in person: deletes the tokens of the login
+/// it replaces when the key changes, stores `tokens`, and writes the login
+/// file at `login_file`, creating its folder. File and store work runs off
+/// the async workers.
+///
+/// # Errors
+///
+/// The error of reading the old login file, deleting the old tokens
+/// ([`LoginError::StoreWrite`]), storing the new ones, or writing the file
+/// ([`LoginError::Write`]).
+pub async fn save_login(
+    store: &TokenStore,
+    login_file: &Path,
+    login: &Login,
+    tokens: &HumanTokens,
+) -> Result<(), LoginError> {
+    let key = login.key().map_err(LoginError::Key)?;
+    let reader = login_file.to_owned();
+    let old = tokio::task::spawn_blocking(move || Login::read(&reader))
+        .await
+        .map_err(LoginError::Join)??;
+    if let Some(old) = old {
+        let old_key = old.key().map_err(LoginError::Key)?;
+        if old_key != key {
+            let old_store = store.clone();
+            tokio::task::spawn_blocking(move || old_store.delete(&old_key))
+                .await
+                .map_err(LoginError::Join)?
+                .map_err(LoginError::StoreWrite)?;
+        }
+    }
+    store_tokens(store, login, tokens).await?;
+    let json = serde_json::to_vec_pretty(login).map_err(LoginError::Encode)?;
+    let path = login_file.to_owned();
+    tokio::task::spawn_blocking(move || {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).map_err(|source| LoginError::Write {
+                path: dir.to_owned(),
+                source,
+            })?;
+        }
+        std::fs::write(&path, json).map_err(|source| LoginError::Write { path, source })
+    })
+    .await
+    .map_err(LoginError::Join)?
 }
 
 /// `login`'s tokens from `store`, renewed through the hub first when the

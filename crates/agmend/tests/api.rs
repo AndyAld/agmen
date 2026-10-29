@@ -275,6 +275,27 @@ async fn unknown_methods_are_not_found() {
 }
 
 #[tokio::test]
+async fn the_person_asks_for_the_login_state_over_the_socket() {
+    let daemon = Daemon::start().await;
+    let mut client = daemon.client().await;
+    assert_eq!(
+        result(client.call("login_status", json!({})).await),
+        json!({"state": "idle"})
+    );
+    // An unsafe hub is refused before anything is sent.
+    let err = error(
+        client
+            .call("login_start", json!({"hub": "http://hub.example"}))
+            .await,
+    );
+    assert_eq!(err.code, ErrorCode::BadRequest);
+    assert_eq!(
+        result(client.call("login_status", json!({})).await),
+        json!({"state": "idle"})
+    );
+}
+
+#[tokio::test]
 async fn post_requires_identity_token() {
     let daemon = Daemon::seeded().await;
     let mut client = daemon.client().await;
@@ -407,6 +428,8 @@ async fn agent_cannot_mint() {
         "host_restart",
         "agent_budget",
         "prune",
+        "login_start",
+        "login_status",
     ] {
         assert_eq!(
             error(

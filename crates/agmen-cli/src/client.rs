@@ -176,17 +176,9 @@ fn hub_url_policy_api() {
 
 pub(crate) use agmen_client::{HumanTokens, Login};
 
-/// Calls the token endpoint of the hub at `hub` with `form`. A refusal
-/// comes back as a [`Refusal`].
-pub(crate) async fn token_grant(hub: &Url, form: &[(&str, &str)]) -> Result<HumanTokens> {
-    agmen_client::token_grant(&http()?, hub, form)
-        .await
-        .map_err(login_error)
-}
-
 /// `err` as the CLI reports it: a refusal as a [`Refusal`], nobody signed
 /// in as [`Fail::not_signed_in`].
-fn login_error(err: LoginError) -> anyhow::Error {
+pub(crate) fn login_error(err: LoginError) -> anyhow::Error {
     match err {
         LoginError::Refused {
             status,
@@ -223,21 +215,14 @@ pub(crate) async fn read_login() -> Result<Option<Login>> {
 
 /// Stores `tokens` and writes the login file, replacing an earlier login.
 pub(crate) async fn save_login(login: &Login, tokens: &HumanTokens) -> Result<()> {
-    if let Some(old) = read_login().await?
-        && key(&old)? != key(login)?
-    {
-        delete_token(key(&old)?).await?;
-    }
-    agmen_client::store_tokens(&TokenStore::from_env(), login, tokens).await?;
-    let path = paths::login_file()?;
-    let json = serde_json::to_vec_pretty(login).context("encoding the login file")?;
-    blocking(move || {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-        }
-        std::fs::write(&path, json).with_context(|| format!("writing {}", path.display()))
-    })
+    agmen_client::save_login(
+        &TokenStore::from_env(),
+        &paths::login_file()?,
+        login,
+        tokens,
+    )
     .await
+    .map_err(login_error)
 }
 
 /// Forgets the signed-in person: their tokens and the login file. Returns
