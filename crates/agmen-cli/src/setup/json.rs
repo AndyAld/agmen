@@ -4,9 +4,13 @@ use serde_json::{Value, json};
 
 use super::{Merged, SetupError};
 
-pub(crate) fn merge_mcp_servers(existing: Option<&str>) -> Result<Merged, SetupError> {
+pub(crate) fn merge_mcp_servers(
+    existing: Option<&str>,
+    entry: &Value,
+    file: &str,
+) -> Result<Merged, SetupError> {
     let unreadable = |why: String| SetupError::Unreadable {
-        file: ".mcp.json".into(),
+        file: file.into(),
         why,
     };
     let mut value: Value = match existing {
@@ -20,14 +24,13 @@ pub(crate) fn merge_mcp_servers(existing: Option<&str>) -> Result<Merged, SetupE
     let servers = servers
         .as_object_mut()
         .ok_or_else(|| unreadable("mcpServers must be a JSON object".into()))?;
-    let entry = json!({"command":"agmen","args":["mcp"]});
-    if servers.get("agmen") == Some(&entry) {
+    if servers.get("agmen") == Some(entry) {
         return Ok(Merged {
             text: existing.unwrap_or_default().to_owned(),
             changed: false,
         });
     }
-    servers.insert("agmen".into(), entry);
+    servers.insert("agmen".into(), entry.clone());
     let text =
         serde_json::to_string_pretty(&value).map_err(|err| unreadable(err.to_string()))? + "\n";
     Ok(Merged {
@@ -40,10 +43,15 @@ pub(crate) fn merge_mcp_servers(existing: Option<&str>) -> Result<Merged, SetupE
 mod tests {
     use super::*;
     use serde_json::{Value, json};
+    use std::path::Path;
+
+    fn claude_entry() -> Value {
+        json!({"command":"agmen","args":["mcp"]})
+    }
 
     #[test]
     fn adds_agmen_to_a_missing_file() {
-        let merged = merge_mcp_servers(None).unwrap();
+        let merged = merge_mcp_servers(None, &claude_entry(), ".mcp.json").unwrap();
         assert!(merged.changed);
         assert_eq!(
             serde_json::from_str::<Value>(&merged.text).unwrap(),
@@ -53,8 +61,12 @@ mod tests {
 
     #[test]
     fn keeps_other_servers_and_keys() {
-        let merged =
-            merge_mcp_servers(Some(r#"{"mcpServers":{"x":{"command":"x"}},"other":1}"#)).unwrap();
+        let merged = merge_mcp_servers(
+            Some(r#"{"mcpServers":{"x":{"command":"x"}},"other":1}"#),
+            &claude_entry(),
+            ".mcp.json",
+        )
+        .unwrap();
         let value: Value = serde_json::from_str(&merged.text).unwrap();
         assert_eq!(value["mcpServers"]["x"], json!({"command":"x"}));
         assert_eq!(value["other"], 1);
@@ -66,18 +78,27 @@ mod tests {
 
     #[test]
     fn second_run_is_unchanged() {
-        let first = merge_mcp_servers(None).unwrap();
-        let second = merge_mcp_servers(Some(&first.text)).unwrap();
+        let first = merge_mcp_servers(None, &claude_entry(), ".mcp.json").unwrap();
+        let second = merge_mcp_servers(Some(&first.text), &claude_entry(), ".mcp.json").unwrap();
         assert!(!second.changed);
         assert_eq!(first.text, second.text);
         let compact = r#"{"mcpServers":{"agmen":{"command":"agmen","args":["mcp"]}}}"#;
-        assert_eq!(merge_mcp_servers(Some(compact)).unwrap().text, compact);
+        assert_eq!(
+            merge_mcp_servers(Some(compact), &claude_entry(), ".mcp.json")
+                .unwrap()
+                .text,
+            compact
+        );
     }
 
     #[test]
     fn replaces_a_stale_agmen_entry() {
-        let merged =
-            merge_mcp_servers(Some(r#"{"mcpServers":{"agmen":{"command":"old"}}}"#)).unwrap();
+        let merged = merge_mcp_servers(
+            Some(r#"{"mcpServers":{"agmen":{"command":"old"}}}"#),
+            &claude_entry(),
+            ".mcp.json",
+        )
+        .unwrap();
         assert!(merged.changed);
         assert_eq!(
             serde_json::from_str::<Value>(&merged.text).unwrap()["mcpServers"]["agmen"],
@@ -86,11 +107,40 @@ mod tests {
     }
 
     #[test]
+    fn writes_the_given_entry() {
+        let cursor = json!({
+            "type": "stdio",
+            "command": "agmen",
+            "args": ["mcp", "--worktree", "${workspaceFolder}"],
+        });
+        let first = merge_mcp_servers(None, &cursor, ".cursor/mcp.json").unwrap();
+        assert!(first.changed);
+        assert_eq!(
+            serde_json::from_str::<Value>(&first.text).unwrap(),
+            json!({"mcpServers":{"agmen":cursor}})
+        );
+        let second = merge_mcp_servers(Some(&first.text), &cursor, ".cursor/mcp.json").unwrap();
+        assert!(!second.changed);
+        assert_eq!(second.text, first.text);
+        let gemini = json!({"command":"agmen","args":["mcp"],"cwd":"/work/repo"});
+        let third =
+            merge_mcp_servers(Some(&second.text), &gemini, ".gemini/settings.json").unwrap();
+        assert!(third.changed);
+        assert_eq!(
+            serde_json::from_str::<Value>(&third.text).unwrap()["mcpServers"]["agmen"],
+            gemini
+        );
+        let err = merge_mcp_servers(Some("[]"), &cursor, ".cursor/mcp.json").unwrap_err();
+        let SetupError::Unreadable { file, .. } = err;
+        assert_eq!(file, Path::new(".cursor/mcp.json"));
+    }
+
+    #[test]
     fn refuses_files_that_are_not_json_objects() {
         for text in ["[]", "{,}", "// note\n{}", r#"{"mcpServers":[]}"#, "null"] {
             assert!(
                 matches!(
-                    merge_mcp_servers(Some(text)),
+                    merge_mcp_servers(Some(text), &claude_entry(), ".mcp.json"),
                     Err(SetupError::Unreadable { .. })
                 ),
                 "{text}"

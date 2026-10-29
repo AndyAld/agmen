@@ -19,7 +19,7 @@ use agmen_proto::IdentityId;
 use rmcp::ServiceExt as _;
 use rmcp::model::CallToolRequestParams;
 use support::mcp::{Mcp, NOT_JOINED, Recorder, TOOLS, every_tool_call, text_of};
-use support::{Home, Worktree};
+use support::{Home, Worktree, assert_exit, stderr};
 
 const ID: &str = "idn7k2q9";
 
@@ -297,4 +297,252 @@ async fn binary_serves_over_stdio() {
         .expect("agmen mcp exits once stdin closes")
         .unwrap();
     assert!(status.success(), "{status}");
+}
+
+async fn call_binary_tool(
+    home: &Home,
+    cwd: &Path,
+    cli_args: &[&str],
+    tool: &'static str,
+) -> rmcp::model::CallToolResult {
+    let mut cmd = tokio::process::Command::from(home.agmen(cwd, cli_args));
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true);
+    let mut child = cmd.spawn().unwrap();
+    let io = (child.stdout.take().unwrap(), child.stdin.take().unwrap());
+    let client = ().serve(io).await.expect("the MCP handshake");
+    let result = client
+        .call_tool(CallToolRequestParams::new(tool).with_arguments(serde_json::Map::new()))
+        .await
+        .unwrap();
+    client.cancel().await.unwrap();
+    let status = tokio::time::timeout(std::time::Duration::from_secs(20), child.wait())
+        .await
+        .expect("agmen mcp exits once stdin closes")
+        .unwrap();
+    assert!(status.success(), "{status}");
+    result
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn worktree_flag_finds_the_identity() {
+    let recorder = Recorder::start().await;
+    let home = Home::new();
+    store_token(&home, &recorder);
+    let wt = Worktree::new(&home);
+    join_like_agmen(&wt, &recorder);
+    let outside = tempfile::tempdir().unwrap();
+    let wt_path = wt.path();
+    let result = call_binary_tool(
+        &home,
+        outside.path(),
+        &["mcp", "--worktree", wt_path.to_str().unwrap()],
+        "lanes",
+    )
+    .await;
+    assert_ne!(text_of(&result), NOT_JOINED);
+    assert_eq!(result.is_error, Some(true), "{}", text_of(&result));
+    assert!(recorder.hits().0 > 0, "{:?}", recorder.hits());
+}
+
+#[test]
+fn worktree_flag_refuses_relative_and_unexpanded() {
+    let home = Home::new();
+    let relative = home
+        .agmen(home.path(), &["mcp", "--worktree", "repo"])
+        .output()
+        .unwrap();
+    assert_exit(&relative, 2);
+    assert!(
+        stderr(&relative).contains("absolute"),
+        "{}",
+        stderr(&relative)
+    );
+
+    let unexpanded = home
+        .agmen(home.path(), &["mcp", "--worktree", "${workspaceFolder}"])
+        .output()
+        .unwrap();
+    assert_exit(&unexpanded, 2);
+    let err = stderr(&unexpanded);
+    assert!(err.contains("${workspaceFolder}"), "{err}");
+    assert!(err.contains("did not expand"), "{err}");
+
+    let missing = home.path().join("no-such-worktree");
+    let missing_out = home
+        .agmen(
+            home.path(),
+            &["mcp", "--worktree", missing.to_str().unwrap()],
+        )
+        .output()
+        .unwrap();
+    assert_exit(&missing_out, 2);
+
+    let file = home.path().join("not-a-directory");
+    std::fs::write(&file, "hello\n").unwrap();
+    let file_out = home
+        .agmen(home.path(), &["mcp", "--worktree", file.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_exit(&file_out, 2);
+}
+
+#[test]
+fn worktree_flag_needs_a_joined_worktree() {
+    let home = Home::new();
+    let outside = tempfile::tempdir().unwrap();
+    let wt = Worktree::new(&home);
+    for dir in [outside.path(), wt.path().as_path()] {
+        let out = home
+            .agmen(home.path(), &["mcp", "--worktree", dir.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert_exit(&out, 3);
+        assert_eq!(
+            stderr(&out).trim(),
+            format!(
+                "not joined: {} holds no agmen identity; run agmen join there",
+                dir.display()
+            )
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn worktree_flag_keeps_the_trust_checks() {
+    let recorder = Recorder::start().await;
+    let home = Home::new();
+    store_token(&home, &recorder);
+
+    let wt = Worktree::new(&home);
+    let sub = wt.path().join("sub");
+    std::fs::create_dir_all(sub.join(".agmen")).unwrap();
+    std::fs::write(sub.join(".agmen/identity.json"), identity_json(&recorder)).unwrap();
+    std::fs::write(
+        wt.path().join(".git/info/exclude"),
+        ".agmen/\nsub/.agmen/\n",
+    )
+    .unwrap();
+    let out = home
+        .agmen(home.path(), &["mcp", "--worktree", sub.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_exit(&out, 1);
+    assert!(
+        stderr(&out).contains("agmen does not use"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(
+        stderr(&out).contains("not at the worktree root"),
+        "{}",
+        stderr(&out)
+    );
+
+    let tracked = Worktree::new(&home);
+    std::fs::create_dir(tracked.path().join(".agmen")).unwrap();
+    std::fs::write(
+        tracked.path().join(".agmen/identity.json"),
+        identity_json(&recorder),
+    )
+    .unwrap();
+    tracked.git(&home, &["add", ".agmen/identity.json"]);
+    let tracked_path = tracked.path();
+    let out = home
+        .agmen(
+            home.path(),
+            &["mcp", "--worktree", tracked_path.to_str().unwrap()],
+        )
+        .output()
+        .unwrap();
+    assert_exit(&out, 1);
+    assert!(
+        stderr(&out).contains("agmen does not use"),
+        "{}",
+        stderr(&out)
+    );
+
+    #[cfg(unix)]
+    {
+        let linked = Worktree::new(&home);
+        let elsewhere = tempfile::tempdir().unwrap();
+        std::fs::create_dir(elsewhere.path().join(".agmen")).unwrap();
+        std::fs::write(
+            elsewhere.path().join(".agmen/identity.json"),
+            identity_json(&recorder),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(
+            elsewhere.path().join(".agmen"),
+            linked.path().join(".agmen"),
+        )
+        .unwrap();
+        std::fs::write(linked.path().join(".git/info/exclude"), ".agmen/\n").unwrap();
+        let linked_path = linked.path();
+        let out = home
+            .agmen(
+                home.path(),
+                &["mcp", "--worktree", linked_path.to_str().unwrap()],
+            )
+            .output()
+            .unwrap();
+        assert_exit(&out, 1);
+        assert!(
+            stderr(&out).contains("agmen does not use"),
+            "{}",
+            stderr(&out)
+        );
+    }
+
+    assert_eq!(recorder.hits(), (0, 0));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn worktree_flag_with_identity_must_match() {
+    let recorder = Recorder::start().await;
+    let home = Home::new();
+    store_token(&home, &recorder);
+    let wt = Worktree::new(&home);
+    join_like_agmen(&wt, &recorder);
+    let outside = tempfile::tempdir().unwrap();
+    let wt_path = wt.path();
+
+    let mismatch = call_binary_tool(
+        &home,
+        outside.path(),
+        &[
+            "mcp",
+            "--worktree",
+            wt_path.to_str().unwrap(),
+            "--identity",
+            "idother99",
+        ],
+        "lanes",
+    )
+    .await;
+    assert_eq!(
+        text_of(&mismatch),
+        format!("not joined as idother99: this worktree's identity is {ID}")
+    );
+    assert_eq!(mismatch.is_error, Some(false));
+    assert_eq!(recorder.hits(), (0, 0));
+
+    let matched = call_binary_tool(
+        &home,
+        outside.path(),
+        &[
+            "mcp",
+            "--worktree",
+            wt_path.to_str().unwrap(),
+            "--identity",
+            ID,
+        ],
+        "lanes",
+    )
+    .await;
+    assert!(!text_of(&matched).starts_with("not joined"));
+    assert_eq!(matched.is_error, Some(true), "{}", text_of(&matched));
+    assert!(recorder.hits().0 > 0, "{:?}", recorder.hits());
 }

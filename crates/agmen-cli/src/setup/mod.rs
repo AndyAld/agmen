@@ -2,23 +2,28 @@
 //!
 //! Cursor and Gemini CLI MCP formats checked 2026-10-28:
 //!
-//! - Cursor (<https://cursor.com/docs/mcp>; the older
+//! - Cursor (<https://cursor.com/docs/mcp>, checked 2026-10-28; the older
 //!   <https://docs.cursor.com/context/model-context-protocol> redirects to
 //!   <https://cursor.com/docs>): project config is `.cursor/mcp.json` and user
 //!   config is `~/.cursor/mcp.json`. The top-level key is `mcpServers`; a
-//!   stdio entry has `command`, optional `args`, `env` and `envFile`, and a
-//!   `type` of `"stdio"` that the field table marks required but every stdio
-//!   example omits, so setup omits it. The page documents no `cwd` and does
-//!   not say where a server process starts.
+//!   stdio entry has `type` set to `"stdio"` (marked required in the STDIO
+//!   field table), `command`, and optional `args`, `env` and `envFile`. The
+//!   page documents no `cwd` and does not say where a server process starts,
+//!   but its "Config interpolation" section
+//!   (<https://cursor.com/docs/mcp#config-interpolation>, checked 2026-10-28)
+//!   documents variable resolution in `command`, `args`, `env`, `url` and
+//!   `headers`, with `${workspaceFolder}` expanding to the project root (the
+//!   folder that contains `.cursor/mcp.json`), so setup writes `"type":
+//!   "stdio"` and passes `["mcp", "--worktree", "${workspaceFolder}"]` in
+//!   `args`.
 //! - Gemini CLI (<https://github.com/google-gemini/gemini-cli/blob/main/docs/tools/mcp-server.md>
 //!   and <https://github.com/google-gemini/gemini-cli/blob/main/docs/reference/configuration.md>):
 //!   project config is `.gemini/settings.json` in the project root and user
 //!   config is `~/.gemini/settings.json`. The top-level key is `mcpServers`
 //!   alongside other settings; a stdio entry has `command`, optional `args`,
 //!   `env` and `cwd` ("working directory in which to start the server"). The
-//!   docs give no default for `cwd`, so where the server starts is
-//!   undocumented, and `agmen mcp` finds its worktree from its own working
-//!   directory like the other agents' entries.
+//!   docs give no default for `cwd`, so setup sets `cwd` to the canonical
+//!   worktree root.
 
 mod claude;
 mod codex;
@@ -225,11 +230,17 @@ pub(crate) async fn run(
             AgentKind::Codex => codex::run(root, identity, &env).await,
             AgentKind::Opencode => opencode::run(root).await,
             AgentKind::Cursor => {
-                write_worktree_file(root, ".cursor/mcp.json", json::merge_mcp_servers).await
+                let entry = serde_json::json!({
+                    "type": "stdio",
+                    "command": "agmen",
+                    "args": ["mcp", "--worktree", "${workspaceFolder}"],
+                });
+                write_worktree_file(root, ".cursor/mcp.json", |existing| {
+                    json::merge_mcp_servers(existing, &entry, ".cursor/mcp.json")
+                })
+                .await
             }
-            AgentKind::Gemini => {
-                write_worktree_file(root, ".gemini/settings.json", json::merge_mcp_servers).await
-            }
+            AgentKind::Gemini => gemini_setup(root).await,
         };
         changes.push(Change {
             agent,
@@ -247,6 +258,27 @@ pub(crate) async fn run(
         );
     }
     Ok(changes)
+}
+
+async fn gemini_setup(root: &Path) -> Result<Outcome> {
+    let to_resolve = root.to_owned();
+    let canonical = blocking(move || {
+        std::fs::canonicalize(&to_resolve)
+            .with_context(|| format!("resolving {}", to_resolve.display()))
+    })
+    .await?;
+    let cwd = canonical
+        .to_str()
+        .context("the worktree path is not UTF-8")?;
+    let entry = serde_json::json!({
+        "command": "agmen",
+        "args": ["mcp"],
+        "cwd": cwd,
+    });
+    write_worktree_file(root, ".gemini/settings.json", |existing| {
+        json::merge_mcp_servers(existing, &entry, ".gemini/settings.json")
+    })
+    .await
 }
 
 #[derive(Debug)]

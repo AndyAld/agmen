@@ -13,6 +13,8 @@ Outside a joined worktree every tool answers `not joined: run agmen join <invite
 
 `--identity <id>` is optional. With it, the server acts only as that identity: when the worktree's identity file names another one, every tool answers `not joined as <id>: this worktree's identity is <other id>`. Use it when one client config is shared between worktrees and you want each to refuse the wrong one.
 
+`--worktree <path>` tells `agmen mcp` to look for the identity in `<path>` instead of its working directory, for clients that cannot set a server's working directory; `<path>` must be an absolute path to a joined worktree.
+
 ## Claude Code
 
 `agmen setup` installs the agmen plugin (`mods/agmen-claude`), which starts the server and adds wake-ups and the lane guard. In a terminal, setup asks before installing; without a terminal it installs unless you pass `--no-plugin`. The lane guard hook is available only through the Claude Code plugin; other agents can call `check_path`.
@@ -97,9 +99,11 @@ call `check_path` before editing.
 
 Run `agmen setup --agent cursor` in your joined worktree. Setup writes
 `.cursor/mcp.json` in the worktree (creating `.cursor/` if needed) and adds
-`.cursor/mcp.json` to git's local `info/exclude`. It keeps other servers and
-settings, skips tracked or unreadable files and non-folder `.cursor` paths,
-and reports `already set up` on a second run.
+`.cursor/mcp.json` to git's local `info/exclude`. Because Cursor has no `cwd`
+field for MCP servers, setup passes `--worktree` with `${workspaceFolder}`,
+which Cursor expands to the folder holding `.cursor/mcp.json`. It keeps other
+servers and settings, skips tracked or unreadable files and non-folder
+`.cursor` paths, and reports `already set up` on a second run.
 
 For manual setup, add this to `.cursor/mcp.json` in the worktree:
 
@@ -107,8 +111,9 @@ For manual setup, add this to `.cursor/mcp.json` in the worktree:
 {
   "mcpServers": {
     "agmen": {
+      "type": "stdio",
       "command": "agmen",
-      "args": ["mcp"]
+      "args": ["mcp", "--worktree", "${workspaceFolder}"]
     }
   }
 }
@@ -122,26 +127,29 @@ call `check_path` before editing.
 ## Gemini CLI
 
 Run `agmen setup --agent gemini` in your joined worktree. Setup writes
-`.gemini/settings.json` in the worktree (creating `.gemini/` if needed) and
-adds `.gemini/settings.json` to git's local `info/exclude`. It keeps other
-servers and settings (such as `theme`), skips tracked or unreadable files and
-non-folder `.gemini` paths, and reports `already set up` on a second run.
+`.gemini/settings.json` in the worktree (creating `.gemini/` if needed), sets
+`cwd` to the canonical worktree root, and adds `.gemini/settings.json` to
+git's local `info/exclude`. Rerunning `agmen setup` updates `cwd` if the
+worktree moves. It keeps other servers and settings (such as `theme`), skips
+tracked or unreadable files and non-folder `.gemini` paths, and reports
+`already set up` on a second run.
 
-For manual setup, add this to `.gemini/settings.json` in the worktree:
+For manual setup, add this to `.gemini/settings.json` in the worktree,
+replacing the path:
 
 ```json
 {
   "mcpServers": {
     "agmen": {
       "command": "agmen",
-      "args": ["mcp"]
+      "args": ["mcp"],
+      "cwd": "/absolute/path/to/worktree"
     }
   }
 }
 ```
 
-Add `"--identity", "<id>"` to `args` to pin the identity, and `"cwd"` when
-Gemini CLI does not start in the worktree.
+Add `"--identity", "<id>"` to `args` to pin the identity.
 
 Only the Claude Code plugin blocks edits outside your lanes. Gemini CLI
 should call `check_path` before editing.

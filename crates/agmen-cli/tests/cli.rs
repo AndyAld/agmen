@@ -542,7 +542,15 @@ fn setup_writes_cursor_mcp_json() {
     let value: serde_json::Value = serde_json::from_str(&text).unwrap();
     assert_eq!(
         value,
-        serde_json::json!({"mcpServers":{"agmen":{"command":"agmen","args":["mcp"]}}})
+        serde_json::json!({
+            "mcpServers": {
+                "agmen": {
+                    "type": "stdio",
+                    "command": "agmen",
+                    "args": ["mcp", "--worktree", "${workspaceFolder}"],
+                }
+            }
+        })
     );
     let exclude = std::fs::read_to_string(wt.path().join(".git/info/exclude")).unwrap();
     assert!(exclude.lines().any(|line| line == ".cursor/mcp.json"));
@@ -555,6 +563,43 @@ fn setup_writes_cursor_mcp_json() {
         exclude
     );
     assert!(!home.path().join("calls/cursor-agent.log").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn setup_replaces_the_plain_cursor_entry() {
+    let home = Home::new();
+    home.fake_program("cursor", "exit 99");
+    let wt = setup_worktree(&home);
+    let dir = wt.path().join(".cursor");
+    std::fs::create_dir(&dir).unwrap();
+    let path = dir.join("mcp.json");
+    std::fs::write(
+        &path,
+        r#"{"mcpServers":{"other":{"command":"other"},"agmen":{"command":"agmen","args":["mcp"]}}}"#,
+    )
+    .unwrap();
+    let out = home.agmen(&wt.path(), &["setup"]).output().unwrap();
+    assert_exit(&out, 0);
+    assert!(
+        stdout(&out).contains("Cursor: wrote .cursor/mcp.json"),
+        "{}",
+        stdout(&out)
+    );
+    let value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(
+        value["mcpServers"]["other"],
+        serde_json::json!({"command":"other"})
+    );
+    assert_eq!(
+        value["mcpServers"]["agmen"],
+        serde_json::json!({
+            "type": "stdio",
+            "command": "agmen",
+            "args": ["mcp", "--worktree", "${workspaceFolder}"],
+        })
+    );
 }
 
 #[cfg(unix)]
@@ -585,7 +630,11 @@ fn setup_writes_gemini_settings_and_keeps_others() {
     assert_eq!(value["theme"], "x");
     assert_eq!(
         value["mcpServers"]["agmen"],
-        serde_json::json!({"command":"agmen","args":["mcp"]})
+        serde_json::json!({
+            "command": "agmen",
+            "args": ["mcp"],
+            "cwd": wt.path().to_str().unwrap(),
+        })
     );
     let exclude = std::fs::read_to_string(wt.path().join(".git/info/exclude")).unwrap();
     assert!(exclude.lines().any(|line| line == ".gemini/settings.json"));
