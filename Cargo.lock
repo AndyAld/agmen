@@ -111,6 +111,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "agmen-core"
+version = "0.1.0"
+dependencies = [
+ "agmen-core",
+ "agmen-proto",
+ "thiserror 2.0.21",
+ "tokio",
+]
+
+[[package]]
 name = "agmen-desktop"
 version = "0.1.0"
 dependencies = [
@@ -180,6 +190,7 @@ dependencies = [
 name = "agmen-hub"
 version = "0.1.0"
 dependencies = [
+ "agmen-core",
  "agmen-hub",
  "agmen-proto",
  "anyhow",

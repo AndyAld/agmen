@@ -20,6 +20,7 @@ workspace = true
 test-hooks = []
 
 [dependencies]
+agmen-core = { version = "0.1.0", path = "../agmen-core" }
 agmen-proto = { version = "0.1.0", path = "../agmen-proto" }
 anyhow = "1.0.104"
 aws-lc-rs = "1.18.2"
@@ -51,6 +52,7 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 url = { version = "2.5.8", features = ["serde"] }
 
 [dev-dependencies]
+agmen-core = { version = "0.1.0", path = "../agmen-core", features = ["testing"] }
 # The hub's own integration tests use the test hooks too; a dev-dependency
 # never reaches the hub binary's build.
 agmen-hub = { version = "0.1.0", path = ".", features = ["test-hooks"] }

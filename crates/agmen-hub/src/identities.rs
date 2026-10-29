@@ -210,18 +210,6 @@ fn bad_role(message: &str) -> ApiError {
     ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "bad_role", message)
 }
 
-/// Whether `name` may follow `<owner>/` in a child handle.
-fn is_child_name(name: &str) -> bool {
-    (1..=32).contains(&name.len())
-        && name
-            .bytes()
-            .next()
-            .is_some_and(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-}
-
 /// `POST /v1/identities` (human token): mints an identity owned by the
 /// caller in a project they belong to. Its handle must be
 /// `<caller's handle>/<name>`.
@@ -269,7 +257,7 @@ pub(crate) async fn mint(
         .handle
         .strip_prefix(&owner_handle)
         .and_then(|rest| rest.strip_prefix('/'));
-    if !name.is_some_and(is_child_name) {
+    if !name.is_some_and(agmen_core::is_child_name) {
         return Err(ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
             "bad_handle",
@@ -500,19 +488,4 @@ pub(crate) async fn ban_and_kick(hub: &Hub, id: &str, ban_until: Timestamp) -> O
         }
     }
     failed
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn child_names() {
-        for good in ["sol", "a", "w3f", "coord-2", &"x".repeat(32)] {
-            assert!(is_child_name(good), "{good}");
-        }
-        for bad in ["", "-x", "Sol", "a/b", "a b", &"x".repeat(33)] {
-            assert!(!is_child_name(bad), "{bad}");
-        }
-    }
 }
