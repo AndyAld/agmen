@@ -4,7 +4,7 @@
 //! under the listener message they belong to, and ledger presence lines
 //! (HELLO, BYE, ROLLCALL, HEARTBEAT) hide until "Show ledger".
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use agmen_proto::{MessageId, Seq, StampedEnvelope, Stream};
@@ -24,7 +24,9 @@ use super::message::{MessageRow, is_presence};
 use super::ref_chip::RefEvent;
 use super::tokens::{LIST_OVERDRAW, SPACE_2, SPACE_6, SPACE_10, SPACE_12, SPACE_14};
 use crate::alerts::AlertState;
-use crate::backend::{Action, BackendError, BackendHandle, Draft, Link, Older, Snapshot, Update};
+use crate::backend::{
+    Action, BackendError, BackendHandle, ChangeId, Draft, Link, Older, Snapshot, Update,
+};
 use crate::local_time::LocalZone;
 
 // Task 13: the banner, toast, chime and notification for alerts.
@@ -38,6 +40,9 @@ pub(crate) use alert_wiring::AlertCounts;
 mod take_over;
 use take_over::TakeOverSlot;
 pub(crate) use take_over::TerminalPopup;
+
+/// Bound retained card errors by the live chat's message ceiling.
+const MAX_DECISION_ERRORS: usize = 2000;
 
 /// The indices of the messages the chat draws, oldest first.
 #[must_use]
@@ -63,6 +68,7 @@ pub(crate) struct ChatStream {
     chat: WeakEntity<ChatView>,
     /// Task 13: how alert rows draw, by message index.
     looks: Rc<std::collections::BTreeMap<usize, AlertLook>>,
+    decision_errors: BTreeMap<ChangeId, SharedString>,
 }
 
 impl std::fmt::Debug for ChatStream {
@@ -77,6 +83,22 @@ impl ChatStream {
     /// Shows `rows` of `context`'s snapshot. When the old rows lead the new
     /// ones, the list keeps its measurements and scroll position.
     fn set_rows(&mut self, context: Rc<ChatContext>, rows: Vec<usize>, cx: &mut Context<Self>) {
+        self.decision_errors.retain(|id, _| {
+            let previous = self
+                .context
+                .snapshot()
+                .changes
+                .values()
+                .take(MAX_DECISION_ERRORS)
+                .find(|card| &card.id == id)
+                .map(|card| card.state);
+            context
+                .snapshot()
+                .changes
+                .values()
+                .take(MAX_DECISION_ERRORS)
+                .any(|card| &card.id == id && Some(card.state) == previous)
+        });
         self.context = context;
         let old = std::mem::replace(&mut self.rows, rows);
         if self.rows.starts_with(&old) {
@@ -119,6 +141,17 @@ impl ChatStream {
         let (on_ref, on_action, on_answer) =
             (self.chat.clone(), self.chat.clone(), self.chat.clone());
         let on_reply = self.chat.clone();
+        let error = self
+            .context
+            .snapshot()
+            .messages
+            .get(index)
+            .and_then(|env| self.context.change_card(env))
+            .and_then(|card| {
+                self.decision_errors
+                    .get(&card.id)
+                    .map(|why| (card.id.clone(), why.clone()))
+            });
         let row = MessageRow::new(index, self.context.clone())
             .when_some(self.looks.get(&index).copied(), MessageRow::alert)
             .on_reply(move |index, window, cx| {
@@ -153,6 +186,19 @@ impl ChatStream {
             .px(SPACE_12)
             .when(ix > 0, |this| this.pt(SPACE_2))
             .child(row)
+            .when_some(error, |this, (id, why)| {
+                this.child(
+                    div()
+                        .debug_selector(|| format!("chat:decision-error:{id}"))
+                        .px(SPACE_14)
+                        .child(
+                            Label::new(why)
+                                .size(LabelSize::Small)
+                                .color(Color::Error)
+                                .wrap(),
+                        ),
+                )
+            })
             .into_any_element()
     }
 }
@@ -261,6 +307,7 @@ impl ChatView {
             rows,
             chat,
             looks,
+            decision_errors: BTreeMap::new(),
         });
         // Final review fix 1: reaching the top asks for the older page.
         // The handler runs while the list's state is borrowed, and its
@@ -429,6 +476,10 @@ impl ChatView {
 
     /// Does `action` through the backend, such as a change card's Apply.
     fn act(&mut self, action: Action, cx: &mut Context<Self>) {
+        let change = match &action {
+            Action::Apply(id) | Action::Cancel(id) | Action::Undo(id) => Some(id.clone()),
+            _ => None,
+        };
         // Task 13: Snooze is also the person's own view of the alert.
         let snooze = match &action {
             Action::SnoozeAlert(alert) => Some(alert.clone()),
@@ -441,7 +492,30 @@ impl ChatView {
         if let (Some(alert), true) = (snooze, result.is_ok()) {
             self.snooze(alert, cx);
         }
-        self.error = result.err().map(|err| err.to_string().into());
+        if let Some(change) = change {
+            match result {
+                Err(error) => self.decision_result(change, Some(error.to_string()), cx),
+                Ok(()) => self.error = None,
+            }
+        } else {
+            self.error = result.err().map(|err| err.to_string().into());
+        }
+        cx.notify();
+    }
+
+    fn decision_result(&mut self, change: ChangeId, why: Option<String>, cx: &mut Context<Self>) {
+        let why = why.map(|why| clean_decision_error(&why));
+        self.stream.update(cx, |stream, cx| {
+            stream.decision_errors.remove(&change);
+            if let Some(why) = why {
+                if stream.decision_errors.len() == MAX_DECISION_ERRORS {
+                    stream.decision_errors.pop_first();
+                }
+                stream.decision_errors.insert(change, why);
+            }
+            stream.list.remeasure();
+            cx.notify();
+        });
         cx.notify();
     }
 
@@ -568,6 +642,10 @@ impl ChatView {
                 self.show_not_sent(&why, cx);
                 return;
             }
+            Update::Decision { change, why } => {
+                self.decision_result(change, why, cx);
+                return;
+            }
         };
         self.snapshot = Rc::new(snapshot);
         let context = Rc::new(ChatContext::new(self.snapshot.clone()).with_zone(self.zone.clone()));
@@ -592,6 +670,28 @@ impl ChatView {
         self.sync_take_over(cx);
         cx.notify();
     }
+}
+
+/// Keep a refusal as plain chat text, with a body's size bound and no
+/// control or format characters that could hide or reorder its message.
+fn clean_decision_error(why: &str) -> SharedString {
+    use unicode_properties::{GeneralCategory, UnicodeGeneralCategory as _};
+    why.char_indices()
+        .take(agmen_proto::MAX_BODY_BYTES)
+        .take_while(|(index, c)| index + c.len_utf8() <= agmen_proto::MAX_BODY_BYTES)
+        .map(|(_, c)| c)
+        .filter(|c| {
+            matches!(c, '\n' | '\t')
+                || !matches!(
+                    c.general_category(),
+                    GeneralCategory::Control
+                        | GeneralCategory::Format
+                        | GeneralCategory::LineSeparator
+                        | GeneralCategory::ParagraphSeparator
+                )
+        })
+        .collect::<String>()
+        .into()
 }
 
 /// Where the hub put `env`, as the backend orders the chat.

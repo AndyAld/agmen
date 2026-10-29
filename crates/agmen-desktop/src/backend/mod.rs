@@ -243,6 +243,12 @@ pub(crate) enum Update {
         draft: Draft,
         why: String,
     },
+    /// The result of Apply, Cancel or Undo, beside the clicked change card.
+    /// A successful decision clears only that card's error.
+    Decision {
+        change: ChangeId,
+        why: Option<String>,
+    },
 }
 
 /// Final review fix 1: whether the chat has messages older than the ones
