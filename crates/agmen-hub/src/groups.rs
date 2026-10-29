@@ -1,8 +1,10 @@
 //! Hosted groups: creating a tenant and its first project, the one trial
 //! per GitHub account, the three-group ownership limit, and paid seats.
 //!
-//! `checkout_url` stays null until hosted Task 7. This module does not call
-//! Paddle.
+//! A group with no trial gets a Paddle checkout link in `checkout_url`, or
+//! null when Paddle did not answer. A trial group's `checkout_url` stays
+//! null. This module calls Paddle for that link, for seat and plan changes,
+//! and for the billing portal.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -18,8 +20,8 @@ use sqlx::{PgExecutor, Postgres, Transaction};
 
 use crate::auth::Caller;
 use crate::billing::{
-    BusinessStep, MAX_OWNED_GROUPS, Plan, PlanRecord, PlanState, ReadOnlyCause,
-    TRIAL_REMINDER_OFFSETS_DAYS,
+    BusinessStep, Catalog, LineItem, MAX_OWNED_GROUPS, PaddleClient, Plan, PlanRecord, PlanState,
+    ReadOnlyCause, TEAM_INCLUDED_SEATS, TRIAL_REMINDER_OFFSETS_DAYS,
 };
 use crate::db::{self, TenantRole, new_id};
 use crate::http::{ApiError, Hub, error_chain};
@@ -32,6 +34,22 @@ use crate::usage::refuse_read_only;
 const GROUP_LIMIT: &str = "you already own 3 groups, the most one account can own";
 
 const NO_FREE_SEAT: &str = "the group has no free seat; its owner or a group admin can add one with: agmen group seats add 1";
+
+/// The most seats a group can buy without a custom agreement.
+const MAX_PAID_SEATS: u32 = 50;
+
+/// Seats a Business change uses when the body omits `seats`.
+const BUSINESS_DEFAULT_SEATS: u32 = 10;
+
+const SEATS_OVER_50: &str = "more than 50 seats is custom: write to sales@getagmen.ai";
+const SEATS_IN_USE: &str = "remove members first";
+const SUBSCRIPTION_PENDING: &str = "the subscription is not active yet; try again in a minute";
+const BILLED_OUTSIDE: &str = "this group is billed outside Paddle";
+const NO_SUBSCRIPTION: &str =
+    "this group has no subscription yet: agmen group seats add 1 starts one";
+const OWNER_ONLY: &str = "only the owner can change billing";
+const NOT_HOSTED: &str = "this hub is not agmen hosted";
+const NO_SEAT_PLAN: &str = "this group has no seat plan";
 
 const SECS_PER_DAY: u64 = 86_400;
 
@@ -229,6 +247,28 @@ pub(crate) async fn seats_used(
     u32::try_from(count).map_err(decode)
 }
 
+/// Paddle customer and subscription ids, when both are stored.
+///
+/// # Errors
+///
+/// When the query fails.
+async fn paddle_ids(
+    db: impl PgExecutor<'_>,
+    tenant: &TenantId,
+) -> Result<Option<(String, String)>, sqlx::Error> {
+    let row: Option<(Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT paddle_customer_id, paddle_subscription_id
+         FROM tenant_plans WHERE tenant_id = $1",
+    )
+    .bind(tenant.as_str())
+    .fetch_optional(db)
+    .await?;
+    Ok(match row {
+        Some((Some(customer), Some(subscription))) => Some((customer, subscription)),
+        _ => None,
+    })
+}
+
 /// Locks the tenant's plan row, then lets `human` take a seat.
 ///
 /// A group whose ticked plan is not writable answers 403 `group_read_only`
@@ -392,18 +432,12 @@ pub(crate) async fn seats(
     Path(tenant): Path<String>,
     caller: Caller,
 ) -> Result<Json<Seats>, ApiError> {
-    if hub.mode() != crate::config::HubMode::Hosted {
-        return Err(ApiError::new(
-            StatusCode::NOT_FOUND,
-            "not_hosted",
-            "this hub is not agmen hosted",
-        ));
-    }
+    hosted_only(&hub)?;
     let human = caller.human()?;
     require_group_admin(tenant_role(hub.pool(), &tenant, &human).await?)?;
     let tenant_id: TenantId = tenant.parse().map_err(ApiError::stored)?;
     let Some(record) = load_plan(hub.pool(), &tenant_id).await? else {
-        return Err(ApiError::not_found("this group has no seat plan"));
+        return Err(no_seat_plan());
     };
     let used = seats_used(hub.pool(), &tenant_id).await?;
     let used_today: i32 = sqlx::query_scalar(
@@ -430,6 +464,314 @@ fn plan_name(plan: Option<Plan>) -> Option<String> {
         Some(Plan::Team { .. }) => Some("team".to_owned()),
         Some(Plan::Business(step)) => Some(format!("business-{}", step.seats())),
     }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SetSeats {
+    paid: u32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SetPlan {
+    plan: String,
+    seats: Option<u32>,
+}
+
+/// `{plan, seats_paid}` after a stored change, or `{checkout_url}` when
+/// Paddle still has to take payment. Each variant serializes only its fields.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+pub(crate) enum Billed {
+    Checkout {
+        checkout_url: String,
+    },
+    Stored {
+        plan: Option<String>,
+        seats_paid: u32,
+    },
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct Portal {
+    portal_url: String,
+}
+
+/// `PUT /v1/tenants/{tenant}/seats`. Hosted only. Owner or group admin.
+pub(crate) async fn set_seats(
+    State(hub): State<Hub>,
+    Path(tenant): Path<String>,
+    caller: Caller,
+    Json(request): Json<SetSeats>,
+) -> Result<Json<Billed>, ApiError> {
+    let (tenant_id, record) = billing_admin(&hub, &tenant, caller).await?;
+    checked_paid(request.paid, seats_used(hub.pool(), &tenant_id).await?)?;
+    match (paddle_ids(hub.pool(), &tenant_id).await?, record.plan) {
+        (None, None) => unpaid_seats(&hub, &tenant_id, &record, request.paid).await,
+        (None, Some(_)) => Err(no_subscription(BILLED_OUTSIDE)),
+        (Some(_), None) => Err(no_subscription(SUBSCRIPTION_PENDING)),
+        (Some((_, subscription)), Some(current)) => {
+            let plan = seat_change_plan(current, request.paid)?;
+            replace_subscription(&hub, &tenant_id, &subscription, plan).await
+        }
+    }
+}
+
+/// `POST /v1/tenants/{tenant}/plan`. Hosted only. Owner only.
+///
+/// Named apart from the `set_plan` test hook.
+pub(crate) async fn set_plan_route(
+    State(hub): State<Hub>,
+    Path(tenant): Path<String>,
+    caller: Caller,
+    Json(request): Json<SetPlan>,
+) -> Result<Json<Billed>, ApiError> {
+    let (tenant_id, record) = billing_owner(&hub, &tenant, caller).await?;
+    let seats = requested_seats(&request, &record)?;
+    checked_paid(seats, seats_used(hub.pool(), &tenant_id).await?)?;
+    let plan = plan_from_choice(&request.plan, seats)?;
+    match paddle_ids(hub.pool(), &tenant_id).await? {
+        None => {
+            let url = start_checkout(&hub, &tenant_id, plan).await?;
+            Ok(Json(Billed::Checkout { checkout_url: url }))
+        }
+        Some((_, subscription)) => {
+            replace_subscription(&hub, &tenant_id, &subscription, plan).await
+        }
+    }
+}
+
+/// `POST /v1/tenants/{tenant}/portal`. Hosted only. Owner only.
+pub(crate) async fn portal(
+    State(hub): State<Hub>,
+    Path(tenant): Path<String>,
+    caller: Caller,
+) -> Result<Json<Portal>, ApiError> {
+    let (tenant_id, _) = billing_owner(&hub, &tenant, caller).await?;
+    let Some((customer, subscription)) = paddle_ids(hub.pool(), &tenant_id).await? else {
+        return Err(no_subscription(NO_SUBSCRIPTION));
+    };
+    let (paddle, _) = billing_parts(&hub)?;
+    let url = paddle.portal_url(&customer, &subscription).await?;
+    Ok(Json(Portal {
+        portal_url: url.as_str().to_owned(),
+    }))
+}
+
+fn hosted_only(hub: &Hub) -> Result<(), ApiError> {
+    if hub.mode() == crate::config::HubMode::Hosted {
+        Ok(())
+    } else {
+        Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "not_hosted",
+            NOT_HOSTED,
+        ))
+    }
+}
+
+fn no_seat_plan() -> ApiError {
+    ApiError::not_found(NO_SEAT_PLAN)
+}
+
+fn seats_over_50() -> ApiError {
+    ApiError::new(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "seats_over_50",
+        SEATS_OVER_50,
+    )
+}
+
+fn no_subscription(description: &'static str) -> ApiError {
+    ApiError::conflict("no_subscription", description)
+}
+
+fn bad_plan() -> ApiError {
+    ApiError::new(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "bad_plan",
+        "plan is team or business",
+    )
+}
+
+fn internal_error() -> ApiError {
+    ApiError::new(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "server_error",
+        "internal error",
+    )
+}
+
+fn checked_paid(paid: u32, used: u32) -> Result<(), ApiError> {
+    if paid > MAX_PAID_SEATS {
+        return Err(seats_over_50());
+    }
+    // shortcut: seat count checked before the Paddle call, not under the plan lock; recheck under the lock and alert the owner if invites race seat removals in practice
+    if paid < used {
+        return Err(ApiError::conflict("seats_in_use", SEATS_IN_USE));
+    }
+    Ok(())
+}
+
+async fn billing_admin(
+    hub: &Hub,
+    tenant: &str,
+    caller: Caller,
+) -> Result<(TenantId, PlanRecord), ApiError> {
+    hosted_only(hub)?;
+    let human = caller.human()?;
+    require_group_admin(tenant_role(hub.pool(), tenant, &human).await?)?;
+    loaded_plan(hub, tenant).await
+}
+
+async fn billing_owner(
+    hub: &Hub,
+    tenant: &str,
+    caller: Caller,
+) -> Result<(TenantId, PlanRecord), ApiError> {
+    hosted_only(hub)?;
+    let human = caller.human()?;
+    if tenant_role(hub.pool(), tenant, &human).await? != Some(TenantRole::Owner) {
+        return Err(ApiError::forbidden("owner_required", OWNER_ONLY));
+    }
+    loaded_plan(hub, tenant).await
+}
+
+async fn loaded_plan(hub: &Hub, tenant: &str) -> Result<(TenantId, PlanRecord), ApiError> {
+    let tenant_id = tenant.parse().map_err(ApiError::stored)?;
+    let record = load_plan(hub.pool(), &tenant_id)
+        .await?
+        .ok_or_else(no_seat_plan)?;
+    Ok((tenant_id, record))
+}
+
+fn requested_seats(body: &SetPlan, record: &PlanRecord) -> Result<u32, ApiError> {
+    match body.plan.as_str() {
+        "team" => Ok(body
+            .seats
+            .unwrap_or_else(|| record.seats_paid().max(TEAM_INCLUDED_SEATS))),
+        "business" => Ok(body.seats.unwrap_or(BUSINESS_DEFAULT_SEATS)),
+        _ => Err(bad_plan()),
+    }
+}
+
+fn plan_from_choice(name: &str, seats: u32) -> Result<Plan, ApiError> {
+    match name {
+        "team" => Ok(Plan::Team {
+            extra_seats: seats.saturating_sub(TEAM_INCLUDED_SEATS),
+        }),
+        "business" => Ok(Plan::Business(
+            BusinessStep::for_seats(seats).ok_or_else(seats_over_50)?,
+        )),
+        _ => Err(bad_plan()),
+    }
+}
+
+fn seat_change_plan(current: Plan, paid: u32) -> Result<Plan, ApiError> {
+    match current {
+        Plan::Team { .. } => plan_from_choice("team", paid),
+        Plan::Business(_) => plan_from_choice("business", paid),
+    }
+}
+
+async fn unpaid_seats(
+    hub: &Hub,
+    tenant: &TenantId,
+    record: &PlanRecord,
+    paid: u32,
+) -> Result<Json<Billed>, ApiError> {
+    if paid <= TEAM_INCLUDED_SEATS {
+        return Ok(Json(stored_billed(record)));
+    }
+    let url = start_checkout(
+        hub,
+        tenant,
+        Plan::Team {
+            extra_seats: paid - TEAM_INCLUDED_SEATS,
+        },
+    )
+    .await?;
+    Ok(Json(Billed::Checkout { checkout_url: url }))
+}
+
+fn stored_billed(record: &PlanRecord) -> Billed {
+    Billed::Stored {
+        plan: plan_name(record.plan),
+        seats_paid: record.seats_paid(),
+    }
+}
+
+fn billing_parts(hub: &Hub) -> Result<(&PaddleClient, &Catalog), ApiError> {
+    let Some(paddle) = hub.paddle() else {
+        tracing::error!("hosted hub has no Paddle client");
+        return Err(internal_error());
+    };
+    let Some(hosted) = hub.hosted() else {
+        tracing::error!("hosted hub has no hosted config");
+        return Err(internal_error());
+    };
+    Ok((paddle, &hosted.catalog))
+}
+
+async fn start_checkout(hub: &Hub, tenant: &TenantId, plan: Plan) -> Result<String, ApiError> {
+    let (paddle, catalog) = billing_parts(hub)?;
+    let url = paddle
+        .create_checkout(tenant, &catalog.items_for(plan))
+        .await?;
+    Ok(url.as_str().to_owned())
+}
+
+async fn replace_subscription(
+    hub: &Hub,
+    tenant: &TenantId,
+    subscription: &str,
+    plan: Plan,
+) -> Result<Json<Billed>, ApiError> {
+    let (paddle, catalog) = billing_parts(hub)?;
+    let items = paddle
+        .update_items(subscription, &catalog.items_for(plan))
+        .await?;
+    let record = store_returned_plan(hub, catalog, tenant, &items).await?;
+    Ok(Json(stored_billed(&record)))
+}
+
+// Leaves `state` and `last_event_at` for the webhook. `PlanRecord::apply`
+// would stamp the hub clock and then ignore Paddle's earlier event for the
+// same change.
+async fn store_returned_plan(
+    hub: &Hub,
+    catalog: &Catalog,
+    tenant: &TenantId,
+    items: &[LineItem],
+) -> Result<PlanRecord, ApiError> {
+    let Some(plan) = catalog.plan_of(items) else {
+        tracing::error!(
+            ?items,
+            "Paddle returned subscription items that are not a catalog plan"
+        );
+        return Err(ApiError::new(
+            StatusCode::BAD_GATEWAY,
+            "upstream_unavailable",
+            "Paddle returned subscription items that are not a catalog plan",
+        ));
+    };
+    let mut tx = hub.pool().begin().await?;
+    let locked: Option<String> =
+        sqlx::query_scalar("SELECT tenant_id FROM tenant_plans WHERE tenant_id = $1 FOR UPDATE")
+            .bind(tenant.as_str())
+            .fetch_optional(&mut *tx)
+            .await?;
+    if locked.is_none() {
+        return Err(no_seat_plan());
+    }
+    let Some(mut record) = load_plan(&mut *tx, tenant).await? else {
+        return Err(no_seat_plan());
+    };
+    record.plan = Some(plan);
+    store_plan(&mut tx, tenant, &record).await?;
+    tx.commit().await?;
+    Ok(record)
 }
 
 /// Refuses when `human` already owns [`MAX_OWNED_GROUPS`] groups.
@@ -489,27 +831,42 @@ pub(crate) struct CreatedGroup {
 
 /// `POST /v1/groups`. Hosted only. One transaction creates the tenant, its
 /// plan, the trial grant when this GitHub account has none, the owner
-/// membership, and the first project.
+/// membership, and the first project. After that commit, a group with no
+/// trial gets a Paddle checkout link, or null when Paddle did not answer.
 pub(crate) async fn create(
     State(hub): State<Hub>,
     caller: Caller,
     Json(request): Json<CreateGroup>,
 ) -> Result<(StatusCode, Json<CreatedGroup>), ApiError> {
-    if hub.mode() != crate::config::HubMode::Hosted {
-        return Err(ApiError::new(
-            StatusCode::NOT_FOUND,
-            "not_hosted",
-            "this hub is not agmen hosted",
-        ));
-    }
+    hosted_only(&hub)?;
     let human = caller.human()?;
     checked_name(&request.name)?;
     let repo_url = checked_repo(request.repo_url.as_deref())?;
     let now = Timestamp::now();
     let mut tx = hub.pool().begin().await?;
-    let made = insert_group(&mut tx, &human, &request, repo_url, now).await?;
+    let mut made = insert_group(&mut tx, &human, &request, repo_url, now).await?;
     tx.commit().await?;
+    if made.trial_ends_at.is_none() {
+        made.checkout_url = checkout_for_new_group(&hub, &made.tenant).await;
+    }
     Ok((StatusCode::CREATED, Json(made)))
+}
+
+async fn checkout_for_new_group(hub: &Hub, tenant: &str) -> Option<String> {
+    let Ok(tenant_id) = tenant.parse::<TenantId>() else {
+        tracing::warn!(
+            tenant,
+            "new group id is not a tenant id, so it has no checkout link"
+        );
+        return None;
+    };
+    match start_checkout(hub, &tenant_id, Plan::Team { extra_seats: 0 }).await {
+        Ok(url) => Some(url),
+        Err(err) => {
+            tracing::warn!(error = %error_chain(&err), "new group has no checkout link");
+            None
+        }
+    }
 }
 
 fn checked_name(name: &str) -> Result<(), ApiError> {
