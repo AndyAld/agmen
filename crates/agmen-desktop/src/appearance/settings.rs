@@ -107,49 +107,123 @@ impl AgmenSettings {
             })
     }
 
-    /// Replaces the `[appearance]` table in `path`, keeping everything else,
-    /// through a temporary file and a rename so a crash never leaves half a
-    /// file.
+    /// Replaces the `[appearance]` keys this version owns in `path`, keeping
+    /// every other key, table, comment and blank line, through a temporary
+    /// file and a rename so a crash never leaves half a file.
     ///
     /// # Errors
     ///
-    /// When the existing file cannot be parsed (it is left alone), or the
-    /// folder or file cannot be written.
+    /// When the existing file is too large or cannot be parsed (it is left
+    /// alone), or the folder or file cannot be written.
     pub(crate) fn save(&self, path: &Path) -> Result<(), AppearanceError> {
-        let mut table = read_settings_table(path)?.unwrap_or_default();
-        let value = toml::Value::try_from(self).map_err(|err| AppearanceError::Serialize {
+        let ours = match toml::Value::try_from(self).map_err(|err| AppearanceError::Serialize {
             path: path.to_owned(),
             message: err.to_string(),
-        })?;
-        // Merge into the table already there: keys this version does not
-        // know stay; keys it owns are replaced, or dropped when now unset.
-        let mut merged = match table.remove(TABLE) {
-            Some(toml::Value::Table(existing)) => existing,
+        })? {
+            toml::Value::Table(ours) => ours,
             _ => toml::Table::new(),
         };
-        // Font keys a newer version adds survive too (C110).
-        let mut fonts = match merged.remove("fonts") {
-            Some(toml::Value::Table(existing)) => existing,
-            _ => toml::Table::new(),
+        // shortcut: a write from agmend that lands between reading settings.toml and renaming the
+        // temp file over it is lost; revisit with a lock file both writers take.
+        let mut doc = read_settings_doc(path)?;
+        if !doc.get(TABLE).is_some_and(toml_edit::Item::is_table_like) {
+            doc.insert(TABLE, toml_edit::table());
+        }
+        if let Some(table) = doc.get_mut(TABLE).and_then(toml_edit::Item::as_table_mut)
+            && !table.is_dotted()
+        {
+            table.set_implicit(false);
+        }
+        let Some(table) = doc
+            .get_mut(TABLE)
+            .and_then(toml_edit::Item::as_table_like_mut)
+        else {
+            return Err(AppearanceError::Serialize {
+                path: path.to_owned(),
+                message: format!("the [{TABLE}] table could not be made"),
+            });
         };
         for key in OWNED_KEYS {
-            merged.remove(*key);
-        }
-        for key in OWNED_FONT_KEYS {
-            fonts.remove(*key);
-        }
-        if let toml::Value::Table(mut ours) = value {
-            if let Some(toml::Value::Table(our_fonts)) = ours.remove("fonts") {
-                fonts.extend(our_fonts);
+            if *key == "fonts" {
+                save_fonts(table, ours.get("fonts"), path)?;
+                continue;
             }
-            merged.extend(ours);
+            set_table_key(table, key, ours.get(*key), path)?;
         }
-        if !fonts.is_empty() {
-            merged.insert("fonts".to_owned(), toml::Value::Table(fonts));
-        }
-        table.insert(TABLE.to_owned(), toml::Value::Table(merged));
-        write_settings_table(path, &table)
+        write_settings_text(path, &doc.to_string())
     }
+}
+
+fn save_fonts(
+    appearance: &mut dyn toml_edit::TableLike,
+    fonts_value: Option<&toml::Value>,
+    path: &Path,
+) -> Result<(), AppearanceError> {
+    let empty = toml::Table::new();
+    let our_fonts = match fonts_value {
+        Some(toml::Value::Table(fonts)) => fonts,
+        _ => &empty,
+    };
+    let has_fonts_table = appearance
+        .get("fonts")
+        .is_some_and(toml_edit::Item::is_table_like);
+    if !has_fonts_table {
+        if our_fonts.is_empty() {
+            appearance.remove("fonts");
+            return Ok(());
+        }
+        appearance.insert("fonts", toml_edit::table());
+    }
+    let Some(fonts) = appearance
+        .get_mut("fonts")
+        .and_then(toml_edit::Item::as_table_like_mut)
+    else {
+        return Err(AppearanceError::Serialize {
+            path: path.to_owned(),
+            message: "the [appearance.fonts] table could not be made".to_owned(),
+        });
+    };
+    for key in OWNED_FONT_KEYS {
+        set_table_key(fonts, key, our_fonts.get(*key), path)?;
+    }
+    if fonts.is_empty() {
+        appearance.remove("fonts");
+    }
+    Ok(())
+}
+
+fn set_table_key(
+    table: &mut dyn toml_edit::TableLike,
+    key: &str,
+    value: Option<&toml::Value>,
+    path: &Path,
+) -> Result<(), AppearanceError> {
+    match value {
+        Some(value) => {
+            let value = value
+                .to_string()
+                .parse::<toml_edit::Value>()
+                .map_err(|err| AppearanceError::Serialize {
+                    path: path.to_owned(),
+                    message: err.to_string(),
+                })?;
+            match table.get_mut(key).and_then(toml_edit::Item::as_value_mut) {
+                // Keeps the comments around the old value.
+                Some(old) => {
+                    let decor = old.decor().clone();
+                    *old = value;
+                    *old.decor_mut() = decor;
+                }
+                None => {
+                    table.insert(key, toml_edit::value(value));
+                }
+            }
+        }
+        None => {
+            table.remove(key);
+        }
+    }
+    Ok(())
 }
 
 // Task 7: what the desktop app remembers between launches.
@@ -349,28 +423,13 @@ impl DesktopSettings {
     }
 }
 
-/// Writes `table` as the whole settings file at `path`, creating its
-/// folder, through a temporary file and a rename so a crash never leaves
-/// half a file.
+/// Writes `text` as the whole settings file at `path`, creating its folder,
+/// through a temporary file and a rename so a crash never leaves half a file.
 ///
 /// # Errors
 ///
-/// When the table cannot be written as TOML, or the folder or file cannot
-/// be written.
-pub(crate) fn write_settings_table(
-    path: &Path,
-    table: &toml::Table,
-) -> Result<(), AppearanceError> {
-    let text = toml::to_string_pretty(table).map_err(|err| AppearanceError::Serialize {
-        path: path.to_owned(),
-        message: err.to_string(),
-    })?;
-    write_settings_text(path, &text)
-}
-
-/// Writes `text` as the whole settings file at `path`, as
-/// [`write_settings_table`] does.
-fn write_settings_text(path: &Path, text: &str) -> Result<(), AppearanceError> {
+/// When the folder or file cannot be written.
+pub(crate) fn write_settings_text(path: &Path, text: &str) -> Result<(), AppearanceError> {
     let io = |source| AppearanceError::Io {
         path: path.to_owned(),
         source,
@@ -383,29 +442,67 @@ fn write_settings_text(path: &Path, text: &str) -> Result<(), AppearanceError> {
     fs::rename(&tmp, path).map_err(io)
 }
 
-/// The whole settings file at `path` as a table, `None` when it does not
-/// exist.
-///
-/// # Errors
-///
-/// When the file is too large, unreadable, or not valid TOML.
-pub(crate) fn read_settings_table(path: &Path) -> Result<Option<toml::Table>, AppearanceError> {
+/// Reads the settings file text at `path`, `None` when it does not exist,
+/// enforcing [`MAX_SETTINGS_BYTES`].
+fn read_settings_text(path: &Path) -> Result<Option<String>, AppearanceError> {
+    use std::io::Read as _;
+
     let io = |source| AppearanceError::Io {
         path: path.to_owned(),
         source,
     };
-    let len = match fs::metadata(path) {
-        Ok(meta) => meta.len(),
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(err) => return Err(io(err)),
     };
+    let len = file.metadata().map_err(io)?.len();
     if len > MAX_SETTINGS_BYTES {
         return Err(AppearanceError::TooLarge {
             path: path.to_owned(),
             len,
         });
     }
-    let text = fs::read_to_string(path).map_err(io)?;
+    let mut bytes = Vec::with_capacity(usize::try_from(len).unwrap_or(0));
+    file.take(MAX_SETTINGS_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(io)?;
+    if bytes.len() as u64 > MAX_SETTINGS_BYTES {
+        return Err(AppearanceError::TooLarge {
+            path: path.to_owned(),
+            len: bytes.len() as u64,
+        });
+    }
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|err| io(std::io::Error::new(std::io::ErrorKind::InvalidData, err)))
+}
+
+/// Parses the settings file at `path` into an editable [`toml_edit::DocumentMut`];
+/// a missing file gives an empty document.
+///
+/// # Errors
+///
+/// When the file is too large, unreadable, or not valid TOML.
+pub(crate) fn read_settings_doc(path: &Path) -> Result<toml_edit::DocumentMut, AppearanceError> {
+    let text = read_settings_text(path)?.unwrap_or_default();
+    text.parse::<toml_edit::DocumentMut>()
+        .map_err(|err| AppearanceError::Parse {
+            path: path.to_owned(),
+            message: err.to_string(),
+        })
+}
+
+/// The whole settings file at `path` as a table, `None` when it does not
+/// exist.
+///
+/// # Errors
+///
+/// When the file is too large, unreadable, or not valid TOML.
+fn read_settings_table(path: &Path) -> Result<Option<toml::Table>, AppearanceError> {
+    let Some(text) = read_settings_text(path)? else {
+        return Ok(None);
+    };
     text.parse::<toml::Table>()
         .map(Some)
         .map_err(|err| AppearanceError::Parse {

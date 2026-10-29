@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use crate::appearance::{AppearanceError, read_settings_table, write_settings_table};
+use crate::appearance::{AppearanceError, read_settings_doc, write_settings_text};
 
 /// The table this setting lives in.
 const TABLE: &str = "keys";
@@ -21,29 +21,57 @@ pub(crate) enum VimMode {
 }
 
 /// Flips vim mode in the settings file at `path`, keeping every other key,
-/// and returns the new mode. A missing file or key counts as off.
+/// table, comment and blank line, and returns the new mode. A missing file or
+/// key counts as off.
 ///
 /// # Errors
 ///
 /// When the file cannot be read, parsed or written, or its `keys` is not a
 /// table; a file that does not parse is left alone.
 pub(crate) fn toggle_vim_mode(path: &Path) -> Result<VimMode, AppearanceError> {
-    let mut table = read_settings_table(path)?.unwrap_or_default();
-    let mut keys = match table.remove(TABLE) {
-        Some(toml::Value::Table(keys)) => keys,
-        None => toml::Table::new(),
+    // shortcut: a write from agmend that lands between reading settings.toml and renaming the
+    // temp file over it is lost; revisit with a lock file both writers take.
+    let mut doc = read_settings_doc(path)?;
+    match doc.get(TABLE) {
+        Some(item) if item.is_table_like() => {}
+        None => {
+            doc.insert(TABLE, toml_edit::table());
+        }
         // Replacing it would lose the person's value without a word.
         Some(other) => {
             return Err(AppearanceError::Parse {
                 path: path.to_owned(),
-                message: format!("`{TABLE}` is a {}, not a table", other.type_str()),
+                message: format!("`{TABLE}` is a {}, not a table", other.type_name()),
             });
         }
+    }
+    if let Some(table) = doc.get_mut(TABLE).and_then(toml_edit::Item::as_table_mut)
+        && !table.is_dotted()
+    {
+        table.set_implicit(false);
+    }
+    let Some(keys) = doc
+        .get_mut(TABLE)
+        .and_then(toml_edit::Item::as_table_like_mut)
+    else {
+        return Err(AppearanceError::Serialize {
+            path: path.to_owned(),
+            message: format!("the [{TABLE}] table could not be made"),
+        });
     };
-    let on = !matches!(keys.get(KEY), Some(toml::Value::Boolean(true)));
-    keys.insert(KEY.to_owned(), toml::Value::Boolean(on));
-    table.insert(TABLE.to_owned(), toml::Value::Table(keys));
-    write_settings_table(path, &table)?;
+    let on = keys.get(KEY).and_then(toml_edit::Item::as_bool) != Some(true);
+    match keys.get_mut(KEY).and_then(toml_edit::Item::as_value_mut) {
+        // Keeps the comments around the old value.
+        Some(old) => {
+            let decor = old.decor().clone();
+            *old = toml_edit::Value::from(on);
+            *old.decor_mut() = decor;
+        }
+        None => {
+            keys.insert(KEY, toml_edit::value(on));
+        }
+    }
+    write_settings_text(path, &doc.to_string())?;
     Ok(if on { VimMode::On } else { VimMode::Off })
 }
 
@@ -92,5 +120,37 @@ mod tests {
             Err(AppearanceError::Parse { .. })
         ));
         assert_eq!(fs::read_to_string(&path).unwrap(), "keys = \"x\"\n");
+    }
+
+    #[test]
+    fn vim_toggle_keeps_comments_and_other_tables() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.toml");
+        let initial = "# hand-edited agmen settings\n\
+[desktop]\n\
+# last active checkout\n\
+last_project = \"p1\"\n\
+\n\
+[keys]\n\
+vim_mode = false # modal editing\n\
+leader = \"space\"\n\
+\n\
+[listener.p1]\n\
+# triage model and daily cap\n\
+model = \"claude-haiku-5-5\"\n\
+\n\
+daily_usd = \"25.00\"\n\
+reviews = \"on\"\n\
+\n\
+[appearance]\n\
+follow_zed = false\n\
+theme = \"One Dark\"\n";
+        fs::write(&path, initial).unwrap();
+
+        assert_eq!(toggle_vim_mode(&path).unwrap(), VimMode::On);
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            initial.replace("vim_mode = false", "vim_mode = true")
+        );
     }
 }
