@@ -121,7 +121,7 @@ async fn it_second_group_gets_no_trial() {
         assert!(
             body["checkout_url"]
                 .as_str()
-                .is_some_and(|url| url.starts_with(paddle.base().as_str())),
+                .is_some_and(|url| url.starts_with(&paddle.link_base())),
             "{}",
             body["checkout_url"]
         );

@@ -1,7 +1,7 @@
 use std::io::ErrorKind;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::Router;
@@ -91,6 +91,7 @@ fn test_hub(mqtt_ws_upstream: Option<Url>) -> Hub {
             events: Slots::default(),
             claim_lease: DEFAULT_CLAIM_LEASE,
             retention_days: None,
+            billing_calls: Mutex::default(),
         }),
     }
 }

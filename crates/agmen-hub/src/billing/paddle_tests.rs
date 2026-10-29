@@ -202,3 +202,159 @@ fn next_cursor_reads_the_after_parameter_only() {
         Err(PaddleError::Shape(_))
     ));
 }
+
+#[test]
+fn return_urls_allow_https_on_paddle_or_the_api_domain() {
+    let paddle = "https://api.paddle.com/";
+    let custom = "https://billing.customer.test/";
+    for (url, api) in [
+        ("https://checkout.paddle.com/checkout/txn_1", paddle),
+        (
+            "https://sandbox-checkout.paddle.com/pay?_ptxn=txn_1",
+            paddle,
+        ),
+        ("https://paddle.com/checkout/txn_1", paddle),
+        ("https://pay.customer.test/checkout/txn_1", custom),
+        ("https://127.0.0.1:9/checkout/txn_1", "http://127.0.0.1:9/"),
+    ] {
+        assert!(
+            return_url_allowed(&Url::parse(url).unwrap(), &Url::parse(api).unwrap()),
+            "{url} with {api}"
+        );
+    }
+}
+
+#[test]
+fn return_urls_reject_http_other_hosts_and_userinfo() {
+    let api = Url::parse("https://api.paddle.com/").unwrap();
+    for url in [
+        "http://checkout.paddle.com/checkout/txn_1",
+        "https://evil.example/checkout/txn_1",
+        "https://paddle.com.evil.example/checkout/txn_1",
+        "https://user:pass@checkout.paddle.com/checkout/txn_1",
+        "https://checkout.paddle.com@evil.example/checkout/txn_1",
+    ] {
+        let parsed = Url::parse(url).unwrap();
+        assert!(
+            !return_url_allowed(&parsed, &api),
+            "{url} host {:?}",
+            parsed.host_str()
+        );
+    }
+    let leaked = Url::parse("https://user:secret@evil.example/checkout?token=abc").unwrap();
+    match accept_return_url(&leaked, &api) {
+        Err(PaddleError::BadUrl { host }) => {
+            assert_eq!(host, "evil.example");
+            assert!(
+                !host.contains("secret") && !host.contains("token"),
+                "{host}"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn return_urls_ignore_case_ports_and_a_trailing_dot() {
+    let api = Url::parse("https://api.paddle.com/").unwrap();
+    for url in [
+        "https://CHECKOUT.Paddle.COM/checkout/txn_1",
+        "HTTPS://checkout.paddle.com/checkout/txn_1",
+        "https://checkout.paddle.com:8443/checkout/txn_1",
+        // A trailing dot names the same host.
+        "https://checkout.paddle.com./checkout/txn_1",
+        "https://paddle.com./checkout/txn_1",
+    ] {
+        let parsed = Url::parse(url).unwrap();
+        assert!(
+            return_url_allowed(&parsed, &api),
+            "{url} host {:?}",
+            parsed.host_str()
+        );
+    }
+}
+
+#[test]
+fn return_urls_reject_lookalike_and_hidden_hosts() {
+    let api = Url::parse("https://api.paddle.com/").unwrap();
+    for url in [
+        "https://evilpaddle.com/checkout/txn_1",
+        "https://notpaddle.com/checkout/txn_1",
+        "https://paddle.co/checkout/txn_1",
+        "https://paddle.com.evil.example./checkout/txn_1",
+        "https://checkout.paddle.com.evil.example/checkout/txn_1",
+        // A Cyrillic "a" turns the host into punycode, which is not paddle.com.
+        "https://p\u{0430}ddle.com/checkout/txn_1",
+        "https://checkout.p\u{0430}ddle.com/checkout/txn_1",
+        // The Paddle name is in the path, query or fragment, not the host.
+        "https://evil.example/checkout.paddle.com",
+        "https://evil.example/?next=https://checkout.paddle.com/",
+        "https://evil.example/#checkout.paddle.com",
+        "https://evil.example\\@checkout.paddle.com/",
+        "https://paddle.com:443@evil.example/checkout/txn_1",
+        // An address is never a host of paddle.com, however it is spelled.
+        "https://1.2.3.4/checkout/txn_1",
+        "https://127.0.0.1:9/checkout/txn_1",
+        "https://[::1]/checkout/txn_1",
+        "https://0x7f.1/checkout/txn_1",
+        "https://2130706433/checkout/txn_1",
+    ] {
+        let parsed = Url::parse(url).unwrap();
+        assert!(
+            !return_url_allowed(&parsed, &api),
+            "{url} host {:?}",
+            parsed.host_str()
+        );
+    }
+}
+
+#[test]
+fn return_urls_follow_the_api_hosts_domain_and_nothing_wider() {
+    for (api, allowed, refused) in [
+        (
+            "https://billing.customer.test/",
+            &[
+                "https://billing.customer.test/x",
+                "https://pay.customer.test/x",
+                "https://customer.test/x",
+                "https://a.b.customer.test/x",
+            ][..],
+            &[
+                "http://pay.customer.test/x",
+                "https://user@pay.customer.test/x",
+                "https://customer.test.evil.example/x",
+                "https://evilcustomer.test/x",
+                "https://customer.example/x",
+            ][..],
+        ),
+        // A loopback or one-label API host allows only itself.
+        (
+            "http://127.0.0.1:9/",
+            &["https://127.0.0.1:1/x"][..],
+            &[
+                "https://127.0.0.2:9/x",
+                "https://localhost:9/x",
+                "https://127.0.0.1.evil.example/x",
+            ][..],
+        ),
+        (
+            "http://localhost:9/",
+            &["https://localhost:1/x"][..],
+            &[
+                "https://evil.localhost/x",
+                "https://localhost.evil.example/x",
+            ][..],
+        ),
+    ] {
+        let api = Url::parse(api).unwrap();
+        for url in allowed {
+            assert!(return_url_allowed(&Url::parse(url).unwrap(), &api), "{url}");
+        }
+        for url in refused {
+            assert!(
+                !return_url_allowed(&Url::parse(url).unwrap(), &api),
+                "{url}"
+            );
+        }
+    }
+}

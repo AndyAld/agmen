@@ -712,7 +712,7 @@ fn assert_no_paddle(paddle: &FakePaddle) {
 }
 
 fn checkout_url(paddle: &FakePaddle) -> String {
-    format!("{}checkout/txn_1", paddle.base())
+    format!("{}checkout/txn_1", paddle.link_base())
 }
 
 #[tokio::test]
@@ -959,7 +959,7 @@ async fn it_portal_needs_subscription() {
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(
             body,
-            json!({"portal_url": format!("{}portal/ctm_test", paddle.base())})
+            json!({"portal_url": format!("{}portal/ctm_test", paddle.link_base())})
         );
         let sent = paddle_body(&paddle, "POST", "/customers/ctm_test/portal-sessions");
         assert_eq!(sent["subscription_ids"], json!(["sub_test"]));
@@ -1302,4 +1302,507 @@ async fn it_plan_route_checks_its_body() {
         assert_no_paddle(&paddle);
     })
     .await;
+}
+
+async fn send_for_retry(
+    ctx: &Ctx,
+    token: &str,
+    method: reqwest::Method,
+    path: &str,
+    body: Option<Value>,
+) -> (StatusCode, Value, Option<String>) {
+    let mut request = ctx
+        .http
+        .request(method, ctx.hub.url(path))
+        .bearer_auth(token);
+    if let Some(body) = body {
+        request = request.json(&body);
+    }
+    let response = request.send().await.unwrap();
+    let status = response.status();
+    let retry = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    (status, response.json().await.unwrap_or(Value::Null), retry)
+}
+
+/// The limiter refills one call every 10 s and counts whole seconds from the
+/// first call, so a slow test may see a few seconds less than 10.
+fn assert_retry_within_a_refill(retry: Option<&str>) {
+    let secs: u64 = retry
+        .expect("a Retry-After header")
+        .parse()
+        .expect("Retry-After in whole seconds");
+    assert!((1..=10).contains(&secs), "Retry-After {secs}");
+}
+
+/// A request with no token, or with `token` when given: its status only.
+async fn status_of(
+    ctx: &Ctx,
+    token: Option<&str>,
+    method: &reqwest::Method,
+    path: &str,
+    body: Option<&Value>,
+) -> StatusCode {
+    let mut request = ctx.http.request(method.clone(), ctx.hub.url(path));
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+    if let Some(body) = body {
+        request = request.json(body);
+    }
+    request.send().await.unwrap().status()
+}
+
+#[tokio::test]
+async fn it_refused_billing_calls_do_not_use_the_limit() {
+    run_hosted_with_paddle(|ctx, paddle| async move {
+        let (owner, project) = group(&ctx, "acme").await;
+        let member = member_with_token(&ctx, &project, 61, "mel", "member").await;
+        let admin = member_with_token(&ctx, &project, 62, "ada", "admin").await;
+        let stranger = login(&ctx, 63, "eve").await;
+        let tenant = project.tenant.as_str();
+        let routes = [
+            (
+                reqwest::Method::PUT,
+                format!("/v1/tenants/{tenant}/seats"),
+                Some(json!({"paid": 5})),
+            ),
+            (
+                reqwest::Method::POST,
+                format!("/v1/tenants/{tenant}/plan"),
+                Some(json!({"plan": "business"})),
+            ),
+            (
+                reqwest::Method::POST,
+                format!("/v1/tenants/{tenant}/portal"),
+                None,
+            ),
+        ];
+        // Seven rounds, one more than the limit. Nobody here may use a call.
+        for round in 1..=7 {
+            for (method, path, body) in &routes {
+                for (who, token, expected) in [
+                    ("no token", None, StatusCode::UNAUTHORIZED),
+                    ("bad token", Some("not-a-token"), StatusCode::UNAUTHORIZED),
+                    ("member", Some(member.as_str()), StatusCode::FORBIDDEN),
+                    ("stranger", Some(stranger.as_str()), StatusCode::FORBIDDEN),
+                ] {
+                    let status = status_of(&ctx, token, method, path, body.as_ref()).await;
+                    assert_eq!(status, expected, "round {round} {who} {method} {path}");
+                }
+            }
+            // A group admin may set seats, but not change the plan or open the portal.
+            for (method, path, body) in routes.iter().skip(1) {
+                let status = status_of(&ctx, Some(&admin), method, path, body.as_ref()).await;
+                assert_eq!(status, StatusCode::FORBIDDEN, "round {round} admin {path}");
+            }
+        }
+        assert_no_paddle(&paddle);
+        // The owner still has all six calls, and the seventh is the one refused.
+        for n in 1..=6 {
+            let (status, body) = put_seats(&ctx, &owner, tenant, 5).await;
+            assert_eq!(status, StatusCode::OK, "owner call {n}: {body}");
+        }
+        let (status, body) = put_seats(&ctx, &owner, tenant, 5).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+        assert_eq!(paddle.requests().len(), 6, "{:?}", paddle.requests());
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn it_paddle_urls_the_hub_will_not_send_are_refused() {
+    run_hosted_with_paddle(|ctx, paddle| async move {
+        let (token, project) = group(&ctx, "acme").await;
+        let tenant = project.tenant.as_str();
+        let other_host =
+            json!({"data": {"checkout": {"url": "https://evil.example/pay?_ptxn=txn_1"}}});
+        let plain_http =
+            json!({"data": {"checkout": {"url": "http://checkout.paddle.com/pay?_ptxn=txn_1"}}});
+        let with_userinfo =
+            json!({"data": {"checkout": {"url": "https://u:p@checkout.paddle.com/pay"}}});
+        // A trial group asking for a fifth seat starts a checkout.
+        for (n, answer) in [other_host.clone(), plain_http, with_userinfo]
+            .into_iter()
+            .enumerate()
+        {
+            paddle.fail_next(200, answer);
+            let (status, body) = put_seats(&ctx, &token, tenant, 5).await;
+            assert_eq!(status, StatusCode::BAD_GATEWAY, "answer {n}: {body}");
+            assert_eq!(body["error"], "paddle_bad_url", "answer {n}: {body}");
+            assert!(!body.to_string().contains("evil.example"), "{body}");
+        }
+        paddle.fail_next(200, other_host.clone());
+        let (status, body) = call(
+            &ctx,
+            &token,
+            reqwest::Method::POST,
+            &format!("/v1/tenants/{tenant}/plan"),
+            Some(json!({"plan": "team"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+        assert_eq!(body["error"], "paddle_bad_url");
+        // The group is still created, with no checkout link.
+        paddle.fail_next(200, other_host);
+        let (status, created) = call(
+            &ctx,
+            &token,
+            reqwest::Method::POST,
+            "/v1/groups",
+            Some(json!({"name": "beta", "project": "web"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        assert_eq!(created["state"], "read_only");
+        assert!(created["checkout_url"].is_null(), "{created}");
+        // The portal link gets the same check.
+        set_active(&ctx, &project, Plan::Team { extra_seats: 0 }).await;
+        seed_subscription(&ctx, &project).await;
+        paddle.fail_next(
+            200,
+            json!({"data": {"urls": {"general": {"overview": "https://evil.example/portal"}}}}),
+        );
+        let (status, body) = call(
+            &ctx,
+            &token,
+            reqwest::Method::POST,
+            &format!("/v1/tenants/{tenant}/portal"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+        assert_eq!(body["error"], "paddle_bad_url");
+        assert!(!body.to_string().contains("evil.example"), "{body}");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn it_billing_routes_are_rate_limited() {
+    run_hosted_with_paddle(|ctx, paddle| async move {
+        let (token, project) = group(&ctx, "acme").await;
+        let member = member_with_token(&ctx, &project, 61, "mel", "member").await;
+        let (status, body) = put_seats(&ctx, &member, &project.tenant, 5).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(body["error"], "group_admin_required");
+        assert_no_paddle(&paddle);
+        for n in 1..=6 {
+            let (status, body) = put_seats(&ctx, &token, &project.tenant, 5).await;
+            assert_eq!(status, StatusCode::OK, "call {n}: {body}");
+        }
+        assert_eq!(paddle.requests().len(), 6);
+        let (status, body, retry) = send_for_retry(
+            &ctx,
+            &token,
+            reqwest::Method::POST,
+            &format!("/v1/tenants/{}/plan", project.tenant),
+            Some(json!({"plan": "business"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+        assert_eq!(body["error"], "rate_limited");
+        assert_retry_within_a_refill(retry.as_deref());
+        assert_eq!(paddle.requests().len(), 6, "{:?}", paddle.requests());
+
+        let (status, created) = call(
+            &ctx,
+            &token,
+            reqwest::Method::POST,
+            "/v1/groups",
+            Some(json!({"name": "beta", "project": "web"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        let beta = Project {
+            tenant: created["tenant"].as_str().unwrap().to_owned(),
+            project: created["project"].as_str().unwrap().to_owned(),
+        };
+        set_active(&ctx, &beta, Plan::Team { extra_seats: 0 }).await;
+        seed_subscription(&ctx, &beta).await;
+        let before = paddle.requests().len();
+        let portal = format!("/v1/tenants/{}/portal", beta.tenant);
+        for n in 1..=5 {
+            let (status, body) = call(&ctx, &token, reqwest::Method::POST, &portal, None).await;
+            assert_eq!(status, StatusCode::OK, "portal {n}: {body}");
+        }
+        let (status, body, retry) = send_for_retry(
+            &ctx,
+            &token,
+            reqwest::Method::PUT,
+            &format!("/v1/tenants/{}/seats", beta.tenant),
+            Some(json!({"paid": 6})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+        assert_eq!(body["error"], "rate_limited");
+        assert_retry_within_a_refill(retry.as_deref());
+        assert_eq!(
+            paddle.requests().len(),
+            before + 5,
+            "{:?}",
+            paddle.requests()
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn it_plan_route_refuses_operator_groups() {
+    run_hosted_with_paddle(|ctx, paddle| async move {
+        let (token, project) = group(&ctx, "acme").await;
+        set_active(&ctx, &project, Plan::Team { extra_seats: 0 }).await;
+        let (status, body) = call(
+            &ctx,
+            &token,
+            reqwest::Method::POST,
+            &format!("/v1/tenants/{}/plan", project.tenant),
+            Some(json!({"plan": "business"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"], "no_subscription");
+        assert_eq!(
+            body["error_description"],
+            "this group is billed outside Paddle"
+        );
+        assert_no_paddle(&paddle);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn it_plan_route_waits_for_an_active_plan() {
+    run_hosted_with_paddle(|ctx, paddle| async move {
+        let (token, project) = group(&ctx, "acme").await;
+        seed_subscription(&ctx, &project).await;
+        let (status, body) = call(
+            &ctx,
+            &token,
+            reqwest::Method::POST,
+            &format!("/v1/tenants/{}/plan", project.tenant),
+            Some(json!({"plan": "team"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"], "no_subscription");
+        assert_eq!(
+            body["error_description"],
+            "the subscription is not active yet; try again in a minute"
+        );
+        assert_no_paddle(&paddle);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn it_seat_decrease_racing_a_join_is_refused() {
+    run_hosted_with_paddle(|ctx, paddle| async move {
+        let (token, project) = group(&ctx, "acme").await;
+        set_active(&ctx, &project, Plan::Team { extra_seats: 1 }).await;
+        seed_subscription(&ctx, &project).await;
+        for (sub, handle) in [(51_u64, "ada"), (52, "bea"), (53, "cy")] {
+            member_with_token(&ctx, &project, sub, handle, "member").await;
+        }
+        let raced = hold_plan_and_join(&ctx, &paddle, &token, &project, Race::JOIN_ONLY).await;
+        assert_eq!(raced.0, StatusCode::CONFLICT, "{}", raced.1);
+        assert_eq!(raced.1["error"], "seats_below_used");
+        assert_eq!(
+            raced.1["error_description"],
+            "a member joined while seats were changing"
+        );
+        assert_eq!(plan_row(&ctx, &project).await["extra_seats"], 1);
+        let patches = seat_patches(&paddle);
+        assert_eq!(patches.len(), 2, "{patches:?}");
+        assert_eq!(
+            patches[0],
+            json!([{"price_id": "pri_team_base", "quantity": 1}])
+        );
+        assert_eq!(patches[1], team_plus_one_seat());
+        assert!(alerts(&ctx, &project).await.is_empty());
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn it_seat_revert_failure_stores_paddles_count_and_alerts_the_owner() {
+    run_hosted_with_paddle(|ctx, paddle| async move {
+        let (token, project) = group(&ctx, "acme").await;
+        set_active(&ctx, &project, Plan::Team { extra_seats: 1 }).await;
+        seed_subscription(&ctx, &project).await;
+        for (sub, handle) in [(51_u64, "ada"), (52, "bea"), (53, "cy")] {
+            member_with_token(&ctx, &project, sub, handle, "member").await;
+        }
+        let race = Race {
+            revert_fails: true,
+            ..Race::JOIN_ONLY
+        };
+        let raced = hold_plan_and_join(&ctx, &paddle, &token, &project, race).await;
+        assert_eq!(raced.0, StatusCode::CONFLICT, "{}", raced.1);
+        assert_eq!(raced.1["error"], "seats_below_used");
+        assert_eq!(
+            raced.1["error_description"],
+            "paid seats are below the members in the group, and Paddle could not be restored"
+        );
+        // Paddle kept the lower count, so that is what the hub stores.
+        assert_eq!(plan_row(&ctx, &project).await["extra_seats"], 0);
+        assert_eq!(seat_patches(&paddle).len(), 2);
+        let sent = alerts(&ctx, &project).await;
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        let shown = me(&ctx, &token).await;
+        assert!(
+            sent[0]
+                .mentioned
+                .contains(&shown["id"].as_str().unwrap().parse().unwrap()),
+            "{:?}",
+            sent[0].mentioned
+        );
+        let text = sent[0].client.body.as_str();
+        assert!(text.contains("could not be restored"), "{text}");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn it_seat_revert_puts_back_the_items_from_before_the_change() {
+    run_hosted_with_paddle(|ctx, paddle| async move {
+        let (token, project) = group(&ctx, "acme").await;
+        set_active(&ctx, &project, Plan::Team { extra_seats: 1 }).await;
+        seed_subscription(&ctx, &project).await;
+        for (sub, handle) in [(51_u64, "ada"), (52, "bea"), (53, "cy")] {
+            member_with_token(&ctx, &project, sub, handle, "member").await;
+        }
+        // Paddle's event for the lowered count lands first, so the stored plan is
+        // already the lowered one when the seat change gets to store.
+        let race = Race {
+            webhook_first: true,
+            ..Race::JOIN_ONLY
+        };
+        let raced = hold_plan_and_join(&ctx, &paddle, &token, &project, race).await;
+        assert_eq!(raced.0, StatusCode::CONFLICT, "{}", raced.1);
+        assert_eq!(raced.1["error"], "seats_below_used");
+        assert_eq!(
+            raced.1["error_description"],
+            "a member joined while seats were changing"
+        );
+        let patches = seat_patches(&paddle);
+        assert_eq!(patches.len(), 2, "{patches:?}");
+        // The second call restores what the group had before this request, not
+        // what the plan row said when the request got the lock.
+        assert_eq!(patches[1], team_plus_one_seat());
+        assert!(alerts(&ctx, &project).await.is_empty());
+    })
+    .await;
+}
+
+/// Team with one extra seat, as a Paddle request body lists it.
+fn team_plus_one_seat() -> Value {
+    json!([
+        {"price_id": "pri_team_base", "quantity": 1},
+        {"price_id": "pri_team_seat", "quantity": 1},
+    ])
+}
+
+/// The `items` of each subscription change Paddle saw, oldest first.
+fn seat_patches(paddle: &FakePaddle) -> Vec<Value> {
+    paddle
+        .requests()
+        .into_iter()
+        .filter(|(method, path, _)| method.as_str() == "PATCH" && path == "/subscriptions/sub_test")
+        .map(|(_, _, body)| body["items"].clone())
+        .collect()
+}
+
+/// What happens while a seat change waits on the plan row.
+#[derive(Clone, Copy)]
+struct Race {
+    /// A Paddle event stores the lowered plan before the seat change does.
+    webhook_first: bool,
+    /// Paddle refuses the call that puts the previous items back.
+    revert_fails: bool,
+}
+
+impl Race {
+    /// A member joins and nothing else happens.
+    const JOIN_ONLY: Self = Self {
+        webhook_first: false,
+        revert_fails: false,
+    };
+}
+
+/// Holds the plan row, waits until the seat drop reaches Paddle, then adds a
+/// member and lets the seat change go on.
+async fn hold_plan_and_join(
+    ctx: &Ctx,
+    paddle: &FakePaddle,
+    token: &str,
+    project: &Project,
+    race: Race,
+) -> (StatusCode, Value) {
+    let joiner = support::seed_human(&ctx.pool, 54, "rae").await;
+    let mut tx = ctx.pool.begin().await.unwrap();
+    let locked: Option<String> =
+        sqlx::query_scalar("SELECT tenant_id FROM tenant_plans WHERE tenant_id = $1 FOR UPDATE")
+            .bind(&project.tenant)
+            .fetch_optional(&mut *tx)
+            .await
+            .unwrap();
+    assert!(locked.is_some());
+    let http = ctx.http.clone();
+    let url = ctx
+        .hub
+        .url(&format!("/v1/tenants/{}/seats", project.tenant));
+    let owner = token.to_owned();
+    let put = tokio::spawn(async move {
+        let response = http
+            .put(url)
+            .bearer_auth(owner)
+            .json(&json!({"paid": 4}))
+            .send()
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = response.json::<Value>().await.unwrap_or(Value::Null);
+        (status, body)
+    });
+    let mut saw = false;
+    for _ in 0..100 {
+        let hit = paddle.requests().iter().any(|(method, path, _)| {
+            method.as_str() == "PATCH" && path == "/subscriptions/sub_test"
+        });
+        if hit {
+            saw = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        saw,
+        "the seat change did not reach Paddle: {:?}",
+        paddle.requests()
+    );
+    if race.revert_fails {
+        paddle.fail_next(500, json!({"error": {"code": "internal_error"}}));
+    }
+    if race.webhook_first {
+        sqlx::query("UPDATE tenant_plans SET extra_seats = 0 WHERE tenant_id = $1")
+            .bind(&project.tenant)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+    }
+    sqlx::query("INSERT INTO tenant_members (tenant_id, human_id, role) VALUES ($1, $2, 'member')")
+        .bind(&project.tenant)
+        .bind(&joiner)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), put)
+        .await
+        .expect("seat change stayed blocked on the plan row")
+        .unwrap()
 }
