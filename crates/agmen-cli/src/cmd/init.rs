@@ -15,7 +15,7 @@ use url::Url;
 use super::{account, group, host::onboard, join};
 use crate::client::{self, Group, Human, blocking, refusal};
 use crate::git;
-use crate::output::{Fail, clean};
+use crate::output::{Fail, clean, print_notices};
 
 /// Default hosted hub, overridden by `--hub` or `AGMEN_HOSTED_HUB`.
 pub(crate) const HOSTED_HUB: &str = "https://api.getagmen.ai";
@@ -160,6 +160,9 @@ async fn hosted(root: &Path, args: InitArgs) -> Result<()> {
         None => account::device_login(&hub).await?,
     };
     let me = human.api.me().await?;
+    // The only place init prints them: the `agmen invite` it runs at the end
+    // is told `--no-notices`, and `by_flag` below reuses this `me`.
+    print_notices(&me.notices);
     let admin_groups: Vec<_> = me
         .groups
         .iter()
@@ -168,7 +171,9 @@ async fn hosted(root: &Path, args: InitArgs) -> Result<()> {
         .cloned()
         .collect();
     let existing = if let Some(flag) = args.group.as_deref() {
-        Some(group::resolve_group(&human, Some(flag)).await?)
+        // `me` is already loaded above, so this does not read `/v1/me` again
+        // and does not print the same notices twice.
+        Some(group::by_flag(&me.groups, flag)?)
     } else if args.new_group || admin_groups.is_empty() {
         if !args.new_group && !me.groups.is_empty() {
             if !std::io::stdin().is_terminal() {
@@ -329,7 +334,7 @@ fn group_name(folder: &str) -> Option<String> {
     (!name.is_empty()).then(|| name.to_owned())
 }
 
-fn state_words(state: Option<&str>) -> Cow<'_, str> {
+pub(crate) fn state_words(state: Option<&str>) -> Cow<'_, str> {
     match state {
         Some("read_only") => Cow::Borrowed("read-only"),
         Some("past_due") => Cow::Borrowed("past due"),

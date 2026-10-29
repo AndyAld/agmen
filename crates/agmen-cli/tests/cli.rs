@@ -2093,3 +2093,104 @@ async fn group_members_sanitizes_peer_text() {
         "owner andy (marked)\n  idn7k2q9 andy/sol in marked\n"
     );
 }
+
+#[test]
+fn group_seats_and_billing_flags() {
+    let home = Home::new();
+    for args in [
+        &["group", "seats", "add", "0"][..],
+        &["group", "seats", "remove", "51"][..],
+        &["group", "billing", "--seats", "3"][..],
+        &["group", "billing", "--plan", "gold"][..],
+    ] {
+        let out = home.agmen(home.path(), args).output().unwrap();
+        assert_exit(&out, 2);
+        assert!(
+            !stderr(&out).contains("not signed in"),
+            "{args:?} reached the hub path: {}",
+            stderr(&out)
+        );
+    }
+    for args in [
+        &["group", "seats", "--group", "x", "add", "1"][..],
+        &["group", "seats", "add", "1", "--group", "x"][..],
+    ] {
+        let out = home.agmen(home.path(), args).output().unwrap();
+        assert_exit(&out, 3);
+        assert!(
+            stderr(&out).contains("not signed in"),
+            "{args:?}: {}",
+            stderr(&out)
+        );
+    }
+}
+
+#[test]
+fn invite_no_notices_flag_is_hidden_but_accepted() {
+    // `agmen init` runs `agmen invite` after printing the owner's notices
+    // itself, and passes this flag so each notice shows once.
+    let home = Home::new();
+    let out = home
+        .agmen(home.path(), &["invite", "--no-notices"])
+        .output()
+        .unwrap();
+    assert_exit(&out, 3);
+    assert!(stderr(&out).contains("not signed in"), "{}", stderr(&out));
+    let help = home
+        .agmen(home.path(), &["invite", "--help"])
+        .output()
+        .unwrap();
+    assert_exit(&help, 0);
+    assert!(!stdout(&help).contains("no-notices"), "{}", stdout(&help));
+}
+
+#[test]
+fn whoami_prints_notices_on_stderr() {
+    let projects = serde_json::json!([
+        {"tenant":"tenant01","project":"project1","name":"marked","role":"admin"}
+    ]);
+    let base = serde_json::json!({
+        "id":"hmn7k2q9",
+        "handle":"andy",
+        "broker_url":"mqtt://localhost",
+        "projects": projects,
+    });
+    let text = "andy (hmn7k2q9) at {hub}\n  project project1 (marked, tenant tenant01): admin\n";
+
+    let home = Home::new();
+    let (hub, server) = account_fixture(&home, base.clone());
+    let plain = home.agmen(home.path(), &["whoami"]).output().unwrap();
+    assert_exit(&plain, 0);
+    assert!(server.join().unwrap().starts_with("GET /v1/me "));
+    let expected = text.replace("{hub}", &hub);
+    assert_eq!(stdout(&plain), expected);
+    assert!(!stderr(&plain).contains("agmen: "), "{}", stderr(&plain));
+
+    let mut with_notices = base;
+    with_notices["notices"] = serde_json::json!(["a\u{1b}b"]);
+    let home = Home::new();
+    let (hub, server) = account_fixture(&home, with_notices.clone());
+    let out = home.agmen(home.path(), &["whoami"]).output().unwrap();
+    assert_exit(&out, 0);
+    assert!(server.join().unwrap().starts_with("GET /v1/me "));
+    assert_eq!(stdout(&out), text.replace("{hub}", &hub));
+    assert!(stderr(&out).contains("agmen: ab"), "{}", stderr(&out));
+    assert!(!stderr(&out).contains('\u{1b}'), "{}", stderr(&out));
+
+    let home = Home::new();
+    let (_, server) = account_fixture(&home, with_notices);
+    let json = home
+        .agmen(home.path(), &["whoami", "--json"])
+        .output()
+        .unwrap();
+    assert_exit(&json, 0);
+    assert!(server.join().unwrap().starts_with("GET /v1/me "));
+    assert!(stdout(&json).contains("notices"), "{}", stdout(&json));
+    let parsed: serde_json::Value = serde_json::from_str(&stdout(&json)).unwrap();
+    assert_eq!(parsed["notices"], serde_json::json!(["a\u{1b}b"]));
+    assert!(
+        !stderr(&json).contains("agmen: ab"),
+        "json mode printed notices: {}",
+        stderr(&json)
+    );
+}

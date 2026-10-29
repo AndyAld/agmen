@@ -6,11 +6,12 @@ use clap::{Args, ValueEnum};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
+use super::group;
 use crate::client::{
     Api, Human, Login, blocking, forget_login, http, human, login_error, read_login, refusal,
     save_login,
 };
-use crate::output::{Fail, clean};
+use crate::output::{Fail, clean, print_notices};
 
 /// The shortest and longest invite: 1 hour and 30 days (ruling R58).
 const INVITE_SECS: std::ops::RangeInclusive<u64> = 3600..=30 * 24 * 3600;
@@ -173,6 +174,7 @@ pub(crate) async fn whoami(json: bool) -> Result<()> {
         Ok(None) => {}
         Err(err) => println!("this worktree: {}", clean(&err.to_string())),
     }
+    print_notices(&me.notices);
     Ok(())
 }
 
@@ -197,6 +199,11 @@ pub(crate) struct InviteArgs {
     /// to 30d.
     #[arg(long, value_name = "DURATION", default_value = "7d", value_parser = parse_expiry)]
     expires: u64,
+    /// Skip the owner notices that follow a successful invite. `agmen init`
+    /// and `agmen host up` run this command after printing them or having
+    /// none, so each notice shows once.
+    #[arg(long, hide = true)]
+    no_notices: bool,
 }
 
 /// `7d`, `12h`, `90m` or `3600s` as seconds, from 1 hour to 30 days.
@@ -275,6 +282,11 @@ pub(crate) async fn invite(args: InviteArgs) -> Result<()> {
         println!("(copied to the clipboard)");
     }
     println!("Send it. They open it and follow the steps on the page.");
+    if !args.no_notices {
+        // Invite does not read `/v1/me` for its own work. One best-effort read
+        // prints owner notices; its failure must not change this success.
+        group::print_best_effort_notices(&human).await;
+    }
     Ok(())
 }
 

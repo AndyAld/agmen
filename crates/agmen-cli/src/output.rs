@@ -299,6 +299,31 @@ pub(crate) fn clean_lines(text: &str) -> String {
     text.split('\n').map(clean).collect::<Vec<_>>().join("\n")
 }
 
+/// How many owner notices one command prints. The hub sends a few; a longer
+/// list is cut here.
+const MAX_NOTICES: usize = 16;
+
+/// How many times invite and revoke read `/v1/me` for notices. One call, and
+/// no retry.
+pub(crate) const NOTICE_READS: usize = 1;
+
+/// One stderr line per notice: `agmen: ` plus the notice, with control
+/// characters dropped, at most [`MAX_NOTICES`].
+pub(crate) fn notice_lines(notices: &[String]) -> Vec<String> {
+    notices
+        .iter()
+        .take(MAX_NOTICES)
+        .map(|notice| format!("agmen: {}", clean(notice)))
+        .collect()
+}
+
+/// Prints [`notice_lines`] to stderr. An empty list prints nothing.
+pub(crate) fn print_notices(notices: &[String]) {
+    for line in notice_lines(notices) {
+        eprintln!("{line}");
+    }
+}
+
 /// Writes `line` and a newline to stdout and flushes, so a reader on a
 /// pipe (the plugin) gets each line as it is written.
 ///
@@ -417,6 +442,21 @@ mod tests {
         }
         let unknown = Fail::rejected(agmen_proto::NackReason::Unknown);
         assert_eq!(unknown.message, "rejected: unknown");
+    }
+
+    #[test]
+    fn notice_lines_prefix_clean_and_cap() {
+        assert_eq!(
+            notice_lines(&["a\u{1b}b".to_owned()]),
+            vec!["agmen: ab".to_owned()]
+        );
+        assert!(notice_lines(&[]).is_empty());
+        let many: Vec<String> = (0..20).map(|n| format!("n{n}")).collect();
+        let lines = notice_lines(&many);
+        assert_eq!(lines.len(), MAX_NOTICES);
+        assert_eq!(lines[0], "agmen: n0");
+        assert_eq!(lines[15], "agmen: n15");
+        assert!(lines.iter().all(|line| line.starts_with("agmen: ")));
     }
 
     #[test]

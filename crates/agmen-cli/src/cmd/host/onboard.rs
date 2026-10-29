@@ -280,7 +280,10 @@ pub(crate) async fn invite(project: &str) -> Result<()> {
     let status = tokio::time::timeout(
         INVITE_LIMIT,
         Command::new(exe)
-            .args(["invite", "--project", project])
+            // Both callers have printed the owner's notices or have none (a
+            // self-host hub sends none), and this child shares their stderr:
+            // without the flag, `agmen init` would show each notice twice.
+            .args(["invite", "--project", project, "--no-notices"])
             .stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
