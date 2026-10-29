@@ -3,6 +3,7 @@
 //! `claim`, `inbox`, `lanes` and `post`.
 
 mod account;
+mod chat;
 pub(crate) mod claim;
 pub(crate) mod inbox;
 mod install_receipt;
@@ -161,6 +162,8 @@ enum Command {
     Leave,
     /// Post a message with any verb.
     Post(post::PostArgs),
+    /// Talk to the project's swarm as the signed-in person.
+    Chat(chat::ChatArgs),
     /// Ask a question, of the room or of some identities.
     Ask(post::AskArgs),
     /// Answer an ASK.
@@ -275,6 +278,7 @@ impl Cli {
             Command::Role { command } => role::run(command).await,
             Command::Leave => join::leave().await,
             Command::Post(args) => post::post(args).await,
+            Command::Chat(args) => chat::chat(args).await,
             Command::Ask(args) => post::ask(args).await,
             Command::Answer(args) => post::answer(args).await,
             Command::Dm(args) => post::dm(args).await,

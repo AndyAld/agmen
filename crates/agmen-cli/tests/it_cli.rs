@@ -18,6 +18,87 @@ use support::{Home, Ingest, Member, WAIT, Worktree, assert_exit, run, stderr, st
 use tokio::io::{AsyncBufReadExt as _, BufReader};
 use tokio::process::{Child, ChildStdout};
 
+#[tokio::test(flavor = "multi_thread")]
+async fn it_chat_one_shot_mentions() {
+    run(Ingest::On, |ctx| async move {
+        let coord = ctx.member(Role::Admin, "coord", "coordinator").await;
+        let text = format!("stand by @{}", coord.identity.handle);
+        let out = coord.run(&["chat", &text, "--all"]).await;
+        assert_exit(&out, 0);
+        assert_eq!(stdout(&out).trim(), "recorded #1");
+        let messages = feed(&ctx.base, &coord).await;
+        assert_eq!(messages.len(), 1);
+        let message = &messages[0];
+        assert!(matches!(message.client.payload, Payload::Fyi {}));
+        assert_eq!(message.from.as_str(), coord.human.id.as_str());
+        assert_eq!(
+            message.client.mentions,
+            [
+                agmen_proto::Mention::All,
+                agmen_proto::Mention::Identity(coord.identity.identity_id.clone())
+            ]
+        );
+        // The mention reaches coord's inbox once: a FYI is stored in the feed
+        // only, and `agmen inbox` lists what mentions the identity.
+        let out = coord.run(&["inbox"]).await;
+        assert_exit(&out, 0);
+        let text = stdout(&out);
+        assert_eq!(text.matches("stand by").count(), 1, "{text}");
+        let out = coord.run(&["inbox"]).await;
+        assert_eq!(stdout(&out).trim(), "no new messages");
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn it_chat_unknown_handle_exit_2() {
+    run(Ingest::On, |ctx| async move {
+        let who = ctx.member(Role::Member, "sol", "agent").await;
+        let out = who.run(&["chat", "hello @nobody"]).await;
+        assert_exit(&out, 2);
+        assert!(stderr(&out).contains("@nobody"), "{}", stderr(&out));
+        assert!(feed(&ctx.base, &who).await.is_empty());
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn it_chat_follow_posts_stdin_lines() {
+    use tokio::io::AsyncWriteExt as _;
+    run(Ingest::On, |ctx| async move {
+        let who = ctx.member(Role::Member, "sol", "agent").await;
+        let mut command = who.home.agmen(&who.wt.path(), &["chat"]);
+        command.stdin(Stdio::piped());
+        let mut child = spawn(command);
+        let mut lines = Lines::new(&mut child);
+        let mut input = child.stdin.take().unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            input.write_all(b"first\nsecond\n").await.unwrap();
+            drop(input);
+            assert_eq!(
+                lines.next().await.unwrap(),
+                format!("#1 {}: first", who.human.handle)
+            );
+            assert_eq!(
+                lines.next().await.unwrap(),
+                format!("#2 {}: second", who.human.handle)
+            );
+            assert!(child.wait().await.unwrap().success());
+        })
+        .await
+        .expect("chat posts and echoes both lines within 10 seconds");
+        let messages = feed(&ctx.base, &who).await;
+        assert_eq!(messages.len(), 2);
+        assert!(
+            messages
+                .iter()
+                .all(|message| matches!(message.client.payload, Payload::Fyi {})
+                    && message.from.as_str() == who.human.id.as_str())
+        );
+    })
+    .await;
+}
+
 // shortcut: Ctx exposes no per-test database handle, so these join tests check
 // files only. Add hub-row assertions when the harness exposes its pool.
 #[tokio::test(flavor = "multi_thread")]

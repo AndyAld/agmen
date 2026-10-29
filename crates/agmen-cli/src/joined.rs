@@ -190,15 +190,7 @@ impl Agent {
     /// and `role:<name>` as they are, handles and ids through
     /// [`Agent::resolve`] with `via`.
     pub(crate) async fn mentions(&self, via: Via<'_>, mentions: &[String]) -> Result<Vec<Mention>> {
-        let mut out = Vec::with_capacity(mentions.len());
-        let mut names = Vec::new();
-        for mention in mentions {
-            let name = mention.strip_prefix('@').unwrap_or(mention);
-            match name.parse::<Mention>() {
-                Ok(Mention::Identity(_)) | Err(_) => names.push(name.to_owned()),
-                Ok(group) => out.push(group),
-            }
-        }
+        let (mut out, names) = mention_tokens(mentions.iter().map(String::as_str));
         out.extend(
             self.resolve(via, &names)
                 .await?
@@ -307,6 +299,24 @@ impl Agent {
             .into_iter()
             .find(|message| message.client.reply_to.as_ref() == Some(&recorded.id)))
     }
+}
+
+/// Splits mention tokens into protocol groups and names to resolve. Both
+/// explicit post mentions and chat's whitespace-delimited @ tokens use this
+/// parser, preserving the existing group-first order.
+pub(crate) fn mention_tokens<'a>(
+    tokens: impl IntoIterator<Item = &'a str>,
+) -> (Vec<Mention>, Vec<String>) {
+    let mut groups = Vec::new();
+    let mut names = Vec::new();
+    for token in tokens {
+        let name = token.strip_prefix('@').unwrap_or(token);
+        match name.parse::<Mention>() {
+            Ok(Mention::Identity(_)) | Err(_) => names.push(name.to_owned()),
+            Ok(group) => groups.push(group),
+        }
+    }
+    (groups, names)
 }
 
 /// How a command's message reaches the hub, and how long the command waits
@@ -492,6 +502,27 @@ fn new_message_id() -> Result<MessageId> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mention_tokens_parse_once() {
+        let post = [
+            "@adam/coord",
+            "all",
+            "@agents",
+            "humans",
+            "@L-UI",
+            "role:reviewer",
+            "idn7k2q9",
+        ];
+        let chat = "stand by @adam/coord @all @agents @humans @L-UI @role:reviewer @idn7k2q9";
+        assert_eq!(
+            mention_tokens(post),
+            mention_tokens(chat.split_whitespace().filter(|word| word.starts_with('@')))
+        );
+        let (groups, names) = mention_tokens(post);
+        assert_eq!(groups.len(), 5);
+        assert_eq!(names, ["adam/coord", "idn7k2q9"]);
+    }
 
     #[test]
     fn message_ids_are_ulids_in_time_order() {

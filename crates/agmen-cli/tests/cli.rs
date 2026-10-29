@@ -6,7 +6,305 @@
 
 mod support;
 
+use serde_json::{Value, json};
+use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use support::{Home, Worktree, assert_exit, stderr, stdout};
+use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
+
+#[test]
+fn chat_outside_any_project_is_usage() {
+    let home = Home::new();
+    let (_, server) = account_fixture(
+        &home,
+        serde_json::json!({
+            "id":"hmn7k2q9", "handle":"andy", "broker_url":"mqtt://localhost", "projects":[]
+        }),
+    );
+    let out = home
+        .agmen(home.path(), &["chat", "hello"])
+        .output()
+        .unwrap();
+    assert_exit(&out, 2);
+    assert!(stderr(&out).contains("no projects"), "{}", stderr(&out));
+    assert!(server.join().unwrap().starts_with("GET /v1/me "));
+}
+
+struct ChatFixture {
+    home: Home,
+    messages: Arc<Mutex<Vec<Value>>>,
+    /// While set, the feed route answers 503, as a restarting hub would.
+    down: Arc<AtomicBool>,
+    server: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for ChatFixture {
+    fn drop(&mut self) {
+        self.server.abort();
+    }
+}
+
+impl ChatFixture {
+    fn spawn(&self) -> tokio::process::Child {
+        tokio::process::Command::from(
+            self.home
+                .agmen(self.home.path(), &["chat", "--project", "project1"]),
+        )
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap()
+    }
+}
+
+async fn chat_fixture() -> ChatFixture {
+    use axum::extract::Query;
+    use axum::routing::{get, post};
+    use axum::{Json, http::HeaderMap};
+
+    let messages = Arc::new(Mutex::new((1..=60).map(|seq| json!({
+        "v":1, "id":"01JBX6Q4T7W3C2M8Y9K5N0P1RS", "verb":"FYI", "data":{},
+        "body":format!("old {seq}"), "sent_at":"2026-10-25T16:04:11Z", "stream":"feed",
+        "seq":seq, "from":"hmn7k2q9", "from_handle":"andy", "from_kind":"human", "hub_at":"2026-10-25T16:04:11Z"
+    })).collect::<Vec<Value>>()));
+    let read = messages.clone();
+    let write = messages.clone();
+    let down = Arc::new(AtomicBool::new(false));
+    let feed_down = down.clone();
+    let app = axum::Router::new()
+        .route(
+            "/v1/projects/project1/streams/feed",
+            get(
+                move |headers: HeaderMap,
+                      Query(query): Query<std::collections::HashMap<String, u64>>| async move {
+                    assert_eq!(headers["authorization"], "Bearer test");
+                    if feed_down.load(Ordering::SeqCst) {
+                        return (
+                            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                            Json(json!({"error":"hub_busy"})),
+                        );
+                    }
+                    let messages = read.lock().unwrap();
+                    let after = query["after"];
+                    let page: Vec<_> = messages
+                        .iter()
+                        .filter(|m| m["seq"].as_u64().unwrap() > after)
+                        .take(query["limit"] as usize)
+                        .cloned()
+                        .collect();
+                    (
+                        axum::http::StatusCode::OK,
+                        Json(json!({"messages":page,"head":messages.len(),"next_after":null})),
+                    )
+                },
+            ),
+        )
+        .route(
+            "/v1/projects/project1/messages",
+            post(
+                move |headers: HeaderMap, Json(env): Json<Value>| async move {
+                    assert_eq!(headers["authorization"], "Bearer test");
+                    assert_eq!(env["verb"], "FYI");
+                    if env["body"] == "reject me" {
+                        return Json(json!({"verb":"NACK","id":env["id"],"reason":"rate_limited","retryable":true}));
+                    }
+                    let mut messages = write.lock().unwrap();
+                    let mut message = messages[0].clone();
+                    let seq = messages.len() + 1;
+                    message["seq"] = json!(seq);
+                    message["body"] = env["body"].clone();
+                    messages.push(message);
+                    Json(json!({"verb":"ACK","id":env["id"],"stream":"feed","seq":seq}))
+                },
+            ),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}/", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let home = Home::new();
+    let file = home.login_file();
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(
+        file,
+        json!({"hub_url":base,"human_id":"hmn7k2q9","handle":"andy"}).to_string(),
+    )
+    .unwrap();
+    home.tokens()
+        .set(
+            &agmen_client::TokenKey::new(&base.parse().unwrap(), &"hmn7k2q9".parse().unwrap())
+                .unwrap(),
+            r#"{"access_token":"test","refresh_token":"test","expires_at":"2099-01-01T00:00:00Z"}"#,
+        )
+        .unwrap();
+    ChatFixture {
+        home,
+        messages,
+        down,
+        server,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn chat_follow_replays_polls_and_exits() {
+    let fixture = chat_fixture().await;
+    let mut child = fixture.spawn();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let mut input = child.stdin.take().unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        for seq in 11..=60 {
+            assert_eq!(
+                lines.next_line().await.unwrap().unwrap(),
+                format!("#{seq} andy: old {seq}")
+            );
+        }
+        input.write_all(b"first\nsecond\n").await.unwrap();
+        assert_eq!(lines.next_line().await.unwrap().unwrap(), "#61 andy: first");
+        assert_eq!(
+            lines.next_line().await.unwrap().unwrap(),
+            "#62 andy: second"
+        );
+        {
+            let mut messages = fixture.messages.lock().unwrap();
+            let mut remote = messages[0].clone();
+            remote["seq"] = json!(63);
+            remote["body"] = json!("remote\u{1b}[2J");
+            messages.push(remote);
+        }
+        assert_eq!(
+            lines.next_line().await.unwrap().unwrap(),
+            "#63 andy: remote[2J"
+        );
+        drop(input);
+        assert!(child.wait().await.unwrap().success());
+    })
+    .await
+    .expect("follow replays the last 50, posts lines, polls and stops at EOF within 10 seconds");
+    assert_eq!(fixture.messages.lock().unwrap().len(), 63);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn chat_follow_survives_a_hub_outage() {
+    let fixture = chat_fixture().await;
+    let mut child = fixture.spawn();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let input = child.stdin.take().unwrap();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        for _ in 0..50 {
+            lines.next_line().await.unwrap().expect("history line");
+        }
+        fixture.down.store(true, Ordering::SeqCst);
+        // Two polls fail while the hub is down.
+        tokio::time::sleep(Duration::from_millis(4500)).await;
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "chat quit during the outage"
+        );
+        {
+            let mut messages = fixture.messages.lock().unwrap();
+            let mut remote = messages[0].clone();
+            remote["seq"] = json!(61);
+            remote["body"] = json!("after the outage");
+            messages.push(remote);
+        }
+        fixture.down.store(false, Ordering::SeqCst);
+        assert_eq!(
+            lines.next_line().await.unwrap().unwrap(),
+            "#61 andy: after the outage"
+        );
+        drop(input);
+        assert!(child.wait().await.unwrap().success());
+    })
+    .await
+    .expect("follow keeps polling through a hub outage");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn chat_follow_skips_blank_lines_and_survives_a_rejected_one() {
+    let fixture = chat_fixture().await;
+    let mut child = fixture.spawn();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let mut input = child.stdin.take().unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        for _ in 0..50 {
+            lines.next_line().await.unwrap().expect("history line");
+        }
+        input.write_all(b"\n   \nreject me\nkept\n").await.unwrap();
+        assert_eq!(lines.next_line().await.unwrap().unwrap(), "#61 andy: kept");
+        drop(input);
+        assert!(child.wait().await.unwrap().success());
+    })
+    .await
+    .expect("blank lines are skipped and a rejected line does not end the session");
+    assert_eq!(fixture.messages.lock().unwrap().len(), 61);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn chat_follow_ends_quietly_when_stdout_closes() {
+    let fixture = chat_fixture().await;
+    let mut child = fixture.spawn();
+    drop(child.stdout.take());
+    let _input = child.stdin.take();
+    let status = tokio::time::timeout(Duration::from_secs(10), child.wait())
+        .await
+        .expect("chat stops when its stdout is closed")
+        .unwrap();
+    assert!(status.success(), "{status}");
+}
+
+#[test]
+fn chat_blank_text_is_usage() {
+    let home = Home::new();
+    let (_, _server) = account_fixture(
+        &home,
+        serde_json::json!({
+            "id":"hmn7k2q9", "handle":"andy", "broker_url":"mqtt://localhost", "projects":[]
+        }),
+    );
+    let out = home
+        .agmen(home.path(), &["chat", "--project", "project1", "  "])
+        .output()
+        .unwrap();
+    assert_exit(&out, 2);
+    assert!(stderr(&out).contains("nothing to say"), "{}", stderr(&out));
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn chat_follow_ctrl_c_stops_with_stdin_open() {
+    let fixture = chat_fixture().await;
+    let mut child = fixture.spawn();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        for _ in 0..50 {
+            lines.next_line().await.unwrap().expect("history line");
+        }
+        // Wait for a polled message so the dedicated stdin reader is blocked.
+        {
+            let mut messages = fixture.messages.lock().unwrap();
+            let mut remote = messages[0].clone();
+            remote["seq"] = json!(61);
+            remote["body"] = json!("remote");
+            messages.push(remote);
+        }
+        assert_eq!(
+            lines.next_line().await.unwrap().unwrap(),
+            "#61 andy: remote"
+        );
+        let status = tokio::process::Command::new("/bin/kill")
+            .args(["-INT", &child.id().unwrap().to_string()])
+            .status()
+            .await
+            .unwrap();
+        assert!(status.success());
+        assert!(child.wait().await.unwrap().success());
+    })
+    .await
+    .expect("Ctrl-C stops chat with stdin still open within 10 seconds");
+}
 
 #[test]
 fn join_link_to_another_hub_refuses_without_a_terminal() {
