@@ -13,6 +13,34 @@ use crate::ui::tokens::{
 
 type Sent = Rc<RefCell<Vec<Draft>>>;
 
+#[gpui::test]
+fn composer_model_renders_through_chip_button_and_opens(cx: &mut TestAppContext) {
+    let (composer, _, cx) = open_composer(cx);
+    assert!(cx.debug_bounds("chip-button:composer-model").is_some());
+    click(cx, "composer:model");
+    assert!(composer.read_with(cx, |this, _| this.models.as_ref().unwrap().is_open()));
+}
+
+#[gpui::test]
+fn closing_the_model_chip_keeps_typing_in_the_composer(cx: &mut TestAppContext) {
+    let (composer, _, cx) = open_composer(cx);
+    click(cx, "composer:model");
+    click(cx, "composer:model");
+    cx.simulate_input("hello");
+    assert_eq!(
+        composer.read_with(cx, |this, cx| this.text(cx).to_owned()),
+        "hello"
+    );
+}
+
+#[gpui::test]
+fn composer_to_renders_through_chip_button_and_opens(cx: &mut TestAppContext) {
+    let (_, _, cx) = open_composer(cx);
+    assert!(cx.debug_bounds("chip-button:composer-to").is_some());
+    click(cx, "composer:to");
+    assert!(cx.debug_bounds("composer:audience").is_some());
+}
+
 fn open_live(
     cx: &mut TestAppContext,
 ) -> (

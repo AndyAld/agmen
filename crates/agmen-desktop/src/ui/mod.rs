@@ -111,6 +111,35 @@ fn tagged(selector: String, child: impl gpui::IntoElement) -> gpui::Div {
     gpui::div().debug_selector(|| selector).child(child)
 }
 
+/// Tab reaches registered controls after a focused child has had the
+/// chance to consume it, as the composer's mention completion does.
+fn focus_tab(event: &gpui::KeyDownEvent, window: &mut gpui::Window, cx: &mut App) {
+    let key = &event.keystroke;
+    let modifiers = gpui::Modifiers {
+        shift: false,
+        ..key.modifiers
+    };
+    // Text inputs keep plain Tab for completion or a literal tab. Shift-Tab
+    // can leave an input without changing its text.
+    if !key.modifiers.shift
+        && window
+            .context_stack()
+            .iter()
+            .any(|context| context.contains(crate::keymap::TEXT_INPUT_CONTEXT))
+    {
+        return;
+    }
+    if key.key == "tab" && !modifiers.modified() {
+        if key.modifiers.shift {
+            window.focus_prev(cx);
+        } else {
+            window.focus_next(cx);
+        }
+        window.prevent_default();
+        cx.stop_propagation();
+    }
+}
+
 /// The color of the rules between chrome regions (mockup BORDER2).
 fn rule_color(cx: &App) -> gpui::Hsla {
     cx.global::<crate::appearance::Appearance>()

@@ -17,6 +17,36 @@ fn open(cx: &mut TestAppContext) -> (Entity<Workspace>, &mut gpui::VisualTestCon
 }
 
 #[gpui::test]
+fn tab_leaves_the_workspace_root_for_a_control(cx: &mut TestAppContext) {
+    let (workspace, cx) = open(cx);
+    cx.update(|_, cx| crate::keymap::bind_all(cx));
+    cx.simulate_keystrokes("tab");
+    redraw(cx);
+    workspace.update_in(cx, |workspace, window, _| {
+        assert!(!workspace.focus_handle.is_focused(window));
+    });
+}
+
+#[gpui::test]
+fn tab_in_the_workspace_composer_still_completes_mentions(cx: &mut TestAppContext) {
+    let (_, cx) = open(cx);
+    cx.update(|_, cx| crate::keymap::bind_all(cx));
+    click(cx, "composer:input");
+    cx.simulate_input("@andy/f");
+    redraw(cx);
+    assert!(cx.debug_bounds("composer:mentions").is_some());
+    cx.simulate_keystrokes("tab");
+    redraw(cx);
+    assert!(cx.debug_bounds("composer:mentions").is_none());
+    assert!(cx.update(|window, _| {
+        window
+            .context_stack()
+            .iter()
+            .any(|context| context.contains(crate::keymap::TEXT_INPUT_CONTEXT))
+    }));
+}
+
+#[gpui::test]
 fn workspace_toggles_docks(cx: &mut TestAppContext) {
     let (workspace, cx) = open(cx);
     workspace.read_with(cx, |w, _| {

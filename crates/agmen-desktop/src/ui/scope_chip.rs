@@ -4,16 +4,14 @@
 use std::collections::BTreeMap;
 
 use agmen_proto::IdentityId;
-use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Context, EventEmitter, InteractiveElement as _, IntoElement, ParentElement as _, Render,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
+    Context, EventEmitter, IntoElement, ParentElement as _, Render, SharedString, Styled as _,
+    Window, div,
 };
 
-use super::components::{Chip, Color, Dot, Icon, IconSize, Label, Menu, MenuRow};
+use super::components::{Chip, ChipButton, Color, Dot, Label, Menu, MenuRow};
 use super::tokens::{SPACE_2, SPACE_8, SPACE_10};
 use crate::backend::{AgentInfo, WorktreeInfo};
-use crate::icons::UiIcon;
 
 /// The worktree's head as the scope chip and the Project panel's root row
 /// show it.
@@ -101,11 +99,6 @@ impl ScopeChip {
         }
     }
 
-    fn toggle(&mut self, cx: &mut Context<Self>) {
-        self.open = !self.open;
-        cx.notify();
-    }
-
     fn close(&mut self, cx: &mut Context<Self>) {
         self.open = false;
         cx.notify();
@@ -142,11 +135,6 @@ fn chip(label: SharedString, role: SharedString) -> Chip {
         .dot(Color::Role(role))
         .code()
         .full_width()
-        .trailing(
-            Icon::new(UiIcon::ChevronDown)
-                .size(IconSize::Small)
-                .color(Color::Placeholder),
-        )
 }
 
 impl Render for ScopeChip {
@@ -156,30 +144,6 @@ impl Render for ScopeChip {
             .get(self.selected)
             .map(|o| (o.label.clone(), o.role.clone()))
             .unwrap_or_default();
-        let chip = div()
-            .id("scope-chip")
-            .debug_selector(|| "scope-chip".into())
-            .w_full()
-            // Focused by the click that opens the menu, so Escape reaches it.
-            .tab_index(0)
-            .cursor_pointer()
-            // While open, the menu's mouse down out closes it; a click here
-            // too would reopen it on mouse up (C186, as the dropdown's C81).
-            .map(|chip| {
-                if self.open {
-                    chip.on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
-                        if event.keystroke.key == "escape" {
-                            // As Dropdown's: the open menu takes Escape
-                            // before the panel that holds it.
-                            cx.stop_propagation();
-                            this.close(cx);
-                        }
-                    }))
-                } else {
-                    chip.on_click(cx.listener(|this, _, _, cx| this.toggle(cx)))
-                }
-            })
-            .child(chip(label, role));
         let menu = self.open.then(|| {
             let rows: Vec<_> = self
                 .options
@@ -204,10 +168,26 @@ impl Render for ScopeChip {
             .pt(SPACE_2)
             .pb(SPACE_8)
             .px(SPACE_10)
-            .child(chip)
-            .when_some(menu, |this, menu| {
-                this.child(div().absolute().top_full().left(SPACE_10).child(menu))
-            })
+            .child(
+                ChipButton::new("scope-chip", chip(label, role))
+                    .w_full()
+                    .caret(true)
+                    .open(self.open)
+                    .on_toggle(cx.processor(|this, open, _, cx| {
+                        this.open = open;
+                        cx.notify();
+                    }))
+                    // The menu starts below the panel's bottom padding, as before.
+                    .menu(menu.map(|menu| {
+                        div()
+                            .absolute()
+                            .top_full()
+                            .left_0()
+                            .mt(SPACE_8)
+                            .child(menu)
+                            .into_any_element()
+                    })),
+            )
     }
 }
 

@@ -10,11 +10,12 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::{
     Anchor, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable, Hsla,
     InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, ScrollHandle,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, TextRun, Window,
-    anchored, canvas, deferred, div, px,
+    SharedString, Styled as _, Subscription, TextRun, Window, anchored, canvas, deferred, div, px,
 };
 
-use super::components::{Chip, Color, IconButton, IconSize, Label, LabelSize, Menu, MenuRow};
+use super::components::{
+    Chip, ChipButton, Color, IconButton, IconSize, Label, LabelSize, Menu, MenuRow,
+};
 use super::ink_clip::InkClip;
 use super::model_picker::{ModelMenu, PickerEvent};
 use super::text_input::{TextInput, TextInputEvent};
@@ -692,46 +693,43 @@ impl Composer {
         // C287: the wrapper clips at its sides only, so the chip's label
         // shows the glyphs its own clip lets through.
         Some(InkClip::sides(
-            div()
-                .id("composer-model")
-                .debug_selector(|| "composer:model".into())
-                .relative()
-                // C278: the chip shrinks to its ◆ and ▾ and no further;
-                // below that the composer hides it. The picker is
-                // deferred, so the clip does not cut it.
-                .min_w(floor)
-                .cursor_pointer()
-                // C81: while open, mouse down outside the picker closes it;
-                // a click here too would reopen it on mouse up.
-                .when(!open, |this| {
-                    this.on_click(cx.listener(|this, _, _, cx| {
-                        this.open_model_picker(cx);
-                    }))
-                })
-                .child(
-                    Chip::new(models.current().label())
-                        .compact()
-                        .code()
-                        // Node 382: 12 px mono on its 14 px line.
-                        .line_height(AUTO_LINE_12)
-                        .truncate()
-                        .color(Color::Default)
-                        .outline(Color::Accent)
-                        .leading(
-                            Label::new(MODEL_MARK)
-                                .size(LabelSize::XSmall)
-                                .color(Color::Accent),
-                        )
-                        .trailing(
-                            div()
-                                .debug_selector(|| "composer:model-caret".into())
-                                .flex_none()
-                                .child(caret()),
-                        ),
-                )
-                .when_some(picker, |this, picker| {
-                    this.child(div().absolute().top_0().left_0().child(picker))
-                }),
+            ChipButton::new(
+                "composer-model",
+                Chip::new(models.current().label())
+                    .compact()
+                    .code()
+                    // Node 382: 12 px mono on its 14 px line.
+                    .line_height(AUTO_LINE_12)
+                    .truncate()
+                    .color(Color::Default)
+                    .outline(Color::Accent)
+                    .leading(
+                        Label::new(MODEL_MARK)
+                            .size(LabelSize::XSmall)
+                            .color(Color::Accent),
+                    ),
+            )
+            .debug_selector("composer:model")
+            .min_width(floor)
+            .caret(true)
+            .open(open)
+            .on_toggle(cx.processor(|this, open, window, cx| {
+                if open {
+                    this.open_model_picker(cx);
+                } else {
+                    this.close_model_picker(window, cx);
+                }
+                // The picker keeps typing and navigation in the composer.
+                this.input.focus_handle(cx).focus(window, cx);
+            }))
+            .menu(picker.map(|picker| {
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .child(picker)
+                    .into_any_element()
+            })),
         ))
     }
 }
@@ -746,50 +744,49 @@ impl Composer {
         let lead = if replying { "reply to" } else { "to" };
         // C287: clipped at its sides only, as the model chip is.
         InkClip::sides(
-            div()
-                .id("composer-to")
-                .debug_selector(|| "composer:to".into())
-                .relative()
-                .cursor_pointer()
-                .when(!self.audience_open && !replying, |this| {
-                    this.on_click(cx.listener(|this, _, window, cx| {
-                        this.audience_open = true;
+            ChipButton::new(
+                "composer-to",
+                Chip::new(self.target_label(cx))
+                    .compact()
+                    .code()
+                    .line_height(AUTO_LINE_12)
+                    .truncate()
+                    .color(Color::Accent)
+                    .leading(
+                        Label::new(lead)
+                            .size(LabelSize::Small)
+                            .color(Color::Placeholder),
+                    )
+                    .map(|chip| {
+                        if replying {
+                            chip.trailing(
+                                IconButton::new("composer:cancel-reply", UiIcon::Close)
+                                    .size(IconSize::Small)
+                                    .color(Color::Placeholder)
+                                    .on_click(cx.listener(|this, _, _, cx| this.cancel_reply(cx))),
+                            )
+                        } else {
+                            chip
+                        }
+                    }),
+            )
+            .debug_selector("composer:to")
+            // C260 and C278: preserve the lead and close mark or caret.
+            .min_width(floor)
+            .caret(!replying)
+            .open(self.audience_open)
+            .when(replying, |this| this.flex_shrink(REPLY_CHIP_SHRINK))
+            .when(!replying, |this| {
+                this.on_toggle(cx.processor(|this, open, window, cx| {
+                    this.audience_open = open;
+                    if open {
                         this.mentions_dismissed = true;
                         this.close_model_picker(window, cx);
-                        this.input.focus_handle(cx).focus(window, cx);
-                        cx.notify();
-                    }))
-                })
-                // C260 and C278: preserve the lead and close mark or caret.
-                .min_w(floor)
-                .when(replying, |this| this.flex_shrink(REPLY_CHIP_SHRINK))
-                .child(
-                    Chip::new(self.target_label(cx))
-                        .compact()
-                        .code()
-                        .line_height(AUTO_LINE_12)
-                        .truncate()
-                        .color(Color::Accent)
-                        .leading(
-                            Label::new(lead)
-                                .size(LabelSize::Small)
-                                .color(Color::Placeholder),
-                        )
-                        .map(|chip| {
-                            if replying {
-                                chip.trailing(
-                                    IconButton::new("composer:cancel-reply", UiIcon::Close)
-                                        .size(IconSize::Small)
-                                        .color(Color::Placeholder)
-                                        .on_click(
-                                            cx.listener(|this, _, _, cx| this.cancel_reply(cx)),
-                                        ),
-                                )
-                            } else {
-                                chip.trailing(caret())
-                            }
-                        }),
-                ),
+                    }
+                    this.input.focus_handle(cx).focus(window, cx);
+                    cx.notify();
+                }))
+            }),
         )
     }
 }
@@ -858,6 +855,9 @@ impl Render for Composer {
                 }
             }))
             .relative()
+            // The audience and mention menus share the composer's top-left
+            // anchor, rather than the chip's anchor, so their placement stays
+            // fixed when the input grows.
             .when_some(audience_menu, |this, menu| {
                 this.child(div().absolute().top_0().left_0().child(menu))
             })
@@ -966,9 +966,6 @@ const REPLY_CHIP_SHRINK: f32 = 1000.;
 /// The mark before the model chip's label.
 const MODEL_MARK: &str = "◆";
 
-/// The ▾ after a chip's label.
-const CARET: &str = "▾";
-
 /// The send hint at the end of the row (node 385).
 const SEND_HINT: &str = "⏎";
 
@@ -989,7 +986,7 @@ struct Floors {
 impl Floors {
     fn measure(lead: &str, replying: bool, fonts: &Fonts, window: &Window) -> Self {
         let width = |text: &str, size: LabelSize| ui_text_width(text, size, fonts, window);
-        let caret = width(CARET, LabelSize::XSmall);
+        let caret = ICON_SM;
         let to_end = if replying { ICON_SM } else { caret };
         Self {
             to: Chip::compact_floor(width(lead, LabelSize::Small), to_end),
@@ -1038,13 +1035,6 @@ fn ui_text_width(text: &str, size: LabelSize, fonts: &Fonts, window: &Window) ->
         .shape_line(text.to_owned().into(), size, &[run], None)
         .width()
         .ceil()
-}
-
-/// The ▾ after a chip's label.
-fn caret() -> Label {
-    Label::new(CARET)
-        .size(LabelSize::XSmall)
-        .color(Color::Placeholder)
 }
 
 #[cfg(test)]
