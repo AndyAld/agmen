@@ -16,6 +16,22 @@ for _turn in 1 2 3 4 5 6 7 8; do
 done
 "#;
 
+// The fake claude appends a line in several writes when it is over about 64 KiB,
+// so a read during the append can end in a half-written line.
+fn complete_batch_lines(text: &str) -> Vec<Value> {
+    let complete = text.rfind('\n').map_or("", |end| &text[..end]);
+    complete
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+#[test]
+fn a_half_written_last_batch_line_is_ignored() {
+    let lines = complete_batch_lines("{\"batch_id\":1}\n{\"batch_id\":2");
+    assert_eq!(lines, vec![json!({"batch_id":1})]);
+}
+
 struct Fixture {
     dir: tempfile::TempDir,
     daemon: crate::Agmend,
@@ -260,10 +276,7 @@ impl Fixture {
                 let text = tokio::fs::read_to_string(self.repo().join("batches"))
                     .await
                     .unwrap_or_default();
-                let lines: Vec<Value> = text
-                    .lines()
-                    .map(|line| serde_json::from_str(line).unwrap())
-                    .collect();
+                let lines = complete_batch_lines(&text);
                 if lines.len() >= n {
                     return lines;
                 }
