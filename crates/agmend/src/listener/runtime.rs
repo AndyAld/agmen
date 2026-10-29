@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::{OsStr, OsString};
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex, Weak};
@@ -13,7 +13,7 @@ use agmen_proto::{
     ClientEnvelope, IdentityId, IdentityKind, MessageId, Payload, ProjectId, StampedEnvelope,
     Timestamp,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, OnceCell, mpsc, oneshot};
 use tokio::time::Instant;
@@ -201,6 +201,16 @@ struct Start {
     #[serde(default)]
     coordinator: bool,
 }
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Intent {
+    project: ProjectId,
+    root: PathBuf,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
+    identity_id: IdentityId,
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Project {
@@ -308,6 +318,10 @@ impl Listeners {
             .ok_or_else(|| failure("managed service stopped"))
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "keep owner-authorized listener command dispatch together"
+    )]
     pub(crate) async fn human_call(
         self: &Arc<Self>,
         method: &str,
@@ -350,6 +364,47 @@ impl Listeners {
                     let mut live = entry.live.lock().await;
                     live.state = "stopped";
                     live.current = None;
+                } else {
+                    let path = self
+                        .state_dir
+                        .join("listener")
+                        .join(project.as_str())
+                        .join("intent.json");
+                    let intent = tokio::task::spawn_blocking(move || read_intent(&path))
+                        .await
+                        .map_err(|_| failure("listener intent reader failed"))?;
+                    match intent {
+                        Ok(intent) => {
+                            let registered = self
+                                .identities()?
+                                .managed(
+                                    login.hub_url.origin().ascii_serialization(),
+                                    login.human_id.clone(),
+                                )
+                                .await?;
+                            if intent.project != project
+                                || !registered.iter().any(|identity| {
+                                    identity.kind == IdentityKind::Listener
+                                        && identity.identity_id == intent.identity_id
+                                        && identity.project == project
+                                })
+                            {
+                                return Err(forbidden());
+                            }
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(_) => return Err(failure("reading listener intent failed")),
+                    }
+                }
+                let path = self
+                    .state_dir
+                    .join("listener")
+                    .join(project.as_str())
+                    .join("intent.json");
+                match tokio::fs::remove_file(path).await {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(_) => return Err(failure("removing listener intent failed")),
                 }
                 Ok(json!({}))
             }
@@ -492,8 +547,8 @@ impl Listeners {
             return Err(bad_request("the listener role must have kind listener"));
         }
         let mut settings = self.load(&request.project).await?;
-        if let Some(model) = request.model {
-            settings.model = model;
+        if let Some(model) = &request.model {
+            settings.model.clone_from(model);
         }
         let launch = self.resolve().await?;
         let origin = login.hub_url.origin().ascii_serialization();
@@ -518,7 +573,7 @@ impl Listeners {
         let live = Arc::new(Mutex::new(Live {
             identity: identity.clone(),
             person: login.handle.clone(),
-            root: request.root,
+            root: request.root.clone(),
             prompt,
             settings,
             state: "running",
@@ -536,6 +591,19 @@ impl Listeners {
         let running = self.spawn(&live, &launch).await?;
         // The collector is an ingester. Its broadcast is never a batch source.
         self.identities()?.project_channel(&request.project).await?;
+        write_intent(
+            self.state_dir
+                .join("listener")
+                .join(request.project.as_str())
+                .join("intent.json"),
+            Intent {
+                project: request.project.clone(),
+                root: request.root,
+                model: request.model,
+                identity_id: identity.identity_id.clone(),
+            },
+        )
+        .await?;
         let (stop, stopped) = oneshot::channel();
         let context = RunContext {
             hub: self.hub.clone(),
@@ -831,6 +899,83 @@ impl Listeners {
         }
     }
 
+    pub(crate) async fn readopt(self: &Arc<Self>) {
+        // Stop must not delete an intent between the startup scan and start.
+        let _changing = self.changing.lock().await;
+        let folder = self.state_dir.join("listener");
+        let intents = tokio::task::spawn_blocking(move || -> std::io::Result<Vec<Intent>> {
+            let folders = match std::fs::read_dir(folder) {
+                Ok(folders) => folders,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+                Err(error) => return Err(error),
+            };
+            let mut intents = Vec::new();
+            for folder in folders.take(MAX_LISTENERS) {
+                let read = || -> Result<Intent, Box<dyn std::error::Error>> {
+                    let folder = folder?;
+                    if !folder.file_type()?.is_dir() {
+                        return Err("listener intent folder is not a directory".into());
+                    }
+                    let intent = read_intent(&folder.path().join("intent.json"))?;
+                    if folder.file_name() != OsStr::new(intent.project.as_str()) {
+                        return Err("listener intent project does not match its folder".into());
+                    }
+                    Ok(intent)
+                };
+                match read() {
+                    Ok(intent) => intents.push(intent),
+                    Err(_) => tracing::warn!("skipping unreadable listener intent"),
+                }
+            }
+            Ok(intents)
+        })
+        .await;
+        let Ok(Ok(intents)) = intents else {
+            tracing::warn!("reading listener intents failed");
+            return;
+        };
+        let Ok(login) = self.hub.credentials().login().await else {
+            tracing::warn!("listener re-adoption needs a login");
+            return;
+        };
+        let Ok(identities) = self.identities() else {
+            return;
+        };
+        let Ok(registered) = identities
+            .managed(
+                login.hub_url.origin().ascii_serialization(),
+                login.human_id.clone(),
+            )
+            .await
+        else {
+            tracing::warn!("reading registered listeners for re-adoption failed");
+            return;
+        };
+        for intent in intents {
+            if !registered.iter().any(|identity| {
+                identity.kind == IdentityKind::Listener
+                    && identity.identity_id == intent.identity_id
+                    && identity.project == intent.project
+            }) {
+                continue;
+            }
+            if let Err(error) = self
+                .start(
+                    Start {
+                        project: intent.project,
+                        root: intent.root,
+                        model: intent.model,
+                        coordinator: false,
+                    },
+                    &login,
+                )
+                .await
+            {
+                tracing::warn!(code=?error.code, "listener re-adoption failed");
+            }
+        }
+    }
+
     async fn resolve(&self) -> Result<Launch, ApiError> {
         if let (Some(helper), Some(env)) = (&self.helper, &self.environment) {
             return Ok(Launch {
@@ -1054,13 +1199,53 @@ async fn advance(
                 None
             }
         }
-        Err(error) => Some(error.to_string()),
+        Err(error) => {
+            // shortcut: a turn that crashes before its result adds no cost, so the daily cap can be overshot by at most 4 uncounted crashed turns an hour (MAX_RESTARTS restarts, then the crash that ends in failed); count partial cost when the CLI reports it on a crash.
+            alert_lost_batch(context).await;
+            Some(error.to_string())
+        }
     };
     if let Some(error) = failure_text {
         let error = error.replace(process.secret.expose(), "<redacted>");
         restart(context, running, retries, error).await?;
     }
     Ok(())
+}
+
+async fn alert_lost_batch(context: &RunContext) {
+    let mut live = context.live.lock().await;
+    let Some((_, messages)) = live.current.take() else {
+        return;
+    };
+    let mut body =
+        String::from("listener restarted after a crash; these messages were not handled: ");
+    let ids: Vec<_> = messages
+        .iter()
+        .take(32)
+        .map(|message| message.client.id.as_str())
+        .collect();
+    body.push_str(&ids.join(", "));
+    if messages.len() > 32 {
+        body.push_str(&format!(" and {} more", messages.len() - 32));
+    }
+    let identity = live.identity.clone();
+    drop(live);
+    let alert = envelope(
+        Payload::Alert {
+            need: body.clone(),
+            urgency: agmen_proto::Urgency::Normal,
+            needs: agmen_proto::Needs::Owner,
+            actions: Vec::new(),
+        },
+        &body,
+    );
+    let result = match alert {
+        Ok(alert) => context.identities.post(&identity, alert).await,
+        Err(error) => Err(error),
+    };
+    if let Err(error) = result {
+        tracing::warn!(code=?error.code, "lost listener batch ALERT could not be queued");
+    }
 }
 
 async fn flush_cap_alert(context: &RunContext) {
@@ -1163,6 +1348,7 @@ async fn restart(
 }
 
 async fn drain(context: &RunContext) -> Result<(), ApiError> {
+    // shortcut: drained rows leave the store before the batch runs, so after a daemon stop agmend cannot list the messages that were in the channel or Queue.pending; keep drained ids in the store until their turn ends if the lost-batch ALERT must cover a restart.
     // Reserving before the transaction leaves pending rows in the store when
     // the channel is full. Each tick drains at most its 256 channel slots.
     for _ in 0..256 {
@@ -1309,6 +1495,52 @@ async fn write_config(
     .await
     .map_err(|_| failure("listener MCP config worker failed"))?
     .map_err(|_| failure("writing private listener MCP config failed"))
+}
+
+fn read_intent(path: &Path) -> std::io::Result<Intent> {
+    if !std::fs::symlink_metadata(path)?.is_file() {
+        return Err(std::io::Error::other(
+            "listener intent is not a regular file",
+        ));
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take(64 * 1024 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > 64 * 1024 {
+        return Err(std::io::Error::other("listener intent is too large"));
+    }
+    serde_json::from_slice(&bytes).map_err(std::io::Error::other)
+}
+
+async fn write_intent(path: PathBuf, intent: Intent) -> Result<(), ApiError> {
+    tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        let dir = path
+            .parent()
+            .ok_or_else(|| std::io::Error::other("listener intent has no folder"))?;
+        let metadata = std::fs::symlink_metadata(dir)?;
+        if !metadata.is_dir() || metadata.permissions().mode() & 0o077 != 0 {
+            return Err(std::io::Error::other(
+                "listener intent folder is not private",
+            ));
+        }
+        let temp = dir.join(format!(".intent-{}", crate::launch::new_session_id()?));
+        let cleanup = McpFile(temp.clone());
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temp)?;
+        serde_json::to_writer(&mut file, &intent)?;
+        file.flush()?;
+        file.sync_all()?;
+        std::fs::rename(&temp, &path)?;
+        drop(cleanup);
+        Ok(())
+    })
+    .await
+    .map_err(|_| failure("listener intent worker failed"))?
+    .map_err(|_| failure("writing private listener intent failed"))
 }
 
 fn git_request(method: &str, raw: Value) -> Result<GitRead, ApiError> {

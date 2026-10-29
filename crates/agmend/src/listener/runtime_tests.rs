@@ -1295,3 +1295,453 @@ async fn listener_stops_when_login_changes_during_a_turn() {
         f.listeners().shutdown().await;
     }
 }
+
+#[tokio::test]
+async fn batch_line_id_works_as_settings_reply_to() {
+    let f = Fixture::new(FAKE).await;
+    f.start().await;
+    f.enqueue(event(1, "owner001")).await;
+    let lines = f.wait_batches(1).await;
+    let batch: Value =
+        serde_json::from_str(lines[0]["message"]["content"].as_str().unwrap()).unwrap();
+    assert_eq!(batch["events"][0]["id"], format!("{:026}", 1));
+    let answer = f.tool("settings_apply", json!({"reply_to":batch["events"][0]["id"],"batch_id":batch["batch_id"],"changes":[{"target":"listener","key":"max_workers","value":1}]})).await.unwrap();
+    assert_eq!(answer["state"], "applied");
+    assert_eq!(
+        f.tool("settings_get", json!({})).await.unwrap()["max_workers"],
+        1
+    );
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn seq_is_not_a_reply_to() {
+    let f = Fixture::new(FAKE).await;
+    f.start().await;
+    f.enqueue(event(1, "owner001")).await;
+    let lines = f.wait_batches(1).await;
+    let batch: Value =
+        serde_json::from_str(lines[0]["message"]["content"].as_str().unwrap()).unwrap();
+    let path = f.dir.path().join("settings.toml");
+    let before = std::fs::read(&path).ok();
+    let error = f.tool("settings_apply", json!({"reply_to":batch["events"][0]["seq"].to_string(),"batch_id":batch["batch_id"],"changes":[{"target":"listener","key":"max_workers","value":1}]})).await.unwrap_err();
+    assert!(matches!(
+        error.code,
+        ErrorCode::BadRequest | ErrorCode::StaleRequest
+    ));
+    assert_eq!(std::fs::read(path).ok(), before);
+    f.stop().await;
+}
+
+async fn wait_alerts(f: &Fixture, n: usize) -> Vec<ClientEnvelope> {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        for _ in 0..300 {
+            let alerts: Vec<_> = f
+                .posts
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|post| post.payload.verb() == Some(agmen_proto::Verb::Alert))
+                .cloned()
+                .collect();
+            if alerts.len() >= n {
+                return alerts;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("lost batch must produce an ALERT");
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn crashed_turn_alerts_the_owner_with_lost_ids() {
+    let script = format!(
+        "if [ ! -f crashed ]; then\n: >crashed\nIFS= read -r message\nprintf '%s\\n' \"$message\" >>batches\nexit 1\nfi\n{FAKE}"
+    );
+    let f = Fixture::new(&script).await;
+    f.start().await;
+    f.enqueue(event(1, "owner001")).await;
+    f.wait_batches(1).await;
+    let alerts = wait_alerts(&f, 1).await;
+    assert_eq!(alerts.len(), 1);
+    assert!(matches!(
+        alerts[0].payload,
+        Payload::Alert {
+            needs: agmen_proto::Needs::Owner,
+            ..
+        }
+    ));
+    assert!(alerts[0].body.as_str().contains(&format!("{:026}", 1)));
+    f.enqueue(event(2, "owner001")).await;
+    let lines = f.wait_batches(2).await;
+    let second: Value =
+        serde_json::from_str(lines[1]["message"]["content"].as_str().unwrap()).unwrap();
+    assert_eq!(second["events"].as_array().unwrap().len(), 1);
+    assert_eq!(second["events"][0]["body"], "message 2");
+    assert_eq!(f.posts.lock().unwrap().len(), 1);
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn crash_alert_lists_at_most_32_ids() {
+    let f =
+        Fixture::new("IFS= read -r message\nprintf '%s\\n' \"$message\" >>batches\nexit 1").await;
+    f.start().await;
+    let live = f
+        .listeners()
+        .entries
+        .lock()
+        .await
+        .get(&"project1".parse().unwrap())
+        .unwrap()
+        .live
+        .clone();
+    let held = live.lock().await;
+    for seq in 1..=40 {
+        f.enqueue(event(seq, "owner001")).await;
+    }
+    drop(held);
+    let alerts = wait_alerts(&f, 1).await;
+    let body = alerts[0].body.as_str();
+    for seq in 1..=32 {
+        assert!(body.contains(&format!("{seq:026}")));
+    }
+    for seq in 33..=40 {
+        assert!(!body.contains(&format!("{seq:026}")));
+    }
+    assert!(body.ends_with("and 8 more"));
+    assert_eq!(alerts.len(), 1);
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn answered_turn_then_exit_posts_no_alert() {
+    let script = format!(
+        "if [ ! -f answered ]; then\n: >answered\nIFS= read -r message\nprintf '%s\\n' \"$message\" >>batches\nprintf '{{\"type\":\"result\",\"is_error\":false}}\\n'\nexit 0\nfi\n{FAKE}"
+    );
+    let f = Fixture::new(&script).await;
+    f.start().await;
+    f.enqueue(event(1, "owner001")).await;
+    f.wait_batches(1).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    f.enqueue(event(2, "owner001")).await;
+    f.wait_batches(2).await;
+    assert!(f.posts.lock().unwrap().is_empty());
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn failed_after_three_crashes_still_alerts() {
+    let f =
+        Fixture::new("IFS= read -r message\nprintf '%s\\n' \"$message\" >>batches\nexit 1").await;
+    f.start().await;
+    for seq in 1..=4 {
+        f.enqueue(event(seq, "owner001")).await;
+        f.wait_batches(seq as usize).await;
+        wait_alerts(&f, seq as usize).await;
+    }
+    f.wait_state("failed").await;
+    assert_eq!(f.posts.lock().unwrap().len(), 4);
+    f.stop().await;
+}
+
+// Rebind the daemon on the same state, using its original fake publisher and process.
+async fn restart_fixture(
+    f: &mut Fixture,
+) -> (
+    Arc<crate::Core>,
+    tokio::task::JoinHandle<()>,
+    oneshot::Sender<()>,
+) {
+    f.listeners().shutdown().await;
+    f.daemon.core.identities.shutdown().await;
+    let old = &f.daemon.core;
+    let mut listeners = Listeners::new(
+        old.console.hub.clone(),
+        f.dir.path().to_owned(),
+        f.dir.path().join("settings.toml"),
+    );
+    listeners.program = f.dir.path().join("fake-claude");
+    listeners.helper = Some(PathBuf::from("/fake/agmen"));
+    listeners.environment = Some(vec![
+        ("PATH".into(), "/usr/bin:/bin".into()),
+        ("AGMEN_MANAGED".into(), "1".into()),
+    ]);
+    listeners.tick = Duration::from_millis(10);
+    listeners.restart_delay = Duration::from_millis(10);
+    let clock = f.clock.clone();
+    listeners.now = Arc::new(move || clock.lock().unwrap().clone());
+    // A second socket lets the test retain its fixture while serving the new daemon.
+    let config = crate::Config::new(
+        f.dir.path().join("restart.sock"),
+        f.dir.path().join("login.json"),
+        TokenStore::Dir(f.dir.path().join("tokens")),
+    )
+    .personal_roles(f.dir.path().join("roles"));
+    let mut daemon = crate::Agmend::bind(config).unwrap();
+    let core = Arc::get_mut(&mut daemon.core).unwrap();
+    let credentials = Arc::new(crate::login::Credentials::new(
+        f.dir.path().join("login.json"),
+        TokenStore::Dir(f.dir.path().join("tokens")),
+        Hub::http().unwrap(),
+    ));
+    let mut identities = Identities::new(
+        credentials,
+        Arc::new(StdMutex::new(
+            crate::state::Store::open(&f.dir.path().join("test.db")).unwrap(),
+        )),
+        f.dir.path().to_owned(),
+        core.console.hub.clone(),
+    );
+    identities.publisher = old.identities.publisher.clone();
+    core.identities = Arc::new(identities);
+    core.listeners = Arc::new(listeners);
+    let core = daemon.core.clone();
+    let (stop, stopped) = oneshot::channel();
+    let task = tokio::spawn(daemon.serve_until(async {
+        let _closed = stopped.await;
+    }));
+    (core, task, stop)
+}
+
+async fn wait_spawns(f: &Fixture, n: usize) {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        for _ in 0..300 {
+            if std::fs::read_to_string(f.repo().join("spawns"))
+                .unwrap_or_default()
+                .lines()
+                .count()
+                == n
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("listener must spawn the expected number of processes");
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn listener_readopts_after_restart() {
+    let mut f = Fixture::new(&format!("printf 'spawn\\n' >>spawns\n{FAKE}")).await;
+    f.start().await;
+    wait_spawns(&f, 1).await;
+    let intent_path = f.dir.path().join("listener/project1/intent.json");
+    let intent = std::fs::read(&intent_path).unwrap();
+    assert_eq!(
+        std::fs::metadata(&intent_path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    let secret = f
+        .daemon
+        .core
+        .identities
+        .local_token(&"listen01".parse().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!String::from_utf8_lossy(&intent).contains(secret.expose()));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&intent).unwrap(),
+        json!({"project":"project1","root":f.repo(),"identity_id":"listen01"})
+    );
+    let (core, task, stop) = restart_fixture(&mut f).await;
+    wait_spawns(&f, 2).await;
+    assert_eq!(
+        core.listeners
+            .human_call("listener_status", json!({}))
+            .await
+            .unwrap()[0]["state"],
+        "running"
+    );
+    stop.send(()).unwrap();
+    task.await.unwrap();
+    assert!(intent_path.exists());
+}
+
+#[tokio::test]
+async fn listener_stopped_by_person_stays_stopped_after_restart() {
+    let mut f = Fixture::new(&format!("printf 'spawn\\n' >>spawns\n{FAKE}")).await;
+    f.start().await;
+    wait_spawns(&f, 1).await;
+    f.stop().await;
+    let (core, task, stop) = restart_fixture(&mut f).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        core.listeners
+            .human_call("listener_status", json!({}))
+            .await
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(!f.dir.path().join("listener/project1/intent.json").exists());
+    assert_eq!(
+        std::fs::read_to_string(f.repo().join("spawns"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+    stop.send(()).unwrap();
+    task.await.unwrap();
+}
+
+#[tokio::test]
+async fn readopt_skips_another_logins_intent() {
+    let mut f = Fixture::new(&format!("printf 'spawn\\n' >>spawns\n{FAKE}")).await;
+    f.start().await;
+    wait_spawns(&f, 1).await;
+    let mut other = f.identity().await;
+    other.identity_id = "other001".parse().unwrap();
+    other.owner_id = "otherown".parse().unwrap();
+    f.daemon.core.identities.register(other).await.unwrap();
+    let path = f.dir.path().join("listener/project1/intent.json");
+    std::fs::write(
+        &path,
+        serde_json::to_vec(&json!({"project":"project1","root":f.repo(),"identity_id":"other001"}))
+            .unwrap(),
+    )
+    .unwrap();
+    let (core, task, stop) = restart_fixture(&mut f).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        core.listeners
+            .human_call("listener_status", json!({}))
+            .await
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(path.exists());
+    assert_eq!(
+        std::fs::read_to_string(f.repo().join("spawns"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+    stop.send(()).unwrap();
+    task.await.unwrap();
+}
+
+#[tokio::test]
+async fn listener_pending_is_refused() {
+    use agmen_local::{Outcome, Request, Response, frame};
+    let f = Fixture::new(FAKE).await;
+    f.start().await;
+    // Stop delivery while leaving the listener identity registered.
+    f.listeners().shutdown().await;
+    f.enqueue(event(1, "owner001")).await;
+    let secret = f
+        .daemon
+        .core
+        .identities
+        .local_token(&"listen01".parse().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    let (mut client, server) = tokio::net::UnixStream::pair().unwrap();
+    let task = tokio::spawn(crate::api::serve_with_peer(
+        server,
+        f.daemon.core.clone(),
+        |_| Ok(std::process::id().try_into().unwrap()),
+    ));
+    for (id, method, raw) in [
+        (1, "hello", json!({"api":1})),
+        (2, "pending", json!({"local_token":secret.expose()})),
+    ] {
+        let mut request = Request::new(id, method, raw);
+        if id == 2 {
+            request.as_ = Some("listen01".parse().unwrap());
+        }
+        frame::write_async(&mut client, &request).await.unwrap();
+        let response: Response = frame::read_async(&mut client).await.unwrap();
+        match (id, response.outcome) {
+            (1, Outcome::Ok { .. }) => {}
+            (2, Outcome::Err { error }) => {
+                assert_eq!(error.code, ErrorCode::Forbidden);
+                assert_eq!(
+                    error.message,
+                    "the listener's messages arrive in its batches"
+                );
+            }
+            _ => panic!("unexpected pending response"),
+        }
+    }
+    let identity = f.identity().await;
+    let rows = f
+        .daemon
+        .core
+        .identities
+        .listener_pending(&identity, 1, 8192)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].client.id, event(1, "owner001").client.id);
+    drop(client);
+    task.await.unwrap();
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn readopt_checks_intent_after_acquiring_change_lock() {
+    let f = Fixture::new(&format!("printf 'spawn\\n' >>spawns\n{FAKE}")).await;
+    f.start().await;
+    wait_spawns(&f, 1).await;
+    f.listeners().shutdown().await;
+    f.listeners().entries.lock().await.clear();
+    let changing = f.listeners().changing.lock().await;
+    let listeners = f.listeners().clone();
+    let readopt = tokio::spawn(async move {
+        listeners.readopt().await;
+    });
+    // A person can finish stop while startup re-adoption waits for this lock.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    std::fs::remove_file(f.dir.path().join("listener/project1/intent.json")).unwrap();
+    drop(changing);
+    readopt.await.unwrap();
+    assert!(f.listeners().entries.lock().await.is_empty());
+    assert_eq!(
+        std::fs::read_to_string(f.repo().join("spawns"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn listener_stop_preserves_another_logins_intent() {
+    let f = Fixture::new(FAKE).await;
+    f.start().await;
+    let mut other = f.identity().await;
+    other.identity_id = "other001".parse().unwrap();
+    other.owner_id = "otherown".parse().unwrap();
+    f.daemon.core.identities.register(other).await.unwrap();
+    f.listeners().shutdown().await;
+    f.listeners().entries.lock().await.clear();
+    let path = f.dir.path().join("listener/project1/intent.json");
+    std::fs::write(
+        &path,
+        serde_json::to_vec(&json!({"project":"project1","root":f.repo(),"identity_id":"other001"}))
+            .unwrap(),
+    )
+    .unwrap();
+    let error = f
+        .human("listener_stop", json!({"project":"project1"}))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::Forbidden);
+    assert!(path.exists());
+}

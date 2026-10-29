@@ -1,7 +1,7 @@
 //! Talks to a running agmend over its Unix socket.
 //!
 //! One connection sends `hello` once, then human calls and identity-scoped
-//! calls in order. Worker commands call it; listener commands will follow.
+//! calls in order. Worker and listener commands call it.
 
 // shortcut: Windows named pipes replace this Unix socket when S6 lands (D36).
 #![cfg(unix)]
@@ -68,11 +68,20 @@ impl Agmend {
     pub(crate) async fn connect_default() -> Result<Self, AgmendError> {
         let path = agmen_client::agmend_socket()
             .map_err(|err| AgmendError::Io(std::io::Error::other(err)))?;
-        agmen_client::check_agmend_socket(&path).map_err(|error| match error {
+        Self::connect_checked(&path).await
+    }
+
+    /// Checks the socket's type, owner and mode before connecting or sending a frame.
+    ///
+    /// # Errors
+    ///
+    /// As [`connect`](Self::connect), plus [`AgmendError::Socket`] for an unsafe socket.
+    pub(crate) async fn connect_checked(socket: &Path) -> Result<Self, AgmendError> {
+        agmen_client::check_agmend_socket(socket).map_err(|error| match error {
             agmen_client::AgmendSocketError::Missing => AgmendError::NotRunning,
             other => AgmendError::Socket(other),
         })?;
-        Self::connect(&path).await
+        Self::connect(socket).await
     }
 
     /// [`connect`](Self::connect) with `call_timeout` in place of the 30 second
@@ -121,7 +130,6 @@ impl Agmend {
     ///
     /// [`AgmendError::BadParams`] when `params` is not an object, and the same
     /// connection errors as [`call`](Self::call).
-    #[cfg_attr(not(test), expect(dead_code, reason = "used by L21-CLI"))]
     pub(crate) async fn call_as(
         &mut self,
         identity: &IdentityId,
@@ -173,6 +181,41 @@ impl FromStr for LocalToken {
             Err(AgmendError::Protocol(
                 "a local token is 64 lowercase hex digits".into(),
             ))
+        }
+    }
+}
+
+/// Identity credentials supplied by agmend to managed helpers.
+#[derive(Debug)]
+pub(crate) struct LaunchCredential {
+    pub(crate) identity: IdentityId,
+    pub(crate) token: LocalToken,
+}
+
+impl LaunchCredential {
+    /// Reads the paired credential without exposing invalid values in errors.
+    pub(crate) fn from_env() -> Result<Option<Self>, crate::output::Fail> {
+        use crate::output::Fail;
+        let identity = std::env::var_os("AGMEN_IDENTITY");
+        let token = std::env::var_os("AGMEN_LOCAL_TOKEN");
+        match (identity, token) {
+            (None, None) => Ok(None),
+            (Some(identity), Some(token)) => {
+                let identity = identity
+                    .to_str()
+                    .and_then(|text| text.parse().ok())
+                    .ok_or_else(|| Fail::usage("AGMEN_IDENTITY must be a valid identity id"))?;
+                let token = token
+                    .to_str()
+                    .and_then(|text| text.parse().ok())
+                    .ok_or_else(|| {
+                        Fail::usage("AGMEN_LOCAL_TOKEN must be 64 lowercase hex digits")
+                    })?;
+                Ok(Some(Self { identity, token }))
+            }
+            _ => Err(Fail::usage(
+                "AGMEN_IDENTITY and AGMEN_LOCAL_TOKEN must be set together",
+            )),
         }
     }
 }

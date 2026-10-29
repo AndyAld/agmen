@@ -46,8 +46,8 @@ fn batch_message_shape() {
     assert_eq!(
         content,
         json!({"batch_id": batch.batch_id.get(), "events": [
-        {"seq": 1, "from_handle": "andy", "from_kind": "human", "verb": "FYI", "body": "hello\nworld", "reply_to": format!("{:026}", 9)},
-        {"seq": 2, "from_handle": "andy", "from_kind": "human", "verb": "ASK", "body": "why?", "reply_to": null}
+        {"id": format!("{:026}", 1), "seq": 1, "from_handle": "andy", "from_kind": "human", "verb": "FYI", "body": "hello\nworld", "reply_to": format!("{:026}", 9)},
+        {"id": format!("{:026}", 2), "seq": 2, "from_handle": "andy", "from_kind": "human", "verb": "ASK", "body": "why?", "reply_to": null}
     ], "context": {"workers": []}})
     );
 }
@@ -107,4 +107,13 @@ fn batch_unknown_verb_is_an_error() {
         BatchLine::try_from(&batch.messages[0]),
         Err(BatchError::UnknownVerb)
     ));
+}
+
+#[test]
+fn batch_line_serializes_id_first() {
+    let batch = batch(vec![message(1, Verb::Fyi, "hello")]);
+    let bytes = encode(&batch, &json!({})).unwrap();
+    let outer: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let content = outer["message"]["content"].as_str().unwrap();
+    assert!(content.contains(&format!("\"events\":[{{\"id\":\"{:026}\",\"seq\":1,", 1)));
 }
