@@ -91,12 +91,20 @@ pub(crate) struct McpArgs {
     /// names another, every tool answers that it is not joined.
     #[arg(long, value_name = "ID")]
     identity: Option<IdentityId>,
+
+    /// Look for this worktree's identity here instead of the working directory.
+    /// Must be an absolute path to a joined worktree.
+    #[arg(long, value_name = "PATH")]
+    worktree: Option<PathBuf>,
 }
 
 /// `agmen mcp`: serves the MCP tools on stdin and stdout until the client
 /// goes away.
 pub(crate) async fn run(args: McpArgs) -> anyhow::Result<()> {
-    let cwd = std::env::current_dir().context("reading the working directory")?;
+    let cwd = match args.worktree {
+        Some(path) => resolve_worktree(path).await?,
+        None => std::env::current_dir().context("reading the working directory")?,
+    };
     let managed = std::env::var("AGMEN_MANAGED").is_ok_and(|value| value == "1");
     let mut options =
         McpOptions::new(cwd, TokenStore::from_env(), paths::state_base()?).with_managed(managed);
@@ -105,6 +113,61 @@ pub(crate) async fn run(args: McpArgs) -> anyhow::Result<()> {
     }
     serve(rmcp::transport::stdio(), options).await?;
     Ok(())
+}
+
+/// Validates `--worktree <path>` and returns its canonical directory once
+/// [`find_identity`] confirms it belongs to a joined worktree.
+async fn resolve_worktree(path: PathBuf) -> anyhow::Result<PathBuf> {
+    if path.as_os_str().as_encoded_bytes().starts_with(b"${") {
+        return Err(Fail::usage(format!(
+            "--worktree {}: the client did not expand the variable",
+            path.display()
+        ))
+        .into());
+    }
+    if !path.is_absolute() {
+        return Err(Fail::usage(format!(
+            "--worktree must be an absolute path: {}",
+            path.display()
+        ))
+        .into());
+    }
+    blocking(move || {
+        match std::fs::metadata(&path) {
+            Ok(meta) if !meta.is_dir() => {
+                return Err(Fail::usage(format!(
+                    "--worktree is not a directory: {}",
+                    path.display()
+                ))
+                .into());
+            }
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Err(
+                    Fail::usage(format!("--worktree does not exist: {}", path.display())).into(),
+                );
+            }
+            Err(err) => {
+                return Err(anyhow::Error::new(err)
+                    .context(format!("checking --worktree {}", path.display())));
+            }
+        }
+        match find_identity(&path) {
+            Ok(Some(_)) => std::fs::canonicalize(&path)
+                .with_context(|| format!("resolving --worktree {}", path.display())),
+            Ok(None) => Err(Fail::new(
+                Code::NotLoggedIn,
+                format!(
+                    "not joined: {} holds no agmen identity; run agmen join there",
+                    path.display()
+                ),
+            )
+            .into()),
+            Err(err @ IdentityError::Untrusted { .. }) => Err(anyhow::Error::new(err)),
+            Err(err) => Err(anyhow::Error::new(err).context("loading .agmen/identity.json failed")),
+        }
+    })
+    .await
 }
 
 /// Where [`serve`] finds the identity it acts as, its token and its state,

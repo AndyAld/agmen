@@ -38,7 +38,11 @@ impl InstalledPlugin {
 
 pub(super) async fn run(root: &Path, env: &AgentEnv, plugin: Plugin) -> Result<Outcome> {
     if plugin == Plugin::Decline {
-        return write_worktree_file(root, ".mcp.json", merge_mcp_servers).await;
+        let entry = serde_json::json!({"command":"agmen","args":["mcp"]});
+        return write_worktree_file(root, ".mcp.json", |existing| {
+            merge_mcp_servers(existing, &entry, ".mcp.json")
+        })
+        .await;
     }
     let failure = if let Some(program) = env.find_program("claude") {
         if let Ok(output) = command(
@@ -87,7 +91,11 @@ pub(super) async fn run(root: &Path, env: &AgentEnv, plugin: Plugin) -> Result<O
     } else {
         "claude is not on PATH".into()
     };
-    let outcome = write_worktree_file(root, ".mcp.json", merge_mcp_servers).await?;
+    let entry = serde_json::json!({"command":"agmen","args":["mcp"]});
+    let outcome = write_worktree_file(root, ".mcp.json", |existing| {
+        merge_mcp_servers(existing, &entry, ".mcp.json")
+    })
+    .await?;
     Ok(match outcome {
         Outcome::Configured(_) => Outcome::Configured(format!(
             "plugin install failed ({failure}); wrote .mcp.json instead"
