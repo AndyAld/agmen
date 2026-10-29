@@ -232,7 +232,15 @@ impl Hub {
                 "/v1/tenants/{tenant}/transfer",
                 post(crate::tenants::transfer),
             )
-            .route("/v1/tenants/{tenant}/seats", get(crate::groups::seats))
+            .route(
+                "/v1/tenants/{tenant}/seats",
+                get(crate::groups::seats).put(crate::groups::set_seats),
+            )
+            .route(
+                "/v1/tenants/{tenant}/plan",
+                post(crate::groups::set_plan_route),
+            )
+            .route("/v1/tenants/{tenant}/portal", post(crate::groups::portal))
             .route("/v1/identities", post(identities::mint))
             .route("/v1/identities/{id}", delete(identities::revoke))
             .route(
@@ -288,9 +296,6 @@ impl Hub {
         &self.inner.tokens
     }
 
-    // shortcut: unused until hosted Task 7 calls checkout, seat changes and the
-    // portal; drop the expectation there.
-    #[expect(dead_code, reason = "hosted Task 7 calls the client")]
     pub(crate) fn paddle(&self) -> Option<&PaddleClient> {
         self.inner.paddle.as_ref()
     }
@@ -474,6 +479,8 @@ pub(crate) enum ApiError {
     Emqx(#[from] EmqxError),
     #[error("GitHub call failed")]
     Github(#[from] GithubError),
+    #[error("Paddle call failed")]
+    Paddle(#[from] PaddleError),
 }
 
 impl ApiError {
@@ -529,7 +536,7 @@ impl IntoResponse for ApiError {
                 code,
                 description,
             } => (status, code, description),
-            Self::Emqx(_) | Self::Github(_) => {
+            Self::Emqx(_) | Self::Github(_) | Self::Paddle(_) => {
                 tracing::error!(error = %error_chain(&self), "upstream call failed");
                 (
                     StatusCode::BAD_GATEWAY,

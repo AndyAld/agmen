@@ -11,7 +11,8 @@ use reqwest::StatusCode;
 use serde_json::{Value, json};
 use sqlx::postgres::PgPoolOptions;
 use support::{
-    Ctx, Project, TestDb, login, member_with_token, mint_ok, run, run_hosted, seed_project,
+    Ctx, Project, TestDb, login, member_with_token, mint_ok, run, run_hosted,
+    run_hosted_with_paddle, seed_project,
 };
 
 const GROUP_LIMIT: &str = "you already own 3 groups, the most one account can own";
@@ -110,14 +111,20 @@ async fn it_first_group_starts_trial() {
 
 #[tokio::test]
 async fn it_second_group_gets_no_trial() {
-    run_hosted(|ctx| async move {
+    run_hosted_with_paddle(|ctx, paddle| async move {
         let token = login(&ctx, 4242, "andy").await;
         create_named(&ctx, &token, "acme").await;
         let now = jiff::Timestamp::now();
         let body = create_named(&ctx, &token, "beta").await;
         assert_eq!(body["state"], "read_only");
         assert!(body["trial_ends_at"].is_null());
-        assert!(body["checkout_url"].is_null());
+        assert!(
+            body["checkout_url"]
+                .as_str()
+                .is_some_and(|url| url.starts_with(paddle.base().as_str())),
+            "{}",
+            body["checkout_url"]
+        );
         let row: (String, String, i64) = sqlx::query_as(
             "SELECT state, read_only_cause,
                     (extract(epoch FROM read_only_since) * 1000000)::bigint
