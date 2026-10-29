@@ -8,6 +8,7 @@
 mod catalog;
 mod paddle;
 mod plan;
+pub(crate) mod webhook;
 
 pub use catalog::{Catalog, LineItem};
 pub use paddle::{PaddleClient, PaddleError, sync_catalog};

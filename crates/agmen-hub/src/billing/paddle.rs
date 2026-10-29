@@ -621,8 +621,13 @@ fn checkout_url(response: &Value) -> Result<Url, PaddleError> {
 
 /// The items of a subscription response, as the plan's line items.
 fn items_of(response: &Value) -> Result<Vec<LineItem>, PaddleError> {
-    let items = response
-        .pointer("/data/items")
+    entity_items(&response["data"])
+}
+
+/// The items of a Paddle subscription entity, including webhook data.
+pub(super) fn entity_items(entity: &Value) -> Result<Vec<LineItem>, PaddleError> {
+    let items = entity
+        .get("items")
         .and_then(Value::as_array)
         .ok_or_else(|| shape("the subscription has no items list"))?;
     let mut out = Vec::with_capacity(items.len());

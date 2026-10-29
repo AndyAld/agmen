@@ -20,7 +20,7 @@ use url::Url;
 use crate::auth::{self, Github, GithubError};
 use crate::billing::{PaddleClient, PaddleError};
 use crate::broker_tokens::{BrokerTokens, TokenError};
-use crate::config::{Config, HubMode};
+use crate::config::{Config, HostedConfig, HubMode};
 use crate::emqx::{EmqxAdmin, EmqxError};
 use crate::events::Slots;
 use crate::group::{self, GroupError};
@@ -87,6 +87,7 @@ struct Inner {
     emqx: EmqxAdmin,
     github: Github,
     paddle: Option<PaddleClient>,
+    hosted: Option<HostedConfig>,
     public_url: Url,
     public_mqtt_url: Url,
     mqtt_ws_upstream: Option<Url>,
@@ -176,6 +177,7 @@ impl Hub {
                 emqx,
                 github,
                 paddle,
+                hosted: config.hosted.clone(),
                 public_url: config.public_url.clone(),
                 public_mqtt_url: config.public_mqtt_url.clone(),
                 mqtt_ws_upstream: config.mqtt_ws_upstream.clone(),
@@ -211,6 +213,12 @@ impl Hub {
             .route("/v1/me", get(me::me))
             .route("/v1/projects", post(crate::projects::create))
             .route("/v1/groups", post(crate::groups::create))
+            .route(
+                "/v1/paddle/webhook",
+                post(crate::billing::webhook::receive).layer(DefaultBodyLimit::max(
+                    crate::billing::webhook::MAX_BODY_BYTES,
+                )),
+            )
             .route("/v1/tenants/{tenant}/members", get(crate::tenants::list))
             .route(
                 "/v1/tenants/{tenant}/members/{handle}",
@@ -258,6 +266,10 @@ impl Hub {
 
     pub(crate) fn mode(&self) -> HubMode {
         self.inner.mode
+    }
+
+    pub(crate) fn hosted(&self) -> Option<&HostedConfig> {
+        self.inner.hosted.as_ref()
     }
 
     pub(crate) fn retention_days(&self) -> Option<u32> {
