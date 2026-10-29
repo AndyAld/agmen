@@ -24,7 +24,9 @@ agmen-cli = { version = "0.1.0", path = "../../crates/agmen-cli" }
 [dev-dependencies]
 agmen-client = { version = "0.1.0", path = "../../crates/agmen-client" }
 agmen-hub = { version = "0.1.0", path = "../../crates/agmen-hub", features = ["test-hooks"] }
+agmen-local = { version = "0.1.0", path = "../../crates/agmen-local", features = ["tokio"] }
 agmen-proto = { version = "0.1.0", path = "../../crates/agmen-proto" }
+agmend = { version = "0.1.0", path = "../../crates/agmend", features = ["test-hooks"] }
 axum = { version = "0.8.9", default-features = false, features = ["tokio", "http1", "json", "query"] }
 jiff = "0.2.38"
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls"] }

@@ -218,6 +218,25 @@ impl Config {
     }
 }
 
+#[cfg(feature = "test-hooks")]
+impl Config {
+    /// Points launches at `claude` and `agmen` for tests only.
+    ///
+    /// The runner's program is `claude`. Its PATH is `path`, taken from a
+    /// fixed shell result, so it does not run `zsh -lic`. Its MCP command
+    /// is `agmen`.
+    #[must_use]
+    pub fn test_programs(
+        mut self,
+        claude: PathBuf,
+        agmen: PathBuf,
+        path: std::ffi::OsString,
+    ) -> Self {
+        self.runner = Arc::new(launch::ClaudeRunner::for_tests(claude, agmen, path));
+        self
+    }
+}
+
 /// A bound agmend, ready to serve.
 #[derive(Debug)]
 pub struct Agmend {

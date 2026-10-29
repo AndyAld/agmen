@@ -694,3 +694,27 @@ async fn attach_refuses_a_session_id_that_is_not_a_uuid() {
     assert!(runner.attach(spec.clone()).await.is_err());
     assert!(!spec.script.exists());
 }
+
+/// The fixed shell result is the PATH the child sees, so this never runs
+/// `zsh -lic` (a login shell would report its own PATH).
+#[cfg(feature = "test-hooks")]
+#[tokio::test]
+async fn test_programs_runs_the_given_claude() {
+    let dir = tempfile::tempdir().unwrap();
+    let program = fake(
+        dir.path(),
+        "#!/bin/sh\nprintf '%s' \"$PATH\" > path-seen\nprintf '%s\\n' '{\"type\":\"result\",\"total_cost_usd\":0.25,\"is_error\":false}'\n",
+    );
+    let agmen = dir.path().join("agmen");
+    std::fs::write(&agmen, "unused").unwrap();
+    std::fs::set_permissions(&agmen, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let path = dir.path().join("fixed-login-path");
+    let runner = ClaudeRunner::for_tests(program, agmen.clone(), path.as_os_str().to_owned());
+    assert_eq!(runner.mcp_command().await.unwrap(), agmen);
+    let (_send, stop) = tokio::sync::oneshot::channel();
+    let result = runner.run(spec(dir.path()), stop).await.unwrap();
+    assert_eq!(result.total_cost_usd, "0.25");
+    let seen = std::fs::read_to_string(dir.path().join("path-seen")).unwrap();
+    assert_eq!(seen, path.to_str().unwrap());
+    assert_ne!(seen, std::env::var("PATH").unwrap_or_default());
+}
