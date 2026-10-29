@@ -60,8 +60,8 @@ struct UpArgs {
     /// Public https URL of this hub.
     #[arg(long, value_name = "URL")]
     public_url: Option<String>,
-    /// Local port published to the hub's port 8080.
-    #[arg(long, default_value_t = 7080)]
+    /// Local port published to the hub's port 8080, from 1 to 65535.
+    #[arg(long, default_value_t = 7080, value_parser = parse_host_port)]
     port: u16,
     /// Seconds a later reachability check may wait. This command polls health on its own.
     #[arg(long, default_value_t = 90)]
@@ -108,7 +108,7 @@ impl Service {
 ///
 /// # Errors
 ///
-/// Usage errors exit 2. A missing host for `status` or `stop` exits 3.
+/// Usage errors exit 2. A missing host for `status`, `logs`, or `stop` exits 3.
 /// Docker and port failures exit 1.
 pub(crate) async fn run(args: HostArgs) -> Result<()> {
     match args.command {
@@ -146,10 +146,27 @@ async fn up(args: UpArgs) -> Result<()> {
     wait_healthy(args.port).await
 }
 
+fn parse_host_port(text: &str) -> Result<u16, String> {
+    let port: u16 = text
+        .parse()
+        .map_err(|_| "the port must be from 1 to 65535".to_owned())?;
+    if port == 0 {
+        return Err("the port must be from 1 to 65535".to_owned());
+    }
+    Ok(port)
+}
+
 fn require_public_url(text: Option<String>) -> Result<Url> {
     let Some(text) = text else {
         return Err(Fail::usage("pass --public-url <https url>").into());
     };
+    // `$` would be expanded by compose when this value is written into `.env`.
+    if text.contains('$') {
+        return Err(Fail::usage(
+            "--public-url cannot contain '$', because the value lands in .env and compose expands it",
+        )
+        .into());
+    }
     let url = match Url::parse(&text) {
         Ok(url) => url,
         Err(_err) => {
@@ -159,6 +176,15 @@ fn require_public_url(text: Option<String>) -> Result<Url> {
             .into());
         }
     };
+    if url.as_str().contains('$') {
+        return Err(Fail::usage(
+            "--public-url cannot contain '$', because the value lands in .env and compose expands it",
+        )
+        .into());
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(Fail::usage("--public-url cannot contain a username or password").into());
+    }
     let allow_http = matches!(std::env::var("AGMEN_HOST_ALLOW_HTTP").as_deref(), Ok("1"));
     let scheme_ok = url.scheme() == "https" || (allow_http && url.scheme() == "http");
     if !scheme_ok || !url.has_host() || url.query().is_some() || url.fragment().is_some() {
@@ -276,9 +302,7 @@ async fn wait_healthy(port: u16) -> Result<()> {
 
 async fn status(args: NameArgs) -> Result<()> {
     let dir = host_dir_path(args.name.as_str())?;
-    if !dir.is_dir() {
-        return Err(missing_host(args.name.as_str()).into());
-    }
+    require_host(&dir, args.name.as_str())?;
     let compose = Compose::new(dir.clone());
     for state in compose.ps().await? {
         if state.health.is_empty() {
@@ -319,9 +343,19 @@ async fn stop(args: NameArgs) -> Result<()> {
 
 async fn logs(args: LogsArgs) -> Result<()> {
     let dir = host_dir_path(args.name.host_name().as_str())?;
+    require_host(&dir, args.name.host_name().as_str())?;
     Compose::new(dir)
         .logs(args.service.map(Service::as_str), args.follow, args.tail)
         .await
+}
+
+/// `status` and `logs` need a compose file. A bare directory is not a host.
+fn require_host(dir: &std::path::Path, name: &str) -> Result<()> {
+    if dir.join("compose.yaml").is_file() {
+        Ok(())
+    } else {
+        Err(missing_host(name).into())
+    }
 }
 
 fn missing_host(name: &str) -> Fail {

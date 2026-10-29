@@ -50,9 +50,13 @@ impl HostName {
 }
 
 /// `KEY=value` pairs for one host. Debug output names the keys and omits the values.
+///
+/// Comment lines and blank lines are kept and written back above the sorted
+/// keys. They are not pairs.
 #[derive(Default, PartialEq, Eq)]
 pub(crate) struct HostEnv {
     pairs: BTreeMap<String, String>,
+    notes: Vec<String>,
 }
 
 impl fmt::Debug for HostEnv {
@@ -68,7 +72,8 @@ impl HostEnv {
     /// # Errors
     ///
     /// When the file cannot be read, is larger than 64 KiB, is not UTF-8,
-    /// or contains a line this type refuses.
+    /// or contains a line this type refuses. A blank line, or a comment
+    /// (`#` after leading whitespace), is kept and is not a pair.
     pub(crate) fn load(path: &Path) -> Result<Option<Self>> {
         let file = match File::open(path) {
             Ok(file) => file,
@@ -87,7 +92,9 @@ impl HostEnv {
         let text = String::from_utf8(bytes).context("the env file is not UTF-8")?;
         let mut env = Self::default();
         for (number, line) in text.lines().enumerate() {
-            if line.is_empty() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                env.notes.push(line.to_owned());
                 continue;
             }
             let Some((key, value)) = line.split_once('=') else {
@@ -155,6 +162,10 @@ impl HostEnv {
         tmp_name.push(".tmp");
         let tmp = parent.join(tmp_name);
         let mut body = String::new();
+        for note in &self.notes {
+            body.push_str(note);
+            body.push('\n');
+        }
         for (key, value) in &self.pairs {
             body.push_str(key);
             body.push('=');
