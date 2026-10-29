@@ -10,6 +10,7 @@ pub mod console;
 pub mod frame;
 mod message;
 pub mod roles;
+pub mod safeguards;
 
 pub use message::{API, ApiError, ErrorCode, HelloAnswer, Outcome, ReadyAnswer, Request, Response};
 
