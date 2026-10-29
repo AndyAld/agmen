@@ -19,6 +19,7 @@ keyring-core = "1.0.1"
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls", "form"] }
 rumqttc_next = { version = "0.34.0", package = "rumqttc-next", default-features = false, features = ["websocket", "use-rustls"] }
 rusqlite = { version = "0.39.0", features = ["bundled"] }
+rustix = { version = "1.1.5", default-features = false, features = ["std", "process"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 thiserror = "2.0.21"

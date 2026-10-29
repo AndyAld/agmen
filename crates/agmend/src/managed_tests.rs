@@ -948,6 +948,8 @@ async fn worker_peer_cannot_call_owner_methods_even_without_identity_credentials
         "agent_attach",
         "agent_detach",
         "agent_remove",
+        "agent_budget",
+        "prune",
         "post",
         "host_list",
         "host_add",
@@ -1022,6 +1024,8 @@ async fn framed_owner_request_from_worker_is_forbidden() {
         "agent_attach",
         "agent_detach",
         "agent_remove",
+        "agent_budget",
+        "prune",
         "post",
         "shutdown",
         "login",
@@ -2229,4 +2233,340 @@ fn ps_elapsed_times_parse_in_every_form() {
     for bad in ["", "7", "a:b", "1:2:3:4", "x-01:02"] {
         assert_eq!(parse(bad), None, "{bad}");
     }
+}
+
+/// Exercises human dispatch on an isolated connection to this fixture.
+async fn worker_call(
+    fixture: &Fixture,
+    method: &str,
+    params: Value,
+) -> Result<Value, agmen_local::ApiError> {
+    use agmen_local::{API, Outcome, Request, Response, frame};
+    let (mut client, server) = tokio::net::UnixStream::pair().unwrap();
+    let core = fixture.daemon.core.clone();
+    let task = tokio::spawn(async move {
+        crate::api::serve_with_peer(server, core, |_| Ok(12345)).await;
+    });
+    let result = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        frame::write_async(&mut client, &Request::new(1, "hello", json!({"api":API})))
+            .await
+            .unwrap();
+        let hello = frame::read_async::<Response>(&mut client).await.unwrap();
+        assert!(matches!(hello.outcome, Outcome::Ok { .. }));
+        frame::write_async(&mut client, &Request::new(2, method, params))
+            .await
+            .unwrap();
+        match frame::read_async::<Response>(&mut client)
+            .await
+            .unwrap()
+            .outcome
+        {
+            Outcome::Ok { result } => Ok(result),
+            Outcome::Err { error } => Err(error),
+        }
+    })
+    .await;
+    drop(client);
+    task.abort();
+    let _stopped = task.await;
+    result.unwrap()
+}
+
+async fn prune_fixture() -> Fixture {
+    let fixture = Fixture::new().await;
+    fixture
+        .daemon
+        .core
+        .managed
+        .remember_root(&json!({"project":"project1","root":fixture.dir.path().join("repo")}))
+        .await;
+    fixture
+}
+
+async fn prune_tree(fixture: &Fixture, branch: &str, unmerged: bool) -> std::path::PathBuf {
+    let repo = fixture.dir.path().join("repo");
+    let path = crate::worktree::create(&repo, "main", branch)
+        .await
+        .unwrap();
+    if unmerged {
+        std::fs::write(path.join("work"), branch).unwrap();
+        git(&path, &["add", "work"]);
+        git(
+            &path,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "worker work"],
+        );
+    }
+    path
+}
+
+#[tokio::test]
+async fn prune_removes_merged_unmanaged_worktrees() {
+    let fixture = prune_fixture().await;
+    let repo = fixture.dir.path().join("repo");
+    let path = prune_tree(&fixture, "agent/done", false).await;
+    let cherry = prune_tree(&fixture, "agent/cherry", true).await;
+    std::fs::write(repo.join("main-work"), "diverge").unwrap();
+    git(&repo, &["add", "main-work"]);
+    git(
+        &repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "diverge"],
+    );
+    git(
+        &repo,
+        &["-c", "commit.gpgsign=false", "cherry-pick", "agent/cherry"],
+    );
+    let unrelated = prune_tree(&fixture, "feature/keep", false).await;
+    let out = worker_call(&fixture, "prune", json!({"project":"project1"}))
+        .await
+        .unwrap();
+    let removed = out["removed"].as_array().unwrap();
+    assert_eq!(removed.len(), 2);
+    assert!(removed.contains(&json!("agent/done")) && removed.contains(&json!("agent/cherry")));
+    assert!(!path.exists() && !cherry.exists());
+    assert!(unrelated.exists());
+    assert!(listing(&repo, &["branch", "--list", "agent/*"]).is_empty());
+}
+
+#[tokio::test]
+async fn prune_keeps_managed_agents() {
+    let fixture = prune_fixture().await;
+    let launched = fixture.launch().await;
+    fixture
+        .daemon
+        .core
+        .managed
+        .stop(json!({"identity":"agent001"}))
+        .await
+        .unwrap();
+    let out = worker_call(
+        &fixture,
+        "prune",
+        json!({"project":"project1","confirm":launched["branch"]}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        out,
+        json!({"removed":[],"kept":[{"branch":launched["branch"],"reason":"managed"}]})
+    );
+    assert!(std::path::Path::new(launched["worktree"].as_str().unwrap()).exists());
+    fixture
+        .daemon
+        .core
+        .managed
+        .remove(json!({"identity":"agent001"}))
+        .await
+        .unwrap();
+    let out = worker_call(&fixture, "prune", json!({"project":"project1"}))
+        .await
+        .unwrap();
+    assert_eq!(out["removed"], json!([launched["branch"]]));
+}
+
+#[tokio::test]
+async fn prune_saves_dirty_to_wip() {
+    let fixture = prune_fixture().await;
+    let path = prune_tree(&fixture, "agent/dirty", false).await;
+    std::fs::write(path.join("dirty"), "keep my work").unwrap();
+    let repo = fixture.dir.path().join("repo");
+    let before = listing(&path, &["status", "--porcelain"]);
+    let out = worker_call(
+        &fixture,
+        "prune",
+        json!({"project":"project1","confirm":"agent/dirty"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        out,
+        json!({"removed":[],"kept":[{"branch":"agent/dirty","reason":"uncommitted"}]})
+    );
+    assert!(path.exists());
+    assert_eq!(listing(&path, &["status", "--porcelain"]), before);
+    assert_eq!(
+        listing(&repo, &["show", "refs/wip/agent/dirty:dirty"]),
+        b"keep my work"
+    );
+}
+
+#[tokio::test]
+async fn prune_confirm_removes_one_unmerged_branch() {
+    let fixture = prune_fixture().await;
+    let one = prune_tree(&fixture, "agent/one", true).await;
+    let two = prune_tree(&fixture, "agent/two", true).await;
+    let out = worker_call(&fixture, "prune", json!({"project":"project1"}))
+        .await
+        .unwrap();
+    assert!(out["removed"].as_array().unwrap().is_empty());
+    assert_eq!(out["kept"].as_array().unwrap().len(), 2);
+    assert!(
+        out["kept"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry["reason"] == "not merged")
+    );
+    let out = worker_call(
+        &fixture,
+        "prune",
+        json!({"project":"project1","confirm":"agent/one"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        out,
+        json!({"removed":["agent/one"],"kept":[{"branch":"agent/two","reason":"not merged"}]})
+    );
+    assert!(!one.exists() && two.exists());
+    let repo = fixture.dir.path().join("repo");
+    assert_eq!(
+        listing(&repo, &["show", "refs/wip/agent/one:work"]),
+        b"agent/one"
+    );
+    assert!(listing(&repo, &["branch", "--list", "agent/one"]).is_empty());
+}
+
+#[tokio::test]
+async fn prune_never_forces() {
+    let fixture = prune_fixture().await;
+    prune_tree(&fixture, "agent/done", false).await;
+    prune_tree(&fixture, "agent/unmerged", true).await;
+    let dirty = prune_tree(&fixture, "agent/dirty", false).await;
+    std::fs::write(dirty.join("dirty"), "keep").unwrap();
+    crate::worktree::COMMANDS.with_borrow_mut(Vec::clear);
+    worker_call(
+        &fixture,
+        "prune",
+        json!({"project":"project1","confirm":"agent/unmerged"}),
+    )
+    .await
+    .unwrap();
+    crate::worktree::COMMANDS.with_borrow(|log| {
+        assert!(!log.is_empty());
+        assert!(
+            log.iter()
+                .flatten()
+                .all(|arg| arg != "--force" && arg != "-f" && arg != "-D")
+        );
+        assert!(
+            log.iter()
+                .any(|args| args.starts_with(&["worktree".into(), "remove".into()]))
+        );
+    });
+}
+
+#[tokio::test]
+async fn agent_budget_raises_the_cap() {
+    let fixture = Fixture::new().await;
+    fixture.launch().await;
+    let managed = &fixture.daemon.core.managed;
+    let worker = worker_of(managed, "agent001").await;
+    worker
+        .lock()
+        .await
+        .budget
+        .add_cost_usd("2", |_| {})
+        .unwrap();
+    super::actions::save_spent(
+        &managed.agent_dir(&"agent001".parse().unwrap()),
+        crate::budget::Money::from_usd("2").unwrap(),
+    )
+    .await;
+    assert!(worker.lock().await.budget.exhausted());
+    let out = worker_call(
+        &fixture,
+        "agent_budget",
+        json!({"identity":"agent001","add_usd":2.5}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(out, json!({"identity":"agent001","budget_usd":"4.500000"}));
+    let held = worker.lock().await;
+    assert!(!held.budget.exhausted());
+    assert_eq!(held.budget.remaining_usd(), "2.500000");
+    assert_eq!(held.budget.spent().usd(), "2.000000");
+    drop(held);
+    managed.shutdown().await;
+    let restored = restarted(&fixture).await;
+    let listed = restored.list(json!({})).await.unwrap();
+    assert_eq!(listed["agents"][0]["budget_usd"], "4.500000");
+    assert_eq!(listed["agents"][0]["spent_usd"], "2.000000");
+}
+
+#[tokio::test]
+async fn agent_budget_refuses_bad_amounts() {
+    let fixture = Fixture::new().await;
+    fixture.launch().await;
+    for amount in [
+        json!(0),
+        json!(-1),
+        json!(1000.01),
+        json!("abc"),
+        json!(0.0000001),
+    ] {
+        let error = worker_call(
+            &fixture,
+            "agent_budget",
+            json!({"identity":"agent001","add_usd":amount}),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, agmen_local::ErrorCode::BadRequest, "{error:?}");
+    }
+    assert_eq!(
+        fixture.daemon.core.managed.list(json!({})).await.unwrap()["agents"][0]["budget_usd"],
+        "2"
+    );
+}
+
+#[tokio::test]
+async fn prune_confirm_preserves_new_commits_after_an_older_wip() {
+    let fixture = prune_fixture().await;
+    let repo = fixture.dir.path().join("repo");
+    let path = prune_tree(&fixture, "agent/later", true).await;
+    std::fs::write(path.join("dirty"), "old snapshot").unwrap();
+    worker_call(&fixture, "prune", json!({"project":"project1"}))
+        .await
+        .unwrap();
+    git(&path, &["add", "dirty"]);
+    git(
+        &path,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "newer commit"],
+    );
+    let tip = String::from_utf8(listing(&path, &["rev-parse", "HEAD"])).unwrap();
+    let out = worker_call(
+        &fixture,
+        "prune",
+        json!({"project":"project1","confirm":"agent/later"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(out["removed"], json!(["agent/later"]));
+    assert!(!path.exists());
+    git(
+        &repo,
+        &[
+            "merge-base",
+            "--is-ancestor",
+            tip.trim(),
+            "refs/wip/agent/later",
+        ],
+    );
+}
+
+#[tokio::test]
+async fn agent_budget_serializes_with_record_removal() {
+    let fixture = Fixture::new().await;
+    fixture.launch().await;
+    let managed = &fixture.daemon.core.managed;
+    let mutation = managed.launching.lock().await;
+    let request = managed.agent_budget(json!({"identity":"agent001","add_usd":1}));
+    tokio::pin!(request);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), &mut request)
+            .await
+            .is_err()
+    );
+    drop(mutation);
+    assert_eq!(request.await.unwrap()["budget_usd"], "3.000000");
 }
