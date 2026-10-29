@@ -810,30 +810,7 @@ async fn load_sender(
 ///   explicit stored permissions and stay closed in this legacy table.
 /// - GRANT, DENY, ITEM and STATE are the hub's own (ruling R34).
 pub(crate) const fn may_send(kind: IdentityKind, verb: Verb) -> bool {
-    use IdentityKind::{Agent, Coordinator, Human, Listener};
-    match verb {
-        Verb::Hello
-        | Verb::Bye
-        | Verb::Fyi
-        | Verb::Ask
-        | Verb::Answer
-        | Verb::Ack
-        | Verb::Status
-        | Verb::Alert
-        | Verb::Dm
-        | Verb::Found
-        | Verb::Proposal => matches!(kind, Human | Agent | Coordinator | Listener),
-        Verb::Rollcall | Verb::Decision | Verb::Ruling => matches!(kind, Human | Coordinator),
-        Verb::Claim | Verb::Heartbeat | Verb::Release | Verb::Done => {
-            matches!(kind, Agent | Coordinator)
-        }
-        Verb::Lend => matches!(kind, Human | Agent | Coordinator),
-        Verb::Assign => matches!(kind, Coordinator),
-        Verb::Delegated => matches!(kind, Listener),
-        Verb::PushRequest => matches!(kind, Agent),
-        Verb::PushOk | Verb::PushNo => matches!(kind, Human),
-        Verb::Review | Verb::Plan | Verb::Grant | Verb::Deny | Verb::Item | Verb::State => false,
-    }
+    agmen_proto::kind_may_send(kind, verb)
 }
 
 /// One live member of a project: a non-revoked identity or a human

@@ -20,11 +20,7 @@ pub fn cap_verbs(kind: IdentityKind, verbs: &BTreeSet<String>) -> BTreeSet<Strin
         .iter()
         .filter(|name| {
             Verb::ALL.iter().any(|verb| {
-                verb.as_str() == name.as_str()
-                    && (crate::ingest::may_send(kind, *verb)
-                        || (matches!(kind, IdentityKind::Agent | IdentityKind::Coordinator)
-                            && matches!(verb, Verb::Review | Verb::Plan))
-                        || (kind == IdentityKind::Listener && *verb == Verb::Assign))
+                verb.as_str() == name.as_str() && agmen_proto::kind_ceiling(kind, *verb)
             })
         })
         .cloned()

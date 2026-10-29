@@ -38,6 +38,7 @@
 mod envelope;
 mod error;
 mod ids;
+mod kinds;
 mod reply;
 mod repo_url;
 mod roles;
@@ -53,6 +54,7 @@ pub use ids::{
     Body, GitSha, IdentityId, ItemKey, LaneName, MAX_BODY_BYTES, Mention, MessageId, ProjectId,
     RoleName, Seq, Sha256Hex, Stream, TenantId, Timestamp,
 };
+pub use kinds::{kind_ceiling, kind_may_send};
 pub use reply::{DeliveryReply, NackReason};
 pub use repo_url::{BadRepoUrl, RepoUrl};
 pub use roles::{EditScope, RoleSpec};

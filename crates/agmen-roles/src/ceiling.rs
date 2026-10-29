@@ -1,14 +1,10 @@
 use std::collections::BTreeSet;
 
+use agmen_proto::{IdentityKind, Verb};
+
 use crate::{EditScope, Kind, ToolClass};
 
-/// Baseline protocol verbs for every role inheriting base.
-pub(crate) const BASE_VERBS: [&str; 10] = [
-    "HELLO", "BYE", "FYI", "ASK", "ANSWER", "ACK", "STATUS", "DM", "ALERT", "FOUND",
-];
-
-// shortcut: local spec ceilings while agmen-proto has no shared table;
-// replace these checks when L6 exports that table.
+// The kind table lives in agmen-proto.
 pub(crate) fn apply(
     kind: Kind,
     tools: &mut BTreeSet<ToolClass>,
@@ -30,38 +26,18 @@ pub(crate) fn apply(
         }
         allowed
     });
+    let identity_kind = match kind {
+        Kind::Agent => IdentityKind::Agent,
+        Kind::Coordinator => IdentityKind::Coordinator,
+        Kind::Listener => IdentityKind::Listener,
+    };
     verbs.retain(|verb| {
-        let allowed = BASE_VERBS.contains(&verb.as_str())
-            || match kind {
-                Kind::Agent => matches!(
-                    verb.as_str(),
-                    "CLAIM"
-                        | "HEARTBEAT"
-                        | "RELEASE"
-                        | "DONE"
-                        | "PUSH_REQUEST"
-                        | "LEND"
-                        | "REVIEW"
-                        | "PLAN"
-                        | "PROPOSAL"
-                ),
-                Kind::Coordinator => matches!(
-                    verb.as_str(),
-                    "CLAIM"
-                        | "HEARTBEAT"
-                        | "RELEASE"
-                        | "DONE"
-                        | "LEND"
-                        | "ASSIGN"
-                        | "RULING"
-                        | "ROLLCALL"
-                        | "PROPOSAL"
-                        | "DECISION"
-                        | "REVIEW"
-                        | "PLAN"
-                ),
-                Kind::Listener => matches!(verb.as_str(), "DELEGATED" | "PROPOSAL"),
-            };
+        // A role file cannot know whether its person will be a coordinator;
+        // the hub decides listener ASSIGN at mint.
+        let allowed = !(kind == Kind::Listener && verb == "ASSIGN")
+            && Verb::ALL.iter().any(|candidate| {
+                candidate.as_str() == verb && agmen_proto::kind_ceiling(identity_kind, *candidate)
+            });
         if !allowed {
             stripped.push(format!("verb {verb}"));
         }

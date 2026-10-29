@@ -133,43 +133,16 @@ pub struct ResolvedRole {
     pub edits: Edits,
 }
 
-/// Whether the hub lets an identity of `kind` send `verb` at all, whatever
-/// its role: the kind cap of protocol section 1.
-// shortcut: a copy of agmen-hub's private `may_send` (ingest.rs) for the
-// three role kinds; read one shared table once agmen-proto exports it.
+/// Whether the hub's NULL-verb fallback lets an identity of `kind` send `verb`.
+// The kind table lives in agmen-proto.
 #[must_use]
 pub const fn kind_may_send(kind: RoleKind, verb: agmen_proto::Verb) -> bool {
-    use RoleKind::{Agent, Coordinator, Listener};
-    use agmen_proto::Verb;
-    match verb {
-        Verb::Hello
-        | Verb::Bye
-        | Verb::Fyi
-        | Verb::Ask
-        | Verb::Answer
-        | Verb::Ack
-        | Verb::Status
-        | Verb::Alert
-        | Verb::Dm
-        | Verb::Found
-        | Verb::Proposal => true,
-        Verb::Rollcall | Verb::Decision | Verb::Ruling | Verb::Assign => {
-            matches!(kind, Coordinator)
-        }
-        Verb::Claim | Verb::Heartbeat | Verb::Release | Verb::Done | Verb::Lend => {
-            matches!(kind, Agent | Coordinator)
-        }
-        Verb::Delegated => matches!(kind, Listener),
-        Verb::PushRequest => matches!(kind, Agent),
-        Verb::PushOk
-        | Verb::PushNo
-        | Verb::Review
-        | Verb::Plan
-        | Verb::Grant
-        | Verb::Deny
-        | Verb::Item
-        | Verb::State => false,
-    }
+    let kind = match kind {
+        RoleKind::Agent => agmen_proto::IdentityKind::Agent,
+        RoleKind::Coordinator => agmen_proto::IdentityKind::Coordinator,
+        RoleKind::Listener => agmen_proto::IdentityKind::Listener,
+    };
+    agmen_proto::kind_may_send(kind, verb)
 }
 
 /// Splits a space-separated attribute into its words.
