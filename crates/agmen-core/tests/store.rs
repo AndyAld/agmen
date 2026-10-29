@@ -1,6 +1,6 @@
 #![cfg(test)]
 
-use agmen_core::{ItemLock, Lapsed, NewItem, NewLend, ReleaseBy};
+use agmen_core::{ItemLock, Lapsed, NewItem, NewLend, Parent, QuotaTaken, ReleaseBy, Sender};
 use agmen_proto::Timestamp;
 use std::cell::Cell;
 use std::time::Duration;
@@ -9,7 +9,10 @@ use agmen_core::{
     Core, LaneHolder, LaneRow, MEM_MAX_ROWS, MemStore, MessageRow, Reads, ResolvedLane, Roster,
     Store, StoreError, StoreTx,
 };
-use agmen_proto::{IdentityId, IdentityKind, ItemKey, LaneName, ProjectId, Seq, Topics};
+use agmen_proto::{
+    IdentityId, IdentityKind, ItemKey, LaneName, MessageId, ProjectId, Seq, Stream, TenantId,
+    Topics,
+};
 use tokio::sync::OwnedMutexGuard;
 
 #[tokio::test]
@@ -50,6 +53,40 @@ fn tx_is_send_with_a_non_sync_state() {
     struct NonSyncTx(OwnedMutexGuard<Cell<u8>>);
 
     impl Reads for NonSyncTx {
+        async fn project_exists(&mut self, _topics: &Topics) -> Result<bool, StoreError> {
+            Ok(false)
+        }
+        async fn sender(
+            &mut self,
+            _topics: &Topics,
+            _from: &IdentityId,
+        ) -> Result<Option<Sender>, StoreError> {
+            Ok(None)
+        }
+        async fn parent(
+            &mut self,
+            _project: &ProjectId,
+            _sender: &IdentityId,
+            _reply_to: &MessageId,
+        ) -> Result<Option<Parent>, StoreError> {
+            Ok(None)
+        }
+        async fn is_delegate(
+            &mut self,
+            _project: &ProjectId,
+            _worker: &IdentityId,
+            _delegator: &IdentityId,
+        ) -> Result<bool, StoreError> {
+            Ok(false)
+        }
+        async fn recorded(
+            &mut self,
+            _from: &IdentityId,
+            _id: &MessageId,
+        ) -> Result<Option<(Stream, Seq, Vec<u8>)>, StoreError> {
+            Ok(None)
+        }
+
         async fn roster(&mut self, _project: &ProjectId) -> Result<Roster, StoreError> {
             Ok(Roster::default())
         }
@@ -98,6 +135,14 @@ fn tx_is_send_with_a_non_sync_state() {
     }
 
     impl StoreTx for NonSyncTx {
+        async fn take_quota(
+            &mut self,
+            _tenant: &TenantId,
+            _limit: u32,
+        ) -> Result<QuotaTaken, StoreError> {
+            Ok(QuotaTaken::Exhausted)
+        }
+
         async fn lock_item(
             &mut self,
             _project: &ProjectId,

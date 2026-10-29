@@ -5,11 +5,11 @@ use std::time::Duration;
 
 use agmen_proto::{
     IdentityId, IdentityKind, ItemKey, LaneName, MessageId, ProjectId, Seq, Severity, Stream,
-    Timestamp, Topics,
+    TenantId, Timestamp, Topics,
 };
 
-use crate::Roster;
 use crate::lanes::{LaneHolder, LaneRow, ResolvedLane};
+use crate::{Parent, QuotaTaken, Roster, Sender};
 
 /// An item's state, lane, assignee and lane owner, in storage spelling.
 pub type ItemLock = (String, Option<String>, Option<String>, Option<String>);
@@ -150,6 +150,57 @@ pub trait Store: Send + Sync + 'static {
 
 /// Queries shared by a reader and an open transaction.
 pub trait Reads: Send {
+    /// Whether both tenant and project identify a project in this store.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] when the project lookup fails.
+    fn project_exists(
+        &mut self,
+        topics: &Topics,
+    ) -> impl Future<Output = Result<bool, StoreError>> + Send;
+
+    /// A live project identity or human member, including stored verb permissions.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] when reading or parsing the sender fails.
+    fn sender(
+        &mut self,
+        topics: &Topics,
+        from: &IdentityId,
+    ) -> impl Future<Output = Result<Option<Sender>, StoreError>> + Send;
+
+    /// The earliest parent visible in the feed or the sender's inbox, and all its streams.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] when reading or parsing a parent fails.
+    fn parent(
+        &mut self,
+        project: &ProjectId,
+        sender: &IdentityId,
+        reply_to: &MessageId,
+    ) -> impl Future<Output = Result<Option<Parent>, StoreError>> + Send;
+
+    /// Whether a live worker was delegated by this sender in the project.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] when reading the delegation fails.
+    fn is_delegate(
+        &mut self,
+        project: &ProjectId,
+        worker: &IdentityId,
+        delegator: &IdentityId,
+    ) -> impl Future<Output = Result<bool, StoreError>> + Send;
+
+    /// The ACK copy's stream, sequence and canonical payload hash for a resend.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] when reading or parsing the recorded copy fails.
+    fn recorded(
+        &mut self,
+        from: &IdentityId,
+        id: &MessageId,
+    ) -> impl Future<Output = Result<Option<(Stream, Seq, Vec<u8>)>, StoreError>> + Send;
+
     /// Live identities and human members in storage order.
     ///
     /// # Errors
@@ -235,6 +286,17 @@ pub trait Reads: Send {
 /// Dropping a transaction without a successful [`commit`](Self::commit)
 /// records nothing. Numbering and head locks last until commit or drop.
 pub trait StoreTx: Reads {
+    /// Takes the UTC daily usage row before stream heads, counting only on commit.
+    /// The warning is acquired once when `messages * 5 >= limit * 4`.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] when the atomic usage update fails.
+    fn take_quota(
+        &mut self,
+        tenant: &TenantId,
+        limit: u32,
+    ) -> impl Future<Output = Result<QuotaTaken, StoreError>> + Send;
+
     /// Locks the item row, returning its state, lane, assignee and lane owner.
     ///
     /// # Errors

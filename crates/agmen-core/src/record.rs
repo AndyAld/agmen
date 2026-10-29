@@ -227,7 +227,7 @@ async fn post_hub(
 }
 
 /// The `stream_heads` key of one project's stream: `<project_id>/<stream>`.
-fn head_key(topics: &Topics, stream: &Stream) -> String {
+pub(crate) fn head_key(topics: &Topics, stream: &Stream) -> String {
     stream_key(topics.project(), stream)
 }
 
@@ -244,11 +244,9 @@ fn stream_topic(topics: &Topics, stream: &Stream) -> String {
     }
 }
 
-// shortcut: public bridge for hub accept; make crate-private when Task 7 moves ingest.
 /// Whether the store queues an ACK on `ack/{from}`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[doc(hidden)]
-pub enum AckCopy {
+pub(crate) enum AckCopy {
     /// A client's message: its ACK follows its copies.
     Queue,
     /// The hub's own message: nobody waits for an ACK.
@@ -257,8 +255,7 @@ pub enum AckCopy {
 
 /// A message ready to be numbered and stored.
 #[derive(Debug)]
-#[doc(hidden)]
-pub struct Draft<'a> {
+pub(crate) struct Draft<'a> {
     pub topics: &'a Topics,
     pub client: ClientEnvelope,
     pub from: IdentityId,
@@ -274,8 +271,7 @@ pub struct Draft<'a> {
 
 /// Where a message was recorded.
 #[derive(Debug)]
-#[doc(hidden)]
-pub struct Recorded {
+pub(crate) struct Recorded {
     /// The copy the ACK reports.
     pub ack: (Stream, Seq),
     pub copies: Vec<(Stream, Seq)>,
@@ -285,8 +281,7 @@ pub struct Recorded {
 /// per copy and the ACK's outbox row; the caller commits. Streams are
 /// numbered in `BTreeSet` order, so two transactions lock `stream_heads`
 /// rows in the same order and cannot deadlock.
-#[doc(hidden)]
-pub async fn write(tx: &mut impl StoreTx, draft: Draft<'_>) -> Result<Recorded, StoreError> {
+pub(crate) async fn write(tx: &mut impl StoreTx, draft: Draft<'_>) -> Result<Recorded, StoreError> {
     let ack_at = ack_stream(&draft.streams, &draft.from).ok_or_else(|| {
         StoreError::Stored("a stored value is invalid: a message with no stream".into())
     })?;
@@ -379,7 +374,7 @@ fn encoding_error(err: serde_json::Error) -> StoreError {
     }))
 }
 
-fn backend_context(err: StoreError, context: &'static str) -> StoreError {
+pub(crate) fn backend_context(err: StoreError, context: &'static str) -> StoreError {
     match err {
         StoreError::Backend(source) => {
             StoreError::Backend(Box::new(RecordError { context, source }))
@@ -388,7 +383,7 @@ fn backend_context(err: StoreError, context: &'static str) -> StoreError {
     }
 }
 
-fn database_error(err: StoreError) -> StoreError {
+pub(crate) fn database_error(err: StoreError) -> StoreError {
     backend_context(err, "database error")
 }
 

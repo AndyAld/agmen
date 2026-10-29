@@ -20,6 +20,7 @@ mod claims;
 mod core;
 mod identity;
 mod ids;
+mod ingest;
 mod items;
 mod lanes;
 mod limiter;
@@ -29,6 +30,7 @@ mod record;
 mod refs;
 mod roster;
 mod routing;
+mod secrets_scan;
 mod store;
 
 #[doc(hidden)]
@@ -37,6 +39,9 @@ pub use claims::{LedgerError, LedgerMessage, apply_ledger};
 pub use core::{Core, CoreError};
 pub use identity::{cap_verbs, is_child_name};
 pub use ids::{HUB_IDENTITY, envelope_hash, hub_identity, hub_now, message_id, new_message_id};
+pub use ingest::{
+    Gate, Handled, IngestError, QuotaTaken, RecordedMeta, ReplyRoute, next_utc_midnight,
+};
 pub use lanes::{
     EditRule, LaneError, LaneHolder, LaneList, LaneRow, LaneSpec, LaneSpecError, Lanes, LendError,
     Lends, MAX_ACTIVE_LENDS, MAX_CHECK_PATHS, MAX_GLOBS, MAX_GLOBS_PER_LANE, MAX_LANES,
@@ -47,8 +52,7 @@ pub use lanes::{
 pub use limiter::{BURST, MAX_TRACKED, RATE_PER_SEC, RateLimiter};
 #[cfg(feature = "testing")]
 pub use mem_store::{MEM_MAX_ROWS, MemStore, MemTx};
-#[doc(hidden)]
-pub use record::{AckCopy, Draft, Recorded, write};
+pub(crate) use record::{AckCopy, Draft, write};
 pub use record::{HubPost, PostError, Posted, post_alert, post_in};
 pub use refs::{MAX_REFS_PER_MESSAGE, candidate_item_keys, stamp_refs};
 pub use roster::{Member, MemberRole, Roster, Sender};
