@@ -3,10 +3,10 @@
 use std::cell::Cell;
 
 use agmen_core::{
-    Core, LaneHolder, LaneRow, MEM_MAX_ROWS, MemStore, Reads, ResolvedLane, Store, StoreError,
-    StoreTx,
+    Core, LaneHolder, LaneRow, MEM_MAX_ROWS, MemStore, MessageRow, Reads, ResolvedLane, Roster,
+    Store, StoreError, StoreTx,
 };
-use agmen_proto::{IdentityId, IdentityKind, LaneName, ProjectId, Seq};
+use agmen_proto::{IdentityId, IdentityKind, ItemKey, LaneName, ProjectId, Seq, Topics};
 use tokio::sync::OwnedMutexGuard;
 
 #[tokio::test]
@@ -43,6 +43,18 @@ fn tx_is_send_with_a_non_sync_state() {
     struct NonSyncTx(OwnedMutexGuard<Cell<u8>>);
 
     impl Reads for NonSyncTx {
+        async fn roster(&mut self, _project: &ProjectId) -> Result<Roster, StoreError> {
+            Ok(Roster::default())
+        }
+
+        async fn ref_targets(
+            &mut self,
+            _project: &ProjectId,
+            _candidates: &[String],
+        ) -> Result<(Vec<String>, Vec<ItemKey>), StoreError> {
+            Ok((Vec::new(), Vec::new()))
+        }
+
         async fn lane_globs(
             &mut self,
             _project: &ProjectId,
@@ -79,6 +91,19 @@ fn tx_is_send_with_a_non_sync_state() {
     }
 
     impl StoreTx for NonSyncTx {
+        async fn insert_message(&mut self, _row: &MessageRow<'_>) -> Result<(), StoreError> {
+            Ok(())
+        }
+
+        async fn enqueue_publish(
+            &mut self,
+            _topics: &Topics,
+            _topic: &str,
+            _payload: &[u8],
+        ) -> Result<(), StoreError> {
+            Ok(())
+        }
+
         async fn lock_head(&mut self, _key: &str) -> Result<(), StoreError> {
             Ok(())
         }

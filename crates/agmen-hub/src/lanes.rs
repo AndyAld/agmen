@@ -27,7 +27,7 @@ use crate::http::{ApiError, Hub};
 use crate::identities::Identity;
 use crate::ingest::{HubPost, post_alert};
 use crate::items::close_claimed;
-use crate::store_pg::PgStore;
+use crate::store_pg::{PgStore, PgTx};
 
 /// A `PUT` body: the whole lane list, as `{"lanes": [...]}` in JSON or
 /// `[[lanes]]` tables in TOML.
@@ -283,7 +283,7 @@ pub(crate) async fn lend(
 /// paths to the coordinators, or to the sender's owner when the project has
 /// none (ruling R35).
 pub(crate) async fn check_done(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut PgTx,
     topics: &Topics,
     msg: &LedgerMessage,
     item: &ItemKey,
@@ -291,13 +291,14 @@ pub(crate) async fn check_done(
 ) -> Result<(), LedgerError> {
     let project = topics.project().as_str();
     // The lanes held before this DONE ends its claim, which counts.
-    let holders = crate::store_pg::lane_holders(&mut **tx, project).await?;
-    close_claimed(tx, project, item, &msg.from).await?;
-    let lanes = Lanes::compile(crate::store_pg::load_lanes(&mut **tx, project).await?)
+    let holders = crate::store_pg::lane_holders(&mut **tx.sqlx(), project).await?;
+    close_claimed(tx.sqlx(), project, item, &msg.from).await?;
+    let lanes = Lanes::compile(crate::store_pg::load_lanes(&mut **tx.sqlx(), project).await?)
         .map_err(|err| LedgerError::Stored(err.to_string()))?;
-    let edits = load_edits(tx, msg).await?;
-    let lends = Lends::compile(crate::store_pg::load_lends(&mut **tx, project, &msg.from).await?)
-        .map_err(|err| LedgerError::Stored(err.to_string()))?;
+    let edits = load_edits(tx.sqlx(), msg).await?;
+    let lends =
+        Lends::compile(crate::store_pg::load_lends(&mut **tx.sqlx(), project, &msg.from).await?)
+            .map_err(|err| LedgerError::Stored(err.to_string()))?;
     let strays = stray_changes(&lanes, &holders, msg, &edits, &lends, changes);
     if strays.is_empty() {
         return Ok(());

@@ -83,6 +83,7 @@ struct Inner {
     mode: HubMode,
     broker_up: AtomicBool,
     pool: PgPool,
+    core: agmen_core::Core<crate::store_pg::PgStore>,
     tokens: BrokerTokens,
     emqx: EmqxAdmin,
     github: Github,
@@ -172,6 +173,10 @@ impl Hub {
             inner: Arc::new(Inner {
                 mode: config.mode,
                 broker_up: AtomicBool::new(false),
+                core: agmen_core::Core::new(
+                    crate::store_pg::PgStore::new(pool.clone()),
+                    config.claim_lease,
+                ),
                 pool,
                 tokens,
                 emqx,
@@ -270,6 +275,10 @@ impl Hub {
 
     pub(crate) fn pool(&self) -> &PgPool {
         &self.inner.pool
+    }
+
+    pub(crate) fn core(&self) -> &agmen_core::Core<crate::store_pg::PgStore> {
+        &self.inner.core
     }
 
     pub(crate) fn mode(&self) -> HubMode {

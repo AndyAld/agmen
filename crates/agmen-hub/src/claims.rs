@@ -16,6 +16,7 @@ use sqlx::{PgConnection, Postgres, Transaction};
 
 use crate::http::{Hub, error_chain};
 use crate::ingest::{HubPost, PostError, post_in};
+use crate::store_pg::PgTx;
 
 /// Expired claims one sweep releases at most.
 const SWEEP_BATCH: i64 = 100;
@@ -89,7 +90,7 @@ impl Hub {
     /// commit together or not at all.
     pub(crate) async fn apply_ledger(
         &self,
-        tx: &mut Transaction<'_, Postgres>,
+        tx: &mut PgTx,
         topics: &Topics,
         msg: &LedgerMessage,
     ) -> Result<(), LedgerError> {
@@ -97,10 +98,12 @@ impl Hub {
         match &msg.env.payload {
             Payload::Claim { item } => claim(tx, topics, msg, item, self.claim_lease()).await,
             Payload::Heartbeat { items } => {
-                renew(tx, project, &msg.from, items, self.claim_lease()).await
+                renew(tx.sqlx(), project, &msg.from, items, self.claim_lease()).await
             }
-            Payload::Release { item, .. } => release(tx, project, msg, item).await,
-            Payload::Assign { item, to } => crate::items::assign(tx, project, item, to).await,
+            Payload::Release { item, .. } => release(tx.sqlx(), project, msg, item).await,
+            Payload::Assign { item, to } => {
+                crate::items::assign(tx.sqlx(), project, item, to).await
+            }
             Payload::Found {
                 title,
                 lane,
@@ -238,7 +241,7 @@ fn lease_expired(
 /// (protocol 4). A CLAIM past its `valid_until` by more than the skew
 /// allowance, judged by the hub's clock, gets DENY `expired`.
 async fn claim(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut PgTx,
     topics: &Topics,
     msg: &LedgerMessage,
     item: &ItemKey,
@@ -249,7 +252,7 @@ async fn claim(
     let decided = if late {
         Decided::denied(DenyReason::Expired, None)
     } else {
-        decide(tx, topics.project().as_str(), msg, item, lease).await?
+        decide(tx.sqlx(), topics.project().as_str(), msg, item, lease).await?
     };
     if let Some(lapsed) = &decided.lapsed {
         post_in(

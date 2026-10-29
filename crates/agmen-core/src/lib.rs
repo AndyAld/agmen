@@ -23,6 +23,7 @@ mod lanes;
 mod limiter;
 #[cfg(feature = "testing")]
 mod mem_store;
+mod record;
 mod refs;
 mod roster;
 mod routing;
@@ -41,9 +42,12 @@ pub use lanes::{
 pub use limiter::{BURST, MAX_TRACKED, RATE_PER_SEC, RateLimiter};
 #[cfg(feature = "testing")]
 pub use mem_store::{MEM_MAX_ROWS, MemStore, MemTx};
+#[doc(hidden)]
+pub use record::{AckCopy, Draft, Recorded, write};
+pub use record::{HubPost, PostError, Posted, post_alert, post_in};
 pub use refs::{MAX_REFS_PER_MESSAGE, candidate_item_keys, stamp_refs};
 pub use roster::{Member, MemberRole, Roster, Sender};
 pub use routing::{
     Parent, ack_stream, expand_mentions, fan_out, may_send, mentioned, needs_roster, route,
 };
-pub use store::{Reads, Store, StoreError, StoreTx, parse_kind};
+pub use store::{MessageRow, Reads, Store, StoreError, StoreTx, parse_kind};
