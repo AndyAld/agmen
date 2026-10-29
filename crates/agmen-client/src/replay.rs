@@ -325,6 +325,10 @@ impl Replayer {
             let (cursors, key) = (self.cursors.clone(), stream.clone());
             let after = blocking(move || cursors.last(&key)).await?;
             let page = self.hub.page(stream, after).await?;
+            if page.pruned_through > after {
+                let (cursors, key) = (self.cursors.clone(), stream.clone());
+                blocking(move || cursors.skip_to(&key, page.pruned_through)).await?;
+            }
             for message in page.messages {
                 if message.stream != *stream
                     || deliver(&self.cursors, &self.events, message).await? == Delivered::AfterGap

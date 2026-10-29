@@ -108,6 +108,16 @@ pub struct Messaging {
     tasks: JoinSet<Result<(), MessagingError>>,
 }
 
+/// Clears the status even when the connection task is aborted before its
+/// first poll or unwinds after a panic.
+struct BrokerStatus(Hub);
+
+impl Drop for BrokerStatus {
+    fn drop(&mut self) {
+        self.0.set_broker_up(false);
+    }
+}
+
 impl Messaging {
     /// Waits until a task stops, which only happens when it fails, and
     /// returns why. The caller should then exit.
@@ -164,6 +174,8 @@ impl Hub {
             .map_err(MessagingError::Client)?;
         let filters = [config.up_filter(), PRESENCE_FILTER.to_owned()];
         first_connect(&client, &mut eventloop, &filters, CONNECT_WAIT).await?;
+        self.set_broker_up(true);
+        let broker_status = BrokerStatus(self.clone());
         tracing::info!(client_id = %config.client_id(), ?filters, "subscribed to up/ and presence/");
         // What an earlier connection of this hub read no longer holds.
         self.presence().clear();
@@ -178,6 +190,7 @@ impl Hub {
                 resubscribe: JoinSet::new(),
             },
             self.clone(),
+            broker_status,
         ));
         tasks.spawn(run_ingest(self.clone(), client.clone(), rx));
         tasks.spawn(presence::run(self.clone(), client.clone()));
@@ -350,16 +363,22 @@ impl Connection {
 
 /// Polls the connection ([`Connection::poll_once`]) and reconnects with a
 /// fresh token after a failure, giving up after [`MAX_FAILURES`] in a row.
-async fn run_connection(mut conn: Connection, hub: Hub) -> Result<(), MessagingError> {
+async fn run_connection(
+    mut conn: Connection,
+    hub: Hub,
+    _broker_status: BrokerStatus,
+) -> Result<(), MessagingError> {
     let mut failures = 0_u32;
     loop {
         match conn.poll_once(hub.presence()).await? {
             Polled::Connected => {
+                hub.set_broker_up(true);
                 failures = 0;
                 tracing::info!("reconnected to the broker");
             }
             Polled::Other => {}
             Polled::Lost(err) => {
+                hub.set_broker_up(false);
                 failures += 1;
                 if failures >= MAX_FAILURES {
                     return Err(MessagingError::GaveUp {

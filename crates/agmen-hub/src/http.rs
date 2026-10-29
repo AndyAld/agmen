@@ -2,6 +2,7 @@
 //! responses.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use agmen_proto::MAX_ENVELOPE_BYTES;
@@ -61,6 +62,7 @@ pub struct Hub {
 #[derive(Debug)]
 struct Inner {
     mode: HubMode,
+    broker_up: AtomicBool,
     pool: PgPool,
     tokens: BrokerTokens,
     emqx: EmqxAdmin,
@@ -133,6 +135,7 @@ impl Hub {
         Ok(Self {
             inner: Arc::new(Inner {
                 mode: config.mode,
+                broker_up: AtomicBool::new(false),
                 pool,
                 tokens,
                 emqx,
@@ -204,6 +207,14 @@ impl Hub {
 
     pub(crate) fn pool(&self) -> &PgPool {
         &self.inner.pool
+    }
+
+    pub(crate) fn set_broker_up(&self, up: bool) {
+        self.inner.broker_up.store(up, Ordering::Relaxed);
+    }
+
+    pub(crate) fn broker_up(&self) -> bool {
+        self.inner.broker_up.load(Ordering::Relaxed)
     }
 
     pub(crate) fn tokens(&self) -> &BrokerTokens {

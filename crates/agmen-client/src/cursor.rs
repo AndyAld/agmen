@@ -101,6 +101,29 @@ impl Cursors {
         Ok(advance)
     }
 
+    /// Raises the delivery cursor of `stream` to `seq`; it never moves back.
+    ///
+    /// ```
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let dir = tempfile::tempdir()?;
+    /// let cursors = agmen_client::Cursors::open(dir.path().join("identity.db"))?;
+    /// cursors.skip_to(&agmen_proto::Stream::Feed, 6)?;
+    /// assert_eq!(cursors.last(&agmen_proto::Stream::Feed)?, 6);
+    /// # Ok(()) }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`ClientError`] when the write fails or `seq` is too large to store.
+    pub fn skip_to(&self, stream: &Stream, seq: u64) -> Result<(), ClientError> {
+        self.db.lock().execute(
+            "INSERT INTO cursors (stream, delivered) VALUES (?1, ?2)
+             ON CONFLICT (stream) DO UPDATE SET delivered = max(delivered, excluded.delivered)",
+            params![stream.to_string(), to_sql_seq(seq)?],
+        )?;
+        Ok(())
+    }
+
     /// The last seq of `stream` the inbox listed; 0 before the first.
     ///
     /// # Errors

@@ -70,6 +70,9 @@ pub struct Page {
     pub next_after: Option<u64>,
     /// The stream's last seq; 0 for a stream with no messages.
     pub head: u64,
+    /// The highest seq the hub deleted from this stream; 0 when none.
+    #[serde(default)]
+    pub pruned_through: u64,
 }
 
 /// An identity's client for the hub's HTTP API. Cheap to clone.
