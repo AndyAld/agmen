@@ -308,13 +308,20 @@ async fn send_until(
         if page.is_empty() {
             break;
         }
+        // A page can start past `*at + 1` when retention pruned the stream's
+        // oldest messages (protocol 5.3): a prune removes a prefix, so
+        // within one page the seqs are still contiguous.
+        let mut previous = None;
         for message in page {
             let seq = message.seq.0;
             // fetch_page reads seq > *at; this keeps a repeat out even so.
             if seq <= *at {
                 continue;
             }
-            debug_assert_eq!(seq, *at + 1, "a gap in {stream}");
+            if let Some(previous) = previous {
+                debug_assert_eq!(seq, previous + 1, "a gap in {stream}");
+            }
+            previous = Some(seq);
             let event = Event::default()
                 .id(format!("{stream}:{seq}"))
                 .data(serde_json::to_string(&message).map_err(ApiError::stored)?);

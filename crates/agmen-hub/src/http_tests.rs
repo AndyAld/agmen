@@ -88,6 +88,7 @@ fn test_hub(mqtt_ws_upstream: Option<Url>) -> Hub {
             presence: PresenceState::default(),
             events: Slots::default(),
             claim_lease: DEFAULT_CLAIM_LEASE,
+            retention_days: None,
         }),
     }
 }

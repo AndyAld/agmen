@@ -24,7 +24,7 @@ use tokio::task::JoinSet;
 
 use crate::broker_tokens::{HUB_USERNAME, TokenError};
 use crate::claims::LeaseSweepError;
-use crate::config::MqttConfig;
+use crate::config::{HubMode, MqttConfig};
 use crate::http::Hub;
 use crate::ingest::{IngestError, ReplyRoute};
 use crate::presence::{self, PRESENCE_FILTER, PresenceState};
@@ -93,6 +93,9 @@ pub enum MessagingError {
     /// The lease sweeper failed too many times in a row.
     #[error("the lease sweeper stopped")]
     Leases(#[source] LeaseSweepError),
+    /// The retention task failed too many times in a row.
+    #[error("retention stopped")]
+    Retention(#[source] crate::retention::RetentionError),
     /// A task ended because another one it depends on ended.
     #[error("the {0} task stopped")]
     Stopped(&'static str),
@@ -102,7 +105,7 @@ pub enum MessagingError {
 }
 
 /// The running broker connection, ingest worker, presence task, sweeper
-/// and lease sweeper. Dropping it stops them all.
+/// and lease sweeper, plus retention when configured. Dropping it stops them all.
 #[derive(Debug)]
 pub struct Messaging {
     tasks: JoinSet<Result<(), MessagingError>>,
@@ -134,7 +137,8 @@ impl Hub {
     /// Connects to the broker as `agmen-hub-<instance>`, subscribes to
     /// `$share/<group>/agmen/v1/+/+/up/+` and `agmen/v1/+/+/presence/+`,
     /// and starts ingest, the presence task, the sweeper and the lease
-    /// sweeper ([`Hub::run_lease_sweeper`]). It returns once both
+    /// sweeper ([`Hub::run_lease_sweeper`]), plus [`Hub::run_retention`] for
+    /// hosted hubs and self-host hubs with a retention limit. It returns once both
     /// subscriptions are granted, so nothing published to `up/` afterwards
     /// is missed. A failed, refused or unanswered connect step is retried
     /// with backoff, about two minutes in all: in the cluster EMQX reads
@@ -201,6 +205,11 @@ impl Hub {
                 .await
                 .map_err(MessagingError::Leases)
         });
+        if self.mode() == HubMode::Hosted || self.retention_days().is_some() {
+            let hub = self.clone();
+            tasks
+                .spawn(async move { hub.run_retention().await.map_err(MessagingError::Retention) });
+        }
         Ok(Messaging { tasks })
     }
 }

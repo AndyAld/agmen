@@ -422,7 +422,7 @@ pub struct Config {
     /// history to keep, from 1 to 36500. Unset or empty means no limit.
     /// Self-host's compose file passes the variable through even when it is
     /// empty, so an empty value is normal. Ignored in hosted mode, where the
-    /// plan's retention decides. Nothing prunes yet (hosted Task 9).
+    /// plan's retention decides. Pruning runs at startup and hourly.
     pub retention_days: Option<u32>,
     /// `AGMEN_PUBLIC_MQTT_URL`, default `AGMEN_MQTT_URL`, or the public
     /// hub URL with scheme `wss` and `mqtt` appended when proxying: the broker
