@@ -17,7 +17,7 @@ pub(crate) mod post;
 mod role;
 #[cfg(unix)]
 mod settings;
-mod templates;
+pub(crate) mod templates;
 mod watch;
 #[cfg(unix)]
 mod workers;

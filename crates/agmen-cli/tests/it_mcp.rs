@@ -521,6 +521,38 @@ async fn it_tool_result_carries_pending() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn it_template_save_carries_pending() {
+    run(Ingest::On, |ctx| async move {
+        let sol = ctx.member(Role::Member, "sol", "agent").await;
+        let luna = ctx.member(Role::Member, "luna", "agent").await;
+        assert_exit(&luna.run(&["dm", &sol.identity.handle, "ping"]).await, 0);
+        let dir = tempfile::tempdir().unwrap();
+        let mcp = Mcp::start(options(&sol).with_templates_dir(dir.path())).await;
+        let text = mcp
+            .text(
+                "template_save",
+                json!({"xml": "<agent-template name=\"from-sol\"/>"}),
+            )
+            .await;
+        let (answer, pending) = text.split_once(PENDING_HEADER).unwrap();
+        assert!(answer.starts_with("saved from-sol (agent) to "), "{text}");
+        assert_eq!(pending.lines().count(), 1, "{text}");
+        assert!(
+            pending.contains(&format!("DM from {}", luna.identity.handle)),
+            "{text}"
+        );
+        assert!(pending.ends_with(": ping"), "{text}");
+        let saved = std::fs::read_to_string(dir.path().join("from-sol.agent.xml")).unwrap();
+        assert_eq!(
+            agmen_roles::parse_template(&saved).unwrap().saved_by(),
+            Some(sol.identity.handle.as_str())
+        );
+        mcp.stop().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn it_pending_on_rejected_answer() {
     run(Ingest::On, |ctx| async move {
         let sol = ctx.member(Role::Member, "sol", "agent").await;

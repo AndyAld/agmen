@@ -116,8 +116,9 @@ pub(crate) async fn run(args: McpArgs) -> anyhow::Result<()> {
         None => std::env::current_dir().context("reading the working directory")?,
     };
     let managed = std::env::var("AGMEN_MANAGED").is_ok_and(|value| value == "1");
-    let mut options =
-        McpOptions::new(cwd, TokenStore::from_env(), paths::state_base()?).with_managed(managed);
+    let mut options = McpOptions::new(cwd, TokenStore::from_env(), paths::state_base()?)
+        .with_managed(managed)
+        .with_templates_dir(crate::cmd::templates::personal_dir()?);
     if let Some(identity) = args.identity {
         options = options.with_identity(identity);
     }
@@ -212,6 +213,7 @@ pub struct McpOptions {
     session_expiry: Option<Duration>,
     presence_recheck: Duration,
     managed: bool,
+    templates_dir: Option<PathBuf>,
 }
 
 impl McpOptions {
@@ -235,6 +237,7 @@ impl McpOptions {
             session_expiry: None,
             presence_recheck: PRESENCE_RECHECK,
             managed: false,
+            templates_dir: None,
         }
     }
 
@@ -300,6 +303,12 @@ impl McpOptions {
     /// zero, so they leave no session behind.
     pub fn with_session_expiry(mut self, expiry: Duration) -> Self {
         self.session_expiry = Some(expiry);
+        self
+    }
+
+    /// Reads and writes personal templates here instead of `$HOME/.config/agmen/templates`.
+    pub fn with_templates_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.templates_dir = Some(dir.into());
         self
     }
 }

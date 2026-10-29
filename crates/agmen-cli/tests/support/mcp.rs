@@ -17,8 +17,8 @@ use url::Url;
 /// The answer every tool gives outside a joined worktree.
 pub const NOT_JOINED: &str = "not joined: run agmen join <invite> in this worktree";
 
-/// The fourteen tools, sorted.
-pub const TOOLS: [&str; 14] = [
+/// The sixteen tools, sorted.
+pub const TOOLS: [&str; 16] = [
     "answer",
     "ask",
     "chat",
@@ -33,6 +33,8 @@ pub const TOOLS: [&str; 14] = [
     "read_chat",
     "release",
     "state",
+    "template_list",
+    "template_save",
 ];
 
 /// A running `agmen mcp` and the client connected to it.
@@ -128,6 +130,11 @@ pub fn every_tool_call() -> Vec<(&'static str, Value)> {
         ("found", json!({ "title": "the build is slow" })),
         ("lanes", json!({})),
         ("check_path", json!({ "paths": ["src/a.rs"] })),
+        ("template_list", json!({})),
+        (
+            "template_save",
+            json!({"xml": "<agent-template name=\"x1\"/>"}),
+        ),
     ]
 }
 

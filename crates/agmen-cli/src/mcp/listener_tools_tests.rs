@@ -121,10 +121,50 @@ async fn listener_tools_are_exactly_these() {
             "post",
             "roster",
             "settings_apply",
-            "settings_get"
+            "settings_get",
+            "template_list"
         ]
     );
     assert!(fake.requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn listener_tool_list_omits_template_save() {
+    let fake = Fake::new(json!({}));
+    let names: Vec<_> = fake
+        .server()
+        .tool_router
+        .list_all()
+        .into_iter()
+        .map(|tool| tool.name.to_string())
+        .collect();
+    assert!(names.iter().any(|name| name == "template_list"));
+    assert!(names.iter().all(|name| name != "template_save"));
+    assert!(fake.requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn template_list_shows_built_in_and_personal_templates() {
+    // Both directories are temporary, so the real ~/.config/agmen/templates is never read.
+    let personal = tempfile::tempdir().unwrap();
+    std::fs::write(
+        personal.path().join("mine.agent.xml"),
+        r#"<agent-template name="mine"><description>for my listener</description></agent-template>"#,
+    )
+    .unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let text = list_templates_in(personal.path().to_path_buf(), cwd.path())
+        .await
+        .unwrap();
+    assert!(
+        text.starts_with("name\tkind\tlayer\tdescription\n"),
+        "{text}"
+    );
+    assert!(text.contains("claude\tagent\tbuiltin\t"), "{text}");
+    assert!(
+        text.contains("mine\tagent\tpersonal\tfor my listener\n"),
+        "{text}"
+    );
 }
 
 #[tokio::test]
