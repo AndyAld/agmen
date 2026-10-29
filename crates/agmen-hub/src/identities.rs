@@ -33,6 +33,9 @@ pub const CLIENT_ID_SUFFIXES: [&str; 3] = ["mcp", "watch", "cli"];
 /// minted just as the revocation committed, and clock skew.
 const BAN_MARGIN: Duration = Duration::from_secs(300);
 
+const DELEGATED_PARENT_SQL: &str = "SELECT id FROM identities WHERE id=$1 AND owner_human_id=$2
+     AND project_id=$3 AND revoked_at IS NULL FOR UPDATE";
+
 /// A person's id, minted by the hub at first sign-in.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct HumanId(String);
@@ -307,21 +310,18 @@ pub(crate) async fn mint(
         .map_err(ApiError::stored)?;
 
     let id = new_id()?;
-    if let Some(listener) = &request.delegated_by {
-        // Hold the listener through the worker insert. A revocation that
+    if let Some(parent) = &request.delegated_by {
+        // Hold the parent through the child insert. A revocation that
         // already holds the row wins, and its committed state is rechecked.
-        let valid: Option<String> = sqlx::query_scalar(
-            "SELECT id FROM identities WHERE id=$1 AND owner_human_id=$2
-             AND project_id=$3 AND kind='listener' AND revoked_at IS NULL FOR UPDATE",
-        )
-        .bind(listener.as_str())
-        .bind(human.as_str())
-        .bind(request.project.as_str())
-        .fetch_optional(&mut *tx)
-        .await?;
+        let valid: Option<String> = sqlx::query_scalar(DELEGATED_PARENT_SQL)
+            .bind(parent.as_str())
+            .bind(human.as_str())
+            .bind(request.project.as_str())
+            .fetch_optional(&mut *tx)
+            .await?;
         if request.kind != MintKind::Agent || valid.is_none() {
             return Err(bad_role(
-                "delegated_by must name a live listener of this owner and project for an agent worker",
+                "delegated_by must name a live identity of this owner and project for an agent child",
             ));
         }
     }
@@ -505,6 +505,27 @@ pub(crate) async fn ban_and_kick(hub: &Hub, id: &str, ban_until: Timestamp) -> O
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn delegated_parent_lookup_accepts_any_identity_kind() {
+        assert!(
+            !DELEGATED_PARENT_SQL.contains("kind"),
+            "an agent, coordinator or listener may be a parent"
+        );
+    }
+
+    #[test]
+    fn delegated_parent_lookup_scopes_and_locks_live_identity() {
+        for predicate in [
+            "id=$1",
+            "owner_human_id=$2",
+            "project_id=$3",
+            "revoked_at IS NULL",
+        ] {
+            assert!(DELEGATED_PARENT_SQL.contains(predicate), "{predicate}");
+        }
+        assert!(DELEGATED_PARENT_SQL.ends_with("FOR UPDATE"));
+    }
 
     #[test]
     fn child_names() {
