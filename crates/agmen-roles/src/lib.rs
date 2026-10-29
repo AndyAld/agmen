@@ -33,5 +33,5 @@ pub use template::{
     AgentSpec, AgentTemplate, MAX_DIRECTORY_ENTRIES, MAX_NODE_DEPTH, MAX_NODES, MAX_OPTIONS,
     MAX_REFERENCES, MAX_TEAM_AGENTS, MAX_TEMPLATE_BYTES, MAX_TEMPLATE_FILES, Named, Node,
     NodeAgent, PackRef, Reference, TeamTemplate, Template, TemplateError, TemplateKind,
-    TemplateOption, parse_template,
+    TemplateOption, agents_started, parse_template,
 };

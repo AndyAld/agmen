@@ -1,6 +1,7 @@
 use agmen_roles::{
-    AgentSpec, AgentTemplate, MAX_OPTIONS, MAX_REFERENCES, MAX_TEMPLATE_BYTES, Named, PackRef,
-    Reference, RoleError, Template, TemplateError, TemplateOption, parse_template,
+    AgentSpec, AgentTemplate, MAX_NODES, MAX_OPTIONS, MAX_REFERENCES, MAX_TEMPLATE_BYTES, Named,
+    NodeAgent, PackRef, Reference, RoleError, Template, TemplateError, TemplateOption,
+    agents_started, parse_template,
 };
 
 #[test]
@@ -420,4 +421,208 @@ fn hostile_markup_nesting_is_rejected() {
     let unclosed = format!(r#"<team-template name="one">{}"#, "<node>".repeat(4000));
     let error = parse_template(&unclosed).expect_err("unclosed");
     assert!(matches!(error, TemplateError::Xml(_)), "{error}");
+}
+
+#[test]
+fn spec_team_example_parses() {
+    let template =
+        parse_template(include_str!("fixtures/templates/eng-team.team.xml")).expect("eng-team");
+    let Template::Team(named) = template else {
+        panic!("expected a team template");
+    };
+    assert_eq!(named.name, "eng-team");
+    assert_eq!(
+        named.template.description.as_deref(),
+        Some("A coordinator with two engineers; each engineer can start reviewers.")
+    );
+    let top = &named.template.nodes[0];
+    assert_eq!(top.agent, NodeAgent::Named("coordinator-opus".into()));
+    assert_eq!(top.count, 1);
+    let engineer = &top.children[0];
+    assert_eq!(engineer.agent, NodeAgent::Named("rust-engineer".into()));
+    assert_eq!(engineer.count, 2);
+    let reviewer = &engineer.children[0];
+    assert_eq!(reviewer.agent, NodeAgent::Named("rust-reviewer".into()));
+    assert_eq!(reviewer.count, 0);
+    assert!(reviewer.children.is_empty());
+    assert_eq!(agents_started(&named.template.nodes), 3);
+}
+
+#[test]
+fn inline_node_parses() {
+    let template = parse_template(
+        r#"<team-template name="one"><node><agent-template><agent kind="codex"/></agent-template></node></team-template>"#,
+    )
+    .expect("inline node");
+    let Template::Team(named) = template else {
+        panic!("expected a team template");
+    };
+    let NodeAgent::Inline(agent) = &named.template.nodes[0].agent else {
+        panic!("expected an inline agent");
+    };
+    assert_eq!(agent.agent.kind.as_deref(), Some("codex"));
+}
+
+#[test]
+fn node_needs_exactly_one_agent() {
+    let cases = [
+        r#"<team-template name="one"><node template="a1"><agent-template><agent kind="codex"/></agent-template></node></team-template>"#,
+        r#"<team-template name="one"><node></node></team-template>"#,
+        r#"<team-template name="one"><node><agent-template name="x"><agent kind="codex"/></agent-template></node></team-template>"#,
+    ];
+    for xml in cases {
+        let error = parse_template(xml).expect_err("node");
+        assert!(matches!(error, TemplateError::Schema(_)), "{xml}: {error}");
+        assert!(error.to_string().contains("node"), "{xml}: {error}");
+    }
+}
+
+#[test]
+fn count_product_is_capped() {
+    for counts in [vec!["64", "64", "64"], vec!["4", "4", "4"]] {
+        let error = parse_template(&nested_counts(&counts)).expect_err("too many agents");
+        assert!(matches!(error, TemplateError::Schema(_)), "{error}");
+        assert!(error.to_string().contains("64 agents"), "{error}");
+    }
+    let template = parse_template(&nested_counts(&["4", "3", "3"])).expect("52 agents");
+    let Template::Team(named) = template else {
+        panic!("expected a team template");
+    };
+    assert_eq!(agents_started(&named.template.nodes), 52);
+}
+
+#[test]
+fn depth_33_is_rejected() {
+    let error = parse_template(&nested_nodes(33)).expect_err("33 levels");
+    assert!(matches!(error, TemplateError::Schema(_)), "{error}");
+    assert!(error.to_string().contains("32 levels"), "{error}");
+    parse_template(&nested_nodes(32)).expect("32 levels");
+}
+
+#[test]
+fn count_out_of_range_is_rejected() {
+    for count in ["65", "-1"] {
+        let xml = format!(
+            "<team-template name=\"one\"><node template=\"a1\" count=\"{count}\"/></team-template>"
+        );
+        let error = parse_template(&xml).expect_err(count);
+        assert!(
+            matches!(error, TemplateError::Schema(_)),
+            "{count}: {error}"
+        );
+    }
+}
+
+fn nested_counts(counts: &[&str]) -> String {
+    let mut xml = String::from(r#"<team-template name="big">"#);
+    for count in counts {
+        xml.push_str(&format!(r#"<node template="a1" count="{count}">"#));
+    }
+    for _ in counts {
+        xml.push_str("</node>");
+    }
+    xml.push_str("</team-template>");
+    xml
+}
+
+fn nested_nodes(depth: usize) -> String {
+    let mut xml = String::from(r#"<team-template name="deep">"#);
+    for _ in 0..depth {
+        xml.push_str(r#"<node template="a1">"#);
+    }
+    for _ in 0..depth {
+        xml.push_str("</node>");
+    }
+    xml.push_str("</team-template>");
+    xml
+}
+
+fn team_xml(body: &str) -> String {
+    format!(r#"<team-template name="one">{body}</team-template>"#)
+}
+
+const TEAM_WITH_OPTIONS: &str = r#"<team-template name="opts">
+  <node>
+    <agent-template><options><option name="a" value="1"/><option name="b" value="2"/></options></agent-template>
+    <node><agent-template><options><option name="c" value="3"/></options></agent-template></node>
+  </node>
+  <node template="named-one"/>
+  <node><agent-template><options><option name="d" value="4"/></options></agent-template></node>
+</team-template>"#;
+
+#[test]
+fn option_helpers_reach_inline_team_nodes() {
+    let mut template = parse_template(TEAM_WITH_OPTIONS).expect("team with options");
+    assert_eq!(template.option_names(), ["a", "b", "c", "d"]);
+    assert_eq!(template.strip_options(), 4);
+    assert!(template.option_names().is_empty());
+}
+
+#[test]
+fn rejects_bad_team_shapes() {
+    let cases = [
+        (r#"<team-template name="one"/>"#.to_owned(), "no node"),
+        (team_xml("<description>a</description>"), "no node"),
+        (
+            team_xml(
+                r#"<description>a</description><description>b</description><node template="a1"/>"#,
+            ),
+            "duplicate description",
+        ),
+        (
+            team_xml(r#"<agent/><node template="a1"/>"#),
+            "unknown element agent",
+        ),
+        (team_xml(r#"<node template="A1"/>"#), "template"),
+        (
+            team_xml(r#"<node template="a1" foo="x"/>"#),
+            "unknown attribute foo",
+        ),
+        (
+            team_xml(r#"<node template="a1"><agent/></node>"#),
+            "unknown element agent in node",
+        ),
+        (
+            team_xml(r#"<node><agent-template/><agent-template/></node>"#),
+            "more than one agent-template",
+        ),
+        (
+            team_xml(r#"<node><agent-template version="2"/></node>"#),
+            "version",
+        ),
+        (
+            team_xml(r#"<node><agent-template saved-by="x"/></node>"#),
+            "node",
+        ),
+        (
+            r#"<team-template name="one" saved-by=""><node template="a1"/></team-template>"#
+                .to_owned(),
+            "saved-by",
+        ),
+    ];
+    for (xml, needle) in cases {
+        expect_schema(&xml, needle);
+    }
+}
+
+#[test]
+fn node_limit_is_enforced() {
+    let nodes = |n: usize| team_xml(&r#"<node template="a1" count="0"/>"#.repeat(n));
+    parse_template(&nodes(MAX_NODES)).expect("64 nodes");
+    expect_schema(&nodes(MAX_NODES + 1), "more than 64 node elements");
+}
+
+#[test]
+fn hostile_node_nesting_is_rejected() {
+    // 1200 nested <node> elements fit in the size limit and stop at level 33.
+    let deep = nested_nodes(1200);
+    assert!(deep.len() <= MAX_TEMPLATE_BYTES);
+    expect_schema(&deep, "32 levels");
+}
+
+#[test]
+fn count_product_does_not_overflow() {
+    // 64 to the 32nd power does not fit in a u32. The product saturates and the
+    // cap still reports too many agents.
+    expect_schema(&nested_counts(&["64"; 32]), "64 agents");
 }

@@ -35,6 +35,7 @@ const MAX_PACK_SOURCE_BYTES: usize = 256;
 const MIN_PACK_SHA_BYTES: usize = 7;
 const MAX_PACK_SHA_BYTES: usize = 40;
 const MAX_USD_WHOLE: u32 = 1000;
+const MAX_NODE_COUNT: u32 = 64;
 
 /// Failure to parse, read, or resolve a template.
 #[non_exhaustive]
@@ -278,6 +279,49 @@ pub enum NodeAgent {
     Inline(Box<AgentTemplate>),
 }
 
+/// Agents a team starts.
+///
+/// Each node contributes its `count` multiplied by the product of the counts
+/// on the path from the top. A `count` of 0 contributes nothing, and neither
+/// does anything below it. Multiplication and addition saturate.
+///
+/// # Examples
+/// ```
+/// use agmen_roles::{Node, NodeAgent, agents_started};
+///
+/// let nodes = vec![Node {
+///     agent: NodeAgent::Named("lead".into()),
+///     count: 1,
+///     children: vec![Node {
+///         agent: NodeAgent::Named("hand".into()),
+///         count: 2,
+///         children: vec![],
+///     }],
+/// }];
+/// assert_eq!(agents_started(&nodes), 3);
+/// ```
+#[must_use]
+pub fn agents_started(nodes: &[Node]) -> u32 {
+    agents_started_from(nodes, 1, 1)
+}
+
+fn agents_started_from(nodes: &[Node], parent: u32, depth: u32) -> u32 {
+    if depth > MAX_NODE_DEPTH {
+        return 0;
+    }
+    let mut total = 0u32;
+    for node in nodes.iter().take(MAX_NODES) {
+        let here = parent.saturating_mul(node.count);
+        total = total.saturating_add(here);
+        total = total.saturating_add(agents_started_from(
+            &node.children,
+            here,
+            depth.saturating_add(1),
+        ));
+    }
+    total
+}
+
 /// Parse one version-one agent or team template.
 ///
 /// # Errors
@@ -305,9 +349,7 @@ pub fn parse_template(xml: &str) -> Result<Template, TemplateError> {
     }
     match root.tag_name().name() {
         "agent-template" => parse_agent_root(root).map(Template::Agent),
-        "team-template" => Err(TemplateError::Schema(
-            "team templates are parsed in Task 2".into(),
-        )),
+        "team-template" => parse_team_root(root).map(Template::Team),
         _ => Err(TemplateError::NotATemplate),
     }
 }
@@ -321,6 +363,160 @@ fn parse_agent_root(root: roxmltree::Node<'_, '_>) -> Result<Named<AgentTemplate
         saved_by: saved_by(root)?,
         template: parse_agent_body(root)?,
     })
+}
+
+fn parse_team_root(root: roxmltree::Node<'_, '_>) -> Result<Named<TeamTemplate>, TemplateError> {
+    attributes(root, &["name", "version", "saved-by"])?;
+    let name = required_name(root)?;
+    check_version(root)?;
+    let saved_by = saved_by(root)?;
+    let mut description = None;
+    let mut nodes = Vec::new();
+    let mut node_count = 0usize;
+    let mut seen_description = false;
+    let mut children = 0usize;
+    for child in root.children().filter(roxmltree::Node::is_element) {
+        children = children.saturating_add(1);
+        if children > MAX_NODES.saturating_add(1) {
+            return Err(TemplateError::Schema(format!(
+                "team has more than {MAX_NODES} child elements"
+            )));
+        }
+        if child.tag_name().namespace().is_some() {
+            return Err(TemplateError::Schema(format!(
+                "namespaced element {}",
+                child.tag_name().name()
+            )));
+        }
+        match child.tag_name().name() {
+            "description" => {
+                if seen_description {
+                    return Err(TemplateError::Schema("duplicate description".into()));
+                }
+                seen_description = true;
+                description = Some(text_field(child, MAX_DESCRIPTION_BYTES)?);
+            }
+            "node" => nodes.push(parse_node(child, 1, &mut node_count)?),
+            tag => return Err(TemplateError::Schema(format!("unknown element {tag}"))),
+        }
+    }
+    if nodes.is_empty() {
+        return Err(TemplateError::Schema("team has no node".into()));
+    }
+    if agents_started(&nodes) > MAX_TEAM_AGENTS {
+        return Err(TemplateError::Schema(format!(
+            "team starts more than {MAX_TEAM_AGENTS} agents"
+        )));
+    }
+    Ok(Named {
+        name,
+        saved_by,
+        template: TeamTemplate { description, nodes },
+    })
+}
+
+fn parse_node(
+    node: roxmltree::Node<'_, '_>,
+    depth: u32,
+    node_count: &mut usize,
+) -> Result<Node, TemplateError> {
+    *node_count = node_count.saturating_add(1);
+    if *node_count > MAX_NODES {
+        return Err(TemplateError::Schema(format!(
+            "team has more than {MAX_NODES} node elements"
+        )));
+    }
+    if depth > MAX_NODE_DEPTH {
+        return Err(TemplateError::Schema(format!(
+            "node nesting exceeds {MAX_NODE_DEPTH} levels"
+        )));
+    }
+    attributes(node, &["template", "count"])?;
+    let count = node_count_attr(node)?;
+    let template_name = node.attribute("template");
+    let mut inline = None;
+    let mut children = Vec::new();
+    let mut seen = 0usize;
+    for child in node.children().filter(roxmltree::Node::is_element) {
+        seen = seen.saturating_add(1);
+        if seen > MAX_NODES.saturating_add(1) {
+            return Err(TemplateError::Schema("too many children in node".into()));
+        }
+        if child.tag_name().namespace().is_some() {
+            return Err(TemplateError::Schema(format!(
+                "namespaced element {} in node",
+                child.tag_name().name()
+            )));
+        }
+        match child.tag_name().name() {
+            "agent-template" => {
+                if inline.is_some() {
+                    return Err(TemplateError::Schema(
+                        "node has more than one agent-template".into(),
+                    ));
+                }
+                inline = Some(parse_inline_agent(child)?);
+            }
+            "node" => children.push(parse_node(child, depth.saturating_add(1), node_count)?),
+            tag => {
+                return Err(TemplateError::Schema(format!(
+                    "unknown element {tag} in node"
+                )));
+            }
+        }
+    }
+    Ok(Node {
+        agent: node_agent(template_name, inline)?,
+        count,
+        children,
+    })
+}
+
+fn parse_inline_agent(node: roxmltree::Node<'_, '_>) -> Result<AgentTemplate, TemplateError> {
+    if node.attribute("name").is_some() || node.attribute("saved-by").is_some() {
+        return Err(TemplateError::Schema(
+            "inline node agent-template must not have a name or saved-by".into(),
+        ));
+    }
+    attributes(node, &["version"])?;
+    check_version(node)?;
+    parse_agent_body(node)
+}
+
+fn node_agent(
+    template_name: Option<&str>,
+    inline: Option<AgentTemplate>,
+) -> Result<NodeAgent, TemplateError> {
+    match (template_name, inline) {
+        (Some(_), Some(_)) => Err(TemplateError::Schema(
+            "node has both a template attribute and an inline agent-template".into(),
+        )),
+        (None, None) => Err(TemplateError::Schema(
+            "node has no template attribute or inline agent-template".into(),
+        )),
+        (Some(name), None) => {
+            if valid_name(name) {
+                Ok(NodeAgent::Named(name.to_owned()))
+            } else {
+                Err(invalid("template", name))
+            }
+        }
+        (None, Some(agent)) => Ok(NodeAgent::Inline(Box::new(agent))),
+    }
+}
+
+fn node_count_attr(node: roxmltree::Node<'_, '_>) -> Result<u32, TemplateError> {
+    let Some(value) = node.attribute("count") else {
+        return Ok(1);
+    };
+    if value.is_empty() || value.len() > 2 || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(invalid("count", value));
+    }
+    let number = decimal(value);
+    if number > MAX_NODE_COUNT {
+        return Err(invalid("count", value));
+    }
+    Ok(number)
 }
 
 fn parse_agent_body(root: roxmltree::Node<'_, '_>) -> Result<AgentTemplate, TemplateError> {
