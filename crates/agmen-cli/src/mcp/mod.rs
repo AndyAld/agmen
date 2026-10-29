@@ -27,6 +27,8 @@
 //! what it read. Every hub- or peer-supplied string in them goes through
 //! the sanitizer (ruling R63), since results reach the model.
 
+#[cfg(unix)]
+mod listener_tools;
 mod tools;
 
 use std::path::{Path, PathBuf};
@@ -87,6 +89,10 @@ const PENDING_HEADER: &str =
 /// `agmen mcp`'s arguments.
 #[derive(Debug, Args)]
 pub(crate) struct McpArgs {
+    /// Serve the headless listener's tools through agmend.
+    #[cfg(unix)]
+    #[arg(long, conflicts_with_all = ["identity", "worktree"])]
+    listener: bool,
     /// Act only as this identity id: when the worktree's identity file
     /// names another, every tool answers that it is not joined.
     #[arg(long, value_name = "ID")]
@@ -101,6 +107,10 @@ pub(crate) struct McpArgs {
 /// `agmen mcp`: serves the MCP tools on stdin and stdout until the client
 /// goes away.
 pub(crate) async fn run(args: McpArgs) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    if args.listener {
+        return listener_tools::run().await;
+    }
     let cwd = match args.worktree {
         Some(path) => resolve_worktree(path).await?,
         None => std::env::current_dir().context("reading the working directory")?,

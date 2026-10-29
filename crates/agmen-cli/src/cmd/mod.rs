@@ -10,9 +10,13 @@ pub(crate) mod inbox;
 mod install_receipt;
 mod join;
 pub(crate) mod lanes;
+#[cfg(unix)]
+mod listener;
 mod open;
 pub(crate) mod post;
 mod role;
+#[cfg(unix)]
+mod settings;
 mod templates;
 mod watch;
 #[cfg(unix)]
@@ -127,6 +131,12 @@ mod launch_tests {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Control your project's listener.
+    #[cfg(unix)]
+    Listener(listener::ListenerArgs),
+    /// Apply, cancel or undo listener settings changes.
+    #[cfg(unix)]
+    Settings(settings::SettingsArgs),
     /// Launch a managed agent in a new worktree.
     #[cfg(unix)]
     Launch(workers::LaunchArgs),
@@ -276,6 +286,10 @@ impl Cli {
             .into_command(interactive)
             .unwrap_or_else(|error| error.exit());
         match command {
+            #[cfg(unix)]
+            Command::Listener(args) => listener::run(args).await,
+            #[cfg(unix)]
+            Command::Settings(args) => settings::run(args).await,
             #[cfg(unix)]
             Command::Launch(args) => workers::launch(args).await,
             #[cfg(unix)]

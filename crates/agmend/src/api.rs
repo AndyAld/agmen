@@ -181,6 +181,12 @@ async fn pending(core: &Core, caller: Caller, raw: Value) -> Result<Value, ApiEr
     params::<Pending>(raw)?;
     match caller {
         Caller::Human => Err(bad_request("pending requires an identity caller")),
+        Caller::Identity(identity) if identity.kind == agmen_proto::IdentityKind::Listener => {
+            Err(ApiError {
+                code: ErrorCode::Forbidden,
+                message: "the listener's messages arrive in its batches".into(),
+            })
+        }
         Caller::Identity(identity) => core.identities.pending(&identity).await,
     }
 }

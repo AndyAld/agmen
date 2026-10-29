@@ -370,6 +370,8 @@ impl Agmend {
         });
         // Agents launched before a restart come back offline until Start.
         self.core.managed.load().await;
+        let listeners = self.core.listeners.clone();
+        tasks.spawn(async move { listeners.readopt().await });
         let managed = self.core.managed.clone();
         tasks.spawn(async move {
             managed.supervise().await;

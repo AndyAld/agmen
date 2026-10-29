@@ -60,7 +60,7 @@ pub(crate) struct BudgetArgs {
     add: serde_json::Number,
 }
 
-fn daemon_error(error: AgmendError) -> anyhow::Error {
+pub(super) fn daemon_error(error: AgmendError) -> anyhow::Error {
     match error {
         AgmendError::NotRunning => Fail::new(Code::NotLoggedIn, error.to_string()).into(),
         AgmendError::Refused { message, .. } => anyhow::Error::msg(clean(&message).into_owned()),
@@ -76,14 +76,14 @@ pub(super) async fn call(daemon: &mut Agmend, method: &str, params: Value) -> Re
     daemon.call(method, params).await.map_err(daemon_error)
 }
 
-async fn project(explicit: Option<ProjectId>) -> Result<ProjectId> {
+pub(super) async fn project(explicit: Option<ProjectId>) -> Result<ProjectId> {
     match explicit {
         Some(project) => Ok(project),
         None => Ok(crate::joined::joined().await?.identity.project),
     }
 }
 
-fn field<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
+pub(super) fn field<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
     value
         .get(key)
         .and_then(Value::as_str)
