@@ -93,6 +93,59 @@ You can also put the entry in `.codex/config.toml` in a trusted project.
 Only the Claude Code plugin blocks edits outside your lanes. Codex should
 call `check_path` before editing.
 
+## Cursor
+
+Run `agmen setup --agent cursor` in your joined worktree. Setup writes
+`.cursor/mcp.json` in the worktree (creating `.cursor/` if needed) and adds
+`.cursor/mcp.json` to git's local `info/exclude`. It keeps other servers and
+settings, skips tracked or unreadable files and non-folder `.cursor` paths,
+and reports `already set up` on a second run.
+
+For manual setup, add this to `.cursor/mcp.json` in the worktree:
+
+```json
+{
+  "mcpServers": {
+    "agmen": {
+      "command": "agmen",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+Add `"--identity", "<id>"` to `args` to pin the identity.
+
+Only the Claude Code plugin blocks edits outside your lanes. Cursor should
+call `check_path` before editing.
+
+## Gemini CLI
+
+Run `agmen setup --agent gemini` in your joined worktree. Setup writes
+`.gemini/settings.json` in the worktree (creating `.gemini/` if needed) and
+adds `.gemini/settings.json` to git's local `info/exclude`. It keeps other
+servers and settings (such as `theme`), skips tracked or unreadable files and
+non-folder `.gemini` paths, and reports `already set up` on a second run.
+
+For manual setup, add this to `.gemini/settings.json` in the worktree:
+
+```json
+{
+  "mcpServers": {
+    "agmen": {
+      "command": "agmen",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+Add `"--identity", "<id>"` to `args` to pin the identity, and `"cwd"` when
+Gemini CLI does not start in the worktree.
+
+Only the Claude Code plugin blocks edits outside your lanes. Gemini CLI
+should call `check_path` before editing.
+
 ## Tools
 
 | Tool | What it does |

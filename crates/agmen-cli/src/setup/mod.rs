@@ -1,4 +1,24 @@
 //! Agent discovery and setup in a trusted, joined worktree.
+//!
+//! Cursor and Gemini CLI MCP formats checked 2026-10-28:
+//!
+//! - Cursor (<https://cursor.com/docs/mcp>; the older
+//!   <https://docs.cursor.com/context/model-context-protocol> redirects to
+//!   <https://cursor.com/docs>): project config is `.cursor/mcp.json` and user
+//!   config is `~/.cursor/mcp.json`. The top-level key is `mcpServers`; a
+//!   stdio entry has `command`, optional `args`, `env` and `envFile`, and a
+//!   `type` of `"stdio"` that the field table marks required but every stdio
+//!   example omits, so setup omits it. The page documents no `cwd` and does
+//!   not say where a server process starts.
+//! - Gemini CLI (<https://github.com/google-gemini/gemini-cli/blob/main/docs/tools/mcp-server.md>
+//!   and <https://github.com/google-gemini/gemini-cli/blob/main/docs/reference/configuration.md>):
+//!   project config is `.gemini/settings.json` in the project root and user
+//!   config is `~/.gemini/settings.json`. The top-level key is `mcpServers`
+//!   alongside other settings; a stdio entry has `command`, optional `args`,
+//!   `env` and `cwd` ("working directory in which to start the server"). The
+//!   docs give no default for `cwd`, so where the server starts is
+//!   undocumented, and `agmen mcp` finds its worktree from its own working
+//!   directory like the other agents' entries.
 
 mod claude;
 mod codex;
@@ -21,6 +41,8 @@ pub(crate) enum AgentKind {
     Claude,
     Codex,
     Opencode,
+    Cursor,
+    Gemini,
 }
 
 impl fmt::Display for AgentKind {
@@ -29,6 +51,8 @@ impl fmt::Display for AgentKind {
             Self::Claude => f.write_str("Claude Code"),
             Self::Codex => f.write_str("Codex"),
             Self::Opencode => f.write_str("OpenCode"),
+            Self::Cursor => f.write_str("Cursor"),
+            Self::Gemini => f.write_str("Gemini CLI"),
         }
     }
 }
@@ -140,6 +164,14 @@ impl AgentEnv {
                 self.find_program("opencode").is_some()
                     || self.home.join(".config/opencode").is_dir()
             }
+            AgentKind::Cursor => {
+                self.find_program("cursor").is_some()
+                    || self.find_program("cursor-agent").is_some()
+                    || self.home.join(".cursor").is_dir()
+            }
+            AgentKind::Gemini => {
+                self.find_program("gemini").is_some() || self.home.join(".gemini").is_dir()
+            }
         }
     }
 }
@@ -178,7 +210,13 @@ pub(crate) async fn run(
 ) -> Result<Vec<Change>> {
     let env = blocking(AgentEnv::from_process).await?;
     let mut changes = Vec::new();
-    for agent in [AgentKind::Claude, AgentKind::Codex, AgentKind::Opencode] {
+    for agent in [
+        AgentKind::Claude,
+        AgentKind::Codex,
+        AgentKind::Opencode,
+        AgentKind::Cursor,
+        AgentKind::Gemini,
+    ] {
         if only.is_some_and(|only| only != agent) || !env.detected(agent) {
             continue;
         }
@@ -186,6 +224,12 @@ pub(crate) async fn run(
             AgentKind::Claude => claude::run(root, &env, plugin).await,
             AgentKind::Codex => codex::run(root, identity, &env).await,
             AgentKind::Opencode => opencode::run(root).await,
+            AgentKind::Cursor => {
+                write_worktree_file(root, ".cursor/mcp.json", json::merge_mcp_servers).await
+            }
+            AgentKind::Gemini => {
+                write_worktree_file(root, ".gemini/settings.json", json::merge_mcp_servers).await
+            }
         };
         changes.push(Change {
             agent,
@@ -230,20 +274,46 @@ pub(crate) async fn write_worktree_file(
             "{rel} is tracked by git; add the agmen entry by hand (docs/mcp-setup.md)"
         )));
     }
+    let parent = Path::new(rel)
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .map(|dir| root.join(dir));
     let path = root.join(rel);
-    let existing = blocking(move || read_config(&path)).await;
+    let check_parent = parent.clone();
+    let existing = blocking(move || {
+        if let Some(dir) = &check_parent
+            && !worktree_dir_exists(dir)?
+        {
+            return Ok(None);
+        }
+        read_config(&path)
+    })
+    .await;
     let existing = match existing {
         Ok(text) => text,
         Err(err) => return Ok(Outcome::Skipped(format!("{err:#}"))),
     };
     let merged = match merge(existing.as_deref()) {
         Ok(merged) => merged,
-        Err(err) => return Ok(Outcome::Skipped(err.to_string())),
+        Err(SetupError::Unreadable { why, .. }) => {
+            return Ok(Outcome::Skipped(
+                SetupError::Unreadable {
+                    file: rel.into(),
+                    why,
+                }
+                .to_string(),
+            ));
+        }
     };
     let exclude = git::exclude_file(root).await?;
     let path = root.join(rel);
     let rel = rel.to_owned();
     blocking(move || {
+        if merged.changed
+            && let Some(dir) = &parent
+        {
+            create_worktree_dir(dir)?;
+        }
         git::add_exclude(&exclude, &rel)?;
         if merged.changed {
             write_atomically(&path, merged.text.as_bytes())?;
@@ -253,6 +323,40 @@ pub(crate) async fn write_worktree_file(
         }
     })
     .await
+}
+
+fn worktree_dir_exists(dir: &Path) -> Result<bool> {
+    let metadata = match std::fs::symlink_metadata(dir) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(err).with_context(|| format!("reading {}", dir.display())),
+    };
+    if metadata.file_type().is_symlink() {
+        bail!("{} is a symbolic link", dir.display());
+    }
+    if !metadata.is_dir() {
+        bail!("{} is not a folder", dir.display());
+    }
+    Ok(true)
+}
+
+fn create_worktree_dir(dir: &Path) -> Result<()> {
+    if worktree_dir_exists(dir)? {
+        return Ok(());
+    }
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o755);
+    builder
+        .create(dir)
+        .with_context(|| format!("creating {}", dir.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755))
+            .with_context(|| format!("setting permissions on {}", dir.display()))?;
+    }
+    Ok(())
 }
 
 /// Writes `bytes` to a new file beside `path` and renames it into place, so
@@ -378,5 +482,47 @@ mod tests {
         std::fs::remove_file(&program).unwrap();
         std::fs::create_dir(dir.path().join(".claude")).unwrap();
         assert!(env.detected(AgentKind::Claude));
+    }
+
+    #[test]
+    fn detects_cursor_and_gemini() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let env = AgentEnv {
+            path: vec![bin.clone()],
+            home: dir.path().to_owned(),
+            codex_home: dir.path().join(".codex"),
+        };
+        assert!(!env.detected(AgentKind::Cursor));
+        assert!(!env.detected(AgentKind::Gemini));
+        std::fs::create_dir(env.home.join(".cursor")).unwrap();
+        assert!(env.detected(AgentKind::Cursor));
+        assert!(!env.detected(AgentKind::Gemini));
+        std::fs::remove_dir(env.home.join(".cursor")).unwrap();
+        std::fs::create_dir(env.home.join(".gemini")).unwrap();
+        assert!(env.detected(AgentKind::Gemini));
+        assert!(!env.detected(AgentKind::Cursor));
+        std::fs::remove_dir(env.home.join(".gemini")).unwrap();
+        for (name, agent) in [
+            ("cursor", AgentKind::Cursor),
+            ("cursor-agent", AgentKind::Cursor),
+            ("gemini", AgentKind::Gemini),
+        ] {
+            let program = bin.join(if cfg!(windows) {
+                format!("{name}.exe")
+            } else {
+                name.to_owned()
+            });
+            std::fs::write(&program, "#!/bin/sh\nexit 0\n").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                assert!(!env.detected(agent));
+                std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            assert!(env.detected(agent));
+            std::fs::remove_file(program).unwrap();
+        }
     }
 }
