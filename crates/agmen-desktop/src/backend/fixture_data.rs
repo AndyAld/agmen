@@ -100,6 +100,7 @@ pub(super) fn listener() -> Result<ListenerInfo, BackendError> {
         agent: "codex".into(),
         state: "idle".into(),
         details: Some(ListenerDetails {
+            unreported: Default::default(),
             harness_label: "Codex 0.164.0 over ACP".into(),
             role_label: "Listener (built-in)".into(),
             can_use: words("Read Grep Glob git_log git_show git_diff git_status"),

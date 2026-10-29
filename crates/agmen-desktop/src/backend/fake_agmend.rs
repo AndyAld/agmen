@@ -229,6 +229,8 @@ pub(crate) struct FakeState {
     pub(crate) snapshots_served: usize,
     /// `settings_decide` and `settings_undo` calls, in order.
     pub(crate) settings_requests: Vec<Request>,
+    /// Refuse a decision without changing its card, so it can be retried.
+    pub(crate) settings_error: Option<String>,
     /// `listener_status`'s answer. Unset answers `[]`, which does not
     /// replace the snapshot's listener.
     pub(crate) listener_status_answer: Option<Value>,
@@ -560,6 +562,9 @@ fn listener_response(id: u64, request: &Request, state: &Mutex<FakeState>) -> Re
     }
     let mut state = state.lock().unwrap();
     state.settings_requests.push(request.clone());
+    if let Some(why) = &state.settings_error {
+        return Response::err(id, ErrorCode::BadRequest, why.clone());
+    }
     match apply_settings(&mut state, request.method.as_str(), &request.params) {
         Ok(()) => Response::ok(id, json!({})),
         Err(why) => Response::err(id, ErrorCode::BadRequest, why),

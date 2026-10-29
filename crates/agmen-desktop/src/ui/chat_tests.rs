@@ -177,6 +177,159 @@ fn apply_on_the_hosted_card_changes_it(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn refused_apply_shows_beside_its_card_and_success_clears_it(cx: &mut TestAppContext) {
+    refused_decision(cx, "apply", ChangeState::Pending, ChangeState::Applied).await;
+}
+
+#[gpui::test]
+async fn refused_cancel_shows_beside_its_card_and_success_clears_it(cx: &mut TestAppContext) {
+    refused_decision(cx, "cancel", ChangeState::Pending, ChangeState::Cancelled).await;
+}
+
+#[gpui::test]
+async fn refused_undo_shows_beside_its_card_and_success_clears_it(cx: &mut TestAppContext) {
+    refused_decision(cx, "undo", ChangeState::Applied, ChangeState::Undone).await;
+}
+
+async fn refused_decision(
+    cx: &mut TestAppContext,
+    button: &str,
+    before: ChangeState,
+    after: ChangeState,
+) {
+    use crate::backend::fake_agmend::{FakeAgmend, PROJECT, console, ident, message};
+    use crate::backend::{AgmendBackend, ChangeId};
+    use agmen_local::console::{SettingsChangeEntry, SettingsChangeRow, SettingsChangeState};
+
+    let mut message = message(1);
+    message.from = ident("idlisten");
+    message.from_handle = "andy/listen".into();
+    message.from_kind = agmen_proto::IdentityKind::Listener;
+    let mut snapshot = console(vec![message.clone()]);
+    let id = ChangeId("chg-retry".into());
+    snapshot.changes.push(SettingsChangeEntry {
+        id: id.0.clone(),
+        message_id: Some(message.client.id.clone()),
+        requested_by: "andy".into(),
+        widens: true,
+        state: if before == ChangeState::Pending {
+            SettingsChangeState::Pending
+        } else {
+            SettingsChangeState::Applied
+        },
+        rows: vec![SettingsChangeRow {
+            target: "listener".into(),
+            setting: "per_delegation_usd".into(),
+            before: "5.00".into(),
+            after: "8.00".into(),
+        }],
+    });
+    let fake = FakeAgmend::start(snapshot);
+    fake.edit(|state| state.settings_error = Some("\u{202e}The change\u{7} is stale".into()));
+    cx.executor().allow_parking();
+    let backend = Rc::new(AgmendBackend::connect(&fake.path(), PROJECT, None).unwrap());
+    cx.update(|cx| cx.set_global(BackendHandle(backend.clone())));
+    let (chat, cx) = open_with(cx, backend.snapshot());
+    let button = Box::leak(format!("{id}:{button}").into_boxed_str());
+    click(cx, button);
+    // GPUI's condition has a three-second deadline while socket threads answer.
+    cx.condition(&chat, |chat, cx| {
+        chat.stream.read(cx).decision_errors.contains_key(&id)
+    })
+    .await;
+    redraw(cx);
+    let error = Box::leak(format!("chat:decision-error:{id}").into_boxed_str());
+    let error_bounds = cx.debug_bounds(error).expect("refusal beside the card");
+    let card = Box::leak(format!("{id}:card").into_boxed_str());
+    assert!(error_bounds.top() >= cx.debug_bounds(card).unwrap().bottom());
+    assert!(cx.debug_bounds("chat:error").is_none());
+    assert!(backend.snapshot().agent_error.is_none());
+    chat.read_with(cx, |chat, cx| {
+        assert_eq!(
+            chat.stream.read(cx).decision_errors[&id],
+            "The change is stale"
+        );
+        assert_eq!(chat.snapshot.changes[&message.client.id].state, before);
+    });
+
+    fake.edit(|state| state.settings_error = None);
+    click(cx, button);
+    cx.condition(&chat, |chat, cx| {
+        chat.snapshot.changes[&message.client.id].state == after
+            && !chat.stream.read(cx).decision_errors.contains_key(&id)
+    })
+    .await;
+    redraw(cx);
+    assert!(cx.debug_bounds(error).is_none());
+    assert!(backend.snapshot().agent_error.is_none());
+    assert_eq!(fake.state.lock().unwrap().settings_requests.len(), 2);
+}
+
+#[gpui::test]
+fn a_synchronous_decision_refusal_stays_with_its_card(cx: &mut TestAppContext) {
+    let (chat, _backend, cx) = open_screen(cx, Screen::SettingsFromChat);
+    let id = chat.read_with(cx, |chat, _| {
+        chat.snapshot.changes.values().next().unwrap().id.clone()
+    });
+    cx.update(|_, cx| {
+        cx.remove_global::<BackendHandle>();
+    });
+    chat.update(cx, |chat, cx| chat.act(Action::Apply(id.clone()), cx));
+    redraw(cx);
+    let error = Box::leak(format!("chat:decision-error:{id}").into_boxed_str());
+    assert!(cx.debug_bounds(error).is_some());
+    assert!(cx.debug_bounds("chat:error").is_none());
+}
+
+#[gpui::test]
+fn another_cards_success_keeps_the_first_cards_error(cx: &mut TestAppContext) {
+    let (chat, _backend, cx) = open_screen(cx, Screen::SettingsFromChat);
+    let id = chat.read_with(cx, |chat, _| {
+        chat.snapshot.changes.values().next().unwrap().id.clone()
+    });
+    chat.update(cx, |chat, cx| {
+        chat.apply(
+            Update::Decision {
+                change: id.clone(),
+                why: Some("Try again".into()),
+            },
+            cx,
+        );
+        chat.apply(
+            Update::Decision {
+                change: ChangeId("another-card".into()),
+                why: None,
+            },
+            cx,
+        );
+    });
+    redraw(cx);
+    let error = Box::leak(format!("chat:decision-error:{id}").into_boxed_str());
+    assert!(cx.debug_bounds(error).is_some());
+    chat.read_with(cx, |chat, cx| {
+        assert_eq!(chat.stream.read(cx).decision_errors[&id], "Try again")
+    });
+    // A synchronous fixture success also clears the error when its card changes.
+    chat.update(cx, |chat, _| {
+        chat.error = Some("Earlier send refused".into())
+    });
+    chat.update(cx, |chat, cx| chat.act(Action::Apply(id), cx));
+    cx.run_until_parked();
+    redraw(cx);
+    assert!(cx.debug_bounds(error).is_none());
+    assert!(cx.debug_bounds("chat:error").is_none());
+}
+
+#[test]
+fn decision_error_text_is_bounded_and_keeps_unicode_and_line_breaks() {
+    assert_eq!(
+        clean_decision_error("\u{202e}Refusé\u{7}\nTry\t again"),
+        "Refusé\nTry\t again"
+    );
+    assert!(clean_decision_error(&"é".repeat(MAX_BODY_BYTES)).len() <= MAX_BODY_BYTES);
+}
+
+#[gpui::test]
 fn refused_send_shows_why_until_the_next_send(cx: &mut TestAppContext) {
     let (chat, backend, cx) = open_screen(cx, Screen::Chat);
     let to = vec![backend.snapshot().listener_id().cloned().unwrap()];

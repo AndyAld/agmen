@@ -7,9 +7,9 @@ use gpui::{
 
 use super::components::{Button, Color, EmptyState, KvRow, KvSection};
 use super::dock::RightDockHeader;
-use super::format::{listener_tokens, money, money_of, workers_today};
+use super::format::{duration, listener_tokens, money, money_of, tokens, workers_today};
 use super::tokens::{SPACE_14, SPACE_16};
-use crate::backend::{ListenerDetails, ListenerInfo, RecentKind};
+use crate::backend::{ListenerDetails, ListenerField, ListenerInfo, RecentKind};
 
 /// What the panel says when the person has no listener in the project.
 pub(crate) const NO_LISTENER: &str = "No listener for this project";
@@ -76,31 +76,26 @@ impl RenderOnce for ListenerPanel {
 
 /// The Runs, Policy and Recent sections, and the Change listener button.
 fn details(d: ListenerDetails) -> impl IntoElement {
+    let [
+        can_use,
+        never,
+        takes_work_from,
+        per_worker,
+        workers,
+        listener,
+        tokens,
+    ] = panel_values(&d);
     let runs = KvSection::new("Runs")
         .row(KvRow::new("Harness", d.harness_label))
         .row(KvRow::new("Role", d.role_label))
-        .row(KvRow::new("Can use", d.can_use.join(" ")).color(Color::Success))
-        .row(KvRow::new("Never", d.never.join(" ")).color(Color::Error));
+        .row(value_row("Can use", can_use))
+        .row(value_row("Never", never));
     let policy = KvSection::new("Policy")
-        .row(KvRow::new("Takes work from", d.takes_work_from))
-        .row(KvRow::new("Per worker", money(d.per_worker_usd)))
-        .row(KvRow::new(
-            "Workers today",
-            workers_today(
-                d.workers_today_usd,
-                d.workers_cap_usd,
-                d.workers_running,
-                d.workers_max,
-            ),
-        ))
-        .row(KvRow::new(
-            "Listener today",
-            money_of(d.listener_today_usd, d.listener_cap_usd),
-        ))
-        .row(KvRow::new(
-            "Listener tokens",
-            listener_tokens(d.tokens_in, d.tokens_out, d.uptime_minutes),
-        ));
+        .row(value_row("Takes work from", takes_work_from))
+        .row(value_row("Per worker", per_worker))
+        .row(value_row("Workers today", workers))
+        .row(value_row("Listener today", listener))
+        .row(value_row("Listener tokens", tokens));
     let recent = d
         .recent
         .into_iter()
@@ -119,6 +114,91 @@ fn details(d: ListenerDetails) -> impl IntoElement {
         .child(policy)
         .child(recent)
         .child(Button::new("change-listener", "Change listener…"))
+}
+
+fn value_row(label: &'static str, (text, color): (String, Color)) -> KvRow {
+    KvRow::new(label, text).color(color)
+}
+
+/// Keep each reported part of a composite row, including measured zeroes.
+fn panel_values(d: &ListenerDetails) -> [(String, Color); 7] {
+    use ListenerField::{
+        CanUse, Never, PerWorker, TakesWorkFrom, TokensIn, TokensOut, Uptime, WorkersCap,
+        WorkersMax, WorkersRunning, WorkersToday,
+    };
+    let value = |field, text: String| {
+        if d.unreported.contains(&field) {
+            "not reported".to_owned()
+        } else {
+            text
+        }
+    };
+    let missing =
+        |fields: &[ListenerField]| fields.iter().any(|field| d.unreported.contains(field));
+    let row = |fields: &[ListenerField], text, color| {
+        let color = if missing(fields) {
+            Color::Placeholder
+        } else {
+            color
+        };
+        (text, color)
+    };
+    [
+        row(
+            &[CanUse],
+            value(CanUse, d.can_use.join(" ")),
+            Color::Success,
+        ),
+        row(&[Never], value(Never, d.never.join(" ")), Color::Error),
+        row(
+            &[TakesWorkFrom],
+            value(TakesWorkFrom, d.takes_work_from.clone()),
+            Color::Default,
+        ),
+        row(
+            &[PerWorker],
+            value(PerWorker, money(d.per_worker_usd)),
+            Color::Default,
+        ),
+        row(
+            &[WorkersToday, WorkersCap, WorkersRunning, WorkersMax],
+            if missing(&[WorkersToday, WorkersCap, WorkersRunning, WorkersMax]) {
+                format!(
+                    "{} of {} · {} of {} running",
+                    value(WorkersToday, money(d.workers_today_usd)),
+                    value(WorkersCap, money(d.workers_cap_usd)),
+                    value(WorkersRunning, d.workers_running.to_string()),
+                    value(WorkersMax, d.workers_max.to_string()),
+                )
+            } else {
+                workers_today(
+                    d.workers_today_usd,
+                    d.workers_cap_usd,
+                    d.workers_running,
+                    d.workers_max,
+                )
+            },
+            Color::Default,
+        ),
+        (
+            money_of(d.listener_today_usd, d.listener_cap_usd),
+            Color::Default,
+        ),
+        row(
+            &[TokensIn, TokensOut, Uptime],
+            if missing(&[TokensIn, TokensOut, Uptime]) {
+                format!(
+                    "{} in · {} out · up {}",
+                    value(TokensIn, tokens(d.tokens_in)),
+                    value(TokensOut, tokens(d.tokens_out)),
+                    value(Uptime, duration(d.uptime_minutes)),
+                )
+            } else {
+                listener_tokens(d.tokens_in, d.tokens_out, d.uptime_minutes)
+            },
+            Color::Default,
+        ),
+    ]
 }
 
 /// A Recent row's text color (console.py 1504 to 1511).
@@ -251,5 +331,114 @@ mod tests {
                 .into_any_element()
         });
         assert!(size.height > px(300.));
+    }
+
+    #[gpui::test]
+    fn live_status_marks_each_missing_value_as_not_reported(cx: &mut TestAppContext) {
+        let mut console = crate::backend::fake_agmend::console(Vec::new());
+        console.listener = Some(
+            serde_json::from_value(serde_json::json!({
+                "identity_id": "idlisten", "handle": "andy/listen",
+                "state": "running", "model": "claude-haiku-5-5",
+                "today_usd": "0.40", "daily_usd": "2.00"
+            }))
+            .unwrap(),
+        );
+        use crate::backend::Backend as _;
+        let fake = crate::backend::fake_agmend::FakeAgmend::start(console);
+        let backend = crate::backend::AgmendBackend::connect(
+            &fake.path(),
+            crate::backend::fake_agmend::PROJECT,
+            None,
+        )
+        .unwrap();
+        assert_live_values(
+            cx,
+            backend.snapshot().listener,
+            [
+                "not reported",
+                "not reported",
+                "not reported",
+                "not reported",
+                "not reported of not reported · not reported of not reported running",
+                "$0.40 of $2.00",
+                "not reported in · not reported out · up not reported",
+            ],
+        );
+    }
+
+    #[gpui::test]
+    fn live_caps_and_reported_zeroes_keep_their_values(cx: &mut TestAppContext) {
+        use crate::backend::Backend as _;
+        let mut console = crate::backend::fake_agmend::console(Vec::new());
+        let entry = console.listener.as_mut().unwrap();
+        entry.can_use.clear();
+        entry.never.clear();
+        entry.workers_today_usd = None;
+        entry.workers_running = None;
+        entry.tokens_in = Some(0);
+        entry.tokens_out = Some(0);
+        entry.uptime_minutes = Some(0);
+        let fake = crate::backend::fake_agmend::FakeAgmend::start(console);
+        let backend = crate::backend::AgmendBackend::connect(
+            &fake.path(),
+            crate::backend::fake_agmend::PROJECT,
+            None,
+        )
+        .unwrap();
+        assert_live_values(
+            cx,
+            backend.snapshot().listener,
+            [
+                "not reported",
+                "not reported",
+                "andy",
+                "$5.00",
+                "not reported of $20.00 · not reported of 3 running",
+                "$0.40 of $2.00",
+                "0 in · 0 out · up 0 min",
+            ],
+        );
+    }
+
+    fn assert_live_values(
+        cx: &mut TestAppContext,
+        listener: Option<ListenerInfo>,
+        expected: [&str; 7],
+    ) {
+        let values = panel_values(listener.as_ref().unwrap().details.as_ref().unwrap());
+        for ((text, color), expected) in values.iter().zip(expected) {
+            assert_eq!(text, expected);
+            if expected.contains("not reported") {
+                assert_eq!(*color, Color::Placeholder);
+                assert!(!text.contains("$0.00"));
+            }
+        }
+        let cx = draw(cx, move || {
+            div()
+                .w(crate::ui::tokens::RIGHT_DOCK_WIDTH)
+                .child(ListenerPanel::new(listener.clone()))
+                .into_any_element()
+        });
+        for ((label, row), expected) in [
+            ("Can use", 2),
+            ("Never", 3),
+            ("Takes work from", 0),
+            ("Per worker", 1),
+            ("Workers today", 2),
+            ("Listener today", 3),
+            ("Listener tokens", 4),
+        ]
+        .into_iter()
+        .zip(expected)
+        {
+            let words = expected.split_whitespace().take(32).count();
+            for index in 0..words {
+                let selector = Box::leak(format!("kv-word:{label}:{row}:{index}").into_boxed_str());
+                assert!(cx.debug_bounds(selector).is_some(), "{label}: {index}");
+            }
+            let selector = Box::leak(format!("kv-word:{label}:{row}:{words}").into_boxed_str());
+            assert!(cx.debug_bounds(selector).is_none(), "extra word in {label}");
+        }
     }
 }

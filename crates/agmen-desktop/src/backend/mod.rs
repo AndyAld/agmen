@@ -25,7 +25,7 @@ mod fixture_models;
 mod models;
 pub(crate) use models::{ChoiceScope, Effort, ModelChoice, ModelGroup};
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use agmen_proto::{GitSha, IdentityId, MessageId, Seq, StampedEnvelope, Stream, Timestamp};
 use futures::channel::mpsc::UnboundedReceiver;
@@ -242,6 +242,12 @@ pub(crate) enum Update {
     NotSent {
         draft: Draft,
         why: String,
+    },
+    /// The result of Apply, Cancel or Undo, beside the clicked change card.
+    /// A successful decision clears only that card's error.
+    Decision {
+        change: ChangeId,
+        why: Option<String>,
     },
 }
 
@@ -517,6 +523,9 @@ pub(crate) struct ListenerInfo {
 /// The Listener panel's Runs, Policy and Recent sections.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ListenerDetails {
+    /// Missing live fields, kept separate from measured zeroes and empty
+    /// fixture values. The panel formats these as "not reported".
+    pub(crate) unreported: BTreeSet<ListenerField>,
     pub(crate) harness_label: String,
     pub(crate) role_label: String,
     pub(crate) can_use: Vec<String>,
@@ -533,6 +542,22 @@ pub(crate) struct ListenerDetails {
     pub(crate) tokens_out: u64,
     pub(crate) uptime_minutes: u32,
     pub(crate) recent: Vec<RecentAction>,
+}
+
+/// Listener values that the console answer may omit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) enum ListenerField {
+    CanUse,
+    Never,
+    TakesWorkFrom,
+    PerWorker,
+    WorkersToday,
+    WorkersCap,
+    WorkersRunning,
+    WorkersMax,
+    TokensIn,
+    TokensOut,
+    Uptime,
 }
 
 /// The right dock's Agent panel, for one selected agent.

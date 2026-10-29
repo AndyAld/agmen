@@ -52,7 +52,8 @@ use super::agmend_local;
 use super::{
     Action, AgentInfo, AgentRow, AgentStatus, Backend, BackendError, ChangeCard, ChangeId,
     ChangeRow, ChangeState, Draft, FileText, FileTextReply, GitFacts, Link, ListenerDetails,
-    ListenerInfo, ManagedWork, Older, PersonGroup, Snapshot, StatusSummary, Update, WorktreeInfo,
+    ListenerField, ListenerInfo, ManagedWork, Older, PersonGroup, Snapshot, StatusSummary, Update,
+    WorktreeInfo,
 };
 
 /// The most messages held per project; the oldest go first (the plan's
@@ -510,6 +511,7 @@ enum Job {
     Settings {
         method: &'static str,
         params: Value,
+        change: ChangeId,
     },
 }
 
@@ -571,9 +573,18 @@ impl AgmendBackend {
         self.queue(Job::Agent { method, params }, "agent request queue is full")
     }
 
-    fn queue_settings(&self, method: &'static str, params: Value) -> Result<(), BackendError> {
+    fn queue_settings(
+        &self,
+        method: &'static str,
+        params: Value,
+        change: ChangeId,
+    ) -> Result<(), BackendError> {
         self.queue(
-            Job::Settings { method, params },
+            Job::Settings {
+                method,
+                params,
+                change,
+            },
             "settings request queue is full",
         )
     }
@@ -931,14 +942,17 @@ impl Backend for AgmendBackend {
             Action::Apply(id) => self.queue_settings(
                 "settings_decide",
                 json!({"project": self.shared.project, "id": id.0, "apply": true}),
+                id,
             ),
             Action::Cancel(id) => self.queue_settings(
                 "settings_decide",
                 json!({"project": self.shared.project, "id": id.0, "apply": false}),
+                id,
             ),
             Action::Undo(id) => self.queue_settings(
                 "settings_undo",
                 json!({"project": self.shared.project, "id": id.0}),
+                id,
             ),
             Action::TakeOver(_) => unsupported("taking over an agent"),
             Action::HandBack(_) => unsupported("handing an agent back"),
@@ -1294,35 +1308,43 @@ fn serve_jobs(shared: &Shared, queue: &Receiver<Job>, mut conn: Option<Conn>) {
                 // The file view may have closed meanwhile.
                 drop(reply.send(answer));
             }
-            Job::Settings { method, params } => {
+            Job::Settings {
+                method,
+                params,
+                change,
+            } => {
                 // A fresh connection, once: retrying a lost answer could
                 // decide a change the first call already applied.
                 let result = decide_settings(shared, method, params);
-                finish_decision(shared, result);
+                finish_decision(shared, change, result);
             }
         }
     }
 }
 
 /// Takes a decision's outcome: the listener and cards it read back, or why
-/// it failed. Like an agent action, the latest decision's outcome is what
-/// the banner says.
-fn finish_decision(shared: &Shared, result: Result<ConsoleSnapshot, RequestError>) {
+/// it failed. The result belongs to the card, independently of agent actions.
+fn finish_decision(
+    shared: &Shared,
+    change: ChangeId,
+    result: Result<ConsoleSnapshot, RequestError>,
+) {
     let mut live = shared.lock();
-    match result {
+    let why = match result {
         Ok(console) => {
             live.listener = console.listener;
             live.changes = console.changes;
-            live.agent_error = None;
+            None
         }
         Err(error) => {
-            live.agent_error = Some(error.to_string());
             // A refusal may mean the card is out of date, such as a change
             // decided from the command line.
             live.listener_stale = true;
+            Some(error.to_string())
         }
-    }
+    };
     live.publish_snapshot();
+    live.publish(&Update::Decision { change, why });
 }
 
 /// `settings_decide` or `settings_undo`, then one snapshot on that same
@@ -2148,6 +2170,31 @@ fn listener_with_details(row: &RosterEntry, entry: &ListenerEntry) -> ListenerIn
         agent: harness_of(row),
         state,
         details: Some(ListenerDetails {
+            unreported: [
+                (ListenerField::CanUse, entry.can_use.is_empty()),
+                (ListenerField::Never, entry.never.is_empty()),
+                (
+                    ListenerField::TakesWorkFrom,
+                    entry.takes_work_from.is_none(),
+                ),
+                (ListenerField::PerWorker, entry.per_delegation_usd.is_none()),
+                (
+                    ListenerField::WorkersToday,
+                    entry.workers_today_usd.is_none(),
+                ),
+                (ListenerField::WorkersCap, entry.workers_daily_usd.is_none()),
+                (
+                    ListenerField::WorkersRunning,
+                    entry.workers_running.is_none(),
+                ),
+                (ListenerField::WorkersMax, entry.max_workers.is_none()),
+                (ListenerField::TokensIn, entry.tokens_in.is_none()),
+                (ListenerField::TokensOut, entry.tokens_out.is_none()),
+                (ListenerField::Uptime, entry.uptime_minutes.is_none()),
+            ]
+            .into_iter()
+            .filter_map(|(field, absent)| absent.then_some(field))
+            .collect(),
             harness_label,
             role_label,
             can_use: entry.can_use.clone(),

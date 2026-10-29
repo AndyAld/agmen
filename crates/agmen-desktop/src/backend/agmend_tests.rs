@@ -1909,6 +1909,35 @@ fn a_card_my_listener_posts_shows_without_a_new_snapshot() {
 }
 
 #[test]
+fn a_refused_decision_does_not_use_the_agents_banner() {
+    let fake = FakeAgmend::start(console(vec![message(1)]));
+    let (backend, _updates) = live_backend(&fake);
+    finish_decision(
+        &backend.shared,
+        ChangeId("chg-stale".into()),
+        Err(RequestError::Refused("the change is stale".into())),
+    );
+    assert!(backend.snapshot().agent_error.is_none());
+}
+
+#[test]
+fn settings_decisions_preserve_agent_action_errors() {
+    let fake = FakeAgmend::start(console(vec![message(1)]));
+    let (backend, _updates) = live_backend(&fake);
+    backend.shared.lock().agent_error = Some("agent launch failed".into());
+    for result in [
+        Err(RequestError::Refused("the change is stale".into())),
+        Ok(console(vec![message(1)])),
+    ] {
+        finish_decision(&backend.shared, ChangeId("chg-stale".into()), result);
+        assert_eq!(
+            backend.snapshot().agent_error.as_deref(),
+            Some("agent launch failed")
+        );
+    }
+}
+
+#[test]
 fn a_refused_decision_shows_why_until_the_next_one_goes_through() {
     let mut snapshot = console(vec![message(1)]);
     snapshot.changes.push(cap_change(
@@ -1918,25 +1947,25 @@ fn a_refused_decision_shows_why_until_the_next_one_goes_through() {
         "8.00",
     ));
     let fake = FakeAgmend::start(snapshot);
-    let (backend, _updates) = live_backend(&fake);
+    let (backend, mut updates) = live_backend(&fake);
     backend
         .act(Action::Apply(ChangeId("chg-gone".into())))
         .unwrap();
-    until(|| {
-        backend
-            .snapshot()
-            .agent_error
-            .is_some_and(|why| why.contains("unknown or already decided change"))
+    wait_for(&mut updates, |update| {
+        matches!(update, Update::Decision { change, why: Some(why) }
+            if change.0 == "chg-gone" && why.contains("unknown or already decided change"))
     });
+    assert!(backend.snapshot().agent_error.is_none());
     // The card stays as it was: nothing was decided.
     assert_eq!(per_worker(&backend.snapshot()), 5.0);
     backend
         .act(Action::Apply(ChangeId("chg-ok".into())))
         .unwrap();
-    until(|| {
-        let snapshot = backend.snapshot();
-        snapshot.agent_error.is_none() && per_worker(&snapshot) == 8.0
-    });
+    wait_for(
+        &mut updates,
+        |update| matches!(update, Update::Decision { change, why: None } if change.0 == "chg-ok"),
+    );
+    assert_eq!(per_worker(&backend.snapshot()), 8.0);
 }
 
 #[test]
@@ -1975,17 +2004,16 @@ fn a_decision_whose_card_cannot_be_read_back_says_it_went_through() {
         "8.00",
     ));
     let fake = FakeAgmend::start(snapshot);
-    let (backend, _updates) = live_backend(&fake);
+    let (backend, mut updates) = live_backend(&fake);
     fake.edit(|state| state.fail_snapshots_after_settings = true);
     backend
         .act(Action::Apply(ChangeId("chg-ok".into())))
         .unwrap();
-    until(|| {
-        backend
-            .snapshot()
-            .agent_error
-            .is_some_and(|why| why.contains("The change went through"))
+    wait_for(&mut updates, |update| {
+        matches!(update, Update::Decision { change, why: Some(why) }
+            if change.0 == "chg-ok" && why.contains("The change went through"))
     });
+    assert!(backend.snapshot().agent_error.is_none());
     // The decision reached agmend once, and was not sent again.
     assert_eq!(fake.state.lock().unwrap().settings_requests.len(), 1);
 }
