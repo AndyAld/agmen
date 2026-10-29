@@ -84,7 +84,7 @@ const MANAGED_COMMAND_OFF =
 /**
  * check-path reasons a deny may show, beside `lane <lane> held by <handle>`
  * (docs/plans/mvp.md, `it_check_path`). They are the hub's fixed phrases in
- * crates/agmen-hub/src/lanes.rs (`UNOWNED`, `NOT_CLAIMED`, `NOT_A_REPO_PATH`);
+ * crates/agmen-core/src/lanes.rs (`UNOWNED`, `NOT_CLAIMED`, `NOT_A_REPO_PATH`);
  * a phrase added there goes here in the same change. A reason of any other
  * shape is not shown: it could carry text the model would read as instructions.
  */

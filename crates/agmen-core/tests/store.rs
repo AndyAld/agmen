@@ -2,8 +2,11 @@
 
 use std::cell::Cell;
 
-use agmen_core::{Core, MEM_MAX_ROWS, MemStore, Reads, Store, StoreError, StoreTx};
-use agmen_proto::Seq;
+use agmen_core::{
+    Core, LaneHolder, LaneRow, MEM_MAX_ROWS, MemStore, Reads, ResolvedLane, Store, StoreError,
+    StoreTx,
+};
+use agmen_proto::{IdentityId, IdentityKind, LaneName, ProjectId, Seq};
 use tokio::sync::OwnedMutexGuard;
 
 #[tokio::test]
@@ -39,7 +42,41 @@ fn tx_is_send_with_a_non_sync_state() {
 
     struct NonSyncTx(OwnedMutexGuard<Cell<u8>>);
 
-    impl Reads for NonSyncTx {}
+    impl Reads for NonSyncTx {
+        async fn lane_globs(
+            &mut self,
+            _project: &ProjectId,
+        ) -> Result<Vec<(LaneName, Vec<String>)>, StoreError> {
+            Ok(Vec::new())
+        }
+
+        async fn lane_holders(
+            &mut self,
+            _project: &ProjectId,
+        ) -> Result<Vec<LaneHolder>, StoreError> {
+            Ok(Vec::new())
+        }
+
+        async fn live_edit_scope(
+            &mut self,
+            _project: &ProjectId,
+            _id: &IdentityId,
+        ) -> Result<Option<(IdentityKind, Option<serde_json::Value>)>, StoreError> {
+            Ok(None)
+        }
+
+        async fn lends_to(
+            &mut self,
+            _project: &ProjectId,
+            _to: &IdentityId,
+        ) -> Result<Vec<(LaneName, Vec<String>)>, StoreError> {
+            Ok(Vec::new())
+        }
+
+        async fn lane_list(&mut self, _project: &ProjectId) -> Result<Vec<LaneRow>, StoreError> {
+            Ok(Vec::new())
+        }
+    }
 
     impl StoreTx for NonSyncTx {
         async fn lock_head(&mut self, _key: &str) -> Result<(), StoreError> {
@@ -52,6 +89,22 @@ fn tx_is_send_with_a_non_sync_state() {
 
         async fn commit(self) -> Result<(), StoreError> {
             Ok(())
+        }
+
+        async fn replace_lanes(
+            &mut self,
+            _project: &ProjectId,
+            _lanes: &[ResolvedLane],
+        ) -> Result<(), StoreError> {
+            Ok(())
+        }
+
+        async fn resolve_owner(
+            &mut self,
+            _project: &ProjectId,
+            _handle: &str,
+        ) -> Result<Option<IdentityId>, StoreError> {
+            Ok(None)
         }
     }
 

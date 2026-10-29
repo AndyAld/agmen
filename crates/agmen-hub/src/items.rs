@@ -117,7 +117,7 @@ pub(crate) async fn assign(
 
 /// Ends `holder`'s live claim on `item` and moves the item to done, which
 /// closes it to new claims. A claim is live by the test
-/// [`crate::claims::lane_holders`] uses: not released and its lease not
+/// [`crate::store_pg::lane_holders`] uses: not released and its lease not
 /// over. Without one, nothing changes.
 pub(crate) async fn close_claimed(
     conn: &mut PgConnection,

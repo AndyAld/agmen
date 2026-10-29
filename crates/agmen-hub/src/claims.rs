@@ -12,7 +12,7 @@ use agmen_proto::{
     Body, ClientEnvelope, DenyReason, IdentityId, IdentityKind, ItemKey, LaneName, NackReason,
     Payload, ProtoError, Stream, Timestamp, Topics, Verb, validate,
 };
-use sqlx::{PgConnection, PgExecutor, Postgres, Transaction};
+use sqlx::{PgConnection, Postgres, Transaction};
 
 use crate::http::{Hub, error_chain};
 use crate::ingest::{HubPost, PostError, post_in};
@@ -552,41 +552,4 @@ async fn release(
         tracing::debug!(%item, from = %msg.from, "RELEASE released nothing");
     }
     Ok(())
-}
-
-/// One identity's active claim on an item of a lane.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct LaneHolder {
-    pub(crate) lane: LaneName,
-    pub(crate) identity: IdentityId,
-    pub(crate) handle: String,
-}
-
-/// Who holds a live claim on an item with a lane in `project`, oldest claim
-/// first.
-pub(crate) async fn lane_holders(
-    db: impl PgExecutor<'_>,
-    project: &str,
-) -> Result<Vec<LaneHolder>, LedgerError> {
-    let rows: Vec<(String, String, String)> = sqlx::query_as(
-        "SELECT i.lane, c.identity_id, h.handle
-         FROM claims c
-         JOIN items i ON i.project_id = c.project_id AND i.key = c.item_key
-         JOIN identities h ON h.id = c.identity_id
-         WHERE c.project_id = $1 AND c.released_at IS NULL AND c.lease_until > now()
-           AND i.lane IS NOT NULL
-         ORDER BY c.granted_at, c.id",
-    )
-    .bind(project)
-    .fetch_all(db)
-    .await?;
-    rows.into_iter()
-        .map(|(lane, identity, handle)| {
-            Ok(LaneHolder {
-                lane: lane.parse().map_err(stored)?,
-                identity: identity.parse().map_err(stored)?,
-                handle,
-            })
-        })
-        .collect()
 }
