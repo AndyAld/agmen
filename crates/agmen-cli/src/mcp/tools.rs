@@ -36,7 +36,9 @@ report finished work with done, give a claim up with release, and report a new p
 found. Talk with post, ask, answer and dm; wherever a tool names an identity, a handle such as \
 andy/sol works. A tool that sends answers recorded #<seq> (<stream>) once the hub has the \
 message, queued id=<id> (not yet recorded) while it is still on its way (agmen keeps sending it), \
-or rejected: <reason>. Never send a rejected message again unchanged.";
+or rejected: <reason>. Never send a rejected message again unchanged. \
+Messages addressed to you are added at the end of tool results under \"for you\"; when you \
+have no other agmen call to make, call inbox between steps.";
 
 /// Tool visibility at startup; absence of verbs preserves the legacy list.
 pub(crate) fn hidden_tools(verbs: Option<&BTreeSet<String>>) -> Vec<&'static str> {
@@ -223,7 +225,7 @@ impl Server {
         description = "Review a DONE by its id with a verdict, findings and the paths traced. Sends REVIEW."
     )]
     async fn review(&self, Parameters(params): Parameters<ReviewParams>) -> CallToolResult {
-        self.respond(move |live: Arc<Live>| async move {
+        self.respond_with_pending(move |live: Arc<Live>| async move {
             let out = Outgoing {
                 reply_to: Some(params.reply_to),
                 ..Outgoing::new(
@@ -245,7 +247,7 @@ impl Server {
         ALERT and the rest). Answers recorded, queued or rejected."
     )]
     async fn post(&self, Parameters(params): Parameters<PostParams>) -> CallToolResult {
-        self.respond(move |live: Arc<Live>| async move {
+        self.respond_with_pending(move |live: Arc<Live>| async move {
             let data = Value::Object(params.data.unwrap_or_default());
             let out = Outgoing {
                 to: params.to,
@@ -263,7 +265,7 @@ impl Server {
         the inbox."
     )]
     async fn ask(&self, Parameters(params): Parameters<AskParams>) -> CallToolResult {
-        self.respond(move |live: Arc<Live>| async move {
+        self.respond_with_pending(move |live: Arc<Live>| async move {
             let of = match params.of {
                 Some(of) => live.agent.resolve(live.via(), &[of]).await?.pop(),
                 None => None,
@@ -280,7 +282,7 @@ impl Server {
 
     #[tool(description = "Answer an ASK by its id, as inbox shows it.")]
     async fn answer(&self, Parameters(params): Parameters<AnswerParams>) -> CallToolResult {
-        self.respond(move |live: Arc<Live>| async move {
+        self.respond_with_pending(move |live: Arc<Live>| async move {
             let out = Outgoing {
                 reply_to: Some(params.reply_to),
                 about: params.about,
@@ -293,7 +295,7 @@ impl Server {
 
     #[tool(description = "Send a direct message to 1 to 8 identities, by handle or id.")]
     async fn dm(&self, Parameters(params): Parameters<DmParams>) -> CallToolResult {
-        self.respond(move |live: Arc<Live>| async move {
+        self.respond_with_pending(move |live: Arc<Live>| async move {
             let out = Outgoing {
                 to: params.to,
                 reply_to: params.reply_to,
@@ -328,7 +330,7 @@ impl Server {
         versions) or roster (who is in the project and online)."
     )]
     async fn state(&self, Parameters(params): Parameters<StateParams>) -> CallToolResult {
-        self.respond(move |live: Arc<Live>| async move {
+        self.respond_with_pending(move |live: Arc<Live>| async move {
             let key = params.key.unwrap_or_default().as_str();
             let value = live
                 .agent
@@ -346,7 +348,7 @@ impl Server {
         the lease) or denied (with the reason)."
     )]
     async fn claim(&self, Parameters(params): Parameters<ClaimParams>) -> CallToolResult {
-        self.respond(move |live: Arc<Live>| async move {
+        self.respond_with_pending(move |live: Arc<Live>| async move {
             let (at, answer) = claim::claim_item(&live.agent, live.via(), params.item).await?;
             Ok(format!("{}\n{}", recorded_line(&at), answer.line()))
         })
@@ -355,7 +357,7 @@ impl Server {
 
     #[tool(description = "Give up a claim.")]
     async fn release(&self, Parameters(params): Parameters<ReleaseParams>) -> CallToolResult {
-        self.respond(move |live: Arc<Live>| async move {
+        self.respond_with_pending(move |live: Arc<Live>| async move {
             let at =
                 claim::release_item(&live.agent, live.via(), params.item, params.reason).await?;
             Ok(recorded_line(&at))
@@ -368,7 +370,7 @@ impl Server {
         the branch and the changed paths since the claim."
     )]
     async fn done(&self, Parameters(params): Parameters<DoneParams>) -> CallToolResult {
-        self.respond(move |live: Arc<Live>| async move {
+        self.respond_with_pending(move |live: Arc<Live>| async move {
             let (at, line) = claim::done_item(
                 &live.agent,
                 live.via(),
@@ -384,7 +386,7 @@ impl Server {
 
     #[tool(description = "Report a new problem; the hub answers with its item key, such as B-7.")]
     async fn found(&self, Parameters(params): Parameters<FoundParams>) -> CallToolResult {
-        self.respond(move |live: Arc<Live>| async move {
+        self.respond_with_pending(move |live: Arc<Live>| async move {
             let payload = Payload::Found {
                 title: params.title,
                 lane: params.lane,
@@ -402,14 +404,16 @@ impl Server {
 
     #[tool(description = "Show the project's lanes: each lane's name, owner and path globs.")]
     async fn lanes(&self) -> CallToolResult {
-        self.respond(|live: Arc<Live>| async move { lanes::lanes_text(&live.agent).await })
-            .await
+        self.respond_with_pending(
+            |live: Arc<Live>| async move { lanes::lanes_text(&live.agent).await },
+        )
+        .await
     }
 
     #[tool(description = "Say whether this identity may edit each path, and why.")]
     async fn check_path(&self, Parameters(params): Parameters<CheckPathParams>) -> CallToolResult {
         let cwd = self.cwd().to_path_buf();
-        self.respond(move |live: Arc<Live>| async move {
+        self.respond_with_pending(move |live: Arc<Live>| async move {
             let answers = lanes::check(&live.agent, &cwd, params.paths).await?;
             Ok(lanes::check_lines(&answers))
         })

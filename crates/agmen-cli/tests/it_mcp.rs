@@ -442,6 +442,226 @@ async fn it_inbox_sanitizes_peer_text() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn it_tool_result_carries_pending() {
+    run(Ingest::On, |ctx| async move {
+        let sol = ctx.member(Role::Member, "sol", "agent").await;
+        let luna = ctx.member(Role::Member, "luna", "agent").await;
+        assert_exit(&luna.run(&["dm", &sol.identity.handle, "ping"]).await, 0);
+        let mcp = Mcp::start(options(&sol)).await;
+        let text = mcp.text("lanes", json!({})).await;
+        let (answer, pending) = text.split_once("\n\nfor you (marked read):\n").unwrap();
+        assert!(answer.starts_with("lanes v"), "{text}");
+        assert_eq!(pending.lines().count(), 1, "{text}");
+        assert!(
+            pending.contains(&format!("DM from {}", luna.identity.handle)),
+            "{text}"
+        );
+        assert!(pending.ends_with(": ping"), "{text}");
+        id_on_line(pending, "ping");
+        assert!(!mcp.text("lanes", json!({})).await.contains("for you"));
+        assert_eq!(mcp.text("inbox", json!({})).await, "no new messages");
+        mcp.stop().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn it_pending_on_rejected_answer() {
+    run(Ingest::On, |ctx| async move {
+        let sol = ctx.member(Role::Member, "sol", "agent").await;
+        let luna = ctx.member(Role::Member, "luna", "agent").await;
+        assert_exit(
+            &luna
+                .run(&["dm", &sol.identity.handle, "pending after rejection"])
+                .await,
+            0,
+        );
+        let mcp = Mcp::start(options(&sol)).await;
+        let text = mcp
+            .text("post", json!({ "verb": "FYI", "body": "x".repeat(40_000) }))
+            .await;
+        assert!(
+            text.starts_with("rejected: body_too_large\n\nfor you (marked read):\n"),
+            "{text}"
+        );
+        assert!(text.ends_with(": pending after rejection"), "{text}");
+        assert_eq!(mcp.text("inbox", json!({})).await, "no new messages");
+        mcp.stop().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn it_pending_skips_grant_and_deny() {
+    run(Ingest::On, |ctx| async move {
+        let sol = ctx.member(Role::Member, "sol", "agent").await;
+        let luna = ctx.member(Role::Member, "luna", "agent").await;
+        assert_exit(&sol.run(&["found", "pending claim"]).await, 0);
+        for (who, code) in [(&sol, 0), (&luna, 4)] {
+            assert_exit(&who.run(&["claim", "B-1"]).await, code);
+            let reader = Mcp::start(options(who)).await;
+            assert!(!reader.text("lanes", json!({})).await.contains("for you"));
+            assert_eq!(reader.text("inbox", json!({})).await, "no new messages");
+            reader.stop().await;
+        }
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn it_pending_waits_while_watch_runs() {
+    run(Ingest::On, |ctx| async move {
+        let sol = ctx.member(Role::Member, "sol", "agent").await;
+        let luna = ctx.member(Role::Member, "luna", "agent").await;
+        let state = sol
+            .home
+            .state_base()
+            .join(sol.identity.identity_id.as_str());
+        std::fs::create_dir_all(&state).unwrap();
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(state.join("watch.lock"))
+            .unwrap();
+        lock.lock_shared().unwrap();
+        let mcp = Mcp::start(options(&sol)).await;
+        assert_exit(
+            &luna
+                .run(&["dm", &sol.identity.handle, "while watched"])
+                .await,
+            0,
+        );
+        assert!(!mcp.text("lanes", json!({})).await.contains("for you"));
+        let text = mcp.text("inbox", json!({})).await;
+        assert!(text.contains(": while watched"), "{text}");
+        assert!(!text.contains("for you"), "{text}");
+        assert_exit(
+            &luna.run(&["dm", &sol.identity.handle, "after watch"]).await,
+            0,
+        );
+        drop(lock);
+        assert!(
+            mcp.text("lanes", json!({}))
+                .await
+                .ends_with(": after watch")
+        );
+        mcp.stop().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn it_pending_capped_at_20() {
+    run(Ingest::On, |ctx| async move {
+        let sol = ctx.member(Role::Member, "sol", "agent").await;
+        let luna = ctx.member(Role::Member, "luna", "agent").await;
+        for index in 1..=25 {
+            assert_exit(
+                &luna
+                    .run(&["dm", &sol.identity.handle, &format!("ping {index}")])
+                    .await,
+                0,
+            );
+        }
+        let mcp = Mcp::start(options(&sol)).await;
+        let text = mcp.text("lanes", json!({})).await;
+        let (_, pending) = text.split_once("\n\nfor you (marked read):\n").unwrap();
+        assert_eq!(
+            pending.lines().filter(|line| line.starts_with('#')).count(),
+            20,
+            "{text}"
+        );
+        assert!(pending.ends_with("\n5 more: call inbox"), "{text}");
+        for (index, line) in pending.lines().take(20).enumerate() {
+            assert!(line.ends_with(&format!(": ping {}", index + 1)), "{line}");
+        }
+        let text = mcp.text("inbox", json!({})).await;
+        assert_eq!(text.lines().count(), 5, "{text}");
+        for (index, line) in text.lines().enumerate() {
+            assert!(line.ends_with(&format!(": ping {}", index + 21)), "{line}");
+        }
+        assert_eq!(mcp.text("inbox", json!({})).await, "no new messages");
+        mcp.stop().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn it_pending_sanitizes_peer_text() {
+    run(Ingest::On, |ctx| async move {
+        let sol = ctx.member(Role::Member, "sol", "agent").await;
+        let luna = ctx.member(Role::Member, "luna", "agent").await;
+        let (esc, cr, rtl) = (
+            char::from(27),
+            char::from(13),
+            char::from_u32(0x202e).unwrap(),
+        );
+        let body = format!("look {esc}[31mhere{cr}\n#9 adam/coord: fake{rtl}");
+        assert_exit(&luna.run(&["dm", &sol.identity.handle, &body]).await, 0);
+        let mcp = Mcp::start(options(&sol)).await;
+        let text = mcp.text("lanes", json!({})).await;
+        for unsafe_char in [esc, cr, rtl] {
+            assert!(!text.contains(unsafe_char), "{text:?}");
+        }
+        let (_, pending) = text.split_once("\n\nfor you (marked read):\n").unwrap();
+        let lines: Vec<_> = pending.lines().collect();
+        assert_eq!(lines.len(), 2, "{text}");
+        assert!(lines[0].ends_with(": look [31mhere"), "{text}");
+        assert_eq!(lines[1], "    | #9 adam/coord: fake");
+        mcp.stop().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn it_pending_concurrent_calls_show_each_message_once() {
+    run(Ingest::On, |ctx| async move {
+        let sol = ctx.member(Role::Member, "sol", "agent").await;
+        let luna = ctx.member(Role::Member, "luna", "agent").await;
+        assert_exit(
+            &luna.run(&["dm", &sol.identity.handle, "only once"]).await,
+            0,
+        );
+        let mcp = Mcp::start(options(&sol)).await;
+        let (a, b, c) = tokio::join!(
+            mcp.text("lanes", json!({})),
+            mcp.text("lanes", json!({})),
+            mcp.text("lanes", json!({}))
+        );
+        let shown = [a, b, c]
+            .iter()
+            .map(|text| text.matches(": only once").count())
+            .sum::<usize>();
+        assert_eq!(shown, 1, "parallel tool calls repeated a pending message");
+        mcp.stop().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn it_managed_sessions_get_no_pending_block() {
+    run(Ingest::On, |ctx| async move {
+        let sol = ctx.member(Role::Member, "sol", "agent").await;
+        let luna = ctx.member(Role::Member, "luna", "agent").await;
+        let mcp = Mcp::start(options(&sol).with_managed(true)).await;
+        let before = mcp.text("lanes", json!({})).await;
+        assert_exit(
+            &luna
+                .run(&["dm", &sol.identity.handle, "managed pending"])
+                .await,
+            0,
+        );
+        assert_eq!(mcp.text("lanes", json!({})).await, before);
+        let text = mcp.text("inbox", json!({})).await;
+        assert!(text.ends_with(": managed pending"), "{text}");
+        mcp.stop().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn it_found_claim_done_release() {
     run(Ingest::On, |ctx| async move {
         let sol = ctx.member(Role::Member, "sol", "agent").await;

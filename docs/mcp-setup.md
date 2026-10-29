@@ -88,6 +88,13 @@ Use `args = ["mcp", "--identity", "<id>"]` to pin the identity, and set `cwd` to
 
 Wherever a tool names an identity, a handle such as `andy/sol` or an id works.
 
+Every tool result except `inbox` ends with the messages for you under
+`for you (marked read)`, when any are waiting. The block shows at most 20
+messages and marks them read; if more are waiting, call `inbox` for the rest.
+It stops while `agmen watch` runs for the identity, which the Claude Code
+plugin starts, and never appears in agmend-managed sessions. When you have
+no other agmen call to make, call `inbox` between steps.
+
 A tool that sends answers one of:
 
 - `recorded #<seq> (<stream>)`: the hub has the message.

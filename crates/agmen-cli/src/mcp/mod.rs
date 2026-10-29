@@ -38,7 +38,7 @@ use agmen_client::{
     ClientError, ClientEvent, ClientKind, Events, IdentityError, Joined, Presence, Session,
     SessionConfig, TokenStore, find_identity,
 };
-use agmen_proto::IdentityId;
+use agmen_proto::{IdentityId, Payload};
 use anyhow::Context as _;
 use clap::Args;
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -52,8 +52,9 @@ use tokio::time::Instant;
 
 use crate::client::blocking;
 use crate::cmd::claim::heartbeat_envelope;
+use crate::cmd::inbox;
 use crate::joined::{Agent, Via, client_error};
-use crate::output::{Code, Fail, NOT_JOINED, clean, clean_lines, explain};
+use crate::output::{Code, Fail, NOT_JOINED, clean, clean_lines, explain, message_line_with_id};
 use crate::paths;
 use crate::watch_lock::watch_running;
 
@@ -68,6 +69,8 @@ const RECONNECT_FIRST: Duration = Duration::from_secs(1);
 const ANSWER_WAIT: Duration = Duration::from_secs(5);
 /// How often an MCP session checks whether a watch took over presence.
 const PRESENCE_RECHECK: Duration = Duration::from_secs(60);
+/// The most pending messages appended to one tool result.
+pub(crate) const PENDING_MAX: usize = 20;
 
 /// `agmen mcp`'s arguments.
 #[derive(Debug, Args)]
@@ -290,6 +293,9 @@ struct Shared {
     /// Read-locked for the length of a tool call and write-locked by a
     /// presence handoff. Lock it before `slot`.
     calls: RwLock<()>,
+    /// Held from the pending read to the mark, so tool calls that run at
+    /// the same time never show one message twice.
+    pending: Mutex<()>,
 }
 
 /// The identity's broker session while it runs, and what the tools need.
@@ -431,6 +437,7 @@ impl Server {
                 options,
                 slot: Mutex::new(None),
                 calls: RwLock::new(()),
+                pending: Mutex::new(()),
             }),
             tool_router,
         }
@@ -458,6 +465,82 @@ impl Server {
             },
             Err(answer) => answer,
         }
+    }
+
+    /// Adds pending messages to a successful answer when no watch runs.
+    /// Managed sessions leave all pending reads to agmend, whose sender
+    /// restrictions would otherwise be bypassed by this block.
+    pub(crate) async fn respond_with_pending<F, Fut>(&self, work: F) -> CallToolResult
+    where
+        F: FnOnce(Arc<Live>) -> Fut,
+        Fut: Future<Output = anyhow::Result<String>>,
+    {
+        if self.shared.options.managed {
+            return self.respond(work).await;
+        }
+        self.respond(move |live| async move {
+            let mut answer = match work(live.clone()).await {
+                Ok(answer) => answer,
+                Err(err) => {
+                    let result = failure(&err);
+                    if result.is_error != Some(false) {
+                        return Err(err);
+                    }
+                    // Queued and rejected sends are text answers too.
+                    result_text(&result)
+                }
+            };
+            let _pending = self.shared.pending.lock().await;
+            let pending = async {
+                if watch_running(&live.agent.state_dir).await? {
+                    return Ok(None);
+                }
+                inbox::unread(&live.agent, None).await.map(Some)
+            }
+            .await;
+            let mut unread = match pending {
+                Ok(Some(unread)) => unread,
+                Ok(None) => return Ok(answer),
+                Err(err) => {
+                    tracing::warn!(
+                        error = %clean(&format!("{err:#}")),
+                        "reading pending messages failed"
+                    );
+                    return Ok(answer);
+                }
+            };
+            // The claim tool already answers these. Keep the scan marks
+            // so they are still marked read without using the display cap.
+            unread.messages.retain(|message| {
+                !matches!(
+                    message.client.payload,
+                    Payload::Grant { .. } | Payload::Deny { .. }
+                )
+            });
+            let (unread, dropped) = unread.keep_first(PENDING_MAX);
+            if !unread.messages.is_empty() {
+                answer.push_str("\n\nfor you (marked read):\n");
+                for (index, message) in unread.messages.iter().enumerate() {
+                    if index > 0 {
+                        answer.push('\n');
+                    }
+                    answer.push_str(&clean_lines(&message_line_with_id(message)));
+                }
+                if dropped > 0 {
+                    answer.push_str(&format!("\n{dropped} more: call inbox"));
+                }
+            }
+            if let Err(err) = unread.mark_read().await {
+                // Keep the displayed messages in the answer even if a
+                // cursor write fails; the next read may repeat them.
+                tracing::warn!(
+                    error = %clean(&format!("{err:#}")),
+                    "marking pending messages read failed"
+                );
+            }
+            Ok(answer)
+        })
+        .await
     }
 
     /// The working directory paths are relative to.
@@ -771,6 +854,23 @@ fn result_text(result: &CallToolResult) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn managed_sessions_get_no_pending_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let options = McpOptions::new(dir.path(), TokenStore::Dir(dir.path().into()), dir.path())
+            .with_managed(true);
+        let server = Server::new(options, Server::tool_router());
+        let plain = server.respond(|_| async { Ok("answer".to_owned()) }).await;
+        let pending = server
+            .respond_with_pending(|_| async { Ok("answer".to_owned()) })
+            .await;
+        assert_eq!(
+            serde_json::to_value(&pending).unwrap(),
+            serde_json::to_value(&plain).unwrap()
+        );
+        assert_eq!(result_text(&pending), NOT_JOINED);
+    }
 
     #[tokio::test]
     async fn managed_sessions_never_publish_presence() {
