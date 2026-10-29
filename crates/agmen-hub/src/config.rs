@@ -300,6 +300,55 @@ pub struct PaddleConfig {
     pub webhook_secret: Secret,
 }
 
+impl PaddleConfig {
+    /// Reads `AGMEN_PADDLE_API_URL` (unset or empty means
+    /// `https://api.paddle.com`) and `AGMEN_PADDLE_API_KEY` from the process
+    /// environment, for `agmen-hub paddle-catalog`. That command runs before
+    /// the price ids exist, so it cannot use [`Config::from_env`], and it does
+    /// not read `AGMEN_HUB_MODE`.
+    ///
+    /// `webhook_secret` is left as [`Secret::default`] because the catalog
+    /// command verifies no webhook.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::Missing`] when `AGMEN_PADDLE_API_KEY` is unset or empty,
+    /// and [`ConfigError::Invalid`] when the URL is not an https URL without
+    /// credentials.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # fn main() -> Result<(), agmen_hub::ConfigError> {
+    /// let paddle = agmen_hub::PaddleConfig::api_from_env()?;
+    /// println!("{}", paddle.api_url);
+    /// # Ok(()) }
+    /// ```
+    pub fn api_from_env() -> Result<Self, ConfigError> {
+        paddle_api_settings(|name| std::env::var(name).ok())
+    }
+}
+
+/// [`PaddleConfig::api_from_env`] over `lookup`.
+fn paddle_api_settings(
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Result<PaddleConfig, ConfigError> {
+    let get = |name: &'static str| lookup(name).filter(|value| !value.is_empty());
+    let api_url = https_url(
+        "AGMEN_PADDLE_API_URL",
+        get("AGMEN_PADDLE_API_URL")
+            .as_deref()
+            .unwrap_or(DEFAULT_PADDLE_API_URL),
+    )?;
+    let api_key =
+        get("AGMEN_PADDLE_API_KEY").ok_or(ConfigError::Missing("AGMEN_PADDLE_API_KEY"))?;
+    Ok(PaddleConfig {
+        api_url,
+        api_key: Secret::new(api_key),
+        webhook_secret: Secret::default(),
+    })
+}
+
 /// Hosted-mode settings. Present on [`Config`] exactly when [`HubMode`] is
 /// [`HubMode::Hosted`], so a self-hosted hub never builds a Paddle client.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1253,6 +1302,73 @@ mod tests {
                 ),
                 "{bad}"
             );
+        }
+    }
+
+    #[test]
+    fn api_from_env_needs_a_key() {
+        for key in [None, Some(String::new())] {
+            let err = paddle_api_settings(|name| match name {
+                "AGMEN_PADDLE_API_KEY" => key.clone(),
+                _ => None,
+            })
+            .unwrap_err();
+            assert!(
+                matches!(err, ConfigError::Missing("AGMEN_PADDLE_API_KEY")),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn api_from_env_reads_the_key_and_leaves_the_webhook_secret_empty() {
+        let key = runtime_secret("api");
+        let paddle = |url: Option<&str>| {
+            paddle_api_settings(|name| match name {
+                "AGMEN_PADDLE_API_KEY" => Some(key.clone()),
+                "AGMEN_PADDLE_API_URL" => url.map(str::to_owned),
+                _ => None,
+            })
+            .unwrap()
+        };
+        let default = paddle(None);
+        assert_eq!(default.api_url.as_str(), "https://api.paddle.com/");
+        assert_eq!(default.api_key.expose(), key);
+        assert_eq!(default.webhook_secret, Secret::default());
+        assert_eq!(paddle(Some("")).api_url, default.api_url);
+        assert_eq!(
+            paddle(Some("https://sandbox-api.paddle.com"))
+                .api_url
+                .as_str(),
+            "https://sandbox-api.paddle.com/"
+        );
+    }
+
+    #[test]
+    fn api_from_env_refuses_an_http_url() {
+        let key = runtime_secret("api");
+        for bad in [
+            "http://api.paddle.com",
+            "not a url",
+            "https://user:pw@api.paddle.com",
+        ] {
+            let err = paddle_api_settings(|name| match name {
+                "AGMEN_PADDLE_API_KEY" => Some(key.clone()),
+                "AGMEN_PADDLE_API_URL" => Some(bad.to_owned()),
+                _ => None,
+            })
+            .unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    ConfigError::Invalid {
+                        name: "AGMEN_PADDLE_API_URL",
+                        ..
+                    }
+                ),
+                "{bad}: {err}"
+            );
+            assert!(!err.to_string().contains(bad), "{err}");
         }
     }
 }

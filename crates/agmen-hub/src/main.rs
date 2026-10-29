@@ -28,7 +28,8 @@ use tracing_subscriber::EnvFilter;
 const USAGE: &str = "usage: agmen-hub [serve]
        agmen-hub health
        agmen-hub bootstrap --tenant <name> --project <name> (--admin-github <login> | --admin-github-id <id>) [--repo-url <url>]
-       agmen-hub set-plan --tenant <id> --plan team|business-10|business-25|business-50";
+       agmen-hub set-plan --tenant <id> --plan team|business-10|business-25|business-50
+       agmen-hub paddle-catalog";
 
 /// What the command line asks for.
 #[derive(Debug, PartialEq, Eq)]
@@ -45,6 +46,7 @@ enum Command {
         tenant: String,
         plan: String,
     },
+    PaddleCatalog,
     Help,
 }
 
@@ -71,6 +73,7 @@ async fn main() -> anyhow::Result<()> {
             repo_url,
         } => bootstrap(tenant, project, admin, repo_url).await,
         Command::SetPlan { tenant, plan } => set_plan(tenant, plan).await,
+        Command::PaddleCatalog => paddle_catalog().await,
         Command::Help => {
             println!("{USAGE}");
             Ok(())
@@ -99,6 +102,7 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> anyhow::Result<Comman
     let command = match args.next().as_deref() {
         None | Some("serve") => Command::Serve,
         Some("health") => Command::Health,
+        Some("paddle-catalog") => Command::PaddleCatalog,
         Some("-h" | "--help" | "help") => return Ok(Command::Help),
         Some("bootstrap") => {
             let (mut tenant, mut project, mut login, mut id) = (None, None, None, None);
@@ -295,6 +299,18 @@ async fn set_plan(tenant: String, plan: String) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Finds or creates the Paddle products and prices, and prints the five
+/// `AGMEN_PADDLE_PRICE_*` lines on stdout. It needs no database and does not
+/// read `AGMEN_HUB_MODE`: the price ids it prints do not exist yet.
+async fn paddle_catalog() -> anyhow::Result<()> {
+    let config = agmen_hub::PaddleConfig::api_from_env().context("reading the Paddle settings")?;
+    let catalog = agmen_hub::sync_catalog(&config)
+        .await
+        .context("syncing the Paddle catalog")?;
+    print!("{}", catalog.env_lines());
+    Ok(())
+}
+
 /// Resolves on Ctrl-C or SIGTERM, so in-flight requests finish first.
 async fn shutdown() {
     let ctrl_c = async {
@@ -426,6 +442,8 @@ mod tests {
         assert_eq!(parse(&[]).unwrap(), Command::Serve);
         assert_eq!(parse(&["serve"]).unwrap(), Command::Serve);
         assert_eq!(parse(&["--help"]).unwrap(), Command::Help);
+        assert_eq!(parse(&["paddle-catalog"]).unwrap(), Command::PaddleCatalog);
+        assert!(parse(&["paddle-catalog", "x"]).is_err());
         assert_eq!(
             parse(&[
                 "bootstrap",
