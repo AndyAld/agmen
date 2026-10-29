@@ -1,7 +1,9 @@
 //! Agent discovery and setup in a trusted, joined worktree.
 
 mod claude;
+mod codex;
 mod json;
+mod opencode;
 
 use std::fmt;
 use std::io::{BufRead as _, IsTerminal as _, Read as _, Write as _};
@@ -17,12 +19,16 @@ use crate::{client::blocking, git};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(crate) enum AgentKind {
     Claude,
+    Codex,
+    Opencode,
 }
 
 impl fmt::Display for AgentKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Claude => f.write_str("Claude Code"),
+            Self::Codex => f.write_str("Codex"),
+            Self::Opencode => f.write_str("OpenCode"),
         }
     }
 }
@@ -75,6 +81,7 @@ pub(crate) fn plugin_choice(no_plugin: bool) -> Result<Plugin> {
 pub(crate) struct AgentEnv {
     path: Vec<PathBuf>,
     home: PathBuf,
+    codex_home: PathBuf,
 }
 
 impl AgentEnv {
@@ -83,13 +90,18 @@ impl AgentEnv {
             .filter(|value| !value.is_empty())
             .or_else(|| std::env::var_os("USERPROFILE").filter(|value| !value.is_empty()))
             .context("HOME or USERPROFILE must name your home directory")?;
+        let home = PathBuf::from(home);
+        let codex_home = std::env::var_os("CODEX_HOME")
+            .filter(|value| !value.is_empty())
+            .map_or_else(|| home.join(".codex"), PathBuf::from);
         Ok(Self {
             // A relative or empty entry means the current directory, which can
             // be a repository that ships its own `claude`; never run that.
             path: std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
                 .filter(|dir| dir.is_absolute())
                 .collect(),
-            home: home.into(),
+            home,
+            codex_home,
         })
     }
 
@@ -123,6 +135,11 @@ impl AgentEnv {
             AgentKind::Claude => {
                 self.find_program("claude").is_some() || self.home.join(".claude").is_dir()
             }
+            AgentKind::Codex => self.find_program("codex").is_some() || self.codex_home.is_dir(),
+            AgentKind::Opencode => {
+                self.find_program("opencode").is_some()
+                    || self.home.join(".config/opencode").is_dir()
+            }
         }
     }
 }
@@ -155,23 +172,35 @@ impl fmt::Display for Change {
 
 pub(crate) async fn run(
     root: &Path,
-    _identity: &IdentityFile,
+    identity: &IdentityFile,
     only: Option<AgentKind>,
     plugin: Plugin,
 ) -> Result<Vec<Change>> {
     let env = blocking(AgentEnv::from_process).await?;
     let mut changes = Vec::new();
-    for agent in [AgentKind::Claude] {
+    for agent in [AgentKind::Claude, AgentKind::Codex, AgentKind::Opencode] {
         if only.is_some_and(|only| only != agent) || !env.detected(agent) {
             continue;
         }
         let outcome = match agent {
             AgentKind::Claude => claude::run(root, &env, plugin).await,
+            AgentKind::Codex => codex::run(root, identity, &env).await,
+            AgentKind::Opencode => opencode::run(root).await,
         };
         changes.push(Change {
             agent,
             outcome: outcome.unwrap_or_else(|err| Outcome::Failed(format!("{err:#}"))),
         });
+    }
+    // Callers clean each summary for one terminal line, so print this
+    // static notice separately after the config writes have finished.
+    if changes.iter().any(|change| {
+        change.agent != AgentKind::Claude
+            && matches!(change.outcome, Outcome::Configured(_) | Outcome::Unchanged)
+    }) {
+        println!(
+            "lane guard: only the Claude Code plugin blocks edits outside your lanes; other agents should call check_path before editing"
+        );
     }
     Ok(changes)
 }
@@ -282,6 +311,47 @@ mod tests {
     use super::*;
 
     #[test]
+    fn detects_codex_and_opencode() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let env = AgentEnv {
+            path: vec![bin.clone()],
+            home: dir.path().to_owned(),
+            codex_home: dir.path().join(".codex"),
+        };
+        assert!(!env.detected(AgentKind::Codex));
+        assert!(!env.detected(AgentKind::Opencode));
+        std::fs::create_dir(&env.codex_home).unwrap();
+        assert!(env.detected(AgentKind::Codex));
+        assert!(!env.detected(AgentKind::Opencode));
+        std::fs::remove_dir(&env.codex_home).unwrap();
+        std::fs::create_dir_all(env.home.join(".config/opencode")).unwrap();
+        assert!(env.detected(AgentKind::Opencode));
+        assert!(!env.detected(AgentKind::Codex));
+        std::fs::remove_dir_all(env.home.join(".config")).unwrap();
+        for (name, agent) in [
+            ("codex", AgentKind::Codex),
+            ("opencode", AgentKind::Opencode),
+        ] {
+            let program = bin.join(if cfg!(windows) {
+                format!("{name}.exe")
+            } else {
+                name.to_owned()
+            });
+            std::fs::write(&program, "#!/bin/sh\nexit 0\n").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                assert!(!env.detected(agent));
+                std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            assert!(env.detected(agent));
+            std::fs::remove_file(program).unwrap();
+        }
+    }
+
+    #[test]
     fn detects_agents_by_program_or_config_dir() {
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("bin");
@@ -289,6 +359,7 @@ mod tests {
         let env = AgentEnv {
             path: vec![bin.clone()],
             home: dir.path().to_owned(),
+            codex_home: dir.path().join(".codex"),
         };
         assert!(!env.detected(AgentKind::Claude));
         let program = bin.join(if cfg!(windows) {

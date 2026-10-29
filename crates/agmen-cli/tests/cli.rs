@@ -216,15 +216,245 @@ fn setup_needs_a_joined_worktree() {
 fn setup_refuses_an_agent_it_cannot_set_up_yet() {
     let home = Home::new();
     let out = home
-        .agmen(home.path(), &["setup", "--agent", "codex"])
+        .agmen(home.path(), &["setup", "--agent", "cursor"])
         .output()
         .unwrap();
     assert_exit(&out, 2);
     assert!(
-        stderr(&out).contains("possible values: claude"),
+        stderr(&out).contains("possible values: claude, codex, opencode"),
         "{}",
         stderr(&out)
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn setup_writes_codex_config_with_cwd() {
+    let home = Home::new();
+    home.fake_program("codex", "exit 99");
+    let wt = setup_worktree(&home);
+    let out = home.agmen(&wt.path(), &["setup"]).output().unwrap();
+    assert_exit(&out, 0);
+    assert!(stdout(&out).contains("Codex: wrote"), "{}", stdout(&out));
+    let path = home.path().join(".codex/config.toml");
+    let text = std::fs::read_to_string(&path).unwrap();
+    let doc = text.parse::<toml_edit::DocumentMut>().unwrap();
+    assert_eq!(
+        doc["mcp_servers"]["agmen"]["cwd"].as_str(),
+        wt.path().to_str()
+    );
+    assert_eq!(
+        doc["mcp_servers"]["agmen"]["args"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["mcp", "--identity", "idn7k2q9"]
+    );
+    let out = home.agmen(&wt.path(), &["setup"]).output().unwrap();
+    assert_exit(&out, 0);
+    assert!(stdout(&out).contains("Codex: already set up"));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+    let other = setup_worktree(&home);
+    let out = home.agmen(&other.path(), &["setup"]).output().unwrap();
+    assert_exit(&out, 0);
+    assert!(
+        stdout(&out).contains(&format!(
+            "Codex: now points at {} (was {})",
+            other.path().display(),
+            wt.path().display()
+        )),
+        "{}",
+        stdout(&out)
+    );
+    assert!(!home.path().join("calls/codex.log").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn setup_writes_opencode_json_and_excludes_it() {
+    let home = Home::new();
+    home.fake_program("opencode", "exit 99");
+    let wt = setup_worktree(&home);
+    let out = home.agmen(&wt.path(), &["setup"]).output().unwrap();
+    assert_exit(&out, 0);
+    assert!(stdout(&out).contains("OpenCode: wrote opencode.json"));
+    let path = wt.path().join("opencode.json");
+    let text = std::fs::read_to_string(&path).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(
+        value["mcp"]["agmen"],
+        serde_json::json!({"type":"local","command":["agmen","mcp"],"enabled":true})
+    );
+    let exclude = std::fs::read_to_string(wt.path().join(".git/info/exclude")).unwrap();
+    assert!(exclude.lines().any(|line| line == "opencode.json"));
+    let out = home.agmen(&wt.path(), &["setup"]).output().unwrap();
+    assert_exit(&out, 0);
+    assert!(stdout(&out).contains("OpenCode: already set up"));
+    assert_eq!(std::fs::read_to_string(path).unwrap(), text);
+    assert_eq!(
+        std::fs::read_to_string(wt.path().join(".git/info/exclude")).unwrap(),
+        exclude
+    );
+    assert!(!home.path().join("calls/opencode.log").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn setup_skips_opencode_jsonc() {
+    let home = Home::new();
+    home.fake_program("opencode", "exit 99");
+    let wt = setup_worktree(&home);
+    let original = "// mine\n{}\n";
+    std::fs::write(wt.path().join("opencode.jsonc"), original).unwrap();
+    let out = home.agmen(&wt.path(), &["setup"]).output().unwrap();
+    assert_exit(&out, 0);
+    assert!(stdout(&out).contains(
+        "OpenCode: skipped: opencode.jsonc exists; add the agmen entry by hand (docs/mcp-setup.md)"
+    ));
+    assert!(!wt.path().join("opencode.json").exists());
+    assert_eq!(
+        std::fs::read_to_string(wt.path().join("opencode.jsonc")).unwrap(),
+        original
+    );
+    assert_eq!(
+        std::fs::read_to_string(wt.path().join(".git/info/exclude")).unwrap(),
+        ".agmen/\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn setup_agent_flag_picks_one() {
+    let home = Home::new();
+    home.fake_program("codex", "exit 99");
+    home.fake_program("opencode", "exit 99");
+    let wt = setup_worktree(&home);
+    let out = home
+        .agmen(&wt.path(), &["setup", "--agent", "opencode"])
+        .output()
+        .unwrap();
+    assert_exit(&out, 0);
+    assert!(wt.path().join("opencode.json").is_file());
+    assert!(!home.path().join(".codex/config.toml").exists());
+    assert!(!stdout(&out).contains("Codex:"));
+}
+
+#[cfg(unix)]
+#[test]
+fn setup_names_the_lane_guard_limit() {
+    let home = Home::new();
+    home.fake_program("codex", "exit 99");
+    let wt = setup_worktree(&home);
+    let out = home.agmen(&wt.path(), &["setup"]).output().unwrap();
+    assert_exit(&out, 0);
+    assert!(stdout(&out).lines().any(|line| line == "lane guard: only the Claude Code plugin blocks edits outside your lanes; other agents should call check_path before editing"), "{}", stdout(&out));
+}
+
+#[cfg(unix)]
+#[test]
+fn setup_codex_uses_codex_home_and_preserves_the_file() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let home = Home::new();
+    let codex_home = home.path().join("custom-codex");
+    std::fs::create_dir(&codex_home).unwrap();
+    let path = codex_home.join("config.toml");
+    let original = "# mine\n[mcp_servers.other]\ncommand='other' # unchanged\n";
+    std::fs::write(&path, original).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+    let link = codex_home.join("old-config");
+    std::fs::hard_link(&path, &link).unwrap();
+    let wt = setup_worktree(&home);
+    let out = home
+        .agmen(&wt.path(), &["setup"])
+        .env("CODEX_HOME", &codex_home)
+        .output()
+        .unwrap();
+    assert_exit(&out, 0);
+    assert!(stdout(&out).contains("Codex: wrote"), "{}", stdout(&out));
+    assert!(
+        std::fs::read_to_string(&path)
+            .unwrap()
+            .starts_with(original)
+    );
+    assert_eq!(std::fs::read_to_string(link).unwrap(), original);
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o640
+    );
+    assert!(!home.path().join(".codex").exists());
+    assert_eq!(std::fs::read_dir(codex_home).unwrap().count(), 2);
+}
+
+#[cfg(unix)]
+#[test]
+fn setup_codex_preserves_unreadable_and_oversized_configs() {
+    for original in [
+        "[[".to_owned(),
+        "mcp_servers = 1".to_owned(),
+        " ".repeat(1024 * 1024 + 1),
+    ] {
+        let home = Home::new();
+        let path = home.path().join(".codex/config.toml");
+        std::fs::create_dir(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, &original).unwrap();
+        let wt = setup_worktree(&home);
+        let out = home.agmen(&wt.path(), &["setup"]).output().unwrap();
+        assert_exit(&out, 0);
+        assert!(stdout(&out).contains("Codex: skipped:"), "{}", stdout(&out));
+        assert!(!stdout(&out).contains("wrote"));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), original);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn setup_codex_refuses_a_symlinked_config() {
+    let home = Home::new();
+    let codex_home = home.path().join(".codex");
+    std::fs::create_dir(&codex_home).unwrap();
+    let target = home.path().join("original.toml");
+    std::fs::write(&target, "# original\n").unwrap();
+    std::os::unix::fs::symlink(&target, codex_home.join("config.toml")).unwrap();
+    let wt = setup_worktree(&home);
+    let out = home.agmen(&wt.path(), &["setup"]).output().unwrap();
+    assert_exit(&out, 0);
+    assert!(stdout(&out).contains("not a regular file"));
+    assert_eq!(std::fs::read_to_string(target).unwrap(), "# original\n");
+    assert!(
+        std::fs::symlink_metadata(codex_home.join("config.toml"))
+            .unwrap()
+            .is_symlink()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn setup_opencode_preserves_tracked_and_unreadable_configs() {
+    for tracked in [false, true] {
+        let home = Home::new();
+        home.fake_program("opencode", "exit 99");
+        let wt = setup_worktree(&home);
+        let original = if tracked { "{}" } else { "// comment\n{}" };
+        let path = wt.path().join("opencode.json");
+        std::fs::write(&path, original).unwrap();
+        if tracked {
+            wt.git(&home, &["add", "opencode.json"]);
+        }
+        let out = home.agmen(&wt.path(), &["setup"]).output().unwrap();
+        assert_exit(&out, 0);
+        assert!(
+            stdout(&out).contains("OpenCode: skipped:"),
+            "{}",
+            stdout(&out)
+        );
+        assert_eq!(std::fs::read_to_string(path).unwrap(), original);
+        assert_eq!(
+            std::fs::read_to_string(wt.path().join(".git/info/exclude")).unwrap(),
+            ".agmen/\n"
+        );
+    }
 }
 
 #[cfg(unix)]

@@ -40,7 +40,13 @@ To pin the identity:
 
 ## OpenCode
 
-In `opencode.json` at the worktree root:
+Run `agmen setup --agent opencode` in your joined worktree. Setup writes
+`opencode.json` at the worktree root and adds it to git's local `info/exclude`.
+It keeps other servers and settings, skips tracked or unreadable files, and
+reports `already set up` on a second run. If `opencode.jsonc` exists, setup
+leaves both files alone and asks you to add the entry by hand.
+
+For manual setup, add this to `opencode.json` at the worktree root:
 
 ```json
 {
@@ -57,17 +63,35 @@ In `opencode.json` at the worktree root:
 
 Add `"--identity", "<id>"` to `command` to pin the identity, and `"cwd"` when OpenCode does not start in the worktree.
 
+Only the Claude Code plugin blocks edits outside your lanes. OpenCode should
+call `check_path` before editing.
+
 ## Codex
 
-In `~/.codex/config.toml`, or `.codex/config.toml` in a trusted project:
+Run `agmen setup --agent codex` in your joined worktree. Setup writes
+`$CODEX_HOME/config.toml`, or `~/.codex/config.toml` when `CODEX_HOME` is unset.
+It pins the entry to this worktree's identity and sets `cwd` to the worktree
+root. It keeps comments, ordering and unrelated settings, refuses unreadable
+TOML or files larger than 1 MiB, and reports `already set up` on a second run.
+The file is written through a temporary file in the same folder and a rename.
+
+Codex has one user-level agmen entry. Running setup in another worktree
+repoints it and prints `Codex: now points at <root> (was <old root>)`.
+The identity pin prevents an existing session from acting as a different
+worktree's identity.
+
+For manual setup, add this to your Codex config, replacing `<id>` and the path:
 
 ```toml
 [mcp_servers.agmen]
 command = "agmen"
-args = ["mcp"]
+args = ["mcp", "--identity", "<id>"]
+cwd = "/absolute/path/to/worktree"
 ```
 
-Use `args = ["mcp", "--identity", "<id>"]` to pin the identity, and set `cwd` to the worktree when Codex starts elsewhere.
+You can also put the entry in `.codex/config.toml` in a trusted project.
+Only the Claude Code plugin blocks edits outside your lanes. Codex should
+call `check_path` before editing.
 
 ## Tools
 
