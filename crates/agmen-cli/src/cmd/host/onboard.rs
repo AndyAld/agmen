@@ -194,7 +194,7 @@ struct CreateProject<'a> {
     repo_url: Option<RepoUrl>,
 }
 
-async fn create_project(
+pub(crate) async fn create_project(
     human: &Human,
     root: &Path,
     tenant: &str,
@@ -231,7 +231,7 @@ async fn create_project(
 }
 
 /// Keep git's stdout bounded and discard stderr: either can contain credentials.
-async fn origin(root: &Path) -> Result<RepoUrl> {
+pub(crate) async fn origin(root: &Path) -> Result<RepoUrl> {
     let mut child = Command::new("git")
         .args(["remote", "get-url", "origin"])
         .current_dir(root)
@@ -275,7 +275,7 @@ async fn read_origin(stdout: impl AsyncRead + Unpin) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-async fn invite(project: &str) -> Result<()> {
+pub(crate) async fn invite(project: &str) -> Result<()> {
     let exe = std::env::current_exe().context("finding agmen to print an invite")?;
     let status = tokio::time::timeout(
         INVITE_LIMIT,

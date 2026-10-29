@@ -8,6 +8,7 @@ pub(crate) mod claim;
 mod group;
 mod host;
 pub(crate) mod inbox;
+mod init;
 mod install_receipt;
 mod join;
 pub(crate) mod lanes;
@@ -178,6 +179,8 @@ enum Command {
     Invite(account::InviteArgs),
     /// Join this worktree to a project as a new identity of yours.
     Join(join::JoinArgs),
+    /// Start agmen here: self host or agmen hosted.
+    Init(init::InitArgs),
     /// Set up your installed agents to use agmen in this worktree.
     Setup {
         #[arg(long, value_enum)]
@@ -310,6 +313,7 @@ impl Cli {
             Command::Group(args) => group::run(args).await,
             Command::Invite(args) => account::invite(args).await,
             Command::Join(args) => join::join(args).await,
+            Command::Init(args) => init::run(args).await,
             Command::Setup { agent, no_plugin } => {
                 let joined = crate::joined::joined().await?;
                 let plugin =
