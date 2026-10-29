@@ -103,7 +103,7 @@ impl EventEmitter<TextInputEvent> for TextInput {}
 impl TextInput {
     pub(crate) fn new(cx: &mut Context<Self>) -> Self {
         Self {
-            focus_handle: cx.focus_handle(),
+            focus_handle: cx.focus_handle().tab_index(0).tab_stop(true),
             buffer: TextBuffer::default(),
             placeholder: SharedString::default(),
             max_lines: 1,

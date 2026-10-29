@@ -1,12 +1,11 @@
 //! Launch a managed Claude Code agent through the local backend.
 
-use super::components::{Button, ButtonStyle, Color, InputFrame, Label, LabelSize, Modal};
+use super::components::{Button, DialogFooter, InputFrame, Label, Modal};
 use super::text_input::TextInput;
-use super::tokens::SPACE_12;
 use crate::backend::{Action, BackendHandle};
 use gpui::{
     AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, Styled as _, Window, div, px,
+    ParentElement as _, Render, Window, div,
 };
 
 pub(crate) struct Closed;
@@ -94,9 +93,9 @@ fn budget_cents(raw: &str) -> Option<u32> {
 
 impl Render for NewAgentDialog {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        Modal::new("new-agent", px(440.), px(80.))
+        Modal::small("new-agent")
             .on_dismiss(cx.listener(|_, _, _, cx| cx.emit(Closed)))
-            .child(Label::new("New Agent").size(LabelSize::Title))
+            .title(Label::title("New Agent"))
             .child(Label::new("Name"))
             .child(
                 div()
@@ -115,24 +114,16 @@ impl Render for NewAgentDialog {
                     .debug_selector(|| "new-agent:budget".into())
                     .child(InputFrame::new().child(self.budget.clone())),
             )
-            .children(
-                self.error
-                    .clone()
-                    .map(|error| Label::new(error).color(Color::Error).wrap()),
-            )
-            .child(
-                div()
-                    .flex()
-                    .gap(SPACE_12)
-                    .child(
-                        Button::new("new-agent:cancel", "Cancel")
-                            .on_click(cx.listener(|_, _, _, cx| cx.emit(Closed))),
-                    )
-                    .child(
-                        Button::new("new-agent:launch", "Launch")
-                            .style(ButtonStyle::Primary)
-                            .on_click(cx.listener(|this, _, _, cx| this.launch(cx))),
-                    ),
+            .error(self.error.clone())
+            .footer(
+                DialogFooter::new(
+                    Button::new("new-agent:launch", "Launch")
+                        .on_click(cx.listener(|this, _, _, cx| this.launch(cx))),
+                )
+                .cancel(
+                    Button::new("new-agent:cancel", "Cancel")
+                        .on_click(cx.listener(|_, _, _, cx| cx.emit(Closed))),
+                ),
             )
     }
 }

@@ -2,6 +2,17 @@ use super::*;
 use crate::ui::test_support::rendered_size;
 use gpui::TestAppContext;
 
+#[test]
+fn title_atom_uses_the_shared_mockup_style() {
+    assert_eq!(
+        Label::title("Title"),
+        Label::new("Title")
+            .size(LabelSize::Title)
+            .weight(FontWeight::SEMIBOLD)
+            .color(Color::TextMuted),
+    );
+}
+
 #[gpui::test]
 fn label_renders(cx: &mut TestAppContext) {
     let size = rendered_size(cx, || {

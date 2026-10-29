@@ -13,8 +13,8 @@ use super::{LiveRoot, LiveState, ProjectChoice};
 use crate::appearance::DesktopSettings;
 use crate::backend::BackendHandle;
 use crate::keymap::{OpenProject, Quit};
-use crate::ui::components::{Button, ButtonStyle, Color, Label, LabelSize, Modal};
-use crate::ui::tokens::{LAUNCH_STATE_WIDTH, SPACE_10};
+use crate::ui::components::{Button, Color, DialogFooter, Label, LabelSize, Modal};
+use crate::ui::tokens::SPACE_10;
 
 #[derive(Debug, Clone, PartialEq, Eq, Action)]
 #[action(namespace = menu, no_json)]
@@ -290,9 +290,9 @@ impl LiveRoot {
             || (String::new(), None),
             |rejected| (rejected.folder.display().to_string(), rejected.why.clone()),
         );
-        Modal::new("live:not-a-project", LAUNCH_STATE_WIDTH, px(100.))
+        Modal::small("live:not-a-project")
             .on_dismiss(cx.listener(|this, _, window, cx| this.dismiss_rejected(window, cx)))
-            .child(Label::new("Open Project").size(LabelSize::Title))
+            .title(Label::title("Open Project"))
             .child(Label::new(folder).wrap())
             .when(
                 self.rejected.as_ref().is_some_and(|folder| !folder.is_git),
@@ -308,13 +308,8 @@ impl LiveRoot {
                 self.rejected.as_ref().is_some_and(|folder| folder.is_git),
                 |this| this.child(self.onboarding_controls(cx)),
             )
-            .when_some(self.service_error.clone(), |this, error| {
-                this.child(
-                    div()
-                        .debug_selector(|| "live:project-error".into())
-                        .child(Label::new(error).wrap().color(Color::Error)),
-                )
-            })
+            .error(self.service_error.clone())
+            .error_selector("live:project-error")
             .when(self._resolving.is_some(), |this| {
                 this.child(
                     div()
@@ -325,21 +320,23 @@ impl LiveRoot {
             .when_some(why, |this, why| {
                 this.child(Label::new(why).wrap().color(Color::Placeholder))
             })
-            .child(
-                Button::new("live:choose-another", "Choose Another Folder")
-                    .style(ButtonStyle::Primary)
-                    .on_click(cx.listener(|this, _, window, cx| this.prompt_project(window, cx))),
-            )
-            .child(
-                Button::new(
-                    "live:keep-project",
-                    if matches!(self.state, LiveState::Open(_)) {
-                        "Keep Current Project"
-                    } else {
-                        "Close"
-                    },
+            .footer(
+                DialogFooter::new(
+                    Button::new("live:choose-another", "Choose Another Folder").on_click(
+                        cx.listener(|this, _, window, cx| this.prompt_project(window, cx)),
+                    ),
                 )
-                .on_click(cx.listener(|this, _, window, cx| this.dismiss_rejected(window, cx))),
+                .cancel(
+                    Button::new(
+                        "live:keep-project",
+                        if matches!(self.state, LiveState::Open(_)) {
+                            "Keep Current Project"
+                        } else {
+                            "Close"
+                        },
+                    )
+                    .on_click(cx.listener(|this, _, window, cx| this.dismiss_rejected(window, cx))),
+                ),
             )
     }
 }

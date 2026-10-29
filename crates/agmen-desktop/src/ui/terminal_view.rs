@@ -1,6 +1,6 @@
 //! The take-over terminal (frame "Desktop · chat + terminal", node 1129):
 //! between the chat and the composer, a head with the agent chip
-//! (`claude ▾`, which opens the switch menu), how the session started, the
+//! (claude with a chevron icon, which opens the switch menu), how the session started, the
 //! agent's handle, "live · stays on this machine", Open as tab and Hand
 //! back, over the agent's own screen as a grid of cells (spec 5.4, 5.5).
 //! What is typed here goes to the agent on this machine, never the hub.
@@ -19,13 +19,13 @@ use gpui::{
 
 use super::add_agent_dialog::{AddAgentDialog, AgentDialog};
 use super::components::{
-    Button, ButtonSize, ButtonStyle, Chip, ChipButton, Color, Icon, Label, LabelSize, Menu, Modal,
+    Button, ButtonSize, ButtonStyle, Chip, ChipButton, Color, Icon, Label, LabelSize, Menu,
 };
 use super::switch_menu::{SwitchMenu, place_menu};
 use super::tokens::{
-    BORDER_WIDTH, DIALOG_TOP, DIALOG_WIDTH, MONO_CELL_HEIGHT, RADIUS_LG, SPACE_6, SPACE_8,
-    SPACE_10, SPACE_12, STATUS_BAR_HEIGHT, SWITCH_MENU_HEIGHT, SWITCH_MENU_WIDTH,
-    TERMINAL_BLOCK_HEIGHT, TERMINAL_HEAD_HEIGHT, TINT_PENDING, tint,
+    BORDER_WIDTH, MONO_CELL_HEIGHT, RADIUS_LG, SPACE_6, SPACE_8, SPACE_10, SPACE_12,
+    STATUS_BAR_HEIGHT, SWITCH_MENU_HEIGHT, SWITCH_MENU_WIDTH, TERMINAL_BLOCK_HEIGHT,
+    TERMINAL_HEAD_HEIGHT, TINT_PENDING, tint,
 };
 use crate::appearance::{Appearance, Theme};
 use crate::backend::{
@@ -423,7 +423,7 @@ impl TerminalView {
         cx.emit(TerminalEvent::Act(action));
     }
 
-    /// The agent chip, `claude ▾`: it opens the menu.
+    /// The agent chip, claude with a chevron icon: it opens the menu.
     fn agent_chip(
         &self,
         menu: Option<AnyElement>,
@@ -637,7 +637,11 @@ impl TerminalView {
                 });
             })
             .on_cancel(move |_, cx| with_view(&cancel_view, cx, Self::close_dialog))
-            .on_check(move |_, cx| with_view(&check_view, cx, Self::check_again));
+            .on_check(move |_, cx| with_view(&check_view, cx, Self::check_again))
+            .into_modal()
+            .on_dismiss(move |_, _, cx| {
+                with_view(&dismiss_view, cx, Self::close_dialog);
+            });
         let viewport = window.viewport_size();
         Some(
             deferred(
@@ -652,13 +656,7 @@ impl TerminalView {
                         .on_action(cx.listener(|this, _: &Cancel, _, cx| {
                             this.close_dialog(cx);
                         }))
-                        .child(
-                            Modal::new("add-agent-dialog", DIALOG_WIDTH, DIALOG_TOP)
-                                .on_dismiss(move |_, _, cx| {
-                                    with_view(&dismiss_view, cx, Self::close_dialog);
-                                })
-                                .child(content),
-                        ),
+                        .child(content),
                 ),
             )
             // Over the menu.

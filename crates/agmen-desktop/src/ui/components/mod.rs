@@ -17,6 +17,7 @@ mod color;
 #[cfg(test)]
 mod control_harness;
 mod detail_row;
+mod dialog_footer;
 mod dot;
 mod dropdown;
 // Task 7: the live panels' empty states.
@@ -61,6 +62,7 @@ pub(crate) use chip::Chip;
 pub(crate) use chip_button::ChipButton;
 pub(crate) use color::Color;
 pub(crate) use detail_row::DetailRow;
+pub(crate) use dialog_footer::DialogFooter;
 pub(crate) use dot::Dot;
 pub(crate) use empty_state::EmptyState;
 pub(crate) use icon::{Icon, IconSize};

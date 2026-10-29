@@ -9,16 +9,13 @@ use std::rc::Rc;
 use agmen_proto::ProjectId;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AppContext as _, Context, Entity, FocusHandle, Focusable, FontWeight, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, Task,
-    Window, div,
+    AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, Task, Window, div,
 };
 
 use super::Workspace;
-use super::components::{
-    Button, ButtonSize, ButtonStyle, CheckRow, Color, Label, LabelSize, Modal,
-};
-use super::tokens::{LAUNCH_STATE_WIDTH, SPACE_8, SPACE_10, SPACE_16, TITLE_BAR_HEIGHT};
+use super::components::{Button, ButtonStyle, CheckRow, Color, DialogFooter, Label, Modal};
+use super::tokens::{LAUNCH_STATE_WIDTH, SPACE_10, SPACE_16, TITLE_BAR_HEIGHT};
 use crate::appearance::{Appearance, DesktopSettings};
 use crate::backend::{AgmendBackend, Backend, BackendError, BackendHandle, HostSocket, HostState};
 use crate::bundle::Bundle;
@@ -819,10 +816,10 @@ impl LiveRoot {
         self.quit_choice?;
         let busy = self.quit_busy;
         Some(
-            Modal::new("quit:dialog", gpui::px(480.), gpui::px(100.))
-                .child(Label::new("Keep agents running in the background?").size(LabelSize::Title))
+            Modal::medium("quit:dialog")
+                .title(Label::title("Keep agents running in the background?"))
                 .child(Label::new("Your agents and the listener keep working and receiving messages after agmen closes.").wrap())
-                .children(self.service_error.clone().map(|error| Label::new(error).color(Color::Error).wrap()))
+                .error(self.service_error.clone())
                 .child(
                     div()
                         .id("quit:remember")
@@ -836,23 +833,17 @@ impl LiveRoot {
                             }
                         })),
                 )
-                .child(
-                    div()
-                        .flex()
-                        .justify_end()
-                        .gap(SPACE_8)
-                        .child(Button::new("quit:cancel", "Cancel")
-                            .style(ButtonStyle::Inset)
-                            .size(ButtonSize::Large)
+                .footer(
+                    DialogFooter::new(
+                        Button::new("quit:everything", if busy { "Stopping agmend…" } else { "Quit Everything" })
+                            .on_click(cx.listener(|this, _, window, cx| this.choose_quit(service::QuitChoice::Stop, window, cx))),
+                    )
+                        .destructive(true)
+                        .cancel(Button::new("quit:cancel", "Cancel")
                             .on_click(cx.listener(|this, _, window, cx| this.cancel_quit(window, cx))))
-                        .child(Button::new("quit:keep", "Keep Running")
+                        .secondary(Button::new("quit:keep", "Keep Running")
                             .style(ButtonStyle::Primary)
-                            .size(ButtonSize::Large)
-                            .on_click(cx.listener(|this, _, window, cx| this.choose_quit(service::QuitChoice::Keep, window, cx))))
-                        .child(Button::new("quit:everything", if busy { "Stopping agmend…" } else { "Quit Everything" })
-                            .style(ButtonStyle::Danger)
-                            .size(ButtonSize::Large)
-                            .on_click(cx.listener(|this, _, window, cx| this.choose_quit(service::QuitChoice::Stop, window, cx)))),
+                            .on_click(cx.listener(|this, _, window, cx| this.choose_quit(service::QuitChoice::Keep, window, cx)))),
                 ),
         )
     }
@@ -868,9 +859,7 @@ impl LiveRoot {
             .items_start()
             .gap(SPACE_10)
             .child(
-                Label::new(wording.heading)
-                    .size(LabelSize::Title)
-                    .weight(FontWeight::SEMIBOLD),
+                Label::title(wording.heading),
             )
             .child(Label::new(wording.body).wrap())
             .when(matches!(self.state, LiveState::NoProject | LiveState::Refused(_)), |this| {
@@ -963,13 +952,17 @@ impl LiveRoot {
         div()
             .track_focus(&self.focus_handle)
             .on_key_down(super::focus_tab)
-            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+            .capture_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
                 if this.quit_choice == Some(service::QuitChoice::Ask)
                     && event.keystroke.key == "enter"
                 {
+                    window.prevent_default();
                     this.choose_quit(service::QuitChoice::Keep, window, cx);
                     cx.stop_propagation();
-                } else if this.quit_choice == Some(service::QuitChoice::Ask)
+                }
+            }))
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                if this.quit_choice == Some(service::QuitChoice::Ask)
                     && event.keystroke.key == "escape"
                 {
                     this.cancel_quit(window, cx);

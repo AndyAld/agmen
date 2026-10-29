@@ -1365,12 +1365,9 @@ impl Render for SettingsView {
                             .py(SPACE_8)
                             .px(SPACE_24)
                             .child(
-                                div().debug_selector(|| "settings-title".into()).child(
-                                    Label::new(title)
-                                        .size(LabelSize::Title)
-                                        .weight(FontWeight::SEMIBOLD)
-                                        .color(Color::TextMuted),
-                                ),
+                                div()
+                                    .debug_selector(|| "settings-title".into())
+                                    .child(Label::title(title)),
                             )
                             .children(body)
                             .children(error),
