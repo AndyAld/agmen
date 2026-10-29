@@ -5,7 +5,7 @@
 //! those through a browser sign-in with GitHub, and a test that wrote the
 //! rows itself would have to copy how the hub stores token hashes.
 
-use agmen_proto::{TenantId, Topics};
+use agmen_proto::{TenantId, Timestamp, Topics};
 
 use crate::billing::PlanRecord;
 
@@ -253,6 +253,17 @@ impl Hub {
     pub async fn post_owner_alert(&self, tenant: &TenantId, body: &str) -> Result<(), HookError> {
         crate::usage::post_owner_alert(self, tenant, body).await?;
         Ok(())
+    }
+
+    /// Prunes one bounded pass at `now` using this hub's retention rules,
+    /// returning the number of message copies deleted.
+    ///
+    /// # Errors
+    ///
+    /// When reading tenants or plans, deleting prefixes, or recording the
+    /// pruning markers fails.
+    pub async fn prune_at(&self, now: Timestamp) -> Result<u64, HookError> {
+        Ok(crate::retention::prune_once(self, now).await?)
     }
 
     /// Approves the device login `user_code` (as `agmen login` shows it,

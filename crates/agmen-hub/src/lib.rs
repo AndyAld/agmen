@@ -47,6 +47,7 @@ mod presence;
 mod projects;
 mod refs;
 mod replay;
+mod retention;
 mod roles;
 mod rollcall;
 mod secrets_scan;
@@ -83,6 +84,7 @@ pub use identities::{BROKER_TOKEN_TTL, CLIENT_ID_SUFFIXES, HumanId, Identity};
 pub use ingest::{HUB_IDENTITY, HubPost, IngestError, PostError, Posted};
 pub use mqtt::{Messaging, MessagingError};
 pub use numbering::{NumberingError, next_seq};
+pub use retention::RetentionError;
 pub use roles::cap_verbs;
 pub use self_config::SelfConfigError;
 #[cfg(feature = "test-hooks")]

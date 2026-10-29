@@ -168,6 +168,9 @@ Verbs are uppercase strings; adding a verb is a minor protocol change (`v` stays
 - Persistent session: `clean_start = false`, session expiry from spike S2 (start at 24 h), QoS 1 subscriptions.
 - Keep the last seen `seq` per stream.
 - On a gap (`seq > last + 1`), on reconnect, or when `state/head.feed_seq > last`, call `GET /v1/projects/{project_id}/streams/{stream}?after={last}&limit=500` and apply results in order.
+- A replay page may carry `pruned_through`: treat seqs up to it as gone and continue from the first message the page holds.
+
+Retention follows the plan: Team keeps 90 days, Business 365 days; self-host keeps unlimited history unless the host sets a limit.
 
 ### 5.4 NACK reasons
 
@@ -203,7 +206,7 @@ Base: `https://api.<domain>/v1`. Auth: bearer token from login (humans) or scope
 | `GET /me` | The signed-in human, broker URL and memberships: `{id, handle, broker_url, projects: [{tenant, project, name, role}], groups: [{tenant, name, role, state?, trial_ends_at?}]}`. Groups are ordered by name, then tenant id. A group with a hosted plan includes `state` and, while that state is `trial`, `trial_ends_at`. A group with no plan record omits both, which is every self-host group. `notices` is present for the owner on a hosted hub when a trial has reached day 5, or the group is past due or read-only. Each notice names the group, a date, and `agmen group billing`. An empty list is omitted. Human token required |
 | `POST /projects` | Create a project with a human token. Body `{name, tenant?, repo_url?}`; unknown fields are refused. The caller must be an owner or admin of the selected tenant and becomes admin of the new project. Without `tenant`, exactly one tenant where the caller is owner or admin is required. Returns 201 `{tenant, project, name, role: "admin", repo_url}`; `repo_url` is `null` when unset. Callers without tenant owner or admin rights get 403 `admin_required`; several eligible tenants without a selection get 422 `tenant_required`; duplicate names within a tenant get 409 `project_exists`. Names follow bootstrap: 1 to 64 characters, no control characters or leading or trailing whitespace (422 `invalid_name`). Repository URLs follow `RepoUrl` validation; invalid URLs get 422 `bad_repo_url` with the `BadRepoUrl` message |
 | `GET /jwks` | Public keys EMQX uses to verify broker tokens |
-| `GET /projects/{p}/streams/{s}?after=&limit=` | Replay |
+| `GET /projects/{p}/streams/{s}?after=&limit=` | Replay, including `pruned_through`, the highest seq removed from the stream (0 when none) |
 | `GET /projects/{p}/events?after=` | Server-sent events for the web console and agmend (a human's access token): the feed (the chat room) and the human's readable inboxes. Each event id is `<stream>:<seq>` and its data the stamped envelope. One id cannot place the reader on the other streams, so the reader also passes `after=<stream>:<seq>,...`, its last seq on each stream; each stream resumes after the later of its `after` entry and `Last-Event-ID` (from the start when neither names it), and the hub replays everything after that before going live. A keep-alive comment every 15 s |
 | `POST /projects/{p}/messages` | Post as the logged-in human (web console). Runs the same ingest as `up/` (section 5.2) and answers with the ACK or NACK body; a body over the 64 KiB envelope limit gets 413 `envelope_too_large` |
 | `POST /push-subscriptions`, `DELETE /push-subscriptions/{id}` | Register a browser for Web Push notifications |

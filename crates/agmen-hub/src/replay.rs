@@ -43,6 +43,8 @@ pub(crate) struct Page {
     next_after: Option<u64>,
     /// The stream's last seq; 0 for a stream with no messages.
     head: u64,
+    /// The highest seq removed from this stream; 0 when none was pruned.
+    pruned_through: u64,
 }
 
 fn invalid(description: impl Into<String>) -> ApiError {
@@ -79,11 +81,14 @@ pub(crate) async fn stream(
     let messages = fetch_page(hub.pool(), &project, &stream, after, limit).await?;
     // Read after the messages: the head moves in the same transaction as
     // each insert, so it is never behind the page.
-    let head: Option<i64> = sqlx::query_scalar("SELECT seq FROM stream_heads WHERE stream = $1")
-        .bind(stream_key(&project, &stream))
-        .fetch_optional(hub.pool())
-        .await?;
-    let head = u64::try_from(head.unwrap_or(0)).map_err(ApiError::stored)?;
+    let head: Option<(i64, i64)> =
+        sqlx::query_as("SELECT seq, pruned_through FROM stream_heads WHERE stream = $1")
+            .bind(stream_key(&project, &stream))
+            .fetch_optional(hub.pool())
+            .await?;
+    let (head, pruned_through) = head.unwrap_or((0, 0));
+    let head = u64::try_from(head).map_err(ApiError::stored)?;
+    let pruned_through = u64::try_from(pruned_through).map_err(ApiError::stored)?;
     let next_after = messages
         .last()
         .map(|message| message.seq.0)
@@ -92,6 +97,7 @@ pub(crate) async fn stream(
         messages,
         next_after,
         head,
+        pruned_through,
     }))
 }
 

@@ -226,7 +226,7 @@ async fn it_replay_pages_in_order() {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(
             page,
-            json!({ "messages": [], "next_after": null, "head": 10_000 })
+            json!({ "messages": [], "next_after": null, "head": 10_000, "pruned_through": 0 })
         );
     })
     .await;

@@ -190,6 +190,7 @@ where
     let config = Config::from_lookup(|name| {
         Some(match name {
             "AGMEN_DATABASE_URL" => db.url.clone(),
+            "AGMEN_RETENTION_DAYS" => "30".to_owned(),
             "AGMEN_LISTEN" => addr.to_string(),
             "AGMEN_PUBLIC_URL" => base.to_string(),
             "AGMEN_GITHUB_CLIENT_ID" => agmen_hub::FAKE_GITHUB_CLIENT_ID.to_owned(),

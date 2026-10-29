@@ -94,6 +94,7 @@ struct Inner {
     presence: PresenceState,
     events: Slots,
     claim_lease: Duration,
+    retention_days: Option<u32>,
 }
 
 impl Hub {
@@ -182,6 +183,7 @@ impl Hub {
                 presence: PresenceState::default(),
                 events: Slots::default(),
                 claim_lease: config.claim_lease,
+                retention_days: config.retention_days,
             }),
         })
     }
@@ -256,6 +258,10 @@ impl Hub {
 
     pub(crate) fn mode(&self) -> HubMode {
         self.inner.mode
+    }
+
+    pub(crate) fn retention_days(&self) -> Option<u32> {
+        self.inner.retention_days
     }
 
     pub(crate) fn set_broker_up(&self, up: bool) {

@@ -114,6 +114,48 @@ async fn it_publish_recorded() {
     .await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn it_replay_after_prune_catches_up() {
+    run(|ctx| async move {
+        let poster = ctx.identity().await;
+        let (post, mut posted) =
+            Session::connect(ctx.config(ClientKind::Cli, &poster, &ctx.broker))
+                .await
+                .unwrap();
+        for seq in 1..=6 {
+            let env = fyi("old history");
+            post.publish(env.clone()).await.unwrap();
+            assert_eq!(recorded_on_feed(&mut posted, &env.id).await, seq);
+        }
+        let mid = agmen_proto::Timestamp::now();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        for seq in 7..=10 {
+            let env = fyi("kept history");
+            post.publish(env.clone()).await.unwrap();
+            assert_eq!(recorded_on_feed(&mut posted, &env.id).await, seq);
+        }
+        close(post).await;
+        assert_eq!(
+            ctx.hub
+                .prune_at(mid + Duration::from_secs(30 * 86_400))
+                .await
+                .unwrap(),
+            6
+        );
+        let reader = ctx.identity().await;
+        let (session, mut events) =
+            Session::connect(ctx.config(ClientKind::Watch, &reader, &ctx.broker))
+                .await
+                .unwrap();
+        for seq in 7..=10 {
+            assert_eq!(next_feed_seq(&mut events).await, seq);
+        }
+        assert_eq!(session.cursors().last(&Stream::Feed).unwrap(), 10);
+        close(session).await;
+    })
+    .await;
+}
+
 /// The watcher's session does not persist (expiry 0), so while toxiproxy
 /// cuts it off the broker drops what is published; feed seq 2 and the DM in
 /// its inbox reach it only by replay (ruling R18).
