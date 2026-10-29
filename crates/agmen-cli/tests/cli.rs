@@ -490,6 +490,119 @@ const IDENTITY: &str = r#"{"tenant":"tenant01","project":"project1","identity_id
 "handle":"andy/sol","owner_id":"andyandy","hub_url":"http://127.0.0.1:9",
 "broker_url":"mqtt://127.0.0.1:9"}"#;
 
+#[test]
+fn init_without_choice_off_tty_exits_2() {
+    let home = Home::new();
+    let wt = Worktree::new(&home);
+    let out = home
+        .agmen(&wt.path(), &["init"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_exit(&out, 2);
+    assert!(
+        stderr(&out).contains("--self-host or --hosted"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn init_outside_worktree_exits_2() {
+    let home = Home::new();
+    for args in [
+        vec!["init"],
+        vec!["init", "--hosted"],
+        vec!["init", "--self-host"],
+    ] {
+        let out = home
+            .agmen(home.path(), &args)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert_exit(&out, 2);
+        assert!(
+            stderr(&out).contains("inside your project's git repository"),
+            "{}",
+            stderr(&out)
+        );
+    }
+}
+
+#[test]
+fn init_flags_conflict() {
+    let home = Home::new();
+    let wt = Worktree::new(&home);
+    for flags in [
+        vec!["--self-host", "--hosted"],
+        vec!["--self-host", "--group", "x"],
+        vec!["--self-host", "--new-group"],
+        vec!["--group", "x", "--new-group"],
+        vec!["--self-host", "--hub", "http://127.0.0.1:9"],
+    ] {
+        let mut args = vec!["init"];
+        args.extend(flags);
+        let out = home
+            .agmen(&wt.path(), &args)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert_exit(&out, 2);
+        assert!(
+            stderr(&out).contains("cannot be used with"),
+            "{}",
+            stderr(&out)
+        );
+    }
+}
+
+#[test]
+fn init_self_host_ignores_hosted_hub_env() {
+    // A hosted user exports AGMEN_HOSTED_HUB; that must not make --self-host
+    // a flag conflict. Outside a repository init exits 2 before `host up`.
+    let home = Home::new();
+    let out = home
+        .agmen(home.path(), &["init", "--self-host"])
+        .env("AGMEN_HOSTED_HUB", "http://127.0.0.1:9")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_exit(&out, 2);
+    assert!(
+        stderr(&out).contains("inside your project's git repository"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn init_joined_worktree_refused_before_sign_in() {
+    let home = Home::new();
+    let wt = Worktree::new(&home);
+    std::fs::create_dir(wt.path().join(".agmen")).unwrap();
+    std::fs::write(wt.path().join(".agmen/identity.json"), IDENTITY).unwrap();
+    wt.git(
+        &home,
+        &["config", "--local", "core.excludesFile", "/dev/null"],
+    );
+    std::fs::write(wt.path().join(".git/info/exclude"), ".agmen/\n").unwrap();
+    let out = home
+        .agmen(
+            &wt.path(),
+            &["init", "--hosted", "--hub", "http://127.0.0.1:9"],
+        )
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_exit(&out, 2);
+    assert!(
+        stderr(&out).contains("already joined as andy/sol; run agmen leave first"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(!stderr(&out).contains("device login"));
+}
+
 #[cfg(unix)]
 fn setup_worktree(home: &Home) -> Worktree {
     let wt = Worktree::new(home);

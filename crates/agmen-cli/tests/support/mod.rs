@@ -167,6 +167,23 @@ where
     F: FnOnce(Ctx) -> Fut,
     Fut: Future<Output = ()> + Send + 'static,
 {
+    run_in_mode(agmen_hub::HubMode::SelfHost, ingest, body).await;
+}
+
+/// Runs the same isolated harness as [`run`] with hosted group creation enabled.
+pub async fn run_hosted<F, Fut>(ingest: Ingest, body: F)
+where
+    F: FnOnce(Ctx) -> Fut,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    run_in_mode(agmen_hub::HubMode::Hosted, ingest, body).await;
+}
+
+async fn run_in_mode<F, Fut>(mode: agmen_hub::HubMode, ingest: Ingest, body: F)
+where
+    F: FnOnce(Ctx) -> Fut,
+    Fut: Future<Output = ()> + Send + 'static,
+{
     let db = TestDb::create().await;
     let github = agmen_hub::FakeGithub::start().await.unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -180,7 +197,7 @@ where
         .to_owned();
     // Built through the hub's own variable parser, so a setting the hub adds
     // later takes its default here instead of breaking this harness.
-    let config = Config::from_lookup(|name| {
+    let mut config = Config::from_lookup(|name| {
         Some(match name {
             "AGMEN_DATABASE_URL" => db.url.clone(),
             "AGMEN_LISTEN" => addr.to_string(),
@@ -198,6 +215,7 @@ where
         })
     })
     .expect("build the hub config");
+    config.mode = mode;
     let hub = Hub::connect(&config).await.expect("start the hub");
     let router = hub.router();
     let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });

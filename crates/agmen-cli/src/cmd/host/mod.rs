@@ -2,7 +2,7 @@
 
 mod docker;
 mod files;
-mod onboard;
+pub(super) mod onboard;
 mod tunnel;
 
 use std::time::Duration;
