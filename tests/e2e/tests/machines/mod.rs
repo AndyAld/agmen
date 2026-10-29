@@ -7,16 +7,16 @@
 //! stack's (deploy/dev).
 
 pub mod contract;
-// it_m1 compiles these and never names them. it_roles_listener does, so
-// `expect` cannot cover both crates.
+// Each test binary uses a different subset of these helpers, so `expect`
+// cannot cover both crates.
 #[allow(
     dead_code,
-    reason = "it_m1 includes this module and does not construct Daemon"
+    reason = "each test binary uses only part of the daemon harness"
 )]
 pub mod daemon;
 #[allow(
     dead_code,
-    reason = "it_m1 includes this module and does not construct FakeClaude"
+    reason = "each test binary uses only part of the fake claude harness"
 )]
 pub mod fake_claude;
 
