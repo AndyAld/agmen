@@ -47,6 +47,40 @@ async fn list_names_skipped_files() {
 }
 
 #[tokio::test]
+async fn list_says_how_many_templates_a_layer_left_unloaded() {
+    let home = Home::new();
+    for i in 0..66 {
+        personal(
+            &home,
+            &format!("t{i:03}.agent.xml"),
+            &format!(r#"<agent-template name="t{i:03}"/>"#),
+        );
+    }
+    let out = home.run(home.path(), &["templates", "list"]).await;
+    assert_exit(&out, 0);
+    let text = stdout(&out);
+    assert!(
+        text.lines().any(|line| line.starts_with("skipped ")
+            && line.ends_with(": 2 templates in personal not loaded (limit 64)")),
+        "{text}"
+    );
+    let listed = text.lines().filter(|l| l.contains("\tpersonal\t")).count();
+    assert_eq!(listed, 64, "{text}");
+
+    let out = home
+        .run(home.path(), &["templates", "list", "--json"])
+        .await;
+    assert_exit(&out, 0);
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let problems = value["problems"].as_array().unwrap();
+    assert_eq!(problems.len(), 1, "{value}");
+    assert_eq!(
+        problems[0]["message"],
+        "2 templates in personal not loaded (limit 64)"
+    );
+}
+
+#[tokio::test]
 async fn list_json_has_both_arrays() {
     let home = Home::new();
     let out = home

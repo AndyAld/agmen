@@ -208,8 +208,9 @@ impl TemplateLayers {
                 Layer::Builtin,
                 None,
                 format!(
-                    "{} template files left unread",
-                    self.builtin.len() - MAX_TEMPLATE_FILES
+                    "{} templates in {} not loaded (limit {MAX_TEMPLATE_FILES})",
+                    self.builtin.len() - MAX_TEMPLATE_FILES,
+                    Layer::Builtin
                 ),
             );
         }
@@ -305,7 +306,7 @@ fn load_dir(catalog: &mut TemplateCatalog, dir: &Path, layer: Layer, follow: boo
             layer,
             Some(dir.into()),
             format!(
-                "{} template files left unread",
+                "{} templates in {layer} not loaded (limit {MAX_TEMPLATE_FILES})",
                 paths.len() - MAX_TEMPLATE_FILES
             ),
         );

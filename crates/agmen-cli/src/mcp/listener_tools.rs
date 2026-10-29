@@ -350,7 +350,7 @@ async fn list_templates() -> Result<String> {
 async fn list_templates_in(personal: PathBuf, cwd: &Path) -> Result<String> {
     let project = crate::git::toplevel(cwd).await.ok();
     let catalog = crate::cmd::templates::catalog(project, personal).await?;
-    Ok(crate::cmd::templates::list_text(&catalog))
+    Ok(crate::cmd::templates::list_for_model(&catalog))
 }
 
 // Clean strings before JSON escapes could hide terminal control characters.
