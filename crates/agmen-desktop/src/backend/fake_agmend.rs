@@ -10,8 +10,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use agmen_local::console::{
-    ConsoleEvent, ConsoleSnapshot, GitFactsEntry, Me, RoleFileInfo, RoleLayer, RosterEntry, Status,
-    WorktreeEntry,
+    ConsoleEvent, ConsoleSnapshot, GitFactsEntry, ListenerEntry, Me, RoleFileInfo, RoleLayer,
+    RosterEntry, SettingsChangeState, Status, WorktreeEntry,
 };
 use agmen_local::{ErrorCode, Request, Response, frame};
 use agmen_proto::{IdentityId, IdentityKind, StampedEnvelope};
@@ -94,6 +94,32 @@ pub(crate) fn message_with(seq: u64, verb: &str) -> StampedEnvelope {
     .unwrap()
 }
 
+/// Andy's listener as a live snapshot reports it: running, with the caps
+/// the panel shows. Tool lists stay empty on agmend's own path; the fake
+/// fills them so the panel's rows have the same shape as the fixture.
+pub(crate) fn listener_entry() -> ListenerEntry {
+    ListenerEntry {
+        identity_id: ident("idlisten"),
+        handle: "andy/listen".into(),
+        state: "running".into(),
+        model: "claude-haiku-5-5".into(),
+        today_usd: "0.40".into(),
+        daily_usd: "2.00".into(),
+        per_delegation_usd: Some("5.00".into()),
+        workers_daily_usd: Some("20.00".into()),
+        max_workers: Some(3),
+        workers_running: Some(1),
+        workers_today_usd: Some("1.25".into()),
+        can_use: vec!["Read".into(), "Grep".into(), "Glob".into()],
+        never: vec!["Edit".into(), "Write".into(), "Bash".into()],
+        takes_work_from: Some("andy".into()),
+        role: Some("listener".into()),
+        tokens_in: Some(1200),
+        tokens_out: Some(340),
+        uptime_minutes: Some(18),
+    }
+}
+
 pub(crate) fn console(messages: Vec<StampedEnvelope>) -> ConsoleSnapshot {
     ConsoleSnapshot {
         project: PROJECT.into(),
@@ -107,6 +133,8 @@ pub(crate) fn console(messages: Vec<StampedEnvelope>) -> ConsoleSnapshot {
         roles: Vec::new(),
         worktrees: Vec::new(),
         git: GitFactsEntry::default(),
+        listener: Some(listener_entry()),
+        changes: Vec::new(),
     }
 }
 
@@ -199,6 +227,18 @@ pub(crate) struct FakeState {
     /// What agent actions other than `agent_list` answer; `{}` when null.
     pub(crate) agent_answer: Value,
     pub(crate) snapshots_served: usize,
+    /// `settings_decide` and `settings_undo` calls, in order.
+    pub(crate) settings_requests: Vec<Request>,
+    /// `listener_status`'s answer. Unset answers `[]`, which does not
+    /// replace the snapshot's listener.
+    pub(crate) listener_status_answer: Option<Value>,
+    /// `listener_status` answers this error when set.
+    pub(crate) listener_status_error: Option<String>,
+    /// How many times `listener_status` was asked.
+    pub(crate) listener_status_calls: usize,
+    /// Once a settings decision has arrived, `console_snapshot` fails, as
+    /// when agmend drops between the decision and the read back.
+    pub(crate) fail_snapshots_after_settings: bool,
     /// Task 8: each `console_snapshot`'s params.
     pub(crate) snapshot_params: Vec<Value>,
     /// Final review fix 1: the whole feed `chat_history` pages through,
@@ -408,6 +448,124 @@ fn managed_response(request: Request, state: &Mutex<FakeState>) -> Response {
     }
 }
 
+/// Applies one settings decision to the snapshot the fake is serving.
+/// An unknown setting changes no cap, and the card's state still moves.
+fn apply_settings(state: &mut FakeState, method: &str, params: &Value) -> Result<(), String> {
+    let id = params
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "missing id".to_owned())?;
+    let snapshot = state
+        .snapshot
+        .as_mut()
+        .ok_or_else(|| "unknown or already decided change".to_owned())?;
+    let index = snapshot
+        .changes
+        .iter()
+        .position(|change| change.id == id)
+        .ok_or_else(|| "unknown or already decided change".to_owned())?;
+    let state_now = snapshot.changes[index].state;
+    let written: Vec<(String, String)> = snapshot.changes[index]
+        .rows
+        .iter()
+        .take(32)
+        .map(|row| {
+            let value = if method == "settings_undo" {
+                row.before.clone()
+            } else {
+                row.after.clone()
+            };
+            (row.setting.clone(), value)
+        })
+        .collect();
+    match method {
+        "settings_decide" => {
+            let apply = params
+                .get("apply")
+                .and_then(Value::as_bool)
+                .ok_or_else(|| "missing apply".to_owned())?;
+            if state_now != SettingsChangeState::Pending {
+                return Err("unknown or already decided change".into());
+            }
+            snapshot.changes[index].state = if apply {
+                SettingsChangeState::Applied
+            } else {
+                SettingsChangeState::Cancelled
+            };
+            if apply {
+                write_caps(snapshot.listener.as_mut(), &written);
+            }
+        }
+        "settings_undo" => {
+            if state_now != SettingsChangeState::Applied {
+                return Err("unknown or already decided change".into());
+            }
+            snapshot.changes[index].state = SettingsChangeState::Undone;
+            write_caps(snapshot.listener.as_mut(), &written);
+        }
+        _ => return Err("unknown listener method".into()),
+    }
+    Ok(())
+}
+
+fn write_caps(listener: Option<&mut ListenerEntry>, rows: &[(String, String)]) {
+    let Some(listener) = listener else {
+        return;
+    };
+    for (setting, value) in rows.iter().take(32) {
+        match setting.as_str() {
+            "per_delegation_usd" => listener.per_delegation_usd = Some(value.clone()),
+            "daily_usd" => listener.workers_daily_usd = Some(value.clone()),
+            "listener_daily_usd" => listener.daily_usd = value.clone(),
+            "model" => listener.model = value.clone(),
+            "max_workers" => {
+                if let Ok(workers) = value.parse::<u32>() {
+                    listener.max_workers = Some(workers);
+                }
+            }
+            // An unknown setting is a no-op on the caps.
+            _ => {}
+        }
+    }
+}
+
+/// Task 8: the fixture's main.rs, with a second line added.
+fn file_text_response(id: u64, request: &Request, state: &Mutex<FakeState>) -> Response {
+    state
+        .lock()
+        .unwrap()
+        .file_text_params
+        .push(request.params.clone());
+    Response::ok(
+        id,
+        json!({"text": "fn live() {}\nfn more() {}", "truncated": false,
+               "marks": [{"kind": "added", "from": 2, "to": 3}]}),
+    )
+}
+
+/// `listener_status` returns the scripted list, or `[]`. Decide and undo
+/// record the request, then change the snapshot the next read returns.
+fn listener_response(id: u64, request: &Request, state: &Mutex<FakeState>) -> Response {
+    if request.method == "listener_status" {
+        let mut state = state.lock().unwrap();
+        state.listener_status_calls += 1;
+        if let Some(why) = state.listener_status_error.clone() {
+            return Response::err(id, ErrorCode::Hub, why);
+        }
+        let answer = state
+            .listener_status_answer
+            .clone()
+            .unwrap_or_else(|| json!([]));
+        return Response::ok(id, answer);
+    }
+    let mut state = state.lock().unwrap();
+    state.settings_requests.push(request.clone());
+    match apply_settings(&mut state, request.method.as_str(), &request.params) {
+        Ok(()) => Response::ok(id, json!({})),
+        Err(why) => Response::err(id, ErrorCode::BadRequest, why),
+    }
+}
+
 fn serve(mut stream: UnixStream, state: &Mutex<FakeState>) -> Option<()> {
     while let Ok(request) = frame::read::<Request>(&mut stream) {
         if request.method == "shutdown" {
@@ -444,9 +602,13 @@ fn serve(mut stream: UnixStream, state: &Mutex<FakeState>) -> Option<()> {
                     std::thread::sleep(Duration::from_millis(100));
                     state = shared.lock().unwrap();
                 }
+                let cut_off =
+                    state.fail_snapshots_after_settings && !state.settings_requests.is_empty();
                 match &state.snapshot {
-                    Some(snapshot) => Response::ok(id, serde_json::to_value(snapshot).unwrap()),
-                    None => Response::err(id, ErrorCode::Hub, "the hub cannot be reached"),
+                    Some(snapshot) if !cut_off => {
+                        Response::ok(id, serde_json::to_value(snapshot).unwrap())
+                    }
+                    _ => Response::err(id, ErrorCode::Hub, "the hub cannot be reached"),
                 }
             }
             method if method.starts_with("agent_") => managed_response(request, state),
@@ -480,17 +642,9 @@ fn serve(mut stream: UnixStream, state: &Mutex<FakeState>) -> Option<()> {
                 Response::ok(id, json!({"messages": page, "older": older}))
             }
             // Task 8: the fixture's main.rs, with a second line added.
-            "file_text" => {
-                state
-                    .lock()
-                    .unwrap()
-                    .file_text_params
-                    .push(request.params.clone());
-                Response::ok(
-                    id,
-                    json!({"text": "fn live() {}\nfn more() {}", "truncated": false,
-                           "marks": [{"kind": "added", "from": 2, "to": 3}]}),
-                )
+            "file_text" => file_text_response(id, &request, state),
+            "listener_status" | "settings_decide" | "settings_undo" => {
+                listener_response(id, &request, state)
             }
             "console_watch" => {
                 let mut state = state.lock().unwrap();

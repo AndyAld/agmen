@@ -9,7 +9,8 @@
 //!   with backoff (1, 2, 4 ... 30 s) and pushes each event to subscribers.
 //! - The request thread owns a second connection and runs one job at a
 //!   time: a snapshot once a watch is connected, a post, a file's text,
-//!   or an older page of the chat (final review fix 1).
+//!   an older page of the chat (final review fix 1), or a settings
+//!   decision.
 //!
 //! Only `Send` data crosses threads: agmen-local and agmen-proto types and
 //! [`Update`]s. The backend itself stays on the main thread as an
@@ -30,7 +31,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use agmen_local::console::{
-    ConsoleEvent, ConsoleSnapshot, FileTextEntry, GitFactsEntry, LocalData, Me, RosterEntry, Status,
+    ConsoleEvent, ConsoleSnapshot, FileTextEntry, GitFactsEntry, ListenerEntry, LocalData, Me,
+    RosterEntry, SettingsChangeEntry, SettingsChangeState, Status, change_card_id,
 };
 use agmen_local::{
     API, ApiError, ErrorCode, HelloAnswer, Outcome, ReadyAnswer, Request, Response, frame,
@@ -48,9 +50,9 @@ use serde_json::{Value, json};
 
 use super::agmend_local;
 use super::{
-    Action, AgentInfo, AgentRow, AgentStatus, Backend, BackendError, Draft, FileText,
-    FileTextReply, GitFacts, Link, ListenerInfo, ManagedWork, Older, PersonGroup, Snapshot,
-    StatusSummary, Update, WorktreeInfo,
+    Action, AgentInfo, AgentRow, AgentStatus, Backend, BackendError, ChangeCard, ChangeId,
+    ChangeRow, ChangeState, Draft, FileText, FileTextReply, GitFacts, Link, ListenerDetails,
+    ListenerInfo, ManagedWork, Older, PersonGroup, Snapshot, StatusSummary, Update, WorktreeInfo,
 };
 
 /// The most messages held per project; the oldest go first (the plan's
@@ -182,10 +184,29 @@ struct Live {
     ended: Option<Link>,
     /// Set when the backend is dropped.
     closed: bool,
+    /// The person's listener from the last snapshot, overlaid by
+    /// `listener_status`. `None` until one arrives.
+    listener: Option<ListenerEntry>,
+    /// Settings cards from the last snapshot. Apply, Cancel and Undo
+    /// replace this from a fresh snapshot; the poll does not.
+    changes: Vec<SettingsChangeEntry>,
+    /// The listener or its cards may have changed since the last snapshot:
+    /// the listener posted a card, or status named a listener the snapshot
+    /// lacked. The next poll reads them again, once.
+    listener_stale: bool,
     subscribers: Vec<UnboundedSender<Update>>,
 }
 
 impl Live {
+    /// Whether this person has a listener to ask about: the last snapshot
+    /// named one, or the roster lists one of theirs.
+    fn knows_listener(&self) -> bool {
+        self.listener.is_some()
+            || self.roster.iter().any(|entry| {
+                entry.kind == IdentityKind::Listener && person_of(&entry.handle) == self.me.handle
+            })
+    }
+
     fn snapshot(&self) -> Snapshot {
         let mut snapshot = snapshot_from(ConsoleSnapshot {
             project: self.project.clone(),
@@ -196,6 +217,8 @@ impl Live {
             roles: self.local.roles.clone(),
             worktrees: self.local.worktrees.clone(),
             git: self.local.git.clone(),
+            listener: self.listener.clone(),
+            changes: self.changes.clone(),
         });
         // Final review fix 1: what paging back is doing.
         snapshot.older = match (&self.paging, self.held.older) {
@@ -482,6 +505,12 @@ enum Job {
         path: String,
         reply: oneshot::Sender<Result<FileText, String>>,
     },
+    /// Apply, Cancel or Undo. One fresh connection, no retry: a decision
+    /// is not safe to send twice.
+    Settings {
+        method: &'static str,
+        params: Value,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq, serde::Deserialize)]
@@ -539,12 +568,21 @@ impl AgmendBackend {
     }
 
     fn queue_agent(&self, method: &'static str, params: Value) -> Result<(), BackendError> {
-        self.jobs
-            .try_send(Job::Agent { method, params })
-            .map_err(|error| match error {
-                TrySendError::Full(_) => BackendError::Agmend("agent request queue is full".into()),
-                TrySendError::Disconnected(_) => BackendError::NotConnected,
-            })
+        self.queue(Job::Agent { method, params }, "agent request queue is full")
+    }
+
+    fn queue_settings(&self, method: &'static str, params: Value) -> Result<(), BackendError> {
+        self.queue(
+            Job::Settings { method, params },
+            "settings request queue is full",
+        )
+    }
+
+    fn queue(&self, job: Job, full: &'static str) -> Result<(), BackendError> {
+        self.jobs.try_send(job).map_err(|error| match error {
+            TrySendError::Full(_) => BackendError::Agmend(full.into()),
+            TrySendError::Disconnected(_) => BackendError::NotConnected,
+        })
     }
 
     pub(crate) fn shutdown_owned(
@@ -718,6 +756,8 @@ impl AgmendBackend {
                     roles: Vec::new(),
                     worktrees: Vec::new(),
                     git: GitFactsEntry::default(),
+                    listener: None,
+                    changes: Vec::new(),
                 }
             }
             Err(fail) => return Err(fail.into()),
@@ -748,6 +788,9 @@ impl AgmendBackend {
                 watch: None,
                 ended: None,
                 closed: false,
+                listener: console.listener,
+                changes: console.changes,
+                listener_stale: false,
                 subscribers: Vec::new(),
             }),
         });
@@ -885,9 +928,18 @@ impl Backend for AgmendBackend {
             }
             // Snoozing is the window's own state (Task 13); nothing to send.
             Action::SnoozeAlert(_) => Ok(()),
-            Action::Apply(_) => unsupported("applying a settings change"),
-            Action::Cancel(_) => unsupported("cancelling a settings change"),
-            Action::Undo(_) => unsupported("undoing a settings change"),
+            Action::Apply(id) => self.queue_settings(
+                "settings_decide",
+                json!({"project": self.shared.project, "id": id.0, "apply": true}),
+            ),
+            Action::Cancel(id) => self.queue_settings(
+                "settings_decide",
+                json!({"project": self.shared.project, "id": id.0, "apply": false}),
+            ),
+            Action::Undo(id) => self.queue_settings(
+                "settings_undo",
+                json!({"project": self.shared.project, "id": id.0}),
+            ),
             Action::TakeOver(_) => unsupported("taking over an agent"),
             Action::HandBack(_) => unsupported("handing an agent back"),
             Action::SwitchAgent { .. } => unsupported("switching an agent"),
@@ -1105,15 +1157,22 @@ fn on_event(shared: &Shared, jobs: &SyncSender<Job>, event: ConsoleEvent) -> Res
             jobs.send(Job::Snapshot { generation })
                 .map_err(|_| "the agmend request thread stopped".to_owned())?;
         }
-        ConsoleEvent::Message(env) => match &mut live.early {
-            Some(early) => {
-                early.push_back(env);
-                if early.len() > MAX_MESSAGES {
-                    early.pop_front();
-                }
+        ConsoleEvent::Message(env) => {
+            // The cards come from snapshots, and a new card's change is not
+            // in the last one. A snapshot still pending may miss it too.
+            if own_change_card(&live.roster, &live.me.handle, &env) {
+                live.listener_stale = true;
             }
-            None => live.hear(env),
-        },
+            match &mut live.early {
+                Some(early) => {
+                    early.push_back(env);
+                    if early.len() > MAX_MESSAGES {
+                        early.pop_front();
+                    }
+                }
+                None => live.hear(env),
+            }
+        }
         ConsoleEvent::Roster(roster) => {
             live.roster = roster;
             live.publish_snapshot();
@@ -1140,6 +1199,10 @@ fn serve_jobs(shared: &Shared, queue: &Receiver<Job>, mut conn: Option<Conn>) {
         }
         if std::time::Instant::now() >= next_poll {
             refresh_agents(shared, &mut conn);
+            // Beside the agent poll, not after an agent job: status overlays
+            // spend and state and must not add a console_snapshot.
+            refresh_listener(shared, &mut conn);
+            reread_listener(shared, &mut conn);
             next_poll = std::time::Instant::now() + interval;
         }
         let job = match queue
@@ -1231,8 +1294,63 @@ fn serve_jobs(shared: &Shared, queue: &Receiver<Job>, mut conn: Option<Conn>) {
                 // The file view may have closed meanwhile.
                 drop(reply.send(answer));
             }
+            Job::Settings { method, params } => {
+                // A fresh connection, once: retrying a lost answer could
+                // decide a change the first call already applied.
+                let result = decide_settings(shared, method, params);
+                finish_decision(shared, result);
+            }
         }
     }
+}
+
+/// Takes a decision's outcome: the listener and cards it read back, or why
+/// it failed. Like an agent action, the latest decision's outcome is what
+/// the banner says.
+fn finish_decision(shared: &Shared, result: Result<ConsoleSnapshot, RequestError>) {
+    let mut live = shared.lock();
+    match result {
+        Ok(console) => {
+            live.listener = console.listener;
+            live.changes = console.changes;
+            live.agent_error = None;
+        }
+        Err(error) => {
+            live.agent_error = Some(error.to_string());
+            // A refusal may mean the card is out of date, such as a change
+            // decided from the command line.
+            live.listener_stale = true;
+        }
+    }
+    live.publish_snapshot();
+}
+
+/// `settings_decide` or `settings_undo`, then one snapshot on that same
+/// connection. The snapshot is how the panel sees the new caps and card.
+fn decide_settings(
+    shared: &Shared,
+    method: &str,
+    params: Value,
+) -> Result<ConsoleSnapshot, RequestError> {
+    let mut fresh = open_for_request(&shared.socket, &shared.identity)?;
+    let refused = |error: Fail| match error {
+        Fail::Refused(error) => RequestError::Refused(error.message),
+        Fail::Lost(why) => RequestError::Down(why),
+    };
+    fresh.call(method, params).map_err(refused)?;
+    // The decision is made. A failure from here on is about reading it back.
+    fresh
+        .call("console_snapshot", shared.checkout_params())
+        .map_err(refused)
+        .and_then(|value| {
+            parse::<ConsoleSnapshot>(value)
+                .map_err(|error| RequestError::Refused(error.to_string()))
+        })
+        .map_err(|error| {
+            RequestError::Refused(format!(
+                "The change went through, but its card could not be read back: {error}"
+            ))
+        })
 }
 
 /// The line Start or Attach's answer earns when agmend began a fresh
@@ -1319,6 +1437,169 @@ fn refresh_agents(shared: &Shared, conn: &mut Option<Conn>) {
     live.publish_snapshot();
 }
 
+/// How many `listener_status` rows one poll reads.
+const MAX_STATUS_ROWS: usize = 64;
+
+/// One `listener_status` row. Extra fields (`started_at`, `error`) are ignored.
+#[derive(Debug, Deserialize)]
+struct StatusRow {
+    #[serde(default)]
+    identity_id: String,
+    #[serde(default)]
+    handle: String,
+    #[serde(default)]
+    state: String,
+    #[serde(default)]
+    model: String,
+    #[serde(default)]
+    today_usd: String,
+    #[serde(default)]
+    daily_usd: String,
+}
+
+/// Overlays the person's listener status onto the snapshot entry.
+/// An empty list or a failed call leaves the entry as it was, and does
+/// not set `agent_error`: status is a poll, not an action the person took.
+fn refresh_listener(shared: &Shared, conn: &mut Option<Conn>) {
+    // No listener to ask about, so no request: a project without one would
+    // be asked every two seconds for nothing.
+    if !shared.lock().knows_listener() {
+        return;
+    }
+    let value = match request(
+        shared,
+        conn,
+        "listener_status",
+        json!({"project": shared.project}),
+    ) {
+        Ok(value) => value,
+        Err(_) => return,
+    };
+    let Ok(rows) = serde_json::from_value::<Vec<Value>>(value) else {
+        return;
+    };
+    let mut live = shared.lock();
+    let me = live.me.handle.clone();
+    let mine: Vec<StatusRow> = rows
+        .into_iter()
+        .take(MAX_STATUS_ROWS)
+        .filter_map(|row| serde_json::from_value(row).ok())
+        .filter(|row: &StatusRow| person_of(&row.handle) == me)
+        .collect();
+    if mine.is_empty() {
+        return;
+    }
+    let before = live.listener.clone();
+    if let Some(entry) = live.listener.as_mut() {
+        if let Some(row) = mine.iter().find(|row| status_matches(entry, row)) {
+            overlay_status(entry, row);
+        }
+    } else if let Some(entry) = mine.iter().find_map(entry_from_status) {
+        // Started after the last snapshot, so status has no caps to show.
+        live.listener = Some(entry);
+        live.listener_stale = true;
+    }
+    if live.listener != before {
+        live.publish_snapshot();
+    }
+}
+
+/// Reads the listener and its cards again when they may have changed since
+/// the last snapshot: the listener posted a card, or began after it. At most
+/// once per poll and per such event, so a burst of cards costs one snapshot.
+/// A failed read keeps what is shown; the next snapshot or decision sets it
+/// right. A snapshot with no listener keeps the one shown.
+fn reread_listener(shared: &Shared, conn: &mut Option<Conn>) {
+    if !std::mem::take(&mut shared.lock().listener_stale) {
+        return;
+    }
+    let answer =
+        request(shared, conn, "console_snapshot", shared.checkout_params()).and_then(|value| {
+            parse::<ConsoleSnapshot>(value)
+                .map_err(|error| RequestError::Refused(error.to_string()))
+        });
+    let Ok(console) = answer else {
+        return;
+    };
+    let mut live = shared.lock();
+    if console.listener.is_some() {
+        live.listener = console.listener;
+    }
+    live.changes = console.changes;
+    live.publish_snapshot();
+}
+
+/// Whether `env` is a settings change card from this person's own listener:
+/// sent by the listener the roster lists for them, and ending in
+/// `apply:<id>` or `undo:<id>`. A card from anyone else is only chat.
+fn own_change_card(roster: &[RosterEntry], me: &str, env: &StampedEnvelope) -> bool {
+    let from_my_listener = roster.iter().any(|entry| {
+        entry.kind == IdentityKind::Listener
+            && person_of(&entry.handle) == me
+            && entry.identity_id == env.from
+    });
+    from_my_listener && change_card_id(env.client.body.as_str()).is_some()
+}
+
+fn status_matches(entry: &ListenerEntry, row: &StatusRow) -> bool {
+    let same_identity = row
+        .identity_id
+        .parse::<IdentityId>()
+        .ok()
+        .is_some_and(|id| id == entry.identity_id);
+    same_identity || (!row.handle.is_empty() && row.handle == entry.handle)
+}
+
+/// Copies the fields status reports. Caps, tools and token counts stay.
+fn overlay_status(entry: &mut ListenerEntry, row: &StatusRow) {
+    if !row.state.is_empty() {
+        entry.state.clone_from(&row.state);
+    }
+    if !row.model.is_empty() {
+        entry.model.clone_from(&row.model);
+    }
+    if !row.today_usd.is_empty() {
+        entry.today_usd.clone_from(&row.today_usd);
+    }
+    if !row.daily_usd.is_empty() {
+        entry.daily_usd.clone_from(&row.daily_usd);
+    }
+}
+
+/// A listener known only from status, when the snapshot had none.
+/// The identity has to parse; a bad id is skipped.
+fn entry_from_status(row: &StatusRow) -> Option<ListenerEntry> {
+    let identity_id = row.identity_id.parse().ok()?;
+    Some(ListenerEntry {
+        identity_id,
+        handle: row.handle.clone(),
+        state: row.state.clone(),
+        model: row.model.clone(),
+        today_usd: if row.today_usd.is_empty() {
+            "0.00".into()
+        } else {
+            row.today_usd.clone()
+        },
+        daily_usd: if row.daily_usd.is_empty() {
+            "0.00".into()
+        } else {
+            row.daily_usd.clone()
+        },
+        per_delegation_usd: None,
+        workers_daily_usd: None,
+        max_workers: None,
+        workers_running: None,
+        workers_today_usd: None,
+        can_use: Vec::new(),
+        never: Vec::new(),
+        takes_work_from: None,
+        role: None,
+        tokens_in: None,
+        tokens_out: None,
+        uptime_minutes: None,
+    })
+}
+
 /// `chat_history`'s answer (agmend's console.rs `History`).
 #[derive(Debug, serde::Deserialize)]
 struct HistoryPage {
@@ -1366,6 +1647,8 @@ fn take_snapshot(shared: &Shared, generation: u64, answer: Result<ConsoleSnapsho
             live.project = console.project;
             live.me = console.me;
             live.roster = console.roster;
+            live.listener = console.listener;
+            live.changes = console.changes;
             live.held.merge(console.messages, console.older);
             for env in live.early.take().unwrap_or_default() {
                 live.held.insert(env);
@@ -1630,8 +1913,9 @@ fn parse<T: DeserializeOwned>(value: Value) -> Result<T, BackendError> {
 // Mapping agmend's data to the window's.
 
 /// The window's snapshot from agmend's: the chat, the person, the roster,
-/// and (Task 8) the role files, worktrees and git facts. Every field
-/// agmend has no source for yet stays empty.
+/// the listener when the roster still lists one, settings cards, and
+/// (Task 8) the role files, worktrees and git facts. Every field agmend
+/// has no source for yet stays empty.
 #[must_use]
 pub(super) fn snapshot_from(console: ConsoleSnapshot) -> Snapshot {
     let ConsoleSnapshot {
@@ -1643,12 +1927,18 @@ pub(super) fn snapshot_from(console: ConsoleSnapshot) -> Snapshot {
         roles,
         worktrees,
         git,
+        listener: listener_entry,
+        changes: settings_changes,
     } = console;
-    // The person's own listener; another person's never takes their
-    // messages by default.
-    let listener = roster
+    // The roster row decides whether this person has a listener. An entry
+    // without that row (sean's, or one the roster dropped) is not shown.
+    let listener_row = roster
         .iter()
         .find(|e| e.kind == IdentityKind::Listener && person_of(&e.handle) == me.handle);
+    let listener = listener_row.map(|row| match &listener_entry {
+        Some(entry) => listener_with_details(row, entry),
+        None => listener_info(row),
+    });
     let online = roster.iter().filter(|e| e.status == Status::Online).count();
     let groups = person_groups(&roster, &me.handle);
     let roles = super::role_files::role_files(
@@ -1667,7 +1957,7 @@ pub(super) fn snapshot_from(console: ConsoleSnapshot) -> Snapshot {
     let worktrees = agmend_local::worktrees_from(worktrees, &me);
     Snapshot {
         project,
-        listener: listener.map(listener_info),
+        listener,
         roster: groups,
         managed_agents: BTreeMap::new(),
         managed_work: BTreeMap::new(),
@@ -1685,7 +1975,7 @@ pub(super) fn snapshot_from(console: ConsoleSnapshot) -> Snapshot {
         older: if older { Older::More } else { Older::Start },
         newer: false,
         waiting: 0,
-        changes: BTreeMap::new(),
+        changes: change_cards(settings_changes),
         plan: None,
         git: GitFacts {
             branches: git.branches.into_iter().collect(),
@@ -1792,8 +2082,94 @@ fn depth(entry: &RosterEntry, roster: &[RosterEntry]) -> u8 {
     depth
 }
 
-/// The Listener panel: the listener's identity, handle, agent and state;
-/// no details, since agmend reports no policy or spend yet.
+/// How many settings cards and rows one snapshot keeps.
+const MAX_CHANGE_CARDS: usize = 256;
+const MAX_CHANGE_ROWS: usize = 32;
+
+/// Cards that name a message, keyed by that message. A card with no
+/// message id has nowhere to sit, so it is left out. The last card for a
+/// message wins.
+fn change_cards(changes: Vec<SettingsChangeEntry>) -> BTreeMap<MessageId, ChangeCard> {
+    let mut out = BTreeMap::new();
+    for change in changes.into_iter().take(MAX_CHANGE_CARDS) {
+        let Some(message_id) = change.message_id else {
+            continue;
+        };
+        out.insert(
+            message_id,
+            ChangeCard {
+                id: ChangeId(change.id),
+                requested_by: change.requested_by,
+                widens: change.widens,
+                rows: change
+                    .rows
+                    .into_iter()
+                    .take(MAX_CHANGE_ROWS)
+                    .map(|row| ChangeRow {
+                        target: row.target,
+                        setting: row.setting,
+                        before: row.before,
+                        after: row.after,
+                    })
+                    .collect(),
+                state: match change.state {
+                    SettingsChangeState::Pending => ChangeState::Pending,
+                    SettingsChangeState::Applied => ChangeState::Applied,
+                    SettingsChangeState::Cancelled => ChangeState::Cancelled,
+                    SettingsChangeState::Undone => ChangeState::Undone,
+                },
+            },
+        );
+    }
+    out
+}
+
+/// The listener panel from a live entry, with the roster's identity and
+/// harness. An empty entry field falls back to the roster word.
+fn listener_with_details(row: &RosterEntry, entry: &ListenerEntry) -> ListenerInfo {
+    let state = if entry.state.is_empty() {
+        status_word(row.status).to_owned()
+    } else {
+        entry.state.clone()
+    };
+    let harness_label = if entry.model.is_empty() {
+        harness_of(row)
+    } else {
+        entry.model.clone()
+    };
+    let role_label = entry
+        .role
+        .clone()
+        .filter(|role| !role.is_empty())
+        .unwrap_or_else(|| "listener".to_owned());
+    ListenerInfo {
+        id: row.identity_id.clone(),
+        handle: row.handle.clone(),
+        agent: harness_of(row),
+        state,
+        details: Some(ListenerDetails {
+            harness_label,
+            role_label,
+            can_use: entry.can_use.clone(),
+            never: entry.never.clone(),
+            takes_work_from: entry.takes_work_from.clone().unwrap_or_default(),
+            per_worker_usd: usd(entry.per_delegation_usd.as_deref()),
+            workers_today_usd: usd(entry.workers_today_usd.as_deref()),
+            workers_cap_usd: usd(entry.workers_daily_usd.as_deref()),
+            workers_running: entry.workers_running.unwrap_or(0),
+            workers_max: entry.max_workers.unwrap_or(0),
+            listener_today_usd: usd(Some(entry.today_usd.as_str())),
+            listener_cap_usd: usd(Some(entry.daily_usd.as_str())),
+            tokens_in: entry.tokens_in.unwrap_or(0),
+            tokens_out: entry.tokens_out.unwrap_or(0),
+            uptime_minutes: entry.uptime_minutes.unwrap_or(0),
+            recent: Vec::new(),
+        }),
+    }
+}
+
+/// The Listener panel from the roster alone: identity, handle, agent and
+/// state, and no dollar figures.
 fn listener_info(listener: &RosterEntry) -> ListenerInfo {
     ListenerInfo {
         id: listener.identity_id.clone(),

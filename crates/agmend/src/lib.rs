@@ -307,11 +307,13 @@ impl Agmend {
             config.claude_home,
             config.personal_roles.clone(),
         ));
+        let settings_file = config.listener_settings.clone();
         let listeners = Arc::new(listener::Listeners::new(
             hub.clone(),
             config.socket.with_file_name(""),
             config.listener_settings,
         ));
+        let console_listeners = Arc::clone(&listeners);
         Ok(Self {
             bound,
             opening,
@@ -330,6 +332,8 @@ impl Agmend {
                         personal_roles: config.personal_roles,
                     },
                     local_every: config.local_every,
+                    listeners: console_listeners,
+                    settings_file,
                 }),
             }),
         })

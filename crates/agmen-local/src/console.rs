@@ -1,6 +1,6 @@
 //! Types for the desktop console: a snapshot of a project's chat, then events.
 
-use agmen_proto::{GitSha, IdentityId, IdentityKind, StampedEnvelope, Timestamp};
+use agmen_proto::{GitSha, IdentityId, IdentityKind, MessageId, StampedEnvelope, Timestamp};
 use serde::{Deserialize, Serialize};
 
 /// Who the console acts as.
@@ -74,6 +74,145 @@ pub struct ConsoleSnapshot {
     /// What local git knows across those worktrees.
     #[serde(default)]
     pub git: GitFactsEntry,
+    /// The person's listener: state, model, caps and spend. Absent when
+    /// agmend has no running listener and no settings table for one the
+    /// roster lists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listener: Option<ListenerEntry>,
+    /// Settings changes, at most 256. `message_id` is the FYI from the
+    /// person's own listener whose last line is `apply:<id>` or
+    /// `undo:<id>`, when that message is here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changes: Vec<SettingsChangeEntry>,
+}
+
+/// The person's listener as agmend reports it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListenerEntry {
+    /// The listener's identity.
+    pub identity_id: IdentityId,
+    /// The listener's handle.
+    pub handle: String,
+    /// `running`, `stopped`, `capped`, or the roster word when it is not live.
+    pub state: String,
+    /// The model it is set to run.
+    pub model: String,
+    /// What the listener itself spent today, USD with two decimals.
+    pub today_usd: String,
+    /// The listener's own daily cap, USD with two decimals.
+    pub daily_usd: String,
+    /// Per-worker delegation cap. A running listener reports the cap it
+    /// works to, defaults included. Absent when agmend could not read the
+    /// settings, or the listener is not running and no table names it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub per_delegation_usd: Option<String>,
+    /// Workers' shared daily cap. Absent as `per_delegation_usd` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workers_daily_usd: Option<String>,
+    /// How many workers may run at once. Absent as `per_delegation_usd` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_workers: Option<u32>,
+    /// Workers running now. Status does not report this; it stays absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workers_running: Option<u32>,
+    /// What workers spent today. Status does not report this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workers_today_usd: Option<String>,
+    /// Tools the listener may use. Empty on the live path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub can_use: Vec<String>,
+    /// Tools the listener may not use. Empty on the live path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub never: Vec<String>,
+    /// Who may hand it work, joined for display: the person, coordinators,
+    /// and anyone the settings list. Absent as `per_delegation_usd` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub takes_work_from: Option<String>,
+    /// Role label. Absent when agmend did not name one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    /// Input tokens since it started. Absent when unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens_in: Option<u64>,
+    /// Output tokens since it started. Absent when unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens_out: Option<u64>,
+    /// Minutes since it started. Absent when unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uptime_minutes: Option<u32>,
+}
+
+/// Whether a settings change is waiting, in effect, refused or undone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SettingsChangeState {
+    /// A widening change waiting for Apply.
+    Pending,
+    /// Applied, including a narrowing change that applied immediately.
+    Applied,
+    /// The person cancelled it before it applied.
+    Cancelled,
+    /// Applied, then undone.
+    Undone,
+}
+
+/// One setting a change would set, or did set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettingsChangeRow {
+    /// `listener` until other targets exist.
+    pub target: String,
+    /// The settings key, such as `per_delegation_usd`.
+    pub setting: String,
+    /// The value before the change.
+    pub before: String,
+    /// The value after the change.
+    pub after: String,
+}
+
+/// A settings change card. `ChangeEntry` is a git file, so this is separate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettingsChangeEntry {
+    /// The id `settings_decide` and `settings_undo` take.
+    pub id: String,
+    /// The FYI from the person's own listener this card belongs under.
+    /// Absent when that message is not in the snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<MessageId>,
+    /// Who asked, as the listener recorded them.
+    pub requested_by: String,
+    /// Widening changes wait for Apply. Narrowing ones apply at once.
+    pub widens: bool,
+    /// Where the change stands.
+    pub state: SettingsChangeState,
+    /// The settings it touches, at most 32.
+    pub rows: Vec<SettingsChangeRow>,
+}
+
+/// The change id a settings card names on its last line, `apply:<id>` or
+/// `undo:<id>`. The listener writes that line; agmend and the console read
+/// it to find the message a card belongs under.
+///
+/// # Examples
+///
+/// ```
+/// use agmen_local::console::change_card_id;
+///
+/// assert_eq!(
+///     change_card_id("per_delegation_usd: 5.00 -> 8.00\napply:a1b2"),
+///     Some("a1b2")
+/// );
+/// assert_eq!(change_card_id("model: x -> y\nundo:c3d4"), Some("c3d4"));
+/// // Only the last line counts, and an id has to follow the prefix.
+/// assert_eq!(change_card_id("apply:a1b2\nsee above"), None);
+/// assert_eq!(change_card_id("apply:"), None);
+/// ```
+#[must_use]
+pub fn change_card_id(body: &str) -> Option<&str> {
+    let last = body.lines().next_back()?;
+    let id = last
+        .strip_prefix("apply:")
+        .or_else(|| last.strip_prefix("undo:"))?;
+    (!id.is_empty()).then_some(id)
 }
 
 /// Where a role file comes from (spec 3.5).

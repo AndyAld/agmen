@@ -2,7 +2,9 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use agmen_local::console::ConsoleEvent;
+use agmen_local::console::{
+    ConsoleEvent, SettingsChangeEntry, SettingsChangeRow, SettingsChangeState,
+};
 use agmen_local::{ApiError, ErrorCode};
 use agmen_proto::{Seq, StampedEnvelope};
 use futures::channel::mpsc::{TryRecvError, UnboundedReceiver};
@@ -14,8 +16,8 @@ use crate::backend::fake_agmend::{
     self, FakeAgmend, PROJECT, ROOT, console, ident, message, message_with, roster,
 };
 use crate::backend::{
-    Action, Backend, BackendError, ChangeId, Draft, GutterMark, Link, Older, RoleLayer, Snapshot,
-    Update, WorktreeHead, WorktreeState,
+    Action, Backend, BackendError, ChangeId, ChangeState, Draft, GutterMark, Link, Older,
+    RoleLayer, Snapshot, Update, WorktreeHead, WorktreeState,
 };
 
 /// Long enough for a loaded test machine, short enough to fail fast.
@@ -297,7 +299,20 @@ fn snapshot_maps_roster_into_person_groups() {
     assert!(s.models.is_empty());
     assert!(s.installed_agents.is_empty());
     assert!(s.plan.is_none());
-    assert!(s.listener.as_ref().unwrap().details.is_none());
+    let listener = s.listener.as_ref().unwrap();
+    let details = listener.details.as_ref().unwrap();
+    assert_eq!(
+        (
+            listener.state.as_str(),
+            details.harness_label.as_str(),
+            details.listener_today_usd,
+            details.listener_cap_usd,
+            details.per_worker_usd,
+            details.workers_cap_usd,
+            details.workers_max,
+        ),
+        ("running", "claude-haiku-5-5", 0.40, 2.0, 5.0, 20.0, 3)
+    );
     assert_eq!(s.status.worktrees, 0);
 }
 
@@ -1090,11 +1105,7 @@ fn refuses_foreign_socket() {
 fn unsupported_actions_say_so() {
     let fake = FakeAgmend::start(console(vec![]));
     let (backend, _updates) = live_backend(&fake);
-    let change = ChangeId("C-015".into());
     let actions = [
-        Action::Apply(change.clone()),
-        Action::Cancel(change.clone()),
-        Action::Undo(change),
         Action::TakeOver(ident("idfx1abc")),
         Action::HandBack(ident("idfx1abc")),
         Action::SwitchAgent {
@@ -1624,4 +1635,391 @@ fn start_that_skipped_previous_context_says_so() {
         &mut updates,
         |update| matches!(update, Update::Snapshot(snapshot) if snapshot.agent_notice.is_none()),
     );
+}
+
+fn cap_change(
+    id: &str,
+    state: SettingsChangeState,
+    before: &str,
+    after: &str,
+) -> SettingsChangeEntry {
+    SettingsChangeEntry {
+        id: id.into(),
+        message_id: Some(message(1).client.id),
+        requested_by: "andy".into(),
+        widens: true,
+        state,
+        rows: vec![SettingsChangeRow {
+            target: "listener".into(),
+            setting: "per_delegation_usd".into(),
+            before: before.into(),
+            after: after.into(),
+        }],
+    }
+}
+
+fn per_worker(snapshot: &Snapshot) -> f64 {
+    snapshot
+        .listener
+        .as_ref()
+        .and_then(|listener| listener.details.as_ref())
+        .map(|details| details.per_worker_usd)
+        .unwrap_or(0.0)
+}
+
+#[test]
+fn apply_widens_through_settings_decide() {
+    let mut snapshot = console(vec![message(1)]);
+    let id = "chg-widen".to_owned();
+    snapshot.changes.push(cap_change(
+        &id,
+        SettingsChangeState::Pending,
+        "5.00",
+        "8.00",
+    ));
+    let fake = FakeAgmend::start(snapshot);
+    let (backend, _updates) = live_backend(&fake);
+    assert_eq!(per_worker(&backend.snapshot()), 5.0);
+    backend.act(Action::Apply(ChangeId(id.clone()))).unwrap();
+    until(|| {
+        fake.state
+            .lock()
+            .unwrap()
+            .settings_requests
+            .iter()
+            .any(|request| request.method == "settings_decide")
+    });
+    until(|| {
+        let snapshot = backend.snapshot();
+        per_worker(&snapshot) == 8.0
+            && snapshot
+                .changes
+                .values()
+                .any(|card| card.id.0 == id && card.state == ChangeState::Applied && card.widens)
+    });
+    let request = fake.state.lock().unwrap().settings_requests[0].clone();
+    assert_eq!(request.method, "settings_decide");
+    assert_eq!(
+        request.params,
+        json!({"project": PROJECT, "id": id, "apply": true})
+    );
+}
+
+#[test]
+fn cancel_leaves_settings_unchanged() {
+    let mut snapshot = console(vec![message(1)]);
+    let id = "chg-cancel".to_owned();
+    snapshot.changes.push(cap_change(
+        &id,
+        SettingsChangeState::Pending,
+        "5.00",
+        "8.00",
+    ));
+    let fake = FakeAgmend::start(snapshot);
+    let (backend, _updates) = live_backend(&fake);
+    backend.act(Action::Cancel(ChangeId(id.clone()))).unwrap();
+    until(|| {
+        fake.state
+            .lock()
+            .unwrap()
+            .settings_requests
+            .iter()
+            .any(|request| request.method == "settings_decide")
+    });
+    until(|| {
+        backend
+            .snapshot()
+            .changes
+            .values()
+            .any(|card| card.id.0 == id && card.state == ChangeState::Cancelled)
+    });
+    assert_eq!(per_worker(&backend.snapshot()), 5.0);
+    let request = fake.state.lock().unwrap().settings_requests[0].clone();
+    assert_eq!(request.method, "settings_decide");
+    assert_eq!(
+        request.params,
+        json!({"project": PROJECT, "id": id, "apply": false})
+    );
+}
+
+#[test]
+fn undo_restores_the_before_values() {
+    let mut snapshot = console(vec![message(1)]);
+    let id = "chg-undo".to_owned();
+    snapshot.listener.as_mut().unwrap().per_delegation_usd = Some("8.00".into());
+    snapshot.changes.push(cap_change(
+        &id,
+        SettingsChangeState::Applied,
+        "5.00",
+        "8.00",
+    ));
+    let fake = FakeAgmend::start(snapshot);
+    let (backend, _updates) = live_backend(&fake);
+    assert_eq!(per_worker(&backend.snapshot()), 8.0);
+    backend.act(Action::Undo(ChangeId(id.clone()))).unwrap();
+    until(|| {
+        fake.state
+            .lock()
+            .unwrap()
+            .settings_requests
+            .iter()
+            .any(|request| request.method == "settings_undo")
+    });
+    until(|| {
+        let snapshot = backend.snapshot();
+        per_worker(&snapshot) == 5.0
+            && snapshot
+                .changes
+                .values()
+                .any(|card| card.id.0 == id && card.state == ChangeState::Undone)
+    });
+    let request = fake.state.lock().unwrap().settings_requests[0].clone();
+    assert_eq!(request.method, "settings_undo");
+    assert_eq!(request.params, json!({"project": PROJECT, "id": id}));
+}
+
+#[test]
+fn listener_panel_shows_live_caps() {
+    let fake = FakeAgmend::start(console(vec![message(1)]));
+    let (backend, _updates) = live_backend(&fake);
+    let details = backend
+        .snapshot()
+        .listener
+        .as_ref()
+        .and_then(|listener| listener.details.clone())
+        .expect("live caps");
+    assert_eq!(details.harness_label, "claude-haiku-5-5");
+    assert_eq!(details.listener_today_usd, 0.40);
+    assert_eq!(details.listener_cap_usd, 2.0);
+    assert_eq!(details.per_worker_usd, 5.0);
+    assert_eq!(details.workers_cap_usd, 20.0);
+    assert_eq!(details.workers_today_usd, 1.25);
+    assert_eq!(details.workers_running, 1);
+    assert_eq!(details.workers_max, 3);
+    assert_eq!(details.takes_work_from, "andy");
+    assert_eq!(details.can_use, ["Read", "Grep", "Glob"]);
+    fake.edit(|state| {
+        state.listener_status_answer = Some(json!([{
+            "project": PROJECT,
+            "identity_id": "idlisten",
+            "handle": "andy/listen",
+            "state": "capped",
+            "model": "claude-haiku-5-5",
+            "today_usd": "1.10",
+            "daily_usd": "2.00",
+            "started_at": "2026-10-25T22:00:00Z"
+        }]));
+    });
+    until(|| {
+        let snapshot = backend.snapshot();
+        let listener = snapshot.listener.as_ref().unwrap();
+        let details = listener.details.as_ref().unwrap();
+        listener.state == "capped"
+            && details.listener_today_usd == 1.10
+            && details.per_worker_usd == 5.0
+    });
+}
+
+/// An FYI as the hub stamps it, from `from`, ending in the card's line.
+fn fyi_from(seq: u64, from: &str, handle: &str, kind: &str, body: &str) -> StampedEnvelope {
+    serde_json::from_value(json!({
+        "v": 1,
+        "id": format!("01JBX6Q4T7W3C2M8Y9K{seq:07}"),
+        "body": body,
+        "sent_at": "2026-10-25T22:00:00Z",
+        "verb": "FYI",
+        "data": {},
+        "stream": "feed",
+        "seq": seq,
+        "from": from,
+        "from_handle": handle,
+        "from_kind": kind,
+        "hub_at": "2026-10-25T22:00:00Z",
+    }))
+    .unwrap()
+}
+
+fn listeners_fyi(seq: u64, body: &str) -> StampedEnvelope {
+    fyi_from(seq, "idlisten", "andy/listen", "listener", body)
+}
+
+#[test]
+fn the_status_poll_waits_for_a_listener() {
+    // A project where this person has no listener is never asked for status.
+    let mut bare = console(vec![message(1)]);
+    bare.roster.retain(|entry| entry.handle != "andy/listen");
+    bare.listener = None;
+    let without = FakeAgmend::start(bare);
+    let (_without, _updates) = live_backend(&without);
+    // The control: the same backend with a listener does ask, so a wait
+    // long enough for it to ask is long enough for the other to have.
+    let with = FakeAgmend::start(console(vec![message(1)]));
+    let (_with, _updates) = live_backend(&with);
+    until(|| with.state.lock().unwrap().listener_status_calls > 0);
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(without.state.lock().unwrap().listener_status_calls, 0);
+}
+
+#[test]
+fn only_my_listeners_change_cards_ask_for_a_refresh() {
+    let roster = roster();
+    let mine = listeners_fyi(2, "per_delegation_usd: 5.00 -> 8.00\napply:chg-1");
+    let narrowed = listeners_fyi(3, "model: a -> b\nundo:chg-2");
+    let chat = listeners_fyi(4, "Nothing to change.");
+    let buried = listeners_fyi(5, "apply:chg-3\nsee above");
+    let their_listener = fyi_from(6, "idseanl1", "sean/listen", "listener", "x\napply:chg-4");
+    let a_person = fyi_from(7, "idsean00", "sean", "human", "x\napply:chg-1");
+    assert!(own_change_card(&roster, "andy", &mine));
+    assert!(own_change_card(&roster, "andy", &narrowed));
+    assert!(!own_change_card(&roster, "andy", &chat));
+    assert!(!own_change_card(&roster, "andy", &buried));
+    assert!(!own_change_card(&roster, "andy", &their_listener));
+    assert!(!own_change_card(&roster, "andy", &a_person));
+    // Without a listener of mine in the roster, no card is mine.
+    assert!(!own_change_card(&[], "andy", &mine));
+}
+
+#[test]
+fn a_card_my_listener_posts_shows_without_a_new_snapshot() {
+    let fake = FakeAgmend::start(console(vec![message(1)]));
+    let (backend, _updates) = live_backend(&fake);
+    assert!(backend.snapshot().changes.is_empty());
+    let served = fake.state.lock().unwrap().snapshots_served;
+    // agmend records the change, then the listener posts its card, and the
+    // watch hears the card. No hub reconnect, so no new snapshot comes.
+    let card = listeners_fyi(2, "per_delegation_usd: 5.00 -> 8.00\napply:chg-new");
+    fake.edit(|state| {
+        let snapshot = state.snapshot.as_mut().unwrap();
+        snapshot.messages.push(card.clone());
+        snapshot.changes.push(SettingsChangeEntry {
+            message_id: Some(card.client.id.clone()),
+            ..cap_change("chg-new", SettingsChangeState::Pending, "5.00", "8.00")
+        });
+    });
+    fake.push(&ConsoleEvent::Message(card.clone()));
+    until(|| {
+        backend
+            .snapshot()
+            .changes
+            .get(&card.client.id)
+            .is_some_and(|shown| shown.id.0 == "chg-new" && shown.state == ChangeState::Pending)
+    });
+    // One read for the card, not one per poll.
+    assert_eq!(fake.state.lock().unwrap().snapshots_served, served + 1);
+}
+
+#[test]
+fn a_refused_decision_shows_why_until_the_next_one_goes_through() {
+    let mut snapshot = console(vec![message(1)]);
+    snapshot.changes.push(cap_change(
+        "chg-ok",
+        SettingsChangeState::Pending,
+        "5.00",
+        "8.00",
+    ));
+    let fake = FakeAgmend::start(snapshot);
+    let (backend, _updates) = live_backend(&fake);
+    backend
+        .act(Action::Apply(ChangeId("chg-gone".into())))
+        .unwrap();
+    until(|| {
+        backend
+            .snapshot()
+            .agent_error
+            .is_some_and(|why| why.contains("unknown or already decided change"))
+    });
+    // The card stays as it was: nothing was decided.
+    assert_eq!(per_worker(&backend.snapshot()), 5.0);
+    backend
+        .act(Action::Apply(ChangeId("chg-ok".into())))
+        .unwrap();
+    until(|| {
+        let snapshot = backend.snapshot();
+        snapshot.agent_error.is_none() && per_worker(&snapshot) == 8.0
+    });
+}
+
+#[test]
+fn a_listener_that_starts_after_the_window_opened_shows_its_caps() {
+    // The window opened with the roster's row for the listener and nothing
+    // else: no caps yet, so the panel has no details.
+    let mut early = console(vec![message(1)]);
+    early.listener = None;
+    let fake = FakeAgmend::start(early);
+    let (backend, _updates) = live_backend(&fake);
+    assert!(backend.snapshot().listener.unwrap().details.is_none());
+    // The listener starts. Status names it, and a fresh snapshot has its caps.
+    fake.edit(|state| {
+        state.snapshot.as_mut().unwrap().listener = Some(fake_agmend::listener_entry());
+        state.listener_status_answer = Some(json!([{
+            "project": PROJECT,
+            "identity_id": "idlisten",
+            "handle": "andy/listen",
+            "state": "running",
+            "model": "claude-haiku-5-5",
+            "today_usd": "0.00",
+            "daily_usd": "2.00",
+            "started_at": "2026-10-25T22:00:00Z"
+        }]));
+    });
+    until(|| per_worker(&backend.snapshot()) == 5.0);
+}
+
+#[test]
+fn a_decision_whose_card_cannot_be_read_back_says_it_went_through() {
+    let mut snapshot = console(vec![message(1)]);
+    snapshot.changes.push(cap_change(
+        "chg-ok",
+        SettingsChangeState::Pending,
+        "5.00",
+        "8.00",
+    ));
+    let fake = FakeAgmend::start(snapshot);
+    let (backend, _updates) = live_backend(&fake);
+    fake.edit(|state| state.fail_snapshots_after_settings = true);
+    backend
+        .act(Action::Apply(ChangeId("chg-ok".into())))
+        .unwrap();
+    until(|| {
+        backend
+            .snapshot()
+            .agent_error
+            .is_some_and(|why| why.contains("The change went through"))
+    });
+    // The decision reached agmend once, and was not sent again.
+    assert_eq!(fake.state.lock().unwrap().settings_requests.len(), 1);
+}
+
+#[test]
+fn a_failed_status_poll_keeps_the_listener_as_it_was() {
+    let fake = FakeAgmend::start(console(vec![message(1)]));
+    let (backend, _updates) = live_backend(&fake);
+    // One good poll moves the state, so there is something to keep.
+    fake.edit(|state| {
+        state.listener_status_answer = Some(json!([{
+            "project": PROJECT,
+            "identity_id": "idlisten",
+            "handle": "andy/listen",
+            "state": "capped",
+            "model": "claude-haiku-5-5",
+            "today_usd": "2.00",
+            "daily_usd": "2.00",
+            "started_at": "2026-10-25T22:00:00Z"
+        }]));
+    });
+    until(|| {
+        backend
+            .snapshot()
+            .listener
+            .is_some_and(|listener| listener.state == "capped")
+    });
+    // Then agmend refuses the poll: the entry stays, and the banner is
+    // for what the person did, so it stays empty.
+    let asked = fake.state.lock().unwrap().listener_status_calls;
+    fake.edit(|state| state.listener_status_error = Some("agmend is busy".into()));
+    until(|| fake.state.lock().unwrap().listener_status_calls > asked);
+    std::thread::sleep(Duration::from_millis(200));
+    let snapshot = backend.snapshot();
+    assert_eq!(snapshot.listener.unwrap().state, "capped");
+    assert_eq!(snapshot.agent_error, None);
 }

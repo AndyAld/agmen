@@ -840,3 +840,96 @@ fn a_field_classify_does_not_know_waits_for_apply() {
         Applied::Now { .. }
     ));
 }
+
+#[test]
+fn listener_caps_follow_the_project_table() {
+    let (_dir, path) = file();
+    // No file, or only another project's table: the defaults `load` gives a
+    // running listener, marked as not set by the person.
+    let defaults = listener_caps(&path, &project()).unwrap();
+    assert!(!defaults.configured);
+    assert_eq!(
+        (
+            defaults.model.as_str(),
+            defaults.per_delegation_usd.as_str(),
+            defaults.workers_daily_usd.as_str(),
+            defaults.max_workers,
+            defaults.listener_daily_usd.as_str(),
+        ),
+        ("claude-haiku-5-5", "5.00", "20.00", 3, "2.00")
+    );
+    assert!(defaults.accept_from.is_empty());
+    std::fs::write(&path, "[listener.project2]\nmodel = 'other'\n").unwrap();
+    assert!(!listener_caps(&path, &project()).unwrap().configured);
+    // Each key lands in its own field: every value differs from the others
+    // and from the defaults, so a swapped pair fails here.
+    let settings = ListenerSettings {
+        model: "custom-model".into(),
+        effort: Some("high".into()),
+        per_delegation: UsdCents(345),
+        daily: UsdCents(1234),
+        max_workers: 2,
+        listener_daily: UsdCents(123),
+        accept_from: vec!["sean".into(), "adam/coord".into()],
+        worker_roles: vec!["reviewer".into()],
+        reviews: Reviews::Off,
+    };
+    save(&path, &project(), &settings).unwrap();
+    assert_eq!(
+        listener_caps(&path, &project()).unwrap(),
+        ListenerCaps {
+            configured: true,
+            model: "custom-model".into(),
+            per_delegation_usd: "3.45".into(),
+            workers_daily_usd: "12.34".into(),
+            max_workers: 2,
+            listener_daily_usd: "1.23".into(),
+            accept_from: vec!["sean".into(), "adam/coord".into()],
+        }
+    );
+    // A file that does not parse is none: the snapshot keeps the chat.
+    std::fs::write(&path, "[listener\n").unwrap();
+    assert!(listener_caps(&path, &project()).is_none());
+}
+
+#[test]
+fn published_changes_follow_propose_decide_and_undo() {
+    let (_dir, path) = file();
+    let mut changes = Changes::default();
+    let Applied::Pending { apply, .. } = changes
+        .propose(&path, &project(), "person01", &[], per_delegation(800))
+        .unwrap()
+    else {
+        panic!("widening should wait");
+    };
+    let cards = published_changes(&path, &project());
+    assert_eq!(cards.len(), 1);
+    assert_eq!(cards[0].id, apply.0);
+    assert_eq!(cards[0].requested_by, "person01");
+    assert!(cards[0].widens);
+    assert!(cards[0].message_id.is_none());
+    assert_eq!(cards[0].state, SettingsChangeState::Pending);
+    assert_eq!(
+        cards[0].rows,
+        vec![SettingsChangeRow {
+            target: "listener".into(),
+            setting: "per_delegation_usd".into(),
+            before: "5.00".into(),
+            after: "8.00".into(),
+        }]
+    );
+    changes.decide(&path, &project(), &apply, true).unwrap();
+    assert_eq!(
+        published_changes(&path, &project())[0].state,
+        SettingsChangeState::Applied
+    );
+    changes.undo(&path, &project(), &apply).unwrap();
+    assert_eq!(
+        published_changes(&path, &project())[0].state,
+        SettingsChangeState::Undone
+    );
+    assert_eq!(
+        load(&path, &project()).unwrap().per_delegation,
+        UsdCents(500)
+    );
+}

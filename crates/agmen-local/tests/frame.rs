@@ -202,17 +202,21 @@ fn console_snapshot_round_trips() -> TestResult {
             truncated: false,
         }],
         git: GitFactsEntry::default(),
+        listener: None,
+        changes: Vec::new(),
     };
     let back: ConsoleSnapshot = serde_json::from_value(serde_json::to_value(&snap)?)?;
     assert_eq!(back, snap);
     // Task 8: an older agmend's snapshot, without the local fields, parses.
     let mut old = serde_json::to_value(&snap)?;
-    for field in ["roles", "worktrees", "git"] {
+    for field in ["roles", "worktrees", "git", "listener", "changes"] {
         old.as_object_mut().map(|o| o.remove(field));
     }
     let old: ConsoleSnapshot = serde_json::from_value(old)?;
     assert!(old.roles.is_empty() && old.worktrees.is_empty());
     assert_eq!(old.git, GitFactsEntry::default());
+    assert!(old.listener.is_none());
+    assert!(old.changes.is_empty());
     let ev = ConsoleEvent::Hub {
         connected: false,
         error: None,
