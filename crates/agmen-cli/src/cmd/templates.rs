@@ -389,7 +389,7 @@ pub(crate) fn write_personal(
 ///   already holds 64;
 /// - in a team, a named node that is not a built-in without options or a
 ///   personal template this agent saved, and a node `count` above 4;
-/// - a role, a skill or an MCP server, anywhere in the template.
+/// - a role, a skill, an MCP server or a budget, anywhere in the template.
 pub(crate) fn save_for_agent(
     xml: &str,
     handle: &str,
@@ -517,27 +517,21 @@ fn template_files(dir: &Path) -> usize {
 fn check_saved_shape(template: &Template, catalog: &TemplateCatalog, handle: &str) -> Result<()> {
     match template {
         Template::Agent(named) => check_agent_body(&named.template, &named.name),
-        Template::Team(named) => check_nodes(&named.template.nodes, catalog, handle, "", 1),
+        Template::Team(named) => check_nodes(&named.template.nodes, catalog, handle, "", 1, &mut 0),
     }
 }
 
 /// Check each node and then its children, in document order. `parent` is the
-/// position of the node above, such as `2.1`, and is empty at the top.
+/// position of the node above, such as `2.1`, and is empty at the top. `checked`
+/// includes nodes reached through named templates, so references cannot reset the cap.
 fn check_nodes(
     nodes: &[Node],
     catalog: &TemplateCatalog,
     handle: &str,
     parent: &str,
     depth: u32,
+    checked: &mut usize,
 ) -> Result<()> {
-    // `parse_template` keeps a team inside both limits. Refuse a team built by
-    // hand that is not, rather than leave the nodes past the limit unchecked.
-    if depth > MAX_NODE_DEPTH || nodes.len() > MAX_NODES {
-        return Err(Fail::usage(format!(
-            "template_save refuses this team: it has more than {MAX_NODES} nodes in one list or {MAX_NODE_DEPTH} levels"
-        ))
-        .into());
-    }
     for (index, node) in nodes.iter().enumerate() {
         let position = if parent.is_empty() {
             (index + 1).to_string()
@@ -548,6 +542,13 @@ fn check_nodes(
             NodeAgent::Named(name) => name.clone(),
             NodeAgent::Inline(_) => format!("inline {position}"),
         };
+        if depth > MAX_NODE_DEPTH || *checked >= MAX_NODES {
+            return Err(node_refusal(
+                &label,
+                &format!("the team has more than {MAX_NODES} nodes or {MAX_NODE_DEPTH} levels"),
+            ));
+        }
+        *checked += 1;
         if node.count > MAX_AGENT_NODE_COUNT {
             return Err(node_refusal(
                 &label,
@@ -556,13 +557,40 @@ fn check_nodes(
         }
         match &node.agent {
             NodeAgent::Named(name) => {
-                if let Some(reason) = named_node_reason(catalog.get(name), handle) {
+                let entry = catalog
+                    .get(name)
+                    .ok_or_else(|| node_refusal(&label, "no template has this name"))?;
+                if let Template::Team(named) = &entry.template {
+                    // The resolver rejects a team as a node, and `named_node_reason` below
+                    // refuses it too. Walk it first anyway, so a reference cycle stops at the
+                    // shared depth and node bounds and the refusal names what is inside.
+                    check_nodes(
+                        &named.template.nodes,
+                        catalog,
+                        handle,
+                        &position,
+                        depth + 1,
+                        checked,
+                    )
+                    .map_err(|error| node_refusal(&label, &error.to_string()))?;
+                }
+                if let Some(reason) = named_node_reason(Some(entry), handle) {
                     return Err(node_refusal(&label, &reason));
+                }
+                if let Template::Agent(named) = &entry.template {
+                    check_agent_body(&named.template, &label)?;
                 }
             }
             NodeAgent::Inline(agent) => check_agent_body(agent, &label)?,
         }
-        check_nodes(&node.children, catalog, handle, &position, depth + 1)?;
+        check_nodes(
+            &node.children,
+            catalog,
+            handle,
+            &position,
+            depth + 1,
+            checked,
+        )?;
     }
     Ok(())
 }
@@ -611,6 +639,22 @@ fn check_agent_body(agent: &AgentTemplate, label: &str) -> Result<()> {
         return Err(node_refusal(
             label,
             "agents cannot save MCP servers until agent profiles say which are safe",
+        ));
+    }
+    // shortcut: refuse budgets until the first task that lets an agent launch a template clamps budgets at launch (review decision 3).
+    if agent.budget_usd.is_some() {
+        return Err(node_refusal(
+            label,
+            "agents cannot set a budget; the launch decides it",
+        ));
+    }
+    if let Some(option) = agent.options.first() {
+        return Err(node_refusal(
+            label,
+            &format!(
+                "option {}: agents cannot save options until agent profiles say which are safe",
+                option.name
+            ),
         ));
     }
     Ok(())
@@ -1833,6 +1877,75 @@ mod tests {
     }
 
     #[test]
+    fn agent_save_checks_the_body_of_its_own_named_node() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        save_for_agent(
+            r#"<agent-template name="mine"/>"#,
+            "andy/sol",
+            root.path(),
+            dir.path(),
+        )
+        .unwrap();
+        let mut accepted = Vec::new();
+        for (name, body, reason) in [
+            (
+                "role",
+                r#"<role name="engineer"/>"#,
+                "agents cannot set roles",
+            ),
+            (
+                "skills",
+                r#"<skills><skill name="rust-review"/></skills>"#,
+                "agents cannot save skills",
+            ),
+            (
+                "options",
+                r#"<options><option name="permission-mode" value="bypassPermissions"/></options>"#,
+                "permission-mode",
+            ),
+            (
+                "mcp",
+                r#"<mcp><server name="docs"/></mcp>"#,
+                "agents cannot save MCP servers",
+            ),
+            (
+                "budget",
+                r#"<budget usd="5"/>"#,
+                "agents cannot set a budget; the launch decides it",
+            ),
+        ] {
+            let edited = format!(
+                r#"<agent-template name="mine" saved-by="andy/sol">{body}</agent-template>"#
+            );
+            put(dir.path(), "mine.agent.xml", &edited);
+            let xml = format!(
+                r#"<team-template name="bad-{name}"><node template="mine"/></team-template>"#
+            );
+            match save_for_agent(&xml, "andy/sol", root.path(), dir.path()) {
+                Err(error) => {
+                    let text = error.to_string();
+                    assert!(
+                        text.contains("template_save refuses node mine:") && text.contains(reason),
+                        "{name}: {text}"
+                    );
+                    assert!(!dir.path().join(format!("bad-{name}.team.xml")).exists());
+                }
+                Ok(_) => accepted.push(name),
+            }
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join("mine.agent.xml")).unwrap(),
+                edited
+            );
+        }
+        assert!(
+            accepted.is_empty(),
+            "named node bodies unexpectedly accepted: {accepted:?}"
+        );
+        assert_eq!(files_in(dir.path()), 1);
+    }
+
+    #[test]
     fn agent_save_caps_node_count_at_4() {
         let dir = tempfile::tempdir().unwrap();
         let root = tempfile::tempdir().unwrap();
@@ -1911,6 +2024,68 @@ mod tests {
         );
         assert!(text.contains("template_save refuses node"), "{text}");
         assert!(!dir.path().join("agentmade.team.xml").exists());
+        // A person's budget still imports, on an agent template and on an inline node.
+        put(
+            source.path(),
+            "budget.agent.xml",
+            r#"<agent-template name="budget"><budget usd="5"/></agent-template>"#,
+        );
+        let imported = read_import(&source.path().join("budget.agent.xml")).unwrap();
+        let path = write_personal(dir.path(), &loaded, &imported, Overwrite::Refuse).unwrap();
+        let Template::Agent(named) = read_import(&path).unwrap() else {
+            panic!("expected the imported agent template");
+        };
+        assert_eq!(named.template.budget_usd.as_deref(), Some("5"));
+        put(
+            source.path(),
+            "budget-team.team.xml",
+            r#"<team-template name="budget-team"><node><agent-template><budget usd="5"/></agent-template></node></team-template>"#,
+        );
+        let imported = read_import(&source.path().join("budget-team.team.xml")).unwrap();
+        let path = write_personal(dir.path(), &loaded, &imported, Overwrite::Refuse).unwrap();
+        let Template::Team(named) = read_import(&path).unwrap() else {
+            panic!("expected the imported team");
+        };
+        let NodeAgent::Inline(agent) = &named.template.nodes[0].agent else {
+            panic!("expected an inline node");
+        };
+        assert_eq!(agent.budget_usd.as_deref(), Some("5"));
+    }
+
+    #[test]
+    fn agent_save_refuses_a_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let mut accepted = Vec::new();
+        for (xml, node) in [
+            (
+                r#"<agent-template name="budget"><budget usd="5"/></agent-template>"#,
+                "budget",
+            ),
+            (
+                r#"<team-template name="inline-budget"><node><agent-template><budget usd="5"/></agent-template></node></team-template>"#,
+                "inline 1",
+            ),
+            (
+                r#"<team-template name="nested-budget"><node template="claude"><node><agent-template><budget usd="5"/></agent-template></node></node></team-template>"#,
+                "inline 1.1",
+            ),
+        ] {
+            match save_for_agent(xml, "andy/sol", root.path(), dir.path()) {
+                Err(error) => assert_eq!(
+                    error.to_string(),
+                    format!(
+                        "template_save refuses node {node}: agents cannot set a budget; the launch decides it"
+                    )
+                ),
+                Ok(_) => accepted.push(node),
+            }
+        }
+        assert!(
+            accepted.is_empty(),
+            "budgets unexpectedly accepted: {accepted:?}"
+        );
+        assert_eq!(files_in(dir.path()), 0);
     }
 
     #[test]
@@ -2013,6 +2188,80 @@ mod tests {
     }
 
     #[test]
+    fn check_nodes_checks_plain_builtin_bodies() {
+        for (body, reason) in [
+            (r#"<role name="engineer"/>"#, "agents cannot set roles"),
+            (
+                r#"<skills><skill name="rust-review"/></skills>"#,
+                "agents cannot save skills",
+            ),
+            (
+                r#"<mcp><server name="docs"/></mcp>"#,
+                "agents cannot save MCP servers",
+            ),
+            (r#"<budget usd="5"/>"#, "agents cannot set a budget"),
+        ] {
+            let catalog = TemplateLayers {
+                builtin: vec![(
+                    "plain".into(),
+                    format!(r#"<agent-template name="plain">{body}</agent-template>"#),
+                )],
+                ..Default::default()
+            }
+            .load();
+            let node = Node {
+                agent: NodeAgent::Named("plain".into()),
+                count: 1,
+                children: vec![],
+            };
+            let error = check_nodes(&[node], &catalog, "andy/sol", "", 1, &mut 0).unwrap_err();
+            let text = error.to_string();
+            assert!(
+                text.contains("template_save refuses node plain:") && text.contains(reason),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn agent_save_checks_a_named_team_within_the_limits_before_refusing_it() {
+        // The resolver never accepts a team as a node, so `named_node_reason` refuses
+        // every one of these saves. The cases pin what the walk into the team reports
+        // first: a budget, a cycle (`mine` names itself) stopped at the depth bound,
+        // and a node count stopped at the node bound.
+        let dir = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        for (body, reason) in [
+            (
+                r#"<node><agent-template><budget usd="5"/></agent-template></node>"#.to_owned(),
+                "agents cannot set a budget",
+            ),
+            (r#"<node template="mine"/>"#.to_owned(), "levels"),
+            (r#"<node template="claude"/>"#.repeat(MAX_NODES), "nodes"),
+        ] {
+            put(
+                dir.path(),
+                "mine.team.xml",
+                &format!(
+                    r#"<team-template name="mine" saved-by="andy/sol">{body}</team-template>"#
+                ),
+            );
+            let text = refusal(
+                r#"<team-template name="bad"><node template="mine"/></team-template>"#,
+                "andy/sol",
+                root.path(),
+                dir.path(),
+            );
+            assert!(
+                text.contains("template_save refuses node mine:") && text.contains(reason),
+                "{text}"
+            );
+            assert!(!dir.path().join("bad.team.xml").exists());
+        }
+        assert_eq!(files_in(dir.path()), 1);
+    }
+
+    #[test]
     fn check_nodes_refuses_a_team_past_the_schema_limits() {
         let catalog = TemplateLayers::default().load();
         let leaf = Node {
@@ -2029,7 +2278,7 @@ mod tests {
                 children: vec![deep],
             };
         }
-        let error = check_nodes(&[deep], &catalog, "andy/sol", "", 1).unwrap_err();
+        let error = check_nodes(&[deep], &catalog, "andy/sol", "", 1, &mut 0).unwrap_err();
         assert!(error.to_string().contains("levels"), "{error}");
         let error = check_nodes(
             &vec![leaf.clone(); MAX_NODES + 1],
@@ -2037,9 +2286,10 @@ mod tests {
             "andy/sol",
             "",
             1,
+            &mut 0,
         )
         .unwrap_err();
         assert!(error.to_string().contains("nodes"), "{error}");
-        check_nodes(&vec![leaf; MAX_NODES], &catalog, "andy/sol", "", 1).unwrap();
+        check_nodes(&vec![leaf; MAX_NODES], &catalog, "andy/sol", "", 1, &mut 0).unwrap();
     }
 }
