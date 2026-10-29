@@ -25,6 +25,8 @@ use crate::presence::PresenceState;
 use crate::self_config;
 
 const WAIT: Duration = Duration::from_secs(5);
+/// The EMQX API key name the test hub presents; not a secret.
+const EMQX_KEY_NAME: &str = "agmen-hub";
 const UPGRADE_HEAD: &[u8] = b"GET /mqtt HTTP/1.1\r\nHost: hub.example\r\nUpgrade: WebSocket\r\nConnection: keep-alive, Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: mqtt\r\n\r\n";
 const SWITCH: &[u8] = b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\nSec-WebSocket-Protocol: mqtt\r\n\r\n";
 
@@ -53,7 +55,7 @@ fn test_hub(mqtt_ws_upstream: Option<Url>) -> Hub {
     let emqx = EmqxAdmin::new(
         &EmqxConfig {
             api_url: Url::parse("http://127.0.0.1:1/api/v5").unwrap(),
-            api_key: "agmen-hub".to_owned(),
+            api_key: EMQX_KEY_NAME.to_owned(),
         },
         loaded.emqx_api_secret,
         http.clone(),
@@ -414,4 +416,46 @@ async fn graceful_shutdown_finishes_in_flight_requests() {
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.text().await.unwrap(), "finished");
     timeout(WAIT, &mut server).await.unwrap().unwrap();
+}
+
+#[test]
+fn hub_mode_messages_name_the_paddle_settings() {
+    let messages = [
+        (
+            GroupError::ManyTenants(2).to_string(),
+            "a self-host hub has one group, but the database has 2 tenants; set AGMEN_HUB_MODE=hosted",
+        ),
+        (
+            ADOPTED_GROUP_MESSAGE.to_owned(),
+            "adopted the database's only tenant as this self-host hub's group; set AGMEN_HUB_MODE=hosted to keep tenants separate",
+        ),
+        (
+            crate::BootstrapError::OtherGroup {
+                group: "agmen".to_owned(),
+            }
+            .to_string(),
+            "this self-host hub has one group, \"agmen\"; use --tenant \"agmen\" or set AGMEN_HUB_MODE=hosted",
+        ),
+    ];
+    let mut missing = Vec::new();
+    for (message, existing) in messages {
+        assert!(message.starts_with(existing), "{message}");
+        for setting in [
+            "AGMEN_PADDLE_API_KEY",
+            "AGMEN_PADDLE_WEBHOOK_SECRET",
+            "AGMEN_PADDLE_PRICE_TEAM_BASE",
+            "AGMEN_PADDLE_PRICE_TEAM_SEAT",
+            "AGMEN_PADDLE_PRICE_BUSINESS_10",
+            "AGMEN_PADDLE_PRICE_BUSINESS_25",
+            "AGMEN_PADDLE_PRICE_BUSINESS_50",
+        ] {
+            if !message.contains(setting) {
+                missing.push((existing, setting));
+            }
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "messages omit Paddle settings: {missing:?}"
+    );
 }

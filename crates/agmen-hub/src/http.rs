@@ -35,6 +35,12 @@ pub const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long the hub waits for GitHub or EMQX to answer.
 const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(10);
 
+const ADOPTED_GROUP_MESSAGE: &str = "adopted the database's only tenant as this self-host hub's group; \
+     set AGMEN_HUB_MODE=hosted to keep tenants separate; \
+     hosted mode also requires AGMEN_PADDLE_API_KEY, AGMEN_PADDLE_WEBHOOK_SECRET, \
+     AGMEN_PADDLE_PRICE_TEAM_BASE, AGMEN_PADDLE_PRICE_TEAM_SEAT, \
+     AGMEN_PADDLE_PRICE_BUSINESS_10, AGMEN_PADDLE_PRICE_BUSINESS_25 and AGMEN_PADDLE_PRICE_BUSINESS_50";
+
 /// Why the hub could not start.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -139,8 +145,7 @@ impl Hub {
                 tracing::info!(
                     tenant = %group.tenant,
                     name = %name,
-                    "adopted the database's only tenant as this self-host hub's group; \
-                     set AGMEN_HUB_MODE=hosted to keep tenants separate"
+                    "{ADOPTED_GROUP_MESSAGE}"
                 );
             }
             if let Some(token) = group::mint_claim_token(&pool)

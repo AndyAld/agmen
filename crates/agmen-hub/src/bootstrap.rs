@@ -47,7 +47,10 @@ pub enum BootstrapError {
     StoredId(#[from] agmen_proto::ProtoError),
     /// A self-host hub has one group and the requested tenant is another.
     #[error(
-        "this self-host hub has one group, {group:?}; use --tenant {group:?} or set AGMEN_HUB_MODE=hosted"
+        "this self-host hub has one group, {group:?}; use --tenant {group:?} or set AGMEN_HUB_MODE=hosted; \
+         hosted mode also requires AGMEN_PADDLE_API_KEY, AGMEN_PADDLE_WEBHOOK_SECRET, \
+         AGMEN_PADDLE_PRICE_TEAM_BASE, AGMEN_PADDLE_PRICE_TEAM_SEAT, \
+         AGMEN_PADDLE_PRICE_BUSINESS_10, AGMEN_PADDLE_PRICE_BUSINESS_25 and AGMEN_PADDLE_PRICE_BUSINESS_50"
     )]
     OtherGroup {
         /// The hub's group name.

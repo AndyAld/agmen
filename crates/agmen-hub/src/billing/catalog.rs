@@ -6,7 +6,7 @@
 use super::plan::{BusinessStep, Plan};
 
 /// One price on a Paddle checkout or subscription, and how many of it to buy.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct LineItem {
     /// Paddle price id, such as `pri_...`.
     pub price_id: String,
@@ -15,7 +15,7 @@ pub struct LineItem {
 }
 
 /// The price ids for Team and the three Business steps.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Catalog {
     /// Team base price, quantity 1.
     pub team_base: String,
