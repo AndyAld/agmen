@@ -237,6 +237,26 @@ fn charge_child_moves_reserved_to_children_spent() {
 }
 
 #[test]
+fn a_child_that_overshoots_releases_only_what_it_held() {
+    let mut budget = Budget::new(money("5"));
+    budget.reserve(money("1"), money("0")).unwrap();
+    budget.reserve(money("1"), money("0")).unwrap();
+    // One child held 1 and its batch cost 1.5: the other child's 1 stays held.
+    budget.charge_child_covered(money("1.5"), money("1"));
+    assert_eq!(budget.reserved().usd(), "1.000000");
+    assert_eq!(budget.children_spent().usd(), "1.500000");
+    assert_eq!(budget.remaining_usd(), "2.500000");
+    // A spend the reservation covered in full moves exactly that much.
+    budget.charge_child_covered(money("0.25"), money("0.25"));
+    assert_eq!(budget.reserved().usd(), "0.750000");
+    assert_eq!(budget.children_spent().usd(), "1.750000");
+    // A spend nothing covered only counts.
+    budget.charge_child_covered(money("0.25"), money("0"));
+    assert_eq!(budget.reserved().usd(), "0.750000");
+    assert_eq!(budget.children_spent().usd(), "2.000000");
+}
+
+#[test]
 fn release_saturates_at_zero() {
     let mut budget = Budget::new(money("2"));
     budget.reserve(money("1"), money("0.5")).unwrap();

@@ -1000,6 +1000,81 @@ async fn spend_rolls_up_through_four_levels_and_funds_return_one_level_at_a_time
     );
 }
 
+/// Charges `cost` to a running agent as a finished batch does, whatever its cap.
+async fn spend(fixture: &Fixture, id: &str, cost: &str) {
+    let managed = &fixture.daemon.core.managed;
+    let worker = worker_of(managed, id).await;
+    let accounting = managed.accounting.lock().await;
+    let held = worker.lock().await;
+    managed.record_cost(held, cost).await.unwrap();
+    drop(accounting);
+}
+
+/// What `id` still holds in its parent's reservation.
+async fn held_in_parent(fixture: &Fixture, id: &str) -> String {
+    worker_of(&fixture.daemon.core.managed, id)
+        .await
+        .lock()
+        .await
+        .reserved_from_parent
+        .usd()
+}
+
+/// A batch can cost more than the cap its child was given, since
+/// `--max-budget-usd` ends a run after the response that passes it.
+#[tokio::test]
+async fn an_overshooting_child_does_not_release_its_siblings_reservation() {
+    let (fixture, _) = tree_fixture().await;
+    budget_root(&fixture, 5.0).await;
+    budget_child(&fixture, "k1", 1.0).await.unwrap();
+    budget_child(&fixture, "k2", 1.0).await.unwrap();
+    assert_eq!(reserved(&fixture, "agent001").await, "2.000000");
+    spend(&fixture, "kid00001", "1.5").await;
+    let parent = listed(&fixture, "agent001").await;
+    assert_eq!(parent["reserved_usd"], "1.000000");
+    assert_eq!(parent["children_spent_usd"], "1.500000");
+    assert_eq!(held_in_parent(&fixture, "kid00001").await, "0.000000");
+    assert_eq!(held_in_parent(&fixture, "kid00002").await, "1.000000");
+    assert_eq!(listed(&fixture, "kid00001").await["spent_usd"], "1.500000");
+    // The parent has 5 - 1.5 spent - 1 still held for the other child.
+    enqueue(&fixture, 1, "agent001").await;
+    batch(&fixture.daemon.core.managed, "agent001").await;
+    assert_eq!(
+        fixture.runner.runs.lock().unwrap()[0].budget_remaining,
+        "2.500000"
+    );
+}
+
+/// The same holds one level up, where the parent's own parent holds funds
+/// for it: only what the parent can spare goes back.
+#[tokio::test]
+async fn an_overshoot_under_a_stopped_parent_keeps_its_other_children_backed() {
+    let (fixture, _) = tree_fixture().await;
+    budget_root(&fixture, 10.0).await;
+    budget_child(&fixture, "k1", 6.0).await.unwrap();
+    grandchild(&fixture, "kid00001", "k2", 1.0).await;
+    grandchild(&fixture, "kid00001", "k3", 1.0).await;
+    worker_call(
+        &fixture,
+        "agent_stop",
+        json!({"identity":"kid00001","subtree":false}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(reserved(&fixture, "agent001").await, "2.000000");
+    spend(&fixture, "kid00002", "1.5").await;
+    assert_eq!(reserved(&fixture, "kid00001").await, "1.000000");
+    assert_eq!(held_in_parent(&fixture, "kid00001").await, "1.000000");
+    assert_eq!(reserved(&fixture, "agent001").await, "1.000000");
+    for id in ["agent001", "kid00001"] {
+        assert_eq!(
+            listed(&fixture, id).await["children_spent_usd"],
+            "1.500000",
+            "{id}"
+        );
+    }
+}
+
 async fn child_quarter_of(fixture: &Fixture, id: &str) {
     fixture.runner.mode.store(1, Ordering::SeqCst);
     enqueue(fixture, 1, id).await;
@@ -1052,13 +1127,11 @@ async fn books(managed: &Managed) -> BTreeMap<String, Books> {
     rows
 }
 
-/// What every agent's books must say after any step. Costs never pass an
-/// agent's own cap here, as `--max-budget-usd` would stop a real run.
-fn unbalanced(
-    rows: &BTreeMap<String, Books>,
-    ledger: &BTreeMap<String, Money>,
-    parents: &BTreeMap<String, Option<String>>,
-) -> Option<String> {
+/// What each agent's descendants amount to in `ledger`, at most 16 levels up.
+fn rolled_up<'a>(
+    ledger: &'a BTreeMap<String, Money>,
+    parents: &'a BTreeMap<String, Option<String>>,
+) -> BTreeMap<&'a str, Money> {
     let mut below: BTreeMap<&str, Money> = BTreeMap::new();
     for (id, cost) in ledger {
         let mut at = parents.get(id).and_then(Option::as_deref);
@@ -1069,6 +1142,21 @@ fn unbalanced(
             at = parents.get(parent).and_then(Option::as_deref);
         }
     }
+    below
+}
+
+/// What every agent's books must say after any step. `over` lists what each
+/// agent's batches cost beyond what it held in its parent: `--max-budget-usd`
+/// ends a run only after the response that passes it. Past its cap an agent,
+/// and every ancestor above it, may be that far over its own cap.
+fn unbalanced(
+    rows: &BTreeMap<String, Books>,
+    ledger: &BTreeMap<String, Money>,
+    over: &BTreeMap<String, Money>,
+    parents: &BTreeMap<String, Option<String>>,
+) -> Option<String> {
+    let below_over = rolled_up(over, parents);
+    let below = rolled_up(ledger, parents);
     for (id, row) in rows {
         let children = rows
             .values()
@@ -1085,10 +1173,14 @@ fn unbalanced(
             // Running, an agent holds its whole unspent cap. Stopped, it holds
             // at least what its live children need, plus any raise the person
             // made while it was stopped.
+            // A raise after an overshoot reserves the whole amount in the parent
+            // while only part of it becomes spendable, so the parent may hold
+            // up to the agent's own overshoot more than it can use.
+            let slack = over.get(id).copied().unwrap_or(Money::ZERO);
             let fits = if row.online {
-                row.held == row.unspent
+                row.unspent <= row.held && row.held <= row.unspent.saturating_add(slack)
             } else {
-                row.reserved <= row.held && row.held <= row.unspent
+                row.reserved <= row.held && row.held <= row.unspent.saturating_add(slack)
             };
             if !fits {
                 return Some(format!(
@@ -1106,11 +1198,17 @@ fn unbalanced(
             .spent
             .saturating_add(row.children_spent)
             .saturating_add(row.reserved);
-        if committed > row.cap {
+        let allowed = over
+            .get(id)
+            .copied()
+            .unwrap_or(Money::ZERO)
+            .saturating_add(below_over.get(id.as_str()).copied().unwrap_or(Money::ZERO));
+        if committed > row.cap.saturating_add(allowed) {
             return Some(format!(
-                "{id} has committed {} of a {} cap",
+                "{id} has committed {} of a {} cap, with {} of overshoot below it",
                 committed.usd(),
-                row.cap.usd()
+                row.cap.usd(),
+                allowed.usd()
             ));
         }
         let own = ledger.get(id).copied().unwrap_or(Money::ZERO);
@@ -1151,6 +1249,7 @@ async fn launch_under(
 }
 
 /// Charges up to a quarter dollar to an online agent, as a finished batch does.
+/// This never passes the agent's cap; `overshoot_at` does.
 async fn spend_at(managed: &Managed, target: &str, ledger: &mut BTreeMap<String, Money>) -> String {
     let worker = worker_of(managed, target).await;
     let (online, remaining) = {
@@ -1171,6 +1270,56 @@ async fn spend_at(managed: &Managed, target: &str, ledger: &mut BTreeMap<String,
     format!("spend {} at {target}", cost.usd())
 }
 
+/// Charges a running shared agent more than it holds in its parent, by up to a
+/// quarter dollar past its cap. The agent has no live children of its own, so
+/// the overshoot is all of what it spends beyond its cap, and it is kept to
+/// what every ancestor still has free, so no ancestor passes its own cap by
+/// more than the overshoot.
+async fn overshoot_at(
+    managed: &Managed,
+    dice: &mut Dice,
+    (ledger, over): (&mut BTreeMap<String, Money>, &mut BTreeMap<String, Money>),
+) -> String {
+    let rows = books(managed).await;
+    let eligible: Vec<&String> = rows
+        .iter()
+        .filter(|(_, row)| row.online && row.shared && row.reserved == Money::ZERO)
+        .map(|(id, _)| id)
+        .collect();
+    if eligible.is_empty() {
+        return "skip overshoot".to_owned();
+    }
+    let target = eligible[dice.below(eligible.len())].clone();
+    let row = &rows[&target];
+    let mut room = Money::from_usd("0.25").unwrap();
+    let mut at = row.parent.as_deref();
+    for _ in 0..16 {
+        let Some(parent) = at.and_then(|id| rows.get(id)) else {
+            break;
+        };
+        room = room.min(parent.unspent.saturating_sub(parent.reserved));
+        at = parent.parent.as_deref();
+    }
+    if room == Money::ZERO {
+        return format!("skip overshoot at {target}");
+    }
+    let cost = row.unspent.saturating_add(room);
+    let worker = worker_of(managed, &target).await;
+    let accounting = managed.accounting.lock().await;
+    let held = worker.lock().await;
+    managed.record_cost(held, &cost.usd()).await.unwrap();
+    drop(accounting);
+    for (book, amount) in [(ledger, cost), (over, room)] {
+        let total = book.entry(target.clone()).or_insert(Money::ZERO);
+        *total = total.saturating_add(amount);
+    }
+    format!(
+        "overshoot {} at {target}, {} past its cap",
+        cost.usd(),
+        room.usd()
+    )
+}
+
 async fn model_run(seed: u64) {
     let (fixture, _) = tree_fixture().await;
     settings(&fixture, "limit_tree_depth = false\nlimit_agents = false");
@@ -1178,6 +1327,7 @@ async fn model_run(seed: u64) {
     let mut managed = fixture.daemon.core.managed.clone();
     let mut dice = Dice(seed);
     let mut ledger = BTreeMap::new();
+    let mut over = BTreeMap::new();
     let mut parents = BTreeMap::from([("agent001".to_owned(), None)]);
     let mut log = Vec::new();
     let mut launches = 0;
@@ -1199,7 +1349,7 @@ async fn model_run(seed: u64) {
             rows.keys().collect()
         };
         let target = present[dice.below(present.len())].clone();
-        let action = match dice.below(10) {
+        let action = match dice.below(12) {
             0 | 1 if launches < 8 => {
                 launches += 1;
                 let amount = [0.5, 1.0, 1.5, 2.5, 4.0][dice.below(5)];
@@ -1237,10 +1387,11 @@ async fn model_run(seed: u64) {
                 }
                 format!("raise {target}: {}", raised.is_ok())
             }
-            _ => spend_at(&managed, &target, &mut ledger).await,
+            9 => spend_at(&managed, &target, &mut ledger).await,
+            _ => overshoot_at(&managed, &mut dice, (&mut ledger, &mut over)).await,
         };
         log.push(action);
-        if let Some(wrong) = unbalanced(&books(&managed).await, &ledger, &parents) {
+        if let Some(wrong) = unbalanced(&books(&managed).await, &ledger, &over, &parents) {
             panic!("seed {seed}, step {step}: {wrong}\n{}", log.join("\n"));
         }
     }

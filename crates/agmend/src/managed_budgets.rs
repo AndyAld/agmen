@@ -53,6 +53,23 @@ impl SettingsCache {
     }
 }
 
+impl Worker {
+    /// The part of `cost` that comes out of what this worker holds in its
+    /// parent, which it then no longer holds. A stopped worker keeps holding
+    /// what its live children need, as `release_to_parent` leaves it.
+    fn spend_from_parent(&mut self, cost: Money) -> Money {
+        let spare = if self.state == "offline" {
+            self.reserved_from_parent
+                .saturating_sub(self.budget.reserved())
+        } else {
+            self.reserved_from_parent
+        };
+        let covered = cost.min(spare);
+        self.reserved_from_parent = self.reserved_from_parent.saturating_sub(covered);
+        covered
+    }
+}
+
 impl Managed {
     /// Caller holds launching and accounting until launch completes or refunds this amount.
     // shortcut: the parent's running batch keeps the `--max-budget-usd` it
@@ -223,7 +240,7 @@ impl Managed {
         held.budget.add_cost_usd(cost, |step| steps.push(step))?;
         let spent = held.budget.spent();
         let cost = spent.saturating_sub(before);
-        held.reserved_from_parent = held.reserved_from_parent.saturating_sub(cost);
+        let covered = held.spend_from_parent(cost);
         let children_spent = held.budget.children_spent();
         let record = held.record.clone();
         drop(held);
@@ -236,7 +253,7 @@ impl Managed {
             children_spent,
         )
         .await;
-        self.charge_ancestors(&record, cost).await;
+        self.charge_ancestors(&record, cost, covered).await;
         Ok((record, steps))
     }
 
@@ -321,8 +338,13 @@ impl Managed {
         Ok(())
     }
 
-    /// Caller holds accounting. A stopped intermediary still accounts for live children.
-    pub(super) async fn charge_ancestors(&self, record: &Record, cost: Money) {
+    /// Caller holds accounting. A stopped intermediary still accounts for live
+    /// children. Every ancestor counts all of `cost` as its descendants' spend,
+    /// but gives back only `covered`, the part that came out of what the level
+    /// below held. A batch that passes its cap by one response costs more than
+    /// that, and the rest of the cost was never reserved: giving it back would
+    /// free what the other children hold.
+    pub(super) async fn charge_ancestors(&self, record: &Record, cost: Money, mut covered: Money) {
         let mut record = record.clone();
         let mut seen = BTreeSet::from([record.identity.identity_id.clone()]);
         for _ in 0..MAX_MANAGED {
@@ -339,8 +361,8 @@ impl Managed {
             let parent = self.workers.lock().await.get(id).cloned();
             let Some(parent) = parent else { break };
             let mut held = parent.lock().await;
-            held.budget.charge_child(cost);
-            held.reserved_from_parent = held.reserved_from_parent.saturating_sub(cost);
+            held.budget.charge_child_covered(cost, covered);
+            covered = held.spend_from_parent(cost);
             let spent = held.budget.spent();
             let children_spent = held.budget.children_spent();
             record = held.record.clone();

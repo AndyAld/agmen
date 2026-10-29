@@ -184,7 +184,15 @@ impl Budget {
     }
 
     pub(crate) fn charge_child(&mut self, cost: Money) {
-        self.release(cost);
+        self.charge_child_covered(cost, cost);
+    }
+
+    /// Counts all of a shared child's `cost` as its spend, and gives back only
+    /// the `covered` part of what it held. A batch can pass its cap by one
+    /// response, and the rest of `cost` was never reserved: releasing it
+    /// would free what the other children hold.
+    pub(crate) fn charge_child_covered(&mut self, cost: Money, covered: Money) {
+        self.release(covered.min(cost));
         self.children_spent = self.children_spent.saturating_add(cost);
     }
 
