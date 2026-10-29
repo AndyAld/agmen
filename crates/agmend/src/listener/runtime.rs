@@ -373,28 +373,25 @@ impl Listeners {
                     let intent = tokio::task::spawn_blocking(move || read_intent(&path))
                         .await
                         .map_err(|_| failure("listener intent reader failed"))?;
-                    match intent {
-                        Ok(intent) => {
-                            let registered = self
-                                .identities()?
-                                .managed(
-                                    login.hub_url.origin().ascii_serialization(),
-                                    login.human_id.clone(),
-                                )
-                                .await?;
-                            if intent.project != project
-                                || !registered.iter().any(|identity| {
-                                    identity.kind == IdentityKind::Listener
-                                        && identity.identity_id == intent.identity_id
-                                        && identity.project == project
-                                })
-                            {
-                                return Err(forbidden());
-                            }
+                    // A missing, corrupt or oversized intent names no owner, and
+                    // readopt skips it, so stop may clear it below.
+                    if let Ok(intent) = intent {
+                        let registered = self
+                            .identities()?
+                            .managed(
+                                login.hub_url.origin().ascii_serialization(),
+                                login.human_id.clone(),
+                            )
+                            .await?;
+                        if intent.project != project
+                            || !registered.iter().any(|identity| {
+                                identity.kind == IdentityKind::Listener
+                                    && identity.identity_id == intent.identity_id
+                                    && identity.project == project
+                            })
+                        {
+                            return Err(forbidden());
                         }
-                        // A missing, corrupt or oversized intent names no owner, and
-                        // readopt skips it, so stop may clear it below.
-                        Err(_) => {}
                     }
                 }
                 remove_intent(
