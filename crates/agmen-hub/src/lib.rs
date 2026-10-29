@@ -52,6 +52,7 @@ mod rollcall;
 mod secrets_scan;
 mod self_config;
 mod state;
+mod store_pg;
 mod sweeper;
 mod tenants;
 #[cfg(feature = "test-hooks")]

@@ -4,6 +4,7 @@ members = [
     "crates/agmen-proto",
     "crates/agmen-local",
     "crates/agmen-roles",
+    "crates/agmen-core",
     "crates/agmen-client",
     "crates/agmen-cli",
     "crates/agmen-hub",
