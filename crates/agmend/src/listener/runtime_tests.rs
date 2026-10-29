@@ -111,9 +111,15 @@ impl Fixture {
                     axum::Json(json!({"id":"listen01","handle":body["handle"],"project":"project1","tenant":"tenant01","token":String::from("fake-hub-credential"),"verbs":["FYI","ALERT","DELEGATED"]})).into_response()
                 }
             }))
-            .route("/v1/projects/{project}/state", axum::routing::get(move || {
+            .route("/v1/projects/{project}/state", axum::routing::get(move |axum::extract::Query(query): axum::extract::Query<BTreeMap<String, String>>| {
                 let roster = rosters.lock().unwrap().clone();
-                async move { axum::Json(json!({"value":roster})) }
+                async move {
+                    axum::Json(if query.get("key").is_some_and(|key| key == "head") {
+                        json!({"value":{"feed_seq":0}})
+                    } else {
+                        json!({"value":roster})
+                    })
+                }
             }))
             .route("/published", axum::routing::post(move |axum::Json(envelope): axum::Json<ClientEnvelope>| {
                 posted.lock().unwrap().push(envelope);
@@ -229,6 +235,17 @@ impl Fixture {
     fn config(&self) -> PathBuf {
         self.dir.path().join("listener/project1/mcp.json")
     }
+    fn console(&self, listeners: Arc<Listeners>) -> crate::console::Console {
+        let console = &self.daemon.core.console;
+        crate::console::Console {
+            hub: console.hub.clone(),
+            feeds: console.feeds.clone(),
+            local: console.local.clone(),
+            local_every: console.local_every,
+            listeners,
+            settings_file: self.listeners().settings_file.clone(),
+        }
+    }
     async fn human(&self, method: &str, raw: Value) -> Result<Value, ApiError> {
         self.listeners().human_call(method, raw).await
     }
@@ -334,6 +351,126 @@ impl Fixture {
 
 fn event(seq: u64, from: &str) -> StampedEnvelope {
     serde_json::from_value(json!({"v":1,"id":format!("{seq:026}"),"verb":"FYI","data":{},"body":format!("message {seq}"),"sent_at":"2026-10-29T16:00:00Z","stream":"feed","seq":seq,"from":from,"from_handle":if from=="owner001" {"owner"} else {"stranger"},"from_kind":"human","hub_at":"2026-10-29T16:00:00Z"})).unwrap()
+}
+
+#[tokio::test]
+async fn status_does_not_wait_on_changing() {
+    let f = Fixture::new(FAKE).await;
+    f.start().await;
+    f.request(json!([{"target":"listener","key":"per_delegation_usd","value":"8.00"}]))
+        .await
+        .unwrap();
+    f.wait_spend("0.01").await;
+    let console = f.console(f.listeners().clone());
+    let expected_status = f.human("listener_status", json!({})).await.unwrap();
+    let expected_snapshot = console
+        .snapshot(json!({"project":"project1"}))
+        .await
+        .unwrap();
+    let changing = f.listeners().changing.lock().await;
+    // Start and stop also hold entries across I/O.
+    let entries = f.listeners().entries.lock().await;
+    let (status, snapshot) = tokio::join!(
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            f.human("listener_status", json!({}))
+        ),
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            console.snapshot(json!({"project":"project1"}))
+        )
+    );
+    drop(entries);
+    drop(changing);
+    f.stop().await;
+    assert!(
+        status.is_ok() && snapshot.is_ok(),
+        "reads must finish within 1 s: listener_status={status:?}, console_snapshot={snapshot:?}"
+    );
+    assert_eq!(status.unwrap().unwrap(), expected_status);
+    assert_eq!(snapshot.unwrap().unwrap(), expected_snapshot);
+}
+
+#[tokio::test]
+async fn status_does_not_wait_on_listener_spawn() {
+    let mut f = Fixture::new(&format!(
+        "if [ ! -f crashed ]; then\n    : >crashed\n    IFS= read -r message\n    exit 1\nfi\n{FAKE}"
+    ))
+    .await;
+    let (created, mut observed) = mpsc::channel(1);
+    let (release, released) = std::sync::mpsc::sync_channel(1);
+    let released = StdMutex::new(released);
+    let launches = std::sync::atomic::AtomicUsize::new(0);
+    let core = Arc::get_mut(&mut f.daemon.core).unwrap();
+    let listeners = Arc::get_mut(&mut core.listeners).unwrap();
+    listeners.created = Some(Arc::new(move |_| {
+        if launches.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1 {
+            created.try_send(()).unwrap();
+            released
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(3))
+                .expect("test must release the blocked config write");
+        }
+    }));
+    f.start().await;
+    f.enqueue(event(1, "owner001")).await;
+    tokio::time::timeout(Duration::from_secs(3), observed.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let console = f.console(f.listeners().clone());
+    let (status, snapshot) = tokio::join!(
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            f.human("listener_status", json!({}))
+        ),
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            console.snapshot(json!({"project":"project1"}))
+        )
+    );
+    release.send(()).unwrap();
+    f.stop().await;
+    assert!(
+        status.is_ok() && snapshot.is_ok(),
+        "reads must finish within 1 s during spawn: listener_status={status:?}, console_snapshot={snapshot:?}"
+    );
+    assert_eq!(status.unwrap().unwrap()[0]["state"], "running");
+    assert_eq!(snapshot.unwrap().unwrap()["listener"]["state"], "running");
+}
+
+#[tokio::test]
+async fn cards_are_per_listeners_value() {
+    let f = Fixture::new(FAKE).await;
+    f.start().await;
+    let proposed = f
+        .request(json!([{"target":"listener","key":"per_delegation_usd","value":"8.00"}]))
+        .await
+        .unwrap();
+    let first = f.console(f.listeners().clone());
+    // Use the same settings path so a process-wide path key cannot isolate cards.
+    let second = f.console(Arc::new(Listeners::new(
+        f.listeners().hub.clone(),
+        f.listeners().state_dir.clone(),
+        f.listeners().settings_file.clone(),
+    )));
+    let own = first.snapshot(json!({"project":"project1"})).await.unwrap();
+    let other: agmen_local::console::ConsoleSnapshot = serde_json::from_value(
+        second
+            .snapshot(json!({"project":"project1"}))
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    f.stop().await;
+    assert_eq!(own["changes"].as_array().unwrap().len(), 1);
+    assert_eq!(own["changes"][0]["id"], proposed["id"]);
+    assert!(
+        other.changes.is_empty(),
+        "a second Listeners value must not see the first value's cards: {:?}",
+        other.changes
+    );
 }
 
 #[tokio::test]
