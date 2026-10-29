@@ -11,7 +11,9 @@ use agmen_local::ErrorCode;
 use agmen_local::console::{ConsoleEvent, ConsoleSnapshot};
 use axum::http::StatusCode;
 use serde_json::{Value, json};
-use support::{ACCESS, Daemon, PROJECT, envelope, error, next, quiet, result, roster};
+use support::{
+    ACCESS, Daemon, HANDLE, HUMAN, PROJECT, envelope, error, next, quiet, result, roster,
+};
 
 fn seqs(messages: &Value) -> Vec<u64> {
     messages
@@ -444,4 +446,69 @@ async fn too_many_streams_tells_the_console_and_retries() {
     // retry connects.
     *daemon.hub.state.events_refusal.lock().unwrap() = None;
     until_connected(&mut frames).await;
+}
+
+#[tokio::test]
+async fn snapshot_fills_the_listener_from_roster_and_settings() {
+    // No listener process is running, so status is empty. The roster row
+    // plus the project's settings table are enough for the entry.
+    let daemon = Daemon::start().await;
+    let settings = daemon.home.socket().with_file_name("settings.toml");
+    std::fs::write(
+        &settings,
+        format!("[listener.{PROJECT}]\nper_delegation_usd = \"8.00\"\n"),
+    )
+    .unwrap();
+    *daemon.hub.state.roster.lock().unwrap() = json!([
+        {"identity_id": HUMAN, "handle": HANDLE, "kind": "human", "status": "online"},
+        {"identity_id": "idlisten", "handle": "andy/listen", "kind": "listener", "status": "away"},
+        {"identity_id": "idn7k2q9", "handle": "andy/sol", "kind": "agent", "status": "online",
+         "agent": "claude", "model": "opus"},
+    ]);
+    let mut client = daemon.client().await;
+    let snap = result(
+        client
+            .call("console_snapshot", json!({"project": PROJECT}))
+            .await,
+    );
+    let snap: ConsoleSnapshot = serde_json::from_value(snap).unwrap();
+    let listener = snap.listener.expect("roster and settings name a listener");
+    assert_eq!(listener.identity_id.as_str(), "idlisten");
+    assert_eq!(listener.handle, "andy/listen");
+    assert_eq!(listener.state, "away");
+    assert_eq!(listener.model, "claude-haiku-5-5");
+    assert_eq!(listener.today_usd, "0.00");
+    assert_eq!(listener.daily_usd, "2.00");
+    assert_eq!(listener.per_delegation_usd.as_deref(), Some("8.00"));
+    assert_eq!(listener.workers_daily_usd.as_deref(), Some("20.00"));
+    assert_eq!(listener.max_workers, Some(3));
+    assert_eq!(
+        listener.takes_work_from.as_deref(),
+        Some("andy, coordinators")
+    );
+    assert_eq!(listener.role.as_deref(), Some("listener"));
+    assert!(listener.can_use.is_empty());
+    assert!(listener.never.is_empty());
+    assert!(listener.workers_running.is_none());
+    assert!(snap.changes.is_empty());
+}
+
+#[tokio::test]
+async fn snapshot_invents_no_listener_caps_without_a_table_or_a_running_listener() {
+    // The roster lists the listener, nothing runs, and there is no settings
+    // file: the defaults are not something this person set, so no entry.
+    let daemon = Daemon::start().await;
+    *daemon.hub.state.roster.lock().unwrap() = json!([
+        {"identity_id": HUMAN, "handle": HANDLE, "kind": "human", "status": "online"},
+        {"identity_id": "idlisten", "handle": "andy/listen", "kind": "listener", "status": "away"},
+    ]);
+    let mut client = daemon.client().await;
+    let snap = result(
+        client
+            .call("console_snapshot", json!({"project": PROJECT}))
+            .await,
+    );
+    let snap: ConsoleSnapshot = serde_json::from_value(snap).unwrap();
+    assert!(snap.listener.is_none());
+    assert!(snap.changes.is_empty());
 }

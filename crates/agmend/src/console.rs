@@ -10,18 +10,22 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agmen_client::PAGE_LIMIT;
-use agmen_local::console::{ConsoleEvent, ConsoleSnapshot, LocalData, Me};
+use agmen_local::console::{
+    ConsoleEvent, ConsoleSnapshot, ListenerEntry, LocalData, Me, RosterEntry, SettingsChangeEntry,
+    Status, change_card_id,
+};
 use agmen_local::{ApiError, ErrorCode, MAX_FRAME, Response, frame};
-use agmen_proto::{ClientEnvelope, ProjectId, Seq, StampedEnvelope};
+use agmen_proto::{ClientEnvelope, IdentityId, IdentityKind, ProjectId, Seq, StampedEnvelope};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use tokio::io::AsyncReadExt as _;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::broadcast::error::RecvError;
 
 use crate::feed::Feeds;
 use crate::hub::{Hub, HubError};
+use crate::listener::ListenerCaps;
 use crate::local::{self, Local};
 
 /// What every console method needs.
@@ -32,6 +36,10 @@ pub(crate) struct Console {
     pub(crate) local: Local,
     /// How often a watch with a checkout re-reads its local data.
     pub(crate) local_every: Duration,
+    /// Listener status. Change cards are published from the settings store.
+    pub(crate) listeners: Arc<crate::listener::Listeners>,
+    /// The settings file the listener caps are read from.
+    pub(crate) settings_file: PathBuf,
 }
 
 /// `params` as `T`, or `bad_request`.
@@ -173,6 +181,181 @@ struct Posted {
     seq: Seq,
 }
 
+/// How many listener rows and change cards one snapshot keeps.
+const MAX_STATUS_ROWS: usize = 64;
+const MAX_CHANGE_CARDS: usize = 256;
+/// Messages scanned for `apply:<id>` / `undo:<id>`.
+const MAX_CARD_MESSAGES: usize = 500;
+/// How many `accept_from` handles the listener row names.
+const MAX_ACCEPT_SHOWN: usize = 64;
+
+#[derive(Debug, Deserialize)]
+struct StatusRow {
+    #[serde(default)]
+    identity_id: String,
+    #[serde(default)]
+    handle: String,
+    #[serde(default)]
+    state: String,
+    #[serde(default)]
+    model: String,
+    #[serde(default)]
+    today_usd: String,
+    #[serde(default)]
+    daily_usd: String,
+}
+
+fn person_of(handle: &str) -> &str {
+    handle.split_once('/').map_or(handle, |(person, _)| person)
+}
+
+fn presence(status: Status) -> &'static str {
+    match status {
+        Status::Online => "online",
+        Status::Away => "away",
+        Status::Offline => "offline",
+    }
+}
+
+/// The person's listener when a status row exists, or when the roster
+/// lists one and the settings file has that project's table. Otherwise
+/// none, so an empty status does not invent caps.
+///
+/// A running listener works to the settings `load` reads, defaults
+/// included, so it reports those. One that is not running reports caps
+/// only when the person's table names them.
+fn listener_entry(
+    rows: &[StatusRow],
+    caps: Option<&ListenerCaps>,
+    roster: &[RosterEntry],
+    me: &Me,
+) -> Option<ListenerEntry> {
+    let mine = |handle: &str| person_of(handle) == me.handle;
+    let row = rows
+        .iter()
+        .take(MAX_STATUS_ROWS)
+        .find(|row| mine(&row.handle));
+    let roster_listener = roster
+        .iter()
+        .find(|entry| entry.kind == IdentityKind::Listener && mine(&entry.handle));
+    let caps = caps.filter(|caps| row.is_some() || caps.configured);
+    if row.is_none() && (roster_listener.is_none() || caps.is_none()) {
+        return None;
+    }
+    let identity_id = row
+        .and_then(|row| row.identity_id.parse::<IdentityId>().ok())
+        .or_else(|| roster_listener.map(|entry| entry.identity_id.clone()))?;
+    let handle = row
+        .map(|row| row.handle.clone())
+        .filter(|handle| !handle.is_empty())
+        .or_else(|| roster_listener.map(|entry| entry.handle.clone()))
+        .unwrap_or_default();
+    let state = row
+        .map(|row| row.state.clone())
+        .filter(|state| !state.is_empty())
+        .unwrap_or_else(|| {
+            roster_listener
+                .map(|entry| presence(entry.status).to_owned())
+                .unwrap_or_default()
+        });
+    let model = row
+        .map(|row| row.model.clone())
+        .filter(|model| !model.is_empty())
+        .or_else(|| caps.map(|caps| caps.model.clone()))
+        .unwrap_or_default();
+    let today_usd = row
+        .map(|row| row.today_usd.clone())
+        .filter(|amount| !amount.is_empty())
+        .unwrap_or_else(|| "0.00".into());
+    let daily_usd = row
+        .map(|row| row.daily_usd.clone())
+        .filter(|amount| !amount.is_empty())
+        .or_else(|| caps.map(|caps| caps.listener_daily_usd.clone()))
+        .unwrap_or_else(|| "0.00".into());
+    let takes_work_from = caps.map(|caps| takes_work_from(me, caps));
+    Some(ListenerEntry {
+        identity_id,
+        handle,
+        state,
+        model,
+        today_usd,
+        daily_usd,
+        per_delegation_usd: caps.map(|caps| caps.per_delegation_usd.clone()),
+        workers_daily_usd: caps.map(|caps| caps.workers_daily_usd.clone()),
+        max_workers: caps.map(|caps| caps.max_workers),
+        workers_running: None,
+        workers_today_usd: None,
+        can_use: Vec::new(),
+        never: Vec::new(),
+        takes_work_from,
+        role: Some("listener".into()),
+        tokens_in: None,
+        tokens_out: None,
+        uptime_minutes: None,
+    })
+}
+
+/// Who the listener takes work from: the person, coordinators, and the
+/// handles the settings add. These are the senders its intake accepts.
+fn takes_work_from(me: &Me, caps: &ListenerCaps) -> String {
+    let mut who = vec![me.handle.as_str(), "coordinators"];
+    who.extend(
+        caps.accept_from
+            .iter()
+            .map(String::as_str)
+            .filter(|handle| *handle != me.handle)
+            .take(MAX_ACCEPT_SHOWN),
+    );
+    who.join(", ")
+}
+
+/// The identities of the person's own listener, from the roster.
+fn own_listeners(roster: &[RosterEntry], me: &Me) -> Vec<IdentityId> {
+    roster
+        .iter()
+        .filter(|entry| {
+            entry.kind == IdentityKind::Listener && person_of(&entry.handle) == me.handle
+        })
+        .map(|entry| entry.identity_id.clone())
+        .take(MAX_STATUS_ROWS)
+        .collect()
+}
+
+/// Points each card at the newest message from one of `listeners` whose
+/// last line names it. The card's id is on the shared feed, so anyone can
+/// end an FYI with it: a message from anyone else never takes a card, and
+/// cannot move one off the listener's own message.
+fn attach_message_ids(
+    changes: &mut [SettingsChangeEntry],
+    messages: &[StampedEnvelope],
+    listeners: &[IdentityId],
+) {
+    let start = messages.len().saturating_sub(MAX_CARD_MESSAGES);
+    let messages = &messages[start..];
+    for card in changes.iter_mut().take(MAX_CHANGE_CARDS) {
+        card.message_id = messages.iter().rev().find_map(|message| {
+            (listeners.contains(&message.from)
+                && change_card_id(message.client.body.as_str()) == Some(card.id.as_str()))
+            .then(|| message.client.id.clone())
+        });
+    }
+}
+
+/// Drops a card's message id when `fit` did not keep that message, so the
+/// encoded snapshot stays within the size `fit` already allowed.
+fn clear_dropped_cards(changes: &mut [SettingsChangeEntry], kept: &[StampedEnvelope]) {
+    for card in changes.iter_mut().take(MAX_CHANGE_CARDS) {
+        let present = card.message_id.as_ref().is_some_and(|id| {
+            kept.iter()
+                .take(MAX_CARD_MESSAGES)
+                .any(|message| &message.client.id == id)
+        });
+        if card.message_id.is_some() && !present {
+            card.message_id = None;
+        }
+    }
+}
+
 impl Console {
     /// `whoami`: the person in the CLI's login file.
     pub(crate) async fn whoami(&self) -> Result<Value, ApiError> {
@@ -205,23 +388,97 @@ impl Console {
             .await?;
         let roster = self.hub.roster(&project).await?;
         let local = self.local.read(&project, root.as_deref()).await;
+        let me = Me {
+            id: login.human_id,
+            handle: login.handle,
+        };
+        // After the hub reads, so this does not hold a hub lock across them.
+        // A status or settings failure leaves the chat snapshot intact.
+        let (listener, mut changes) = self.listener_view(&project, &roster, &me).await;
+        attach_message_ids(&mut changes, &messages, &own_listeners(&roster, &me));
         let mut snapshot = ConsoleSnapshot {
             project: project.to_string(),
-            me: Me {
-                id: login.human_id,
-                handle: login.handle,
-            },
+            me,
             roster,
             messages: Vec::new(),
             older,
             roles: local.roles,
             worktrees: local.worktrees,
             git: local.git,
+            listener,
+            changes,
         };
         let (messages, trimmed) = fit(messages, json_len(&snapshot)?)?;
+        clear_dropped_cards(&mut snapshot.changes, &messages);
         snapshot.messages = messages;
         snapshot.older |= trimmed;
         to_value(&snapshot)
+    }
+
+    /// Status rows for `project`, or none when agmend cannot read them.
+    /// One bad row is skipped so the chat snapshot still returns.
+    async fn status_rows(&self, project: &ProjectId) -> Vec<StatusRow> {
+        let value = match self
+            .listeners
+            .human_call("listener_status", json!({"project": project}))
+            .await
+        {
+            Ok(value) => value,
+            Err(err) => {
+                tracing::debug!(
+                    message = %err.message,
+                    "listener status unavailable; the snapshot keeps the chat"
+                );
+                return Vec::new();
+            }
+        };
+        let Value::Array(rows) = value else {
+            tracing::debug!("listener status was not a list; the snapshot keeps the chat");
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for row in rows.into_iter().take(MAX_STATUS_ROWS) {
+            match serde_json::from_value(row) {
+                Ok(row) => out.push(row),
+                Err(_) => {
+                    tracing::debug!("skipping a listener status row the console could not read");
+                }
+            }
+        }
+        out
+    }
+
+    async fn file_caps(&self, project: &ProjectId) -> Option<ListenerCaps> {
+        let path = self.settings_file.clone();
+        let project = project.clone();
+        match tokio::task::spawn_blocking(move || crate::listener::listener_caps(&path, &project))
+            .await
+        {
+            Ok(caps) => caps,
+            Err(err) => {
+                tracing::debug!(
+                    error = %err,
+                    "reading listener caps failed; the snapshot keeps the chat"
+                );
+                None
+            }
+        }
+    }
+
+    async fn listener_view(
+        &self,
+        project: &ProjectId,
+        roster: &[RosterEntry],
+        me: &Me,
+    ) -> (Option<ListenerEntry>, Vec<SettingsChangeEntry>) {
+        let rows = self.status_rows(project).await;
+        let caps = self.file_caps(project).await;
+        let listener = listener_entry(&rows, caps.as_ref(), roster, me);
+        let mut changes = crate::listener::published_changes(&self.settings_file, project);
+        if changes.len() > MAX_CHANGE_CARDS {
+            changes.truncate(MAX_CHANGE_CARDS);
+        }
+        (listener, changes)
     }
 
     /// `chat_history {project, before?, limit?}`: up to `limit` (default
@@ -423,4 +680,215 @@ async fn send_event(
 ) -> Result<(), frame::FrameError> {
     let value = serde_json::to_value(event)?;
     frame::write_async(writer, &Response::ok(id, value)).await
+}
+
+#[cfg(test)]
+mod tests {
+    use agmen_local::console::{Me, RosterEntry, SettingsChangeEntry, SettingsChangeState, Status};
+    use agmen_proto::{IdentityId, IdentityKind, StampedEnvelope};
+
+    use super::{ListenerCaps, StatusRow, attach_message_ids, listener_entry, own_listeners};
+
+    /// Andy's listener, the sender of every card in these tests.
+    const LISTENER: &str = "idlisten";
+
+    fn ident(id: &str) -> IdentityId {
+        id.parse().unwrap()
+    }
+
+    fn message_from(seq: u64, from: &str, kind: &str, body: &str) -> StampedEnvelope {
+        serde_json::from_value(serde_json::json!({
+            "v": 1,
+            "id": format!("01JBX6Q4T7W3C2M8Y9K5N{seq:05}"),
+            "verb": "FYI",
+            "data": {},
+            "body": body,
+            "sent_at": "2026-10-25T16:04:11Z",
+            "stream": "feed",
+            "seq": seq,
+            "from": from,
+            "from_handle": "andy/listener",
+            "from_kind": kind,
+            "hub_at": "2026-10-25T16:04:12Z",
+        }))
+        .unwrap()
+    }
+
+    fn message(seq: u64, body: &str) -> StampedEnvelope {
+        message_from(seq, LISTENER, "listener", body)
+    }
+
+    fn card(id: &str) -> SettingsChangeEntry {
+        SettingsChangeEntry {
+            id: id.into(),
+            message_id: None,
+            requested_by: "person01".into(),
+            widens: true,
+            state: SettingsChangeState::Pending,
+            rows: Vec::new(),
+        }
+    }
+
+    fn entry(id: &str, handle: &str, kind: IdentityKind, status: Status) -> RosterEntry {
+        RosterEntry {
+            identity_id: ident(id),
+            handle: handle.into(),
+            kind,
+            status,
+            role: None,
+            agent: None,
+            model: None,
+            delegated_by: None,
+        }
+    }
+
+    fn roster() -> Vec<RosterEntry> {
+        vec![
+            entry("idandy00", "andy", IdentityKind::Human, Status::Online),
+            entry("idfx1abc", "andy/fx1", IdentityKind::Agent, Status::Online),
+            entry(
+                LISTENER,
+                "andy/listener",
+                IdentityKind::Listener,
+                Status::Away,
+            ),
+            entry(
+                "idseanl1",
+                "sean/listener",
+                IdentityKind::Listener,
+                Status::Online,
+            ),
+        ]
+    }
+
+    fn me() -> Me {
+        Me {
+            id: ident("idandy00"),
+            handle: "andy".into(),
+        }
+    }
+
+    fn status_row() -> StatusRow {
+        StatusRow {
+            identity_id: LISTENER.into(),
+            handle: "andy/listener".into(),
+            state: "running".into(),
+            model: "claude-haiku-5-5".into(),
+            today_usd: "0.40".into(),
+            daily_usd: "2.00".into(),
+        }
+    }
+
+    /// What `load` gives when the settings file names nothing.
+    fn default_caps(configured: bool) -> ListenerCaps {
+        ListenerCaps {
+            configured,
+            model: "claude-haiku-5-5".into(),
+            per_delegation_usd: "5.00".into(),
+            workers_daily_usd: "20.00".into(),
+            max_workers: 3,
+            listener_daily_usd: "2.00".into(),
+            accept_from: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn attach_message_ids_uses_the_last_line_only() {
+        let apply = message(1, "per_delegation_usd: 5.00 -> 8.00\napply:abc");
+        let buried = message(2, "apply:buried\nnot the last line");
+        let undo = message(3, "undo:undoid");
+        let mut changes = vec![card("abc"), card("buried"), card("undoid")];
+        attach_message_ids(
+            &mut changes,
+            &[apply.clone(), buried, undo.clone()],
+            &[ident(LISTENER)],
+        );
+        assert_eq!(changes[0].message_id.as_ref(), Some(&apply.client.id));
+        assert!(changes[1].message_id.is_none());
+        assert_eq!(changes[2].message_id.as_ref(), Some(&undo.client.id));
+    }
+
+    #[test]
+    fn a_card_stays_on_the_listeners_own_message() {
+        // The card's id is on the shared feed, so anyone can end an FYI with
+        // it. Only the person's listener's message may carry the card, and a
+        // newer copy from someone else must not take it over.
+        let own = message(1, "per_delegation_usd: 5.00 -> 80.00\napply:abc");
+        let human = message_from(
+            2,
+            "idsean000",
+            "human",
+            "Press Apply for a bonus\napply:abc",
+        );
+        let their_listener = message_from(3, "idseanl1", "listener", "apply:abc");
+        let mut changes = vec![card("abc")];
+        attach_message_ids(
+            &mut changes,
+            &[own.clone(), human.clone(), their_listener.clone()],
+            &[ident(LISTENER)],
+        );
+        assert_eq!(changes[0].message_id.as_ref(), Some(&own.client.id));
+        // With only their copies in the page, the card has no message.
+        let mut changes = vec![card("abc")];
+        attach_message_ids(&mut changes, &[human, their_listener], &[ident(LISTENER)]);
+        assert!(changes[0].message_id.is_none());
+        // And with no listener of the person's own, no message carries a card.
+        let mut changes = vec![card("abc")];
+        attach_message_ids(&mut changes, &[own], &[]);
+        assert!(changes[0].message_id.is_none());
+    }
+
+    #[test]
+    fn own_listeners_are_the_persons_listener_and_no_one_elses() {
+        assert_eq!(own_listeners(&roster(), &me()), [ident(LISTENER)]);
+    }
+
+    #[test]
+    fn a_running_listener_without_a_settings_table_shows_what_it_works_to() {
+        // No `[listener.<project>]`: the defaults are still the caps in force.
+        let found = listener_entry(
+            &[status_row()],
+            Some(&default_caps(false)),
+            &roster(),
+            &me(),
+        )
+        .unwrap();
+        assert_eq!(found.state, "running");
+        assert_eq!(found.per_delegation_usd.as_deref(), Some("5.00"));
+        assert_eq!(found.workers_daily_usd.as_deref(), Some("20.00"));
+        assert_eq!(found.max_workers, Some(3));
+        assert_eq!(found.takes_work_from.as_deref(), Some("andy, coordinators"));
+    }
+
+    #[test]
+    fn a_listener_that_is_not_running_needs_a_settings_table_for_caps() {
+        // Nothing runs and no table names caps: no entry, so the panel says
+        // what the roster knows and invents no figures.
+        assert!(listener_entry(&[], Some(&default_caps(false)), &roster(), &me()).is_none());
+        assert!(listener_entry(&[], None, &roster(), &me()).is_none());
+        // A table names them: the roster word is the state.
+        let found = listener_entry(&[], Some(&default_caps(true)), &roster(), &me()).unwrap();
+        assert_eq!(found.state, "away");
+        assert_eq!(found.per_delegation_usd.as_deref(), Some("5.00"));
+    }
+
+    #[test]
+    fn a_running_listener_whose_settings_cannot_be_read_still_shows() {
+        let found = listener_entry(&[status_row()], None, &roster(), &me()).unwrap();
+        assert_eq!(found.state, "running");
+        assert!(found.per_delegation_usd.is_none());
+        assert!(found.takes_work_from.is_none());
+    }
+
+    #[test]
+    fn takes_work_from_is_the_person_coordinators_and_the_listed() {
+        // agmend accepts the owner, any coordinator, and these handles.
+        let mut caps = default_caps(true);
+        caps.accept_from = vec!["andy".into(), "sean".into()];
+        let found = listener_entry(&[status_row()], Some(&caps), &roster(), &me()).unwrap();
+        assert_eq!(
+            found.takes_work_from.as_deref(),
+            Some("andy, coordinators, sean")
+        );
+    }
 }

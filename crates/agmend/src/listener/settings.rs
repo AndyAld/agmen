@@ -5,8 +5,10 @@ use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock, PoisonError};
 
 use agmen_local::ErrorCode;
+use agmen_local::console::{SettingsChangeEntry, SettingsChangeRow, SettingsChangeState};
 use agmen_proto::ProjectId;
 use toml_edit::{Document, Item, Table, TableLike, value};
 
@@ -624,6 +626,8 @@ struct Change {
     before: ListenerSettings,
     after: ListenerSettings,
     coordinators: Vec<String>,
+    /// The person the proposal named. The console card shows it.
+    requested_by: String,
 }
 
 #[derive(Debug, Default)]
@@ -704,17 +708,21 @@ impl Changes {
             widens,
             state,
         };
-        let history = self.projects.entry(project.clone()).or_default();
-        if history.entries.len() == MAX_CHANGES {
-            history.entries.pop_front();
+        {
+            let history = self.projects.entry(project.clone()).or_default();
+            if history.entries.len() == MAX_CHANGES {
+                history.entries.pop_front();
+            }
+            history.entries.push_back(Change {
+                row: row.clone(),
+                before,
+                after,
+                coordinators: coordinators.iter().map(|id| (*id).to_owned()).collect(),
+                requested_by: person.to_owned(),
+            });
+            history.record(row);
         }
-        history.entries.push_back(Change {
-            row: row.clone(),
-            before,
-            after,
-            coordinators: coordinators.iter().map(|id| (*id).to_owned()).collect(),
-        });
-        history.record(row);
+        self.publish(path, project);
         Ok(applied)
     }
 
@@ -726,26 +734,29 @@ impl Changes {
         id: &ChangeId,
         apply: bool,
     ) -> Result<(), SettingsError> {
-        let history = self
-            .projects
-            .get_mut(project)
-            .ok_or_else(|| SettingsError::UnknownChange(id.clone()))?;
-        let change = history
-            .entries
-            .iter_mut()
-            .find(|entry| entry.row.id == *id && entry.row.state == ChangeState::Pending)
-            .ok_or_else(|| SettingsError::UnknownChange(id.clone()))?;
-        if apply {
-            let merged = rebase(path, project, change, &change.before, &change.after)?;
-            save(path, project, &merged)?;
+        {
+            let history = self
+                .projects
+                .get_mut(project)
+                .ok_or_else(|| SettingsError::UnknownChange(id.clone()))?;
+            let change = history
+                .entries
+                .iter_mut()
+                .find(|entry| entry.row.id == *id && entry.row.state == ChangeState::Pending)
+                .ok_or_else(|| SettingsError::UnknownChange(id.clone()))?;
+            if apply {
+                let merged = rebase(path, project, change, &change.before, &change.after)?;
+                save(path, project, &merged)?;
+            }
+            change.row.state = if apply {
+                ChangeState::Applied
+            } else {
+                ChangeState::Cancelled
+            };
+            let row = change.row.clone();
+            history.record(row);
         }
-        change.row.state = if apply {
-            ChangeState::Applied
-        } else {
-            ChangeState::Cancelled
-        };
-        let row = change.row.clone();
-        history.record(row);
+        self.publish(path, project);
         Ok(())
     }
 
@@ -756,20 +767,23 @@ impl Changes {
         project: &ProjectId,
         id: &ChangeId,
     ) -> Result<(), SettingsError> {
-        let history = self
-            .projects
-            .get_mut(project)
-            .ok_or_else(|| SettingsError::UnknownChange(id.clone()))?;
-        let change = history
-            .entries
-            .iter_mut()
-            .find(|entry| entry.row.id == *id && entry.row.state == ChangeState::Applied)
-            .ok_or_else(|| SettingsError::UnknownChange(id.clone()))?;
-        let merged = rebase(path, project, change, &change.after, &change.before)?;
-        save(path, project, &merged)?;
-        change.row.state = ChangeState::Undone;
-        let row = change.row.clone();
-        history.record(row);
+        {
+            let history = self
+                .projects
+                .get_mut(project)
+                .ok_or_else(|| SettingsError::UnknownChange(id.clone()))?;
+            let change = history
+                .entries
+                .iter_mut()
+                .find(|entry| entry.row.id == *id && entry.row.state == ChangeState::Applied)
+                .ok_or_else(|| SettingsError::UnknownChange(id.clone()))?;
+            let merged = rebase(path, project, change, &change.after, &change.before)?;
+            save(path, project, &merged)?;
+            change.row.state = ChangeState::Undone;
+            let row = change.row.clone();
+            history.record(row);
+        }
+        self.publish(path, project);
         Ok(())
     }
 
@@ -779,6 +793,212 @@ impl Changes {
             .into_iter()
             .flat_map(|history| history.audit.iter())
     }
+
+    fn publish(&self, path: &Path, project: &ProjectId) {
+        remember(path, project, self.cards_for(project));
+    }
+
+    fn cards_for(&self, project: &ProjectId) -> Vec<SettingsChangeEntry> {
+        let Some(history) = self.projects.get(project) else {
+            return Vec::new();
+        };
+        history
+            .entries
+            .iter()
+            .take(MAX_CHANGES)
+            .map(|change| SettingsChangeEntry {
+                id: change.row.id.0.clone(),
+                message_id: None,
+                requested_by: change.requested_by.clone(),
+                widens: matches!(change.row.direction, Direction::Widen(_)),
+                state: match change.row.state {
+                    ChangeState::Pending => SettingsChangeState::Pending,
+                    ChangeState::Applied => SettingsChangeState::Applied,
+                    ChangeState::Cancelled => SettingsChangeState::Cancelled,
+                    ChangeState::Undone => SettingsChangeState::Undone,
+                },
+                rows: rows_between(&change.before, &change.after),
+            })
+            .collect()
+    }
+}
+
+/// The caps a project's listener works to, as `load` reads them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ListenerCaps {
+    /// `[listener.<project>]` exists. When it does not, the values below
+    /// are the defaults: a running listener works to them, but the person
+    /// set none of them, so a listener that is not running does not show them.
+    pub(crate) configured: bool,
+    /// The configured model.
+    pub(crate) model: String,
+    /// Per-worker cap, USD with two decimals.
+    pub(crate) per_delegation_usd: String,
+    /// Workers' shared daily cap.
+    pub(crate) workers_daily_usd: String,
+    /// How many workers may run at once.
+    pub(crate) max_workers: u32,
+    /// The listener's own daily cap.
+    pub(crate) listener_daily_usd: String,
+    /// Who may hand it work, beyond the person and coordinators.
+    pub(crate) accept_from: Vec<String>,
+}
+
+/// The project's listener caps, defaults included when the file or its
+/// table is missing.
+///
+/// A read or parse failure is `None`: the console snapshot still returns
+/// the chat.
+#[must_use]
+pub(crate) fn listener_caps(path: &Path, project: &ProjectId) -> Option<ListenerCaps> {
+    let doc = read_document(path).ok()?;
+    let configured = doc
+        .get("listener")
+        .and_then(Item::as_table_like)
+        .and_then(|listener| listener.get(project.as_str()))
+        .is_some_and(Item::is_table_like);
+    let settings = load(path, project).ok()?;
+    Some(ListenerCaps {
+        configured,
+        model: settings.model,
+        per_delegation_usd: usd_text(settings.per_delegation),
+        workers_daily_usd: usd_text(settings.daily),
+        max_workers: u32::try_from(settings.max_workers).unwrap_or(u32::MAX),
+        listener_daily_usd: usd_text(settings.listener_daily),
+        accept_from: settings.accept_from,
+    })
+}
+
+/// Cards for `project` last published by a change on `path`. Empty when
+/// this process has not proposed, decided or undone one there.
+#[must_use]
+pub(crate) fn published_changes(path: &Path, project: &ProjectId) -> Vec<SettingsChangeEntry> {
+    let guard = published().lock().unwrap_or_else(PoisonError::into_inner);
+    guard
+        .by_path
+        .get(path)
+        .and_then(|projects| projects.get(project))
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn usd_text(amount: UsdCents) -> String {
+    format!("{}.{:02}", amount.0 / 100, amount.0 % 100)
+}
+
+fn effort_text(effort: &Option<String>) -> String {
+    effort.clone().unwrap_or_default()
+}
+
+fn reviews_text(reviews: Reviews) -> &'static str {
+    match reviews {
+        Reviews::On => "on",
+        Reviews::Off => "off",
+    }
+}
+
+fn list_text(values: &[String]) -> String {
+    values
+        .iter()
+        .take(MAX_ACCEPT_FROM)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn rows_between(before: &ListenerSettings, after: &ListenerSettings) -> Vec<SettingsChangeRow> {
+    let mut rows = Vec::new();
+    let mut push = |setting: &str, left: String, right: String| {
+        if left != right && rows.len() < 32 {
+            rows.push(SettingsChangeRow {
+                target: "listener".into(),
+                setting: setting.into(),
+                before: left,
+                after: right,
+            });
+        }
+    };
+    push("model", before.model.clone(), after.model.clone());
+    push(
+        "effort",
+        effort_text(&before.effort),
+        effort_text(&after.effort),
+    );
+    push(
+        "per_delegation_usd",
+        usd_text(before.per_delegation),
+        usd_text(after.per_delegation),
+    );
+    push("daily_usd", usd_text(before.daily), usd_text(after.daily));
+    push(
+        "max_workers",
+        before.max_workers.to_string(),
+        after.max_workers.to_string(),
+    );
+    push(
+        "listener_daily_usd",
+        usd_text(before.listener_daily),
+        usd_text(after.listener_daily),
+    );
+    push(
+        "reviews",
+        reviews_text(before.reviews).to_owned(),
+        reviews_text(after.reviews).to_owned(),
+    );
+    push(
+        "accept_from",
+        list_text(&before.accept_from),
+        list_text(&after.accept_from),
+    );
+    push(
+        "worker_roles",
+        list_text(&before.worker_roles),
+        list_text(&after.worker_roles),
+    );
+    rows
+}
+
+// shortcut: `Listeners` holds `Changes` privately, so each mutation publishes
+// its cards here, keyed by the settings path, for the console to read. One
+// process-wide store: at most 64 paths, and each project keeps at most
+// MAX_CHANGES cards. It is right while one `Listeners` owns a settings file,
+// as in agmend; parallel tests use their own temp files. Replace it with an
+// accessor on `Listeners` when runtime.rs is free to change.
+const MAX_PUBLISHED_PATHS: usize = 64;
+
+#[derive(Debug, Default)]
+struct Published {
+    order: VecDeque<PathBuf>,
+    by_path: HashMap<PathBuf, HashMap<ProjectId, Vec<SettingsChangeEntry>>>,
+}
+
+fn published() -> &'static Mutex<Published> {
+    static PUBLISHED: OnceLock<Mutex<Published>> = OnceLock::new();
+    PUBLISHED.get_or_init(|| Mutex::new(Published::default()))
+}
+
+fn remember(path: &Path, project: &ProjectId, cards: Vec<SettingsChangeEntry>) {
+    let mut guard = published().lock().unwrap_or_else(PoisonError::into_inner);
+    let path = path.to_path_buf();
+    if let Some(index) = guard.order.iter().position(|item| item == &path) {
+        if let Some(item) = guard.order.remove(index) {
+            guard.order.push_back(item);
+        }
+    } else {
+        while guard.order.len() >= MAX_PUBLISHED_PATHS {
+            if let Some(old) = guard.order.pop_front() {
+                guard.by_path.remove(&old);
+            } else {
+                break;
+            }
+        }
+        guard.order.push_back(path.clone());
+    }
+    guard
+        .by_path
+        .entry(path)
+        .or_default()
+        .insert(project.clone(), cards);
 }
 
 /// Moves only the fields `change` touched from `from` to `to`, on top of the

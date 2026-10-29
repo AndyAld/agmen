@@ -167,11 +167,42 @@ mod tests {
     }
 
     #[gpui::test]
-    fn a_live_listener_shows_no_dollar_figures(cx: &mut TestAppContext) {
-        // Review fix 3: agmend reports the listener's handle, agent and
-        // state, not its policy or spend, so the panel shows no $0.00
-        // that reads as a measured cap.
+    fn listener_panel_shows_live_caps(cx: &mut TestAppContext) {
+        // Task 10: a live snapshot carries the listener's caps, and the
+        // panel draws them instead of the no-details empty state.
         let listener = crate::backend::live_snapshot().listener;
+        let details = listener
+            .as_ref()
+            .and_then(|listener| listener.details.as_ref())
+            .expect("live listener caps");
+        assert_eq!(details.harness_label, "claude-haiku-5-5");
+        assert_eq!(details.listener_today_usd, 0.40);
+        assert_eq!(details.listener_cap_usd, 2.0);
+        assert_eq!(details.per_worker_usd, 5.0);
+        assert_eq!(details.workers_cap_usd, 20.0);
+        assert_eq!(details.workers_max, 3);
+        let cx = draw(cx, move || {
+            div()
+                .w(crate::ui::tokens::RIGHT_DOCK_WIDTH)
+                .child(ListenerPanel::new(listener.clone()))
+                .into_any_element()
+        });
+        assert!(cx.debug_bounds("kv-label:Listener today:3").is_some());
+        assert!(cx.debug_bounds("kv-label:Harness:0").is_some());
+        assert!(cx.debug_bounds("listener-panel:no-details").is_none());
+    }
+
+    #[gpui::test]
+    fn a_listener_without_details_shows_no_dollar_figures(cx: &mut TestAppContext) {
+        // A listener agmend has not given policy or spend for still shows
+        // its handle, agent and state, and no $0.00 that reads as a cap.
+        let listener = Some(crate::backend::ListenerInfo {
+            id: "idlisten".parse().unwrap(),
+            handle: "andy/listen".into(),
+            agent: "codex".into(),
+            state: "away".into(),
+            details: None,
+        });
         assert!(listener.as_ref().is_some_and(|l| l.details.is_none()));
         let cx = draw(cx, move || {
             div()
