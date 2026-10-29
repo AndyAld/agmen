@@ -3,15 +3,15 @@
 mod ledger;
 mod messages;
 
+use std::time::Duration;
+
 use agmen_core::{
     LaneHolder, LaneRow, MessageRow, Reads, ResolvedLane, Roster, Store, StoreError, StoreTx,
 };
-use agmen_proto::{IdentityId, IdentityKind, ItemKey, LaneName, ProjectId, Seq, Topics};
+use agmen_proto::{IdentityId, IdentityKind, ItemKey, LaneName, ProjectId, Seq, Timestamp, Topics};
 use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 
 use crate::claims::LedgerError;
-
-pub(crate) use ledger::{lane_holders, load_lanes, load_lends};
 
 #[derive(Debug)]
 pub(crate) struct PgStore {
@@ -172,6 +172,139 @@ impl Store for PgStore {
 }
 
 impl StoreTx for PgTx {
+    async fn lock_item(
+        &mut self,
+        project: &ProjectId,
+        item: &ItemKey,
+    ) -> Result<Option<agmen_core::ItemLock>, StoreError> {
+        ledger::lock_item(self.sqlx(), project, item).await
+    }
+
+    async fn release_lapsed(
+        &mut self,
+        project: &ProjectId,
+        item: &ItemKey,
+    ) -> Result<Option<agmen_core::Lapsed>, StoreError> {
+        ledger::release_lapsed(self.sqlx(), project, item).await
+    }
+
+    async fn active_claim(
+        &mut self,
+        project: &ProjectId,
+        item: &ItemKey,
+    ) -> Result<Option<(IdentityId, String)>, StoreError> {
+        ledger::active_claim(self.sqlx(), project, item).await
+    }
+
+    async fn extend_claim(
+        &mut self,
+        project: &ProjectId,
+        item: &ItemKey,
+        lease: Duration,
+    ) -> Result<Timestamp, StoreError> {
+        ledger::extend_claim(self.sqlx(), project, item, lease).await
+    }
+
+    async fn insert_claim(
+        &mut self,
+        project: &ProjectId,
+        item: &ItemKey,
+        from: &IdentityId,
+        lease: Duration,
+    ) -> Result<Timestamp, StoreError> {
+        ledger::insert_claim(self.sqlx(), project, item, from, lease).await
+    }
+
+    async fn renew_claims(
+        &mut self,
+        project: &ProjectId,
+        from: &IdentityId,
+        items: &[ItemKey],
+        lease: Duration,
+    ) -> Result<u64, StoreError> {
+        ledger::renew_claims(self.sqlx(), project, from, items, lease).await
+    }
+
+    async fn release_claim(
+        &mut self,
+        project: &ProjectId,
+        item: &ItemKey,
+        from: &IdentityId,
+        by: agmen_core::ReleaseBy,
+    ) -> Result<u64, StoreError> {
+        ledger::release_claim(self.sqlx(), project, item, from, by).await
+    }
+
+    async fn next_item_number(
+        &mut self,
+        project: &ProjectId,
+        prefix: &str,
+    ) -> Result<u64, StoreError> {
+        ledger::next_item_number(self.sqlx(), project, prefix).await
+    }
+
+    async fn insert_item(&mut self, item: &agmen_core::NewItem<'_>) -> Result<(), StoreError> {
+        ledger::insert_item(self.sqlx(), item).await
+    }
+
+    async fn assign_item(
+        &mut self,
+        project: &ProjectId,
+        item: &ItemKey,
+        to: &IdentityId,
+    ) -> Result<u64, StoreError> {
+        ledger::assign_item(self.sqlx(), project, item, to).await
+    }
+
+    async fn close_claim(
+        &mut self,
+        project: &ProjectId,
+        item: &ItemKey,
+        holder: &IdentityId,
+    ) -> Result<u64, StoreError> {
+        ledger::close_claim(self.sqlx(), project, item, holder).await
+    }
+
+    async fn mark_done(&mut self, project: &ProjectId, item: &ItemKey) -> Result<(), StoreError> {
+        ledger::mark_done(self.sqlx(), project, item).await
+    }
+
+    async fn lock_lane_owner(
+        &mut self,
+        project: &ProjectId,
+        lane: &LaneName,
+    ) -> Result<Option<Option<IdentityId>>, StoreError> {
+        ledger::lock_lane_owner(self.sqlx(), project, lane).await
+    }
+
+    async fn identity_live(
+        &mut self,
+        project: &ProjectId,
+        id: &IdentityId,
+    ) -> Result<bool, StoreError> {
+        ledger::identity_live(self.sqlx(), project, id).await
+    }
+
+    async fn identity_edits(
+        &mut self,
+        id: &IdentityId,
+    ) -> Result<Option<serde_json::Value>, StoreError> {
+        ledger::identity_edits(self.sqlx(), id).await
+    }
+
+    async fn active_lends(
+        &mut self,
+        project: &ProjectId,
+        lane: &LaneName,
+        to: &IdentityId,
+    ) -> Result<u64, StoreError> {
+        ledger::active_lends(self.sqlx(), project, lane, to).await
+    }
+
+    async fn insert_lend(&mut self, lend: &agmen_core::NewLend<'_>) -> Result<(), StoreError> {
+        ledger::insert_lend(self.sqlx(), lend).await
+    }
+
     async fn insert_message(&mut self, row: &MessageRow<'_>) -> Result<(), StoreError> {
         messages::insert_message(self.sqlx(), row).await
     }
