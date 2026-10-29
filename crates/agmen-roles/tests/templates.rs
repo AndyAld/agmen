@@ -766,3 +766,285 @@ fn stripped_options_are_not_written() {
     let xml = to_xml(&template);
     assert!(!xml.contains("<option"), "{xml}");
 }
+
+#[cfg(test)]
+fn template_file(dir: &std::path::Path, file: &str, xml: impl AsRef<[u8]>) {
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(dir.join(file), xml).unwrap();
+}
+
+#[test]
+fn builtins_load() {
+    let catalog = agmen_roles::TemplateLayers::default().load();
+    assert!(catalog.problems().is_empty(), "{:?}", catalog.problems());
+    for name in ["claude", "codex"] {
+        let entry = catalog.get(name).unwrap();
+        assert_eq!(entry.layer, agmen_roles::Layer::Builtin);
+        let Template::Agent(agent) = &entry.template else {
+            panic!("agent")
+        };
+        assert_eq!(agent.template.agent.kind.as_deref(), Some(name));
+    }
+}
+
+#[test]
+fn layers_override_by_name() {
+    let root = tempfile::tempdir().unwrap();
+    let personal = tempfile::tempdir().unwrap();
+    let project = root.path().join(".agmen/templates");
+    template_file(
+        &project,
+        "claude.agent.xml",
+        r#"<agent-template name="claude"><description>project</description></agent-template>"#,
+    );
+    template_file(
+        personal.path(),
+        "claude.agent.xml",
+        r#"<agent-template name="claude"><description>personal</description></agent-template>"#,
+    );
+    let mut layers = agmen_roles::TemplateLayers {
+        project: Some(root.path().into()),
+        personal: Some(personal.path().into()),
+        ..Default::default()
+    };
+    let catalog = layers.load();
+    let entry = catalog.get("claude").unwrap();
+    assert_eq!(entry.layer, agmen_roles::Layer::Personal);
+    assert!(to_xml(&entry.template).contains("personal"));
+    layers.personal = None;
+    assert_eq!(
+        layers.load().get("claude").unwrap().layer,
+        agmen_roles::Layer::Project
+    );
+}
+
+#[test]
+fn bad_files_are_problems_not_failures() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join(".agmen/templates");
+    for (file, xml) in [
+        ("good.agent.xml", r#"<agent-template name="good"/>"#),
+        ("broken.xml", "<agent-template"),
+        ("dup-1.xml", r#"<agent-template name="dup"/>"#),
+        ("dup-2.xml", r#"<agent-template name="dup"/>"#),
+    ] {
+        template_file(&dir, file, xml);
+    }
+    template_file(&dir, "big.xml", "x".repeat(33 * 1024));
+    template_file(&dir, "bin.xml", [0xff]);
+    let catalog = agmen_roles::TemplateLayers {
+        project: Some(root.path().into()),
+        ..Default::default()
+    }
+    .load();
+    assert!(catalog.get("good").is_some());
+    assert!(
+        catalog
+            .get("dup")
+            .unwrap()
+            .path
+            .as_ref()
+            .unwrap()
+            .ends_with("dup-1.xml")
+    );
+    assert_eq!(catalog.problems().len(), 4);
+    for file in ["broken.xml", "big.xml", "bin.xml", "dup-2.xml"] {
+        assert!(
+            catalog
+                .problems()
+                .iter()
+                .any(|problem| problem.path.as_ref().unwrap().ends_with(file)),
+            "{file}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn project_links_are_skipped() {
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    template_file(
+        outside.path(),
+        "evil.xml",
+        r#"<agent-template name="evil"/>"#,
+    );
+    let dir = root.path().join(".agmen/templates");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::os::unix::fs::symlink(outside.path().join("evil.xml"), dir.join("evil.xml")).unwrap();
+    let layers = agmen_roles::TemplateLayers {
+        project: Some(root.path().into()),
+        ..Default::default()
+    };
+    assert!(layers.load().get("evil").is_none());
+    std::fs::remove_dir_all(&dir).unwrap();
+    std::os::unix::fs::symlink(outside.path(), &dir).unwrap();
+    assert!(layers.load().get("evil").is_none());
+    let personal = agmen_roles::TemplateLayers {
+        personal: Some(dir),
+        ..Default::default()
+    };
+    assert!(personal.load().get("evil").is_some());
+}
+
+#[test]
+fn inline_resolves_named_nodes() {
+    let personal = tempfile::tempdir().unwrap();
+    template_file(
+        personal.path(),
+        "rust-engineer.agent.xml",
+        r#"<agent-template name="rust-engineer" saved-by="ada"><agent kind="codex"/></agent-template>"#,
+    );
+    template_file(
+        personal.path(),
+        "eng.team.xml",
+        r#"<team-template name="eng"><node template="rust-engineer"><node template="rust-engineer" count="0"/></node></team-template>"#,
+    );
+    let catalog = agmen_roles::TemplateLayers {
+        personal: Some(personal.path().into()),
+        ..Default::default()
+    }
+    .load();
+    let Template::Team(team) = &catalog.get("eng").unwrap().template else {
+        panic!("team")
+    };
+    let inlined = catalog.inline(&team.template).unwrap();
+    assert!(matches!(inlined.nodes[0].agent, NodeAgent::Inline(_)));
+    assert!(matches!(
+        inlined.nodes[0].children[0].agent,
+        NodeAgent::Inline(_)
+    ));
+    let mut team = team.template.clone();
+    team.nodes[0].agent = NodeAgent::Named("nope".into());
+    assert!(matches!(catalog.inline(&team), Err(TemplateError::Missing(n)) if n == "nope"));
+    team.nodes[0].agent = NodeAgent::Named("eng".into());
+    assert!(matches!(catalog.inline(&team), Err(TemplateError::NotAnAgent(n)) if n == "eng"));
+}
+
+#[test]
+fn layer_file_and_directory_limits_are_reported() {
+    let personal = tempfile::tempdir().unwrap();
+    for i in 0..agmen_roles::MAX_TEMPLATE_FILES + 2 {
+        template_file(
+            personal.path(),
+            &format!("t{i:03}.xml"),
+            format!(r#"<agent-template name="t{i:03}"/>"#),
+        );
+    }
+    let layers = agmen_roles::TemplateLayers {
+        builtin: vec![],
+        project: None,
+        personal: Some(personal.path().into()),
+    };
+    let catalog = layers.load();
+    assert_eq!(catalog.iter().count(), agmen_roles::MAX_TEMPLATE_FILES);
+    assert_eq!(catalog.problems().len(), 1);
+    assert!(catalog.problems()[0].message.contains("2"));
+    for i in 0..agmen_roles::MAX_DIRECTORY_ENTRIES + 1 {
+        std::fs::write(personal.path().join(format!("ignored{i}")), "").unwrap();
+    }
+    assert!(
+        layers
+            .load()
+            .problems()
+            .iter()
+            .any(|p| p.message.contains("4096"))
+    );
+}
+
+#[test]
+fn inline_rejects_oversized_output() {
+    let body = format!(
+        r#"<agent-template name="worker"><prompt>{}</prompt></agent-template>"#,
+        "x".repeat(16 * 1024)
+    );
+    let catalog = agmen_roles::TemplateLayers {
+        builtin: vec![("worker".into(), body)],
+        project: None,
+        personal: None,
+    }
+    .load();
+    let Template::Team(team) = parse_template(r#"<team-template name="eng"><node template="worker"/><node template="worker"/></team-template>"#).unwrap() else { panic!("team") };
+    assert!(matches!(
+        catalog.inline(&team.template),
+        Err(TemplateError::TooLarge { .. })
+    ));
+}
+
+#[test]
+fn inline_accepts_an_export_exactly_at_the_size_limit() {
+    let mut first = AgentTemplate {
+        prompt: Some("x".into()),
+        ..Default::default()
+    };
+    let mut second = first.clone();
+    let team = |first: &AgentTemplate, second: &AgentTemplate| {
+        Template::Team(Named {
+            name: "eng".into(),
+            saved_by: None,
+            template: agmen_roles::TeamTemplate {
+                description: None,
+                nodes: vec![
+                    agmen_roles::Node {
+                        agent: NodeAgent::Inline(Box::new(first.clone())),
+                        count: 1,
+                        children: vec![],
+                    },
+                    agmen_roles::Node {
+                        agent: NodeAgent::Inline(Box::new(second.clone())),
+                        count: 1,
+                        children: vec![],
+                    },
+                ],
+            },
+        })
+    };
+    let remaining = MAX_TEMPLATE_BYTES - to_xml(&team(&first, &second)).len();
+    first.prompt = Some("x".repeat(1 + remaining / 2));
+    second.prompt = Some("x".repeat(1 + remaining - remaining / 2));
+    let expected = team(&first, &second);
+    assert_eq!(to_xml(&expected).len(), MAX_TEMPLATE_BYTES);
+    parse_template(&to_xml(&expected)).unwrap();
+    let agent = |name: &str, template: AgentTemplate| {
+        to_xml(&Template::Agent(Named {
+            name: name.into(),
+            saved_by: None,
+            template,
+        }))
+    };
+    let catalog = agmen_roles::TemplateLayers {
+        builtin: vec![
+            ("first".into(), agent("first", first)),
+            ("second".into(), agent("second", second)),
+        ],
+        project: None,
+        personal: None,
+    }
+    .load();
+    let Template::Team(named) = parse_template(r#"<team-template name="eng"><node template="first"/><node template="second"/></team-template>"#).unwrap() else { panic!("team") };
+    let actual = catalog.inline(&named.template).unwrap();
+    let Template::Team(expected) = expected else {
+        panic!("team")
+    };
+    assert_eq!(actual, expected.template);
+}
+
+#[test]
+fn oversized_file_with_a_multibyte_char_at_the_limit_says_too_large() {
+    let dir = tempfile::tempdir().unwrap();
+    // The read stops one byte past the limit, in the middle of a 2-byte char.
+    let text = format!("{}é", "x".repeat(MAX_TEMPLATE_BYTES));
+    template_file(dir.path(), "wide.xml", text);
+    let catalog = agmen_roles::TemplateLayers {
+        builtin: vec![],
+        project: None,
+        personal: Some(dir.path().into()),
+    }
+    .load();
+    assert_eq!(catalog.problems().len(), 1);
+    assert!(
+        catalog.problems()[0].message.contains("exceeds"),
+        "{}",
+        catalog.problems()[0].message
+    );
+}

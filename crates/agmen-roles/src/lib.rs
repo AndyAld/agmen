@@ -20,6 +20,7 @@ mod layer;
 mod render;
 mod schema;
 mod template;
+mod template_layer;
 mod template_xml;
 
 pub use compat::{BUILT_IN, RoleKind as Kind, Tier};
@@ -35,5 +36,8 @@ pub use template::{
     MAX_REFERENCES, MAX_TEAM_AGENTS, MAX_TEMPLATE_BYTES, MAX_TEMPLATE_FILES, Named, Node,
     NodeAgent, PackRef, Reference, TeamTemplate, Template, TemplateError, TemplateKind,
     TemplateOption, agents_started, parse_template,
+};
+pub use template_layer::{
+    BUILT_IN_TEMPLATES, Problem, TemplateCatalog, TemplateEntry, TemplateLayers,
 };
 pub use template_xml::to_xml;
