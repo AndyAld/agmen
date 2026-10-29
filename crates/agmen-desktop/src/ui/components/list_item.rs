@@ -10,7 +10,7 @@ use super::ClickHandler;
 use crate::appearance::Appearance;
 use crate::ui::tokens::{
     AGENT_ROW_HEIGHT, LEADING_SLOT, RADIUS_MD, SPACE_6, SPACE_7, SPACE_8, SPACE_10,
-    TREE_INDENT_BASE, TREE_INDENT_STEP,
+    TREE_INDENT_BASE, TREE_INDENT_STEP, focus_ring,
 };
 
 /// Where a row's content starts.
@@ -173,11 +173,17 @@ impl RenderOnce for ListItem {
             .pr(SPACE_10)
             .when_some(self.radius, |this, radius| this.rounded(radius))
             .when(self.selected, |this| this.bg(theme.element_selected))
-            .when_some(hover_fill(self.selected, theme), |this, fill| {
-                this.hover(move |style| style.bg(fill))
-            })
             .when_some(self.on_click, |this, handler| {
-                this.cursor_pointer().on_click(handler)
+                let focus = theme.text_accent;
+                let focused_fill =
+                    hover_fill(self.selected, theme).unwrap_or(theme.element_selected);
+                this.tab_index(0)
+                    .cursor_pointer()
+                    .when_some(hover_fill(self.selected, theme), |this, fill| {
+                        this.hover(move |style| style.bg(fill))
+                    })
+                    .focus_visible(move |style| style.bg(focused_fill).shadow(focus_ring(focus)))
+                    .on_click(handler)
             })
             .when_some(self.on_secondary_click, |this, handler| {
                 this.on_aux_click(move |event, window, cx| {
@@ -225,6 +231,48 @@ mod tests {
     }
 
     #[gpui::test]
+    fn list_items_without_a_click_do_not_hover(cx: &mut TestAppContext) {
+        let cx = draw(cx, || {
+            div()
+                .w(px(200.))
+                .child(ListItem::new("inert", Indent::Group).child(Label::new("No matches")))
+                .into_any_element()
+        });
+        cx.simulate_mouse_move(
+            gpui::point(px(900.), px(900.)),
+            None,
+            gpui::Modifiers::none(),
+        );
+        crate::ui::test_support::redraw(cx);
+        let before = crate::ui::test_support::fills_at(cx, "inert");
+        let center = cx.debug_bounds("inert").unwrap().center();
+        cx.simulate_mouse_move(center, None, gpui::Modifiers::none());
+        crate::ui::test_support::redraw(cx);
+        assert_eq!(crate::ui::test_support::fills_at(cx, "inert"), before);
+    }
+
+    #[gpui::test]
+    fn focusing_a_row_does_not_move_its_content(cx: &mut TestAppContext) {
+        let cx = crate::ui::test_support::draw_with_tab(cx, || {
+            div()
+                .w(px(200.))
+                .child(
+                    ListItem::new("row", Indent::Group)
+                        .on_click(|_, _, _| {})
+                        .child(
+                            div()
+                                .debug_selector(|| "row:content".into())
+                                .child(Label::new("go")),
+                        ),
+                )
+                .into_any_element()
+        });
+        let before = cx.debug_bounds("row:content").unwrap();
+        crate::ui::test_support::press(cx, "tab");
+        assert_eq!(cx.debug_bounds("row:content").unwrap(), before);
+    }
+
+    #[gpui::test]
     fn selected_rows_keep_their_fill_on_hover(cx: &mut TestAppContext) {
         // V117 (C245, drawn per C253): hovering a selected row keeps the
         // selected fill, as Zed's lists do; an unselected row takes hover.
@@ -238,7 +286,11 @@ mod tests {
                         .selected(true)
                         .child(Label::new("on")),
                 )
-                .child(ListItem::new("off", Indent::Group).child(Label::new("off")))
+                .child(
+                    ListItem::new("off", Indent::Group)
+                        .on_click(|_, _, _| {})
+                        .child(Label::new("off")),
+                )
                 .into_any_element()
         });
         for (row, want) in [("on", theme.element_selected), ("off", theme.element_hover)] {

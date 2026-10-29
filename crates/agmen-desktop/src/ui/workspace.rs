@@ -99,6 +99,8 @@ pub(crate) struct Workspace {
     // Task 14: it also holds the take-over terminal.
     chat: Entity<ChatView>,
     _chat_changes: Subscription,
+    /// Keeps the shortcuts alive when the focused control leaves the tree.
+    _focus_lost: Subscription,
 }
 
 impl Workspace {
@@ -160,6 +162,25 @@ impl Workspace {
         let left = LeftDockState::new(&snapshot, cx);
         let plan = plan_wiring::PlanWiring::new(&snapshot, cx);
         let (left_width, right_width) = Self::saved_dock_widths(cx);
+        // A focused toast, banner button or tab close can leave the tree. The
+        // workspace shortcuts only match from the workspace's own context, so
+        // focus goes to the nearest ancestor that still draws, else the root.
+        // Two deferrals let a closing dialog restore its own earlier focus
+        // first (`Modal`), and the fallback applies only if nothing did.
+        // shortcut: this relies on deferred effects running in queue order;
+        // give Modal one restore path if a third restorer appears.
+        let focus_lost = cx.on_focus_lost(window, |this, window, cx| {
+            let target = window
+                .focus_lost_restore_target(cx)
+                .unwrap_or_else(|| this.focus_handle.clone());
+            cx.defer_in(window, move |_, window, cx| {
+                cx.defer_in(window, move |_, window, cx| {
+                    if window.focused(cx).is_none() {
+                        window.focus(&target, cx);
+                    }
+                });
+            });
+        });
         Self {
             focus_handle: cx.focus_handle(),
             snapshot,
@@ -183,6 +204,7 @@ impl Workspace {
             _chat_refs: chat_refs,
             chat,
             _chat_changes: chat_changes,
+            _focus_lost: focus_lost,
         }
     }
 

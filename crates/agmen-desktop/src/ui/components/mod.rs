@@ -10,6 +10,8 @@ mod avatar;
 mod badge;
 mod breadcrumb;
 mod button;
+#[cfg(test)]
+mod button_interaction_tests;
 mod card;
 mod chip;
 mod chip_button;

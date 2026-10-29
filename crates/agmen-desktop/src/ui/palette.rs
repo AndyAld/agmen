@@ -94,6 +94,7 @@ impl std::fmt::Debug for PaletteEvent {
 /// The palette view. Its owner places it and closes it on a
 /// [`PaletteEvent`].
 pub(crate) struct CommandPalette {
+    focus: FocusHandle,
     input: Entity<TextInput>,
     entries: Vec<PaletteEntry>,
     labels: Vec<SharedString>,
@@ -142,6 +143,7 @@ impl CommandPalette {
         window.focus(&input.focus_handle(cx), cx);
         let labels = entries.iter().map(|e| e.label.clone()).collect();
         let mut palette = Self {
+            focus: cx.focus_handle(),
             input,
             entries,
             labels,
@@ -287,8 +289,8 @@ impl CommandPalette {
 }
 
 impl Focusable for CommandPalette {
-    fn focus_handle(&self, cx: &gpui::App) -> FocusHandle {
-        self.input.focus_handle(cx)
+    fn focus_handle(&self, _cx: &gpui::App) -> FocusHandle {
+        self.focus.clone()
     }
 }
 
@@ -323,6 +325,7 @@ impl Render for CommandPalette {
             .child(div().flex_1().min_w_0().child(self.input.clone()));
         div()
             .debug_selector(|| "command-palette".into())
+            .track_focus(&self.focus)
             .key_context(PALETTE_CONTEXT)
             .w(PALETTE_WIDTH)
             .occlude()

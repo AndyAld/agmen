@@ -4,11 +4,13 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Window, div,
+    Styled as _, Window, div,
 };
 
 use super::chat::AlertCounts;
-use super::components::{Badge, Button, ButtonStyle, Color, IconButton, KeyHint, Label, LabelSize};
+use super::components::{
+    Badge, Button, ButtonSize, ButtonStyle, Color, IconButton, Label, LabelSize,
+};
 use super::format::{counted, counted_capped, spend_today, status_listener_label};
 use super::left_dock::PanelButtons;
 use super::tokens::{BORDER_WIDTH, SPACE_5, SPACE_10, SPACE_14, STATUS_BAR_HEIGHT};
@@ -202,19 +204,18 @@ impl RenderOnce for StatusBar {
             ))
             // Task 13: the count opens the chat at the alert (node 456).
             .child(
-                div()
-                    .id("status-alerts")
-                    .debug_selector(|| "status-alerts".into())
-                    .when(self.alerts.alerts > 0, |this| {
-                        this.cursor_pointer().on_click(|_, window, cx| {
-                            window.dispatch_action(Box::new(OpenAlerts), cx);
-                        })
+                Button::new(
+                    "status-alerts",
+                    counted_capped(self.alerts.alerts, "alert", "alerts"),
+                )
+                .style(ButtonStyle::Plain)
+                .size(ButtonSize::Compact)
+                .leading(Label::new("⚠").size(LabelSize::Small).color(Color::Warning))
+                .when(self.alerts.alerts > 0, |this| {
+                    this.on_click(|_, window, cx| {
+                        window.dispatch_action(Box::new(OpenAlerts), cx);
                     })
-                    .child(item(
-                        "⚠",
-                        Color::Warning,
-                        counted_capped(self.alerts.alerts, "alert", "alerts"),
-                    )),
+                }),
             )
             .child(item(
                 "⎇",
@@ -255,20 +256,110 @@ impl RenderOnce for StatusBar {
 
 /// Task 18: the ⌘⇧P hint, which opens the palette while it is closed.
 fn palette_trigger(palette_open: bool) -> impl IntoElement {
-    div()
-        .id("palette-trigger")
-        .debug_selector(|| "palette-trigger".into())
+    Button::new("palette-trigger", crate::keymap::palette_hint())
+        .style(ButtonStyle::Plain)
+        .size(ButtonSize::Compact)
         .when(!palette_open, |this| {
-            this.cursor_pointer().on_click(|_, window, cx| {
+            this.on_click(|_, window, cx| {
                 window.dispatch_action(Box::new(ToggleCommandPalette), cx);
             })
         })
-        .child(KeyHint::new(crate::keymap::palette_hint()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn alerts_count_hovers_takes_focus_and_opens_alerts(cx: &mut gpui::TestAppContext) {
+        use crate::ui::test_support::{assert_control_feedback, click, draw_with_tab, press};
+        use std::{cell::Cell, rc::Rc};
+        let actions = Rc::new(Cell::new(0));
+        let seen = actions.clone();
+        let cx = draw_with_tab(cx, move || {
+            let seen = seen.clone();
+            div()
+                .w(gpui::px(1600.))
+                .on_action(move |_: &OpenAlerts, _, _| seen.set(seen.get() + 1))
+                .child(
+                    StatusBar::new(&crate::backend::chat_snapshot(), false).alert_counts(
+                        AlertCounts {
+                            needs_you: 1,
+                            alerts: 2,
+                        },
+                    ),
+                )
+                .into_any_element()
+        });
+        assert_control_feedback(cx, "status-alerts", "status-alerts", 4);
+        press(cx, "enter");
+        assert_eq!(actions.get(), 1);
+        press(cx, "space");
+        assert_eq!(actions.get(), 2);
+        click(cx, "status-alerts");
+        assert_eq!(actions.get(), 3);
+    }
+
+    #[gpui::test]
+    fn palette_trigger_hovers_takes_focus_and_keeps_its_open_guard(cx: &mut gpui::TestAppContext) {
+        use crate::ui::test_support::{assert_control_feedback, click, draw_with_tab, press};
+        use std::{cell::Cell, rc::Rc};
+        let actions = Rc::new(Cell::new(0));
+        let seen = actions.clone();
+        let cx = draw_with_tab(cx, move || {
+            let seen = seen.clone();
+            div()
+                .on_action(move |_: &ToggleCommandPalette, _, _| seen.set(seen.get() + 1))
+                .child(palette_trigger(false))
+                .into_any_element()
+        });
+        assert_control_feedback(cx, "palette-trigger", "palette-trigger", 1);
+        press(cx, "enter");
+        assert_eq!(actions.get(), 1);
+        click(cx, "palette-trigger");
+        assert_eq!(actions.get(), 2);
+        let seen = actions.clone();
+        let mut app = gpui::TestAppContext::single();
+        let cx = draw_with_tab(&mut app, move || {
+            let seen = seen.clone();
+            div()
+                .on_action(move |_: &ToggleCommandPalette, _, _| seen.set(seen.get() + 1))
+                .child(palette_trigger(true))
+                .into_any_element()
+        });
+        click(cx, "palette-trigger");
+        press(cx, "tab");
+        press(cx, "enter");
+        assert_eq!(actions.get(), 2, "the open palette must not reopen");
+    }
+
+    #[gpui::test]
+    fn inert_status_bar_text_does_not_highlight(cx: &mut gpui::TestAppContext) {
+        use crate::ui::test_support::{draw, fills_at, redraw};
+        let cx = draw(cx, || {
+            div()
+                .w(gpui::px(1600.))
+                .child(StatusBar::new(&crate::backend::chat_snapshot(), false).palette_open(true))
+                .into_any_element()
+        });
+        for selector in ["status-alerts", "palette-trigger"] {
+            cx.simulate_mouse_move(
+                gpui::point(gpui::px(900.), gpui::px(900.)),
+                None,
+                gpui::Modifiers::none(),
+            );
+            redraw(cx);
+            let before = fills_at(cx, selector);
+            let center = cx.debug_bounds(selector).unwrap().center();
+            cx.simulate_mouse_move(center, None, gpui::Modifiers::none());
+            redraw(cx);
+            assert_eq!(
+                fills_at(cx, selector),
+                before,
+                "{selector} must not highlight"
+            );
+        }
+    }
 
     #[gpui::test]
     fn status_bar_buttons_either_act_or_do_not_highlight(cx: &mut gpui::TestAppContext) {

@@ -28,6 +28,32 @@ fn tab_leaves_the_workspace_root_for_a_control(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn tab_from_the_workspace_root_reaches_the_composer(cx: &mut TestAppContext) {
+    let (workspace, cx) = open(cx);
+    cx.update(|_, cx| crate::keymap::bind_all(cx));
+    let chat = workspace.read_with(cx, |w, _| w.chat.clone());
+    for _ in 0..200 {
+        cx.simulate_keystrokes("tab");
+        redraw(cx);
+        let focus = chat.read_with(cx, |chat, cx| chat.focus_handle(cx));
+        if cx.update(|window, _| focus.is_focused(window)) {
+            return;
+        }
+    }
+    panic!("Tab never reached the composer in 200 presses");
+}
+
+#[gpui::test]
+fn shortcuts_work_after_a_clicked_button_leaves_the_tree(cx: &mut TestAppContext) {
+    let (workspace, cx) = open(cx);
+    cx.update(|_, cx| crate::keymap::bind_all(cx));
+    click(cx, "close-right-dock");
+    workspace.read_with(cx, |w, _| assert!(!w.is_dock_open(DockSide::Right)));
+    cx.simulate_keystrokes("cmd-r");
+    workspace.read_with(cx, |w, _| assert!(w.is_dock_open(DockSide::Right)));
+}
+
+#[gpui::test]
 fn tab_in_the_workspace_composer_still_completes_mentions(cx: &mut TestAppContext) {
     let (_, cx) = open(cx);
     cx.update(|_, cx| crate::keymap::bind_all(cx));

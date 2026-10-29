@@ -11,9 +11,10 @@ use gpui::{
 use super::{ClickHandler, Color, Label, LabelSize};
 use crate::appearance::{Appearance, Theme};
 use crate::ui::tokens::{
-    AUTO_LINE_12, BORDER_WIDTH, BUTTON_HOVER_OPACITY, BUTTON_TINT, RADIUS_CARD, RADIUS_INPUT,
-    RADIUS_MD, RADIUS_SM, SPACE_1, SPACE_2, SPACE_3, SPACE_4, SPACE_5, SPACE_6, SPACE_7, SPACE_8,
-    SPACE_9, SPACE_10, SPACE_12, SPACE_14, TINT_SELECTED, tint,
+    AUTO_LINE_12, BORDER_WIDTH, BUTTON_DISABLED_OPACITY, BUTTON_HOVER_OPACITY, BUTTON_TINT,
+    RADIUS_CARD, RADIUS_INPUT, RADIUS_MD, RADIUS_SM, SPACE_1, SPACE_2, SPACE_3, SPACE_4, SPACE_5,
+    SPACE_6, SPACE_7, SPACE_8, SPACE_9, SPACE_10, SPACE_12, SPACE_14, TINT_SELECTED, focus_ring,
+    tint,
 };
 
 /// How the button is drawn.
@@ -29,12 +30,11 @@ pub(crate) enum ButtonStyle {
     /// Accent text on a faint accent fill, as Open in terminal and
     /// Duplicate to .agmen/roles (console.py "primary" breadcrumb buttons).
     Tinted,
-    /// Surface fill, as the agent view's Stop (console.py "plain").
+    /// Surface fill, as the agent view's Stop (console.py "plain") and
+    /// the breadcrumb's "Show ledger" (node 135).
     Plain,
     /// Selected fill, as a change card's Cancel and Undo (nodes 7120, 7736).
     Secondary,
-    /// Surface fill, as the breadcrumb's "Show ledger" (node 135).
-    Subtle,
     /// Error fill with semibold text and no border, as an alert's Reply and
     /// the banner's Jump to it (nodes 5996 and 5712, both 20 px).
     Danger,
@@ -66,7 +66,6 @@ fn hover(style: ButtonStyle, theme: &Theme) -> Hover {
         | ButtonStyle::Filled
         | ButtonStyle::Tinted
         | ButtonStyle::Plain
-        | ButtonStyle::Subtle
         | ButtonStyle::Inset => Hover::Fill(theme.hover_over(fill(style, theme))),
         // An alert's own actions: Andy's theme hovers in the surface's own
         // color, so the border lightens instead (Zed's outlined buttons
@@ -102,10 +101,9 @@ pub(crate) enum ButtonSize {
 /// The fill `style` draws in `theme`, before hover and selection.
 fn fill(style: ButtonStyle, theme: &Theme) -> Hsla {
     match style {
-        ButtonStyle::Outlined
-        | ButtonStyle::Plain
-        | ButtonStyle::Subtle
-        | ButtonStyle::Bordered => theme.elevated_surface,
+        ButtonStyle::Outlined | ButtonStyle::Plain | ButtonStyle::Bordered => {
+            theme.elevated_surface
+        }
         ButtonStyle::Filled | ButtonStyle::Secondary => theme.element_selected,
         ButtonStyle::Primary => theme.text_accent,
         ButtonStyle::Tinted => theme.text_accent.opacity(BUTTON_TINT),
@@ -238,7 +236,7 @@ impl Button {
         self
     }
 
-    /// Task 19: a button that cannot be clicked now, its label dimmed, as
+    /// Task 19: a button that cannot be clicked now, dimmed as a whole, as
     /// "Kick off · waiting on sean" (node 9046).
     #[must_use]
     pub(crate) const fn disabled(mut self, disabled: bool) -> Self {
@@ -266,8 +264,9 @@ impl Button {
 impl RenderOnce for Button {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = &cx.global::<Appearance>().theme;
-        // A disabled button does not light up under the pointer (Task 19).
-        let hover = (!self.disabled).then(|| hover(self.style, theme));
+        // A disabled button, or one with nothing to do, does not light up
+        // under the pointer (Task 19).
+        let hover = (!self.disabled && self.on_click.is_some()).then(|| hover(self.style, theme));
         let selector = self.id.to_string();
         let base = div()
             .id(self.id)
@@ -301,7 +300,6 @@ impl RenderOnce for Button {
             ButtonStyle::Primary | ButtonStyle::Secondary | ButtonStyle::Danger => {
                 base.rounded(RADIUS_MD).py(SPACE_3).px(SPACE_9)
             }
-            ButtonStyle::Subtle => base.rounded(RADIUS_MD).py(SPACE_3).px(SPACE_9),
         };
         let styled = styled.when_some(hover, |styled, hover| {
             styled.hover(move |style| match hover {
@@ -323,9 +321,26 @@ impl RenderOnce for Button {
             label
         };
         let on_click = if self.disabled { None } else { self.on_click };
+        // Accent-filled buttons need a contrasting ring inside their own fill.
+        let focus = if self.style == ButtonStyle::Primary {
+            theme.background
+        } else {
+            theme.text_accent
+        };
         styled
+            .when(self.disabled, |this| this.opacity(BUTTON_DISABLED_OPACITY))
             .when_some(on_click, |this, handler| {
-                this.tab_index(0).cursor_pointer().on_click(handler)
+                // GPUI maps Enter and Space key-up to this click handler.
+                this.tab_index(0)
+                    .cursor_pointer()
+                    .focus_visible(move |style| {
+                        style
+                            .border_color(focus)
+                            .opacity(BUTTON_HOVER_OPACITY)
+                            .shadow(focus_ring(focus))
+                    })
+                    .active(|style| style.opacity(BUTTON_HOVER_OPACITY * BUTTON_HOVER_OPACITY))
+                    .on_click(handler)
             })
             .children(self.leading)
             .child({
@@ -341,7 +356,6 @@ impl RenderOnce for Button {
                     | ButtonStyle::Filled
                     | ButtonStyle::Plain
                     | ButtonStyle::Secondary
-                    | ButtonStyle::Subtle
                     | ButtonStyle::Bordered => label.color(Color::Default),
                 };
                 match self.weight {
@@ -393,16 +407,16 @@ mod tests {
     }
 
     #[gpui::test]
-    fn subtle_button_keeps_its_size_when_selected(cx: &mut TestAppContext) {
+    fn plain_button_keeps_its_size_when_selected(cx: &mut TestAppContext) {
         let off = rendered_size(cx, || {
             Button::new("a", "Show ledger")
-                .style(ButtonStyle::Subtle)
+                .style(ButtonStyle::Plain)
                 .into_any_element()
         });
         let mut cx2 = TestAppContext::single();
         let on = rendered_size(&mut cx2, || {
             Button::new("b", "Show ledger")
-                .style(ButtonStyle::Subtle)
+                .style(ButtonStyle::Plain)
                 .selected(true)
                 .into_any_element()
         });
@@ -613,11 +627,7 @@ mod tests {
     fn button_hover_is_visible_when_the_theme_hover_equals_the_surface(cx: &mut TestAppContext) {
         // Andy's Gruvbox sets element.hover to the elevated surface (V76),
         // so a plain fill change would not show.
-        let styles = [
-            ButtonStyle::Outlined,
-            ButtonStyle::Plain,
-            ButtonStyle::Subtle,
-        ];
+        let styles = [ButtonStyle::Outlined, ButtonStyle::Plain];
         let cx = crate::ui::test_support::draw(cx, move || {
             div()
                 .children(styles.map(|style| {

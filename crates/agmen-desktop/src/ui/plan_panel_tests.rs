@@ -27,6 +27,29 @@ fn pill_counts_what_the_plan_waits_on() {
     assert_eq!(state_pill(&one).0, "waiting on 1 approval");
 }
 
+#[gpui::test]
+fn spec_row_hovers_takes_focus_and_opens_its_spec(cx: &mut TestAppContext) {
+    use crate::ui::test_support::{assert_control_feedback, draw_with_tab, press};
+    let opened = Rc::new(RefCell::new(Vec::new()));
+    let seen = opened.clone();
+    let spec = plan(Screen::Plan).specs[0].clone();
+    let path = spec.path.clone();
+    let selector: &'static str = Box::leak(format!("plan:spec:{path}").into_boxed_str());
+    let cx = draw_with_tab(cx, move || {
+        let seen = seen.clone();
+        div()
+            .w(px(400.))
+            .on_action(move |action: &OpenSpec, _, _| seen.borrow_mut().push(action.0.clone()))
+            .child(spec_row(&spec, true))
+            .into_any_element()
+    });
+    assert_control_feedback(cx, selector, selector, 1);
+    press(cx, "enter");
+    press(cx, "space");
+    click(cx, selector);
+    assert_eq!(*opened.borrow(), [path.clone(), path.clone(), path]);
+}
+
 #[test]
 fn status_context_names_the_plan() {
     assert_eq!(status_context(&plan(Screen::Plan)), "ridgeline · planning");

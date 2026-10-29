@@ -9,16 +9,16 @@ use std::rc::Rc;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, ClipboardItem, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
+    SharedString, Styled as _, Window, div,
 };
 
 use super::components::{
     Button, ButtonSize, ButtonStyle, CodeText, Color, DialogFooter, Icon, IconSize, Label,
-    LabelSize, Modal, SectionHeading,
+    LabelSize, Link, Modal, SectionHeading,
 };
 use super::tokens::{
-    AUTO_LINE_11, AUTO_LINE_12, AUTO_LINE_13, BORDER_WIDTH, DIALOG_TOP, DIALOG_WIDTH,
-    PROMPT_COLUMNS, RADIUS_CARD, RADIUS_REF, SPACE_4, SPACE_8, SPACE_10, SPACE_12,
+    AUTO_LINE_11, AUTO_LINE_13, BORDER_WIDTH, DIALOG_TOP, DIALOG_WIDTH, PROMPT_COLUMNS,
+    RADIUS_CARD, SPACE_8, SPACE_10, SPACE_12,
 };
 use crate::appearance::Appearance;
 use crate::backend::{AgentFound, InstalledAgent};
@@ -287,20 +287,8 @@ impl AddAgentDialog {
                         .line_height(AUTO_LINE_13),
                 )
                 .child(
-                    div()
-                        .id("add-agent:link")
-                        .debug_selector(|| "add-agent:link".into())
-                        .px(SPACE_4)
-                        .rounded(RADIUS_REF)
-                        .cursor_pointer()
-                        .on_click(move |_, _, cx| cx.open_url(&url))
-                        .child(
-                            Label::new(format!("{} ↗", source.url))
-                                .code()
-                                .line_height(AUTO_LINE_12)
-                                .color(Color::Accent)
-                                .underline(),
-                        ),
+                    Link::new("add-agent:link", format!("{} ↗", source.url))
+                        .on_click(move |_, _, cx| cx.open_url(&url)),
                 )
             }
             (None, AgentDialog::Other) => row.child(

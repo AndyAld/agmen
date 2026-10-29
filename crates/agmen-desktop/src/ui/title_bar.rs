@@ -140,7 +140,7 @@ impl RenderOnce for TitleBar {
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .child(
                             Button::new("live:invite-people", "Invite people")
-                                .style(ButtonStyle::Subtle)
+                                .style(ButtonStyle::Plain)
                                 .size(ButtonSize::Compact)
                                 .on_click(|_, window, cx| {
                                     window.dispatch_action(Box::new(InvitePeople), cx)

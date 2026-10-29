@@ -99,7 +99,7 @@ impl SpecView {
         let approval = self.model.read(cx).my_approval(&self.path)?;
         let approve = match (approval, self.shown.clone()) {
             (Approval::Approved, _) => Button::new("spec:approved", "Approved")
-                .style(ButtonStyle::Subtle)
+                .style(ButtonStyle::Plain)
                 .selected(true)
                 .trailing(
                     // The icon's 2 px side bearing plus the button's 5 px gap
@@ -118,20 +118,20 @@ impl SpecView {
                 let model = self.model.clone();
                 let path = self.path.clone();
                 Button::new("spec:approve", "Approve")
-                    .style(ButtonStyle::Subtle)
+                    .style(ButtonStyle::Plain)
                     .on_click(move |_, _, cx| {
                         model.update(cx, |model, cx| model.approve_spec(&path, sha.clone(), cx));
                     })
             }
             // Nothing to read, so nothing to approve.
             (Approval::Waiting, None) => Button::new("spec:approve", "Approve")
-                .style(ButtonStyle::Subtle)
+                .style(ButtonStyle::Plain)
                 .disabled(true),
         };
         // shortcut: the backend has no changes-requested action, so Request
         // changes draws disabled; enable it once agmend records one.
         let request = Button::new("spec:request-changes", "Request changes")
-            .style(ButtonStyle::Subtle)
+            .style(ButtonStyle::Plain)
             .disabled(true);
         Some(
             div()

@@ -850,6 +850,61 @@ fn the_reply_chips_close_mark_cancels_the_reply(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn escape_from_the_focused_reply_close_keeps_typing_in_the_input(cx: &mut TestAppContext) {
+    use crate::ui::test_support::{fills_at, press};
+    let (_, sent, cx, _) = replying(cx);
+    cx.update(|window, cx| window.focus_next(cx));
+    press(cx, "left");
+    assert!(
+        !fills_at(cx, "composer:cancel-reply").is_empty(),
+        "the close takes focus"
+    );
+    press(cx, "escape");
+    assert!(cx.debug_bounds("composer:cancel-reply").is_none());
+    cx.simulate_input("hi");
+    cx.simulate_keystrokes("enter");
+    assert_eq!(*sent.borrow(), vec![plain_hi()]);
+}
+
+#[gpui::test]
+fn enter_and_space_on_the_focused_reply_close_neither_send_nor_type(cx: &mut TestAppContext) {
+    use crate::ui::test_support::press;
+    let (composer, sent, cx, _) = replying(cx);
+    cx.simulate_input("hi");
+    cx.update(|window, cx| window.focus_next(cx));
+    press(cx, "left");
+    press(cx, "space");
+    composer.read_with(cx, |composer, cx| assert_eq!(composer.text(cx), "hi"));
+    assert!(
+        cx.debug_bounds("composer:cancel-reply").is_none(),
+        "Space closes"
+    );
+    assert!(sent.borrow().is_empty(), "Space typed or sent");
+    let (composer, sent, cx, _) = replying(cx);
+    cx.simulate_input("hi");
+    cx.update(|window, cx| window.focus_next(cx));
+    press(cx, "left");
+    press(cx, "enter");
+    composer.read_with(cx, |composer, cx| assert_eq!(composer.text(cx), "hi"));
+    assert!(
+        sent.borrow().is_empty(),
+        "Enter on the close sent the message"
+    );
+}
+
+#[gpui::test]
+fn the_reply_chip_is_as_tall_as_the_audience_chip(cx: &mut TestAppContext) {
+    let (_, _, cx) = open_composer(cx);
+    let audience = cx.debug_bounds("composer:to").unwrap().size.height;
+    let (_, _, cx, _) = replying(cx);
+    let reply = cx.debug_bounds("composer:to").unwrap().size.height;
+    assert_eq!(reply, audience);
+    let close = cx.debug_bounds("composer:cancel-reply").unwrap().size;
+    assert!(close.width >= crate::ui::tokens::ICON_BUTTON_SIZE);
+    assert!(close.height >= crate::ui::tokens::ICON_BUTTON_SIZE);
+}
+
+#[gpui::test]
 fn a_mention_of_another_agent_drops_the_reply(cx: &mut TestAppContext) {
     // C232: "@sean/a1 status?" after Reply on adam/coord's alert goes to
     // sean/a1 as a plain message. Replying to the alert would make it an

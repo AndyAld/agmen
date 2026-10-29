@@ -4,7 +4,7 @@ use gpui::{
     AnyElement, AnyView, Context, IntoElement, ParentElement as _, Pixels, Render, Size,
     Styled as _, TestAppContext, VisualTestContext, Window, div,
 };
-use gpui::{InteractiveElement as _, Modifiers};
+use gpui::{InputEvent as _, InteractiveElement as _, Modifiers};
 
 use super::components::{Button, ButtonStyle};
 use super::tokens::MOCKUP_REM;
@@ -65,6 +65,79 @@ pub(crate) fn draw(
     let (_, cx) = cx.add_window_view(|_, _| Harness(Box::new(make)));
     redraw(cx);
     cx
+}
+
+/// Draws controls under the app's Tab handler, starting with focus on the root.
+pub(crate) fn draw_with_tab(
+    cx: &mut TestAppContext,
+    make: impl Fn() -> AnyElement + 'static,
+) -> &mut VisualTestContext {
+    let focus = cx.update(|cx| cx.focus_handle());
+    let root = focus.clone();
+    let cx = draw(cx, move || {
+        div()
+            .track_focus(&root)
+            .on_key_down(super::focus_tab)
+            .child(make())
+            .into_any_element()
+    });
+    cx.update(|window, cx| focus.focus(window, cx));
+    redraw(cx);
+    cx
+}
+
+/// Sends a complete key press, including GPUI's key-up activation.
+pub(crate) fn press(cx: &mut VisualTestContext, key: &'static str) {
+    let keystroke = gpui::Keystroke::parse(key).unwrap();
+    cx.update(|window, cx| {
+        window.dispatch_event(
+            gpui::KeyDownEvent {
+                keystroke: keystroke.clone(),
+                is_held: false,
+                prefer_character_input: false,
+            }
+            .to_platform_input(),
+            cx,
+        );
+        window.dispatch_event(gpui::KeyUpEvent { keystroke }.to_platform_input(), cx);
+    });
+    redraw(cx);
+}
+
+/// Checks the control's painted surface under the pointer and after Tab navigation.
+pub(crate) fn assert_control_feedback(
+    cx: &mut VisualTestContext,
+    selector: &'static str,
+    surface: &'static str,
+    tabs: usize,
+) {
+    let away = gpui::point(gpui::px(900.), gpui::px(900.));
+    cx.simulate_mouse_move(away, None, Modifiers::none());
+    redraw(cx);
+    let rest = fills_at(cx, surface);
+    let center = cx.debug_bounds(selector).expect("the control").center();
+    cx.simulate_mouse_move(center, None, Modifiers::none());
+    redraw(cx);
+    assert_ne!(fills_at(cx, surface), rest, "{selector} must show hover");
+    cx.simulate_mouse_move(away, None, Modifiers::none());
+    redraw(cx);
+    let borders: Vec<_> = painted_at(cx, surface)
+        .into_iter()
+        .filter(|quad| quad.border_widths.left.0 > 0.)
+        .map(|quad| quad.border_color)
+        .collect();
+    for _ in 0..tabs {
+        press(cx, "tab");
+    }
+    let focused_borders: Vec<_> = painted_at(cx, surface)
+        .into_iter()
+        .filter(|quad| quad.border_widths.left.0 > 0.)
+        .map(|quad| quad.border_color)
+        .collect();
+    assert!(
+        fills_at(cx, surface) != rest || focused_borders != borders,
+        "{selector} must show keyboard focus on its surface"
+    );
 }
 
 /// Renders `make()` in a test window and returns its laid out size.
