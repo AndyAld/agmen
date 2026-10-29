@@ -1,8 +1,5 @@
 //! Reads the person's agent safeguard settings.
 
-// shortcut: Task 1 provides the reader; Task 4 wires it into managed launches.
-#![cfg_attr(not(test), expect(dead_code, reason = "wired by agent trees Task 4"))]
-
 use std::fs::File;
 use std::io::{ErrorKind, Read};
 use std::path::Path;

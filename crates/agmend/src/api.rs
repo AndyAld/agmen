@@ -147,7 +147,8 @@ pub(crate) fn owner_peer_check(
     lookup: impl FnOnce() -> std::io::Result<i32>,
 ) -> Result<(), ApiError> {
     // Identity-scoped chat uses its authenticated identity, never the human post.
-    if (method == "post" && matches!(caller, Caller::Identity(_)))
+    if (matches!(method, "post" | "child_launch" | "child_stop")
+        && matches!(caller, Caller::Identity(_)))
         || matches!(method, "hello" | "watch" | "inbox" | "state" | "pending")
     {
         return Ok(());
@@ -269,6 +270,14 @@ async fn identity_call(
     raw: Value,
 ) -> Result<Value, ApiError> {
     match method {
+        "child_launch" => core.managed.launch_child(caller, raw).await,
+        "child_stop" => {
+            core.managed.check_tree_caller(caller).await?;
+            Err(ApiError {
+                code: ErrorCode::NotFound,
+                message: "agmend has no method \"child_stop\"".into(),
+            })
+        }
         "post" => {
             #[derive(Deserialize)]
             #[serde(deny_unknown_fields)]

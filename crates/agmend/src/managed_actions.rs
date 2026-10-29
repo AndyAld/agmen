@@ -23,8 +23,8 @@ use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
 use super::{
-    Attached, MAX_AGENTS, Managed, Record, Source, Worker, envelope, error, metadata_for,
-    private_json,
+    Attached, MAX_MANAGED, Managed, Record, Source, Worker, envelope, error, metadata_for,
+    private_json, root_depth,
 };
 use crate::budget::{Budget, Money};
 use crate::console::{bad_request, params};
@@ -105,6 +105,12 @@ struct Stored {
     role_sha256: Option<agmen_proto::Sha256Hex>,
     #[serde(default)]
     role_layer: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parent: Option<IdentityId>,
+    #[serde(default = "root_depth")]
+    depth: u32,
+    #[serde(default)]
+    shared_budget: bool,
 }
 
 impl Stored {
@@ -143,6 +149,9 @@ impl Stored {
                 role: self.role,
                 role_sha256: self.role_sha256,
                 role_layer: self.role_layer,
+                parent: self.parent,
+                depth: self.depth,
+                shared_budget: self.shared_budget,
             },
             migrated,
         ))
@@ -166,6 +175,7 @@ impl Managed {
     /// Reads every saved agent record as an offline agent. Nothing starts:
     /// each waits for the person's Start.
     pub(crate) async fn load(&self) {
+        let _launching = self.launching.lock().await;
         let dir = self.state_dir.join("managed");
         let found = match tokio::task::spawn_blocking(move || read_records(&dir)).await {
             Ok(found) => found,
@@ -190,9 +200,12 @@ impl Managed {
                 tracing::warn!("an agent's saved spend is invalid; counting from zero");
             }
             // Start and Attach check the sessions before either tier resumes.
+            let parent = record.parent.clone();
             let worker = Worker::offline(record, budget);
+            let mut tree = self.tree.lock().await;
             let mut workers = self.workers.lock().await;
-            if workers.len() < MAX_AGENTS && !workers.contains_key(&id) {
+            if workers.len() < MAX_MANAGED && !workers.contains_key(&id) {
+                tree.insert(id.clone(), parent);
                 workers.insert(id, Arc::new(Mutex::new(worker)));
             }
         }
@@ -252,6 +265,7 @@ impl Managed {
         let task = {
             let mut held = worker.lock().await;
             held.state = "attached";
+            held.batch_tier = None;
             held.attached = Some(Attached {
                 pid_file: pid_file.clone(),
                 since: tokio::time::Instant::now(),
@@ -452,7 +466,9 @@ impl Managed {
             }
             _ => {}
         }
+        let mut tree = self.tree.lock().await;
         self.workers.lock().await.remove(&identity.identity_id);
+        tree.remove(&identity.identity_id);
         Ok(json!({
             "identity": identity.identity_id,
             "removed": true,
@@ -502,8 +518,8 @@ impl Managed {
             drop(held);
             return Ok((worker, context));
         }
-        if self.workers.lock().await.len() >= MAX_AGENTS {
-            return Err(bad_request("64 managed agents are already registered"));
+        if self.workers.lock().await.len() >= MAX_MANAGED {
+            return Err(super::tree::registry_full());
         }
         let project = target.project.ok_or_else(|| {
             bad_request("project is required for an agent agmend has not started")
@@ -543,6 +559,9 @@ impl Managed {
             role: None,
             role_sha256: None,
             role_layer: None,
+            parent: None,
+            depth: root_depth(),
+            shared_budget: false,
         };
         self.save_record(&record).await?;
         let mcp = self.agent_dir(&target.identity).join("mcp.json");
@@ -555,11 +574,7 @@ impl Managed {
         let mut worker = Worker::offline(record, Budget::new(cap));
         // The newest transcript is the session this folder last used.
         worker.owner_resumed = newest.is_some();
-        let worker = Arc::new(Mutex::new(worker));
-        self.workers
-            .lock()
-            .await
-            .insert(target.identity, worker.clone());
+        let worker = self.insert_worker(worker).await?;
         Ok((worker, context))
     }
 
@@ -1198,7 +1213,7 @@ fn read_records(dir: &Path) -> Vec<Loaded> {
         return Vec::new();
     };
     let mut found = Vec::new();
-    for entry in entries.take(MAX_AGENTS * 4) {
+    for entry in entries.take(MAX_MANAGED * 4) {
         let Ok(entry) = entry else { continue };
         let path = entry.path();
         match read_record(&path) {
@@ -1214,7 +1229,7 @@ fn read_records(dir: &Path) -> Vec<Loaded> {
                 tracing::warn!(%error, path = %path.display(), "skipping an unreadable agent record");
             }
         }
-        if found.len() >= MAX_AGENTS {
+        if found.len() >= MAX_MANAGED {
             break;
         }
     }

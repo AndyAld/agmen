@@ -11,6 +11,7 @@ use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use agmen_client::{IdentityFile, find_identity};
+use agmen_local::safeguards::MAX_MANAGED;
 use agmen_local::{ApiError, ErrorCode};
 use agmen_proto::{ClientEnvelope, IdentityId, IdentityKind, Payload, ProjectId, Timestamp};
 use serde::{Deserialize, Serialize};
@@ -24,7 +25,6 @@ use crate::identities::Identities;
 use crate::launch::{RoleRun, RunError, RunSpec, Runner};
 use crate::state::ManagedIdentity;
 
-const MAX_AGENTS: usize = 64;
 const MAX_ROLE_PROMPT_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Deserialize)]
@@ -42,6 +42,9 @@ pub(crate) struct Launch {
 struct Placement {
     branch: String,
     worktree: PathBuf,
+    parent: Option<Record>,
+    depth: u32,
+    brief: Option<ClientEnvelope>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,6 +68,22 @@ struct Record {
     /// The layer that supplied the role at launch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     role_layer: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parent: Option<IdentityId>,
+    #[serde(default = "root_depth")]
+    depth: u32,
+    #[serde(default)]
+    shared_budget: bool,
+}
+
+fn root_depth() -> u32 {
+    1
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tier {
+    Owner,
+    Others,
 }
 
 /// How the agent's folder came to be.
@@ -91,6 +110,7 @@ struct Worker {
     /// The interactive Claude Code while the state is `attached`.
     attached: Option<Attached>,
     role_error: Option<String>,
+    batch_tier: Option<Tier>,
 }
 
 impl Worker {
@@ -106,6 +126,7 @@ impl Worker {
             last_run: None,
             attached: None,
             role_error: None,
+            batch_tier: None,
         }
     }
 }
@@ -131,8 +152,10 @@ pub(crate) struct Managed {
     state_dir: PathBuf,
     claude_home: Option<PathBuf>,
     personal_roles: Option<PathBuf>,
+    settings_file: Option<PathBuf>,
     roots: Mutex<BTreeMap<ProjectId, PathBuf>>,
     workers: Mutex<BTreeMap<IdentityId, Arc<Mutex<Worker>>>>,
+    tree: Mutex<BTreeMap<IdentityId, Option<IdentityId>>>,
     launching: Mutex<()>,
     shutting_down: AtomicBool,
 }
@@ -147,6 +170,7 @@ impl Managed {
         state_dir: PathBuf,
         claude_home: Option<PathBuf>,
         personal_roles: Option<PathBuf>,
+        settings_file: Option<PathBuf>,
     ) -> Self {
         Self {
             hub,
@@ -155,8 +179,10 @@ impl Managed {
             state_dir,
             claude_home,
             personal_roles,
+            settings_file,
             roots: Mutex::new(BTreeMap::new()),
             workers: Mutex::new(BTreeMap::new()),
+            tree: Mutex::new(BTreeMap::new()),
             launching: Mutex::new(()),
             shutting_down: AtomicBool::new(false),
         }
@@ -184,7 +210,7 @@ impl Managed {
         };
         if let Some(root) = crate::local::checkout(&project, Path::new(root)).await {
             let mut roots = self.roots.lock().await;
-            if roots.len() < MAX_AGENTS || roots.contains_key(&project) {
+            if roots.len() < MAX_MANAGED || roots.contains_key(&project) {
                 roots.insert(project, root);
             }
         }
@@ -230,14 +256,6 @@ impl Managed {
 
     pub(crate) async fn launch(self: &Arc<Self>, raw: Value) -> Result<Value, ApiError> {
         let launch = Self::validate_launch(raw)?;
-        let agmen = self.runner.mcp_command().await.map_err(error)?;
-        let _launching = self.launching.lock().await;
-        if self.shutting_down.load(Ordering::Acquire) {
-            return Err(error("daemon is shutting down"));
-        }
-        if self.workers.lock().await.len() >= MAX_AGENTS {
-            return Err(bad_request("64 managed agents are already registered"));
-        }
         let root = match launch.root.clone() {
             Some(root) => root,
             None => self
@@ -250,64 +268,7 @@ impl Managed {
                     bad_request("open the project's checkout before launching an agent")
                 })?,
         };
-        let joined = tokio::task::spawn_blocking(move || find_identity(&root))
-            .await
-            .map_err(error)?
-            .map_err(error)?
-            .ok_or_else(|| bad_request("checkout has no trusted agmen identity"))?;
-        let login = self.hub.credentials().login().await.map_err(error)?;
-        if joined.identity.project != launch.project
-            || joined.identity.owner_id != login.human_id
-            || joined.identity.hub_url.origin() != login.hub_url.origin()
-        {
-            return Err(bad_request(
-                "checkout is not joined to this project and owner",
-            ));
-        }
-        let (worker_root, _) = crate::worktree::worktree_root(&joined.root)
-            .await
-            .map_err(error)?;
-        let repo = worker_root
-            .parent()
-            .ok_or_else(|| error("worker root has no main checkout"))?
-            .to_owned();
-        let role = match &launch.role {
-            Some(name) => Some(self.resolve_role(&repo, name).await?),
-            None => None,
-        };
-        let branch = format!(
-            "agent/{}-{}",
-            launch.name,
-            &crate::launch::new_session_id().map_err(error)?[..8]
-        );
-        let worktree = crate::worktree::create(&joined.root, "HEAD", &branch)
-            .await
-            .map_err(error)?;
-        let result = self
-            .complete_launch(
-                launch,
-                joined,
-                login,
-                Placement {
-                    branch: branch.clone(),
-                    worktree: worktree.clone(),
-                },
-                agmen,
-                role,
-            )
-            .await;
-        match result {
-            Ok(result) => Ok(result),
-            Err(failure) => match crate::worktree::remove(&repo, &worktree, &branch).await {
-                Ok(()) => Err(failure),
-                Err(cleanup) => Err(error(format!(
-                    "{}; retained {} on branch {} because safe cleanup failed: {cleanup:#}",
-                    failure.message,
-                    worktree.display(),
-                    branch
-                ))),
-            },
-        }
+        self.launch_at(launch, root, None, None).await
     }
 
     async fn complete_launch(
@@ -319,7 +280,6 @@ impl Managed {
         agmen: PathBuf,
         role: Option<agmen_roles::Resolved>,
     ) -> Result<Value, ApiError> {
-        let Placement { branch, worktree } = placement;
         let (worker_root, _) = crate::worktree::worktree_root(&joined.root)
             .await
             .map_err(error)?;
@@ -327,10 +287,45 @@ impl Managed {
             .parent()
             .ok_or_else(|| error("worker root has no main checkout"))?
             .to_owned();
-        let identity = self.mint(&launch, &joined, &login, role.as_ref()).await?;
-        let handle = identity.handle.clone();
-        write_identity(&worktree, &identity).await?;
-        let mut metadata = metadata_for(&identity);
+        let identity = self
+            .mint(
+                &launch,
+                &joined,
+                &login,
+                role.as_ref(),
+                placement.parent.as_ref(),
+            )
+            .await?;
+        // The hub now holds a live identity and agmend a credential for it, so
+        // any failure from here on takes both back.
+        match self
+            .register_launch(launch, &identity, placement, agmen, role, repo)
+            .await
+        {
+            Ok(answer) => Ok(answer),
+            Err(failure) => Err(self.discard_identity(&identity, failure).await),
+        }
+    }
+
+    /// Everything a launch does once the hub has minted the identity.
+    async fn register_launch(
+        self: &Arc<Self>,
+        launch: Launch,
+        identity: &IdentityFile,
+        placement: Placement,
+        agmen: PathBuf,
+        role: Option<agmen_roles::Resolved>,
+        repo: PathBuf,
+    ) -> Result<Value, ApiError> {
+        let Placement {
+            branch,
+            worktree,
+            parent,
+            depth,
+            mut brief,
+        } = placement;
+        write_identity(&worktree, identity).await?;
+        let mut metadata = metadata_for(identity);
         if let Some(role) = &role {
             metadata.kind = role_kind(role);
             self.write_role_prompt(&identity.identity_id, role).await?;
@@ -354,6 +349,11 @@ impl Managed {
             role: identity.role.clone(),
             role_sha256: identity.role_sha256.clone(),
             role_layer: role.as_ref().map(|role| role.layer.to_string()),
+            parent: parent
+                .as_ref()
+                .map(|parent| parent.identity.identity_id.clone()),
+            depth,
+            shared_budget: false,
         };
         let config_dir = self.agent_dir(&identity.identity_id);
         let record_layer = record.role_layer.clone();
@@ -377,20 +377,21 @@ impl Managed {
         .map_err(error)?;
         let budget = Budget::new(Money::from_usd(&record.budget_usd).map_err(error)?);
         let model = record.model.clone();
-        let mut workers = self.workers.lock().await;
-        if self.shutting_down.load(Ordering::Acquire) {
-            return Err(error("daemon is shutting down"));
-        }
         let mut worker = Worker::offline(record, budget);
         worker.state = "idle";
-        workers.insert(identity.identity_id.clone(), Arc::new(Mutex::new(worker)));
-        drop(workers);
         // HELLO goes through the same durable identity outbox as agent chat.
         let hello = actions::hello(model, branch.clone())?;
         if let Err(error) = identities.post(&metadata, hello).await {
             tracing::warn!(code=?error.code,"managed agent HELLO is pending connection");
         }
-        let mut answer = json!({"identity":identity.identity_id,"identity_id":identity.identity_id,"handle":handle,"worktree":worktree,"branch":branch,"state":"idle"});
+        if let (Some(parent), Some(message)) = (&parent, brief.as_mut()) {
+            message.to = vec![identity.identity_id.clone()];
+            identities.post(&parent.identity, message.clone()).await?;
+        }
+        self.insert_worker(worker).await?;
+        let mut answer = json!({"identity":identity.identity_id,"identity_id":identity.identity_id,"handle":identity.handle,"worktree":worktree,"branch":branch,"state":"idle"});
+        answer["parent"] = json!(parent.as_ref().map(|parent| &parent.identity.identity_id));
+        answer["depth"] = json!(depth);
         if let Some(layer) = &record_layer {
             answer["layer"] = json!(layer);
         }
@@ -403,9 +404,13 @@ impl Managed {
         joined: &agmen_client::Joined,
         login: &agmen_client::Login,
         role: Option<&agmen_roles::Resolved>,
+        parent: Option<&Record>,
     ) -> Result<IdentityFile, ApiError> {
         let handle = format!("{}/{}", login.handle, launch.name);
         let mut body = json!({"handle":handle,"project":launch.project,"kind":"agent"});
+        if let Some(parent) = parent {
+            body["delegated_by"] = json!(parent.identity.identity_id);
+        }
         let spec = role
             .map(|role| {
                 Ok::<_, ApiError>(agmen_proto::RoleSpec {
@@ -467,6 +472,16 @@ impl Managed {
         repo: &Path,
         name: &str,
     ) -> Result<agmen_roles::Resolved, ApiError> {
+        let role = self.load_role(repo, name).await?;
+        if role.kind == agmen_roles::Kind::Listener {
+            return Err(bad_request(
+                "listeners are started by the listener runtime, not agent_launch",
+            ));
+        }
+        Ok(role)
+    }
+
+    async fn load_role(&self, repo: &Path, name: &str) -> Result<agmen_roles::Resolved, ApiError> {
         let layers = agmen_roles::Layers {
             project: Some(repo.to_owned()),
             personal: self.personal_roles.clone(),
@@ -482,9 +497,6 @@ impl Managed {
                 let names = catalog.iter().map(|role| role.role.name.as_str()).collect::<Vec<_>>().join(", ");
                 bad_request(format!("unknown role {name:?}; available names: {names}"))
             })?;
-            if role.kind == agmen_roles::Kind::Listener {
-                return Err(bad_request("listeners are started by the listener runtime, not agent_launch"));
-            }
             if let Some(shadow) = shadowed_builtin(&catalog, &layers.builtin, role) {
                 return Err(bad_request(format!("role {name:?} uses the project-layer role {shadow:?}, which takes the name of a built-in role; project roles may not shadow built-in roles (use a personal role)")));
             }
@@ -613,6 +625,8 @@ impl Managed {
                 continue;
             }
             let mut entry = json!({"identity":record.identity.identity_id,"project":record.identity.project,"handle":record.identity.handle,"state":worker.state,"model":record.model,"budget_usd":record.budget_usd,"spent_usd":worker.budget.spent().usd(),"worktree":record.worktree,"branch":record.branch,"source":record.source,"role":record.role,"layer":record.role_layer});
+            entry["parent"] = json!(record.parent);
+            entry["depth"] = json!(record.depth);
             if let Some(failure) = &worker.role_error {
                 entry["role_error"] = json!(failure);
             }
@@ -706,6 +720,7 @@ impl Managed {
                 return Ok(());
             }
             worker.state = "offline";
+            worker.batch_tier = None;
             // An attached Claude Code is the person's own session: it keeps running.
             worker.attached = None;
             if let Some(stop) = worker.stop.take() {
@@ -842,6 +857,11 @@ impl Managed {
             let spec = self.run_spec(&held, prompt, (session_id, resume), owner_only, role);
             held.last_run = Some(tokio::time::Instant::now());
             held.state = "running";
+            held.batch_tier = Some(if owner_only {
+                Tier::Owner
+            } else {
+                Tier::Others
+            });
             let (stop, stopped) = oneshot::channel();
             held.stop = Some(stop);
             let worker = worker.clone();
@@ -867,6 +887,7 @@ async fn run_worker(
     let result = runner.run(spec, stopped).await;
     let mut held = worker.lock().await;
     held.stop = None;
+    held.batch_tier = None;
     // A batch that never spawned Claude created no session: the next batch
     // of this tier must start it with --session-id, not resume it.
     if result.as_ref().map_or_else(RunError::started, |_| true) {
@@ -1111,6 +1132,9 @@ fn envelope(payload: Payload, body: &str) -> Result<ClientEnvelope, ApiError> {
 // Start, Attach, Detach and Remove.
 #[path = "managed_actions.rs"]
 mod actions;
+
+#[path = "managed_tree.rs"]
+mod tree;
 
 #[cfg(test)]
 #[path = "managed_tests.rs"]

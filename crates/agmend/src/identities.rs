@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use agmen_client::{ClientEvent, ClientKind, HubClient, Me, OutboxState, Session, SessionConfig};
+use agmen_local::safeguards::MAX_MANAGED;
 use agmen_local::{ApiError, ErrorCode};
 use agmen_proto::{ClientEnvelope, IdentityId, ProjectId, StampedEnvelope, Stream, Topics};
 use serde::{Deserialize, Serialize};
@@ -260,7 +261,7 @@ impl Identities {
     }
 
     /// Forgets a removed identity: closes its session and drops its row and
-    /// waiting messages, so it no longer counts toward the 64 identity cap.
+    /// waiting messages, so it no longer counts toward the identity cap.
     pub(crate) async fn forget(&self, identity: &ManagedIdentity) -> Result<(), ApiError> {
         self.close_identity(identity).await;
         let origin = identity.hub_url.origin().ascii_serialization();
@@ -771,8 +772,10 @@ impl Identities {
         );
         let slot = {
             let mut runtimes = self.runtimes.lock().await;
-            if !runtimes.contains_key(&key) && runtimes.len() >= 64 {
-                return Err(hub_error("64 identity sessions are already running"));
+            if !runtimes.contains_key(&key) && runtimes.len() >= MAX_MANAGED {
+                return Err(hub_error(&format!(
+                    "{MAX_MANAGED} identity sessions are already running"
+                )));
             }
             runtimes
                 .entry(key)
@@ -1762,6 +1765,36 @@ mod tests {
                 .message,
             "managed identity has no hub token"
         );
+    }
+
+    #[tokio::test]
+    async fn identity_sessions_stop_at_the_managed_bound() {
+        async fn refusal(identities: &Identities, who: &ManagedIdentity) -> String {
+            let envelope = serde_json::from_value(envelope()).unwrap();
+            identities.post(who, envelope).await.unwrap_err().message
+        }
+        let fixture = Fixture::new(None);
+        let identities = &fixture.daemon.core.identities;
+        for n in 0..MAX_MANAGED - 1 {
+            identities.runtimes.lock().await.insert(
+                (
+                    "https://hub.example".into(),
+                    format!("held{n:04}").parse().unwrap(),
+                ),
+                Arc::new(AsyncMutex::new(None)),
+            );
+        }
+        // The 256th session gets as far as looking for its hub token.
+        let no_token = "managed identity has no hub token";
+        assert_eq!(refusal(identities, &fixture.who).await, no_token);
+        let mut sibling = fixture.who.clone();
+        sibling.identity_id = "agent002".parse().unwrap();
+        assert_eq!(
+            refusal(identities, &sibling).await,
+            format!("{MAX_MANAGED} identity sessions are already running")
+        );
+        // A session that holds one of the 256 places keeps it.
+        assert_eq!(refusal(identities, &fixture.who).await, no_token);
     }
 
     #[tokio::test]

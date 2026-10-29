@@ -46,7 +46,7 @@ pub(crate) struct RunSpec {
 }
 
 impl RunSpec {
-    fn args(&self) -> Vec<String> {
+    pub(crate) fn args(&self) -> Vec<String> {
         let mut args = vec![
             "-p".into(),
             self.prompt.clone(),
