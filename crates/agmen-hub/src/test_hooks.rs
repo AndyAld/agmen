@@ -220,6 +220,41 @@ impl Hub {
         Ok(())
     }
 
+    /// Sets usage for UTC today plus `day_offset`, with its warning reset.
+    ///
+    /// # Errors
+    ///
+    /// When the count does not fit the column, the day is out of range, or a query fails.
+    pub async fn set_usage(
+        &self,
+        tenant: &TenantId,
+        day_offset: i32,
+        messages: u32,
+    ) -> Result<(), HookError> {
+        sqlx::query(
+            "INSERT INTO tenant_usage (tenant_id, day, messages, warned)
+             VALUES ($1, (now() AT TIME ZONE 'UTC')::date + $2::integer, $3, false)
+             ON CONFLICT (tenant_id, day) DO UPDATE
+             SET messages = EXCLUDED.messages, warned = false",
+        )
+        .bind(tenant.as_str())
+        .bind(day_offset)
+        .bind(i32::try_from(messages)?)
+        .execute(self.pool())
+        .await?;
+        Ok(())
+    }
+
+    /// Posts an owner ALERT through the usage helper for gate and fan-out tests.
+    ///
+    /// # Errors
+    ///
+    /// When reading projects or the owner, parsing stored data, or posting fails.
+    pub async fn post_owner_alert(&self, tenant: &TenantId, body: &str) -> Result<(), HookError> {
+        crate::usage::post_owner_alert(self, tenant, body).await?;
+        Ok(())
+    }
+
     /// Approves the device login `user_code` (as `agmen login` shows it,
     /// such as `BCDF-GHJK`) for `human`, standing in for the GitHub sign-in
     /// step. The CLI's next poll then gets tokens.

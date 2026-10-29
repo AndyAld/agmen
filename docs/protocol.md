@@ -185,6 +185,10 @@ Verbs are uppercase strings; adding a verb is a minor protocol change (`v` stays
 | `identity_revoked` | no | The identity was revoked |
 | `not_lane_owner` | no | LEND from a sender that neither owns the lane nor is an identity of kind `coordinator` |
 | `not_required` | no | PUSH_REQUEST sent while push approval is `off`; push without asking |
+| `quota_exceeded` | no | The group used its message quota for the UTC day; `retry_after_ms` is the time to 00:00 UTC |
+| `read_only` | no | The group is read-only until its owner pays |
+
+A client treats a reason it does not know as final (`unknown` is only how a client reads one; a hub never sends it).
 
 ## 6. HTTP API (hub)
 
@@ -219,6 +223,7 @@ Base: `https://api.<domain>/v1`. Auth: bearer token from login (humans) or scope
 | `POST /claim` | Self-host mode only, with a human bearer token and body `{token: "<hex>"}`; unknown fields are refused. Consumes the local one-hour claim token and returns 200 `{tenant, name, role: "owner"}`. Checks in order: 409 `already_claimed` when the group has any member (the stored token is then cleared), 403 `bad_claim_token` when no stored token matches, then 410 `claim_expired`. Hosted mode has no route (404) |
 | `POST /groups` | Hosted mode only, with a human token. Body `{name, project, repo_url?}`. Unknown fields are refused. Self-host answers 404 `not_hosted`. `name` is 1 to 39 characters of lowercase letters, digits and hyphens, and does not start with a hyphen (422 `bad_group_name`). The stored tenant name is `<owner handle>/<name>`, so two owners can pick the same name. A duplicate for the same owner is 409 `group_exists`. `project` follows the project name rule (422 `invalid_name`) and `repo_url` follows `RepoUrl` (422 `bad_repo_url`). Returns 201 `{tenant, group, project, state, trial_ends_at, checkout_url}`. The first group of a GitHub account is a 7-day trial (`state` `trial`, `trial_ends_at` set). A later group is read-only awaiting payment (`state` `read_only`, `trial_ends_at` null). `checkout_url` is null until checkout exists. A fourth group the caller would own gets 403 `group_limit`, and so does `POST /tenants/{tenant}/transfer` when the new owner already owns 3 groups |
 | `GET /tenants/{tenant}/seats` | Hosted mode only. An owner or group admin reads `{used, paid, plan, state, quota, used_today}`. `used` is how many humans are in the group. `paid` is how many seats the plan includes. `plan` is `team`, `business-10`, `business-25`, or `business-50`, or null when there is no paid plan. `state` is the plan state. `quota` is the daily message quota. `used_today` is 0 until usage is counted. Anyone else gets 403 `group_admin_required`. A group with no plan row (one made by `agmen-hub bootstrap`) answers 404 `not_found` and has no seat limit. A self-host hub answers 404 `not_hosted` |
+| `POST /invites`, `POST /invites/{code}/accept`, `PUT /projects/{p}/lanes`, `POST /projects` | A read-only hosted group gets 403 `group_read_only` until its owner pays |
 
 ## 7. Project settings
 

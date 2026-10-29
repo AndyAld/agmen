@@ -58,6 +58,29 @@ fn outbox_survives_reopen() {
 }
 
 #[test]
+fn a_stored_unknown_reason_reads_as_unknown() {
+    let (_dir, path) = db_file();
+    let outbox = Outbox::open(&path).unwrap();
+    outbox.enqueue(&fyi(1)).unwrap();
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute(
+            "UPDATE outbox SET state = 'rejected', reason = ?1 WHERE id = ?2",
+            rusqlite::params!["some_future_reason", message_id(1).as_str()],
+        )
+        .unwrap();
+    drop(outbox);
+    let outbox = Outbox::open(&path).unwrap();
+    assert_eq!(
+        outbox.state(&message_id(1)).unwrap(),
+        Some(OutboxState::Rejected {
+            reason: NackReason::Unknown
+        })
+    );
+    assert!(outbox.due(Timestamp::now()).unwrap().is_empty());
+}
+
+#[test]
 fn outbox_stops_on_final_nack() {
     let (_dir, path) = db_file();
     let outbox = Outbox::open(&path).unwrap();

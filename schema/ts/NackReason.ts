@@ -3,4 +3,4 @@
 /**
  * Why the hub refused a message (protocol section 5.4).
  */
-export type NackReason = "rate_limited" | "hub_busy" | "schema" | "body_too_large" | "expired" | "forbidden_verb" | "forbidden_mention" | "secret_detected" | "conflict" | "identity_revoked" | "not_lane_owner" | "not_required";
+export type NackReason = "rate_limited" | "hub_busy" | "schema" | "body_too_large" | "expired" | "forbidden_verb" | "forbidden_mention" | "secret_detected" | "conflict" | "identity_revoked" | "not_lane_owner" | "not_required" | "quota_exceeded" | "read_only" | "unknown";

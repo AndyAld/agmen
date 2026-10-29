@@ -89,6 +89,10 @@ pub(crate) async fn create(
         }
         (Role::Member, _) => return Err(may_not_invite()),
     }
+    let tenant_id = tenant.parse().map_err(ApiError::stored)?;
+    if crate::usage::write_gate(&hub, &tenant_id).await? == crate::usage::Gate::ReadOnly {
+        return Err(crate::usage::refuse_read_only());
+    }
     let code = new_secret()?;
     let expires_at: i64 = sqlx::query_scalar(
         "INSERT INTO invites (code_hash, tenant_id, project_id, role, created_by, expires_at)

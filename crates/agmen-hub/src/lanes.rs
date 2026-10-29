@@ -627,6 +627,14 @@ pub(crate) async fn replace(
             "only humans and coordinators change lanes",
         ));
     }
+    let tenant: String = sqlx::query_scalar("SELECT tenant_id FROM projects WHERE id = $1")
+        .bind(project.as_str())
+        .fetch_one(hub.pool())
+        .await?;
+    let tenant = tenant.parse().map_err(ApiError::stored)?;
+    if crate::usage::write_gate(&hub, &tenant).await? == crate::usage::Gate::ReadOnly {
+        return Err(crate::usage::refuse_read_only());
+    }
     let file = parse_lane_file(&headers, &body)?;
     check_lane_specs(&file.lanes)?;
     let specs = file.lanes.clone();
