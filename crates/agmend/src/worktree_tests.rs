@@ -642,3 +642,76 @@ async fn failed_add_releases_reserved_leaf() {
     git(repo.path(), &["branch", "-d", "taken"]).await;
     create(repo.path(), "main", "taken").await.unwrap();
 }
+
+#[tokio::test]
+async fn remove_unused_takes_back_a_branch_that_starts_at_unmerged_work() {
+    let repo = repo().await;
+    // The child's branch starts at its parent's commit, which main lacks.
+    let parent = create(repo.path(), "main", "agent/parent").await.unwrap();
+    edit_commit(&parent).await;
+    let start = commit(&parent, "HEAD").await.unwrap();
+    assert_eq!(start, git(&parent, &["rev-parse", "HEAD"]).await);
+    let path = create(&parent, &start, "agent/child").await.unwrap();
+    assert_eq!(
+        merged_state(repo.path(), "agent/child", "main")
+            .await
+            .unwrap(),
+        Merged::No
+    );
+    COMMANDS.with_borrow_mut(Vec::clear);
+    remove_unused(repo.path(), &path, "agent/child", &start)
+        .await
+        .unwrap();
+    assert!(!path.exists());
+    assert!(
+        git(repo.path(), &["branch", "--list", "agent/child"])
+            .await
+            .is_empty()
+    );
+    assert!(
+        git(repo.path(), &["for-each-ref", "refs/wip"])
+            .await
+            .is_empty()
+    );
+    COMMANDS.with_borrow(|log| {
+        assert!(
+            log.iter()
+                .flatten()
+                .all(|arg| arg != "--force" && arg != "-f" && arg != "-D")
+        );
+    });
+    // The parent keeps its work.
+    assert!(parent.join("feature").is_file());
+    assert!(
+        git(repo.path(), &["branch", "--list", "agent/parent"])
+            .await
+            .contains("agent/parent")
+    );
+}
+
+#[tokio::test]
+async fn remove_unused_keeps_what_was_used() {
+    let repo = repo().await;
+    let start = commit(repo.path(), "main").await.unwrap();
+    let path = create(repo.path(), &start, "fix/a").await.unwrap();
+    std::fs::write(path.join("scratch"), "work").unwrap();
+    assert!(
+        remove_unused(repo.path(), &path, "fix/a", &start)
+            .await
+            .is_err()
+    );
+    assert!(path.join("scratch").is_file());
+    std::fs::remove_file(path.join("scratch")).unwrap();
+    edit_commit(&path).await;
+    assert!(
+        remove_unused(repo.path(), &path, "fix/a", &start)
+            .await
+            .is_err()
+    );
+    assert!(path.join("feature").is_file());
+    assert!(
+        git(repo.path(), &["branch", "--list", "fix/a"])
+            .await
+            .contains("fix/a")
+    );
+}

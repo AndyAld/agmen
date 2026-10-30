@@ -148,7 +148,8 @@ pub(crate) fn owner_peer_check(
     lookup: impl FnOnce() -> std::io::Result<i32>,
 ) -> Result<(), ApiError> {
     // Identity-scoped chat uses its authenticated identity, never the human post.
-    if (method == "post" && matches!(caller, Caller::Identity(_)))
+    if (matches!(method, "post" | "child_launch" | "child_stop")
+        && matches!(caller, Caller::Identity(_)))
         || (matches!(caller, Caller::Identity(_))
             && matches!(
                 method,
@@ -293,6 +294,8 @@ async fn identity_call(
     raw: Value,
 ) -> Result<Value, ApiError> {
     match method {
+        "child_launch" => core.managed.launch_child(caller, raw).await,
+        "child_stop" => core.managed.stop_child(caller, raw).await,
         "post" => {
             #[derive(Deserialize)]
             #[serde(deny_unknown_fields)]

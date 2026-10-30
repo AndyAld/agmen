@@ -112,12 +112,27 @@ fn spec(dir: &std::path::Path) -> RunSpec {
         resume: false,
         model: Some("sonnet".into()),
         budget_remaining: "5.000000".into(),
+        cap_budget: true,
         mcp_config: dir.join("mcp.json"),
         owner_handle: "andy".into(),
         owner_id: "owner001".parse().unwrap(),
         owner_only: true,
         role: None,
     }
+}
+
+#[test]
+fn uncapped_run_has_no_max_budget_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut request = spec(dir.path());
+    request.cap_budget = false;
+    let args = request.args();
+    assert!(!args.iter().any(|arg| arg == "--max-budget-usd"));
+    assert!(!args.iter().any(|arg| arg == "5.000000"));
+    assert!(
+        args.windows(2)
+            .any(|args| args == ["--output-format", "json"])
+    );
 }
 
 #[test]

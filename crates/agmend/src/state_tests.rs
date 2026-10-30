@@ -864,10 +864,9 @@ fn receipt_cap_refuses_without_cursor_advance() {
 #[test]
 fn registration_and_stream_counts_are_bounded() {
     let (_dir, mut store, who) = setup();
-    for n in 1..64 {
+    for n in 1..agmen_local::safeguards::MAX_MANAGED {
         let mut next = who.clone();
         next.identity_id = format!("peers{n:03}").parse().unwrap();
-        next.project = format!("proj{n:04}").parse().unwrap();
         store.register(&next).unwrap();
     }
     let mut extra = who.clone();
@@ -916,6 +915,44 @@ fn drain_errors_roll_back_the_whole_selection() {
             .drain(ORIGIN, &who.identity_id, 1, usize::MAX)
             .is_err()
     );
+}
+
+#[test]
+fn all_managed_identities_are_listed_and_receive_messages() {
+    let (_dir, mut store, who) = setup();
+    let mut last = who.clone();
+    for n in 1..MAX_MANAGED {
+        last.identity_id = format!("peers{n:03}").parse().unwrap();
+        store.register(&last).unwrap();
+    }
+    assert_eq!(
+        store.identities(ORIGIN, &who.owner_id).unwrap().len(),
+        MAX_MANAGED
+    );
+    let mut event = message(1);
+    event.client.to = vec![last.identity_id.clone()];
+    store.ingest(ORIGIN, &who.project, &event).unwrap();
+    assert_eq!(
+        store
+            .drain(ORIGIN, &last.identity_id, 1, 65536)
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn own_messages_track_up_to_the_managed_identity_bound() {
+    let (_dir, mut store, who) = setup();
+    let message = message(1).client.id;
+    for n in 0..MAX_MANAGED {
+        let id = format!("peers{n:03}").parse().unwrap();
+        store.remember_own(ORIGIN, &id, &message).unwrap();
+    }
+    assert!(matches!(
+        store.remember_own(ORIGIN, &who.identity_id, &message),
+        Err(StoreError::Full(_))
+    ));
 }
 
 #[test]

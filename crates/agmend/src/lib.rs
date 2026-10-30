@@ -27,6 +27,7 @@ mod listener;
 mod local;
 mod login;
 mod managed;
+mod safeguards;
 mod socket;
 mod sse;
 mod state;
@@ -137,6 +138,7 @@ pub struct Config {
     roster_every: Duration,
     local_every: Duration,
     personal_roles: Option<PathBuf>,
+    settings_file: Option<PathBuf>,
     runner: Arc<dyn launch::Runner>,
     claude_home: Option<PathBuf>,
     listener_settings: PathBuf,
@@ -161,6 +163,7 @@ impl Config {
             roster_every: ROSTER_EVERY,
             local_every: LOCAL_EVERY,
             personal_roles: None,
+            settings_file: None,
             runner: Arc::new(launch::ClaudeRunner::default()),
             claude_home: transcripts::home_from_env(),
         }
@@ -169,7 +172,8 @@ impl Config {
     /// This user's config: the socket in the state folder
     /// (`$XDG_STATE_HOME/agmen/agmend.sock`, on macOS
     /// `~/Library/Application Support/agmen/agmend.sock`), the CLI's login
-    /// file and token store, and personal roles in `~/.config/agmen/roles`.
+    /// file and token store, personal roles in `~/.config/agmen/roles`, and
+    /// agent settings in `~/.config/agmen/settings.toml`.
     ///
     /// # Errors
     ///
@@ -187,7 +191,10 @@ impl Config {
         // Spec 3.5 and the desktop's settings use ~/.config/agmen on every
         // platform, not agmen-client's config folder.
         Ok(match std::env::home_dir() {
-            Some(home) => config.personal_roles(home.join(".config/agmen/roles")),
+            Some(home) => {
+                config.settings_file = Some(home.join(".config/agmen/settings.toml"));
+                config.personal_roles(home.join(".config/agmen/roles"))
+            }
             None => config,
         })
     }
@@ -306,6 +313,7 @@ impl Agmend {
             config.socket.with_file_name(""),
             config.claude_home,
             config.personal_roles.clone(),
+            config.settings_file.clone(),
         ));
         let settings_file = config.listener_settings.clone();
         let listeners = Arc::new(listener::Listeners::new(

@@ -200,3 +200,114 @@ fn batch_costs_accumulate_across_resumed_processes() {
     assert!(budget.exhausted());
     assert_eq!(steps, [Step::Warn, Step::WrapUp, Step::Stop]);
 }
+
+#[test]
+fn reserve_reduces_remaining() {
+    let mut budget = Budget::new(money("2"));
+    budget.reserve(money("0.5"), money("0.5")).unwrap();
+    assert_eq!(budget.remaining_usd(), "1.500000");
+    assert!(!budget.exhausted());
+    budget.reserve(money("1.5"), money("0")).unwrap();
+    assert!(budget.exhausted());
+}
+
+#[test]
+fn reserve_keeps_the_floor() {
+    let mut budget = Budget::new(money("2"));
+    let error = budget.reserve(money("1.6"), money("0.5")).unwrap_err();
+    assert_eq!(error.remaining, "2.000000");
+    assert_eq!(budget.remaining_usd(), "2.000000");
+    budget.reserve(money("1.5"), money("0.5")).unwrap();
+    assert_eq!(budget.remaining_usd(), "0.500000");
+    assert!(budget.reserve(money("1"), money("0")).is_err());
+    assert_eq!(budget.remaining_usd(), "0.500000");
+}
+
+#[test]
+fn charge_child_moves_reserved_to_children_spent() {
+    let mut budget = Budget::new(money("2"));
+    budget.reserve(money("1"), money("0.5")).unwrap();
+    budget.charge_child(money("0.25"));
+    assert_eq!(budget.reserved().usd(), "0.750000");
+    assert_eq!(budget.children_spent().usd(), "0.250000");
+    assert_eq!(budget.remaining_usd(), "1.000000");
+    budget.charge_child(money("1"));
+    assert_eq!(budget.reserved().usd(), "0.000000");
+    assert_eq!(budget.children_spent().usd(), "1.250000");
+}
+
+#[test]
+fn a_child_that_overshoots_releases_only_what_it_held() {
+    let mut budget = Budget::new(money("5"));
+    budget.reserve(money("1"), money("0")).unwrap();
+    budget.reserve(money("1"), money("0")).unwrap();
+    // One child held 1 and its batch cost 1.5: the other child's 1 stays held.
+    budget.charge_child_covered(money("1.5"), money("1"));
+    assert_eq!(budget.reserved().usd(), "1.000000");
+    assert_eq!(budget.children_spent().usd(), "1.500000");
+    assert_eq!(budget.remaining_usd(), "2.500000");
+    // A spend the reservation covered in full moves exactly that much.
+    budget.charge_child_covered(money("0.25"), money("0.25"));
+    assert_eq!(budget.reserved().usd(), "0.750000");
+    assert_eq!(budget.children_spent().usd(), "1.750000");
+    // A spend nothing covered only counts.
+    budget.charge_child_covered(money("0.25"), money("0"));
+    assert_eq!(budget.reserved().usd(), "0.750000");
+    assert_eq!(budget.children_spent().usd(), "2.000000");
+}
+
+#[test]
+fn release_saturates_at_zero() {
+    let mut budget = Budget::new(money("2"));
+    budget.reserve(money("1"), money("0.5")).unwrap();
+    budget.release(money("0.25"));
+    assert_eq!(budget.remaining_usd(), "1.250000");
+    budget.release(money("2"));
+    assert_eq!(budget.remaining_usd(), "2.000000");
+}
+
+#[test]
+fn raising_the_cap_keeps_accounting_and_does_not_repeat_spent_steps() {
+    let mut budget = Budget::new(money("1"));
+    budget.reserve(money("0.5"), money("0")).unwrap();
+    budget.charge_child(money("0.25"));
+    budget.add_cost_usd("1", |_| {}).unwrap();
+    budget.raise_cap(money("1.1"));
+    let mut steps = Vec::new();
+    budget.add_cost_usd("0", |step| steps.push(step)).unwrap();
+    assert!(steps.is_empty());
+    assert_eq!(budget.reserved(), money("0.25"));
+    assert_eq!(budget.children_spent(), money("0.25"));
+}
+
+#[test]
+fn reservations_never_wrap_or_go_negative() {
+    let most = money("1e30");
+    assert_eq!(most.saturating_add(money("1")), most);
+    assert_eq!(money("1").saturating_sub(most), money("0"));
+    let mut budget = Budget::new(money("2"));
+    // A reservation far over the cap is refused and changes nothing.
+    let error = budget.reserve(most, money("0")).unwrap_err();
+    assert_eq!(error.remaining, "2.000000");
+    assert_eq!(budget.reserved(), money("0"));
+    // A huge floor cannot be met either.
+    assert!(budget.reserve(money("1"), most).is_err());
+    assert_eq!(budget.remaining_usd(), "2.000000");
+    // Spend and refunds past the largest amount stay at it, not below zero.
+    budget.reserve(money("1"), money("0")).unwrap();
+    budget.charge_child(most);
+    budget.charge_child(most);
+    assert_eq!(budget.children_spent(), most);
+    assert_eq!(budget.reserved(), money("0"));
+    assert_eq!(budget.remaining_usd(), "0.000000");
+    assert!(budget.exhausted());
+    budget.release(most);
+    assert_eq!(budget.reserved(), money("0"));
+    // Totals at the largest amount do not wrap into looking spendable.
+    let mut full = Budget::new(most);
+    full.charge_child(most);
+    full.add_cost_usd("1e30", |_| {}).unwrap();
+    assert!(full.exhausted());
+    assert_eq!(full.remaining_usd(), "0.000000");
+    assert!(full.reserve(money("0.000001"), money("0")).is_err());
+}

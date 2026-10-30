@@ -1286,11 +1286,81 @@ async fn restarted(fixture: &Fixture) -> Arc<Managed> {
         old.state_dir.clone(),
         Some(fixture.dir.path().join("claude")),
         old.personal_roles.clone(),
+        old.settings_file.clone(),
     ));
     managed.attach(&fixture.daemon.core.identities).await;
     managed.load().await;
     managed
 }
+
+async fn tree_fixture() -> (Fixture, Arc<Mutex<Vec<Value>>>) {
+    tree_fixture_with_verbs(json!(["FYI"])).await
+}
+
+async fn tree_fixture_with_verbs(verbs: Value) -> (Fixture, Arc<Mutex<Vec<Value>>>) {
+    let (mut fixture, requests) = role_fixture().await;
+    fixture.hub.abort();
+    let _stopped = tokio::time::timeout(std::time::Duration::from_secs(1), &mut fixture.hub)
+        .await
+        .unwrap();
+    let captured = requests.clone();
+    let revoked = fixture.revoked.clone();
+    let app = axum::Router::new().route("/v1/identities", axum::routing::post(move |axum::Json(body): axum::Json<Value>| {
+        let captured = captured.clone();
+        let verbs = verbs.clone();
+        async move {
+            let id = {
+                let mut requests = captured.lock().unwrap();
+                assert!(requests.len() < 260);
+                requests.push(body.clone());
+                if body["handle"] == "owner/reject" {
+                    return (axum::http::StatusCode::UNPROCESSABLE_ENTITY, axum::Json(json!({"error":"bad_role","error_description":"role permissions were refused"}))).into_response();
+                }
+                if body["handle"] == "owner/worker" { "agent001".to_owned() } else { format!("kid{:05}", requests.len() - 1) }
+            };
+            axum::Json(json!({"id":id,"handle":body["handle"],"tenant":"tenant01","project":"project1","token":"fake-agent-token","verbs":verbs})).into_response()
+        }
+    })).route("/v1/projects/{project}/state", axum::routing::get(|| async { axum::Json(json!({"value":[]})) }))
+    .route("/v1/identities/{id}", axum::routing::delete(move |axum::extract::Path(id): axum::extract::Path<String>| async move {
+        revoked.lock().unwrap().push(id);
+        axum::http::StatusCode::NO_CONTENT
+    }));
+    let listener = tokio::net::TcpListener::bind(fixture.hub_url.socket_addrs(|| None).unwrap()[0])
+        .await
+        .unwrap();
+    fixture.hub = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let roles = fixture.dir.path().join("repo/.agmen/roles");
+    std::fs::create_dir(&roles).unwrap();
+    std::fs::write(roles.join("chain.xml"), "<role name=\"chain\" extends=\"base\" kind=\"agent\" tier=\"standard\" version=\"1\"><summary>c</summary><launches roles=\"chain\"/></role>").unwrap();
+    let repo = fixture.dir.path().join("repo");
+    git(&repo, &["add", "-f", ".agmen/roles/chain.xml"]);
+    git(
+        &repo,
+        &[
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-m",
+            "reviewed roles",
+        ],
+    );
+    git(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    let settings = fixture.dir.path().join("settings.toml");
+    std::fs::write(&settings, "[agents]\n").unwrap();
+    Arc::get_mut(&mut Arc::get_mut(&mut fixture.daemon.core).unwrap().managed)
+        .unwrap()
+        .settings_file = Some(settings);
+    (fixture, requests)
+}
+
+async fn enqueue_from_agent(fixture: &Fixture, seq: u32, sender: &str, recipient: &str) {
+    fixture.daemon.core.identities.enqueue_test(serde_json::from_value(json!({"v":1,"id":format!("01JBX6Q4T7W3C2M8Y9K5P{seq:05}"),"verb":"FYI","data":{},"body":"do the work","sent_at":"2026-10-25T16:04:11Z","stream":"feed","seq":seq,"from":sender,"from_handle":"owner/worker","from_kind":"agent","mentioned":[recipient],"hub_at":"2026-10-25T16:04:12Z"})).unwrap()).await;
+}
+
+#[path = "managed_tree_tests.rs"]
+mod tree;
 
 fn sessions(worker: &super::Worker) -> (String, String, std::path::PathBuf) {
     (
