@@ -23,8 +23,8 @@ use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
 use super::{
-    Attached, MAX_MANAGED, Managed, Record, Source, Worker, envelope, error, metadata_for,
-    private_json, root_depth,
+    Attached, MAX_MANAGED, Managed, Record, ReviewedBase, Source, Worker, envelope, error,
+    metadata_for, private_json, root_depth,
 };
 use crate::budget::{Budget, Money};
 use crate::console::{bad_request, params};
@@ -108,6 +108,8 @@ struct Stored {
     #[serde(default)]
     role_commit: Option<String>,
     #[serde(default)]
+    reviewed_base: Option<ReviewedBase>,
+    #[serde(default)]
     verbs: Option<std::collections::BTreeSet<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     parent: Option<IdentityId>,
@@ -154,6 +156,7 @@ impl Stored {
                 role_sha256: self.role_sha256,
                 role_layer: self.role_layer,
                 role_commit: self.role_commit,
+                reviewed_base: self.reviewed_base,
                 verbs: self.verbs,
                 parent: self.parent,
                 depth: self.depth,
@@ -594,6 +597,7 @@ impl Managed {
             role_sha256: None,
             role_layer: None,
             role_commit: None,
+            reviewed_base: None,
             verbs: joined.identity.verbs.clone(),
             parent: None,
             depth: root_depth(),

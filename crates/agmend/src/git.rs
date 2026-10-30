@@ -89,8 +89,11 @@ impl Git {
         timeout: Duration,
         index_file: Option<&Path>,
     ) -> Result<Output, GitError> {
+        // The subcommand, which a global option such as --no-replace-objects precedes.
         let what = args
-            .first()
+            .iter()
+            .find(|arg| !arg.as_encoded_bytes().starts_with(b"-"))
+            .or(args.first())
             .map(|a| a.to_string_lossy().into_owned())
             .unwrap_or_default();
         let mut command = tokio::process::Command::new("git");

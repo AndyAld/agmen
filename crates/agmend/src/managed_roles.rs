@@ -4,17 +4,55 @@ use std::path::Path;
 use std::time::Duration;
 
 use agmen_local::ApiError;
+use serde::{Deserialize, Serialize};
 
 use super::{Managed, Record, error};
 use crate::console::bad_request;
 use crate::git::{Git, GitError};
 
+/// The reviewed commit a tree reads its project roles at: `origin/<branch>` of
+/// the main checkout as it was when the person launched the tree's root. agmend
+/// records it in its own state and every descendant inherits it. Reading the
+/// reference when a child launches would let an agent that can write the shared
+/// repository choose the commit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) struct ReviewedBase {
+    /// What the commit was called when it was recorded, for messages.
+    pub(super) reference: String,
+    pub(super) commit: String,
+}
+
 impl Managed {
-    /// The main checkout's branch is the base, as for agent_prune.
-    pub(super) async fn child_role_commit(
+    /// What a launch records as its tree's reviewed base, and the commit a
+    /// child's project role is read at. A child takes its parent's, as recorded
+    /// when the person launched the root. A root records `origin/<branch>` as of
+    /// now; a checkout where that does not resolve still launches, and its
+    /// agents cannot launch children.
+    pub(super) async fn launch_base(
         &self,
         repo: &Path,
-    ) -> Result<(String, String), ApiError> {
+        parent: Option<&Record>,
+    ) -> Result<Option<ReviewedBase>, ApiError> {
+        if let Some(parent) = parent {
+            return match &parent.reviewed_base {
+                Some(base) => Ok(Some(base.clone())),
+                None => Err(bad_request(
+                    "this agent's tree has no reviewed base commit on record: its root was launched before agmend recorded one, or origin/<branch> did not resolve then; relaunch the root agent",
+                )),
+            };
+        }
+        match self.resolve_base(repo).await {
+            Ok(base) => Ok(Some(base)),
+            Err(failure) => {
+                tracing::warn!(message = %failure.message, "no reviewed base commit for this agent's tree; its agents cannot launch children");
+                Ok(None)
+            }
+        }
+    }
+
+    /// `origin/<branch>` of the main checkout now. The main checkout's branch is
+    /// the base, as for agent_prune.
+    pub(super) async fn resolve_base(&self, repo: &Path) -> Result<ReviewedBase, ApiError> {
         let git = Git::new(repo, tokio::time::Instant::now() + Duration::from_secs(5));
         let no_branch = || {
             bad_request(
@@ -39,7 +77,13 @@ impl Managed {
         let reference = format!("refs/remotes/{revision}^{{commit}}");
         let output = git
             .run_str(
-                &["rev-parse", "--verify", "--end-of-options", &reference],
+                &[
+                    "--no-replace-objects",
+                    "rev-parse",
+                    "--verify",
+                    "--end-of-options",
+                    &reference,
+                ],
                 128,
             )
             .await
@@ -55,7 +99,10 @@ impl Managed {
         {
             return Err(error("git returned an invalid project role commit"));
         }
-        Ok((revision, oid.to_owned()))
+        Ok(ReviewedBase {
+            reference: revision,
+            commit: oid.to_owned(),
+        })
     }
 
     pub(super) async fn record_role(
@@ -84,7 +131,15 @@ impl Managed {
         let git = Git::new(repo, tokio::time::Instant::now() + Duration::from_secs(5));
         let output = git
             .run_str(
-                &["ls-tree", "-r", "-z", commit, "--", ".agmen/roles/"],
+                &[
+                    "--no-replace-objects",
+                    "ls-tree",
+                    "-r",
+                    "-z",
+                    commit,
+                    "--",
+                    ".agmen/roles/",
+                ],
                 1024 * 1024,
             )
             .await
@@ -129,7 +184,10 @@ impl Managed {
             }
             let oid = oid.ok_or_else(|| error("git role blob has no object ID"))?;
             let blob = git
-                .run_str(&["cat-file", "blob", oid], super::MAX_ROLE_PROMPT_BYTES)
+                .run_str(
+                    &["--no-replace-objects", "cat-file", "blob", oid],
+                    super::MAX_ROLE_PROMPT_BYTES,
+                )
                 .await
                 .map_err(error)?;
             if blob.truncated || std::str::from_utf8(&blob.stdout).is_err() {

@@ -14,7 +14,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::{
-    Launch, Managed, Placement, Record, Source, Tier, envelope, error, metadata_for, root_depth,
+    Launch, Managed, Placement, Record, ReviewedBase, Source, Tier, envelope, error, metadata_for,
+    root_depth,
 };
 use crate::console::{bad_request, params};
 use crate::state::ManagedIdentity;
@@ -306,14 +307,18 @@ impl Managed {
         }
         let (joined, repo) =
             checked_checkout(root, &launch.project, &login, parent.as_ref()).await?;
-        let role_commit = if parent.is_some() {
-            Some(self.child_role_commit(&repo).await?)
-        } else {
-            None
-        };
+        let base = self.launch_base(&repo, parent.as_ref()).await?;
         let role = self
-            .launch_role(&repo, &launch, parent.as_ref(), role_commit.as_ref())
+            .launch_role(&repo, &launch, parent.as_ref(), base.as_ref())
             .await?;
+        // A child's project role is read at its tree's commit. A root's is
+        // read from the checkout, where the person launched it.
+        let role_commit = parent.as_ref().and_then(|_| {
+            role.as_ref()
+                .filter(|role| role.layer == agmen_roles::Layer::Project)
+                .and(base.as_ref())
+                .map(|base| base.commit.clone())
+        });
         let _accounting = self.accounting.lock().await;
         let branch = format!(
             "agent/{}-{}",
@@ -347,10 +352,8 @@ impl Managed {
                         depth,
                         brief,
                         shared_budget: reservation.is_some(),
-                        role_commit: role
-                            .as_ref()
-                            .filter(|role| role.layer == agmen_roles::Layer::Project)
-                            .and(role_commit.map(|(_, oid)| oid)),
+                        role_commit,
+                        reviewed_base: base,
                     },
                     agmen,
                     role,
@@ -383,7 +386,7 @@ impl Managed {
         repo: &std::path::Path,
         launch: &Launch,
         parent: Option<&Record>,
-        commit: Option<&(String, String)>,
+        base: Option<&ReviewedBase>,
     ) -> Result<Option<agmen_roles::Resolved>, ApiError> {
         Ok(match parent {
             Some(parent) => {
@@ -420,16 +423,15 @@ impl Managed {
                         parent.role.as_ref().map_or("(none)", |name| name.as_str())
                     )));
                 }
-                let (revision, commit) =
-                    commit.ok_or_else(|| error("child role commit is missing"))?;
+                let base = base.ok_or_else(|| error("child role commit is missing"))?;
                 let role = self
-                    .load_role_at(repo, name, commit)
+                    .load_role_at(repo, name, &base.commit)
                     .await
                     .map_err(|failure| ApiError {
                         code: failure.code,
                         message: format!(
-                            "role {name} at {revision} ({commit}): {}",
-                            failure.message
+                            "role {name} at {} ({}), the commit recorded when its root launched: {}; relaunch the root to read a newer one",
+                            base.reference, base.commit, failure.message
                         ),
                     })?;
                 if role.kind != agmen_roles::Kind::Agent {

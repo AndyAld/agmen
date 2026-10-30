@@ -261,6 +261,11 @@ async fn child_role_missing_at_base_commit_is_refused() {
     assert!(error.message.contains("leaf"), "{}", error.message);
     assert!(error.message.contains("origin/main"), "{}", error.message);
     assert!(error.message.contains(&commit), "{}", error.message);
+    assert!(
+        error.message.contains("relaunch the root"),
+        "{}",
+        error.message
+    );
     assert_eq!(mints.lock().unwrap().len(), 1);
 }
 
@@ -334,6 +339,8 @@ async fn the_pinned_commit_outlives_origin_moving_and_a_restart() {
         serde_json::from_str::<Value>(&role_file(file).unwrap()).unwrap()
     };
     assert_eq!(saved(managed)["role_commit"], reviewed);
+    assert_eq!(saved(managed)["reviewed_base"]["commit"], reviewed);
+    assert_eq!(saved(managed)["reviewed_base"]["reference"], "origin/main");
     // The remote's branch moves on and its role file changes.
     std::fs::write(
         repo.join(".agmen/roles/leaf.xml"),
@@ -453,19 +460,287 @@ async fn a_refused_brief_removes_the_worktree_when_the_parent_has_unmerged_commi
     assert!(listing(&repo, &["for-each-ref", "refs/wip"]).is_empty());
 }
 
-/// Child roles come from `origin/<branch>` of the main checkout, so a
-/// checkout with no branch has nothing to read from, and says so.
+const LEAF: &str = "<role name=\"leaf\" extends=\"reviewer\" version=\"1\"><rules><rule>reviewed prompt</rule></rules></role>";
+
+/// `leaf` is a reviewed role that `chain` may launch, committed at
+/// `origin/main`. Answers what the reviewed `leaf` hashes to.
+fn review_leaf(fixture: &Fixture) -> String {
+    let repo = fixture.dir.path().join("repo");
+    let chain = repo.join(".agmen/roles/chain.xml");
+    std::fs::write(
+        &chain,
+        role_file(&chain)
+            .unwrap()
+            .replace("roles=\"chain\"", "roles=\"chain leaf\""),
+    )
+    .unwrap();
+    std::fs::write(repo.join(".agmen/roles/leaf.xml"), LEAF).unwrap();
+    commit_roles(fixture);
+    agmen_roles::Layers {
+        project: Some(repo),
+        ..Default::default()
+    }
+    .load()
+    .unwrap()
+    .get("leaf")
+    .unwrap()
+    .sha256
+    .clone()
+}
+
+/// A parent with a shell commits a widened `leaf` on its own branch.
+fn evil_leaf_commit(parent: &Value) -> (std::path::PathBuf, String) {
+    let worktree = std::path::PathBuf::from(parent["worktree"].as_str().unwrap());
+    std::fs::write(
+        worktree.join(".agmen/roles/leaf.xml"),
+        LEAF.replace("reviewed prompt", "EVIL prompt"),
+    )
+    .unwrap();
+    git(&worktree, &["add", "-f", ".agmen/roles/leaf.xml"]);
+    git(
+        &worktree,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "evil"],
+    );
+    let oid = String::from_utf8(listing(&worktree, &["rev-parse", "HEAD"]))
+        .unwrap()
+        .trim()
+        .to_owned();
+    (worktree, oid)
+}
+
+/// The child just launched got the reviewed `leaf`, whatever else the repository says.
+async fn assert_reviewed(
+    fixture: &Fixture,
+    mints: &Arc<Mutex<Vec<Value>>>,
+    child: &str,
+    sha: &str,
+) {
+    assert_eq!(mints.lock().unwrap().last().unwrap()["role_sha256"], sha);
+    let prompt = fixture
+        .daemon
+        .core
+        .managed
+        .state_dir
+        .join("agents")
+        .join(child)
+        .join("role-prompt.md");
+    let text = role_file(&prompt).unwrap();
+    assert!(
+        text.contains("reviewed prompt") && !text.contains("EVIL"),
+        "{text}"
+    );
+}
+
+async fn launch_leaf(fixture: &Fixture, parent: &str, name: &str) {
+    child_call(
+        fixture,
+        parent,
+        "child_launch",
+        json!({"name":name,"role":"leaf"}),
+    )
+    .await
+    .unwrap();
+}
+
+/// The commit is recorded when the person launches the root, in agmend's own
+/// state. Moving `origin/<branch>` afterwards reaches no child.
 #[tokio::test]
-async fn a_main_checkout_with_no_branch_is_refused_with_the_reason() {
+async fn a_parent_that_moves_origin_cannot_change_its_childs_role() {
+    let (fixture, mints) = tree_fixture().await;
+    settings(&fixture, "budgets = false");
+    let sha = review_leaf(&fixture);
+    let parent = root(&fixture).await;
+    let (worktree, evil) = evil_leaf_commit(&parent);
+    git(
+        &worktree,
+        &["update-ref", "refs/remotes/origin/main", &evil],
+    );
+    launch_leaf(&fixture, "agent001", "k1").await;
+    assert_reviewed(&fixture, &mints, "kid00001", &sha).await;
+}
+
+/// Nor does a new base branch, which is read from the main checkout's HEAD.
+#[tokio::test]
+async fn a_parent_that_changes_the_base_branch_cannot_change_its_childs_role() {
+    let (fixture, mints) = tree_fixture().await;
+    settings(&fixture, "budgets = false");
+    let sha = review_leaf(&fixture);
+    let parent = root(&fixture).await;
+    let (worktree, evil) = evil_leaf_commit(&parent);
+    let repo = fixture.dir.path().join("repo");
+    git(&repo, &["branch", "other"]);
+    git(&repo, &["symbolic-ref", "HEAD", "refs/heads/other"]);
+    git(
+        &worktree,
+        &["update-ref", "refs/remotes/origin/other", &evil],
+    );
+    launch_leaf(&fixture, "agent001", "k1").await;
+    assert_reviewed(&fixture, &mints, "kid00001", &sha).await;
+}
+
+/// A replacement ref swaps an object's content while its id stays the same,
+/// so the commit's id alone does not pin what is read.
+#[tokio::test]
+async fn a_parent_that_replaces_objects_cannot_change_its_childs_role() {
+    let (fixture, mints) = tree_fixture().await;
+    settings(&fixture, "budgets = false");
+    let sha = review_leaf(&fixture);
+    let parent = root(&fixture).await;
+    let worktree = std::path::PathBuf::from(parent["worktree"].as_str().unwrap());
+    let repo = fixture.dir.path().join("repo");
+    let reviewed = String::from_utf8(listing(
+        &repo,
+        &["rev-parse", "origin/main:.agmen/roles/leaf.xml"],
+    ))
+    .unwrap()
+    .trim()
+    .to_owned();
+    std::fs::write(
+        worktree.join("evil.xml"),
+        LEAF.replace("reviewed prompt", "EVIL prompt"),
+    )
+    .unwrap();
+    let evil = String::from_utf8(listing(&worktree, &["hash-object", "-w", "evil.xml"]))
+        .unwrap()
+        .trim()
+        .to_owned();
+    git(&worktree, &["replace", &reviewed, &evil]);
+    launch_leaf(&fixture, "agent001", "k1").await;
+    assert_reviewed(&fixture, &mints, "kid00001", &sha).await;
+}
+
+/// The same goes for the recorded commit itself being replaced by another.
+#[tokio::test]
+async fn a_parent_that_replaces_the_commit_cannot_change_its_childs_role() {
+    let (fixture, mints) = tree_fixture().await;
+    settings(&fixture, "budgets = false");
+    let sha = review_leaf(&fixture);
+    let reviewed = String::from_utf8(listing(
+        &fixture.dir.path().join("repo"),
+        &["rev-parse", "refs/remotes/origin/main"],
+    ))
+    .unwrap()
+    .trim()
+    .to_owned();
+    let parent = root(&fixture).await;
+    let (worktree, evil) = evil_leaf_commit(&parent);
+    git(&worktree, &["replace", &reviewed, &evil]);
+    launch_leaf(&fixture, "agent001", "k1").await;
+    assert_reviewed(&fixture, &mints, "kid00001", &sha).await;
+}
+
+/// Every descendant reads at the commit its tree's root recorded, whatever
+/// `origin/<branch>` has moved to since, reviewed or not.
+#[tokio::test]
+async fn a_grandchild_reads_the_commit_its_tree_recorded() {
+    let (fixture, mints) = tree_fixture().await;
+    settings(&fixture, "budgets = false");
+    let sha = review_leaf(&fixture);
+    let reviewed = String::from_utf8(listing(
+        &fixture.dir.path().join("repo"),
+        &["rev-parse", "refs/remotes/origin/main"],
+    ))
+    .unwrap()
+    .trim()
+    .to_owned();
+    root(&fixture).await;
+    child(&fixture, "agent001", "k1").await.unwrap();
+    tier(&fixture, "kid00001", Some(Tier::Owner)).await;
+    let repo = fixture.dir.path().join("repo");
+    std::fs::write(
+        repo.join(".agmen/roles/leaf.xml"),
+        LEAF.replace("reviewed prompt", "later prompt"),
+    )
+    .unwrap();
+    commit_roles(&fixture);
+    launch_leaf(&fixture, "kid00001", "k2").await;
+    assert_reviewed(&fixture, &mints, "kid00002", &sha).await;
+    let saved = |id: &str| {
+        let file = fixture
+            .daemon
+            .core
+            .managed
+            .agent_dir(&id.parse().unwrap())
+            .join("agent.json");
+        serde_json::from_str::<Value>(&role_file(file).unwrap()).unwrap()
+    };
+    for id in ["agent001", "kid00001", "kid00002"] {
+        assert_eq!(saved(id)["reviewed_base"]["commit"], reviewed, "{id}");
+    }
+}
+
+/// A root that agmend recorded no commit for, as one launched before this
+/// was recorded, cannot launch children; the person relaunches it.
+#[tokio::test]
+async fn a_root_without_a_recorded_commit_cannot_launch_children() {
     let (fixture, mints) = tree_fixture().await;
     root(&fixture).await;
-    git(&fixture.dir.path().join("repo"), &["checkout", "--detach"]);
+    let record = fixture
+        .daemon
+        .core
+        .managed
+        .agent_dir(&"agent001".parse().unwrap())
+        .join("agent.json");
+    let mut stored: Value = serde_json::from_str(&role_file(&record).unwrap()).unwrap();
+    assert!(
+        stored
+            .as_object_mut()
+            .unwrap()
+            .remove("reviewed_base")
+            .is_some()
+    );
+    std::fs::write(record, serde_json::to_vec(&stored).unwrap()).unwrap();
+    let restored = restarted(&fixture).await;
+    let worker = worker_of(&restored, "agent001").await;
+    let caller = {
+        let mut held = worker.lock().await;
+        held.batch_tier = Some(Tier::Owner);
+        held.record.identity.clone()
+    };
+    let before = git_state(&fixture);
+    let failure = restored
+        .launch_child(&caller, json!({"name":"k1","role":"chain"}))
+        .await
+        .unwrap_err();
+    assert_eq!(failure.code, ErrorCode::BadRequest);
+    assert!(
+        failure.message.contains("relaunch the root"),
+        "{}",
+        failure.message
+    );
+    assert_eq!(mints.lock().unwrap().len(), 1);
+    assert_eq!(git_state(&fixture), before);
+}
+
+/// A checkout with no `origin/<branch>` still launches its agents, as it did
+/// before; only their children need the commit.
+#[tokio::test]
+async fn a_root_launched_with_no_base_still_launches_but_cannot_launch_children() {
+    let (fixture, mints) = tree_fixture().await;
+    let repo = fixture.dir.path().join("repo");
+    git(&repo, &["checkout", "--detach"]);
+    let launched = root(&fixture).await;
+    assert_eq!(launched["state"], "idle");
     let error = child(&fixture, "agent001", "k1").await.unwrap_err();
     assert_eq!(error.code, ErrorCode::BadRequest);
     assert!(
-        error.message.contains("no current branch") && error.message.contains("origin/"),
+        error.message.contains("relaunch the root"),
         "{}",
         error.message
     );
     assert_eq!(mints.lock().unwrap().len(), 1);
+    // The reason agmend could not record one is plain.
+    let failure = fixture
+        .daemon
+        .core
+        .managed
+        .resolve_base(&repo)
+        .await
+        .unwrap_err();
+    assert_eq!(failure.code, ErrorCode::BadRequest);
+    assert!(
+        failure.message.contains("no current branch") && failure.message.contains("origin/"),
+        "{}",
+        failure.message
+    );
 }

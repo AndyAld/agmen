@@ -24,6 +24,7 @@ use crate::hub::Hub;
 use crate::identities::Identities;
 use crate::launch::{RoleRun, RunError, RunSpec, Runner};
 use crate::state::ManagedIdentity;
+use roles::ReviewedBase;
 
 const MAX_ROLE_PROMPT_BYTES: usize = 64 * 1024;
 
@@ -47,6 +48,7 @@ struct Placement {
     brief: Option<ClientEnvelope>,
     shared_budget: bool,
     role_commit: Option<String>,
+    reviewed_base: Option<ReviewedBase>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,6 +75,10 @@ struct Record {
     /// The reviewed project-role commit for a child, independent of its worktree.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     role_commit: Option<String>,
+    /// The commit this agent's tree reads project roles at: recorded when the
+    /// person launched its root, inherited by every descendant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reviewed_base: Option<ReviewedBase>,
     /// Hub-granted verbs, pinned at mint rather than read from an agent's files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     verbs: Option<std::collections::BTreeSet<String>>,
@@ -341,6 +347,7 @@ impl Managed {
             brief,
             shared_budget,
             role_commit,
+            reviewed_base,
         } = placement;
         write_identity(&worktree, identity).await?;
         let mut metadata = metadata_for(identity);
@@ -375,6 +382,7 @@ impl Managed {
             role_sha256: identity.role_sha256.clone(),
             role_layer: role.as_ref().map(|role| role.layer.to_string()),
             role_commit,
+            reviewed_base,
             verbs: identity.verbs.clone(),
             parent: parent
                 .as_ref()
@@ -382,26 +390,8 @@ impl Managed {
             depth,
             shared_budget,
         };
-        let config_dir = self.agent_dir(&identity.identity_id);
         let record_layer = record.role_layer.clone();
-        let record_copy = record.clone();
-        tokio::task::spawn_blocking(move || {
-            std::fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(&config_dir)?;
-            private_json(
-                &config_dir.join("agent.json"),
-                &serde_json::to_value(&record_copy)?,
-            )?;
-            private_json(
-                &config_dir.join("mcp.json"),
-                &json!({"mcpServers":{"agmen":{"command":agmen,"args":["mcp"]}}}),
-            )
-        })
-        .await
-        .map_err(error)?
-        .map_err(error)?;
+        write_agent_files(self.agent_dir(&identity.identity_id), record.clone(), agmen).await?;
         let budget = Budget::new(Money::from_usd(&record.budget_usd).map_err(error)?);
         let model = record.model.clone();
         let mut worker = Worker::offline(record, budget);
@@ -1132,6 +1122,31 @@ fn error(error: impl std::fmt::Display) -> ApiError {
         code: ErrorCode::Hub,
         message: format!("managed agent: {error}"),
     }
+}
+
+/// A new agent's private folder with its record and its MCP configuration.
+async fn write_agent_files(
+    config_dir: PathBuf,
+    record: Record,
+    agmen: PathBuf,
+) -> Result<(), ApiError> {
+    tokio::task::spawn_blocking(move || {
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&config_dir)?;
+        private_json(
+            &config_dir.join("agent.json"),
+            &serde_json::to_value(&record)?,
+        )?;
+        private_json(
+            &config_dir.join("mcp.json"),
+            &json!({"mcpServers":{"agmen":{"command":agmen,"args":["mcp"]}}}),
+        )
+    })
+    .await
+    .map_err(error)?
+    .map_err(error)
 }
 
 fn private_json(path: &Path, value: &Value) -> anyhow::Result<()> {
