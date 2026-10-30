@@ -24,7 +24,7 @@ Every identity except `human` and `hub` carries a role (design 6.13). At mint, a
 - `coordinator`: the verbs its kind may send in section 4, plus REVIEW and PLAN.
 - `listener`: the verbs its kind may send in section 4, plus ASSIGN when its role is `coordinator`. Never CLAIM, HEARTBEAT, RELEASE, DONE, LEND, RULING, REVIEW, PLAN or push answers. Its `edits` must be `none`. Minting a listener with the `coordinator` role needs the coordinator or admin role in the project, as minting a `coordinator` does.
 
-Ingest refuses any verb outside the stored set with a final NACK `forbidden_verb`. An identity minted without role fields (before roles, or by `agmen join`) has no stored set, and the hub checks its verbs against the fixed table per kind instead (`may_send` in crates/agmen-hub/src/ingest.rs), which matches section 4's "Sent by" column and allows no REVIEW or PLAN. An empty stored set allows nothing. Verbs every role may send: HELLO, BYE, FYI, ASK, ANSWER, ACK, STATUS, DM, ALERT, FOUND.
+Ingest refuses any verb outside the stored set with a final NACK `forbidden_verb`. An identity minted without role fields (before roles, or by `agmen join`) has no stored set, and the hub checks its verbs against the fixed table per kind instead (`may_send` in crates/agmen-core/src/routing.rs), which matches section 4's "Sent by" column and allows no REVIEW or PLAN. An empty stored set allows nothing. Verbs every role may send: HELLO, BYE, FYI, ASK, ANSWER, ACK, STATUS, DM, ALERT, FOUND.
 
 Edit scopes narrow lane authorization as described in section 3.
 

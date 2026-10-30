@@ -49,7 +49,6 @@ mod projects;
 mod replay;
 mod retention;
 mod roles;
-mod rollcall;
 mod roster;
 mod self_config;
 mod state;

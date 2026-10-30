@@ -1,19 +1,10 @@
-//! Lease expiry stays in the hub until the presence and expiry extraction.
+//! Lease expiry. The sweep runs in the core. This module keeps the hub's
+//! error type and the task [`Hub::start_messaging`] spawns.
 
-use std::time::Duration;
+use agmen_core::StoreError;
 
-use agmen_core::{Lapsed, lease_expired};
-use agmen_proto::{ProtoError, Topics};
-
-use crate::http::{Hub, error_chain};
+use crate::http::Hub;
 use crate::ingest::PostError;
-
-/// Expired claims one sweep releases at most.
-const SWEEP_BATCH: i64 = 100;
-/// Failed sweeps in a row before the lease sweeper gives up.
-const MAX_FAILURES: u32 = 60;
-/// The pause after a failed sweep.
-const RETRY_DELAY: Duration = Duration::from_secs(1);
 
 /// Why the ledger could not act on a message.
 #[derive(Debug, thiserror::Error)]
@@ -23,13 +14,9 @@ pub(crate) enum LedgerError {
     #[error("posting the hub's answer failed")]
     Post(#[from] PostError),
     #[error("building the hub's answer failed")]
-    Proto(#[from] ProtoError),
+    Proto(#[from] agmen_proto::ProtoError),
     #[error("a stored value is invalid: {0}")]
     Stored(String),
-}
-
-fn stored(what: impl std::fmt::Display) -> LedgerError {
-    LedgerError::Stored(what.to_string())
 }
 
 /// Why [`Hub::run_lease_sweeper`] stopped.
@@ -65,82 +52,35 @@ impl Hub {
     /// # Ok(()) }
     /// ```
     pub async fn run_lease_sweeper(&self) -> Result<(), LeaseSweepError> {
-        let every =
-            (self.claim_lease() / 4).clamp(Duration::from_millis(100), Duration::from_secs(30));
-        let mut failures = 0_u32;
-        loop {
-            match self.expire_leases().await {
-                Ok(released) => {
-                    failures = 0;
-                    if released < usize::try_from(SWEEP_BATCH).unwrap_or(usize::MAX) {
-                        tokio::time::sleep(every).await;
-                    }
-                }
-                Err(err) => {
-                    failures += 1;
-                    if failures >= MAX_FAILURES {
-                        return Err(LeaseSweepError::GaveUp {
-                            failures,
-                            source: Box::new(err),
-                        });
-                    }
-                    tracing::warn!(error = %error_chain(&err), failures, "lease sweep failed; retrying");
-                    tokio::time::sleep(RETRY_DELAY).await;
-                }
-            }
-        }
-    }
-
-    /// One sweep: releases up to [`SWEEP_BATCH`] expired claims and posts a
-    /// RELEASE for each whose item is still open. Returns how many it
-    /// released. DONE ends its own claim, so a claim on a done item reaches
-    /// here only if it predates that; it is released without a RELEASE.
-    ///
-    /// shortcut: the release commits before its RELEASE is posted, so a
-    /// crash in between loses that RELEASE (the claim is still released);
-    /// post in the release's transaction if that matters.
-    async fn expire_leases(&self) -> Result<usize, LedgerError> {
-        let rows: Vec<ExpiredClaim> = sqlx::query_as(
-            "UPDATE claims c SET released_at = now()
-             FROM items i, identities h, projects p
-             WHERE c.id IN (
-                     SELECT id FROM claims
-                     WHERE released_at IS NULL AND lease_until <= now()
-                     ORDER BY lease_until LIMIT $1
-                     FOR UPDATE SKIP LOCKED)
-               AND i.project_id = c.project_id AND i.key = c.item_key
-               AND h.id = c.identity_id AND p.id = c.project_id
-             RETURNING p.tenant_id, c.project_id, c.item_key, i.lane, c.identity_id, h.handle,
-                       i.state = 'open'",
-        )
-        .bind(SWEEP_BATCH)
-        .fetch_all(self.pool())
-        .await?;
-        for (tenant, project, item, lane, holder, handle, open) in &rows {
-            if !open {
-                continue;
-            }
-            let topics = Topics::new(
-                tenant.parse().map_err(stored)?,
-                project.parse().map_err(stored)?,
-            );
-            let lapsed = Lapsed {
-                holder: holder.parse().map_err(stored)?,
-                handle: handle.clone(),
-            };
-            let lane = lane
-                .as_deref()
-                .map(str::parse)
-                .transpose()
-                .map_err(stored)?;
-            let item = item.parse().map_err(stored)?;
-            self.post_as_hub(&topics, lease_expired(&item, lane, &lapsed)?)
-                .await?;
-        }
-        Ok(rows.len())
+        // Each RELEASE wakes the outbox sweeper and the project's events
+        // streams, as every post through `Hub::post_as_hub` does.
+        self.core()
+            .run_lease_sweeper(|project| self.ingest_state().stored(project))
+            .await
+            .map_err(|gave_up| LeaseSweepError::GaveUp {
+                failures: gave_up.failures,
+                source: Box::new(sweep_source(gave_up.last)),
+            })
     }
 }
 
-/// A claim the lease sweep released: tenant, project, item, lane, holder,
-/// the holder's handle, and whether the item is still open.
-type ExpiredClaim = (String, String, String, Option<String>, String, String, bool);
+fn sweep_source(err: agmen_core::LedgerError) -> LedgerError {
+    match err {
+        agmen_core::LedgerError::Store(source) => match source {
+            StoreError::Backend(source) => LedgerError::Database(decode_sqlx(source)),
+            StoreError::Stored(text) => LedgerError::Stored(text),
+            other => LedgerError::Database(sqlx::Error::Decode(Box::new(other))),
+        },
+        agmen_core::LedgerError::Post(err) => LedgerError::Post(err),
+        agmen_core::LedgerError::Proto(err) => LedgerError::Proto(err),
+        agmen_core::LedgerError::Stored(text) => LedgerError::Stored(text),
+        other => LedgerError::Database(sqlx::Error::Decode(Box::new(other))),
+    }
+}
+
+fn decode_sqlx(source: Box<dyn std::error::Error + Send + Sync>) -> sqlx::Error {
+    match source.downcast::<sqlx::Error>() {
+        Ok(err) => *err,
+        Err(source) => sqlx::Error::Decode(source),
+    }
+}
