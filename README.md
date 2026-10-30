@@ -453,7 +453,7 @@ The script never configures Funnel itself.
 
 Friends with Rust 1.99.1 and repository access can install the CLI from a checkout
 with `cargo install --locked --path crates/agmen-cli`, set
-`AGMEN_HUB=https://andys-macbook-pro.tail55b331.ts.net`, then run `agmen login`.
+`AGMEN_HUB=https://<trial-host>.ts.net` (the hub URL Andy shares), then run `agmen login`.
 `agmen login --hub <url>` takes precedence over `AGMEN_HUB`, then the saved login.
 Andy must already administer a project: run `agmen invite --project <id>` for
 each friend, who runs `agmen join <code>` in a local git worktree. To create the
