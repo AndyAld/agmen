@@ -10,8 +10,8 @@ cat >"$tmp/bin/cargo" <<'CARGO'
 set -euo pipefail
 [[ "$*" == 'run --locked --release -p agmen-hub -- serve' ]]
 [[ "$AGMEN_LISTEN" == '127.0.0.1:8080' ]]
-[[ "$AGMEN_PUBLIC_URL" == 'https://andys-macbook-pro.tail55b331.ts.net' ]]
-[[ "$AGMEN_PUBLIC_MQTT_URL" == 'wss://andys-macbook-pro.tail55b331.ts.net:8443/mqtt' ]]
+[[ "$AGMEN_PUBLIC_URL" == 'https://trial-host.example.ts.net' ]]
+[[ "$AGMEN_PUBLIC_MQTT_URL" == 'wss://trial-host.example.ts.net:8443/mqtt' ]]
 [[ "$AGMEN_GITHUB_URL" == 'https://github.com' ]]
 [[ "$AGMEN_GITHUB_API_URL" == 'https://api.github.com' ]]
 [[ "$AGMEN_DATABASE_URL" == 'synthetic-database' ]]
@@ -40,10 +40,14 @@ AGMEN_PUBLIC_MQTT_URL=mqtt://localhost:1883
 AGMEN_GITHUB_URL=http://fake-github
 AGMEN_GITHUB_API_URL=http://fake-github
 ENV
-cat >"$tmp/trial.env" <<'ENV'
+write_trial_env() {
+  cat >"$tmp/trial.env" <<ENV
 AGMEN_GITHUB_CLIENT_ID=synthetic-client-id
 AGMEN_GITHUB_CLIENT_SECRET=synthetic-client-secret
+AGMEN_TRIAL_HOST='$1'
 ENV
+}
+write_trial_env trial-host.example.ts.net
 run() {
   env -i PATH="$tmp/bin:$PATH" HOME="$tmp" TEST_JWT="$tmp/jwt" \
     AGMEN_DEV_ENV="$tmp/dev.env" AGMEN_TRIAL_HUB_ENV="$tmp/trial.env" \
@@ -57,6 +61,8 @@ rg -q 'tailscale funnel --https=443 off' "$tmp/out"
 rg -q 'tailscale funnel --https=8443 off' "$tmp/out"
 rg -q 'agmen login' "$tmp/out"
 rg -q 'agmen join <code>' "$tmp/out"
+rg -q '^Trial hub: https://trial-host.example.ts.net$' "$tmp/out"
+rg -q 'export AGMEN_HUB=https://trial-host.example.ts.net$' "$tmp/out"
 if rg -q 'synthetic-' "$tmp/out"; then
   echo 'launcher printed synthetic credentials' >&2
   exit 1
@@ -67,6 +73,19 @@ if rg -q 'synthetic-' "$tmp/out"; then
   echo 'shell tracing printed synthetic credentials' >&2
   exit 1
 fi
+for bad in '' 'host with space' 'evil.example/path' '-flag.example'; do
+  write_trial_env "$bad"
+  if run >"$tmp/out" 2>&1; then
+    printf 'launcher accepted trial host %q\n' "$bad" >&2
+    exit 1
+  fi
+  rg -q 'AGMEN_TRIAL_HOST' "$tmp/out"
+  if rg -q 'cargo stub passed' "$tmp/out"; then
+    echo 'launcher started with a bad trial host' >&2
+    exit 1
+  fi
+done
+write_trial_env trial-host.example.ts.net
 rm "$tmp/jwt/agmen-dev-1.pem"
 if run >"$tmp/out" 2>&1; then
   echo 'launcher accepted a missing signing key' >&2
@@ -92,7 +111,7 @@ if run >"$tmp/out" 2>&1; then
   echo 'launcher accepted missing configuration' >&2
   exit 1
 fi
-for name in AGMEN_DATABASE_URL AGMEN_MQTT_URL AGMEN_EMQX_API_URL AGMEN_EMQX_API_KEY \
+for name in AGMEN_TRIAL_HOST AGMEN_DATABASE_URL AGMEN_MQTT_URL AGMEN_EMQX_API_URL AGMEN_EMQX_API_KEY \
   AGMEN_EMQX_API_SECRET AGMEN_GITHUB_CLIENT_ID AGMEN_GITHUB_CLIENT_SECRET AGMEN_JWT_SIGNING_KEY; do
   rg -q "^  $name$" "$tmp/out"
 done
