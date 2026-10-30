@@ -2,14 +2,15 @@
 
 mod ledger;
 mod messages;
+mod presence;
 
 pub(crate) use messages::project_exists;
 
 use std::time::Duration;
 
 use agmen_core::{
-    LaneHolder, LaneRow, MessageRow, Parent, QuotaTaken, Reads, ResolvedLane, Roster, Sender,
-    Store, StoreError, StoreTx,
+    ExpiredClaim, LaneHolder, LaneRow, LatestHellos, MessageRow, Parent, QuotaTaken, Reads,
+    ResolvedLane, Roster, RosterRow, Sender, Store, StoreError, StoreTx,
 };
 use agmen_proto::{
     IdentityId, IdentityKind, ItemKey, LaneName, MessageId, ProjectId, Seq, Stream, TenantId,
@@ -148,6 +149,14 @@ impl Reads for PgReader<'_> {
             .await
             .map_err(from_ledger)
     }
+
+    async fn roster_rows(&mut self, project: &ProjectId) -> Result<Vec<RosterRow>, StoreError> {
+        presence::roster_rows(self.0, project).await
+    }
+
+    async fn latest_hellos(&mut self, project: &ProjectId) -> Result<LatestHellos, StoreError> {
+        presence::latest_hellos(self.0, project).await
+    }
 }
 
 impl Reads for PgTx {
@@ -238,6 +247,14 @@ impl Reads for PgTx {
         ledger::lane_list(connection(&mut self.tx), project)
             .await
             .map_err(from_ledger)
+    }
+
+    async fn roster_rows(&mut self, project: &ProjectId) -> Result<Vec<RosterRow>, StoreError> {
+        presence::roster_rows(connection(&mut self.tx), project).await
+    }
+
+    async fn latest_hellos(&mut self, project: &ProjectId) -> Result<LatestHellos, StoreError> {
+        presence::latest_hellos(connection(&mut self.tx), project).await
     }
 }
 
@@ -453,6 +470,10 @@ impl StoreTx for PgTx {
         ledger::resolve_owner(connection(&mut self.tx), project, handle)
             .await
             .map_err(from_ledger)
+    }
+
+    async fn expire_claims(&mut self, limit: u32) -> Result<Vec<ExpiredClaim>, StoreError> {
+        presence::expire_claims(self.sqlx(), limit).await
     }
 }
 

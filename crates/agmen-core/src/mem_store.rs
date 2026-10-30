@@ -1,6 +1,6 @@
 //! Bounded, serializable test storage with rollback on drop.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex as StdMutex, PoisonError};
 use std::time::Duration;
 
@@ -14,8 +14,9 @@ use tokio::sync::{Mutex, MutexGuard, OwnedMutexGuard};
 
 use crate::lanes::{LaneHolder, LaneRow, ResolvedLane};
 use crate::{
-    ItemLock, Lapsed, Member, MemberRole, MessageRow, NewItem, NewLend, Parent, QuotaTaken, Reads,
-    ReleaseBy, Roster, Sender, Store, StoreError, StoreTx, next_utc_midnight,
+    ExpiredClaim, ItemLock, Lapsed, LatestHellos, Member, MemberRole, MessageRow, NewItem, NewLend,
+    Parent, QuotaTaken, Reads, ReleaseBy, Roster, RosterRow, Sender, Store, StoreError, StoreTx,
+    next_utc_midnight,
 };
 
 /// The maximum rows in each in-memory collection.
@@ -38,6 +39,15 @@ struct MemIdentity {
     identity_role: Option<String>,
     verbs: Option<Vec<String>>,
     delegated_by: Option<IdentityId>,
+    agent: Option<String>,
+}
+
+/// A fault injected by tests. `Once` clears when the named call hits it.
+/// `Always` stays until another fault replaces it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Fault {
+    Once(&'static str),
+    Always(&'static str),
 }
 
 #[derive(Debug, Clone)]
@@ -121,7 +131,7 @@ struct MemMessage {
 pub struct MemStore {
     state: Arc<Mutex<MemState>>,
     clock: Arc<StdMutex<Timestamp>>,
-    failure: Arc<StdMutex<Option<&'static str>>>,
+    failure: Arc<StdMutex<Option<Fault>>>,
     #[cfg(test)]
     hidden_recorded: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -266,6 +276,7 @@ impl MemStore {
                 identity_role: member.identity_role,
                 verbs: None,
                 delegated_by: None,
+                agent: None,
             },
         );
         Ok(())
@@ -282,7 +293,38 @@ impl MemStore {
     /// rollback does not rearm a consumed fault. An existing duplicate message
     /// takes precedence over an injected insert failure, as on a resend race.
     pub fn fail_next(&self, op: &'static str) {
-        *self.failure.lock().unwrap_or_else(PoisonError::into_inner) = Some(op);
+        *self.failure.lock().unwrap_or_else(PoisonError::into_inner) = Some(Fault::Once(op));
+    }
+
+    /// Fails every call to method `op` with [`StoreError::Backend`] until another fault replaces it.
+    ///
+    /// [`fail_next`](Self::fail_next) is one shot, so a loop that must fail on
+    /// every attempt uses this. The injected error text matches `fail_next`.
+    pub fn fail_always(&self, op: &'static str) {
+        *self.failure.lock().unwrap_or_else(PoisonError::into_inner) = Some(Fault::Always(op));
+    }
+
+    /// Sets the minted agent name on a live identity. A later re-seed leaves it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Stored`] when the identity is missing.
+    #[cfg(test)]
+    pub(crate) async fn set_minted_agent(
+        &self,
+        project: &ProjectId,
+        id: &IdentityId,
+        agent: &str,
+    ) -> Result<(), StoreError> {
+        fail(&self.failure, "set_minted_agent")?;
+        let mut state = self.locked().await?;
+        let identity = state
+            .identities
+            .get_mut(project)
+            .and_then(|ids| ids.get_mut(id))
+            .ok_or_else(|| StoreError::Stored("no identity".into()))?;
+        identity.agent = Some(agent.to_owned());
+        Ok(())
     }
 
     /// Records a live identity with no stored edit scope.
@@ -326,6 +368,7 @@ impl MemStore {
                 identity_role: None,
                 verbs: None,
                 delegated_by: None,
+                agent: None,
             },
         );
         Ok(())
@@ -522,6 +565,18 @@ impl Reads for &MemStore {
         let state = (*self).locked().await?;
         Ok(lane_list_of(&state, project))
     }
+
+    async fn roster_rows(&mut self, project: &ProjectId) -> Result<Vec<RosterRow>, StoreError> {
+        fail(&self.failure, "roster_rows")?;
+        let state = (*self).locked().await?;
+        Ok(roster_rows_of(&state, project))
+    }
+
+    async fn latest_hellos(&mut self, project: &ProjectId) -> Result<LatestHellos, StoreError> {
+        fail(&self.failure, "latest_hellos")?;
+        let state = (*self).locked().await?;
+        latest_hellos_of(&state, project)
+    }
 }
 
 impl Store for MemStore {
@@ -553,7 +608,7 @@ pub struct MemTx {
     guard: OwnedMutexGuard<MemState>,
     working: MemState,
     now: Timestamp,
-    failure: Arc<StdMutex<Option<&'static str>>>,
+    failure: Arc<StdMutex<Option<Fault>>>,
 }
 
 impl MemTx {
@@ -653,6 +708,16 @@ impl Reads for MemTx {
     async fn lane_list(&mut self, project: &ProjectId) -> Result<Vec<LaneRow>, StoreError> {
         fail(&self.failure, "lane_list")?;
         Ok(lane_list_of(&self.working, project))
+    }
+
+    async fn roster_rows(&mut self, project: &ProjectId) -> Result<Vec<RosterRow>, StoreError> {
+        fail(&self.failure, "roster_rows")?;
+        Ok(roster_rows_of(&self.working, project))
+    }
+
+    async fn latest_hellos(&mut self, project: &ProjectId) -> Result<LatestHellos, StoreError> {
+        fail(&self.failure, "latest_hellos")?;
+        latest_hellos_of(&self.working, project)
     }
 }
 
@@ -1135,12 +1200,24 @@ impl StoreTx for MemTx {
         fail(&self.failure, "resolve_owner")?;
         resolve_handle(&self.working, project, handle)
     }
+
+    async fn expire_claims(&mut self, limit: u32) -> Result<Vec<ExpiredClaim>, StoreError> {
+        fail(&self.failure, "expire_claims")?;
+        Ok(expire_claims_in(&mut self.working, self.now, limit))
+    }
 }
 
-fn fail(failure: &StdMutex<Option<&'static str>>, op: &'static str) -> Result<(), StoreError> {
+fn fail(failure: &StdMutex<Option<Fault>>, op: &'static str) -> Result<(), StoreError> {
     let mut failure = failure.lock().unwrap_or_else(PoisonError::into_inner);
-    if *failure == Some(op) {
-        *failure = None;
+    let tripped = match *failure {
+        Some(Fault::Once(name)) if name == op => {
+            *failure = None;
+            true
+        }
+        Some(Fault::Always(name)) if name == op => true,
+        _ => false,
+    };
+    if tripped {
         return Err(StoreError::Backend(Box::new(std::io::Error::other(
             format!("injected {op} failure"),
         ))));
@@ -1166,6 +1243,125 @@ fn roster_of(state: &MemState, project: &ProjectId) -> Roster {
             })
             .collect(),
     )
+}
+
+fn roster_rows_of(state: &MemState, project: &ProjectId) -> Vec<RosterRow> {
+    let Some(ids) = state.identities.get(project) else {
+        return Vec::new();
+    };
+    let mut rows = Vec::new();
+    for (id, identity) in ids.iter().take(MEM_MAX_ROWS) {
+        if !identity.live || rows.len() >= MEM_MAX_ROWS {
+            continue;
+        }
+        let human = identity.kind == IdentityKind::Human;
+        rows.push(RosterRow {
+            identity_id: id.as_str().to_owned(),
+            kind: identity.kind.as_str().to_owned(),
+            handle: identity.handle.clone(),
+            role: if human {
+                None
+            } else {
+                identity.identity_role.clone()
+            },
+            agent: if human { None } else { identity.agent.clone() },
+            delegated_by: if human {
+                None
+            } else {
+                identity
+                    .delegated_by
+                    .as_ref()
+                    .map(|id| id.as_str().to_owned())
+            },
+        });
+    }
+    rows.sort_by(|left, right| {
+        left.handle
+            .cmp(&right.handle)
+            .then(left.identity_id.cmp(&right.identity_id))
+    });
+    rows
+}
+
+fn latest_hellos_of(state: &MemState, project: &ProjectId) -> Result<LatestHellos, StoreError> {
+    let mut best: HashMap<IdentityId, (Seq, Option<String>, Option<String>)> = HashMap::new();
+    for row in state.messages.iter().take(MEM_MAX_ROWS) {
+        if row.project != *project || row.stream != Stream::Feed {
+            continue;
+        }
+        let value: serde_json::Value = serde_json::from_str(&row.envelope_json)
+            .map_err(|err| StoreError::Stored(err.to_string()))?;
+        if value.get("verb").and_then(|verb| verb.as_str()) != Some("HELLO") {
+            continue;
+        }
+        let data = value.get("data");
+        let agent = json_text(data, "agent");
+        let model = json_text(data, "model");
+        let replace = match best.get(&row.from) {
+            Some((seq, _, _)) => row.seq >= *seq,
+            None => true,
+        };
+        if replace {
+            best.insert(row.from.clone(), (row.seq, agent, model));
+        }
+    }
+    Ok(best
+        .into_iter()
+        .map(|(id, (_, agent, model))| (id, (agent, model)))
+        .collect())
+}
+
+fn json_text(data: Option<&serde_json::Value>, key: &str) -> Option<String> {
+    match data.and_then(|data| data.get(key)) {
+        Some(serde_json::Value::String(text)) => Some(text.clone()),
+        _ => None,
+    }
+}
+
+fn expire_claims_in(state: &mut MemState, now: Timestamp, limit: u32) -> Vec<ExpiredClaim> {
+    let limit = usize::try_from(limit)
+        .unwrap_or(MEM_MAX_ROWS)
+        .min(MEM_MAX_ROWS);
+    let mut due: Vec<(usize, Timestamp)> = state
+        .claims
+        .iter()
+        .enumerate()
+        .take(MEM_MAX_ROWS)
+        .filter(|(_, claim)| !claim.released && claim.lease_until <= now)
+        .map(|(index, claim)| (index, claim.lease_until))
+        .collect();
+    due.sort_by(|left, right| left.1.cmp(&right.1).then(left.0.cmp(&right.0)));
+    due.truncate(limit);
+    let mut expired = Vec::with_capacity(due.len());
+    for (index, _) in due {
+        let Some(joined) = joined_claim(state, index) else {
+            continue;
+        };
+        if let Some(claim) = state.claims.get_mut(index) {
+            claim.released = true;
+        }
+        expired.push(joined);
+    }
+    expired
+}
+
+fn joined_claim(state: &MemState, index: usize) -> Option<ExpiredClaim> {
+    let claim = state.claims.get(index)?;
+    let tenant = state.projects.get(&claim.project)?.as_str().to_owned();
+    let item = state.items.get(&claim.project)?.get(&claim.item)?;
+    let identity = state.identities.get(&claim.project)?.get(&claim.holder)?;
+    if identity.kind == IdentityKind::Human {
+        return None;
+    }
+    Some(ExpiredClaim {
+        tenant,
+        project: claim.project.as_str().to_owned(),
+        item: claim.item.as_str().to_owned(),
+        lane: item.lane.as_ref().map(ToString::to_string),
+        holder: claim.holder.as_str().to_owned(),
+        handle: identity.handle.clone(),
+        open: item.state == "open",
+    })
 }
 
 fn ref_targets_of(

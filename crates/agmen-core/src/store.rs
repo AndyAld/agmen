@@ -1,5 +1,6 @@
 //! The backend boundary for coordination reads and atomic writes.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::time::Duration;
 
@@ -13,6 +14,51 @@ use crate::{Parent, QuotaTaken, Roster, Sender};
 
 /// An item's state, lane, assignee and lane owner, in storage spelling.
 pub type ItemLock = (String, Option<String>, Option<String>, Option<String>);
+
+/// Each sender's latest feed HELLO agent and model, untrimmed.
+///
+/// The pair is `(agent, model)`. A missing field is `None`.
+pub type LatestHellos = HashMap<IdentityId, (Option<String>, Option<String>)>;
+
+/// One live identity or human member, in storage spelling.
+///
+/// Status and HELLO fields are applied by the core, not the store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RosterRow {
+    /// Identity id as stored.
+    pub identity_id: String,
+    /// Kind as stored, such as `agent` or `human`.
+    pub kind: String,
+    /// Display handle. The roster query orders by this column.
+    pub handle: String,
+    /// Mint role. `None` for a human member.
+    pub role: Option<String>,
+    /// Agent name stored at mint. `None` for a human member.
+    pub agent: Option<String>,
+    /// Listener that started the identity, as stored. `None` for a human member.
+    pub delegated_by: Option<String>,
+}
+
+/// A claim the lease sweep released, in storage spelling.
+///
+/// The core parses ids after the release commits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpiredClaim {
+    /// The project's tenant, as stored.
+    pub tenant: String,
+    /// The claim's project, as stored.
+    pub project: String,
+    /// The item key, as stored.
+    pub item: String,
+    /// The item's lane, when it has one.
+    pub lane: Option<String>,
+    /// The holder's identity id, as stored.
+    pub holder: String,
+    /// The holder's handle.
+    pub handle: String,
+    /// Whether the item was still `open` when the claim was released.
+    pub open: bool,
+}
 
 /// A claim released because its lease ran out.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -279,6 +325,33 @@ pub trait Reads: Send {
         &mut self,
         project: &ProjectId,
     ) -> impl Future<Output = Result<Vec<LaneRow>, StoreError>> + Send;
+
+    /// Live identities and human members for the presence roster, ordered by handle.
+    ///
+    /// Human rows have no mint role, agent or delegator. The walk stops at the
+    /// backend's row cap.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when reading a row fails.
+    fn roster_rows(
+        &mut self,
+        project: &ProjectId,
+    ) -> impl Future<Output = Result<Vec<RosterRow>, StoreError>> + Send;
+
+    /// Each identity's latest feed HELLO agent and model, untrimmed.
+    ///
+    /// The key is the sender. The pair is `(agent, model)`. A missing field is
+    /// `None`. At most one row per sender.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the read fails or a stored id or envelope
+    /// cannot be parsed.
+    fn latest_hellos(
+        &mut self,
+        project: &ProjectId,
+    ) -> impl Future<Output = Result<LatestHellos, StoreError>> + Send;
 }
 
 /// Reads and writes within one atomic transaction.
@@ -547,6 +620,20 @@ pub trait StoreTx: Reads {
         project: &ProjectId,
         handle: &str,
     ) -> impl Future<Output = Result<Option<IdentityId>, StoreError>> + Send;
+
+    /// Releases up to `limit` claims with `lease_until <= now`.
+    ///
+    /// The statement locks those claim rows, joins the item, holder and
+    /// project, and returns only the rows that join. A claim that does not
+    /// join still consumes one slot of `limit` and stays unreleased.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the update fails.
+    fn expire_claims(
+        &mut self,
+        limit: u32,
+    ) -> impl Future<Output = Result<Vec<ExpiredClaim>, StoreError>> + Send;
 }
 
 #[cfg(test)]

@@ -11,6 +11,7 @@ pub struct Core<S> {
     store: S,
     claim_lease: Duration,
     pub(crate) limiter: Arc<Mutex<RateLimiter>>,
+    statuses: Arc<crate::presence::Statuses>,
 }
 
 impl<S> Core<S> {
@@ -21,7 +22,23 @@ impl<S> Core<S> {
             store,
             claim_lease,
             limiter: Arc::new(Mutex::new(RateLimiter::default())),
+            statuses: Arc::new(crate::presence::Statuses::default()),
         }
+    }
+
+    /// Who is online or away. Clones of this core share the map.
+    #[must_use]
+    pub fn statuses(&self) -> &crate::presence::Statuses {
+        &self.statuses
+    }
+
+    /// The same map as [`statuses`](Self::statuses), as a shareable handle.
+    ///
+    /// The hub binds this into its presence task so a reconnect clears the
+    /// statuses and the seen-projects set together.
+    #[must_use]
+    pub fn statuses_shared(&self) -> Arc<crate::presence::Statuses> {
+        Arc::clone(&self.statuses)
     }
 
     /// The storage backend used by this core.

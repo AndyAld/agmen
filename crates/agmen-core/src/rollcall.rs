@@ -9,66 +9,88 @@
 
 use agmen_proto::{Body, IdentityId, IdentityKind, MessageId, Payload, ProtoError, Stream, Topics};
 
-use crate::http::Hub;
-use crate::ingest::{HubPost, PostError};
 use crate::presence::{RosterEntry, Status};
-use crate::roster::RosterError;
+use crate::{Core, PostError, RosterError, Store};
 
 /// The most identities one answer lists; past it the summary ends with
 /// "and N more", which keeps the body far below its 32 KiB limit.
 const MAX_LISTED: usize = 100;
 
-/// Why the hub could not answer.
+/// Why [`Core::answer_rollcall`] could not answer.
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum RollcallError {
+#[non_exhaustive]
+pub enum RollcallError {
+    /// Building the roster failed. The source is the [`RosterError`].
     #[error("building the roster failed")]
     Roster(#[from] RosterError),
+    /// The answer's body is invalid.
     #[error("the answer's body is invalid")]
     Body(#[from] ProtoError),
+    /// Posting the answer failed.
     #[error("posting the answer failed")]
     Post(#[from] PostError),
 }
 
-/// Posts the STATUS that answers ROLLCALL `rollcall` from `asker`. It
-/// mentions the asker when a human, as any reply to a human's message does
-/// (protocol section 3).
-pub(crate) async fn answer(
-    hub: &Hub,
-    topics: &Topics,
-    rollcall: &MessageId,
-    asker: &IdentityId,
-    asker_kind: IdentityKind,
-) -> Result<(), RollcallError> {
-    let roster = hub.roster(topics).await?;
-    let here: Vec<&RosterEntry> = roster
-        .iter()
-        .filter(|entry| entry.status != Status::Offline)
-        .collect();
-    let (summary, body) = describe(&here);
-    hub.post_as_hub(
-        topics,
-        HubPost {
-            payload: Payload::Status {
-                summary,
+impl<S: Store> Core<S> {
+    /// Posts the STATUS that answers ROLLCALL `rollcall` from `asker`.
+    ///
+    /// It mentions the asker when a human, as any reply to a human's message
+    /// does (protocol section 3). The list names at most 100 identities.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RollcallError`] when the roster, the body or the post fails.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn example<S: agmen_core::Store>(
+    /// #     core: &agmen_core::Core<S>,
+    /// #     rollcall: &agmen_proto::MessageId,
+    /// #     asker: &agmen_proto::IdentityId,
+    /// # ) -> Result<(), Box<dyn std::error::Error>> {
+    /// let topics = agmen_proto::Topics::new("tenant01".parse()?, "project1".parse()?);
+    /// core.answer_rollcall(&topics, rollcall, asker, agmen_proto::IdentityKind::Agent).await?;
+    /// # Ok(()) }
+    /// ```
+    pub async fn answer_rollcall(
+        &self,
+        topics: &Topics,
+        rollcall: &MessageId,
+        asker: &IdentityId,
+        asker_kind: IdentityKind,
+    ) -> Result<(), RollcallError> {
+        let roster = self.roster(topics).await?;
+        let here: Vec<&RosterEntry> = roster
+            .iter()
+            .filter(|entry| entry.status != Status::Offline)
+            .collect();
+        let (summary, body) = describe(&here);
+        self.post_as_hub(
+            topics,
+            crate::HubPost {
+                payload: Payload::Status {
+                    summary,
+                    items: Vec::new(),
+                    spend_usd: None,
+                    hours: None,
+                    tokens: None,
+                },
+                body: Body::try_from(body)?,
+                reply_to: Some(rollcall.clone()),
                 items: Vec::new(),
-                spend_usd: None,
-                hours: None,
-                tokens: None,
+                lane: None,
+                mentioned: if asker_kind == IdentityKind::Human {
+                    vec![asker.clone()]
+                } else {
+                    Vec::new()
+                },
+                streams: vec![Stream::Feed],
             },
-            body: Body::try_from(body)?,
-            reply_to: Some(rollcall.clone()),
-            items: Vec::new(),
-            lane: None,
-            mentioned: if asker_kind == IdentityKind::Human {
-                vec![asker.clone()]
-            } else {
-                Vec::new()
-            },
-            streams: vec![Stream::Feed],
-        },
-    )
-    .await?;
-    Ok(())
+        )
+        .await?;
+        Ok(())
+    }
 }
 
 /// The summary line and the body for the identities in `here`, in roster

@@ -187,6 +187,8 @@ impl Hub {
         let broker_status = BrokerStatus(self.clone());
         tracing::info!(client_id = %config.client_id(), ?filters, "subscribed to up/ and presence/");
         // What an earlier connection of this hub read no longer holds.
+        self.presence().bind_statuses(self.core().statuses_shared());
+        self.core().statuses().clear();
         self.presence().clear();
         let (tx, rx) = mpsc::channel(QUEUE);
         let mut tasks = JoinSet::new();

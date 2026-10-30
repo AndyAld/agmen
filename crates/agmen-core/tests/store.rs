@@ -1,6 +1,11 @@
 #![cfg(test)]
 
-use agmen_core::{ItemLock, Lapsed, NewItem, NewLend, Parent, QuotaTaken, ReleaseBy, Sender};
+use std::collections::HashMap;
+
+use agmen_core::{
+    ExpiredClaim, ItemLock, Lapsed, LatestHellos, NewItem, NewLend, Parent, QuotaTaken, ReleaseBy,
+    RosterRow, Sender,
+};
 use agmen_proto::Timestamp;
 use std::cell::Cell;
 use std::time::Duration;
@@ -131,6 +136,20 @@ fn tx_is_send_with_a_non_sync_state() {
 
         async fn lane_list(&mut self, _project: &ProjectId) -> Result<Vec<LaneRow>, StoreError> {
             Ok(Vec::new())
+        }
+
+        async fn roster_rows(
+            &mut self,
+            _project: &ProjectId,
+        ) -> Result<Vec<RosterRow>, StoreError> {
+            Ok(Vec::new())
+        }
+
+        async fn latest_hellos(
+            &mut self,
+            _project: &ProjectId,
+        ) -> Result<LatestHellos, StoreError> {
+            Ok(HashMap::new())
         }
     }
 
@@ -319,6 +338,10 @@ fn tx_is_send_with_a_non_sync_state() {
             _handle: &str,
         ) -> Result<Option<IdentityId>, StoreError> {
             Ok(None)
+        }
+
+        async fn expire_claims(&mut self, _limit: u32) -> Result<Vec<ExpiredClaim>, StoreError> {
+            Err(StoreError::Stored("compile-only transaction".into()))
         }
     }
 

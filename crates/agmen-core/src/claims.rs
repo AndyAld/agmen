@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use crate::{HubPost, Lapsed, PostError, ReleaseBy, StoreError, StoreTx, post_in};
+use crate::{Core, HubPost, Lapsed, PostError, ReleaseBy, Store, StoreError, StoreTx, post_in};
 use agmen_proto::{
     Body, ClientEnvelope, DenyReason, IdentityId, IdentityKind, ItemKey, LaneName, NackReason,
     Payload, ProjectId, ProtoError, Stream, Timestamp, Topics, Verb, validate,
@@ -94,9 +94,7 @@ pub async fn apply_ledger<T: StoreTx>(
 ///
 /// # Errors
 /// Returns [`ProtoError`] if the release body cannot be built.
-// shortcut: public bridge for the hub sweeper until Task 8 moves expiry.
-#[doc(hidden)]
-pub fn lease_expired(
+pub(crate) fn lease_expired(
     item: &ItemKey,
     lane: Option<LaneName>,
     lapsed: &Lapsed,
@@ -332,12 +330,181 @@ async fn release<T: StoreTx>(
     Ok(())
 }
 
+/// Expired claims one sweep releases at most.
+const SWEEP_BATCH: u32 = 100;
+/// Failed sweeps in a row before the lease sweeper gives up.
+const MAX_FAILURES: u32 = 60;
+/// The pause after a failed sweep.
+const RETRY_DELAY: Duration = Duration::from_secs(1);
+
+/// Why [`Core::run_lease_sweeper`] stopped.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+#[error("the lease sweeper failed {failures} times in a row")]
+pub struct SweepGaveUp {
+    /// Sweeps that failed in a row.
+    pub failures: u32,
+    /// The last failure.
+    #[source]
+    pub last: LedgerError,
+}
+
+impl<S: Store> Core<S> {
+    /// Releases claims whose lease ran out and posts RELEASE `lease_expired`
+    /// to the feed for each open item. Checks every quarter lease, and at
+    /// least every 30 s. Returns only when 60 sweeps in a row fail.
+    ///
+    /// `posted` is called with the project after each RELEASE is stored, so
+    /// the caller can wake whatever publishes it.
+    ///
+    /// A full batch does not sleep. A shorter batch sleeps. A failure sleeps
+    /// one second, except the 60th, which returns.
+    ///
+    /// The success path runs until the task is aborted. The failure path
+    /// stops after 60 failures in a row.
+    ///
+    /// shortcut: `posted` stands in for a wake-up the core will own once it
+    /// holds the notifier (hub core plan, Task 9); drop the parameter then.
+    ///
+    /// # Errors
+    ///
+    /// [`SweepGaveUp`] with the last failure. It does not return [`Ok`].
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn example<S: agmen_core::Store + 'static>(core: agmen_core::Core<S>) {
+    /// tokio::spawn(async move { core.run_lease_sweeper(|_project| {}).await });
+    /// # }
+    /// ```
+    pub async fn run_lease_sweeper(
+        &self,
+        posted: impl Fn(&ProjectId) + Send + Sync,
+    ) -> Result<(), SweepGaveUp> {
+        self.sweep_until_gave_up(&posted, RETRY_DELAY).await
+    }
+
+    /// [`run_lease_sweeper`](Self::run_lease_sweeper) with the pause after a
+    /// failed sweep as an argument, so a test need not wait 59 real seconds.
+    async fn sweep_until_gave_up(
+        &self,
+        posted: &(impl Fn(&ProjectId) + Send + Sync),
+        retry_delay: Duration,
+    ) -> Result<(), SweepGaveUp> {
+        let every =
+            (self.claim_lease() / 4).clamp(Duration::from_millis(100), Duration::from_secs(30));
+        let mut failures = 0_u32;
+        loop {
+            match self.expire_leases(posted).await {
+                Ok(released) => {
+                    failures = 0;
+                    if released < batch_len() {
+                        tokio::time::sleep(every).await;
+                    }
+                }
+                Err(err) => {
+                    failures += 1;
+                    if failures >= MAX_FAILURES {
+                        return Err(SweepGaveUp {
+                            failures,
+                            last: err,
+                        });
+                    }
+                    tracing::warn!(
+                        error = %sweep_error(&err),
+                        failures,
+                        "lease sweep failed; retrying"
+                    );
+                    tokio::time::sleep(retry_delay).await;
+                }
+            }
+        }
+    }
+
+    /// One sweep: releases up to [`SWEEP_BATCH`] expired claims and posts a
+    /// RELEASE for each whose item is still open, calling `posted` with its
+    /// project after each post. Returns how many it released. DONE ends its
+    /// own claim, so a claim on a done item reaches here only if it predates
+    /// that; it is released without a RELEASE.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LedgerError`] when the release or a later post fails.
+    ///
+    /// shortcut: the release commits before its RELEASE is posted, so a
+    /// crash in between loses that RELEASE (the claim is still released);
+    /// post in the release's transaction if that matters.
+    pub(crate) async fn expire_leases(
+        &self,
+        posted: &(impl Fn(&ProjectId) + Send + Sync),
+    ) -> Result<usize, LedgerError> {
+        let mut tx = self.store().begin().await?;
+        let rows = tx.expire_claims(SWEEP_BATCH).await?;
+        tx.commit().await?;
+        // Ids are parsed after commit, so a corrupt stored id still leaves
+        // the batch released. Done items are skipped before parsing.
+        for row in rows.iter().take(batch_len()) {
+            if !row.open {
+                continue;
+            }
+            let topics = Topics::new(
+                row.tenant.parse().map_err(stored)?,
+                row.project.parse().map_err(stored)?,
+            );
+            let lapsed = Lapsed {
+                holder: row.holder.parse().map_err(stored)?,
+                handle: row.handle.clone(),
+            };
+            let lane = row
+                .lane
+                .as_deref()
+                .map(str::parse)
+                .transpose()
+                .map_err(stored)?;
+            let item = row.item.parse().map_err(stored)?;
+            self.post_as_hub(&topics, lease_expired(&item, lane, &lapsed)?)
+                .await?;
+            posted(topics.project());
+        }
+        Ok(rows.len())
+    }
+}
+
+fn batch_len() -> usize {
+    usize::try_from(SWEEP_BATCH).unwrap_or(usize::MAX)
+}
+
+fn sweep_error(err: &LedgerError) -> String {
+    match err {
+        LedgerError::Store(StoreError::Backend(source)) => {
+            format!("database error: {}", error_chain(source.as_ref()))
+        }
+        other => error_chain(other),
+    }
+}
+
+/// `err` and up to 16 of its sources, joined with ": ".
+fn error_chain(err: &dyn std::error::Error) -> String {
+    let mut parts = Vec::with_capacity(17);
+    parts.push(err.to_string());
+    let mut current = err.source();
+    while parts.len() < 17 {
+        let Some(inner) = current else {
+            break;
+        };
+        parts.push(inner.to_string());
+        current = std::error::Error::source(inner);
+    }
+    parts.join(": ")
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use std::time::Duration;
 
     use agmen_proto::{
-        ClientEnvelope, DenyReason, IdentityKind, Payload, Stream, Timestamp, Topics,
+        ClientEnvelope, DenyReason, IdentityId, IdentityKind, ItemKey, Payload, ProjectId, Stream,
+        Timestamp, Topics,
     };
 
     use crate::{
@@ -602,5 +769,136 @@ pub(crate) mod tests {
                 .unwrap(),
             agmen_proto::Seq(1)
         );
+    }
+
+    /// `a` holds two claims whose lease ran out: one on open item B-1 and one
+    /// on done item B-2. Returns the store, its project, B-1 and `a`.
+    async fn two_lapsed_claims() -> (MemStore, Topics, ItemKey, IdentityId) {
+        use crate::Sender;
+
+        let (store, topics) = setup().await;
+        store
+            .seed_sender(
+                &topics,
+                Sender {
+                    id: "aaaaaaaa".parse().unwrap(),
+                    kind: IdentityKind::Agent,
+                    handle: "a".to_owned(),
+                    owner: None,
+                    verbs: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        let open = "B-1".parse().unwrap();
+        let done = "B-2".parse().unwrap();
+        let holder = "aaaaaaaa".parse().unwrap();
+        let now = Timestamp::now();
+        store.set_now(now);
+        let mut tx = store.begin().await.unwrap();
+        for key in [&open, &done] {
+            tx.insert_item(&NewItem {
+                project: topics.project(),
+                key,
+                title: "bug",
+                lane: None,
+                severity: None,
+                created_by: &holder,
+            })
+            .await
+            .unwrap();
+        }
+        tx.mark_done(topics.project(), &done).await.unwrap();
+        tx.insert_claim(topics.project(), &open, &holder, LEASE)
+            .await
+            .unwrap();
+        tx.insert_claim(topics.project(), &done, &holder, LEASE)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        store.set_now(now + LEASE);
+        (store, topics, open, holder)
+    }
+
+    #[tokio::test]
+    async fn lease_sweep_posts_release_for_open_items() {
+        use agmen_proto::{Payload, Stream};
+
+        use crate::Core;
+
+        let (store, topics, open, holder) = two_lapsed_claims().await;
+        let done: ItemKey = "B-2".parse().unwrap();
+        let core = Core::new(store.clone(), LEASE);
+        assert_eq!(core.expire_leases(&|_: &ProjectId| {}).await.unwrap(), 2);
+        let rows = store.recorded_messages().await.unwrap();
+        let releases: Vec<_> = rows
+            .iter()
+            .filter(|row| row.stream == Stream::Feed)
+            .collect();
+        assert_eq!(releases.len(), 1);
+        assert_eq!(
+            releases[0].client.payload,
+            Payload::Release {
+                item: open.clone(),
+                reason: Some("lease_expired".into()),
+            }
+        );
+        assert_eq!(
+            releases[0].client.body.as_str(),
+            "B-1 released: a's lease ran out"
+        );
+        assert_eq!(releases[0].mentioned, vec![holder.clone()]);
+        let mut tx = store.begin().await.unwrap();
+        assert!(
+            tx.active_claim(topics.project(), &open)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            tx.active_claim(topics.project(), &done)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn lease_sweep_wakes_the_project_it_posted_in() {
+        use std::sync::Mutex;
+
+        use crate::Core;
+
+        let (store, topics, _, _) = two_lapsed_claims().await;
+        let core = Core::new(store, LEASE);
+        let woken = Mutex::new(Vec::new());
+        core.expire_leases(&|project: &ProjectId| woken.lock().unwrap().push(project.clone()))
+            .await
+            .unwrap();
+        assert_eq!(
+            *woken.lock().unwrap(),
+            [topics.project().clone()],
+            "one RELEASE was posted, so one wake, and none for the done item"
+        );
+    }
+
+    #[tokio::test]
+    async fn sweeper_gives_up_after_the_bound() {
+        use crate::{Core, StoreError};
+
+        let store = MemStore::default();
+        store.fail_always("begin");
+        let core = Core::new(store, Duration::from_millis(400));
+        // No pause between failures: the public loop waits one second each time.
+        let err = core
+            .sweep_until_gave_up(&|_: &ProjectId| {}, Duration::ZERO)
+            .await
+            .unwrap_err();
+        assert_eq!(err.failures, 60);
+        assert!(matches!(
+            err.last,
+            LedgerError::Store(StoreError::Backend(_))
+        ));
     }
 }

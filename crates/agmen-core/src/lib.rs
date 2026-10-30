@@ -26,16 +26,16 @@ mod lanes;
 mod limiter;
 #[cfg(feature = "testing")]
 mod mem_store;
+mod presence;
 mod record;
 mod refs;
+mod rollcall;
 mod roster;
 mod routing;
 mod secrets_scan;
 mod store;
 
-#[doc(hidden)]
-pub use claims::lease_expired;
-pub use claims::{LedgerError, LedgerMessage, apply_ledger};
+pub use claims::{LedgerError, LedgerMessage, SweepGaveUp, apply_ledger};
 pub use core::{Core, CoreError};
 pub use identity::{cap_verbs, is_child_name};
 pub use ids::{HUB_IDENTITY, envelope_hash, hub_identity, hub_now, message_id, new_message_id};
@@ -52,14 +52,16 @@ pub use lanes::{
 pub use limiter::{BURST, MAX_TRACKED, RATE_PER_SEC, RateLimiter};
 #[cfg(feature = "testing")]
 pub use mem_store::{MEM_MAX_ROWS, MemStore, MemTx};
+pub use presence::{RosterEntry, RosterError, Status, Statuses};
 pub(crate) use record::{AckCopy, Draft, write};
 pub use record::{HubPost, PostError, Posted, post_alert, post_in};
 pub use refs::{MAX_REFS_PER_MESSAGE, candidate_item_keys, stamp_refs};
+pub use rollcall::RollcallError;
 pub use roster::{Member, MemberRole, Roster, Sender};
 pub use routing::{
     Parent, ack_stream, expand_mentions, fan_out, may_send, mentioned, needs_roster, route,
 };
 pub use store::{
-    ItemLock, Lapsed, MessageRow, NewItem, NewLend, Reads, ReleaseBy, Store, StoreError, StoreTx,
-    parse_kind,
+    ExpiredClaim, ItemLock, Lapsed, LatestHellos, MessageRow, NewItem, NewLend, Reads, ReleaseBy,
+    RosterRow, Store, StoreError, StoreTx, parse_kind,
 };
