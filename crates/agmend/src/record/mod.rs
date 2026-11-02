@@ -9,6 +9,8 @@ mod replay;
 pub(crate) mod schema;
 
 #[cfg(test)]
+mod contract_tests;
+#[cfg(test)]
 mod test_rows;
 #[cfg(test)]
 mod tests;
