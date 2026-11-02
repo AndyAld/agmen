@@ -1,5 +1,6 @@
 //! SQLite coordination record for the local origin.
 
+pub(crate) mod admin;
 mod heads;
 mod ledger;
 mod messages;
