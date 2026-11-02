@@ -47,6 +47,8 @@ const SUBSCRIPTION_PENDING: &str = "the subscription is not active yet; try agai
 const BILLED_OUTSIDE: &str = "this group is billed outside Paddle";
 const NO_SUBSCRIPTION: &str =
     "this group has no subscription yet: agmen group seats add 1 starts one";
+const SUBSCRIPTION_ENDED: &str =
+    "this group's subscription ended; its owner can start a new one with: agmen group billing";
 const OWNER_ONLY: &str = "only the owner can change billing";
 const NOT_HOSTED: &str = "this hub is not agmen hosted";
 const NO_SEAT_PLAN: &str = "this group has no seat plan";
@@ -510,6 +512,9 @@ pub(crate) async fn set_seats(
     Json(request): Json<SetSeats>,
 ) -> Result<Json<Billed>, ApiError> {
     let (tenant_id, record) = billing_admin(&hub, &tenant, caller).await?;
+    if subscription_ended(&record) {
+        return Err(no_subscription(SUBSCRIPTION_ENDED));
+    }
     checked_paid(request.paid, seats_used(hub.pool(), &tenant_id).await?)?;
     match (paddle_ids(hub.pool(), &tenant_id).await?, record.plan) {
         (None, None) => unpaid_seats(&hub, &tenant_id, &record, request.paid).await,
@@ -535,6 +540,25 @@ pub(crate) async fn set_plan_route(
     let seats = requested_seats(&request, &record)?;
     checked_paid(seats, seats_used(hub.pool(), &tenant_id).await?)?;
     let plan = plan_from_choice(&request.plan, seats)?;
+    if subscription_ended(&record) {
+        if record.read_only_cause == Some(ReadOnlyCause::PaymentFailed) {
+            // Cancellation needs only the subscription, even if its customer
+            // id is missing. `paddle_ids` requires both for the portal.
+            let subscription: Option<String> = sqlx::query_scalar(
+                "SELECT paddle_subscription_id FROM tenant_plans WHERE tenant_id = $1",
+            )
+            .bind(tenant_id.as_str())
+            .fetch_one(hub.pool())
+            .await?;
+            if let Some(subscription) = subscription {
+                let (paddle, _) = billing_parts(&hub)?;
+                hub.take_billing_call(&tenant_id)?;
+                paddle.cancel_subscription(&subscription).await?;
+            }
+        }
+        let url = start_checkout(&hub, &tenant_id, plan).await?;
+        return Ok(Json(Billed::Checkout { checkout_url: url }));
+    }
     match (paddle_ids(hub.pool(), &tenant_id).await?, record.plan) {
         (None, Some(_)) => Err(no_subscription(BILLED_OUTSIDE)),
         (Some(_), None) => Err(no_subscription(SUBSCRIPTION_PENDING)),
@@ -554,7 +578,10 @@ pub(crate) async fn portal(
     Path(tenant): Path<String>,
     caller: Caller,
 ) -> Result<Json<Portal>, ApiError> {
-    let (tenant_id, _) = billing_owner(&hub, &tenant, caller).await?;
+    let (tenant_id, record) = billing_owner(&hub, &tenant, caller).await?;
+    if subscription_ended(&record) {
+        return Err(no_subscription(SUBSCRIPTION_ENDED));
+    }
     let Some((customer, subscription)) = paddle_ids(hub.pool(), &tenant_id).await? else {
         return Err(no_subscription(NO_SUBSCRIPTION));
     };
@@ -564,6 +591,14 @@ pub(crate) async fn portal(
     Ok(Json(Portal {
         portal_url: url.as_str().to_owned(),
     }))
+}
+
+fn subscription_ended(record: &PlanRecord) -> bool {
+    record.state == PlanState::ReadOnly
+        && matches!(
+            record.read_only_cause,
+            Some(ReadOnlyCause::Canceled | ReadOnlyCause::PaymentFailed)
+        )
 }
 
 fn hosted_only(hub: &Hub) -> Result<(), ApiError> {

@@ -252,6 +252,11 @@ fn route_request(
         ("POST", _) => {
             if let Some(customer_id) = customer_portal_id(path) {
                 create_portal_session(state, customer_id)
+            } else if let Some(sub_id) = path
+                .strip_suffix("/cancel")
+                .and_then(|path| single_segment_after(path, "/subscriptions/"))
+            {
+                Json(json!({"data": {"id": sub_id, "status": "canceled"}})).into_response()
             } else {
                 Json(json!({"data": {}})).into_response()
             }

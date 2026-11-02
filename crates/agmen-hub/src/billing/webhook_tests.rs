@@ -298,3 +298,30 @@ fn event_errors() {
     let body = serde_json::from_slice::<PaddleEvent>(b"{").map_err(WebhookError::Body);
     assert!(matches!(body, Err(WebhookError::Body(_))));
 }
+
+#[test]
+fn only_an_activation_names_another_subscription_while_billed() {
+    let activation = BillingEvent::Active(Plan::Team { extra_seats: 0 });
+    let others = [
+        BillingEvent::PastDue,
+        BillingEvent::Canceled,
+        BillingEvent::Paid,
+    ];
+    for state in [PlanState::Active, PlanState::PastDue] {
+        assert!(!ignored_while_billed(state, activation), "{state}");
+        for event in others {
+            assert!(ignored_while_billed(state, event), "{state} {event:?}");
+        }
+    }
+    // A group that is not billed on a subscription takes the next one it hears of.
+    for state in [PlanState::Trial, PlanState::ReadOnly, PlanState::Deleted] {
+        for event in [
+            activation,
+            BillingEvent::PastDue,
+            BillingEvent::Canceled,
+            BillingEvent::Paid,
+        ] {
+            assert!(!ignored_while_billed(state, event), "{state} {event:?}");
+        }
+    }
+}
