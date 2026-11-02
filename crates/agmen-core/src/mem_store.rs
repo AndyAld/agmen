@@ -14,9 +14,9 @@ use tokio::sync::{Mutex, MutexGuard, OwnedMutexGuard};
 
 use crate::lanes::{LaneHolder, LaneRow, ResolvedLane};
 use crate::{
-    ExpiredClaim, ItemLock, Lapsed, LatestHellos, Member, MemberRole, MessageRow, NewItem, NewLend,
-    Parent, QuotaTaken, Reads, ReleaseBy, Roster, RosterRow, Sender, Store, StoreError, StoreTx,
-    next_utc_midnight,
+    ExpiredClaim, ItemLock, ItemRow, Lapsed, LatestHellos, Member, MemberRole, MessageRow, NewItem,
+    NewLend, Page, Parent, QuotaTaken, Reads, ReleaseBy, Roster, RosterRow, Sender, Store,
+    StoreError, StoreTx, next_utc_midnight,
 };
 
 /// The maximum rows in each in-memory collection.
@@ -84,18 +84,16 @@ struct MemItem {
     state: String,
     lane: Option<LaneName>,
     assigned_to: Option<IdentityId>,
-    // shortcut: retain finding details until Task 9 adds item-list reads.
-    #[expect(dead_code, reason = "item-list reads arrive in Task 9")]
     title: String,
-    #[expect(dead_code, reason = "item-list reads arrive in Task 9")]
     severity: Option<Severity>,
-    #[expect(dead_code, reason = "item-list reads arrive in Task 9")]
     created_by: IdentityId,
+    created_at: Timestamp,
 }
 
 #[derive(Debug, Clone, Default)]
 struct MemState {
     heads: BTreeMap<String, Seq>,
+    pruned_through: BTreeMap<String, Seq>,
     projects: BTreeMap<ProjectId, TenantId>,
     usage: BTreeMap<(TenantId, i64), (u32, bool)>,
     identities: BTreeMap<ProjectId, BTreeMap<IdentityId, MemIdentity>>,
@@ -449,6 +447,27 @@ impl MemStore {
 }
 
 impl Reads for &MemStore {
+    async fn page(
+        &mut self,
+        project: &ProjectId,
+        stream: &Stream,
+        after: u64,
+        limit: u32,
+    ) -> Result<Page, StoreError> {
+        fail(&self.failure, "page")?;
+        page_of(&*(*self).locked().await?, project, stream, after, limit)
+    }
+
+    async fn items(&mut self, project: &ProjectId) -> Result<Vec<ItemRow>, StoreError> {
+        fail(&self.failure, "items")?;
+        let state = (*self).locked().await?;
+        Ok(items_of(
+            &state,
+            project,
+            *self.clock.lock().unwrap_or_else(PoisonError::into_inner),
+        ))
+    }
+
     async fn project_exists(&mut self, topics: &Topics) -> Result<bool, StoreError> {
         fail(&self.failure, "project_exists")?;
         Ok((*self).locked().await?.projects.get(topics.project()) == Some(topics.tenant()))
@@ -621,6 +640,22 @@ impl MemTx {
 }
 
 impl Reads for MemTx {
+    async fn page(
+        &mut self,
+        project: &ProjectId,
+        stream: &Stream,
+        after: u64,
+        limit: u32,
+    ) -> Result<Page, StoreError> {
+        fail(&self.failure, "page")?;
+        page_of(&self.working, project, stream, after, limit)
+    }
+
+    async fn items(&mut self, project: &ProjectId) -> Result<Vec<ItemRow>, StoreError> {
+        fail(&self.failure, "items")?;
+        Ok(items_of(&self.working, project, self.now))
+    }
+
     async fn project_exists(&mut self, topics: &Topics) -> Result<bool, StoreError> {
         fail(&self.failure, "project_exists")?;
         Ok(self.working.projects.get(topics.project()) == Some(topics.tenant()))
@@ -965,6 +1000,7 @@ impl StoreTx for MemTx {
                     title: item.title.to_owned(),
                     severity: item.severity,
                     created_by: item.created_by.clone(),
+                    created_at: self.now,
                 },
             );
         Ok(())
@@ -1205,6 +1241,68 @@ impl StoreTx for MemTx {
         fail(&self.failure, "expire_claims")?;
         Ok(expire_claims_in(&mut self.working, self.now, limit))
     }
+}
+
+fn page_of(
+    state: &MemState,
+    project: &ProjectId,
+    stream: &Stream,
+    after: u64,
+    limit: u32,
+) -> Result<Page, StoreError> {
+    let mut rows: Vec<_> = state
+        .messages
+        .iter()
+        .take(MEM_MAX_ROWS)
+        .filter(|row| row.project == *project && row.stream == *stream && row.seq.0 > after)
+        .collect();
+    rows.sort_by_key(|row| row.seq);
+    let messages = rows
+        .into_iter()
+        .take(limit as usize)
+        .map(|row| {
+            serde_json::from_str(&row.envelope_json)
+                .map_err(|err| StoreError::Backend(Box::new(err)))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let key = format!("{project}/{stream}");
+    let head = state.heads.get(&key).map_or(0, |seq| seq.0);
+    let pruned_through = state.pruned_through.get(&key).map_or(0, |seq| seq.0);
+    Ok(Page::new(messages, head, pruned_through))
+}
+
+fn items_of(state: &MemState, project: &ProjectId, now: Timestamp) -> Vec<ItemRow> {
+    let Some(items) = state.items.get(project) else {
+        return Vec::new();
+    };
+    let mut rows: Vec<_> = items.iter().take(MEM_MAX_ROWS).collect();
+    rows.sort_by_key(|(key, item)| (item.created_at, *key));
+    rows.into_iter()
+        .take(crate::MAX_LISTED as usize)
+        .map(|(key, item)| {
+            let claim = state.claims.iter().take(MEM_MAX_ROWS).find(|claim| {
+                claim.project == *project
+                    && claim.item == *key
+                    && !claim.released
+                    && claim.lease_until > now
+            });
+            let handle = claim.and_then(|claim| state.identities.get(project)?.get(&claim.holder));
+            (
+                key.to_string(),
+                item.title.clone(),
+                item.lane.as_ref().map(ToString::to_string),
+                item.severity
+                    .map(crate::items::severity_str)
+                    .map(str::to_owned),
+                item.state.clone(),
+                item.created_by.to_string(),
+                item.assigned_to.as_ref().map(ToString::to_string),
+                claim.map(|claim| claim.holder.to_string()),
+                handle.map(|identity| identity.handle.clone()),
+                claim.map(|claim| claim.lease_until.as_millisecond()),
+            )
+        })
+        .collect()
 }
 
 fn fail(failure: &StdMutex<Option<Fault>>, op: &'static str) -> Result<(), StoreError> {
@@ -1727,6 +1825,58 @@ mod tests {
     use super::*;
     use crate::claims::tests::{LEASE, item, message, setup};
     use agmen_proto::Payload;
+
+    #[tokio::test]
+    async fn pages_keep_pruned_through_and_resume_below_it() {
+        let store = MemStore::default();
+        let core = crate::Core::new(store.clone(), LEASE);
+        let topics = crate::replay::tests::topics();
+        let mut tx = store.begin().await.unwrap();
+        for _ in 0..5 {
+            crate::post_in(&mut tx, &topics, crate::replay::tests::post())
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            tx.page(topics.project(), &Stream::Feed, 2, 2)
+                .await
+                .unwrap()
+                .messages[0]
+                .seq,
+            Seq(3)
+        );
+        tx.commit().await.unwrap();
+        let mut state = store.locked().await.unwrap();
+        state.messages.retain(|message| message.seq.0 > 3);
+        state
+            .pruned_through
+            .insert(format!("{}/feed", topics.project()), Seq(3));
+        drop(state);
+        let page = core
+            .page(topics.project(), &Stream::Feed, 0, 1)
+            .await
+            .unwrap();
+        assert_eq!(page.messages[0].seq, Seq(4));
+        assert_eq!(page.next_after, Some(4));
+        assert_eq!(page.head, 5);
+        assert_eq!(page.pruned_through, 3);
+        let mut state = store.locked().await.unwrap();
+        state.messages.clear();
+        state
+            .pruned_through
+            .insert(format!("{}/feed", topics.project()), Seq(5));
+        drop(state);
+        let page = core
+            .page(topics.project(), &Stream::Feed, 0, 1)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(page).unwrap(),
+            serde_json::json!({
+                "messages": [], "next_after": null, "head": 5, "pruned_through": 5
+            })
+        );
+    }
 
     #[tokio::test]
     async fn lease_deadlines_keep_clock_precision() {

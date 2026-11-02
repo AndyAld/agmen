@@ -15,6 +15,21 @@ use crate::{Parent, QuotaTaken, Roster, Sender};
 /// An item's state, lane, assignee and lane owner, in storage spelling.
 pub type ItemLock = (String, Option<String>, Option<String>, Option<String>);
 
+/// Item list columns in storage spelling: key, title, lane, severity, state,
+/// creator, assignee, live holder, holder handle and lease end in milliseconds.
+pub type ItemRow = (
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<i64>,
+);
+
 /// Each sender's latest feed HELLO agent and model, untrimmed.
 ///
 /// The pair is `(agent, model)`. A missing field is `None`.
@@ -196,6 +211,30 @@ pub trait Store: Send + Sync + 'static {
 
 /// Queries shared by a reader and an open transaction.
 pub trait Reads: Send {
+    /// Messages after `after` in seq order, then the stream head and pruning point.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] when the query or stored value decoding fails.
+    fn page(
+        &mut self,
+        project: &ProjectId,
+        stream: &Stream,
+        after: u64,
+        limit: u32,
+    ) -> impl Future<Output = Result<crate::Page, StoreError>> + Send;
+
+    /// The oldest [`crate::MAX_LISTED`] items, ordered by creation time and key.
+    ///
+    /// Includes titles and only unreleased claims whose lease is strictly live.
+    /// The core removes security titles before returning the list to a caller.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] when the read fails.
+    fn items(
+        &mut self,
+        project: &ProjectId,
+    ) -> impl Future<Output = Result<Vec<ItemRow>, StoreError>> + Send;
+
     /// Whether both tenant and project identify a project in this store.
     ///
     /// # Errors

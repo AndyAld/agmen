@@ -3,14 +3,15 @@
 mod ledger;
 mod messages;
 mod presence;
+mod replay;
 
 pub(crate) use messages::project_exists;
 
 use std::time::Duration;
 
 use agmen_core::{
-    ExpiredClaim, LaneHolder, LaneRow, LatestHellos, MessageRow, Parent, QuotaTaken, Reads,
-    ResolvedLane, Roster, RosterRow, Sender, Store, StoreError, StoreTx,
+    ExpiredClaim, ItemRow, LaneHolder, LaneRow, LatestHellos, MessageRow, Page, Parent, QuotaTaken,
+    Reads, ResolvedLane, Roster, RosterRow, Sender, Store, StoreError, StoreTx,
 };
 use agmen_proto::{
     IdentityId, IdentityKind, ItemKey, LaneName, MessageId, ProjectId, Seq, Stream, TenantId,
@@ -46,6 +47,25 @@ impl PgTx {
 }
 
 impl Reads for PgReader<'_> {
+    async fn page(
+        &mut self,
+        project: &ProjectId,
+        stream: &Stream,
+        after: u64,
+        limit: u32,
+    ) -> Result<Page, StoreError> {
+        let mut db = self
+            .0
+            .acquire()
+            .await
+            .map_err(|err| StoreError::Backend(Box::new(err)))?;
+        replay::page(&mut db, project, stream, after, limit).await
+    }
+
+    async fn items(&mut self, project: &ProjectId) -> Result<Vec<ItemRow>, StoreError> {
+        replay::items(self.0, project).await
+    }
+
     async fn project_exists(&mut self, topics: &Topics) -> Result<bool, StoreError> {
         messages::project_exists(self.0, topics)
             .await
@@ -160,6 +180,20 @@ impl Reads for PgReader<'_> {
 }
 
 impl Reads for PgTx {
+    async fn page(
+        &mut self,
+        project: &ProjectId,
+        stream: &Stream,
+        after: u64,
+        limit: u32,
+    ) -> Result<Page, StoreError> {
+        replay::page(connection(&mut self.tx), project, stream, after, limit).await
+    }
+
+    async fn items(&mut self, project: &ProjectId) -> Result<Vec<ItemRow>, StoreError> {
+        replay::items(connection(&mut self.tx), project).await
+    }
+
     async fn project_exists(&mut self, topics: &Topics) -> Result<bool, StoreError> {
         messages::project_exists(connection(&mut self.tx), topics)
             .await

@@ -150,6 +150,51 @@ fn nack(reply: &DeliveryReply, reason: NackReason) {
 }
 
 #[tokio::test]
+async fn ingest_wakes_its_project() {
+    let (core, store, topics, from) = setup().await;
+    let mut wake = core.notifier().watch_stored(topics.project());
+    let other = core.notifier().watch_stored(&"project02".parse().unwrap());
+    let env = raw(&envelope(1, Payload::Fyi {}));
+    let handled = core.ingest(&topics, &from, &env, Gate::Open).await.unwrap();
+    assert!(matches!(handled.reply, DeliveryReply::Ack { .. }));
+    assert!(wake.has_changed().unwrap());
+    assert!(!other.has_changed().unwrap());
+    assert_eq!(core.notifier().stored_count(), 1);
+    assert_eq!(store.recorded_messages().await.unwrap().len(), 1);
+    wake.mark_unchanged();
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        core.notifier().outbox_ready().notified(),
+    )
+    .await
+    .unwrap();
+    let resend = core.ingest(&topics, &from, &env, Gate::Open).await.unwrap();
+    assert_eq!(resend.reply, handled.reply);
+    assert!(!wake.has_changed().unwrap());
+    store.fail_next("commit");
+    let refused = core
+        .ingest(
+            &topics,
+            &from,
+            &raw(&envelope(2, Payload::Fyi {})),
+            Gate::Open,
+        )
+        .await
+        .unwrap();
+    nack(&refused.reply, NackReason::HubBusy);
+    assert!(!wake.has_changed().unwrap());
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(10),
+            core.notifier().outbox_ready().notified()
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(store.recorded_messages().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn fyi_is_numbered_and_acked() {
     let (core, store, topics, from) = setup().await;
     let env = envelope(1, Payload::Fyi {});

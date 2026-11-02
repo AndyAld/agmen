@@ -237,11 +237,7 @@ impl Hub {
                     .answer_rollcall(topics, id, from, from_kind)
                     .await
                 {
-                    // The answer is a post as the hub, so it wakes the outbox
-                    // sweeper and the project's events streams like one
-                    // (shortcut: the core's notifier replaces this, hub core
-                    // plan Task 9).
-                    Ok(()) => self.ingest_state().stored(topics.project()),
+                    Ok(()) => {}
                     Err(err) => {
                         tracing::warn!(%from, %id, error = %error_chain(&err), "answering a ROLLCALL failed");
                     }

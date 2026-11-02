@@ -52,10 +52,8 @@ impl Hub {
     /// # Ok(()) }
     /// ```
     pub async fn run_lease_sweeper(&self) -> Result<(), LeaseSweepError> {
-        // Each RELEASE wakes the outbox sweeper and the project's events
-        // streams, as every post through `Hub::post_as_hub` does.
         self.core()
-            .run_lease_sweeper(|project| self.ingest_state().stored(project))
+            .run_lease_sweeper()
             .await
             .map_err(|gave_up| LeaseSweepError::GaveUp {
                 failures: gave_up.failures,

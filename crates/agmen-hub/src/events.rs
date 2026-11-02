@@ -28,8 +28,8 @@
 //! commit in order with no gaps (protocol 5.2), so a read after seq N sees
 //! N + 1 next or nothing, and replay and live delivery are the same loop
 //! with no seam where a message could be lost or sent twice. A pass runs
-//! when ingest commits in the stream's project (`IngestState::stored`, an
-//! in-process watch per project, [`Wakes`], which coalesces bursts and
+//! when ingest commits in the stream's project (`agmen_core::Notifier::stored`, an
+//! in-process watch per project, [`agmen_core::Wakes`], which coalesces bursts and
 //! leaves other projects' streams asleep) and at least every second, which
 //! covers commits that
 //! do not signal it (the lane and lease sweeps) and a second hub replica,
@@ -66,8 +66,8 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, KeepAliveStream, Sse};
 use serde::Deserialize;
+use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::SendTimeoutError;
-use tokio::sync::{mpsc, watch};
 
 use crate::auth::{Caller, bearer};
 use crate::db::hash_secret;
@@ -304,7 +304,7 @@ async fn send_until(
 ) -> Result<Option<Ended>, ApiError> {
     while *at < head {
         let after = i64::try_from(*at).map_err(ApiError::stored)?;
-        let page = fetch_page(hub.pool(), project, stream, after, MAX_PAGE).await?;
+        let page = fetch_page(hub, project, stream, after, MAX_PAGE).await?;
         if page.is_empty() {
             break;
         }
@@ -361,49 +361,6 @@ async fn heads(
         }
     }
     Ok(heads)
-}
-
-/// A watch per project that events streams sleep on until a commit in
-/// their project (or the poll) wakes them.
-#[derive(Debug, Default)]
-pub(crate) struct Wakes {
-    by_project: Mutex<HashMap<ProjectId, watch::Sender<()>>>,
-}
-
-impl Wakes {
-    /// Wakes `project`'s streams. A project nobody watches any more loses
-    /// its entry here, so the map holds only watched projects.
-    pub(crate) fn wake(&self, project: &ProjectId) {
-        let mut by_project = self
-            .by_project
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        if let Some(sender) = by_project.get(project)
-            && sender.send(()).is_err()
-        {
-            by_project.remove(project);
-        }
-    }
-
-    /// A receiver that sees a change after each [`Wakes::wake`] of
-    /// `project`.
-    pub(crate) fn watch(&self, project: &ProjectId) -> watch::Receiver<()> {
-        self.by_project
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .entry(project.clone())
-            .or_default()
-            .subscribe()
-    }
-
-    /// How many projects have an entry.
-    #[cfg(test)]
-    fn watched(&self) -> usize {
-        self.by_project
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .len()
-    }
 }
 
 /// How many events streams are open, in all and per person.
@@ -536,26 +493,6 @@ mod tests {
         assert!(parse_after("").unwrap().is_empty());
         assert!(parse_after("feed:1,").is_err());
         assert!(parse_after("feed:1;inbox:abc").is_err());
-    }
-
-    #[test]
-    fn a_wake_reaches_only_its_project() {
-        let wakes = Wakes::default();
-        let a: ProjectId = "projecta1".parse().unwrap();
-        let b: ProjectId = "projectb1".parse().unwrap();
-        let mut on_a = wakes.watch(&a);
-        wakes.wake(&b);
-        assert!(
-            !on_a.has_changed().unwrap(),
-            "a commit in b woke a stream in a"
-        );
-        wakes.wake(&a);
-        assert!(on_a.has_changed().unwrap());
-        on_a.mark_unchanged();
-        // A project nobody watches keeps no entry.
-        drop(on_a);
-        wakes.wake(&a);
-        assert_eq!(wakes.watched(), 0);
     }
 
     #[test]

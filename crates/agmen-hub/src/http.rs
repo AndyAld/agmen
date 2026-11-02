@@ -24,7 +24,6 @@ use crate::config::{Config, HostedConfig, HubMode};
 use crate::emqx::{EmqxAdmin, EmqxError};
 use crate::events::Slots;
 use crate::group::{self, GroupError};
-use crate::ingest::IngestState;
 use crate::presence::PresenceState;
 use crate::self_config::{self, SelfConfigError};
 use crate::{db, events, health, human_post, identities, invites, items, lanes, me, replay, state};
@@ -92,7 +91,6 @@ struct Inner {
     public_url: Url,
     public_mqtt_url: Url,
     mqtt_ws_upstream: Option<Url>,
-    ingest: IngestState,
     presence: PresenceState,
     events: Slots,
     claim_lease: Duration,
@@ -190,7 +188,6 @@ impl Hub {
                 public_url: config.public_url.clone(),
                 public_mqtt_url: config.public_mqtt_url.clone(),
                 mqtt_ws_upstream: config.mqtt_ws_upstream.clone(),
-                ingest: IngestState::default(),
                 presence: PresenceState::default(),
                 events: Slots::default(),
                 claim_lease: config.claim_lease,
@@ -332,8 +329,8 @@ impl Hub {
         &self.inner.github
     }
 
-    pub(crate) fn ingest_state(&self) -> &IngestState {
-        &self.inner.ingest
+    pub(crate) fn ingest_state(&self) -> &agmen_core::Notifier {
+        self.core().notifier()
     }
 
     pub(crate) fn presence(&self) -> &PresenceState {

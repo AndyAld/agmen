@@ -58,6 +58,23 @@ fn tx_is_send_with_a_non_sync_state() {
     struct NonSyncTx(OwnedMutexGuard<Cell<u8>>);
 
     impl Reads for NonSyncTx {
+        async fn page(
+            &mut self,
+            _project: &ProjectId,
+            _stream: &Stream,
+            _after: u64,
+            _limit: u32,
+        ) -> Result<agmen_core::Page, StoreError> {
+            Ok(agmen_core::Page::new(Vec::new(), 0, 0))
+        }
+
+        async fn items(
+            &mut self,
+            _project: &ProjectId,
+        ) -> Result<Vec<agmen_core::ItemRow>, StoreError> {
+            Ok(Vec::new())
+        }
+
         async fn project_exists(&mut self, _topics: &Topics) -> Result<bool, StoreError> {
             Ok(false)
         }

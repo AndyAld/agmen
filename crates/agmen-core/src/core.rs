@@ -12,6 +12,7 @@ pub struct Core<S> {
     claim_lease: Duration,
     pub(crate) limiter: Arc<Mutex<RateLimiter>>,
     statuses: Arc<crate::presence::Statuses>,
+    notifier: Arc<crate::Notifier>,
 }
 
 impl<S> Core<S> {
@@ -23,6 +24,7 @@ impl<S> Core<S> {
             claim_lease,
             limiter: Arc::new(Mutex::new(RateLimiter::default())),
             statuses: Arc::new(crate::presence::Statuses::default()),
+            notifier: Arc::new(crate::Notifier::default()),
         }
     }
 
@@ -30,6 +32,12 @@ impl<S> Core<S> {
     #[must_use]
     pub fn statuses(&self) -> &crate::presence::Statuses {
         &self.statuses
+    }
+
+    /// Message commit notifications. Clones of this core share the signals.
+    #[must_use]
+    pub fn notifier(&self) -> &crate::Notifier {
+        &self.notifier
     }
 
     /// The same map as [`statuses`](Self::statuses), as a shareable handle.

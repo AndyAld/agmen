@@ -354,17 +354,13 @@ impl<S: Store> Core<S> {
     /// to the feed for each open item. Checks every quarter lease, and at
     /// least every 30 s. Returns only when 60 sweeps in a row fail.
     ///
-    /// `posted` is called with the project after each RELEASE is stored, so
-    /// the caller can wake whatever publishes it.
+    /// Each committed RELEASE wakes the publisher and the project's readers.
     ///
     /// A full batch does not sleep. A shorter batch sleeps. A failure sleeps
     /// one second, except the 60th, which returns.
     ///
     /// The success path runs until the task is aborted. The failure path
     /// stops after 60 failures in a row.
-    ///
-    /// shortcut: `posted` stands in for a wake-up the core will own once it
-    /// holds the notifier (hub core plan, Task 9); drop the parameter then.
     ///
     /// # Errors
     ///
@@ -374,28 +370,21 @@ impl<S: Store> Core<S> {
     ///
     /// ```no_run
     /// # async fn example<S: agmen_core::Store + 'static>(core: agmen_core::Core<S>) {
-    /// tokio::spawn(async move { core.run_lease_sweeper(|_project| {}).await });
+    /// tokio::spawn(async move { core.run_lease_sweeper().await });
     /// # }
     /// ```
-    pub async fn run_lease_sweeper(
-        &self,
-        posted: impl Fn(&ProjectId) + Send + Sync,
-    ) -> Result<(), SweepGaveUp> {
-        self.sweep_until_gave_up(&posted, RETRY_DELAY).await
+    pub async fn run_lease_sweeper(&self) -> Result<(), SweepGaveUp> {
+        self.sweep_until_gave_up(RETRY_DELAY).await
     }
 
     /// [`run_lease_sweeper`](Self::run_lease_sweeper) with the pause after a
     /// failed sweep as an argument, so a test need not wait 59 real seconds.
-    async fn sweep_until_gave_up(
-        &self,
-        posted: &(impl Fn(&ProjectId) + Send + Sync),
-        retry_delay: Duration,
-    ) -> Result<(), SweepGaveUp> {
+    async fn sweep_until_gave_up(&self, retry_delay: Duration) -> Result<(), SweepGaveUp> {
         let every =
             (self.claim_lease() / 4).clamp(Duration::from_millis(100), Duration::from_secs(30));
         let mut failures = 0_u32;
         loop {
-            match self.expire_leases(posted).await {
+            match self.expire_leases().await {
                 Ok(released) => {
                     failures = 0;
                     if released < batch_len() {
@@ -422,8 +411,8 @@ impl<S: Store> Core<S> {
     }
 
     /// One sweep: releases up to [`SWEEP_BATCH`] expired claims and posts a
-    /// RELEASE for each whose item is still open, calling `posted` with its
-    /// project after each post. Returns how many it released. DONE ends its
+    /// RELEASE for each whose item is still open, waking its project after
+    /// each post. Returns how many it released. DONE ends its
     /// own claim, so a claim on a done item reaches here only if it predates
     /// that; it is released without a RELEASE.
     ///
@@ -434,10 +423,7 @@ impl<S: Store> Core<S> {
     /// shortcut: the release commits before its RELEASE is posted, so a
     /// crash in between loses that RELEASE (the claim is still released);
     /// post in the release's transaction if that matters.
-    pub(crate) async fn expire_leases(
-        &self,
-        posted: &(impl Fn(&ProjectId) + Send + Sync),
-    ) -> Result<usize, LedgerError> {
+    pub(crate) async fn expire_leases(&self) -> Result<usize, LedgerError> {
         let mut tx = self.store().begin().await?;
         let rows = tx.expire_claims(SWEEP_BATCH).await?;
         tx.commit().await?;
@@ -464,7 +450,6 @@ impl<S: Store> Core<S> {
             let item = row.item.parse().map_err(stored)?;
             self.post_as_hub(&topics, lease_expired(&item, lane, &lapsed)?)
                 .await?;
-            posted(topics.project());
         }
         Ok(rows.len())
     }
@@ -830,7 +815,7 @@ pub(crate) mod tests {
         let (store, topics, open, holder) = two_lapsed_claims().await;
         let done: ItemKey = "B-2".parse().unwrap();
         let core = Core::new(store.clone(), LEASE);
-        assert_eq!(core.expire_leases(&|_: &ProjectId| {}).await.unwrap(), 2);
+        assert_eq!(core.expire_leases().await.unwrap(), 2);
         let rows = store.recorded_messages().await.unwrap();
         let releases: Vec<_> = rows
             .iter()
@@ -873,9 +858,20 @@ pub(crate) mod tests {
         let (store, topics, _, _) = two_lapsed_claims().await;
         let core = Core::new(store, LEASE);
         let woken = Mutex::new(Vec::new());
-        core.expire_leases(&|project: &ProjectId| woken.lock().unwrap().push(project.clone()))
-            .await
-            .unwrap();
+        let other: ProjectId = "project02".parse().unwrap();
+        let watches = [topics.project(), &other]
+            .map(|project| (project, core.notifier().watch_stored(project)));
+        core.expire_leases().await.unwrap();
+        assert_eq!(
+            core.notifier().stored_count(),
+            1,
+            "one RELEASE must notify exactly once"
+        );
+        for (project, wake) in watches {
+            if wake.has_changed().unwrap() {
+                woken.lock().unwrap().push(project.clone());
+            }
+        }
         assert_eq!(
             *woken.lock().unwrap(),
             [topics.project().clone()],
@@ -891,10 +887,7 @@ pub(crate) mod tests {
         store.fail_always("begin");
         let core = Core::new(store, Duration::from_millis(400));
         // No pause between failures: the public loop waits one second each time.
-        let err = core
-            .sweep_until_gave_up(&|_: &ProjectId| {}, Duration::ZERO)
-            .await
-            .unwrap_err();
+        let err = core.sweep_until_gave_up(Duration::ZERO).await.unwrap_err();
         assert_eq!(err.failures, 60);
         assert!(matches!(
             err.last,

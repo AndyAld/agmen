@@ -71,7 +71,7 @@ pub(crate) async fn run(hub: Hub, client: AsyncClient) -> Result<(), MessagingEr
                 failures = 0;
                 if published < usize::try_from(BATCH).unwrap_or(usize::MAX) {
                     tokio::select! {
-                        () = hub.ingest_state().outbox_ready().notified() => {}
+                        () = hub.core().notifier().outbox_ready().notified() => {}
                         () = tokio::time::sleep(IDLE_POLL) => {}
                     }
                 }

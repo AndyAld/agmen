@@ -1,11 +1,116 @@
-//! FOUND, ASSIGN and closing claimed items.
+//! FOUND, ASSIGN, closing claimed items and bounded item lists.
 
-use crate::{HubPost, LedgerError, LedgerMessage, NewItem, StoreTx, post_in};
+use crate::{
+    Core, HubPost, LedgerError, LedgerMessage, NewItem, Reads, Store, StoreError, StoreTx, post_in,
+};
 use agmen_proto::{
     Body, IdentityId, ItemKey, LaneName, Payload, ProjectId, Severity, Stream, Topics,
 };
+use serde::Serialize;
 
 const FOUND_PREFIX: &str = "B";
+
+#[cfg(test)]
+#[path = "items_tests.rs"]
+mod list_tests;
+
+/// The most items one list holds, ordered oldest first.
+pub const MAX_LISTED: i64 = 1000;
+
+/// A severity as the `items` table spells it.
+pub(crate) const fn severity_str(severity: Severity) -> &'static str {
+    match severity {
+        Severity::Low => "low",
+        Severity::Med => "med",
+        Severity::High => "high",
+        Severity::Security => "security",
+    }
+}
+
+/// One listed item. A security item's title is left out.
+#[derive(Debug, Clone, Serialize)]
+pub struct ItemView {
+    /// The minted item key.
+    pub key: String,
+    /// The finding's title, absent for security findings.
+    pub title: Option<String>,
+    /// The item's lane, in storage spelling.
+    pub lane: Option<String>,
+    /// The finding's severity, in storage spelling.
+    pub severity: Option<String>,
+    /// The item's state, in storage spelling.
+    pub state: String,
+    /// The finder's identity id.
+    pub created_by: String,
+    /// The assignee's identity id, when assigned.
+    pub assigned_to: Option<String>,
+    /// The identity with the live claim.
+    pub holder: Option<String>,
+    /// The live claim holder's handle.
+    pub holder_handle: Option<String>,
+    /// When the live claim's lease ends.
+    pub lease_until: Option<agmen_proto::Timestamp>,
+}
+
+/// The bounded item-list answer.
+#[derive(Debug, Clone, Serialize)]
+pub struct ItemList {
+    /// The oldest items, with security titles removed.
+    pub items: Vec<ItemView>,
+}
+
+impl<S: Store> Core<S> {
+    /// Lists at most [`MAX_LISTED`] items with live holders and security titles removed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the read or stored timestamp conversion fails.
+    ///
+    /// ```no_run
+    /// # async fn example<S: agmen_core::Store>(core: &agmen_core::Core<S>, project: &agmen_proto::ProjectId) -> Result<(), agmen_core::StoreError> {
+    /// let list = core.items(project).await?;
+    /// assert!(list.items.len() <= agmen_core::MAX_LISTED as usize);
+    /// # Ok(()) }
+    /// ```
+    pub async fn items(&self, project: &ProjectId) -> Result<ItemList, StoreError> {
+        let rows = self.store().reader().items(project).await?;
+        let items = rows
+            .into_iter()
+            .map(
+                |(
+                    key,
+                    title,
+                    lane,
+                    severity,
+                    state,
+                    created_by,
+                    assigned_to,
+                    holder,
+                    handle,
+                    until,
+                )| {
+                    let secret = severity.as_deref() == Some(severity_str(Severity::Security));
+                    Ok(ItemView {
+                        key,
+                        title: (!secret).then_some(title),
+                        lane,
+                        severity,
+                        state,
+                        created_by,
+                        assigned_to,
+                        holder,
+                        holder_handle: handle,
+                        lease_until: until
+                            .map(agmen_proto::Timestamp::from_millisecond)
+                            .transpose()
+                            .map_err(|err| StoreError::Backend(Box::new(err)))?,
+                    })
+                },
+            )
+            .collect::<Result<_, StoreError>>()?;
+        Ok(ItemList { items })
+    }
+}
 
 /// FOUND: mints the next `B-<n>` key, stores the item, and answers in `tx`
 /// with ITEM `{key}` in the feed and the finder's inbox. The ITEM carries
