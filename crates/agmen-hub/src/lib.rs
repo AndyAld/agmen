@@ -53,6 +53,8 @@ mod roster;
 mod self_config;
 mod state;
 mod store_pg;
+#[cfg(feature = "test-hooks")]
+pub use store_pg::PgStore;
 mod sweeper;
 mod tenants;
 #[cfg(feature = "test-hooks")]

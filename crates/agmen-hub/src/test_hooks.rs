@@ -48,6 +48,12 @@ pub struct SeededHuman {
 }
 
 impl Hub {
+    /// Returns the Postgres adapter for the shared backend contracts.
+    #[must_use]
+    pub fn store_for_tests(&self) -> crate::PgStore {
+        crate::store_pg::PgStore::new(self.pool().clone())
+    }
+
     /// Replaces the self-host group's pending claim token, unless it has an owner.
     ///
     /// # Errors
@@ -308,4 +314,52 @@ impl Hub {
 
 fn hook_error(err: ApiError) -> HookError {
     Box::new(err)
+}
+
+impl agmen_core::contract::Seed for Hub {
+    async fn project(&self) -> Topics {
+        contract_fixture(self.seed_project().await)
+    }
+
+    async fn identity(
+        &self,
+        topics: &Topics,
+        kind: agmen_proto::IdentityKind,
+    ) -> agmen_proto::IdentityId {
+        use agmen_proto::IdentityKind;
+
+        assert!(matches!(
+            kind,
+            IdentityKind::Agent | IdentityKind::Coordinator | IdentityKind::Listener
+        ));
+        let (identity, _) = contract_fixture(self.seed_identity(topics).await);
+        if kind != IdentityKind::Agent {
+            contract_fixture(
+                sqlx::query("UPDATE identities SET kind = $1 WHERE id = $2")
+                    .bind(kind.as_str())
+                    .bind(identity.id.as_str())
+                    .execute(self.pool())
+                    .await,
+            );
+        }
+        contract_fixture(identity.id.as_str().parse())
+    }
+
+    async fn human(&self, topics: &Topics, coordinator: bool) -> agmen_proto::IdentityId {
+        let role = if coordinator {
+            Role::Coordinator
+        } else {
+            Role::Member
+        };
+        let human = contract_fixture(self.seed_human(topics, role).await);
+        contract_fixture(human.id.as_str().parse())
+    }
+}
+
+#[expect(
+    clippy::expect_used,
+    reason = "test-only fixtures must stop on seeding errors"
+)]
+fn contract_fixture<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
+    result.expect("store contract fixture")
 }

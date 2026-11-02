@@ -17,6 +17,8 @@
 #![warn(missing_docs)]
 
 mod claims;
+#[cfg(feature = "testing")]
+pub mod contract;
 mod core;
 mod identity;
 mod ids;

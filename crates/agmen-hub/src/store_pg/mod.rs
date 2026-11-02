@@ -21,16 +21,19 @@ use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 
 use crate::claims::LedgerError;
 
+/// Postgres adapter exposed only through the hub's test hooks.
 #[derive(Debug)]
-pub(crate) struct PgStore {
+pub struct PgStore {
     pool: PgPool,
 }
 
+/// A pool-backed reader for the Postgres adapter.
 #[derive(Debug)]
-pub(crate) struct PgReader<'a>(&'a PgPool);
+pub struct PgReader<'a>(&'a PgPool);
 
+/// A Postgres transaction that rolls back when dropped without commit.
 #[derive(Debug)]
-pub(crate) struct PgTx {
+pub struct PgTx {
     tx: Transaction<'static, Postgres>,
 }
 

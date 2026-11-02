@@ -1824,7 +1824,77 @@ fn parent_of(
 mod tests {
     use super::*;
     use crate::claims::tests::{LEASE, item, message, setup};
+    use crate::contract::Seed;
     use agmen_proto::Payload;
+
+    fn fixture_id() -> IdentityId {
+        crate::new_message_id(Timestamp::now())
+            .unwrap()
+            .to_string()
+            .to_ascii_lowercase()
+            .parse()
+            .unwrap()
+    }
+
+    impl Seed for MemStore {
+        async fn project(&self) -> Topics {
+            let topics = Topics::new(
+                fixture_id().as_str().parse().unwrap(),
+                fixture_id().as_str().parse().unwrap(),
+            );
+            let mut state = self.locked().await.unwrap();
+            assert!(state.projects.len() < MEM_MAX_ROWS);
+            state
+                .projects
+                .insert(topics.project().clone(), topics.tenant().clone());
+            topics
+        }
+
+        async fn identity(&self, topics: &Topics, kind: IdentityKind) -> IdentityId {
+            assert!(matches!(
+                kind,
+                IdentityKind::Agent | IdentityKind::Coordinator | IdentityKind::Listener
+            ));
+            let owner = self.human(topics, false).await;
+            let id = fixture_id();
+            self.seed_sender(
+                topics,
+                Sender {
+                    id: id.clone(),
+                    kind,
+                    handle: format!("{owner}/agent"),
+                    owner: Some(owner),
+                    verbs: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+            id
+        }
+
+        async fn human(&self, topics: &Topics, coordinator: bool) -> IdentityId {
+            let id = fixture_id();
+            self.seed_member(
+                topics.project(),
+                Member {
+                    id: id.clone(),
+                    handle: id.to_string(),
+                    kind: IdentityKind::Human,
+                    owner: None,
+                    role: Some(if coordinator {
+                        MemberRole::Coordinator
+                    } else {
+                        MemberRole::Member
+                    }),
+                    identity_role: None,
+                },
+            )
+            .await
+            .unwrap();
+            id
+        }
+    }
 
     #[tokio::test]
     async fn pages_keep_pruned_through_and_resume_below_it() {

@@ -17,7 +17,7 @@ workspace = true
 # Hub::seed_project, seed_identity, seed_human and approve_device, for
 # integration tests (agmen-client's, the CLI's and the hub's own). Never
 # enabled in the hub binary.
-test-hooks = []
+test-hooks = ["agmen-core/testing"]
 
 [dependencies]
 agmen-core = { version = "0.1.0", path = "../agmen-core" }
@@ -28,13 +28,10 @@ axum = { version = "0.8.9", default-features = false, features = ["form", "http1
 base64 = "0.23.1"
 futures-core = "0.3.34"
 getrandom = "0.4.3"
-globset = "0.4.20"
 hyper = { version = "1.12.0", features = ["client", "http1", "server"] }
 hyper-util = { version = "0.1.21", features = ["service", "tokio"] }
 jiff = { version = "0.2.38", default-features = false, features = ["std", "serde"] }
 jsonwebtoken = { version = "11.1.0", features = ["aws_lc_rs"] }
-regex = "1.13.1"
-regex-automata = { version = "0.4.18", default-features = false, features = ["std", "syntax", "dfa-build", "dfa-search"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls", "form"] }
 # rumqttc-next names its library `rumqttc`, as the upstream rumqttc that the
 # tests use does, so this one is renamed (ADR-0003).
@@ -56,6 +53,7 @@ agmen-core = { version = "0.1.0", path = "../agmen-core", features = ["testing"]
 # The hub's own integration tests use the test hooks too; a dev-dependency
 # never reaches the hub binary's build.
 agmen-hub = { version = "0.1.0", path = ".", features = ["test-hooks"] }
+regex = "1.13.1"
 rumqttc = { version = "0.25.1", default-features = false }
 rumqttc_next = { version = "0.34.0", package = "rumqttc-next", default-features = false, features = ["websocket"] }
 tempfile = "3.27.0"
