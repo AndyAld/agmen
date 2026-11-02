@@ -20,6 +20,7 @@ test-hooks = []
 
 [dependencies]
 agmen-client = { version = "0.1.0", path = "../agmen-client" }
+agmen-core = { version = "0.1.0", path = "../agmen-core" }
 agmen-local = { version = "0.1.0", path = "../agmen-local", features = ["tokio"] }
 agmen-proto = { version = "0.1.0", path = "../agmen-proto" }
 agmen-roles = { version = "0.1.0", path = "../agmen-roles" }
@@ -42,5 +43,6 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 url = "2.5.8"
 
 [dev-dependencies]
+agmen-core = { version = "0.1.0", path = "../agmen-core", features = ["testing"] }
 axum = { version = "0.8.9", default-features = false, features = ["tokio", "http1", "json", "query"] }
 tokio-stream = "0.1.19"

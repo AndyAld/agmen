@@ -271,6 +271,7 @@ name = "agmend"
 version = "0.1.0"
 dependencies = [
  "agmen-client",
+ "agmen-core",
  "agmen-local",
  "agmen-proto",
  "agmen-roles",
