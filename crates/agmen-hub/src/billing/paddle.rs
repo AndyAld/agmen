@@ -364,6 +364,65 @@ impl PaddleClient {
         items_of(&response)
     }
 
+    /// Cancels a subscription immediately, including one that is past due.
+    ///
+    /// Read on 2026-11-02:
+    /// <https://developer.paddle.com/api-reference/subscriptions/cancel-subscription>
+    /// specifies `POST /subscriptions/{subscription_id}/cancel` with
+    /// `effective_from: "immediately"` and a response whose `data.status` is
+    /// `canceled`. The default would wait until the next billing period.
+    /// <https://developer.paddle.com/api-reference/subscriptions/get-subscription>
+    /// documents that status as the completed cancellation, rather than a
+    /// scheduled change.
+    ///
+    /// Send the cancel directly instead of a GET first: the documented 400
+    /// errors `subscription_update_when_canceled` and
+    /// `subscription_is_canceled_action_invalid` both mean the subscription is
+    /// already canceled, so either is success here too, including if another
+    /// cancel races this request. The cancel page does not pin which error it
+    /// returns. See
+    /// <https://developer.paddle.com/errors/subscriptions/subscription_update_when_canceled>
+    /// and <https://developer.paddle.com/errors/subscriptions/subscription_is_canceled_action_invalid>.
+    /// Every invocation makes exactly one Paddle call.
+    ///
+    /// # Errors
+    ///
+    /// [`PaddleError::Http`] or [`PaddleError::Refused`] when the call fails for
+    /// any other reason, or [`PaddleError::Shape`] when a successful response
+    /// does not confirm `canceled`.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn example(client: agmen_hub::PaddleClient)
+    /// #     -> Result<(), Box<dyn std::error::Error>> {
+    /// client.cancel_subscription("sub_example").await?;
+    /// # Ok(()) }
+    /// ```
+    pub async fn cancel_subscription(&self, subscription_id: &str) -> Result<(), PaddleError> {
+        let url = endpoint(&self.base, &["subscriptions", subscription_id, "cancel"])?;
+        match self
+            .call(
+                Method::POST,
+                url,
+                Some(&json!({"effective_from": "immediately"})),
+            )
+            .await
+        {
+            Ok(response) if response["data"]["status"] == "canceled" => Ok(()),
+            Ok(_) => Err(shape("the canceled subscription has no canceled status")),
+            Err(PaddleError::Refused { status: 400, code })
+                if matches!(
+                    code.as_str(),
+                    "subscription_update_when_canceled" | "subscription_is_canceled_action_invalid"
+                ) =>
+            {
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     /// A short-lived link to the customer portal for `customer_id`.
     ///
     /// `POST /customers/{id}/portal-sessions` with `subscription_ids`, per

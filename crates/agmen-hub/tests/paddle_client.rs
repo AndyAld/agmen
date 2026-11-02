@@ -133,6 +133,77 @@ async fn update_with_no_items_sends_nothing() {
 }
 
 #[tokio::test]
+async fn cancel_subscription_sends_immediate_request() {
+    let (fake, client) = start().await;
+    client.cancel_subscription("sub_old").await.unwrap();
+    assert_eq!(
+        fake.requests(),
+        vec![(
+            Method::POST,
+            "/subscriptions/sub_old/cancel".to_owned(),
+            json!({"effective_from": "immediately"}),
+        )]
+    );
+    assert_eq!(
+        fake.authorizations(),
+        vec![Some(format!("Bearer {}", fake.api_key()))]
+    );
+    assert_eq!(fake.paddle_versions(), vec![Some("1".to_owned())]);
+}
+
+#[tokio::test]
+async fn cancel_subscription_already_canceled_is_done() {
+    let (fake, client) = start().await;
+    fake.fail_next(
+        400,
+        json!({"error": {"code": "subscription_update_when_canceled"}}),
+    );
+    client.cancel_subscription("sub_old").await.unwrap();
+    assert_eq!(fake.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn cancel_subscription_canceled_action_is_done() {
+    let (fake, client) = start().await;
+    fake.fail_next(
+        400,
+        json!({"error": {"code": "subscription_is_canceled_action_invalid"}}),
+    );
+    client.cancel_subscription("sub_old").await.unwrap();
+    assert_eq!(fake.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn cancel_subscription_other_refusals_are_errors() {
+    let (fake, client) = start().await;
+    for (status, code) in [
+        (400, "bad_request"),
+        (500, "subscription_update_when_canceled"),
+        (404, "not_found"),
+    ] {
+        fake.fail_next(status, json!({"error": {"code": code}}));
+        let error = client.cancel_subscription("sub_old").await.unwrap_err();
+        assert!(
+            matches!(error, PaddleError::Refused { status: seen, code: seen_code }
+                if seen == status && seen_code == code)
+        );
+    }
+    assert_eq!(fake.requests().len(), 3);
+}
+
+#[tokio::test]
+async fn cancel_subscription_requires_canceled_status() {
+    let (fake, client) = start().await;
+    for data in [json!({}), json!({"status": "active"})] {
+        fake.fail_next(200, json!({"data": data}));
+        assert!(matches!(
+            client.cancel_subscription("sub_old").await.unwrap_err(),
+            PaddleError::Shape(_)
+        ));
+    }
+}
+
+#[tokio::test]
 async fn portal_url_from_session() {
     let (fake, client) = start().await;
     let url = client.portal_url("ctm_1", "sub_1").await.unwrap();

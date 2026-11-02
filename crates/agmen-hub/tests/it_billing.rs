@@ -6,7 +6,7 @@ mod support;
 use std::time::Duration;
 
 use agmen_hub::{
-    BillingEvent, BusinessStep, HUB_IDENTITY, HubMode, Plan, PlanRecord, ReadOnlyCause,
+    BillingEvent, BusinessStep, HUB_IDENTITY, HubMode, Plan, PlanRecord, PlanState, ReadOnlyCause,
 };
 use agmen_proto::{DeliveryReply, StampedEnvelope, Timestamp};
 use reqwest::{Response, StatusCode};
@@ -1647,6 +1647,610 @@ async fn it_plan_route_waits_for_an_active_plan() {
             "the subscription is not active yet; try again in a minute"
         );
         assert_no_paddle(&paddle);
+    })
+    .await;
+}
+
+async fn ended_group(ctx: &Ctx, cause: ReadOnlyCause, plan: Plan) -> (String, Project) {
+    let (token, project) = group(ctx, "ended").await;
+    let at = now() - Duration::from_secs(SECS_PER_DAY);
+    let mut record = PlanRecord::trial(at).apply(BillingEvent::Active(plan), at);
+    record.state = PlanState::ReadOnly;
+    record.read_only_cause = Some(cause);
+    record.read_only_since = Some(at);
+    if cause == ReadOnlyCause::PaymentFailed {
+        record.past_due_since = Some(at - Duration::from_secs(14 * SECS_PER_DAY));
+    }
+    ctx.hub
+        .hub
+        .set_plan(topics(&project).tenant(), &record)
+        .await
+        .unwrap();
+    seed_subscription(ctx, &project).await;
+    (token, project)
+}
+
+async fn checkout_plan(
+    ctx: &Ctx,
+    token: &str,
+    project: &Project,
+    body: Value,
+) -> (StatusCode, Value) {
+    call(
+        ctx,
+        token,
+        reqwest::Method::POST,
+        &format!("/v1/tenants/{}/plan", project.tenant),
+        Some(body),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn it_canceled_group_portal_refuses_and_plan_checks_out_without_storing() {
+    run_hosted_with_paddle(|ctx, paddle| async move {
+        let (token, project) = ended_group(
+            &ctx,
+            ReadOnlyCause::Canceled,
+            Plan::Team { extra_seats: 2 },
+        )
+        .await;
+        let before = plan_row(&ctx, &project).await;
+        let (status, body) = call(
+            &ctx,
+            &token,
+            reqwest::Method::POST,
+            &format!("/v1/tenants/{}/portal", project.tenant),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"], "no_subscription");
+        assert_eq!(
+            body["error_description"],
+            "this group's subscription ended; its owner can start a new one with: agmen group billing"
+        );
+        assert_no_paddle(&paddle);
+        let (status, body) = checkout_plan(&ctx, &token, &project, json!({"plan": "team"})).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body, json!({"checkout_url": checkout_url(&paddle)}));
+        assert_eq!(
+            paddle.requests(),
+            vec![(
+                reqwest::Method::POST,
+                "/transactions".to_owned(),
+                json!({
+                    "items": [
+                        {"price_id": "pri_team_base", "quantity": 1},
+                        {"price_id": "pri_team_seat", "quantity": 2},
+                    ],
+                    "custom_data": {"agmen_tenant": project.tenant},
+                }),
+            )]
+        );
+        assert_eq!(plan_row(&ctx, &project).await, before);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn it_payment_failed_group_cancels_before_checkout_without_storing() {
+    run_hosted_with_paddle(|ctx, paddle| async move {
+        let (token, project) = ended_group(
+            &ctx,
+            ReadOnlyCause::PaymentFailed,
+            Plan::Team { extra_seats: 1 },
+        )
+        .await;
+        let before = plan_row(&ctx, &project).await;
+        let (status, body) = checkout_plan(
+            &ctx,
+            &token,
+            &project,
+            json!({"plan": "business", "seats": 25}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body, json!({"checkout_url": checkout_url(&paddle)}));
+        assert_eq!(
+            paddle.requests(),
+            vec![
+                (
+                    reqwest::Method::POST,
+                    "/subscriptions/sub_test/cancel".to_owned(),
+                    json!({"effective_from": "immediately"}),
+                ),
+                (
+                    reqwest::Method::POST,
+                    "/transactions".to_owned(),
+                    json!({
+                        "items": [{"price_id": "pri_business_25", "quantity": 1}],
+                        "custom_data": {"agmen_tenant": project.tenant},
+                    }),
+                ),
+            ]
+        );
+        assert_eq!(plan_row(&ctx, &project).await, before);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn it_payment_failed_group_already_canceled_still_checks_out() {
+    run_hosted_with_paddle(|ctx, paddle| async move {
+        let (token, project) = ended_group(
+            &ctx,
+            ReadOnlyCause::PaymentFailed,
+            Plan::Team { extra_seats: 0 },
+        )
+        .await;
+        let before = plan_row(&ctx, &project).await;
+        paddle.fail_next(
+            400,
+            json!({"error": {"code": "subscription_update_when_canceled"}}),
+        );
+        let (status, body) = checkout_plan(&ctx, &token, &project, json!({"plan": "team"})).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body, json!({"checkout_url": checkout_url(&paddle)}));
+        let requests = paddle.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].1, "/subscriptions/sub_test/cancel");
+        assert_eq!(requests[0].2, json!({"effective_from": "immediately"}));
+        assert_eq!(requests[1].1, "/transactions");
+        assert_eq!(plan_row(&ctx, &project).await, before);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn it_payment_failed_group_canceled_action_still_checks_out() {
+    run_hosted_with_paddle(|ctx, paddle| async move {
+        let (token, project) = ended_group(
+            &ctx,
+            ReadOnlyCause::PaymentFailed,
+            Plan::Team { extra_seats: 0 },
+        )
+        .await;
+        let before = plan_row(&ctx, &project).await;
+        paddle.fail_next(
+            400,
+            json!({"error": {"code": "subscription_is_canceled_action_invalid"}}),
+        );
+        let (status, body) = checkout_plan(&ctx, &token, &project, json!({"plan": "team"})).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body, json!({"checkout_url": checkout_url(&paddle)}));
+        let requests = paddle.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].1, "/subscriptions/sub_test/cancel");
+        assert_eq!(requests[0].2, json!({"effective_from": "immediately"}));
+        assert_eq!(requests[1].1, "/transactions");
+        assert_eq!(plan_row(&ctx, &project).await, before);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn it_payment_failed_group_cancels_without_customer_id() {
+    run_hosted_with_paddle(|ctx, paddle| async move {
+        let (token, project) = ended_group(
+            &ctx,
+            ReadOnlyCause::PaymentFailed,
+            Plan::Team { extra_seats: 0 },
+        )
+        .await;
+        sqlx::query("UPDATE tenant_plans SET paddle_customer_id = NULL WHERE tenant_id = $1")
+            .bind(&project.tenant)
+            .execute(&ctx.pool)
+            .await
+            .unwrap();
+        let before = plan_row(&ctx, &project).await;
+        let (status, body) = checkout_plan(&ctx, &token, &project, json!({"plan": "team"})).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body, json!({"checkout_url": checkout_url(&paddle)}));
+        let requests = paddle.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].1, "/subscriptions/sub_test/cancel");
+        assert_eq!(requests[0].2, json!({"effective_from": "immediately"}));
+        assert_eq!(requests[1].1, "/transactions");
+        assert_eq!(plan_row(&ctx, &project).await, before);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn it_payment_failed_group_cancel_failure_does_not_check_out() {
+    run_hosted_with_paddle(|ctx, paddle| async move {
+        let (token, project) = ended_group(
+            &ctx,
+            ReadOnlyCause::PaymentFailed,
+            Plan::Team { extra_seats: 0 },
+        )
+        .await;
+        let before = plan_row(&ctx, &project).await;
+        paddle.fail_next(503, json!({"error": {"code": "unavailable"}}));
+        let (status, body) = checkout_plan(&ctx, &token, &project, json!({"plan": "team"})).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+        assert_eq!(body["error"], "upstream_unavailable");
+        assert_eq!(
+            paddle.requests(),
+            vec![(
+                reqwest::Method::POST,
+                "/subscriptions/sub_test/cancel".to_owned(),
+                json!({"effective_from": "immediately"}),
+            )]
+        );
+        assert_eq!(plan_row(&ctx, &project).await, before);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn it_ended_group_seats_refuses_without_paddle() {
+    for cause in [ReadOnlyCause::Canceled, ReadOnlyCause::PaymentFailed] {
+        run_hosted_with_paddle(move |ctx, paddle| async move {
+            let (token, project) = ended_group(&ctx, cause, Plan::Team { extra_seats: 0 }).await;
+            let admin = member_with_token(&ctx, &project, 21, "ada", "admin").await;
+            let before = plan_row(&ctx, &project).await;
+            for caller in [&token, &admin] {
+                let (status, body) = put_seats(&ctx, caller, &project.tenant, 6).await;
+                assert_eq!(status, StatusCode::CONFLICT, "{body}");
+                assert_eq!(body["error"], "no_subscription");
+                assert_eq!(
+                    body["error_description"],
+                    "this group's subscription ended; its owner can start a new one with: agmen group billing"
+                );
+            }
+            assert_no_paddle(&paddle);
+            assert_eq!(plan_row(&ctx, &project).await, before);
+        })
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn it_new_checkout_activation_ignores_delayed_old_cancellation() {
+    run_hosted_with_paddle(|ctx, paddle| async move {
+        let (token, project) = ended_group(
+            &ctx,
+            ReadOnlyCause::PaymentFailed,
+            Plan::Team { extra_seats: 0 },
+        )
+        .await;
+        let (status, body) =
+            checkout_plan(&ctx, &token, &project, json!({"plan": "business"})).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body["checkout_url"].is_string(), "{body}");
+        let at = now();
+        let mut active = subscription(
+            &project,
+            "evt_new_subscription",
+            "subscription.activated",
+            "active",
+            at,
+        );
+        active["data"]["id"] = json!("sub_new");
+        active["data"]["customer_id"] = json!("ctm_new");
+        assert_eq!(
+            send_event(&ctx, &paddle, &active).await.status(),
+            StatusCode::OK
+        );
+        let restored = plan_row(&ctx, &project).await;
+        assert_eq!(restored["state"], "active");
+        assert_eq!(restored["plan"], "business");
+        assert_eq!(restored["business_step"], 25);
+        assert!(restored["read_only_cause"].is_null());
+        assert!(restored["read_only_since"].is_null());
+        assert_eq!(restored["paddle_subscription_id"], "sub_new");
+        assert_eq!(restored["paddle_customer_id"], "ctm_new");
+        let mut canceled = subscription(
+            &project,
+            "evt_old_subscription_canceled",
+            "subscription.canceled",
+            "canceled",
+            at - Duration::from_secs(1),
+        );
+        canceled["data"]["id"] = json!("sub_test");
+        canceled["data"]["customer_id"] = json!("ctm_test");
+        assert_eq!(
+            send_event(&ctx, &paddle, &canceled).await.status(),
+            StatusCode::OK
+        );
+        assert_eq!(plan_row(&ctx, &project).await, restored);
+    })
+    .await;
+}
+
+/// `event` with the subscription and customer ids Paddle would send for it.
+fn of_subscription(mut event: Value, id: &str, customer: &str) -> Value {
+    event["data"]["id"] = json!(id);
+    event["data"]["customer_id"] = json!(customer);
+    event
+}
+
+/// A `transaction.completed` event for `sub_id`.
+fn payment(
+    project: &Project,
+    event_id: &str,
+    sub_id: &str,
+    customer: &str,
+    at: Timestamp,
+) -> Value {
+    let mut event = subscription(project, event_id, "transaction.completed", "completed", at);
+    event["data"]["id"] = json!("txn_1");
+    event["data"]["subscription_id"] = json!(sub_id);
+    event["data"]["customer_id"] = json!(customer);
+    event
+}
+
+#[tokio::test]
+async fn it_old_subscription_events_stamped_after_the_new_activation_change_nothing() {
+    for past_due in [false, true] {
+        run_hosted_with_paddle(move |ctx, paddle| async move {
+            let (token, project) = ended_group(
+                &ctx,
+                ReadOnlyCause::PaymentFailed,
+                Plan::Team { extra_seats: 0 },
+            )
+            .await;
+            let (status, body) =
+                checkout_plan(&ctx, &token, &project, json!({"plan": "business"})).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let at = now();
+            let stamp = |seconds| at + Duration::from_secs(seconds);
+            let mut new_events = vec![of_subscription(
+                subscription(
+                    &project,
+                    "evt_new_active",
+                    "subscription.activated",
+                    "active",
+                    at,
+                ),
+                "sub_new",
+                "ctm_new",
+            )];
+            if past_due {
+                new_events.push(of_subscription(
+                    subscription(
+                        &project,
+                        "evt_new_past_due",
+                        "subscription.past_due",
+                        "past_due",
+                        stamp(1),
+                    ),
+                    "sub_new",
+                    "ctm_new",
+                ));
+            }
+            for event in &new_events {
+                assert_eq!(
+                    send_event(&ctx, &paddle, event).await.status(),
+                    StatusCode::OK
+                );
+            }
+            let followed = plan_row(&ctx, &project).await;
+            assert_eq!(
+                followed["state"],
+                if past_due { "past_due" } else { "active" }
+            );
+            assert_eq!(followed["plan"], "business");
+            assert_eq!(followed["paddle_subscription_id"], "sub_new");
+            assert_eq!(followed["paddle_customer_id"], "ctm_new");
+            let alerts_before = alerts(&ctx, &project).await.len();
+            // Paddle stamps these events of the old subscription after the new
+            // one activated, so the event clock does not drop them.
+            let late = [
+                of_subscription(
+                    subscription(
+                        &project,
+                        "evt_old_canceled",
+                        "subscription.canceled",
+                        "canceled",
+                        stamp(10),
+                    ),
+                    "sub_test",
+                    "ctm_test",
+                ),
+                of_subscription(
+                    subscription(
+                        &project,
+                        "evt_old_past_due",
+                        "subscription.past_due",
+                        "past_due",
+                        stamp(11),
+                    ),
+                    "sub_test",
+                    "ctm_test",
+                ),
+                payment(&project, "evt_old_paid", "sub_test", "ctm_test", stamp(12)),
+            ];
+            for event in &late {
+                assert_eq!(
+                    send_event(&ctx, &paddle, event).await.status(),
+                    StatusCode::OK
+                );
+                assert_eq!(
+                    plan_row(&ctx, &project).await,
+                    followed,
+                    "{}",
+                    event["event_type"]
+                );
+            }
+            assert_eq!(alerts(&ctx, &project).await.len(), alerts_before);
+        })
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn it_payment_delivered_before_the_new_activation_keeps_the_new_plan() {
+    for custom_data in [true, false] {
+        run_hosted_with_paddle(move |ctx, paddle| async move {
+            let (token, project) =
+                ended_group(&ctx, ReadOnlyCause::Canceled, Plan::Team { extra_seats: 0 }).await;
+            let (status, body) = checkout_plan(
+                &ctx,
+                &token,
+                &project,
+                json!({"plan": "business", "seats": 25}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let at = now();
+            // Paddle stamps the activation first and the payment a second
+            // later, yet the payment arrives first. The group still holds its
+            // old Team plan, so the payment must not close the door on the
+            // activation that names the plan paid for.
+            let paid = payment(
+                &project,
+                "evt_new_paid",
+                "sub_new",
+                "ctm_new",
+                at + Duration::from_secs(1),
+            );
+            assert_eq!(
+                send_event(&ctx, &paddle, &paid).await.status(),
+                StatusCode::OK
+            );
+            let paid_row = plan_row(&ctx, &project).await;
+            assert_eq!(paid_row["state"], "active");
+            assert_eq!(paid_row["paddle_subscription_id"], "sub_new");
+            assert_eq!(paid_row["paddle_customer_id"], "ctm_new");
+            let mut active = of_subscription(
+                subscription(
+                    &project,
+                    "evt_new_active",
+                    "subscription.activated",
+                    "active",
+                    at,
+                ),
+                "sub_new",
+                "ctm_new",
+            );
+            if !custom_data {
+                // The hub finds the group by the subscription id the payment stored.
+                active["data"]["custom_data"] = Value::Null;
+            }
+            assert_eq!(
+                send_event(&ctx, &paddle, &active).await.status(),
+                StatusCode::OK
+            );
+            let row = plan_row(&ctx, &project).await;
+            assert_eq!(row["state"], "active");
+            assert_eq!(row["plan"], "business");
+            assert_eq!(row["business_step"], 25);
+            assert_eq!(row["paddle_subscription_id"], "sub_new");
+            assert_eq!(row["paddle_customer_id"], "ctm_new");
+            assert!(row["read_only_cause"].is_null());
+            assert!(row["read_only_since"].is_null());
+        })
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn it_unpaid_read_only_billing_keeps_existing_behavior() {
+    for cause in [ReadOnlyCause::TrialEnded, ReadOnlyCause::AwaitingPayment] {
+        for subscribed in [false, true] {
+            run_hosted_with_paddle(move |ctx, paddle| async move {
+                let (token, project) = group(&ctx, "unpaid").await;
+                let mut record = PlanRecord::awaiting_payment(now());
+                record.read_only_cause = Some(cause);
+                ctx.hub
+                    .hub
+                    .set_plan(topics(&project).tenant(), &record)
+                    .await
+                    .unwrap();
+                if subscribed {
+                    seed_subscription(&ctx, &project).await;
+                }
+                let before = plan_row(&ctx, &project).await;
+                let (status, body) = call(
+                    &ctx,
+                    &token,
+                    reqwest::Method::POST,
+                    &format!("/v1/tenants/{}/portal", project.tenant),
+                    None,
+                )
+                .await;
+                if subscribed {
+                    assert_eq!(status, StatusCode::OK, "{body}");
+                    assert_eq!(
+                        body,
+                        json!({"portal_url": format!("{}portal/ctm_test", paddle.link_base())})
+                    );
+                } else {
+                    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+                    assert_eq!(body["error"], "no_subscription");
+                    assert_eq!(
+                        body["error_description"],
+                        "this group has no subscription yet: agmen group seats add 1 starts one"
+                    );
+                    assert_no_paddle(&paddle);
+                }
+                let (status, body) =
+                    checkout_plan(&ctx, &token, &project, json!({"plan": "team"})).await;
+                if subscribed {
+                    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+                    assert_eq!(body["error"], "no_subscription");
+                    assert_eq!(
+                        body["error_description"],
+                        "the subscription is not active yet; try again in a minute"
+                    );
+                    assert_eq!(paddle.requests().len(), 1);
+                    assert_eq!(
+                        paddle.requests()[0].1,
+                        "/customers/ctm_test/portal-sessions"
+                    );
+                } else {
+                    assert_eq!(status, StatusCode::OK, "{body}");
+                    assert_eq!(body, json!({"checkout_url": checkout_url(&paddle)}));
+                    assert_eq!(paddle.requests().len(), 1);
+                    assert_eq!(paddle.requests()[0].1, "/transactions");
+                }
+                assert_eq!(plan_row(&ctx, &project).await, before);
+            })
+            .await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn it_payment_failed_checkout_counts_each_paddle_call() {
+    run_hosted_with_paddle(|ctx, paddle| async move {
+        let (token, project) = ended_group(
+            &ctx,
+            ReadOnlyCause::PaymentFailed,
+            Plan::Team { extra_seats: 0 },
+        )
+        .await;
+        let before = plan_row(&ctx, &project).await;
+        let path = format!("/v1/tenants/{}/plan", project.tenant);
+        // Leave one token: cancellation can run, but the checkout cannot.
+        for _ in 0..5 {
+            paddle.fail_next(503, json!({"error": {"code": "unavailable"}}));
+            let (status, body) =
+                checkout_plan(&ctx, &token, &project, json!({"plan": "team"})).await;
+            assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+        }
+        let (status, body, retry) = send_for_retry(
+            &ctx,
+            &token,
+            reqwest::Method::POST,
+            &path,
+            Some(json!({"plan": "team"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+        assert_eq!(body["error"], "rate_limited");
+        assert_retry_within_a_refill(retry.as_deref());
+        let requests = paddle.requests();
+        assert_eq!(requests.len(), 6);
+        assert!(requests.iter().all(|(method, path, body)| {
+            method == reqwest::Method::POST
+                && path == "/subscriptions/sub_test/cancel"
+                && body == &json!({"effective_from": "immediately"})
+        }));
+        assert_eq!(plan_row(&ctx, &project).await, before);
     })
     .await;
 }

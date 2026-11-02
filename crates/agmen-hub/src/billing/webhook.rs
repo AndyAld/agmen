@@ -340,9 +340,29 @@ async fn apply_billing(hub: &Hub, event: &PaddleEvent, billing: Billing) -> Resu
         tx.rollback().await?;
         return Ok(());
     };
+    let other_subscription = follows_other_subscription(&mut *tx, &tenant, &billing.ids).await?;
+    if other_subscription && ignored_while_billed(before.state, billing.event) {
+        tracing::warn!(
+            event_id = %event.event_id,
+            %tenant,
+            subscription = %billing.ids.subscription_id,
+            "ignoring a Paddle event of a subscription this group no longer follows"
+        );
+        tx.rollback().await?;
+        return Ok(());
+    }
     // Do not tick here: storing a tick would discard reminders and deletion
     // effects that only the plan clock can post or carry out.
-    let after = before.apply(billing.event, event.occurred_at);
+    let mut after = before.apply(billing.event, event.occurred_at);
+    if other_subscription && billing.event == BillingEvent::Paid {
+        // A payment names no plan. For a subscription the group does not
+        // follow yet (a new checkout after the old subscription ended) it
+        // still restores the group and stores the new ids, but it must not
+        // move the event clock: Paddle can stamp that subscription's
+        // activation earlier yet deliver it later, and a moved clock would
+        // drop the one event that names the plan paid for.
+        after.last_event_at = before.last_event_at;
+    }
     store_plan(&mut tx, &tenant, &after).await?;
     if before
         .last_event_at
@@ -382,6 +402,31 @@ async fn apply_billing(hub: &Hub, event: &PaddleEvent, billing: Billing) -> Resu
         tracing::warn!(event_id = %event.event_id, %tenant, error = %error_chain(&error), "past-due owner alert was not posted");
     }
     Ok(())
+}
+
+/// Whether the group stores a subscription other than the event's.
+async fn follows_other_subscription(
+    db: impl sqlx::PgExecutor<'_>,
+    tenant: &TenantId,
+    ids: &PaddleIds,
+) -> Result<bool, sqlx::Error> {
+    let stored: Option<String> =
+        sqlx::query_scalar("SELECT paddle_subscription_id FROM tenant_plans WHERE tenant_id = $1")
+            .bind(tenant.as_str())
+            .fetch_one(db)
+            .await?;
+    Ok(stored.is_some_and(|stored| stored != ids.subscription_id))
+}
+
+/// While a group is billed on its stored subscription (active, or past due
+/// while the card is retried), only an activation may name another one. A
+/// cancel, past-due or payment event of any other subscription comes from one
+/// the hub let go of, such as the old subscription canceled before a new
+/// checkout. Paddle can stamp such an event after the new activation, and
+/// applying it would lock the paid group or point it back at the old ids.
+fn ignored_while_billed(state: PlanState, event: BillingEvent) -> bool {
+    matches!(state, PlanState::Active | PlanState::PastDue)
+        && !matches!(event, BillingEvent::Active(_))
 }
 
 #[cfg(test)]
