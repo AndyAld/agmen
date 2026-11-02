@@ -2355,6 +2355,318 @@ async fn it_seat_revert_puts_back_the_items_from_before_the_change() {
     .await;
 }
 
+async fn subscribed_team(ctx: &Ctx, extra_seats: u32) -> (String, Project) {
+    let (token, project) = group(ctx, "acme").await;
+    set_active(ctx, &project, Plan::Team { extra_seats }).await;
+    seed_subscription(ctx, &project).await;
+    (token, project)
+}
+
+async fn group_admin(ctx: &Ctx, project: &Project) -> String {
+    member_with_token(ctx, project, 77, "blair", "admin").await
+}
+
+fn assert_no_owner_alert(sent: &[StampedEnvelope]) {
+    assert!(sent.is_empty(), "{sent:?}");
+}
+
+/// Makes every ALERT insert in this test's database fail, and counts each
+/// attempt. `run_hosted_with_paddle` gives each test a database of its own
+/// and drops it at the end, so the trigger, function and sequence cannot
+/// reach another test.
+///
+/// `nextval` is not rolled back with the insert, so the count stays when
+/// the hub's post transaction aborts.
+async fn block_owner_alerts(ctx: &Ctx) {
+    for sql in [
+        "CREATE SEQUENCE alert_post_attempts",
+        "CREATE FUNCTION reject_alert() RETURNS trigger LANGUAGE plpgsql AS $fn$
+         BEGIN
+             PERFORM nextval('alert_post_attempts');
+             RAISE EXCEPTION 'alert post blocked';
+         END
+         $fn$",
+        "CREATE TRIGGER reject_alert BEFORE INSERT ON messages
+         FOR EACH ROW WHEN (NEW.envelope->>'verb' = 'ALERT')
+         EXECUTE FUNCTION reject_alert()",
+    ] {
+        sqlx::raw_sql(sql).execute(&ctx.pool).await.unwrap();
+    }
+}
+
+async fn alert_post_attempts(ctx: &Ctx) -> i64 {
+    sqlx::query_scalar(
+        "SELECT CASE WHEN is_called THEN last_value ELSE 0 END FROM alert_post_attempts",
+    )
+    .fetch_one(&ctx.pool)
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn it_admin_seat_raise_alerts_the_owner() {
+    run_hosted_with_paddle(|ctx, _paddle| async move {
+        let (owner, project) = subscribed_team(&ctx, 0).await;
+        let admin = group_admin(&ctx, &project).await;
+        let (status, body) = put_seats(&ctx, &admin, &project.tenant, 6).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body, json!({"plan": "team", "seats_paid": 6}));
+        let sent = alerts(&ctx, &project).await;
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        let shown = me(&ctx, &owner).await;
+        assert!(
+            sent[0]
+                .mentioned
+                .contains(&shown["id"].as_str().unwrap().parse().unwrap()),
+            "{:?}",
+            sent[0].mentioned
+        );
+        assert_eq!(
+            sent[0].client.body.as_str(),
+            "blair raised andy/acme from 4 to 6 paid seats (team). Paddle bills the change to your card."
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn it_admin_business_seat_raise_names_the_new_step() {
+    run_hosted_with_paddle(|ctx, _paddle| async move {
+        let (_owner, project) = group(&ctx, "acme").await;
+        set_active(&ctx, &project, Plan::Business(BusinessStep::Seats10)).await;
+        seed_subscription(&ctx, &project).await;
+        let admin = group_admin(&ctx, &project).await;
+        let (status, body) = put_seats(&ctx, &admin, &project.tenant, 11).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body, json!({"plan": "business-25", "seats_paid": 25}));
+        let sent = alerts(&ctx, &project).await;
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        assert_eq!(
+            sent[0].client.body.as_str(),
+            "blair raised andy/acme from 10 to 25 paid seats (business-25). Paddle bills the change to your card."
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn it_owner_seat_raise_does_not_alert() {
+    run_hosted_with_paddle(|ctx, _paddle| async move {
+        let (owner, project) = subscribed_team(&ctx, 0).await;
+        let (status, body) = put_seats(&ctx, &owner, &project.tenant, 6).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body, json!({"plan": "team", "seats_paid": 6}));
+        assert_no_owner_alert(&alerts(&ctx, &project).await);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn it_admin_seat_lower_does_not_alert() {
+    run_hosted_with_paddle(|ctx, _paddle| async move {
+        let (_owner, project) = subscribed_team(&ctx, 2).await;
+        let admin = group_admin(&ctx, &project).await;
+        let (status, body) = put_seats(&ctx, &admin, &project.tenant, 4).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body, json!({"plan": "team", "seats_paid": 4}));
+        assert_no_owner_alert(&alerts(&ctx, &project).await);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn it_refused_admin_seat_change_does_not_alert() {
+    run_hosted_with_paddle(|ctx, paddle| async move {
+        let (owner, project) = subscribed_team(&ctx, 0).await;
+        let admin = group_admin(&ctx, &project).await;
+        paddle.fail_next(400, json!({"error": {"code": "bad_request"}}));
+        let (status, body) = put_seats(&ctx, &admin, &project.tenant, 6).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+        assert_eq!(body["error"], "upstream_unavailable");
+        assert_eq!(get_seats(&ctx, &owner, &project.tenant).await["paid"], 4);
+        assert_no_owner_alert(&alerts(&ctx, &project).await);
+
+        // Five humans, and the paid count is still 4, so 4 is below the members.
+        for (sub, handle) in [(78_u64, "ada"), (79, "bea"), (80, "cy")] {
+            member_with_token(&ctx, &project, sub, handle, "member").await;
+        }
+        let (status, body) = put_seats(&ctx, &admin, &project.tenant, 4).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"], "seats_in_use");
+        assert_eq!(body["error_description"], "remove members first");
+        assert_eq!(get_seats(&ctx, &owner, &project.tenant).await["paid"], 4);
+        assert_no_owner_alert(&alerts(&ctx, &project).await);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn it_admin_seat_raise_to_checkout_does_not_alert() {
+    run_hosted_with_paddle(|ctx, paddle| async move {
+        // A trial has no subscription, so more than 4 seats starts a checkout.
+        let (_owner, project) = group(&ctx, "acme").await;
+        let admin = group_admin(&ctx, &project).await;
+        let (status, body) = put_seats(&ctx, &admin, &project.tenant, 6).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body, json!({"checkout_url": checkout_url(&paddle)}));
+        assert_no_owner_alert(&alerts(&ctx, &project).await);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn it_admin_seat_raise_alert_failure_still_answers() {
+    run_hosted_with_paddle(|ctx, _paddle| async move {
+        let (_owner, project) = subscribed_team(&ctx, 0).await;
+        let admin = group_admin(&ctx, &project).await;
+        block_owner_alerts(&ctx).await;
+        let (status, body) = put_seats(&ctx, &admin, &project.tenant, 6).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body, json!({"plan": "team", "seats_paid": 6}));
+        assert_eq!(get_seats(&ctx, &admin, &project.tenant).await["paid"], 6);
+        assert_eq!(alert_post_attempts(&ctx).await, 1);
+        assert_no_owner_alert(&alerts(&ctx, &project).await);
+    })
+    .await;
+}
+
+/// Locks the plan row until the returned transaction ends, so a seat change
+/// that reaches Paddle waits there to store.
+async fn lock_plan_row(ctx: &Ctx, project: &Project) -> sqlx::Transaction<'static, sqlx::Postgres> {
+    let mut tx = ctx.pool.begin().await.unwrap();
+    let locked: Option<String> =
+        sqlx::query_scalar("SELECT tenant_id FROM tenant_plans WHERE tenant_id = $1 FOR UPDATE")
+            .bind(&project.tenant)
+            .fetch_optional(&mut *tx)
+            .await
+            .unwrap();
+    assert!(locked.is_some());
+    tx
+}
+
+/// Sends `PUT /v1/tenants/{tenant}/seats` from a task of its own.
+fn spawn_put_seats(
+    ctx: &Ctx,
+    token: &str,
+    project: &Project,
+    paid: u32,
+) -> tokio::task::JoinHandle<(StatusCode, Value)> {
+    let http = ctx.http.clone();
+    let url = ctx
+        .hub
+        .url(&format!("/v1/tenants/{}/seats", project.tenant));
+    let token = token.to_owned();
+    tokio::spawn(async move {
+        let response = http
+            .put(url)
+            .bearer_auth(token)
+            .json(&json!({"paid": paid}))
+            .send()
+            .await
+            .unwrap();
+        let status = response.status();
+        (
+            status,
+            response.json::<Value>().await.unwrap_or(Value::Null),
+        )
+    })
+}
+
+/// Waits up to five seconds until Paddle has seen `count` seat changes.
+async fn wait_for_seat_patches(paddle: &FakePaddle, count: usize) {
+    for _ in 0..100 {
+        if seat_patches(paddle).len() >= count {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        seat_patches(paddle).len() >= count,
+        "Paddle did not see {count} seat changes: {:?}",
+        paddle.requests()
+    );
+}
+
+async fn finished(put: tokio::task::JoinHandle<(StatusCode, Value)>) -> (StatusCode, Value) {
+    tokio::time::timeout(Duration::from_secs(5), put)
+        .await
+        .expect("seat change stayed blocked on the plan row")
+        .unwrap()
+}
+
+#[tokio::test]
+async fn it_two_admin_seat_raises_in_flight_alert_the_owner_once() {
+    run_hosted_with_paddle(|ctx, paddle| async move {
+        let (_owner, project) = subscribed_team(&ctx, 0).await;
+        let admin = group_admin(&ctx, &project).await;
+        // Both requests read 4 paid seats and reach Paddle before either one
+        // stores. Only the one that stores first raises the stored count.
+        let tx = lock_plan_row(&ctx, &project).await;
+        let puts = [
+            spawn_put_seats(&ctx, &admin, &project, 6),
+            spawn_put_seats(&ctx, &admin, &project, 6),
+        ];
+        wait_for_seat_patches(&paddle, 2).await;
+        tx.commit().await.unwrap();
+        for put in puts {
+            let (status, body) = finished(put).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body, json!({"plan": "team", "seats_paid": 6}));
+        }
+        let sent = alerts(&ctx, &project).await;
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        assert_eq!(
+            sent[0].client.body.as_str(),
+            "blair raised andy/acme from 4 to 6 paid seats (team). Paddle bills the change to your card."
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn it_admin_seat_raise_refused_below_used_posts_no_raise_alert() {
+    run_hosted_with_paddle(|ctx, paddle| async move {
+        let (_owner, project) = subscribed_team(&ctx, 0).await;
+        let admin = group_admin(&ctx, &project).await;
+        for (sub, handle) in [(78_u64, "ada"), (79, "bea")] {
+            member_with_token(&ctx, &project, sub, handle, "member").await;
+        }
+        // Four humans fill the 4 paid seats. Two more join while the raise to
+        // 5 waits to store, and Paddle then refuses to put the old items back.
+        let joiners = [
+            support::seed_human(&ctx.pool, 80, "cy").await,
+            support::seed_human(&ctx.pool, 81, "dee").await,
+        ];
+        let mut tx = lock_plan_row(&ctx, &project).await;
+        let put = spawn_put_seats(&ctx, &admin, &project, 5);
+        wait_for_seat_patches(&paddle, 1).await;
+        paddle.fail_next(500, json!({"error": {"code": "internal_error"}}));
+        for joiner in &joiners {
+            sqlx::query(
+                "INSERT INTO tenant_members (tenant_id, human_id, role) VALUES ($1, $2, 'member')",
+            )
+            .bind(&project.tenant)
+            .bind(joiner)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        }
+        tx.commit().await.unwrap();
+        let (status, body) = finished(put).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"], "seats_below_used");
+        // Paddle kept the raised count, so the hub stores it, and the only
+        // ALERT is the one for the failed restore.
+        assert_eq!(plan_row(&ctx, &project).await["extra_seats"], 1);
+        let sent = alerts(&ctx, &project).await;
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        let text = sent[0].client.body.as_str();
+        assert!(text.contains("could not be restored"), "{text}");
+        assert!(!text.contains("raised"), "{text}");
+    })
+    .await;
+}
+
 /// Team with one extra seat, as a Paddle request body lists it.
 fn team_plus_one_seat() -> Value {
     json!([
