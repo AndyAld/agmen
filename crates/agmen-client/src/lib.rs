@@ -14,8 +14,10 @@ mod hub;
 mod identity;
 mod install_receipt;
 mod link;
+mod local_credential;
 mod login;
 mod mqtt_store;
+mod origin;
 mod outbox;
 mod paths;
 mod replay;
@@ -41,8 +43,13 @@ pub use install_receipt::{
     InstallReceipt, ReceiptError, install_receipt_path, read_install_receipt,
     read_install_receipt_at,
 };
+pub use local_credential::{LOCAL_TOKEN_NAMESPACE, LocalCredential, read_local_credential};
 pub use login::{
     HumanTokens, Login, LoginError, human_tokens, save_login, store_tokens, token_grant,
+};
+pub use origin::{
+    LOCAL_BROKER_URL, LOCAL_HUB_URL, LOCAL_ORIGIN, is_local, local_broker, local_hub_url,
+    origin_key,
 };
 pub use outbox::{Outbox, OutboxState};
 pub use paths::{AGMEND_SOCKET, PathError, agmend_socket, config_dir, login_file, state_dir};

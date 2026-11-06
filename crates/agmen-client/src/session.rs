@@ -420,11 +420,14 @@ impl Session {
     ///
     /// # Errors
     ///
+    /// [`ClientError::LocalOrigin`] for the local origin, before opening state
+    /// or requesting any token or connection.
     /// [`ClientError`] when the state folder, the token, the connection or
     /// a subscription fails, or the broker does not answer within 10 s.
     pub async fn connect<T: TokenSource>(
         config: SessionConfig<T>,
     ) -> Result<(Self, Events), ClientError> {
+        config.hub.ensure_remote()?;
         let SessionConfig {
             kind,
             presence,

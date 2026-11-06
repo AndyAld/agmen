@@ -11,6 +11,21 @@ const JSON: &str = r#"{"tenant":"tenant01","project":"project1","identity_id":"i
   "broker_url":"wss://agmen.example.com/mqtt","role":"engineer"}"#;
 
 #[test]
+fn local_identity_file_passes_the_trust_test() {
+    let (_tmp, root) = repo();
+    let path = join(&root, &root);
+    let mut identity: IdentityFile = serde_json::from_str(JSON).unwrap();
+    assert!(!identity.is_local());
+    identity.hub_url = crate::local_hub_url();
+    identity.broker_url = crate::local_broker();
+    fs::write(&path, serde_json::to_vec(&identity).unwrap()).unwrap();
+    let joined = find_identity(&root).unwrap().unwrap();
+    assert!(joined.identity.is_local());
+    assert_eq!(joined.identity, identity);
+    assert_eq!(joined.root, root);
+}
+
+#[test]
 fn identity_without_role_fields_still_parses() {
     let mut json: serde_json::Value = serde_json::from_str(JSON).unwrap();
     json.as_object_mut().unwrap().remove("role");
