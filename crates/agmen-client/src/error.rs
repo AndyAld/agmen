@@ -8,6 +8,15 @@ use crate::body::BodyReadError;
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ClientError {
+    /// A local identity has no hub or broker connection.
+    #[error("this identity is on this machine's local origin; it has no hub")]
+    LocalOrigin,
+    /// An identity's agmend credential could not be read from the token store.
+    #[error("reading the local identity credential failed")]
+    LocalCredentialStore(#[source] crate::TokenStoreError),
+    /// A stored agmend credential is invalid. Its contents are never included.
+    #[error("the local identity credential is invalid")]
+    LocalCredential,
     /// The hub URL would expose credentials over an unsafe transport.
     #[error(transparent)]
     HubUrl(#[from] crate::HubUrlError),
