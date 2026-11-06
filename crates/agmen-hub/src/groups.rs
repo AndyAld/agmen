@@ -47,6 +47,8 @@ const SUBSCRIPTION_PENDING: &str = "the subscription is not active yet; try agai
 const BILLED_OUTSIDE: &str = "this group is billed outside Paddle";
 const NO_SUBSCRIPTION: &str =
     "this group has no subscription yet: agmen group seats add 1 starts one";
+const SUBSCRIPTION_ENDED: &str =
+    "this group's subscription ended; its owner can start a new one with: agmen group billing";
 const OWNER_ONLY: &str = "only the owner can change billing";
 const NOT_HOSTED: &str = "this hub is not agmen hosted";
 const NO_SEAT_PLAN: &str = "this group has no seat plan";
@@ -509,7 +511,10 @@ pub(crate) async fn set_seats(
     caller: Caller,
     Json(request): Json<SetSeats>,
 ) -> Result<Json<Billed>, ApiError> {
-    let (tenant_id, record) = billing_admin(&hub, &tenant, caller).await?;
+    let (tenant_id, record, human, role) = billing_admin(&hub, &tenant, caller).await?;
+    if subscription_ended(&record) {
+        return Err(no_subscription(SUBSCRIPTION_ENDED));
+    }
     checked_paid(request.paid, seats_used(hub.pool(), &tenant_id).await?)?;
     match (paddle_ids(hub.pool(), &tenant_id).await?, record.plan) {
         (None, None) => unpaid_seats(&hub, &tenant_id, &record, request.paid).await,
@@ -517,7 +522,12 @@ pub(crate) async fn set_seats(
         (Some(_), None) => Err(no_subscription(SUBSCRIPTION_PENDING)),
         (Some((_, subscription)), Some(current)) => {
             let plan = seat_change_plan(current, request.paid)?;
-            replace_subscription(&hub, &tenant_id, &subscription, current, plan).await
+            // Stored only when this returns. A refusal, including
+            // seats_below_used, keeps its own answer and posts no raise alert.
+            let replaced =
+                replace_subscription(&hub, &tenant_id, &subscription, current, plan).await?;
+            alert_admin_seat_raise(&hub, &tenant_id, &human, role, &replaced).await;
+            Ok(Json(stored_billed(&replaced.record)))
         }
     }
 }
@@ -535,6 +545,25 @@ pub(crate) async fn set_plan_route(
     let seats = requested_seats(&request, &record)?;
     checked_paid(seats, seats_used(hub.pool(), &tenant_id).await?)?;
     let plan = plan_from_choice(&request.plan, seats)?;
+    if subscription_ended(&record) {
+        if record.read_only_cause == Some(ReadOnlyCause::PaymentFailed) {
+            // Cancellation needs only the subscription, even if its customer
+            // id is missing. `paddle_ids` requires both for the portal.
+            let subscription: Option<String> = sqlx::query_scalar(
+                "SELECT paddle_subscription_id FROM tenant_plans WHERE tenant_id = $1",
+            )
+            .bind(tenant_id.as_str())
+            .fetch_one(hub.pool())
+            .await?;
+            if let Some(subscription) = subscription {
+                let (paddle, _) = billing_parts(&hub)?;
+                hub.take_billing_call(&tenant_id)?;
+                paddle.cancel_subscription(&subscription).await?;
+            }
+        }
+        let url = start_checkout(&hub, &tenant_id, plan).await?;
+        return Ok(Json(Billed::Checkout { checkout_url: url }));
+    }
     match (paddle_ids(hub.pool(), &tenant_id).await?, record.plan) {
         (None, Some(_)) => Err(no_subscription(BILLED_OUTSIDE)),
         (Some(_), None) => Err(no_subscription(SUBSCRIPTION_PENDING)),
@@ -543,7 +572,9 @@ pub(crate) async fn set_plan_route(
             Ok(Json(Billed::Checkout { checkout_url: url }))
         }
         (Some((_, subscription)), Some(current)) => {
-            replace_subscription(&hub, &tenant_id, &subscription, current, plan).await
+            let replaced =
+                replace_subscription(&hub, &tenant_id, &subscription, current, plan).await?;
+            Ok(Json(stored_billed(&replaced.record)))
         }
     }
 }
@@ -554,7 +585,10 @@ pub(crate) async fn portal(
     Path(tenant): Path<String>,
     caller: Caller,
 ) -> Result<Json<Portal>, ApiError> {
-    let (tenant_id, _) = billing_owner(&hub, &tenant, caller).await?;
+    let (tenant_id, record) = billing_owner(&hub, &tenant, caller).await?;
+    if subscription_ended(&record) {
+        return Err(no_subscription(SUBSCRIPTION_ENDED));
+    }
     let Some((customer, subscription)) = paddle_ids(hub.pool(), &tenant_id).await? else {
         return Err(no_subscription(NO_SUBSCRIPTION));
     };
@@ -564,6 +598,14 @@ pub(crate) async fn portal(
     Ok(Json(Portal {
         portal_url: url.as_str().to_owned(),
     }))
+}
+
+fn subscription_ended(record: &PlanRecord) -> bool {
+    record.state == PlanState::ReadOnly
+        && matches!(
+            record.read_only_cause,
+            Some(ReadOnlyCause::Canceled | ReadOnlyCause::PaymentFailed)
+        )
 }
 
 fn hosted_only(hub: &Hub) -> Result<(), ApiError> {
@@ -624,11 +666,12 @@ async fn billing_admin(
     hub: &Hub,
     tenant: &str,
     caller: Caller,
-) -> Result<(TenantId, PlanRecord), ApiError> {
+) -> Result<(TenantId, PlanRecord, HumanId, TenantRole), ApiError> {
     hosted_only(hub)?;
     let human = caller.human()?;
-    require_group_admin(tenant_role(hub.pool(), tenant, &human).await?)?;
-    loaded_plan(hub, tenant).await
+    let role = require_group_admin(tenant_role(hub.pool(), tenant, &human).await?)?;
+    let (tenant_id, record) = loaded_plan(hub, tenant).await?;
+    Ok((tenant_id, record, human, role))
 }
 
 async fn billing_owner(
@@ -729,6 +772,15 @@ async fn start_checkout(hub: &Hub, tenant: &TenantId, plan: Plan) -> Result<Stri
     Ok(url.as_str().to_owned())
 }
 
+/// A subscription change that is stored.
+struct Replaced {
+    /// The plan row after the change.
+    record: PlanRecord,
+    /// Paid seats the row held when the change took its lock. A request that
+    /// began earlier may have read another count.
+    paid_before: u32,
+}
+
 /// Changes the subscription to `plan` and stores what Paddle answers.
 /// `previous` is the plan the group had when the request began: the seat race
 /// puts it back, whatever the plan row says by then.
@@ -738,14 +790,69 @@ async fn replace_subscription(
     subscription: &str,
     previous: Plan,
     plan: Plan,
-) -> Result<Json<Billed>, ApiError> {
+) -> Result<Replaced, ApiError> {
     let (paddle, catalog) = billing_parts(hub)?;
     hub.take_billing_call(tenant)?;
     let items = paddle
         .update_items(subscription, &catalog.items_for(plan))
         .await?;
-    let record = store_returned_plan(hub, catalog, tenant, subscription, previous, &items).await?;
-    Ok(Json(stored_billed(&record)))
+    store_returned_plan(hub, catalog, tenant, subscription, previous, &items).await
+}
+
+/// Tells the owner when an admin raised the stored paid count. The old count
+/// is the one the change found in the locked plan row, so two requests that
+/// race to the same count alert once. A post failure is logged and does not
+/// change the answer.
+async fn alert_admin_seat_raise(
+    hub: &Hub,
+    tenant: &TenantId,
+    human: &HumanId,
+    role: TenantRole,
+    replaced: &Replaced,
+) {
+    let (before, after) = (replaced.paid_before, replaced.record.seats_paid());
+    if role == TenantRole::Owner || after <= before {
+        return;
+    }
+    let Some(step) = plan_name(replaced.record.plan) else {
+        tracing::error!(%tenant, "seat raise alert was not posted: the stored plan has no name");
+        return;
+    };
+    if let Err(error) = post_seat_raise_alert(hub, tenant, human, before, after, &step).await {
+        tracing::error!(
+            %tenant,
+            error = %error_chain(&error),
+            "seat raise alert was not posted"
+        );
+    }
+}
+
+async fn post_seat_raise_alert(
+    hub: &Hub,
+    tenant: &TenantId,
+    human: &HumanId,
+    before: u32,
+    after: u32,
+    step: &str,
+) -> Result<(), PostError> {
+    let row: Option<(String, String)> = sqlx::query_as(
+        "SELECT humans.handle, tenants.name FROM humans CROSS JOIN tenants \
+         WHERE humans.id = $1 AND tenants.id = $2",
+    )
+    .bind(human.as_str())
+    .bind(tenant.as_str())
+    .fetch_optional(hub.pool())
+    .await
+    .map_err(|err| PostError::Store(Box::new(err)))?;
+    let Some((handle, name)) = row else {
+        return Err(PostError::Store(Box::new(std::io::Error::other(
+            "seat raise alert is missing the caller's handle or the group name",
+        ))));
+    };
+    let body = format!(
+        "{handle} raised {name} from {before} to {after} paid seats ({step}). Paddle bills the change to your card."
+    );
+    post_owner_alert(hub, tenant, &body).await
 }
 
 // Leaves `state` and `last_event_at` for the webhook. `PlanRecord::apply`
@@ -758,7 +865,7 @@ async fn store_returned_plan(
     subscription: &str,
     previous: Plan,
     items: &[LineItem],
-) -> Result<PlanRecord, ApiError> {
+) -> Result<Replaced, ApiError> {
     let Some(plan) = catalog.plan_of(items) else {
         tracing::error!(
             ?items,
@@ -774,13 +881,23 @@ async fn store_returned_plan(
     let Some(record) = locked_plan(&mut tx, tenant).await? else {
         return Err(no_seat_plan());
     };
+    let paid_before = record.seats_paid();
     if plan_seats(plan) < seats_used(&mut *tx, tenant).await? {
         tx.rollback().await?;
-        return refuse_dropped_seats(hub, catalog, tenant, subscription, previous, plan).await;
+        // This always ends in a refusal. The map only fits the return type.
+        return refuse_dropped_seats(hub, catalog, tenant, subscription, previous, plan)
+            .await
+            .map(|record| Replaced {
+                record,
+                paid_before,
+            });
     }
     let record = assign_plan(&mut tx, tenant, record, plan).await?;
     tx.commit().await?;
-    Ok(record)
+    Ok(Replaced {
+        record,
+        paid_before,
+    })
 }
 
 async fn locked_plan(

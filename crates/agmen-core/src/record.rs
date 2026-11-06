@@ -123,6 +123,7 @@ impl<S: Store> Core<S> {
         let mut tx = self.store().begin().await.map_err(PostError::store)?;
         let posted = post_hub(&mut tx, topics, post, None).await?;
         tx.commit().await.map_err(PostError::store)?;
+        self.notifier().stored(topics.project());
         Ok(posted)
     }
 }

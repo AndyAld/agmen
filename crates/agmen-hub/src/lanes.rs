@@ -196,7 +196,7 @@ pub(crate) fn validate_edits(edits: &EditScope) -> Result<(), ApiError> {
     agmen_core::validate_edits(edits).map_err(|err| unprocessable("bad_edits", err))
 }
 
-fn store_error(err: StoreError) -> ApiError {
+pub(crate) fn store_error(err: StoreError) -> ApiError {
     match err {
         StoreError::Backend(source) => match source.downcast::<sqlx::Error>() {
             Ok(err) => ApiError::Database(*err),

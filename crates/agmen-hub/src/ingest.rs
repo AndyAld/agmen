@@ -9,9 +9,7 @@
 
 use agmen_proto::{DeliveryReply, IdentityId, ProjectId, Stream, Topics};
 use sqlx::PgPool;
-use tokio::sync::{Notify, watch};
 
-use crate::events::Wakes;
 use crate::http::{Hub, error_chain};
 use crate::usage::{post_owner_alert, with_thousands, write_gate};
 pub(crate) use agmen_core::{Handled, HubPost, PostError, Posted, ReplyRoute};
@@ -30,34 +28,6 @@ pub enum IngestError {
     /// The project could not be looked up.
     #[error("looking up the project failed")]
     Database(#[source] sqlx::Error),
-}
-
-/// Ingest's transport state: the sweeper's wake-up and the
-/// events streams' wake-up.
-#[derive(Debug, Default)]
-pub(crate) struct IngestState {
-    outbox_ready: Notify,
-    stored: Wakes,
-}
-
-impl IngestState {
-    /// Signalled after each commit that added outbox rows.
-    pub(crate) fn outbox_ready(&self) -> &Notify {
-        &self.outbox_ready
-    }
-
-    /// Call after each commit that stored messages in `project`: wakes the
-    /// sweeper and that project's events streams.
-    pub(crate) fn stored(&self, project: &ProjectId) {
-        self.outbox_ready.notify_one();
-        self.stored.wake(project);
-    }
-
-    /// A receiver that sees a change after each [`IngestState::stored`]
-    /// for `project`.
-    pub(crate) fn watch_stored(&self, project: &ProjectId) -> watch::Receiver<()> {
-        self.stored.watch(project)
-    }
 }
 
 impl Hub {
@@ -134,7 +104,6 @@ impl Hub {
             }
         }
         if let Some(recorded) = &handled.recorded {
-            self.ingest_state().stored(topics.project());
             self.on_recorded(
                 topics,
                 recorded.verb,
@@ -185,9 +154,7 @@ impl Hub {
     /// # Ok(()) }
     /// ```
     pub async fn post_as_hub(&self, topics: &Topics, post: HubPost) -> Result<Posted, PostError> {
-        let posted = self.core().post_as_hub(topics, post).await?;
-        self.ingest_state().stored(topics.project());
-        Ok(posted)
+        self.core().post_as_hub(topics, post).await
     }
 }
 

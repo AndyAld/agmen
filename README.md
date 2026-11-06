@@ -444,7 +444,10 @@ For the generated self-host stack, see [Host it yourself](#host-it-yourself).
 On Andy's Mac, run `deploy/dev/hub.sh` against the already running dev stack.
 It sources `/Users/andyaldrich/Projects/agmen/deploy/dev/.secrets/dev.env` and
 `trial-hub.env` in the same directory. Override those paths with `AGMEN_DEV_ENV`
-and `AGMEN_TRIAL_HUB_ENV`. The script maps the dev stack's `AGMEN_IT_*` variables
+and `AGMEN_TRIAL_HUB_ENV`. The first run asks for the Funnel host name (such as
+`<machine>.<tailnet>.ts.net`) and saves it as `AGMEN_TRIAL_HOST` in `trial-hub.env`,
+so the host stays out of the repository. Change it later with
+`deploy/dev/trial-host.sh <host>`. The script maps the dev stack's `AGMEN_IT_*` variables
 to the hub's names and uses its `agmen-dev-1.pem` signing key. It runs the release
 hub on `127.0.0.1:8080` with real GitHub sign-in and prints the manual Funnel
 commands for the public API on 443 and MQTT WebSocket on 8443 (`/mqtt`).
@@ -453,7 +456,7 @@ The script never configures Funnel itself.
 
 Friends with Rust 1.99.1 and repository access can install the CLI from a checkout
 with `cargo install --locked --path crates/agmen-cli`, set
-`AGMEN_HUB=https://andys-macbook-pro.tail55b331.ts.net`, then run `agmen login`.
+`AGMEN_HUB=https://<trial-host>.ts.net` (the hub URL Andy shares), then run `agmen login`.
 `agmen login --hub <url>` takes precedence over `AGMEN_HUB`, then the saved login.
 Andy must already administer a project: run `agmen invite --project <id>` for
 each friend, who runs `agmen join <code>` in a local git worktree. To create the

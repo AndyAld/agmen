@@ -20,7 +20,6 @@ use crate::broker_tokens::BrokerTokens;
 use crate::config::{DEFAULT_CLAIM_LEASE, EmqxConfig, GithubConfig, HubMode, HubSecrets};
 use crate::emqx::EmqxAdmin;
 use crate::events::Slots;
-use crate::ingest::IngestState;
 use crate::presence::PresenceState;
 use crate::self_config;
 
@@ -90,7 +89,6 @@ fn test_hub(mqtt_ws_upstream: Option<Url>) -> Hub {
             public_url: Url::parse("https://hub.example").unwrap(),
             public_mqtt_url: Url::parse("wss://hub.example/mqtt").unwrap(),
             mqtt_ws_upstream,
-            ingest: IngestState::default(),
             presence: PresenceState::default(),
             events: Slots::default(),
             claim_lease: DEFAULT_CLAIM_LEASE,

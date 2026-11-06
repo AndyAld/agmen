@@ -296,6 +296,7 @@ What the listener may do (Andy, 2026-10-25: "I like that rec"):
 | Path | Contents |
 |---|---|
 | `crates/agmen-proto` | Envelope, verbs, topic builders (opaque ids only), JSON Schema via schemars, TS types via ts-rs |
+| `crates/agmen-core` | Hub logic shared by agmen-hub (Postgres) and agmend (SQLite, Phase 3): ingest, numbering, routing, ledger, lanes, presence, replay |
 | `crates/agmen-client` | MQTT 5 session (rumqttc), SQLite outbox, ACK and NACK tracking, gap detection, replay |
 | `crates/agmend` | Daemon: identities, devices, local API (Unix socket or Windows named pipe, lock file, version negotiation), launcher and ACP client, roles, worktree lifecycle, budgets, listener supervision and delegation policy |
 | `crates/agmen-cli` | `agmen` binary: subcommands, `agmen mcp` (rmcp stdio, the pattern in `~/Projects/kit_mcp`), `agmen watch`, the terminal UI (`agmen` with no arguments) |

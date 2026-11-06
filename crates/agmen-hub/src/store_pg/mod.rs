@@ -2,14 +2,16 @@
 
 mod ledger;
 mod messages;
+mod presence;
+mod replay;
 
 pub(crate) use messages::project_exists;
 
 use std::time::Duration;
 
 use agmen_core::{
-    LaneHolder, LaneRow, MessageRow, Parent, QuotaTaken, Reads, ResolvedLane, Roster, Sender,
-    Store, StoreError, StoreTx,
+    ExpiredClaim, ItemRow, LaneHolder, LaneRow, LatestHellos, MessageRow, Page, Parent, QuotaTaken,
+    Reads, ResolvedLane, Roster, RosterRow, Sender, Store, StoreError, StoreTx,
 };
 use agmen_proto::{
     IdentityId, IdentityKind, ItemKey, LaneName, MessageId, ProjectId, Seq, Stream, TenantId,
@@ -19,16 +21,19 @@ use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 
 use crate::claims::LedgerError;
 
+/// Postgres adapter exposed only through the hub's test hooks.
 #[derive(Debug)]
-pub(crate) struct PgStore {
+pub struct PgStore {
     pool: PgPool,
 }
 
+/// A pool-backed reader for the Postgres adapter.
 #[derive(Debug)]
-pub(crate) struct PgReader<'a>(&'a PgPool);
+pub struct PgReader<'a>(&'a PgPool);
 
+/// A Postgres transaction that rolls back when dropped without commit.
 #[derive(Debug)]
-pub(crate) struct PgTx {
+pub struct PgTx {
     tx: Transaction<'static, Postgres>,
 }
 
@@ -45,6 +50,25 @@ impl PgTx {
 }
 
 impl Reads for PgReader<'_> {
+    async fn page(
+        &mut self,
+        project: &ProjectId,
+        stream: &Stream,
+        after: u64,
+        limit: u32,
+    ) -> Result<Page, StoreError> {
+        let mut db = self
+            .0
+            .acquire()
+            .await
+            .map_err(|err| StoreError::Backend(Box::new(err)))?;
+        replay::page(&mut db, project, stream, after, limit).await
+    }
+
+    async fn items(&mut self, project: &ProjectId) -> Result<Vec<ItemRow>, StoreError> {
+        replay::items(self.0, project).await
+    }
+
     async fn project_exists(&mut self, topics: &Topics) -> Result<bool, StoreError> {
         messages::project_exists(self.0, topics)
             .await
@@ -148,9 +172,31 @@ impl Reads for PgReader<'_> {
             .await
             .map_err(from_ledger)
     }
+
+    async fn roster_rows(&mut self, project: &ProjectId) -> Result<Vec<RosterRow>, StoreError> {
+        presence::roster_rows(self.0, project).await
+    }
+
+    async fn latest_hellos(&mut self, project: &ProjectId) -> Result<LatestHellos, StoreError> {
+        presence::latest_hellos(self.0, project).await
+    }
 }
 
 impl Reads for PgTx {
+    async fn page(
+        &mut self,
+        project: &ProjectId,
+        stream: &Stream,
+        after: u64,
+        limit: u32,
+    ) -> Result<Page, StoreError> {
+        replay::page(connection(&mut self.tx), project, stream, after, limit).await
+    }
+
+    async fn items(&mut self, project: &ProjectId) -> Result<Vec<ItemRow>, StoreError> {
+        replay::items(connection(&mut self.tx), project).await
+    }
+
     async fn project_exists(&mut self, topics: &Topics) -> Result<bool, StoreError> {
         messages::project_exists(connection(&mut self.tx), topics)
             .await
@@ -238,6 +284,14 @@ impl Reads for PgTx {
         ledger::lane_list(connection(&mut self.tx), project)
             .await
             .map_err(from_ledger)
+    }
+
+    async fn roster_rows(&mut self, project: &ProjectId) -> Result<Vec<RosterRow>, StoreError> {
+        presence::roster_rows(connection(&mut self.tx), project).await
+    }
+
+    async fn latest_hellos(&mut self, project: &ProjectId) -> Result<LatestHellos, StoreError> {
+        presence::latest_hellos(connection(&mut self.tx), project).await
     }
 }
 
@@ -453,6 +507,10 @@ impl StoreTx for PgTx {
         ledger::resolve_owner(connection(&mut self.tx), project, handle)
             .await
             .map_err(from_ledger)
+    }
+
+    async fn expire_claims(&mut self, limit: u32) -> Result<Vec<ExpiredClaim>, StoreError> {
+        presence::expire_claims(self.sqlx(), limit).await
     }
 }
 

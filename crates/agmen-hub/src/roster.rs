@@ -5,15 +5,12 @@
 //! limit at any roster size. The full array is
 //! `GET /v1/projects/{p}/state?key=roster`.
 
-use std::collections::HashMap;
-
-use agmen_proto::{IdentityId, IdentityKind, MAX_HELLO_FIELD_BYTES, Topics};
-use serde::de::IntoDeserializer as _;
-use serde::{Deserialize, Serialize};
+use agmen_core::{RosterEntry, RosterError as CoreRosterError, Status};
+use agmen_proto::Topics;
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::http::Hub;
-use crate::presence::{RosterEntry, Status};
 
 /// The retained `state/roster` payload: how many entries, how many are
 /// online, and a short hash of the full array.
@@ -75,86 +72,28 @@ impl Hub {
     /// `topics`' roster: every live identity and every human member, by
     /// handle, with its status and its latest HELLO's agent and model.
     pub(crate) async fn roster(&self, topics: &Topics) -> Result<Vec<RosterEntry>, RosterError> {
-        let project = topics.project();
-        type RosterRow = (
-            String,
-            String,
-            String,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-        );
-        let members: Vec<RosterRow> = sqlx::query_as(
-            "SELECT id, kind, handle, role, agent, delegated_by FROM identities
-             WHERE project_id = $1 AND revoked_at IS NULL
-             UNION ALL
-             SELECT h.id, 'human', h.handle, NULL::text, NULL::text, NULL::text FROM memberships m
-             JOIN humans h ON h.id = m.human_id
-             WHERE m.project_id = $1
-             ORDER BY 3",
-        )
-        .bind(project.as_str())
-        .fetch_all(self.pool())
-        .await?;
-        // Uses the messages_latest_hello index (0005_presence). One row per
-        // identity that has posted a HELLO, so at most one per live identity.
-        let hellos: HashMap<String, (Option<String>, Option<String>)> = sqlx::query_as(
-            "SELECT DISTINCT ON (from_id)
-                    from_id, envelope -> 'data' ->> 'agent', envelope -> 'data' ->> 'model'
-             FROM messages
-             WHERE project_id = $1 AND stream = 'feed' AND envelope ->> 'verb' = 'HELLO'
-             ORDER BY from_id, seq DESC",
-        )
-        .bind(project.as_str())
-        .fetch_all(self.pool())
-        .await?
-        .into_iter()
-        .map(
-            |(from, agent, model): (String, Option<String>, Option<String>)| {
-                (from, (agent.map(hello_field), model.map(hello_field)))
-            },
-        )
-        .collect();
-        members
-            .into_iter()
-            .map(|(id, kind, handle, role, minted_agent, delegated_by)| {
-                let (agent, model) = hellos.get(&id).cloned().unwrap_or_default();
-                let identity_id: IdentityId = id
-                    .parse()
-                    .map_err(|err| RosterError::Stored(format!("{err}")))?;
-                let kind = IdentityKind::deserialize(kind.as_str().into_deserializer())
-                    .map_err(|err: serde::de::value::Error| RosterError::Stored(err.to_string()))?;
-                let status = self.presence().status(project, &identity_id);
-                let delegated_by = delegated_by
-                    .map(|id| id.parse())
-                    .transpose()
-                    .map_err(|err| RosterError::Stored(format!("{err}")))?;
-                Ok(RosterEntry::complete(
-                    identity_id,
-                    handle,
-                    kind,
-                    status,
-                    role,
-                    minted_agent.or(agent),
-                    model,
-                    delegated_by,
-                ))
-            })
-            .collect()
+        self.core().roster(topics).await.map_err(roster_error)
     }
 }
 
-/// `field` cut to [`MAX_HELLO_FIELD_BYTES`] at a character boundary. Ingest
-/// refuses a longer HELLO field, so this only trims one recorded before that
-/// limit, which would otherwise inflate the roster array.
-fn hello_field(mut field: String) -> String {
-    field.truncate(field.floor_char_boundary(MAX_HELLO_FIELD_BYTES));
-    field
+fn roster_error(err: CoreRosterError) -> RosterError {
+    match err {
+        CoreRosterError::Database(source) => {
+            RosterError::Database(match source.downcast::<sqlx::Error>() {
+                Ok(err) => *err,
+                Err(source) => sqlx::Error::Decode(source),
+            })
+        }
+        CoreRosterError::Stored(text) => RosterError::Stored(text),
+        other => RosterError::Database(sqlx::Error::Decode(Box::new(other))),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use agmen_proto::IdentityKind;
 
     fn entry(n: usize, handle: &str, status: Status) -> RosterEntry {
         let id = format!("id{n:06}");
@@ -211,16 +150,5 @@ mod tests {
             .collect();
         let bytes = serde_json::to_vec(&roster_head(&roster)).unwrap();
         assert!(bytes.len() < 4_096, "{} bytes", bytes.len());
-    }
-
-    #[test]
-    fn hello_fields_are_cut_at_a_character_boundary() {
-        assert_eq!(hello_field("opus".to_owned()), "opus");
-        let long = "é".repeat(MAX_HELLO_FIELD_BYTES);
-        let cut = hello_field(long);
-        assert_eq!(cut.len(), MAX_HELLO_FIELD_BYTES);
-        assert_eq!(cut, "é".repeat(MAX_HELLO_FIELD_BYTES / 2));
-        let odd = format!("a{}", "é".repeat(MAX_HELLO_FIELD_BYTES));
-        assert_eq!(hello_field(odd).len(), MAX_HELLO_FIELD_BYTES - 1);
     }
 }

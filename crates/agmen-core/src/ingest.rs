@@ -364,6 +364,7 @@ impl<S: Store> Core<S> {
                         })?;
                 }
                 tx.commit().await.map_err(database_error)?;
+                self.notifier().stored(topics.project());
                 let (stream, seq) = recorded.ack;
                 let draft_id = id.clone();
                 Ok(Handled {

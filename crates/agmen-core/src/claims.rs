@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use crate::{HubPost, Lapsed, PostError, ReleaseBy, StoreError, StoreTx, post_in};
+use crate::{Core, HubPost, Lapsed, PostError, ReleaseBy, Store, StoreError, StoreTx, post_in};
 use agmen_proto::{
     Body, ClientEnvelope, DenyReason, IdentityId, IdentityKind, ItemKey, LaneName, NackReason,
     Payload, ProjectId, ProtoError, Stream, Timestamp, Topics, Verb, validate,
@@ -94,9 +94,7 @@ pub async fn apply_ledger<T: StoreTx>(
 ///
 /// # Errors
 /// Returns [`ProtoError`] if the release body cannot be built.
-// shortcut: public bridge for the hub sweeper until Task 8 moves expiry.
-#[doc(hidden)]
-pub fn lease_expired(
+pub(crate) fn lease_expired(
     item: &ItemKey,
     lane: Option<LaneName>,
     lapsed: &Lapsed,
@@ -332,275 +330,159 @@ async fn release<T: StoreTx>(
     Ok(())
 }
 
-#[cfg(test)]
-pub(crate) mod tests {
-    use std::time::Duration;
+/// Expired claims one sweep releases at most.
+const SWEEP_BATCH: u32 = 100;
+/// Failed sweeps in a row before the lease sweeper gives up.
+const MAX_FAILURES: u32 = 60;
+/// The pause after a failed sweep.
+const RETRY_DELAY: Duration = Duration::from_secs(1);
 
-    use agmen_proto::{
-        ClientEnvelope, DenyReason, IdentityKind, Payload, Stream, Timestamp, Topics,
-    };
+/// Why [`Core::run_lease_sweeper`] stopped.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+#[error("the lease sweeper failed {failures} times in a row")]
+pub struct SweepGaveUp {
+    /// Sweeps that failed in a row.
+    pub failures: u32,
+    /// The last failure.
+    #[source]
+    pub last: LedgerError,
+}
 
-    use crate::{
-        AckCopy, Draft, LedgerError, LedgerMessage, MemStore, NewItem, Reads, ResolvedLane, Store,
-        StoreTx, apply_ledger, envelope_hash, new_message_id, write,
-    };
-
-    pub(crate) const LEASE: Duration = Duration::from_secs(60);
-
-    pub(crate) async fn setup() -> (MemStore, Topics) {
-        let store = MemStore::default();
-        let topics = Topics::new("tenant01".parse().unwrap(), "project01".parse().unwrap());
-        for (id, handle, kind) in [
-            ("aaaaaaaa", "a", IdentityKind::Agent),
-            ("bbbbbbbb", "b", IdentityKind::Agent),
-            ("oooooooo", "o", IdentityKind::Agent),
-            ("cccccccc", "c", IdentityKind::Coordinator),
-        ] {
-            store
-                .seed_live_identity(topics.project(), &id.parse().unwrap(), handle, kind)
-                .await
-                .unwrap();
-        }
-        (store, topics)
+impl<S: Store> Core<S> {
+    /// Releases claims whose lease ran out and posts RELEASE `lease_expired`
+    /// to the feed for each open item. Checks every quarter lease, and at
+    /// least every 30 s. Returns only when 60 sweeps in a row fail.
+    ///
+    /// Each committed RELEASE wakes the publisher and the project's readers.
+    ///
+    /// A full batch does not sleep. A shorter batch sleeps. A failure sleeps
+    /// one second, except the 60th, which returns.
+    ///
+    /// The success path runs until the task is aborted. The failure path
+    /// stops after 60 failures in a row.
+    ///
+    /// # Errors
+    ///
+    /// [`SweepGaveUp`] with the last failure. It does not return [`Ok`].
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn example<S: agmen_core::Store + 'static>(core: agmen_core::Core<S>) {
+    /// tokio::spawn(async move { core.run_lease_sweeper().await });
+    /// # }
+    /// ```
+    pub async fn run_lease_sweeper(&self) -> Result<(), SweepGaveUp> {
+        self.sweep_until_gave_up(RETRY_DELAY).await
     }
 
-    pub(crate) fn message(from: &str, handle: &str, payload: Payload) -> LedgerMessage {
-        let now = Timestamp::now();
-        LedgerMessage {
-            env: ClientEnvelope {
-                v: 1,
-                id: new_message_id(now).unwrap(),
-                reply_to: None,
-                to: Vec::new(),
-                mentions: Vec::new(),
-                items: Vec::new(),
-                lane: None,
-                body: "ledger test".try_into().unwrap(),
-                valid_until: Some(now + LEASE),
-                sent_at: now,
-                payload,
-            },
-            from: from.parse().unwrap(),
-            from_handle: handle.into(),
-            from_kind: IdentityKind::Agent,
-            from_owner: None,
-            hub_at: now,
-        }
-    }
-
-    pub(crate) async fn item(store: &MemStore, topics: &Topics, owned: bool) {
-        let mut tx = store.begin().await.unwrap();
-        tx.replace_lanes(
-            topics.project(),
-            &[ResolvedLane {
-                name: "L-UI".parse().unwrap(),
-                globs: vec!["ui/**".into()],
-                owner: owned.then(|| "oooooooo".parse().unwrap()),
-            }],
-        )
-        .await
-        .unwrap();
-        tx.insert_item(&NewItem {
-            project: topics.project(),
-            key: &"B-1".parse().unwrap(),
-            title: "bug",
-            lane: Some(&"L-UI".parse().unwrap()),
-            severity: None,
-            created_by: &"aaaaaaaa".parse().unwrap(),
-        })
-        .await
-        .unwrap();
-        tx.commit().await.unwrap();
-    }
-
-    pub(crate) async fn apply(store: &MemStore, topics: &Topics, msg: &LedgerMessage) {
-        let mut tx = store.begin().await.unwrap();
-        apply_ledger(&mut tx, topics, msg, LEASE).await.unwrap();
-        tx.commit().await.unwrap();
-    }
-
-    pub(crate) fn claim(from: &str, handle: &str) -> LedgerMessage {
-        message(
-            from,
-            handle,
-            Payload::Claim {
-                item: "B-1".parse().unwrap(),
-            },
-        )
-    }
-
-    #[tokio::test]
-    async fn claim_grants_then_denies_held_by() {
-        let (store, topics) = setup().await;
-        item(&store, &topics, false).await;
-        let now = Timestamp::from_millisecond(Timestamp::now().as_millisecond()).unwrap();
-        store.set_now(now);
-        apply(&store, &topics, &claim("aaaaaaaa", "a")).await;
-        apply(&store, &topics, &claim("bbbbbbbb", "b")).await;
-        store.set_now(now + Duration::from_secs(1));
-        apply(&store, &topics, &claim("aaaaaaaa", "a")).await;
-        let rows = store.recorded_messages().await.unwrap();
-        let feed: Vec<_> = rows
-            .iter()
-            .filter(|row| row.stream == Stream::Feed)
-            .collect();
-        assert_eq!(feed.len(), 3);
-        assert_eq!(
-            feed[0].client.payload,
-            Payload::Grant {
-                item: "B-1".parse().unwrap(),
-                lease_until: now + LEASE,
+    /// [`run_lease_sweeper`](Self::run_lease_sweeper) with the pause after a
+    /// failed sweep as an argument, so a test need not wait 59 real seconds.
+    async fn sweep_until_gave_up(&self, retry_delay: Duration) -> Result<(), SweepGaveUp> {
+        let every =
+            (self.claim_lease() / 4).clamp(Duration::from_millis(100), Duration::from_secs(30));
+        let mut failures = 0_u32;
+        loop {
+            match self.expire_leases().await {
+                Ok(released) => {
+                    failures = 0;
+                    if released < batch_len() {
+                        tokio::time::sleep(every).await;
+                    }
+                }
+                Err(err) => {
+                    failures += 1;
+                    if failures >= MAX_FAILURES {
+                        return Err(SweepGaveUp {
+                            failures,
+                            last: err,
+                        });
+                    }
+                    tracing::warn!(
+                        error = %sweep_error(&err),
+                        failures,
+                        "lease sweep failed; retrying"
+                    );
+                    tokio::time::sleep(retry_delay).await;
+                }
             }
-        );
-        assert_eq!(
-            feed[1].client.payload,
-            Payload::Deny {
-                item: "B-1".parse().unwrap(),
-                reason: DenyReason::HeldBy,
-            }
-        );
-        assert_eq!(feed[1].client.body.as_str(), "B-1 denied to b: held by a");
-        assert_eq!(
-            feed[2].client.payload,
-            Payload::Grant {
-                item: "B-1".parse().unwrap(),
-                lease_until: now + Duration::from_secs(1) + LEASE,
-            }
-        );
-        assert_eq!(rows.len(), 6);
-        for pair in rows.as_chunks::<2>().0 {
-            assert_eq!(pair[0].client.payload, pair[1].client.payload);
-            assert!(matches!(pair[1].stream, Stream::Inbox(_)));
         }
     }
 
-    #[tokio::test]
-    async fn claim_in_owned_lane_needs_owner_coordinator_or_assignee() {
-        let (store, topics) = setup().await;
-        item(&store, &topics, true).await;
-        apply(&store, &topics, &claim("aaaaaaaa", "a")).await;
-        let mut assigned = message(
-            "cccccccc",
-            "c",
-            Payload::Assign {
-                item: "B-1".parse().unwrap(),
-                to: "aaaaaaaa".parse().unwrap(),
-            },
-        );
-        assigned.from_kind = IdentityKind::Coordinator;
-        apply(&store, &topics, &assigned).await;
-        apply(&store, &topics, &claim("aaaaaaaa", "a")).await;
-        let rows = store.recorded_messages().await.unwrap();
-        assert!(matches!(
-            rows[0].client.payload,
-            Payload::Deny {
-                reason: DenyReason::NotInLane,
-                ..
+    /// One sweep: releases up to [`SWEEP_BATCH`] expired claims and posts a
+    /// RELEASE for each whose item is still open, waking its project after
+    /// each post. Returns how many it released. DONE ends its
+    /// own claim, so a claim on a done item reaches here only if it predates
+    /// that; it is released without a RELEASE.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LedgerError`] when the release or a later post fails.
+    ///
+    /// shortcut: the release commits before its RELEASE is posted, so a
+    /// crash in between loses that RELEASE (the claim is still released);
+    /// post in the release's transaction if that matters.
+    pub(crate) async fn expire_leases(&self) -> Result<usize, LedgerError> {
+        let mut tx = self.store().begin().await?;
+        let rows = tx.expire_claims(SWEEP_BATCH).await?;
+        tx.commit().await?;
+        // Ids are parsed after commit, so a corrupt stored id still leaves
+        // the batch released. Done items are skipped before parsing.
+        for row in rows.iter().take(batch_len()) {
+            if !row.open {
+                continue;
             }
-        ));
-        assert!(matches!(rows[2].client.payload, Payload::Grant { .. }));
-        for (id, handle, kind) in [
-            ("oooooooo", "o", IdentityKind::Agent),
-            ("cccccccc", "c", IdentityKind::Coordinator),
-        ] {
-            let (store, topics) = setup().await;
-            item(&store, &topics, true).await;
-            let mut msg = claim(id, handle);
-            msg.from_kind = kind;
-            apply(&store, &topics, &msg).await;
-            assert!(matches!(
-                store.recorded_messages().await.unwrap()[0].client.payload,
-                Payload::Grant { .. }
-            ));
+            let topics = Topics::new(
+                row.tenant.parse().map_err(stored)?,
+                row.project.parse().map_err(stored)?,
+            );
+            let lapsed = Lapsed {
+                holder: row.holder.parse().map_err(stored)?,
+                handle: row.handle.clone(),
+            };
+            let lane = row
+                .lane
+                .as_deref()
+                .map(str::parse)
+                .transpose()
+                .map_err(stored)?;
+            let item = row.item.parse().map_err(stored)?;
+            self.post_as_hub(&topics, lease_expired(&item, lane, &lapsed)?)
+                .await?;
         }
-    }
-
-    #[tokio::test]
-    async fn lapsed_claim_is_released_before_granting() {
-        let (store, topics) = setup().await;
-        item(&store, &topics, false).await;
-        let now = Timestamp::now();
-        store.set_now(now);
-        apply(&store, &topics, &claim("aaaaaaaa", "a")).await;
-        store.set_now(now + LEASE);
-        apply(&store, &topics, &claim("bbbbbbbb", "b")).await;
-        let rows = store.recorded_messages().await.unwrap();
-        let feed: Vec<_> = rows
-            .iter()
-            .filter(|row| row.stream == Stream::Feed)
-            .collect();
-        assert_eq!(feed.len(), 3);
-        assert_eq!(
-            feed[1].client.payload,
-            Payload::Release {
-                item: "B-1".parse().unwrap(),
-                reason: Some("lease_expired".into()),
-            }
-        );
-        assert_eq!(feed[1].mentioned, vec!["aaaaaaaa".parse().unwrap()]);
-        assert_eq!(
-            feed[1].client.body.as_str(),
-            "B-1 released: a's lease ran out"
-        );
-        assert!(matches!(feed[2].client.payload, Payload::Grant { .. }));
-        assert!(feed[1].seq < feed[2].seq);
-    }
-
-    #[tokio::test]
-    async fn ledger_failure_records_nothing() {
-        let (store, topics) = setup().await;
-        item(&store, &topics, false).await;
-        let msg = claim("aaaaaaaa", "a");
-        store.fail_next("insert_claim");
-        let mut tx = store.begin().await.unwrap();
-        tx.lock_head(&format!("{}/feed", topics.project()))
-            .await
-            .unwrap();
-        write(
-            &mut tx,
-            Draft {
-                topics: &topics,
-                client: msg.env.clone(),
-                from: msg.from.clone(),
-                from_handle: msg.from_handle.clone(),
-                from_kind: msg.from_kind,
-                mentioned: Vec::new(),
-                refs: Vec::new(),
-                streams: [Stream::Feed].into_iter().collect(),
-                hash: envelope_hash(&msg.env).unwrap(),
-                hub_at: msg.hub_at,
-                ack: AckCopy::Queue,
-            },
-        )
-        .await
-        .unwrap();
-        assert!(matches!(
-            apply_ledger(&mut tx, &topics, &msg, LEASE).await,
-            Err(LedgerError::Store(_))
-        ));
-        drop(tx);
-        assert!(store.recorded_messages().await.unwrap().is_empty());
-        assert!(store.queued_publishes().await.unwrap().is_empty());
-        assert!(
-            store
-                .reader()
-                .lane_holders(topics.project())
-                .await
-                .unwrap()
-                .is_empty()
-        );
-        let mut tx = store.begin().await.unwrap();
-        assert!(
-            tx.active_claim(topics.project(), &"B-1".parse().unwrap())
-                .await
-                .unwrap()
-                .is_none()
-        );
-        assert_eq!(
-            tx.next_seq(&format!("{}/feed", topics.project()))
-                .await
-                .unwrap(),
-            agmen_proto::Seq(1)
-        );
+        Ok(rows.len())
     }
 }
+
+fn batch_len() -> usize {
+    usize::try_from(SWEEP_BATCH).unwrap_or(usize::MAX)
+}
+
+fn sweep_error(err: &LedgerError) -> String {
+    match err {
+        LedgerError::Store(StoreError::Backend(source)) => {
+            format!("database error: {}", error_chain(source.as_ref()))
+        }
+        other => error_chain(other),
+    }
+}
+
+/// `err` and up to 16 of its sources, joined with ": ".
+fn error_chain(err: &dyn std::error::Error) -> String {
+    let mut parts = Vec::with_capacity(17);
+    parts.push(err.to_string());
+    let mut current = err.source();
+    while parts.len() < 17 {
+        let Some(inner) = current else {
+            break;
+        };
+        parts.push(inner.to_string());
+        current = std::error::Error::source(inner);
+    }
+    parts.join(": ")
+}
+
+#[cfg(test)]
+#[path = "claims_tests.rs"]
+pub(crate) mod tests;

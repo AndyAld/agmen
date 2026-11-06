@@ -12,14 +12,15 @@
 //!
 //! [`Hub::on_recorded`] is ingest's hook into this: a HELLO changes the
 //! roster, a BYE sets its sender offline, and a ROLLCALL gets the hub's
-//! answer (`crate::rollcall`).
+//! answer from the core.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::sync::{Mutex, PoisonError};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::sync::{Arc, Mutex, PoisonError};
 
-use agmen_proto::{IdentityId, IdentityKind, MessageId, ProjectId, Topics, Verb};
+use agmen_core::Status;
+use agmen_proto::{IdentityId, IdentityKind, MessageId, Topics, Verb};
 use rumqttc_next::{AsyncClient, Publish, PublishOptions, QoS};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use tokio::sync::Notify;
 
 use crate::http::{Hub, error_chain};
@@ -46,92 +47,10 @@ const OFFLINE_PAYLOAD: &[u8] = br#"{"status":"offline"}"#;
 /// it far below this.
 const MAX_INBOX: usize = 4096;
 
-/// Whether an identity is there (protocol section 2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub(crate) enum Status {
-    /// Connected and working.
-    Online,
-    /// Connected, but its person or agent is idle.
-    Away,
-    /// Not connected, or never was.
-    Offline,
-}
-
 /// A `presence/{id}` payload. Fields it does not know are ignored.
 #[derive(Debug, Deserialize)]
 struct PresenceMessage {
     status: Status,
-}
-
-/// One identity in the roster (`GET /v1/projects/{p}/state?key=roster`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct RosterEntry {
-    pub(crate) identity_id: IdentityId,
-    pub(crate) handle: String,
-    pub(crate) kind: IdentityKind,
-    pub(crate) status: Status,
-    /// The role supplied at mint, never taken from a HELLO.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) role: Option<String>,
-    /// The coding agent its latest HELLO named.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    agent: Option<String>,
-    /// The model its latest HELLO named.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    model: Option<String>,
-    /// The listener that started it, supplied at mint.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    delegated_by: Option<IdentityId>,
-}
-
-impl RosterEntry {
-    /// An entry with no HELLO details and no `delegated_by`.
-    #[cfg(test)]
-    pub(crate) const fn new(
-        identity_id: IdentityId,
-        handle: String,
-        kind: IdentityKind,
-        status: Status,
-    ) -> Self {
-        Self {
-            identity_id,
-            handle,
-            kind,
-            status,
-            role: None,
-            agent: None,
-            model: None,
-            delegated_by: None,
-        }
-    }
-
-    /// An entry with the mint row and the latest HELLO filled in.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "one argument per roster column, so the private fields stay private"
-    )]
-    pub(crate) fn complete(
-        identity_id: IdentityId,
-        handle: String,
-        kind: IdentityKind,
-        status: Status,
-        role: Option<String>,
-        agent: Option<String>,
-        model: Option<String>,
-        delegated_by: Option<IdentityId>,
-    ) -> Self {
-        Self {
-            identity_id,
-            handle,
-            kind,
-            status,
-            role,
-            agent,
-            model,
-            delegated_by,
-        }
-    }
 }
 
 /// What the presence task still has to publish.
@@ -163,97 +82,69 @@ struct Inbox {
     acks: Vec<Publish>,
 }
 
-/// What the hub has read from presence since it last connected.
+/// The hub's view of who is there, shared by ingest and the presence task.
+///
+/// Statuses live on the core. This keeps the inbox, the publishes still
+/// queued, and which projects have been seen since connect.
 #[derive(Debug, Default)]
-struct View {
-    /// The identities that are online or away, by project; anyone absent
-    /// is offline. Entries come only from presence messages of this hub's
-    /// projects, so it holds at most one per connected identity.
-    present: HashMap<ProjectId, HashMap<IdentityId, Status>>,
+pub(crate) struct PresenceState {
     /// The projects, this hub's or not, that had a presence message. The
     /// first one of each of this hub's projects publishes its roster even
     /// when it changes no status, since the retained roster head may come
     /// from before a reconnect or from another hub process. It holds at
     /// most one entry per project with retained presence on the broker.
-    seen: HashSet<Topics>,
-}
-
-/// The hub's view of who is there, shared by ingest and the presence task.
-#[derive(Debug, Default)]
-pub(crate) struct PresenceState {
-    view: Mutex<View>,
+    seen: Mutex<HashSet<Topics>>,
     pending: Mutex<Pending>,
     inbox: Mutex<Inbox>,
+    /// Statuses from the core, bound when messaging starts, so a reconnect
+    /// clears them with the seen set. Empty until [`Self::bind_statuses`].
+    statuses: Mutex<Option<Arc<agmen_core::Statuses>>>,
     /// Wakes the presence task when `pending` or `inbox` gained something.
     ready: Notify,
 }
 
 impl PresenceState {
-    /// `id`'s status in `project`.
-    pub(crate) fn status(&self, project: &ProjectId, id: &IdentityId) -> Status {
-        self.view
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .present
-            .get(project)
-            .and_then(|ids| ids.get(id))
-            .copied()
-            .unwrap_or(Status::Offline)
+    /// Remembers the core's status map so [`clear`](Self::clear) drops it too.
+    pub(crate) fn bind_statuses(&self, statuses: Arc<agmen_core::Statuses>) {
+        *self.statuses.lock().unwrap_or_else(PoisonError::into_inner) = Some(statuses);
     }
 
     /// Whether `topics`' project had a presence message since the hub
     /// connected.
     fn seen(&self, topics: &Topics) -> bool {
-        self.view
+        self.seen
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .seen
             .contains(topics)
     }
 
     /// Notes that `topics`' project had a presence message; returns whether
     /// it is the first since the hub connected.
     fn mark_seen(&self, topics: &Topics) -> bool {
-        self.view
+        self.seen
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .seen
             .insert(topics.clone())
     }
 
-    /// Sets `id`'s status; returns whether it changed.
-    fn set(&self, project: &ProjectId, id: &IdentityId, status: Status) -> bool {
-        let present = &mut self
-            .view
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .present;
-        if status == Status::Offline {
-            let Some(ids) = present.get_mut(project) else {
-                return false;
-            };
-            let removed = ids.remove(id).is_some();
-            if ids.is_empty() {
-                present.remove(project);
-            }
-            removed
-        } else {
-            present
-                .entry(project.clone())
-                .or_default()
-                .insert(id.clone(), status)
-                != Some(status)
-        }
-    }
-
-    /// Forgets every status and every project seen. Called on each
-    /// connect: the broker then sends every retained presence again, and
-    /// one cleared while the hub was away (or lost with a broker restart)
-    /// must not stay online.
+    /// Forgets every project seen, and the bound status map when messaging
+    /// has bound one. Called on each connect: the broker then sends every
+    /// retained presence again, and one cleared while the hub was away (or
+    /// lost with a broker restart) must not stay online.
     /// It also drops the messages not yet applied: they came on the old
     /// connection, so their acks would name another session's packet ids.
+    /// Pending publishes stay. They are this connection's work.
     pub(crate) fn clear(&self) {
-        *self.view.lock().unwrap_or_else(PoisonError::into_inner) = View::default();
+        {
+            let bound = self.statuses.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(statuses) = bound.as_ref() {
+                statuses.clear();
+            }
+        }
+        self.seen
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
         *self.inbox.lock().unwrap_or_else(PoisonError::into_inner) = Inbox::default();
     }
 
@@ -329,7 +220,9 @@ impl Hub {
         match verb {
             Verb::Hello => presence.roster_changed(topics),
             Verb::Bye => {
-                presence.set(topics.project(), from, Status::Offline);
+                self.core()
+                    .statuses()
+                    .set(topics.project(), from, Status::Offline);
                 presence
                     .pending
                     .lock()
@@ -339,8 +232,15 @@ impl Hub {
                 presence.roster_changed(topics);
             }
             Verb::Rollcall => {
-                if let Err(err) = crate::rollcall::answer(self, topics, id, from, from_kind).await {
-                    tracing::warn!(%from, %id, error = %error_chain(&err), "answering a ROLLCALL failed");
+                match self
+                    .core()
+                    .answer_rollcall(topics, id, from, from_kind)
+                    .await
+                {
+                    Ok(()) => {}
+                    Err(err) => {
+                        tracing::warn!(%from, %id, error = %error_chain(&err), "answering a ROLLCALL failed");
+                    }
                 }
             }
             _ => {}
@@ -422,10 +322,11 @@ async fn handle(
         }
     };
     let presence = hub.presence();
+    let statuses = hub.core().statuses();
     // Skip what changes nothing before the lookup (hubs that share a broker
     // see each other's presence), except a project's first message since
     // the hub connected, which republishes its roster.
-    if presence.seen(&topics) && presence.status(topics.project(), &id) == status {
+    if presence.seen(&topics) && statuses.status(topics.project(), &id) == status {
         return Ok(());
     }
     let ours = match project_exists(hub.pool(), &topics).await {
@@ -439,7 +340,7 @@ async fn handle(
     if !ours {
         return Ok(());
     }
-    if presence.set(topics.project(), &id, status) || first {
+    if statuses.set(topics.project(), &id, status) || first {
         presence.roster_changed(&topics);
     }
     Ok(())
@@ -491,6 +392,8 @@ async fn flush(hub: &Hub, client: &AsyncClient) {
 mod tests {
     use super::*;
 
+    use agmen_proto::ProjectId;
+
     #[test]
     fn presence_topics_parse() {
         let (topics, id) = parse_presence("agmen/v1/tenant01/project1/presence/abcdefgh").unwrap();
@@ -512,52 +415,35 @@ mod tests {
     }
 
     #[test]
-    fn statuses_change_and_clear() {
+    fn seen_marks_the_first_and_clear_starts_over() {
         let state = PresenceState::default();
         let project: ProjectId = "project1".parse().unwrap();
-        let id: IdentityId = "abcdefgh".parse().unwrap();
-        assert_eq!(state.status(&project, &id), Status::Offline);
-        assert!(
-            !state.set(&project, &id, Status::Offline),
-            "already offline"
-        );
-        assert!(state.set(&project, &id, Status::Online));
-        assert!(!state.set(&project, &id, Status::Online), "no change");
-        assert!(state.set(&project, &id, Status::Away));
-        assert_eq!(state.status(&project, &id), Status::Away);
-        assert!(state.set(&project, &id, Status::Offline));
-        assert!(
-            state.view.lock().unwrap().present.is_empty(),
-            "offline is absent"
-        );
-        state.set(&project, &id, Status::Online);
-        let topics = Topics::new("tenant01".parse().unwrap(), project.clone());
+        let topics = Topics::new("tenant01".parse().unwrap(), project);
         assert!(!state.seen(&topics));
         assert!(state.mark_seen(&topics), "the first since connect");
         assert!(!state.mark_seen(&topics));
         state.clear();
-        assert_eq!(state.status(&project, &id), Status::Offline);
         assert!(!state.seen(&topics), "a connect starts over");
     }
 
     #[test]
-    fn roster_entries_omit_what_is_unset() {
-        let entry = RosterEntry {
-            model: Some("opus".to_owned()),
-            ..RosterEntry::new(
-                "abcdefgh".parse().unwrap(),
-                "andy/sol".to_owned(),
-                IdentityKind::Agent,
-                Status::Away,
-            )
-        };
+    fn clear_drops_the_bound_statuses() {
+        let state = PresenceState::default();
+        let statuses = Arc::new(agmen_core::Statuses::default());
+        state.bind_statuses(Arc::clone(&statuses));
+        let project: ProjectId = "project1".parse().unwrap();
+        let id: IdentityId = "abcdefgh".parse().unwrap();
+        assert!(statuses.set(&project, &id, Status::Online));
+        state.clear();
         assert_eq!(
-            serde_json::to_value(&entry).unwrap(),
-            serde_json::json!({
-                "identity_id": "abcdefgh", "handle": "andy/sol", "kind": "agent",
-                "status": "away", "model": "opus",
-            })
+            statuses.status(&project, &id),
+            Status::Offline,
+            "a connect starts over"
         );
+    }
+
+    #[test]
+    fn offline_payload_says_offline() {
         assert_eq!(
             serde_json::from_slice::<PresenceMessage>(OFFLINE_PAYLOAD)
                 .unwrap()

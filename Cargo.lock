@@ -207,13 +207,11 @@ dependencies = [
  "base64 0.23.1",
  "futures-core",
  "getrandom 0.4.3",
- "globset",
  "hyper",
  "hyper-util",
  "jiff",
  "jsonwebtoken",
  "regex",
- "regex-automata",
  "reqwest",
  "rumqttc",
  "rumqttc-next",
@@ -273,6 +271,7 @@ name = "agmend"
 version = "0.1.0"
 dependencies = [
  "agmen-client",
+ "agmen-core",
  "agmen-local",
  "agmen-proto",
  "agmen-roles",

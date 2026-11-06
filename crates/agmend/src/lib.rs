@@ -27,6 +27,8 @@ mod listener;
 mod local;
 mod login;
 mod managed;
+#[cfg_attr(not(test), expect(dead_code, reason = "wired by Task 7"))]
+mod record;
 mod safeguards;
 mod socket;
 mod sse;

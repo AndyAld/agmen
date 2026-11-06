@@ -14,16 +14,13 @@ use axum::Json;
 use axum::extract::rejection::QueryRejection;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use crate::auth::Caller;
 use crate::http::{ApiError, Hub};
 use crate::identities::HumanId;
-use crate::ingest::stream_key;
-
-/// The most messages one page holds, and the page size when the reader
-/// names none (protocol 5.3).
-pub(crate) const MAX_PAGE: u32 = 500;
+use crate::lanes::store_error;
+pub(crate) use agmen_core::{MAX_PAGE, Page};
 
 /// The query string: messages after seq `after` (default 0), at most
 /// `limit` of them (default and cap [`MAX_PAGE`]).
@@ -32,19 +29,6 @@ pub(crate) struct ReplayQuery {
     #[serde(default)]
     after: u64,
     limit: Option<u32>,
-}
-
-/// One page of a stream.
-#[derive(Debug, Serialize)]
-pub(crate) struct Page {
-    /// The messages after `after`, in seq order.
-    messages: Vec<StampedEnvelope>,
-    /// The `after` for the next page; `None` once this page reaches `head`.
-    next_after: Option<u64>,
-    /// The stream's last seq; 0 for a stream with no messages.
-    head: u64,
-    /// The highest seq removed from this stream; 0 when none was pruned.
-    pruned_through: u64,
 }
 
 fn invalid(description: impl Into<String>) -> ApiError {
@@ -68,64 +52,39 @@ pub(crate) async fn stream(
         .map_err(|_| invalid("the stream is neither feed nor inbox:<identity id>"))?;
     let limit = match query.limit {
         Some(0) => return Err(invalid("limit must be at least 1")),
-        Some(limit) => limit.min(MAX_PAGE),
+        Some(limit) => limit,
         None => MAX_PAGE,
     };
-    let after = i64::try_from(query.after).map_err(|_| invalid("after is out of range"))?;
+    i64::try_from(query.after).map_err(|_| invalid("after is out of range"))?;
     if !may_read(&hub, &caller, &project, &stream).await? {
         return Err(ApiError::forbidden(
             "forbidden_stream",
             "you may not read that stream",
         ));
     }
-    let messages = fetch_page(hub.pool(), &project, &stream, after, limit).await?;
-    // Read after the messages: the head moves in the same transaction as
-    // each insert, so it is never behind the page.
-    let head: Option<(i64, i64)> =
-        sqlx::query_as("SELECT seq, pruned_through FROM stream_heads WHERE stream = $1")
-            .bind(stream_key(&project, &stream))
-            .fetch_optional(hub.pool())
-            .await?;
-    let (head, pruned_through) = head.unwrap_or((0, 0));
-    let head = u64::try_from(head).map_err(ApiError::stored)?;
-    let pruned_through = u64::try_from(pruned_through).map_err(ApiError::stored)?;
-    let next_after = messages
-        .last()
-        .map(|message| message.seq.0)
-        .filter(|last| *last < head);
-    Ok(Json(Page {
-        messages,
-        next_after,
-        head,
-        pruned_through,
-    }))
+    hub.core()
+        .page(&project, &stream, query.after, limit)
+        .await
+        .map(Json)
+        .map_err(store_error)
 }
 
 /// The messages of `stream` in `project` after seq `after`, at most
 /// `limit` of them, in seq order. Seqs commit in order with no gaps
 /// (protocol 5.2), so the page is always the next run of the stream.
 pub(crate) async fn fetch_page(
-    pool: &sqlx::PgPool,
+    hub: &Hub,
     project: &ProjectId,
     stream: &Stream,
     after: i64,
     limit: u32,
 ) -> Result<Vec<StampedEnvelope>, ApiError> {
-    let rows: Vec<String> = sqlx::query_scalar(
-        "SELECT envelope::text FROM messages
-         WHERE project_id = $1 AND stream = $2 AND seq > $3
-         ORDER BY seq LIMIT $4",
-    )
-    .bind(project.as_str())
-    .bind(stream.to_string())
-    .bind(after)
-    .bind(i64::from(limit))
-    .fetch_all(pool)
-    .await?;
-    rows.iter()
-        .map(|json| serde_json::from_str::<StampedEnvelope>(json))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(ApiError::stored)
+    let after = u64::try_from(after).map_err(ApiError::stored)?;
+    hub.core()
+        .page(project, stream, after, limit)
+        .await
+        .map(|page| page.messages)
+        .map_err(store_error)
 }
 
 /// Whether `caller` may read `stream` in `project` (see the module docs).
