@@ -453,7 +453,7 @@ impl Managed {
     /// hub's identity and token, agmend's session, row and local credential,
     /// and the agent's folders. Every step runs, so one that fails cannot
     /// leave the others behind; what it could not remove is added to the
-    /// launch's own failure.
+    /// launch's own failure. A hub step that failed is named by id only.
     pub(super) async fn discard_identity(
         &self,
         identity: &IdentityFile,
@@ -462,16 +462,21 @@ impl Managed {
         let id = &identity.identity_id;
         let mut left = Vec::new();
         // Revoke first: the hub token is dead whatever else fails.
-        if let Err(cause) = self.revoke_identity(&metadata_for(identity)).await {
-            left.push(format!("revoking {id}: {}", cause.message));
-        }
-        if let Err(cause) = self
-            .hub
-            .credentials()
-            .delete_token(&identity.hub_url, id)
-            .await
-        {
-            tracing::warn!(identity = %id, "the discarded identity's credential was not deleted: {}", cause.message);
+        if agmen_client::is_local(&identity.hub_url) {
+            if let Err(cause) = self.revoke_identity(&metadata_for(identity)).await {
+                left.push(format!("revoking {id}: {}", cause.message));
+            }
+            if let Err(cause) = self
+                .hub
+                .credentials()
+                .delete_token(&identity.hub_url, id)
+                .await
+            {
+                tracing::warn!(identity = %id, "the discarded identity's credential was not deleted: {}", cause.message);
+            }
+        } else if !self.rollback_hub_mint(&identity.hub_url, id).await {
+            // The id alone: the hub's error text can carry anything.
+            left.push(format!("revoking {id}: the hub did not revoke it"));
         }
         match self.identities() {
             Some(identities) => {
