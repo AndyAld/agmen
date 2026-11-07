@@ -120,6 +120,7 @@ struct Worker {
     record: Record,
     budget: Budget,
     state: &'static str,
+    stopped_at: Option<Timestamp>,
     owner_resumed: bool,
     others_resumed: bool,
     stop: Option<oneshot::Sender<()>>,
@@ -139,6 +140,7 @@ impl Worker {
             record,
             budget,
             state: "offline",
+            stopped_at: None,
             owner_resumed: false,
             others_resumed: false,
             stop: None,
@@ -711,6 +713,8 @@ impl Managed {
         let _accounting = self.accounting.lock().await;
         let mut agents = Vec::new();
         let mut spends = BTreeMap::new();
+        let mut local_members =
+            BTreeMap::<ProjectId, std::collections::BTreeSet<IdentityId>>::new();
         for worker in self.workers.lock().await.values() {
             let worker = worker.lock().await;
             let record = &worker.record;
@@ -734,6 +738,25 @@ impl Managed {
             let mut entry = json!({"identity":record.identity.identity_id,"project":record.identity.project,"handle":record.identity.handle,"state":worker.state,"model":record.model,"budget_usd":record.budget_usd,"spent_usd":worker.budget.spent().usd(),"worktree":record.worktree,"branch":record.branch,"source":record.source,"role":record.role,"layer":record.role_layer});
             entry["parent"] = json!(record.parent);
             entry["depth"] = json!(record.depth);
+            entry["stopped_at"] = json!(worker.stopped_at);
+            // One roster read per local project, not per agent: the desktop polls this.
+            let resumable = if agmen_client::is_local(&record.identity.hub_url) {
+                let members = match local_members.entry(record.identity.project.clone()) {
+                    std::collections::btree_map::Entry::Occupied(found) => found.into_mut(),
+                    std::collections::btree_map::Entry::Vacant(slot) => {
+                        let roster = self
+                            .origins
+                            .local()
+                            .roster(&record.identity.project)
+                            .await?;
+                        slot.insert(roster.into_iter().map(|entry| entry.identity_id).collect())
+                    }
+                };
+                members.contains(&record.identity.identity_id)
+            } else {
+                true
+            };
+            entry["resumable"] = json!(resumable);
             entry["reserved_usd"] = json!(worker.budget.reserved().usd());
             entry["children_spent_usd"] = json!(worker.budget.children_spent().usd());
             spends.insert(record.identity.identity_id.clone(), worker.budget.spent());
@@ -875,6 +898,7 @@ impl Managed {
         if already_offline {
             return Ok(());
         }
+        self.mark_stopped(&identity.identity_id).await;
         if let Some(mut task) = task
             && tokio::time::timeout(Duration::from_secs(5), &mut task)
                 .await
@@ -1381,6 +1405,9 @@ fn envelope(payload: Payload, body: &str) -> Result<ClientEnvelope, ApiError> {
 // Start, Attach, Detach and Remove.
 #[path = "managed_actions.rs"]
 mod actions;
+
+#[path = "managed_recents.rs"]
+mod recents;
 
 #[path = "managed_tree.rs"]
 mod tree;

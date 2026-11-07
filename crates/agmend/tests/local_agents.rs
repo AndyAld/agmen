@@ -803,3 +803,26 @@ async fn quit_records_goodbyes_for_local_agents() {
     );
     f.stop().await;
 }
+
+#[tokio::test]
+async fn stopped_local_agent_keeps_its_stop_time_across_reopen() {
+    let mut f = Fixture::new().await;
+    let worker = f.launch("worker", None).await;
+    result(
+        f.client
+            .call("agent_stop", json!({"identity":worker["identity"]}))
+            .await,
+    );
+    let listed = result(f.client.call("agent_list", json!({})).await);
+    let entry = &listed["agents"][0];
+    assert_eq!(entry["identity"], worker["identity"]);
+    assert_eq!(entry["state"], "offline");
+    let stopped: Timestamp = serde_json::from_value(entry["stopped_at"].clone()).unwrap();
+    let home = f.stop().await;
+    let mut f = Fixture::start(home).await;
+    let listed = result(f.client.call("agent_list", json!({})).await);
+    assert_eq!(listed["agents"][0]["identity"], worker["identity"]);
+    assert_eq!(listed["agents"][0]["state"], "offline");
+    assert_eq!(listed["agents"][0]["stopped_at"], json!(stopped));
+    f.stop().await;
+}
