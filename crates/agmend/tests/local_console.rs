@@ -608,10 +608,12 @@ async fn newer_local_record_without_login_returns_the_version_error() {
 const LOCAL_AGENT: &str = "agent001";
 
 /// A local project whose local.db is unreadable, on a daemon signed in to a hub
-/// that lists the person for every project id, after `prepare` changed
-/// agmend.db. Asking that hub for a roster would place the project on it and
-/// a post would hand it a local body, so neither call may reach it.
+/// that lists the person for every project id, after `worker`, if named, was
+/// minted through `local_mint` and `prepare` changed agmend.db. Asking that hub
+/// for a roster would place the project on it and a post would hand it a local
+/// body, so neither call may reach it.
 async fn unreadable_record_stays_off_the_hub(
+    worker: Option<&'static str>,
     prepare: impl FnOnce(&rusqlite::Connection, &Value) + Send + 'static,
 ) {
     let state = Arc::new(LookupHub {
@@ -628,6 +630,16 @@ async fn unreadable_record_stays_off_the_hub(
     let daemon = LocalDaemon::start(home).await;
     let mut client = daemon.client().await;
     let created = create(&mut client).await;
+    if let Some(name) = worker {
+        result(
+            client
+                .call(
+                    "local_mint",
+                    json!({"project": created["project"], "name": name}),
+                )
+                .await,
+        );
+    }
     drop(client);
     let home = daemon.stop().await;
     let database = home.database();
@@ -683,9 +695,9 @@ async fn unreadable_record_stays_off_the_hub(
 
 #[tokio::test]
 async fn local_identity_keeps_an_unreadable_record_off_the_hub() {
-    unreadable_record_stays_off_the_hub(|agmend_db, created| {
-        // Nothing writes an origin `local` row before Task 9, so seed one the
-        // way Home::seed_identity seeds a hub identity.
+    unreadable_record_stays_off_the_hub(None, |agmend_db, created| {
+        // Seed the row the way Home::seed_identity seeds a hub identity; the
+        // next test gets its row from local_mint instead.
         let origin = agmen_client::origin_key(&agmen_client::local_hub_url());
         let owner = created["person"]["id"].as_str().unwrap();
         let metadata = json!({
@@ -711,10 +723,17 @@ async fn local_identity_keeps_an_unreadable_record_off_the_hub() {
 }
 
 #[tokio::test]
+async fn minted_local_identity_keeps_an_unreadable_record_off_the_hub() {
+    // No seeded row: local_mint registers the identity under the origin key that
+    // routing looks up, so a mismatch between the two sends the project to the hub.
+    unreadable_record_stays_off_the_hub(Some("worker"), |_, _| {}).await;
+}
+
+#[tokio::test]
 async fn unanswerable_agmend_db_keeps_an_unreadable_record_off_the_hub() {
     // No answer from agmend.db cannot rule out a local identity, so it is no
     // license to ask the hub either.
-    unreadable_record_stays_off_the_hub(|agmend_db, _| {
+    unreadable_record_stays_off_the_hub(None, |agmend_db, _| {
         agmend_db.execute_batch("DROP TABLE identities").unwrap();
     })
     .await;

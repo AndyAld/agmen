@@ -213,7 +213,11 @@ async fn names_local_project(core: &Core, raw: &Value) -> bool {
     else {
         return false;
     };
-    core.origins.of(&project).await == crate::origin::Origin::Local
+    // A project routing cannot place counts as local, so the refusal fails closed.
+    !matches!(
+        core.origins.of(&project).await,
+        Ok(crate::origin::Origin::Hub)
+    )
 }
 
 async fn pending(core: &Core, caller: Caller, raw: Value) -> Result<Value, ApiError> {

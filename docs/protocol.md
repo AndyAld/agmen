@@ -552,6 +552,8 @@ hub refusal or error, or a timeout, the call gives `version` naming `local.db`
 and sends no message to the hub. If another call holds the local record past its
 10 s open wait, or agmend is stopping, the call gives `hub` with a message that
 says `local.db` is busy or the local origin has stopped, and makes no hub read.
+Without an identity, `inbox` and `state` give these errors too and never fall
+back to the hub.
 
 The remaining local method contract is implemented by Tasks 8 to 10 of the
 solo-origin plan. These local branches are not enabled by Task 7.
