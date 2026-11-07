@@ -60,6 +60,7 @@ dependencies = [
  "agmen-local",
  "agmen-proto",
  "agmen-roles",
+ "agmend",
  "anyhow",
  "axum",
  "clap",

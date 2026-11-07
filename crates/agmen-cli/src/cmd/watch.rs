@@ -17,8 +17,8 @@ use agmen_proto::Payload;
 use anyhow::{Context as _, Result};
 use clap::Args;
 
-use crate::joined::{agent, client_error, envelope};
-use crate::output::{clean, message_line, println_flush};
+use crate::joined::{agent, client_error, envelope, local_worktree};
+use crate::output::{Fail, clean, message_line, println_flush};
 use crate::watch_lock::WatchLock;
 
 #[derive(Debug, Args)]
@@ -30,6 +30,13 @@ pub(crate) struct WatchArgs {
 
 /// `agmen watch`.
 pub(crate) async fn watch(args: WatchArgs) -> Result<()> {
+    // Before the banner or any credential: a local worktree has no feed here yet.
+    if local_worktree().await.is_some() {
+        return Err(Fail::usage(
+            "agmen watch does not support local projects yet; this worktree is on this machine's local origin",
+        )
+        .into());
+    }
     let agent = agent().await?;
     let me = agent.identity.me();
     let first = if args.json {

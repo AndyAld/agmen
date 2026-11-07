@@ -12,7 +12,7 @@ use anyhow::{Context as _, Result};
 use clap::Args;
 
 use crate::client::blocking;
-use crate::joined::{Agent, agent, client_error};
+use crate::joined::{Agent, agent};
 use crate::output::{message_line, println_flush};
 
 /// The most replay pages one stream is read for in one call (500
@@ -199,10 +199,7 @@ async fn scan(agent: &Agent, stream: Stream, after: u64) -> Result<Scanned> {
     let mut last = after;
     let mut messages = Vec::new();
     for _ in 0..MAX_PAGES {
-        let page =
-            agent.hub.page(&stream, last).await.map_err(|err| {
-                client_error(err, &format!("reading {stream} from the hub failed"))
-            })?;
+        let page = agent.page(&stream, last).await?;
         if let Some(message) = page.messages.last() {
             last = last.max(message.seq.0);
         }
