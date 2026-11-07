@@ -52,15 +52,34 @@ impl From<std::io::Error> for Error {
 #[derive(Debug, Default)]
 pub(crate) struct Guard {
     failure: Mutex<Option<Cause>>,
+    /// Test seam: each walk first takes a permit from here, so a test decides when it ends.
+    #[cfg(test)]
+    pub(crate) gate: Mutex<Option<std::sync::Arc<tokio::sync::Semaphore>>>,
 }
 
 impl Guard {
+    #[cfg(test)]
+    async fn hold(&self) {
+        let gate = self
+            .gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(gate) = gate
+            && let Ok(permit) = gate.acquire().await
+        {
+            permit.forget();
+        }
+    }
+
     pub(crate) async fn contains_peer(
         &self,
         peer: std::io::Result<i32>,
         groups: &BTreeSet<i32>,
     ) -> bool {
         self.check(groups, async {
+            #[cfg(test)]
+            self.hold().await;
             let pid = peer?;
             for ancestor in ancestor_pids(pid).await? {
                 if contains_pid(groups, ancestor)? {
@@ -106,6 +125,49 @@ impl Guard {
                 true
             }
         }
+    }
+}
+
+/// One connection's peer. Its ancestry walk can take as long as a client waits for `hello`,
+/// so it runs when the first request that only the person may make arrives, and the answer
+/// stays with the connection.
+#[derive(Debug)]
+pub(crate) struct Peer {
+    pid: Option<std::io::Result<i32>>,
+    groups: BTreeSet<i32>,
+    managed: bool,
+    owner: Option<bool>,
+}
+
+impl Peer {
+    /// `groups` are the process groups of the agents running now, and `managed` says
+    /// whether the peer itself sits in one.
+    pub(crate) fn new(pid: std::io::Result<i32>, groups: BTreeSet<i32>, managed: bool) -> Self {
+        Self {
+            pid: Some(pid),
+            groups,
+            managed,
+            owner: None,
+        }
+    }
+
+    /// Whether the peer is the person's own process, which walks its ancestry the first time.
+    pub(crate) async fn is_owner(&mut self, guard: &Guard) -> bool {
+        if let Some(owner) = self.owner {
+            return owner;
+        }
+        // A walk dropped half way took the pid with it: refuse.
+        let owner = match self.pid.take() {
+            Some(pid) => {
+                let known = pid.is_ok();
+                // The walk runs even when `managed` refuses, so its failures are logged.
+                let contained = guard.contains_peer(pid, &self.groups).await;
+                known && !self.managed && !contained
+            }
+            None => false,
+        };
+        self.owner = Some(owner);
+        owner
     }
 }
 

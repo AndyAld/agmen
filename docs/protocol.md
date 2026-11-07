@@ -292,6 +292,10 @@ An unreadable ancestry or process group, a chain deeper than 32 hops, or a
 timeout refuses owner-only calls and logs the reason, warning on the first
 failure or a changed cause and using debug on repeats. The result is cached
 for the connection; with no running worker or listener, no ancestry walk runs.
+The walk runs when the first request that needs it arrives, not when the
+connection opens, so `hello` and identity-authenticated requests never wait for
+it, and a client's deadline for its first owner-only request has to cover up to
+2 more seconds.
 A process that deliberately daemonizes by double forking to pid 1, or whose
 parent exits first, still escapes. Same-user containment is not a security
 boundary: workers share the user's uid and can access the user's files and

@@ -51,6 +51,34 @@ async fn a_person_outside_every_worker_walks_to_init_without_a_refusal() {
     assert_eq!(*guard.failure.lock().unwrap(), None);
 }
 
+#[tokio::test]
+async fn a_peer_is_the_owner_only_when_known_unmanaged_and_outside_every_agent() {
+    let guard = Guard::default();
+    let me = i32::try_from(std::process::id()).unwrap();
+    let outside = BTreeSet::from([i32::MAX]);
+    let unknown = || Err(std::io::Error::other("no peer"));
+    assert!(
+        Peer::new(Ok(me), outside.clone(), false)
+            .is_owner(&guard)
+            .await
+    );
+    // In an agent's group when it connected, whatever the walk finds.
+    assert!(
+        !Peer::new(Ok(me), outside.clone(), true)
+            .is_owner(&guard)
+            .await
+    );
+    let own_group = BTreeSet::from([rustix::process::getpgrp().as_raw_nonzero().get()]);
+    assert!(!Peer::new(Ok(me), own_group, false).is_owner(&guard).await);
+    // No pid is refused, walking or not.
+    assert!(!Peer::new(unknown(), outside, false).is_owner(&guard).await);
+    assert!(
+        !Peer::new(unknown(), BTreeSet::new(), false)
+            .is_owner(&guard)
+            .await
+    );
+}
+
 #[test]
 fn linux_stat_uses_the_parent_after_the_final_closing_parenthesis() {
     assert_eq!(stat_parent("42 (a (process) name)) S 21 42 0").unwrap(), 21);
