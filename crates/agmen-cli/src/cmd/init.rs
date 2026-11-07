@@ -1,11 +1,13 @@
-//! Start a hosted project or hand off to self hosting.
+//! Start a local or hosted project, or hand off to self hosting.
 
 use std::borrow::Cow;
 use std::io::{BufRead, IsTerminal as _, Write};
 use std::path::Path;
 use std::process::Stdio;
 
-use agmen_proto::{RepoUrl, Timestamp};
+use agmen_client::IdentityFile;
+use agmen_local::ErrorCode;
+use agmen_proto::{ProjectId, RepoUrl, Timestamp};
 use anyhow::{Context as _, Result, bail};
 use clap::Args;
 use serde::{Deserialize, Serialize};
@@ -13,6 +15,7 @@ use tokio::process::Command;
 use url::Url;
 
 use super::{account, group, host::onboard, join};
+use crate::agmend::{Agmend, AgmendError};
 use crate::client::{self, Group, Human, blocking, refusal};
 use crate::git;
 use crate::output::{Fail, clean, print_notices};
@@ -23,14 +26,18 @@ pub(crate) const HOSTED_HUB: &str = "https://api.getagmen.ai";
 const HOSTED_HUB_ENV: &str = "AGMEN_HOSTED_HUB";
 const ANSWER_CAP: u64 = 64;
 const LIST_CAP: usize = 1000;
+const LOCAL_PROJECT_NAME_ATTEMPTS: u8 = 9;
 const GROUP_NAME_CAP: usize = 39;
 const NAME_THE_GROUP: &str = "name the group: --group <name or id>";
 const NEW_GROUP_PROMPT: &str =
     "This creates a new group and starts your one free trial. Continue? [y/N] ";
 
-/// Start this worktree on a self-hosted or agmen hosted hub.
+/// Start this worktree locally, or on a self-hosted or agmen hosted hub.
 #[derive(Debug, Args)]
 pub(crate) struct InitArgs {
+    /// Start on this machine (the default), with agmend running.
+    #[arg(long, conflicts_with_all = ["self_host", "hosted"])]
+    local: bool,
     /// Start your own hub with agmen host up.
     #[arg(long, conflicts_with = "hosted")]
     self_host: bool,
@@ -56,12 +63,6 @@ pub(crate) struct InitArgs {
     handle: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Hosting {
-    SelfHost,
-    Hosted,
-}
-
 /// Map init's project name and handle to `agmen host up` arguments.
 #[must_use]
 pub(crate) fn host_up_args(project: Option<&str>, handle: Option<&str>) -> Vec<String> {
@@ -75,7 +76,7 @@ pub(crate) fn host_up_args(project: Option<&str>, handle: Option<&str>) -> Vec<S
     args
 }
 
-/// Initialize this worktree, checking git, choice, and identity before sign-in.
+/// Initialize this worktree, checking git and identity before creating a project.
 ///
 /// # Errors
 ///
@@ -100,16 +101,7 @@ pub(crate) async fn run(args: InitArgs) -> Result<()> {
             return Err(Fail::usage("run agmen init inside your project's git repository").into());
         }
     };
-    let hosting = if args.self_host {
-        Hosting::SelfHost
-    } else if args.hosted {
-        Hosting::Hosted
-    } else if std::io::stdin().is_terminal() {
-        blocking(|| choose_hosting(std::io::stdin().lock(), std::io::stdout().lock())).await?
-    } else {
-        return Err(Fail::usage("choose --self-host or --hosted").into());
-    };
-    if hosting == Hosting::SelfHost {
+    if args.self_host {
         let exe = std::env::current_exe().context("finding agmen to start self hosting")?;
         let status = Command::new(exe)
             .args(host_up_args(args.name.as_deref(), args.handle.as_deref()))
@@ -134,7 +126,90 @@ pub(crate) async fn run(args: InitArgs) -> Result<()> {
         ))
         .into());
     }
-    hosted(&root, args).await
+    if args.local || !args.hosted {
+        local(&root, args).await
+    } else {
+        hosted(&root, args).await
+    }
+}
+
+async fn local(root: &Path, args: InitArgs) -> Result<()> {
+    join::check_not_joined(root).await?;
+    let name = args.name.as_deref().unwrap_or(
+        root.file_name()
+            .and_then(|folder| folder.to_str())
+            .context("the repository folder name is not valid UTF-8")?,
+    );
+    let mut daemon = Agmend::connect_default().await?;
+    let (project, name) = create_local_project(&mut daemon, name).await?;
+    let handle = args.handle.unwrap_or_else(|| join::default_name(root));
+    let identity: IdentityFile = serde_json::from_value(
+        daemon
+            .call(
+                "local_mint",
+                serde_json::json!({"project": project, "name": handle}),
+            )
+            .await?,
+    )
+    .context("agmend's local_mint answer is invalid")?;
+    // The identity must be ignored before the trust test can read it.
+    let exclude = git::exclude_file(root).await?;
+    blocking(move || git::add_exclude(&exclude, ".agmen/")).await?;
+    join::write_identity(root, &identity).await?;
+    let check_root = root.to_owned();
+    let trusted = blocking(move || {
+        agmen_client::find_identity(&check_root)
+            .context("the new identity file fails the trust test")
+    })
+    .await?;
+    if trusted.is_none_or(|joined| joined.identity != identity) {
+        bail!(
+            "agmen cannot find the identity file it just wrote in {}",
+            root.display()
+        );
+    }
+    println!(
+        "started {} on this machine; add a hub later with agmen host up or agmen join <invite>",
+        clean(&name)
+    );
+    Ok(())
+}
+
+async fn create_local_project(daemon: &mut Agmend, name: &str) -> Result<(ProjectId, String)> {
+    #[derive(Deserialize)]
+    struct Created {
+        project: ProjectId,
+    }
+    for attempt in 1..=LOCAL_PROJECT_NAME_ATTEMPTS {
+        let candidate = if attempt == 1 {
+            name.to_owned()
+        } else {
+            format!("{name}-{attempt}")
+        };
+        match daemon
+            .call(
+                "local_project_create",
+                serde_json::json!({"name": candidate}),
+            )
+            .await
+        {
+            Ok(result) => {
+                let created: Created = serde_json::from_value(result)
+                    .context("agmend's local_project_create answer is invalid")?;
+                return Ok((created.project, candidate));
+            }
+            // agmend maps the record's Duplicate to this local API refusal.
+            Err(AgmendError::Refused {
+                code: ErrorCode::BadRequest,
+                message,
+            }) if message == "a local project already has that name" => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    bail!(
+        "local projects already use {} and its suffixes -2 to -{LOCAL_PROJECT_NAME_ATTEMPTS}; choose another name with --name",
+        clean(name)
+    )
 }
 
 /// The hosted hub: `--hub`, else `AGMEN_HOSTED_HUB` when set and not empty, else [`HOSTED_HUB`].
@@ -383,17 +458,6 @@ fn read_answer(input: impl BufRead) -> Result<String> {
     Ok(answer.trim().to_owned())
 }
 
-fn choose_hosting(input: impl BufRead, mut output: impl Write) -> Result<Hosting> {
-    writeln!(output, "Self host or agmen hosted?\n1) Self host (free, requires setup)\n2) agmen hosted (7-day free trial)")
-        .context("printing the hosting choices")?;
-    output.flush().context("flushing the hosting choices")?;
-    match read_answer(input)?.as_str() {
-        "1" => Ok(Hosting::SelfHost),
-        "2" => Ok(Hosting::Hosted),
-        _ => Err(Fail::usage("choose 1 for self host or 2 for agmen hosted").into()),
-    }
-}
-
 fn confirm_new_group(input: impl BufRead, mut output: impl Write) -> Result<()> {
     write!(output, "{NEW_GROUP_PROMPT}").context("printing the new group confirmation")?;
     output
@@ -589,16 +653,7 @@ mod tests {
     }
 
     #[test]
-    fn init_terminal_choices_are_bounded_and_sanitized() {
-        assert_eq!(
-            choose_hosting("1\n".as_bytes(), Vec::new()).unwrap(),
-            Hosting::SelfHost
-        );
-        assert_eq!(
-            choose_hosting("2\n".as_bytes(), Vec::new()).unwrap(),
-            Hosting::Hosted
-        );
-        assert!(choose_hosting("3\n".as_bytes(), Vec::new()).is_err());
+    fn init_terminal_group_choices_are_bounded_and_sanitized() {
         let mut one = group(Some("active"));
         one.name.push('\u{1b}');
         let groups = [one, group(Some("trial"))];

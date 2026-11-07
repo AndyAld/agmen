@@ -21,7 +21,7 @@ use url::Url;
 use crate::client::{
     Human, blocking, delete_token, human, human_at, read_login, refusal, same_hub, send, set_token,
 };
-use crate::joined::joined;
+use crate::joined::{joined, local_worktree};
 use crate::output::{Fail, clean};
 use crate::{git, setup};
 
@@ -264,6 +264,12 @@ impl Minted {
 
 /// `agmen join`.
 pub(crate) async fn join(args: JoinArgs) -> Result<()> {
+    if local_worktree().await.is_some() {
+        return Err(Fail::usage(
+            "this worktree is on this machine's local origin; a project cannot move to a hub",
+        )
+        .into());
+    }
     let args = args.with_stdin().await?;
     let cwd = std::env::current_dir().context("reading the working directory")?;
     // Every local check runs here, before sign-in or any hub call: an invite
@@ -524,7 +530,7 @@ pub(crate) async fn join_here(
 }
 
 /// Refuses a worktree that already has an identity file.
-async fn check_not_joined(root: &Path) -> Result<()> {
+pub(super) async fn check_not_joined(root: &Path) -> Result<()> {
     let file = root.join(IDENTITY_DIR).join(IDENTITY_FILE);
     let existing = file.clone();
     let present = blocking(move || {
@@ -676,7 +682,7 @@ async fn accept(human: &Human, code: &str) -> Result<Accepted> {
 
 /// The worktree folder's name as a handle name: lowercase `[a-z0-9-]`,
 /// starting with a letter or digit, at most 32 characters.
-fn default_name(root: &Path) -> String {
+pub(super) fn default_name(root: &Path) -> String {
     let folder = root
         .file_name()
         .map(|name| name.to_string_lossy().to_lowercase())
@@ -704,7 +710,7 @@ fn default_name(root: &Path) -> String {
 }
 
 /// Writes `<root>/.agmen/identity.json`, readable only by its owner.
-async fn write_identity(root: &Path, identity: &IdentityFile) -> Result<()> {
+pub(super) async fn write_identity(root: &Path, identity: &IdentityFile) -> Result<()> {
     let dir = root.join(IDENTITY_DIR);
     let mut json = serde_json::to_vec_pretty(identity).context("encoding the identity file")?;
     json.push(b'\n');

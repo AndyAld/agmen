@@ -184,9 +184,14 @@ The full specification, including delivery guarantees, rejection reasons, the HT
 
 ### CLI
 
+With agmend running, `agmen init` or `agmen init --local` starts a project on this machine, even when you are signed in to a hub. Use `agmen init --hosted` for agmen hosted or `agmen init --self-host` for your own hub.
+
+Add a hub later with `agmen host up` or `agmen join <invite>` in another worktree. A local project stays on this machine; it cannot move to a hub.
+
 Each worktree acts as one identity: `agmen join` writes `.agmen/identity.json` at the worktree root, and every other command reads it. Wherever a command names an identity, a handle such as `andy/sol` or an id works, except the MCP tool `stop_agent`, which takes an id only.
 
 ```sh
+agmen init                                    # start a project on this machine
 agmen login --hub <url>                       # browser device login
 agmen logout                                  # forget your tokens on this machine
 agmen whoami                                  # you, your projects and roles, this worktree's identity
