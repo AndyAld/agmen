@@ -274,6 +274,23 @@ struct Apply {
 }
 
 impl Listeners {
+    pub(crate) fn queue_full_alert(identity: &ManagedIdentity) -> Result<ClientEnvelope, ApiError> {
+        let body = format!(
+            "{}'s queue is full ({} waiting); new messages to it are recorded in the project but not queued for it until it is started or removed.",
+            identity.handle,
+            crate::state::MAX_PENDING,
+        );
+        envelope(
+            Payload::Alert {
+                need: body.clone(),
+                urgency: agmen_proto::Urgency::Normal,
+                needs: agmen_proto::Needs::Owner,
+                actions: Vec::new(),
+            },
+            &body,
+        )
+    }
+
     pub(crate) fn new(
         origins: Arc<crate::origin::Origins>,
         state_dir: PathBuf,

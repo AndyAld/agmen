@@ -29,6 +29,10 @@ use crate::state::{MAX_STREAM_POSITIONS, ManagedIdentity, Store};
 #[path = "identity_watch.rs"]
 mod watch;
 
+#[cfg(test)]
+#[path = "queue_full_tests.rs"]
+mod queue_full_tests;
+
 const DEADLINE: Duration = Duration::from_secs(10);
 const POST_WAIT: Duration = Duration::from_secs(5);
 const MAX_DATABASE_JOBS: usize = 64;
@@ -38,6 +42,7 @@ const LOCAL_RECHECK: Duration = Duration::from_secs(30);
 const COLLECTION_PAGE_SIZE: u32 = 500;
 const MAX_COLLECTION_PAGES: usize = 100;
 const AUTHORITY_RECHECK: Duration = Duration::from_secs(1);
+const MAX_QUEUE_ALERT_ATTEMPTS: usize = 3;
 /// agmen-hub's events endpoint refuses more positions in one SSE request.
 const MAX_HUB_AFTER: usize = 256;
 const MAX_HUB_CONNECTIONS: usize = MAX_STREAM_POSITIONS.div_ceil(MAX_HUB_AFTER);
@@ -912,6 +917,13 @@ impl Identities {
                 runtimes.remove(&key);
             }
             drop(runtimes);
+            if let Ok(local) = self.origins.person(crate::origin::Origin::Local).await {
+                self.flush_queue_full_alerts(agmen_client::LOCAL_ORIGIN, &local.human_id)
+                    .await;
+            }
+            if let Some(owner) = &owner {
+                self.flush_queue_full_alerts(&origin, owner).await;
+            }
             for row in rows {
                 // A finished collector stays offline until an explicit call.
                 let key = (origin.clone(), row.owner_id.clone(), row.project.clone());
@@ -919,6 +931,57 @@ impl Identities {
                     && let Err(error) = self.project_channel(&row.project).await
                 {
                     tracing::warn!(code = ?error.code,"starting collector failed");
+                }
+            }
+        }
+    }
+
+    async fn flush_queue_full_alerts(&self, origin: &str, owner: &IdentityId) {
+        let origin = origin.to_owned();
+        let owner = owner.clone();
+        // The existing envelope builder reads random bytes synchronously.
+        let alerts = store_work(self.store.clone(), move |store| {
+            let mut alerts = Vec::new();
+            for identity in store.pending_queue_full_alerts(&origin, &owner)? {
+                let proposed = crate::listener::Listeners::queue_full_alert(&identity)
+                    .map_err(|_| crate::state::StoreError::Invalid("full queue ALERT envelope"))?;
+                if let Some(alert) =
+                    store.prepare_queue_full_alert(&origin, &identity.identity_id, &proposed)?
+                {
+                    alerts.push((identity, alert));
+                }
+            }
+            Ok(alerts)
+        })
+        .await;
+        let alerts = match alerts {
+            Ok(alerts) => alerts,
+            Err(error) => {
+                tracing::warn!(code=?error.code, "reading full queue ALERTs failed");
+                return;
+            }
+        };
+        for (identity, alert) in alerts.into_iter().take(MAX_MANAGED) {
+            // As with the listener cap alert, retry the same id so an ambiguous
+            // enqueue outcome cannot publish a second notification for the fill.
+            for _ in 0..MAX_QUEUE_ALERT_ATTEMPTS {
+                match self.post(&identity, alert.clone()).await {
+                    Ok(_) => {
+                        let origin = agmen_client::origin_key(&identity.hub_url);
+                        let id = identity.identity_id.clone();
+                        let message = alert.id.clone();
+                        if let Err(error) = store_work(self.store.clone(), move |store| {
+                            store.acknowledge_queue_full_alert(&origin, &id, &message)
+                        })
+                        .await
+                        {
+                            tracing::warn!(identity=%identity.identity_id, code=?error.code, "acknowledging full queue ALERT failed");
+                        }
+                        break;
+                    }
+                    Err(error) => {
+                        tracing::warn!(identity=%identity.identity_id, code=?error.code, "full queue ALERT could not be queued")
+                    }
                 }
             }
         }
