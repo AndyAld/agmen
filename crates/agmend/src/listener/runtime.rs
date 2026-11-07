@@ -32,6 +32,8 @@ use crate::git::Git;
 use crate::hub::{Hub, HubError};
 use crate::identities::{Identities, LocalToken, forbidden};
 use crate::managed::Managed;
+use crate::origin::{Origin, Origins};
+use crate::record::admin::LocalMint;
 use crate::state::ManagedIdentity;
 
 const MAX_LISTENERS: usize = 64;
@@ -45,8 +47,7 @@ type Clock = Arc<dyn Fn() -> jiff::Zoned + Send + Sync>;
 type CreationHook = Arc<dyn Fn(&Path) + Send + Sync>;
 
 pub(crate) struct Listeners {
-    #[expect(dead_code, reason = "origin routing is wired in Task 15")]
-    origins: Arc<crate::origin::Origins>,
+    origins: Arc<Origins>,
     hub: Arc<Hub>,
     identities: OnceCell<Weak<Identities>>,
     managed: OnceCell<Weak<Managed>>,
@@ -342,13 +343,10 @@ impl Listeners {
     }
 
     pub(crate) async fn status(&self, raw: Value) -> Result<Value, ApiError> {
-        let login = self
-            .hub
-            .credentials()
-            .login()
-            .await
-            .map_err(HubError::from)?;
         let Status { project } = params(raw)?;
+        if let Some(project) = &project {
+            self.origins.person(self.origins.of(project).await?).await?;
+        }
         let entries = {
             let statuses = self
                 .statuses
@@ -370,6 +368,9 @@ impl Listeners {
         };
         let mut rows = Vec::new();
         for live in entries.into_values() {
+            // Read the owner before locking: a busy local record must not hold the turn loop.
+            let hub_url = live.lock().await.identity.hub_url.clone();
+            let login = self.origins.person_for(&hub_url).await?;
             let mut live = live.lock().await;
             if owns(&live.identity, &login) {
                 live.reset_day(&(self.now)());
@@ -397,12 +398,16 @@ impl Listeners {
         }
         // Local API dispatch has already checked the owner's peer. Re-read the
         // login too so another owner's retained session cannot be controlled.
+        let project: ProjectId = serde_json::from_value(
+            raw.get("project")
+                .cloned()
+                .ok_or_else(|| bad_request("project is required"))?,
+        )
+        .map_err(|_| bad_request("invalid project"))?;
         let login = self
-            .hub
-            .credentials()
-            .login()
-            .await
-            .map_err(HubError::from)?;
+            .origins
+            .person(self.origins.of(&project).await?)
+            .await?;
         let _changing = self.changing.lock().await;
         match method {
             "listener_start" => self.start(params(raw)?, &login).await,
@@ -432,7 +437,7 @@ impl Listeners {
                         let registered = self
                             .identities()?
                             .managed(
-                                login.hub_url.origin().ascii_serialization(),
+                                agmen_client::origin_key(&login.hub_url),
                                 login.human_id.clone(),
                             )
                             .await?;
@@ -540,13 +545,22 @@ impl Listeners {
 
     async fn coordinators(&self, project: &ProjectId) -> Result<Vec<String>, ApiError> {
         Ok(self
-            .hub
             .roster(project)
             .await?
             .into_iter()
             .filter(|entry| entry.kind == IdentityKind::Coordinator)
             .map(|entry| entry.handle)
             .collect())
+    }
+
+    async fn roster(
+        &self,
+        project: &ProjectId,
+    ) -> Result<Vec<agmen_local::console::RosterEntry>, ApiError> {
+        match self.origins.of(project).await? {
+            Origin::Local => self.origins.local().roster(project).await,
+            Origin::Hub => self.hub.roster(project).await.map_err(Into::into),
+        }
     }
 
     #[expect(
@@ -599,19 +613,31 @@ impl Listeners {
             settings.model.clone_from(model);
         }
         let launch = self.resolve().await?;
-        let origin = login.hub_url.origin().ascii_serialization();
-        let registered = self
-            .identities()?
-            .managed(origin, login.human_id.clone())
-            .await?;
-        let identity = if let Some(identity) = registered.into_iter().find(|identity| {
+        let origin = agmen_client::origin_key(&login.hub_url);
+        let identities = self.identities()?;
+        let registered = identities.managed(origin, login.human_id.clone()).await?;
+        let (identity, minted) = if let Some(identity) = registered.into_iter().find(|identity| {
             identity.project == request.project && identity.kind == IdentityKind::Listener
         }) {
-            identity
+            (identity, false)
         } else {
-            self.mint(&request.project, login, &role).await?
+            (self.mint(&request.project, login, &role).await?, true)
         };
-        self.identities()?.register(identity.clone()).await?;
+        if let Err(error) = identities.register(identity.clone()).await {
+            // A committed local mint with no registered row would answer "already
+            // running" to every retry, so revoke it. The hub path is unchanged.
+            if minted
+                && agmen_client::is_local(&identity.hub_url)
+                && let Err(revoke) = self
+                    .origins
+                    .local()
+                    .revoke(&identity.project, &identity.identity_id)
+                    .await
+            {
+                tracing::warn!(code = ?revoke.code, "revoking an unregistered local listener failed");
+            }
+            return Err(error);
+        }
         let prompt = self
             .managed()?
             .write_role_prompt(&identity.identity_id, &role)
@@ -657,7 +683,7 @@ impl Listeners {
         .await?;
         let (stop, stopped) = oneshot::channel();
         let context = RunContext {
-            hub: self.hub.clone(),
+            origins: self.origins.clone(),
             identities: self.identities()?,
             groups: self.groups.clone(),
             live: live.clone(),
@@ -698,7 +724,6 @@ impl Listeners {
         login: &agmen_client::Login,
         role: &agmen_roles::Resolved,
     ) -> Result<ManagedIdentity, ApiError> {
-        let broker = self.broker().await?;
         let handle = format!("{}/listener", login.handle);
         let spec = agmen_proto::RoleSpec {
             role: role.role.name.parse().map_err(failure)?,
@@ -706,19 +731,38 @@ impl Listeners {
             edits: role.edits.clone().into(),
             role_sha256: role.sha256.parse().map_err(failure)?,
         };
+        if self.origins.of(project).await? == Origin::Local {
+            let minted = self
+                .origins
+                .local()
+                .mint(LocalMint {
+                    project: project.clone(),
+                    name: "listener".into(),
+                    kind: IdentityKind::Listener,
+                    spec: Some(spec),
+                    agent: None,
+                    delegated_by: None,
+                })
+                .await
+                .map_err(listener_mint_error)?;
+            return Ok(ManagedIdentity {
+                hub_url: agmen_client::local_hub_url(),
+                broker_url: agmen_client::local_broker(),
+                tenant: minted.topics.tenant().clone(),
+                project: minted.topics.project().clone(),
+                identity_id: minted.id,
+                owner_id: login.human_id.clone(),
+                handle: minted.handle,
+                kind: IdentityKind::Listener,
+            });
+        }
+        let broker = self.broker().await?;
         let body = json!({"project":project,"handle":handle,"kind":"listener","role":spec.role,"verbs":spec.verbs,"edits":spec.edits,"role_sha256":spec.role_sha256});
         let minted = self
             .hub
             .mint_identity(&body)
             .await
-            .map_err(|error| match error {
-                HubError::Refused {
-                    status: 409,
-                    ref code,
-                    ..
-                } if code == "listener_exists" => already_running(),
-                other => other.into(),
-            })?;
+            .map_err(listener_mint_error)?;
         // This boundary never derives Debug or includes the response in an error.
         #[derive(Deserialize)]
         struct Minted {
@@ -800,11 +844,16 @@ impl Listeners {
 
     async fn caller(&self, caller: &ManagedIdentity) -> Result<Arc<Mutex<Live>>, ApiError> {
         let login = self
-            .hub
-            .credentials()
-            .login()
+            .origins
+            .person_for(&caller.hub_url)
             .await
-            .map_err(|_| forbidden())?;
+            .map_err(|error| {
+                if agmen_client::is_local(&caller.hub_url) {
+                    error
+                } else {
+                    forbidden()
+                }
+            })?;
         if !owns(caller, &login) || caller.kind != IdentityKind::Listener {
             return Err(forbidden());
         }
@@ -853,7 +902,7 @@ impl Listeners {
             "settings_apply" => self.apply(caller, live, params(raw)?).await,
             "roster" => {
                 params::<Empty>(raw)?;
-                serde_json::to_value(self.hub.roster(&caller.project).await?).map_err(failure)
+                serde_json::to_value(self.roster(&caller.project).await?).map_err(failure)
             }
             "git_log" | "git_show" | "git_diff" | "git_status" => {
                 let request = git_request(method, raw)?;
@@ -995,24 +1044,30 @@ impl Listeners {
             tracing::warn!("reading listener intents failed");
             return;
         };
-        let Ok(login) = self.hub.credentials().login().await else {
-            tracing::warn!("listener re-adoption needs a login");
-            return;
-        };
         let Ok(identities) = self.identities() else {
             return;
         };
-        let Ok(registered) = identities
-            .managed(
-                login.hub_url.origin().ascii_serialization(),
-                login.human_id.clone(),
-            )
-            .await
-        else {
-            tracing::warn!("reading registered listeners for re-adoption failed");
-            return;
-        };
         for intent in intents {
+            let login = async {
+                self.origins
+                    .person(self.origins.of(&intent.project).await?)
+                    .await
+            }
+            .await;
+            let Ok(login) = login else {
+                tracing::warn!("listener re-adoption could not read the project's owner");
+                continue;
+            };
+            let Ok(registered) = identities
+                .managed(
+                    agmen_client::origin_key(&login.hub_url),
+                    login.human_id.clone(),
+                )
+                .await
+            else {
+                tracing::warn!("reading registered listeners for re-adoption failed");
+                continue;
+            };
             if !registered.iter().any(|identity| {
                 identity.kind == IdentityKind::Listener
                     && identity.identity_id == intent.identity_id
@@ -1065,7 +1120,7 @@ async fn stop(entry: &mut Listener) {
 }
 
 struct RunContext {
-    hub: Arc<Hub>,
+    origins: Arc<Origins>,
     identities: Arc<Identities>,
     groups: Arc<StdMutex<BTreeSet<i32>>>,
     live: Arc<Mutex<Live>>,
@@ -1119,9 +1174,13 @@ async fn login_changed(context: &RunContext) {
     // This watcher shares the runtime's stop future, including during a turn.
     loop {
         tick.tick().await;
-        let login = tokio::time::timeout(IO_LIMIT, context.hub.credentials().login()).await;
-        if !login.is_ok_and(|login| login.is_ok_and(|login| owns(&identity, &login))) {
-            return;
+        let login =
+            tokio::time::timeout(IO_LIMIT, context.origins.person_for(&identity.hub_url)).await;
+        match login {
+            Ok(Ok(login)) if owns(&identity, &login) => {}
+            Ok(Err(error))
+                if agmen_client::is_local(&identity.hub_url) && error.code == ErrorCode::Hub => {}
+            _ => return,
         }
     }
 }
@@ -1804,7 +1863,18 @@ fn zero() -> Money {
     Money::from_usd("0").unwrap_or_else(|_| std::process::abort())
 }
 fn owns(identity: &ManagedIdentity, login: &agmen_client::Login) -> bool {
-    identity.owner_id == login.human_id && identity.hub_url.origin() == login.hub_url.origin()
+    identity.owner_id == login.human_id
+        && agmen_client::origin_key(&identity.hub_url) == agmen_client::origin_key(&login.hub_url)
+}
+fn listener_mint_error(error: HubError) -> ApiError {
+    match error {
+        HubError::Refused {
+            status: 409,
+            ref code,
+            ..
+        } if code == "listener_exists" => already_running(),
+        other => other.into(),
+    }
 }
 fn failure(error: impl std::fmt::Display) -> ApiError {
     bad_request(error.to_string())

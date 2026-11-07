@@ -501,7 +501,7 @@ fn check_available(
 fn bad_delegator() -> MintError {
     MintError::new(
         "bad_role",
-        "delegated_by must name a live listener of this owner and project for an agent worker",
+        "delegated_by must name a live identity of this owner and project for an agent child",
     )
 }
 
@@ -516,7 +516,7 @@ pub(crate) fn check_delegator(
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM identities
              WHERE id=?1 AND owner_human_id=?2 AND project_id=?3
-               AND kind='listener' AND revoked_at IS NULL)",
+               AND revoked_at IS NULL)",
             params![id.as_str(), owner.as_str(), project.as_str()],
             |row| row.get(0),
         )

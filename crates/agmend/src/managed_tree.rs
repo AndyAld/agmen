@@ -49,12 +49,12 @@ impl Managed {
             .get(&caller.identity_id)
             .cloned()
             .ok_or_else(refusal)?;
-        let login = self.hub.credentials().login().await.map_err(error)?;
+        let login = self.origins.person_for(&caller.hub_url).await?;
         let held = worker.lock().await;
         if held.record.source != Source::Launched
             || held.record.identity != *caller
             || caller.owner_id != login.human_id
-            || caller.hub_url.origin() != login.hub_url.origin()
+            || agmen_client::origin_key(&caller.hub_url) != agmen_client::origin_key(&login.hub_url)
         {
             return Err(refusal());
         }
@@ -149,7 +149,6 @@ impl Managed {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         let mut tasks = tokio::task::JoinSet::new();
         let operation = async {
-            let login = self.hub.credentials().login().await.map_err(error)?;
             let levels = if subtree {
                 self.tree_levels(&root).await
             } else {
@@ -163,8 +162,13 @@ impl Managed {
                     .get(id)
                     .ok_or_else(|| bad_request("agent is not managed by this daemon"))?;
                 let held = worker.lock().await;
+                let login = self
+                    .origins
+                    .person_for(&held.record.identity.hub_url)
+                    .await?;
                 if held.record.identity.owner_id != login.human_id
-                    || held.record.identity.hub_url.origin() != login.hub_url.origin()
+                    || agmen_client::origin_key(&held.record.identity.hub_url)
+                        != agmen_client::origin_key(&login.hub_url)
                 {
                     return Err(crate::identities::forbidden());
                 }
@@ -178,7 +182,19 @@ impl Managed {
                         .cloned()
                         .ok_or_else(|| error("stop target disappeared"))?;
                     let manager = self.clone();
-                    tasks.spawn(async move { manager.stop_worker(worker).await });
+                    tasks.spawn(async move {
+                        let identity = worker.lock().await.record.identity.clone();
+                        manager.stop_worker(worker).await?;
+                        if agmen_client::is_local(&identity.hub_url) {
+                            manager.revoke_identity(&identity).await?;
+                            manager
+                                .identities()
+                                .ok_or_else(|| error("identity service stopped"))?
+                                .forget(&identity)
+                                .await?;
+                        }
+                        Ok::<_, ApiError>(())
+                    });
                 }
                 for _ in 0..level.len() {
                     if let Some(result) = tasks.join_next().await {
@@ -227,7 +243,7 @@ impl Managed {
     async fn admit(
         &self,
         parent: Option<&Record>,
-        owner: &IdentityId,
+        login: &agmen_client::Login,
         safeguards: &Safeguards,
     ) -> Result<u32, ApiError> {
         let workers: Vec<_> = self.workers.lock().await.values().cloned().collect();
@@ -251,14 +267,14 @@ impl Managed {
             )));
         }
         if safeguards.limit_agents {
-            let login = self.hub.credentials().login().await.map_err(error)?;
             let mut running = 0_u32;
             // The registry bounds this snapshot to MAX_MANAGED workers.
             for worker in workers {
                 let held = worker.lock().await;
                 if held.state != "offline"
-                    && held.record.identity.owner_id == *owner
-                    && held.record.identity.hub_url.origin() == login.hub_url.origin()
+                    && held.record.identity.owner_id == login.human_id
+                    && agmen_client::origin_key(&held.record.identity.hub_url)
+                        == agmen_client::origin_key(&login.hub_url)
                 {
                     running += 1;
                 }
@@ -292,10 +308,9 @@ impl Managed {
             None => None,
         };
         let safeguards = self.read_safeguards(true).await?;
-        let login = self.hub.credentials().login().await.map_err(error)?;
-        let depth = self
-            .admit(parent.as_ref(), &login.human_id, &safeguards)
-            .await?;
+        let origin = self.origins.of(&launch.project).await?;
+        let login = self.origins.person(origin).await?;
+        let depth = self.admit(parent.as_ref(), &login, &safeguards).await?;
         let brief = brief
             .as_deref()
             .map(|body| envelope(Payload::Dm {}, body))
@@ -459,8 +474,8 @@ impl Managed {
         let id = &identity.identity_id;
         let mut left = Vec::new();
         // Revoke first: the hub token is dead whatever else fails.
-        if let Err(cause) = self.hub.revoke_identity(id).await {
-            left.push(format!("revoking {id}: {cause}"));
+        if let Err(cause) = self.revoke_identity(&metadata_for(identity)).await {
+            left.push(format!("revoking {id}: {}", cause.message));
         }
         if let Err(cause) = self
             .hub
