@@ -10,8 +10,8 @@ use url::Url;
 use super::group;
 use crate::agmend::{Agmend, AgmendError};
 use crate::client::{
-    Api, Human, Login, blocking, forget_login, http, human, login_error, read_login, refusal,
-    save_login,
+    Api, Human, Login, blocking, check_login_lock, forget_login, http, human, login_error,
+    read_login, refusal, save_login,
 };
 use crate::output::{Fail, clean, print_notices};
 
@@ -79,6 +79,7 @@ pub(crate) async fn login(args: LoginArgs) -> Result<()> {
 pub(crate) async fn device_login(hub: &Url) -> Result<Human> {
     // First, so the refusal reads as it always has, without a context line.
     agmen_client::check_hub_url(hub)?;
+    check_login_lock().await?;
     let http = http()?;
     let start = device_start(&http, hub)
         .await

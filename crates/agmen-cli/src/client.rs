@@ -220,6 +220,14 @@ pub(crate) async fn save_login(login: &Login, tokens: &HumanTokens) -> Result<()
     .map_err(login_error)
 }
 
+/// Fails now if a login could not take the login lock, so the person is not
+/// sent through the browser first. Holds nothing afterwards.
+pub(crate) async fn check_login_lock() -> Result<()> {
+    agmen_client::check_login_lock(&paths::login_file()?)
+        .await
+        .map_err(login_error)
+}
+
 /// Forgets the signed-in person: their tokens and the login file. Returns
 /// who it was, or `None` when nobody was signed in.
 pub(crate) async fn forget_login() -> Result<Option<Login>> {

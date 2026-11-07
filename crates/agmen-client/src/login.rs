@@ -23,7 +23,7 @@ use crate::token_store::{TokenKey, TokenStore, TokenStoreError};
 
 #[path = "login_lock.rs"]
 mod lock;
-use lock::LoginLock;
+use lock::{LOGIN_LOCK_TIMEOUT, LoginLock, SIGN_IN_LOCK_TIMEOUT};
 
 /// Renew the access token when it has less than this left.
 const RENEW_LEAD: SignedDuration = SignedDuration::from_secs(120);
@@ -45,13 +45,16 @@ pub enum LoginError {
     /// The login lock file could not be opened or locked, for a reason other
     /// than another process holding it. A login or logout needs the lock, so
     /// it changed nothing.
-    #[error("cannot use the login lock {}; nothing was changed", path.display())]
+    #[error(
+        "cannot use the login lock {}: {error}; nothing was changed. Check its owner and permissions, and that the filesystem supports file locks",
+        path.display()
+    )]
     LockUnusable {
         /// The shared lock file.
         path: PathBuf,
-        /// What failed.
-        #[source]
-        source: std::io::Error,
+        /// What failed. Not a `source`, since the message already holds it
+        /// and an error chain would print it twice.
+        error: std::io::Error,
     },
     /// The hub URL would expose credentials over an unsafe transport.
     #[error(transparent)]
@@ -189,7 +192,7 @@ impl Login {
     pub async fn forget(store: &TokenStore, login_file: &Path) -> Result<Option<Self>, LoginError> {
         let (store, path) = (store.clone(), login_file.to_owned());
         tokio::task::spawn_blocking(move || {
-            let _lock = LoginLock::hold(&path)?;
+            let _lock = LoginLock::hold(&path, SIGN_IN_LOCK_TIMEOUT)?;
             let Some(login) = Self::read(&path)? else {
                 return Ok(None);
             };
@@ -412,7 +415,7 @@ pub async fn save_login(
     let json = serde_json::to_vec_pretty(login).map_err(LoginError::Encode)?;
     let (store, path) = (store.clone(), login_file.to_owned());
     tokio::task::spawn_blocking(move || {
-        let _lock = LoginLock::hold(&path)?;
+        let _lock = LoginLock::hold(&path, SIGN_IN_LOCK_TIMEOUT)?;
         if let Some(old) = Login::read(&path)? {
             let old_key = old.key().map_err(LoginError::Key)?;
             if old_key != key {
@@ -432,6 +435,31 @@ pub async fn save_login(
     })
     .await
     .map_err(LoginError::Join)?
+}
+
+/// Checks that a login or logout could take the shared login lock now, by
+/// taking it and letting go at once. Call it before the browser sign-in, so a
+/// lock that is busy or unusable fails before the person is sent to GitHub.
+/// It holds nothing afterwards: [`save_login`] takes the lock again around
+/// its own writes, and a lock that goes bad in between still fails there.
+///
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// use agmen_client::{check_login_lock, login_file};
+/// check_login_lock(&login_file()?).await?;
+/// # Ok(()) }
+/// ```
+///
+/// # Errors
+///
+/// [`LoginError::LockTimeout`] when another process holds the lock past the
+/// wait a login gets, and [`LoginError::LockUnusable`] when it cannot be
+/// opened or locked. Either way nothing was changed.
+pub async fn check_login_lock(login_file: &Path) -> Result<(), LoginError> {
+    let path = login_file.to_owned();
+    tokio::task::spawn_blocking(move || LoginLock::hold(&path, SIGN_IN_LOCK_TIMEOUT).map(drop))
+        .await
+        .map_err(LoginError::Join)?
 }
 
 /// `login`'s tokens from `store`, renewed through the hub first when the
@@ -497,25 +525,58 @@ pub async fn human_tokens(
         Err(LoginError::Refused { status: 400, .. }) => return Err(LoginError::NotSignedIn),
         Err(err) => return Err(err),
     };
-    if !store_renewed(store, login_file, login, &renewed).await? {
-        // The log holds no token, or part of one.
-        tracing::info!(
-            "discarded a renewed token pair: the sign-in changed while the hub renewed it"
-        );
-        return Err(LoginError::NotSignedIn);
+    // Logged here, off the blocking pool, and with no token in it.
+    match renew_outcome(store, login_file, login, &renewed).await? {
+        Renewal::Stored => {}
+        Renewal::SignInChanged => {
+            tracing::info!(
+                path = %login_file.display(),
+                "discarded a renewed token pair: the sign-in changed while the hub renewed it"
+            );
+            return Err(LoginError::NotSignedIn);
+        }
+        Renewal::LockBusy(timeout) => {
+            tracing::info!(
+                path = %login_file.display(),
+                "discarded a renewed token pair: login.lock stayed busy for {timeout:?}"
+            );
+            return Err(LoginError::NotSignedIn);
+        }
     }
     Ok(renewed)
 }
 
-/// Stores `renewed` as `login`'s tokens if `login` is still the signed-in
-/// person, and says whether it did. The login lock covers the check and the
-/// write ([`TokenStore::set_if`]), including the keychain path.
+/// What became of a renewed pair.
+enum Renewal {
+    Stored,
+    /// The sign-in changed while the hub renewed it.
+    SignInChanged,
+    /// Another process held the login lock past a renewal's wait.
+    LockBusy(std::time::Duration),
+}
+
+/// [`renew_outcome`] as whether the pair was stored.
+#[cfg(test)]
 async fn store_renewed(
     store: &TokenStore,
     login_file: &Path,
     login: &Login,
     renewed: &HumanTokens,
 ) -> Result<bool, LoginError> {
+    renew_outcome(store, login_file, login, renewed)
+        .await
+        .map(|outcome| matches!(outcome, Renewal::Stored))
+}
+
+/// Stores `renewed` as `login`'s tokens if `login` is still the signed-in
+/// person, and says what became of it. The login lock covers the check and the
+/// write ([`TokenStore::set_if`]), including the keychain path.
+async fn renew_outcome(
+    store: &TokenStore,
+    login_file: &Path,
+    login: &Login,
+    renewed: &HumanTokens,
+) -> Result<Renewal, LoginError> {
     let key = login.key().map_err(LoginError::Key)?;
     let json = serde_json::to_string(renewed).map_err(LoginError::Encode)?;
     let (store, login_file, login) = (store.clone(), login_file.to_owned(), login.clone());
@@ -523,15 +584,27 @@ async fn store_renewed(
         // A lock held too long drops the pair. A lock file that cannot be used
         // at all must not cost a refresh the hub already spent, so then the
         // renewal falls back to the login file check alone.
-        let _lock = match LoginLock::hold(&login_file) {
+        let _lock = match LoginLock::hold(&login_file, LOGIN_LOCK_TIMEOUT) {
             Ok(lock) => Some(lock),
-            Err(LoginError::LockTimeout { .. }) => return Ok(false),
-            Err(LoginError::LockUnusable { path, source }) => {
-                tracing::warn!(
-                    path = %path.display(),
-                    error = %source,
-                    "login.lock is unusable; the renewal checks the login file without it"
-                );
+            Err(LoginError::LockTimeout { timeout, .. }) => {
+                return Ok(Renewal::LockBusy(timeout));
+            }
+            Err(LoginError::LockUnusable { path, error }) => {
+                // The renewal runs on every expiry, so a lock that stays
+                // unusable warns once, and again only if the error changes.
+                if lock::fell_back(&path, &error) {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %error,
+                        "login.lock is unusable; the renewal checks the login file without it"
+                    );
+                } else {
+                    tracing::debug!(
+                        path = %path.display(),
+                        error = %error,
+                        "login.lock is still unusable; the renewal checks the login file without it"
+                    );
+                }
                 None
             }
             Err(error) => return Err(error),
@@ -545,7 +618,11 @@ async fn store_renewed(
                 })
             })
             .map_err(LoginError::StoreWrite)?;
-        unconfirmed.map_or(Ok(stored), Err)
+        match unconfirmed {
+            Some(error) => Err(error),
+            None if stored => Ok(Renewal::Stored),
+            None => Ok(Renewal::SignInChanged),
+        }
     })
     .await
     .map_err(LoginError::Join)?

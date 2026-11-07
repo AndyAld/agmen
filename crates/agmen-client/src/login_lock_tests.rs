@@ -1,11 +1,14 @@
 use std::fs::{File, OpenOptions};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+use axum::Router;
+use axum::routing::post;
 
 use super::*;
 use crate::token_store::fake_keychain::FakeKeychain;
 
 const PENDING_WINDOW: Duration = Duration::from_millis(150);
-const TEST_DEADLINE: Duration = Duration::from_secs(4);
+const TEST_DEADLINE: Duration = Duration::from_secs(8);
 
 fn login() -> Login {
     Login {
@@ -310,11 +313,16 @@ fn capture_logs() {
 
 /// The warnings logged about files under `dir`, each as its fields.
 fn logged_about(dir: &Path) -> Vec<String> {
+    logged_at(tracing::Level::WARN, dir)
+}
+
+/// The events at `level` logged about files under `dir`, each as its fields.
+fn logged_at(level: tracing::Level, dir: &Path) -> Vec<String> {
     let dir = dir.display().to_string();
     let logged = LOGGED.lock().unwrap();
     logged
         .iter()
-        .filter(|(level, fields)| *level == tracing::Level::WARN && fields.contains(&dir))
+        .filter(|(at, fields)| *at == level && fields.contains(&dir))
         .map(|(_, fields)| fields.clone())
         .collect()
 }
@@ -361,4 +369,225 @@ async fn logout_file_removal_error_keeps_its_diagnostic() {
     std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o700)).unwrap();
     let error = result.unwrap_err();
     assert_eq!(error.to_string(), format!("removing {}", file.display()));
+}
+
+/// Holds `login.lock` beside `file` for `time` on another thread.
+fn hold_for(file: &Path, time: Duration) -> std::thread::JoinHandle<()> {
+    let guard = hold(file);
+    std::thread::spawn(move || {
+        std::thread::sleep(time);
+        drop(guard);
+    })
+}
+
+#[tokio::test]
+async fn login_waits_longer_than_a_renewal_for_the_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = TokenStore::Dir(dir.path().join("tokens"));
+    let file = dir.path().join("login.json");
+    let holder = hold_for(&file, Duration::from_secs(2));
+    save_login(&store, &file, &login(), &tokens())
+        .await
+        .expect("a lock freed after 2 s is within a login's wait");
+    holder.join().unwrap();
+    assert_eq!(Login::read(&file).unwrap(), Some(login()));
+}
+
+#[tokio::test]
+async fn logout_waits_longer_than_a_renewal_for_the_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = TokenStore::Dir(dir.path().join("tokens"));
+    let file = dir.path().join("login.json");
+    save_login(&store, &file, &login(), &tokens())
+        .await
+        .unwrap();
+    let holder = hold_for(&file, Duration::from_secs(2));
+    let gone = Login::forget(&store, &file)
+        .await
+        .expect("a lock freed after 2 s is within a logout's wait");
+    holder.join().unwrap();
+    assert_eq!(gone, Some(login()));
+}
+
+#[tokio::test]
+async fn login_gives_up_on_a_busy_lock_after_five_seconds() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = TokenStore::Dir(dir.path().join("tokens"));
+    let file = dir.path().join("login.json");
+    let _guard = hold(&file);
+    let start = Instant::now();
+    let error = save_login(&store, &file, &login(), &tokens())
+        .await
+        .unwrap_err();
+    assert!(start.elapsed() >= Duration::from_secs(5), "{error}");
+    assert!(error.to_string().contains("after 5s"), "{error}");
+}
+
+#[tokio::test]
+async fn check_login_lock_fails_a_busy_lock_and_leaves_no_login() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("login.json");
+    let _guard = hold(&file);
+    let error = tokio::time::timeout(TEST_DEADLINE, check_login_lock(&file))
+        .await
+        .expect("the check must stop waiting")
+        .expect_err("a busy lock fails the check");
+    assert!(matches!(error, LoginError::LockTimeout { .. }), "{error}");
+    assert!(!file.exists());
+}
+
+#[tokio::test]
+async fn check_login_lock_fails_an_unusable_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("login.json");
+    make_lock_unusable(&file);
+    let error = check_login_lock(&file).await.unwrap_err();
+    assert!(matches!(error, LoginError::LockUnusable { .. }), "{error}");
+}
+
+#[tokio::test]
+async fn check_login_lock_lets_go_of_the_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("login.json");
+    check_login_lock(&file).await.unwrap();
+    // Held across the browser step, the check would keep this out.
+    let _again = hold(&file);
+    assert!(!file.exists(), "the check wrote the login file");
+}
+
+/// A token endpoint that renews any refresh token.
+async fn renewing_hub() -> Url {
+    let app = Router::new().route(
+        "/v1/auth/token",
+        post(|| async {
+            (
+                [("content-type", "application/json")],
+                r#"{"access_token":"test-renewed-a","refresh_token":"test-renewed-r","expires_in":3600}"#,
+            )
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    format!("http://{addr}").parse().unwrap()
+}
+
+/// A person whose access token is about to run out, signed in while the
+/// lock worked.
+async fn expiring_sign_in() -> (tempfile::TempDir, TokenStore, PathBuf, Login) {
+    let dir = tempfile::tempdir().unwrap();
+    let store = TokenStore::Dir(dir.path().join("tokens"));
+    let file = dir.path().join("login.json");
+    let login = Login {
+        hub_url: renewing_hub().await,
+        ..login()
+    };
+    let old = HumanTokens::new("test-old-a".into(), "test-old-r".into(), 30);
+    save_login(&store, &file, &login, &old).await.unwrap();
+    (dir, store, file, login)
+}
+
+#[tokio::test]
+async fn a_renewal_dropped_for_a_busy_lock_says_the_lock_was_busy() {
+    capture_logs();
+    let (dir, store, file, login) = expiring_sign_in().await;
+    let _guard = hold(&file);
+    let error = human_tokens(&reqwest::Client::new(), &store, &file, &login)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, LoginError::NotSignedIn), "{error:?}");
+    let notes = logged_at(tracing::Level::INFO, dir.path());
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(notes[0].contains("busy"), "{notes:?}");
+    assert!(!notes[0].contains("sign-in changed"), "{notes:?}");
+    assert!(!notes[0].contains("test-renewed"), "{notes:?}");
+}
+
+#[tokio::test]
+async fn a_renewal_dropped_for_a_changed_login_still_says_so() {
+    capture_logs();
+    let (dir, store, file, login) = expiring_sign_in().await;
+    std::fs::remove_file(&file).unwrap();
+    let error = human_tokens(&reqwest::Client::new(), &store, &file, &login)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, LoginError::NotSignedIn), "{error:?}");
+    let notes = logged_at(tracing::Level::INFO, dir.path());
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(notes[0].contains("sign-in changed"), "{notes:?}");
+    assert!(!notes[0].contains("busy"), "{notes:?}");
+}
+
+#[tokio::test]
+async fn an_unusable_lock_warns_on_the_first_fallback_and_logs_repeats_at_debug() {
+    capture_logs();
+    let (dir, store, file) = signed_in_with_unusable_lock().await;
+    for _ in 0..3 {
+        assert!(
+            store_renewed(&store, &file, &login(), &tokens())
+                .await
+                .unwrap()
+        );
+    }
+    let warnings = logged_about(dir.path());
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    let repeats = logged_at(tracing::Level::DEBUG, dir.path());
+    assert_eq!(repeats.len(), 2, "{repeats:?}");
+    assert!(
+        repeats.iter().all(|r| r.contains("login.lock")),
+        "{repeats:?}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_changed_lock_error_warns_again_and_so_does_a_break_after_a_repair() {
+    capture_logs();
+    let (dir, store, file) = signed_in_with_unusable_lock().await;
+    let lock = file.with_file_name("login.lock");
+    let renew = || async {
+        assert!(
+            store_renewed(&store, &file, &login(), &tokens())
+                .await
+                .unwrap()
+        );
+    };
+    renew().await;
+    renew().await;
+    assert_eq!(logged_about(dir.path()).len(), 1);
+    // A different failure: the path now leads nowhere, not into a directory.
+    std::fs::remove_dir(&lock).unwrap();
+    std::os::unix::fs::symlink(dir.path().join("missing/login.lock"), &lock).unwrap();
+    renew().await;
+    renew().await;
+    assert_eq!(logged_about(dir.path()).len(), 2);
+    // The lock works again, and then breaks as before: a new warning.
+    std::fs::remove_file(&lock).unwrap();
+    renew().await;
+    assert_eq!(logged_about(dir.path()).len(), 2);
+    std::fs::remove_file(&lock).unwrap();
+    std::fs::create_dir(&lock).unwrap();
+    renew().await;
+    assert_eq!(logged_about(dir.path()).len(), 3);
+}
+
+#[tokio::test]
+async fn an_unusable_lock_error_names_the_path_the_os_error_and_what_to_check() {
+    let (dir, store, file) = signed_in_with_unusable_lock().await;
+    let lock = dir.path().join("login.lock");
+    let login_error = save_login(&store, &file, &login(), &tokens())
+        .await
+        .unwrap_err();
+    let logout_error = Login::forget(&store, &file).await.unwrap_err();
+    for error in [login_error, logout_error] {
+        let text = error.to_string();
+        assert!(text.contains(&lock.display().to_string()), "{text}");
+        assert!(text.contains("os error"), "{text}");
+        for check in ["owner", "permissions", "filesystem"] {
+            assert!(text.contains(check), "{text}");
+        }
+        assert!(text.contains("nothing was changed"), "{text}");
+        // The OS error is in the message once, so `{:#}` does not repeat it.
+        assert!(std::error::Error::source(&error).is_none(), "{text}");
+    }
 }
