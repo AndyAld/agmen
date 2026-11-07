@@ -37,12 +37,9 @@ CREATE TABLE receipts (
 CREATE INDEX receipts_identity ON receipts(origin, identity);
 ";
 
-/// Stream positions one hub project keeps per origin. The hub refuses an `after`
-/// list over 256 streams (agmen-hub `events.rs` `MAX_AFTER`), so this stays 256.
-const MAX_HUB_STREAMS: usize = 256;
-/// Stream positions one local project keeps: Feed, the person's inbox and one
-/// inbox per managed identity, which the local collector pages separately.
-pub(crate) const MAX_LOCAL_STREAMS: usize = MAX_MANAGED + 2;
+/// Stream positions per project and origin: Feed, the person's inbox and one
+/// inbox per managed identity. Hub reconnects split these into bounded requests.
+pub(crate) const MAX_STREAM_POSITIONS: usize = MAX_MANAGED + 2;
 
 /// Metadata only. Credentials stay in TokenStore.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -435,9 +432,8 @@ impl Store {
     ) -> Result<BTreeMap<Stream, u64>, StoreError> {
         let mut stmt = self.conn.prepare("SELECT stream, seq FROM positions WHERE origin=?1 AND project=?2 ORDER BY stream LIMIT ?3")?;
         let mut result = BTreeMap::new();
-        // The larger bound never cuts a hub project short: insertion caps it at 256.
         for row in stmt.query_map(
-            params![origin, project.as_str(), MAX_LOCAL_STREAMS as i64],
+            params![origin, project.as_str(), MAX_STREAM_POSITIONS as i64],
             |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
         )? {
             let (stream, seq) = row?;
@@ -514,13 +510,8 @@ impl Store {
                 params![origin, project.as_str(),format!("{origin}#owner=")],
                 |r| r.get(0),
             )?;
-            let (cap, full) = if origin == agmen_client::LOCAL_ORIGIN {
-                (MAX_LOCAL_STREAMS, "local stream positions")
-            } else {
-                (MAX_HUB_STREAMS, "256 stream positions")
-            };
-            if count >= cap as i64 {
-                return Err(StoreError::Full(full));
+            if count >= MAX_STREAM_POSITIONS as i64 {
+                return Err(StoreError::Full("258 stream positions"));
             }
         }
         let mut remember = None;
@@ -538,6 +529,15 @@ impl Store {
         )?;
         for row in identities {
             let (id, owner, metadata) = row?;
+            // An inbox can route only to its identity or an owning listener.
+            // Keep the sender too, since its outgoing ids must be remembered.
+            if let Stream::Inbox(recipient) = &message.stream
+                && recipient.as_str() != id
+                && recipient.as_str() != owner
+                && message.from.as_str() != id
+            {
+                continue;
+            }
             let identity: ManagedIdentity = serde_json::from_str(&metadata)?;
             let id = id
                 .parse::<IdentityId>()
@@ -714,6 +714,10 @@ fn addressed_to(
     kind: IdentityKind,
     own_ids: Option<&VecDeque<MessageId>>,
 ) -> Result<bool, StoreError> {
+    // ingest_for_owner skips an identity before decoding it when an inbox is
+    // neither its own nor its owner's. Keep that skip in step with the inbox
+    // rules below; inbox_ingest_skips_only_identities_the_addressing_rules_reject
+    // checks they agree.
     if kind == IdentityKind::Listener {
         // Private fanout includes the owner; public messages have a feed copy.
         // Choose one durable copy even if another arrives after a drain/restart.
