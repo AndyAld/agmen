@@ -546,6 +546,31 @@ async fn launch_chain_stops_at_the_registry_bound_with_limits_off() {
 }
 
 #[tokio::test]
+async fn stopped_hub_agent_still_counts_toward_the_cap() {
+    let (fixture, _) = tree_fixture().await;
+    root(&fixture).await;
+    worker_call(&fixture, "agent_stop", json!({"identity":"agent001"}))
+        .await
+        .unwrap();
+    let managed = &fixture.daemon.core.managed;
+    assert_eq!(managed.workers.lock().await.len(), 1);
+    let identities = managed
+        .identities()
+        .unwrap()
+        .managed(
+            agmen_client::origin_key(&fixture.hub_url),
+            "owner001".parse().unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        identities
+            .iter()
+            .any(|identity| identity.identity_id.as_str() == "agent001")
+    );
+}
+
+#[tokio::test]
 async fn invalid_agents_table_refuses_launch() {
     let (fixture, mints) = tree_fixture().await;
     settings(&fixture, "max_agents = \"many\"");
