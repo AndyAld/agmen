@@ -29,6 +29,133 @@ const HEARTBEAT_EVERY: Duration = Duration::from_secs(1);
 /// Polls for the first beat: 10 s at `LOCAL_POLL`, inside `MCP_WAIT`.
 const HEARTBEAT_POLLS: usize = 500;
 
+async fn run_bounded(home: &Home, cwd: &std::path::Path, args: &[&str]) -> std::process::Output {
+    tokio::time::timeout(
+        MCP_WAIT,
+        tokio::process::Command::from(home.agmen(cwd, args))
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+}
+
+#[tokio::test]
+async fn whoami_in_a_local_worktree_names_a_stopped_agmend() {
+    let home = Home::new_in(std::path::Path::new("/tmp"));
+    let (stop, daemon) = start_agmend(&home);
+    let worktree = Worktree::new(&home);
+    assert_exit(&run_bounded(&home, &worktree.path(), &["init"]).await, 0);
+    stop_agmend(stop, daemon).await;
+    assert!(!home.login_file().exists());
+    for args in [&["whoami"][..], &["whoami", "--json"][..]] {
+        let out = run_bounded(&home, &worktree.path(), args).await;
+        assert_exit(&out, 1);
+        assert_eq!(
+            stderr(&out).trim(),
+            "agmen: agmend is not running: open the agmen app or run agmend service install"
+        );
+        assert!(!stderr(&out).contains("agmen login"));
+        assert_eq!(stdout(&out), "");
+    }
+}
+
+#[tokio::test]
+async fn whoami_outside_a_local_worktree_keeps_the_hub_login_hint() {
+    let home = Home::new_in(std::path::Path::new("/tmp"));
+    let (stop, daemon) = start_agmend(&home);
+    for args in [&["whoami"][..], &["whoami", "--json"][..]] {
+        let out = run_bounded(&home, home.path(), args).await;
+        assert_exit(&out, 3);
+        assert_eq!(
+            stderr(&out).trim(),
+            "not signed in: run agmen login --hub <url>"
+        );
+    }
+    assert!(!home.state_base().join("local.db").exists());
+    stop_agmend(stop, daemon).await;
+    for args in [&["whoami"][..], &["whoami", "--json"][..]] {
+        let out = run_bounded(&home, home.path(), args).await;
+        assert_exit(&out, 3);
+        assert_eq!(
+            stderr(&out).trim(),
+            "not signed in: run agmen login --hub <url>"
+        );
+    }
+}
+
+#[tokio::test]
+async fn whoami_reads_the_person_with_one_local_projects_call() {
+    use agmen_local::{API, ErrorCode, Request, Response, frame};
+    use std::os::unix::fs::PermissionsExt as _;
+
+    const REQUEST_LIMIT: usize = 4;
+    let projects = json!([{"project": "project1", "name": "lightweight"}]);
+    let person = json!({"id": "hmn7k2q9", "handle": "local-person"});
+    for args in [&["whoami"][..], &["whoami", "--json"][..]] {
+        let home = Home::new_in(std::path::Path::new("/tmp"));
+        std::fs::create_dir_all(home.state_base()).unwrap();
+        let socket = home.state_base().join("agmend.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let answer = json!({"projects": projects, "person": person, "future_field": true});
+        let daemon = tokio::spawn(async move {
+            tokio::time::timeout(MCP_WAIT, async {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut methods = Vec::new();
+                for _ in 0..REQUEST_LIMIT {
+                    let Ok(request) = frame::read_async::<Request>(&mut socket).await else {
+                        break;
+                    };
+                    let response = match request.method.as_str() {
+                        "hello" => Response::ok(request.id, json!({"api": API})),
+                        "local_projects" => Response::ok(request.id, answer.clone()),
+                        _ => Response::err(request.id, ErrorCode::BadRequest, "unexpected method"),
+                    };
+                    methods.push(request.method);
+                    frame::write_async(&mut socket, &response).await.unwrap();
+                }
+                methods
+            })
+            .await
+            .unwrap()
+        });
+        let out = run_bounded(&home, home.path(), args).await;
+        let methods = tokio::time::timeout(STOP_WAIT, daemon)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(methods, ["hello", "local_projects"]);
+        assert_exit(&out, 0);
+        assert_eq!(stderr(&out), "");
+        if args.contains(&"--json") {
+            assert_eq!(
+                serde_json::from_str::<Value>(&stdout(&out)).unwrap(),
+                json!({"local": {"id": person["id"], "handle": person["handle"], "projects": projects}})
+            );
+        } else {
+            assert!(stdout(&out).contains("local-person (hmn7k2q9) on this machine"));
+            assert!(stdout(&out).contains("project project1 (lightweight)"));
+        }
+    }
+}
+
+#[test]
+fn socket_read_error_chain_names_the_io_error_once() {
+    let err = anyhow::Error::new(agmen_client::AgmendSocketError::Read {
+        path: std::path::PathBuf::from("/unreadable/agmend.sock"),
+        source: std::io::Error::other("socket metadata unavailable"),
+    });
+    let printed = format!("{err:#}");
+    assert_eq!(
+        printed.matches("socket metadata unavailable").count(),
+        1,
+        "{printed}"
+    );
+    assert!(printed.contains("cannot read /unreadable/agmend.sock"));
+}
+
 #[tokio::test]
 async fn whoami_lists_this_machine_without_a_hub() {
     let local = Local::new().await;

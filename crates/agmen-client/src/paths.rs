@@ -47,7 +47,7 @@ pub enum AgmendSocketError {
         mode: u32,
     },
     /// The socket's metadata could not be read.
-    #[error("cannot read {}: {source}", path.display())]
+    #[error("cannot read {}", path.display())]
     Read {
         /// The socket path checked.
         path: PathBuf,
@@ -219,6 +219,22 @@ mod tests {
             check_agmend_socket_for(&dir.path().join("missing"), uid),
             Err(AgmendSocketError::Missing)
         ));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn socket_read_error_keeps_its_source_separate() {
+        use std::error::Error as _;
+
+        let err = AgmendSocketError::Read {
+            path: PathBuf::from("/unreadable/agmend.sock"),
+            source: std::io::Error::other("socket metadata unavailable"),
+        };
+        assert_eq!(format!("{err}"), "cannot read /unreadable/agmend.sock");
+        assert_eq!(
+            err.source().unwrap().to_string(),
+            "socket metadata unavailable"
+        );
     }
 
     #[test]

@@ -193,8 +193,8 @@ Each worktree acts as one identity: `agmen join` writes `.agmen/identity.json` a
 ```sh
 agmen init                                    # start a project on this machine
 agmen login --hub <url>                       # browser device login
-agmen logout                                  # forget your tokens on this machine
-agmen whoami                                  # you, your projects and roles, this worktree's identity
+agmen logout                                  # forget the hub login, keeping local credentials
+agmen whoami                                  # local person/projects, plus hub facts when signed in
 agmen invite --project <id> --role member     # a single-use invite (admins and coordinators)
 agmen join <invite>                           # join this worktree as a new identity of yours
 agmen join --project <id> --handle sol        # or join a project you already belong to

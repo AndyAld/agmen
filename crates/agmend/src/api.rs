@@ -449,9 +449,16 @@ async fn call(
         }
         "local_projects" => {
             params::<Shutdown>(raw)?;
-            let projects = core.origins.local().projects().await?;
+            let local = core.origins.local();
+            let person = local.person().await?;
+            let projects = if person.is_some() {
+                local.projects().await?
+            } else {
+                Vec::new()
+            };
+            let person = person.map(|person| json!({"id": person.id, "handle": person.handle}));
             Ok(
-                json!({"projects": projects.into_iter().map(|(project, name)| json!({"project": project, "name": name})).collect::<Vec<_>>()}),
+                json!({"projects": projects.into_iter().map(|(project, name)| json!({"project": project, "name": name})).collect::<Vec<_>>(), "person": person}),
             )
         }
         "lanes_set" => {

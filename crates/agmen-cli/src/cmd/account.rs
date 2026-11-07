@@ -239,12 +239,21 @@ struct LocalProject {
 async fn local_account() -> Result<Option<LocalAccount>> {
     let mut daemon = match Agmend::connect_default().await {
         Ok(daemon) => daemon,
-        Err(AgmendError::NotRunning) => return Ok(None),
+        Err(AgmendError::NotRunning) => {
+            let cwd = std::env::current_dir().context("reading the working directory")?;
+            if let Ok(Some(joined)) = blocking(move || Ok(find_identity(&cwd))).await?
+                && joined.identity.is_local()
+            {
+                return Err(AgmendError::NotRunning.into());
+            }
+            return Ok(None);
+        }
         Err(error) => return Err(error.into()),
     };
     #[derive(Deserialize)]
     struct Projects {
         projects: Vec<LocalProject>,
+        person: Option<agmen_local::console::Me>,
     }
     let answer = match daemon.call("local_projects", serde_json::json!({})).await {
         Ok(answer) => answer,
@@ -255,29 +264,9 @@ async fn local_account() -> Result<Option<LocalAccount>> {
         }) => return Ok(None),
         Err(error) => return Err(error.into()),
     };
-    let Projects { projects } =
+    let Projects { projects, person } =
         serde_json::from_value(answer).context("reading this machine's projects failed")?;
-    let Some(first) = projects.first() else {
-        return Ok(None);
-    };
-    // A local snapshot names the local person even when a hub login exists.
-    #[derive(Deserialize)]
-    struct Snapshot {
-        me: agmen_local::console::Me,
-    }
-    let snapshot: Snapshot = serde_json::from_value(
-        daemon
-            .call(
-                "console_snapshot",
-                serde_json::json!({"project": first.project}),
-            )
-            .await?,
-    )
-    .context("reading this machine's person failed")?;
-    Ok(Some(LocalAccount {
-        person: snapshot.me,
-        projects,
-    }))
+    Ok(person.map(|person| LocalAccount { person, projects }))
 }
 
 /// The role an invite gives.
