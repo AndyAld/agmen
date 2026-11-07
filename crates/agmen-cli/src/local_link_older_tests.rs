@@ -20,7 +20,7 @@ use tracing_subscriber::fmt::MakeWriter;
 
 use super::{LocalLink, WatchState, retryable};
 use crate::agmend::AgmendError;
-use crate::output::{Code, Fail};
+use crate::output::{Code, Fail, explain};
 
 const WAIT: Duration = Duration::from_secs(10);
 
@@ -715,4 +715,91 @@ async fn an_outage_shows_once_in_the_default_log() {
     let text = logs.text();
     assert_eq!(text.matches("waiting for agmend").count(), 1, "{text}");
     assert_eq!(text.matches("reconnected to agmend").count(), 1, "{text}");
+}
+
+/// What agmend answers when its local.db holds a schema it does not read.
+const NEWER_LOCAL_DB: &str = "local.db schema version 2 is unsupported";
+
+/// What `agmen watch` prints for it, and exits 1 with: agmend's words, and
+/// whose move it is.
+pub(super) const NEWER_LOCAL_DB_SAID: &str = "agmen: local.db schema version 2 is unsupported; it was written by a newer agmend, so update agmend";
+
+#[tokio::test]
+async fn a_newer_local_db_ends_the_first_open_with_exit_1_and_is_not_retried() {
+    let dir = tempfile::Builder::new().prefix("lr").tempdir().unwrap();
+    let identity = identity();
+    for (n, delivery) in [true, false].into_iter().enumerate() {
+        let socket = dir.path().join(format!("newer{n}.sock"));
+        let mut daemon = FakeAgmend::start(&socket, me(&identity), 0, |_, _| {
+            Answer::Refuse(ErrorCode::Version, NEWER_LOCAL_DB)
+        });
+        let link = link_at(&socket, &identity);
+        let state = dir.path().join(format!("state{n}"));
+        let state = if delivery {
+            WatchState::Delivery(&state)
+        } else {
+            WatchState::Notifications
+        };
+        let opened = tokio::time::timeout(Duration::from_secs(3), link.watch(state)).await;
+        let error = opened
+            .expect("the first open waited for agmend instead of failing")
+            .expect_err("a newer local.db ends the watch");
+        assert_eq!(explain(&error), (NEWER_LOCAL_DB_SAID.to_owned(), 1));
+        assert_eq!(
+            daemon.asked().len(),
+            1,
+            "delivery {delivery}: it was retried"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_newer_local_db_after_a_reconnect_ends_the_watch_and_is_not_retried() {
+    let dir = tempfile::Builder::new().prefix("lr").tempdir().unwrap();
+    let socket = dir.path().join("agmend.sock");
+    let identity = identity();
+    let mut daemon = FakeAgmend::start(&socket, me(&identity), 0, |n, _| match n {
+        0 => Answer::Open {
+            events: vec![feed_message(1)],
+            drop_after: true,
+        },
+        _ => Answer::Refuse(ErrorCode::Version, NEWER_LOCAL_DB),
+    });
+    let link = link_at(&socket, &identity);
+    let mut rx = link.watch(WatchState::Notifications).await.unwrap();
+    tokio::time::timeout(WAIT, async { while rx.recv().await.is_some() {} })
+        .await
+        .expect("a newer local.db ends the watch");
+    // Every later call hears it too, not only the first.
+    for _ in 0..2 {
+        let error = link.check_watch().expect_err("the refusal is kept");
+        assert_eq!(explain(&error), (NEWER_LOCAL_DB_SAID.to_owned(), 1));
+    }
+    // One try after the loss, and none after that however long the CLI waits.
+    tokio::time::sleep(Duration::from_secs(300)).await;
+    assert_eq!(daemon.asked().len(), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_newer_local_db_that_ends_an_open_watch_is_not_retried() {
+    // The authority recheck ends an open watch with an error frame, where the
+    // test above has a reconnect meet the refusal at open.
+    let dir = tempfile::Builder::new().prefix("lr").tempdir().unwrap();
+    let socket = dir.path().join("agmend.sock");
+    let identity = identity();
+    let mut daemon = FakeAgmend::start(&socket, me(&identity), 0, |_, _| Answer::Cut {
+        events: vec![feed_message(1)],
+        code: ErrorCode::Version,
+        message: NEWER_LOCAL_DB,
+    });
+    let link = link_at(&socket, &identity);
+    let mut rx = link.watch(WatchState::Notifications).await.unwrap();
+    assert_eq!(delivered(&mut rx, 1).await, [1]);
+    tokio::time::timeout(WAIT, async { while rx.recv().await.is_some() {} })
+        .await
+        .expect("a newer local.db ends the watch");
+    let error = link.check_watch().expect_err("the refusal is kept");
+    assert_eq!(explain(&error), (NEWER_LOCAL_DB_SAID.to_owned(), 1));
+    tokio::time::sleep(Duration::from_secs(300)).await;
+    assert_eq!(daemon.asked().len(), 1, "the watch was opened again");
 }

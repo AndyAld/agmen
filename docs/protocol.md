@@ -640,8 +640,12 @@ serves nothing, and `unauthorized` is for an identity that is unknown or
 revoked and for a credential that does not match. For `unauthorized` and
 `forbidden`, `agmen watch` exits 3, and `agmen mcp` answers the tool call
 that finds the watch ended with the reason, once; the next call opens the
-watch again. A first open that fails is not retried: the command or tool
-reports it at once.
+watch again. A `local.db` that a newer agmend wrote is the exception to the
+busy and stopped answers: both checks refuse it with `version` and the message
+``local.db schema version 2 is unsupported``, which no retry changes. The CLI
+does not retry it: `agmen watch` exits 1 with that message and says a newer
+agmend wrote it, and `agmen mcp` answers as it does for `unauthorized`. A
+first open that fails is not retried: the command or tool reports it at once.
 
 Identity methods use the authenticated identity's project. `page` accepts
 `feed` or that identity's own inbox, otherwise `forbidden`. Its default and

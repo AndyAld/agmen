@@ -2,7 +2,9 @@
 //! `Identities::authorize`. It answers `unauthorized` only for a caller that is
 //! unknown, revoked or holds the wrong credential. A read that fails, runs out
 //! of time or meets a stopped origin says nothing against the caller: it is
-//! refused with the answer the CLI retries, and nothing is served after it.
+//! refused with the answer the CLI retries, and nothing is served after it. A
+//! local.db that a newer agmend wrote is refused with `version`, which the CLI
+//! does not retry. Every read answered busy is logged with its cause.
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -10,6 +12,8 @@ use std::time::Instant;
 use agmen_local::Request;
 use agmen_proto::IdentityId;
 use serde_json::Value;
+
+use crate::identities::local_collection_tests::LogBytes;
 
 use super::*;
 
@@ -395,5 +399,276 @@ async fn an_unknown_identity_or_a_wrong_credential_at_connect_is_unauthorized() 
         unauthorized()
     );
     assert_untouched(&f, head_before).await;
+    f.stop().await;
+}
+
+/// What agmend says of a local.db that a newer agmend wrote.
+const NEWER: &str = "local.db schema version 2 is unsupported";
+
+fn version() -> ApiError {
+    ApiError {
+        code: ErrorCode::Version,
+        message: NEWER.into(),
+    }
+}
+
+/// Makes local.db one that a newer agmend wrote and puts a daemon that has not
+/// opened it in the fixture's place. The daemon it replaces is returned with
+/// the record still open, so a test can read what a call that got through
+/// would have written.
+fn after_a_newer_agmend(f: &mut Fixture) -> crate::Agmend {
+    rusqlite::Connection::open(f.dir.path().join("local.db"))
+        .unwrap()
+        .pragma_update(None, "user_version", 2)
+        .unwrap();
+    let next = crate::Agmend::bind(crate::Config::new(
+        f.dir.path().join("next.sock"),
+        f.dir.path().join("login.json"),
+        TokenStore::Dir(f.dir.path().join("tokens")),
+    ))
+    .unwrap();
+    std::mem::replace(&mut f.daemon, next)
+}
+
+async fn stop_replaced(daemon: crate::Agmend) {
+    daemon.core.identities.shutdown().await;
+    daemon.core.origins.local().shutdown().await;
+}
+
+/// Each log line about a read answered with busy, as "LEVEL Site Cause", in
+/// the order written.
+fn busy_reads(logs: &LogBytes) -> Vec<String> {
+    logs.text()
+        .lines()
+        .filter(|line| line.contains("answered busy"))
+        .map(|line| {
+            let field = |name: &str| {
+                let rest = line.split(name).nth(1).unwrap();
+                rest.split_whitespace().next().unwrap().to_owned()
+            };
+            let level = line.split_whitespace().next().unwrap();
+            format!("{level} {} {}", field("site="), field("cause="))
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_newer_local_db_at_connect_is_version_and_nothing_is_served() {
+    let (logs, _capture) = LogBytes::capture();
+    let mut f = Fixture::new().await;
+    let token = token(&f).await;
+    let first = after_a_newer_agmend(&mut f);
+    let project = f.who.project.clone();
+    let head_before = first.core.origins.local().head(&project).await.unwrap();
+
+    // No retry changes it, so it is not busy: the client is told what is wrong.
+    assert_eq!(
+        authorize(&f, &f.who.identity_id, &token).await.unwrap_err(),
+        version()
+    );
+    refused_everywhere(&f, &f.who.identity_id, &token, &version()).await;
+    let head_after = first.core.origins.local().head(&project).await.unwrap();
+    assert_eq!(head_after, head_before, "a refused call was recorded");
+    // The person is not asked to read the registry.
+    assert!(matches!(
+        f.daemon.core.identities.authorize(None, None).await,
+        Ok(Caller::Human)
+    ));
+    assert_eq!(busy_reads(&logs), Vec::<String>::new());
+    stop_replaced(first).await;
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn a_newer_local_db_in_the_recheck_is_version() {
+    let mut f = Fixture::new().await;
+    let first = after_a_newer_agmend(&mut f);
+    let core = &f.daemon.core;
+    // A watch cannot be open on such a record, since opening one reads it. This
+    // is what its recheck would read of an identity, and of the person.
+    assert_eq!(
+        check_managed(&core.origins, core.identities.store.clone(), &f.who).await,
+        Err(version())
+    );
+    let unread = core.origins.person(Origin::Local).await.unwrap_err();
+    assert_eq!(unconfirmed(unread), Err(version()));
+    // The recheck itself gives it on, for an identity and for the person.
+    let me = Me {
+        identity_id: f.who.identity_id.clone(),
+        handle: f.who.handle.clone(),
+        owner_id: f.who.owner_id.clone(),
+    };
+    let identity = Caller::Identity(f.who.clone());
+    assert_eq!(
+        core.identities.recheck(&identity, &me).await,
+        Err(version())
+    );
+    assert_eq!(
+        core.identities.recheck(&Caller::Human, &me).await,
+        Err(version())
+    );
+    stop_replaced(first).await;
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn busy_at_connect_is_logged_with_its_cause_once_then_at_debug() {
+    let (logs, _capture) = LogBytes::capture();
+    let f = Fixture::new().await;
+    let token = token(&f).await;
+    let who = f.who.identity_id.clone();
+    let path = credential_path(&f);
+    let credential = std::fs::read_to_string(&path).unwrap();
+    let kept = path.with_extension("kept");
+    assert_admitted(&f, &token).await;
+
+    // The registry cannot be read for three requests: one warning, then debug.
+    f.state(HIDE_REGISTRY).await;
+    for _ in 0..3 {
+        assert_eq!(
+            authorize(&f, &who, &token).await.unwrap_err(),
+            retried(BUSY)
+        );
+    }
+    f.state(SHOW_REGISTRY).await;
+    // The credential cannot be read: another cause warns again, then debug.
+    std::fs::rename(&path, &kept).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    for _ in 0..2 {
+        assert_eq!(
+            authorize(&f, &who, &token).await.unwrap_err(),
+            retried(BUSY)
+        );
+    }
+    // A request that works, and then the same failure: a warning again.
+    std::fs::remove_dir(&path).unwrap();
+    std::fs::rename(&kept, &path).unwrap();
+    assert_admitted(&f, &token).await;
+    std::fs::rename(&path, &kept).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    assert_eq!(
+        authorize(&f, &who, &token).await.unwrap_err(),
+        retried(BUSY)
+    );
+
+    assert_eq!(
+        busy_reads(&logs),
+        [
+            "WARN Connect Code(Hub)",
+            "DEBUG Connect Code(Hub)",
+            "DEBUG Connect Code(Hub)",
+            "WARN Connect Code(Unauthorized)",
+            "DEBUG Connect Code(Unauthorized)",
+            "WARN Connect Code(Unauthorized)",
+        ]
+    );
+    // The log says what failed and never what was read.
+    let text = logs.text();
+    assert!(text.contains("daemon state operation failed"), "{text}");
+    assert!(
+        text.contains("could not read identity credential"),
+        "{text}"
+    );
+    for secret in [
+        token.as_str(),
+        credential.as_str(),
+        path.to_str().unwrap(),
+        "tok-",
+    ] {
+        assert!(!text.contains(secret), "the log names a secret: {text}");
+    }
+
+    std::fs::remove_dir(&path).unwrap();
+    std::fs::rename(&kept, &path).unwrap();
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn busy_in_the_recheck_is_logged_apart_from_busy_at_connect() {
+    let (logs, _capture) = LogBytes::capture();
+    let f = Fixture::new().await;
+    let token = token(&f).await;
+    let who = f.who.identity_id.clone();
+
+    // Each watch meets the hidden registry at its first recheck: one warning,
+    // then debug.
+    f.state(HIDE_REGISTRY).await;
+    for _ in 0..3 {
+        let (watch, _client) = f.watch().await;
+        assert_eq!(ended(watch).await, retried(BUSY));
+    }
+    // A connect that fails has a record of its own, so its first failure warns.
+    for _ in 0..2 {
+        assert_eq!(
+            authorize(&f, &who, &token).await.unwrap_err(),
+            retried(BUSY)
+        );
+    }
+    // A recheck that works clears the recheck's record only.
+    f.state(SHOW_REGISTRY).await;
+    let (watch, client) = f.watch().await;
+    let failures = &f.daemon.core.identities.read_failures;
+    tokio::time::timeout(WAIT, async {
+        while failures.lock().unwrap().contains_key(&Site::Recheck) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the open watch rechecks its caller");
+    drop(client);
+    let closed = tokio::time::timeout(WAIT, watch).await;
+    closed.expect("the watch ends").unwrap().unwrap();
+    f.state(HIDE_REGISTRY).await;
+    let (watch, _client) = f.watch().await;
+    assert_eq!(ended(watch).await, retried(BUSY));
+    assert_eq!(
+        authorize(&f, &who, &token).await.unwrap_err(),
+        retried(BUSY)
+    );
+
+    assert_eq!(
+        busy_reads(&logs),
+        [
+            "WARN Recheck Code(Hub)",
+            "DEBUG Recheck Code(Hub)",
+            "DEBUG Recheck Code(Hub)",
+            "WARN Connect Code(Hub)",
+            "DEBUG Connect Code(Hub)",
+            "WARN Recheck Code(Hub)",
+            "DEBUG Connect Code(Hub)",
+        ]
+    );
+    let text = logs.text();
+    assert!(!text.contains(&token), "the log names a secret: {text}");
+    f.state(SHOW_REGISTRY).await;
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn a_read_that_outlasts_the_deadline_is_logged_as_a_timeout() {
+    let (logs, _capture) = LogBytes::capture();
+    let f = Fixture::new().await;
+    let token = token(&f).await;
+    // A cause with a code first, so the timeout shows as a cause of its own.
+    f.state(HIDE_REGISTRY).await;
+    assert_eq!(
+        authorize(&f, &f.who.identity_id, &token).await.unwrap_err(),
+        retried(BUSY)
+    );
+    f.state(SHOW_REGISTRY).await;
+    // A pipe nobody writes to, as above: only the 10 s deadline ends the call.
+    let path = credential_path(&f);
+    std::fs::remove_file(&path).unwrap();
+    mkfifo(&path);
+    let release = Release(path);
+    assert_eq!(
+        authorize(&f, &f.who.identity_id, &token).await.unwrap_err(),
+        retried(BUSY)
+    );
+    assert_eq!(
+        busy_reads(&logs),
+        ["WARN Connect Code(Hub)", "WARN Connect TimedOut"]
+    );
+    drop(release);
     f.stop().await;
 }

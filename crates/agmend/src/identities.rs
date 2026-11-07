@@ -171,6 +171,24 @@ type Publisher = Arc<
         + Sync,
 >;
 
+/// Where agmend reads an identity's records and answers a failure with busy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Site {
+    /// `Identities::authorize`, on each request that names an identity.
+    Connect,
+    /// The authority recheck of an open identity watch.
+    Recheck,
+}
+
+/// Why a read failed, as far as the log tells one failure from another.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Cause {
+    /// The read did not finish within `DEADLINE`.
+    TimedOut,
+    /// The read failed with this code.
+    Code(ErrorCode),
+}
+
 pub(crate) struct Identities {
     origins: Arc<crate::origin::Origins>,
     credentials: Arc<Credentials>,
@@ -181,6 +199,8 @@ pub(crate) struct Identities {
     collectors: AsyncMutex<BTreeMap<ProjectKey, Collector>>,
     /// The code of the catch-up failure last warned about, for each local project still failing.
     catch_up_failures: Mutex<BTreeMap<ProjectId, ErrorCode>>,
+    /// The cause of the busy answer last warned about, for each site whose reads still fail.
+    read_failures: Mutex<BTreeMap<Site, Cause>>,
     launched: AsyncMutex<BTreeSet<RuntimeKey>>,
     #[cfg(test)]
     pub(crate) publisher: Option<Publisher>,
@@ -356,6 +376,7 @@ impl Identities {
             runtimes: AsyncMutex::new(BTreeMap::new()),
             collectors: AsyncMutex::new(BTreeMap::new()),
             catch_up_failures: Mutex::new(BTreeMap::new()),
+            read_failures: Mutex::new(BTreeMap::new()),
             launched: AsyncMutex::new(BTreeSet::new()),
             #[cfg(test)]
             publisher: None,
@@ -379,14 +400,14 @@ impl Identities {
             return Err(unauthorized());
         }
         // A read that fails or runs out of time says nothing against the caller:
-        // it is refused with the answer a client retries (see `retryable`) and
-        // never lets the call through. `unauthorized` stays for an identity that
-        // is unknown or revoked, and for a credential that reads and does not match.
+        // it is refused with the answer `read_failed` gives and never lets the
+        // call through. `unauthorized` stays for an identity that is unknown or
+        // revoked, and for a credential that reads and does not match.
         tokio::time::timeout(DEADLINE, async {
             let caller = self
                 .owned_identity(id)
                 .await
-                .map_err(retryable)?
+                .map_err(|error| self.read_failed(Site::Connect, id, error))?
                 .ok_or_else(unauthorized)?;
             let origin = agmen_client::origin_key(&caller.hub_url);
             let namespace = Url::parse("https://agmend.invalid").map_err(|_| unauthorized())?;
@@ -394,8 +415,10 @@ impl Identities {
                 .credentials
                 .token(&namespace, id)
                 .await
-                .map_err(retryable)?
-                .ok_or_else(unauthorized)?;
+                .map_err(|error| self.read_failed(Site::Connect, id, error))?;
+            // Both reads came back, so a failure that went before is over.
+            self.read_worked(Site::Connect);
+            let raw = raw.ok_or_else(unauthorized)?;
             let credential: LocalCredential =
                 serde_json::from_str(&raw).map_err(|_| unauthorized())?;
             if credential.origin != origin
@@ -407,7 +430,65 @@ impl Identities {
             Ok(Caller::Identity(caller))
         })
         .await
-        .map_err(|_| crate::local_origin::busy())?
+        .unwrap_or_else(|_| Err(self.read_timed_out(Site::Connect, id)))
+    }
+
+    /// The answer for a read at `site` that failed with `error`. A newer
+    /// local.db is answered as it is, since no retry changes it, and so is a
+    /// stopped origin, which the CLI retries. Anything else is answered busy,
+    /// which tells the client nothing of the cause, so it is logged here.
+    fn read_failed(&self, site: Site, who: &IdentityId, error: ApiError) -> ApiError {
+        if error.code == ErrorCode::Version || crate::local_origin::is_unavailable(&error) {
+            return error;
+        }
+        self.log_busy(site, who, Cause::Code(error.code), &error.message);
+        crate::local_origin::busy()
+    }
+
+    /// The answer for a read at `site` that ran out of time.
+    fn read_timed_out(&self, site: Site, who: &IdentityId) -> ApiError {
+        self.log_busy(site, who, Cause::TimedOut, "no answer in time");
+        crate::local_origin::busy()
+    }
+
+    /// The reads at `site` came back, so their next failure is news again.
+    fn read_worked(&self, site: Site) {
+        self.read_failures
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&site);
+    }
+
+    /// Like `log_catch_up`, a failure that stays warns when it first appears or
+    /// its cause changes, and logs at debug after that. The record is per site,
+    /// not per identity: the stores that fail are shared by all of them, and at
+    /// connect the identity is only what the caller claims until a read
+    /// confirms it, so keying by it would let a caller dodge the limit.
+    // shortcut: a read that works for one identity ends the record of another
+    // whose credential cannot be read, so that one warns on each try, key the
+    // credential read by its registered identity when that is too noisy.
+    fn log_busy(&self, site: Site, who: &IdentityId, cause: Cause, detail: &str) {
+        let mut failing = self
+            .read_failures
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if failing.insert(site, cause) == Some(cause) {
+            tracing::debug!(
+                ?site,
+                identity = %who,
+                ?cause,
+                detail,
+                "a local read failed again; the caller was answered busy"
+            );
+        } else {
+            tracing::warn!(
+                ?site,
+                identity = %who,
+                ?cause,
+                detail,
+                "a local read failed; the caller was answered busy"
+            );
+        }
     }
 
     pub(crate) async fn managed(
@@ -1620,8 +1701,8 @@ async fn still_managed(
 }
 
 /// Whether `identity` is still managed: `Ok(false)` when it is revoked or gone.
-/// A read that failed says nothing against it, and is the error a local client
-/// retries (see `unconfirmed`).
+/// A read that failed says nothing against it, and is returned as it failed;
+/// `Identities::read_failed` gives the answer a local client hears.
 async fn check_managed(
     origins: &crate::origin::Origins,
     store: Arc<Database>,
@@ -1641,25 +1722,15 @@ async fn check_managed(
             .map(|rows| rows.contains(&expected))
     })
     .await
-    .map_err(|_| crate::local_origin::busy())
 }
 
 /// What a failed read of the person means for a recheck. A person who is not on
-/// this machine is gone. Anything else is a read that failed (see `retryable`).
+/// this machine is gone. Anything else is a read that failed, returned as it
+/// failed (see `check_managed`).
 fn unconfirmed(error: ApiError) -> Result<bool, ApiError> {
     match error.code {
         ErrorCode::NotFound => Ok(false),
-        _ => Err(retryable(error)),
-    }
-}
-
-/// A read that failed, as the answer a local client retries: a stopped origin
-/// is answered as it is, and anything else as busy.
-fn retryable(error: ApiError) -> ApiError {
-    if crate::local_origin::is_unavailable(&error) {
-        error
-    } else {
-        crate::local_origin::busy()
+        _ => Err(error),
     }
 }
 
@@ -1718,7 +1789,7 @@ mod local_collection_tests {
     const AGENTS: [&str; 2] = ["first", "second"];
 
     #[derive(Clone, Default)]
-    struct LogBytes(Arc<Mutex<Vec<u8>>>);
+    pub(super) struct LogBytes(Arc<Mutex<Vec<u8>>>);
 
     impl std::io::Write for LogBytes {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
@@ -1739,7 +1810,7 @@ mod local_collection_tests {
 
     impl LogBytes {
         /// Captures this thread's output from debug up until the guard drops.
-        fn capture() -> (Self, tracing::subscriber::DefaultGuard) {
+        pub(super) fn capture() -> (Self, tracing::subscriber::DefaultGuard) {
             let logs = Self::default();
             let guard = tracing::subscriber::set_default(
                 tracing_subscriber::fmt()
@@ -1752,10 +1823,15 @@ mod local_collection_tests {
             (logs, guard)
         }
 
+        /// Everything written so far.
+        pub(super) fn text(&self) -> String {
+            String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+        }
+
         /// Each listener catch-up line as "LEVEL Code", in the order written.
         fn catch_ups(&self) -> Vec<String> {
-            let text = String::from_utf8(self.0.lock().unwrap().clone()).unwrap();
-            text.lines()
+            self.text()
+                .lines()
                 .filter(|line| line.contains("listener collector catch-up failed"))
                 .map(|line| {
                     let level = line.split_whitespace().next().unwrap();

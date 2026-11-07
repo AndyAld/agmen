@@ -38,6 +38,11 @@ const OLDER_AGMEND_REFUSAL: &str = "bad params: unknown field `after`, expected 
 const OLDER_AGMEND_NOTICE: &str =
     "agmend is older and cannot resume a watch; resume is off until agmend restarts";
 
+/// The words of agmend's `Version` refusal for a local.db whose schema it does
+/// not read, alone or after `local.db cannot be read: `. A newer agmend wrote
+/// that file and no retry changes it, so [`retryable`] does not list it.
+const NEWER_LOCAL_DB: &str = "local.db schema version";
+
 /// Whether this process has said that agmend is older, whichever link met it.
 static OLDER_AGMEND_SAID: AtomicBool = AtomicBool::new(false);
 
@@ -603,7 +608,8 @@ fn redact_error(error: AgmendError, token: &LocalToken) -> AgmendError {
     }
 }
 
-/// Keep daemon messages intact; only a final protocol rejection exits 4.
+/// Keep daemon messages intact; only a final protocol rejection exits 4. A
+/// local.db that a newer agmend wrote also says whose move it is.
 fn local_error(error: AgmendError) -> anyhow::Error {
     match error {
         AgmendError::Refused {
@@ -616,6 +622,12 @@ fn local_error(error: AgmendError) -> anyhow::Error {
             code: ErrorCode::Unauthorized | ErrorCode::Forbidden,
             message,
         } => Fail::new(Code::NotLoggedIn, message).into(),
+        AgmendError::Refused {
+            code: ErrorCode::Version,
+            message,
+        } if message.contains(NEWER_LOCAL_DB) => {
+            anyhow::anyhow!("{message}; it was written by a newer agmend, so update agmend")
+        }
         AgmendError::Refused { message, .. } => anyhow::Error::msg(message),
         other => other.into(),
     }
