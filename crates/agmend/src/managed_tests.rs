@@ -3508,3 +3508,115 @@ async fn agent_budget_serializes_with_record_removal() {
     drop(mutation);
     assert_eq!(request.await.unwrap()["budget_usd"], "3.000000");
 }
+
+const SLOW_QUIT_TEST_WAIT: std::time::Duration = std::time::Duration::from_secs(16);
+const RENEWAL_SHARE: std::time::Duration = std::time::Duration::from_secs(3);
+const LATE_RENEWAL: std::time::Duration = std::time::Duration::from_millis(2500);
+
+/// Waits for startup before the test holds launch admission through QUIT_WAIT.
+async fn slow_quit_with_a_renewal(
+    daemon: crate::Agmend,
+    refresh: &crate::login::tests::DelayedRefresh,
+) -> (
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<()>,
+) {
+    let hub = daemon.core.origins.hub().clone();
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let (ready, started) = tokio::sync::oneshot::channel();
+    let serving = tokio::spawn(daemon.serve_until(async move {
+        ready.send(()).unwrap();
+        let _stopped = stopped.await;
+    }));
+    tokio::time::timeout(SLOW_QUIT_TEST_WAIT, started)
+        .await
+        .expect("daemon must finish loading managed agents")
+        .unwrap();
+    let caller = tokio::spawn(async move { hub.credentials().access().await });
+    tokio::time::timeout(SLOW_QUIT_TEST_WAIT, refresh.started.notified())
+        .await
+        .expect("the hub must hold the spent refresh grant");
+    caller.abort();
+    let _cancelled = caller.await;
+    (stop, serving)
+}
+
+#[tokio::test]
+async fn slow_quit_stores_a_renewal_during_its_reserved_share() {
+    let fixture = crate::login::tests::RefreshFixture::new().await;
+    let store = TokenStore::Dir(fixture.dir().join("tokens"));
+    let login = fixture
+        .daemon
+        .core
+        .origins
+        .hub()
+        .credentials()
+        .login()
+        .await
+        .unwrap();
+    let managed = fixture.daemon.core.managed.clone();
+    let (stop, mut serving) = slow_quit_with_a_renewal(fixture.daemon, &fixture.refresh).await;
+    let launching = managed.launching.lock().await;
+    let began = tokio::time::Instant::now();
+    stop.send(()).unwrap();
+    // An answer 2.5 s after the ordered phase ends (QUIT_WAIT minus STOP_WORKERS_FLOOR) must still be stored.
+    assert!(
+        tokio::time::timeout(
+            (super::QUIT_WAIT - super::STOP_WORKERS_FLOOR) + LATE_RENEWAL,
+            &mut serving
+        )
+        .await
+        .is_err(),
+        "slow quit consumed the renewal's reserved share"
+    );
+    fixture.refresh.release();
+    tokio::time::timeout_at(began + SLOW_QUIT_TEST_WAIT, serving)
+        .await
+        .expect("shutdown exceeded its bound after the renewal answered")
+        .unwrap();
+    drop(launching);
+    let stored = store.get(&login.key().unwrap()).unwrap().unwrap();
+    let stored: Value = serde_json::from_str(&stored).unwrap();
+    assert_eq!(stored["refresh_token"], "new-refresh");
+    assert_eq!(stored["access_token"], "new-access");
+}
+
+#[tokio::test]
+async fn slow_quit_bounds_a_hung_renewal_after_its_reserved_share() {
+    let fixture = crate::login::tests::RefreshFixture::new().await;
+    let managed = fixture.daemon.core.managed.clone();
+    let (stop, serving) = slow_quit_with_a_renewal(fixture.daemon, &fixture.refresh).await;
+    let launching = managed.launching.lock().await;
+    let began = tokio::time::Instant::now();
+    stop.send(()).unwrap();
+    tokio::time::timeout(SLOW_QUIT_TEST_WAIT, serving)
+        .await
+        .expect("a slow quit and hung renewal exceeded the shutdown bound")
+        .unwrap();
+    drop(launching);
+    assert!(
+        began.elapsed() >= (super::QUIT_WAIT - super::STOP_WORKERS_FLOOR) + RENEWAL_SHARE,
+        "managed shutdown consumed part of the renewal's three seconds"
+    );
+}
+
+#[tokio::test]
+async fn slow_quit_reserves_renewal_time_after_the_session_deadline() {
+    const SESSION_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+    let fixture = crate::login::tests::RefreshFixture::new().await;
+    let managed = fixture.daemon.core.managed.clone();
+    let (stop, serving) = slow_quit_with_a_renewal(fixture.daemon, &fixture.refresh).await;
+    // Contention beyond the managed launch wait consumes the outer session deadline.
+    let workers = managed.workers.lock().await;
+    let began = tokio::time::Instant::now();
+    stop.send(()).unwrap();
+    tokio::time::timeout(SLOW_QUIT_TEST_WAIT, serving)
+        .await
+        .expect("the session deadline and renewal floor exceeded their combined bound")
+        .unwrap();
+    drop(workers);
+    assert!(
+        began.elapsed() >= SESSION_WAIT + RENEWAL_SHARE,
+        "session shutdown consumed the renewal's three seconds"
+    );
+}

@@ -18,7 +18,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::io::AsyncReadExt as _;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::sync::{Mutex as AsyncMutex, broadcast, mpsc, oneshot};
+use tokio::sync::{Mutex as AsyncMutex, RwLock, RwLockWriteGuard, broadcast, mpsc, oneshot};
 use url::Url;
 
 use crate::console::{bad_request, params};
@@ -308,6 +308,12 @@ pub(crate) struct Identities {
     /// The cause of the busy answer last warned about, for each site whose reads still fail.
     read_failures: Mutex<BTreeMap<Site, Cause>>,
     launched: AsyncMutex<BTreeSet<RuntimeKey>>,
+    /// Read-held for the whole of a local mint; quit takes the
+    /// write side to let those finish before it closes their connections.
+    pub(crate) minting: RwLock<()>,
+    /// Set when quit starts draining; later mints are refused even after the
+    /// drain's cap has released the write side.
+    closing: AtomicBool,
     #[cfg(test)]
     pub(crate) publisher: Option<Publisher>,
 }
@@ -484,9 +490,24 @@ impl Identities {
             catch_up_failures: Mutex::new(BTreeMap::new()),
             read_failures: Mutex::new(BTreeMap::new()),
             launched: AsyncMutex::new(BTreeSet::new()),
+            minting: RwLock::new(()),
+            closing: AtomicBool::new(false),
             #[cfg(test)]
             publisher: None,
         }
+    }
+
+    /// The store's lock, so a test can stall every store job behind it.
+    #[cfg(test)]
+    pub(crate) fn store_lock(&self) -> Arc<Mutex<Store>> {
+        self.store.store.clone()
+    }
+
+    /// Waits for every local mint in flight to register or roll back, and
+    /// holds off the next until the guard drops.
+    pub(crate) async fn quiesce_mints(&self) -> RwLockWriteGuard<'_, ()> {
+        self.closing.store(true, Ordering::Release);
+        self.minting.write().await
     }
 
     pub(crate) async fn authorize(
@@ -657,6 +678,10 @@ impl Identities {
             kind,
             role,
         } = params(raw)?;
+        let _minting = self.minting.read().await;
+        if self.closing.load(Ordering::Acquire) {
+            return Err(bad_request("daemon is shutting down"));
+        }
         let local = self.origins.local();
         // Preserve local.db version errors before mint maps open failures to a hub refusal.
         let login = local.login().await?.ok_or_else(|| ApiError {

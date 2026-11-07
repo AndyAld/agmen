@@ -30,8 +30,11 @@ use roles::ReviewedBase;
 const MAX_ROLE_PROMPT_BYTES: usize = 64 * 1024;
 pub(crate) const QUIT_WAIT: Duration = Duration::from_secs(8);
 /// How long quit lets an admitted launch finish before abandoning it.
-const QUIT_LAUNCH_WAIT: Duration = Duration::from_secs(4);
+pub(crate) const QUIT_LAUNCH_WAIT: Duration = Duration::from_secs(4);
 const QUIT_LEVEL_WAIT: Duration = Duration::from_secs(2);
+/// The end of `QUIT_WAIT` that the launch drain may not use, so the goodbyes
+/// always get this long even when a launch cannot be abandoned.
+pub(crate) const STOP_WORKERS_FLOOR: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -965,22 +968,54 @@ impl Managed {
         result.map(|_| ())
     }
 
+    /// Both halves of quit in one call, for tests that have no connections.
+    #[cfg(test)]
     pub(crate) async fn shutdown(self: &Arc<Self>) {
+        let (deadline, launching) = self.close_launches().await;
+        self.stop_workers(deadline, launching).await;
+    }
+
+    /// Refuses new launches and lets an admitted one finish, or abandons it
+    /// once `quit_launch_wait` passes: the launch then discards what it made
+    /// and frees admission. A launch stuck elsewhere (worktree, role load,
+    /// the hub mint) is waited for no later than `STOP_WORKERS_FLOOR` before
+    /// the returned deadline, which is what `stop_workers` keeps for itself.
+    /// The launch runs on its caller's connection, so this must finish before
+    /// that connection is closed. Returns the quit deadline and the admission
+    /// guard, which `stop_workers` holds on to.
+    pub(crate) async fn close_launches(
+        &self,
+    ) -> (
+        tokio::time::Instant,
+        Option<tokio::sync::MutexGuard<'_, ()>>,
+    ) {
         self.shutting_down.store(true, Ordering::Release);
         let deadline = tokio::time::Instant::now() + QUIT_WAIT;
-        let launch_deadline = deadline.min(tokio::time::Instant::now() + self.quit_launch_wait);
-        let _launching = match tokio::time::timeout_at(launch_deadline, self.launching.lock()).await
+        let drain_deadline = deadline - STOP_WORKERS_FLOOR;
+        let launch_deadline =
+            drain_deadline.min(tokio::time::Instant::now() + self.quit_launch_wait);
+        let launching = match tokio::time::timeout_at(launch_deadline, self.launching.lock()).await
         {
             Ok(guard) => Some(guard),
             Err(_) => {
                 tracing::warn!("managed shutdown is abandoning an in-flight launch");
                 // The launch discards its identity, then frees the lock.
                 self.abandon_launch.send_replace(true);
-                tokio::time::timeout_at(deadline, self.launching.lock())
+                tokio::time::timeout_at(drain_deadline, self.launching.lock())
                     .await
                     .ok()
             }
         };
+        (deadline, launching)
+    }
+
+    /// Says goodbye for every worker, children before their parents, until
+    /// `deadline`. Admission stays closed while `launching` is held.
+    pub(crate) async fn stop_workers(
+        self: &Arc<Self>,
+        deadline: tokio::time::Instant,
+        _launching: Option<tokio::sync::MutexGuard<'_, ()>>,
+    ) {
         let workers: Vec<_> = self
             .workers
             .lock()
@@ -1038,7 +1073,8 @@ impl Managed {
             return;
         };
         let workers: Vec<_> = self.workers.lock().await.values().cloned().collect();
-        if workers.is_empty() {
+        // No new paid batch once quit has begun; the drain can last seconds.
+        if workers.is_empty() || self.shutting_down.load(Ordering::Acquire) {
             return;
         }
         let cap_budget = match self.safeguards().await {
@@ -1120,19 +1156,32 @@ impl Managed {
                 cap_budget,
             );
             spec.local_token = batch_local_token(&identities, &spec.identity).await;
-            held.last_run = Some(tokio::time::Instant::now());
-            held.state = "running";
-            held.batch_tier = Some(if owner_only {
-                Tier::Owner
-            } else {
-                Tier::Others
-            });
-            let (stop, stopped) = oneshot::channel();
-            held.stop = Some(stop);
-            let worker = worker.clone();
-            let managed = self.clone();
-            held.task = Some(tokio::spawn(run_worker(managed, worker, spec, stopped)));
+            // Quit may have begun during the awaits above; start no paid batch then.
+            if self.shutting_down.load(Ordering::Acquire) {
+                return;
+            }
+            self.start_batch(&worker, &mut held, spec, owner_only);
         }
+    }
+
+    fn start_batch(
+        self: &Arc<Self>,
+        worker: &Arc<Mutex<Worker>>,
+        held: &mut Worker,
+        spec: RunSpec,
+        owner_only: bool,
+    ) {
+        held.last_run = Some(tokio::time::Instant::now());
+        held.state = "running";
+        held.batch_tier = Some(if owner_only {
+            Tier::Owner
+        } else {
+            Tier::Others
+        });
+        let (stop, stopped) = oneshot::channel();
+        held.stop = Some(stop);
+        let (managed, worker) = (self.clone(), worker.clone());
+        held.task = Some(tokio::spawn(run_worker(managed, worker, spec, stopped)));
     }
 }
 

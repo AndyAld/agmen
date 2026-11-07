@@ -7,6 +7,9 @@ use super::{
     remove_unit,
 };
 
+/// Seconds launchd waits after SIGTERM before it kills agmend.
+pub(super) const EXIT_TIMEOUT_SECS: u64 = 30;
+
 fn invoke(
     run: &mut Runner<'_>,
     action: &str,
@@ -197,6 +200,14 @@ pub(super) fn render_with_token(
     )?;
     // shortcut: no automatic restart after a crash; revisit when Andy chooses a bounded restart policy.
     append(&mut contents, "  <key>KeepAlive</key><false/>\n")?;
+    // launchd's default is 20 s, which is below the worst-case stop of 21 s: the
+    // 10 s ordered phase (in-flight launches, listener starts and local mints,
+    // then closing connections and stopping sessions), the 3 s renewal floor,
+    // the 6 s hosted hub stop and the 2 s exit wait. 30 s leaves a 9 s margin.
+    append(
+        &mut contents,
+        &format!("  <key>ExitTimeOut</key><integer>{EXIT_TIMEOUT_SECS}</integer>\n"),
+    )?;
     if let Some(token) = token {
         append(
             &mut contents,
@@ -315,6 +326,7 @@ mod tests {
                 "  <array><string>/opt/agmen/agmend</string></array>\n",
                 "  <key>RunAtLoad</key><true/>\n",
                 "  <key>KeepAlive</key><false/>\n",
+                "  <key>ExitTimeOut</key><integer>30</integer>\n",
                 "  <key>StandardOutPath</key><string>/test/home/Library/Logs/agmen/agmend.log</string>\n",
                 "  <key>StandardErrorPath</key><string>/test/home/Library/Logs/agmen/agmend.log</string>\n",
                 "</dict>\n</plist>\n",

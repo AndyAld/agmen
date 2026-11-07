@@ -399,3 +399,34 @@ async fn hub_receives_only_hub_settings_from_its_environment() {
         assert!(!names.contains(&unwanted), "{unwanted} passed: {names:?}");
     }
 }
+
+#[tokio::test]
+async fn shutdown_returns_when_the_hosted_hub_will_not_exit() {
+    let dir = tempfile::tempdir().unwrap();
+    config_for(dir.path()).write(dir.path(), false).unwrap();
+    write_env(dir.path());
+    let daemon = crate::Agmend::bind(crate::Config::new(
+        dir.path().join("agmend.sock"),
+        dir.path().join("login.json"),
+        agmen_client::TokenStore::Dir(dir.path().join("tokens")),
+    ))
+    .unwrap();
+    // The child outlives the stop, so the supervisor's own wait fails.
+    daemon
+        .core
+        .host
+        .spare_on_stop
+        .store(true, Ordering::Relaxed);
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let serving = tokio::spawn(daemon.serve_until(async {
+        let _stopped = stopped.await;
+    }));
+    let pid = wait_pid(&dir.path().join("pid")).await;
+    stop.send(()).unwrap();
+    tokio::time::timeout(crate::HOST_STOP_WAIT + Duration::from_secs(2), serving)
+        .await
+        .expect("a hosted hub that will not exit held serve_until past its bound")
+        .unwrap();
+    // Dropping the supervisor's child ends the fake hub.
+    assert_stopped(pid).await;
+}

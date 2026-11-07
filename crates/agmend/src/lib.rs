@@ -93,6 +93,26 @@ const ROSTER_EVERY: Duration = Duration::from_secs(15);
 /// How often a watch with a checkout re-reads its roles, worktrees and git
 /// facts (Task 8 review fix 3).
 const LOCAL_EVERY: Duration = Duration::from_secs(15);
+/// The shared deadline for stopping daemon-owned sessions and collectors.
+const SHUTDOWN_WAIT: Duration = Duration::from_secs(10);
+/// Time reserved for storing a spent refresh grant after the ordered shutdown.
+const RENEWAL_SHUTDOWN_FLOOR: Duration = Duration::from_secs(3);
+/// How long shutdown waits for the hosted hub's supervisor to finish. The
+/// supervisor's own wait for the killed child is 5 s; the extra second covers
+/// a supervisor that parks after that wait fails.
+const HOST_STOP_WAIT: Duration = Duration::from_secs(6);
+/// The longest `serve_until` takes after shutdown is requested: the ordered
+/// phase, the renewal floor and the hosted hub's stop. The service's
+/// `ExitTimeOut` must exceed this plus the process exit wait.
+pub const SHUTDOWN_BUDGET: Duration = Duration::from_secs(
+    SHUTDOWN_WAIT.as_secs() + RENEWAL_SHUTDOWN_FLOOR.as_secs() + HOST_STOP_WAIT.as_secs(),
+);
+// The goodbyes' reserved floor sits inside the ordered phase, not on top of it.
+const _: () = assert!(
+    managed::QUIT_LAUNCH_WAIT.as_secs() + managed::STOP_WORKERS_FLOOR.as_secs()
+        <= managed::QUIT_WAIT.as_secs()
+        && managed::QUIT_WAIT.as_secs() < SHUTDOWN_WAIT.as_secs()
+);
 
 /// Why agmend could not start.
 #[derive(Debug, thiserror::Error)]
@@ -458,11 +478,43 @@ impl Agmend {
         self.serve_until(std::future::pending()).await;
     }
 
-    /// Serves until `shutdown` resolves, then joins daemon-owned collectors
-    /// and sessions, waiting at most 5 s per task and 10 s in total.
+    /// The ordered part of shutdown: finish in-flight work, close the
+    /// connections, then stop agents, listeners and the local record.
+    async fn close_sessions(core: &Core, tasks: &mut JoinSet<()>) {
+        // A launch, listener start or local mint runs on its caller's
+        // connection and rolls back only if it is not dropped midway, so
+        // they finish (or a launch is abandoned and discarded) before
+        // the connections close. The starts and mints wait no longer
+        // than a launch does before it is abandoned, and the launch drain
+        // stops `STOP_WORKERS_FLOOR` before the managed deadline, so a
+        // stuck one cannot take the goodbyes' time. Once the drain begins,
+        // new mints and starts are refused.
+        let drained = tokio::time::Instant::now() + managed::QUIT_LAUNCH_WAIT;
+        let (launches, _mints, starts) = tokio::join!(
+            core.managed.close_launches(),
+            tokio::time::timeout_at(drained, core.identities.quiesce_mints()),
+            tokio::time::timeout_at(drained, core.listeners.quiesce()),
+        );
+        tasks.abort_all();
+        while tasks.join_next().await.is_some() {}
+        let (managed_deadline, launching) = launches;
+        core.managed.stop_workers(managed_deadline, launching).await;
+        match starts {
+            Ok(starts) => core.listeners.shutdown_held(starts).await,
+            Err(_) => core.listeners.shutdown().await,
+        }
+        core.origins.local().shutdown().await;
+        core.identities.shutdown().await;
+    }
+
+    /// Serves until `shutdown` resolves, then lets launches, listener starts
+    /// and local mints in flight finish or roll back, closes the connections,
+    /// and joins daemon-owned collectors and sessions, all within 10 s. Then
+    /// it waits for an in-flight hub token renewal until that deadline or for
+    /// 3 s, whichever is longer, and for the hosted hub's stop for up to 6 s
+    /// more: shutdown takes at most 19 s (`SHUTDOWN_BUDGET`).
     /// Stops agents before the listener that may have delegated them, then
-    /// the local record, so their BYEs can still reach a live record. A hub
-    /// token renewal in flight gets the same 10 s to store its tokens.
+    /// the local record, so their BYEs can still reach a live record.
     pub async fn serve_until(self, shutdown: impl std::future::Future<Output = ()>) {
         self.core.origins.local().start().await;
         self.core.managed.attach(&self.core.identities).await;
@@ -524,24 +576,35 @@ impl Agmend {
                 drop(slot);
             });
         }
-        tasks.abort_all();
-        while tasks.join_next().await.is_some() {}
-        if tokio::time::timeout(Duration::from_secs(10), async {
-            self.core.managed.shutdown().await;
-            self.core.listeners.shutdown().await;
-            self.core.origins.local().shutdown().await;
-            self.core.identities.shutdown().await;
-            // Last, so a hung hub cannot use up the time the steps above need.
-            self.core.origins.hub().credentials().shutdown().await;
-        })
+        let deadline = tokio::time::Instant::now() + SHUTDOWN_WAIT;
+        if tokio::time::timeout_at(deadline, Self::close_sessions(&self.core, &mut tasks))
+            .await
+            .is_err()
+        {
+            tracing::warn!("daemon session shutdown reached its ten second deadline");
+        }
+        // Keep the original deadline on a fast quit, but reserve a floor even
+        // when the ordered phase uses its whole budget. This only waits; it
+        // cannot initiate a renewal. The combined phases take at most 13 s.
+        let renewal_deadline = deadline.max(tokio::time::Instant::now() + RENEWAL_SHUTDOWN_FLOOR);
+        if tokio::time::timeout_at(
+            renewal_deadline,
+            self.core.origins.hub().credentials().shutdown(),
+        )
         .await
         .is_err()
         {
-            tracing::warn!("daemon shutdown reached its ten second deadline");
+            tracing::warn!("hub token renewal reached its shutdown deadline");
         }
         self.core.host.stop();
-        if !host_stopped {
-            hosting.await;
+        // A hub child that survives SIGKILL (a stalled filesystem) leaves the
+        // supervisor parked; do not let it keep the daemon from exiting.
+        if !host_stopped
+            && tokio::time::timeout(HOST_STOP_WAIT, &mut hosting)
+                .await
+                .is_err()
+        {
+            tracing::warn!("hosted hub did not stop within its shutdown bound");
         }
     }
 }

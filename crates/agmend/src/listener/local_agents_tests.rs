@@ -135,6 +135,11 @@ impl Fixture {
     }
 
     async fn with_home(home: Home) -> Self {
+        let daemon = Self::daemon(&home);
+        Self::with_daemon(home, daemon).await
+    }
+
+    async fn with_daemon(home: Home, daemon: Agmend) -> Self {
         let root = home.dir.path().join("repo");
         std::fs::create_dir(&root).unwrap();
         git(&root, &["init", "-b", "main"]);
@@ -154,7 +159,7 @@ impl Fixture {
                 "fixture",
             ],
         );
-        let (mut client, stop, task) = Self::serve(&home).await;
+        let (mut client, stop, task) = Self::serve_daemon(&home, daemon).await;
         let project = result(
             client
                 .call("local_project_create", json!({"name":"listeners"}))
@@ -625,4 +630,161 @@ async fn local_listener_collector_never_connects_to_the_hub() {
     );
     f.stop().await;
     assert!(tokio::time::timeout(POLL, socket.accept()).await.is_err());
+}
+
+/// Holds the store's lock on another thread until the returned closure runs.
+fn stall_store(store: Arc<std::sync::Mutex<crate::state::Store>>) -> impl FnOnce() {
+    let (held, ready) = std::sync::mpsc::channel();
+    let (free, freed) = std::sync::mpsc::channel::<()>();
+    let thread = std::thread::spawn(move || {
+        let _held = store.lock().unwrap();
+        held.send(()).unwrap();
+        let _freed = freed.recv();
+    });
+    ready.recv().unwrap();
+    move || {
+        free.send(()).unwrap();
+        thread.join().unwrap();
+    }
+}
+
+/// Quits while `in_flight` holds a request that waits on the store, frees the
+/// store once quit is under way, and returns after agmend ends.
+async fn quit_with_a_stalled_request(
+    f: Fixture,
+    release: impl FnOnce(),
+    in_flight: impl std::future::Future<Output = ()>,
+) -> Home {
+    in_flight.await;
+    f.stop.send(()).unwrap();
+    // Quit is now waiting on the request; free the store so it can finish.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    release();
+    tokio::time::timeout(WAIT, f.task)
+        .await
+        .expect("quit with a request in flight exceeded its bound")
+        .unwrap();
+    f.home
+}
+
+#[tokio::test]
+async fn quit_lets_a_listener_start_in_flight_finish() {
+    let home = Home {
+        dir: tempfile::Builder::new().prefix("ll").tempdir().unwrap(),
+    };
+    let daemon = Fixture::daemon(&home);
+    let core = daemon.core.clone();
+    let mut f = Fixture::with_daemon(home, daemon).await;
+    let stalled = stall_store(core.identities.store_lock());
+    let project = f.project["project"].as_str().unwrap().to_owned();
+    f.client
+        .send(&Request::new(
+            1,
+            "listener_start",
+            json!({"project":project,"root":f.root}),
+        ))
+        .await;
+    let home = quit_with_a_stalled_request(f, stalled, async {
+        tokio::time::timeout(WAIT, async {
+            while core.listeners.changing.try_lock().is_ok() {
+                tokio::time::sleep(POLL).await;
+            }
+        })
+        .await
+        .expect("the listener start must be in flight");
+    })
+    .await;
+    // The start ran to its end instead of being dropped.
+    assert!(
+        home.dir
+            .path()
+            .join("listener")
+            .join(project)
+            .join("intent.json")
+            .exists()
+    );
+}
+
+#[tokio::test]
+async fn quit_lets_a_local_mint_in_flight_register() {
+    let home = Home {
+        dir: tempfile::Builder::new().prefix("ll").tempdir().unwrap(),
+    };
+    let daemon = Fixture::daemon(&home);
+    let core = daemon.core.clone();
+    let mut f = Fixture::with_daemon(home, daemon).await;
+    let stalled = stall_store(core.identities.store_lock());
+    let project = f.project["project"].as_str().unwrap().to_owned();
+    f.client
+        .send(&Request::new(
+            1,
+            "local_mint",
+            json!({"project":project,"name":"helper"}),
+        ))
+        .await;
+    let home = quit_with_a_stalled_request(f, stalled, async {
+        tokio::time::timeout(WAIT, async {
+            while core.identities.minting.try_write().is_ok() {
+                tokio::time::sleep(POLL).await;
+            }
+        })
+        .await
+        .expect("the local mint must be in flight");
+    })
+    .await;
+    // A mint that committed is registered, not left behind without a row.
+    let registry = rusqlite::Connection::open(home.dir.path().join("agmend.db")).unwrap();
+    let rows: i64 = registry
+        .query_row(
+            "SELECT count(*) FROM identities WHERE project = ?1",
+            [project],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(rows, 1);
+}
+
+#[tokio::test]
+async fn a_local_mint_after_the_quit_drain_starts_is_refused() {
+    let home = Home {
+        dir: tempfile::Builder::new().prefix("ll").tempdir().unwrap(),
+    };
+    let daemon = Fixture::daemon(&home);
+    let core = daemon.core.clone();
+    let mut f = Fixture::with_daemon(home, daemon).await;
+    // The drain's cap passed: the write guard is gone, the drain is not over.
+    drop(core.identities.quiesce_mints().await);
+    let project = f.project["project"].as_str().unwrap().to_owned();
+    let refused = error(
+        f.client
+            .call("local_mint", json!({"project":project,"name":"late"}))
+            .await,
+    );
+    assert!(refused.message.contains("shutting down"), "{refused:?}");
+    let registry = rusqlite::Connection::open(f.home.dir.path().join("agmend.db")).unwrap();
+    let rows: i64 = registry
+        .query_row("SELECT count(*) FROM identities", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(rows, 0);
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn a_listener_start_after_the_quit_drain_starts_is_refused() {
+    let home = Home {
+        dir: tempfile::Builder::new().prefix("ll").tempdir().unwrap(),
+    };
+    let daemon = Fixture::daemon(&home);
+    let core = daemon.core.clone();
+    let mut f = Fixture::with_daemon(home, daemon).await;
+    drop(core.listeners.quiesce().await);
+    let project = f.project["project"].as_str().unwrap().to_owned();
+    let refused = error(
+        f.client
+            .call("listener_start", json!({"project":project,"root":f.root}))
+            .await,
+    );
+    assert!(refused.message.contains("shutting down"), "{refused:?}");
+    assert!(!f.home.dir.path().join("listener").join(project).exists());
+    f.stop().await;
 }

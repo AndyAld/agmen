@@ -5,6 +5,7 @@ use std::ffi::{OsStr, OsString};
 use std::io::{Read as _, Write as _};
 use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, Weak};
 use std::time::Duration;
 
@@ -66,6 +67,8 @@ pub(crate) struct Listeners {
     // Start and stop may hold entries across I/O; status only needs live state.
     statuses: StdMutex<StatusIndex>,
     changing: Mutex<()>,
+    /// Set when quit starts draining; later starts are refused.
+    closing: AtomicBool,
     projects: Mutex<BTreeSet<ProjectId>>,
     changes: Arc<StdMutex<Changes>>,
     cards: Arc<StdMutex<settings::Published>>,
@@ -329,6 +332,7 @@ impl Listeners {
             entries: Mutex::new(BTreeMap::new()),
             statuses: StdMutex::new(StatusIndex::default()),
             changing: Mutex::new(()),
+            closing: AtomicBool::new(false),
             projects: Mutex::new(BTreeSet::new()),
             changes: Arc::new(StdMutex::new(changes)),
             cards,
@@ -440,6 +444,9 @@ impl Listeners {
             .await?;
         let _changing = self.changing.lock().await;
         match method {
+            "listener_start" if self.closing.load(Ordering::Acquire) => {
+                Err(bad_request("daemon is shutting down"))
+            }
             "listener_start" => self.start(params(raw)?, &login).await,
             "listener_stop" => {
                 let Project { project } = params(raw)?;
@@ -1111,8 +1118,19 @@ impl Listeners {
         Ok(json!({"state":state,"id":id}))
     }
 
+    /// Waits for a start or stop in flight to finish, and holds off the next
+    /// until the guard drops.
+    pub(crate) async fn quiesce(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.closing.store(true, Ordering::Release);
+        self.changing.lock().await
+    }
+
     pub(crate) async fn shutdown(&self) {
-        let _changing = self.changing.lock().await;
+        self.shutdown_held(self.changing.lock().await).await;
+    }
+
+    /// Shuts down with `changing` already held, so no start slipped in between.
+    pub(crate) async fn shutdown_held(&self, _changing: tokio::sync::MutexGuard<'_, ()>) {
         let mut entries = self.entries.lock().await;
         for entry in entries.values_mut() {
             stop(entry).await;

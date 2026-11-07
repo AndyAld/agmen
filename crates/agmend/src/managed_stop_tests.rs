@@ -750,3 +750,161 @@ pub(super) async fn publisher(fixture: &mut Fixture, publisher: TestPublisher) {
         .attach(&fixture.daemon.core.identities)
         .await;
 }
+
+const SERVE_BOUND: std::time::Duration = std::time::Duration::from_secs(5);
+/// The ordered 10 s, the 3 s renewal floor and the 6 s hub stop.
+const STUCK_QUIT_BOUND: std::time::Duration = std::time::Duration::from_secs(19);
+
+/// Moves the fixture's daemon out to serve on its socket until `stop`. The
+/// fixture keeps the same shared state, behind a spare daemon of its own.
+fn serve(
+    fixture: &mut Fixture,
+) -> (
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<()>,
+) {
+    let spare = fixture.dir.path().join("spare");
+    std::fs::create_dir(&spare).unwrap();
+    let spare = crate::Agmend::bind(crate::Config::new(
+        spare.join("agmend.sock"),
+        spare.join("login.json"),
+        fixture.tokens.clone(),
+    ))
+    .unwrap();
+    let core = fixture.daemon.core.clone();
+    let serving = std::mem::replace(&mut fixture.daemon, spare);
+    fixture.daemon.core = core;
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let task = tokio::spawn(serving.serve_until(async {
+        let _stopped = stopped.await;
+    }));
+    (stop, task)
+}
+
+async fn connect(fixture: &Fixture) -> tokio::net::UnixStream {
+    use agmen_local::{Outcome, Request, Response, frame};
+    let mut stream = tokio::net::UnixStream::connect(fixture.dir.path().join("agmend.sock"))
+        .await
+        .unwrap();
+    frame::write_async(&mut stream, &Request::new(1, "hello", json!({"api":1})))
+        .await
+        .unwrap();
+    let hello: Response = frame::read_async(&mut stream).await.unwrap();
+    assert!(matches!(hello.outcome, Outcome::Ok { .. }));
+    stream
+}
+
+/// Quit used to close the connections first, which dropped the launch
+/// before it could discard the identity it had minted.
+#[tokio::test]
+async fn quit_over_a_connection_discards_a_launch_that_never_finishes() {
+    let (mut fixture, _) = tree_fixture().await;
+    let reached = Arc::new(tokio::sync::Notify::new());
+    let held = reached.clone();
+    publisher(
+        &mut fixture,
+        Arc::new(move |sender, envelope| {
+            let reached = held.clone();
+            Box::pin(async move {
+                if matches!(envelope.payload, agmen_proto::Payload::Hello { .. })
+                    && sender.identity_id.as_str() == "agent001"
+                {
+                    reached.notify_one();
+                    std::future::pending::<()>().await;
+                }
+                Ok(OutboxState::Pending { attempts: 0 })
+            })
+        }),
+    )
+    .await;
+    Arc::get_mut(&mut Arc::get_mut(&mut fixture.daemon.core).unwrap().managed)
+        .unwrap()
+        .quit_launch_wait = std::time::Duration::from_millis(300);
+    let before = git_state(&fixture);
+    let (stop, serving) = serve(&mut fixture);
+    let mut stream = connect(&fixture).await;
+    let launch = agmen_local::Request::new(
+        2,
+        "agent_launch",
+        json!({"project":"project1","name":"worker","root":fixture.dir.path().join("repo")}),
+    );
+    agmen_local::frame::write_async(&mut stream, &launch)
+        .await
+        .unwrap();
+    tokio::time::timeout(QUIT_TEST_WAIT, reached.notified())
+        .await
+        .expect("the launch must reach its HELLO");
+    stop.send(()).unwrap();
+    tokio::time::timeout(SERVE_BOUND, serving)
+        .await
+        .expect("quit with a launch in flight exceeded its bound")
+        .unwrap();
+    assert_discarded_but_the_row(&fixture, "agent001", &before, 0).await;
+    let registry = rusqlite::Connection::open(fixture.dir.path().join("agmend.db")).unwrap();
+    let rows: i64 = registry
+        .query_row(
+            "SELECT count(*) FROM identities WHERE identity = 'agent001'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(rows, 0, "store row");
+}
+
+/// A launch that is stuck before its post-mint select (here: holding
+/// admission for good) cannot be abandoned, and used to run the quit clock
+/// out so that no worker got its goodbye.
+#[tokio::test]
+async fn quit_with_a_launch_stuck_before_its_mint_still_says_goodbye() {
+    let (mut fixture, _) = tree_fixture().await;
+    let senders = Arc::new(Mutex::new(Vec::new()));
+    let captured = senders.clone();
+    publisher(
+        &mut fixture,
+        Arc::new(move |sender, envelope| {
+            if matches!(envelope.payload, agmen_proto::Payload::Bye {}) {
+                captured
+                    .lock()
+                    .unwrap()
+                    .push(sender.identity_id.to_string());
+            }
+            Box::pin(async { Ok(OutboxState::Pending { attempts: 0 }) })
+        }),
+    )
+    .await;
+    settings(&fixture, "budgets = false");
+    root(&fixture).await;
+    let managed = fixture.daemon.core.managed.clone();
+    let (stop, serving) = serve(&mut fixture);
+    // Startup takes admission too; hold it only once the daemon accepts.
+    let _stream = connect(&fixture).await;
+    let _stuck = managed.launching.lock().await;
+    stop.send(()).unwrap();
+    tokio::time::timeout(STUCK_QUIT_BOUND, serving)
+        .await
+        .expect("quit with a stuck launch exceeded its bound")
+        .unwrap();
+    assert_eq!(*senders.lock().unwrap(), ["agent001"]);
+    assert_eq!(state(&fixture, "agent001").await, "offline");
+}
+
+/// The supervisor kept ticking while quit waited on a launch, and could start
+/// a paid batch seconds after the owner quit.
+#[tokio::test]
+async fn quit_stops_the_supervisor_from_starting_a_batch() {
+    let fixture = Fixture::new().await;
+    fixture.runner.mode.store(1, Ordering::SeqCst);
+    fixture.launch().await;
+    enqueue(&fixture, 1, "agent001").await;
+    let managed = &fixture.daemon.core.managed;
+    let launching = managed.launching.lock().await;
+    tokio::join!(managed.shutdown(), async {
+        while !managed.shutting_down.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+        managed.tick().await;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(fixture.runner.runs.lock().unwrap().is_empty());
+        drop(launching);
+    });
+}

@@ -6,6 +6,8 @@ use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -297,6 +299,9 @@ pub(crate) struct Host {
     restart: Notify,
     stop: Notify,
     log: PathBuf,
+    /// A test models a child that outlives SIGKILL by not sending it.
+    #[cfg(test)]
+    pub(crate) spare_on_stop: AtomicBool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -347,6 +352,8 @@ impl Host {
             restart: Notify::new(),
             stop: Notify::new(),
             log,
+            #[cfg(test)]
+            spare_on_stop: AtomicBool::new(false),
         })
     }
 
@@ -379,6 +386,17 @@ impl Host {
         self.set(HostState::Stopped, None);
         self.restart.notify_one();
         Ok(self.status())
+    }
+
+    #[cfg(test)]
+    fn kills_on_stop(&self) -> bool {
+        !self.spare_on_stop.load(Ordering::Relaxed)
+    }
+
+    #[cfg(not(test))]
+    #[expect(clippy::unused_self, reason = "the test build reads a flag here")]
+    fn kills_on_stop(&self) -> bool {
+        true
     }
 
     pub(crate) fn stop(&self) {
@@ -475,12 +493,12 @@ impl Host {
                     self.set(HostState::Running, None);
                     tokio::select! {
                         () = self.stop.notified() => {
-                            stop_child(&mut child).await?;
+                            stop_child(&mut child, self.kills_on_stop()).await?;
                             self.set(HostState::Stopped, None);
                             return Ok(true);
                         }
                         () = self.restart.notified() => {
-                            stop_child(&mut child).await?;
+                            stop_child(&mut child, self.kills_on_stop()).await?;
                             return Ok(false);
                         }
                         status = child.wait() => {
@@ -537,8 +555,8 @@ impl Host {
     }
 }
 
-async fn stop_child(child: &mut Child) -> Result<()> {
-    if child.try_wait()?.is_none() {
+async fn stop_child(child: &mut Child, kill: bool) -> Result<()> {
+    if kill && child.try_wait()?.is_none() {
         child.start_kill().context("stopping agmen-hub")?;
     }
     tokio::time::timeout(Duration::from_secs(5), child.wait())
