@@ -142,6 +142,8 @@ type Publisher = Arc<
 >;
 
 pub(crate) struct Identities {
+    #[expect(dead_code, reason = "origin routing is wired in Task 9")]
+    origins: Arc<crate::origin::Origins>,
     credentials: Arc<Credentials>,
     store: Arc<Database>,
     state_dir: PathBuf,
@@ -314,16 +316,17 @@ impl Identities {
         credentials: Arc<Credentials>,
         store: Arc<Mutex<Store>>,
         state_dir: PathBuf,
-        hub: Arc<Hub>,
+        origins: Arc<crate::origin::Origins>,
     ) -> Self {
         Self {
+            hub: origins.hub().clone(),
+            origins,
             credentials,
             store: Arc::new(Database {
                 store,
                 jobs: AsyncMutex::new(tokio::task::JoinSet::new()),
             }),
             state_dir,
-            hub,
             runtimes: AsyncMutex::new(BTreeMap::new()),
             collectors: AsyncMutex::new(BTreeMap::new()),
             launched: AsyncMutex::new(BTreeSet::new()),

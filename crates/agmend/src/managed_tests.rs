@@ -1050,6 +1050,43 @@ async fn framed_owner_request_from_worker_is_forbidden() {
 }
 
 #[tokio::test]
+async fn framed_local_origin_request_from_worker_is_forbidden() {
+    use agmen_local::{Outcome, Request, Response, frame};
+    let fixture = Fixture::new().await;
+    let (mut client, server) = tokio::net::UnixStream::pair().unwrap();
+    let task = tokio::spawn(crate::api::serve_with_peer(
+        server,
+        fixture.daemon.core.clone(),
+        |_| Ok(4242),
+    ));
+    frame::write_async(&mut client, &Request::new(1, "hello", json!({"api":1})))
+        .await
+        .unwrap();
+    let hello: Response = frame::read_async(&mut client).await.unwrap();
+    assert!(matches!(hello.outcome, Outcome::Ok { .. }));
+    for (method, params) in [
+        ("local_project_create", json!({"name": "from-worker"})),
+        ("local_projects", json!({})),
+        ("lanes_set", json!({"project": "project1", "lanes": []})),
+    ] {
+        frame::write_async(&mut client, &Request::new(2, method, params))
+            .await
+            .unwrap();
+        let response: Response = frame::read_async(&mut client).await.unwrap();
+        match response.outcome {
+            Outcome::Err { error } => {
+                assert_eq!(error.code, agmen_local::ErrorCode::Forbidden);
+                assert_eq!(error.message, "agents cannot call owner-only methods");
+            }
+            other => panic!("expected forbidden: {other:?}"),
+        }
+    }
+    assert!(!fixture.dir.path().join("local.db").exists());
+    drop(client);
+    task.await.unwrap();
+}
+
+#[tokio::test]
 async fn mixed_queue_runs_owner_batch_before_default_batch() {
     let fixture = Fixture::new().await;
     fixture.launch().await;
@@ -1281,7 +1318,7 @@ fn transcript(fixture: &Fixture, folder: &std::path::Path, id: &str) {
 async fn restarted(fixture: &Fixture) -> Arc<Managed> {
     let old = &fixture.daemon.core.managed;
     let managed = Arc::new(Managed::new(
-        old.hub.clone(),
+        fixture.daemon.core.origins.clone(),
         fixture.runner.clone(),
         old.state_dir.clone(),
         Some(fixture.dir.path().join("claude")),

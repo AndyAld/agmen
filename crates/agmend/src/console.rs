@@ -31,6 +31,7 @@ use crate::local::{self, Local};
 /// What every console method needs.
 #[derive(Debug)]
 pub(crate) struct Console {
+    pub(crate) origins: Arc<crate::origin::Origins>,
     pub(crate) hub: Arc<Hub>,
     pub(crate) feeds: Arc<Feeds>,
     pub(crate) local: Local,
@@ -376,17 +377,26 @@ impl Console {
     /// its worktrees and git facts.
     pub(crate) async fn snapshot(&self, raw: Value) -> Result<Value, ApiError> {
         let SnapshotParams { project, root } = params(raw)?;
-        let login = self
-            .hub
-            .credentials()
-            .login()
-            .await
-            .map_err(HubError::from)?;
-        let head = self.hub.head(&project).await?;
-        let (messages, older) = self
-            .before(&project, head.saturating_add(1), PAGE_LIMIT)
-            .await?;
-        let roster = self.hub.roster(&project).await?;
+        let origin = self.origins.of(&project).await;
+        let login = self.origins.person(origin).await?;
+        let (messages, older, roster) = match origin {
+            crate::origin::Origin::Local => {
+                let local = self.origins.local();
+                let head = local.head(&project).await?;
+                let after = head.saturating_sub(u64::from(PAGE_LIMIT));
+                let page = local
+                    .page(&project, &agmen_proto::Stream::Feed, after, PAGE_LIMIT)
+                    .await?;
+                (page.messages, after > 0, local.roster(&project).await?)
+            }
+            crate::origin::Origin::Hub => {
+                let head = self.hub.head(&project).await?;
+                let (messages, older) = self
+                    .before(&project, head.saturating_add(1), PAGE_LIMIT)
+                    .await?;
+                (messages, older, self.hub.roster(&project).await?)
+            }
+        };
         let local = self.local.read(&project, root.as_deref()).await;
         let me = Me {
             id: login.human_id,
