@@ -156,6 +156,23 @@ impl Worker {
             reserved_from_parent: Money::ZERO,
         }
     }
+
+    /// What the next batch may spend. Only an owner batch can launch children
+    /// (`tree_caller`), so only an owner batch of a role that can, on shared
+    /// budgets, leaves half of what is left for them. Any other batch may spend
+    /// all of it.
+    fn batch_cap(&self, owner_only: bool, can_launch: bool, settings: &Safeguards) -> Money {
+        let remaining = self.budget.remaining();
+        if settings.budgets
+            && settings.child_budgets == ChildBudgets::Shared
+            && can_launch
+            && owner_only
+        {
+            remaining.child_reserve_share()
+        } else {
+            remaining
+        }
+    }
 }
 
 /// An interactive Claude Code on the owner session, opened by Attach.
@@ -707,17 +724,7 @@ impl Managed {
         (role, can_launch): (Option<RoleRun>, bool),
         settings: &Safeguards,
     ) -> RunSpec {
-        let remaining = held.budget.remaining();
-        // Only an owner batch can launch children (`tree_caller`), so only it leaves a share.
-        let batch_cap = if settings.budgets
-            && settings.child_budgets == ChildBudgets::Shared
-            && can_launch
-            && owner_only
-        {
-            remaining.child_reserve_share()
-        } else {
-            remaining
-        };
+        let batch_cap = held.batch_cap(owner_only, can_launch, settings);
         held.in_flight_cap = if settings.budgets {
             batch_cap
         } else {
@@ -1053,6 +1060,10 @@ impl Managed {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one pass per worker, from the login check to the spawn, on one held guard"
+    )]
     pub(crate) async fn tick(self: &Arc<Self>) {
         let Some(identities) = self.identities() else {
             return;
@@ -1097,7 +1108,7 @@ impl Managed {
             {
                 continue;
             }
-            let role = match self.batch_role(&held.record).await {
+            let (role, can_launch) = match self.batch_role(&held.record).await {
                 Ok(role) => role,
                 Err(failure) => {
                     held.role_error = Some(failure.message);
@@ -1106,6 +1117,14 @@ impl Managed {
                 }
             };
             held.role_error = None;
+            // An owner batch of a role that can launch children gets half of what is
+            // left, so at 1 micro-dollar it would get nothing. Wait like an exhausted
+            // agent, before the drain below deletes the queued messages.
+            // shortcut: the tier is unknown before the drain, so an Others batch of
+            // such a role waits too; read the tier first if sub-cent budgets matter.
+            if cap_budget && held.batch_cap(true, can_launch, &settings) == Money::ZERO {
+                continue;
+            }
             let rows = match identities.launch_pending(&held.record.identity).await {
                 Ok(rows) if rows.is_empty() => continue,
                 Ok(rows) => rows,
@@ -1137,7 +1156,7 @@ impl Managed {
                 prompt,
                 (session_id, resume),
                 owner_only,
-                role,
+                (role, can_launch),
                 &settings,
             );
             spec.local_token = batch_local_token(&identities, &spec.identity).await;

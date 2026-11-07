@@ -195,6 +195,27 @@ async fn shared_others_tier_batch_of_a_launching_role_keeps_the_full_remaining_c
 }
 
 #[tokio::test]
+async fn shared_launching_owner_batch_waits_when_half_of_what_is_left_rounds_to_zero() {
+    let (fixture, _) = tree_fixture().await;
+    budget_root(&fixture, 5.0).await;
+    spend(&fixture, "agent001", "4.999999").await;
+    enqueue(&fixture, 1, "agent001").await;
+    fixture.runner.mode.store(2, Ordering::SeqCst);
+    fixture.daemon.core.managed.tick().await;
+    // Like an exhausted agent: still idle, nothing started.
+    assert_eq!(listed(&fixture, "agent001").await["state"], "idle");
+    assert!(fixture.runner.runs.lock().unwrap().is_empty());
+    // The message stayed queued, so it runs once the person adds budget.
+    let raise = json!({"identity":"agent001","add_usd":5});
+    worker_call(&fixture, "agent_budget", raise).await.unwrap();
+    running_batch(&fixture, "agent001", Tier::Owner).await;
+    assert_eq!(batch_cap(&fixture, "agent001").unwrap().usd(), "2.500000");
+    let prompt = fixture.runner.runs.lock().unwrap()[0].prompt.clone();
+    assert!(prompt.contains("do the work"));
+    fixture.daemon.core.managed.shutdown().await;
+}
+
+#[tokio::test]
 async fn separate_launching_batch_keeps_the_full_remaining_cap() {
     let (fixture, _) = tree_fixture().await;
     settings(&fixture, "child_budgets = 'separate'");
