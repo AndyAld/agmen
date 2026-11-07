@@ -18,13 +18,13 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::io::AsyncReadExt as _;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::sync::{Mutex as AsyncMutex, broadcast, oneshot};
+use tokio::sync::{Mutex as AsyncMutex, broadcast, mpsc, oneshot};
 use url::Url;
 
 use crate::console::{bad_request, params};
 use crate::hub::Hub;
 use crate::login::Credentials;
-use crate::state::{MAX_LOCAL_STREAMS, ManagedIdentity, Store};
+use crate::state::{MAX_STREAM_POSITIONS, ManagedIdentity, Store};
 
 #[path = "identity_watch.rs"]
 mod watch;
@@ -43,6 +43,15 @@ const COLLECTION_PAGE_SIZE: u32 = 500;
 const MAX_COLLECTION_PAGES: usize = 100;
 const AUTHORITY_RECHECK: Duration = Duration::from_secs(1);
 const MAX_QUEUE_ALERT_ATTEMPTS: usize = 3;
+/// agmen-hub's events endpoint refuses more positions in one SSE request.
+const MAX_HUB_AFTER: usize = 256;
+const MAX_HUB_CONNECTIONS: usize = MAX_STREAM_POSITIONS.div_ceil(MAX_HUB_AFTER);
+const MAX_HUB_RECONNECTS: u32 = 10;
+const HUB_BACKOFF_SHIFT: u32 = 5;
+const HUB_MAX_BACKOFF: Duration = Duration::from_secs(30);
+const HUB_READ_WAIT: Duration = Duration::from_secs(45);
+const HUB_EVENT_QUEUE: usize = 64;
+const HUB_PARSE_BYTES: usize = 16 * 1024;
 
 type RuntimeKey = (String, IdentityId);
 type RuntimeSlot = Arc<AsyncMutex<Option<Runtime>>>;
@@ -1522,10 +1531,14 @@ impl Collection {
             }
             return;
         }
-        for attempt in 0..=10_u32 {
+        let mut warned_limit = false;
+        for attempt in 0..=MAX_HUB_RECONNECTS {
             if attempt > 0 {
-                tokio::time::sleep(Duration::from_secs((1_u64 << (attempt - 1).min(5)).min(30)))
-                    .await;
+                tokio::time::sleep(
+                    Duration::from_secs(1_u64 << (attempt - 1).min(HUB_BACKOFF_SHIFT))
+                        .min(HUB_MAX_BACKOFF),
+                )
+                .await;
             }
             let positions = match self.positions().await {
                 Ok(p) => p,
@@ -1534,53 +1547,99 @@ impl Collection {
                     return;
                 }
             };
-            let response =
-                tokio::time::timeout(DEADLINE, self.hub.events(&self.project, &positions, None))
-                    .await;
-            let mut response = match response {
-                Ok(Ok(response)) => response,
-                Ok(Err(error)) if error.is_final() => {
-                    self.send(Err(error.into()));
-                    return;
-                }
-                _ => {
-                    self.send(Ok(ClientEvent::Connection { connected: false }));
-                    continue;
-                }
-            };
-            self.send(Ok(ClientEvent::Connection { connected: true }));
-            let mut parser = crate::sse::SseParser::default();
-            loop {
-                let chunk = match response.chunk().await {
-                    Ok(Some(chunk)) => chunk,
-                    _ => break,
-                };
-                for part in chunk.chunks(16 * 1024) {
-                    let events = match parser.push(part) {
-                        Ok(events) => events,
-                        Err(_) => {
-                            self.send(Err(hub_error("invalid SSE stream")));
-                            return;
-                        }
-                    };
-                    for event in events {
-                        let message = match serde_json::from_str(&event.data) {
-                            Ok(message) => message,
-                            Err(_) => {
-                                self.send(Err(hub_error("invalid SSE envelope")));
-                                return;
-                            }
-                        };
-                        if let Err(error) = self.accept(message).await {
-                            self.send(Err(error));
-                            return;
-                        }
-                    }
-                }
+            if let Err(error) = self.hub_pass(positions, &mut warned_limit).await {
+                self.send(Err(error));
+                return;
             }
             self.send(Ok(ClientEvent::Connection { connected: false }));
         }
         self.send(Err(hub_error("collector offline after 10 reconnects")));
+    }
+
+    async fn hub_pass(
+        &self,
+        positions: BTreeMap<Stream, u64>,
+        warned_limit: &mut bool,
+    ) -> Result<(), ApiError> {
+        let mut chunks = vec![BTreeMap::new()];
+        for (n, (stream, seq)) in positions.iter().take(MAX_STREAM_POSITIONS).enumerate() {
+            let index = n / MAX_HUB_AFTER;
+            if index == chunks.len() {
+                chunks.push(BTreeMap::new());
+            }
+            if let Some(chunk) = chunks.get_mut(index) {
+                chunk.insert(stream.clone(), *seq);
+            }
+        }
+        let mut responses = Vec::with_capacity(MAX_HUB_CONNECTIONS);
+        for chunk in chunks.iter().take(MAX_HUB_CONNECTIONS) {
+            // The hub replays from seq 0 any stream `after` omits. Name other
+            // streams too, up to its limit, so a short chunk does not make the
+            // hub resend their whole history on every reconnect.
+            let mut after = chunk.clone();
+            for (stream, seq) in positions.iter().take(MAX_STREAM_POSITIONS) {
+                if after.len() >= MAX_HUB_AFTER {
+                    break;
+                }
+                after.entry(stream.clone()).or_insert(*seq);
+            }
+            match tokio::time::timeout(DEADLINE, self.hub.events(&self.project, &after, None)).await
+            {
+                Ok(Ok(response)) => responses.push(response),
+                Ok(Err(error)) if error.is_final() => return Err(error.into()),
+                Ok(Err(crate::hub::HubError::Refused { status, code, .. })) => {
+                    if !*warned_limit
+                        && (status == 429 || code == "too_many_streams" || code == "hub_busy")
+                    {
+                        // The hub's error text is its own: log the status only.
+                        tracing::warn!(project = %self.project, status,
+                            "hub events connection refused; hub limit is 8 streams per person (128 total); retrying");
+                        *warned_limit = true;
+                    }
+                    return Ok(());
+                }
+                _ => return Ok(()),
+            }
+        }
+        let (tx, mut rx) = mpsc::channel(HUB_EVENT_QUEUE);
+        let mut readers = tokio::task::JoinSet::new();
+        // The hub sends all readable streams on every connection, including
+        // ones absent from `after`. Assign each stream to one reader. The first
+        // reader also covers streams created since the last reconnect.
+        let secondary: BTreeSet<_> = chunks
+            .iter()
+            .skip(1)
+            .flat_map(|chunk| chunk.keys().cloned())
+            .collect();
+        for (index, response) in responses.into_iter().enumerate().take(MAX_HUB_CONNECTIONS) {
+            let tx = tx.clone();
+            let assigned = if index == 0 {
+                secondary.clone()
+            } else {
+                chunks
+                    .get(index)
+                    .map(|chunk| chunk.keys().cloned().collect())
+                    .unwrap_or_default()
+            };
+            readers.spawn(read_hub_events(response, tx, assigned, index == 0));
+        }
+        drop(tx);
+        self.send(Ok(ClientEvent::Connection { connected: true }));
+        // Readers only parse; one consumer performs position checks and ingest
+        // transactions, preserving order and suppressing duplicates on replay.
+        loop {
+            tokio::select! {
+                event = rx.recv() => match event {
+                    Some(message) => self.accept(message).await?,
+                    None => return Ok(()),
+                },
+                ended = readers.join_next() => return match ended {
+                    Some(Ok(result)) => result,
+                    Some(Err(_)) => Err(hub_error("hub events reader failed")),
+                    None => Ok(()),
+                },
+            }
+        }
     }
 
     async fn run_local(&self) -> Result<(), ApiError> {
@@ -1609,7 +1668,7 @@ impl Collection {
             store.identities(&origin, &owner)
         })
         .await?;
-        let mut active = Vec::with_capacity(MAX_LOCAL_STREAMS);
+        let mut active = Vec::with_capacity(MAX_STREAM_POSITIONS);
         active.extend([Stream::Feed, Stream::Inbox(self.owner.clone())]);
         active.extend(
             identities
@@ -1621,7 +1680,7 @@ impl Collection {
         // Keep unfinished streams first across wakes, even when there are more
         // inboxes than the page budget. Refresh registration on every wake.
         streams.retain(|stream| active.contains(stream));
-        for stream in active.into_iter().take(MAX_LOCAL_STREAMS) {
+        for stream in active.into_iter().take(MAX_STREAM_POSITIONS) {
             if !streams.contains(&stream) {
                 streams.push_back(stream);
             }
@@ -1660,6 +1719,35 @@ impl Collection {
         }
         Ok(())
     }
+}
+
+async fn read_hub_events(
+    mut response: reqwest::Response,
+    tx: mpsc::Sender<StampedEnvelope>,
+    assigned: BTreeSet<Stream>,
+    first: bool,
+) -> Result<(), ApiError> {
+    let mut parser = crate::sse::SseParser::default();
+    while let Ok(Ok(Some(chunk))) = tokio::time::timeout(HUB_READ_WAIT, response.chunk()).await {
+        for part in chunk.chunks(HUB_PARSE_BYTES) {
+            let events = parser
+                .push(part)
+                .map_err(|_| hub_error("invalid SSE stream"))?;
+            for event in events {
+                let message: StampedEnvelope = serde_json::from_str(&event.data)
+                    .map_err(|_| hub_error("invalid SSE envelope"))?;
+                if assigned.contains(&message.stream) != first
+                    && !matches!(
+                        tokio::time::timeout(DEADLINE, tx.send(message)).await,
+                        Ok(Ok(()))
+                    )
+                {
+                    return Ok(());
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn still_managed(
