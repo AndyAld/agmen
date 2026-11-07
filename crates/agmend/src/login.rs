@@ -5,7 +5,8 @@
 //! agmend keeps the access token in memory and asks the store again when it
 //! is about to run out or the hub refused it. The hub replaces the refresh
 //! token on every use, so renewals in this process go one at a time (the
-//! cache lock is held across one); a renewal by the CLI at the same moment
+//! cache lock is held across one, and a renewal runs to its end even when the
+//! caller that started it gives up); a renewal by the CLI at the same moment
 //! can still spend the refresh token first, and then agmend reports
 //! `unauthorized` until `agmen login` runs again.
 //!
@@ -145,23 +146,37 @@ impl Credentials {
 
     /// The login and a current access token for it.
     ///
+    /// A renewal runs as its own task that owns the cache lock, so a caller
+    /// that gives up (a timeout, a dropped request) cannot lose the new
+    /// tokens after the hub has spent the refresh token: they are still
+    /// stored and cached, and the next caller finds them. A caller that gives
+    /// up while only waiting for the lock leaves without starting a renewal.
+    ///
     /// # Errors
     ///
     /// [`LoginError::NotSignedIn`] when nobody is signed in or the hub no
     /// longer takes the refresh token, else the store's or the hub's error.
     pub(crate) async fn access(&self) -> Result<(Login, String), LoginError> {
         let login = self.login().await?;
-        let mut cache = self.cache.lock().await;
+        let mut cache = self.cache.clone().lock_owned().await;
         if let Some((cached, tokens)) = cache.as_ref()
             && *cached == login
             && !tokens.expiring()
         {
             return Ok((login, tokens.access_token().to_owned()));
         }
-        let tokens = human_tokens(&self.http, &self.store, &login).await?;
-        let token = tokens.access_token().to_owned();
-        *cache = Some((login.clone(), tokens));
-        Ok((login, token))
+        let (http, store) = (self.http.clone(), self.store.clone());
+        // shortcut: nothing joins this task at shutdown, so a renewal still in
+        // flight when agmend exits can lose the spent grant; await the cache
+        // lock in Agmend::serve_until if that ever matters.
+        tokio::spawn(async move {
+            let tokens = human_tokens(&http, &store, &login).await?;
+            let token = tokens.access_token().to_owned();
+            *cache = Some((login.clone(), tokens));
+            Ok((login, token))
+        })
+        .await
+        .map_err(LoginError::Join)?
     }
 
     /// Drops the cached token after the hub refused it (a logout, or a
@@ -355,4 +370,4 @@ fn token_error() -> ApiError {
 
 #[cfg(test)]
 #[path = "login_tests.rs"]
-mod tests;
+pub(crate) mod tests;
