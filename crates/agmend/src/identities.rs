@@ -1,6 +1,6 @@
 //! Per-request local caller authentication and identity session publishing.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::Read as _;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -24,10 +24,17 @@ use url::Url;
 use crate::console::{bad_request, params};
 use crate::hub::Hub;
 use crate::login::Credentials;
-use crate::state::{ManagedIdentity, Store};
+use crate::state::{MAX_LOCAL_STREAMS, ManagedIdentity, Store};
 
 const DEADLINE: Duration = Duration::from_secs(10);
 const POST_WAIT: Duration = Duration::from_secs(5);
+const MAX_DATABASE_JOBS: usize = 64;
+const MAX_COLLECTORS: usize = 64;
+const WATCH_CAPACITY: usize = 256;
+const LOCAL_RECHECK: Duration = Duration::from_secs(30);
+const COLLECTION_PAGE_SIZE: u32 = 500;
+const MAX_COLLECTION_PAGES: usize = 100;
+const AUTHORITY_RECHECK: Duration = Duration::from_secs(1);
 
 type RuntimeKey = (String, IdentityId);
 type RuntimeSlot = Arc<AsyncMutex<Option<Runtime>>>;
@@ -45,6 +52,16 @@ impl Database {
         Self {
             store,
             jobs: AsyncMutex::new(tokio::task::JoinSet::new()),
+        }
+    }
+
+    pub(crate) async fn shutdown(&self) {
+        let mut jobs = self.jobs.lock().await;
+        jobs.abort_all();
+        for _ in 0..MAX_DATABASE_JOBS {
+            if jobs.join_next().await.is_none() {
+                break;
+            }
         }
     }
 }
@@ -718,11 +735,8 @@ impl Identities {
         &self,
         project: &ProjectId,
     ) -> Result<broadcast::Sender<WatchEvent>, ApiError> {
-        let login = self
-            .credentials
-            .login()
-            .await
-            .map_err(crate::hub::HubError::from)?;
+        let origin = self.origins.of(project).await?;
+        let login = self.origins.person(origin).await?;
         let key = (
             agmen_client::origin_key(&login.hub_url),
             login.human_id.clone(),
@@ -734,11 +748,11 @@ impl Identities {
         {
             return Ok(collector.tx.clone());
         }
-        if collectors.len() >= 64 && !collectors.contains_key(&key) {
+        if collectors.len() >= MAX_COLLECTORS && !collectors.contains_key(&key) {
             return Err(hub_error("64 managed projects are already running"));
         }
         let tx = collectors.get(&key).map_or_else(
-            || broadcast::channel(256).0,
+            || broadcast::channel(WATCH_CAPACITY).0,
             |collector| collector.tx.clone(),
         );
         if let Some(collector) = collectors.get_mut(&key) {
@@ -746,6 +760,7 @@ impl Identities {
         }
         let context = Collection {
             hub: self.hub.clone(),
+            origins: self.origins.clone(),
             store: self.store.clone(),
             origin: key.0.clone(),
             owner: key.1.clone(),
@@ -784,20 +799,21 @@ impl Identities {
                 Ok::<_, ApiError>((origin, login.human_id, rows))
             })
             .await;
-            let Ok(Ok((origin, owner, rows))) = active else {
-                self.clear().await;
-                continue;
+            let (origin, owner, rows) = match active {
+                Ok(Ok((origin, owner, rows))) => (origin, Some(owner), rows),
+                _ => (String::new(), None, Vec::new()),
             };
             let mut collectors = self.collectors.lock().await;
             let stale: Vec<_> = collectors
                 .keys()
                 .filter(|(o, h, p)| {
-                    *o != origin
-                        || *h != owner
-                        || (!rows.iter().any(|row| row.project == *p)
-                            && collectors
-                                .get(&((*o).clone(), (*h).clone(), (*p).clone()))
-                                .is_none_or(|collector| collector.tx.receiver_count() == 0))
+                    o != agmen_client::LOCAL_ORIGIN
+                        && (*o != origin
+                            || Some(h) != owner.as_ref()
+                            || (!rows.iter().any(|row| row.project == *p)
+                                && collectors
+                                    .get(&((*o).clone(), (*h).clone(), (*p).clone()))
+                                    .is_none_or(|collector| collector.tx.receiver_count() == 0)))
                 })
                 .cloned()
                 .collect();
@@ -815,7 +831,10 @@ impl Identities {
             let runtimes = self.runtimes.lock().await;
             let stale_keys: Vec<_> = runtimes
                 .keys()
-                .filter(|(o, id)| *o != origin || !rows.iter().any(|row| &row.identity_id == id))
+                .filter(|(o, id)| {
+                    o != agmen_client::LOCAL_ORIGIN
+                        && (*o != origin || !rows.iter().any(|row| &row.identity_id == id))
+                })
                 .cloned()
                 .collect();
             let stale: Vec<_> = stale_keys
@@ -831,7 +850,7 @@ impl Identities {
             drop(runtimes);
             for row in rows {
                 // A finished collector stays offline until an explicit call.
-                let key = (origin.clone(), owner.clone(), row.project.clone());
+                let key = (origin.clone(), row.owner_id.clone(), row.project.clone());
                 if !self.collectors.lock().await.contains_key(&key)
                     && let Err(error) = self.project_channel(&row.project).await
                 {
@@ -860,9 +879,8 @@ impl Identities {
 
     pub(crate) async fn shutdown(&self) {
         self.clear().await;
-        let mut jobs = self.store.jobs.lock().await;
-        jobs.abort_all();
-        while jobs.join_next().await.is_some() {}
+        self.store.shutdown().await;
+        self.origins.shutdown().await;
     }
 
     pub(crate) async fn watch(
@@ -875,11 +893,17 @@ impl Identities {
     ) -> Result<(), ApiError> {
         Self::project(caller, &raw)?;
         let ProjectParams { project } = params(raw)?;
-        let login = self
-            .credentials
-            .login()
-            .await
-            .map_err(crate::hub::HubError::from)?;
+        let origin = self.origins.of(&project).await?;
+        let login = self.origins.person(origin).await?;
+        let _presence = match (origin, caller) {
+            (crate::origin::Origin::Local, Caller::Identity(who)) => Some(
+                self.origins
+                    .local()
+                    .presence(&project, &who.identity_id)
+                    .await?,
+            ),
+            _ => None,
+        };
         let me = match caller {
             Caller::Human => Me {
                 identity_id: login.human_id.clone(),
@@ -896,7 +920,7 @@ impl Identities {
         let mut events = tx.subscribe();
         write_event(writer, id, &ClientEvent::Me(me.clone())).await?;
         let mut disconnected = [0; 1];
-        let mut authority = tokio::time::interval(Duration::from_secs(1));
+        let mut authority = tokio::time::interval(AUTHORITY_RECHECK);
         loop {
             let (target, event) = tokio::select! {
                 _ = reader.read(&mut disconnected) => return Ok(()),
@@ -904,8 +928,8 @@ impl Identities {
                 _ = authority.tick() => {
                     let valid = tokio::time::timeout(DEADLINE,async {
                         match caller {
-                            Caller::Identity(identity) => still_managed(&self.credentials,self.store.clone(),identity).await,
-                            Caller::Human => self.credentials.login().await.is_ok_and(|current| current.human_id == me.identity_id && current.hub_url == login.hub_url),
+                            Caller::Identity(identity) => still_managed(&self.origins,self.store.clone(),identity).await,
+                            Caller::Human => self.origins.person_for(&login.hub_url).await.is_ok_and(|current| current.human_id == me.identity_id && current.hub_url == login.hub_url),
                         }
                     }).await;
                     if !matches!(valid,Ok(true)) { return Err(unauthorized()); }
@@ -1095,14 +1119,14 @@ impl Identities {
             .map_err(|_| hub_error("connecting identity session timed out"))?
             .map_err(|_| hub_error("connecting identity session failed"))?;
         let session = Arc::new(session);
-        if !still_managed(&self.credentials, self.store.clone(), caller).await {
+        if !still_managed(&self.origins, self.store.clone(), caller).await {
             return Err(unauthorized());
         }
         let tx = self.project_channel(&caller.project).await?;
         *runtime = Some(Runtime::start(
             session.clone(),
             events,
-            self.credentials.clone(),
+            self.origins.clone(),
             self.store.clone(),
             caller.clone(),
             tx,
@@ -1116,7 +1140,7 @@ impl Runtime {
     fn start(
         held: Arc<Session>,
         mut events: agmen_client::Events,
-        credentials: Arc<Credentials>,
+        origins: Arc<crate::origin::Origins>,
         store: Arc<Database>,
         identity: ManagedIdentity,
         tx: broadcast::Sender<WatchEvent>,
@@ -1151,7 +1175,7 @@ impl Runtime {
                         Some(_) => {}
                     },
                     _ = check.tick() => {
-                        let valid = tokio::time::timeout(DEADLINE, still_managed(&credentials, store.clone(), &identity)).await;
+                        let valid = tokio::time::timeout(DEADLINE, still_managed(&origins, store.clone(), &identity)).await;
                         if !matches!(valid, Ok(true)) { break; }
                     }
                 }
@@ -1224,7 +1248,7 @@ pub(crate) async fn store_work<T: Send + 'static>(
     let (send, receive) = oneshot::channel();
     let mut jobs = database.jobs.lock().await;
     while jobs.try_join_next().is_some() {}
-    if jobs.len() >= 64 {
+    if jobs.len() >= MAX_DATABASE_JOBS {
         return Err(hub_error("64 daemon state operations are already running"));
     }
     jobs.spawn_blocking(move || {
@@ -1265,6 +1289,7 @@ pub(crate) async fn store_work<T: Send + 'static>(
 
 struct Collection {
     hub: Arc<Hub>,
+    origins: Arc<crate::origin::Origins>,
     store: Arc<Database>,
     origin: String,
     owner: IdentityId,
@@ -1296,12 +1321,12 @@ impl Collection {
         {
             return Err(hub_error("message exceeds protocol envelope cap"));
         }
-        let login = self
-            .hub
-            .credentials()
-            .login()
-            .await
-            .map_err(crate::hub::HubError::from)?;
+        let hub_url = if self.origin == agmen_client::LOCAL_ORIGIN {
+            agmen_client::local_hub_url()
+        } else {
+            Url::parse(&self.origin).map_err(|_| unauthorized())?
+        };
+        let login = self.origins.person_for(&hub_url).await?;
         if login.human_id != self.owner || agmen_client::origin_key(&login.hub_url) != self.origin {
             return Err(unauthorized());
         }
@@ -1355,6 +1380,12 @@ impl Collection {
     }
 
     async fn run(self) {
+        if self.origin == agmen_client::LOCAL_ORIGIN {
+            if let Err(error) = self.run_local().await {
+                self.send(Err(error));
+            }
+            return;
+        }
         for attempt in 0..=10_u32 {
             if attempt > 0 {
                 tokio::time::sleep(Duration::from_secs((1_u64 << (attempt - 1).min(5)).min(30)))
@@ -1415,14 +1446,92 @@ impl Collection {
         }
         self.send(Err(hub_error("collector offline after 10 reconnects")));
     }
+
+    async fn run_local(&self) -> Result<(), ApiError> {
+        let local = self.origins.local();
+        let mut stored = local.watch_stored(&self.project).await?;
+        let mut streams = VecDeque::new();
+        self.send(Ok(ClientEvent::Connection { connected: true }));
+        loop {
+            // Subscribe before paging so commits during replay remain visible.
+            stored.borrow_and_update();
+            self.local_wake(&mut streams, MAX_COLLECTION_PAGES).await?;
+            if let Ok(Err(_)) = tokio::time::timeout(LOCAL_RECHECK, stored.changed()).await {
+                return Err(hub_error("local record notification channel closed"));
+            }
+        }
+    }
+
+    async fn local_wake(
+        &self,
+        streams: &mut VecDeque<Stream>,
+        max_pages: usize,
+    ) -> Result<(), ApiError> {
+        let origin = self.origin.clone();
+        let owner = self.owner.clone();
+        let identities = store_work(self.store.clone(), move |store| {
+            store.identities(&origin, &owner)
+        })
+        .await?;
+        let mut active = Vec::with_capacity(MAX_LOCAL_STREAMS);
+        active.extend([Stream::Feed, Stream::Inbox(self.owner.clone())]);
+        active.extend(
+            identities
+                .into_iter()
+                .take(MAX_MANAGED)
+                .filter(|identity| identity.project == self.project)
+                .map(|identity| Stream::Inbox(identity.identity_id)),
+        );
+        // Keep unfinished streams first across wakes, even when there are more
+        // inboxes than the page budget. Refresh registration on every wake.
+        streams.retain(|stream| active.contains(stream));
+        for stream in active.into_iter().take(MAX_LOCAL_STREAMS) {
+            if !streams.contains(&stream) {
+                streams.push_back(stream);
+            }
+        }
+        let mut positions = self.positions().await?;
+        for _ in 0..max_pages.min(MAX_COLLECTION_PAGES) {
+            let Some(stream) = streams.pop_front() else {
+                break;
+            };
+            let after = positions.get(&stream).copied().unwrap_or(0);
+            let page = self
+                .origins
+                .local()
+                .page(&self.project, &stream, after, COLLECTION_PAGE_SIZE)
+                .await?;
+            for row in page
+                .messages
+                .into_iter()
+                .take(COLLECTION_PAGE_SIZE as usize)
+            {
+                let expected = positions
+                    .get(&stream)
+                    .copied()
+                    .unwrap_or(0)
+                    .saturating_add(1);
+                if row.seq.0 != expected || row.stream != stream {
+                    return Err(hub_error("noncontiguous local replay"));
+                }
+                let seq = row.seq.0;
+                self.commit(row).await?;
+                positions.insert(stream.clone(), seq);
+            }
+            if page.next_after.is_some() {
+                streams.push_back(stream);
+            }
+        }
+        Ok(())
+    }
 }
 
 async fn still_managed(
-    credentials: &Credentials,
+    origins: &crate::origin::Origins,
     store: Arc<Database>,
     identity: &ManagedIdentity,
 ) -> bool {
-    let Ok(login) = credentials.login().await else {
+    let Ok(login) = origins.person_for(&identity.hub_url).await else {
         return false;
     };
     let origin = agmen_client::origin_key(&identity.hub_url);
@@ -1476,6 +1585,290 @@ fn hub_error(message: &str) -> ApiError {
     ApiError {
         code: ErrorCode::Hub,
         message: message.into(),
+    }
+}
+
+#[cfg(test)]
+mod local_collection_tests {
+    use super::*;
+    use agmen_proto::{IdentityKind, Payload, Timestamp};
+
+    // Exercise the production wake with two pages, keeping the real 500-row page size.
+    const TEST_COLLECTION_PAGES: usize = 2;
+    const TEST_DM_COUNT: usize = COLLECTION_PAGE_SIZE as usize + 1;
+    const TEST_DRAIN_WAKES: usize = 4;
+    const TEST_WAIT: Duration = Duration::from_secs(30);
+    const AGENTS: [&str; 2] = ["first", "second"];
+
+    struct Fixture {
+        _dir: tempfile::TempDir,
+        daemon: crate::Agmend,
+        collection: Collection,
+        agents: Vec<IdentityId>,
+    }
+
+    impl Fixture {
+        async fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let daemon = crate::Agmend::bind(crate::Config::new(
+                dir.path().join("agmend.sock"),
+                dir.path().join("login.json"),
+                agmen_client::TokenStore::Dir(dir.path().join("tokens")),
+            ))
+            .unwrap();
+            let local = daemon.core.origins.local();
+            let topics = local.create_project("collection", "andy").await.unwrap();
+            let person = local.person().await.unwrap().unwrap();
+            let mut agents = Vec::new();
+            for name in AGENTS {
+                let minted = local
+                    .mint(crate::record::admin::LocalMint {
+                        project: topics.project().clone(),
+                        name: name.into(),
+                        kind: IdentityKind::Agent,
+                        spec: None,
+                        agent: None,
+                        delegated_by: None,
+                    })
+                    .await
+                    .unwrap();
+                let identity = ManagedIdentity {
+                    hub_url: agmen_client::local_hub_url(),
+                    broker_url: agmen_client::LOCAL_BROKER_URL.parse().unwrap(),
+                    tenant: topics.tenant().clone(),
+                    project: topics.project().clone(),
+                    identity_id: minted.id.clone(),
+                    owner_id: person.id.clone(),
+                    handle: minted.handle,
+                    kind: IdentityKind::Agent,
+                };
+                store_work(daemon.core.identities.store.clone(), move |store| {
+                    store.register(&identity)
+                })
+                .await
+                .unwrap();
+                agents.push(minted.id);
+            }
+            // Use the same stream order as Store::identities, regardless of minted ids.
+            agents.sort();
+            let collection = Collection {
+                hub: daemon.core.origins.hub().clone(),
+                origins: daemon.core.origins.clone(),
+                store: daemon.core.identities.store.clone(),
+                origin: agmen_client::LOCAL_ORIGIN.into(),
+                owner: person.id,
+                project: topics.project().clone(),
+                tx: broadcast::channel(WATCH_CAPACITY).0,
+            };
+            Self {
+                _dir: dir,
+                daemon,
+                collection,
+                agents,
+            }
+        }
+
+        async fn post(&self, to: Option<&IdentityId>) -> ClientEnvelope {
+            let now = Timestamp::now();
+            let mut envelope: ClientEnvelope = serde_json::from_value(json!({
+                "v":1, "id":agmen_core::new_message_id(now).unwrap(),
+                "verb":"FYI", "data":{}, "body":"collection test", "sent_at":now
+            }))
+            .unwrap();
+            if let Some(to) = to {
+                envelope.payload = Payload::Dm {};
+                envelope.to.push(to.clone());
+            }
+            self.collection
+                .origins
+                .local()
+                .post_as_person(&self.collection.project, &envelope)
+                .await
+                .unwrap();
+            envelope
+        }
+
+        async fn drain(&self, id: &IdentityId) -> Vec<StampedEnvelope> {
+            let id = id.clone();
+            store_work(self.collection.store.clone(), move |store| {
+                store.drain(
+                    agmen_client::LOCAL_ORIGIN,
+                    &id,
+                    COLLECTION_PAGE_SIZE,
+                    agmen_local::MAX_FRAME as usize - 4096,
+                )
+            })
+            .await
+            .unwrap()
+        }
+
+        async fn execute_state(&self, sql: String) {
+            let path = self._dir.path().join("agmend.db");
+            tokio::task::spawn_blocking(move || {
+                rusqlite::Connection::open(path)
+                    .unwrap()
+                    .execute_batch(&sql)
+                    .unwrap();
+            })
+            .await
+            .unwrap();
+        }
+
+        async fn fill_dm_history(&self) {
+            let path = self._dir.path().join("local.db");
+            let project = self.collection.project.clone();
+            let streams = [
+                Stream::Inbox(self.collection.owner.clone()),
+                Stream::Inbox(self.agents[0].clone()),
+            ];
+            // Extend real DM copies directly so history setup does not exercise
+            // the sender's 10 messages per second rate limit.
+            tokio::task::spawn_blocking(move || {
+                let mut conn = rusqlite::Connection::open(path).unwrap();
+                let tx = conn.transaction().unwrap();
+                let raw: String = tx
+                    .query_row(
+                        "SELECT envelope FROM messages WHERE project_id=?1 AND stream=?2 AND seq=1",
+                        rusqlite::params![project.as_str(), streams[0].to_string()],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                let mut message: StampedEnvelope = serde_json::from_str(&raw).unwrap();
+                for seq in 2..=TEST_DM_COUNT {
+                    message.client.id = agmen_core::new_message_id(Timestamp::now()).unwrap();
+                    message.seq = agmen_proto::Seq(seq as u64);
+                    for stream in &streams {
+                        message.stream = stream.clone();
+                        tx.execute(
+                            "INSERT INTO messages
+                             SELECT project_id,stream,?3,?4,from_id,payload_hash,?5,hub_at,ack_row
+                             FROM messages WHERE project_id=?1 AND stream=?2 AND seq=1",
+                            rusqlite::params![
+                                project.as_str(),
+                                stream.to_string(),
+                                seq as i64,
+                                message.client.id.as_str(),
+                                serde_json::to_string(&message).unwrap()
+                            ],
+                        )
+                        .unwrap();
+                    }
+                }
+                for stream in streams {
+                    tx.execute(
+                        "UPDATE stream_heads SET seq=?2 WHERE stream=?1",
+                        rusqlite::params![format!("{project}/{stream}"), TEST_DM_COUNT as i64],
+                    )
+                    .unwrap();
+                }
+                tx.commit().unwrap();
+            })
+            .await
+            .unwrap();
+        }
+
+        async fn stop(self) {
+            self.daemon.core.identities.shutdown().await;
+            self.daemon.core.origins.local().shutdown().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn local_collection_shares_page_budget_and_resumes_every_stream() {
+        tokio::time::timeout(TEST_WAIT, async {
+            let f = Fixture::new().await;
+            f.post(None).await;
+            f.post(Some(&f.agents[0])).await;
+            f.fill_dm_history().await;
+            f.post(Some(&f.agents[1])).await;
+            let owner = Stream::Inbox(f.collection.owner.clone());
+            let first = Stream::Inbox(f.agents[0].clone());
+            let second = Stream::Inbox(f.agents[1].clone());
+            let mut streams = VecDeque::new();
+            f.collection
+                .local_wake(&mut streams, TEST_COLLECTION_PAGES)
+                .await
+                .unwrap();
+            let positions = f.collection.positions().await.unwrap();
+            assert_eq!(positions.len(), TEST_COLLECTION_PAGES);
+            assert_eq!(positions[&Stream::Feed], 1);
+            assert_eq!(positions[&owner], u64::from(COLLECTION_PAGE_SIZE));
+            assert!(!positions.contains_key(&first));
+            assert!(!positions.contains_key(&second));
+
+            f.collection
+                .local_wake(&mut streams, TEST_COLLECTION_PAGES)
+                .await
+                .unwrap();
+            let positions = f.collection.positions().await.unwrap();
+            assert_eq!(positions[&first], u64::from(COLLECTION_PAGE_SIZE));
+            assert_eq!(positions[&second], 1);
+            assert_eq!(positions[&owner], u64::from(COLLECTION_PAGE_SIZE));
+            assert_eq!(positions[&Stream::Feed], 1);
+
+            for _ in 0..TEST_DRAIN_WAKES {
+                f.collection
+                    .local_wake(&mut streams, TEST_COLLECTION_PAGES)
+                    .await
+                    .unwrap();
+            }
+            let positions = f.collection.positions().await.unwrap();
+            assert_eq!(positions[&owner], (TEST_DM_COUNT + 1) as u64);
+            assert_eq!(positions[&first], TEST_DM_COUNT as u64);
+            assert_eq!(positions[&second], 1);
+            let mut rows = f.drain(&f.agents[0]).await;
+            rows.extend(f.drain(&f.agents[0]).await);
+            assert_eq!(rows.len(), TEST_DM_COUNT);
+            assert_eq!(rows.first().unwrap().seq.0, 1);
+            assert_eq!(rows.last().unwrap().seq.0, TEST_DM_COUNT as u64);
+            assert!(f.drain(&f.agents[0]).await.is_empty());
+            assert_eq!(f.drain(&f.agents[1]).await.len(), 1);
+            f.stop().await;
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn local_inbox_position_and_pending_commit_together() {
+        tokio::time::timeout(TEST_WAIT, async {
+            let f = Fixture::new().await;
+            let dm = f.post(Some(&f.agents[0])).await;
+            let inbox = Stream::Inbox(f.agents[0].clone());
+            f.execute_state(format!(
+                "CREATE TRIGGER refuse_position BEFORE INSERT ON positions
+                 WHEN NEW.stream='{inbox}'
+                 BEGIN SELECT RAISE(ABORT, 'test position failure'); END;"
+            ))
+            .await;
+            let mut streams = VecDeque::new();
+            let error = f
+                .collection
+                .local_wake(&mut streams, MAX_COLLECTION_PAGES)
+                .await
+                .unwrap_err();
+            assert_eq!(error, hub_error("daemon state operation failed"));
+            assert!(f.drain(&f.agents[0]).await.is_empty());
+            assert!(!f.collection.positions().await.unwrap().contains_key(&inbox));
+
+            f.execute_state("DROP TRIGGER refuse_position".into()).await;
+            f.collection
+                .local_wake(&mut streams, MAX_COLLECTION_PAGES)
+                .await
+                .unwrap();
+            assert_eq!(f.collection.positions().await.unwrap()[&inbox], 1);
+            let rows = f.drain(&f.agents[0]).await;
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].client.id, dm.id);
+            f.collection
+                .local_wake(&mut streams, MAX_COLLECTION_PAGES)
+                .await
+                .unwrap();
+            assert!(f.drain(&f.agents[0]).await.is_empty());
+            f.stop().await;
+        })
+        .await
+        .unwrap();
     }
 }
 

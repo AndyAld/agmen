@@ -37,6 +37,13 @@ CREATE TABLE receipts (
 CREATE INDEX receipts_identity ON receipts(origin, identity);
 ";
 
+/// Stream positions one hub project keeps per origin. The hub refuses an `after`
+/// list over 256 streams (agmen-hub `events.rs` `MAX_AFTER`), so this stays 256.
+const MAX_HUB_STREAMS: usize = 256;
+/// Stream positions one local project keeps: Feed, the person's inbox and one
+/// inbox per managed identity, which the local collector pages separately.
+pub(crate) const MAX_LOCAL_STREAMS: usize = MAX_MANAGED + 2;
+
 /// Metadata only. Credentials stay in TokenStore.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ManagedIdentity {
@@ -426,11 +433,13 @@ impl Store {
         origin: &str,
         project: &ProjectId,
     ) -> Result<BTreeMap<Stream, u64>, StoreError> {
-        let mut stmt = self.conn.prepare("SELECT stream, seq FROM positions WHERE origin=?1 AND project=?2 ORDER BY stream LIMIT 256")?;
+        let mut stmt = self.conn.prepare("SELECT stream, seq FROM positions WHERE origin=?1 AND project=?2 ORDER BY stream LIMIT ?3")?;
         let mut result = BTreeMap::new();
-        for row in stmt.query_map(params![origin, project.as_str()], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
-        })? {
+        // The larger bound never cuts a hub project short: insertion caps it at 256.
+        for row in stmt.query_map(
+            params![origin, project.as_str(), MAX_LOCAL_STREAMS as i64],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+        )? {
             let (stream, seq) = row?;
             result.insert(
                 stream
@@ -505,8 +514,13 @@ impl Store {
                 params![origin, project.as_str(),format!("{origin}#owner=")],
                 |r| r.get(0),
             )?;
-            if count >= 256 {
-                return Err(StoreError::Full("256 stream positions"));
+            let (cap, full) = if origin == agmen_client::LOCAL_ORIGIN {
+                (MAX_LOCAL_STREAMS, "local stream positions")
+            } else {
+                (MAX_HUB_STREAMS, "256 stream positions")
+            };
+            if count >= cap as i64 {
+                return Err(StoreError::Full(full));
             }
         }
         let mut remember = None;

@@ -1036,6 +1036,41 @@ fn owner_position_namespaces_preserve_project_quota() {
 }
 
 #[test]
+fn local_projects_at_the_identity_cap_keep_every_stream_position() {
+    let (_dir, mut store, who) = setup();
+    let local = agmen_client::LOCAL_ORIGIN;
+    let person = who.owner_id.clone();
+    // The local collector pages Feed, the person's inbox and one inbox per
+    // managed identity. The bound is per project, so two full projects fit.
+    let streams: Vec<Stream> = [Stream::Feed, Stream::Inbox(person.clone())]
+        .into_iter()
+        .chain((0..MAX_MANAGED).map(|n| Stream::Inbox(format!("agent{n:03}").parse().unwrap())))
+        .collect();
+    assert_eq!(streams.len(), MAX_MANAGED + 2);
+    let projects: [ProjectId; 2] = ["project1".parse().unwrap(), "project2".parse().unwrap()];
+    for project in &projects {
+        for stream in &streams {
+            let mut event = message(1);
+            event.stream = stream.clone();
+            store
+                .ingest_for_owner(local, project, &event, Some(&person))
+                .unwrap();
+        }
+    }
+    for project in &projects {
+        let positions = store.positions_for_owner(local, &person, project).unwrap();
+        assert_eq!(positions.len(), MAX_MANAGED + 2);
+        assert!(streams.iter().all(|stream| positions[stream] == 1));
+        let mut extra = message(1);
+        extra.stream = Stream::Inbox("extra001".parse().unwrap());
+        assert!(matches!(
+            store.ingest_for_owner(local, project, &extra, Some(&person)),
+            Err(StoreError::Full(_))
+        ));
+    }
+}
+
+#[test]
 fn launch_batches_prioritize_owner_and_preserve_other_senders() {
     let (_dir, mut store, who) = setup();
     for seq in 1..=4 {

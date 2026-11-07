@@ -1,5 +1,6 @@
 //! This machine's lazy coordination record and its owned lease sweeper.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -29,11 +30,19 @@ use crate::record::{
 pub(crate) const DEFAULT_CLAIM_LEASE: Duration = Duration::from_secs(60);
 const OPEN_WAIT: Duration = Duration::from_secs(10);
 const MAX_NAME_CHARS: usize = 64;
+const SWEEPER_RETRY: Duration = Duration::from_secs(1);
+const MAX_SWEEPER_BACKOFF: Duration = Duration::from_secs(30);
+const MAX_SWEEPER_RUNS: u32 = 10;
+const MAX_PRESENCES: usize = 256;
+const MAX_PRESENCE_CONNECTIONS: usize = 64;
+
+type PresenceCounts = Arc<std::sync::Mutex<BTreeMap<(ProjectId, IdentityId), usize>>>;
 
 #[derive(Debug, Clone)]
 struct Record {
     core: Arc<Core<SqliteStore>>,
     person: LocalPerson,
+    presences: PresenceCounts,
 }
 
 #[derive(Debug)]
@@ -122,11 +131,13 @@ impl LocalOrigin {
         let core = Arc::new(Core::new(store, self.claim_lease));
         let sweep_core = core.clone();
         let sweeper = tokio::spawn(async move {
-            if let Err(error) = sweep_core.run_lease_sweeper().await {
-                tracing::error!(%error, "local lease sweeper stopped");
-            }
+            supervise_sweeper(|| sweep_core.run_lease_sweeper(), SWEEPER_RETRY).await;
         });
-        let record = Record { core, person };
+        let record = Record {
+            core,
+            person,
+            presences: Arc::default(),
+        };
         *running = Some(Running {
             record: record.clone(),
             sweeper,
@@ -432,11 +443,24 @@ impl LocalOrigin {
         project: &ProjectId,
         id: &IdentityId,
     ) -> Result<PresenceGuard, ApiError> {
-        let core = self.for_project(project).await?.core;
+        let record = self.for_project(project).await?;
+        let core = record.core;
+        let key = (project.clone(), id.clone());
+        let mut counts = record.presences.lock().map_err(failed)?;
+        if !counts.contains_key(&key) && counts.len() >= MAX_PRESENCES {
+            return Err(failed("local presence capacity reached"));
+        }
+        let count = counts.entry(key).or_default();
+        if *count >= MAX_PRESENCE_CONNECTIONS {
+            return Err(failed("local presence connection capacity reached"));
+        }
+        *count += 1;
         core.statuses().set(project, id, Status::Online);
         core.notifier().stored(project);
+        drop(counts);
         Ok(PresenceGuard {
             core,
+            counts: record.presences,
             project: project.clone(),
             id: id.clone(),
         })
@@ -463,15 +487,114 @@ impl LocalOrigin {
     }
 }
 
+async fn supervise_sweeper<F, Fut, E>(mut sweep: F, retry: Duration)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<(), E>>,
+    E: std::fmt::Display,
+{
+    let mut backoff = retry.min(MAX_SWEEPER_BACKOFF);
+    for attempt in 1..=MAX_SWEEPER_RUNS {
+        match sweep().await {
+            Ok(()) => return,
+            Err(error) if attempt == MAX_SWEEPER_RUNS => {
+                tracing::error!(%error, attempt, "local lease sweeper exhausted its attempts");
+            }
+            Err(error) => {
+                tracing::warn!(%error, attempt, ?backoff, "retrying the local lease sweeper");
+                tokio::time::sleep(backoff).await;
+                backoff = backoff.saturating_mul(2).min(MAX_SWEEPER_BACKOFF);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod delivery_tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    const RETRY: Duration = Duration::from_millis(1);
+    const TEST_WAIT: Duration = Duration::from_secs(2);
+
+    #[tokio::test]
+    async fn sweeper_recovers_after_transient_give_up() {
+        let attempts = AtomicUsize::new(0);
+        supervise_sweeper(
+            || async {
+                if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                    Err("60 transient sweep failures")
+                } else {
+                    Ok(())
+                }
+            },
+            RETRY,
+        )
+        .await;
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn sweeper_exhausts_a_bounded_number_of_runs() {
+        let attempts = AtomicUsize::new(0);
+        tokio::time::timeout(
+            TEST_WAIT,
+            supervise_sweeper(
+                || async {
+                    attempts.fetch_add(1, Ordering::SeqCst);
+                    Err::<(), _>("record unavailable")
+                },
+                RETRY,
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(attempts.load(Ordering::SeqCst), MAX_SWEEPER_RUNS as usize);
+    }
+
+    #[tokio::test]
+    async fn overlapping_presence_guards_remain_online_until_the_last_closes() {
+        let dir = tempfile::tempdir().unwrap();
+        let local = LocalOrigin::new(dir.path(), DEFAULT_CLAIM_LEASE);
+        let topics = local.create_project("presence", "andy").await.unwrap();
+        let project = topics.project();
+        let id = local.person().await.unwrap().unwrap().id;
+        let record = local.for_project(project).await.unwrap();
+        let first = local.presence(project, &id).await.unwrap();
+        let second = local.presence(project, &id).await.unwrap();
+        drop(first);
+        assert_eq!(record.core.statuses().status(project, &id), Status::Online);
+        drop(second);
+        assert_eq!(record.core.statuses().status(project, &id), Status::Offline);
+        tokio::time::timeout(TEST_WAIT, local.shutdown())
+            .await
+            .unwrap();
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct PresenceGuard {
     core: Arc<Core<SqliteStore>>,
+    counts: PresenceCounts,
     project: ProjectId,
     id: IdentityId,
 }
 
 impl Drop for PresenceGuard {
     fn drop(&mut self) {
+        let mut counts = self
+            .counts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let key = (self.project.clone(), self.id.clone());
+        let Some(count) = counts.get_mut(&key) else {
+            return;
+        };
+        *count -= 1;
+        if *count > 0 {
+            return;
+        }
+        counts.remove(&key);
         self.core
             .statuses()
             .set(&self.project, &self.id, Status::Offline);
