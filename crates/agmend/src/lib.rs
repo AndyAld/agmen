@@ -21,6 +21,7 @@ mod feed;
 mod git;
 pub mod host;
 mod hub;
+mod hub_mint;
 mod identities;
 mod launch;
 mod listener;

@@ -14,11 +14,15 @@
 //!
 //! An identity on this machine's local origin has no broker: it follows
 //! agmend's `watch` for it, which marks it online while the connection is
-//! open, and posts its HELLO through agmend. It sends the saved delivery
-//! cursors to resume; an agmend too old to take them gets a watch without
-//! resume, and one line on stderr says so.
+//! open. It queues its HELLO in the identity's outbox, as the hub path does,
+//! and sends it once agmend answers. It sends the saved delivery cursors to
+//! resume; an agmend too old to take them gets a watch without resume, and
+//! one line on stderr says so. A watch that loses agmend tries again with no
+//! limit (1 s, doubling to 30 s), with one line on stderr when the wait
+//! starts and one when agmend is back. An agmend that refuses the identity
+//! ends the watch with exit 3, as a refusal by the hub does.
 
-use agmen_client::{ClientEvent, ClientKind, Session, SessionConfig};
+use agmen_client::{ClientEvent, ClientKind, Outbox, STATE_DB, Session, SessionConfig};
 use agmen_proto::Payload;
 use anyhow::{Context as _, Result};
 use clap::Args;
@@ -59,15 +63,29 @@ pub(crate) async fn watch(args: WatchArgs) -> Result<()> {
             model: None,
             looking_at: None,
         };
-        local.post(&envelope(hello, String::new())?).await?;
+        let hello = envelope(hello, String::new())?;
+        let dir = agent.state_dir.clone();
+        let outbox = crate::client::blocking(move || {
+            let outbox = Outbox::open(dir.join(STATE_DB))?;
+            outbox.enqueue(&hello)?;
+            Ok(outbox)
+        })
+        .await
+        .context("queueing the HELLO failed")?;
+        let sending = local.send_outbox(outbox);
+        tokio::pin!(sending);
         let stop = stop_signal();
         tokio::pin!(stop);
         for _ in 0..LOCAL_MAX_EVENTS {
             // A quiet project is not an error; the link ends this only by stopping.
             let event = tokio::select! {
                 event = events.recv() => {
+                    if event.is_none() {
+                        local.check_watch()?;
+                    }
                     event.context("the local watch stopped; check agmend's connection")?
                 }
+                result = &mut sending => return result,
                 () = &mut stop => return Ok(()),
             };
             if !print_event(&event, args.json)? {

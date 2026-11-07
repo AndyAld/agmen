@@ -20,7 +20,7 @@ enum Answer {
     Valid,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum Listed {
     // The roster lists the mint as a listener that never connected.
     Offline,
@@ -30,6 +30,7 @@ enum Listed {
     Absent,
     // The roster answers 503.
     Unreadable,
+    Custom(Value),
 }
 
 fn warnings() -> (
@@ -110,7 +111,11 @@ async fn mint_hub(f: &mut Fixture, answer: Answer, listed: Listed) -> Arc<StdMut
             "/v1/projects/{project}/state",
             axum::routing::get(move || {
                 let live = listing.load(Ordering::SeqCst);
+                let listed = listed.clone();
                 async move {
+                    if let Listed::Custom(roster) = &listed {
+                        return axum::Json(json!({"value":roster})).into_response();
+                    }
                     if matches!(listed, Listed::Unreadable) {
                         return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
                     }
@@ -121,7 +126,7 @@ async fn mint_hub(f: &mut Fixture, answer: Answer, listed: Listed) -> Arc<StdMut
                     let status = match listed {
                         Listed::Offline => Some("offline"),
                         Listed::Online => Some("online"),
-                        Listed::Absent | Listed::Unreadable => None,
+                        Listed::Absent | Listed::Unreadable | Listed::Custom(_) => None,
                     };
                     if let (true, Some(status)) = (live, status) {
                         roster.push(json!({"identity_id":MINTED,"handle":"owner/listener","kind":"listener","status":status}));
@@ -270,4 +275,211 @@ async fn connected_hub_listener_with_the_minted_handle_is_not_revoked() {
 #[tokio::test]
 async fn hub_listener_mint_is_not_revoked_when_the_roster_cannot_be_read() {
     assert_mint_not_guessed(Listed::Unreadable).await;
+}
+
+fn offline_listener(id: &str) -> Value {
+    json!({"identity_id":id,"handle":"owner/listener","kind":"listener","status":"offline"})
+}
+
+async fn assert_lookup_refused(f: &mut Fixture, roster: Value) {
+    let revokes = mint_hub(f, Answer::Misshapen, Listed::Custom(roster)).await;
+    let (bytes, subscriber) = warnings();
+    let error = start_error(f).with_subscriber(subscriber).await;
+    assert_eq!(error.message, "invalid listener mint response");
+    assert!(revokes.lock().unwrap().is_empty());
+    let logs = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
+    assert_eq!(
+        logs.lines()
+            .filter(|line| line.contains("cannot revoke an unregistered hub listener"))
+            .count(),
+        1,
+        "one warning must explain the skipped revoke: {logs}"
+    );
+    assert!(!logs.contains(MINTED), "{logs}");
+    assert!(!logs.contains("fake-hub-credential"), "{logs}");
+}
+
+#[tokio::test]
+async fn listener_lookup_skips_entries_that_said_hello() {
+    for (field, value) in [("agent", "claude-code"), ("model", "sonnet")] {
+        let mut f = Fixture::new(FAKE).await;
+        let mut said = offline_listener(MINTED);
+        said[field] = json!(value);
+        assert_lookup_refused(&mut f, json!([said])).await;
+    }
+}
+
+#[tokio::test]
+async fn listener_lookup_skips_a_stored_credential() {
+    let mut f = Fixture::new(FAKE).await;
+    let listeners = f.listeners().clone();
+    let credentials = listeners.hub.credentials();
+    let login = credentials.login().await.unwrap();
+    credentials
+        .set_token(
+            &login.hub_url,
+            &MINTED.parse().unwrap(),
+            "held-listener".into(),
+        )
+        .await
+        .unwrap();
+    assert_lookup_refused(&mut f, json!([offline_listener(MINTED)])).await;
+    assert_eq!(
+        credentials
+            .token(&login.hub_url, &MINTED.parse().unwrap())
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("held-listener")
+    );
+}
+
+#[tokio::test]
+async fn listener_lookup_finds_fresh_mint_among_known_and_said_hello_entries() {
+    let mut f = Fixture::new(FAKE).await;
+    let listeners = f.listeners().clone();
+    let credentials = listeners.hub.credentials();
+    let login = credentials.login().await.unwrap();
+    let known = "known001".parse().unwrap();
+    credentials
+        .set_token(&login.hub_url, &known, "held-listener".into())
+        .await
+        .unwrap();
+    let mut said = offline_listener("hello001");
+    said["agent"] = json!("claude-code");
+    said["model"] = json!("sonnet");
+    let revokes = mint_hub(
+        &mut f,
+        Answer::Misshapen,
+        Listed::Custom(json!([
+            offline_listener("known001"),
+            said,
+            offline_listener(MINTED)
+        ])),
+    )
+    .await;
+    let (bytes, subscriber) = warnings();
+    let error = start_error(&f).with_subscriber(subscriber).await;
+    assert_eq!(error.message, "invalid listener mint response");
+    assert_eq!(*revokes.lock().unwrap(), [MINTED]);
+    assert_eq!(
+        credentials
+            .token(&login.hub_url, &known)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("held-listener")
+    );
+    let logs = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
+    assert!(logs.contains(MINTED), "{logs}");
+    for hidden in [
+        "known001",
+        "hello001",
+        "held-listener",
+        "fake-hub-credential",
+    ] {
+        assert!(!logs.contains(hidden), "{hidden} in {logs}");
+    }
+}
+
+#[tokio::test]
+async fn listener_lookup_skips_a_stopped_listener_record_alone() {
+    let mut f = Fixture::new(FAKE).await;
+    f.start().await;
+    f.stop().await;
+    let listeners = f.listeners();
+    let entries = listeners.entries.lock().await;
+    let identity = entries
+        .get(&"project1".parse().unwrap())
+        .unwrap()
+        .live
+        .lock()
+        .await
+        .identity
+        .clone();
+    drop(entries);
+    listeners
+        .identities()
+        .unwrap()
+        .forget(&identity)
+        .await
+        .unwrap();
+    listeners
+        .hub
+        .credentials()
+        .delete_token(&identity.hub_url, &identity.identity_id)
+        .await
+        .unwrap();
+    assert_lookup_refused(&mut f, json!([offline_listener(MINTED)])).await;
+}
+
+#[tokio::test]
+async fn listener_lookup_skips_a_durable_intent_alone() {
+    let mut f = Fixture::new(FAKE).await;
+    let folder = f.dir.path().join("listener/project1");
+    tokio::fs::create_dir_all(&folder).await.unwrap();
+    tokio::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700))
+        .await
+        .unwrap();
+    write_intent(
+        folder.join("intent.json"),
+        Intent {
+            project: "project1".parse().unwrap(),
+            root: f.repo(),
+            identity_id: MINTED.parse().unwrap(),
+        },
+    )
+    .await
+    .unwrap();
+    assert_lookup_refused(&mut f, json!([offline_listener(MINTED)])).await;
+}
+
+#[tokio::test]
+async fn listener_lookup_skips_an_unreadable_intent() {
+    let mut f = Fixture::new(FAKE).await;
+    let folder = f.dir.path().join("listener/project1");
+    tokio::fs::create_dir_all(&folder).await.unwrap();
+    tokio::fs::write(folder.join("intent.json"), "not json")
+        .await
+        .unwrap();
+    assert_lookup_refused(&mut f, json!([offline_listener(MINTED)])).await;
+}
+
+#[tokio::test]
+async fn listener_lookup_skips_an_identity_row_alone() {
+    let mut f = Fixture::new(FAKE).await;
+    let listeners = f.listeners().clone();
+    let login = listeners.hub.credentials().login().await.unwrap();
+    // This person's listener in another project: a row that start would not
+    // reuse for project1, with no record, intent or hub credential beside it.
+    let other: ManagedIdentity = serde_json::from_value(json!({
+        "hub_url":login.hub_url,"broker_url":"mqtt://127.0.0.1:9","tenant":"tenant01",
+        "project":"project2","identity_id":MINTED,"owner_id":login.human_id,
+        "handle":"owner/listener","kind":"listener"
+    }))
+    .unwrap();
+    listeners
+        .identities()
+        .unwrap()
+        .register(other)
+        .await
+        .unwrap();
+    assert_lookup_refused(&mut f, json!([offline_listener(MINTED)])).await;
+}
+
+#[tokio::test]
+async fn listener_lookup_skips_a_credential_it_cannot_read() {
+    let mut f = Fixture::new(FAKE).await;
+    let login = f.listeners().hub.credentials().login().await.unwrap();
+    let key = agmen_client::TokenKey::new(&login.hub_url, &MINTED.parse().unwrap()).unwrap();
+    let hex: String = key
+        .as_str()
+        .bytes()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    // A directory where the token file belongs makes the read fail.
+    tokio::fs::create_dir(f.dir.path().join("tokens").join(format!("tok-{hex}")))
+        .await
+        .unwrap();
+    assert_lookup_refused(&mut f, json!([offline_listener(MINTED)])).await;
 }

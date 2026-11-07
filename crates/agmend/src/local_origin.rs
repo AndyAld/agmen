@@ -623,7 +623,7 @@ fn failed(error: impl std::fmt::Display) -> ApiError {
     }
 }
 
-fn busy() -> ApiError {
+pub(crate) fn busy() -> ApiError {
     ApiError {
         code: ErrorCode::Hub,
         message: "local.db is busy; try again".into(),
