@@ -26,6 +26,22 @@ struct Hello {
 #[serde(deny_unknown_fields)]
 struct Shutdown {}
 
+const REQUEST_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+const BOUNDED_METHODS: [&str; 12] = [
+    "inbox",
+    "state",
+    "pending",
+    "ready",
+    "shutdown",
+    "host_status",
+    "host_restart",
+    "page",
+    "lanes",
+    "items",
+    "check_path",
+    "local_mint",
+];
+
 /// Serves `stream` until the peer hangs up or breaks the framing.
 pub(crate) async fn serve(stream: UnixStream, core: Arc<Core>) {
     serve_with_peer(stream, core, |stream| {
@@ -64,11 +80,8 @@ pub(crate) async fn serve_with_peer(
             }
         };
         let id = request.id;
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-        let bounded = matches!(
-            request.method.as_str(),
-            "inbox" | "state" | "pending" | "ready" | "shutdown" | "host_status" | "host_restart"
-        );
+        let deadline = tokio::time::Instant::now() + REQUEST_WAIT;
+        let bounded = BOUNDED_METHODS.contains(&request.method.as_str());
         let mut shutting_down = false;
         let outcome = if let Some(refusal) = refuse(&request, greeted) {
             Err(refusal)
@@ -101,7 +114,7 @@ pub(crate) async fn serve_with_peer(
                     finite(deadline, pending(&core, caller, request.params)).await
                 }
                 Ok(Caller::Identity(caller)) => {
-                    identity_call(&core, &caller, &request.method, request.params).await
+                    identity_call(&core, &caller, &request.method, request.params, deadline).await
                 }
                 Ok(Caller::Human) if request.method == "hello" => {
                     hello(request.params).inspect(|_| greeted = true)
@@ -159,6 +172,10 @@ pub(crate) fn owner_peer_check(
                     | "settings_get"
                     | "settings_apply"
                     | "roster"
+                    | "page"
+                    | "lanes"
+                    | "items"
+                    | "check_path"
             ))
         || matches!(method, "hello" | "watch" | "inbox" | "state" | "pending")
     {
@@ -291,8 +308,12 @@ async fn identity_call(
     caller: &crate::state::ManagedIdentity,
     method: &str,
     raw: Value,
+    deadline: tokio::time::Instant,
 ) -> Result<Value, ApiError> {
     match method {
+        "page" | "lanes" | "items" | "check_path" => {
+            finite(deadline, core.identities.read_local(caller, method, raw)).await
+        }
         "post" => {
             #[derive(Deserialize)]
             #[serde(deny_unknown_fields)]
@@ -344,6 +365,7 @@ async fn identity_call(
         | "settings_undo"
         | "local_project_create"
         | "local_projects"
+        | "local_mint"
         | "lanes_set" => Err(forbidden()),
         other => Err(ApiError {
             code: ErrorCode::NotFound,
@@ -379,6 +401,7 @@ async fn call(
 ) -> Result<Value, ApiError> {
     let console = &core.console;
     match method {
+        "local_mint" => finite(deadline, core.identities.local_mint(&core.managed, raw)).await,
         "local_project_create" => {
             #[derive(Deserialize)]
             #[serde(deny_unknown_fields)]

@@ -269,10 +269,6 @@ impl LocalOrigin {
         convert(record.core.roster(&topics).await.map_err(failed)?)
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "consumed by local identity reads in Task 9")
-    )]
     pub(crate) async fn state(&self, project: &ProjectId, key: &str) -> Result<Value, ApiError> {
         if !matches!(key, "head" | "roster") {
             return Err(bad_request("key must be roster or head"));
@@ -286,10 +282,6 @@ impl LocalOrigin {
         Ok(json!({"key": key, "as_of_seq": head, "value": value}))
     }
 
-    #[cfg_attr(
-        not(any(test, feature = "test-hooks")),
-        expect(dead_code, reason = "local posts are wired in Tasks 8 and 9")
-    )]
     pub(crate) async fn ingest(
         &self,
         project: &ProjectId,
@@ -352,10 +344,6 @@ impl LocalOrigin {
         }
     }
 
-    #[cfg_attr(
-        not(any(test, feature = "test-hooks")),
-        expect(dead_code, reason = "local mint is wired in Task 9")
-    )]
     pub(crate) async fn mint(&self, request: LocalMint) -> Result<Minted, HubError> {
         let record = self.open(None).await.map_err(|error| HubError::Refused {
             status: 500,
@@ -372,10 +360,6 @@ impl LocalOrigin {
         Ok(minted)
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "consumed by local identity lifecycle in Task 9")
-    )]
     pub(crate) async fn revoke(
         &self,
         project: &ProjectId,
@@ -395,10 +379,6 @@ impl LocalOrigin {
         Ok(revoked)
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "consumed by local identity reads in Task 9")
-    )]
     pub(crate) async fn lanes(&self, project: &ProjectId) -> Result<LaneList, ApiError> {
         self.for_project(project)
             .await?
@@ -426,10 +406,6 @@ impl LocalOrigin {
         Ok(list)
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "consumed by local identity reads in Task 9")
-    )]
     pub(crate) async fn check_path(
         &self,
         project: &ProjectId,
@@ -450,10 +426,6 @@ impl LocalOrigin {
             .ok_or_else(|| missing("no such live identity on this machine"))
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "consumed by local identity reads in Task 9")
-    )]
     pub(crate) async fn items(&self, project: &ProjectId) -> Result<ItemList, ApiError> {
         self.for_project(project)
             .await?

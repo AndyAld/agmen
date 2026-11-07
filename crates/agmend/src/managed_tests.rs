@@ -1002,6 +1002,40 @@ async fn worker_peer_cannot_call_owner_methods_even_without_identity_credentials
 }
 
 #[tokio::test]
+async fn worker_peer_cannot_mint_locally_or_read_the_local_record_as_the_owner() {
+    use crate::identities::Caller;
+    let fixture = Fixture::new().await;
+    let managed = &fixture.daemon.core.managed;
+    let identity = crate::state::ManagedIdentity {
+        hub_url: agmen_client::local_hub_url(),
+        broker_url: agmen_client::local_broker(),
+        tenant: "tenant01".parse().unwrap(),
+        project: "project1".parse().unwrap(),
+        identity_id: "agent001".parse().unwrap(),
+        owner_id: "human001".parse().unwrap(),
+        handle: "owner/worker".into(),
+        kind: agmen_proto::IdentityKind::Agent,
+    };
+    for method in ["local_mint", "page", "lanes", "items", "check_path"] {
+        let error =
+            crate::api::owner_peer_check(managed, &Caller::Human, method, || Ok(4242)).unwrap_err();
+        assert_eq!(error.code, agmen_local::ErrorCode::Forbidden, "{method}");
+        crate::api::owner_peer_check(managed, &Caller::Human, method, || Ok(4243)).unwrap();
+    }
+    // An identity may make its own four reads from its worker process, never the mint.
+    for method in ["page", "lanes", "items", "check_path"] {
+        crate::api::owner_peer_check(managed, &Caller::Identity(identity.clone()), method, || {
+            Ok(4242)
+        })
+        .unwrap();
+    }
+    crate::api::owner_peer_check(managed, &Caller::Identity(identity), "local_mint", || {
+        Ok(4242)
+    })
+    .unwrap_err();
+}
+
+#[tokio::test]
 async fn framed_owner_request_from_worker_is_forbidden() {
     use agmen_local::{Outcome, Request, Response, frame};
     let fixture = Fixture::new().await;
