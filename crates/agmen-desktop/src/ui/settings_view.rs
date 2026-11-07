@@ -1,11 +1,12 @@
-//! Settings (`desktop-settings.webp`): the page list, Appearance and About.
-//! The other pages come with agmend. Every change saves `settings.toml` and
-//! re-resolves the `Appearance` global, so every window repaints at once.
+//! Settings (`desktop-settings.webp`): General, Appearance, Agents and About.
+//! Appearance changes save `settings.toml` and re-resolve the `Appearance`
+//! global, so every window repaints at once.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use agmen_local::safeguards::Safeguards;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, EventEmitter, Focusable as _, FontWeight,
@@ -194,6 +195,8 @@ pub(crate) struct SettingsView {
     cli_install: Option<Entity<super::cli_install::CliInstall>>,
     start_at_login: bool,
     agent_model: Entity<TextInput>,
+    separate_child_usd: Entity<TextInput>,
+    safeguards: Result<Safeguards, String>,
     login_task: Option<gpui::Task<()>>,
     sources: SettingsSources,
     settings: AgmenSettings,
@@ -256,12 +259,21 @@ impl SettingsView {
             .and_then(|settings| settings.default_agent_model)
             .unwrap_or_else(|| "sonnet".into());
         let agent_model = cx.new(|cx| TextInput::new(cx).placeholder(default_model));
+        let safeguards = crate::appearance::load_safeguards(&sources.settings_path())
+            .map_err(|error| error.to_string());
+        let separate_amount = safeguards
+            .as_ref()
+            .map(|value| value.separate_child_usd.to_string())
+            .unwrap_or_default();
+        let separate_child_usd = cx.new(|cx| TextInput::new(cx).placeholder(separate_amount));
         let mut view = Self {
             host_status: None,
             host_error: None,
             host_task: None,
             _host_poll: None,
             agent_model,
+            separate_child_usd,
+            safeguards,
             cli_install: super::cli_install::CliInstall::for_app(cx),
             start_at_login,
             login_task: None,
@@ -1329,6 +1341,7 @@ impl Render for SettingsView {
         let body: Vec<AnyElement> = match self.page {
             Page::General => self.general_page(cx),
             Page::Appearance => self.appearance_page(cx),
+            Page::Agents => self.agents_page(cx),
             Page::About => Self::about_page(),
             _ => vec![
                 EmptyState::new("settings-placeholder", "Comes with agmend.").into_any_element(),
@@ -1389,6 +1402,9 @@ impl Render for SettingsView {
 
 #[path = "settings_rows.rs"]
 mod rows;
+
+#[path = "settings_agents.rs"]
+mod agents;
 
 #[cfg(test)]
 #[path = "settings_view_tests.rs"]

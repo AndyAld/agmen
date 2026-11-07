@@ -12,14 +12,12 @@ use super::{ChangeHandler, Color, Label};
 use crate::appearance::Appearance;
 use crate::ui::tokens::{BORDER_WIDTH, RADIUS_MD, SPACE_3, SPACE_9};
 
-/// Font size bounds, from the plan's `size_stepper_bounds`.
-const MIN: u32 = 6;
-const MAX: u32 = 72;
-
 #[derive(IntoElement)]
 pub(crate) struct Stepper {
     id: SharedString,
     value: u32,
+    min: u32,
+    max: u32,
     on_change: Option<ChangeHandler<u32>>,
 }
 
@@ -41,8 +39,18 @@ impl Stepper {
         Self {
             id: id.into(),
             value,
+            min: 6,
+            max: 72,
             on_change: None,
         }
+    }
+
+    /// Uses inclusive bounds instead of the default font size bounds.
+    #[must_use]
+    pub(crate) fn range(mut self, min: u32, max: u32) -> Self {
+        self.min = min;
+        self.max = max;
+        self
     }
 
     /// Called with the new value when a button is clicked.
@@ -57,19 +65,19 @@ impl Stepper {
 
     /// The value shown: the given value clamped to the range.
     fn shown(&self) -> u32 {
-        self.value.clamp(MIN, MAX)
+        self.value.clamp(self.min, self.max)
     }
 
     /// The value one step down, or `None` at the minimum.
     fn decremented(&self) -> Option<u32> {
         let value = self.shown();
-        (value > MIN).then(|| value - 1)
+        (value > self.min).then(|| value - 1)
     }
 
     /// The value one step up, or `None` at the maximum.
     fn incremented(&self) -> Option<u32> {
         let value = self.shown();
-        (value < MAX).then(|| value + 1)
+        (value < self.max).then(|| value + 1)
     }
 }
 
@@ -112,7 +120,9 @@ impl RenderOnce for Stepper {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = &cx.global::<Appearance>().theme;
         let (border, background) = (theme.border, theme.background);
+        let selector = self.id.to_string();
         div()
+            .debug_selector(|| selector)
             .flex()
             .flex_none()
             .rounded(RADIUS_MD)
