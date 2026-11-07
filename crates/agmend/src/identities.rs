@@ -1768,6 +1768,15 @@ pub(crate) async fn store_work<T: Send + 'static>(
         .map_err(|_| hub_error("daemon state worker failed"))?
 }
 
+/// Marks the errors `store_work` raises (all contain this text). A closed
+/// store at shutdown is not one: the collector task is stopped, not errored.
+const STORE_ERROR_MARK: &str = "daemon state";
+
+/// Whether `error` came from the daemon database rather than the hub.
+fn is_store_failure(error: &ApiError) -> bool {
+    error.code == ErrorCode::Hub && error.message.contains(STORE_ERROR_MARK)
+}
+
 /// The positions split into the `after` sets of one SSE request each.
 fn hub_chunks(positions: &BTreeMap<Stream, u64>) -> Vec<BTreeMap<Stream, u64>> {
     let mut chunks = vec![BTreeMap::new()];
@@ -2002,6 +2011,12 @@ impl Collection {
         Ok(())
     }
 
+    /// Warn with the cause and tell watchers; store errors carry no token or body.
+    fn store_failed(&self, error: &ApiError, what: &str) {
+        tracing::warn!(project = %self.project, cause = %error.message, "{what}");
+        self.send(Err(error.clone()));
+    }
+
     async fn run(self) {
         if self.origin == agmen_client::LOCAL_ORIGIN {
             if let Err(error) = self.run_local().await {
@@ -2026,9 +2041,9 @@ impl Collection {
                     });
                     state
                 }
-                Err(_) => {
+                Err(error) => {
                     // A store error must not end the collector; retry later.
-                    tracing::warn!(project = %self.project, "collection state failed; retrying");
+                    self.store_failed(&error, "collection state failed; retrying");
                     tokio::time::sleep(self.timing.backoff(backoff_shift)).await;
                     backoff_shift = (backoff_shift + 1).min(HUB_BACKOFF_SHIFT);
                     continue;
@@ -2040,6 +2055,15 @@ impl Collection {
                 .await
             {
                 Ok(healthy) => healthy,
+                // Positions advance only in the ingest transaction, so a retry
+                // from the saved positions delivers each message exactly once.
+                Err(error) if is_store_failure(&error) => {
+                    self.store_failed(&error, "hub ingest failed; reconnecting");
+                    tokio::time::sleep(backoff).await;
+                    backoff_shift = (backoff_shift + 1).min(HUB_BACKOFF_SHIFT);
+                    continue;
+                }
+                // Hub, credential and protocol faults still end the collector.
                 Err(error) => {
                     self.send(Err(error));
                     return;
@@ -2061,6 +2085,7 @@ impl Collection {
         &self,
         skipped: &mut BTreeSet<Stream>,
         seen: &BTreeMap<Stream, u64>,
+        failing: &mut bool,
     ) -> bool {
         let checked = if skipped.is_empty() {
             self.active_streams().await.map(|streams| (false, streams))
@@ -2069,9 +2094,20 @@ impl Collection {
                 .await
                 .map(|state| (state.room, state.streams))
         };
-        let Ok((room, streams)) = checked else {
-            tracing::warn!(project = %self.project, "recheck failed; retrying");
-            return false;
+        let (room, streams) = match checked {
+            Ok(checked) => {
+                *failing = false;
+                checked
+            }
+            Err(error) => {
+                // Warn on the first failure of an outage; repeats are debug.
+                if std::mem::replace(failing, true) {
+                    tracing::debug!(project = %self.project, cause = %error.message, "recheck failed; retrying");
+                } else {
+                    tracing::warn!(project = %self.project, cause = %error.message, "recheck failed; retrying");
+                }
+                return false;
+            }
         };
         // A re-picked stream is not skipped; clear skipped only with room.
         if room {
@@ -2151,6 +2187,7 @@ impl Collection {
         // Readers only parse; one consumer performs position checks and ingest
         // transactions, preserving order and suppressing duplicates on replay.
         let mut receiving = true;
+        let mut recheck_failing = false;
         let mut recheck = tokio::time::interval_at(
             tokio::time::Instant::now() + SKIPPED_RECHECK,
             SKIPPED_RECHECK,
@@ -2165,7 +2202,7 @@ impl Collection {
                 // The hub sends a skipped stream's backlog again only on a new
                 // connection, so reconnect once a position has freed.
                 _ = recheck.tick(), if !skipped.is_empty() || !seen.is_empty() => {
-                    if self.should_reconnect(skipped, seen).await {
+                    if self.should_reconnect(skipped, seen, &mut recheck_failing).await {
                         return Ok(false);
                     }
                 },

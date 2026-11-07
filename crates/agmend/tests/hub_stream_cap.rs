@@ -122,6 +122,8 @@ struct ReplayHub {
     hub: std::sync::Arc<support::HubState>,
     passes: std::sync::Mutex<Vec<ReplayPass>>,
     disconnect: tokio::sync::Notify,
+    /// While false, a new connection waits before it replays anything.
+    gate: tokio::sync::watch::Sender<bool>,
 }
 
 async fn counted_replay(
@@ -182,6 +184,12 @@ async fn counted_replay(
         let disconnected = sending.disconnect.notified();
         tokio::pin!(disconnected);
         disconnected.as_mut().enable();
+        sending
+            .gate
+            .subscribe()
+            .wait_for(|open| *open)
+            .await
+            .unwrap();
         for message in replay {
             let stream = message["stream"].as_str().unwrap().to_owned();
             let seq = message["seq"].as_u64().unwrap();
@@ -225,6 +233,7 @@ async fn replay_fixture(
         hub: daemon.hub.state.clone(),
         passes: Default::default(),
         disconnect: Default::default(),
+        gate: tokio::sync::watch::Sender::new(true),
     });
     let socket = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let proxy_url = format!("http://{}/", socket.local_addr().unwrap());
@@ -461,6 +470,46 @@ async fn hub_undeliverable_heads_are_rechecked_without_a_write_transaction() {
     state.disconnect.notify_waiters();
     wait_position(&daemon, "feed", 2).await;
     assert_eq!(state.passes.lock().unwrap()[1].after["inbox:revoked000"], 2);
+    stop_replay_fixture(daemon, state, server).await;
+}
+
+#[tokio::test]
+async fn hub_store_errors_during_ingest_do_not_end_the_collector() {
+    let (mut daemon, state, server) = replay_fixture(false).await;
+    daemon
+        .hub
+        .state
+        .inject(support::stamped(1, "first pass consumed"));
+    daemon.resume();
+    wait_position(&daemon, "feed", 1).await;
+    // Hold the new connection until the write lock is taken, so the lock is
+    // held while the message is ingested, not while the pass starts.
+    state.gate.send_replace(false);
+    daemon
+        .hub
+        .state
+        .inject(support::stamped(2, "held by a store error"));
+    state.disconnect.notify_waiters();
+    while state.passes.lock().unwrap().len() < 2 {
+        tokio::time::sleep(POSITION_POLL).await;
+    }
+    let path = daemon.home.database();
+    let (locked, held) = std::sync::mpsc::channel();
+    let holder = tokio::task::spawn_blocking(move || {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        locked.send(()).unwrap();
+        std::thread::sleep(WRITE_LOCK_HELD);
+        conn.execute_batch("COMMIT").unwrap();
+    });
+    held.recv().unwrap();
+    state.gate.send_replace(true);
+    holder.await.unwrap();
+    // The collector must still be running: it delivers the held message and a later one.
+    wait_position(&daemon, "feed", 2).await;
+    daemon.hub.state.inject(support::stamped(3, "later"));
+    state.disconnect.notify_waiters();
+    wait_position(&daemon, "feed", 3).await;
     stop_replay_fixture(daemon, state, server).await;
 }
 
