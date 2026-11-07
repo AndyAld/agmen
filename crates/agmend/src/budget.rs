@@ -9,6 +9,16 @@ pub(crate) struct Money(u64);
 pub(crate) struct InvalidCost;
 
 impl Money {
+    pub(crate) const ZERO: Self = Self(0);
+
+    pub(crate) fn saturating_add(self, other: Self) -> Self {
+        Self(self.0.saturating_add(other.0))
+    }
+
+    pub(crate) fn saturating_sub(self, other: Self) -> Self {
+        Self(self.0.saturating_sub(other.0))
+    }
+
     pub(crate) fn checked_add(self, other: Self) -> Result<Self, InvalidCost> {
         self.0.checked_add(other.0).map(Self).ok_or(InvalidCost)
     }
@@ -101,7 +111,19 @@ pub(crate) enum Step {
 pub(crate) struct Budget {
     cap: Money,
     spent: Money,
+    reserved: Money,
+    children_spent: Money,
     fired: usize,
+}
+
+pub(crate) const PARENT_FLOOR_USD: &str = "0.5";
+
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "launching this child would leave the parent under 0.50 USD; the parent has {remaining} USD left"
+)]
+pub(crate) struct Overdrawn {
+    pub(crate) remaining: String,
 }
 
 impl Budget {
@@ -110,6 +132,8 @@ impl Budget {
         Self {
             cap,
             spent: Money(0),
+            reserved: Money::ZERO,
+            children_spent: Money::ZERO,
             fired: 0,
         }
     }
@@ -119,11 +143,65 @@ impl Budget {
     }
 
     pub(crate) fn remaining_usd(&self) -> String {
-        Money(self.cap.0.saturating_sub(self.spent.0)).usd()
+        self.unspent().saturating_sub(self.reserved).usd()
     }
 
     pub(crate) fn exhausted(&self) -> bool {
-        self.spent >= self.cap
+        self.spent
+            .saturating_add(self.children_spent)
+            .saturating_add(self.reserved)
+            >= self.cap
+    }
+
+    /// Unspent cap, including funds reserved for this worker's children.
+    pub(crate) fn unspent(&self) -> Money {
+        self.cap
+            .saturating_sub(self.spent)
+            .saturating_sub(self.children_spent)
+    }
+
+    pub(crate) fn reserved(&self) -> Money {
+        self.reserved
+    }
+
+    pub(crate) fn children_spent(&self) -> Money {
+        self.children_spent
+    }
+
+    pub(crate) fn reserve(&mut self, amount: Money, floor: Money) -> Result<(), Overdrawn> {
+        let remaining = self.unspent().saturating_sub(self.reserved);
+        if amount > remaining || remaining.saturating_sub(amount) < floor {
+            return Err(Overdrawn {
+                remaining: remaining.usd(),
+            });
+        }
+        self.reserved = self.reserved.saturating_add(amount);
+        Ok(())
+    }
+
+    pub(crate) fn release(&mut self, amount: Money) {
+        self.reserved = self.reserved.saturating_sub(amount);
+    }
+
+    pub(crate) fn charge_child(&mut self, cost: Money) {
+        self.charge_child_covered(cost, cost);
+    }
+
+    /// Counts all of a shared child's `cost` as its spend, and gives back only
+    /// the `covered` part of what it held. A batch can pass its cap by one
+    /// response, and the rest of `cost` was never reserved: releasing it
+    /// would free what the other children hold.
+    pub(crate) fn charge_child_covered(&mut self, cost: Money, covered: Money) {
+        self.release(covered.min(cost));
+        self.children_spent = self.children_spent.saturating_add(cost);
+    }
+
+    pub(crate) fn raise_cap(&mut self, cap: Money) {
+        self.cap = cap;
+        self.fired = [80_u128, 95, 100]
+            .into_iter()
+            .take_while(|percent| u128::from(self.spent.0) * 100 >= u128::from(cap.0) * percent)
+            .count();
     }
 
     /// Adds one batch's reported cost to the managed agent's lifetime spend.

@@ -52,6 +52,8 @@ use tokio::sync::{Mutex, Notify, RwLock};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
+#[cfg(unix)]
+use crate::agmend::LaunchCredential;
 use crate::client::blocking;
 use crate::cmd::claim::heartbeat_envelope;
 use crate::cmd::inbox;
@@ -121,6 +123,18 @@ pub(crate) async fn run(args: McpArgs) -> anyhow::Result<()> {
         .with_templates_dir(crate::cmd::templates::personal_dir()?);
     if let Some(identity) = args.identity {
         options = options.with_identity(identity);
+    }
+    // Task 7 supplies these variables explicitly in the server's mcp.json env.
+    #[cfg(unix)]
+    {
+        let credential = match LaunchCredential::from_env() {
+            Ok(credential) => credential,
+            Err(error) => {
+                tracing::warn!(%error, "agent launch tools are disabled");
+                None
+            }
+        };
+        options = options.with_launch(credential);
     }
     serve(rmcp::transport::stdio(), options).await?;
     Ok(())
@@ -214,6 +228,8 @@ pub struct McpOptions {
     presence_recheck: Duration,
     managed: bool,
     templates_dir: Option<PathBuf>,
+    #[cfg(unix)]
+    launch: Option<LaunchCredential>,
 }
 
 impl McpOptions {
@@ -238,6 +254,8 @@ impl McpOptions {
             presence_recheck: PRESENCE_RECHECK,
             managed: false,
             templates_dir: None,
+            #[cfg(unix)]
+            launch: None,
         }
     }
 
@@ -267,6 +285,24 @@ impl McpOptions {
     pub fn with_managed(mut self, managed: bool) -> Self {
         self.managed = managed;
         self
+    }
+
+    /// Enables child tools only with agmend's explicit server credential.
+    #[cfg(unix)]
+    pub(crate) fn with_launch(mut self, launch: Option<LaunchCredential>) -> Self {
+        self.launch = launch;
+        self
+    }
+
+    fn can_launch(&self) -> bool {
+        #[cfg(unix)]
+        {
+            self.launch.is_some()
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
     }
 
     async fn presence(&self, state_dir: &Path) -> anyhow::Result<Presence> {
@@ -358,6 +394,11 @@ where
     // the hub still enforces verbs. Revisit with a tools/list_changed refresh.
     for name in tools::hidden_tools(verbs.as_ref()) {
         tool_router.remove_route(name);
+    }
+    if !options.can_launch() {
+        for name in tools::LAUNCH_TOOLS {
+            tool_router.remove_route(name);
+        }
     }
     let server = Server::new(options, tool_router);
     // Connects now and keeps a session for the HEARTBEAT, so held claims
@@ -1124,5 +1165,32 @@ mod tests {
         )
         .await
         .expect("the recheck stops when the server is gone");
+    }
+
+    /// The options and the server now carry the agent's local token.
+    #[cfg(unix)]
+    #[test]
+    fn launch_credential_stays_out_of_debug_output() {
+        let raw = "0123456789abcdef".repeat(4);
+        let credential = LaunchCredential {
+            identity: "parent01".parse().unwrap(),
+            token: raw.parse().unwrap(),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let options = McpOptions::new(dir.path(), TokenStore::Dir(dir.path().into()), dir.path())
+            .with_launch(Some(credential.clone()));
+        let server = Server::new(options.clone(), Server::tool_router());
+        for shown in [
+            format!("{credential:?}"),
+            format!("{credential:#?}"),
+            format!("{options:?}"),
+            format!("{options:#?}"),
+            format!("{server:?}"),
+            format!("{server:#?}"),
+        ] {
+            // The token repeats its first 16 digits, so any 16 of them show a leak.
+            assert!(!shown.contains(&raw[..16]), "{shown}");
+            assert!(shown.contains("LocalToken(<redacted>)"), "{shown}");
+        }
     }
 }

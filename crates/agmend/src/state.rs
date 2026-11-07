@@ -7,6 +7,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use agmen_client::Broker;
+use agmen_local::safeguards::MAX_MANAGED;
 use agmen_proto::{
     IdentityId, IdentityKind, MessageId, Payload, ProjectId, StampedEnvelope, Stream, TenantId,
 };
@@ -355,8 +356,10 @@ impl Store {
             }
         } else {
             let count: i64 = tx.query_row("SELECT count(*) FROM identities", [], |r| r.get(0))?;
-            if count >= 64 {
-                return Err(StoreError::Full("64 managed identities"));
+            if count >= MAX_MANAGED as i64 {
+                static FULL: std::sync::LazyLock<String> =
+                    std::sync::LazyLock::new(|| format!("{MAX_MANAGED} managed identities"));
+                return Err(StoreError::Full(&FULL));
             }
             let projects: i64 = tx.query_row(
                 "SELECT count(*) FROM (SELECT DISTINCT origin, project FROM identities UNION SELECT ?1, ?2)",
@@ -395,9 +398,11 @@ impl Store {
         origin: &str,
         owner: &IdentityId,
     ) -> Result<Vec<ManagedIdentity>, StoreError> {
-        let mut stmt = self.conn.prepare("SELECT metadata FROM identities WHERE origin=?1 AND owner=?2 ORDER BY identity LIMIT 64")?;
+        let mut stmt = self.conn.prepare("SELECT metadata FROM identities WHERE origin=?1 AND owner=?2 ORDER BY identity LIMIT ?3")?;
         let mut result = Vec::new();
-        for row in stmt.query_map(params![origin, owner.as_str()], |r| r.get::<_, String>(0))? {
+        for row in stmt.query_map(params![origin, owner.as_str(), MAX_MANAGED as i64], |r| {
+            r.get::<_, String>(0)
+        })? {
             result.push(serde_json::from_str(&row?)?);
         }
         Ok(result)
@@ -492,9 +497,10 @@ impl Store {
             }
         }
         let mut remember = None;
-        let mut stmt = tx.prepare("SELECT identity,owner,metadata FROM identities WHERE origin=?1 AND project=?2 AND (?3 IS NULL OR owner=?3) ORDER BY identity LIMIT 64")?;
+        let mut stmt = tx.prepare("SELECT identity,owner,metadata FROM identities WHERE origin=?1 AND project=?2 AND (?3 IS NULL OR owner=?3) ORDER BY identity LIMIT ?4")?;
+        let owner = owner.map(IdentityId::as_str);
         let identities = stmt.query_map(
-            params![origin, project.as_str(), owner.map(IdentityId::as_str)],
+            params![origin, project.as_str(), owner, MAX_MANAGED as i64],
             |r| {
                 Ok((
                     r.get::<_, String>(0)?,
@@ -574,8 +580,10 @@ impl Store {
         id: &MessageId,
     ) -> Result<(), StoreError> {
         let key = (origin.to_owned(), identity.clone());
-        if self.own_ids.len() >= 64 && !self.own_ids.contains_key(&key) {
-            return Err(StoreError::Full("64 own-message trackers"));
+        if self.own_ids.len() >= MAX_MANAGED && !self.own_ids.contains_key(&key) {
+            static FULL: std::sync::LazyLock<String> =
+                std::sync::LazyLock::new(|| format!("{MAX_MANAGED} own-message trackers"));
+            return Err(StoreError::Full(&FULL));
         }
         let ids = self.own_ids.entry(key).or_default();
         if !ids.contains(id) {

@@ -911,3 +911,226 @@ fn general_settings_saves_default_agent_model(cx: &mut TestAppContext) {
         Some("opus")
     );
 }
+
+#[gpui::test]
+fn agents_page_shows_the_defaults(cx: &mut TestAppContext) {
+    use agmen_local::safeguards::Safeguards;
+
+    let home = Home::new();
+    let (_, cx) = open(cx, &home);
+    click(cx, "settings-page:agents");
+    for selector in [
+        "agents:depth:limit",
+        "agents:depth:max:increment",
+        "agents:count:limit",
+        "agents:count:max:increment",
+        "agents:budgets",
+        "agents:child-budgets",
+    ] {
+        assert!(cx.debug_bounds(selector).is_some(), "{selector}");
+    }
+    for selector in [
+        "settings-placeholder",
+        "agents:depth:warning",
+        "agents:count:warning",
+        "agents:budgets:warning",
+        "agents:separate-usd",
+    ] {
+        assert!(cx.debug_bounds(selector).is_none(), "{selector}");
+    }
+    assert!(!home.settings_path().exists(), "opening must not write");
+    click(cx, "agents:depth:limit");
+    click(cx, "agents:depth:limit");
+    assert_eq!(
+        crate::appearance::load_safeguards(&home.settings_path()).unwrap(),
+        Safeguards::default()
+    );
+}
+
+#[gpui::test]
+fn turning_depth_off_is_one_click_and_warns(cx: &mut TestAppContext) {
+    let home = Home::new();
+    home.write_settings("[agents]\nmax_tree_depth = 9\n");
+    let (_, cx) = open(cx, &home);
+    click(cx, "settings-page:agents");
+    click(cx, "agents:depth:limit");
+    let saved = crate::appearance::load_safeguards(&home.settings_path()).unwrap();
+    assert!(!saved.limit_tree_depth);
+    assert_eq!(saved.max_tree_depth, 9);
+    assert!(cx.debug_bounds("agents:depth:max:increment").is_none());
+    let warning = cx.debug_bounds("agents:depth:warning").unwrap();
+    assert!(warning.top() >= cx.debug_bounds("agents:depth:limit").unwrap().bottom());
+    click(cx, "agents:depth:limit");
+    assert!(cx.debug_bounds("agents:depth:warning").is_none());
+    let saved = crate::appearance::load_safeguards(&home.settings_path()).unwrap();
+    assert!(saved.limit_tree_depth);
+    assert_eq!(saved.max_tree_depth, 9);
+}
+
+#[gpui::test]
+fn turning_count_off_is_one_click_and_warns(cx: &mut TestAppContext) {
+    let home = Home::new();
+    home.write_settings("[agents]\nmax_agents = 23\n");
+    let (_, cx) = open(cx, &home);
+    click(cx, "settings-page:agents");
+    click(cx, "agents:count:limit");
+    let saved = crate::appearance::load_safeguards(&home.settings_path()).unwrap();
+    assert!(!saved.limit_agents);
+    assert_eq!(saved.max_agents, 23);
+    assert!(cx.debug_bounds("agents:count:max:increment").is_none());
+    let warning = cx.debug_bounds("agents:count:warning").unwrap();
+    assert!(warning.top() >= cx.debug_bounds("agents:count:limit").unwrap().bottom());
+    click(cx, "agents:count:limit");
+    assert!(cx.debug_bounds("agents:count:warning").is_none());
+    let saved = crate::appearance::load_safeguards(&home.settings_path()).unwrap();
+    assert!(saved.limit_agents);
+    assert_eq!(saved.max_agents, 23);
+}
+
+#[gpui::test]
+fn turning_budgets_off_is_one_click_and_warns(cx: &mut TestAppContext) {
+    let home = Home::new();
+    let (_, cx) = open(cx, &home);
+    click(cx, "settings-page:agents");
+    click(cx, "agents:budgets");
+    assert!(
+        !crate::appearance::load_safeguards(&home.settings_path())
+            .unwrap()
+            .budgets
+    );
+    let warning = cx.debug_bounds("agents:budgets:warning").unwrap();
+    assert!(warning.top() >= cx.debug_bounds("agents:budgets").unwrap().bottom());
+    click(cx, "agents:budgets");
+    assert!(
+        crate::appearance::load_safeguards(&home.settings_path())
+            .unwrap()
+            .budgets
+    );
+    assert!(cx.debug_bounds("agents:budgets:warning").is_none());
+}
+
+#[gpui::test]
+fn child_budgets_hidden_while_budgets_are_off(cx: &mut TestAppContext) {
+    let home = Home::new();
+    home.write_settings("[agents]\nchild_budgets = \"separate\"\nseparate_child_usd = 7.5\n");
+    let (_, cx) = open(cx, &home);
+    click(cx, "settings-page:agents");
+    assert!(cx.debug_bounds("agents:separate-usd").is_some());
+    click(cx, "agents:budgets");
+    for selector in [
+        "agents:child-budgets",
+        "agents:separate-usd",
+        "agents:separate-usd:save",
+    ] {
+        assert!(cx.debug_bounds(selector).is_none(), "{selector}");
+    }
+    click(cx, "agents:budgets");
+    assert!(cx.debug_bounds("agents:child-budgets").is_some());
+    assert!(cx.debug_bounds("agents:separate-usd").is_some());
+    let saved = crate::appearance::load_safeguards(&home.settings_path()).unwrap();
+    assert_eq!(
+        saved.child_budgets,
+        agmen_local::safeguards::ChildBudgets::Separate
+    );
+    assert_eq!(saved.separate_child_usd, 7.5);
+}
+
+#[gpui::test]
+fn separate_amount_shows_only_for_separate_and_saves(cx: &mut TestAppContext) {
+    cx.update(super::super::text_input::bind_keys);
+    let home = Home::new();
+    let (view, cx) = open(cx, &home);
+    click(cx, "settings-page:agents");
+    assert!(cx.debug_bounds("agents:separate-usd").is_none());
+    click(cx, "agents:child-budgets:1");
+    assert_eq!(
+        crate::appearance::load_safeguards(&home.settings_path())
+            .unwrap()
+            .child_budgets,
+        agmen_local::safeguards::ChildBudgets::Separate
+    );
+    click(cx, "agents:separate-usd");
+    cx.simulate_input("2.5");
+    click(cx, "agents:separate-usd:save");
+    let saved = fs::read_to_string(home.settings_path()).unwrap();
+    assert!(saved.contains("separate_child_usd = 2.5"), "{saved}");
+    for invalid in ["0", "bad", "NaN", "inf", "1000.01", ""] {
+        click(cx, "agents:separate-usd");
+        cx.simulate_keystrokes("cmd-a backspace");
+        cx.simulate_input(invalid);
+        click(cx, "agents:separate-usd:save");
+        let error = view.read_with(cx, |view, _| view.error.clone());
+        assert_eq!(
+            error.as_deref(),
+            Some(
+                agmen_local::safeguards::SafeguardsError::SeparateChildUsd
+                    .to_string()
+                    .as_str()
+            )
+        );
+        assert_eq!(fs::read_to_string(home.settings_path()).unwrap(), saved);
+    }
+    click(cx, "agents:child-budgets:0");
+    assert!(cx.debug_bounds("agents:separate-usd").is_none());
+    assert_eq!(
+        crate::appearance::load_safeguards(&home.settings_path())
+            .unwrap()
+            .child_budgets,
+        agmen_local::safeguards::ChildBudgets::Shared
+    );
+}
+
+#[gpui::test]
+fn depth_stepper_stays_within_1_to_256(cx: &mut TestAppContext) {
+    for (depth, count, blocked_depth, blocked_count, step_depth, step_count) in [
+        (
+            1,
+            256,
+            "agents:depth:max:decrement",
+            "agents:count:max:increment",
+            "agents:depth:max:increment",
+            "agents:count:max:decrement",
+        ),
+        (
+            256,
+            1,
+            "agents:depth:max:increment",
+            "agents:count:max:decrement",
+            "agents:depth:max:decrement",
+            "agents:count:max:increment",
+        ),
+    ] {
+        let home = Home::new();
+        home.write_settings(&format!(
+            "[agents]\nmax_tree_depth = {depth}\nmax_agents = {count}\n"
+        ));
+        let (_, cx) = open(cx, &home);
+        click(cx, "settings-page:agents");
+        let before = fs::read_to_string(home.settings_path()).unwrap();
+        click(cx, blocked_depth);
+        click(cx, blocked_count);
+        assert_eq!(fs::read_to_string(home.settings_path()).unwrap(), before);
+        click(cx, step_depth);
+        click(cx, step_count);
+        let saved = crate::appearance::load_safeguards(&home.settings_path()).unwrap();
+        assert_eq!(saved.max_tree_depth, if depth == 1 { 2 } else { 255 });
+        assert_eq!(saved.max_agents, if count == 1 { 2 } else { 255 });
+        click(cx, blocked_depth);
+        click(cx, blocked_count);
+        let saved = crate::appearance::load_safeguards(&home.settings_path()).unwrap();
+        assert_eq!(saved.max_tree_depth, depth);
+        assert_eq!(saved.max_agents, count);
+    }
+}
+
+#[gpui::test]
+fn invalid_agents_table_is_shown_without_default_controls(cx: &mut TestAppContext) {
+    let home = Home::new();
+    let original = "[agents]\nmax_tree_depth = 0\n";
+    home.write_settings(original);
+    let (_, cx) = open(cx, &home);
+    click(cx, "settings-page:agents");
+    assert!(cx.debug_bounds("agents:error").is_some());
+    assert!(cx.debug_bounds("agents:depth:limit").is_none());
+    assert_eq!(fs::read_to_string(home.settings_path()).unwrap(), original);
+}

@@ -23,8 +23,8 @@ use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
 use super::{
-    Attached, MAX_AGENTS, Managed, Record, Source, Worker, envelope, error, metadata_for,
-    private_json,
+    Attached, MAX_MANAGED, Managed, Record, ReviewedBase, Source, Worker, envelope, error,
+    mcp_config, metadata_for, private_json, root_depth,
 };
 use crate::budget::{Budget, Money};
 use crate::console::{bad_request, params};
@@ -109,6 +109,18 @@ struct Stored {
     role_sha256: Option<agmen_proto::Sha256Hex>,
     #[serde(default)]
     role_layer: Option<String>,
+    #[serde(default)]
+    role_commit: Option<String>,
+    #[serde(default)]
+    reviewed_base: Option<ReviewedBase>,
+    #[serde(default)]
+    verbs: Option<std::collections::BTreeSet<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parent: Option<IdentityId>,
+    #[serde(default = "root_depth")]
+    depth: u32,
+    #[serde(default)]
+    shared_budget: bool,
 }
 
 impl Stored {
@@ -147,6 +159,12 @@ impl Stored {
                 role: self.role,
                 role_sha256: self.role_sha256,
                 role_layer: self.role_layer,
+                role_commit: self.role_commit,
+                reviewed_base: self.reviewed_base,
+                verbs: self.verbs,
+                parent: self.parent,
+                depth: self.depth,
+                shared_budget: self.shared_budget,
             },
             migrated,
         ))
@@ -156,11 +174,17 @@ impl Stored {
 #[derive(Debug, Deserialize)]
 struct SavedStatus {
     spent_usd: String,
+    #[serde(default = "zero_usd")]
+    children_spent_usd: String,
+}
+
+fn zero_usd() -> String {
+    "0".into()
 }
 
 /// One record read from disk: the record, its saved spend, and whether it
 /// must be saved again in the current format.
-type Loaded = (Record, Option<String>, bool);
+type Loaded = (Record, Option<SavedStatus>, bool);
 
 impl Managed {
     pub(super) fn agent_dir(&self, id: &IdentityId) -> PathBuf {
@@ -170,6 +194,7 @@ impl Managed {
     /// Reads every saved agent record as an offline agent. Nothing starts:
     /// each waits for the person's Start.
     pub(crate) async fn load(&self) {
+        let _launching = self.launching.lock().await;
         let dir = self.state_dir.join("managed");
         let found = match tokio::task::spawn_blocking(move || read_records(&dir)).await {
             Ok(found) => found,
@@ -188,15 +213,32 @@ impl Managed {
                 continue;
             };
             let mut budget = Budget::new(cap);
-            if let Some(spent) = spent
-                && budget.observe_total_cost_usd(&spent, |_| {}).is_err()
-            {
-                tracing::warn!("an agent's saved spend is invalid; counting from zero");
+            // shortcut: reservations are not saved. Every loaded agent is
+            // offline and holds nothing in its parent until Start reserves its
+            // unspent cap again, and Start is refused if the parent has used
+            // that money meanwhile. Revisit if agents ever keep running across
+            // an agmend restart.
+            if let Some(spent) = spent {
+                if budget
+                    .observe_total_cost_usd(&spent.spent_usd, |_| {})
+                    .is_err()
+                {
+                    tracing::warn!("an agent's saved spend is invalid; counting from zero");
+                }
+                match Money::from_usd(&spent.children_spent_usd) {
+                    Ok(cost) => budget.charge_child(cost),
+                    Err(_) => tracing::warn!(
+                        "an agent's saved child spend is invalid; counting from zero"
+                    ),
+                }
             }
             // Start and Attach check the sessions before either tier resumes.
+            let parent = record.parent.clone();
             let worker = Worker::offline(record, budget);
+            let mut tree = self.tree.lock().await;
             let mut workers = self.workers.lock().await;
-            if workers.len() < MAX_AGENTS && !workers.contains_key(&id) {
+            if workers.len() < MAX_MANAGED && !workers.contains_key(&id) {
+                tree.insert(id.clone(), parent);
                 workers.insert(id, Arc::new(Mutex::new(worker)));
             }
         }
@@ -242,7 +284,10 @@ impl Managed {
         let identity = target.identity.clone();
         let adopted = online.is_none();
         let (worker, mut context) = match online {
-            Some(worker) => (worker, "resumed"),
+            Some(worker) => {
+                self.refresh_mcp_config(&identity).await?;
+                (worker, "resumed")
+            }
             None => {
                 let (worker, context) = self.adopt(target).await?;
                 self.bring_online(&worker, "attached").await?;
@@ -256,6 +301,7 @@ impl Managed {
         let task = {
             let mut held = worker.lock().await;
             held.state = "attached";
+            held.batch_tier = None;
             held.attached = Some(Attached {
                 pid_file: pid_file.clone(),
                 since: tokio::time::Instant::now(),
@@ -389,6 +435,7 @@ impl Managed {
                 (metadata_for(&joined.identity), joined.root, branch)
             }
         };
+        self.refuse_live_descendants(&identity.identity_id).await?;
         // A record's identity file may already be gone; one that is there
         // must be this identity's before it is deleted.
         let present = tokio::fs::try_exists(identity_file(&folder))
@@ -402,14 +449,15 @@ impl Managed {
             };
         // An attached Claude Code, or one left open across a restart, is
         // ended: its identity is about to be revoked.
-        let known = match &existing {
-            Some(worker) => worker
+        let known = if let Some(worker) = &existing {
+            worker
                 .lock()
                 .await
                 .attached
                 .as_ref()
-                .and_then(|attached| attached.pid),
-            None => None,
+                .and_then(|attached| attached.pid)
+        } else {
+            None
         };
         end_interactive(
             &self.agent_dir(&identity.identity_id).join("attach.pid"),
@@ -430,6 +478,16 @@ impl Managed {
         if let Some(joined) = joined {
             delete_identity_file(&joined.root).await?;
         }
+        self.forget_removed_worker(&identity).await?;
+        Ok(json!({
+            "identity": identity.identity_id,
+            "removed": true,
+            "kept": {"folder": folder, "branch": branch},
+        }))
+    }
+
+    /// Cleanup runs only after the hub revoked the identity.
+    async fn forget_removed_worker(&self, identity: &ManagedIdentity) -> Result<(), ApiError> {
         // The hub has revoked it, so a credential left behind no longer
         // works. The Keychain refuses agmend a delete of one that another
         // program saved, such as the CLI's `agmen join`.
@@ -447,7 +505,7 @@ impl Managed {
         }
         self.identities()
             .ok_or_else(|| error("identity service stopped"))?
-            .forget(&identity)
+            .forget(identity)
             .await?;
         let dir = self.agent_dir(&identity.identity_id);
         match tokio::fs::remove_dir_all(&dir).await {
@@ -456,12 +514,10 @@ impl Managed {
             }
             _ => {}
         }
+        let mut tree = self.tree.lock().await;
         self.workers.lock().await.remove(&identity.identity_id);
-        Ok(json!({
-            "identity": identity.identity_id,
-            "removed": true,
-            "kept": {"folder": folder, "branch": branch},
-        }))
+        tree.remove(&identity.identity_id);
+        Ok(())
     }
 
     /// The offline agent `target` names, read from memory or adopted from a
@@ -506,8 +562,8 @@ impl Managed {
             drop(held);
             return Ok((worker, context));
         }
-        if self.workers.lock().await.len() >= MAX_AGENTS {
-            return Err(bad_request("64 managed agents are already registered"));
+        if self.workers.lock().await.len() >= MAX_MANAGED {
+            return Err(super::tree::registry_full());
         }
         let project = target.project.ok_or_else(|| {
             bad_request("project is required for an agent agmend has not started")
@@ -522,7 +578,6 @@ impl Managed {
         let joined = verify_folder(&folder, &target.identity, &project, &login).await?;
         let identity = metadata_for(&joined.identity);
         self.refuse_if_connected(&identity).await?;
-        let agmen = self.runner.mcp_command().await.map_err(error)?;
         let (worker_root, _) = crate::worktree::worktree_root(&joined.root)
             .await
             .map_err(error)?;
@@ -547,23 +602,19 @@ impl Managed {
             role: None,
             role_sha256: None,
             role_layer: None,
+            role_commit: None,
+            reviewed_base: None,
+            verbs: joined.identity.verbs.clone(),
+            parent: None,
+            depth: root_depth(),
+            shared_budget: false,
         };
         self.save_record(&record).await?;
-        let mcp = self.agent_dir(&target.identity).join("mcp.json");
-        let config = json!({"mcpServers":{"agmen":{"command":agmen,"args":["mcp"]}}});
-        tokio::task::spawn_blocking(move || replace_private_json(&mcp, &config))
-            .await
-            .map_err(error)?
-            .map_err(error)?;
         let cap = Money::from_usd(JOINED_BUDGET_USD).map_err(|_| error("invalid budget"))?;
         let mut worker = Worker::offline(record, Budget::new(cap));
         // The newest transcript is the session this folder last used.
         worker.owner_resumed = newest.is_some();
-        let worker = Arc::new(Mutex::new(worker));
-        self.workers
-            .lock()
-            .await
-            .insert(target.identity, worker.clone());
+        let worker = self.insert_worker(worker).await?;
         Ok((worker, context))
     }
 
@@ -593,8 +644,14 @@ impl Managed {
         let identities = self
             .identities()
             .ok_or_else(|| error("identity service stopped"))?;
+        let _accounting = self.accounting.lock().await;
+        // Register before reserving: a failed register must not hold parent funds.
+        let record = worker.lock().await.record.clone();
+        identities.register(record.identity.clone()).await?;
+        self.refresh_mcp_config(&record.identity.identity_id)
+            .await?;
+        self.reserve_on_start(worker).await?;
         let mut held = worker.lock().await;
-        identities.register(held.record.identity.clone()).await?;
         held.state = state;
         held.last_run = None;
         let record = held.record.clone();
@@ -610,6 +667,20 @@ impl Managed {
             "branch": record.branch,
             "state": state,
         }))
+    }
+
+    async fn refresh_mcp_config(&self, identity: &IdentityId) -> Result<(), ApiError> {
+        let agmen = self.runner.mcp_command().await.map_err(error)?;
+        let identities = self
+            .identities()
+            .ok_or_else(|| error("identity service stopped"))?;
+        let local_token = identities.local_token(identity).await?;
+        let config = mcp_config(&agmen, identity, local_token.as_ref());
+        let path = self.agent_dir(identity).join("mcp.json");
+        tokio::task::spawn_blocking(move || replace_private_json(&path, &config))
+            .await
+            .map_err(error)?
+            .map_err(error)
     }
 
     /// Refuses when the hub shows the identity connected: an interactive
@@ -1007,8 +1078,20 @@ pub(super) fn hello(model: Option<String>, branch: String) -> Result<ClientEnvel
 
 /// Saves the agent's lifetime spend so a restart keeps counting from it.
 pub(super) async fn save_spent(dir: &Path, spent: Money) {
+    write_status(dir, spent, Money::ZERO).await;
+}
+
+pub(super) async fn save_status(dir: &Path, spent: Money, children_spent: Money) {
+    if children_spent == Money::ZERO {
+        save_spent(dir, spent).await;
+    } else {
+        write_status(dir, spent, children_spent).await;
+    }
+}
+
+async fn write_status(dir: &Path, spent: Money, children_spent: Money) {
     let path = dir.join("status.json");
-    let value = json!({"spent_usd": spent.usd()});
+    let value = json!({"spent_usd": spent.usd(), "children_spent_usd": children_spent.usd()});
     match tokio::task::spawn_blocking(move || replace_private_json(&path, &value)).await {
         Ok(Ok(())) => {}
         Ok(Err(error)) => tracing::warn!(%error, "saving an agent's spend failed"),
@@ -1067,14 +1150,7 @@ async fn verify_folder(
             joined.identity.identity_id
         )));
     }
-    if joined.identity.project != *project
-        || joined.identity.owner_id != login.human_id
-        || joined.identity.hub_url.origin() != login.hub_url.origin()
-    {
-        return Err(bad_request(
-            "checkout is not joined to this project and owner",
-        ));
-    }
+    super::check_project(&joined.identity, project, login)?;
     Ok(joined)
 }
 
@@ -1271,7 +1347,7 @@ fn read_records(dir: &Path) -> Vec<Loaded> {
         return Vec::new();
     };
     let mut found = Vec::new();
-    for entry in entries.take(MAX_AGENTS * 4) {
+    for entry in entries.take(MAX_MANAGED * 4) {
         let Ok(entry) = entry else { continue };
         let path = entry.path();
         match read_record(&path) {
@@ -1287,7 +1363,7 @@ fn read_records(dir: &Path) -> Vec<Loaded> {
                 tracing::warn!(%error, path = %path.display(), "skipping an unreadable agent record");
             }
         }
-        if found.len() >= MAX_AGENTS {
+        if found.len() >= MAX_MANAGED {
             break;
         }
     }
@@ -1303,8 +1379,7 @@ fn read_record(dir: &Path) -> anyhow::Result<Option<Loaded>> {
     let (record, migrated) = serde_json::from_slice::<Stored>(&bytes)?.into_record()?;
     let spent = read_bounded(&dir.join("status.json"))
         .ok()
-        .and_then(|bytes| serde_json::from_slice::<SavedStatus>(&bytes).ok())
-        .map(|status| status.spent_usd);
+        .and_then(|bytes| serde_json::from_slice::<SavedStatus>(&bytes).ok());
     Ok(Some((record, spent, migrated)))
 }
 

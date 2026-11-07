@@ -38,7 +38,10 @@ pub(crate) struct RunSpec {
     pub(crate) resume: bool,
     pub(crate) model: Option<String>,
     pub(crate) budget_remaining: String,
+    pub(crate) cap_budget: bool,
     pub(crate) mcp_config: PathBuf,
+    pub(crate) identity: agmen_proto::IdentityId,
+    pub(crate) local_token: Option<crate::identities::LocalToken>,
     pub(crate) owner_handle: String,
     pub(crate) owner_id: agmen_proto::IdentityId,
     pub(crate) owner_only: bool,
@@ -46,7 +49,7 @@ pub(crate) struct RunSpec {
 }
 
 impl RunSpec {
-    fn args(&self) -> Vec<String> {
+    pub(crate) fn args(&self) -> Vec<String> {
         let mut args = vec![
             "-p".into(),
             self.prompt.clone(),
@@ -78,11 +81,11 @@ impl RunSpec {
             }
             .into(),
         ]);
+        args.extend(["--output-format".into(), "json".into()]);
+        if self.cap_budget {
+            args.extend(["--max-budget-usd".into(), self.budget_remaining.clone()]);
+        }
         args.extend([
-            "--output-format".into(),
-            "json".into(),
-            "--max-budget-usd".into(),
-            self.budget_remaining.clone(),
             "--strict-mcp-config".into(),
             "--mcp-config".into(),
             self.mcp_config.to_string_lossy().into_owned(),
@@ -538,12 +541,20 @@ impl Runner for ClaudeRunner {
         Box::pin(async move {
             let environment = runner.environment().await?;
             // No shell interpolation: the batch and prompt each remain one argument.
-            let mut child = tokio::process::Command::new(&environment.claude)
+            let mut command = tokio::process::Command::new(&environment.claude);
+            command
                 .args(spec.args())
                 .current_dir(&spec.cwd)
                 .env("AGMEN_MANAGED", "1")
+                .env("AGMEN_IDENTITY", spec.identity.as_str())
                 .env("PATH", &environment.path)
-                .env_remove("CLAUDECODE")
+                .env_remove("CLAUDECODE");
+            if let Some(token) = &spec.local_token {
+                command.env("AGMEN_LOCAL_TOKEN", token.expose());
+            } else {
+                command.env_remove("AGMEN_LOCAL_TOKEN");
+            }
+            let mut child = command
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())

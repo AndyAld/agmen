@@ -829,13 +829,153 @@ async fn it_delegated_by_validated_and_rostered() {
                 .any(|row| row["identity_id"] == worker["id"]
                     && row["delegated_by"] == listener["id"])
         );
+        let outsider = member_with_token(&ctx, &p, 5151, "adam", "member").await;
+        let (status, other) = mint(
+            &ctx,
+            &outsider,
+            &json!({"handle":"adam/worker","project":p.project}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
         let (status, _) = mint(
             &ctx,
             &t,
-            &json!({"handle":"andy/bad","project":p.project,"delegated_by":worker["id"]}),
+            &json!({"handle":"andy/bad","project":p.project,"delegated_by":other["id"]}),
         )
         .await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        let (status, _) = mint(
+            &ctx,
+            &t,
+            &json!({"handle":"andy/child","project":p.project,"delegated_by":worker["id"]}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn it_delegated_by_any_live_parent_of_owner() {
+    run(|ctx| async move {
+        let (p, t) = room(&ctx).await;
+        let parent = mint_ok(&ctx, &t, "andy/parent", &p).await;
+        let (status, child) = mint(
+            &ctx,
+            &t,
+            &json!({"handle":"andy/child","project":p.project,"delegated_by":parent.id}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{child}");
+        let (status, grandchild) = mint(
+            &ctx,
+            &t,
+            &json!({"handle":"andy/grandchild","project":p.project,"delegated_by":child["id"]}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{grandchild}");
+        let coordinator = role(
+            &ctx,
+            &p,
+            &t,
+            "coord",
+            "coordinator",
+            "coordinator",
+            &["ASSIGN"],
+            json!({"scope":"none"}),
+        )
+        .await;
+        let (status, coordinated) = mint(
+            &ctx,
+            &t,
+            &json!({"handle":"andy/coordinated","project":p.project,"delegated_by":coordinator["id"]}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{coordinated}");
+        let rows = roster(&ctx, &p, &t).await;
+        for (child, parent) in [
+            (&child["id"], json!(parent.id)),
+            (&grandchild["id"], child["id"].clone()),
+            (&coordinated["id"], coordinator["id"].clone()),
+        ] {
+            assert!(rows.as_array().unwrap().iter().any(|row| {
+                row["identity_id"] == *child && row["delegated_by"] == parent
+            }));
+        }
+
+        let other_project = seed_project(&ctx.pool).await;
+        let human: String = sqlx::query_scalar("SELECT id FROM humans WHERE handle='andy'")
+            .fetch_one(&ctx.pool)
+            .await
+            .unwrap();
+        support::seed_member(&ctx.pool, &human, &other_project, "admin").await;
+        let foreign = mint_ok(&ctx, &t, "andy/foreign", &other_project).await;
+        let revoked = mint_ok(&ctx, &t, "andy/revoked", &p).await;
+        sqlx::query("UPDATE identities SET revoked_at=now() WHERE id=$1")
+            .bind(&revoked.id)
+            .execute(&ctx.pool)
+            .await
+            .unwrap();
+        for parent in [&foreign.id, &revoked.id] {
+            let (status, body) = mint(
+                &ctx,
+                &t,
+                &json!({"handle":"andy/refused","project":p.project,"delegated_by":parent}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+            assert_eq!(body["error"], "bad_role");
+            assert_eq!(
+                body["error_description"],
+                "delegated_by must name a live identity of this owner and project for an agent child"
+            );
+        }
+        for kind in ["coordinator", "listener"] {
+            let (status, body) = mint(
+                &ctx,
+                &t,
+                &json!({"handle":"andy/refused","project":p.project,"kind":kind,"delegated_by":parent.id}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+            assert_eq!(body["error"], "bad_role");
+            assert_eq!(
+                body["error_description"],
+                "delegated_by must name a live identity of this owner and project for an agent child"
+            );
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn it_delegated_by_refuses_removed_parent() {
+    run(|ctx| async move {
+        let (p, t) = room(&ctx).await;
+        let parent = mint_ok(&ctx, &t, "andy/removed", &p).await;
+        sqlx::query("DELETE FROM tokens WHERE identity_id=$1")
+            .bind(&parent.id)
+            .execute(&ctx.pool)
+            .await
+            .unwrap();
+        let removed = sqlx::query("DELETE FROM identities WHERE id=$1")
+            .bind(&parent.id)
+            .execute(&ctx.pool)
+            .await
+            .unwrap();
+        assert_eq!(removed.rows_affected(), 1);
+        let (status, body) = mint(
+            &ctx,
+            &t,
+            &json!({"handle":"andy/child","project":p.project,"delegated_by":parent.id}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert_eq!(body["error"], "bad_role");
+        assert_eq!(
+            body["error_description"],
+            "delegated_by must name a live identity of this owner and project for an agent child"
+        );
     })
     .await;
 }

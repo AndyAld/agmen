@@ -25,6 +25,12 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(5);
 /// Retain this many stderr bytes, draining the rest within the call's deadline.
 const STDERR_BYTES: u64 = 64 * 1024;
 
+#[cfg(test)]
+tokio::task_local! {
+    // Each test counts only its own task, even when tests run concurrently.
+    pub(crate) static INVOCATIONS: std::cell::Cell<usize>;
+}
+
 /// Why a git call gave no output.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum GitError {
@@ -89,8 +95,11 @@ impl Git {
         timeout: Duration,
         index_file: Option<&Path>,
     ) -> Result<Output, GitError> {
+        // The subcommand, which a global option such as --no-replace-objects precedes.
         let what = args
-            .first()
+            .iter()
+            .find(|arg| !arg.as_encoded_bytes().starts_with(b"-"))
+            .or(args.first())
             .map(|a| a.to_string_lossy().into_owned())
             .unwrap_or_default();
         let mut command = tokio::process::Command::new("git");
@@ -115,6 +124,9 @@ impl Git {
             command.env("GIT_INDEX_FILE", index_file);
         }
         let mut child = command.spawn()?;
+        #[cfg(test)]
+        // Most tests do not install a counter; those calls need no accounting.
+        let _counter_scope = INVOCATIONS.try_with(|count| count.set(count.get() + 1));
         let deadline = self.deadline.min(Instant::now() + timeout);
         let mut stdout = child
             .stdout

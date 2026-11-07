@@ -1,11 +1,11 @@
-//! Human worker commands through agmend's local API.
+//! Human and parent-agent worker commands through agmend's local API.
 
 use agmen_proto::{IdentityId, ProjectId};
 use anyhow::{Context as _, Result, bail};
 use clap::{Args, Subcommand};
 use serde_json::{Value, json};
 
-use crate::agmend::{Agmend, AgmendError};
+use crate::agmend::{Agmend, AgmendError, LaunchCredential};
 use crate::output::{Code, Fail, clean};
 
 #[derive(Debug, Args)]
@@ -20,6 +20,8 @@ pub(crate) struct LaunchArgs {
     budget: Option<serde_json::Number>,
     #[arg(long)]
     project: Option<ProjectId>,
+    #[arg(long)]
+    brief: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -36,7 +38,12 @@ pub(crate) struct WorkersArgs {
 #[derive(Debug, Subcommand)]
 enum WorkersCommand {
     /// Stop a managed agent.
-    Stop { identity: IdentityId },
+    Stop {
+        identity: IdentityId,
+        /// Leave this agent's children running.
+        #[arg(long)]
+        keep_children: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -91,11 +98,32 @@ pub(super) fn field<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
 }
 
 pub(crate) async fn launch(args: LaunchArgs) -> Result<()> {
+    let credential = LaunchCredential::from_env()?;
+    if credential.is_some() && args.project.is_some() {
+        return Err(Fail::usage(
+            "--project does not apply to an agent's launch: the child joins its parent's project",
+        )
+        .into());
+    }
+    // agmend's child_launch needs a role; a person's own launch may omit it.
+    if credential.is_some() && args.role.is_none() {
+        return Err(Fail::usage("--role is required for an agent's launch").into());
+    }
+    if credential.is_none() && args.brief.is_some() {
+        return Err(Fail::usage(
+            "--brief is for an agent's launch; message your agent after launching it",
+        )
+        .into());
+    }
     let mut daemon = connect().await?;
-    let project = project(args.project).await?;
-    let cwd = std::env::current_dir().context("reading the working directory")?;
-    let root = crate::git::toplevel(&cwd).await?;
-    let mut params = json!({"project":project,"name":args.name,"root":root});
+    let mut params = json!({"name":args.name});
+    if credential.is_none() {
+        let project = project(args.project).await?;
+        let cwd = std::env::current_dir().context("reading the working directory")?;
+        let root = crate::git::toplevel(&cwd).await?;
+        params["project"] = json!(project);
+        params["root"] = json!(root);
+    }
     if let Some(role) = args.role {
         params["role"] = json!(role);
     }
@@ -105,7 +133,21 @@ pub(crate) async fn launch(args: LaunchArgs) -> Result<()> {
     if let Some(budget) = args.budget {
         params["budget_usd"] = json!(budget);
     }
-    let answer = call(&mut daemon, "agent_launch", params).await?;
+    if let Some(brief) = args.brief {
+        params["brief"] = json!(brief);
+    }
+    let answer = match credential {
+        Some(credential) => daemon
+            .call_as(
+                &credential.identity,
+                &credential.token,
+                "child_launch",
+                params,
+            )
+            .await
+            .map_err(daemon_error)?,
+        None => call(&mut daemon, "agent_launch", params).await?,
+    };
     println!(
         "{} {} {}",
         clean(field(&answer, "identity")?),
@@ -116,9 +158,29 @@ pub(crate) async fn launch(args: LaunchArgs) -> Result<()> {
 }
 
 pub(crate) async fn workers(args: WorkersArgs) -> Result<()> {
-    let mut daemon = connect().await?;
-    if let Some(WorkersCommand::Stop { identity }) = args.command {
-        let answer = call(&mut daemon, "agent_stop", json!({"identity":identity})).await?;
+    if let Some(WorkersCommand::Stop {
+        identity,
+        keep_children,
+    }) = args.command
+    {
+        let credential = LaunchCredential::from_env()?;
+        let mut daemon = connect().await?;
+        let mut params = json!({"identity":identity});
+        if keep_children {
+            params["subtree"] = json!(false);
+        }
+        let answer = match credential {
+            Some(credential) => daemon
+                .call_as(
+                    &credential.identity,
+                    &credential.token,
+                    "child_stop",
+                    params,
+                )
+                .await
+                .map_err(daemon_error)?,
+            None => call(&mut daemon, "agent_stop", params).await?,
+        };
         println!(
             "{} {}",
             clean(field(&answer, "state")?),
@@ -126,6 +188,7 @@ pub(crate) async fn workers(args: WorkersArgs) -> Result<()> {
         );
         return Ok(());
     }
+    let mut daemon = connect().await?;
     let params = args
         .project
         .map_or_else(|| json!({}), |project| json!({"project":project}));

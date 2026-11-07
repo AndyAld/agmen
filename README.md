@@ -184,7 +184,7 @@ The full specification, including delivery guarantees, rejection reasons, the HT
 
 ### CLI
 
-Each worktree acts as one identity: `agmen join` writes `.agmen/identity.json` at the worktree root, and every other command reads it. Wherever a command names an identity, a handle such as `andy/sol` or an id works.
+Each worktree acts as one identity: `agmen join` writes `.agmen/identity.json` at the worktree root, and every other command reads it. Wherever a command names an identity, a handle such as `andy/sol` or an id works, except the MCP tool `stop_agent`, which takes an id only.
 
 ```sh
 agmen login --hub <url>                       # browser device login
@@ -231,7 +231,7 @@ command = "agmen"
 args = ["mcp"]
 ```
 
-OpenCode reads the same command from the `mcp` section of `opencode.json`. `--identity <id>` is optional: with it, the server acts only when the worktree's identity file names that id, and otherwise every tool answers that it is not joined. Tools: `post`, `ask`, `answer`, `dm`, `inbox`, `state`, `claim`, `release`, `done`, `found`, `lanes`, `check_path`. Setup for each client and what each tool answers: [docs/mcp-setup.md](docs/mcp-setup.md).
+OpenCode reads the same command from the `mcp` section of `opencode.json`. `--identity <id>` is optional: with it, the server acts only when the worktree's identity file names that id, and otherwise every tool answers that it is not joined. Tools: `post`, `ask`, `answer`, `dm`, `inbox`, `state`, `claim`, `release`, `done`, `found`, `lanes`, `check_path`, and for agents agmen launched `launch` and `stop_agent`. Setup for each client and what each tool answers: [docs/mcp-setup.md](docs/mcp-setup.md).
 
 ### Claude Code mod
 

@@ -120,6 +120,390 @@ async fn launch_sends_agent_launch_with_this_worktree() {
 }
 
 #[tokio::test]
+async fn launch_as_an_agent_sends_child_launch() {
+    let home = Home::new_in(std::path::Path::new("/tmp"));
+    let fake = Fake::start(
+        &home,
+        json!({"identity":"agent001","worktree":"/fake/worker","branch":"agent/worker"}),
+    );
+    let token = "a".repeat(64);
+    let out = home
+        .run_env(
+            home.path(),
+            &[
+                "launch",
+                "--name",
+                "k1",
+                "--role",
+                "reviewer",
+                "--brief",
+                "look at a.rs",
+            ],
+            &[
+                ("AGMEN_IDENTITY", "parent01"),
+                ("AGMEN_LOCAL_TOKEN", &token),
+            ],
+        )
+        .await;
+    assert_exit(&out, 0);
+    assert_eq!(stdout(&out), "agent001 /fake/worker agent/worker\n");
+    assert!(!stdout(&out).contains(&token));
+    assert!(!stderr(&out).contains(&token));
+    let mut request = fake.request("child_launch");
+    assert_eq!(request.as_.unwrap().as_str(), "parent01");
+    assert!(
+        request
+            .params
+            .as_object_mut()
+            .unwrap()
+            .remove("local_token")
+            .is_some_and(|value| value == token)
+    );
+    assert_eq!(
+        request.params,
+        json!({"name":"k1","role":"reviewer","brief":"look at a.rs"})
+    );
+}
+
+#[tokio::test]
+async fn launch_with_one_variable_is_a_usage_error() {
+    let token = "a".repeat(64);
+    for env in [
+        vec![("AGMEN_IDENTITY", "parent01")],
+        vec![("AGMEN_LOCAL_TOKEN", token.as_str())],
+    ] {
+        let home = Home::new_in(std::path::Path::new("/tmp"));
+        let wt = joined(&home);
+        let fake = Fake::start(
+            &home,
+            json!({"identity":"agent001","worktree":"/fake/worker","branch":"agent/worker"}),
+        );
+        let out = home
+            .run_env(&wt.path(), &["launch", "--name", "k1"], &env)
+            .await;
+        assert_exit(&out, 2);
+        assert_eq!(
+            stderr(&out),
+            "AGMEN_IDENTITY and AGMEN_LOCAL_TOKEN must be set together\n"
+        );
+        assert!(!stdout(&out).contains(&token));
+        assert!(!stderr(&out).contains(&token));
+        assert!(
+            fake.requests
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|request| request.method == "hello")
+        );
+    }
+}
+
+#[tokio::test]
+async fn launch_as_an_agent_refuses_project() {
+    let home = Home::new_in(std::path::Path::new("/tmp"));
+    let wt = joined(&home);
+    let fake = Fake::start(
+        &home,
+        json!({"identity":"agent001","worktree":"/fake/worker","branch":"agent/worker"}),
+    );
+    let token = "a".repeat(64);
+    let out = home
+        .run_env(
+            &wt.path(),
+            &["launch", "--name", "k1", "--project", "project2"],
+            &[
+                ("AGMEN_IDENTITY", "parent01"),
+                ("AGMEN_LOCAL_TOKEN", &token),
+            ],
+        )
+        .await;
+    assert_exit(&out, 2);
+    assert_eq!(
+        stderr(&out),
+        "--project does not apply to an agent's launch: the child joins its parent's project\n"
+    );
+    assert!(!stdout(&out).contains(&token));
+    assert!(!stderr(&out).contains(&token));
+    assert!(
+        fake.requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|request| request.method == "hello")
+    );
+}
+
+#[tokio::test]
+async fn launch_as_an_agent_requires_a_role() {
+    let home = Home::new_in(std::path::Path::new("/tmp"));
+    let fake = Fake::start(
+        &home,
+        json!({"identity":"agent001","worktree":"/fake/worker","branch":"agent/worker"}),
+    );
+    let token = "a".repeat(64);
+    let out = home
+        .run_env(
+            home.path(),
+            &["launch", "--name", "k1"],
+            &[
+                ("AGMEN_IDENTITY", "parent01"),
+                ("AGMEN_LOCAL_TOKEN", &token),
+            ],
+        )
+        .await;
+    assert_exit(&out, 2);
+    assert_eq!(stderr(&out), "--role is required for an agent's launch\n");
+    assert!(!stdout(&out).contains(&token));
+    assert!(!stderr(&out).contains(&token));
+    assert!(
+        fake.requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|request| request.method == "hello")
+    );
+}
+
+#[tokio::test]
+async fn launch_without_a_credential_keeps_role_optional() {
+    let home = Home::new_in(std::path::Path::new("/tmp"));
+    let wt = joined(&home);
+    let fake = Fake::start(
+        &home,
+        json!({"identity":"agent001","worktree":"/fake/worker","branch":"agent/worker"}),
+    );
+    let out = home.run(&wt.path(), &["launch", "--name", "k1"]).await;
+    assert_exit(&out, 0);
+    assert_eq!(
+        fake.request("agent_launch").params,
+        json!({"project":"project1","name":"k1","root":wt.path()})
+    );
+}
+
+#[tokio::test]
+async fn brief_without_a_credential_is_a_usage_error() {
+    let home = Home::new_in(std::path::Path::new("/tmp"));
+    let fake = Fake::start(&home, json!({}));
+    let out = home
+        .run(
+            home.path(),
+            &["launch", "--name", "k1", "--brief", "look at a.rs"],
+        )
+        .await;
+    assert_exit(&out, 2);
+    assert_eq!(
+        stderr(&out),
+        "--brief is for an agent's launch; message your agent after launching it\n"
+    );
+    assert!(
+        fake.requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|request| request.method == "hello")
+    );
+}
+
+#[tokio::test]
+async fn stop_as_an_agent_sends_child_stop() {
+    let home = Home::new_in(std::path::Path::new("/tmp"));
+    let fake = Fake::start(&home, json!({"identity":"agent001","state":"offline"}));
+    let token = "a".repeat(64);
+    let out = home
+        .run_env(
+            home.path(),
+            &["workers", "stop", "agent001"],
+            &[
+                ("AGMEN_IDENTITY", "parent01"),
+                ("AGMEN_LOCAL_TOKEN", &token),
+            ],
+        )
+        .await;
+    assert_exit(&out, 0);
+    assert_eq!(stdout(&out), "offline agent001\n");
+    assert!(!stdout(&out).contains(&token));
+    assert!(!stderr(&out).contains(&token));
+    let mut request = fake.request("child_stop");
+    assert_eq!(request.as_.unwrap().as_str(), "parent01");
+    assert!(
+        request
+            .params
+            .as_object_mut()
+            .unwrap()
+            .remove("local_token")
+            .is_some_and(|value| value == token)
+    );
+    assert_eq!(request.params, json!({"identity":"agent001"}));
+}
+
+#[tokio::test]
+async fn stop_keep_children_sends_subtree_false() {
+    let token = "a".repeat(64);
+    for env in [
+        vec![],
+        vec![
+            ("AGMEN_IDENTITY", "parent01"),
+            ("AGMEN_LOCAL_TOKEN", token.as_str()),
+        ],
+    ] {
+        let home = Home::new_in(std::path::Path::new("/tmp"));
+        let fake = Fake::start(&home, json!({"identity":"agent001","state":"offline"}));
+        let out = home
+            .run_env(
+                home.path(),
+                &["workers", "stop", "agent001", "--keep-children"],
+                &env,
+            )
+            .await;
+        assert_exit(&out, 0);
+        assert_eq!(stdout(&out), "offline agent001\n");
+        assert!(!stdout(&out).contains(&token));
+        assert!(!stderr(&out).contains(&token));
+        let mut request = fake.request(if env.is_empty() {
+            "agent_stop"
+        } else {
+            "child_stop"
+        });
+        if env.is_empty() {
+            assert!(request.as_.is_none());
+        } else {
+            assert_eq!(request.as_.unwrap().as_str(), "parent01");
+            assert!(
+                request
+                    .params
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("local_token")
+                    .is_some_and(|value| value == token)
+            );
+        }
+        assert_eq!(
+            request.params,
+            json!({"identity":"agent001","subtree":false})
+        );
+    }
+}
+
+#[tokio::test]
+async fn launch_as_an_agent_forwards_optional_model_and_budget() {
+    let home = Home::new_in(std::path::Path::new("/tmp"));
+    let fake = Fake::start(
+        &home,
+        json!({"identity":"agent001","worktree":"/fake/worker","branch":"agent/worker"}),
+    );
+    let token = "a".repeat(64);
+    let out = home
+        .run_env(
+            home.path(),
+            &[
+                "launch", "--name", "k1", "--role", "reviewer", "--model", "sonnet", "--budget",
+                "2.5",
+            ],
+            &[
+                ("AGMEN_IDENTITY", "parent01"),
+                ("AGMEN_LOCAL_TOKEN", &token),
+            ],
+        )
+        .await;
+    assert_exit(&out, 0);
+    assert!(!stdout(&out).contains(&token));
+    assert!(!stderr(&out).contains(&token));
+    let mut request = fake.request("child_launch");
+    assert!(
+        request
+            .params
+            .as_object_mut()
+            .unwrap()
+            .remove("local_token")
+            .is_some_and(|value| value == token)
+    );
+    assert_eq!(
+        request.params,
+        json!({"name":"k1","role":"reviewer","model":"sonnet","budget_usd":2.5})
+    );
+}
+
+#[tokio::test]
+async fn launch_with_invalid_credentials_is_a_usage_error() {
+    let token = "a".repeat(64);
+    for (identity, credential, message) in [
+        (
+            "INVALID!",
+            token.as_str(),
+            "AGMEN_IDENTITY must be a valid identity id\n",
+        ),
+        (
+            "parent01",
+            "INVALID!",
+            "AGMEN_LOCAL_TOKEN must be 64 lowercase hex digits\n",
+        ),
+        (
+            "parent01",
+            "",
+            "AGMEN_LOCAL_TOKEN must be 64 lowercase hex digits\n",
+        ),
+    ] {
+        let home = Home::new_in(std::path::Path::new("/tmp"));
+        let wt = joined(&home);
+        let fake = Fake::start(
+            &home,
+            json!({"identity":"agent001","worktree":"/fake/worker","branch":"agent/worker"}),
+        );
+        let out = home
+            .run_env(
+                &wt.path(),
+                &["launch", "--name", "k1"],
+                &[
+                    ("AGMEN_IDENTITY", identity),
+                    ("AGMEN_LOCAL_TOKEN", credential),
+                ],
+            )
+            .await;
+        assert_exit(&out, 2);
+        assert_eq!(stderr(&out), message);
+        assert!(!stdout(&out).contains(&token));
+        assert!(!stderr(&out).contains(&token));
+        assert!(!stderr(&out).contains("INVALID!"));
+        assert!(
+            fake.requests
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|request| request.method == "hello")
+        );
+    }
+}
+
+#[tokio::test]
+async fn stop_with_one_variable_is_a_usage_error() {
+    let token = "a".repeat(64);
+    for env in [
+        vec![("AGMEN_IDENTITY", "parent01")],
+        vec![("AGMEN_LOCAL_TOKEN", token.as_str())],
+    ] {
+        let home = Home::new_in(std::path::Path::new("/tmp"));
+        let fake = Fake::start(&home, json!({"identity":"agent001","state":"offline"}));
+        let out = home
+            .run_env(home.path(), &["workers", "stop", "agent001"], &env)
+            .await;
+        assert_exit(&out, 2);
+        assert_eq!(
+            stderr(&out),
+            "AGMEN_IDENTITY and AGMEN_LOCAL_TOKEN must be set together\n"
+        );
+        assert!(!stdout(&out).contains(&token));
+        assert!(!stderr(&out).contains(&token));
+        assert!(
+            fake.requests
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|request| request.method == "hello")
+        );
+    }
+}
+
+#[tokio::test]
 async fn workers_lists_agents() {
     let home = Home::new_in(std::path::Path::new("/tmp"));
     let wt = joined(&home);

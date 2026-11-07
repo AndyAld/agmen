@@ -428,3 +428,21 @@ fn local_token_debug_is_redacted() {
     assert!("gggggggggggggggg".repeat(4).parse::<LocalToken>().is_err());
     assert!("abc".parse::<LocalToken>().is_err());
 }
+
+#[tokio::test]
+async fn an_open_socket_is_refused_with_the_reason_printed_once() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("open.sock");
+    let _listener = UnixListener::bind(&path).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
+    let err = Agmend::connect_checked(&path).await.unwrap_err();
+    assert!(matches!(err, AgmendError::Socket(_)), "{err:?}");
+    // The CLI prints `{err:#}`, which appends every source to the message.
+    let text = format!("{:#}", anyhow::Error::from(err));
+    assert_eq!(
+        text.matches("so other users can reach it").count(),
+        1,
+        "{text}"
+    );
+}

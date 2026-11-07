@@ -1,5 +1,6 @@
 //! Theme, fonts and icon theme: read from Zed, or from agmen settings.
 
+mod agents;
 mod catalog;
 mod fallback;
 mod marked;
@@ -13,6 +14,7 @@ use std::path::{Path, PathBuf};
 use gpui::{Global, Pixels, SharedString, px};
 use serde::{Deserialize, Serialize};
 
+pub(crate) use agents::{load_safeguards, save_safeguards};
 pub(crate) use catalog::{
     PickerEntry, ThemeEntry, ThemeOrigin, installed_themes, picker_entries, theme_names,
 };
