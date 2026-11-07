@@ -217,7 +217,9 @@ impl TokenStore {
         }
     }
 
-    /// Removes the token under `key`; removing one that is not there
+    /// Removes the token under `key`, and in a directory store the temporary
+    /// files a crashed or older write of that key left (best effort: a failed
+    /// sweep is logged, not returned); removing one that is not there
     /// succeeds.
     ///
     /// # Errors
@@ -232,10 +234,14 @@ impl TokenStore {
             Self::Dir(dir) => {
                 let path = dir.join(key.file_name());
                 match fs::remove_file(&path) {
-                    Ok(()) => Ok(()),
-                    Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
-                    Err(source) => Err(TokenStoreError::File { path, source }),
+                    Ok(()) => {}
+                    Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                    Err(source) => return Err(TokenStoreError::File { path, source }),
                 }
+                if let Err((failed, error)) = remove_leftovers(dir, &key.file_name()) {
+                    tracing::warn!(path = %failed.display(), %error, "cannot remove the leftover temporary files of a deleted token");
+                }
+                Ok(())
             }
         }
     }
@@ -315,22 +321,164 @@ fn write_private(
             fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
         }
     }
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
-    let tmp = PathBuf::from(tmp);
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    let mut file = options.open(&tmp)?;
+    let (mut file, tmp) = create_temp(path, &mut || getrandom::u64().map_err(io::Error::other))?;
+    // Every failure or unwind after the file exists removes it, so no token
+    // is left behind in the folder.
+    let mut staged = TempFile {
+        path: tmp,
+        armed: true,
+    };
     file.write_all(bytes)?;
+    #[cfg(any(test, feature = "test-hooks"))]
+    if write_fails(path) {
+        return Err(io::Error::other("injected token write failure"));
+    }
     file.sync_all()?;
     if !commit() {
-        fs::remove_file(&tmp)?;
+        fs::remove_file(&staged.path)?;
+        staged.armed = false;
         return Ok(false);
     }
-    fs::rename(&tmp, path)?;
+    fs::rename(&staged.path, path)?;
+    staged.armed = false;
     Ok(true)
+}
+
+/// A staged temporary file, removed when dropped while `armed`.
+struct TempFile {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        // The write error is the one to report; a failed cleanup adds nothing.
+        if self.armed {
+            drop(fs::remove_file(&self.path));
+        }
+    }
+}
+
+/// How many random names `create_temp` tries before giving up.
+const TEMP_NAME_TRIES: u32 = 8;
+
+/// Creates `<path>.<16 hex digits>.tmp` beside `path`, owner-only on unix,
+/// with the digits from `names`. The open is `create_new` (O_CREAT | O_EXCL),
+/// so a file or a symlink already at the name is never followed, written or
+/// replaced: the name is just tried again, up to `TEMP_NAME_TRIES` times.
+fn create_temp(
+    path: &Path,
+    names: &mut impl FnMut() -> io::Result<u64>,
+) -> io::Result<(fs::File, PathBuf)> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    for _ in 0..TEMP_NAME_TRIES {
+        let mut tmp = path.as_os_str().to_owned();
+        tmp.push(format!(".{:016x}.tmp", names()?));
+        let tmp = PathBuf::from(tmp);
+        match options.open(&tmp) {
+            Ok(file) => return Ok((file, tmp)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::from(io::ErrorKind::AlreadyExists))
+}
+
+/// Removes the leftovers of the token file `name` in `dir`: the crash
+/// leftovers `<name>.<16 lowercase hex digits>.tmp` and the fixed name
+/// `<name>.tmp` earlier builds wrote, so another key's file never matches,
+/// even when its name starts with this one's (key file names have no `.`).
+/// Links are unlinked, never followed, and directories are skipped.
+///
+/// Best effort: it keeps going past a failure and returns the first one with
+/// the path that failed.
+fn remove_leftovers(dir: &Path, name: &str) -> Result<(), (PathBuf, io::Error)> {
+    let is_leftover = |file: &std::ffi::OsStr| {
+        file.to_str()
+            .and_then(|file| file.strip_suffix(".tmp"))
+            .is_some_and(|stem| {
+                stem == name
+                    || stem
+                        .strip_prefix(name)
+                        .and_then(|rest| rest.strip_prefix('.'))
+                        .is_some_and(|hex| {
+                            hex.len() == 16
+                                && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+                        })
+            })
+    };
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err((dir.to_owned(), error)),
+    };
+    let mut first = None;
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                first.get_or_insert((dir.to_owned(), error));
+                continue;
+            }
+        };
+        if !is_leftover(&entry.file_name()) {
+            continue;
+        }
+        let removed = match entry.file_type() {
+            Ok(kind) if kind.is_dir() => Ok(()),
+            Ok(_) => fs::remove_file(entry.path()),
+            Err(error) => Err(error),
+        };
+        match removed {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => {
+                first.get_or_insert((entry.path(), error));
+            }
+            _ => {}
+        }
+    }
+    first.map_or(Ok(()), Err)
+}
+
+/// Token files whose next write fails once the temporary file is written.
+#[cfg(any(test, feature = "test-hooks"))]
+static FAILING_WRITES: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+/// Ends the failure `fail_token_writes` started when dropped.
+#[cfg(any(test, feature = "test-hooks"))]
+#[must_use = "the failure ends when the guard is dropped"]
+#[derive(Debug)]
+pub struct TokenWriteFailure(PathBuf);
+
+#[cfg(any(test, feature = "test-hooks"))]
+impl Drop for TokenWriteFailure {
+    fn drop(&mut self) {
+        if let Ok(mut failing) = FAILING_WRITES.lock()
+            && let Some(at) = failing.iter().position(|p| *p == self.0)
+        {
+            failing.swap_remove(at);
+        }
+    }
+}
+
+/// Makes every write to the token file at `path` fail after its temporary
+/// file is written, until the guard is dropped, so a test can check the
+/// failure path and its cleanup.
+#[cfg(any(test, feature = "test-hooks"))]
+pub fn fail_token_writes(path: PathBuf) -> TokenWriteFailure {
+    if let Ok(mut failing) = FAILING_WRITES.lock() {
+        failing.push(path.clone());
+    }
+    TokenWriteFailure(path)
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+fn write_fails(path: &Path) -> bool {
+    FAILING_WRITES
+        .lock()
+        .is_ok_and(|failing| failing.iter().any(|p| p == path))
 }
 
 #[cfg(test)]
@@ -437,11 +585,19 @@ mod tests {
         assert_eq!(files(), [OsString::from(ours.file_name())]);
         // The check runs once the new file is staged and before it replaces
         // the old token, which is the latest a store can run it.
-        let staged = tokens.join(format!("{}.tmp", ours.file_name()));
+        let staged = || {
+            let found: Vec<_> = fs::read_dir(&tokens)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .filter(|path| path.extension().is_some_and(|ext| ext == "tmp"))
+                .collect();
+            assert_eq!(found.len(), 1);
+            found[0].clone()
+        };
         assert!(
             store
                 .set_if(&ours, "third", || {
-                    assert_eq!(fs::read_to_string(&staged).unwrap(), "third");
+                    assert_eq!(fs::read_to_string(staged()).unwrap(), "third");
                     assert_eq!(store.get(&ours).unwrap().as_deref(), Some("first"));
                     true
                 })
@@ -449,6 +605,216 @@ mod tests {
         );
         assert_eq!(store.get(&ours).unwrap().as_deref(), Some("third"));
         assert_eq!(files(), [OsString::from(ours.file_name())]);
+    }
+
+    fn temp_files(dir: &Path) -> Vec<PathBuf> {
+        fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "tmp"))
+            .collect()
+    }
+
+    #[test]
+    fn a_failed_write_leaves_no_temp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let tokens = dir.path().join("tokens");
+        let store = TokenStore::Dir(tokens.clone());
+        let ours = key("https://hub.example.com");
+        let _failure = fail_token_writes(tokens.join(ours.file_name()));
+        assert!(store.set_if(&ours, "secret", || true).is_err());
+        assert!(temp_files(&tokens).is_empty());
+        assert_eq!(store.get(&ours).unwrap(), None);
+    }
+
+    /// A name source that hands out `names` in order.
+    fn names(names: &[u64]) -> impl FnMut() -> io::Result<u64> + use<'_> {
+        let mut names = names.iter();
+        move || Ok(*names.next().expect("create_temp asked for too many names"))
+    }
+
+    fn temp_name(path: &Path, name: u64) -> PathBuf {
+        let mut tmp = path.as_os_str().to_owned();
+        tmp.push(format!(".{name:016x}.tmp"));
+        PathBuf::from(tmp)
+    }
+
+    #[test]
+    fn a_taken_temp_name_is_skipped_and_the_planted_file_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tok-aa");
+        fs::write(temp_name(&path, 1), "keep").unwrap();
+        let (mut file, tmp) = create_temp(&path, &mut names(&[1, 2])).unwrap();
+        file.write_all(b"new").unwrap();
+        assert_eq!(tmp, temp_name(&path, 2));
+        assert_eq!(fs::read_to_string(temp_name(&path, 1)).unwrap(), "keep");
+        assert_eq!(fs::read_to_string(tmp).unwrap(), "new");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_planted_link_at_a_temp_name_is_never_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tok-aa");
+        let victim = dir.path().join("victim");
+        fs::write(&victim, "keep").unwrap();
+        std::os::unix::fs::symlink(&victim, temp_name(&path, 1)).unwrap();
+        // A link to a missing file is refused too: create_new never follows.
+        std::os::unix::fs::symlink(dir.path().join("missing"), temp_name(&path, 2)).unwrap();
+        let (_file, tmp) = create_temp(&path, &mut names(&[1, 2, 3])).unwrap();
+        assert_eq!(tmp, temp_name(&path, 3));
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "keep");
+        assert!(!dir.path().join("missing").exists());
+        assert!(
+            fs::symlink_metadata(temp_name(&path, 1))
+                .unwrap()
+                .is_symlink()
+        );
+    }
+
+    #[test]
+    fn temp_names_give_up_after_the_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tok-aa");
+        fs::write(temp_name(&path, 1), "keep").unwrap();
+        let mut asked = 0;
+        let error = create_temp(&path, &mut || {
+            asked += 1;
+            Ok(1)
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(asked, TEMP_NAME_TRIES);
+        assert_eq!(fs::read_to_string(temp_name(&path, 1)).unwrap(), "keep");
+    }
+
+    #[test]
+    fn two_writes_in_a_row_leave_no_temp_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let tokens = dir.path().join("tokens");
+        let store = TokenStore::Dir(tokens.clone());
+        let ours = key("https://hub.example.com");
+        assert!(store.set_if(&ours, "one", || true).unwrap());
+        assert!(store.set_if(&ours, "two", || true).unwrap());
+        assert_eq!(store.get(&ours).unwrap().as_deref(), Some("two"));
+        assert!(temp_files(&tokens).is_empty());
+    }
+
+    #[test]
+    fn a_failed_rename_leaves_no_temp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let tokens = dir.path().join("tokens");
+        let store = TokenStore::Dir(tokens.clone());
+        let ours = key("https://hub.example.com");
+        // A directory where the token belongs makes the rename fail.
+        fs::create_dir_all(tokens.join(ours.file_name())).unwrap();
+        assert!(store.set_if(&ours, "secret", || true).is_err());
+        assert!(temp_files(&tokens).is_empty());
+    }
+
+    #[test]
+    fn a_panicking_check_leaves_no_temp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let tokens = dir.path().join("tokens");
+        let store = TokenStore::Dir(tokens.clone());
+        let ours = key("https://hub.example.com");
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            drop(store.set_if(&ours, "secret", || panic!("check failed")));
+        }));
+        assert!(result.is_err());
+        assert!(temp_files(&tokens).is_empty());
+    }
+
+    #[test]
+    fn delete_removes_that_keys_leftover_temp_files_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let tokens = dir.path().join("tokens");
+        let store = TokenStore::Dir(tokens.clone());
+        // A key whose file name is a prefix of the other's (names are `tok-`
+        // and hex), so a loose match would delete across them.
+        let short = TokenKey("https://hub.example.com idn7k2q".to_owned());
+        let long = key("https://hub.example.com");
+        assert!(long.file_name().starts_with(&short.file_name()));
+        assert!(store.set_if(&short, "secret", || true).unwrap());
+        let leftover =
+            |key: &TokenKey, hex: &str| tokens.join(format!("{}.{hex}.tmp", key.file_name()));
+        let mine = [
+            leftover(&short, "0123456789abcdef"),
+            leftover(&short, "fedcba9876543210"),
+        ];
+        let others = [
+            leftover(&long, "0123456789abcdef"),
+            // Not this writer's naming: wrong length or suffix.
+            leftover(&short, "0123"),
+            leftover(&short, "0123456789abcdeg"),
+            tokens.join(format!("{}.0123456789abcdef.tmp.bak", short.file_name())),
+        ];
+        for path in mine.iter().chain(&others) {
+            fs::write(path, "old").unwrap();
+        }
+        store.delete(&short).unwrap();
+        assert_eq!(store.get(&short).unwrap(), None);
+        assert!(mine.iter().all(|path| !path.exists()));
+        assert!(others.iter().all(|path| path.exists()));
+        // Deleting what is not there is still fine.
+        store.delete(&short).unwrap();
+    }
+
+    #[test]
+    fn delete_removes_the_legacy_fixed_temp_name_of_that_key_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let tokens = dir.path().join("tokens");
+        let store = TokenStore::Dir(tokens.clone());
+        let short = TokenKey("https://hub.example.com idn7k2q".to_owned());
+        let long = key("https://hub.example.com");
+        assert!(store.set_if(&short, "secret", || true).unwrap());
+        let legacy = |key: &TokenKey| tokens.join(format!("{}.tmp", key.file_name()));
+        let (mine, others) = (legacy(&short), [legacy(&long), tokens.join("other.tmp")]);
+        for path in others.iter().chain([&mine]) {
+            fs::write(path, "old").unwrap();
+        }
+        store.delete(&short).unwrap();
+        assert!(!mine.exists());
+        assert!(others.iter().all(|path| path.exists()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delete_unlinks_a_leftover_symlink_and_keeps_a_leftover_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let tokens = dir.path().join("tokens");
+        let store = TokenStore::Dir(tokens.clone());
+        let ours = key("https://hub.example.com");
+        assert!(store.set_if(&ours, "secret", || true).unwrap());
+        let target = dir.path().join("target");
+        fs::write(&target, "keep").unwrap();
+        let link = tokens.join(format!("{}.tmp", ours.file_name()));
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let folder = tokens.join(format!("{}.0123456789abcdef.tmp", ours.file_name()));
+        fs::create_dir(&folder).unwrap();
+        store.delete(&ours).unwrap();
+        assert!(fs::symlink_metadata(&link).is_err());
+        assert_eq!(fs::read_to_string(&target).unwrap(), "keep");
+        assert!(folder.is_dir());
+    }
+
+    // The crate has no log-capture helper, so this asserts only that the
+    // delete succeeds; the one warn naming the directory is not asserted.
+    #[cfg(unix)]
+    #[test]
+    fn delete_succeeds_when_the_leftover_sweep_cannot_run() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let tokens = dir.path().join("tokens");
+        let store = TokenStore::Dir(tokens.clone());
+        let ours = key("https://hub.example.com");
+        assert!(store.set_if(&ours, "secret", || true).unwrap());
+        // Write and search but no read: the token can go, the listing cannot.
+        fs::set_permissions(&tokens, fs::Permissions::from_mode(0o300)).unwrap();
+        let result = store.delete(&ours);
+        fs::set_permissions(&tokens, fs::Permissions::from_mode(0o700)).unwrap();
+        result.unwrap();
+        assert_eq!(store.get(&ours).unwrap(), None);
     }
 
     #[test]
