@@ -9,6 +9,11 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+# fail_token_writes, so a test can force a token store write to fail.
+# Never a default feature, never enabled by a normal dependency.
+test-hooks = []
+
 [dependencies]
 agmen-proto = { version = "0.1.0", path = "../agmen-proto" }
 base64 = "0.23.1"

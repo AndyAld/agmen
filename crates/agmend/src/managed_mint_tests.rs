@@ -1,7 +1,169 @@
 use super::*;
 
+use crate::hub_mint::tests::{Calls, Failure, connect_failure_hub, mint_router};
 use agmen_local::ApiError;
 use agmen_proto::IdentityId;
+
+async fn ambiguous_hub(f: &mut Fixture, failure: Failure, roster: Value) -> Arc<Calls> {
+    failure.configure(f.daemon.core.origins.hub());
+    let (app, calls) = mint_router(failure, "agent002", roster);
+    f.hub.abort();
+    assert!((&mut f.hub).await.unwrap_err().is_cancelled());
+    let socket = tokio::net::TcpListener::bind(f.hub_url.socket_addrs(|| None).unwrap()[0])
+        .await
+        .unwrap();
+    f.hub = tokio::spawn(async move { axum::serve(socket, app).await.unwrap() });
+    calls
+}
+
+async fn ambiguous_agent_rollback(failure: Failure) {
+    let mut f = Fixture::new().await;
+    let calls = ambiguous_hub(&mut f, failure, json!([offline_agent()])).await;
+    let (logs, _guard) = capture();
+    let error = other(&f, None).await.unwrap_err();
+    failure.assert_error(&error);
+    assert_eq!(calls.mints.load(Ordering::SeqCst), 1);
+    assert_eq!(calls.roster.load(Ordering::SeqCst), 1);
+    assert_eq!(*calls.revoked.lock().unwrap(), ["agent002"]);
+    assert!(assert_private(&logs, &error).contains("agent002"));
+    assert_no_credentials(&f).await;
+    assert!(f.daemon.core.managed.workers.lock().await.is_empty());
+    let login = f
+        .daemon
+        .core
+        .origins
+        .hub()
+        .credentials()
+        .login()
+        .await
+        .unwrap();
+    assert!(
+        !f.daemon
+            .core
+            .managed
+            .on_record(&login, &"agent002".parse().unwrap())
+            .await
+    );
+    assert_eq!(other(&f, None).await.unwrap()["identity"], "agent002");
+    assert_eq!(calls.mints.load(Ordering::SeqCst), 2);
+    assert_eq!(*calls.revoked.lock().unwrap(), ["agent002"]);
+    f.daemon.core.managed.shutdown().await;
+}
+
+#[tokio::test]
+async fn agent_ambiguous_late_headers_revokes_and_allows_retry() {
+    ambiguous_agent_rollback(Failure::LateHeaders).await;
+}
+
+#[tokio::test]
+async fn agent_ambiguous_late_body_revokes_and_allows_retry() {
+    ambiguous_agent_rollback(Failure::LateBody).await;
+}
+
+#[tokio::test]
+async fn agent_ambiguous_reset_body_revokes_and_allows_retry() {
+    ambiguous_agent_rollback(Failure::ResetBody).await;
+}
+
+#[tokio::test]
+async fn agent_ambiguous_oversized_body_revokes_and_allows_retry() {
+    ambiguous_agent_rollback(Failure::OversizedBody).await;
+}
+
+#[tokio::test]
+async fn agent_ambiguous_oversized_stream_revokes_and_allows_retry() {
+    ambiguous_agent_rollback(Failure::OversizedStream).await;
+}
+
+#[tokio::test]
+async fn agent_ambiguous_lookup_preserves_on_record_and_hello_entries() {
+    for failure in [
+        Failure::LateHeaders,
+        Failure::LateBody,
+        Failure::ResetBody,
+        Failure::OversizedBody,
+        Failure::OversizedStream,
+    ] {
+        for held in [true, false] {
+            let mut f = Fixture::new().await;
+            let mut roster = offline_agent();
+            if held {
+                stopped_worker(&mut f, "other").await;
+            } else {
+                roster["model"] = json!("sonnet");
+            }
+            let calls = ambiguous_hub(&mut f, failure, json!([roster])).await;
+            let (logs, _guard) = capture();
+            let error = other(&f, None).await.unwrap_err();
+            failure.assert_error(&error);
+            assert_private(&logs, &error);
+            assert_eq!(calls.roster.load(Ordering::SeqCst), 1, "{failure:?}");
+            assert!(calls.revoked.lock().unwrap().is_empty(), "{failure:?}");
+        }
+    }
+}
+
+// A mint that timed out may never have reached the hub: with no fresh match in
+// the roster the lookup reads it once and revokes nothing.
+#[tokio::test]
+async fn agent_timeout_without_a_fresh_match_revokes_nothing() {
+    for roster in [
+        json!([]),
+        json!([entry("agent002", "owner/other", "agent", "online")]),
+        json!([entry("agent002", "owner/someone", "agent", "offline")]),
+        json!([entry("agent002", "owner/other", "listener", "offline")]),
+    ] {
+        let mut f = Fixture::new().await;
+        let failure = Failure::LateHeaders;
+        let calls = ambiguous_hub(&mut f, failure, roster.clone()).await;
+        let error = other(&f, None).await.unwrap_err();
+        failure.assert_error(&error);
+        assert_eq!(calls.roster.load(Ordering::SeqCst), 1, "{roster}");
+        assert!(calls.revoked.lock().unwrap().is_empty(), "{roster}");
+    }
+}
+
+#[tokio::test]
+async fn agent_refusal_with_an_oversized_body_skips_lookup_and_revoke() {
+    let mut f = Fixture::new().await;
+    let failure = Failure::OversizedRefusal;
+    let calls = ambiguous_hub(&mut f, failure, json!([offline_agent()])).await;
+    let error = other(&f, None).await.unwrap_err();
+    assert_eq!(calls.mints.load(Ordering::SeqCst), 1);
+    assert_eq!(calls.roster.load(Ordering::SeqCst), 0);
+    assert!(calls.revoked.lock().unwrap().is_empty());
+    failure.assert_error(&error);
+}
+
+#[tokio::test]
+async fn agent_mint_connect_failure_skips_lookup_and_revoke() {
+    let mut f = Fixture::new().await;
+    let calls = ambiguous_hub(&mut f, Failure::ResetBody, json!([offline_agent()])).await;
+    let mut managed = Managed::new(
+        f.daemon.core.origins.clone(),
+        f.runner.clone(),
+        f.dir.path().to_owned(),
+        Some(f.dir.path().join("claude")),
+        None,
+        None,
+    );
+    managed.hub = connect_failure_hub(&managed.hub).await;
+    managed.attach(&f.daemon.core.identities).await;
+    let (logs, _guard) = capture();
+    let error = Arc::new(managed)
+        .launch(json!({"project":"project1","name":"other","root":f.dir.path().join("repo")}))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, agmen_local::ErrorCode::Hub);
+    assert!(error.message.contains("connect"), "{error:?}");
+    assert_eq!(calls.mints.load(Ordering::SeqCst), 0);
+    assert_eq!(calls.roster.load(Ordering::SeqCst), 0);
+    assert!(calls.revoked.lock().unwrap().is_empty());
+    assert!(
+        !assert_private(&logs, &error).contains("unregistered hub"),
+        "no rollback attempted"
+    );
+}
 
 const MINT_TOKEN: &str = "fake-private-mint-token";
 const DECOY: &str = "decoy001";
@@ -197,29 +359,23 @@ async fn mint_missing_role_verbs_revokes_only_roster_match() {
     invalid_answer(Answer::MissingVerbs).await;
 }
 
-fn block_token_write(fixture: &Fixture, origin: &url::Url) {
+#[cfg(feature = "test-hooks")]
+fn block_token_write(fixture: &Fixture, origin: &url::Url) -> agmen_client::TokenWriteFailure {
     let key = agmen_client::TokenKey::new(origin, &"agent002".parse().unwrap()).unwrap();
     let hex: String = key
         .as_str()
         .bytes()
         .map(|byte| format!("{byte:02x}"))
         .collect();
-    // Reuse the directory-store failure injection used by identity registration tests.
-    std::fs::create_dir(
-        fixture
-            .dir
-            .path()
-            .join("tokens")
-            .join(format!("tok-{hex}.tmp")),
-    )
-    .unwrap();
+    agmen_client::fail_token_writes(fixture.dir.path().join("tokens").join(format!("tok-{hex}")))
 }
 
+#[cfg(feature = "test-hooks")]
 #[tokio::test]
 async fn mint_token_store_failure_revokes_validated_id() {
     let mut fixture = Fixture::new().await;
     mint_hub(&mut fixture, Answer::Valid, false).await;
-    block_token_write(&fixture, &fixture.hub_url);
+    let _blocked = block_token_write(&fixture, &fixture.hub_url);
     let (logs, _guard) = capture();
     let failure = other(&fixture, None).await.unwrap_err();
     let logs = assert_private(&logs, &failure);
@@ -228,11 +384,12 @@ async fn mint_token_store_failure_revokes_validated_id() {
     assert!(logs.contains("agent002"));
 }
 
+#[cfg(feature = "test-hooks")]
 #[tokio::test]
 async fn mint_register_failure_deletes_token_when_revoke_fails() {
     let mut fixture = Fixture::new().await;
     mint_hub(&mut fixture, Answer::Valid, true).await;
-    block_token_write(&fixture, &"https://agmend.invalid".parse().unwrap());
+    let _blocked = block_token_write(&fixture, &"https://agmend.invalid".parse().unwrap());
     let (logs, _guard) = capture();
     let failure = other(&fixture, None).await.unwrap_err();
     assert_eq!(*fixture.revoked.lock().unwrap(), ["agent002"]);
@@ -247,11 +404,12 @@ async fn mint_register_failure_deletes_token_when_revoke_fails() {
     );
 }
 
+#[cfg(feature = "test-hooks")]
 #[tokio::test]
 async fn mint_register_failure_revokes_and_reports_no_leftover_identity() {
     let mut fixture = Fixture::new().await;
     mint_hub(&mut fixture, Answer::Valid, false).await;
-    block_token_write(&fixture, &"https://agmend.invalid".parse().unwrap());
+    let _blocked = block_token_write(&fixture, &"https://agmend.invalid".parse().unwrap());
     let (logs, _guard) = capture();
     let failure = other(&fixture, None).await.unwrap_err();
     assert_private(&logs, &failure);

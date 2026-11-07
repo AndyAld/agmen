@@ -29,6 +29,13 @@ use crate::login::Credentials;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long to wait for a TCP connection.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long the mint request may take: just above the connect timeout. A
+/// request's own timeout starts before its connect and is polled first, so at
+/// the connect timeout's length it would end a stalled connect as a plain
+/// timeout. Above it, the client's connect timeout ends a stalled connect as a
+/// connect error, and a plain timeout only means silence after the connection
+/// was made (see `HubError::mint_may_have_committed`).
+const MINT_REQUEST_TIMEOUT: Duration = CONNECT_TIMEOUT.saturating_add(Duration::from_secs(1));
 /// The longest silence on a connection: three of the hub's 15 s
 /// keep-alives, so a dead events stream is noticed within 45 s.
 const READ_TIMEOUT: Duration = Duration::from_secs(45);
@@ -80,6 +87,38 @@ pub(crate) enum HubError {
 }
 
 impl HubError {
+    /// Whether a failed mint may have committed, so the guarded roster lookup
+    /// runs. A refusal never does: it made nothing (a 409 handle_taken while a
+    /// stopped worker of mine holds the handle). A transport error does unless
+    /// reqwest proves the request never left: its connect errors (DNS, TCP
+    /// connect, TLS handshake, the client's connect timeout) and builder errors.
+    ///
+    /// Reqwest cannot say whether a request was written, and marks no timeout
+    /// before the response as coming after the connection was made. A request's
+    /// own timeout starts before its connect and is polled first, so at the
+    /// connect timeout's length it would end a stalled connect as a plain
+    /// timeout (reqwest 0.13.5, async_impl/client.rs, `PendingRequest::poll`).
+    /// The mint request therefore has `MINT_REQUEST_TIMEOUT`, just above the
+    /// connect timeout: a stalled connect (blackholed SYN, slow DNS) always ends
+    /// as the client's connect timeout, a connect error that gets no lookup, and
+    /// only silence after the connection was made counts as ambiguous. Looking up
+    /// only after a response would strand the late answer this exists for. The
+    /// lookup stays bounded: one roster read (a hub that stalled often cannot
+    /// answer it, which ends the lookup), then a revoke only if exactly one
+    /// offline identity of this kind and handle, with no HELLO, is unknown to
+    /// this daemon. When nothing was minted that is this daemon's own earlier
+    /// stranded mint, which is the one to remove, or an identity of the same
+    /// person made elsewhere that never named an agent or model: the residual of
+    /// `rollback_untrusted_hub_mint`, as for any lost answer.
+    pub(crate) fn mint_may_have_committed(&self) -> bool {
+        match self {
+            Self::BadAnswer(_) | Self::Body(_) => true,
+            // A plain timeout is silence after the connection was made (see above).
+            Self::Http(error) => !error.is_connect() && !error.is_builder(),
+            _ => false,
+        }
+    }
+
     /// Whether retrying soon will not help: nobody is signed in, the hub
     /// refused the sign-in, or it refused this person the project (401,
     /// 403, 404). Everything else (unreachable, 5xx, a broken answer) is
@@ -181,6 +220,9 @@ struct Head {
 pub(crate) struct Hub {
     http: reqwest::Client,
     credentials: std::sync::Arc<Credentials>,
+    /// Test seam: the timeout of the next mint only, so a retry runs at full length.
+    #[cfg(test)]
+    pub(crate) mint_timeout: std::sync::Mutex<Option<Duration>>,
 }
 
 impl Hub {
@@ -189,6 +231,14 @@ impl Hub {
         &self,
         body: &serde_json::Value,
     ) -> Result<serde_json::Value, HubError> {
+        let timeout = MINT_REQUEST_TIMEOUT;
+        #[cfg(test)]
+        let timeout = self
+            .mint_timeout
+            .lock()
+            .ok()
+            .and_then(|mut next| next.take())
+            .unwrap_or(timeout);
         let (login, token) = self.credentials.access().await?;
         agmen_client::check_hub_url(&login.hub_url).map_err(LoginError::from)?;
         let mut url = login.hub_url.clone();
@@ -201,11 +251,21 @@ impl Hub {
             .post(url)
             .bearer_auth(token)
             .json(body)
-            .timeout(REQUEST_TIMEOUT)
+            .timeout(timeout)
             .send()
             .await
             .map_err(HubError::Http)?;
-        json_with_limit(response, MAX_HUB_RESPONSE_BYTES).await
+        let status = response.status();
+        match json_with_limit(response, MAX_HUB_RESPONSE_BYTES).await {
+            // A refusal made nothing, so one whose body is over the cap is no
+            // ambiguity: keep it a refusal, which gets no roster lookup.
+            Err(HubError::Body(_)) if !status.is_success() => Err(HubError::Refused {
+                status: status.as_u16(),
+                code: String::new(),
+                description: String::new(),
+            }),
+            answer => answer,
+        }
     }
     /// Revokes one of the person's identities, as `agmen leave` does
     /// (`DELETE /v1/identities/{id}` with the owner's token). `Ok(false)`
@@ -239,7 +299,12 @@ impl Hub {
         http: reqwest::Client,
         credentials: std::sync::Arc<Credentials>,
     ) -> Self {
-        Self { http, credentials }
+        Self {
+            http,
+            credentials,
+            #[cfg(test)]
+            mint_timeout: std::sync::Mutex::new(None),
+        }
     }
 
     /// An HTTP client for the hub: no redirects, bounded connect and read.
@@ -258,6 +323,11 @@ impl Hub {
 
     pub(crate) fn credentials(&self) -> &Credentials {
         &self.credentials
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_http(&self, http: reqwest::Client) -> Self {
+        Self::new(http, self.credentials.clone())
     }
 
     /// Sends `method` to `/v1/projects/{project}/<segments>?<query>` with
@@ -868,5 +938,96 @@ mod tests {
                 assert!(error.to_string().contains("16777216 byte limit"), "{error}");
             }
         }
+    }
+
+    /// Resolves nothing, so a request never leaves its connect phase.
+    struct Stalled;
+
+    impl reqwest::dns::Resolve for Stalled {
+        fn resolve(&self, _name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    /// The error of a POST to `url` that fails, or times out after `wait`.
+    async fn send_error(
+        client: reqwest::ClientBuilder,
+        url: &str,
+        wait: Duration,
+    ) -> reqwest::Error {
+        let client = client.no_proxy().build().unwrap();
+        client.post(url).timeout(wait).send().await.unwrap_err()
+    }
+
+    // Only a failure that proves the request never left skips the mint lookup.
+    #[tokio::test]
+    async fn mint_lookup_skips_only_errors_before_the_request_is_written() {
+        let client = reqwest::Client::builder;
+        let (long, short) = (Duration::from_secs(30), Duration::from_millis(50));
+        let lookup = |error| HubError::Http(error).mint_may_have_committed();
+        // Nothing listens: the connection is refused.
+        let socket = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let closed = format!("http://{}/", socket.local_addr().unwrap());
+        drop(socket);
+        assert!(!lookup(send_error(client(), &closed, long).await));
+        // A request reqwest cannot build is never sent.
+        let unbuildable = send_error(client(), "ftp://hub.invalid/", long).await;
+        assert!(unbuildable.is_builder() && !lookup(unbuildable));
+        // The client's connect timeout is a connect error as well as a timeout.
+        let stalled = || client().dns_resolver(Stalled);
+        let url = "http://hub.invalid/";
+        let error = send_error(stalled().connect_timeout(short), url, long).await;
+        assert!(error.is_connect() && error.is_timeout(), "{error:?}");
+        assert!(!lookup(error));
+        // The request's own timeout is not a connect error, whichever phase it
+        // ends, so one that beats the connect timeout gets the lookup. The mint's
+        // (`MINT_REQUEST_TIMEOUT`) is above it: a stalled connect never ends this way.
+        let error = send_error(stalled().connect_timeout(long), url, short).await;
+        assert!(error.is_timeout() && !error.is_connect(), "{error:?}");
+        assert!(lookup(error));
+        // A connected socket nobody answers: the request was written.
+        let silent = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", silent.local_addr().unwrap());
+        assert!(lookup(send_error(client(), &url, short).await));
+    }
+
+    // A stalled connect ends the mint as the client's connect timeout, a connect
+    // error, so it gets no roster lookup: the hub never saw the request.
+    #[tokio::test]
+    async fn mint_against_a_stalled_connect_ends_as_a_connect_error() {
+        use agmen_client::{HumanTokens, Login, TokenStore, store_tokens};
+
+        // The production pair scaled down: the mint's timeout sits as far above
+        // the client's connect timeout as the production one does.
+        let connect = Duration::from_millis(100);
+        let http = reqwest::Client::builder()
+            .no_proxy()
+            .dns_resolver(Stalled)
+            .connect_timeout(connect)
+            .build()
+            .unwrap();
+        let login = Login {
+            hub_url: "https://hub.invalid/".parse().unwrap(),
+            human_id: "hmn7k2q9".parse().unwrap(),
+            handle: "andy".to_owned(),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let login_file = dir.path().join("login.json");
+        std::fs::write(&login_file, serde_json::to_vec(&login).unwrap()).unwrap();
+        let store = TokenStore::Dir(dir.path().join("tokens"));
+        let tokens = HumanTokens::new("access".into(), "refresh".into(), 3600);
+        store_tokens(&store, &login, &tokens).await.unwrap();
+        let hub = Hub::new(
+            http.clone(),
+            std::sync::Arc::new(Credentials::new(login_file, store, http)),
+        );
+        *hub.mint_timeout.lock().unwrap() =
+            Some(connect + MINT_REQUEST_TIMEOUT.saturating_sub(CONNECT_TIMEOUT));
+        let error = hub.mint_identity(&serde_json::json!({})).await.unwrap_err();
+        assert!(
+            matches!(&error, HubError::Http(source) if source.is_connect() && source.is_timeout()),
+            "{error:?}"
+        );
+        assert!(!error.mint_may_have_committed(), "{error:?}");
     }
 }

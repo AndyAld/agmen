@@ -10,6 +10,10 @@ use agmen_proto::{IdentityId, IdentityKind, ProjectId};
 use crate::hub::Hub;
 use crate::identities::Identities;
 
+#[cfg(test)]
+#[path = "hub_mint_tests.rs"]
+pub(crate) mod tests;
+
 /// Revokes a hub mint the caller made but will not keep, and deletes its stored
 /// credential. Both steps are best effort and both run, so one that fails
 /// cannot skip the other. Their errors may contain hub text or credentials, so
@@ -63,12 +67,13 @@ pub(crate) async fn identity_on_record(
         .map_or(true, |token| token.is_some())
 }
 
-/// Rolls back a hub mint that was accepted but whose answer cannot be trusted
-/// to name it: not JSON, the wrong shape, or another handle or project. Its id
+/// Rolls back a hub mint whose outcome is ambiguous or whose answer cannot be
+/// trusted to name it: a transport failure, an oversized body, invalid JSON,
+/// the wrong shape, or another handle or project. An id in such an answer
 /// is not safe to revoke, because DELETE takes any identity the person may
 /// administer, and a group admin may administer a teammate's. The hub allows
 /// one live identity per handle in a project (identities_live_handle), and
-/// mint accepts only the owner's handle prefix. So after a success status, an
+/// mint accepts only the owner's handle prefix. So after a possible mint, an
 /// offline identity of the requested kind and handle in this project's roster
 /// is this mint only if it is fresh: a stopped worker or listener of the
 /// person's is just as live and offline under that handle. Fresh means the
