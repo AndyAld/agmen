@@ -132,26 +132,38 @@ impl Workspace {
         agents_panel.update(cx, |panel, cx| {
             panel.set_listener(snapshot.listener_id().cloned(), cx);
             panel.set_notice(snapshot.agent_notice.clone(), cx);
+            panel.set_recents(snapshot.recents.len(), cx);
             panel.set_managed(
                 snapshot.managed_agents.clone(),
                 snapshot.agent_error.clone(),
                 cx,
             )
         });
-        let agents_events = cx.subscribe(&agents_panel, |this, _, event, cx| match event {
-            AgentsPanelEvent::Selected(id) => this.select_agent(id, cx),
-            AgentsPanelEvent::NewAgent => this.open_new_agent(cx),
-            AgentsPanelEvent::Stop(id) => this.stop_managed_agent(id, cx),
-            AgentsPanelEvent::Start(id) => this.start_agent(id, cx),
-            AgentsPanelEvent::Attach(id) => this.attach_agent(id, cx),
-            AgentsPanelEvent::Detach(id) => this.detach_agent(id, cx),
-            AgentsPanelEvent::Remove(id) => this.ask_remove(id, cx),
-        });
+        let agents_events =
+            cx.subscribe_in(
+                &agents_panel,
+                window,
+                |this, _, event, window, cx| match event {
+                    AgentsPanelEvent::Selected(id) => this.select_agent(id, cx),
+                    AgentsPanelEvent::NewAgent => this.open_new_agent(cx),
+                    AgentsPanelEvent::OpenRecents => {
+                        window.dispatch_action(Box::new(crate::keymap::OpenRecents), cx);
+                    }
+                    AgentsPanelEvent::Stop(id) => this.stop_managed_agent(id, cx),
+                    AgentsPanelEvent::Start(id) => this.start_agent(id, cx),
+                    AgentsPanelEvent::Attach(id) => this.attach_agent(id, cx),
+                    AgentsPanelEvent::Detach(id) => this.detach_agent(id, cx),
+                    AgentsPanelEvent::Remove(id) => this.ask_remove(id, cx),
+                },
+            );
         let chat = cx.new(|cx| ChatView::new(Rc::clone(&snapshot), window, cx));
         // Task 13: the status bar's counts and the toast redraw on any change;
         // Task 14: the roster and the Agent panel follow the chat's snapshot.
         let chat_changes = cx.observe(&chat, |this, _, cx| {
             this.follow_chat(cx);
+            this.agents_panel.update(cx, |panel, cx| {
+                panel.set_recents(this.snapshot.recents.len(), cx);
+            });
             cx.notify();
         });
         let pane_group = cx.new(|cx| PaneGroup::new(&snapshot, Some(chat.clone()), tabs, cx));

@@ -243,3 +243,21 @@ fn the_search_glyph_fills_the_mockups_box(cx: &mut TestAppContext) {
     assert_eq!(slot.size.width, ICON_MD);
     assert_eq!(slot.size.height, ICON_MD);
 }
+
+#[gpui::test]
+fn a_long_list_stays_within_the_height_cap(cx: &mut TestAppContext) {
+    // Zed's modal limit: the list scrolls past PALETTE_MAX_HEIGHT instead of
+    // growing over the windows below.
+    init(cx);
+    let (_, cx) = cx.add_window_view(|window, cx| {
+        let entries = (0..60)
+            .map(|n| PaletteEntry::new(format!("agmen: entry {n}"), Box::new(Quit)))
+            .collect();
+        CommandPalette::new(entries, window, cx)
+    });
+    redraw(cx);
+    let list = cx.debug_bounds("palette:list").unwrap();
+    // The list's cap and its 4 px padding either side.
+    let cap = PALETTE_MAX_HEIGHT + SPACE_4 * 2.;
+    assert!(list.size.height <= cap, "{:?} over {cap:?}", list.size);
+}

@@ -76,7 +76,8 @@ fn context_for(item: &TabItem, label: &str, snapshot: &Snapshot) -> Option<Strin
         | TabItem::Plan
         | TabItem::Spec(_)
         | TabItem::SettingsFile(_)
-        | TabItem::Search => None,
+        | TabItem::Search
+        | TabItem::Recents => None,
     }
 }
 

@@ -40,6 +40,8 @@ actions!(
         /// Opens the Search tab in the active pane (Zed's
         /// `pane::DeploySearch`).
         OpenSearch,
+        /// Opens the Recents tab of stopped managed agents. No key binding.
+        OpenRecents,
         /// Opens the Settings tab in the active pane (Zed's
         /// `zed::OpenSettings`).
         OpenSettings,
@@ -115,6 +117,12 @@ pub(crate) struct TakeOverAgent(pub(crate) agmen_proto::IdentityId);
 pub(crate) struct SpawnWorkerWith {
     pub(crate) agent: SharedString,
 }
+
+/// Asks to remove this stopped agent: the Recents tab's Remove. It names its
+/// agent, so no key or palette row runs it.
+#[derive(Debug, Clone, PartialEq, Eq, Action)]
+#[action(namespace = workspace, no_json)]
+pub(crate) struct AskRemoveAgent(pub(crate) agmen_proto::IdentityId);
 
 /// The key context the workspace's root sets.
 pub(crate) const WORKSPACE_CONTEXT: &str = "Workspace";
@@ -317,6 +325,7 @@ pub(crate) fn commands() -> Vec<Command> {
         window("git panel: toggle focus", Box::new(ToggleGitPanel)),
         window("roles panel: toggle focus", Box::new(ToggleRolesPanel)),
         window("pane: deploy search", Box::new(OpenSearch)),
+        window("agmen: open recents", Box::new(OpenRecents)),
         window("pane: split right", Box::new(SplitRight)),
         window("pane: close active item", Box::new(CloseActiveTab)),
         window("composer: dismiss", Box::new(Dismiss)),
