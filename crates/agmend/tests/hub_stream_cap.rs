@@ -425,10 +425,98 @@ async fn hub_skipped_seen_head_is_discarded_when_a_position_frees() {
     discarded_history(true, true).await;
 }
 
+/// SQLite refuses a second writer for longer than its 5 s busy timeout.
+const WRITE_LOCK_HELD: Duration = Duration::from_secs(7);
+
+#[tokio::test]
+async fn hub_undeliverable_heads_are_rechecked_without_a_write_transaction() {
+    let (mut daemon, state, server) = replay_fixture(false).await;
+    for seq in 1..=2 {
+        daemon
+            .hub
+            .state
+            .inject(discarded_message("inbox:revoked000", seq));
+    }
+    daemon
+        .hub
+        .state
+        .inject(support::stamped(1, "first pass consumed"));
+    daemon.resume();
+    wait_position(&daemon, "feed", 1).await;
+    // A held write lock fails any write transaction after the busy timeout. The
+    // recheck of an undeliverable head must neither take one nor end on one.
+    let path = daemon.home.database();
+    tokio::task::spawn_blocking(move || {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        std::thread::sleep(WRITE_LOCK_HELD);
+        conn.execute_batch("COMMIT").unwrap();
+    })
+    .await
+    .unwrap();
+    daemon
+        .hub
+        .state
+        .inject(support::stamped(2, "collector survived"));
+    state.disconnect.notify_waiters();
+    wait_position(&daemon, "feed", 2).await;
+    assert_eq!(state.passes.lock().unwrap()[1].after["inbox:revoked000"], 2);
+    stop_replay_fixture(daemon, state, server).await;
+}
+
+#[tokio::test]
+async fn hub_repick_without_room_keeps_heads_of_streams_still_skipped() {
+    let (mut daemon, state, server) = replay_fixture(true).await;
+    let path = daemon.home.database();
+    let copy = |name: &'static str| {
+        let path = path.clone();
+        tokio::task::spawn_blocking(move || {
+            rusqlite::Connection::open(path)
+                .unwrap()
+                .execute(
+                    "INSERT INTO identities SELECT origin,?1,owner,project,metadata FROM identities WHERE identity='agent001'",
+                    [name],
+                )
+                .unwrap();
+        })
+    };
+    copy("agent003").await.unwrap();
+    for stream in ["inbox:agent002", "inbox:agent003", "inbox:agent004"] {
+        for seq in 1..=3 {
+            daemon.hub.state.inject(discarded_message(stream, seq));
+        }
+    }
+    daemon
+        .hub
+        .state
+        .inject(support::stamped(1, "first pass consumed"));
+    daemon.resume();
+    wait_position(&daemon, "feed", 1).await;
+    daemon
+        .hub
+        .state
+        .inject(support::stamped(2, "second pass consumed"));
+    // agent004 becomes deliverable while the project is still full.
+    copy("agent004").await.unwrap();
+    wait_position(&daemon, "feed", 2).await;
+    {
+        let passes = state.passes.lock().unwrap();
+        for stream in ["inbox:agent002", "inbox:agent003"] {
+            assert!(
+                sent_for(&passes[1], stream).is_empty(),
+                "{stream} is still skipped and must not replay"
+            );
+            assert_eq!(passes[1].after[stream], 3);
+        }
+    }
+    stop_replay_fixture(daemon, state, server).await;
+}
+
 #[tokio::test]
 async fn hub_discarded_head_overflow_keeps_deliverable_cursors_first() {
     const REMOTE_STREAMS: usize = 600;
-    const DELIVERABLE_STREAMS: usize = SEEDED_IDENTITIES + 2;
+    // Only the feed has a saved position; deliverable streams without one are unnamed.
+    const NAMED_CURSORS: usize = 1;
     let (mut daemon, state, server) = replay_fixture(false).await;
     for n in 0..REMOTE_STREAMS {
         daemon
@@ -446,6 +534,8 @@ async fn hub_discarded_head_overflow_keeps_deliverable_cursors_first() {
         state.passes.lock().unwrap()[0].sent.len(),
         REMOTE_STREAMS + 1
     );
+    // An unnamed deliverable stream still gets every message from the hub.
+    daemon.hub.state.inject(inbox_message(1, 1));
     daemon
         .hub
         .state
@@ -460,21 +550,11 @@ async fn hub_discarded_head_overflow_keeps_deliverable_cursors_first() {
             "discarded heads must not add SSE connections"
         );
         assert_eq!(passes[1].after.len(), MAX_AFTER);
-        for stream in [
-            "feed",
-            "inbox:agent001",
-            "inbox:agent002",
-            &format!("inbox:{HUMAN}"),
-        ] {
-            assert!(
-                passes[1].after.contains_key(stream),
-                "missing deliverable cursor {stream}"
-            );
-        }
+        assert!(!passes[1].after.contains_key("inbox:agent001"));
         assert_eq!(passes[1].after["feed"], 1);
         assert_eq!(
             passes[1].sent.len(),
-            REMOTE_STREAMS - (MAX_AFTER - DELIVERABLE_STREAMS) + 1
+            REMOTE_STREAMS - (MAX_AFTER - NAMED_CURSORS) + 2
         );
     }
     assert_eq!(
@@ -485,6 +565,7 @@ async fn hub_discarded_head_overflow_keeps_deliverable_cursors_first() {
         .await,
         0
     );
+    wait_position(&daemon, "inbox:agent001", 1).await;
     stop_replay_fixture(daemon, state, server).await;
 }
 

@@ -50,9 +50,9 @@ const QUEUE_ALERT_MAX_BACKOFF: Duration = Duration::from_secs(30);
 /// agmen-hub's events endpoint refuses more positions in one SSE request.
 const MAX_HUB_AFTER: usize = 256;
 const MAX_HUB_CONNECTIONS: usize = MAX_STREAM_POSITIONS.div_ceil(MAX_HUB_AFTER);
-/// Discarded cursors live only for this collector. Beyond this bound, replay
-/// remains preferable to retaining an unbounded set of remote stream names.
-const MAX_HUB_SEEN_HEADS: usize = MAX_HUB_AFTER * MAX_HUB_CONNECTIONS;
+/// Discarded cursors live only for this collector. One request names at most
+/// `MAX_HUB_AFTER` streams, so more heads than that could never be sent.
+const MAX_HUB_SEEN_HEADS: usize = MAX_HUB_AFTER;
 const HUB_BACKOFF_SHIFT: u32 = 5;
 const HUB_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 const HUB_MAX_BACKOFF: Duration = Duration::from_secs(30);
@@ -1788,7 +1788,6 @@ fn hub_chunks(positions: &BTreeMap<Stream, u64>) -> Vec<BTreeMap<Stream, u64>> {
 fn hub_after(
     chunk: &BTreeMap<Stream, u64>,
     state: &CollectionState,
-    skipped: &BTreeSet<Stream>,
     seen: &BTreeMap<Stream, u64>,
 ) -> BTreeMap<Stream, u64> {
     let mut after = chunk.clone();
@@ -1798,16 +1797,8 @@ fn hub_after(
         }
         after.entry(stream.clone()).or_insert(*seq);
     }
-    // Active streams without a saved position still take priority over heads
-    // of discarded messages, without opening connections just for zero cursors.
-    for stream in &state.streams {
-        if after.len() >= MAX_HUB_AFTER {
-            break;
-        }
-        if !skipped.contains(stream) {
-            after.entry(stream.clone()).or_insert(0);
-        }
-    }
+    // A deliverable stream without a saved position stays unnamed: the hub
+    // sends it from 0 either way, so naming it would only waste a slot.
     // A new connection cannot suppress replay on another request that has no
     // room for these heads. Leave that overflow replay rather than add sockets.
     for (stream, seq) in seen {
@@ -1847,6 +1838,17 @@ impl Collection {
         let owner = self.owner.clone();
         store_work(self.store.clone(), move |s| {
             s.collection_positions(&origin, &owner, &project)
+        })
+        .await
+    }
+
+    /// The streams this collector delivers, read without a write transaction.
+    async fn active_streams(&self) -> Result<BTreeSet<Stream>, ApiError> {
+        let origin = self.origin.clone();
+        let project = self.project.clone();
+        let owner = self.owner.clone();
+        store_work(self.store.clone(), move |s| {
+            s.active_streams(&origin, &owner, &project)
         })
         .await
     }
@@ -2024,9 +2026,12 @@ impl Collection {
                     });
                     state
                 }
-                Err(error) => {
-                    self.send(Err(error));
-                    return;
+                Err(_) => {
+                    // A store error must not end the collector; retry later.
+                    tracing::warn!(project = %self.project, "collection state failed; retrying");
+                    tokio::time::sleep(self.timing.backoff(backoff_shift)).await;
+                    backoff_shift = (backoff_shift + 1).min(HUB_BACKOFF_SHIFT);
+                    continue;
                 }
             };
             let backoff = self.timing.backoff(backoff_shift);
@@ -2047,6 +2052,34 @@ impl Collection {
                 (backoff_shift + 1).min(HUB_BACKOFF_SHIFT)
             };
         }
+    }
+
+    /// Whether a skipped stream got room or a seen head became deliverable.
+    /// Only a skipped stream needs the write path (room check); heads alone are
+    /// rechecked by a read. A store error logs and retries on the next tick.
+    async fn should_reconnect(
+        &self,
+        skipped: &mut BTreeSet<Stream>,
+        seen: &BTreeMap<Stream, u64>,
+    ) -> bool {
+        let checked = if skipped.is_empty() {
+            self.active_streams().await.map(|streams| (false, streams))
+        } else {
+            self.collection_state()
+                .await
+                .map(|state| (state.room, state.streams))
+        };
+        let Ok((room, streams)) = checked else {
+            tracing::warn!(project = %self.project, "recheck failed; retrying");
+            return false;
+        };
+        // A re-picked stream is not skipped; clear skipped only with room.
+        if room {
+            skipped.clear();
+        }
+        room || seen
+            .keys()
+            .any(|stream| streams.contains(stream) && !skipped.contains(stream))
     }
 
     async fn hub_pass(
@@ -2071,7 +2104,7 @@ impl Collection {
         let mut healthy = false;
         let mut cleaned = tokio::time::Instant::now();
         'opening: for (index, chunk) in chunks.iter().enumerate().take(MAX_HUB_CONNECTIONS) {
-            let after = hub_after(chunk, &state, skipped, seen);
+            let after = hub_after(chunk, &state, seen);
             let opening =
                 tokio::time::timeout(DEADLINE, self.hub.events(&self.project, &after, None));
             tokio::pin!(opening);
@@ -2132,11 +2165,7 @@ impl Collection {
                 // The hub sends a skipped stream's backlog again only on a new
                 // connection, so reconnect once a position has freed.
                 _ = recheck.tick(), if !skipped.is_empty() || !seen.is_empty() => {
-                    let state = self.collection_state().await?;
-                    if (state.room && !skipped.is_empty())
-                        || seen.keys().any(|stream| state.streams.contains(stream) && !skipped.contains(stream))
-                    {
-                        skipped.clear();
+                    if self.should_reconnect(skipped, seen).await {
                         return Ok(false);
                     }
                 },

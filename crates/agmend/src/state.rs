@@ -615,12 +615,13 @@ impl Store {
     }
 
     /// Only registered inboxes and the person's streams belong to a collector.
-    pub(crate) fn collection_positions(
-        &mut self,
+    /// Read without a write transaction.
+    pub(crate) fn active_streams(
+        &self,
         origin: &str,
         owner: &IdentityId,
         project: &ProjectId,
-    ) -> Result<CollectionState, StoreError> {
+    ) -> Result<BTreeSet<Stream>, StoreError> {
         let mut streams = BTreeSet::from([Stream::Feed, Stream::Inbox(owner.clone())]);
         let mut stmt = self.conn.prepare("SELECT identity FROM identities WHERE origin=?1 AND owner=?2 AND project=?3 ORDER BY identity LIMIT ?4")?;
         for row in stmt.query_map(
@@ -632,7 +633,16 @@ impl Store {
                     .map_err(|_| StoreError::Invalid("stored identity"))?,
             ));
         }
-        drop(stmt);
+        Ok(streams)
+    }
+
+    pub(crate) fn collection_positions(
+        &mut self,
+        origin: &str,
+        owner: &IdentityId,
+        project: &ProjectId,
+    ) -> Result<CollectionState, StoreError> {
+        let streams = self.active_streams(origin, owner, project)?;
         let namespace = position_namespace(origin, Some(owner));
         let tx = self
             .conn
