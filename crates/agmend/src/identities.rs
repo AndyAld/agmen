@@ -175,6 +175,8 @@ pub(crate) struct Identities {
     hub: Arc<Hub>,
     runtimes: AsyncMutex<BTreeMap<RuntimeKey, RuntimeSlot>>,
     collectors: AsyncMutex<BTreeMap<ProjectKey, Collector>>,
+    /// The code of the catch-up failure last warned about, for each local project still failing.
+    catch_up_failures: Mutex<BTreeMap<ProjectId, ErrorCode>>,
     launched: AsyncMutex<BTreeSet<RuntimeKey>>,
     #[cfg(test)]
     pub(crate) publisher: Option<Publisher>,
@@ -349,6 +351,7 @@ impl Identities {
             state_dir,
             runtimes: AsyncMutex::new(BTreeMap::new()),
             collectors: AsyncMutex::new(BTreeMap::new()),
+            catch_up_failures: Mutex::new(BTreeMap::new()),
             launched: AsyncMutex::new(BTreeSet::new()),
             #[cfg(test)]
             publisher: None,
@@ -711,10 +714,9 @@ impl Identities {
     ) -> Result<Vec<StampedEnvelope>, ApiError> {
         // The pump marks a listener failed on any error here, so a failed catch-up
         // is logged and retried on the next drain instead of returned.
-        if agmen_client::is_local(&caller.hub_url)
-            && let Err(error) = self.project_channel(&caller.project).await
-        {
-            tracing::warn!(code = ?error.code, "listener collector catch-up failed");
+        if agmen_client::is_local(&caller.hub_url) {
+            let caught_up = self.project_channel(&caller.project).await;
+            self.log_catch_up(&caller.project, caught_up.err().map(|error| error.code));
         }
         let origin = agmen_client::origin_key(&caller.hub_url);
         let identity = caller.identity_id.clone();
@@ -722,6 +724,24 @@ impl Identities {
             store.drain(&origin, &identity, limit, byte_budget)
         })
         .await
+    }
+
+    /// The pump retries every second, so a failure that stays warns when it first
+    /// appears or its code changes and logs at debug after that. A success resets it.
+    fn log_catch_up(&self, project: &ProjectId, failure: Option<ErrorCode>) {
+        let mut failing = self
+            .catch_up_failures
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(code) = failure else {
+            failing.remove(project);
+            return;
+        };
+        if failing.insert(project.clone(), code) == Some(code) {
+            tracing::debug!(code = ?code, "listener collector catch-up failed again");
+        } else {
+            tracing::warn!(code = ?code, "listener collector catch-up failed");
+        }
     }
 
     /// Keeps a prompt below operating systems' per-argument size limit.
@@ -1654,6 +1674,35 @@ mod local_collection_tests {
         }
     }
 
+    impl LogBytes {
+        /// Captures this thread's output from debug up until the guard drops.
+        fn capture() -> (Self, tracing::subscriber::DefaultGuard) {
+            let logs = Self::default();
+            let guard = tracing::subscriber::set_default(
+                tracing_subscriber::fmt()
+                    .without_time()
+                    .with_ansi(false)
+                    .with_max_level(tracing::Level::DEBUG)
+                    .with_writer(logs.clone())
+                    .finish(),
+            );
+            (logs, guard)
+        }
+
+        /// Each listener catch-up line as "LEVEL Code", in the order written.
+        fn catch_ups(&self) -> Vec<String> {
+            let text = String::from_utf8(self.0.lock().unwrap().clone()).unwrap();
+            text.lines()
+                .filter(|line| line.contains("listener collector catch-up failed"))
+                .map(|line| {
+                    let level = line.split_whitespace().next().unwrap();
+                    let code = line.rsplit("code=").next().unwrap();
+                    format!("{level} {code}")
+                })
+                .collect()
+        }
+    }
+
     struct Fixture {
         _dir: tempfile::TempDir,
         daemon: crate::Agmend,
@@ -1769,6 +1818,16 @@ mod local_collection_tests {
                 .unwrap()
                 .into_iter()
                 .find(|row| row.identity_id == *id)
+                .unwrap()
+        }
+
+        /// A listener drain of one row, which errs only when the store does.
+        async fn listener_pending(&self, caller: &ManagedIdentity) -> Vec<StampedEnvelope> {
+            self.daemon
+                .core
+                .identities
+                .listener_pending(caller, 1, agmen_local::MAX_FRAME as usize - 4096)
+                .await
                 .unwrap()
         }
 
@@ -2022,6 +2081,95 @@ mod local_collection_tests {
                 .unwrap();
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0].client.id, dm.id);
+            f.stop().await;
+        })
+        .await
+        .unwrap();
+    }
+
+    // The pump drains once a second, so a permanent failure would warn forever.
+    #[tokio::test]
+    async fn listener_pending_warns_once_while_the_catch_up_keeps_failing() {
+        let (logs, _capture) = LogBytes::capture();
+        tokio::time::timeout(TEST_WAIT, async {
+            let f = Fixture::new().await;
+            let caller = f.caller(&f.agents[0]).await;
+            f.daemon.core.origins.local().shutdown().await;
+            for _ in 0..3 {
+                f.listener_pending(&caller).await;
+            }
+            assert_eq!(logs.catch_ups(), ["WARN Hub", "DEBUG Hub", "DEBUG Hub"]);
+            f.stop().await;
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn listener_pending_warns_again_when_the_catch_up_fails_with_a_new_code() {
+        let (logs, _capture) = LogBytes::capture();
+        tokio::time::timeout(TEST_WAIT, async {
+            let f = Fixture::new().await;
+            // No local.db record holds this project, so the catch-up reports NotFound.
+            // Once agmend.db registers an identity there, local.db counts as unreadable
+            // and the catch-up reports Version.
+            let stray = ManagedIdentity {
+                project: "ghostproject".parse().unwrap(),
+                identity_id: "stray0001".parse().unwrap(),
+                handle: "andy/stray".into(),
+                ..f.caller(&f.agents[0]).await
+            };
+            for _ in 0..2 {
+                f.listener_pending(&stray).await;
+            }
+            let row = stray.clone();
+            store_work(f.daemon.core.identities.store.clone(), move |store| {
+                store.register(&row)
+            })
+            .await
+            .unwrap();
+            for _ in 0..2 {
+                f.listener_pending(&stray).await;
+            }
+            assert_eq!(
+                logs.catch_ups(),
+                [
+                    "WARN NotFound",
+                    "DEBUG NotFound",
+                    "WARN Version",
+                    "DEBUG Version"
+                ]
+            );
+            f.stop().await;
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn listener_pending_warns_again_after_a_catch_up_succeeds() {
+        let (logs, _capture) = LogBytes::capture();
+        tokio::time::timeout(TEST_WAIT, async {
+            let f = Fixture::new().await;
+            let dm = f.post(Some(&f.agents[0])).await;
+            let caller = f.caller(&f.agents[0]).await;
+            let inbox = Stream::Inbox(f.agents[0].clone());
+            f.execute_state(format!(
+                "CREATE TRIGGER refuse_position BEFORE INSERT ON positions
+                 WHEN NEW.stream='{inbox}'
+                 BEGIN SELECT RAISE(ABORT, 'test position failure'); END;"
+            ))
+            .await;
+            assert!(f.listener_pending(&caller).await.is_empty());
+            assert!(f.listener_pending(&caller).await.is_empty());
+            f.execute_state("DROP TRIGGER refuse_position".into()).await;
+            let rows = f.listener_pending(&caller).await;
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].client.id, dm.id);
+            // Hub again, as before the success, so only the success can make this warn.
+            f.daemon.core.origins.local().shutdown().await;
+            assert!(f.listener_pending(&caller).await.is_empty());
+            assert_eq!(logs.catch_ups(), ["WARN Hub", "DEBUG Hub", "WARN Hub"]);
             f.stop().await;
         })
         .await
