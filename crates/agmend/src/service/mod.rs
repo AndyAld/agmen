@@ -606,8 +606,8 @@ mod tests {
 
     #[test]
     fn launchd_waits_longer_than_the_worst_case_stop_before_killing() {
-        // Worst stop: 10 s sessions + 3 s renewal floor + 5 s hub stop + 2 s
-        // exit wait = 20 s, which is launchd's default ExitTimeOut.
+        // Worst stop: 10 s ordered phase + 3 s renewal floor + 6 s hub stop + 2 s
+        // exit wait = 21 s, which is over launchd's default ExitTimeOut of 20 s.
         let paths = ServicePaths {
             home: PathBuf::from("/test/home"),
             executable: PathBuf::from("/opt/agmen/agmend"),

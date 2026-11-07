@@ -30,7 +30,7 @@ use roles::ReviewedBase;
 const MAX_ROLE_PROMPT_BYTES: usize = 64 * 1024;
 pub(crate) const QUIT_WAIT: Duration = Duration::from_secs(8);
 /// How long quit lets an admitted launch finish before abandoning it.
-const QUIT_LAUNCH_WAIT: Duration = Duration::from_secs(4);
+pub(crate) const QUIT_LAUNCH_WAIT: Duration = Duration::from_secs(4);
 const QUIT_LEVEL_WAIT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Deserialize)]
@@ -965,11 +965,28 @@ impl Managed {
         result.map(|_| ())
     }
 
+    /// Both halves of quit in one call, for tests that have no connections.
+    #[cfg(test)]
     pub(crate) async fn shutdown(self: &Arc<Self>) {
+        let (deadline, launching) = self.close_launches().await;
+        self.stop_workers(deadline, launching).await;
+    }
+
+    /// Refuses new launches and lets an admitted one finish, or abandons it
+    /// once `quit_launch_wait` passes: the launch then discards what it made
+    /// and frees admission. The launch runs on its caller's connection, so
+    /// this must finish before that connection is closed. Returns the quit
+    /// deadline and the admission guard, which `stop_workers` holds on to.
+    pub(crate) async fn close_launches(
+        &self,
+    ) -> (
+        tokio::time::Instant,
+        Option<tokio::sync::MutexGuard<'_, ()>>,
+    ) {
         self.shutting_down.store(true, Ordering::Release);
         let deadline = tokio::time::Instant::now() + QUIT_WAIT;
         let launch_deadline = deadline.min(tokio::time::Instant::now() + self.quit_launch_wait);
-        let _launching = match tokio::time::timeout_at(launch_deadline, self.launching.lock()).await
+        let launching = match tokio::time::timeout_at(launch_deadline, self.launching.lock()).await
         {
             Ok(guard) => Some(guard),
             Err(_) => {
@@ -981,6 +998,16 @@ impl Managed {
                     .ok()
             }
         };
+        (deadline, launching)
+    }
+
+    /// Says goodbye for every worker, children before their parents, until
+    /// `deadline`. Admission stays closed while `launching` is held.
+    pub(crate) async fn stop_workers(
+        self: &Arc<Self>,
+        deadline: tokio::time::Instant,
+        _launching: Option<tokio::sync::MutexGuard<'_, ()>>,
+    ) {
         let workers: Vec<_> = self
             .workers
             .lock()

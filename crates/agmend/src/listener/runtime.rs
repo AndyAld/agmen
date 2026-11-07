@@ -1111,8 +1111,18 @@ impl Listeners {
         Ok(json!({"state":state,"id":id}))
     }
 
+    /// Waits for a start or stop in flight to finish, and holds off the next
+    /// until the guard drops.
+    pub(crate) async fn quiesce(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.changing.lock().await
+    }
+
     pub(crate) async fn shutdown(&self) {
-        let _changing = self.changing.lock().await;
+        self.shutdown_held(self.changing.lock().await).await;
+    }
+
+    /// Shuts down with `changing` already held, so no start slipped in between.
+    pub(crate) async fn shutdown_held(&self, _changing: tokio::sync::MutexGuard<'_, ()>) {
         let mut entries = self.entries.lock().await;
         for entry in entries.values_mut() {
             stop(entry).await;

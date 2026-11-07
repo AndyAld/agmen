@@ -856,6 +856,28 @@ fn git_state(fixture: &Fixture) -> (Vec<u8>, Vec<u8>) {
 /// Everything a launch made for `id` after the hub minted it is gone, and the
 /// parent is as it was.
 async fn assert_discarded(fixture: &Fixture, id: &str, before: &(Vec<u8>, Vec<u8>)) {
+    assert_discarded_but_the_row(fixture, id, before, 1).await;
+    assert!(
+        fixture
+            .daemon
+            .core
+            .identities
+            .local_token(&id.parse().unwrap())
+            .await
+            .unwrap()
+            .is_none(),
+        "store row"
+    );
+}
+
+/// As `assert_discarded`, with `kept` workers left in the registry, and without
+/// the store row, which a stopped daemon cannot be asked about.
+async fn assert_discarded_but_the_row(
+    fixture: &Fixture,
+    id: &str,
+    before: &(Vec<u8>, Vec<u8>),
+    kept: usize,
+) {
     let managed = &fixture.daemon.core.managed;
     let identity: agmen_proto::IdentityId = id.parse().unwrap();
     assert_eq!(*fixture.revoked.lock().unwrap(), [id.to_owned()]);
@@ -870,24 +892,13 @@ async fn assert_discarded(fixture: &Fixture, id: &str, before: &(Vec<u8>, Vec<u8
         credential(&"https://agmend.invalid".parse().unwrap()).is_none(),
         "local credential"
     );
-    assert!(
-        fixture
-            .daemon
-            .core
-            .identities
-            .local_token(&identity)
-            .await
-            .unwrap()
-            .is_none(),
-        "store row"
-    );
     assert!(!managed.agent_dir(&identity).exists(), "record folder");
     assert!(
         !managed.state_dir.join("agents").join(id).exists(),
         "role prompt folder"
     );
-    assert_eq!(managed.workers.lock().await.len(), 1);
-    assert_eq!(managed.tree.lock().await.len(), 1);
+    assert_eq!(managed.workers.lock().await.len(), kept);
+    assert_eq!(managed.tree.lock().await.len(), kept);
     assert_eq!(&git_state(fixture), before, "worktree and branch");
 }
 

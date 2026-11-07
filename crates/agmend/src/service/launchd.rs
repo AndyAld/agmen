@@ -197,8 +197,10 @@ pub(super) fn render_with_token(
     )?;
     // shortcut: no automatic restart after a crash; revisit when Andy chooses a bounded restart policy.
     append(&mut contents, "  <key>KeepAlive</key><false/>\n")?;
-    // launchd's default is 20 s, which equals the worst-case stop (10 s sessions,
-    // 3 s renewal floor, 5 s hub stop, 2 s exit wait); 30 s leaves a 10 s margin.
+    // launchd's default is 20 s, which is below the worst-case stop of 21 s: the
+    // 10 s ordered phase (in-flight launches, listener starts and local mints,
+    // then closing connections and stopping sessions), the 3 s renewal floor,
+    // the 6 s hosted hub stop and the 2 s exit wait. 30 s leaves a 9 s margin.
     append(
         &mut contents,
         "  <key>ExitTimeOut</key><integer>30</integer>\n",
