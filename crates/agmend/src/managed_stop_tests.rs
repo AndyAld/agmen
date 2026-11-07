@@ -752,6 +752,8 @@ pub(super) async fn publisher(fixture: &mut Fixture, publisher: TestPublisher) {
 }
 
 const SERVE_BOUND: std::time::Duration = std::time::Duration::from_secs(5);
+/// The ordered 10 s, the 3 s renewal floor and the 6 s hub stop.
+const STUCK_QUIT_BOUND: std::time::Duration = std::time::Duration::from_secs(19);
 
 /// Moves the fixture's daemon out to serve on its socket until `stop`. The
 /// fixture keeps the same shared state, behind a spare daemon of its own.
@@ -847,4 +849,62 @@ async fn quit_over_a_connection_discards_a_launch_that_never_finishes() {
         )
         .unwrap();
     assert_eq!(rows, 0, "store row");
+}
+
+/// A launch that is stuck before its post-mint select (here: holding
+/// admission for good) cannot be abandoned, and used to run the quit clock
+/// out so that no worker got its goodbye.
+#[tokio::test]
+async fn quit_with_a_launch_stuck_before_its_mint_still_says_goodbye() {
+    let (mut fixture, _) = tree_fixture().await;
+    let senders = Arc::new(Mutex::new(Vec::new()));
+    let captured = senders.clone();
+    publisher(
+        &mut fixture,
+        Arc::new(move |sender, envelope| {
+            if matches!(envelope.payload, agmen_proto::Payload::Bye {}) {
+                captured
+                    .lock()
+                    .unwrap()
+                    .push(sender.identity_id.to_string());
+            }
+            Box::pin(async { Ok(OutboxState::Pending { attempts: 0 }) })
+        }),
+    )
+    .await;
+    settings(&fixture, "budgets = false");
+    root(&fixture).await;
+    let managed = fixture.daemon.core.managed.clone();
+    let (stop, serving) = serve(&mut fixture);
+    // Startup takes admission too; hold it only once the daemon accepts.
+    let _stream = connect(&fixture).await;
+    let _stuck = managed.launching.lock().await;
+    stop.send(()).unwrap();
+    tokio::time::timeout(STUCK_QUIT_BOUND, serving)
+        .await
+        .expect("quit with a stuck launch exceeded its bound")
+        .unwrap();
+    assert_eq!(*senders.lock().unwrap(), ["agent001"]);
+    assert_eq!(state(&fixture, "agent001").await, "offline");
+}
+
+/// The supervisor kept ticking while quit waited on a launch, and could start
+/// a paid batch seconds after the owner quit.
+#[tokio::test]
+async fn quit_stops_the_supervisor_from_starting_a_batch() {
+    let fixture = Fixture::new().await;
+    fixture.runner.mode.store(1, Ordering::SeqCst);
+    fixture.launch().await;
+    enqueue(&fixture, 1, "agent001").await;
+    let managed = &fixture.daemon.core.managed;
+    let launching = managed.launching.lock().await;
+    tokio::join!(managed.shutdown(), async {
+        while !managed.shutting_down.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+        managed.tick().await;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(fixture.runner.runs.lock().unwrap().is_empty());
+        drop(launching);
+    });
 }

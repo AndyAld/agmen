@@ -101,6 +101,18 @@ const RENEWAL_SHUTDOWN_FLOOR: Duration = Duration::from_secs(3);
 /// supervisor's own wait for the killed child is 5 s; the extra second covers
 /// a supervisor that parks after that wait fails.
 const HOST_STOP_WAIT: Duration = Duration::from_secs(6);
+/// The longest `serve_until` takes after shutdown is requested: the ordered
+/// phase, the renewal floor and the hosted hub's stop. The service's
+/// `ExitTimeOut` must exceed this plus the process exit wait.
+pub const SHUTDOWN_BUDGET: Duration = Duration::from_secs(
+    SHUTDOWN_WAIT.as_secs() + RENEWAL_SHUTDOWN_FLOOR.as_secs() + HOST_STOP_WAIT.as_secs(),
+);
+// The goodbyes' reserved floor sits inside the ordered phase, not on top of it.
+const _: () = assert!(
+    managed::QUIT_LAUNCH_WAIT.as_secs() + managed::STOP_WORKERS_FLOOR.as_secs()
+        <= managed::QUIT_WAIT.as_secs()
+        && managed::QUIT_WAIT.as_secs() < SHUTDOWN_WAIT.as_secs()
+);
 
 /// Why agmend could not start.
 #[derive(Debug, thiserror::Error)]
@@ -473,8 +485,10 @@ impl Agmend {
         // connection and rolls back only if it is not dropped midway, so
         // they finish (or a launch is abandoned and discarded) before
         // the connections close. The starts and mints wait no longer
-        // than a launch does before it is abandoned, so a stuck one
-        // cannot take the goodbyes' time.
+        // than a launch does before it is abandoned, and the launch drain
+        // stops `STOP_WORKERS_FLOOR` before the managed deadline, so a
+        // stuck one cannot take the goodbyes' time. Once the drain begins,
+        // new mints and starts are refused.
         let drained = tokio::time::Instant::now() + managed::QUIT_LAUNCH_WAIT;
         let (launches, _mints, starts) = tokio::join!(
             core.managed.close_launches(),
@@ -498,7 +512,7 @@ impl Agmend {
     /// and joins daemon-owned collectors and sessions, all within 10 s. Then
     /// it waits for an in-flight hub token renewal until that deadline or for
     /// 3 s, whichever is longer, and for the hosted hub's stop for up to 6 s
-    /// more: shutdown takes at most 19 s.
+    /// more: shutdown takes at most 19 s (`SHUTDOWN_BUDGET`).
     /// Stops agents before the listener that may have delegated them, then
     /// the local record, so their BYEs can still reach a live record.
     pub async fn serve_until(self, shutdown: impl std::future::Future<Output = ()>) {

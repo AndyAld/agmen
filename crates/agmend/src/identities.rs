@@ -311,6 +311,9 @@ pub(crate) struct Identities {
     /// Read-held for the whole of a local mint; quit takes the
     /// write side to let those finish before it closes their connections.
     pub(crate) minting: RwLock<()>,
+    /// Set when quit starts draining; later mints are refused even after the
+    /// drain's cap has released the write side.
+    closing: AtomicBool,
     #[cfg(test)]
     pub(crate) publisher: Option<Publisher>,
 }
@@ -488,6 +491,7 @@ impl Identities {
             read_failures: Mutex::new(BTreeMap::new()),
             launched: AsyncMutex::new(BTreeSet::new()),
             minting: RwLock::new(()),
+            closing: AtomicBool::new(false),
             #[cfg(test)]
             publisher: None,
         }
@@ -502,6 +506,7 @@ impl Identities {
     /// Waits for every local mint in flight to register or roll back, and
     /// holds off the next until the guard drops.
     pub(crate) async fn quiesce_mints(&self) -> RwLockWriteGuard<'_, ()> {
+        self.closing.store(true, Ordering::Release);
         self.minting.write().await
     }
 
@@ -674,6 +679,9 @@ impl Identities {
             role,
         } = params(raw)?;
         let _minting = self.minting.read().await;
+        if self.closing.load(Ordering::Acquire) {
+            return Err(bad_request("daemon is shutting down"));
+        }
         let local = self.origins.local();
         // Preserve local.db version errors before mint maps open failures to a hub refusal.
         let login = local.login().await?.ok_or_else(|| ApiError {

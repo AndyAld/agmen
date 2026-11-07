@@ -32,6 +32,9 @@ pub(crate) const QUIT_WAIT: Duration = Duration::from_secs(8);
 /// How long quit lets an admitted launch finish before abandoning it.
 pub(crate) const QUIT_LAUNCH_WAIT: Duration = Duration::from_secs(4);
 const QUIT_LEVEL_WAIT: Duration = Duration::from_secs(2);
+/// The end of `QUIT_WAIT` that the launch drain may not use, so the goodbyes
+/// always get this long even when a launch cannot be abandoned.
+pub(crate) const STOP_WORKERS_FLOOR: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -974,7 +977,9 @@ impl Managed {
 
     /// Refuses new launches and lets an admitted one finish, or abandons it
     /// once `quit_launch_wait` passes: the launch then discards what it made
-    /// and frees admission. The launch runs on its caller's connection, so
+    /// and frees admission. A launch stuck elsewhere (worktree, role load,
+    /// the hub mint) is waited for no later than `STOP_WORKERS_FLOOR` before
+    /// the returned deadline, which is what `stop_workers` keeps for itself. The launch runs on its caller's connection, so
     /// this must finish before that connection is closed. Returns the quit
     /// deadline and the admission guard, which `stop_workers` holds on to.
     pub(crate) async fn close_launches(
@@ -985,7 +990,9 @@ impl Managed {
     ) {
         self.shutting_down.store(true, Ordering::Release);
         let deadline = tokio::time::Instant::now() + QUIT_WAIT;
-        let launch_deadline = deadline.min(tokio::time::Instant::now() + self.quit_launch_wait);
+        let drain_deadline = deadline - STOP_WORKERS_FLOOR;
+        let launch_deadline =
+            drain_deadline.min(tokio::time::Instant::now() + self.quit_launch_wait);
         let launching = match tokio::time::timeout_at(launch_deadline, self.launching.lock()).await
         {
             Ok(guard) => Some(guard),
@@ -993,7 +1000,7 @@ impl Managed {
                 tracing::warn!("managed shutdown is abandoning an in-flight launch");
                 // The launch discards its identity, then frees the lock.
                 self.abandon_launch.send_replace(true);
-                tokio::time::timeout_at(deadline, self.launching.lock())
+                tokio::time::timeout_at(drain_deadline, self.launching.lock())
                     .await
                     .ok()
             }
@@ -1065,7 +1072,8 @@ impl Managed {
             return;
         };
         let workers: Vec<_> = self.workers.lock().await.values().cloned().collect();
-        if workers.is_empty() {
+        // No new paid batch once quit has begun; the drain can last seconds.
+        if workers.is_empty() || self.shutting_down.load(Ordering::Acquire) {
             return;
         }
         let cap_budget = match self.safeguards().await {

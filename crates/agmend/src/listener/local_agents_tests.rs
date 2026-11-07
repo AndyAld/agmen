@@ -743,3 +743,48 @@ async fn quit_lets_a_local_mint_in_flight_register() {
         .unwrap();
     assert_eq!(rows, 1);
 }
+
+#[tokio::test]
+async fn a_local_mint_after_the_quit_drain_starts_is_refused() {
+    let home = Home {
+        dir: tempfile::Builder::new().prefix("ll").tempdir().unwrap(),
+    };
+    let daemon = Fixture::daemon(&home);
+    let core = daemon.core.clone();
+    let mut f = Fixture::with_daemon(home, daemon).await;
+    // The drain's cap passed: the write guard is gone, the drain is not over.
+    drop(core.identities.quiesce_mints().await);
+    let project = f.project["project"].as_str().unwrap().to_owned();
+    let refused = error(
+        f.client
+            .call("local_mint", json!({"project":project,"name":"late"}))
+            .await,
+    );
+    assert!(refused.message.contains("shutting down"), "{refused:?}");
+    let registry = rusqlite::Connection::open(f.home.dir.path().join("agmend.db")).unwrap();
+    let rows: i64 = registry
+        .query_row("SELECT count(*) FROM identities", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(rows, 0);
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn a_listener_start_after_the_quit_drain_starts_is_refused() {
+    let home = Home {
+        dir: tempfile::Builder::new().prefix("ll").tempdir().unwrap(),
+    };
+    let daemon = Fixture::daemon(&home);
+    let core = daemon.core.clone();
+    let mut f = Fixture::with_daemon(home, daemon).await;
+    drop(core.listeners.quiesce().await);
+    let project = f.project["project"].as_str().unwrap().to_owned();
+    let refused = error(
+        f.client
+            .call("listener_start", json!({"project":project,"root":f.root}))
+            .await,
+    );
+    assert!(refused.message.contains("shutting down"), "{refused:?}");
+    assert!(!f.home.dir.path().join("listener").join(project).exists());
+    f.stop().await;
+}

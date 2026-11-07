@@ -3561,9 +3561,12 @@ async fn slow_quit_stores_a_renewal_during_its_reserved_share() {
     stop.send(()).unwrap();
     // An answer 2.5 s after the full managed deadline must still be stored.
     assert!(
-        tokio::time::timeout(super::QUIT_WAIT + LATE_RENEWAL, &mut serving)
-            .await
-            .is_err(),
+        tokio::time::timeout(
+            (super::QUIT_WAIT - super::STOP_WORKERS_FLOOR) + LATE_RENEWAL,
+            &mut serving
+        )
+        .await
+        .is_err(),
         "slow quit consumed the renewal's reserved share"
     );
     fixture.refresh.release();
@@ -3592,7 +3595,7 @@ async fn slow_quit_bounds_a_hung_renewal_after_its_reserved_share() {
         .unwrap();
     drop(launching);
     assert!(
-        began.elapsed() >= super::QUIT_WAIT + RENEWAL_SHARE,
+        began.elapsed() >= (super::QUIT_WAIT - super::STOP_WORKERS_FLOOR) + RENEWAL_SHARE,
         "managed shutdown consumed part of the renewal's three seconds"
     );
 }

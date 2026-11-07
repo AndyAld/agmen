@@ -7,6 +7,9 @@ use super::{
     remove_unit,
 };
 
+/// Seconds launchd waits after SIGTERM before it kills agmend.
+pub(super) const EXIT_TIMEOUT_SECS: u64 = 30;
+
 fn invoke(
     run: &mut Runner<'_>,
     action: &str,
@@ -203,7 +206,7 @@ pub(super) fn render_with_token(
     // the 6 s hosted hub stop and the 2 s exit wait. 30 s leaves a 9 s margin.
     append(
         &mut contents,
-        "  <key>ExitTimeOut</key><integer>30</integer>\n",
+        &format!("  <key>ExitTimeOut</key><integer>{EXIT_TIMEOUT_SECS}</integer>\n"),
     )?;
     if let Some(token) = token {
         append(
