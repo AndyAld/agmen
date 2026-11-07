@@ -232,8 +232,8 @@ impl LaunchCredential {
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum AgmendError {
     /// The default socket failed the shared ownership or mode check.
-    #[error("{0}")]
-    Socket(#[source] agmen_client::AgmendSocketError),
+    #[error(transparent)]
+    Socket(agmen_client::AgmendSocketError),
     /// The socket is missing, or nothing is listening.
     #[error("agmend is not running: open the agmen app or run agmend service install")]
     NotRunning,

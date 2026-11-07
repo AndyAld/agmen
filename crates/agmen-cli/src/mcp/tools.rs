@@ -48,7 +48,8 @@ you start a task and before you report it done. Claim an item before editing fil
 report finished work with done, give a claim up with release, and report a new problem with \
 found. Talk with post, chat, ask, answer and dm; read the room with read_chat. Chat sends an FYI \
 and turns @ tokens into mentions. Wherever a tool names an identity, a handle such as \
-andy/sol works. A tool that sends answers recorded #<seq> (<stream>) once the hub has the \
+andy/sol works, except stop_agent, which takes an id only (launch prints it). A tool that sends \
+answers recorded #<seq> (<stream>) once the hub has the \
 message, queued id=<id> (not yet recorded) while it is still on its way (agmen keeps sending it), \
 or rejected: <reason>. Never send a rejected message again unchanged. \
 Messages addressed to you are added at the end of tool results under \"for you\"; when you \
