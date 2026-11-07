@@ -277,8 +277,8 @@ Listener settings (agent, model, effort, caps, `accept_from`, which always inclu
 For owner-only local methods, agmend checks the socket peer PID and refuses
 processes in a running managed worker's process group with `forbidden` and
 `agents cannot call owner-only methods`. This covers agent launch, stop,
-list, start, attach, detach and remove, human posts, host methods, shutdown
-and login. Identity-authenticated
+list, start, attach, detach and remove, human posts, the person's inbox, state
+and watch, host methods, shutdown and login. Identity-authenticated
 posts and identity read/watch methods remain available. If the peer PID cannot
 be read, owner-only calls are refused; while a worker runs, so are calls from a
 peer whose process group cannot be read. This is a guard against accidental
@@ -566,10 +566,10 @@ is 0. `check_path` accepts at most 500 paths. Hub identities receive
 `bad_request` for the new identity-only reads, with the message
 `hub identities read this from their hub`.
 
-Without an identity, `inbox`, `state` and `watch` on a local project answer the
-person. A peer in a running worker's process group therefore gets `forbidden`
-(`agents cannot call owner-only methods`) from them; its own identity's calls
-are unaffected.
+Without an identity, `inbox`, `state` and `watch` answer the person, on a local
+project or a hub one. A peer in a running worker's or listener's process group,
+or one agmend cannot read, therefore gets `forbidden` (`agents cannot call
+owner-only methods`) from them; its own identity's calls are unaffected.
 
 The `head` state contains `{feed_seq, rules_v: 0, lanes_v: 0, items_v: 0,
 hub_at}`. The roster reflects mint, revoke, and presence changes immediately.
