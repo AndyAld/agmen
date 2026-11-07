@@ -2,6 +2,9 @@ use super::*;
 use crate::budget::Money;
 use std::collections::BTreeMap;
 
+#[path = "managed_child_budget_tests.rs"]
+mod child_reserve;
+
 async fn budget_root(fixture: &Fixture, cap: f64) {
     worker_call(fixture, "agent_launch", json!({"project":"project1","name":"worker","root":fixture.dir.path().join("repo"),"role":"chain","budget_usd":cap})).await.unwrap();
     tier(fixture, "agent001", Some(Tier::Owner)).await;

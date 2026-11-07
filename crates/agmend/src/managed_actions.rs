@@ -388,6 +388,7 @@ impl Managed {
         }
         let spec = {
             let mut held = worker.lock().await;
+            held.in_flight_cap = Money::ZERO;
             self.refresh_sessions(&mut held).await.map(|fresh| {
                 if let Some(found) = fresh {
                     context = fresh_context(found);

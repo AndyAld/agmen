@@ -11,7 +11,7 @@ use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use agmen_client::{IdentityFile, find_identity};
-use agmen_local::safeguards::MAX_MANAGED;
+use agmen_local::safeguards::{ChildBudgets, MAX_MANAGED, Safeguards};
 use agmen_local::{ApiError, ErrorCode};
 use agmen_proto::{ClientEnvelope, IdentityId, IdentityKind, Payload, ProjectId, Timestamp};
 use serde::{Deserialize, Serialize};
@@ -131,6 +131,8 @@ struct Worker {
     attached: Option<Attached>,
     role_error: Option<String>,
     batch_tier: Option<Tier>,
+    /// The fixed cap passed to the running batch, protected from child reservations.
+    in_flight_cap: Money,
     /// Unspent funds still held in the parent's reservation, including live descendants.
     reserved_from_parent: Money,
 }
@@ -150,6 +152,7 @@ impl Worker {
             attached: None,
             role_error: None,
             batch_tier: None,
+            in_flight_cap: Money::ZERO,
             reserved_from_parent: Money::ZERO,
         }
     }
@@ -697,13 +700,25 @@ impl Managed {
 
     fn run_spec(
         &self,
-        held: &Worker,
+        held: &mut Worker,
         prompt: String,
         (session_id, resume): (String, bool),
         owner_only: bool,
-        role: Option<RoleRun>,
-        cap_budget: bool,
+        (role, can_launch): (Option<RoleRun>, bool),
+        settings: &Safeguards,
     ) -> RunSpec {
+        let remaining = held.budget.remaining();
+        let batch_cap =
+            if settings.budgets && settings.child_budgets == ChildBudgets::Shared && can_launch {
+                remaining.child_reserve_share()
+            } else {
+                remaining
+            };
+        held.in_flight_cap = if settings.budgets {
+            batch_cap
+        } else {
+            Money::ZERO
+        };
         RunSpec {
             cwd: held.record.worktree.clone(),
             prompt,
@@ -711,7 +726,8 @@ impl Managed {
             resume,
             model: held.record.model.clone(),
             budget_remaining: held.budget.remaining_usd(),
-            cap_budget,
+            budget_cap: Some(batch_cap),
+            cap_budget: settings.budgets,
             identity: held.record.identity.identity_id.clone(),
             local_token: None,
             mcp_config: self
@@ -731,12 +747,11 @@ impl Managed {
         }
     }
 
-    /// The role's tools and a freshly written prompt file for the next batch,
-    /// or `None` for an agent launched without a role. A role that no longer
-    /// resolves is an error: the batch must not run unrestricted.
-    async fn batch_role(&self, record: &Record) -> Result<Option<RoleRun>, ApiError> {
+    /// The next batch's role and whether its pinned launch list allows children.
+    /// A role that no longer resolves is an error: the batch must not run unrestricted.
+    async fn batch_role(&self, record: &Record) -> Result<(Option<RoleRun>, bool), ApiError> {
         let Some(name) = &record.role else {
-            return Ok(None);
+            return Ok((None, false));
         };
         let role = self.record_role(record, name.as_str()).await?;
         if record.role_sha256.as_ref().map(|sha| sha.as_str()) != Some(role.sha256.as_str()) {
@@ -746,7 +761,7 @@ impl Managed {
         }
         self.write_role_prompt(&record.identity.identity_id, &role)
             .await
-            .map(Some)
+            .map(|run| (Some(run), !role.launches.is_empty()))
     }
 
     pub(crate) async fn list(&self, raw: Value) -> Result<Value, ApiError> {
@@ -922,6 +937,7 @@ impl Managed {
             let already_offline = worker.state == "offline";
             worker.state = "offline";
             worker.batch_tier = None;
+            worker.in_flight_cap = Money::ZERO;
             // An attached Claude Code is the person's own session: it keeps running.
             worker.attached = None;
             if let Some(stop) = worker.stop.take() {
@@ -1041,10 +1057,11 @@ impl Managed {
         if workers.is_empty() {
             return;
         }
-        let cap_budget = match self.safeguards().await {
-            Ok(settings) => settings.budgets,
-            Err(_) => self.safeguards_cache.lock().await.last_good.budgets,
+        let settings = match self.safeguards().await {
+            Ok(settings) => settings,
+            Err(_) => self.safeguards_cache.lock().await.last_good,
         };
+        let cap_budget = settings.budgets;
         for worker in workers {
             let mut held = worker.lock().await;
             match self.origins.person_for(&held.record.identity.hub_url).await {
@@ -1112,12 +1129,12 @@ impl Managed {
                 }
             };
             let mut spec = self.run_spec(
-                &held,
+                &mut held,
                 prompt,
                 (session_id, resume),
                 owner_only,
                 role,
-                cap_budget,
+                &settings,
             );
             spec.local_token = batch_local_token(&identities, &spec.identity).await;
             held.last_run = Some(tokio::time::Instant::now());
@@ -1166,6 +1183,7 @@ async fn run_worker(
     let mut held = worker.lock().await;
     held.stop = None;
     held.batch_tier = None;
+    held.in_flight_cap = Money::ZERO;
     // A batch that never spawned Claude created no session: the next batch
     // of this tier must start it with --session-id, not resume it.
     if result.as_ref().map_or_else(RunError::started, |_| true) {

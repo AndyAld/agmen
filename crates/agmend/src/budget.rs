@@ -4,12 +4,20 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct Money(u64);
 
+/// Exact numerator and denominator, so splitting never rounds a cap upward.
+const CHILD_RESERVE_SHARE: (u64, u64) = (1, 2);
+
 #[derive(Debug, thiserror::Error)]
 #[error("invalid or out-of-range total_cost_usd")]
 pub(crate) struct InvalidCost;
 
 impl Money {
     pub(crate) const ZERO: Self = Self(0);
+
+    pub(crate) fn child_reserve_share(self) -> Self {
+        let (numerator, denominator) = CHILD_RESERVE_SHARE;
+        Self(self.0 / denominator * numerator)
+    }
 
     pub(crate) fn saturating_add(self, other: Self) -> Self {
         Self(self.0.saturating_add(other.0))
@@ -143,7 +151,11 @@ impl Budget {
     }
 
     pub(crate) fn remaining_usd(&self) -> String {
-        self.unspent().saturating_sub(self.reserved).usd()
+        self.remaining().usd()
+    }
+
+    pub(crate) fn remaining(&self) -> Money {
+        self.unspent().saturating_sub(self.reserved)
     }
 
     pub(crate) fn exhausted(&self) -> bool {
