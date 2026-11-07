@@ -34,6 +34,7 @@ mod palette;
 mod palette_filter;
 mod pane;
 mod project_panel;
+mod recents_view;
 mod ref_chip;
 mod rich_text;
 mod roles_panel;

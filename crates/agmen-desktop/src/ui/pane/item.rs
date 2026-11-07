@@ -45,6 +45,8 @@ pub(crate) enum TabItem {
     // cmd-shift-f open; no task in the desktop plan builds search. Revisit
     // when a plan names project search and its view.
     Search,
+    /// Stopped managed agents and their saved trees.
+    Recents,
 }
 
 impl SettingsPage {

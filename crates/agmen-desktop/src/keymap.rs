@@ -40,6 +40,8 @@ actions!(
         /// Opens the Search tab in the active pane (Zed's
         /// `pane::DeploySearch`).
         OpenSearch,
+        /// Opens the Recents tab of stopped managed agents. No key binding.
+        OpenRecents,
         /// Opens the Settings tab in the active pane (Zed's
         /// `zed::OpenSettings`).
         OpenSettings,
@@ -317,6 +319,7 @@ pub(crate) fn commands() -> Vec<Command> {
         window("git panel: toggle focus", Box::new(ToggleGitPanel)),
         window("roles panel: toggle focus", Box::new(ToggleRolesPanel)),
         window("pane: deploy search", Box::new(OpenSearch)),
+        window("agmen: open recents", Box::new(OpenRecents)),
         window("pane: split right", Box::new(SplitRight)),
         window("pane: close active item", Box::new(CloseActiveTab)),
         window("composer: dismiss", Box::new(Dismiss)),

@@ -26,6 +26,7 @@ pub(crate) enum AgentsPanelEvent {
     /// An agent row was clicked; holds its identity id.
     Selected(IdentityId),
     NewAgent,
+    OpenRecents,
     Stop(IdentityId),
     /// Start from the agent's menu: back online with its previous context.
     Start(IdentityId),
@@ -79,6 +80,7 @@ pub(crate) struct AgentsPanel {
     menu: Option<IdentityId>,
     /// A line about the last agent action that is not an error.
     notice: Option<String>,
+    recents: usize,
 }
 
 impl EventEmitter<AgentsPanelEvent> for AgentsPanel {}
@@ -94,6 +96,7 @@ impl AgentsPanel {
             listener: None,
             menu: None,
             notice: None,
+            recents: 0,
         }
     }
 
@@ -109,6 +112,13 @@ impl AgentsPanel {
     pub(crate) fn set_listener(&mut self, listener: Option<IdentityId>, cx: &mut Context<Self>) {
         self.listener = listener;
         cx.notify();
+    }
+
+    pub(crate) fn set_recents(&mut self, count: usize, cx: &mut Context<Self>) {
+        if self.recents != count {
+            self.recents = count;
+            cx.notify();
+        }
     }
 
     fn open_menu(&mut self, id: &IdentityId, cx: &mut Context<Self>) {
@@ -425,6 +435,15 @@ impl Render for AgentsPanel {
                     .map(|error| Label::new(error).color(Color::Error).wrap()),
             )
             .children(rows)
+            .when(self.recents > 0, |panel| {
+                panel.child(
+                    Button::new("agents:recents", "Recents")
+                        .style(ButtonStyle::Plain)
+                        .on_click(
+                            cx.listener(|_, _, _, cx| cx.emit(AgentsPanelEvent::OpenRecents)),
+                        ),
+                )
+            })
     }
 }
 
