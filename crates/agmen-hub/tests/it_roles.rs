@@ -591,6 +591,60 @@ async fn it_one_listener_per_person_project() {
 }
 
 #[tokio::test]
+async fn it_second_listener_with_the_same_live_handle_is_listener_exists() {
+    run(|ctx| async move {
+        let (p, t) = room(&ctx).await;
+        let listener = role(
+            &ctx,
+            &p,
+            &t,
+            "listener",
+            "listener",
+            "listener",
+            &["FYI"],
+            json!({"scope":"none"}),
+        )
+        .await;
+        let (status, body) = mint(
+            &ctx,
+            &t,
+            &json!({"handle":listener["handle"],"project":p.project,"kind":"listener"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"], "listener_exists");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn it_handle_collision_that_is_not_a_second_listener_stays_handle_taken() {
+    run(|ctx| async move {
+        let (p, t) = room(&ctx).await;
+        mint_ok(&ctx, &t, "andy/worker", &p).await;
+        let (status, body) = mint(
+            &ctx,
+            &t,
+            &json!({"handle":"andy/worker","project":p.project,"kind":"listener"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"], "handle_taken");
+        // Only a listener mint is answered listener_exists, not an agent on a listener's handle.
+        support::mint_kind(&ctx, &t, "andy/listen", &p, "listener").await;
+        let (status, body) = mint(
+            &ctx,
+            &t,
+            &json!({"handle":"andy/listen","project":p.project,"kind":"agent"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"], "handle_taken");
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn it_role_verbs_enforced_on_ingest() {
     run(|ctx| async move {
     let (p,t)=room(&ctx).await;
