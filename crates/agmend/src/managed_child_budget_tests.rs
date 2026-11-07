@@ -144,6 +144,18 @@ async fn shared_nonlaunching_batch_keeps_the_full_remaining_cap() {
 }
 
 #[tokio::test]
+async fn shared_others_tier_batch_of_a_launching_role_keeps_the_full_remaining_cap() {
+    let (fixture, _) = tree_fixture().await;
+    budget_root(&fixture, 5.0).await;
+    spend(&fixture, "agent001", "0.75").await;
+    enqueue_from(&fixture, 1, "sender01", "agent001").await;
+    running_batch(&fixture, "agent001", Tier::Others).await;
+    assert!(!fixture.runner.runs.lock().unwrap()[0].owner_only);
+    assert_eq!(batch_cap(&fixture, "agent001").unwrap().usd(), "4.250000");
+    fixture.daemon.core.managed.shutdown().await;
+}
+
+#[tokio::test]
 async fn separate_launching_batch_keeps_the_full_remaining_cap() {
     let (fixture, _) = tree_fixture().await;
     settings(&fixture, "child_budgets = 'separate'");

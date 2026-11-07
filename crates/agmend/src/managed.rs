@@ -708,12 +708,16 @@ impl Managed {
         settings: &Safeguards,
     ) -> RunSpec {
         let remaining = held.budget.remaining();
-        let batch_cap =
-            if settings.budgets && settings.child_budgets == ChildBudgets::Shared && can_launch {
-                remaining.child_reserve_share()
-            } else {
-                remaining
-            };
+        // Only an owner batch can launch children (`tree_caller`), so only it leaves a share.
+        let batch_cap = if settings.budgets
+            && settings.child_budgets == ChildBudgets::Shared
+            && can_launch
+            && owner_only
+        {
+            remaining.child_reserve_share()
+        } else {
+            remaining
+        };
         held.in_flight_cap = if settings.budgets {
             batch_cap
         } else {
