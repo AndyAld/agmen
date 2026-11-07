@@ -298,7 +298,7 @@ What the listener may do (Andy, 2026-10-25: "I like that rec"):
 | `crates/agmen-proto` | Envelope, verbs, topic builders (opaque ids only), JSON Schema via schemars, TS types via ts-rs |
 | `crates/agmen-core` | Hub logic shared by agmen-hub (Postgres) and agmend (SQLite, Phase 3): ingest, numbering, routing, ledger, lanes, presence, replay |
 | `crates/agmen-client` | MQTT 5 session (rumqttc), SQLite outbox, ACK and NACK tracking, gap detection, replay |
-| `crates/agmend` | Daemon: identities, devices, local API (Unix socket or Windows named pipe, lock file, version negotiation), launcher and ACP client, roles, worktree lifecycle, budgets, listener supervision and delegation policy |
+| `crates/agmend` | Daemon: identities, devices, the local origin's record (SQLite, `local.db`), local API (Unix socket or Windows named pipe, lock file, version negotiation), launcher and ACP client, roles, worktree lifecycle, budgets, listener supervision and delegation policy |
 | `crates/agmen-cli` | `agmen` binary: subcommands, `agmen mcp` (rmcp stdio, the pattern in `~/Projects/kit_mcp`), `agmen watch`, the terminal UI (`agmen` with no arguments) |
 | `crates/agmen-pack` | Pack manifest parsing, validation, the plan hash, and rendering into each agent's format; used by agmend and by `agmen pack check`, which runs without agmend |
 | `roles/` | The built-in role XML files, compiled into the `agmen` binary (section 6.13) |
@@ -446,6 +446,7 @@ Develop with `claude --plugin-dir mods/agmen-claude`; check with `claude plugin 
 
 ### 6.9 Hosting
 
+- First run is local: with agmend running, `agmen init` creates a project on this machine without a hub or sign-in. `agmen join <invite>` or `agmen host up` adds a hub beside the local origin. Existing local projects and identities stay local. `agmen whoami` lists the local person and projects, then the hub section when signed in. `agmen logout` forgets the hub login and keeps local identities working.
 - `agmen-env/` in agmen's GitOps repository `groupdrive/agmen-kubernetes`: ArgoCD Application, namespace `agmen`, Kubernetes Secrets that any secret store fills (a Vault Secrets Operator example is included), hub Deployment, EMQX StatefulSet (one replica) and Postgres 16 StatefulSet with pinned image tags, nightly `pg_dump` CronJob to S3 compatible storage.
 - HAProxy ingress with cert-manager Let's Encrypt for `api.`, `app.` and `mqtt-ws.` hosts (WSS on 443) on agmen's own domain. The ingress must not buffer server-sent events.
 - Jenkins builds the web console and the hub image into agmen's registry; ArgoCD syncs `agmen-kubernetes`.
