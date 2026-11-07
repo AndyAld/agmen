@@ -8,7 +8,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use agmen_client::{ClientEvent, Cursors, IdentityFile, STATE_DB};
+use agmen_client::{AgmendSocketError, ClientEvent, Cursors, IdentityFile, STATE_DB};
+use agmen_local::frame::FrameError;
 use agmen_local::{ErrorCode, Request, Response, frame};
 use agmen_proto::Stream;
 use serde_json::{Value, json};
@@ -17,7 +18,9 @@ use tokio::sync::mpsc;
 use tokio::task::{JoinHandle, JoinSet};
 use tracing_subscriber::fmt::MakeWriter;
 
-use super::{LocalLink, WatchState};
+use super::{LocalLink, WatchState, retryable};
+use crate::agmend::AgmendError;
+use crate::output::{Code, Fail};
 
 const WAIT: Duration = Duration::from_secs(10);
 
@@ -28,6 +31,7 @@ const OLD_REFUSAL: &str = "bad params: unknown field `after`, expected `project`
 
 /// How a fake agmend answers one `watch` request.
 enum Answer {
+    Drop,
     /// An error frame, then the connection closes, as agmend does after a
     /// terminal error.
     Refuse(ErrorCode, &'static str),
@@ -103,6 +107,7 @@ async fn serve(
                 let n = count.fetch_add(1, Ordering::SeqCst);
                 let _queued = seen.send(request.params.clone());
                 let (events, drop_after) = match script(n, &request.params) {
+                    Answer::Drop => return,
                     Answer::Refuse(code, message) => {
                         let _sent =
                             frame::write_async(&mut socket, &Response::err(id, code, message))
@@ -223,6 +228,20 @@ impl LogBytes {
             tracing_subscriber::fmt()
                 .without_time()
                 .with_ansi(false)
+                .with_writer(logs.clone())
+                .finish(),
+        );
+        (logs, guard)
+    }
+
+    /// As [`capture`](Self::capture), keeping only what `agmen` logs by default.
+    fn capture_default() -> (Self, tracing::subscriber::DefaultGuard) {
+        let logs = Self::default();
+        let guard = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .without_time()
+                .with_ansi(false)
+                .with_max_level(tracing::Level::WARN)
                 .with_writer(logs.clone())
                 .finish(),
         );
@@ -428,4 +447,223 @@ async fn a_quiet_watch_on_an_older_agmend_is_not_cut_off() {
     }
     assert_eq!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty));
     assert_eq!(older.asked().len(), 2, "the watch reconnected");
+}
+
+#[tokio::test(start_paused = true)]
+async fn local_watch_survives_six_failed_reconnects_without_duplicate_delivery() {
+    let (logs, _guard) = LogBytes::capture();
+    let dir = tempfile::Builder::new().prefix("lr").tempdir().unwrap();
+    let socket = dir.path().join("agmend.sock");
+    let identity = identity();
+    let mut daemon = FakeAgmend::start(&socket, me(&identity), 0, |n, _| match n {
+        0 => Answer::Open {
+            events: vec![feed_message(1)],
+            drop_after: true,
+        },
+        1..=6 => Answer::Drop,
+        _ => Answer::Open {
+            events: vec![feed_message(1), feed_message(2), feed_message(3)],
+            drop_after: false,
+        },
+    });
+    let link = link_at(&socket, &identity);
+    let mut rx = link.watch(WatchState::Notifications).await.unwrap();
+    let seqs = tokio::time::timeout(Duration::from_secs(300), async {
+        let mut seqs = Vec::new();
+        while seqs.len() < 3 {
+            if let ClientEvent::Message { message } = rx.recv().await.expect("watch keeps retrying")
+            {
+                seqs.push(message.seq.0);
+            }
+        }
+        seqs
+    })
+    .await
+    .unwrap();
+    assert_eq!(seqs, [1, 2, 3]);
+    let asked = daemon.asked();
+    assert_eq!(asked.len(), 8);
+    for params in &asked[1..] {
+        assert_eq!(params["after"]["feed"], 1);
+    }
+    assert_eq!(logs.text().matches("waiting for agmend").count(), 1);
+    assert_eq!(logs.text().matches("reconnected to agmend").count(), 1);
+    assert_eq!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+}
+
+#[tokio::test(start_paused = true)]
+async fn local_watch_retries_temporary_refusals() {
+    for message in [
+        "busy",
+        "local.db is busy; try again",
+        "the local origin has stopped",
+    ] {
+        let dir = tempfile::Builder::new().prefix("lr").tempdir().unwrap();
+        let socket = dir.path().join("agmend.sock");
+        let identity = identity();
+        let _daemon = FakeAgmend::start(&socket, me(&identity), 0, move |n, _| match n {
+            0 => Answer::Open {
+                events: Vec::new(),
+                drop_after: true,
+            },
+            1 => Answer::Refuse(ErrorCode::Hub, message),
+            _ => Answer::Open {
+                events: vec![feed_message(1)],
+                drop_after: false,
+            },
+        });
+        let link = link_at(&socket, &identity);
+        let mut rx = link.watch(WatchState::Notifications).await.unwrap();
+        assert_eq!(delivered(&mut rx, 1).await, [1], "{message}");
+    }
+}
+
+#[tokio::test]
+async fn local_watch_returns_a_failed_first_open_at_once() {
+    // `agmen mcp` connects while it holds its slot lock, so a first open that
+    // waited for agmend would hang every tool call. Only a watch that was
+    // open and then lost keeps trying.
+    let dir = tempfile::Builder::new().prefix("lr").tempdir().unwrap();
+    let identity = identity();
+    for (n, delivery) in [false, true].into_iter().enumerate() {
+        let socket = dir.path().join(format!("down{n}.sock"));
+        let mut daemon = FakeAgmend::start(&socket, me(&identity), 0, |_, _| Answer::Drop);
+        let link = link_at(&socket, &identity);
+        let state = dir.path().join(format!("state{n}"));
+        let state = if delivery {
+            WatchState::Delivery(&state)
+        } else {
+            WatchState::Notifications
+        };
+        let opened = tokio::time::timeout(Duration::from_secs(3), link.watch(state)).await;
+        assert!(
+            opened.is_ok_and(|result| result.is_err()),
+            "delivery {delivery}: the first open waited for agmend instead of failing"
+        );
+        assert_eq!(daemon.asked().len(), 1);
+    }
+}
+
+#[test]
+fn retryable_errors_are_told_from_terminal_ones() {
+    let refused = |code, message: &str| AgmendError::Refused {
+        code,
+        message: message.into(),
+    };
+    let socket = || std::path::PathBuf::from("/run/agmend.sock");
+    let retry = [
+        AgmendError::NotRunning,
+        AgmendError::Timeout {
+            method: "watch".into(),
+        },
+        AgmendError::Io(std::io::Error::other("reset")),
+        AgmendError::Frame(FrameError::Io(std::io::Error::other("eof"))),
+        // agmend binds its socket and only then sets mode 0600.
+        AgmendError::Socket(AgmendSocketError::OpenMode {
+            path: socket(),
+            mode: 0o755,
+        }),
+        refused(ErrorCode::Hub, "busy"),
+        refused(ErrorCode::Hub, "local.db is busy; try again"),
+        refused(ErrorCode::Unknown, "the local origin has stopped"),
+    ];
+    let terminal = [
+        refused(ErrorCode::Unauthorized, "invalid local identity credential"),
+        refused(ErrorCode::Forbidden, "method is not available"),
+        refused(ErrorCode::NotFound, "no such project on this machine"),
+        refused(ErrorCode::BadRequest, "bad params: missing field `project`"),
+        refused(ErrorCode::StaleRequest, "stale"),
+        refused(ErrorCode::Version, "local.db schema is newer"),
+        refused(ErrorCode::Hub, "local.db: disk I/O error"),
+        refused(
+            ErrorCode::Hub,
+            "hub rejected identity message: identity_revoked",
+        ),
+        // The same words under a code that is not a transient one.
+        refused(ErrorCode::NotFound, "local.db is busy; try again"),
+        AgmendError::Version {
+            daemon: 2,
+            client: 1,
+        },
+        AgmendError::Protocol("agmend's watch response id is invalid".into()),
+        AgmendError::BadParams,
+        AgmendError::Socket(AgmendSocketError::WrongOwner {
+            path: socket(),
+            owner: 0,
+            uid: 501,
+        }),
+    ];
+    for error in &retry {
+        assert!(retryable(error), "should be retried: {error:?}");
+    }
+    for error in &terminal {
+        assert!(!retryable(error), "should end the watch: {error:?}");
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_terminal_refusal_after_a_reconnect_is_kept_with_its_own_exit_code() {
+    let dir = tempfile::Builder::new().prefix("lr").tempdir().unwrap();
+    let identity = identity();
+    // A revoked identity exits 3 with the hint; any other refusal is a plain
+    // error (exit 1), not a rejection (exit 4).
+    for (code, message) in [
+        (ErrorCode::Forbidden, "identity revoked by the owner"),
+        (ErrorCode::NotFound, "no such project on this machine"),
+    ] {
+        let socket = dir.path().join(format!("{code:?}.sock"));
+        let _daemon = FakeAgmend::start(&socket, me(&identity), 0, move |n, _| match n {
+            0 => Answer::Open {
+                events: Vec::new(),
+                drop_after: true,
+            },
+            _ => Answer::Refuse(code, message),
+        });
+        let link = link_at(&socket, &identity);
+        let mut rx = link.watch(WatchState::Notifications).await.unwrap();
+        tokio::time::timeout(WAIT, async { while rx.recv().await.is_some() {} })
+            .await
+            .expect("a terminal refusal ends the watch");
+        // Every later call hears it too, not only the first.
+        for _ in 0..2 {
+            let error = link.check_watch().expect_err("the refusal is kept");
+            let exit = error.downcast_ref::<Fail>().map(|fail| fail.code);
+            if code == ErrorCode::Forbidden {
+                assert_eq!(exit, Some(Code::NotLoggedIn), "{error:#}");
+                let text = format!("{error:#}");
+                assert!(text.contains(message), "{text}");
+                assert!(text.contains("run agmen leave, then agmen join"), "{text}");
+            } else {
+                assert_eq!(exit, None, "{error:#}");
+                assert_eq!(format!("{error:#}"), message);
+            }
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_outage_shows_once_in_the_default_log() {
+    // `agmen mcp` has no stderr notice; its log is where the outage shows, and
+    // `agmen` logs warnings and above unless AGMEN_LOG says otherwise.
+    let (logs, _guard) = LogBytes::capture_default();
+    let dir = tempfile::Builder::new().prefix("lr").tempdir().unwrap();
+    let socket = dir.path().join("agmend.sock");
+    let identity = identity();
+    let _daemon = FakeAgmend::start(&socket, me(&identity), 0, |n, _| match n {
+        0 => Answer::Open {
+            events: Vec::new(),
+            drop_after: true,
+        },
+        1 | 2 => Answer::Drop,
+        _ => Answer::Open {
+            events: vec![feed_message(1)],
+            drop_after: false,
+        },
+    });
+    let link = link_at(&socket, &identity);
+    let mut rx = link.watch(WatchState::Notifications).await.unwrap();
+    assert_eq!(delivered(&mut rx, 1).await, [1]);
+    let text = logs.text();
+    assert_eq!(text.matches("waiting for agmend").count(), 1, "{text}");
+    assert_eq!(text.matches("reconnected to agmend").count(), 1, "{text}");
 }

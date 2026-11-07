@@ -43,6 +43,7 @@ pub use install_receipt::{
     InstallReceipt, ReceiptError, install_receipt_path, read_install_receipt,
     read_install_receipt_at,
 };
+pub use link::retry_delay;
 pub use local_credential::{LOCAL_TOKEN_NAMESPACE, LocalCredential, read_local_credential};
 pub use login::{
     HumanTokens, Login, LoginError, human_tokens, save_login, store_tokens, token_grant,

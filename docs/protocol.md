@@ -622,6 +622,18 @@ that connection. Once per process it says that resume is off: on stderr for
 `agmen mcp`. Every reconnect sends `after` again, so resume returns when agmend
 restarts on a version that accepts it.
 
+A watch that was open and loses agmend tries again with no limit, after 1 s and
+then after twice the last wait, up to 30 s. The CLI treats as temporary: agmend
+not running, no answer in time, a dropped socket, a socket whose mode is not yet
+0600 (agmend binds it before it sets the mode), and a `hub` error reading
+`busy`, `local.db is busy; try again` or `the local origin has stopped`. It
+prints one line when the wait starts and one when agmend is back, in the same
+places as the resume notice. Any other refusal ends the watch. For
+`unauthorized` and `forbidden` (agmend answers `unauthorized` when it can no
+longer confirm the identity), `agmen watch` exits 3 and every `agmen mcp` tool
+answers with the reason. A first open that fails is not retried: the command or
+tool reports it at once.
+
 Identity methods use the authenticated identity's project. `page` accepts
 `feed` or that identity's own inbox, otherwise `forbidden`. Its default and
 maximum limit are 500, and limits below 1 give `bad_request`. `pruned_through`

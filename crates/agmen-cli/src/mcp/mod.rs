@@ -714,6 +714,13 @@ impl Server {
         reason = "gpui enables serde_json preserve_order workspace-wide, which grows CallToolResult"
     )]
     async fn live(&self, slot: &mut Option<Connected>) -> Result<Arc<Live>, CallToolResult> {
+        if let Some(local) = slot
+            .as_ref()
+            .and_then(|connected| connected.connection.as_ref())
+            .and_then(|connection| connection.live.agent.local.as_ref())
+        {
+            local.check_watch().map_err(|err| failure(&err))?;
+        }
         if let Some(connected) = slot.as_ref()
             && let Some(connection) = &connected.connection
             && !connection.live.stopped.load(Ordering::SeqCst)
@@ -984,8 +991,13 @@ async fn heartbeat(server: Server) {
     let mut retry = RECONNECT_FIRST.min(every);
     let mut due = Instant::now() + every;
     loop {
-        let mut slot = server.shared.slot.lock().await;
-        let wait = match server.live(&mut slot).await {
+        // The lock is let go before the post: a local post waits up to 30 s on
+        // agmend, and a tool call must not wait behind it.
+        let live = {
+            let mut slot = server.shared.slot.lock().await;
+            server.live(&mut slot).await
+        };
+        let wait = match live {
             Ok(live) => {
                 if Instant::now() >= due {
                     send_heartbeat(&live).await;
@@ -1006,7 +1018,6 @@ async fn heartbeat(server: Server) {
             // Not joined: no news, and nothing to beat for.
             Err(_) => every,
         };
-        drop(slot);
         tokio::time::sleep(wait).await;
     }
 }
