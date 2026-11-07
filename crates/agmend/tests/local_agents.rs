@@ -7,6 +7,8 @@ mod support;
 
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use agmen_client::{IdentityFile, LocalCredential, read_local_credential};
@@ -40,9 +42,13 @@ struct Fixture {
 
 impl Fixture {
     async fn new() -> Self {
-        let home = Home {
+        Self::new_in(Home {
             dir: tempfile::Builder::new().prefix("lag").tempdir().unwrap(),
-        };
+        })
+        .await
+    }
+
+    async fn new_in(home: Home) -> Self {
         let mut f = Self::start(home).await;
         f.project = result(
             f.client
@@ -536,5 +542,110 @@ async fn local_worker_token_stays_out_of_the_worktree_and_answers() {
             path.display()
         );
     }
+    f.stop().await;
+}
+
+/// A hub that only counts. Any request to it means agmend called a hub.
+/// Local to this file because the same helper in `local_identities.rs` is not
+/// shared and `tests/support` is not edited here.
+struct CountingHub {
+    url: String,
+    requests: Arc<AtomicUsize>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl CountingHub {
+    async fn new() -> Self {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let count = requests.clone();
+        let app = axum::Router::new().fallback(move || {
+            let count = count.clone();
+            async move {
+                count.fetch_add(1, Ordering::SeqCst);
+                axum::http::StatusCode::SERVICE_UNAVAILABLE
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        Self {
+            url,
+            requests,
+            task,
+        }
+    }
+}
+
+impl Drop for CountingHub {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+/// A hub worker an earlier signed-in run saved. It loads offline, so it holds
+/// no session and makes no hub call of its own.
+async fn save_hub_worker(home: &Home, hub_url: &str) -> String {
+    const ID: &str = "hubwork1";
+    let dir = home.dir.path().join("managed").join(ID);
+    tokio::fs::create_dir_all(&dir).await.unwrap();
+    let record = json!({
+        "identity": {
+            "hub_url": hub_url, "broker_url": "mqtt://127.0.0.1:9",
+            "tenant": "tenant01", "project": support::PROJECT, "identity_id": ID,
+            "owner_id": support::HUMAN, "handle": "andy/hub-worker", "kind": "agent",
+        },
+        "repo": home.dir.path().join("hub-repo"),
+        "worktree": home.dir.path().join("hub-repo/.worktrees/hub-worker"),
+        "branch": "agent/hub-worker-1",
+        "owner_session_id": "11111111-1111-4111-8111-111111111111",
+        "others_session_id": "22222222-2222-4222-8222-222222222222",
+        "model": "sonnet",
+        "budget_usd": "5",
+    });
+    tokio::fs::write(dir.join("agent.json"), serde_json::to_vec(&record).unwrap())
+        .await
+        .unwrap();
+    ID.to_owned()
+}
+
+/// The identities of every agent `agent_list` shows, sorted. An error answer
+/// fails the test.
+async fn listed_ids(f: &mut Fixture) -> Vec<String> {
+    let answer = result(f.client.call("agent_list", json!({})).await);
+    let mut ids: Vec<String> = answer["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|agent| agent["identity"].as_str().unwrap().to_owned())
+        .collect();
+    ids.sort();
+    ids
+}
+
+#[tokio::test]
+async fn agent_list_signed_out_lists_local_workers_and_calls_no_hub() {
+    let hub = CountingHub::new().await;
+    let home = Home::signed_in(&hub.url).await;
+    let hub_worker = save_hub_worker(&home, &hub.url).await;
+    let mut f = Fixture::new_in(home).await;
+    let local_worker = f.launch("worker", None).await["identity"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // Signed in, both origins' workers are listed, so the next answer is not
+    // short only because the hub worker never loaded.
+    let mut both = vec![hub_worker, local_worker.clone()];
+    both.sort();
+    assert_eq!(listed_ids(&mut f).await, both);
+    // `agmen logout` removes the login file.
+    tokio::fs::remove_file(f.home.login_file()).await.unwrap();
+    assert_eq!(listed_ids(&mut f).await, [local_worker]);
+    assert_eq!(
+        hub.requests.load(Ordering::SeqCst),
+        0,
+        "agent_list called a hub while signed out"
+    );
     f.stop().await;
 }

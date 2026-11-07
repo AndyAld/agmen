@@ -501,7 +501,7 @@ fn check_available(
 fn bad_delegator() -> MintError {
     MintError::new(
         "bad_role",
-        "delegated_by must name a live listener of this owner and project for an agent worker",
+        "delegated_by must name a live identity of this owner and project for an agent child",
     )
 }
 

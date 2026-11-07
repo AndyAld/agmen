@@ -12,7 +12,7 @@ use crate::record::{Clock, SqliteStore, backend, micros, schema, test_clock, tes
 
 const NOW: &str = "2026-11-02T12:00:00Z";
 const BAD_DELEGATOR: &str =
-    "delegated_by must name a live listener of this owner and project for an agent worker";
+    "delegated_by must name a live identity of this owner and project for an agent child";
 const PROJECT_FIXTURES: usize = MAX_LOCAL_PROJECTS + 1;
 
 async fn store() -> (TempDir, SqliteStore) {
