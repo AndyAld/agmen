@@ -1633,6 +1633,107 @@ async fn framed_hub_inbox_state_and_watch_requests_from_worker_are_forbidden() {
 }
 
 #[tokio::test]
+async fn framed_requests_on_a_project_routing_cannot_place_fail_closed_and_ask_no_hub() {
+    use agmen_local::{ErrorCode, Outcome, Request, frame};
+    let mut fixture = Fixture::new().await;
+    // A hub that lists the person in every project, so it would place any project
+    // routing asks about, and that counts what it is asked.
+    fixture.hub.abort();
+    let _stopped = tokio::time::timeout(FRAME_WAIT, &mut fixture.hub)
+        .await
+        .unwrap();
+    let asked = Arc::new(AtomicUsize::new(0));
+    let counted = asked.clone();
+    let app = axum::Router::new().fallback(move || {
+        let counted = counted.clone();
+        async move {
+            counted.fetch_add(1, Ordering::SeqCst);
+            axum::Json(json!({"value": [
+                {"identity_id": "owner001", "handle": "owner", "kind": "human", "status": "online"}
+            ]}))
+        }
+    });
+    let listener = tokio::net::TcpListener::bind(fixture.hub_url.socket_addrs(|| None).unwrap()[0])
+        .await
+        .unwrap();
+    fixture.hub = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let core = &fixture.daemon.core;
+    let project = core
+        .origins
+        .local()
+        .create_project("private", "owner")
+        .await
+        .unwrap()
+        .project()
+        .clone();
+    // The worker's row in agmend.db is what routing reads once local.db cannot be.
+    core.identities
+        .local_mint(&core.managed, json!({"project": project, "name": "sender"}))
+        .await
+        .unwrap();
+    // The daemon bound next has not opened local.db, and finds it newer than it reads.
+    rusqlite::Connection::open(fixture.dir.path().join("local.db"))
+        .unwrap()
+        .pragma_update(None, "user_version", 2)
+        .unwrap();
+    let mut config = crate::Config::new(
+        fixture.dir.path().join("next.sock"),
+        fixture.dir.path().join("login.json"),
+        fixture.tokens.clone(),
+    );
+    config.runner = fixture.runner.clone();
+    config.claude_home = Some(fixture.dir.path().join("claude"));
+    let next = crate::Agmend::bind(config).unwrap();
+    let requests = [
+        ("inbox", json!({"project": project})),
+        ("state", json!({"project": project, "key": "roster"})),
+        ("state", json!({"project": project, "key": "head"})),
+        ("watch", json!({"project": project})),
+    ];
+    // A peer in a worker's process group is refused, although routing cannot place the project.
+    let (mut client, task) = hello_over(4242, next.core.clone()).await;
+    for (method, params) in requests.clone() {
+        frame::write_async(&mut client, &Request::new(2, method, params))
+            .await
+            .unwrap();
+        match framed_reply(&mut client).await.outcome {
+            Outcome::Err { error } => {
+                assert_eq!(error.code, ErrorCode::Forbidden, "{method}: {error:?}");
+                assert_eq!(error.message, "agents cannot call owner-only methods");
+            }
+            other => panic!("{method} got past the guard of an unplaced project: {other:?}"),
+        }
+    }
+    drop(client);
+    tokio::time::timeout(FRAME_WAIT, task)
+        .await
+        .unwrap()
+        .unwrap();
+    // The person's own process gets the routing error, never an answer from the hub.
+    let (mut client, task) = hello_over(4243, next.core.clone()).await;
+    for (method, params) in requests.into_iter().take(3) {
+        frame::write_async(&mut client, &Request::new(2, method, params))
+            .await
+            .unwrap();
+        match framed_reply(&mut client).await.outcome {
+            Outcome::Err { error } => {
+                assert_eq!(error.code, ErrorCode::Version, "{method}: {error:?}");
+                assert!(error.message.contains("local.db"), "{method}: {error:?}");
+            }
+            other => panic!("{method} was answered for an unplaced project: {other:?}"),
+        }
+    }
+    drop(client);
+    tokio::time::timeout(FRAME_WAIT, task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(asked.load(Ordering::SeqCst), 0, "the hub was asked");
+}
+
+#[tokio::test]
 async fn mixed_queue_runs_owner_batch_before_default_batch() {
     let fixture = Fixture::new().await;
     fixture.launch().await;

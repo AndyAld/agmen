@@ -9,13 +9,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use agmen_client::PAGE_LIMIT;
+use agmen_client::{LoginError, PAGE_LIMIT};
 use agmen_local::console::{
     ConsoleEvent, ConsoleSnapshot, ListenerEntry, LocalData, Me, RosterEntry, SettingsChangeEntry,
     Status, change_card_id,
 };
 use agmen_local::{ApiError, ErrorCode, MAX_FRAME, Response, frame};
-use agmen_proto::{ClientEnvelope, IdentityId, IdentityKind, ProjectId, Seq, StampedEnvelope};
+use agmen_proto::{
+    ClientEnvelope, IdentityId, IdentityKind, ProjectId, Seq, StampedEnvelope, Stream,
+};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -27,6 +29,7 @@ use crate::feed::Feeds;
 use crate::hub::{Hub, HubError};
 use crate::listener::ListenerCaps;
 use crate::local::{self, Local};
+use crate::origin::Origin;
 
 /// What every console method needs.
 #[derive(Debug)]
@@ -358,14 +361,18 @@ fn clear_dropped_cards(changes: &mut [SettingsChangeEntry], kept: &[StampedEnvel
 }
 
 impl Console {
-    /// `whoami`: the person in the CLI's login file.
+    /// `whoami`: the hub login, or the local person when signed out.
     pub(crate) async fn whoami(&self) -> Result<Value, ApiError> {
-        let login = self
-            .hub
-            .credentials()
-            .login()
-            .await
-            .map_err(HubError::from)?;
+        let login = match self.hub.credentials().login().await {
+            Ok(login) => login,
+            Err(LoginError::NotSignedIn) => self
+                .origins
+                .local()
+                .login()
+                .await?
+                .ok_or_else(|| ApiError::from(HubError::from(LoginError::NotSignedIn)))?,
+            Err(error) => return Err(HubError::from(error).into()),
+        };
         to_value(&Me {
             id: login.human_id,
             handle: login.handle,
@@ -377,10 +384,10 @@ impl Console {
     /// its worktrees and git facts.
     pub(crate) async fn snapshot(&self, raw: Value) -> Result<Value, ApiError> {
         let SnapshotParams { project, root } = params(raw)?;
-        let origin = self.origins.of(&project).await;
+        let origin = self.origins.of(&project).await?;
         let login = self.origins.person(origin).await?;
         let (messages, older, roster) = match origin {
-            crate::origin::Origin::Local => {
+            Origin::Local => {
                 let local = self.origins.local();
                 let head = local.head(&project).await?;
                 let after = head.saturating_sub(u64::from(PAGE_LIMIT));
@@ -389,10 +396,10 @@ impl Console {
                     .await?;
                 (page.messages, after > 0, local.roster(&project).await?)
             }
-            crate::origin::Origin::Hub => {
+            Origin::Hub => {
                 let head = self.hub.head(&project).await?;
                 let (messages, older) = self
-                    .before(&project, head.saturating_add(1), PAGE_LIMIT)
+                    .before(origin, &project, head.saturating_add(1), PAGE_LIMIT)
                     .await?;
                 (messages, older, self.hub.roster(&project).await?)
             }
@@ -500,11 +507,17 @@ impl Console {
                 "limit must be 1 to {PAGE_LIMIT}, not {limit}"
             )));
         }
+        let origin = self.origins.of(&project).await?;
+        self.origins.person(origin).await?;
         let before = match before {
             Some(before) => before.0,
-            None => self.hub.head(&project).await?.saturating_add(1),
+            None => match origin {
+                Origin::Local => self.origins.local().head(&project).await?,
+                Origin::Hub => self.hub.head(&project).await?,
+            }
+            .saturating_add(1),
         };
-        let (messages, older) = self.before(&project, before, limit).await?;
+        let (messages, older) = self.before(origin, &project, before, limit).await?;
         let base = json_len(&History {
             messages: Vec::new(),
             older,
@@ -520,10 +533,11 @@ impl Console {
     /// older ones exist.
     async fn before(
         &self,
+        origin: Origin,
         project: &ProjectId,
         before: u64,
         limit: u32,
-    ) -> Result<(Vec<StampedEnvelope>, bool), HubError> {
+    ) -> Result<(Vec<StampedEnvelope>, bool), ApiError> {
         let last = before.saturating_sub(1);
         let after = last.saturating_sub(u64::from(limit));
         let count = last - after;
@@ -532,7 +546,15 @@ impl Console {
         }
         // count <= limit <= 500, so it fits.
         let count = u32::try_from(count).unwrap_or(PAGE_LIMIT);
-        let page = self.hub.page(project, after, count).await?;
+        let page = match origin {
+            Origin::Local => {
+                self.origins
+                    .local()
+                    .page(project, &Stream::Feed, after, count)
+                    .await?
+            }
+            Origin::Hub => self.hub.page(project, after, count).await?,
+        };
         let mut messages = page.messages;
         messages.retain(|m| m.seq.0 < before);
         Ok((messages, after > 0))
@@ -550,10 +572,20 @@ impl Console {
         to_value(&local::file_text(&project, &root, &worktree, &path).await?)
     }
 
-    /// `post {project, envelope}`: the envelope as the person, over HTTP.
+    /// `post {project, envelope}`: the envelope as the project's person.
     pub(crate) async fn post(&self, raw: Value) -> Result<Value, ApiError> {
         let PostParams { project, envelope } = params(raw)?;
-        let (stream, seq) = self.hub.post(&project, &envelope).await?;
+        let origin = self.origins.of(&project).await?;
+        self.origins.person(origin).await?;
+        let (stream, seq) = match origin {
+            Origin::Local => {
+                self.origins
+                    .local()
+                    .post_as_person(&project, &envelope)
+                    .await?
+            }
+            Origin::Hub => self.hub.post(&project, &envelope).await?,
+        };
         to_value(&Posted { stream, seq })
     }
 
@@ -568,15 +600,27 @@ impl Console {
         writer: &mut OwnedWriteHalf,
     ) -> Result<(), ApiError> {
         let WatchParams { project, root } = params(raw)?;
+        let origin = self.origins.of(&project).await?;
+        let login = self.origins.person(origin).await?;
+        let _presence = match origin {
+            Origin::Local => Some(
+                self.origins
+                    .local()
+                    .presence(&project, &login.human_id)
+                    .await?,
+            ),
+            Origin::Hub => None,
+        };
         // A project the person may not read fails here, not as a stream
         // that never connects. An unreachable hub is not an error: the
         // watch starts disconnected and connects when the hub is back.
-        if let Err(err) = self.hub.head(&project).await
+        if origin == Origin::Hub
+            && let Err(err) = self.hub.head(&project).await
             && err.is_final()
         {
             return Err(err.into());
         }
-        let mut watch = self.feeds.watch(&project);
+        let mut watch = self.feeds.watch(&project, origin).await?;
         if send_event(writer, id, &watch.first).await.is_err() {
             return Ok(());
         }

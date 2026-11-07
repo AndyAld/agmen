@@ -408,6 +408,19 @@ impl Store {
         Ok(result)
     }
 
+    /// Whether any identity registered under `origin` belongs to `project`.
+    pub(crate) fn has_identity(
+        &self,
+        origin: &str,
+        project: &ProjectId,
+    ) -> Result<bool, StoreError> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM identities WHERE origin=?1 AND project=?2)",
+            params![origin, project.as_str()],
+            |r| r.get(0),
+        )?)
+    }
+
     pub(crate) fn positions(
         &self,
         origin: &str,

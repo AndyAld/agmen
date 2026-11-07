@@ -354,11 +354,6 @@ impl Agmend {
             http.clone(),
         ));
         let hub = Arc::new(Hub::new(http, credentials.clone()));
-        let origins = Origins::new(
-            LocalOrigin::new(&config.socket.with_file_name(""), config.local_claim_lease),
-            hub.clone(),
-        );
-        let feeds = Feeds::new(hub.clone(), config.roster_every);
         let bound = socket::bind(&config.socket)?;
         let path = config.socket.with_file_name("agmend.db");
         let database = path.clone();
@@ -387,6 +382,13 @@ impl Agmend {
                 source: Box::new(source),
             })?;
         let store = Arc::new(std::sync::Mutex::new(store));
+        // Routing reads agmend.db, so Origins is built once the store is open.
+        let origins = Origins::new(
+            LocalOrigin::new(&config.socket.with_file_name(""), config.local_claim_lease),
+            hub.clone(),
+            store.clone(),
+        );
+        let feeds = Feeds::new(origins.clone(), config.roster_every);
         let identities = Arc::new(Identities::new(
             credentials,
             store.clone(),

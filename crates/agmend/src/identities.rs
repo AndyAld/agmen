@@ -35,9 +35,18 @@ type ProjectKey = (String, IdentityId, ProjectId);
 type WatchEvent = (Option<IdentityId>, Result<ClientEvent, ApiError>);
 
 #[derive(Debug)]
-struct Database {
+pub(crate) struct Database {
     store: Arc<Mutex<Store>>,
     jobs: AsyncMutex<tokio::task::JoinSet<()>>,
+}
+
+impl Database {
+    pub(crate) fn new(store: Arc<Mutex<Store>>) -> Self {
+        Self {
+            store,
+            jobs: AsyncMutex::new(tokio::task::JoinSet::new()),
+        }
+    }
 }
 
 struct Cancellation(Arc<AtomicBool>);
@@ -319,10 +328,7 @@ impl Identities {
             hub: origins.hub().clone(),
             origins,
             credentials,
-            store: Arc::new(Database {
-                store,
-                jobs: AsyncMutex::new(tokio::task::JoinSet::new()),
-            }),
+            store: Arc::new(Database::new(store)),
             state_dir,
             runtimes: AsyncMutex::new(BTreeMap::new()),
             collectors: AsyncMutex::new(BTreeMap::new()),
@@ -535,7 +541,7 @@ impl Identities {
         if !(1..=500).contains(&limit) {
             return Err(bad_request("limit must be 1 to 500"));
         }
-        let origin = self.read_origin(caller, &project).await;
+        let origin = self.read_origin(caller, &project).await?;
         let identity = match caller {
             Caller::Human => self.origins.person(origin).await?.human_id,
             Caller::Identity(identity) => identity.identity_id.clone(),
@@ -567,7 +573,7 @@ impl Identities {
             return Err(bad_request("key must be roster or head"));
         }
         tokio::time::timeout(DEADLINE, async {
-            match self.read_origin(caller, &project).await {
+            match self.read_origin(caller, &project).await? {
                 crate::origin::Origin::Local => self.origins.local().state(&project, &key).await,
                 crate::origin::Origin::Hub => {
                     self.hub.state(&project, &key).await.map_err(Into::into)
@@ -578,12 +584,18 @@ impl Identities {
         .map_err(|_| hub_error("state read timed out"))?
     }
 
-    async fn read_origin(&self, caller: &Caller, project: &ProjectId) -> crate::origin::Origin {
+    /// Where `caller` reads `project`. A project routing cannot place answers
+    /// that error, since the hub must not be asked in its place.
+    async fn read_origin(
+        &self,
+        caller: &Caller,
+        project: &ProjectId,
+    ) -> Result<crate::origin::Origin, ApiError> {
         match caller {
             Caller::Identity(identity) if agmen_client::is_local(&identity.hub_url) => {
-                crate::origin::Origin::Local
+                Ok(crate::origin::Origin::Local)
             }
-            Caller::Identity(_) => crate::origin::Origin::Hub,
+            Caller::Identity(_) => Ok(crate::origin::Origin::Hub),
             Caller::Human => self.origins.of(project).await,
         }
     }
@@ -1202,7 +1214,7 @@ async fn write_event(
         .map_err(|_| hub_error("watch write failed"))
 }
 
-async fn store_work<T: Send + 'static>(
+pub(crate) async fn store_work<T: Send + 'static>(
     database: Arc<Database>,
     work: impl FnOnce(&mut Store) -> Result<T, crate::state::StoreError> + Send + 'static,
 ) -> Result<T, ApiError> {

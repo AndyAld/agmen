@@ -77,9 +77,9 @@ impl LocalOrigin {
     async fn open(&self, handle_hint: Option<&str>) -> Result<Record, ApiError> {
         let mut running = tokio::time::timeout(OPEN_WAIT, self.running.lock())
             .await
-            .map_err(failed)?;
+            .map_err(|_| busy())?;
         if self.stopped.load(Ordering::Acquire) {
-            return Err(missing("the local origin has stopped"));
+            return Err(stopped());
         }
         if let Some(running) = running.as_ref() {
             return Ok(running.record.clone());
@@ -117,7 +117,7 @@ impl LocalOrigin {
                 .person()
                 .await
                 .map_err(failed)?
-                .ok_or_else(|| missing("no local person on this machine"))?,
+                .ok_or_else(|| failed("no local person on this machine"))?,
         };
         let core = Arc::new(Core::new(store, self.claim_lease));
         let sweep_core = core.clone();
@@ -149,21 +149,9 @@ impl LocalOrigin {
         Ok(record)
     }
 
+    #[cfg(test)]
     pub(crate) async fn has_project(&self, project: &ProjectId) -> bool {
-        match self.open(None).await {
-            Ok(record) => match record.core.store().topics(project).await {
-                Ok(topics) => topics.is_some(),
-                Err(error) => {
-                    tracing::debug!(%error, "local project lookup failed");
-                    false
-                }
-            },
-            // A broken or newer local record must not prevent hub routing.
-            Err(error) => {
-                tracing::debug!(message = %error.message, "local origin unavailable");
-                false
-            }
-        }
+        self.topics(project).await.is_ok()
     }
 
     pub(crate) async fn person(&self) -> Result<Option<LocalPerson>, ApiError> {
@@ -216,10 +204,6 @@ impl LocalOrigin {
             .map_err(failed)
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "consumed by local identity routing in Task 9")
-    )]
     pub(crate) async fn topics(&self, project: &ProjectId) -> Result<Topics, ApiError> {
         self.open(None)
             .await?
@@ -320,10 +304,6 @@ impl LocalOrigin {
         Ok(handled.reply)
     }
 
-    #[cfg_attr(
-        not(any(test, feature = "test-hooks")),
-        expect(dead_code, reason = "local posts are wired in Task 8")
-    )]
     pub(crate) async fn post_as_person(
         &self,
         project: &ProjectId,
@@ -435,10 +415,6 @@ impl LocalOrigin {
             .map_err(failed)
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "consumed by local console watches in Task 8")
-    )]
     pub(crate) async fn watch_stored(
         &self,
         project: &ProjectId,
@@ -451,10 +427,6 @@ impl LocalOrigin {
             .watch_stored(project))
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "consumed by local console watches in Task 8")
-    )]
     pub(crate) async fn presence(
         &self,
         project: &ProjectId,
@@ -526,6 +498,26 @@ fn failed(error: impl std::fmt::Display) -> ApiError {
         code: ErrorCode::Hub,
         message: format!("local.db: {error}"),
     }
+}
+
+fn busy() -> ApiError {
+    ApiError {
+        code: ErrorCode::Hub,
+        message: "local.db is busy; try again".into(),
+    }
+}
+
+fn stopped() -> ApiError {
+    ApiError {
+        code: ErrorCode::Hub,
+        message: "the local origin has stopped".into(),
+    }
+}
+
+/// Whether `error` says the origin is busy or stopped, which tells routing
+/// nothing about the record, rather than that the record cannot be read.
+pub(crate) fn is_unavailable(error: &ApiError) -> bool {
+    *error == busy() || *error == stopped()
 }
 
 fn record_error(error: record::schema::RecordError) -> ApiError {
