@@ -533,8 +533,13 @@ receive `forbidden`, and so do worker peers.
 | Method | Params | Result |
 |--------|--------|--------|
 | `local_project_create` | `{name}` | `{project, tenant, person: {id, handle}}` |
-| `local_projects` | `{}` | `{projects: [{project, name}]}` |
+| `local_projects` | `{}` | `{projects: [{project, name}], person: {id, handle} \| null}` |
 | `lanes_set` | `{project, lanes: [LaneSpec]}` | `{v, lanes: [{name, globs, owner, owner_handle}]}` |
+
+`local_projects` returns `person: null` and an empty `projects` list before
+the first local project, without creating `local.db`. Once the local origin
+exists, `person` names its fixed local person. The field is additive; clients
+must accept unknown result fields.
 
 Project names contain 1 to 64 characters, with no control characters or
 leading or trailing whitespace. Invalid or duplicate names give `bad_request`.

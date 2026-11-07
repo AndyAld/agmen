@@ -160,11 +160,11 @@ enum Command {
     InstallReceipt(install_receipt::ReceiptArgs),
     /// Sign in to a hub with your browser (device login).
     Login(account::LoginArgs),
-    /// Sign out: forget your tokens on this machine.
+    /// Sign out of the hub, keeping this machine's local credentials.
     Logout,
-    /// Show who is signed in, their projects and roles, and this worktree's identity.
+    /// Show the local person and projects, plus hub memberships and this worktree's identity when signed in.
     Whoami {
-        /// Print the hub membership response as JSON.
+        /// Print local person and projects under `local`, plus hub memberships when signed in, as JSON.
         #[arg(long)]
         json: bool,
     },

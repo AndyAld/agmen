@@ -1102,6 +1102,24 @@ fn refuses_foreign_socket() {
 }
 
 #[test]
+fn unreadable_socket_keeps_its_io_cause() {
+    // A path below a plain file fails with ENOTDIR, not NotFound, so the
+    // client reports `Read` and the io error is only its `source`.
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("plain");
+    std::fs::write(&file, "").unwrap();
+    let cause = std::fs::metadata(file.join("agmend.sock"))
+        .unwrap_err()
+        .to_string();
+    let refused = check_socket(&file.join("agmend.sock"), 0);
+    let Err(BackendError::Agmend(why)) = &refused else {
+        panic!("{refused:?}");
+    };
+    assert!(why.starts_with("cannot read "), "{why}");
+    assert_eq!(why.matches(&cause).count(), 1, "{why}");
+}
+
+#[test]
 fn unsupported_actions_say_so() {
     let fake = FakeAgmend::start(console(vec![]));
     let (backend, _updates) = live_backend(&fake);

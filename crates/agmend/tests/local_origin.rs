@@ -125,6 +125,30 @@ async fn feed_until(
 }
 
 #[tokio::test]
+async fn local_projects_names_the_person() {
+    let home = unsigned_home().await;
+    let (mut client, stop, task, _) = start(&home, home.config()).await;
+    assert_eq!(
+        result(client.call("local_projects", json!({})).await),
+        json!({"projects": [], "person": null})
+    );
+    assert!(!home.dir.path().join("local.db").exists());
+    let created = create(&mut client, "solo").await;
+    assert_eq!(
+        result(client.call("local_projects", json!({})).await),
+        json!({
+            "projects": [{"project": created["project"], "name": "solo"}],
+            "person": {"id": created["person"]["id"], "handle": created["person"]["handle"]}
+        })
+    );
+    stop.send(()).unwrap();
+    tokio::time::timeout(WATCH_WAIT, task)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
 async fn local_project_create_needs_no_login() {
     let home = unsigned_home().await;
     let (mut client, stop, task, _) = start(&home, home.config()).await;
@@ -142,7 +166,7 @@ async fn local_project_create_needs_no_login() {
     let projects = result(client.call("local_projects", json!({})).await);
     assert_eq!(
         projects,
-        json!({"projects": [{"project": created["project"], "name": "solo"}]})
+        json!({"projects": [{"project": created["project"], "name": "solo"}], "person": {"id": created["person"]["id"], "handle": created["person"]["handle"]}})
     );
     assert_eq!(
         result(client.call("ready", json!({})).await),
