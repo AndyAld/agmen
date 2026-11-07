@@ -33,7 +33,7 @@ use gpui::SharedString;
 
 use crate::roles::{Edits, RoleKind, Tier};
 
-pub(crate) use agmend::{AgmendBackend, HostSocket, HostState, HostStatus};
+pub(crate) use agmend::{AgmendBackend, HostSocket, HostState, HostStatus, MAX_DEPTH};
 pub(crate) use fixture::FixtureBackend;
 pub(crate) use fixture_data::REVIEWER_XML;
 pub(crate) use worktree::{
@@ -176,6 +176,12 @@ pub(crate) enum Action {
         identity: IdentityId,
         root: Option<std::path::PathBuf>,
     },
+    /// Brings an offline agent and its stopped descendants back.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the Recents view will send this action in Task 8")
+    )]
+    ResumeTree(IdentityId),
     /// Opens Claude Code on the agent's owner session in Terminal.
     AttachAgent {
         identity: IdentityId,
@@ -620,6 +626,18 @@ pub(crate) struct ManagedWork {
     pub(crate) joined: bool,
 }
 
+/// A stopped managed agent kept until the person removes it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RecentAgent {
+    pub(crate) id: IdentityId,
+    pub(crate) handle: String,
+    pub(crate) role: Option<String>,
+    pub(crate) branch: Option<String>,
+    pub(crate) parent: Option<IdentityId>,
+    pub(crate) stopped_at: Option<Timestamp>,
+    pub(crate) resumable: bool,
+}
+
 /// Everything the window shows at one moment.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Snapshot {
@@ -630,6 +648,8 @@ pub(crate) struct Snapshot {
     pub(crate) managed_agents: BTreeMap<IdentityId, String>,
     /// Where each managed agent works, as agmend lists it.
     pub(crate) managed_work: BTreeMap<IdentityId, ManagedWork>,
+    /// This project's stopped managed agents, including any that cannot resume.
+    pub(crate) recents: Vec<RecentAgent>,
     pub(crate) agent_error: Option<String>,
     /// A plain line about the last agent action that is not an error, such
     /// as a Start that skipped the previous context.

@@ -24,7 +24,7 @@ use url::Url;
 use crate::console::{bad_request, params};
 use crate::hub::Hub;
 use crate::login::Credentials;
-use crate::state::{MAX_STREAM_POSITIONS, ManagedIdentity, Store};
+use crate::state::{CollectionState, MAX_STREAM_POSITIONS, ManagedIdentity, Store};
 
 #[path = "identity_watch.rs"]
 mod watch;
@@ -42,21 +42,113 @@ const LOCAL_RECHECK: Duration = Duration::from_secs(30);
 const COLLECTION_PAGE_SIZE: u32 = 500;
 const MAX_COLLECTION_PAGES: usize = 100;
 const AUTHORITY_RECHECK: Duration = Duration::from_secs(1);
+#[cfg(test)]
 const MAX_QUEUE_ALERT_ATTEMPTS: usize = 3;
+const QUEUE_ALERT_RECHECK: Duration = Duration::from_millis(100);
+const QUEUE_ALERT_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
+const QUEUE_ALERT_MAX_BACKOFF: Duration = Duration::from_secs(30);
 /// agmen-hub's events endpoint refuses more positions in one SSE request.
 const MAX_HUB_AFTER: usize = 256;
 const MAX_HUB_CONNECTIONS: usize = MAX_STREAM_POSITIONS.div_ceil(MAX_HUB_AFTER);
-const MAX_HUB_RECONNECTS: u32 = 10;
 const HUB_BACKOFF_SHIFT: u32 = 5;
+const HUB_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 const HUB_MAX_BACKOFF: Duration = Duration::from_secs(30);
+/// A hub connection that stayed up this long starts the next reconnect over at
+/// the initial delay.
+const HUB_HEALTHY: Duration = Duration::from_secs(60);
 const HUB_READ_WAIT: Duration = Duration::from_secs(45);
+/// How often a collector with skipped streams checks whether a position freed.
+const SKIPPED_RECHECK: Duration = Duration::from_secs(1);
 const HUB_EVENT_QUEUE: usize = 64;
 const HUB_PARSE_BYTES: usize = 16 * 1024;
+
+/// How a collector paces hub reconnects. Tests shorten it per hub origin.
+#[derive(Clone, Copy)]
+struct HubTiming {
+    initial: Duration,
+    max: Duration,
+    healthy: Duration,
+}
+
+impl HubTiming {
+    const DEFAULT: Self = Self {
+        initial: HUB_INITIAL_BACKOFF,
+        max: HUB_MAX_BACKOFF,
+        healthy: HUB_HEALTHY,
+    };
+
+    #[cfg(feature = "test-hooks")]
+    fn for_origin(origin: &str) -> Self {
+        HUB_TIMING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(origin)
+            .copied()
+            .unwrap_or(Self::DEFAULT)
+    }
+
+    #[cfg(not(feature = "test-hooks"))]
+    fn for_origin(_origin: &str) -> Self {
+        Self::DEFAULT
+    }
+
+    fn backoff(self, shift: u32) -> Duration {
+        self.initial.saturating_mul(1_u32 << shift).min(self.max)
+    }
+}
+
+#[cfg(feature = "test-hooks")]
+static HUB_TIMING: Mutex<BTreeMap<String, HubTiming>> = Mutex::new(BTreeMap::new());
+
+/// Shortens the reconnect delays of collectors started later for `hub_url`.
+#[cfg(feature = "test-hooks")]
+pub(crate) fn set_hub_timing(hub_url: &Url, initial: Duration, max: Duration, healthy: Duration) {
+    HUB_TIMING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(
+            agmen_client::origin_key(hub_url),
+            HubTiming {
+                initial,
+                max,
+                healthy,
+            },
+        );
+}
 
 type RuntimeKey = (String, IdentityId);
 type RuntimeSlot = Arc<AsyncMutex<Option<Runtime>>>;
 type ProjectKey = (String, IdentityId, ProjectId);
 type WatchEvent = (Option<IdentityId>, Result<ClientEvent, ApiError>);
+
+struct AlertRetry {
+    next: tokio::time::Instant,
+    delay: Duration,
+    code: ErrorCode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum AlertKey {
+    Identity(RuntimeKey),
+    Project(ProjectKey),
+}
+
+enum FullAlert {
+    Identity(Box<ManagedIdentity>, ClientEnvelope),
+    Project(ProjectKey, ClientEnvelope),
+}
+
+impl FullAlert {
+    fn key(&self) -> AlertKey {
+        match self {
+            Self::Identity(identity, _) => AlertKey::Identity((
+                agmen_client::origin_key(&identity.hub_url),
+                identity.identity_id.clone(),
+            )),
+            Self::Project(key, _) => AlertKey::Project(key.clone()),
+        }
+    }
+}
 
 #[derive(Debug)]
 pub(crate) struct Database {
@@ -907,6 +999,7 @@ impl Identities {
             owner: key.1.clone(),
             project: project.clone(),
             tx: tx.clone(),
+            timing: HubTiming::for_origin(&key.0),
         };
         if origin == crate::origin::Origin::Local {
             // Complete the first catch-up before a pending call can drain.
@@ -931,7 +1024,14 @@ impl Identities {
 
     /// Runs independently of local subscriptions. Removing a login or identity
     /// ends its runtime; durable rows remain for their original owner.
-    pub(crate) async fn supervise(&self) {
+    pub(crate) async fn supervise(self: &Arc<Self>) {
+        tokio::select! {
+            () = self.supervise_projects() => {},
+            () = self.queue_alert_worker() => {},
+        }
+    }
+
+    async fn supervise_projects(&self) {
         match self.origins.local().projects().await {
             Ok(projects) => {
                 for (project, _) in projects.into_iter().take(MAX_COLLECTORS) {
@@ -1007,13 +1107,6 @@ impl Identities {
                 runtimes.remove(&key);
             }
             drop(runtimes);
-            if let Ok(local) = self.origins.person(crate::origin::Origin::Local).await {
-                self.flush_queue_full_alerts(agmen_client::LOCAL_ORIGIN, &local.human_id)
-                    .await;
-            }
-            if let Some(owner) = &owner {
-                self.flush_queue_full_alerts(&origin, owner).await;
-            }
             for row in rows {
                 // A finished collector stays offline until an explicit call.
                 let key = (origin.clone(), row.owner_id.clone(), row.project.clone());
@@ -1026,11 +1119,15 @@ impl Identities {
         }
     }
 
-    async fn flush_queue_full_alerts(&self, origin: &str, owner: &IdentityId) {
+    async fn queue_full_alerts(
+        &self,
+        origin: &str,
+        owner: &IdentityId,
+    ) -> Result<Vec<FullAlert>, ApiError> {
         let origin = origin.to_owned();
         let owner = owner.clone();
         // The existing envelope builder reads random bytes synchronously.
-        let alerts = store_work(self.store.clone(), move |store| {
+        store_work(self.store.clone(), move |store| {
             let mut alerts = Vec::new();
             for identity in store.pending_queue_full_alerts(&origin, &owner)? {
                 let proposed = crate::listener::Listeners::queue_full_alert(&identity)
@@ -1038,41 +1135,187 @@ impl Identities {
                 if let Some(alert) =
                     store.prepare_queue_full_alert(&origin, &identity.identity_id, &proposed)?
                 {
-                    alerts.push((identity, alert));
+                    alerts.push(FullAlert::Identity(Box::new(identity), alert));
+                }
+            }
+            for project in store.pending_stream_alerts(&origin, &owner)? {
+                let proposed =
+                    crate::listener::Listeners::stream_full_alert(&project).map_err(|_| {
+                        crate::state::StoreError::Invalid("full stream list ALERT envelope")
+                    })?;
+                if let Some(alert) =
+                    store.prepare_stream_alert(&origin, &owner, &project, &proposed)?
+                {
+                    alerts.push(FullAlert::Project(
+                        (origin.clone(), owner.clone(), project),
+                        alert,
+                    ));
                 }
             }
             Ok(alerts)
         })
-        .await;
-        let alerts = match alerts {
-            Ok(alerts) => alerts,
-            Err(error) => {
-                tracing::warn!(code=?error.code, "reading full queue ALERTs failed");
-                return;
+        .await
+    }
+
+    async fn publish_full_alert(&self, alert: FullAlert) -> Result<(), ApiError> {
+        match alert {
+            FullAlert::Identity(identity, alert) => {
+                self.post(&identity, alert.clone()).await?;
+                let origin = agmen_client::origin_key(&identity.hub_url);
+                store_work(self.store.clone(), move |store| {
+                    store.acknowledge_queue_full_alert(&origin, &identity.identity_id, &alert.id)
+                })
+                .await
             }
-        };
-        for (identity, alert) in alerts.into_iter().take(MAX_MANAGED) {
-            // As with the listener cap alert, retry the same id so an ambiguous
-            // enqueue outcome cannot publish a second notification for the fill.
-            for _ in 0..MAX_QUEUE_ALERT_ATTEMPTS {
-                match self.post(&identity, alert.clone()).await {
-                    Ok(_) => {
-                        let origin = agmen_client::origin_key(&identity.hub_url);
-                        let id = identity.identity_id.clone();
-                        let message = alert.id.clone();
-                        if let Err(error) = store_work(self.store.clone(), move |store| {
-                            store.acknowledge_queue_full_alert(&origin, &id, &message)
-                        })
-                        .await
-                        {
-                            tracing::warn!(identity=%identity.identity_id, code=?error.code, "acknowledging full queue ALERT failed");
-                        }
-                        break;
+            FullAlert::Project((origin, owner, project), alert) => {
+                // Post as one of the owner's identities, as a full queue does, so
+                // the hub mentions the owner. Only a project with no identity
+                // falls back to the person, whom a hub mentions on nobody's behalf.
+                // shortcut: the sender is picked again on each retry, so removing
+                // it between an ambiguous post and its retry can post a second
+                // ALERT; store the sender with the envelope if that ever matters.
+                let sender = self
+                    .managed(origin.clone(), owner.clone())
+                    .await?
+                    .into_iter()
+                    .find(|identity| identity.project == project);
+                match sender {
+                    Some(identity) => {
+                        self.post(&identity, alert.clone()).await?;
                     }
-                    Err(error) => {
-                        tracing::warn!(identity=%identity.identity_id, code=?error.code, "full queue ALERT could not be queued")
+                    None => {
+                        self.post_project_alert(&origin, &owner, &project, &alert)
+                            .await?;
                     }
                 }
+                store_work(self.store.clone(), move |store| {
+                    store.acknowledge_stream_alert(&origin, &owner, &project, &alert.id)
+                })
+                .await
+            }
+        }
+    }
+
+    async fn post_project_alert(
+        &self,
+        origin: &str,
+        owner: &IdentityId,
+        project: &ProjectId,
+        alert: &ClientEnvelope,
+    ) -> Result<(), ApiError> {
+        let hub_url = if origin == agmen_client::LOCAL_ORIGIN {
+            agmen_client::local_hub_url()
+        } else {
+            Url::parse(origin).map_err(|_| unauthorized())?
+        };
+        let login = self.origins.person_for(&hub_url).await?;
+        if &login.human_id != owner {
+            return Err(unauthorized());
+        }
+        #[cfg(test)]
+        if let Some(publish) = &self.publisher
+            && let Some(mut person) = self
+                .managed(origin.to_owned(), owner.clone())
+                .await?
+                .into_iter()
+                .find(|identity| &identity.project == project)
+        {
+            person.identity_id = owner.clone();
+            person.kind = agmen_proto::IdentityKind::Human;
+            return tokio::time::timeout(DEADLINE, publish(person, alert.clone()))
+                .await
+                .map_err(|_| hub_error("project ALERT publish timed out"))?
+                .map(|_| ());
+        }
+        if origin == agmen_client::LOCAL_ORIGIN {
+            self.origins.local().post_as_person(project, alert).await?;
+        } else {
+            self.hub
+                .post(project, alert)
+                .await
+                .map_err(ApiError::from)?;
+        }
+        Ok(())
+    }
+
+    async fn queue_alert_worker(self: &Arc<Self>) {
+        let mut tick = tokio::time::interval(QUEUE_ALERT_RECHECK);
+        let mut retries: BTreeMap<AlertKey, AlertRetry> = BTreeMap::new();
+        let mut in_flight = BTreeSet::new();
+        let mut jobs = tokio::task::JoinSet::new();
+        let mut read_failure = None;
+        loop {
+            tokio::select! {
+                _ = tick.tick() => {
+                    let mut owners = Vec::new();
+                    if let Ok(local) = self.origins.person(crate::origin::Origin::Local).await {
+                        owners.push((agmen_client::LOCAL_ORIGIN.to_owned(), local.human_id));
+                    }
+                    if let Ok(login) = self.credentials.login().await {
+                        owners.push((agmen_client::origin_key(&login.hub_url), login.human_id));
+                    }
+                    let mut pending = BTreeSet::new();
+                    let mut read_ok = true;
+                    for (origin, owner) in owners {
+                        let alerts = match self.queue_full_alerts(&origin, &owner).await {
+                            Ok(alerts) => alerts,
+                            Err(error) => {
+                                if read_failure != Some(error.code) {
+                                    tracing::warn!(code=?error.code, "reading full queue ALERTs failed");
+                                }
+                                read_failure = Some(error.code);
+                                read_ok = false;
+                                continue;
+                            }
+                        };
+                        for alert in alerts.into_iter().take(MAX_MANAGED + MAX_COLLECTORS) {
+                            let key = alert.key();
+                            pending.insert(key.clone());
+                            if jobs.len() >= MAX_MANAGED || in_flight.contains(&key)
+                                || retries.get(&key).is_some_and(|retry| retry.next > tokio::time::Instant::now()) {
+                                continue;
+                            }
+                            in_flight.insert(key.clone());
+                            let identities = self.clone();
+                            jobs.spawn(async move {
+                                let result = identities.publish_full_alert(alert).await;
+                                (key, result)
+                            });
+                        }
+                    }
+                    if read_ok {
+                        read_failure = None;
+                        retries.retain(|key, _| pending.contains(key) || in_flight.contains(key));
+                    }
+                },
+                result = jobs.join_next(), if !jobs.is_empty() => {
+                    match result {
+                        Some(Ok((key, result))) => {
+                            in_flight.remove(&key);
+                            match result {
+                                Ok(()) => { retries.remove(&key); },
+                                Err(error) => {
+                                    let previous = retries.get(&key);
+                                    if previous.is_none_or(|retry| retry.code != error.code) {
+                                        tracing::warn!(alert=?key, code=?error.code, "full queue ALERT could not be queued");
+                                    }
+                                    let delay = previous.map_or(QUEUE_ALERT_INITIAL_BACKOFF, |retry| retry.delay.saturating_mul(2).min(QUEUE_ALERT_MAX_BACKOFF));
+                                    retries.insert(key, AlertRetry { next: tokio::time::Instant::now() + delay, delay, code: error.code });
+                                }
+                            }
+                        }
+                        Some(Err(_)) => {
+                            // A failed worker cannot retain its identity's in-flight slot.
+                            jobs.abort_all();
+                            for _ in 0..MAX_MANAGED {
+                                if jobs.join_next().await.is_none() { break; }
+                            }
+                            in_flight.clear();
+                            tracing::warn!("full queue ALERT worker failed");
+                        }
+                        None => {}
+                    }
+                },
             }
         }
     }
@@ -1522,6 +1765,21 @@ pub(crate) async fn store_work<T: Send + 'static>(
         .map_err(|_| hub_error("daemon state worker failed"))?
 }
 
+/// The positions split into the `after` sets of one SSE request each.
+fn hub_chunks(positions: &BTreeMap<Stream, u64>) -> Vec<BTreeMap<Stream, u64>> {
+    let mut chunks = vec![BTreeMap::new()];
+    for (n, (stream, seq)) in positions.iter().take(MAX_STREAM_POSITIONS).enumerate() {
+        let index = n / MAX_HUB_AFTER;
+        if index == chunks.len() {
+            chunks.push(BTreeMap::new());
+        }
+        if let Some(chunk) = chunks.get_mut(index) {
+            chunk.insert(stream.clone(), *seq);
+        }
+    }
+    chunks
+}
+
 struct Collection {
     hub: Arc<Hub>,
     origins: Arc<crate::origin::Origins>,
@@ -1530,6 +1788,7 @@ struct Collection {
     owner: IdentityId,
     project: ProjectId,
     tx: broadcast::Sender<WatchEvent>,
+    timing: HubTiming,
 }
 
 impl Collection {
@@ -1539,16 +1798,33 @@ impl Collection {
     }
 
     async fn positions(&self) -> Result<BTreeMap<Stream, u64>, ApiError> {
+        self.collection_state().await.map(|state| state.positions)
+    }
+
+    async fn collection_state(&self) -> Result<CollectionState, ApiError> {
         let origin = self.origin.clone();
         let project = self.project.clone();
         let owner = self.owner.clone();
         store_work(self.store.clone(), move |s| {
-            s.positions_for_owner(&origin, &owner, &project)
+            s.collection_positions(&origin, &owner, &project)
         })
         .await
     }
 
-    async fn commit(&self, message: StampedEnvelope) -> Result<(), ApiError> {
+    /// The saved position of a stream this collector may deliver, without the
+    /// cleanup `collection_state` runs.
+    async fn saved_position(&self, stream: &Stream) -> Result<Option<u64>, ApiError> {
+        let origin = self.origin.clone();
+        let project = self.project.clone();
+        let owner = self.owner.clone();
+        let stream = stream.clone();
+        store_work(self.store.clone(), move |s| {
+            s.saved_position(&origin, &owner, &project, &stream)
+        })
+        .await
+    }
+
+    async fn commit(&self, message: StampedEnvelope) -> Result<bool, ApiError> {
         if serde_json::to_vec(&message.client)
             .map_err(|_| hub_error("invalid envelope"))?
             .len()
@@ -1569,26 +1845,73 @@ impl Collection {
         let project = self.project.clone();
         let saved = message.clone();
         let owner = self.owner.clone();
-        store_work(self.store.clone(), move |s| {
-            s.ingest_for_owner(&origin, &project, &saved, Some(&owner))
+        let delivered = store_work(self.store.clone(), move |s| {
+            if !s.can_deliver(&origin, &owner, &project, &saved.stream)? {
+                return Ok(false);
+            }
+            match s.ingest_for_owner(&origin, &project, &saved, Some(&owner)) {
+                Ok(()) => Ok(true),
+                Err(crate::state::StoreError::Full("258 stream positions")) => {
+                    s.mark_streams_full(&origin, &owner, &project)?;
+                    Ok(false)
+                }
+                Err(error) => Err(error),
+            }
         })
         .await?;
-        self.send(Ok(ClientEvent::Message {
-            message: Box::new(message),
-        }));
-        Ok(())
+        if delivered {
+            self.send(Ok(ClientEvent::Message {
+                message: Box::new(message),
+            }));
+        }
+        Ok(delivered)
     }
 
-    async fn accept(&self, message: StampedEnvelope) -> Result<(), ApiError> {
+    async fn accept(
+        &self,
+        message: StampedEnvelope,
+        skipped: &mut BTreeSet<Stream>,
+        cleaned: &mut tokio::time::Instant,
+    ) -> Result<(), ApiError> {
         let stream = message.stream.clone();
-        let mut last = self.positions().await?.get(&stream).copied().unwrap_or(0);
+        // The cleanup and room check take a write transaction. A deliverable
+        // stream with a saved position needs neither until a stream is skipped
+        // or SKIPPED_RECHECK has passed since the last one.
+        let saved = if skipped.is_empty() && cleaned.elapsed() < SKIPPED_RECHECK {
+            self.saved_position(&stream).await?
+        } else {
+            None
+        };
+        let mut last = if let Some(saved) = saved {
+            saved
+        } else {
+            let CollectionState {
+                positions,
+                streams: active,
+                room,
+            } = self.collection_state().await?;
+            *cleaned = tokio::time::Instant::now();
+            // A freed position lets every skipped stream try again.
+            if room {
+                skipped.clear();
+            } else {
+                skipped.retain(|stream| active.contains(stream));
+            }
+            if !active.contains(&stream) || skipped.contains(&stream) {
+                return Ok(());
+            }
+            positions.get(&stream).copied().unwrap_or(0)
+        };
         if message.seq.0 <= last {
             return Ok(());
         }
         // At most 100 pages per catch-up, committing progress after each row.
         for _ in 0..100 {
             if message.seq.0 == last.saturating_add(1) {
-                return self.commit(message).await;
+                if !self.commit(message).await? {
+                    skipped.insert(stream);
+                }
+                return Ok(());
             }
             let page = tokio::time::timeout(
                 DEADLINE,
@@ -1604,7 +1927,10 @@ impl Collection {
                     return Err(hub_error("noncontiguous gap replay"));
                 }
                 last = row.seq.0;
-                self.commit(row).await?;
+                if !self.commit(row).await? {
+                    skipped.insert(stream);
+                    return Ok(());
+                }
                 if last >= message.seq.0 {
                     return Ok(());
                 }
@@ -1622,14 +1948,9 @@ impl Collection {
             return;
         }
         let mut warned_limit = false;
-        for attempt in 0..=MAX_HUB_RECONNECTS {
-            if attempt > 0 {
-                tokio::time::sleep(
-                    Duration::from_secs(1_u64 << (attempt - 1).min(HUB_BACKOFF_SHIFT))
-                        .min(HUB_MAX_BACKOFF),
-                )
-                .await;
-            }
+        let mut backoff_shift = 0;
+        let mut skipped = BTreeSet::new();
+        loop {
             let positions = match self.positions().await {
                 Ok(p) => p,
                 Err(error) => {
@@ -1637,32 +1958,47 @@ impl Collection {
                     return;
                 }
             };
-            if let Err(error) = self.hub_pass(positions, &mut warned_limit).await {
-                self.send(Err(error));
-                return;
-            }
+            let backoff = self.timing.backoff(backoff_shift);
+            let healthy = match self
+                .hub_pass(positions, &mut warned_limit, &mut skipped, backoff)
+                .await
+            {
+                Ok(healthy) => healthy,
+                Err(error) => {
+                    self.send(Err(error));
+                    return;
+                }
+            };
             self.send(Ok(ClientEvent::Connection { connected: false }));
+            backoff_shift = if healthy {
+                0
+            } else {
+                (backoff_shift + 1).min(HUB_BACKOFF_SHIFT)
+            };
         }
-        self.send(Err(hub_error("collector offline after 10 reconnects")));
     }
 
     async fn hub_pass(
         &self,
         positions: BTreeMap<Stream, u64>,
         warned_limit: &mut bool,
-    ) -> Result<(), ApiError> {
-        let mut chunks = vec![BTreeMap::new()];
-        for (n, (stream, seq)) in positions.iter().take(MAX_STREAM_POSITIONS).enumerate() {
-            let index = n / MAX_HUB_AFTER;
-            if index == chunks.len() {
-                chunks.push(BTreeMap::new());
-            }
-            if let Some(chunk) = chunks.get_mut(index) {
-                chunk.insert(stream.clone(), *seq);
-            }
-        }
-        let mut responses = Vec::with_capacity(MAX_HUB_CONNECTIONS);
-        for chunk in chunks.iter().take(MAX_HUB_CONNECTIONS) {
+        skipped: &mut BTreeSet<Stream>,
+        backoff: Duration,
+    ) -> Result<bool, ApiError> {
+        let chunks = hub_chunks(&positions);
+        let (tx, mut rx) = mpsc::channel(HUB_EVENT_QUEUE);
+        let mut readers = tokio::task::JoinSet::new();
+        let secondary: BTreeSet<_> = chunks
+            .iter()
+            .skip(1)
+            .flat_map(|chunk| chunk.keys().cloned())
+            .collect();
+        let mut retry_at = None;
+        let mut opened = 0;
+        let mut up_since = None;
+        let mut healthy = false;
+        let mut cleaned = tokio::time::Instant::now();
+        'opening: for (index, chunk) in chunks.iter().enumerate().take(MAX_HUB_CONNECTIONS) {
             // The hub replays from seq 0 any stream `after` omits. Name other
             // streams too, up to its limit, so a short chunk does not make the
             // hub resend their whole history on every reconnect.
@@ -1673,61 +2009,86 @@ impl Collection {
                 }
                 after.entry(stream.clone()).or_insert(*seq);
             }
-            match tokio::time::timeout(DEADLINE, self.hub.events(&self.project, &after, None)).await
-            {
-                Ok(Ok(response)) => responses.push(response),
-                Ok(Err(error)) if error.is_final() => return Err(error.into()),
-                Ok(Err(crate::hub::HubError::Refused { status, code, .. })) => {
-                    if !*warned_limit
-                        && (status == 429 || code == "too_many_streams" || code == "hub_busy")
-                    {
-                        // The hub's error text is its own: log the status only.
-                        tracing::warn!(project = %self.project, status,
-                            "hub events connection refused; hub limit is 8 streams per person (128 total); retrying");
-                        *warned_limit = true;
-                    }
-                    return Ok(());
+            let opening =
+                tokio::time::timeout(DEADLINE, self.hub.events(&self.project, &after, None));
+            tokio::pin!(opening);
+            loop {
+                tokio::select! {
+                    response = &mut opening => {
+                        match response {
+                            Ok(Ok(response)) => {
+                                let assigned = if index == 0 { secondary.clone() } else { chunk.keys().cloned().collect() };
+                                readers.spawn(read_hub_events(response, tx.clone(), assigned, index == 0));
+                                opened += 1;
+                                if opened == 1 {
+                                    up_since = Some(tokio::time::Instant::now());
+                                    self.send(Ok(ClientEvent::Connection { connected: true }));
+                                }
+                                break;
+                            }
+                            Ok(Err(error)) if error.is_final() => return Err(error.into()),
+                            Ok(Err(crate::hub::HubError::Refused { status, code, .. }))
+                                if !*warned_limit && (status == 429 || code == "too_many_streams" || code == "hub_busy") => {
+                                    // Refusal bodies belong to the hub; never log them.
+                                    tracing::warn!(project = %self.project, status,
+                                        "hub events connection refused; hub limit is 8 streams per person (128 total); retrying");
+                                    *warned_limit = true;
+                            }
+                            _ => {}
+                        }
+                        retry_at = Some(tokio::time::Instant::now() + backoff);
+                        break 'opening;
+                    },
+                    Some(message) = rx.recv() => self.accept(message, skipped, &mut cleaned).await?,
+                    ended = readers.join_next(), if !readers.is_empty() => {
+                        reader_result(ended)?;
+                        retry_at = Some(tokio::time::Instant::now() + backoff);
+                        break 'opening;
+                    },
                 }
-                _ => return Ok(()),
             }
         }
-        let (tx, mut rx) = mpsc::channel(HUB_EVENT_QUEUE);
-        let mut readers = tokio::task::JoinSet::new();
-        // The hub sends all readable streams on every connection, including
-        // ones absent from `after`. Assign each stream to one reader. The first
-        // reader also covers streams created since the last reconnect.
-        let secondary: BTreeSet<_> = chunks
-            .iter()
-            .skip(1)
-            .flat_map(|chunk| chunk.keys().cloned())
-            .collect();
-        for (index, response) in responses.into_iter().enumerate().take(MAX_HUB_CONNECTIONS) {
-            let tx = tx.clone();
-            let assigned = if index == 0 {
-                secondary.clone()
-            } else {
-                chunks
-                    .get(index)
-                    .map(|chunk| chunk.keys().cloned().collect())
-                    .unwrap_or_default()
-            };
-            readers.spawn(read_hub_events(response, tx, assigned, index == 0));
+        if opened == chunks.len() {
+            *warned_limit = false;
         }
         drop(tx);
-        self.send(Ok(ClientEvent::Connection { connected: true }));
         // Readers only parse; one consumer performs position checks and ingest
         // transactions, preserving order and suppressing duplicates on replay.
+        let mut receiving = true;
+        let mut recheck = tokio::time::interval_at(
+            tokio::time::Instant::now() + SKIPPED_RECHECK,
+            SKIPPED_RECHECK,
+        );
+        recheck.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
-                event = rx.recv() => match event {
-                    Some(message) => self.accept(message).await?,
-                    None => return Ok(()),
+                event = rx.recv(), if receiving => match event {
+                    Some(message) => self.accept(message, skipped, &mut cleaned).await?,
+                    None => { receiving = false; },
                 },
-                ended = readers.join_next() => return match ended {
-                    Some(Ok(result)) => result,
-                    Some(Err(_)) => Err(hub_error("hub events reader failed")),
-                    None => Ok(()),
+                // The hub sends a skipped stream's backlog again only on a new
+                // connection, so reconnect once a position has freed.
+                _ = recheck.tick(), if !skipped.is_empty() => {
+                    if self.collection_state().await?.room {
+                        skipped.clear();
+                        return Ok(false);
+                    }
                 },
+                ended = readers.join_next(), if !readers.is_empty() => {
+                    reader_result(ended)?;
+                    retry_at.get_or_insert_with(|| {
+                        // A connection that stayed up starts over at the initial delay.
+                        healthy = up_since.is_some_and(|since| since.elapsed() >= self.timing.healthy);
+                        let delay = if healthy { self.timing.initial } else { backoff };
+                        tokio::time::Instant::now() + delay
+                    });
+                },
+                () = async {
+                    match retry_at {
+                        Some(deadline) => tokio::time::sleep_until(deadline).await,
+                        None => std::future::pending().await,
+                    }
+                } => return Ok(healthy),
             }
         }
     }
@@ -1736,11 +2097,13 @@ impl Collection {
         let local = self.origins.local();
         let mut stored = local.watch_stored(&self.project).await?;
         let mut streams = VecDeque::new();
+        let mut skipped = BTreeSet::new();
         self.send(Ok(ClientEvent::Connection { connected: true }));
         loop {
             // Subscribe before paging so commits during replay remain visible.
             stored.borrow_and_update();
-            self.local_wake(&mut streams, MAX_COLLECTION_PAGES).await?;
+            self.local_wake_skipping(&mut streams, MAX_COLLECTION_PAGES, &mut skipped)
+                .await?;
             if let Ok(Err(_)) = tokio::time::timeout(LOCAL_RECHECK, stored.changed()).await {
                 return Err(hub_error("local record notification channel closed"));
             }
@@ -1752,6 +2115,25 @@ impl Collection {
         streams: &mut VecDeque<Stream>,
         max_pages: usize,
     ) -> Result<(), ApiError> {
+        self.local_wake_skipping(streams, max_pages, &mut BTreeSet::new())
+            .await
+    }
+
+    async fn local_wake_skipping(
+        &self,
+        streams: &mut VecDeque<Stream>,
+        max_pages: usize,
+        skipped: &mut BTreeSet<Stream>,
+    ) -> Result<(), ApiError> {
+        let CollectionState {
+            mut positions,
+            room,
+            ..
+        } = self.collection_state().await?;
+        // A freed position lets every skipped stream try again.
+        if room {
+            skipped.clear();
+        }
         let origin = self.origin.clone();
         let owner = self.owner.clone();
         let identities = store_work(self.store.clone(), move |store| {
@@ -1769,13 +2151,13 @@ impl Collection {
         );
         // Keep unfinished streams first across wakes, even when there are more
         // inboxes than the page budget. Refresh registration on every wake.
-        streams.retain(|stream| active.contains(stream));
+        skipped.retain(|stream| active.contains(stream));
+        streams.retain(|stream| active.contains(stream) && !skipped.contains(stream));
         for stream in active.into_iter().take(MAX_STREAM_POSITIONS) {
-            if !streams.contains(&stream) {
+            if !streams.contains(&stream) && !skipped.contains(&stream) {
                 streams.push_back(stream);
             }
         }
-        let mut positions = self.positions().await?;
         for _ in 0..max_pages.min(MAX_COLLECTION_PAGES) {
             let Some(stream) = streams.pop_front() else {
                 break;
@@ -1800,14 +2182,27 @@ impl Collection {
                     return Err(hub_error("noncontiguous local replay"));
                 }
                 let seq = row.seq.0;
-                self.commit(row).await?;
+                if !self.commit(row).await? {
+                    skipped.insert(stream.clone());
+                    break;
+                }
                 positions.insert(stream.clone(), seq);
             }
-            if page.next_after.is_some() {
+            if page.next_after.is_some() && !skipped.contains(&stream) {
                 streams.push_back(stream);
             }
         }
         Ok(())
+    }
+}
+
+fn reader_result(
+    ended: Option<Result<Result<(), ApiError>, tokio::task::JoinError>>,
+) -> Result<(), ApiError> {
+    match ended {
+        Some(Ok(result)) => result,
+        Some(Err(_)) => Err(hub_error("hub events reader failed")),
+        None => Ok(()),
     }
 }
 
@@ -2052,6 +2447,7 @@ mod local_collection_tests {
                 owner: person.id,
                 project: topics.project().clone(),
                 tx: broadcast::channel(WATCH_CAPACITY).0,
+                timing: HubTiming::DEFAULT,
             };
             Self {
                 _dir: dir,
@@ -2288,6 +2684,115 @@ mod local_collection_tests {
         })
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn local_stream_skipped_at_the_position_cap_resumes_when_an_identity_is_removed() {
+        const FILLER: usize = MAX_STREAM_POSITIONS - 3;
+        tokio::time::timeout(TEST_WAIT, async {
+            let f = Fixture::new().await;
+            // The project holds 258 positions: this owner's feed, inbox and first
+            // agent, and another owner's. The second agent's inbox has none.
+            let namespace = format!("{}#owner={}", agmen_client::LOCAL_ORIGIN, f.collection.owner);
+            let project = f.collection.project.clone();
+            let mut sql = String::new();
+            for stream in [
+                "feed".to_owned(),
+                format!("inbox:{}", f.collection.owner),
+                format!("inbox:{}", f.agents[0]),
+            ] {
+                sql.push_str(&format!(
+                    "INSERT INTO positions VALUES ('{namespace}','{project}','{stream}',0);"
+                ));
+            }
+            for n in 0..FILLER {
+                sql.push_str(&format!(
+                    "INSERT INTO positions VALUES ('{}#owner=other001','{project}','inbox:other{n:03}',0);",
+                    agmen_client::LOCAL_ORIGIN
+                ));
+            }
+            f.execute_state(sql).await;
+            f.post(Some(&f.agents[1])).await;
+            let second = Stream::Inbox(f.agents[1].clone());
+            let (mut streams, mut skipped) = (VecDeque::new(), BTreeSet::new());
+            f.collection
+                .local_wake_skipping(&mut streams, MAX_COLLECTION_PAGES, &mut skipped)
+                .await
+                .unwrap();
+            assert!(skipped.contains(&second), "no position is left for it");
+            assert!(f.drain(&f.agents[1]).await.is_empty());
+
+            // Removing the first agent frees its position, so the second agent's
+            // inbox fits again without a restart.
+            let first = f.agents[0].clone();
+            store_work(f.collection.store.clone(), move |store| {
+                store.unregister(agmen_client::LOCAL_ORIGIN, &first)
+            })
+            .await
+            .unwrap();
+            f.collection
+                .local_wake_skipping(&mut streams, MAX_COLLECTION_PAGES, &mut skipped)
+                .await
+                .unwrap();
+            assert!(skipped.is_empty());
+            assert_eq!(f.drain(&f.agents[1]).await.len(), 1);
+            assert_eq!(f.collection.positions().await.unwrap()[&second], 1);
+            f.stop().await;
+        })
+        .await
+        .unwrap();
+    }
+
+    fn feed_event(seq: u64) -> StampedEnvelope {
+        serde_json::from_value(json!({
+            "v":1,"id":"01JBX6Q4T7W3C2M8Y9K5N0P1RS","verb":"FYI","data":{},
+            "body":"already saved","sent_at":"2026-10-27T12:00:00Z",
+            "stream":"feed","seq":seq,"from":"sender01","from_handle":"sender",
+            "from_kind":"human","hub_at":"2026-10-27T12:00:00Z"
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn saved_stream_event_leaves_stale_positions_until_the_recheck() {
+        let f = Fixture::new().await;
+        let namespace = format!(
+            "{}#owner={}",
+            agmen_client::LOCAL_ORIGIN,
+            f.collection.owner
+        );
+        let project = f.collection.project.clone();
+        f.execute_state(format!(
+            "INSERT INTO positions VALUES ('{namespace}','{project}','feed',9);
+             INSERT INTO positions VALUES ('{namespace}','{project}','inbox:revoked001',1);"
+        ))
+        .await;
+        let stale = Stream::Inbox("revoked001".parse().unwrap());
+        let mut skipped = BTreeSet::new();
+        let mut cleaned = tokio::time::Instant::now();
+        f.collection
+            .accept(feed_event(3), &mut skipped, &mut cleaned)
+            .await
+            .unwrap();
+        // Not `positions()`, which is itself the cleanup.
+        let (owner, saved_project) = (f.collection.owner.clone(), project.clone());
+        let saved = store_work(f.collection.store.clone(), move |store| {
+            store.positions_for_owner(agmen_client::LOCAL_ORIGIN, &owner, &saved_project)
+        })
+        .await
+        .unwrap();
+        assert!(
+            saved.contains_key(&stale),
+            "a saved stream's event must not run the cleanup transaction"
+        );
+        // Once SKIPPED_RECHECK has passed, the next event cleans up.
+        cleaned = cleaned.checked_sub(SKIPPED_RECHECK).unwrap();
+        f.collection
+            .accept(feed_event(3), &mut skipped, &mut cleaned)
+            .await
+            .unwrap();
+        assert!(!f.collection.positions().await.unwrap().contains_key(&stale));
+        f.stop().await;
     }
 
     // The next three run no supervise task and no collector: a recorded row reaches

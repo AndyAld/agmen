@@ -392,3 +392,482 @@ async fn hub_chunks_resume_after_refusal_without_duplicate_delivery() {
     daemon.0.stop().await;
     server.abort();
 }
+
+const LIVE_IDENTITIES: usize = agmen_local::safeguards::MAX_MANAGED;
+const STALE_IDENTITIES: usize = 3;
+const OLD_RETRY_BUDGET: usize = 10;
+const LONG_REFUSAL_WAIT: Duration = Duration::from_secs(280);
+
+async fn seed_positions(daemon: Daemon, origin: String, stale: bool) -> Daemon {
+    tokio::task::spawn_blocking(move || {
+        let conn = rusqlite::Connection::open(daemon.home.database()).unwrap();
+        conn.execute("DELETE FROM identities", []).unwrap();
+        for n in 1..=LIVE_IDENTITIES {
+            daemon
+                .home
+                .seed_identity(&origin, &format!("agent{n:03}"), &"c".repeat(64));
+        }
+        let namespace = format!("{}#owner={HUMAN}", origin.trim_end_matches('/'));
+        for stream in std::iter::once("feed".to_owned())
+            .chain(std::iter::once(format!("inbox:{HUMAN}")))
+            .chain((1..=LIVE_IDENTITIES).map(|n| format!("inbox:agent{n:03}")))
+            .chain(
+                (0..if stale { STALE_IDENTITIES } else { 0 })
+                    .map(|n| format!("inbox:revoked{n:03}")),
+            )
+        {
+            conn.execute(
+                "INSERT INTO positions VALUES (?1,?2,?3,0)",
+                rusqlite::params![namespace, PROJECT, stream],
+            )
+            .unwrap();
+        }
+        daemon
+    })
+    .await
+    .unwrap()
+}
+
+fn inbox_message(n: usize, seq: u64) -> serde_json::Value {
+    let id = format!("agent{n:03}");
+    let mut message = support::stamped(n as u64 * 10 + seq, "deliverable inbox");
+    message["stream"] = json!(format!("inbox:{id}"));
+    message["seq"] = json!(seq);
+    message["verb"] = json!("DM");
+    message["to"] = json!([id]);
+    message
+}
+
+async fn drain_inbox(daemon: &Daemon, n: usize) -> Vec<u64> {
+    let mut client = daemon.client().await;
+    let mut request = Request::new(99, "pending", json!({"local_token":"c".repeat(64)}));
+    request.as_ = Some(format!("agent{n:03}").parse().unwrap());
+    client.send(&request).await;
+    result(
+        tokio::time::timeout(CALL_WAIT, client.read())
+            .await
+            .unwrap(),
+    )
+    .as_array()
+    .unwrap()
+    .iter()
+    .map(|row| row["seq"].as_u64().unwrap())
+    .collect()
+}
+
+#[tokio::test]
+async fn hub_drops_revoked_positions_and_delivers_all_live_inboxes() {
+    let mut daemon = Daemon::seeded().await;
+    daemon.pause().await;
+    let origin = daemon.hub.url.clone();
+    let mut daemon = seed_positions(daemon, origin, true).await;
+    for n in 1..=LIVE_IDENTITIES {
+        daemon.hub.state.inject(inbox_message(n, 1));
+    }
+    let mut stale = inbox_message(1, 1);
+    stale["stream"] = json!("inbox:revoked000");
+    stale["to"] = json!(["revoked000"]);
+    daemon.hub.state.inject(stale);
+    daemon.resume();
+    wait_position(&daemon, "inbox:agent256", 1).await;
+    let path = daemon.home.database();
+    let stale_count = tokio::task::spawn_blocking(move || {
+        rusqlite::Connection::open(path)
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM positions WHERE stream LIKE 'inbox:revoked%'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        stale_count, 0,
+        "stale positions must be deleted, including new stale events"
+    );
+    {
+        let afters = daemon.hub.state.event_afters.lock().unwrap();
+        assert!(
+            afters.len() >= 2,
+            "all deliverable saved positions need two chunks"
+        );
+        assert!(
+            afters
+                .iter()
+                .flatten()
+                .all(|after| !after.contains("revoked"))
+        );
+    }
+    for n in 1..=LIVE_IDENTITIES {
+        wait_position(&daemon, &format!("inbox:agent{n:03}"), 1).await;
+        assert_eq!(drain_inbox(&daemon, n).await, [1]);
+    }
+    daemon.stop().await;
+}
+
+async fn refusing_second_chunk(
+    refusals: usize,
+) -> (Daemon, std::sync::Arc<Proxy>, tokio::task::JoinHandle<()>) {
+    chunk_connections(refusals, None, false).await
+}
+
+/// The same refusals with the collector's reconnect delays shortened, when the
+/// build has the hook; the retries are the same, only the waits between them.
+async fn quickly_retrying_second_chunk(
+    refusals: usize,
+) -> (Daemon, std::sync::Arc<Proxy>, tokio::task::JoinHandle<()>) {
+    chunk_connections(refusals, None, true).await
+}
+
+#[cfg(feature = "test-hooks")]
+fn shorten_hub_backoff(hub_url: &str) {
+    const RETRY_INITIAL: Duration = Duration::from_millis(10);
+    const RETRY_MAX: Duration = Duration::from_millis(80);
+    const RETRY_HEALTHY: Duration = Duration::from_secs(60);
+    agmend::test_hub_timing(
+        &hub_url.parse().unwrap(),
+        RETRY_INITIAL,
+        RETRY_MAX,
+        RETRY_HEALTHY,
+    );
+}
+
+#[cfg(not(feature = "test-hooks"))]
+fn shorten_hub_backoff(_hub_url: &str) {}
+
+type HeldHeaders = std::sync::Arc<(tokio::sync::Notify, tokio::sync::Notify)>;
+
+async fn chunk_connections(
+    refusals: usize,
+    held: Option<HeldHeaders>,
+    quick_retries: bool,
+) -> (Daemon, std::sync::Arc<Proxy>, tokio::task::JoinHandle<()>) {
+    let mut daemon = Daemon::seeded().await;
+    daemon.pause().await;
+    let state = std::sync::Arc::new(Proxy {
+        upstream: daemon.hub.url.clone(),
+        afters: Default::default(),
+        refusals: std::sync::atomic::AtomicUsize::new(refusals),
+        tasks: Default::default(),
+    });
+    let socket = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_url = format!("http://{}/", socket.local_addr().unwrap());
+    let app = axum::Router::new()
+        .fallback(
+            move |state: axum::extract::State<std::sync::Arc<Proxy>>, uri: axum::http::Uri| {
+                let held = held.clone();
+                async move {
+                    let second = uri.path().ends_with("/events")
+                        && url::Url::parse(&format!("http://proxy{uri}"))
+                            .unwrap()
+                            .query_pairs()
+                            .any(|(name, value)| {
+                                name == "after" && value.contains(&format!("inbox:{HUMAN}:"))
+                            });
+                    if second && let Some(held) = held {
+                        held.0.notify_one();
+                        held.1.notified().await;
+                    }
+                    proxy(state, uri).await
+                }
+            },
+        )
+        .with_state(state.clone());
+    let server = tokio::spawn(async move { axum::serve(socket, app).await.unwrap() });
+    let mut daemon = seed_positions(daemon, proxy_url.clone(), false).await;
+    let login = agmen_client::Login {
+        hub_url: proxy_url.parse().unwrap(),
+        human_id: HUMAN.parse().unwrap(),
+        handle: support::HANDLE.into(),
+    };
+    tokio::fs::write(
+        daemon.home.login_file(),
+        serde_json::to_vec(&login).unwrap(),
+    )
+    .await
+    .unwrap();
+    agmen_client::store_tokens(
+        &daemon.home.tokens(),
+        &login,
+        &agmen_client::HumanTokens::new(support::ACCESS.into(), "refresh-1".into(), 3600),
+    )
+    .await
+    .unwrap();
+    daemon.hub.state.inject(inbox_message(1, 1));
+    daemon.hub.state.inject(inbox_message(LIVE_IDENTITIES, 1));
+    if quick_retries {
+        shorten_hub_backoff(&proxy_url);
+    }
+    daemon.resume();
+    (daemon, state, server)
+}
+
+#[tokio::test]
+async fn hub_first_chunk_delivers_during_second_chunk_refusal() {
+    let (daemon, state, server) = refusing_second_chunk(MAX_PROXY_REQUESTS).await;
+    wait_afters(&state, 2).await;
+    wait_position(&daemon, "inbox:agent001", 1).await;
+    assert!(state.refusals.load(std::sync::atomic::Ordering::SeqCst) > 0);
+    assert_eq!(drain_inbox(&daemon, 1).await, [1]);
+    state.refusals.store(0, std::sync::atomic::Ordering::SeqCst);
+    wait_position(&daemon, "inbox:agent256", 1).await;
+    assert_eq!(drain_inbox(&daemon, LIVE_IDENTITIES).await, [1]);
+    assert!(
+        drain_inbox(&daemon, 1).await.is_empty(),
+        "replay must not redeliver the first chunk"
+    );
+    daemon.hub.state.inject(inbox_message(1, 2));
+    wait_position(&daemon, "inbox:agent001", 2).await;
+    assert_eq!(drain_inbox(&daemon, 1).await, [2]);
+    daemon.stop().await;
+    server.abort();
+    assert!(server.await.unwrap_err().is_cancelled());
+}
+
+#[tokio::test]
+async fn hub_first_chunk_delivers_before_second_response_headers() {
+    let held = HeldHeaders::default();
+    let (daemon, _, server) = chunk_connections(0, Some(held.clone()), false).await;
+    tokio::time::timeout(CALL_WAIT, held.0.notified())
+        .await
+        .unwrap();
+    wait_position(&daemon, "inbox:agent001", 1).await;
+    assert_eq!(drain_inbox(&daemon, 1).await, [1]);
+    held.1.notify_one();
+    wait_position(&daemon, "inbox:agent256", 1).await;
+    assert_eq!(drain_inbox(&daemon, LIVE_IDENTITIES).await, [1]);
+    assert!(drain_inbox(&daemon, 1).await.is_empty());
+    daemon.stop().await;
+    server.abort();
+    assert!(server.await.unwrap_err().is_cancelled());
+}
+
+#[tokio::test]
+async fn person_only_collector_posts_a_project_stream_alert() {
+    let mut daemon = Daemon::seeded().await;
+    daemon.pause().await;
+    let mut daemon = tokio::task::spawn_blocking(move || {
+        let conn = rusqlite::Connection::open(daemon.home.database()).unwrap();
+        conn.execute("DELETE FROM identities", []).unwrap();
+        let origin = agmen_client::origin_key(&daemon.hub.url.parse().unwrap());
+        conn.execute(
+            "INSERT INTO positions VALUES (?1,?2,'feed',0)",
+            rusqlite::params![format!("{origin}#owner={HUMAN}"), PROJECT],
+        )
+        .unwrap();
+        for n in 1..LIVE_IDENTITIES + 2 {
+            conn.execute(
+                "INSERT INTO positions VALUES (?1,?2,?3,0)",
+                rusqlite::params![
+                    format!("{origin}#owner=other001"),
+                    PROJECT,
+                    format!("inbox:other{n:03}")
+                ],
+            )
+            .unwrap();
+        }
+        daemon
+    })
+    .await
+    .unwrap();
+    let mut blocked = support::stamped(1, "owner inbox at the project position cap");
+    blocked["stream"] = json!(format!("inbox:{HUMAN}"));
+    blocked["verb"] = json!("DM");
+    blocked["to"] = json!([HUMAN]);
+    daemon.hub.state.inject(blocked);
+    daemon.resume();
+    let mut client = daemon.client().await;
+    client
+        .send(&Request::new(9, "watch", json!({"project":PROJECT})))
+        .await;
+    tokio::time::timeout(CALL_WAIT, async {
+        for _ in 0..POSITION_POLLS {
+            if !daemon.hub.state.posts.lock().unwrap().is_empty() {
+                return;
+            }
+            tokio::time::sleep(POSITION_POLL).await;
+        }
+        panic!("person-only collector lost its project ALERT");
+    })
+    .await
+    .unwrap();
+    {
+        let posts = daemon.hub.state.posts.lock().unwrap();
+        assert_eq!(posts.len(), 1);
+        assert_eq!(posts[0].0, format!("Bearer {}", support::ACCESS));
+        assert_eq!(posts[0].1["verb"], "ALERT");
+        assert_eq!(posts[0].1["data"]["needs"], "owner");
+        assert!(posts[0].1["body"].as_str().unwrap().contains("258 streams"));
+    }
+    wait_position(&daemon, "feed", 1).await;
+    drop(client);
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn hub_refusal_outlives_previous_retry_budget() {
+    let (daemon, state, server) = quickly_retrying_second_chunk(OLD_RETRY_BUDGET + 1).await;
+    tokio::time::timeout(LONG_REFUSAL_WAIT, async {
+        for _ in 0..LONG_REFUSAL_WAIT.as_secs() {
+            if state
+                .afters
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|after| after.contains_key(&format!("inbox:{HUMAN}")))
+                .count()
+                > OLD_RETRY_BUDGET + 1
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        panic!("collector stopped retrying the refused second chunk");
+    })
+    .await
+    .expect("collector must retry beyond the old reconnect budget");
+    wait_position(&daemon, "inbox:agent256", 1).await;
+    assert_eq!(drain_inbox(&daemon, LIVE_IDENTITIES).await, [1]);
+    daemon.stop().await;
+    server.abort();
+    assert!(server.await.unwrap_err().is_cancelled());
+}
+
+#[cfg(feature = "test-hooks")]
+const BACKOFF_STEPS: u32 = 5;
+#[cfg(feature = "test-hooks")]
+const STREAM_WAIT: Duration = Duration::from_secs(10);
+
+#[cfg(feature = "test-hooks")]
+async fn wait_event_streams(daemon: &Daemon, expected: usize) {
+    tokio::time::timeout(STREAM_WAIT, async {
+        while daemon
+            .hub
+            .state
+            .event_streams
+            .load(std::sync::atomic::Ordering::SeqCst)
+            < expected
+        {
+            tokio::time::sleep(POSITION_POLL / 10).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("the collector never opened events connection {expected}"));
+}
+
+#[cfg(feature = "test-hooks")]
+#[tokio::test]
+async fn hub_backoff_starts_over_after_a_healthy_connection() {
+    const INITIAL: Duration = Duration::from_millis(50);
+    const MAX: Duration = Duration::from_millis(1600);
+    const HEALTHY: Duration = Duration::from_millis(400);
+    // Longer than HEALTHY, shorter than MAX, and well past INITIAL.
+    const UP_FOR: Duration = Duration::from_millis(600);
+    const RECONNECT_BY: Duration = Duration::from_millis(800);
+    let mut daemon = Daemon::seeded().await;
+    daemon.pause().await;
+    agmend::test_hub_timing(&daemon.hub.url.parse().unwrap(), INITIAL, MAX, HEALTHY);
+    daemon.resume();
+    // Each drop comes before HEALTHY, so the delay doubles up to MAX.
+    for n in 1..=BACKOFF_STEPS as usize {
+        wait_event_streams(&daemon, n).await;
+        daemon.hub.state.drop_streams();
+    }
+    let n = BACKOFF_STEPS as usize + 1;
+    wait_event_streams(&daemon, n).await;
+    tokio::time::sleep(UP_FOR).await;
+    daemon.hub.state.drop_streams();
+    let dropped = std::time::Instant::now();
+    wait_event_streams(&daemon, n + 1).await;
+    assert!(
+        dropped.elapsed() < RECONNECT_BY,
+        "reconnected after {:?}, not at the initial {INITIAL:?}",
+        dropped.elapsed()
+    );
+    daemon.stop().await;
+}
+
+const OTHER_OWNER_STREAMS: usize = agmen_local::safeguards::MAX_MANAGED;
+
+async fn count(daemon: &Daemon, sql: &'static str) -> i64 {
+    let path = daemon.home.database();
+    tokio::task::spawn_blocking(move || {
+        rusqlite::Connection::open(path)
+            .unwrap()
+            .query_row(sql, [PROJECT], |row| row.get(0))
+            .unwrap()
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn hub_stream_skipped_at_the_position_cap_resumes_when_an_identity_is_removed() {
+    const ALERTS: &str = "SELECT coalesce(max(alerts),0) FROM stream_alerts WHERE project=?1";
+    const REARMED: &str = "SELECT count(*) FROM stream_alerts WHERE project=?1 AND full=0";
+    const POSITION: &str =
+        "SELECT count(*) FROM positions WHERE project=?1 AND stream='inbox:agent002'";
+    const PENDING: &str = "SELECT count(*) FROM pending WHERE project=?1 AND identity='agent002'";
+    let mut daemon = Daemon::seeded().await;
+    daemon.pause().await;
+    // The project holds 258 positions: this owner's feed and agent001, and
+    // another owner's 256, which this collector never deletes. agent002 is live
+    // but has none, and cannot get one.
+    let origin = agmen_client::origin_key(&daemon.hub.url.parse().unwrap());
+    let path = daemon.home.database();
+    tokio::task::spawn_blocking(move || {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        for stream in ["feed", "inbox:agent001"] {
+            conn.execute(
+                "INSERT INTO positions VALUES (?1,?2,?3,0)",
+                rusqlite::params![format!("{origin}#owner={HUMAN}"), PROJECT, stream],
+            )
+            .unwrap();
+        }
+        for n in 1..=OTHER_OWNER_STREAMS {
+            conn.execute(
+                "INSERT INTO positions VALUES (?1,?2,?3,0)",
+                rusqlite::params![
+                    format!("{origin}#owner=other001"),
+                    PROJECT,
+                    format!("inbox:other{n:03}")
+                ],
+            )
+            .unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    daemon.hub.state.inject(inbox_message(2, 1));
+    daemon.resume();
+    for _ in 0..POSITION_POLLS {
+        if count(&daemon, ALERTS).await > 0 {
+            break;
+        }
+        tokio::time::sleep(POSITION_POLL).await;
+    }
+    assert_eq!(count(&daemon, ALERTS).await, 1, "one ALERT for the fill");
+    assert_eq!(count(&daemon, POSITION).await, 0, "no position at the cap");
+    assert_eq!(count(&daemon, PENDING).await, 0, "skipped, not delivered");
+
+    // Removing agent001 frees its position, so agent002's inbox fits again.
+    let path = daemon.home.database();
+    tokio::task::spawn_blocking(move || {
+        rusqlite::Connection::open(path)
+            .unwrap()
+            .execute("DELETE FROM identities WHERE identity='agent001'", [])
+            .unwrap();
+    })
+    .await
+    .unwrap();
+    wait_position(&daemon, "inbox:agent002", 1).await;
+    assert_eq!(
+        count(&daemon, PENDING).await,
+        1,
+        "the skipped message arrives"
+    );
+    assert_eq!(count(&daemon, REARMED).await, 1, "the ALERT re-arms");
+    daemon.stop().await;
+}

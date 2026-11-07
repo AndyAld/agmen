@@ -10,6 +10,9 @@ mod budgets;
 #[path = "managed_stop_tests.rs"]
 mod stop;
 
+#[path = "managed_recents_tests.rs"]
+mod recents;
+
 #[path = "managed_child_security_tests.rs"]
 mod security;
 

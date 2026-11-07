@@ -9,6 +9,9 @@ use serde_json::{Value, json};
 
 use crate::managed::Managed;
 
+#[path = "managed_mint_tests.rs"]
+mod mint;
+
 fn role_file(path: impl AsRef<std::path::Path>) -> std::io::Result<String> {
     use std::io::Read as _;
     let mut text = String::new();

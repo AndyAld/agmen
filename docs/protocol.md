@@ -430,13 +430,36 @@ signed-in hub login for a hub project.
   on a new `agent/<name>-<8 hex>` branch, mints an identity in it and writes
   `managed/<identity>/agent.json`. The agent starts `idle`.
 - `agent_list {project?}` answers `{"agents":[{identity, project, handle,
-  state, model, budget_usd, spent_usd, worktree, branch, source}]}`. `state`
+  state, model, budget_usd, spent_usd, worktree, branch, source, stopped_at,
+  resumable}]}`. `state`
   is `running`, `idle`, `offline` or `attached`; `source` is `launched` or
-  `joined`.
+  `joined`. `stopped_at` is an RFC 3339 timestamp, or `null` while running
+  or when unknown. Each transition to stopped writes
+  `managed/<identity>/stopped.json` with `{"stopped_at": timestamp}`;
+  stopping an already offline agent keeps its first time. Start clears the
+  mark. Write or removal failures are logged without failing the action.
+  On load, a missing or unreadable mark falls back to the modified time of
+  `status.json`, else `agent.json`. `resumable` is false exactly when
+  `agent_start` would refuse a revoked local identity, including agents
+  stopped before local stop began keeping identities; it is true otherwise.
+  This check uses local data without a network call and does not check other
+  reasons Start might fail.
 - `agent_stop {identity}` cancels a running batch, posts BYE and sets
   `offline`. The identity is kept on every origin; `agent_start` brings it
   back and `agent_remove` revokes it.
-- `agent_start {identity, project?, root?}` brings an offline agent back.
+- `agent_start {identity, project?, root?, subtree?}` brings an offline agent back.
+  `subtree` defaults to false, preserving the single-agent answer. When true,
+  the root starts first, then offline descendants by level, parents before
+  children. A root failure fails the call without starting descendants.
+  The root's answer gains `started`, an array of identity ids with the root
+  first, and `skipped`, an array of `{identity, reason}`. Running descendants
+  are skipped as `already running`; descendants whose parent is neither running nor
+  started in this call are skipped as `parent not started`. Other start failures,
+  including a revoked local identity, use the original error message and
+  do not stop siblings from starting. The tree has a 30 second deadline;
+  unfinished and unreached members are skipped as `deadline`. Quit cancels
+  a stuck start and skips remaining members as `daemon is shutting down`,
+  preserving managed shutdown's 8 second deadline.
   After agmend restarts, every saved record loads as `offline` and nothing runs
   until Start. A record restores its spend (`status.json`) and both session
   ids; each tier's next batch uses `--resume <id>` when Claude Code has saved
