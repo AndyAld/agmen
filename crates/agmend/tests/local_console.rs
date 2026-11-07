@@ -604,3 +604,140 @@ async fn newer_local_record_without_login_returns_the_version_error() {
     assert!(err.message.contains("local.db"), "{err:?}");
     daemon.stop().await;
 }
+
+const LOCAL_AGENT: &str = "agent001";
+
+/// A local project whose local.db is unreadable, on a daemon signed in to a hub
+/// that lists the person for every project id, after `prepare` changed
+/// agmend.db. Asking that hub for a roster would place the project on it and
+/// a post would hand it a local body, so neither call may reach it.
+async fn unreadable_record_stays_off_the_hub(
+    prepare: impl FnOnce(&rusqlite::Connection, &Value) + Send + 'static,
+) {
+    let state = Arc::new(LookupHub {
+        roster: Some(support::roster("online")),
+        ..LookupHub::default()
+    });
+    let app = axum::Router::new()
+        .route("/v1/projects/{p}/state", get(lookup))
+        .route("/v1/projects/{p}/messages", post(capture_post))
+        .with_state(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let home = Home::signed_in(&format!("http://{}/", listener.local_addr().unwrap())).await;
+    let hub = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let daemon = LocalDaemon::start(home).await;
+    let mut client = daemon.client().await;
+    let created = create(&mut client).await;
+    drop(client);
+    let home = daemon.stop().await;
+    let database = home.database();
+    let row = created.clone();
+    tokio::task::spawn_blocking(move || {
+        prepare(&rusqlite::Connection::open(database).unwrap(), &row);
+    })
+    .await
+    .unwrap();
+    let path = home.dir.path().join("local.db");
+    let damaged = path.clone();
+    tokio::task::spawn_blocking(move || {
+        rusqlite::Connection::open(damaged)
+            .unwrap()
+            .pragma_update(None, "user_version", 2)
+            .unwrap();
+    })
+    .await
+    .unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let daemon = LocalDaemon::start(home).await;
+    let mut client = daemon.client().await;
+    let mut answers = Vec::new();
+    for (method, params) in [
+        (
+            "post",
+            json!({"project": created["project"], "envelope": envelope(1, "private local body")}),
+        ),
+        ("console_snapshot", json!({"project": created["project"]})),
+    ] {
+        let answer = tokio::time::timeout(ANSWER_WAIT, client.call(method, params))
+            .await
+            .unwrap();
+        answers.push((method, answer));
+    }
+    let lookups = state.lookups.lock().unwrap().clone();
+    let posts = state.posts.lock().unwrap().clone();
+    assert!(posts.is_empty(), "a local body reached the hub: {posts:?}");
+    assert!(
+        lookups.is_empty(),
+        "the hub was asked for a roster: {lookups:?}"
+    );
+    for (method, answer) in answers {
+        let err = error(answer);
+        assert_eq!(err.code, ErrorCode::Version, "{method}: {err:?}");
+        assert!(err.message.contains("local.db"), "{method}: {err:?}");
+    }
+    assert_eq!(std::fs::read(path).unwrap(), before);
+    daemon.stop().await;
+    hub.abort();
+    assert!(hub.await.unwrap_err().is_cancelled());
+}
+
+#[tokio::test]
+async fn local_identity_keeps_an_unreadable_record_off_the_hub() {
+    unreadable_record_stays_off_the_hub(|agmend_db, created| {
+        // Nothing writes an origin `local` row before Task 9, so seed one the
+        // way Home::seed_identity seeds a hub identity.
+        let origin = agmen_client::origin_key(&agmen_client::local_hub_url());
+        let owner = created["person"]["id"].as_str().unwrap();
+        let metadata = json!({
+            "hub_url": agmen_client::LOCAL_HUB_URL, "broker_url": agmen_client::LOCAL_BROKER_URL,
+            "tenant": created["tenant"], "project": created["project"],
+            "identity_id": LOCAL_AGENT, "owner_id": owner,
+            "handle": "andy/worker", "kind": "agent",
+        });
+        agmend_db
+            .execute(
+                "INSERT INTO identities VALUES (?1,?2,?3,?4,?5)",
+                rusqlite::params![
+                    origin,
+                    LOCAL_AGENT,
+                    owner,
+                    created["project"].as_str().unwrap(),
+                    metadata.to_string()
+                ],
+            )
+            .unwrap();
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn unanswerable_agmend_db_keeps_an_unreadable_record_off_the_hub() {
+    // No answer from agmend.db cannot rule out a local identity, so it is no
+    // license to ask the hub either.
+    unreadable_record_stays_off_the_hub(|agmend_db, _| {
+        agmend_db.execute_batch("DROP TABLE identities").unwrap();
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn hub_identity_rows_do_not_keep_a_hub_project_off_the_hub() {
+    // The fake hub's origin holds identities for this very project id, which
+    // says nothing about a local project.
+    let daemon = Daemon::seeded().await;
+    daemon.hub.state.fill(2);
+    let path = daemon.home.dir.path().join("local.db");
+    tokio::task::spawn_blocking(move || {
+        rusqlite::Connection::open(path)
+            .unwrap()
+            .pragma_update(None, "user_version", 2)
+            .unwrap();
+    })
+    .await
+    .unwrap();
+    let mut client = daemon.client().await;
+    let snap = snapshot(&mut client, &json!(support::PROJECT)).await;
+    assert_eq!(snap.messages.len(), 2);
+    assert_eq!(snap.me.id.as_str(), support::HUMAN);
+    daemon.stop().await;
+}

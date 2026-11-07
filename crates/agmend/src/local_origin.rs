@@ -77,9 +77,9 @@ impl LocalOrigin {
     async fn open(&self, handle_hint: Option<&str>) -> Result<Record, ApiError> {
         let mut running = tokio::time::timeout(OPEN_WAIT, self.running.lock())
             .await
-            .map_err(failed)?;
+            .map_err(|_| busy())?;
         if self.stopped.load(Ordering::Acquire) {
-            return Err(failed("the local origin has stopped"));
+            return Err(stopped());
         }
         if let Some(running) = running.as_ref() {
             return Ok(running.record.clone());
@@ -522,6 +522,26 @@ fn failed(error: impl std::fmt::Display) -> ApiError {
         code: ErrorCode::Hub,
         message: format!("local.db: {error}"),
     }
+}
+
+fn busy() -> ApiError {
+    ApiError {
+        code: ErrorCode::Hub,
+        message: "local.db is busy; try again".into(),
+    }
+}
+
+fn stopped() -> ApiError {
+    ApiError {
+        code: ErrorCode::Hub,
+        message: "the local origin has stopped".into(),
+    }
+}
+
+/// Whether `error` says the origin is busy or stopped, which tells routing
+/// nothing about the record, rather than that the record cannot be read.
+pub(crate) fn is_unavailable(error: &ApiError) -> bool {
+    *error == busy() || *error == stopped()
 }
 
 fn record_error(error: record::schema::RecordError) -> ApiError {

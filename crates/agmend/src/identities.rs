@@ -31,9 +31,18 @@ type ProjectKey = (String, IdentityId, ProjectId);
 type WatchEvent = (Option<IdentityId>, Result<ClientEvent, ApiError>);
 
 #[derive(Debug)]
-struct Database {
+pub(crate) struct Database {
     store: Arc<Mutex<Store>>,
     jobs: AsyncMutex<tokio::task::JoinSet<()>>,
+}
+
+impl Database {
+    pub(crate) fn new(store: Arc<Mutex<Store>>) -> Self {
+        Self {
+            store,
+            jobs: AsyncMutex::new(tokio::task::JoinSet::new()),
+        }
+    }
 }
 
 struct Cancellation(Arc<AtomicBool>);
@@ -322,10 +331,7 @@ impl Identities {
             hub: origins.hub().clone(),
             origins,
             credentials,
-            store: Arc::new(Database {
-                store,
-                jobs: AsyncMutex::new(tokio::task::JoinSet::new()),
-            }),
+            store: Arc::new(Database::new(store)),
             state_dir,
             runtimes: AsyncMutex::new(BTreeMap::new()),
             collectors: AsyncMutex::new(BTreeMap::new()),
@@ -976,7 +982,7 @@ async fn write_event(
         .map_err(|_| hub_error("watch write failed"))
 }
 
-async fn store_work<T: Send + 'static>(
+pub(crate) async fn store_work<T: Send + 'static>(
     database: Arc<Database>,
     work: impl FnOnce(&mut Store) -> Result<T, crate::state::StoreError> + Send + 'static,
 ) -> Result<T, ApiError> {

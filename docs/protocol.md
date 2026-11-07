@@ -542,10 +542,16 @@ shape. A project absent from this machine, with no hub login, gives `not_found`
 whose message names both `this machine` and `not signed in to a hub` and ends
 with ``(run `agmen login`)``. `chat_history`, `post` and `console_watch` route
 and answer the same way. When `local.db` exists but cannot be read, a project
-goes to the hub only if the signed-in hub's roster lists the person, a read that
-carries no message body and is limited to 3 s. With no login, a hub refusal or
-error, or a timeout, the call gives `version` naming `local.db` and sends no
-message to the hub.
+with a local identity never goes to the hub: `agmend.db` holds a row for it under
+the origin key `local`, and the call gives `version` naming `local.db` before any
+hub read. A read of `agmend.db` that fails or takes longer than 3 s counts as a row. A
+person-only local project, one with no such row, goes to the hub only if the
+signed-in hub's roster lists the person, a read that carries no message body and
+is limited to 3 s; agmend trusts its own hub for that placement. With no login, a
+hub refusal or error, or a timeout, the call gives `version` naming `local.db`
+and sends no message to the hub. If another call holds the local record past its
+10 s open wait, or agmend is stopping, the call gives `hub` with a message that
+says `local.db` is busy or the local origin has stopped, and makes no hub read.
 
 The remaining local method contract is implemented by Tasks 8 to 10 of the
 solo-origin plan. These local branches are not enabled by Task 7.

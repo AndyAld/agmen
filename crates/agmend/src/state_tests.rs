@@ -1115,3 +1115,26 @@ fn listener_deduplicates_persons_assign_across_drains() {
         assert_eq!(received.len(), 1);
     }
 }
+
+#[test]
+fn identity_lookup_is_keyed_by_origin_and_project() {
+    let (_dir, store, who) = setup();
+    store
+        .conn
+        .execute(
+            "INSERT INTO identities VALUES ('local','agent002','owner001','project2','{}')",
+            [],
+        )
+        .unwrap();
+    let local_project: ProjectId = "project2".parse().unwrap();
+    assert!(store.has_identity(ORIGIN, &who.project).unwrap());
+    assert!(store.has_identity("local", &local_project).unwrap());
+    // The same project id under the other origin does not count.
+    assert!(!store.has_identity("local", &who.project).unwrap());
+    assert!(!store.has_identity(ORIGIN, &local_project).unwrap());
+    assert!(
+        !store
+            .has_identity("local", &"project3".parse().unwrap())
+            .unwrap()
+    );
+}
