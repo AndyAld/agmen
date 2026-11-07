@@ -209,26 +209,6 @@ fn owner_only() -> ApiError {
     }
 }
 
-/// Whether the request names a project this machine's record holds.
-#[expect(
-    dead_code,
-    reason = "no caller now that inbox, state and watch are refused on every origin; agmen-4f drops it"
-)]
-async fn names_local_project(core: &Core, raw: &Value) -> bool {
-    let Some(project) = raw
-        .get("project")
-        .and_then(Value::as_str)
-        .and_then(|project| project.parse::<ProjectId>().ok())
-    else {
-        return false;
-    };
-    // A project routing cannot place counts as local, so the refusal fails closed.
-    !matches!(
-        core.origins.of(&project).await,
-        Ok(crate::origin::Origin::Hub)
-    )
-}
-
 async fn pending(core: &Core, caller: Caller, raw: Value) -> Result<Value, ApiError> {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
