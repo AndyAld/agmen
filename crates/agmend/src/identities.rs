@@ -3791,7 +3791,13 @@ mod local_collection_tests {
         let error = f.collection.commit(dm_to(1, &f.agents)).await.unwrap_err();
         assert_eq!(error.store, Some(StoreKind::Permanent));
         assert!(f.collection.positions().await.unwrap().is_empty());
-        assert_eq!(feed_alerts(&f).await, 0);
+        tokio::time::timeout(COLLECT_WAIT, async {
+            while feed_alerts(&f).await != 1 {
+                tokio::time::sleep(COLLECT_POLL).await;
+            }
+        })
+        .await
+        .expect("exactly one held ALERT did not arrive");
         assert!(
             f.collection
                 .store
@@ -3950,6 +3956,108 @@ mod local_collection_tests {
         assert_eq!(f.collection.positions().await.unwrap()[&Stream::Feed], 1);
         assert!(f.collection.commit(dm_to(2, &f.agents[1..])).await.unwrap());
         assert_eq!(f.drain(&f.agents[1]).await.len(), 1);
+        f.stop().await;
+    }
+
+    fn owner_alert(seq: u64, owner: &IdentityId) -> StampedEnvelope {
+        let mut message = feed_message(seq, "FYI", &[], &[]);
+        message.from = owner.clone();
+        message.client.payload = Payload::Alert {
+            need: "dropped".to_owned(),
+            urgency: agmen_proto::Urgency::Normal,
+            needs: agmen_proto::Needs::Owner,
+            actions: Vec::new(),
+        };
+        message
+    }
+
+    #[tokio::test]
+    async fn broadcast_alert_never_holds_a_project_whose_only_identities_are_broken() {
+        let f = Fixture::new().await;
+        f.execute_state("UPDATE identities SET metadata='{}'".into())
+            .await;
+        assert!(
+            f.collection
+                .commit(feed_message(1, "FYI", &[], &[]))
+                .await
+                .unwrap()
+        );
+        assert!(
+            f.collection
+                .commit(owner_alert(2, &f.collection.owner))
+                .await
+                .unwrap()
+        );
+        assert!(
+            f.collection
+                .commit(feed_message(3, "DM", &["person01"], &[]))
+                .await
+                .unwrap()
+        );
+        assert_eq!(f.collection.positions().await.unwrap()[&Stream::Feed], 3);
+        f.stop().await;
+    }
+
+    #[tokio::test]
+    async fn owner_alert_mentioning_a_broken_coordinator_does_not_hold_the_feed() {
+        let f = Fixture::new().await;
+        f.execute_state("UPDATE identities SET metadata='{}'".into())
+            .await;
+        let coordinator = f.agents[0].clone();
+        let mut alert = owner_alert(1, &f.collection.owner);
+        alert.mentioned = vec![f.collection.owner.clone(), coordinator];
+        assert!(f.collection.commit(alert).await.unwrap());
+        assert_eq!(f.collection.positions().await.unwrap()[&Stream::Feed], 1);
+        f.stop().await;
+    }
+
+    #[tokio::test]
+    async fn non_alert_mentioning_a_broken_coordinator_is_still_held() {
+        let f = Fixture::new().await;
+        f.execute_state("UPDATE identities SET metadata='{}'".into())
+            .await;
+        let coordinator = f.agents[0].clone();
+        let error = f
+            .collection
+            .commit(feed_message(1, "FYI", &[], &[&coordinator]))
+            .await
+            .unwrap_err();
+        assert_eq!(error.store, Some(StoreKind::Permanent));
+        f.stop().await;
+    }
+
+    #[tokio::test]
+    async fn owner_alert_still_reaches_a_healthy_agent_beside_a_broken_one() {
+        let f = Fixture::new().await;
+        let poison = f.agents[0].clone();
+        f.execute_state(format!(
+            "UPDATE identities SET metadata='{{}}' WHERE identity='{poison}'"
+        ))
+        .await;
+        assert!(
+            f.collection
+                .commit(owner_alert(1, &f.collection.owner))
+                .await
+                .unwrap()
+        );
+        assert_eq!(f.drain(&f.agents[1]).await.len(), 1);
+        f.stop().await;
+    }
+
+    #[tokio::test]
+    async fn broken_identitys_own_inbox_message_is_not_held() {
+        let f = Fixture::new().await;
+        let poison = f.agents[0].clone();
+        f.execute_state(format!(
+            "UPDATE identities SET metadata='{{}}' WHERE identity='{poison}'"
+        ))
+        .await;
+        let mut message = feed_message(1, "DM", &["person01"], &[]);
+        message.from = poison.clone();
+        message.stream = Stream::Inbox(poison);
+        let stream = message.stream.clone();
+        assert!(f.collection.commit(message).await.unwrap());
+        assert_eq!(f.collection.positions().await.unwrap()[&stream], 1);
         f.stop().await;
     }
 
