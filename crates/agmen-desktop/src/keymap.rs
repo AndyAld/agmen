@@ -118,6 +118,12 @@ pub(crate) struct SpawnWorkerWith {
     pub(crate) agent: SharedString,
 }
 
+/// Asks to remove this stopped agent: the Recents tab's Remove. It names its
+/// agent, so no key or palette row runs it.
+#[derive(Debug, Clone, PartialEq, Eq, Action)]
+#[action(namespace = workspace, no_json)]
+pub(crate) struct AskRemoveAgent(pub(crate) agmen_proto::IdentityId);
+
 /// The key context the workspace's root sets.
 pub(crate) const WORKSPACE_CONTEXT: &str = "Workspace";
 /// The key context a text input sets.

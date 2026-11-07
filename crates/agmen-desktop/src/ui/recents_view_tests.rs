@@ -130,7 +130,13 @@ fn backend(cx: &mut TestAppContext, recents: Vec<RecentAgent>) -> Rc<Recording> 
         inner: FixtureBackend::for_screen(Screen::Chat).unwrap(),
         acts: RefCell::new(Vec::new()),
     });
-    backend.inner.edit(|s| s.recents = recents);
+    backend.inner.edit(|s| {
+        // The agmend backend lists every stopped agent as managed too.
+        for agent in &recents {
+            s.managed_agents.insert(agent.id.clone(), "offline".into());
+        }
+        s.recents = recents;
+    });
     let handle: Rc<dyn Backend> = backend.clone();
     cx.update(|cx| cx.set_global(BackendHandle(handle)));
     backend
@@ -266,8 +272,8 @@ fn recents_revoked_agent_has_remove_without_resume(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn recents_remove_frees_name_and_sends_remove_action(cx: &mut TestAppContext) {
-    let (backend, _, cx) = open(cx, tree());
+fn recents_remove_has_the_name_hint(cx: &mut TestAppContext) {
+    let (_, _, cx) = open(cx, tree());
     for agent in tree() {
         assert!(cx.debug_bounds(selector("remove", &agent.handle)).is_some());
         assert!(
@@ -275,7 +281,26 @@ fn recents_remove_frees_name_and_sends_remove_action(cx: &mut TestAppContext) {
                 .is_some()
         );
     }
+}
+
+#[gpui::test]
+fn recents_remove_asks_first_and_cancel_sends_nothing(cx: &mut TestAppContext) {
+    let (backend, _, cx) = workspace(cx, tree());
+    click(cx, "agents:recents");
     click(cx, selector("remove", "andy/root"));
+    assert!(cx.debug_bounds("remove-agent").is_some());
+    assert!(backend.acts.borrow().is_empty(), "nothing before Remove");
+    click(cx, "remove-agent:cancel");
+    assert!(cx.debug_bounds("remove-agent").is_none());
+    assert!(backend.acts.borrow().is_empty());
+}
+
+#[gpui::test]
+fn recents_remove_confirm_sends_remove_action(cx: &mut TestAppContext) {
+    let (backend, _, cx) = workspace(cx, tree());
+    click(cx, "agents:recents");
+    click(cx, selector("remove", "andy/root"));
+    click(cx, "remove-agent:confirm");
     assert_eq!(
         *backend.acts.borrow(),
         [Action::RemoveAgent {

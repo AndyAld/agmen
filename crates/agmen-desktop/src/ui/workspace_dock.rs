@@ -10,8 +10,8 @@ use gpui::{
 use super::Workspace;
 use crate::backend::{RoleFile, Snapshot};
 use crate::keymap::{
-    ActivatePane, CloseActiveTab, OpenRecents, OpenSearch, OpenSettings, SplitRight,
-    ToggleGitPanel, ToggleProjectPanel,
+    ActivatePane, AskRemoveAgent, CloseActiveTab, OpenRecents, OpenSearch, OpenSettings,
+    SplitRight, ToggleGitPanel, ToggleProjectPanel,
 };
 use crate::ui::agent_panel::{AgentPanel, no_local_agents};
 use crate::ui::git_panel::{GitPanel, GitPanelEvent};
@@ -237,6 +237,9 @@ impl Workspace {
         .on_action(cx.listener(|this, _: &OpenSearch, _, cx| {
             this.pane_group
                 .update(cx, |group, cx| group.open(TabItem::Search, cx));
+        }))
+        .on_action(cx.listener(|this, action: &AskRemoveAgent, _, cx| {
+            this.ask_remove(&action.0, cx);
         }))
         .on_action(cx.listener(|this, _: &OpenRecents, _, cx| {
             this.pane_group

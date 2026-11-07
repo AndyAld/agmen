@@ -18,6 +18,7 @@ use super::tokens::{SPACE_4, SPACE_6};
 use crate::backend::{
     Action, AgentStatus, BackendError, BackendHandle, MAX_DEPTH, RecentAgent, Snapshot, Update,
 };
+use crate::keymap::AskRemoveAgent;
 use crate::local_time::LocalZone;
 
 /// Indices in tree order, newest roots and siblings first. Missing parents
@@ -194,16 +195,11 @@ impl RecentsView {
             .child(
                 Button::new(format!("recents:remove:{}", agent.id), "Remove")
                     .style(ButtonStyle::Plain)
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                    // The workspace asks first, as the Agents panel's Remove does.
+                    .on_click(move |_, window, cx| {
                         cx.stop_propagation();
-                        this.act(
-                            Action::RemoveAgent {
-                                identity: remove_id.clone(),
-                                root: None,
-                            },
-                            cx,
-                        );
-                    })),
+                        window.dispatch_action(Box::new(AskRemoveAgent(remove_id.clone())), cx);
+                    }),
             )
     }
 
