@@ -446,6 +446,142 @@ async fn capture_post(
     StatusCode::NOT_FOUND
 }
 
+async fn start_lookup_hub(hub: LookupHub) -> (Arc<LookupHub>, Home, tokio::task::JoinHandle<()>) {
+    let state = Arc::new(hub);
+    let app = axum::Router::new()
+        .route("/v1/projects/{p}/state", get(lookup))
+        .route("/v1/projects/{p}/messages", post(capture_post))
+        .with_state(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let home = Home::signed_in(&format!("http://{}/", listener.local_addr().unwrap())).await;
+    let hub = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (state, home, hub)
+}
+
+#[tokio::test]
+async fn absent_marked_record_never_posts_an_unconfirmed_person_only_body() {
+    let (state, home, hub) = start_lookup_hub(LookupHub::default()).await;
+    let daemon = LocalDaemon::start(home).await;
+    let mut client = daemon.client().await;
+    let created = create(&mut client).await;
+    drop(client);
+    let home = daemon.stop().await;
+    // The marker local_project_create left must survive removing only the database.
+    std::fs::remove_file(home.dir.path().join("local.db")).unwrap();
+    let daemon = LocalDaemon::start(home).await;
+    let mut client = daemon.client().await;
+    let answer = client
+        .call(
+            "post",
+            json!({"project": created["project"], "envelope": envelope(1, "private local body")}),
+        )
+        .await;
+    assert_eq!(state.posts.lock().unwrap().len(), 0);
+    let err = error(answer);
+    assert_eq!(err.code, ErrorCode::Version, "{err:?}");
+    assert!(err.message.contains("local.db"), "{err:?}");
+    assert_eq!(
+        *state.lookups.lock().unwrap(),
+        vec![(
+            created["project"].as_str().unwrap().into(),
+            json!({"key": "roster"})
+        )]
+    );
+    daemon.stop().await;
+    hub.abort();
+    assert!(hub.await.unwrap_err().is_cancelled());
+}
+
+#[tokio::test]
+async fn absent_unmarked_record_keeps_hub_posts_without_roster_confirmation() {
+    let (state, home, hub) = start_lookup_hub(LookupHub::default()).await;
+    let daemon = LocalDaemon::start(home).await;
+    let mut client = daemon.client().await;
+    let body: agmen_proto::ClientEnvelope =
+        serde_json::from_value(envelope(1, "hub project body")).unwrap();
+    let body = serde_json::to_value(body).unwrap();
+    let answer = client
+        .call(
+            "post",
+            json!({"project": support::PROJECT, "envelope": body}),
+        )
+        .await;
+    assert_eq!(*state.posts.lock().unwrap(), vec![body]);
+    assert!(state.lookups.lock().unwrap().is_empty());
+    assert_eq!(error(answer).code, ErrorCode::NotFound);
+    assert!(!daemon.home.dir.path().join("local.db").exists());
+    assert!(!daemon.home.dir.path().join("local-origin-created").exists());
+    daemon.stop().await;
+    hub.abort();
+    assert!(hub.await.unwrap_err().is_cancelled());
+}
+
+#[tokio::test]
+async fn absent_record_with_an_unreadable_marker_requires_roster_confirmation() {
+    let (state, home, hub) = start_lookup_hub(LookupHub::default()).await;
+    let marker = home.dir.path().join("local-origin-created");
+    // A directory makes reading fail even when the test runs with elevated privileges.
+    std::fs::create_dir(&marker).unwrap();
+    assert!(std::fs::read(&marker).is_err());
+    let daemon = LocalDaemon::start(home).await;
+    let mut client = daemon.client().await;
+    let answer = client
+        .call(
+            "post",
+            json!({"project": support::PROJECT, "envelope": envelope(1, "private local body")}),
+        )
+        .await;
+    assert_eq!(state.posts.lock().unwrap().len(), 0);
+    assert_eq!(error(answer).code, ErrorCode::Version);
+    assert_eq!(state.lookups.lock().unwrap().len(), 1);
+    daemon.stop().await;
+    hub.abort();
+    assert!(hub.await.unwrap_err().is_cancelled());
+}
+
+#[tokio::test]
+async fn absent_marked_record_with_a_local_identity_never_asks_the_hub() {
+    // This hub lists the person for every project id, so a roster read would
+    // place the project on it. agmend.db already says the project is local.
+    let (state, home, hub) = start_lookup_hub(LookupHub {
+        roster: Some(support::roster("online")),
+        ..LookupHub::default()
+    })
+    .await;
+    let daemon = LocalDaemon::start(home).await;
+    let mut client = daemon.client().await;
+    let created = create(&mut client).await;
+    result(
+        client
+            .call(
+                "local_mint",
+                json!({"project": created["project"], "name": "worker"}),
+            )
+            .await,
+    );
+    drop(client);
+    let home = daemon.stop().await;
+    std::fs::remove_file(home.dir.path().join("local.db")).unwrap();
+    let daemon = LocalDaemon::start(home).await;
+    let mut client = daemon.client().await;
+    for (method, params) in [
+        (
+            "post",
+            json!({"project": created["project"], "envelope": envelope(1, "private local body")}),
+        ),
+        ("console_snapshot", json!({"project": created["project"]})),
+    ] {
+        let err = error(client.call(method, params).await);
+        assert_eq!(err.code, ErrorCode::Version, "{method}: {err:?}");
+        assert!(err.message.contains("local.db"), "{method}: {err:?}");
+    }
+    assert!(state.posts.lock().unwrap().is_empty());
+    assert!(state.lookups.lock().unwrap().is_empty());
+    daemon.stop().await;
+    hub.abort();
+    assert!(hub.await.unwrap_err().is_cancelled());
+}
+
 #[tokio::test]
 async fn newer_local_record_never_sends_a_local_body_to_the_hub() {
     unreadable_record_never_posts("PRAGMA user_version=2", None).await;

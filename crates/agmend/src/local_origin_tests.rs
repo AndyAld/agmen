@@ -5,6 +5,99 @@ const SWEEP_WAIT: Duration = Duration::from_secs(2);
 const SWEEP_POLLS: usize = 100;
 const POLL_EVERY: Duration = Duration::from_millis(20);
 
+#[tokio::test]
+async fn existing_record_without_a_marker_is_marked_on_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let local = LocalOrigin::new(dir.path(), TEST_LEASE);
+    let topics = local.create_project("existing", "andy").await.unwrap();
+    local.shutdown().await;
+    drop(local);
+    let marker = dir.path().join("local-origin-created");
+    match std::fs::remove_file(&marker) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => panic!("removing the marker: {error}"),
+    }
+    let local = LocalOrigin::new(dir.path(), TEST_LEASE);
+    assert_eq!(local.topics(topics.project()).await.unwrap(), topics);
+    assert!(
+        marker.is_file(),
+        "opening an existing record must leave a marker"
+    );
+    local.shutdown().await;
+}
+
+#[tokio::test]
+async fn first_local_project_leaves_a_private_marker() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    let local = LocalOrigin::new(dir.path(), TEST_LEASE);
+    local.create_project("first", "andy").await.unwrap();
+    let marker = std::fs::metadata(dir.path().join("local-origin-created")).unwrap();
+    assert!(marker.is_file());
+    assert_eq!(marker.permissions().mode() & 0o777, 0o600);
+    local.shutdown().await;
+}
+
+#[tokio::test]
+async fn marker_write_failure_prevents_creating_the_local_record() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("local-origin-created")).unwrap();
+    let local = LocalOrigin::new(dir.path(), TEST_LEASE);
+    assert!(local.create_project("first", "andy").await.is_err());
+    assert!(!dir.path().join("local.db").exists());
+    local.shutdown().await;
+}
+
+#[tokio::test]
+async fn existing_record_opens_when_only_its_marker_cannot_be_written() {
+    let dir = tempfile::tempdir().unwrap();
+    let local = LocalOrigin::new(dir.path(), TEST_LEASE);
+    let topics = local.create_project("existing", "andy").await.unwrap();
+    local.shutdown().await;
+    drop(local);
+    let marker = dir.path().join("local-origin-created");
+    // A folder in the marker's place fails the write and leaves local.db alone.
+    std::fs::remove_file(&marker).unwrap();
+    std::fs::create_dir(&marker).unwrap();
+    let local = LocalOrigin::new(dir.path(), TEST_LEASE);
+    assert_eq!(local.topics(topics.project()).await.unwrap(), topics);
+    local.shutdown().await;
+}
+
+#[tokio::test]
+async fn marker_write_never_follows_a_link() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("elsewhere");
+    std::fs::write(&target, "keep").unwrap();
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+    std::os::unix::fs::symlink(&target, dir.path().join("local-origin-created")).unwrap();
+    let local = LocalOrigin::new(dir.path(), TEST_LEASE);
+    assert!(local.create_project("first", "andy").await.is_err());
+    assert!(!dir.path().join("local.db").exists());
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
+    let mode = std::fs::metadata(&target).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o644, "the link target's mode changed");
+    local.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_dangling_marker_link_counts_as_present() {
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("local-origin-created");
+    std::os::unix::fs::symlink(dir.path().join("gone"), marker).unwrap();
+    let local = LocalOrigin::new(dir.path(), TEST_LEASE);
+    let error = local
+        .topics(&"projectp1".parse().unwrap())
+        .await
+        .unwrap_err();
+    assert_ne!(error.code, ErrorCode::NotFound, "{error:?}");
+    local.shutdown().await;
+}
+
 fn envelope(payload: agmen_proto::Payload) -> ClientEnvelope {
     let now = Timestamp::now();
     ClientEnvelope {
