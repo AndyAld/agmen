@@ -163,7 +163,7 @@ impl Fixture {
                 crate::state::Store::open(&dir.path().join("test.db")).unwrap(),
             )),
             dir.path().to_owned(),
-            core.console.hub.clone(),
+            core.origins.clone(),
         );
         let post_url = hub_url.join("published").unwrap();
         let post_failure = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -196,7 +196,7 @@ impl Fixture {
                 .unwrap(),
         ));
         let mut listeners = Listeners::new(
-            core.console.hub.clone(),
+            core.origins.clone(),
             dir.path().to_owned(),
             dir.path().join("settings.toml"),
         );
@@ -238,6 +238,7 @@ impl Fixture {
     fn console(&self, listeners: Arc<Listeners>) -> crate::console::Console {
         let console = &self.daemon.core.console;
         crate::console::Console {
+            origins: console.origins.clone(),
             hub: console.hub.clone(),
             feeds: console.feeds.clone(),
             local: console.local.clone(),
@@ -451,7 +452,7 @@ async fn cards_are_per_listeners_value() {
     let first = f.console(f.listeners().clone());
     // Use the same settings path so a process-wide path key cannot isolate cards.
     let second = f.console(Arc::new(Listeners::new(
-        f.listeners().hub.clone(),
+        f.daemon.core.origins.clone(),
         f.listeners().state_dir.clone(),
         f.listeners().settings_file.clone(),
     )));
@@ -1609,7 +1610,7 @@ async fn restart_fixture(
     f.daemon.core.identities.shutdown().await;
     let old = &f.daemon.core;
     let mut listeners = Listeners::new(
-        old.console.hub.clone(),
+        old.origins.clone(),
         f.dir.path().to_owned(),
         f.dir.path().join("settings.toml"),
     );
@@ -1643,7 +1644,7 @@ async fn restart_fixture(
             crate::state::Store::open(&f.dir.path().join("test.db")).unwrap(),
         )),
         f.dir.path().to_owned(),
-        core.console.hub.clone(),
+        core.origins.clone(),
     );
     identities.publisher = old.identities.publisher.clone();
     core.identities = Arc::new(identities);
