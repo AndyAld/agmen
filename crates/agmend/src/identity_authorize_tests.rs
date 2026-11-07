@@ -50,20 +50,8 @@ const METHODS: [&str; 22] = [
     "no_such_method",
 ];
 
-/// A pipe nobody writes to stops a reader. Opening it for reading and writing
-/// never blocks, and closing it again gives the reader end of file.
-struct Release(PathBuf);
-
-impl Drop for Release {
-    fn drop(&mut self) {
-        drop(
-            std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&self.0),
-        );
-    }
-}
+/// The whole of one deadline test: the 10 s it waits for and room for a loaded machine.
+const TEST: Duration = Duration::from_secs(60);
 
 fn mkfifo(path: &Path) {
     let made = std::process::Command::new("mkfifo")
@@ -71,6 +59,54 @@ fn mkfifo(path: &Path) {
         .status()
         .unwrap();
     assert!(made.success(), "mkfifo {path:?}");
+}
+
+/// Makes `path` a pipe nobody writes to, so reading it blocks, and returns the
+/// writer that ends that read when it drops: the reader gets end of file.
+///
+/// The writer is open before the read starts, so the read never waits in
+/// `open`: it opens at once and waits in `read`. Opening the pipe once to wake
+/// a read blocked in `open`, and closing it again, is not enough: on macOS the
+/// woken read can miss that close and wait in `read` for good. Drop the writer
+/// only after the read has started; one that starts later waits in `open`.
+fn pipe_nobody_writes_to(path: &Path) -> std::fs::File {
+    std::fs::remove_file(path).unwrap();
+    mkfifo(path);
+    // Opening a pipe for reading and writing never blocks.
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .unwrap()
+}
+
+/// Runs a deadline test on a runtime of its own, as `#[tokio::test]` does, with
+/// every wait bound. The test has `TEST`. A runtime that drops waits for its
+/// blocking threads without end, so a credential read stuck on its pipe would
+/// hang the test after it passed; here those threads have `WAIT` after the
+/// test, and one still running fails it.
+fn run(test: impl Future<Output = ()>) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        runtime.block_on(async {
+            assert!(
+                tokio::time::timeout(TEST, test).await.is_ok(),
+                "the test did not finish within {TEST:?}"
+            );
+        });
+    }));
+    let stopping = Instant::now();
+    runtime.shutdown_timeout(WAIT);
+    match outcome {
+        Err(panic) => std::panic::resume_unwind(panic),
+        Ok(()) => assert!(
+            stopping.elapsed() < WAIT,
+            "a blocking thread was still running {WAIT:?} after the test"
+        ),
+    }
 }
 
 /// The one credential the daemon stored for the fixture's identity.
@@ -94,11 +130,12 @@ async fn token(f: &Fixture) -> String {
 }
 
 async fn authorize(f: &Fixture, who: &IdentityId, token: &str) -> Result<Caller, ApiError> {
-    f.daemon
-        .core
-        .identities
-        .authorize(Some(who), Some(token))
-        .await
+    tokio::time::timeout(
+        WAIT,
+        f.daemon.core.identities.authorize(Some(who), Some(token)),
+    )
+    .await
+    .expect("authorize answers")
 }
 
 /// The fixture's identity is let in, so a refusal in a test is the fault under test.
@@ -301,41 +338,40 @@ async fn an_unreadable_credential_at_connect_is_busy_and_nothing_is_served() {
     f.stop().await;
 }
 
-#[tokio::test]
-async fn a_read_that_outlasts_the_deadline_at_connect_is_busy_and_nothing_is_served() {
-    let f = Fixture::new().await;
-    let token = token(&f).await;
-    let head_before = head(&f).await;
-    // The credential becomes a pipe nobody writes to, so reading it blocks and
-    // only the 10 s deadline ends the call. This is the one real wait here:
-    // agmend's tests have no paused clock, and no inner read gives up sooner.
-    let path = credential_path(&f);
-    std::fs::remove_file(&path).unwrap();
-    mkfifo(&path);
-    let release = Release(path);
-    let (mut client, serving) = connect(&f).await;
-    let started = Instant::now();
-    let answer = ask(
-        &mut client,
-        7,
-        Some(&f.who.identity_id),
-        "watch",
-        params(&f, "watch"),
-        Some(&token),
-    )
-    .await;
-    let waited = started.elapsed();
-    assert!(
-        waited >= DEADLINE,
-        "refused after {waited:?}, before the deadline"
-    );
-    assert_eq!(refusal(answer, "watch"), retried(BUSY));
-    let next = ask(&mut client, 8, None, "hello", json!({"api": 1}), None).await;
-    assert!(matches!(next.outcome, Outcome::Ok { .. }), "{next:?}");
-    assert_untouched(&f, head_before).await;
-    close(client, serving).await;
-    drop(release);
-    f.stop().await;
+#[test]
+fn a_read_that_outlasts_the_deadline_at_connect_is_busy_and_nothing_is_served() {
+    run(async {
+        let f = Fixture::new().await;
+        let token = token(&f).await;
+        let head_before = head(&f).await;
+        // The credential becomes a pipe nobody writes to, so reading it blocks and
+        // only the 10 s deadline ends the call. This is the one real wait here:
+        // agmend's tests have no paused clock, and no inner read gives up sooner.
+        let release = pipe_nobody_writes_to(&credential_path(&f));
+        let (mut client, serving) = connect(&f).await;
+        let started = Instant::now();
+        let answer = ask(
+            &mut client,
+            7,
+            Some(&f.who.identity_id),
+            "watch",
+            params(&f, "watch"),
+            Some(&token),
+        )
+        .await;
+        let waited = started.elapsed();
+        assert!(
+            waited >= DEADLINE,
+            "refused after {waited:?}, before the deadline"
+        );
+        assert_eq!(refusal(answer, "watch"), retried(BUSY));
+        let next = ask(&mut client, 8, None, "hello", json!({"api": 1}), None).await;
+        assert!(matches!(next.outcome, Outcome::Ok { .. }), "{next:?}");
+        assert_untouched(&f, head_before).await;
+        close(client, serving).await;
+        drop(release);
+        f.stop().await;
+    });
 }
 
 #[tokio::test]
@@ -644,31 +680,30 @@ async fn busy_in_the_recheck_is_logged_apart_from_busy_at_connect() {
     f.stop().await;
 }
 
-#[tokio::test]
-async fn a_read_that_outlasts_the_deadline_is_logged_as_a_timeout() {
-    let (logs, _capture) = LogBytes::capture();
-    let f = Fixture::new().await;
-    let token = token(&f).await;
-    // A cause with a code first, so the timeout shows as a cause of its own.
-    f.state(HIDE_REGISTRY).await;
-    assert_eq!(
-        authorize(&f, &f.who.identity_id, &token).await.unwrap_err(),
-        retried(BUSY)
-    );
-    f.state(SHOW_REGISTRY).await;
-    // A pipe nobody writes to, as above: only the 10 s deadline ends the call.
-    let path = credential_path(&f);
-    std::fs::remove_file(&path).unwrap();
-    mkfifo(&path);
-    let release = Release(path);
-    assert_eq!(
-        authorize(&f, &f.who.identity_id, &token).await.unwrap_err(),
-        retried(BUSY)
-    );
-    assert_eq!(
-        busy_reads(&logs),
-        ["WARN Connect Code(Hub)", "WARN Connect TimedOut"]
-    );
-    drop(release);
-    f.stop().await;
+#[test]
+fn a_read_that_outlasts_the_deadline_is_logged_as_a_timeout() {
+    run(async {
+        let (logs, _capture) = LogBytes::capture();
+        let f = Fixture::new().await;
+        let token = token(&f).await;
+        // A cause with a code first, so the timeout shows as a cause of its own.
+        f.state(HIDE_REGISTRY).await;
+        assert_eq!(
+            authorize(&f, &f.who.identity_id, &token).await.unwrap_err(),
+            retried(BUSY)
+        );
+        f.state(SHOW_REGISTRY).await;
+        // A pipe nobody writes to, as above: only the 10 s deadline ends the call.
+        let release = pipe_nobody_writes_to(&credential_path(&f));
+        assert_eq!(
+            authorize(&f, &f.who.identity_id, &token).await.unwrap_err(),
+            retried(BUSY)
+        );
+        assert_eq!(
+            busy_reads(&logs),
+            ["WARN Connect Code(Hub)", "WARN Connect TimedOut"]
+        );
+        drop(release);
+        f.stop().await;
+    });
 }
