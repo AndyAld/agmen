@@ -14,7 +14,9 @@
 //!
 //! An identity on this machine's local origin has no broker: it follows
 //! agmend's `watch` for it, which marks it online while the connection is
-//! open, and posts its HELLO through agmend.
+//! open, and posts its HELLO through agmend. It sends the saved delivery
+//! cursors to resume; an agmend too old to take them gets a watch without
+//! resume, and one line on stderr says so.
 
 use agmen_client::{ClientEvent, ClientKind, Session, SessionConfig};
 use agmen_proto::Payload;

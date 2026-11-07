@@ -178,6 +178,7 @@ impl Agmend {
             reader: BufReader::new(stream),
             id,
             frame_timeout: WATCH_FRAME_TIMEOUT,
+            keepalive: true,
         })
     }
 
@@ -197,21 +198,37 @@ pub(crate) struct Watch {
     reader: BufReader<UnixStream>,
     id: u64,
     frame_timeout: Duration,
+    /// Whether agmend sends keepalives. One from before them stays silent
+    /// while the watch is quiet, so silence does not mean a dead socket.
+    keepalive: bool,
 }
 
 impl Watch {
-    /// The next event, skipping keepalives. Idle waits have `WATCH_IDLE_TIMEOUT`;
-    /// a frame that begins has `WATCH_FRAME_TIMEOUT` to finish.
+    /// This watch's agmend predates keepalives: a quiet watch waits for as
+    /// long as the socket stays open.
+    pub(crate) fn without_keepalive(mut self) -> Self {
+        self.keepalive = false;
+        self
+    }
+
+    /// The next event, skipping keepalives. Idle waits have `WATCH_IDLE_TIMEOUT`
+    /// unless agmend sends no keepalive; a frame that begins has
+    /// `WATCH_FRAME_TIMEOUT` to finish.
     pub(crate) async fn recv(&mut self) -> Result<ClientEvent, AgmendError> {
         loop {
             // fill_buf is cancel safe; a timeout during read_async requires
             // dropping the watch because that read may have consumed a prefix.
-            tokio::time::timeout(WATCH_IDLE_TIMEOUT, self.reader.fill_buf())
-                .await
-                .map_err(|_| AgmendError::Timeout {
-                    method: "watch".into(),
-                })?
-                .map_err(AgmendError::Io)?;
+            let idle = self.reader.fill_buf();
+            let ready = if self.keepalive {
+                tokio::time::timeout(WATCH_IDLE_TIMEOUT, idle)
+                    .await
+                    .map_err(|_| AgmendError::Timeout {
+                        method: "watch".into(),
+                    })?
+            } else {
+                idle.await
+            };
+            ready.map_err(AgmendError::Io)?;
             let response: Response =
                 tokio::time::timeout(self.frame_timeout, read_async(&mut self.reader))
                     .await
@@ -520,6 +537,7 @@ mod watch_tests {
             reader: BufReader::new(client),
             id: 7,
             frame_timeout: Duration::from_millis(200),
+            keepalive: true,
         };
         let sender = tokio::spawn(async move {
             for _ in 0..3 {
@@ -558,6 +576,7 @@ mod watch_tests {
             reader: BufReader::new(client),
             id: 7,
             frame_timeout: Duration::from_millis(200),
+            keepalive: true,
         };
         let result = tokio::time::timeout(Duration::from_secs(61), watch.recv()).await;
         assert!(matches!(result, Ok(Err(AgmendError::Timeout { .. }))));
@@ -572,6 +591,7 @@ mod watch_tests {
             reader: BufReader::new(client),
             id: 7,
             frame_timeout: Duration::from_millis(200),
+            keepalive: true,
         };
         let idle = tokio::time::timeout(Duration::from_millis(800), watch.recv()).await;
         assert!(idle.is_err(), "an idle watch ended on its own: {idle:?}");
@@ -590,6 +610,7 @@ mod watch_tests {
             reader: BufReader::new(client),
             id: 7,
             frame_timeout: Duration::from_millis(200),
+            keepalive: true,
         };
         // The length prefix of a 100 byte frame, and nothing after it.
         daemon.write_all(&100_u32.to_be_bytes()).await.unwrap();

@@ -600,6 +600,17 @@ separate 10 s deadline. A reader from before the keepalive parses it as a
 `connection` event with `connected` true, so an older `agmen watch` prints it
 once per 30 s of silence.
 
+An agmend from before `after` refuses a `watch` that carries it with
+`bad_request` and the message ``bad params: unknown field `after`, expected
+`project` ``. The CLI treats that refusal, and no other, as an older agmend. It
+opens the watch again on a new connection without `after`, so that watch starts
+at the current heads and replays nothing, and the delivery cursors follow what
+was printed. Such an agmend sends no keepalive, so the CLI sets no idle limit on
+that connection. Once per process it says that resume is off: on stderr for
+`agmen watch`, where `--json` keeps stdout to JSON lines, and in the log for
+`agmen mcp`. Every reconnect sends `after` again, so resume returns when agmend
+restarts on a version that accepts it.
+
 Identity methods use the authenticated identity's project. `page` accepts
 `feed` or that identity's own inbox, otherwise `forbidden`. Its default and
 maximum limit are 500, and limits below 1 give `bad_request`. `pruned_through`
