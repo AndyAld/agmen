@@ -25,6 +25,7 @@ const ID: &str = "idn7k2q9";
 
 #[cfg(unix)]
 mod tree_tools {
+    use std::os::unix::fs::PermissionsExt as _;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
@@ -43,7 +44,8 @@ mod tree_tools {
         fn start(home: &Home, reply: impl Fn(&Request) -> Response + Send + 'static) -> Self {
             let path = home.state_base().join(agmen_client::AGMEND_SOCKET);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            let listener = tokio::net::UnixListener::bind(path).unwrap();
+            let listener = tokio::net::UnixListener::bind(&path).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
             let requests = Arc::new(Mutex::new(Vec::new()));
             let recorded = requests.clone();
             let task = tokio::spawn(async move {
@@ -526,6 +528,42 @@ mod tree_tools {
             assert!(text_of(&result).contains("<redacted>"));
             mcp.stop(&token).await;
             assert!(fake.requests.lock().unwrap().is_empty());
+        }
+    }
+
+    /// The local token goes only to a socket that is agmend's: the mode check
+    /// runs before `hello`, so the fake sees no frame at all.
+    #[tokio::test]
+    async fn launch_tools_refuse_an_open_socket_before_any_frame() {
+        let token = "a".repeat(64);
+        for tool in ["launch", "stop_agent"] {
+            let home = Home::new_in(Path::new("/tmp"));
+            let fake = FakeAgmend::start(&home, |request| Response::ok(request.id, launched()));
+            std::fs::set_permissions(
+                home.state_base().join(agmen_client::AGMEND_SOCKET),
+                std::fs::Permissions::from_mode(0o666),
+            )
+            .unwrap();
+            let mcp = AgentMcp::start(
+                &home,
+                &[
+                    ("AGMEN_IDENTITY", "parent01"),
+                    ("AGMEN_LOCAL_TOKEN", &token),
+                ],
+            )
+            .await;
+            let params = if tool == "launch" {
+                json!({"name": "k1", "role": "reviewer"})
+            } else {
+                json!({"identity": "child001"})
+            };
+            // `call` and `stop` assert the token is in neither the answer nor stderr.
+            let result = mcp.call(tool, params, &token).await;
+            let text = text_of(&result);
+            assert_eq!(result.is_error, Some(true), "{tool}: {text}");
+            assert!(text.contains("0666"), "{tool}: {text}");
+            mcp.stop(&token).await;
+            assert!(fake.requests.lock().unwrap().is_empty(), "{tool}");
         }
     }
 
