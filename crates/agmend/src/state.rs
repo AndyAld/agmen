@@ -759,10 +759,7 @@ impl Store {
         self.ingest_for_owner(origin, project, message, None)
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "routing, deduplication, quota and position commit in one transaction"
-    )]
+    #[cfg(test)]
     pub(crate) fn ingest_for_owner(
         &mut self,
         origin: &str,
@@ -770,6 +767,40 @@ impl Store {
         message: &StampedEnvelope,
         owner: Option<&IdentityId>,
     ) -> Result<(), StoreError> {
+        self.ingest_core(origin, project, message, owner, None)
+            .map(|_| ())
+    }
+
+    /// Like `ingest_for_owner`, but an identity whose stored metadata does not
+    /// parse is skipped instead of failing the message, so the other
+    /// recipients still get it and the position advances. `broken` maps the
+    /// identities already known to be broken to a hash of their stored text; a
+    /// changed text is parsed again. Returns the identities found broken by this
+    /// message, which the caller records only once the transaction committed.
+    pub(crate) fn ingest_skipping_broken(
+        &mut self,
+        origin: &str,
+        project: &ProjectId,
+        message: &StampedEnvelope,
+        owner: &IdentityId,
+        broken: &BTreeMap<IdentityId, u64>,
+    ) -> Result<Vec<(IdentityId, u64)>, StoreError> {
+        self.ingest_core(origin, project, message, Some(owner), Some(broken))
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "routing, deduplication, quota and position commit in one transaction"
+    )]
+    fn ingest_core(
+        &mut self,
+        origin: &str,
+        project: &ProjectId,
+        message: &StampedEnvelope,
+        owner: Option<&IdentityId>,
+        tolerate: Option<&BTreeMap<IdentityId, u64>>,
+    ) -> Result<Vec<(IdentityId, u64)>, StoreError> {
+        let mut found = Vec::new();
         let seq = i64::try_from(message.seq.0)
             .map_err(|_| StoreError::Invalid("sequence exceeds SQLite integer"))?;
         let raw = serde_json::to_string(message)?;
@@ -787,7 +818,7 @@ impl Store {
             .optional()?;
         let last = previous.unwrap_or(0);
         if seq <= last {
-            return Ok(());
+            return Ok(found);
         }
         if seq != last + 1 {
             return Err(StoreError::Gap {
@@ -829,10 +860,25 @@ impl Store {
             {
                 continue;
             }
-            let identity: ManagedIdentity = serde_json::from_str(&metadata)?;
             let id = id
                 .parse::<IdentityId>()
                 .map_err(|_| StoreError::Invalid("stored identity"))?;
+            let identity: ManagedIdentity = match tolerate {
+                None => serde_json::from_str(&metadata)?,
+                Some(known) => {
+                    let hash = metadata_hash(&metadata);
+                    if known.get(&id) == Some(&hash) {
+                        continue;
+                    }
+                    match serde_json::from_str(&metadata) {
+                        Ok(identity) => identity,
+                        Err(_) => {
+                            found.push((id, hash));
+                            continue;
+                        }
+                    }
+                }
+            };
             if message.from == id {
                 remember = Some(id);
                 continue;
@@ -898,7 +944,7 @@ impl Store {
         if let Some(id) = remember {
             self.remember_own(origin, &id, &message.client.id)?;
         }
-        Ok(())
+        Ok(found)
     }
 
     /// Watches receive delivery IDs even when an outgoing ASK has no feed copy.
@@ -1107,6 +1153,14 @@ fn addressed_to(
     Ok(addressed
         || (kind == IdentityKind::Listener
             && crate::listener::includes(message, id, &me.owner_id, &[])))
+}
+
+/// Identifies one stored metadata text, so a re-registered identity is parsed again.
+fn metadata_hash(metadata: &str) -> u64 {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    metadata.hash(&mut hasher);
+    hasher.finish()
 }
 
 #[cfg(test)]

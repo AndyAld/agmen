@@ -436,6 +436,10 @@ async fn hub_skipped_seen_head_is_discarded_when_a_position_frees() {
 
 /// SQLite refuses a second writer for longer than its 5 s busy timeout.
 const WRITE_LOCK_HELD: Duration = Duration::from_secs(7);
+/// A failed ingest waits the 5 s busy timeout before it reports.
+const STORE_FAILURE_WAIT: Duration = Duration::from_secs(30);
+/// No watch event for this long means the collector has delivered everything.
+const QUIET: Duration = Duration::from_millis(500);
 
 #[tokio::test]
 async fn hub_undeliverable_heads_are_rechecked_without_a_write_transaction() {
@@ -510,6 +514,121 @@ async fn hub_store_errors_during_ingest_do_not_end_the_collector() {
     daemon.hub.state.inject(support::stamped(3, "later"));
     state.disconnect.notify_waiters();
     wait_position(&daemon, "feed", 3).await;
+    stop_replay_fixture(daemon, state, server).await;
+}
+
+/// Reads watch events until the collector reports `connected`.
+async fn next_connection(watch: &mut support::Client, connected: bool) {
+    tokio::time::timeout(STORE_FAILURE_WAIT, async {
+        loop {
+            let event = result(watch.read().await);
+            if event["kind"] == "connection" && event["connected"] == connected {
+                return;
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("no connection event with connected={connected}"));
+}
+
+fn pending_copies(path: std::path::PathBuf, identity: &'static str, id: String) -> i64 {
+    rusqlite::Connection::open(path)
+        .unwrap()
+        .query_row(
+            "SELECT count(*) FROM pending WHERE identity=?1 AND id=?2",
+            rusqlite::params![identity, id],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+#[tokio::test]
+async fn hub_transient_store_failure_goes_offline_and_resumes_once() {
+    let (mut daemon, state, server) = replay_fixture(false).await;
+    let first = inbox_message(1, 1);
+    let held = [inbox_message(1, 2), inbox_message(2, 1)];
+    daemon.hub.state.inject(first.clone());
+    daemon
+        .hub
+        .state
+        .inject(support::stamped(1, "first pass consumed"));
+    daemon.resume();
+    wait_position(&daemon, "feed", 1).await;
+    wait_position(&daemon, "inbox:agent001", 1).await;
+    // The second pass waits at the gate, so the lock is certainly held when
+    // its first message is ingested.
+    state.gate.send_replace(false);
+    for message in &held {
+        daemon.hub.state.inject(message.clone());
+    }
+    daemon
+        .hub
+        .state
+        .inject(support::stamped(2, "held by a store error"));
+    state.disconnect.notify_waiters();
+    while state.passes.lock().unwrap().len() < 2 {
+        tokio::time::sleep(POSITION_POLL).await;
+    }
+    let mut watch = daemon.client().await;
+    watch
+        .send(&Request::new(9, "watch", json!({"project":PROJECT})))
+        .await;
+    assert_eq!(result(watch.read().await)["kind"], "self");
+    let path = daemon.home.database();
+    let (locked, taken) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let holder = tokio::task::spawn_blocking(move || {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        locked.send(()).unwrap();
+        // Held until the test has seen the failure, however long that takes.
+        released.recv().unwrap();
+        conn.execute_batch("COMMIT").unwrap();
+    });
+    taken.recv().unwrap();
+    state.gate.send_replace(true);
+    // Nothing disconnects the second pass, so an offline status can only come
+    // from the failed ingest.
+    next_connection(&mut watch, false).await;
+    release.send(()).unwrap();
+    holder.await.unwrap();
+    wait_position(&daemon, "feed", 2).await;
+    next_connection(&mut watch, true).await;
+    {
+        let passes = state.passes.lock().unwrap();
+        assert!(passes.len() >= 3, "the failure must end the second pass");
+        // The failed pass saved nothing, so the reconnect resumes from it.
+        assert_eq!(passes[2].after["feed"], 1);
+        assert_eq!(passes[2].after["inbox:agent001"], 1);
+    }
+    let path = daemon.home.database();
+    let copies = tokio::task::spawn_blocking(move || {
+        [
+            (&first, "agent001"),
+            (&held[0], "agent001"),
+            (&held[1], "agent002"),
+        ]
+        .map(|(message, identity)| {
+            let id = message["id"].as_str().unwrap().to_owned();
+            pending_copies(path.clone(), identity, id)
+        })
+    })
+    .await
+    .unwrap();
+    assert_eq!(copies, [1, 1, 1]);
+    // The feed message reaches the watcher once.
+    let mut delivered = 0;
+    while let Ok(event) = tokio::time::timeout(QUIET, watch.read()).await {
+        let event = result(event);
+        if event["kind"] == "message"
+            && event["message"]["seq"] == 2
+            && event["message"]["stream"] == "feed"
+        {
+            delivered += 1;
+        }
+    }
+    assert_eq!(delivered, 1);
+    drop(watch);
     stop_replay_fixture(daemon, state, server).await;
 }
 

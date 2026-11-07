@@ -36,6 +36,10 @@ mod queue_full_tests;
 const DEADLINE: Duration = Duration::from_secs(10);
 const POST_WAIT: Duration = Duration::from_secs(5);
 const MAX_DATABASE_JOBS: usize = 64;
+/// Identities remembered as broken; more than a daemon can manage never exist.
+const MAX_BROKEN_IDENTITIES: usize = MAX_MANAGED;
+/// A permanent store fault is warned about at most this often per collector.
+const STORE_WARN_EVERY: Duration = Duration::from_secs(60);
 const MAX_COLLECTORS: usize = 64;
 const WATCH_CAPACITY: usize = 256;
 const LOCAL_RECHECK: Duration = Duration::from_secs(30);
@@ -157,6 +161,9 @@ impl FullAlert {
 pub(crate) struct Database {
     store: Arc<Mutex<Store>>,
     jobs: AsyncMutex<tokio::task::JoinSet<()>>,
+    /// Identities whose stored state would not parse, with a hash of that state.
+    /// Kept in memory only: a restart tries them again.
+    broken: Mutex<BTreeMap<(String, IdentityId), u64>>,
 }
 
 impl Database {
@@ -164,7 +171,25 @@ impl Database {
         Self {
             store,
             jobs: AsyncMutex::new(tokio::task::JoinSet::new()),
+            broken: Mutex::new(BTreeMap::new()),
         }
+    }
+
+    fn broken_in(&self, origin: &str) -> BTreeMap<IdentityId, u64> {
+        let broken = self.broken.lock().unwrap_or_else(|e| e.into_inner());
+        broken
+            .iter()
+            .filter(|((known, _), _)| known == origin)
+            .map(|((_, id), hash)| (id.clone(), *hash))
+            .collect()
+    }
+
+    fn remember_broken(&self, origin: &str, id: IdentityId, hash: u64) {
+        let mut broken = self.broken.lock().unwrap_or_else(|e| e.into_inner());
+        if broken.len() >= MAX_BROKEN_IDENTITIES {
+            broken.pop_first();
+        }
+        broken.insert((origin.to_owned(), id), hash);
     }
 
     pub(crate) async fn shutdown(&self) {
@@ -1206,39 +1231,24 @@ impl Identities {
         project: &ProjectId,
         alert: &ClientEnvelope,
     ) -> Result<(), ApiError> {
-        let hub_url = if origin == agmen_client::LOCAL_ORIGIN {
-            agmen_client::local_hub_url()
-        } else {
-            Url::parse(origin).map_err(|_| unauthorized())?
-        };
-        let login = self.origins.person_for(&hub_url).await?;
-        if &login.human_id != owner {
-            return Err(unauthorized());
-        }
         #[cfg(test)]
-        if let Some(publish) = &self.publisher
-            && let Some(mut person) = self
+        if let Some(publish) = &self.publisher {
+            check_owner(&self.origins, origin, owner).await?;
+            if let Some(mut person) = self
                 .managed(origin.to_owned(), owner.clone())
                 .await?
                 .into_iter()
                 .find(|identity| &identity.project == project)
-        {
-            person.identity_id = owner.clone();
-            person.kind = agmen_proto::IdentityKind::Human;
-            return tokio::time::timeout(DEADLINE, publish(person, alert.clone()))
-                .await
-                .map_err(|_| hub_error("project ALERT publish timed out"))?
-                .map(|_| ());
+            {
+                person.identity_id = owner.clone();
+                person.kind = agmen_proto::IdentityKind::Human;
+                return tokio::time::timeout(DEADLINE, publish(person, alert.clone()))
+                    .await
+                    .map_err(|_| hub_error("project ALERT publish timed out"))?
+                    .map(|_| ());
+            }
         }
-        if origin == agmen_client::LOCAL_ORIGIN {
-            self.origins.local().post_as_person(project, alert).await?;
-        } else {
-            self.hub
-                .post(project, alert)
-                .await
-                .map_err(ApiError::from)?;
-        }
-        Ok(())
+        post_as_person(&self.hub, &self.origins, origin, owner, project, alert).await
     }
 
     async fn queue_alert_worker(self: &Arc<Self>) {
@@ -1719,10 +1729,113 @@ async fn write_watch_frame(
         .map_err(|_| hub_error("watch write failed"))
 }
 
+/// The signed-in person of `origin` must be `owner`.
+async fn check_owner(
+    origins: &crate::origin::Origins,
+    origin: &str,
+    owner: &IdentityId,
+) -> Result<(), ApiError> {
+    let hub_url = if origin == agmen_client::LOCAL_ORIGIN {
+        agmen_client::local_hub_url()
+    } else {
+        Url::parse(origin).map_err(|_| unauthorized())?
+    };
+    let login = origins.person_for(&hub_url).await?;
+    if &login.human_id != owner {
+        return Err(unauthorized());
+    }
+    Ok(())
+}
+
+/// Posts `alert` to `project` as its owner, who a hub mentions on nobody's behalf.
+async fn post_as_person(
+    hub: &Hub,
+    origins: &crate::origin::Origins,
+    origin: &str,
+    owner: &IdentityId,
+    project: &ProjectId,
+    alert: &ClientEnvelope,
+) -> Result<(), ApiError> {
+    check_owner(origins, origin, owner).await?;
+    if origin == agmen_client::LOCAL_ORIGIN {
+        origins.local().post_as_person(project, alert).await?;
+    } else {
+        hub.post(project, alert).await.map_err(ApiError::from)?;
+    }
+    Ok(())
+}
+
+/// How a collector treats a failed store call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StoreKind {
+    /// Busy, locked, timed out, I/O, or out of job slots: retry soon.
+    Transient,
+    /// Schema, version, or unknown: retrying cannot fix it, but a repair can.
+    Permanent,
+}
+
+/// An error along a collector's internal calls. `store` is set only by
+/// `store_job`, so an `ApiError` the hub supplied never counts as a store
+/// failure whatever its text says.
+#[derive(Debug)]
+struct Failed {
+    error: ApiError,
+    store: Option<StoreKind>,
+}
+
+impl From<ApiError> for Failed {
+    fn from(error: ApiError) -> Self {
+        Self { error, store: None }
+    }
+}
+
+impl From<crate::hub::HubError> for Failed {
+    fn from(error: crate::hub::HubError) -> Self {
+        ApiError::from(error).into()
+    }
+}
+
+impl From<Failed> for ApiError {
+    fn from(failed: Failed) -> Self {
+        failed.error
+    }
+}
+
+fn store_failed(kind: StoreKind, message: &str) -> Failed {
+    Failed {
+        error: hub_error(message),
+        store: Some(kind),
+    }
+}
+
+fn kind_of(error: &crate::state::StoreError) -> StoreKind {
+    use crate::state::StoreError;
+    match error {
+        StoreError::Io(_) => StoreKind::Transient,
+        StoreError::Sql(rusqlite::Error::SqliteFailure(failure, _))
+            if matches!(
+                failure.code,
+                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+            ) =>
+        {
+            StoreKind::Transient
+        }
+        StoreError::Identity { source, .. } => kind_of(source),
+        _ => StoreKind::Permanent,
+    }
+}
+
 pub(crate) async fn store_work<T: Send + 'static>(
     database: Arc<Database>,
     work: impl FnOnce(&mut Store) -> Result<T, crate::state::StoreError> + Send + 'static,
 ) -> Result<T, ApiError> {
+    store_job(database, work).await.map_err(ApiError::from)
+}
+
+async fn store_job<T: Send + 'static>(
+    database: Arc<Database>,
+    work: impl FnOnce(&mut Store) -> Result<T, crate::state::StoreError> + Send + 'static,
+) -> Result<T, Failed> {
     let store = database.store.clone();
     let cancelled = Arc::new(AtomicBool::new(false));
     let _cancel = Cancellation(cancelled.clone());
@@ -1730,7 +1843,10 @@ pub(crate) async fn store_work<T: Send + 'static>(
     let mut jobs = database.jobs.lock().await;
     while jobs.try_join_next().is_some() {}
     if jobs.len() >= MAX_DATABASE_JOBS {
-        return Err(hub_error("64 daemon state operations are already running"));
+        return Err(store_failed(
+            StoreKind::Transient,
+            "64 daemon state operations are already running",
+        ));
     }
     jobs.spawn_blocking(move || {
         let result = (|| {
@@ -1738,25 +1854,38 @@ pub(crate) async fn store_work<T: Send + 'static>(
             // Cancelled queued work must not mutate the store later.
             for _ in 0..100 {
                 if cancelled.load(Ordering::Acquire) {
-                    return Err(hub_error("daemon state operation cancelled"));
+                    return Err(store_failed(
+                        StoreKind::Transient,
+                        "daemon state operation cancelled",
+                    ));
                 }
                 match store.try_lock() {
                     Ok(mut guard) => {
                         if cancelled.load(Ordering::Acquire) {
-                            return Err(hub_error("daemon state operation cancelled"));
+                            return Err(store_failed(
+                                StoreKind::Transient,
+                                "daemon state operation cancelled",
+                            ));
                         }
-                        return work(&mut guard)
-                            .map_err(|_| hub_error("daemon state operation failed"));
+                        return work(&mut guard).map_err(|error| {
+                            store_failed(kind_of(&error), "daemon state operation failed")
+                        });
                     }
                     Err(std::sync::TryLockError::Poisoned(_)) => {
-                        return Err(hub_error("daemon state lock failed"));
+                        return Err(store_failed(
+                            StoreKind::Permanent,
+                            "daemon state lock failed",
+                        ));
                     }
                     Err(std::sync::TryLockError::WouldBlock) => {
                         std::thread::sleep(Duration::from_millis(50))
                     }
                 }
             }
-            Err(hub_error("daemon state lock timed out"))
+            Err(store_failed(
+                StoreKind::Transient,
+                "daemon state lock timed out",
+            ))
         })();
         // A caller can leave after a transaction committed.
         let _received = send.send(result);
@@ -1764,17 +1893,8 @@ pub(crate) async fn store_work<T: Send + 'static>(
     drop(jobs);
     tokio::time::timeout(DEADLINE, receive)
         .await
-        .map_err(|_| hub_error("daemon state operation timed out"))?
-        .map_err(|_| hub_error("daemon state worker failed"))?
-}
-
-/// Marks the errors `store_work` raises (all contain this text). A closed
-/// store at shutdown is not one: the collector task is stopped, not errored.
-const STORE_ERROR_MARK: &str = "daemon state";
-
-/// Whether `error` came from the daemon database rather than the hub.
-fn is_store_failure(error: &ApiError) -> bool {
-    error.code == ErrorCode::Hub && error.message.contains(STORE_ERROR_MARK)
+        .map_err(|_| store_failed(StoreKind::Transient, "daemon state operation timed out"))?
+        .map_err(|_| store_failed(StoreKind::Transient, "daemon state worker failed"))?
 }
 
 /// The positions split into the `after` sets of one SSE request each.
@@ -1838,25 +1958,25 @@ impl Collection {
 
     #[cfg(test)]
     async fn positions(&self) -> Result<BTreeMap<Stream, u64>, ApiError> {
-        self.collection_state().await.map(|state| state.positions)
+        Ok(self.collection_state().await?.positions)
     }
 
-    async fn collection_state(&self) -> Result<CollectionState, ApiError> {
+    async fn collection_state(&self) -> Result<CollectionState, Failed> {
         let origin = self.origin.clone();
         let project = self.project.clone();
         let owner = self.owner.clone();
-        store_work(self.store.clone(), move |s| {
+        store_job(self.store.clone(), move |s| {
             s.collection_positions(&origin, &owner, &project)
         })
         .await
     }
 
     /// The streams this collector delivers, read without a write transaction.
-    async fn active_streams(&self) -> Result<BTreeSet<Stream>, ApiError> {
+    async fn active_streams(&self) -> Result<BTreeSet<Stream>, Failed> {
         let origin = self.origin.clone();
         let project = self.project.clone();
         let owner = self.owner.clone();
-        store_work(self.store.clone(), move |s| {
+        store_job(self.store.clone(), move |s| {
             s.active_streams(&origin, &owner, &project)
         })
         .await
@@ -1864,24 +1984,24 @@ impl Collection {
 
     /// The saved position of a stream this collector may deliver, without the
     /// cleanup `collection_state` runs.
-    async fn saved_position(&self, stream: &Stream) -> Result<Option<u64>, ApiError> {
+    async fn saved_position(&self, stream: &Stream) -> Result<Option<u64>, Failed> {
         let origin = self.origin.clone();
         let project = self.project.clone();
         let owner = self.owner.clone();
         let stream = stream.clone();
-        store_work(self.store.clone(), move |s| {
+        store_job(self.store.clone(), move |s| {
             s.saved_position(&origin, &owner, &project, &stream)
         })
         .await
     }
 
-    async fn commit(&self, message: StampedEnvelope) -> Result<bool, ApiError> {
+    async fn commit(&self, message: StampedEnvelope) -> Result<bool, Failed> {
         if serde_json::to_vec(&message.client)
             .map_err(|_| hub_error("invalid envelope"))?
             .len()
             > agmen_proto::MAX_ENVELOPE_BYTES
         {
-            return Err(hub_error("message exceeds protocol envelope cap"));
+            return Err(hub_error("message exceeds protocol envelope cap").into());
         }
         let hub_url = if self.origin == agmen_client::LOCAL_ORIGIN {
             agmen_client::local_hub_url()
@@ -1890,26 +2010,34 @@ impl Collection {
         };
         let login = self.origins.person_for(&hub_url).await?;
         if login.human_id != self.owner || agmen_client::origin_key(&login.hub_url) != self.origin {
-            return Err(unauthorized());
+            return Err(unauthorized().into());
         }
         let origin = self.origin.clone();
         let project = self.project.clone();
         let saved = message.clone();
         let owner = self.owner.clone();
-        let delivered = store_work(self.store.clone(), move |s| {
+        let known = self.store.broken_in(&self.origin);
+        let (delivered, found) = store_job(self.store.clone(), move |s| {
             if !s.can_deliver(&origin, &owner, &project, &saved.stream)? {
-                return Ok(false);
+                return Ok((false, Vec::new()));
             }
-            match s.ingest_for_owner(&origin, &project, &saved, Some(&owner)) {
-                Ok(()) => Ok(true),
+            match s.ingest_skipping_broken(&origin, &project, &saved, &owner, &known) {
+                Ok(found) => Ok((true, found)),
                 Err(crate::state::StoreError::Full("258 stream positions")) => {
                     s.mark_streams_full(&origin, &owner, &project)?;
-                    Ok(false)
+                    Ok((false, Vec::new()))
                 }
                 Err(error) => Err(error),
             }
         })
         .await?;
+        // The message committed without these identities. Later messages skip
+        // them unprompted; the owner hears once.
+        for (identity, hash) in found {
+            self.store
+                .remember_broken(&self.origin, identity.clone(), hash);
+            self.alert_broken(&identity, &message.stream, message.seq.0);
+        }
         if delivered {
             self.send(Ok(ClientEvent::Message {
                 message: Box::new(message),
@@ -1918,12 +2046,68 @@ impl Collection {
         Ok(delivered)
     }
 
+    /// Warn and tell the owner that `identity` gets nothing until it is
+    /// registered again or the daemon restarts. Names no message body.
+    fn alert_broken(&self, identity: &IdentityId, stream: &Stream, seq: u64) {
+        tracing::warn!(
+            project = %self.project, identity = %identity, stream = %stream, seq,
+            "identity stored state is broken; skipping it"
+        );
+        let body = format!(
+            "{identity}'s stored state in {} cannot be read, so it is skipped from {stream} #{seq} on. Register it again or restart agmend.",
+            self.project
+        );
+        let now = agmen_proto::Timestamp::now();
+        let alert = agmen_core::new_message_id(now)
+            .ok()
+            .zip(body.clone().try_into().ok())
+            .map(|(id, text)| ClientEnvelope {
+                v: 1,
+                id,
+                reply_to: None,
+                to: Vec::new(),
+                mentions: Vec::new(),
+                items: Vec::new(),
+                lane: None,
+                body: text,
+                valid_until: None,
+                payload: agmen_proto::Payload::Alert {
+                    need: body,
+                    urgency: agmen_proto::Urgency::Normal,
+                    needs: agmen_proto::Needs::Owner,
+                    actions: Vec::new(),
+                },
+                sent_at: now,
+            });
+        let Some(alert) = alert else {
+            tracing::warn!(project = %self.project, "broken identity ALERT could not be built");
+            return;
+        };
+        let (hub, origins) = (self.hub.clone(), self.origins.clone());
+        let (origin, owner, project) = (
+            self.origin.clone(),
+            self.owner.clone(),
+            self.project.clone(),
+        );
+        // Posted off the ingest path. Not retried: the warn above is the record.
+        tokio::spawn(async move {
+            let posted = tokio::time::timeout(
+                DEADLINE,
+                post_as_person(&hub, &origins, &origin, &owner, &project, &alert),
+            )
+            .await;
+            if !matches!(posted, Ok(Ok(()))) {
+                tracing::warn!(project = %project, "broken identity ALERT could not be posted");
+            }
+        });
+    }
+
     async fn accept(
         &self,
         message: StampedEnvelope,
         skipped: &mut BTreeSet<Stream>,
         cleaned: &mut tokio::time::Instant,
-    ) -> Result<bool, ApiError> {
+    ) -> Result<bool, Failed> {
         let stream = message.stream.clone();
         // The cleanup and room check take a write transaction. A deliverable
         // stream with a saved position needs neither until a stream is skipped
@@ -1972,11 +2156,11 @@ impl Collection {
             .await
             .map_err(|_| hub_error("gap replay timed out"))??;
             if page.messages.is_empty() {
-                return Err(hub_error("gap replay made no progress"));
+                return Err(hub_error("gap replay made no progress").into());
             }
             for row in page.messages {
                 if row.seq.0 != last.saturating_add(1) {
-                    return Err(hub_error("noncontiguous gap replay"));
+                    return Err(hub_error("noncontiguous gap replay").into());
                 }
                 last = row.seq.0;
                 if !self.commit(row).await? {
@@ -1989,7 +2173,7 @@ impl Collection {
             }
             tokio::task::yield_now().await;
         }
-        Err(hub_error("gap replay incomplete after 100 pages"))
+        Err(hub_error("gap replay incomplete after 100 pages").into())
     }
 
     async fn accept_hub(
@@ -1998,7 +2182,7 @@ impl Collection {
         skipped: &mut BTreeSet<Stream>,
         cleaned: &mut tokio::time::Instant,
         seen: &mut BTreeMap<Stream, u64>,
-    ) -> Result<(), ApiError> {
+    ) -> Result<(), Failed> {
         let stream = message.stream.clone();
         let seq = message.seq.0;
         if self.accept(message, skipped, cleaned).await? {
@@ -2011,10 +2195,36 @@ impl Collection {
         Ok(())
     }
 
-    /// Warn with the cause and tell watchers; store errors carry no token or body.
-    fn store_failed(&self, error: &ApiError, what: &str) {
-        tracing::warn!(project = %self.project, cause = %error.message, "{what}");
-        self.send(Err(error.clone()));
+    /// Report a store failure and wait before the next try: offline status for
+    /// watchers, the cause in the log (store errors carry no token or body).
+    /// A transient fault keeps watchers open; a permanent one also sends them the error.
+    /// A transient fault retries on the backoff; a permanent one at its cap.
+    async fn store_retry(
+        &self,
+        kind: StoreKind,
+        error: &ApiError,
+        what: &str,
+        backoff: Duration,
+        warned: &mut Option<tokio::time::Instant>,
+    ) {
+        self.send(Ok(ClientEvent::Connection { connected: false }));
+        match kind {
+            StoreKind::Transient => {
+                tracing::warn!(project = %self.project, cause = %error.message, "{what}");
+                tokio::time::sleep(backoff).await;
+            }
+            StoreKind::Permanent => {
+                // Watchers hear the error too: only a repair clears it.
+                self.send(Err(error.clone()));
+                if warned.is_none_or(|at| at.elapsed() >= STORE_WARN_EVERY) {
+                    *warned = Some(tokio::time::Instant::now());
+                    tracing::warn!(project = %self.project, cause = %error.message, "{what}; the daemon state needs repair");
+                } else {
+                    tracing::debug!(project = %self.project, cause = %error.message, "{what}");
+                }
+                tokio::time::sleep(self.timing.max).await;
+            }
+        }
     }
 
     async fn run(self) {
@@ -2025,6 +2235,7 @@ impl Collection {
             return;
         }
         let mut warned_limit = false;
+        let mut warned_store = None;
         let mut backoff_shift = 0;
         let mut skipped = BTreeSet::new();
         let mut seen = BTreeMap::new();
@@ -2041,10 +2252,18 @@ impl Collection {
                     });
                     state
                 }
-                Err(error) => {
+                Err(failed) => {
                     // A store error must not end the collector; retry later.
-                    self.store_failed(&error, "collection state failed; retrying");
-                    tokio::time::sleep(self.timing.backoff(backoff_shift)).await;
+                    let kind = failed.store.unwrap_or(StoreKind::Permanent);
+                    let backoff = self.timing.backoff(backoff_shift);
+                    self.store_retry(
+                        kind,
+                        &failed.error,
+                        "collection state failed; retrying",
+                        backoff,
+                        &mut warned_store,
+                    )
+                    .await;
                     backoff_shift = (backoff_shift + 1).min(HUB_BACKOFF_SHIFT);
                     continue;
                 }
@@ -2057,14 +2276,23 @@ impl Collection {
                 Ok(healthy) => healthy,
                 // Positions advance only in the ingest transaction, so a retry
                 // from the saved positions delivers each message exactly once.
-                Err(error) if is_store_failure(&error) => {
-                    self.store_failed(&error, "hub ingest failed; reconnecting");
-                    tokio::time::sleep(backoff).await;
+                Err(Failed {
+                    error,
+                    store: Some(kind),
+                }) => {
+                    self.store_retry(
+                        kind,
+                        &error,
+                        "hub ingest failed; reconnecting",
+                        backoff,
+                        &mut warned_store,
+                    )
+                    .await;
                     backoff_shift = (backoff_shift + 1).min(HUB_BACKOFF_SHIFT);
                     continue;
                 }
                 // Hub, credential and protocol faults still end the collector.
-                Err(error) => {
+                Err(Failed { error, store: None }) => {
                     self.send(Err(error));
                     return;
                 }
@@ -2102,9 +2330,9 @@ impl Collection {
             Err(error) => {
                 // Warn on the first failure of an outage; repeats are debug.
                 if std::mem::replace(failing, true) {
-                    tracing::debug!(project = %self.project, cause = %error.message, "recheck failed; retrying");
+                    tracing::debug!(project = %self.project, cause = %error.error.message, "recheck failed; retrying");
                 } else {
-                    tracing::warn!(project = %self.project, cause = %error.message, "recheck failed; retrying");
+                    tracing::warn!(project = %self.project, cause = %error.error.message, "recheck failed; retrying");
                 }
                 return false;
             }
@@ -2125,7 +2353,7 @@ impl Collection {
         skipped: &mut BTreeSet<Stream>,
         seen: &mut BTreeMap<Stream, u64>,
         backoff: Duration,
-    ) -> Result<bool, ApiError> {
+    ) -> Result<bool, Failed> {
         let chunks = hub_chunks(&state.positions);
         let (tx, mut rx) = mpsc::channel(HUB_EVENT_QUEUE);
         let mut readers = tokio::task::JoinSet::new();
@@ -3154,6 +3382,86 @@ mod local_collection_tests {
         let logs = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
         assert!(!logs.contains("reading local projects failed"), "{logs}");
         daemon.core.identities.shutdown().await;
+    }
+
+    fn dm_to(seq: u64, to: &[IdentityId]) -> StampedEnvelope {
+        serde_json::from_value(json!({
+            "v":1,"id":agmen_core::new_message_id(Timestamp::now()).unwrap(),
+            "verb":"DM","to":to,"data":{},"body":"poison test",
+            "sent_at":"2026-10-27T12:00:00Z","stream":"feed","seq":seq,
+            "from":"sender01","from_handle":"sender","from_kind":"human",
+            "hub_at":"2026-10-27T12:00:00Z"
+        }))
+        .unwrap()
+    }
+
+    async fn feed_alerts(f: &Fixture) -> usize {
+        f.collection
+            .origins
+            .local()
+            .page(
+                &f.collection.project,
+                &Stream::Feed,
+                0,
+                COLLECTION_PAGE_SIZE,
+            )
+            .await
+            .unwrap()
+            .messages
+            .iter()
+            .filter(|row| matches!(row.client.payload, Payload::Alert { .. }))
+            .count()
+    }
+
+    #[tokio::test]
+    async fn identity_with_unreadable_state_is_skipped_once_and_others_get_every_message() {
+        const MESSAGES: u64 = 3;
+        let (logs, _capture) = LogBytes::capture();
+        let f = Fixture::new().await;
+        let poison = f.agents[0].clone();
+        f.execute_state(format!(
+            "UPDATE identities SET metadata='{{}}' WHERE identity='{poison}'"
+        ))
+        .await;
+        for seq in 1..=MESSAGES {
+            assert!(f.collection.commit(dm_to(seq, &f.agents)).await.unwrap());
+        }
+        assert_eq!(f.drain(&f.agents[1]).await.len(), MESSAGES as usize);
+        assert!(f.drain(&f.agents[0]).await.is_empty());
+        assert_eq!(
+            f.collection.positions().await.unwrap()[&Stream::Feed],
+            MESSAGES
+        );
+        tokio::time::timeout(COLLECT_WAIT, async {
+            while feed_alerts(&f).await == 0 {
+                tokio::time::sleep(COLLECT_POLL).await;
+            }
+        })
+        .await
+        .expect("no owner ALERT named the broken identity");
+        tokio::time::sleep(SUPERVISE_PROBE).await;
+        assert_eq!(
+            feed_alerts(&f).await,
+            1,
+            "later messages must not alert again"
+        );
+        let warns: Vec<_> = logs
+            .text()
+            .lines()
+            .filter(|line| line.contains("stored state is broken"))
+            .map(|line| line.trim_start().to_owned())
+            .collect();
+        assert_eq!(warns.len(), 1, "{warns:?}");
+        assert!(warns[0].starts_with("WARN"), "{warns:?}");
+        assert!(warns[0].contains(poison.as_str()), "{warns:?}");
+        assert!(!warns[0].contains("poison test"), "no message body in logs");
+        f.stop().await;
+    }
+
+    #[test]
+    fn hub_text_that_mentions_daemon_state_is_not_a_store_failure() {
+        let hub = hub_error("the hub answered 422 invalid: daemon state is full");
+        assert!(Failed::from(hub).store.is_none());
     }
 }
 
