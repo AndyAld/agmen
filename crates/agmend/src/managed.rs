@@ -177,6 +177,8 @@ pub(crate) struct Managed {
     /// Serializes reservations, refunds, cap raises and spend propagation.
     accounting: Mutex<()>,
     safeguards_cache: Mutex<budgets::SettingsCache>,
+    /// At most MAX_MANAGED successful resolutions, keyed by repo, name and commit.
+    role_cache: Mutex<BTreeMap<(PathBuf, String, String), agmen_roles::Resolved>>,
     shutting_down: AtomicBool,
 }
 
@@ -206,6 +208,7 @@ impl Managed {
             launching: Mutex::new(()),
             accounting: Mutex::new(()),
             safeguards_cache: Mutex::new(budgets::SettingsCache::default()),
+            role_cache: Mutex::new(BTreeMap::new()),
             shutting_down: AtomicBool::new(false),
         }
     }

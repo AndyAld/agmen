@@ -271,6 +271,244 @@ fn commit_roles(fixture: &Fixture) {
 }
 
 #[tokio::test]
+async fn pinned_role_idle_ticks_stop_spawning_git_after_first_resolution() {
+    let (fixture, _) = tree_fixture().await;
+    root(&fixture).await;
+    child_call(
+        &fixture,
+        "agent001",
+        "child_launch",
+        json!({"name":"k1","role":"chain"}),
+    )
+    .await
+    .unwrap();
+    let managed = &fixture.daemon.core.managed;
+    let worker = worker_of(managed, "kid00001").await;
+    assert!(worker.lock().await.record.role_commit.is_some());
+    crate::git::INVOCATIONS
+        .scope(std::cell::Cell::new(0), async {
+            managed.tick().await;
+            let first = crate::git::INVOCATIONS.with(std::cell::Cell::get);
+            assert!(
+                first > 0,
+                "the first tick resolves the pinned role with git"
+            );
+            for _ in 0..3 {
+                managed.tick().await;
+                assert_eq!(crate::git::INVOCATIONS.with(std::cell::Cell::get), first);
+                assert_eq!(worker.lock().await.state, "idle");
+            }
+        })
+        .await;
+    assert!(fixture.runner.runs.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn pinned_role_records_at_different_commits_resolve_separately() {
+    let (fixture, _) = tree_fixture().await;
+    root(&fixture).await;
+    child_call(
+        &fixture,
+        "agent001",
+        "child_launch",
+        json!({"name":"k1","role":"chain"}),
+    )
+    .await
+    .unwrap();
+    let managed = &fixture.daemon.core.managed;
+    let first = worker_of(managed, "kid00001")
+        .await
+        .lock()
+        .await
+        .record
+        .clone();
+    let chain = first.repo.join(".agmen/roles/chain.xml");
+    std::fs::write(
+        &chain,
+        role_file(&chain)
+            .unwrap()
+            .replace("<summary>c</summary>", "<summary>later</summary>"),
+    )
+    .unwrap();
+    commit_roles(&fixture);
+    let mut second = first.clone();
+    second.role_commit = Some(
+        String::from_utf8(listing(&first.repo, &["rev-parse", "HEAD"]))
+            .unwrap()
+            .trim()
+            .to_owned(),
+    );
+    assert_ne!(first.role_commit, second.role_commit);
+    crate::git::INVOCATIONS
+        .scope(std::cell::Cell::new(0), async {
+            let earlier = managed.record_role(&first, "chain").await.unwrap();
+            let after_first = crate::git::INVOCATIONS.with(std::cell::Cell::get);
+            assert!(after_first > 0);
+            let later = managed.record_role(&second, "chain").await.unwrap();
+            let after_second = crate::git::INVOCATIONS.with(std::cell::Cell::get);
+            assert!(
+                after_second > after_first,
+                "a different commit needs its own resolution"
+            );
+            assert_ne!(earlier.sha256, later.sha256);
+            for (record, expected) in [(&first, &earlier), (&second, &later)] {
+                assert_eq!(
+                    &managed.record_role(record, "chain").await.unwrap(),
+                    expected
+                );
+                assert_eq!(
+                    crate::git::INVOCATIONS.with(std::cell::Cell::get),
+                    after_second
+                );
+            }
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn pinned_role_resolution_errors_are_retried() {
+    let (fixture, _) = tree_fixture().await;
+    root(&fixture).await;
+    let managed = &fixture.daemon.core.managed;
+    let mut record = worker_of(managed, "agent001")
+        .await
+        .lock()
+        .await
+        .record
+        .clone();
+    record.role_commit = Some(record.reviewed_base.as_ref().unwrap().commit.clone());
+    crate::git::INVOCATIONS
+        .scope(std::cell::Cell::new(0), async {
+            assert!(managed.record_role(&record, "chain").await.is_ok());
+            for _ in 0..2 {
+                let before = crate::git::INVOCATIONS.with(std::cell::Cell::get);
+                assert!(managed.record_role(&record, "missing").await.is_err());
+                assert!(crate::git::INVOCATIONS.with(std::cell::Cell::get) > before);
+            }
+            assert!(managed.record_role(&record, "chain").await.is_ok());
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn pinned_role_cache_hit_does_not_wait_for_another_cold_load() {
+    use std::{
+        future::Future,
+        pin::pin,
+        task::{Context, Poll, Waker},
+    };
+    let (fixture, _) = tree_fixture().await;
+    root(&fixture).await;
+    let managed = &fixture.daemon.core.managed;
+    let mut record = worker_of(managed, "agent001")
+        .await
+        .lock()
+        .await
+        .record
+        .clone();
+    record.role_commit = Some(record.reviewed_base.as_ref().unwrap().commit.clone());
+    assert!(managed.record_role(&record, "chain").await.is_ok());
+    let mut cx = Context::from_waker(Waker::noop());
+    // The first poll starts git and parks, so a held lock would still be held here.
+    let mut cold = pin!(managed.record_role(&record, "missing"));
+    assert!(cold.as_mut().poll(&mut cx).is_pending());
+    let mut hit = pin!(managed.record_role(&record, "chain"));
+    assert!(matches!(hit.as_mut().poll(&mut cx), Poll::Ready(Ok(_))));
+}
+
+#[tokio::test]
+async fn pinned_role_cache_evicts_smallest_key_at_managed_bound() {
+    let (fixture, _) = tree_fixture().await;
+    root(&fixture).await;
+    let managed = &fixture.daemon.core.managed;
+    let mut record = worker_of(managed, "agent001")
+        .await
+        .lock()
+        .await
+        .record
+        .clone();
+    record.role_commit = Some(record.reviewed_base.as_ref().unwrap().commit.clone());
+    let repo = record.repo.clone();
+    let aliases = fixture.dir.path().join("cache");
+    std::fs::create_dir(&aliases).unwrap();
+    crate::git::INVOCATIONS
+        .scope(std::cell::Cell::new(0), async {
+            for index in (0..=agmen_local::safeguards::MAX_MANAGED).rev() {
+                record.repo = aliases.join(format!("{index:03}"));
+                std::os::unix::fs::symlink(&repo, &record.repo).unwrap();
+                assert!(managed.record_role(&record, "chain").await.is_ok());
+            }
+            let full = crate::git::INVOCATIONS.with(std::cell::Cell::get);
+            record.repo = aliases.join(format!("{:03}", agmen_local::safeguards::MAX_MANAGED));
+            assert!(managed.record_role(&record, "chain").await.is_ok());
+            assert_eq!(crate::git::INVOCATIONS.with(std::cell::Cell::get), full);
+            // The smallest key before the last insertion was 001, not the oldest, 256.
+            record.repo = aliases.join("001");
+            assert!(managed.record_role(&record, "chain").await.is_ok());
+            assert!(crate::git::INVOCATIONS.with(std::cell::Cell::get) > full);
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn unpinned_role_records_keep_reading_local_files() {
+    let (fixture, _) = tree_fixture().await;
+    root(&fixture).await;
+    let managed = &fixture.daemon.core.managed;
+    let record = worker_of(managed, "agent001")
+        .await
+        .lock()
+        .await
+        .record
+        .clone();
+    assert!(record.role_commit.is_none());
+    let earlier = managed.record_role(&record, "chain").await.unwrap();
+    let chain = record.repo.join(".agmen/roles/chain.xml");
+    std::fs::write(
+        &chain,
+        role_file(&chain)
+            .unwrap()
+            .replace("<summary>c</summary>", "<summary>later</summary>"),
+    )
+    .unwrap();
+    let later = managed.record_role(&record, "chain").await.unwrap();
+    assert_ne!(earlier.sha256, later.sha256);
+}
+
+#[tokio::test]
+async fn pinned_role_cached_resolution_still_checks_launch_hash_each_tick() {
+    let (fixture, _) = tree_fixture().await;
+    root(&fixture).await;
+    child_call(
+        &fixture,
+        "agent001",
+        "child_launch",
+        json!({"name":"k1","role":"chain"}),
+    )
+    .await
+    .unwrap();
+    let managed = &fixture.daemon.core.managed;
+    let worker = worker_of(managed, "kid00001").await;
+    crate::git::INVOCATIONS
+        .scope(std::cell::Cell::new(0), async {
+            managed.tick().await;
+            let first = crate::git::INVOCATIONS.with(std::cell::Cell::get);
+            worker.lock().await.record.role_sha256 = Some("0".repeat(64).parse().unwrap());
+            managed.tick().await;
+            let held = worker.lock().await;
+            assert_eq!(held.state, "offline");
+            assert!(
+                held.role_error
+                    .as_ref()
+                    .unwrap()
+                    .contains("changed since launch")
+            );
+            assert_eq!(crate::git::INVOCATIONS.with(std::cell::Cell::get), first);
+        })
+        .await;
+}
+
+#[tokio::test]
 async fn child_project_role_comes_from_the_base_commit_and_is_pinned() {
     let (fixture, mints) = tree_fixture().await;
     let repo = fixture.dir.path().join("repo");

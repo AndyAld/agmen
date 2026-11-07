@@ -110,10 +110,22 @@ impl Managed {
         record: &Record,
         name: &str,
     ) -> Result<agmen_roles::Resolved, ApiError> {
-        match &record.role_commit {
-            Some(commit) => self.load_role_at(&record.repo, name, commit).await,
-            None => self.resolve_role(&record.repo, name).await,
+        let Some(commit) = &record.role_commit else {
+            return self.resolve_role(&record.repo, name).await;
+        };
+        let key = (record.repo.clone(), name.to_owned(), commit.clone());
+        if let Some(role) = self.role_cache.lock().await.get(&key) {
+            return Ok(role.clone());
         }
+        // The lock is not held across git, so one cold load never stalls other workers.
+        let role = self.load_role_at(&record.repo, name, commit).await?;
+        let mut cache = self.role_cache.lock().await;
+        if cache.len() >= agmen_local::safeguards::MAX_MANAGED && !cache.contains_key(&key) {
+            // Evict the smallest key so eviction is deterministic without another index.
+            cache.pop_first();
+        }
+        cache.insert(key, role.clone());
+        Ok(role)
     }
 
     /// Reuse Layers' inheritance, layer precedence, shadow checks and hashing.
