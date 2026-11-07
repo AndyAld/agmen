@@ -6,6 +6,7 @@ mod agents_panel;
 mod change_card;
 mod chat;
 mod chat_context;
+mod chat_filter;
 mod code_view;
 mod components;
 mod composer;
