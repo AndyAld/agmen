@@ -524,3 +524,37 @@ async fn answer(writer: &mut OwnedWriteHalf, id: u64, outcome: Result<Value, Api
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn finite_identity_read_timeout_preserves_spent_refresh() {
+        let fixture = crate::login::tests::RefreshFixture::new().await;
+        let core = fixture.daemon.core.clone();
+        let read = tokio::spawn(async move {
+            finite(
+                // Expire before the identity read's own 10 s timeout.
+                tokio::time::Instant::now() + Duration::from_secs(1),
+                core.identities.state(
+                    &Caller::Human,
+                    json!({"project": "project1", "key": "head"}),
+                ),
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), fixture.refresh.started.notified())
+            .await
+            .expect("the hub must spend the refresh token before the timeout");
+        let error = tokio::time::timeout(Duration::from_secs(3), read)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Hub);
+        assert_eq!(error.message, "local operation timed out");
+        fixture.finish_refresh().await;
+    }
+}

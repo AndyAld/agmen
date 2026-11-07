@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -29,6 +29,14 @@ struct FakeHub {
 
 impl FakeHub {
     async fn start(script: Script, me: StatusCode) -> Self {
+        Self::with_refresh(script, me, None).await
+    }
+
+    async fn with_refresh(
+        script: Script,
+        me: StatusCode,
+        refresh: Option<Arc<DelayedRefresh>>,
+    ) -> Self {
         let starts = Arc::new(AtomicUsize::new(0));
         let polls: Arc<Mutex<HashMap<String, usize>>> = Arc::default();
         let seen = polls.clone();
@@ -51,6 +59,7 @@ impl FakeHub {
             .route(
                 "/v1/auth/token",
                 post(move |form: String| {
+                    let refresh = refresh.clone();
                     let code = form
                         .split('&')
                         .find_map(|pair| pair.strip_prefix("device_code="))
@@ -67,7 +76,16 @@ impl FakeHub {
                         *count
                     };
                     let (status, body) = script(n, count);
-                    async move { (status, [("content-type", "application/json")], body) }
+                    async move {
+                        let (status, body) = if let Some(refresh) = refresh
+                            && form.contains("grant_type=refresh_token")
+                        {
+                            refresh.grant(&form).await
+                        } else {
+                            (status, body)
+                        };
+                        (status, [("content-type", "application/json")], body)
+                    }
                 }),
             )
             .route(
@@ -103,6 +121,134 @@ impl FakeHub {
             .get(&device_code(n))
             .copied()
             .unwrap_or(0)
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct DelayedRefresh {
+    pub(crate) started: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+    calls: AtomicUsize,
+    /// Answer the delayed first call with a server error instead of the tokens.
+    fail: AtomicBool,
+}
+
+impl DelayedRefresh {
+    async fn grant(&self, form: &str) -> (StatusCode, &'static str) {
+        assert!(form.contains("refresh_token=old-refresh"));
+        if self.calls.fetch_add(1, Ordering::SeqCst) != 0 {
+            return (StatusCode::BAD_REQUEST, r#"{"error":"invalid_grant"}"#);
+        }
+        self.started.notify_one();
+        tokio::time::timeout(Duration::from_secs(30), self.release.notified())
+            .await
+            .expect("test must release the spent refresh grant");
+        if self.fail.load(Ordering::SeqCst) {
+            return (StatusCode::INTERNAL_SERVER_ERROR, "{}");
+        }
+        (StatusCode::OK, GRANTED)
+    }
+}
+
+pub(crate) struct RefreshFixture {
+    pub(crate) daemon: crate::Agmend,
+    pub(crate) refresh: Arc<DelayedRefresh>,
+    home: Home,
+    login: Login,
+}
+
+impl RefreshFixture {
+    pub(crate) async fn new() -> Self {
+        let refresh = Arc::new(DelayedRefresh::default());
+        let hub = FakeHub::with_refresh(
+            |_, _| (StatusCode::BAD_REQUEST, PENDING),
+            StatusCode::OK,
+            Some(refresh.clone()),
+        )
+        .await;
+        let home = Home::new();
+        let login = Login {
+            hub_url: hub.url,
+            human_id: "hmn7k2q9".parse().unwrap(),
+            handle: "andy".into(),
+        };
+        save_login(
+            &home.store(),
+            &home.login_file(),
+            &login,
+            &HumanTokens::new("old-access".into(), "old-refresh".into(), 0),
+        )
+        .await
+        .unwrap();
+        let daemon = crate::Agmend::bind(crate::Config::new(
+            home.dir.path().join("agmend.sock"),
+            home.login_file(),
+            home.store(),
+        ))
+        .unwrap();
+        Self {
+            daemon,
+            refresh,
+            home,
+            login,
+        }
+    }
+
+    pub(crate) fn dir(&self) -> &std::path::Path {
+        self.home.dir.path()
+    }
+
+    /// What the store holds for `login`, as written.
+    fn stored(&self, login: &Login) -> Option<String> {
+        self.home.store().get(&login.key().unwrap()).unwrap()
+    }
+
+    /// The first step of `agmen logout`, which runs in the CLI's process.
+    fn delete_tokens(&self) {
+        self.home
+            .store()
+            .delete(&self.login.key().unwrap())
+            .unwrap();
+    }
+
+    /// How many files the token store's folder holds, staged ones included.
+    fn store_files(&self) -> usize {
+        std::fs::read_dir(self.dir().join("tokens"))
+            .unwrap()
+            .count()
+    }
+
+    pub(crate) async fn finish_refresh(&self) {
+        assert_eq!(self.refresh.calls.load(Ordering::SeqCst), 1);
+        self.refresh.release.notify_one();
+        let stored = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let store = self.home.store();
+                let key = self.login.key().unwrap();
+                let raw = tokio::task::spawn_blocking(move || store.get(&key))
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+                let pair: Value = serde_json::from_str(&raw).unwrap();
+                if pair["access_token"] == "new-access" {
+                    break pair;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("renewed tokens must be stored after the caller times out");
+        assert_eq!(stored["access_token"], "new-access");
+        assert_eq!(stored["refresh_token"], "new-refresh");
+        let credentials = self.daemon.core.origins.hub().credentials();
+        let (login, access) = credentials.access().await.unwrap();
+        assert_eq!(login, self.login);
+        assert_eq!(access, "new-access");
+        credentials.forget().await;
+        let (_, access) = credentials.access().await.unwrap();
+        assert_eq!(access, "new-access");
+        assert_eq!(self.refresh.calls.load(Ordering::SeqCst), 1);
     }
 }
 
@@ -423,4 +569,329 @@ async fn a_replaced_flow_that_wakes_late_saves_nothing() {
         home.credentials.login_status(json!({})).await.unwrap()["state"],
         "idle"
     );
+}
+
+#[tokio::test]
+async fn a_caller_that_gives_up_in_the_queue_starts_no_refresh() {
+    let fixture = RefreshFixture::new().await;
+    fixture.refresh.fail.store(true, Ordering::SeqCst);
+    let hub = fixture.daemon.core.origins.hub().clone();
+    let first = tokio::spawn({
+        let hub = hub.clone();
+        async move { hub.credentials().access().await }
+    });
+    tokio::time::timeout(Duration::from_secs(2), fixture.refresh.started.notified())
+        .await
+        .expect("the hub must see the first refresh");
+    // A second caller waits behind the refresh and gives up.
+    let waited = tokio::time::timeout(Duration::from_millis(300), hub.credentials().access()).await;
+    assert!(waited.is_err(), "the second caller must still be waiting");
+    fixture.refresh.release.notify_one();
+    let first = first.await.unwrap();
+    assert!(
+        matches!(&first, Err(LoginError::Refused { status: 500, .. })),
+        "{:?}",
+        first.as_ref().err()
+    );
+    // The next caller makes the only other attempt (the hub answers 400 to it).
+    let third = hub.credentials().access().await;
+    assert!(
+        matches!(&third, Err(LoginError::NotSignedIn)),
+        "{:?}",
+        third.as_ref().err()
+    );
+    assert_eq!(
+        fixture.refresh.calls.load(Ordering::SeqCst),
+        2,
+        "the caller that left started a refresh of its own"
+    );
+}
+
+#[tokio::test]
+async fn a_second_caller_waits_for_a_refresh_whose_caller_left() {
+    let fixture = RefreshFixture::new().await;
+    let hub = fixture.daemon.core.origins.hub().clone();
+    let first = tokio::spawn({
+        let hub = hub.clone();
+        async move { hub.credentials().access().await }
+    });
+    tokio::time::timeout(Duration::from_secs(2), fixture.refresh.started.notified())
+        .await
+        .expect("the hub must see the refresh");
+    // The caller leaves while the hub holds its spent grant.
+    first.abort();
+    let second = tokio::spawn({
+        let hub = hub.clone();
+        async move { hub.credentials().access().await }
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    fixture.finish_refresh().await;
+    let (login, access) = second.await.unwrap().unwrap();
+    assert_eq!(login, fixture.login);
+    assert_eq!(access, "new-access");
+}
+
+/// Serves `daemon` until the returned sender fires, after a caller has
+/// started a renewal that the hub holds and then given up on it.
+async fn serve_with_a_renewal_in_flight(
+    daemon: crate::Agmend,
+    refresh: &DelayedRefresh,
+) -> (tokio::sync::oneshot::Sender<()>, JoinHandle<()>) {
+    let core = daemon.core.clone();
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let serving = tokio::spawn(daemon.serve_until(async move {
+        let _stopped = stopped.await;
+    }));
+    let caller = tokio::spawn(async move { core.origins.hub().credentials().access().await });
+    tokio::time::timeout(Duration::from_secs(2), refresh.started.notified())
+        .await
+        .expect("the hub must see the refresh");
+    caller.abort();
+    (stop, serving)
+}
+
+#[tokio::test]
+async fn shutdown_waits_for_a_renewal_in_flight_to_store_its_tokens() {
+    let RefreshFixture {
+        daemon,
+        refresh,
+        home,
+        login,
+    } = RefreshFixture::new().await;
+    let (stop, mut serving) = serve_with_a_renewal_in_flight(daemon, &refresh).await;
+    stop.send(()).unwrap();
+    // The hub answers only after shutdown began: agmend must still be there
+    // to store the answer.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), &mut serving)
+            .await
+            .is_err(),
+        "agmend exited with a renewal in flight"
+    );
+    refresh.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), serving)
+        .await
+        .expect("agmend must exit once the renewal ends")
+        .unwrap();
+    let stored = home.store().get(&login.key().unwrap()).unwrap().unwrap();
+    let stored: Value = serde_json::from_str(&stored).unwrap();
+    assert_eq!(stored["access_token"], "new-access");
+    assert_eq!(stored["refresh_token"], "new-refresh");
+}
+
+#[tokio::test]
+async fn shutdown_does_not_wait_past_its_bound_for_a_hung_hub() {
+    let RefreshFixture {
+        daemon,
+        refresh,
+        home: _home,
+        login: _login,
+    } = RefreshFixture::new().await;
+    let (stop, serving) = serve_with_a_renewal_in_flight(daemon, &refresh).await;
+    // The hub never answers.
+    let began = std::time::Instant::now();
+    stop.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(13), serving)
+        .await
+        .expect("a hung hub held agmend past its shutdown bound")
+        .unwrap();
+    let waited = began.elapsed();
+    assert!(
+        waited >= Duration::from_secs(10),
+        "agmend left after {waited:?} with the renewal still in flight"
+    );
+}
+
+/// Starts a renewal and waits until the hub holds its refresh grant.
+async fn renewal_in_flight(
+    fixture: &RefreshFixture,
+) -> JoinHandle<Result<(Login, String), LoginError>> {
+    let hub = fixture.daemon.core.origins.hub().clone();
+    let renewal = tokio::spawn(async move { hub.credentials().access().await });
+    tokio::time::timeout(Duration::from_secs(2), fixture.refresh.started.notified())
+        .await
+        .expect("the hub must see the refresh");
+    renewal
+}
+
+async fn cache_is_empty(fixture: &RefreshFixture) -> bool {
+    let hub = fixture.daemon.core.origins.hub();
+    hub.credentials().cache.lock().await.is_none()
+}
+
+/// What the tracing subscriber wrote, to read back.
+#[derive(Clone, Default)]
+struct LogBytes(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogBytes {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBytes {
+    type Writer = Self;
+    fn make_writer(&'a self) -> Self {
+        self.clone()
+    }
+}
+
+impl LogBytes {
+    /// Captures this thread's events up to INFO until the guard drops.
+    fn capture() -> (Self, tracing::subscriber::DefaultGuard) {
+        let logs = Self::default();
+        let guard = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .without_time()
+                .with_ansi(false)
+                .with_max_level(tracing::Level::INFO)
+                .with_writer(logs.clone())
+                .finish(),
+        );
+        (logs, guard)
+    }
+
+    fn text(&self) -> String {
+        String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+    }
+}
+
+#[tokio::test]
+async fn a_logout_during_a_renewal_leaves_no_token_pair() {
+    let (logs, _capture) = LogBytes::capture();
+    let fixture = RefreshFixture::new().await;
+    let renewal = renewal_in_flight(&fixture).await;
+    // `agmen logout`: the tokens go, then the login file.
+    fixture.delete_tokens();
+    std::fs::remove_file(fixture.home.login_file()).unwrap();
+    fixture.refresh.release.notify_one();
+    let outcome = renewal.await.unwrap();
+    assert!(
+        matches!(outcome, Err(LoginError::NotSignedIn)),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        fixture.stored(&fixture.login),
+        None,
+        "the store holds a pair after the logout"
+    );
+    assert_eq!(fixture.store_files(), 0, "the store folder is not empty");
+    assert!(
+        cache_is_empty(&fixture).await,
+        "the cache holds a pair after the logout"
+    );
+    assert!(!fixture.home.login_file().exists());
+    let text = logs.text();
+    assert!(
+        text.contains("INFO") && text.contains("discarded"),
+        "{text}"
+    );
+    for secret in ["old-access", "old-refresh", "new-access", "new-refresh"] {
+        assert!(!text.contains(secret), "{text}");
+    }
+}
+
+#[tokio::test]
+async fn a_logout_under_way_during_a_renewal_discards_it() {
+    // `agmen logout` deletes the tokens before the login file, so a renewal
+    // that checks in between finds the file still there.
+    let fixture = RefreshFixture::new().await;
+    let renewal = renewal_in_flight(&fixture).await;
+    fixture.delete_tokens();
+    fixture.refresh.release.notify_one();
+    let outcome = renewal.await.unwrap();
+    assert!(
+        matches!(outcome, Err(LoginError::NotSignedIn)),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        fixture.stored(&fixture.login),
+        None,
+        "the pair was written back after the logout began"
+    );
+    assert!(cache_is_empty(&fixture).await);
+}
+
+#[tokio::test]
+async fn a_login_as_another_account_during_a_renewal_keeps_the_new_pair() {
+    let fixture = RefreshFixture::new().await;
+    let renewal = renewal_in_flight(&fixture).await;
+    // `agmen login` as someone else: the old tokens go, then the new pair
+    // and the login file are written.
+    let other = Login {
+        hub_url: fixture.login.hub_url.clone(),
+        human_id: "hmn0new1".parse().unwrap(),
+        handle: "other".into(),
+    };
+    let pair = HumanTokens::new("other-access".into(), "other-refresh".into(), 3600);
+    save_login(
+        &fixture.home.store(),
+        &fixture.home.login_file(),
+        &other,
+        &pair,
+    )
+    .await
+    .unwrap();
+    let saved = fixture.stored(&other);
+    assert!(saved.is_some());
+    fixture.refresh.release.notify_one();
+    let outcome = renewal.await.unwrap();
+    assert!(
+        matches!(outcome, Err(LoginError::NotSignedIn)),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        fixture.stored(&fixture.login),
+        None,
+        "the old account's pair came back"
+    );
+    assert_eq!(
+        fixture.stored(&other),
+        saved,
+        "the new account's pair changed"
+    );
+    assert_eq!(
+        fixture.store_files(),
+        1,
+        "the store holds more than the new pair"
+    );
+    assert_eq!(
+        Login::read(&fixture.home.login_file()).unwrap(),
+        Some(other.clone())
+    );
+    assert!(cache_is_empty(&fixture).await);
+    // agmend serves the new account from its untouched pair, with no second
+    // refresh.
+    let hub = fixture.daemon.core.origins.hub();
+    let (login, access) = hub.credentials().access().await.unwrap();
+    assert_eq!((login, access.as_str()), (other, "other-access"));
+    assert_eq!(fixture.refresh.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn a_renewal_for_an_unchanged_login_is_stored_and_cached() {
+    let (logs, _capture) = LogBytes::capture();
+    let fixture = RefreshFixture::new().await;
+    let renewal = renewal_in_flight(&fixture).await;
+    fixture.refresh.release.notify_one();
+    let (login, access) = renewal.await.unwrap().unwrap();
+    assert_eq!(login, fixture.login);
+    assert_eq!(access, "new-access");
+    let stored = fixture.stored(&fixture.login).unwrap();
+    let stored: Value = serde_json::from_str(&stored).unwrap();
+    assert_eq!(stored["access_token"], "new-access");
+    assert_eq!(stored["refresh_token"], "new-refresh");
+    let hub = fixture.daemon.core.origins.hub();
+    let cache = hub.credentials().cache.lock().await;
+    assert!(
+        cache.as_ref().is_some_and(|(cached, tokens)| {
+            *cached == fixture.login && tokens.access_token() == "new-access"
+        }),
+        "the renewed pair is not cached"
+    );
+    assert!(!logs.text().contains("discarded"), "{}", logs.text());
 }

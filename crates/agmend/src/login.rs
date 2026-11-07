@@ -5,9 +5,11 @@
 //! agmend keeps the access token in memory and asks the store again when it
 //! is about to run out or the hub refused it. The hub replaces the refresh
 //! token on every use, so renewals in this process go one at a time (the
-//! cache lock is held across one); a renewal by the CLI at the same moment
-//! can still spend the refresh token first, and then agmend reports
-//! `unauthorized` until `agmen login` runs again.
+//! cache lock is held across one, and a renewal runs to its end even when the
+//! caller that started it gives up, and shutdown waits for one within its
+//! bound); a renewal by the CLI at the same moment can still spend the refresh
+//! token first, and then agmend reports `unauthorized` until `agmen login`
+//! runs again.
 //!
 //! agmend can also sign a person in itself (`login_start`, `login_status`):
 //! the hub's device flow from agmen-client, run by one background task, so
@@ -145,29 +147,54 @@ impl Credentials {
 
     /// The login and a current access token for it.
     ///
+    /// A renewal runs as its own task that owns the cache lock, so a caller
+    /// that gives up (a timeout, a dropped request) cannot lose the new
+    /// tokens after the hub has spent the refresh token: they are still
+    /// stored and cached, and the next caller finds them. A caller that gives
+    /// up while only waiting for the lock leaves without starting a renewal.
+    ///
+    /// A renewal whose person signed out, or in as someone else, while the
+    /// hub renewed it is dropped: its tokens are neither stored nor cached,
+    /// and the call fails with `NotSignedIn`.
+    ///
     /// # Errors
     ///
-    /// [`LoginError::NotSignedIn`] when nobody is signed in or the hub no
-    /// longer takes the refresh token, else the store's or the hub's error.
+    /// [`LoginError::NotSignedIn`] when nobody is signed in, the hub no
+    /// longer takes the refresh token, or the person changed during the
+    /// renewal, else the store's or the hub's error.
     pub(crate) async fn access(&self) -> Result<(Login, String), LoginError> {
         let login = self.login().await?;
-        let mut cache = self.cache.lock().await;
+        let mut cache = self.cache.clone().lock_owned().await;
         if let Some((cached, tokens)) = cache.as_ref()
             && *cached == login
             && !tokens.expiring()
         {
             return Ok((login, tokens.access_token().to_owned()));
         }
-        let tokens = human_tokens(&self.http, &self.store, &login).await?;
-        let token = tokens.access_token().to_owned();
-        *cache = Some((login.clone(), tokens));
-        Ok((login, token))
+        let (http, store) = (self.http.clone(), self.store.clone());
+        let login_file = self.login_file.clone();
+        tokio::spawn(async move {
+            let tokens = human_tokens(&http, &store, &login_file, &login).await?;
+            let token = tokens.access_token().to_owned();
+            *cache = Some((login.clone(), tokens));
+            Ok((login, token))
+        })
+        .await
+        .map_err(LoginError::Join)?
     }
 
     /// Drops the cached token after the hub refused it (a logout, or a
     /// renewal by the CLI), so the next call reads the store again.
     pub(crate) async fn forget(&self) {
         forget_cached(&self.cache).await;
+    }
+
+    /// Waits for a renewal in flight to store its tokens. The renewal task
+    /// holds the cache lock until it has, whether or not the caller that
+    /// started it is still there. `Agmend::serve_until` calls this inside its
+    /// shutdown bound, so agmend does not exit with a spent grant unstored.
+    pub(crate) async fn shutdown(&self) {
+        drop(self.cache.lock().await);
     }
 
     /// `login_start {hub?}`: starts the hub's device sign-in and answers
@@ -355,4 +382,4 @@ fn token_error() -> ApiError {
 
 #[cfg(test)]
 #[path = "login_tests.rs"]
-mod tests;
+pub(crate) mod tests;

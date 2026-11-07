@@ -175,6 +175,34 @@ mod tests {
     const JOIN_PROBE: Duration = Duration::from_millis(20);
 
     #[tokio::test]
+    async fn project_lookup_timeout_preserves_spent_refresh() {
+        let fixture = crate::login::tests::RefreshFixture::new().await;
+        std::fs::write(fixture.dir().join("local.db"), "unreadable record").unwrap();
+        let project = "project1".parse().unwrap();
+        let local_error = fixture
+            .daemon
+            .core
+            .origins
+            .local
+            .topics(&project)
+            .await
+            .unwrap_err();
+        let origins = fixture.daemon.core.origins.clone();
+        let lookup = tokio::spawn(async move { origins.of(&project).await });
+        tokio::time::timeout(JOB_WAIT, fixture.refresh.started.notified())
+            .await
+            .expect("the hub must spend the refresh token before the timeout");
+        let error = tokio::time::timeout(HUB_PROJECT_LOOKUP_WAIT + JOB_WAIT, lookup)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Version);
+        assert_eq!(error.message, unreadable(&local_error).message);
+        fixture.finish_refresh().await;
+    }
+
+    #[tokio::test]
     async fn identity_shutdown_joins_origin_database_jobs() {
         let dir = tempfile::tempdir().unwrap();
         let daemon = crate::Agmend::bind(crate::Config::new(
