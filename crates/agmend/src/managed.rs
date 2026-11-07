@@ -1098,10 +1098,6 @@ impl Managed {
         }
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one pass per worker, from the login check to the spawn, on one held guard"
-    )]
     pub(crate) async fn tick(self: &Arc<Self>) {
         let Some(identities) = self.identities() else {
             return;
