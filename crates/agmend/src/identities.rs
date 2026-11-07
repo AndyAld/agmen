@@ -7,11 +7,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
-use agmen_client::{ClientEvent, ClientKind, HubClient, Me, OutboxState, Session, SessionConfig};
+use agmen_client::{
+    ClientEvent, ClientKind, HubClient, IdentityFile, LocalCredential, Me, OutboxState, Session,
+    SessionConfig,
+};
 use agmen_local::safeguards::MAX_MANAGED;
 use agmen_local::{ApiError, ErrorCode};
 use agmen_proto::{ClientEnvelope, IdentityId, ProjectId, StampedEnvelope, Stream, Topics};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::io::AsyncReadExt as _;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -66,6 +69,10 @@ struct ProjectParams {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct Empty {}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct InboxParams {
     project: ProjectId,
     #[serde(default)]
@@ -93,15 +100,6 @@ struct StateParams {
 pub(crate) enum Caller {
     Human,
     Identity(ManagedIdentity),
-}
-
-// This record deliberately has no Debug implementation: it holds a credential.
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct LocalCredential {
-    origin: String,
-    owner_id: IdentityId,
-    local_token: String,
 }
 
 #[derive(Clone)]
@@ -144,7 +142,6 @@ type Publisher = Arc<
 >;
 
 pub(crate) struct Identities {
-    #[expect(dead_code, reason = "origin routing is wired in Task 9")]
     origins: Arc<crate::origin::Origins>,
     credentials: Arc<Credentials>,
     store: Arc<Database>,
@@ -169,12 +166,10 @@ impl Identities {
         id: &IdentityId,
     ) -> Result<Option<LocalToken>, ApiError> {
         tokio::time::timeout(DEADLINE, async {
-            let login = self.credentials.login().await.map_err(|_| unauthorized())?;
-            let origin = login.hub_url.origin().ascii_serialization();
-            let rows = self.managed(origin.clone(), login.human_id.clone()).await?;
-            if !rows.iter().any(|row| row.identity_id == *id) {
+            let Some(identity) = self.owned_identity(id).await? else {
                 return Ok(None);
-            }
+            };
+            let origin = agmen_client::origin_key(&identity.hub_url);
             let namespace = Url::parse("https://agmend.invalid").map_err(|_| unauthorized())?;
             let Some(raw) = self.credentials.token(&namespace, id).await? else {
                 return Ok(None);
@@ -182,7 +177,7 @@ impl Identities {
             let credential: LocalCredential =
                 serde_json::from_str(&raw).map_err(|_| unauthorized())?;
             if credential.origin != origin
-                || credential.owner_id != login.human_id
+                || credential.owner_id != identity.owner_id
                 || !valid_token(&credential.local_token)
             {
                 return Err(unauthorized());
@@ -195,7 +190,7 @@ impl Identities {
 
     pub(crate) async fn register(&self, identity: ManagedIdentity) -> Result<(), ApiError> {
         let key = (
-            identity.hub_url.origin().ascii_serialization(),
+            agmen_client::origin_key(&identity.hub_url),
             identity.identity_id.clone(),
         );
         // A row from an earlier run holds waiting messages and receipts that
@@ -261,7 +256,7 @@ impl Identities {
     /// waiting messages, so it no longer counts toward the identity cap.
     pub(crate) async fn forget(&self, identity: &ManagedIdentity) -> Result<(), ApiError> {
         self.close_identity(identity).await;
-        let origin = identity.hub_url.origin().ascii_serialization();
+        let origin = agmen_client::origin_key(&identity.hub_url);
         self.launched
             .lock()
             .await
@@ -291,7 +286,7 @@ impl Identities {
 
     pub(crate) async fn close_identity(&self, identity: &ManagedIdentity) {
         let key = (
-            identity.hub_url.origin().ascii_serialization(),
+            agmen_client::origin_key(&identity.hub_url),
             identity.identity_id.clone(),
         );
         if let Some(slot) = self.runtimes.lock().await.remove(&key) {
@@ -354,17 +349,8 @@ impl Identities {
             return Err(unauthorized());
         }
         tokio::time::timeout(DEADLINE, async {
-            let login = self.credentials.login().await.map_err(|_| unauthorized())?;
-            let origin = login.hub_url.origin().ascii_serialization();
-            let rows = self.managed(origin.clone(), login.human_id.clone()).await?;
-            let caller = rows
-                .into_iter()
-                .find(|row| {
-                    row.identity_id == *id
-                        && row.owner_id == login.human_id
-                        && row.hub_url.origin().ascii_serialization() == origin
-                })
-                .ok_or_else(unauthorized)?;
+            let caller = self.owned_identity(id).await?.ok_or_else(unauthorized)?;
+            let origin = agmen_client::origin_key(&caller.hub_url);
             let namespace = Url::parse("https://agmend.invalid").map_err(|_| unauthorized())?;
             let raw = self
                 .credentials
@@ -374,7 +360,7 @@ impl Identities {
             let credential: LocalCredential =
                 serde_json::from_str(&raw).map_err(|_| unauthorized())?;
             if credential.origin != origin
-                || credential.owner_id != login.human_id
+                || credential.owner_id != caller.owner_id
                 || !tokens_match(&credential.local_token, supplied)
             {
                 return Err(unauthorized());
@@ -392,6 +378,139 @@ impl Identities {
     ) -> Result<Vec<ManagedIdentity>, ApiError> {
         let store = self.store.clone();
         store_work(store, move |s| s.identities(&origin, &owner)).await
+    }
+
+    async fn owned_identity(&self, id: &IdentityId) -> Result<Option<ManagedIdentity>, ApiError> {
+        // A missing or unreadable hub login must not remove local authority.
+        if let Ok(login) = self.credentials.login().await
+            && let Some(identity) = self.owned_by(&login, id).await?
+        {
+            return Ok(Some(identity));
+        }
+        match self.origins.local().login().await? {
+            Some(login) => self.owned_by(&login, id).await,
+            None => Ok(None),
+        }
+    }
+
+    async fn owned_by(
+        &self,
+        login: &agmen_client::Login,
+        id: &IdentityId,
+    ) -> Result<Option<ManagedIdentity>, ApiError> {
+        let origin = agmen_client::origin_key(&login.hub_url);
+        Ok(self
+            .managed(origin.clone(), login.human_id.clone())
+            .await?
+            .into_iter()
+            .find(|row| {
+                row.identity_id == *id
+                    && row.owner_id == login.human_id
+                    && agmen_client::origin_key(&row.hub_url) == origin
+            }))
+    }
+
+    /// Uses the project's known checkout for roles, or only built-in and personal
+    /// layers when no checkout is known.
+    pub(crate) async fn local_mint(
+        &self,
+        managed: &crate::managed::Managed,
+        raw: Value,
+    ) -> Result<Value, ApiError> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Mint {
+            project: ProjectId,
+            name: String,
+            kind: Option<agmen_proto::IdentityKind>,
+            role: Option<String>,
+        }
+        let Mint {
+            project,
+            name,
+            kind,
+            role,
+        } = params(raw)?;
+        let local = self.origins.local();
+        // Preserve local.db version errors before mint maps open failures to a hub refusal.
+        let login = local.login().await?.ok_or_else(|| ApiError {
+            code: ErrorCode::NotFound,
+            message: "no local person on this machine".into(),
+        })?;
+        let resolved = match role {
+            Some(name) => {
+                let checkout = managed.known_checkout(&project).await;
+                Some(
+                    managed
+                        .resolve_role_layers(checkout.as_deref(), &name)
+                        .await?,
+                )
+            }
+            None => None,
+        };
+        let kind = kind.unwrap_or_else(|| match resolved.as_ref().map(|role| role.kind) {
+            Some(agmen_roles::Kind::Coordinator) => agmen_proto::IdentityKind::Coordinator,
+            Some(agmen_roles::Kind::Listener) => agmen_proto::IdentityKind::Listener,
+            _ => agmen_proto::IdentityKind::Agent,
+        });
+        let spec = resolved
+            .as_ref()
+            .map(|role| {
+                Ok::<_, ApiError>(agmen_proto::RoleSpec {
+                    role: role
+                        .role
+                        .name
+                        .parse()
+                        .map_err(|error| bad_request(format!("{error}")))?,
+                    verbs: role.verbs.clone(),
+                    edits: role.edits.clone().into(),
+                    role_sha256: role
+                        .sha256
+                        .parse()
+                        .map_err(|error| bad_request(format!("{error}")))?,
+                })
+            })
+            .transpose()?;
+        let minted = local
+            .mint(crate::record::admin::LocalMint {
+                project,
+                name,
+                kind,
+                spec: spec.clone(),
+                agent: None,
+                delegated_by: None,
+            })
+            .await?;
+        let identity = IdentityFile {
+            tenant: minted.topics.tenant().clone(),
+            project: minted.topics.project().clone(),
+            identity_id: minted.id,
+            handle: minted.handle,
+            owner_id: login.human_id,
+            hub_url: agmen_client::local_hub_url(),
+            broker_url: agmen_client::local_broker(),
+            role: spec.as_ref().map(|spec| spec.role.clone()),
+            role_sha256: spec.map(|spec| spec.role_sha256),
+            verbs: minted.verbs,
+        };
+        let row = ManagedIdentity {
+            hub_url: identity.hub_url.clone(),
+            broker_url: identity.broker_url.clone(),
+            tenant: identity.tenant.clone(),
+            project: identity.project.clone(),
+            identity_id: identity.identity_id.clone(),
+            owner_id: identity.owner_id.clone(),
+            handle: identity.handle.clone(),
+            kind,
+        };
+        if let Err(error) = self.register(row).await {
+            // The mint is committed: revoke it so a retry can use the same name.
+            if let Err(revoke) = local.revoke(&identity.project, &identity.identity_id).await {
+                tracing::warn!(code = ?revoke.code, "revoking an unregistered local identity failed");
+            }
+            return Err(error);
+        }
+        serde_json::to_value(identity).map_err(|_| hub_error("encoding local identity failed"))
     }
 
     fn project(caller: &Caller, raw: &Value) -> Result<(), ApiError> {
@@ -416,20 +535,28 @@ impl Identities {
         if !(1..=500).contains(&limit) {
             return Err(bad_request("limit must be 1 to 500"));
         }
+        let origin = self.read_origin(caller, &project).await;
         let identity = match caller {
-            Caller::Human => {
-                self.credentials
-                    .login()
-                    .await
-                    .map_err(crate::hub::HubError::from)?
-                    .human_id
-            }
+            Caller::Human => self.origins.person(origin).await?.human_id,
             Caller::Identity(identity) => identity.identity_id.clone(),
         };
-        let page =
-            tokio::time::timeout(DEADLINE, self.hub.inbox(&project, &identity, after, limit))
-                .await
-                .map_err(|_| hub_error("inbox read timed out"))??;
+        let page = tokio::time::timeout(DEADLINE, async {
+            match origin {
+                crate::origin::Origin::Local => {
+                    self.origins
+                        .local()
+                        .page(&project, &Stream::Inbox(identity), after, limit)
+                        .await
+                }
+                crate::origin::Origin::Hub => self
+                    .hub
+                    .inbox(&project, &identity, after, limit)
+                    .await
+                    .map_err(Into::into),
+            }
+        })
+        .await
+        .map_err(|_| hub_error("inbox read timed out"))??;
         Ok(json!({"messages":page.messages,"next_after":page.next_after,"head":page.head}))
     }
 
@@ -439,14 +566,91 @@ impl Identities {
         if !matches!(key.as_str(), "head" | "roster") {
             return Err(bad_request("key must be roster or head"));
         }
-        tokio::time::timeout(DEADLINE, self.hub.state(&project, &key))
-            .await
-            .map_err(|_| hub_error("state read timed out"))?
-            .map_err(Into::into)
+        tokio::time::timeout(DEADLINE, async {
+            match self.read_origin(caller, &project).await {
+                crate::origin::Origin::Local => self.origins.local().state(&project, &key).await,
+                crate::origin::Origin::Hub => {
+                    self.hub.state(&project, &key).await.map_err(Into::into)
+                }
+            }
+        })
+        .await
+        .map_err(|_| hub_error("state read timed out"))?
+    }
+
+    async fn read_origin(&self, caller: &Caller, project: &ProjectId) -> crate::origin::Origin {
+        match caller {
+            Caller::Identity(identity) if agmen_client::is_local(&identity.hub_url) => {
+                crate::origin::Origin::Local
+            }
+            Caller::Identity(_) => crate::origin::Origin::Hub,
+            Caller::Human => self.origins.of(project).await,
+        }
+    }
+
+    pub(crate) async fn read_local(
+        &self,
+        caller: &ManagedIdentity,
+        method: &str,
+        raw: Value,
+    ) -> Result<Value, ApiError> {
+        if !agmen_client::is_local(&caller.hub_url) {
+            return Err(bad_request("hub identities read this from their hub"));
+        }
+        let local = self.origins.local();
+        let project = &caller.project;
+        match method {
+            "page" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Page {
+                    stream: Stream,
+                    #[serde(default)]
+                    after: u64,
+                    #[serde(default = "page_limit")]
+                    limit: u32,
+                }
+                let Page {
+                    stream,
+                    after,
+                    limit,
+                } = params(raw)?;
+                if stream != Stream::Feed && stream != Stream::Inbox(caller.identity_id.clone()) {
+                    return Err(forbidden());
+                }
+                let page = local.page(project, &stream, after, limit).await?;
+                return Ok(
+                    json!({"messages": page.messages, "next_after": page.next_after,
+                    "head": page.head, "pruned_through": page.pruned_through}),
+                );
+            }
+            "lanes" => {
+                params::<Empty>(raw)?;
+                serde_json::to_value(local.lanes(project).await?)
+            }
+            "items" => {
+                params::<Empty>(raw)?;
+                serde_json::to_value(local.items(project).await?)
+            }
+            "check_path" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Check {
+                    paths: Vec<String>,
+                }
+                let Check { paths } = params(raw)?;
+                let checks = local
+                    .check_path(project, &caller.identity_id, paths)
+                    .await?;
+                return Ok(json!({"checks": checks}));
+            }
+            _ => return Err(bad_request("unknown local identity read")),
+        }
+        .map_err(|_| hub_error("encoding local identity read failed"))
     }
 
     pub(crate) async fn pending(&self, caller: &ManagedIdentity) -> Result<Value, ApiError> {
-        let origin = caller.hub_url.origin().ascii_serialization();
+        let origin = agmen_client::origin_key(&caller.hub_url);
         let identity = caller.identity_id.clone();
         let rows = store_work(self.store.clone(), move |store| {
             store.drain(
@@ -473,7 +677,7 @@ impl Identities {
         limit: u32,
         byte_budget: usize,
     ) -> Result<Vec<StampedEnvelope>, ApiError> {
-        let origin = caller.hub_url.origin().ascii_serialization();
+        let origin = agmen_client::origin_key(&caller.hub_url);
         let identity = caller.identity_id.clone();
         store_work(self.store.clone(), move |store| {
             store.drain(&origin, &identity, limit, byte_budget)
@@ -486,7 +690,7 @@ impl Identities {
         &self,
         caller: &ManagedIdentity,
     ) -> Result<Vec<StampedEnvelope>, ApiError> {
-        let origin = caller.hub_url.origin().ascii_serialization();
+        let origin = agmen_client::origin_key(&caller.hub_url);
         let identity = caller.clone();
         let rows = store_work(self.store.clone(), move |store| {
             store.drain_launch(&origin, &identity)
@@ -508,7 +712,7 @@ impl Identities {
             .await
             .map_err(crate::hub::HubError::from)?;
         let key = (
-            login.hub_url.origin().ascii_serialization(),
+            agmen_client::origin_key(&login.hub_url),
             login.human_id.clone(),
             project.clone(),
         );
@@ -563,7 +767,7 @@ impl Identities {
                     .login()
                     .await
                     .map_err(crate::hub::HubError::from)?;
-                let origin = login.hub_url.origin().ascii_serialization();
+                let origin = agmen_client::origin_key(&login.hub_url);
                 let rows = self.managed(origin.clone(), login.human_id.clone()).await?;
                 Ok::<_, ApiError>((origin, login.human_id, rows))
             })
@@ -727,6 +931,24 @@ impl Identities {
                 "message exceeds protocol envelope cap",
             ));
         }
+        if agmen_client::is_local(&caller.hub_url) {
+            let reply = tokio::time::timeout(
+                DEADLINE,
+                self.origins
+                    .local()
+                    .ingest(&caller.project, &caller.identity_id, &envelope),
+            )
+            .await
+            .map_err(|_| hub_error("identity post timed out"))??;
+            return match reply {
+                agmen_proto::DeliveryReply::Ack { stream, seq, .. } => {
+                    Ok(json!({"stream": stream, "seq": seq}))
+                }
+                agmen_proto::DeliveryReply::Nack { reason, .. } => Err(hub_error(&format!(
+                    "hub rejected identity message: {reason}"
+                ))),
+            };
+        }
         let operation = async {
             #[cfg(test)]
             if let Some(publish) = &self.publisher {
@@ -780,7 +1002,7 @@ impl Identities {
 
     async fn session(&self, caller: &ManagedIdentity) -> Result<Arc<Session>, ApiError> {
         let key = (
-            caller.hub_url.origin().ascii_serialization(),
+            agmen_client::origin_key(&caller.hub_url),
             caller.identity_id.clone(),
         );
         let slot = {
@@ -842,7 +1064,7 @@ impl Identities {
         .map_err(|_| hub_error("creating identity state directory failed"))?
         .map_err(|_| hub_error("creating identity state directory failed"))?;
         let kind = if self.launched.lock().await.contains(&(
-            caller.hub_url.origin().ascii_serialization(),
+            agmen_client::origin_key(&caller.hub_url),
             caller.identity_id.clone(),
         )) {
             ClientKind::Watch
@@ -903,7 +1125,7 @@ impl Runtime {
                         Some(event @ (ClientEvent::Delivery { .. } | ClientEvent::Connection { .. })) => {
                             if let ClientEvent::Delivery { id, .. } = &event {
                                 let id = id.clone();
-                                let origin = identity.hub_url.origin().ascii_serialization();
+                                let origin = agmen_client::origin_key(&identity.hub_url);
                                 let who = identity.identity_id.clone();
                                 if let Err(error) = store_work(store.clone(), move |s| s.remember_own(&origin, &who, &id)).await {
                                     tracing::warn!(code = ?error.code, "remembering outgoing message failed");
@@ -1068,9 +1290,7 @@ impl Collection {
             .login()
             .await
             .map_err(crate::hub::HubError::from)?;
-        if login.human_id != self.owner
-            || login.hub_url.origin().ascii_serialization() != self.origin
-        {
+        if login.human_id != self.owner || agmen_client::origin_key(&login.hub_url) != self.origin {
             return Err(unauthorized());
         }
         let origin = self.origin.clone();
@@ -1193,9 +1413,8 @@ async fn still_managed(
     let Ok(login) = credentials.login().await else {
         return false;
     };
-    let origin = identity.hub_url.origin().ascii_serialization();
-    if login.human_id != identity.owner_id || login.hub_url.origin().ascii_serialization() != origin
-    {
+    let origin = agmen_client::origin_key(&identity.hub_url);
+    if login.human_id != identity.owner_id || agmen_client::origin_key(&login.hub_url) != origin {
         return false;
     }
     let expected = identity.clone();

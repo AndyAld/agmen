@@ -26,6 +26,22 @@ struct Hello {
 #[serde(deny_unknown_fields)]
 struct Shutdown {}
 
+const REQUEST_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+const BOUNDED_METHODS: [&str; 12] = [
+    "inbox",
+    "state",
+    "pending",
+    "ready",
+    "shutdown",
+    "host_status",
+    "host_restart",
+    "page",
+    "lanes",
+    "items",
+    "check_path",
+    "local_mint",
+];
+
 /// Serves `stream` until the peer hangs up or breaks the framing.
 pub(crate) async fn serve(stream: UnixStream, core: Arc<Core>) {
     serve_with_peer(stream, core, |stream| {
@@ -64,11 +80,8 @@ pub(crate) async fn serve_with_peer(
             }
         };
         let id = request.id;
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-        let bounded = matches!(
-            request.method.as_str(),
-            "inbox" | "state" | "pending" | "ready" | "shutdown" | "host_status" | "host_restart"
-        );
+        let deadline = tokio::time::Instant::now() + REQUEST_WAIT;
+        let bounded = BOUNDED_METHODS.contains(&request.method.as_str());
         let mut shutting_down = false;
         let outcome = if let Some(refusal) = refuse(&request, greeted) {
             Err(refusal)
@@ -101,7 +114,7 @@ pub(crate) async fn serve_with_peer(
                     finite(deadline, pending(&core, caller, request.params)).await
                 }
                 Ok(Caller::Identity(caller)) => {
-                    identity_call(&core, &caller, &request.method, request.params).await
+                    identity_call(&core, &caller, &request.method, request.params, deadline).await
                 }
                 Ok(Caller::Human) if request.method == "hello" => {
                     hello(request.params).inspect(|_| greeted = true)
@@ -160,19 +173,47 @@ pub(crate) fn owner_peer_check(
                     | "settings_get"
                     | "settings_apply"
                     | "roster"
+                    | "page"
+                    | "lanes"
+                    | "items"
+                    | "check_path"
             ))
         || matches!(method, "hello" | "watch" | "inbox" | "state" | "pending")
     {
         return Ok(());
     }
-    if lookup().is_ok_and(|pid| !managed.contains_peer(pid)) {
+    if is_owner_peer(managed, lookup) {
         Ok(())
     } else {
-        Err(ApiError {
-            code: ErrorCode::Forbidden,
-            message: "agents cannot call owner-only methods".into(),
-        })
+        Err(owner_only())
     }
+}
+
+/// Whether `lookup` names a peer outside every worker and listener process group.
+fn is_owner_peer(
+    managed: &crate::managed::Managed,
+    lookup: impl FnOnce() -> std::io::Result<i32>,
+) -> bool {
+    lookup().is_ok_and(|pid| !managed.contains_peer(pid))
+}
+
+fn owner_only() -> ApiError {
+    ApiError {
+        code: ErrorCode::Forbidden,
+        message: "agents cannot call owner-only methods".into(),
+    }
+}
+
+/// Whether the request names a project this machine's record holds.
+async fn names_local_project(core: &Core, raw: &Value) -> bool {
+    let Some(project) = raw
+        .get("project")
+        .and_then(Value::as_str)
+        .and_then(|project| project.parse::<ProjectId>().ok())
+    else {
+        return false;
+    };
+    core.origins.of(&project).await == crate::origin::Origin::Local
 }
 
 async fn pending(core: &Core, caller: Caller, raw: Value) -> Result<Value, ApiError> {
@@ -273,7 +314,7 @@ async fn authorize(
         .identities
         .authorize(request.as_.as_ref(), token.as_deref())
         .await?;
-    owner_peer_check(&core.managed, &caller, &request.method, || {
+    let lookup = || {
         let pid = peer
             .as_ref()
             .copied()
@@ -283,7 +324,19 @@ async fn authorize(
         } else {
             Ok(pid)
         }
-    })?;
+    };
+    owner_peer_check(&core.managed, &caller, &request.method, lookup)?;
+    // owner_peer_check lets these reads through for any caller, and a worker arrives
+    // as the human, so on a local project it would read the person's own record.
+    // shortcut: a hub project stays open to workers as before; to close it, drop
+    // names_local_project and change worker_peer_cannot_call_owner_methods_even_without_identity_credentials.
+    if matches!(caller, Caller::Human)
+        && matches!(request.method.as_str(), "inbox" | "state" | "watch")
+        && !is_owner_peer(&core.managed, lookup)
+        && names_local_project(core, &request.params).await
+    {
+        return Err(owner_only());
+    }
     Ok(caller)
 }
 
@@ -292,10 +345,14 @@ async fn identity_call(
     caller: &crate::state::ManagedIdentity,
     method: &str,
     raw: Value,
+    deadline: tokio::time::Instant,
 ) -> Result<Value, ApiError> {
     match method {
         "child_launch" => core.managed.launch_child(caller, raw).await,
         "child_stop" => core.managed.stop_child(caller, raw).await,
+        "page" | "lanes" | "items" | "check_path" => {
+            finite(deadline, core.identities.read_local(caller, method, raw)).await
+        }
         "post" => {
             #[derive(Deserialize)]
             #[serde(deny_unknown_fields)]
@@ -347,6 +404,7 @@ async fn identity_call(
         | "settings_undo"
         | "local_project_create"
         | "local_projects"
+        | "local_mint"
         | "lanes_set" => Err(forbidden()),
         other => Err(ApiError {
             code: ErrorCode::NotFound,
@@ -382,6 +440,7 @@ async fn call(
 ) -> Result<Value, ApiError> {
     let console = &core.console;
     match method {
+        "local_mint" => finite(deadline, core.identities.local_mint(&core.managed, raw)).await,
         "local_project_create" => {
             #[derive(Deserialize)]
             #[serde(deny_unknown_fields)]

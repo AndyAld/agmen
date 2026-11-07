@@ -339,7 +339,7 @@ impl Store {
     }
 
     pub(crate) fn register(&mut self, identity: &ManagedIdentity) -> Result<(), StoreError> {
-        let origin = identity.hub_url.origin().ascii_serialization();
+        let origin = agmen_client::origin_key(&identity.hub_url);
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;

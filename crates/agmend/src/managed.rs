@@ -524,8 +524,22 @@ impl Managed {
         repo: &Path,
         name: &str,
     ) -> Result<agmen_roles::Resolved, ApiError> {
+        self.resolve_role_layers(Some(repo), name).await
+    }
+
+    pub(crate) async fn known_checkout(&self, project: &ProjectId) -> Option<PathBuf> {
+        let root = self.roots.lock().await.get(project).cloned()?;
+        crate::local::checkout(project, &root).await
+    }
+
+    /// Without a known checkout, only built-in and personal roles apply.
+    pub(crate) async fn resolve_role_layers(
+        &self,
+        repo: Option<&Path>,
+        name: &str,
+    ) -> Result<agmen_roles::Resolved, ApiError> {
         let layers = agmen_roles::Layers {
-            project: Some(repo.to_owned()),
+            project: repo.map(Path::to_owned),
             personal: self.personal_roles.clone(),
             ..agmen_roles::Layers::default()
         };

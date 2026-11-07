@@ -566,6 +566,11 @@ is 0. `check_path` accepts at most 500 paths. Hub identities receive
 `bad_request` for the new identity-only reads, with the message
 `hub identities read this from their hub`.
 
+Without an identity, `inbox`, `state` and `watch` on a local project answer the
+person. A peer in a running worker's process group therefore gets `forbidden`
+(`agents cannot call owner-only methods`) from them; its own identity's calls
+are unaffected.
+
 The `head` state contains `{feed_seq, rules_v: 0, lanes_v: 0, items_v: 0,
 hub_at}`. The roster reflects mint, revoke, and presence changes immediately.
 Each change wakes stored-record watchers. Console and identity watches hold
