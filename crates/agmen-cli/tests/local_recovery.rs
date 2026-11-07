@@ -232,8 +232,10 @@ async fn local_mcp_terminal_refusal_keeps_server_and_reports_reason() {
     .await
     .unwrap();
     assert!(!mcp.tools().await.is_empty());
+    // The refusal was reported once. This call tries the local watch again,
+    // and the fake accepts it.
     let again = mcp.call("state", json!({"key": "head"})).await;
-    assert!(text_of(&again).contains("identity revoked by the owner"));
+    assert!(text_of(&again).contains("feed_seq"), "{}", text_of(&again));
     mcp.stop().await;
     local.stop().await;
 }

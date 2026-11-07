@@ -714,13 +714,6 @@ impl Server {
         reason = "gpui enables serde_json preserve_order workspace-wide, which grows CallToolResult"
     )]
     async fn live(&self, slot: &mut Option<Connected>) -> Result<Arc<Live>, CallToolResult> {
-        if let Some(local) = slot
-            .as_ref()
-            .and_then(|connected| connected.connection.as_ref())
-            .and_then(|connection| connection.live.agent.local.as_ref())
-        {
-            local.check_watch().map_err(|err| failure(&err))?;
-        }
         if let Some(connected) = slot.as_ref()
             && let Some(connection) = &connected.connection
             && !connection.live.stopped.load(Ordering::SeqCst)
@@ -733,19 +726,21 @@ impl Server {
             && let Some(stopped) = slot.take()
         {
             // The session stopped on its own: say why once, and connect
-            // again on the next call.
-            let reason = if stopped
+            // again on the next call. A refusal that ended the local watch is
+            // the reason, and is not kept: the next call tries the watch again.
+            let local = stopped
                 .connection
                 .as_ref()
-                .is_some_and(|connection| connection.live.agent.local.is_some())
-            {
+                .and_then(|connection| connection.live.agent.local.as_ref());
+            let reason = if local.is_some() {
                 "the local watch stopped"
             } else {
                 "the broker session stopped"
             };
+            let refusal = local.and_then(|local| local.check_watch().err());
             let err = match stopped.close(false).await {
                 Err(err) => client_error(err, reason),
-                Ok(()) => anyhow::anyhow!(reason),
+                Ok(()) => refusal.unwrap_or_else(|| anyhow::anyhow!(reason)),
             };
             return Err(failure(&err));
         }

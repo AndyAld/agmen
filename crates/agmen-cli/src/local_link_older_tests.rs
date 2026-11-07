@@ -41,6 +41,13 @@ enum Answer {
         events: Vec<ClientEvent>,
         drop_after: bool,
     },
+    /// The `self` answer, `events`, and then an error frame in the middle of
+    /// the stream, as agmend ends a watch whose authority recheck fails.
+    Cut {
+        events: Vec<ClientEvent>,
+        code: ErrorCode,
+        message: &'static str,
+    },
 }
 
 /// A daemon that answers `hello`, `page` (every stream at `head`) and `watch`.
@@ -106,7 +113,7 @@ async fn serve(
             "watch" => {
                 let n = count.fetch_add(1, Ordering::SeqCst);
                 let _queued = seen.send(request.params.clone());
-                let (events, drop_after) = match script(n, &request.params) {
+                let (events, drop_after, ending) = match script(n, &request.params) {
                     Answer::Drop => return,
                     Answer::Refuse(code, message) => {
                         let _sent =
@@ -114,7 +121,12 @@ async fn serve(
                                 .await;
                         return;
                     }
-                    Answer::Open { events, drop_after } => (events, drop_after),
+                    Answer::Open { events, drop_after } => (events, drop_after, None),
+                    Answer::Cut {
+                        events,
+                        code,
+                        message,
+                    } => (events, true, Some((code, message))),
                 };
                 let frames = std::iter::once(me.clone())
                     .chain(events.iter().map(|e| serde_json::to_value(e).unwrap()));
@@ -125,6 +137,10 @@ async fn serve(
                     {
                         return;
                     }
+                }
+                if let Some((code, message)) = ending {
+                    let _sent =
+                        frame::write_async(&mut socket, &Response::err(id, code, message)).await;
                 }
                 if !drop_after {
                     // Held open until the CLI closes its end.
@@ -515,6 +531,39 @@ async fn local_watch_retries_temporary_refusals() {
         let link = link_at(&socket, &identity);
         let mut rx = link.watch(WatchState::Notifications).await.unwrap();
         assert_eq!(delivered(&mut rx, 1).await, [1], "{message}");
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn local_watch_reconnects_after_a_retryable_answer_mid_stream() {
+    // agmend's authority recheck ends a watch this way when it cannot read its
+    // records: an error frame after the watch has delivered, not a refused open.
+    for message in [
+        "local.db is busy; try again",
+        "the local origin has stopped",
+    ] {
+        let dir = tempfile::Builder::new().prefix("lr").tempdir().unwrap();
+        let socket = dir.path().join("agmend.sock");
+        let identity = identity();
+        let mut daemon = FakeAgmend::start(&socket, me(&identity), 0, move |n, _| match n {
+            0 => Answer::Cut {
+                events: vec![feed_message(1)],
+                code: ErrorCode::Hub,
+                message,
+            },
+            _ => Answer::Open {
+                events: vec![feed_message(2)],
+                drop_after: false,
+            },
+        });
+        let link = link_at(&socket, &identity);
+        let mut rx = link.watch(WatchState::Notifications).await.unwrap();
+        assert_eq!(delivered(&mut rx, 2).await, [1, 2], "{message}");
+        let asked = daemon.asked();
+        assert_eq!(asked.len(), 2, "{message}: {asked:?}");
+        assert_eq!(asked[1]["after"]["feed"], 1, "{message}: it resumes");
+        link.check_watch()
+            .unwrap_or_else(|error| panic!("{message}: the watch failed for good: {error:#}"));
     }
 }
 

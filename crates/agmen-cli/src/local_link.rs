@@ -264,7 +264,9 @@ impl LocalLink {
         Ok(rx)
     }
 
-    /// The terminal reason is retained for watch and every subsequent MCP call.
+    /// The refusal that ended the watch, kept until the watch is opened again.
+    /// `agmen watch` exits with it; `agmen mcp` reports it once, in the answer
+    /// that finds the watch stopped, and its next call opens the watch again.
     pub(crate) fn check_watch(&self) -> Result<()> {
         match &*self
             .failure

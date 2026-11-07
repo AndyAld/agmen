@@ -1599,27 +1599,51 @@ impl Collection {
     }
 }
 
+/// Whether `identity` is still managed. A read that fails counts as not
+/// managed, so authority is not retained after the daemon can no longer verify
+/// its managed identity.
 async fn still_managed(
     origins: &crate::origin::Origins,
     store: Arc<Database>,
     identity: &ManagedIdentity,
 ) -> bool {
-    let Ok(login) = origins.person_for(&identity.hub_url).await else {
-        return false;
+    matches!(check_managed(origins, store, identity).await, Ok(true))
+}
+
+/// Whether `identity` is still managed: `Ok(false)` when it is revoked or gone.
+/// A read that failed says nothing against it, and is the error a local client
+/// retries (see `unconfirmed`).
+async fn check_managed(
+    origins: &crate::origin::Origins,
+    store: Arc<Database>,
+    identity: &ManagedIdentity,
+) -> Result<bool, ApiError> {
+    let login = match origins.person_for(&identity.hub_url).await {
+        Ok(login) => login,
+        Err(error) => return unconfirmed(error),
     };
     let origin = agmen_client::origin_key(&identity.hub_url);
     if login.human_id != identity.owner_id || agmen_client::origin_key(&login.hub_url) != origin {
-        return false;
+        return Ok(false);
     }
     let expected = identity.clone();
-    // Any failed state read ends the runtime, rather than retaining authority
-    // after the daemon can no longer verify its managed identity.
     store_work(store, move |s| {
         s.identities(&origin, &expected.owner_id)
             .map(|rows| rows.contains(&expected))
     })
     .await
-    .unwrap_or(false)
+    .map_err(|_| crate::local_origin::busy())
+}
+
+/// What a failed read of the person means for a recheck. A person who is not on
+/// this machine is gone. Anything else is a read that failed: a stopped origin
+/// is answered as it is, and the rest as busy, which the CLI retries.
+fn unconfirmed(error: ApiError) -> Result<bool, ApiError> {
+    match error.code {
+        ErrorCode::NotFound => Ok(false),
+        _ if crate::local_origin::is_unavailable(&error) => Err(error),
+        _ => Err(crate::local_origin::busy()),
+    }
 }
 
 fn valid_token(value: &str) -> bool {

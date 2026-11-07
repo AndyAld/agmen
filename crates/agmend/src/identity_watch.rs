@@ -11,8 +11,10 @@ use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 
 use super::{
     AUTHORITY_RECHECK, COLLECTION_PAGE_SIZE, Caller, DEADLINE, Identities, ProjectParams,
-    bad_request, forbidden, hub_error, still_managed, unauthorized, write_event, write_watch_frame,
+    bad_request, check_managed, forbidden, hub_error, unauthorized, unconfirmed, write_event,
+    write_watch_frame,
 };
+use crate::local_origin::busy;
 use crate::origin::Origin;
 
 impl Identities {
@@ -90,13 +92,19 @@ impl Identities {
                     last_frame = tokio::time::Instant::now();
                 }
                 _ = authority.tick() => {
+                    // A read that failed or ran out of time says nothing against
+                    // the caller. It ends the watch with the answer the CLI
+                    // retries; `unauthorized` is for a caller that is revoked or gone.
                     let valid = tokio::time::timeout(DEADLINE, async {
                         match caller {
-                            Caller::Identity(identity) => still_managed(&self.origins, self.store.clone(), identity).await,
-                            Caller::Human => self.origins.person(Origin::Local).await.is_ok_and(|login| login.human_id == me.identity_id),
+                            Caller::Identity(identity) => check_managed(&self.origins, self.store.clone(), identity).await,
+                            Caller::Human => match self.origins.person(Origin::Local).await {
+                                Ok(login) => Ok(login.human_id == me.identity_id),
+                                Err(error) => unconfirmed(error),
+                            },
                         }
-                    }).await;
-                    if !matches!(valid, Ok(true)) {
+                    }).await.unwrap_or_else(|_| Err(busy()));
+                    if !valid? {
                         return Err(unauthorized());
                     }
                 }
@@ -104,3 +112,7 @@ impl Identities {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "identity_watch_tests.rs"]
+mod tests;
