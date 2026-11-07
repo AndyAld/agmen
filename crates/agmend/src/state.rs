@@ -880,13 +880,23 @@ impl Store {
                 Some(known) => {
                     let hash = metadata_hash(&metadata);
                     if known.get(&id) == Some(&hash) {
-                        broken_recipient |= broken_is_recipient(message, &id, &owner);
+                        broken_recipient |= broken_is_recipient(
+                            message,
+                            &id,
+                            &owner,
+                            self.own_ids.get(&(origin.to_owned(), id.clone())),
+                        );
                         continue;
                     }
                     match serde_json::from_str(&metadata) {
                         Ok(identity) => identity,
                         Err(_) => {
-                            broken_recipient |= broken_is_recipient(message, &id, &owner);
+                            broken_recipient |= broken_is_recipient(
+                                message,
+                                &id,
+                                &owner,
+                                self.own_ids.get(&(origin.to_owned(), id.clone())),
+                            );
                             found.push((id, hash));
                             continue;
                         }
@@ -1175,17 +1185,33 @@ fn addressed_to(
             && crate::listener::includes(message, id, &me.owner_id, &[])))
 }
 
-/// Whether a message with an unreadable row was addressed to that identity,
-/// by the rules of `is_for_me` applied to the row's id.
-fn broken_is_recipient(message: &StampedEnvelope, id: &IdentityId, owner: &str) -> bool {
+/// Whether a message with an unreadable row was addressed to that identity.
+/// The row's kind is unreadable, so it is also treated as a possible Listener
+/// under the canonical-copy and `listener::includes` rules of `addressed_to`.
+fn broken_is_recipient(
+    message: &StampedEnvelope,
+    id: &IdentityId,
+    owner: &str,
+    own_ids: Option<&VecDeque<MessageId>>,
+) -> bool {
     matches!(&message.stream, Stream::Inbox(recipient) if recipient == id)
-        || owner.parse().is_ok_and(|owner_id| {
-            agmen_client::Me {
-                identity_id: id.clone(),
-                handle: String::new(),
-                owner_id,
-            }
-            .is_for_me(message, |_| false)
+        || owner.parse().is_ok_and(|owner_id: IdentityId| {
+            let canonical = match &message.stream {
+                Stream::Feed => true,
+                Stream::Inbox(recipient) if recipient.as_str() == owner => {
+                    !matches!(message.client.payload, Payload::Assign { .. })
+                }
+                Stream::Inbox(_) => false,
+            };
+            (canonical && crate::listener::includes(message, id, &owner_id, &[]))
+                || agmen_client::Me {
+                    identity_id: id.clone(),
+                    handle: String::new(),
+                    owner_id,
+                }
+                .is_for_me(message, |reply| {
+                    own_ids.is_some_and(|own| own.contains(reply))
+                })
         })
 }
 

@@ -1892,6 +1892,19 @@ pub(crate) async fn store_work<T: Send + 'static>(
     store_job(database, work).await.map_err(ApiError::from)
 }
 
+/// Whether a message whose ingest job failed had already committed, from the
+/// result of re-reading its stream's saved position.
+fn committed_after(saved: Result<Option<u64>, Failed>, seq: u64) -> bool {
+    match saved {
+        Ok(saved) => saved.is_some_and(|saved| saved >= seq),
+        // Unknown, so assume committed: the next good read ends the offline state.
+        Err(error) => {
+            tracing::warn!(code = ?error.error.code, "position check failed after a store failure; treating the message as committed");
+            true
+        }
+    }
+}
+
 async fn store_job<T: Send + 'static>(
     database: Arc<Database>,
     work: impl FnOnce(&mut Store) -> Result<T, crate::state::StoreError> + Send + 'static,
@@ -2118,12 +2131,7 @@ impl Collection {
         let delivered = match delivered {
             Err(mut failed) if failed.store.is_some() => {
                 // A failure after the commit leaves nothing to replay.
-                failed.committed = self
-                    .saved_position(&probe)
-                    .await
-                    .ok()
-                    .flatten()
-                    .is_some_and(|saved| saved >= seq);
+                failed.committed = committed_after(self.saved_position(&probe).await, seq);
                 return Err(failed);
             }
             other => other?,
@@ -3778,6 +3786,90 @@ mod local_collection_tests {
         assert_eq!(error.store, Some(StoreKind::Permanent));
         assert!(f.collection.positions().await.unwrap().is_empty());
         f.stop().await;
+    }
+
+    /// Breaks agent 0 and asserts the message built from the owner id is held:
+    /// a permanent error and no saved position.
+    async fn assert_held_for_broken_row(build: impl FnOnce(&IdentityId) -> StampedEnvelope) {
+        let f = Fixture::new().await;
+        let poison = f.agents[0].clone();
+        f.execute_state(format!(
+            "UPDATE identities SET metadata='{{}}' WHERE identity='{poison}'"
+        ))
+        .await;
+        let error = f
+            .collection
+            .commit(build(&f.collection.owner))
+            .await
+            .unwrap_err();
+        assert_eq!(error.store, Some(StoreKind::Permanent));
+        assert!(f.collection.positions().await.unwrap().is_empty());
+        f.stop().await;
+    }
+
+    #[tokio::test]
+    async fn owners_plain_fyi_is_held_for_a_broken_row() {
+        assert_held_for_broken_row(|owner| {
+            let mut message = feed_message(1, "FYI", &[], &[]);
+            message.from = owner.clone();
+            message
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn dm_to_the_owner_is_held_for_a_broken_row() {
+        assert_held_for_broken_row(|owner| feed_message(1, "DM", &[owner.as_str()], &[])).await;
+    }
+
+    #[tokio::test]
+    async fn owner_inbox_copy_is_held_for_a_broken_row() {
+        assert_held_for_broken_row(|owner| {
+            let mut message = feed_message(1, "DM", &[owner.as_str()], &[]);
+            message.stream = Stream::Inbox(owner.clone());
+            message
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn answer_to_a_broken_senders_message_is_held() {
+        let f = Fixture::new().await;
+        let poison = f.agents[0].clone();
+        let sent = agmen_core::new_message_id(Timestamp::now()).unwrap();
+        let remembered = sent.clone();
+        let remembered_for = poison.clone();
+        store_work(f.collection.store.clone(), move |s| {
+            s.remember_own(agmen_client::LOCAL_ORIGIN, &remembered_for, &remembered)
+        })
+        .await
+        .unwrap();
+        f.execute_state(format!(
+            "UPDATE identities SET metadata='{{}}' WHERE identity='{poison}'"
+        ))
+        .await;
+        let mut message = feed_message(1, "ANSWER", &[], &[]);
+        message.client.reply_to = Some(sent);
+        let error = f.collection.commit(message).await.unwrap_err();
+        assert_eq!(error.store, Some(StoreKind::Permanent));
+        assert!(f.collection.positions().await.unwrap().is_empty());
+        f.stop().await;
+    }
+
+    #[test]
+    fn failed_position_probe_counts_as_committed_and_warns_but_a_held_message_does_not() {
+        let (logs, _capture) = LogBytes::capture();
+        let failed = || store_failed(StoreKind::Transient, "probe fault");
+        assert!(committed_after(Err(failed()), 5));
+        let text = logs.text();
+        assert!(
+            text.lines()
+                .any(|l| l.contains("WARN") && l.contains("position check failed")),
+            "{text}"
+        );
+        assert!(committed_after(Ok(Some(5)), 5));
+        assert!(!committed_after(Ok(Some(4)), 5));
+        assert!(!committed_after(Ok(None), 5));
     }
 
     #[tokio::test]
