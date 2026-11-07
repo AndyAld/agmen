@@ -27,6 +27,8 @@ const HEARTBEAT_AFTER: Duration = Duration::from_millis(2_500);
 const LEASE_WAIT: Duration = Duration::from_secs(10);
 const LEASE_POLLS: usize = 500;
 const OWNER_METHODS: [&str; 3] = ["local_project_create", "local_projects", "lanes_set"];
+const WATCH_WAIT: Duration = Duration::from_secs(5);
+const WATCH_FRAMES: usize = 16;
 
 async fn unsigned_home() -> Home {
     let dir = tempfile::Builder::new()
@@ -187,6 +189,98 @@ async fn hub_project_is_never_served_locally() {
     assert_eq!(snapshot["messages"][0]["body"], "message 1");
     assert_eq!(snapshot["me"]["id"], support::HUMAN);
     daemon.stop().await;
+}
+
+async fn watched_message(frames: &mut tokio::sync::mpsc::Receiver<agmen_local::Response>) -> Value {
+    tokio::time::timeout(WATCH_WAIT, async {
+        for _ in 0..WATCH_FRAMES {
+            let event = support::next(frames).await;
+            if event["message"].is_object() {
+                return event["message"].clone();
+            }
+        }
+        panic!("no message in the bounded console watch");
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn hub_login_leaves_local_projects_unchanged() {
+    let home = unsigned_home().await;
+    let (mut client, stop, task, local) = start(&home, home.config()).await;
+    let created = create(&mut client, "before-hub").await;
+    let project: ProjectId = created["project"].as_str().unwrap().parse().unwrap();
+    local
+        .post_as_person(&project, &envelope(Payload::Fyi {}))
+        .await
+        .unwrap();
+    let before = result(
+        client
+            .call("console_snapshot", json!({"project": project}))
+            .await,
+    );
+    let projects = result(client.call("local_projects", json!({})).await);
+    let hub = support::fake_hub().await;
+    hub.state.fill(1);
+    let login = agmen_client::Login {
+        hub_url: hub.url.parse().unwrap(),
+        human_id: support::HUMAN.parse().unwrap(),
+        handle: support::HANDLE.to_owned(),
+    };
+    let tokens =
+        agmen_client::HumanTokens::new(support::ACCESS.to_owned(), "refresh-1".to_owned(), 3600);
+    agmen_client::save_login(&home.tokens(), &home.login_file(), &login, &tokens)
+        .await
+        .unwrap();
+    assert_eq!(
+        result(client.call("local_projects", json!({})).await),
+        projects
+    );
+    let after = result(
+        client
+            .call("console_snapshot", json!({"project": project}))
+            .await,
+    );
+    assert_eq!(after, before);
+    let remote = result(
+        client
+            .call("console_snapshot", json!({"project": PROJECT}))
+            .await,
+    );
+    let expected: agmen_proto::StampedEnvelope =
+        serde_json::from_value(support::stamped(1, "message 1")).unwrap();
+    assert_eq!(remote["messages"], json!([expected]));
+    assert_eq!(remote["me"]["id"], support::HUMAN);
+
+    let mut local_watch = Client::connect(&home.socket()).await;
+    result(local_watch.call("hello", json!({"api": 1})).await);
+    let mut local_frames = local_watch.watch(project.as_str()).await;
+    let mut hub_watch = Client::connect(&home.socket()).await;
+    result(hub_watch.call("hello", json!({"api": 1})).await);
+    let mut hub_frames = hub_watch.watch(PROJECT).await;
+    assert_eq!(
+        support::next(&mut local_frames).await,
+        json!({"hub": {"connected": true}})
+    );
+    let mut status = support::next(&mut hub_frames).await;
+    if status == json!({"hub": {"connected": false}}) {
+        status = support::next(&mut hub_frames).await;
+    }
+    assert_eq!(status, json!({"hub": {"connected": true}}));
+    let mut post = envelope(Payload::Fyi {});
+    post.body = "local after login".try_into().unwrap();
+    local.post_as_person(&project, &post).await.unwrap();
+    hub.state.publish("hub after login");
+    let local_message = watched_message(&mut local_frames).await;
+    let hub_message = watched_message(&mut hub_frames).await;
+    assert_eq!(local_message["body"], "local after login");
+    assert_eq!(local_message["from"], created["person"]["id"]);
+    assert_eq!(local_message["seq"], 2);
+    assert_eq!(hub_message["body"], "hub after login");
+    assert_eq!(hub_message["seq"], 2);
+    stop.send(()).unwrap();
+    task.await.unwrap();
 }
 
 #[tokio::test]

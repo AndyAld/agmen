@@ -82,8 +82,7 @@ pub fn run() -> ExitCode {
 
 /// Reject hub administration before login or membership reads can reach a hub.
 async fn refuse_local_hub_command(matches: &clap::ArgMatches) -> anyhow::Result<()> {
-    let Some(command @ ("invite" | "group" | "project" | "whoami" | "leave")) =
-        matches.subcommand_name()
+    let Some(command @ ("invite" | "group" | "project" | "leave")) = matches.subcommand_name()
     else {
         return Ok(());
     };

@@ -16,8 +16,11 @@ use std::time::Duration;
 use support::mcp::Mcp;
 use support::{Home, Worktree, assert_exit, stderr, stdout};
 use tokio::io::{AsyncBufReadExt as _, BufReader};
+use tokio::sync::oneshot;
 
 const MCP_WAIT: Duration = Duration::from_secs(15);
+/// How long agmend gets to stop in the tests that run it without `Local`.
+const STOP_WAIT: Duration = Duration::from_secs(5);
 const LOCAL_POLL: Duration = Duration::from_millis(20);
 const LOCAL_POLLS: usize = 200;
 const WATCH_EVENTS: usize = 32;
@@ -25,6 +28,236 @@ const WATCH_EVENTS: usize = 32;
 const HEARTBEAT_EVERY: Duration = Duration::from_secs(1);
 /// Polls for the first beat: 10 s at `LOCAL_POLL`, inside `MCP_WAIT`.
 const HEARTBEAT_POLLS: usize = 500;
+
+#[tokio::test]
+async fn whoami_lists_this_machine_without_a_hub() {
+    let local = Local::new().await;
+    let worker = local.member("worker").await;
+    let person = local.call("whoami", json!({})).await;
+    let projects = local.call("local_projects", json!({})).await;
+    let credential = read_local_credential(&local.home.tokens(), &worker.identity().identity_id)
+        .unwrap()
+        .unwrap();
+    const COMMANDS: [&[&str]; 2] = [&["whoami"], &["whoami", "--json"]];
+    for args in COMMANDS {
+        let out = local.run(&worker, args).await;
+        assert_exit(&out, 0);
+        assert!(!stdout(&out).contains(&credential.local_token));
+        assert!(!stderr(&out).contains(&credential.local_token));
+        if args.contains(&"--json") {
+            let answer: Value = serde_json::from_str(&stdout(&out)).unwrap();
+            assert_eq!(answer["local"]["id"], person["id"]);
+            assert_eq!(answer["local"]["handle"], person["handle"]);
+            assert_eq!(answer["local"]["projects"], projects["projects"]);
+        } else {
+            assert!(stdout(&out).contains("on this machine"));
+            assert!(stdout(&out).contains(person["id"].as_str().unwrap()));
+            assert!(stdout(&out).contains(person["handle"].as_str().unwrap()));
+            assert!(stdout(&out).contains(local.project.as_str().unwrap()));
+            assert!(stdout(&out).contains("cli-local"));
+        }
+    }
+    let out = local.home.run(local.home.path(), &["whoami"]).await;
+    assert_exit(&out, 0);
+    assert!(stdout(&out).contains("on this machine"));
+    local.stop().await;
+}
+
+/// `host up` saves the device login through the same client as `agmen login`.
+async fn save_hub_login(home: &Home, hub: &url::Url) -> TokenKey {
+    let login = agmen_client::Login {
+        hub_url: hub.clone(),
+        human_id: "hmn7k2q9".parse().unwrap(),
+        handle: "hub-user".to_owned(),
+    };
+    let tokens =
+        agmen_client::HumanTokens::new("fake-access".to_owned(), "fake-refresh".to_owned(), 3600);
+    agmen_client::save_login(&home.tokens(), &home.login_file(), &login, &tokens)
+        .await
+        .unwrap();
+    login.key().unwrap()
+}
+
+/// `GET /v1/me` for the person `save_hub_login` signs in.
+fn hub_membership() -> Value {
+    json!({
+        "id": "hmn7k2q9", "handle": "hub-user", "broker_url": "mqtt://localhost",
+        "projects": [{"tenant": "tenant01", "project": "hubproj1", "name": "hub-project", "role": "admin"}]
+    })
+}
+
+/// A hub that answers only `GET /v1/me`, and the task that serves it.
+async fn serve_hub_me(me: &Value) -> (url::Url, tokio::task::JoinHandle<()>) {
+    let me = me.clone();
+    let app = axum::Router::new().route(
+        "/v1/me",
+        axum::routing::get(move || async move { axum::Json(me) }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let hub = format!("http://{}/", listener.local_addr().unwrap())
+        .parse()
+        .unwrap();
+    (
+        hub,
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() }),
+    )
+}
+
+/// agmend before any local project, as a person who only uses a hub runs it.
+fn start_agmend(home: &Home) -> (oneshot::Sender<()>, tokio::task::JoinHandle<()>) {
+    let config = agmend::Config::new(
+        home.state_base().join("agmend.sock"),
+        home.login_file(),
+        home.tokens(),
+    );
+    let daemon = agmend::Agmend::bind(config).unwrap();
+    let (stop, stopped) = oneshot::channel();
+    let task = tokio::spawn(daemon.serve_until(async {
+        stopped.await.unwrap();
+    }));
+    (stop, task)
+}
+
+async fn stop_agmend(stop: oneshot::Sender<()>, task: tokio::task::JoinHandle<()>) {
+    stop.send(()).unwrap();
+    tokio::time::timeout(STOP_WAIT, task)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+/// A hub person's `whoami` is the hub's answer alone while agmend has no local
+/// record: that is every hub-only person who runs the desktop app.
+#[tokio::test]
+async fn whoami_for_a_hub_user_ignores_an_agmend_with_no_local_record() {
+    let home = Home::new_in(std::path::Path::new("/tmp"));
+    let (stop, daemon) = start_agmend(&home);
+    let me = hub_membership();
+    let (hub, server) = serve_hub_me(&me).await;
+    save_hub_login(&home, &hub).await;
+    let out = home.run(home.path(), &["whoami"]).await;
+    assert_exit(&out, 0);
+    assert!(stdout(&out).contains("hub-user"));
+    assert!(stdout(&out).contains("hub-project"));
+    assert!(!stdout(&out).contains("on this machine"));
+    assert_eq!(stderr(&out), "");
+    let out = home.run(home.path(), &["whoami", "--json"]).await;
+    assert_exit(&out, 0);
+    assert_eq!(serde_json::from_str::<Value>(&stdout(&out)).unwrap(), me);
+    assert_eq!(stderr(&out), "");
+    server.abort();
+    stop_agmend(stop, daemon).await;
+}
+
+/// A downgrade leaves a `local.db` this agmend cannot read: a hub person still
+/// gets the hub's answer, and is told why this machine's projects are missing.
+#[tokio::test]
+async fn whoami_for_a_hub_user_survives_an_unreadable_local_record() {
+    let home = Home::new_in(std::path::Path::new("/tmp"));
+    let (stop, daemon) = start_agmend(&home);
+    let conn = rusqlite::Connection::open(home.state_base().join("local.db")).unwrap();
+    conn.pragma_update(None, "user_version", 2).unwrap();
+    drop(conn);
+    let me = hub_membership();
+    let (hub, server) = serve_hub_me(&me).await;
+    save_hub_login(&home, &hub).await;
+    for args in [&["whoami"][..], &["whoami", "--json"][..]] {
+        let out = home.run(home.path(), args).await;
+        assert_exit(&out, 0);
+        assert!(stdout(&out).contains("hub-user"));
+        assert!(stderr(&out).contains("local.db"), "{}", stderr(&out));
+    }
+    // Signed out, the unreadable record is all there is to report.
+    assert_exit(&home.run(home.path(), &["logout"]).await, 0);
+    let out = home.run(home.path(), &["whoami"]).await;
+    assert_exit(&out, 1);
+    assert!(stderr(&out).contains("local.db"), "{}", stderr(&out));
+    server.abort();
+    stop_agmend(stop, daemon).await;
+}
+
+#[tokio::test]
+async fn logout_keeps_local_identities_working() {
+    let local = Local::new().await;
+    let worker = local.member("worker").await;
+    let identity = worker.identity();
+    let credential = read_local_credential(&local.home.tokens(), &identity.identity_id)
+        .unwrap()
+        .unwrap();
+    let key = save_hub_login(&local.home, &"http://127.0.0.1:9/".parse().unwrap()).await;
+    let out = local.run(&worker, &["logout"]).await;
+    assert_exit(&out, 0);
+    assert!(!local.home.login_file().exists());
+    assert!(local.home.tokens().get(&key).unwrap().is_none());
+    let after = read_local_credential(&local.home.tokens(), &identity.identity_id)
+        .unwrap()
+        .unwrap();
+    assert!(after.local_token == credential.local_token);
+    assert!(!stdout(&out).contains(&credential.local_token));
+    assert!(!stderr(&out).contains(&credential.local_token));
+    let out = local.run(&worker, &["post", "FYI", "after logout"]).await;
+    assert_exit(&out, 0);
+    let snapshot = local
+        .call("console_snapshot", json!({"project": local.project}))
+        .await;
+    assert_eq!(snapshot["messages"][0]["body"], "after logout");
+    assert_eq!(snapshot["messages"][0]["from"], json!(identity.identity_id));
+    local.stop().await;
+}
+
+#[tokio::test]
+async fn host_up_login_leaves_local_projects_unchanged() {
+    let local = Local::new().await;
+    let worker = local.member("worker").await;
+    let identity = std::fs::read(worker.path().join(".agmen/identity.json")).unwrap();
+    let out = local
+        .run(&worker, &["post", "FYI", "before hub login"])
+        .await;
+    assert_exit(&out, 0);
+    let before = local
+        .call("console_snapshot", json!({"project": local.project}))
+        .await;
+    let hub_me = hub_membership();
+    let (hub, task) = serve_hub_me(&hub_me).await;
+    save_hub_login(&local.home, &hub).await;
+    let after = local
+        .call("console_snapshot", json!({"project": local.project}))
+        .await;
+    assert_eq!(after, before);
+    assert_eq!(
+        std::fs::read(worker.path().join(".agmen/identity.json")).unwrap(),
+        identity
+    );
+    let out = local
+        .run(&worker, &["post", "FYI", "after hub login"])
+        .await;
+    assert_exit(&out, 0);
+    let snapshot = local
+        .call("console_snapshot", json!({"project": local.project}))
+        .await;
+    assert_eq!(snapshot["messages"][1]["body"], "after hub login");
+    assert_eq!(snapshot["messages"][1]["seq"], 2);
+    let out = local.run(&worker, &["whoami"]).await;
+    assert_exit(&out, 0);
+    let text = stdout(&out);
+    assert!(text.find("on this machine").unwrap() < text.find("hub-user").unwrap());
+    assert!(text.contains("cli-local"));
+    assert!(text.contains("hub-project"));
+    let out = local.run(&worker, &["whoami", "--json"]).await;
+    assert_exit(&out, 0);
+    let mut answer: Value = serde_json::from_str(&stdout(&out)).unwrap();
+    let local_answer = answer.as_object_mut().unwrap().remove("local").unwrap();
+    assert_eq!(answer, hub_me);
+    assert_eq!(local_answer["id"], before["me"]["id"]);
+    assert_eq!(local_answer["handle"], before["me"]["handle"]);
+    assert_eq!(
+        local_answer["projects"],
+        local.call("local_projects", json!({})).await["projects"]
+    );
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    local.stop().await;
+}
 
 #[tokio::test]
 async fn init_without_flags_starts_locally() {
@@ -946,11 +1179,10 @@ async fn untrusted_identity_file_does_not_block_hub_commands() {
 async fn hub_admin_commands_refuse_on_local() {
     let local = Local::new().await;
     let worker = local.member("worker").await;
-    const COMMANDS: [&[&str]; 5] = [
+    const COMMANDS: [&[&str]; 4] = [
         &["invite"],
         &["group", "members"],
         &["project", "create", "test"],
-        &["whoami", "--json"],
         &["leave"],
     ];
     for args in COMMANDS {

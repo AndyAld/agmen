@@ -1,12 +1,14 @@
 //! `agmen login`, `logout`, `whoami` and `invite`: the signed-in person.
 
 use agmen_client::{LoginError, device_start, device_wait, find_identity};
+use agmen_local::ErrorCode;
 use anyhow::{Context as _, Result, anyhow};
 use clap::{Args, ValueEnum};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
 use super::group;
+use crate::agmend::{Agmend, AgmendError};
 use crate::client::{
     Api, Human, Login, blocking, forget_login, http, human, login_error, read_login, refusal,
     save_login,
@@ -15,6 +17,8 @@ use crate::output::{Fail, clean, print_notices};
 
 /// The shortest and longest invite: 1 hour and 30 days (ruling R58).
 const INVITE_SECS: std::ops::RangeInclusive<u64> = 3600..=30 * 24 * 3600;
+/// Matches the local record's bounded project listing.
+const LOCAL_PROJECT_LIMIT: usize = 256;
 
 #[derive(Debug, Args)]
 pub(crate) struct LoginArgs {
@@ -112,7 +116,7 @@ pub(crate) async fn device_login(hub: &Url) -> Result<Human> {
     Ok(Human { login, api })
 }
 
-/// `agmen logout`.
+/// `agmen logout`: forgets the hub login, keeping agmend's local credentials.
 pub(crate) async fn logout() -> Result<()> {
     match forget_login().await? {
         Some(login) => println!(
@@ -125,8 +129,43 @@ pub(crate) async fn logout() -> Result<()> {
     Ok(())
 }
 
-/// `agmen whoami`.
+/// `agmen whoami`: this machine's person and projects when agmend has any,
+/// then the hub section when signed in.
 pub(crate) async fn whoami(json: bool) -> Result<()> {
+    let signed_in = read_login().await?.is_some();
+    let local = match local_account().await {
+        Ok(local) => local,
+        // The hub's answer stands when this machine's record cannot be read.
+        Err(error) if signed_in => {
+            eprintln!(
+                "{}",
+                clean(&format!(
+                    "agmen: this machine's projects are unavailable: {error:#}"
+                ))
+            );
+            None
+        }
+        Err(error) => return Err(error),
+    };
+    if !json && let Some(local) = &local {
+        println!(
+            "{} ({}) on this machine",
+            clean(&local.person.handle),
+            local.person.id
+        );
+        for project in local.projects.iter().take(LOCAL_PROJECT_LIMIT) {
+            println!("  project {} ({})", project.project, clean(&project.name));
+        }
+    }
+    if !signed_in {
+        if let Some(local) = local {
+            if json {
+                println!("{}", serde_json::json!({"local": local}));
+            }
+            return Ok(());
+        }
+        return Err(Fail::not_signed_in().into());
+    }
     let human = human().await?;
     let me = human
         .api
@@ -134,7 +173,13 @@ pub(crate) async fn whoami(json: bool) -> Result<()> {
         .await
         .context("reading who is signed in failed")?;
     if json {
-        println!("{}", serde_json::to_string(&me)?);
+        if let Some(local) = local {
+            let mut answer = serde_json::to_value(&me)?;
+            answer["local"] = serde_json::to_value(local)?;
+            println!("{answer}");
+        } else {
+            println!("{}", serde_json::to_string(&me)?);
+        }
         return Ok(());
     }
     println!(
@@ -176,6 +221,63 @@ pub(crate) async fn whoami(json: bool) -> Result<()> {
     }
     print_notices(&me.notices);
     Ok(())
+}
+
+#[derive(Debug, Serialize)]
+struct LocalAccount {
+    #[serde(flatten)]
+    person: agmen_local::console::Me,
+    projects: Vec<LocalProject>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct LocalProject {
+    project: agmen_proto::ProjectId,
+    name: String,
+}
+
+async fn local_account() -> Result<Option<LocalAccount>> {
+    let mut daemon = match Agmend::connect_default().await {
+        Ok(daemon) => daemon,
+        Err(AgmendError::NotRunning) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    #[derive(Deserialize)]
+    struct Projects {
+        projects: Vec<LocalProject>,
+    }
+    let answer = match daemon.call("local_projects", serde_json::json!({})).await {
+        Ok(answer) => answer,
+        // The first local project makes the record; until then there is nothing to list.
+        Err(AgmendError::Refused {
+            code: ErrorCode::NotFound,
+            ..
+        }) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let Projects { projects } =
+        serde_json::from_value(answer).context("reading this machine's projects failed")?;
+    let Some(first) = projects.first() else {
+        return Ok(None);
+    };
+    // A local snapshot names the local person even when a hub login exists.
+    #[derive(Deserialize)]
+    struct Snapshot {
+        me: agmen_local::console::Me,
+    }
+    let snapshot: Snapshot = serde_json::from_value(
+        daemon
+            .call(
+                "console_snapshot",
+                serde_json::json!({"project": first.project}),
+            )
+            .await?,
+    )
+    .context("reading this machine's person failed")?;
+    Ok(Some(LocalAccount {
+        person: snapshot.me,
+        projects,
+    }))
 }
 
 /// The role an invite gives.

@@ -8,11 +8,15 @@ Conventions: MQTT 5, UTF-8 JSON payloads, QoS 1 unless stated. "Client" means an
 
 | Kind | Example handle | Minted by | Can |
 |---|---|---|---|
-| `human` | `andy` | Hub, at OAuth or device login | Everything its roles allow, including RULING, PUSH_OK and PUSH_NO |
-| `agent` | `andy/sol` | Hub, when its owner runs `agmen join` (invite code) or `agmen join --project` (later: agmend, as a child of a human's device) | Post, claim, done, DM, request pushes; never RULING or push answers |
-| `coordinator` | `adam/coord` | Hub, when a human with the coordinator or admin role runs `agmen join --kind coordinator` (later: agmend for a human with the coordinator role) | Agent rights plus ASSIGN, RULING (agent rulings carry `from_kind: coordinator`), and LEND on any lane |
-| `listener` | `andy/listen` | Hub, when its owner's agmend mints it; at most one live listener per human per project | Post, chat, ask, answer, DM, ALERT, DELEGATED, and settings changes for its owner that agmend applies locally; ASSIGN only when minted with the coordinator role; never CLAIM, DONE, LEND, RULING or push answers, and never edit, shell or web tools |
+| `human` | `andy` | Hub, at OAuth or device login; agmend's local origin, on the first local project | Everything its roles allow, including RULING, PUSH_OK and PUSH_NO |
+| `agent` | `andy/sol` | Hub, when its owner runs `agmen join` (invite code) or `agmen join --project`; agmend, for a local project | Post, claim, done, DM, request pushes; never RULING or push answers |
+| `coordinator` | `adam/coord` | Hub, when a human with the coordinator or admin role runs `agmen join --kind coordinator`; agmend, for a local project | Agent rights plus ASSIGN, RULING (agent rulings carry `from_kind: coordinator`), and LEND on any lane |
+| `listener` | `andy/listen` | Hub or local origin, when its owner's agmend mints it; at most one live listener per human per project | Post, chat, ask, answer, DM, ALERT, DELEGATED, and settings changes for its owner that agmend applies locally; ASSIGN only when minted with the coordinator role; never CLAIM, DONE, LEND, RULING or push answers, and never edit, shell or web tools |
 | `hub` | `hub` (id `agmenhub0`) | Fixed | GRANT, DENY, ITEM, ALERT, RELEASE, STATUS, STATE, ACK, NACK |
+
+An origin identifies the record that owns a project. Hub origins use the hub URL's origin; the local origin uses `local`. agmend keeps the local record in `local.db` beside `agmend.db`, with its own person, projects and identities. Signing in to a hub adds that hub's origin without moving or changing local projects.
+
+Local identity files keep the hub identity shape, with reserved `hub_url = "https://local.agmen.invalid/"` and `broker_url = "mqtt://local.agmen.invalid:1883"`. `agmen_client::origin_key` maps the local hub URL to `local`. Neither URL is contacted: local calls go through agmend's socket and need no broker. Credentials remain in the token store under `LOCAL_TOKEN_NAMESPACE` (`https://agmend.invalid`), separate from hub login tokens. Hub logout leaves those credentials alone.
 
 The hub's identity id is the fixed `agmenhub0`. It holds a `0`, which the alphabet the hub mints ids from leaves out, so no minted identity can collide with it. The hub posts its own messages through an internal path, not through `up/`: `from` is `agmenhub0`, `from_handle` is `hub`, `from_kind` is `hub`, and the message takes the same numbering, storage and sweeper as a client's message, with no rate limit and no ACK. It posts GRANT and DENY (claim outcomes), ITEM (the key for a FOUND), ALERT (a DONE that changed paths outside its claimed or lent lanes or its edit scope, and the urgent downgrade notice, which is not sent by the MVP hub yet), RELEASE with `reason: "lease_expired"` (a claim whose lease ran out) and STATUS (the answer to a ROLLCALL). ACK and NACK go on `ack/{identity_id}`, not into a stream, and STATE is reserved for retained `state/` topics (section 2).
 
@@ -418,7 +422,8 @@ snapshot does not establish rollback safety.
 
 Human callers manage their own agents with these methods. Identity callers
 receive `forbidden`, and so do worker peers (above). Each checks that the
-agent's owner and hub origin match the signed-in login.
+agent's owner and origin match the local person for a local project, or the
+signed-in hub login for a hub project.
 
 - `agent_launch {project, name, root?, model?, budget_usd?}` makes a worktree
   on a new `agent/<name>-<8 hex>` branch, mints an identity in it and writes
