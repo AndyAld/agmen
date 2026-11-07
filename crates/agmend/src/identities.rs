@@ -1805,11 +1805,17 @@ enum StoreKind {
 struct Failed {
     error: ApiError,
     store: Option<StoreKind>,
+    /// The failing step came after the position advanced, so no replay follows.
+    committed: bool,
 }
 
 impl From<ApiError> for Failed {
     fn from(error: ApiError) -> Self {
-        Self { error, store: None }
+        Self {
+            error,
+            store: None,
+            committed: false,
+        }
     }
 }
 
@@ -1829,6 +1835,7 @@ fn store_failed(kind: StoreKind, message: &str) -> Failed {
     Failed {
         error: hub_error(message),
         store: Some(kind),
+        committed: false,
     }
 }
 
@@ -2049,6 +2056,7 @@ impl Collection {
         let known = self.store.broken_in(&self.origin);
         let database = self.store.clone();
         let (stream, seq) = (message.stream.clone(), message.seq.0);
+        let probe = stream.clone();
         let delivered = store_job(self.store.clone(), move |s| {
             if !s.can_deliver(&origin, &owner, &project, &saved.stream)? {
                 return Ok(false);
@@ -2083,7 +2091,19 @@ impl Collection {
         // The message committed without these identities. Later messages skip
         // them unprompted; the owner hears once.
         self.report_broken();
-        let delivered = delivered?;
+        let delivered = match delivered {
+            Err(mut failed) if failed.store.is_some() => {
+                // A failure after the commit leaves nothing to replay.
+                failed.committed = self
+                    .saved_position(&probe)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some_and(|saved| saved >= seq);
+                return Err(failed);
+            }
+            other => other?,
+        };
         if delivered {
             self.send(Ok(ClientEvent::Message {
                 message: Box::new(message),
@@ -2372,8 +2392,11 @@ impl Collection {
                 Err(Failed {
                     error,
                     store: Some(kind),
+                    committed,
                 }) => {
                     offline = true;
+                    // Nothing replays after a commit; the next good read ends it.
+                    read_failed |= committed;
                     self.store_retry(
                         kind,
                         &error,
@@ -2386,7 +2409,9 @@ impl Collection {
                     continue;
                 }
                 // Hub, credential and protocol faults still end the collector.
-                Err(Failed { error, store: None }) => {
+                Err(Failed {
+                    error, store: None, ..
+                }) => {
                     self.send(Err(error));
                     return;
                 }
@@ -3628,6 +3653,99 @@ mod local_collection_tests {
         assert_eq!(f.collection.positions().await.unwrap()[&Stream::Feed], 1);
         assert_eq!(f.drain(&f.agents[0]).await.len(), 1);
         assert!(f.drain(&f.agents[1]).await.is_empty());
+        f.stop().await;
+    }
+
+    fn feed_message(
+        seq: u64,
+        verb: &str,
+        to: &[&str],
+        mentioned: &[&IdentityId],
+    ) -> StampedEnvelope {
+        serde_json::from_value(json!({
+            "v":1,"id":agmen_core::new_message_id(Timestamp::now()).unwrap(),
+            "verb":verb,"to":to,"data":{},"body":"addressing test",
+            "sent_at":"2026-10-27T12:00:00Z","stream":"feed","seq":seq,
+            "from":"sender01","from_handle":"sender","from_kind":"human",
+            "mentioned":mentioned,"hub_at":"2026-10-27T12:00:00Z"
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn feed_message_addressed_to_nobody_here_advances_past_a_broken_identity() {
+        let f = Fixture::new().await;
+        let poison = f.agents[0].clone();
+        f.execute_state(format!(
+            "UPDATE identities SET metadata='{{}}' WHERE identity='{poison}'"
+        ))
+        .await;
+        assert!(
+            f.collection
+                .commit(feed_message(1, "FYI", &[], &[]))
+                .await
+                .unwrap()
+        );
+        assert!(
+            f.collection
+                .commit(feed_message(2, "DM", &["person01"], &[]))
+                .await
+                .unwrap()
+        );
+        assert_eq!(f.collection.positions().await.unwrap()[&Stream::Feed], 2);
+        assert!(f.collection.commit(dm_to(3, &f.agents[1..])).await.unwrap());
+        assert_eq!(f.drain(&f.agents[1]).await.len(), 1);
+        f.stop().await;
+    }
+
+    #[tokio::test]
+    async fn feed_message_mentioning_the_broken_identity_is_held() {
+        let f = Fixture::new().await;
+        let poison = f.agents[0].clone();
+        f.execute_state(format!(
+            "UPDATE identities SET metadata='{{}}' WHERE identity='{poison}'"
+        ))
+        .await;
+        let error = f
+            .collection
+            .commit(feed_message(1, "FYI", &[], &[&poison]))
+            .await
+            .unwrap_err();
+        assert_eq!(error.store, Some(StoreKind::Permanent));
+        assert!(f.collection.positions().await.unwrap().is_empty());
+        f.stop().await;
+    }
+
+    #[tokio::test]
+    async fn failure_after_commit_is_marked_committed_and_a_held_message_is_not() {
+        let f = Fixture::new().await;
+        let third = add_third_agent(&f).await;
+        let poison = f.agents[0].clone();
+        f.execute_state(format!(
+            "UPDATE identities SET metadata='{{}}' WHERE identity='{poison}'"
+        ))
+        .await;
+        let held = f
+            .collection
+            .commit(feed_message(1, "FYI", &[], &[&poison]))
+            .await
+            .unwrap_err();
+        assert!(!held.committed);
+        let origin = agmen_client::LOCAL_ORIGIN;
+        store_work(f.collection.store.clone(), move |s| {
+            for n in 0..agmen_local::safeguards::MAX_MANAGED {
+                let id: IdentityId = format!("fill{n:04}").parse().unwrap();
+                let message = agmen_core::new_message_id(Timestamp::now()).unwrap();
+                s.remember_own(origin, &id, &message)?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let mut message = dm_to(1, &[third]);
+        message.from = f.agents[1].clone();
+        let after = f.collection.commit(message).await.unwrap_err();
+        assert!(after.committed);
         f.stop().await;
     }
 

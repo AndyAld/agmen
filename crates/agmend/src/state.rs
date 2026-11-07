@@ -811,7 +811,7 @@ impl Store {
         tolerate: Option<&BTreeMap<IdentityId, u64>>,
     ) -> Result<IngestOutcome, StoreError> {
         let mut found = Vec::new();
-        let mut skipped_known = false;
+        let mut broken_recipient = false;
         let mut delivered_to = 0_usize;
         let seq = i64::try_from(message.seq.0)
             .map_err(|_| StoreError::Invalid("sequence exceeds SQLite integer"))?;
@@ -880,12 +880,13 @@ impl Store {
                 Some(known) => {
                     let hash = metadata_hash(&metadata);
                     if known.get(&id) == Some(&hash) {
-                        skipped_known = true;
+                        broken_recipient |= broken_is_recipient(message, &id, &owner);
                         continue;
                     }
                     match serde_json::from_str(&metadata) {
                         Ok(identity) => identity,
                         Err(_) => {
+                            broken_recipient |= broken_is_recipient(message, &id, &owner);
                             found.push((id, hash));
                             continue;
                         }
@@ -953,8 +954,9 @@ impl Store {
         }
         drop(stmt);
         // A message nobody can read is not skipped: the position stays, and a
-        // repair of any one recipient delivers it.
-        if (skipped_known || !found.is_empty()) && delivered_to == 0 {
+        // repair of any one recipient delivers it. A broken identity the
+        // message was not addressed to does not hold it.
+        if broken_recipient && delivered_to == 0 {
             return Err(StoreError::Invalid(
                 "every recipient's stored state is unreadable",
             ));
@@ -1171,6 +1173,20 @@ fn addressed_to(
     Ok(addressed
         || (kind == IdentityKind::Listener
             && crate::listener::includes(message, id, &me.owner_id, &[])))
+}
+
+/// Whether a message with an unreadable row was addressed to that identity,
+/// by the rules of `is_for_me` applied to the row's id.
+fn broken_is_recipient(message: &StampedEnvelope, id: &IdentityId, owner: &str) -> bool {
+    matches!(&message.stream, Stream::Inbox(recipient) if recipient == id)
+        || owner.parse().is_ok_and(|owner_id| {
+            agmen_client::Me {
+                identity_id: id.clone(),
+                handle: String::new(),
+                owner_id,
+            }
+            .is_for_me(message, |_| false)
+        })
 }
 
 /// What `ingest_tx` leaves for after the commit: the identities found broken,

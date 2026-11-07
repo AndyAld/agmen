@@ -1544,3 +1544,56 @@ async fn hub_permanent_store_failure_keeps_a_watch_open_and_offline_until_repair
     drop(watch);
     daemon.stop().await;
 }
+
+#[tokio::test]
+async fn hub_failure_after_the_commit_goes_back_online_on_a_quiet_hub() {
+    let mut daemon = Daemon::seeded().await;
+    daemon.pause().await;
+    shorten_hub_backoff(&daemon.hub.url);
+    let mut daemon = tokio::task::spawn_blocking(move || {
+        for n in SEEDED_IDENTITIES + 1..=agmen_local::safeguards::MAX_MANAGED {
+            daemon
+                .home
+                .seed_identity(&daemon.hub.url, &format!("agent{n:03}"), &"c".repeat(64));
+        }
+        daemon
+    })
+    .await
+    .unwrap();
+    daemon.resume();
+    // Each managed sender takes one own-message tracker, so all are used.
+    for n in 1..=agmen_local::safeguards::MAX_MANAGED {
+        let mut message = support::stamped(n as u64, "own message");
+        message["from"] = json!(format!("agent{n:03}"));
+        daemon.hub.state.inject(message);
+    }
+    wait_position(&daemon, "feed", agmen_local::safeguards::MAX_MANAGED as i64).await;
+    // A new managed sender finds no free tracker, which fails after its commit.
+    let path = daemon.home.database();
+    tokio::task::spawn_blocking(move || {
+        rusqlite::Connection::open(path)
+            .unwrap()
+            .execute(
+                "UPDATE identities SET identity='agent900' WHERE identity='agent256'",
+                [],
+            )
+            .unwrap();
+    })
+    .await
+    .unwrap();
+    let mut watch = daemon.client().await;
+    watch
+        .send(&Request::new(9, "watch", json!({"project":PROJECT})))
+        .await;
+    assert_eq!(result(watch.read().await)["kind"], "self");
+    let last = agmen_local::safeguards::MAX_MANAGED as u64 + 1;
+    let mut message = support::stamped(last, "from the new identity");
+    message["from"] = json!("agent900");
+    daemon.hub.state.inject(message);
+    next_connection(&mut watch, false).await;
+    wait_position(&daemon, "feed", last as i64).await;
+    // The hub stays quiet: only the next good state read can end the outage.
+    next_connection(&mut watch, true).await;
+    drop(watch);
+    daemon.stop().await;
+}
