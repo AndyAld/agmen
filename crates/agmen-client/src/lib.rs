@@ -61,3 +61,5 @@ pub use session::{Broker, ClientKind, Events, Presence, STATE_DB, Session, Sessi
 pub use state::{read_state, resolve_handle};
 pub use token::TokenSource;
 pub use token_store::{TokenKey, TokenStore, TokenStoreError};
+#[cfg(any(test, feature = "test-hooks"))]
+pub use token_store::{TokenWriteFailure, fail_token_writes};

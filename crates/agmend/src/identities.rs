@@ -3075,6 +3075,7 @@ mod tests {
             .unwrap()
         }
 
+        #[cfg(feature = "test-hooks")]
         fn local_path(&self) -> PathBuf {
             let name: String = self
                 .local_key()
@@ -3303,15 +3304,13 @@ mod tests {
         assert_eq!(format!("{token:?}"), "LocalToken(<redacted>)");
     }
 
+    #[cfg(feature = "test-hooks")]
     #[tokio::test]
     async fn failed_store_rolls_back_register() {
         let fixture = Fixture::unregistered();
         let identities = &fixture.daemon.core.identities;
-        // The read finds no credential, but the file store cannot open its
-        // temporary write path because a directory occupies it.
-        let mut temporary = fixture.local_path().into_os_string();
-        temporary.push(".tmp");
-        std::fs::create_dir(PathBuf::from(temporary)).unwrap();
+        // The read finds no credential, but the file store's write fails.
+        let _blocked = agmen_client::fail_token_writes(fixture.local_path());
         assert!(identities.register(fixture.who.clone()).await.is_err());
         let rows = identities
             .managed(
@@ -3325,6 +3324,7 @@ mod tests {
         assert!(fixture.tokens.get(&fixture.local_key()).unwrap().is_none());
     }
 
+    #[cfg(feature = "test-hooks")]
     #[tokio::test]
     async fn failed_store_keeps_a_row_that_was_already_registered() {
         let fixture = Fixture::new(None);
@@ -3332,9 +3332,7 @@ mod tests {
         // A row from an earlier run whose credential is gone: issuing a new
         // one fails, and the failure must not erase the row it did not add.
         fixture.tokens.delete(&fixture.local_key()).unwrap();
-        let mut temporary = fixture.local_path().into_os_string();
-        temporary.push(".tmp");
-        std::fs::create_dir(PathBuf::from(temporary)).unwrap();
+        let _blocked = agmen_client::fail_token_writes(fixture.local_path());
         assert!(identities.register(fixture.who.clone()).await.is_err());
         let rows = identities
             .managed(

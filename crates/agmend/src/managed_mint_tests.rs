@@ -197,29 +197,23 @@ async fn mint_missing_role_verbs_revokes_only_roster_match() {
     invalid_answer(Answer::MissingVerbs).await;
 }
 
-fn block_token_write(fixture: &Fixture, origin: &url::Url) {
+#[cfg(feature = "test-hooks")]
+fn block_token_write(fixture: &Fixture, origin: &url::Url) -> agmen_client::TokenWriteFailure {
     let key = agmen_client::TokenKey::new(origin, &"agent002".parse().unwrap()).unwrap();
     let hex: String = key
         .as_str()
         .bytes()
         .map(|byte| format!("{byte:02x}"))
         .collect();
-    // Reuse the directory-store failure injection used by identity registration tests.
-    std::fs::create_dir(
-        fixture
-            .dir
-            .path()
-            .join("tokens")
-            .join(format!("tok-{hex}.tmp")),
-    )
-    .unwrap();
+    agmen_client::fail_token_writes(fixture.dir.path().join("tokens").join(format!("tok-{hex}")))
 }
 
+#[cfg(feature = "test-hooks")]
 #[tokio::test]
 async fn mint_token_store_failure_revokes_validated_id() {
     let mut fixture = Fixture::new().await;
     mint_hub(&mut fixture, Answer::Valid, false).await;
-    block_token_write(&fixture, &fixture.hub_url);
+    let _blocked = block_token_write(&fixture, &fixture.hub_url);
     let (logs, _guard) = capture();
     let failure = other(&fixture, None).await.unwrap_err();
     let logs = assert_private(&logs, &failure);
@@ -228,11 +222,12 @@ async fn mint_token_store_failure_revokes_validated_id() {
     assert!(logs.contains("agent002"));
 }
 
+#[cfg(feature = "test-hooks")]
 #[tokio::test]
 async fn mint_register_failure_deletes_token_when_revoke_fails() {
     let mut fixture = Fixture::new().await;
     mint_hub(&mut fixture, Answer::Valid, true).await;
-    block_token_write(&fixture, &"https://agmend.invalid".parse().unwrap());
+    let _blocked = block_token_write(&fixture, &"https://agmend.invalid".parse().unwrap());
     let (logs, _guard) = capture();
     let failure = other(&fixture, None).await.unwrap_err();
     assert_eq!(*fixture.revoked.lock().unwrap(), ["agent002"]);
@@ -247,11 +242,12 @@ async fn mint_register_failure_deletes_token_when_revoke_fails() {
     );
 }
 
+#[cfg(feature = "test-hooks")]
 #[tokio::test]
 async fn mint_register_failure_revokes_and_reports_no_leftover_identity() {
     let mut fixture = Fixture::new().await;
     mint_hub(&mut fixture, Answer::Valid, false).await;
-    block_token_write(&fixture, &"https://agmend.invalid".parse().unwrap());
+    let _blocked = block_token_write(&fixture, &"https://agmend.invalid".parse().unwrap());
     let (logs, _guard) = capture();
     let failure = other(&fixture, None).await.unwrap_err();
     assert_private(&logs, &failure);

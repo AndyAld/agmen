@@ -17,6 +17,7 @@ enum Answer {
     // A valid answer for another project, naming the decoy.
     OtherProject,
     // A valid answer; the test blocks storing its credential.
+    #[cfg(feature = "test-hooks")]
     Valid,
 }
 
@@ -90,6 +91,7 @@ async fn mint_hub(f: &mut Fixture, answer: Answer, listed: Listed) -> Arc<StdMut
                                 response["id"] = json!(DECOY);
                                 response["project"] = json!("project2");
                             }
+                            #[cfg(feature = "test-hooks")]
                             Answer::Valid => (),
                         }
                     }
@@ -164,18 +166,20 @@ async fn assert_mint_rolled_back(answer: Answer, expected_error: &str) {
         let credentials = f.listeners().hub.credentials();
         let login = credentials.login().await.unwrap();
         // Block only the atomic write's temporary path, leaving owner auth usable.
-        let key = agmen_client::TokenKey::new(&login.hub_url, &MINTED.parse().unwrap()).unwrap();
-        let name = format!(
-            "tok-{}",
-            key.as_str()
-                .bytes()
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<String>()
-        );
-        let blocked = f.dir.path().join("tokens").join(format!("{name}.tmp"));
-        if matches!(answer, Answer::Valid) {
-            tokio::fs::create_dir(&blocked).await.unwrap();
-        }
+        #[cfg(feature = "test-hooks")]
+        let blocked = {
+            let key =
+                agmen_client::TokenKey::new(&login.hub_url, &MINTED.parse().unwrap()).unwrap();
+            let name = format!(
+                "tok-{}",
+                key.as_str()
+                    .bytes()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
+            );
+            matches!(answer, Answer::Valid)
+                .then(|| agmen_client::fail_token_writes(f.dir.path().join("tokens").join(name)))
+        };
         let error = start_error(&f).await;
         assert_eq!(error.message, expected_error);
         assert_eq!(*revokes.lock().unwrap(), [MINTED]);
@@ -195,9 +199,8 @@ async fn assert_mint_rolled_back(answer: Answer, expected_error: &str) {
             assert!(!logs.contains(hidden), "{hidden} in {logs}");
             assert!(!error.message.contains(hidden), "{hidden} in {error:?}");
         }
-        if matches!(answer, Answer::Valid) {
-            tokio::fs::remove_dir(&blocked).await.unwrap();
-        }
+        #[cfg(feature = "test-hooks")]
+        drop(blocked);
         assert_eq!(f.start().await["identity_id"], MINTED);
         assert_eq!(*revokes.lock().unwrap(), [MINTED]);
         f.stop().await;
@@ -234,6 +237,7 @@ async fn mismatched_hub_listener_project_revokes_only_the_mint_and_allows_retry(
     .await;
 }
 
+#[cfg(feature = "test-hooks")]
 #[tokio::test]
 async fn failed_hub_listener_token_storage_revokes_the_mint_and_allows_retry() {
     assert_mint_rolled_back(Answer::Valid, "could not read identity credential").await;
