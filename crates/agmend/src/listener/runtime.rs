@@ -274,12 +274,24 @@ struct Apply {
 }
 
 impl Listeners {
-    pub(crate) fn queue_full_alert(identity: &ManagedIdentity) -> Result<ClientEnvelope, ApiError> {
+    pub(crate) fn stream_full_alert(project: &ProjectId) -> Result<ClientEnvelope, ApiError> {
         let body = format!(
-            "{}'s queue is full ({} waiting); new messages to it are recorded in the project but not queued for it until it is started or removed.",
-            identity.handle,
-            crate::state::MAX_PENDING,
+            "{project}'s stream list is full ({} streams); messages on more streams are recorded in the project but not delivered here until agents are removed.",
+            crate::state::MAX_STREAM_POSITIONS
         );
+        envelope(
+            Payload::Alert {
+                need: body.clone(),
+                urgency: agmen_proto::Urgency::Normal,
+                needs: agmen_proto::Needs::Owner,
+                actions: Vec::new(),
+            },
+            &body,
+        )
+    }
+
+    pub(crate) fn queue_full_alert(identity: &ManagedIdentity) -> Result<ClientEnvelope, ApiError> {
+        let body = crate::state::QueueLimit::Pending.text(identity);
         envelope(
             Payload::Alert {
                 need: body.clone(),

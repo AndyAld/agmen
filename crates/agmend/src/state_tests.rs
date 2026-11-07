@@ -1,7 +1,95 @@
 use super::*;
 use serde_json::json;
 
+#[test]
+fn receipt_full_alert_names_the_receipt_limit_after_a_drain() {
+    let (_dir, mut store, who) = setup();
+    store
+        .conn
+        .execute(
+            "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<?4)
+         INSERT INTO receipts SELECT ?1,?2,?3,'sender01',printf('old-%d',x),x,NULL FROM n",
+            params![
+                ORIGIN,
+                who.project.as_str(),
+                who.identity_id.as_str(),
+                MAX_RECEIPTS
+            ],
+        )
+        .unwrap();
+    let mut event = message(1);
+    event.client.payload = Payload::Assign {
+        item: "B-4".parse().unwrap(),
+        to: who.identity_id.clone(),
+    };
+    store.ingest(ORIGIN, &who.project, &event).unwrap();
+    store
+        .drain(ORIGIN, &who.identity_id, 1, usize::MAX)
+        .unwrap();
+    let alert = prepared_alert(&mut store, &who);
+    let text = format!(
+        "{}'s queue is full ({MAX_RECEIPTS} receipts); new messages to it are recorded in the project but not queued for it until it is started or removed.",
+        who.handle
+    );
+    assert_eq!(alert.body.as_str(), text);
+    assert!(
+        matches!(alert.payload, Payload::Alert { need, needs: agmen_proto::Needs::Owner, .. } if need == text)
+    );
+}
+
 const ORIGIN: &str = "https://hub.example";
+
+#[test]
+fn project_stream_alert_is_durable_without_managed_identities() {
+    let (dir, mut store, who) = setup();
+    store.unregister(ORIGIN, &who.identity_id).unwrap();
+    store
+        .mark_streams_full(ORIGIN, &who.owner_id, &who.project)
+        .unwrap();
+    store
+        .mark_streams_full(ORIGIN, &who.owner_id, &who.project)
+        .unwrap();
+    let proposed = crate::listener::Listeners::stream_full_alert(&who.project).unwrap();
+    let prepared = store
+        .prepare_stream_alert(ORIGIN, &who.owner_id, &who.project, &proposed)
+        .unwrap()
+        .unwrap();
+    drop(store);
+    let mut store = Store::open(&dir.path().join("agmend.db")).unwrap();
+    assert_eq!(
+        store.pending_stream_alerts(ORIGIN, &who.owner_id).unwrap(),
+        vec![who.project.clone()]
+    );
+    assert_eq!(
+        store
+            .prepare_stream_alert(ORIGIN, &who.owner_id, &who.project, &proposed)
+            .unwrap(),
+        Some(prepared.clone())
+    );
+    store
+        .acknowledge_stream_alert(ORIGIN, &who.owner_id, &who.project, &prepared.id)
+        .unwrap();
+    store
+        .mark_streams_full(ORIGIN, &who.owner_id, &who.project)
+        .unwrap();
+    assert!(
+        store
+            .pending_stream_alerts(ORIGIN, &who.owner_id)
+            .unwrap()
+            .is_empty(),
+        "one ALERT per fill after reopening"
+    );
+    store
+        .collection_positions(ORIGIN, &who.owner_id, &who.project)
+        .unwrap();
+    store
+        .mark_streams_full(ORIGIN, &who.owner_id, &who.project)
+        .unwrap();
+    assert_eq!(
+        store.pending_stream_alerts(ORIGIN, &who.owner_id).unwrap(),
+        vec![who.project]
+    );
+}
 
 #[test]
 fn listener_filter_takes_persons_plain_chat() {

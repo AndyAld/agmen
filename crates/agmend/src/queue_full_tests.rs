@@ -20,6 +20,7 @@ struct Fixture {
     other: ManagedIdentity,
     hub_events: HubEvents,
     published: Arc<Mutex<Vec<ClientEnvelope>>>,
+    published_by: Arc<Mutex<Vec<IdentityId>>>,
     publish_failure: Arc<AtomicBool>,
     publish_attempts: Arc<Mutex<Vec<agmen_proto::MessageId>>>,
     hub_task: tokio::task::JoinHandle<()>,
@@ -58,17 +59,20 @@ impl Fixture {
         .unwrap();
         let published = Arc::new(Mutex::new(Vec::new()));
         let captured = published.clone();
+        let published_by = Arc::new(Mutex::new(Vec::new()));
+        let senders = published_by.clone();
         let publish_failure = Arc::new(AtomicBool::new(false));
         let failed = publish_failure.clone();
         let publish_attempts = Arc::new(Mutex::new(Vec::new()));
         let attempts = publish_attempts.clone();
         Arc::get_mut(&mut Arc::get_mut(&mut daemon.core).unwrap().identities)
             .unwrap()
-            .publisher = Some(Arc::new(move |_, envelope| {
+            .publisher = Some(Arc::new(move |identity, envelope| {
             attempts.lock().unwrap().push(envelope.id.clone());
             if failed.load(Ordering::SeqCst) {
                 return Box::pin(async { Err(hub_error("injected ALERT publishing failure")) });
             }
+            senders.lock().unwrap().push(identity.identity_id);
             captured.lock().unwrap().push(envelope);
             Box::pin(async { Ok(OutboxState::Pending { attempts: 0 }) })
         }));
@@ -113,6 +117,7 @@ impl Fixture {
             other,
             hub_events,
             published,
+            published_by,
             publish_failure,
             publish_attempts,
             hub_task,
@@ -396,4 +401,382 @@ async fn hub_queue_full_alert_recovers_after_post_failures_with_the_same_id() {
         assert!(attempts.iter().all(|id| id == &attempts[0]));
     }
     fixture.stop().await;
+}
+
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "verify skip, continued delivery, one ALERT and rearming across two fills in one collector run"
+)]
+async fn hub_positions_full_skips_the_stream_and_rearms_after_positions_drop() {
+    let mut fixture = Fixture::new(false).await;
+    let path = fixture.dir.path().join("agmend.db");
+    let origin = agmen_client::origin_key(&fixture.full.hub_url);
+    let namespace = format!("{origin}#owner={}", fixture.full.owner_id);
+    tokio::task::spawn_blocking(move || {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.execute("DELETE FROM pending", []).unwrap();
+        conn.execute(
+            "INSERT INTO positions VALUES (?1,'project1','feed',0)",
+            [namespace],
+        )
+        .unwrap();
+        for n in 1..MAX_STREAM_POSITIONS {
+            conn.execute(
+                "INSERT INTO positions VALUES (?1,'project1',?2,0)",
+                rusqlite::params![
+                    format!("{origin}#owner=other001"),
+                    format!("inbox:other{n:03}")
+                ],
+            )
+            .unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    let mut blocked = test_message(&fixture.full, 1);
+    blocked.stream = Stream::Inbox(fixture.full.identity_id.clone());
+    for seq in 1..=3 {
+        blocked.seq = Seq(seq);
+        fixture
+            .hub_events
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .send(
+                axum::response::sse::Event::default()
+                    .data(serde_json::to_string(&blocked).unwrap()),
+            )
+            .await
+            .unwrap();
+    }
+    fixture.send().await;
+    tokio::time::timeout(WAIT, async {
+        while fixture.published.lock().unwrap().is_empty() {
+            tokio::time::sleep(POLL).await;
+        }
+    })
+    .await
+    .expect("positions Full must notify the owner");
+    let text = format!(
+        "{}'s stream list is full ({MAX_STREAM_POSITIONS} streams); messages on more streams are recorded in the project but not delivered here until agents are removed.",
+        fixture.full.project
+    );
+    {
+        let alerts = fixture.published.lock().unwrap();
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].body.as_str(), text);
+        assert!(
+            matches!(&alerts[0].payload, Payload::Alert { need, needs: agmen_proto::Needs::Owner, .. } if need == &text)
+        );
+    }
+    assert!(
+        fixture
+            .drain(&fixture.full.identity_id, 500)
+            .await
+            .iter()
+            .all(|row| row.stream == Stream::Feed)
+    );
+    let origin = agmen_client::origin_key(&fixture.full.hub_url);
+    let owner = fixture.full.owner_id.clone();
+    let project = fixture.full.project.clone();
+    let positions = store_work(fixture.daemon.core.identities.store.clone(), move |store| {
+        store.positions_for_owner(&origin, &owner, &project)
+    })
+    .await
+    .unwrap();
+    assert!(
+        !positions.contains_key(&blocked.stream),
+        "a skipped stream must not have a durable position"
+    );
+    let path = fixture.dir.path().join("agmend.db");
+    tokio::task::spawn_blocking(move || {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.execute(
+            "DELETE FROM positions WHERE origin LIKE '%#owner=other001'",
+            [],
+        )
+        .unwrap();
+    })
+    .await
+    .unwrap();
+    fixture.send().await;
+    // A new stream fits after the drop. Filling it again is a second fill.
+    let origin = agmen_client::origin_key(&fixture.full.hub_url);
+    let path = fixture.dir.path().join("agmend.db");
+    tokio::task::spawn_blocking(move || {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        for n in 1..MAX_STREAM_POSITIONS {
+            conn.execute(
+                "INSERT INTO positions VALUES (?1,'project1',?2,0)",
+                rusqlite::params![
+                    format!("{origin}#owner=other001"),
+                    format!("inbox:other{n:03}")
+                ],
+            )
+            .unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    blocked.stream = Stream::Inbox(fixture.other.identity_id.clone());
+    blocked.seq = Seq(1);
+    fixture
+        .hub_events
+        .lock()
+        .await
+        .as_ref()
+        .unwrap()
+        .send(axum::response::sse::Event::default().data(serde_json::to_string(&blocked).unwrap()))
+        .await
+        .unwrap();
+    fixture.send().await;
+    tokio::time::timeout(WAIT, async {
+        while fixture.published.lock().unwrap().len() < 2 {
+            tokio::time::sleep(POLL).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(fixture.published.lock().unwrap().len(), 2);
+    fixture.stop().await;
+}
+
+#[derive(Clone, Default)]
+struct AlertLogs(Arc<Mutex<Vec<u8>>>);
+
+#[tokio::test]
+async fn project_stream_alert_survives_removing_an_identity() {
+    let fixture = Fixture::new(false).await;
+    fixture.publish_failure.store(true, Ordering::SeqCst);
+    let origin = agmen_client::origin_key(&fixture.full.hub_url);
+    let owner = fixture.full.owner_id.clone();
+    let project = fixture.full.project.clone();
+    store_work(fixture.daemon.core.identities.store.clone(), move |store| {
+        store.mark_streams_full(&origin, &owner, &project)
+    })
+    .await
+    .unwrap();
+    tokio::time::timeout(WAIT, async {
+        while fixture.publish_attempts.lock().unwrap().is_empty() {
+            tokio::time::sleep(POLL).await;
+        }
+    })
+    .await
+    .unwrap();
+    let origin = agmen_client::origin_key(&fixture.full.hub_url);
+    let id = fixture.full.identity_id.clone();
+    store_work(fixture.daemon.core.identities.store.clone(), move |store| {
+        store.unregister(&origin, &id)
+    })
+    .await
+    .unwrap();
+    fixture.publish_failure.store(false, Ordering::SeqCst);
+    let recovered = tokio::time::timeout(WAIT, async {
+        while fixture.published.lock().unwrap().is_empty() {
+            tokio::time::sleep(POLL).await;
+        }
+    })
+    .await;
+    fixture.stop().await;
+    assert!(
+        recovered.is_ok(),
+        "removing an identity must not delete a pending project ALERT"
+    );
+}
+
+#[tokio::test]
+async fn stream_list_full_alert_is_posted_by_an_owned_identity_that_notifies_the_owner() {
+    // The local hub stamps ALERTs with the real routing rules, which mention the
+    // sender's owner. A post by the person itself mentions nobody.
+    let fixture = Fixture::new(true).await;
+    let origin = agmen_client::origin_key(&fixture.full.hub_url);
+    let owner = fixture.full.owner_id.clone();
+    let project = fixture.full.project.clone();
+    store_work(fixture.daemon.core.identities.store.clone(), move |store| {
+        store.mark_streams_full(&origin, &owner, &project)
+    })
+    .await
+    .unwrap();
+    let posted = tokio::time::timeout(WAIT, async {
+        loop {
+            let page = fixture
+                .daemon
+                .core
+                .origins
+                .local()
+                .page(
+                    &fixture.full.project,
+                    &Stream::Feed,
+                    0,
+                    COLLECTION_PAGE_SIZE,
+                )
+                .await
+                .unwrap();
+            if let Some(alert) = page
+                .messages
+                .into_iter()
+                .find(|message| matches!(message.client.payload, Payload::Alert { .. }))
+            {
+                return alert;
+            }
+            tokio::time::sleep(POLL).await;
+        }
+    })
+    .await;
+    let owner = fixture.full.owner_id.clone();
+    let sender = fixture.full.identity_id.clone();
+    fixture.stop().await;
+    let alert = posted.expect("the stream list ALERT must be posted");
+    assert_eq!(alert.from, sender, "the ALERT must come from an identity");
+    assert!(
+        alert.mentioned.contains(&owner),
+        "the owner must be mentioned: {:?}",
+        alert.mentioned
+    );
+}
+
+#[tokio::test]
+async fn hub_stream_list_full_alert_is_published_as_the_first_owned_identity() {
+    let fixture = Fixture::new(false).await;
+    let origin = agmen_client::origin_key(&fixture.full.hub_url);
+    let owner = fixture.full.owner_id.clone();
+    let project = fixture.full.project.clone();
+    store_work(fixture.daemon.core.identities.store.clone(), move |store| {
+        store.mark_streams_full(&origin, &owner, &project)
+    })
+    .await
+    .unwrap();
+    let published = tokio::time::timeout(WAIT, async {
+        while fixture.published.lock().unwrap().is_empty() {
+            tokio::time::sleep(POLL).await;
+        }
+    })
+    .await;
+    assert!(published.is_ok(), "the stream list ALERT must be published");
+    let senders = fixture.published_by.lock().unwrap().clone();
+    let expected = fixture.full.identity_id.clone();
+    fixture.stop().await;
+    assert_eq!(
+        senders,
+        [expected],
+        "not the person: the hub would mention nobody"
+    );
+}
+
+impl std::io::Write for AlertLogs {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for AlertLogs {
+    type Writer = Self;
+    fn make_writer(&'a self) -> Self {
+        self.clone()
+    }
+}
+
+#[tokio::test]
+async fn persistent_queue_alert_failure_warns_once_and_delivery_continues() {
+    let logs = AlertLogs::default();
+    let _guard = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(logs.clone())
+            .finish(),
+    );
+    let mut fixture = Fixture::new(false).await;
+    fixture.publish_failure.store(true, Ordering::SeqCst);
+    fixture.send().await;
+    tokio::time::timeout(WAIT, async {
+        while fixture.publish_attempts.lock().unwrap().len() < MAX_QUEUE_ALERT_ATTEMPTS {
+            tokio::time::sleep(POLL).await;
+        }
+    })
+    .await
+    .unwrap();
+    fixture.send().await;
+    let log = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+    assert_eq!(
+        log.lines()
+            .filter(|line| line.contains("full queue ALERT could not be queued"))
+            .count(),
+        1,
+        "{log}"
+    );
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn slow_queue_alert_does_not_delay_a_collectors_start() {
+    const START_WAIT: Duration = Duration::from_millis(500);
+    let dir = tempfile::tempdir().unwrap();
+    let (hub_url, events, task) = fake_hub().await;
+    let login = Login {
+        hub_url: hub_url.clone(),
+        human_id: "owner001".parse().unwrap(),
+        handle: "owner".into(),
+    };
+    let login_file = dir.path().join("login.json");
+    tokio::fs::write(&login_file, serde_json::to_vec(&login).unwrap())
+        .await
+        .unwrap();
+    let tokens = TokenStore::Dir(dir.path().join("tokens"));
+    store_tokens(
+        &tokens,
+        &login,
+        &HumanTokens::new("fake-access".into(), "fake-refresh".into(), 3600),
+    )
+    .await
+    .unwrap();
+    let mut daemon = crate::Agmend::bind(crate::Config::new(
+        dir.path().join("agmend.sock"),
+        login_file,
+        tokens,
+    ))
+    .unwrap();
+    Arc::get_mut(&mut Arc::get_mut(&mut daemon.core).unwrap().identities)
+        .unwrap()
+        .publisher = Some(Arc::new(|_, _| Box::pin(std::future::pending())));
+    let rows = managed_rows(&daemon, false, &hub_url).await;
+    let full = rows[0].clone();
+    store_work(daemon.core.identities.store.clone(), move |store| {
+        for row in rows {
+            store.register(&row)?;
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let path = dir.path().join("agmend.db");
+    tokio::task::spawn_blocking(move || {
+        rusqlite::Connection::open(path).unwrap().execute(
+            "UPDATE identities SET metadata=json_set(metadata,'$.queue_full.alerts',1) WHERE identity=?1", [full.identity_id.as_str()],
+        ).unwrap();
+    }).await.unwrap();
+    let identities = daemon.core.identities.clone();
+    let supervisor = tokio::spawn(async move { identities.supervise().await });
+    let started = tokio::time::timeout(START_WAIT, async {
+        while events.lock().await.is_none() {
+            tokio::time::sleep(POLL).await;
+        }
+    })
+    .await;
+    supervisor.abort();
+    assert!(supervisor.await.unwrap_err().is_cancelled());
+    daemon.core.identities.shutdown().await;
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    assert!(
+        started.is_ok(),
+        "an ALERT publish must not delay starting the project collector"
+    );
 }
