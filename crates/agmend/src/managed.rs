@@ -1351,7 +1351,7 @@ async fn write_agent_files(
 }
 
 fn mcp_config(agmen: &Path, identity: &IdentityId, local_token: Option<&LocalToken>) -> Value {
-    let mut env = json!({"AGMEN_IDENTITY": identity});
+    let mut env = json!({"AGMEN_IDENTITY": identity, "AGMEN_MANAGED": "1"});
     if let Some(token) = local_token {
         env["AGMEN_LOCAL_TOKEN"] = json!(token.expose());
     }
