@@ -8,7 +8,7 @@ mod support;
 use std::time::Duration;
 
 use agmen_local::ErrorCode;
-use agmen_proto::{ClientEnvelope, DeliveryReply, Payload, ProjectId, Timestamp};
+use agmen_proto::{ClientEnvelope, DeliveryReply, ItemKey, Payload, ProjectId, Timestamp};
 use agmend::{Agmend, Config};
 use serde_json::{Value, json};
 use support::{Client, Daemon, Home, PROJECT, error, result};
@@ -17,6 +17,15 @@ const SHORT_LEASE: Duration = Duration::from_millis(200);
 const SWEEP_WAIT: Duration = Duration::from_secs(2);
 const POLL_EVERY: Duration = Duration::from_millis(20);
 const SWEEP_POLLS: usize = 100;
+/// The claim lease in the heartbeat test. The sweeper looks every quarter lease.
+const HEARTBEAT_LEASE: Duration = Duration::from_secs(4);
+/// How long after its claim the holder sends the HEARTBEAT: 1.5 s inside the
+/// lease, and 1.5 s more than the sweeper's 1 s cadence plus a poll, so the
+/// unrenewed claim is seen released while the renewed one has over a second left.
+const HEARTBEAT_AFTER: Duration = Duration::from_millis(2_500);
+/// The longest any wait for a RELEASE lasts: `LEASE_POLLS` rounds of `POLL_EVERY`.
+const LEASE_WAIT: Duration = Duration::from_secs(10);
+const LEASE_POLLS: usize = 500;
 const OWNER_METHODS: [&str; 3] = ["local_project_create", "local_projects", "lanes_set"];
 
 async fn unsigned_home() -> Home {
@@ -70,6 +79,47 @@ fn envelope(payload: Payload) -> ClientEnvelope {
         payload,
         sent_at: now,
     }
+}
+
+/// The project's feed as the console reads it, oldest first.
+async fn feed(client: &mut Client, project: &ProjectId) -> Vec<Value> {
+    result(
+        client
+            .call("console_snapshot", json!({"project": project}))
+            .await,
+    )["messages"]
+        .as_array()
+        .unwrap()
+        .clone()
+}
+
+/// Whether the feed holds the RELEASE `lease_expired` for `item`.
+fn lease_expired(feed: &[Value], item: &ItemKey) -> bool {
+    feed.iter().any(|message| {
+        message["verb"] == "RELEASE"
+            && message["data"]["reason"] == "lease_expired"
+            && message["data"]["item"] == item.as_str()
+    })
+}
+
+/// The feed at the first poll where `done` holds, within `LEASE_WAIT`.
+async fn feed_until(
+    client: &mut Client,
+    project: &ProjectId,
+    done: impl Fn(&[Value]) -> bool,
+) -> Vec<Value> {
+    tokio::time::timeout(LEASE_WAIT, async {
+        for _ in 0..LEASE_POLLS {
+            let messages = feed(client, project).await;
+            if done(&messages) {
+                return messages;
+            }
+            tokio::time::sleep(POLL_EVERY).await;
+        }
+        panic!("the feed never reached the expected state");
+    })
+    .await
+    .unwrap()
 }
 
 #[tokio::test]
@@ -305,6 +355,76 @@ async fn lease_sweeper_runs_for_the_local_origin() {
     })
     .await
     .unwrap();
+    stop.send(()).unwrap();
+    task.await.unwrap();
+}
+
+/// A HEARTBEAT is routed to the sender's own inbox only (agmen-core routing);
+/// what it does is renew the sender's leases. The unrenewed claim beside it
+/// shows the sweeper had passed the first lease by the time the renewed one is
+/// still held.
+#[tokio::test]
+async fn local_heartbeat_keeps_a_claim_past_its_first_lease() {
+    let home = unsigned_home().await;
+    let (mut client, stop, task, local) =
+        start(&home, home.config().local_claim_lease(HEARTBEAT_LEASE)).await;
+    let created = create(&mut client, "heartbeats").await;
+    let project: ProjectId = created["project"].as_str().unwrap().parse().unwrap();
+    let renewed_by = local.mint_agent(&project, "renewed").await.unwrap();
+    let unrenewed_by = local.mint_agent(&project, "unrenewed").await.unwrap();
+    for title in ["renewed", "unrenewed"] {
+        let found: Payload =
+            serde_json::from_value(json!({"verb": "FOUND", "data": {"title": title}})).unwrap();
+        let reply = local
+            .ingest(&project, &renewed_by, &envelope(found))
+            .await
+            .unwrap();
+        assert!(matches!(reply, DeliveryReply::Ack { .. }), "{reply:?}");
+    }
+    let keys: Vec<ItemKey> = feed(&mut client, &project)
+        .await
+        .iter()
+        .filter(|message| message["verb"] == "ITEM")
+        .map(|message| message["data"]["key"].as_str().unwrap().parse().unwrap())
+        .collect();
+    let [renewed, unrenewed] = <[ItemKey; 2]>::try_from(keys).unwrap();
+    for (by, item) in [(&renewed_by, &renewed), (&unrenewed_by, &unrenewed)] {
+        let claim = Payload::Claim { item: item.clone() };
+        let reply = local.ingest(&project, by, &envelope(claim)).await.unwrap();
+        assert!(matches!(reply, DeliveryReply::Ack { .. }), "{reply:?}");
+    }
+    // Both are granted, so a missing RELEASE below means a held claim.
+    let granted = feed(&mut client, &project).await;
+    for item in [&renewed, &unrenewed] {
+        assert!(
+            granted
+                .iter()
+                .any(|message| message["verb"] == "GRANT"
+                    && message["data"]["item"] == item.as_str()),
+            "{item} was not granted"
+        );
+    }
+    tokio::time::sleep(HEARTBEAT_AFTER).await;
+    let beat = Payload::Heartbeat {
+        items: vec![renewed.clone()],
+    };
+    let reply = local
+        .ingest(&project, &renewed_by, &envelope(beat))
+        .await
+        .unwrap();
+    assert!(matches!(reply, DeliveryReply::Ack { .. }), "{reply:?}");
+    // The claim without a HEARTBEAT lapses at the first lease; the sweeper has
+    // run past it when its RELEASE shows, and the renewed claim is still held.
+    let seen = feed_until(&mut client, &project, |feed| {
+        lease_expired(feed, &unrenewed)
+    })
+    .await;
+    assert!(
+        !lease_expired(&seen, &renewed),
+        "the HEARTBEAT did not keep the claim past its first lease"
+    );
+    // One lease after the HEARTBEAT it lapses too.
+    feed_until(&mut client, &project, |feed| lease_expired(feed, &renewed)).await;
     stop.send(()).unwrap();
     task.await.unwrap();
 }

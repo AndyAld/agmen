@@ -11,15 +11,21 @@
 //! handle lookups (rulings R51 and R60) never wait for a HELLO. Watch still
 //! posts one HELLO per process, after the first connect, to name its client
 //! to the room; the session reconnects on its own and posts none then.
+//!
+//! An identity on this machine's local origin has no broker: it follows
+//! agmend's `watch` for it, which marks it online while the connection is
+//! open, and posts its HELLO through agmend.
 
 use agmen_client::{ClientEvent, ClientKind, Session, SessionConfig};
 use agmen_proto::Payload;
 use anyhow::{Context as _, Result};
 use clap::Args;
 
-use crate::joined::{agent, client_error, envelope, local_worktree};
-use crate::output::{Fail, clean, message_line, println_flush};
+use crate::joined::{agent, client_error, envelope};
+use crate::output::{clean, message_line, println_flush};
 use crate::watch_lock::WatchLock;
+
+const LOCAL_MAX_EVENTS: usize = 1_000_000;
 
 #[derive(Debug, Args)]
 pub(crate) struct WatchArgs {
@@ -30,13 +36,6 @@ pub(crate) struct WatchArgs {
 
 /// `agmen watch`.
 pub(crate) async fn watch(args: WatchArgs) -> Result<()> {
-    // Before the banner or any credential: a local worktree has no feed here yet.
-    if local_worktree().await.is_some() {
-        return Err(Fail::usage(
-            "agmen watch does not support local projects yet; this worktree is on this machine's local origin",
-        )
-        .into());
-    }
     let agent = agent().await?;
     let me = agent.identity.me();
     let first = if args.json {
@@ -48,6 +47,31 @@ pub(crate) async fn watch(args: WatchArgs) -> Result<()> {
         return Ok(());
     }
     let _watch = WatchLock::try_hold(&agent.state_dir).await;
+    if let Some(local) = &agent.local {
+        let mut events = local.watch().await?;
+        let hello = Payload::Hello {
+            client: concat!("agmen-cli/", env!("CARGO_PKG_VERSION")).to_owned(),
+            agent: None,
+            model: None,
+            looking_at: None,
+        };
+        local.post(&envelope(hello, String::new())?).await?;
+        let stop = stop_signal();
+        tokio::pin!(stop);
+        for _ in 0..LOCAL_MAX_EVENTS {
+            // A quiet project is not an error; the link ends this only by stopping.
+            let event = tokio::select! {
+                event = events.recv() => {
+                    event.context("the local watch stopped; check agmend's connection")?
+                }
+                () = &mut stop => return Ok(()),
+            };
+            if !print_event(&event, args.json)? {
+                return Ok(());
+            }
+        }
+        anyhow::bail!("the local watch reached its event limit; run agmen watch again");
+    }
     let config = SessionConfig::new(
         ClientKind::Watch,
         agent.topics(),
@@ -79,19 +103,21 @@ pub(crate) async fn watch(args: WatchArgs) -> Result<()> {
             // The session stopped; close says why.
             break;
         };
-        let line = if args.json {
-            Some(serde_json::to_string(&event).context("encoding an event")?)
-        } else {
-            text_line(&event)
-        };
-        // A closed stdout means the reader is gone: stop quietly.
-        if let Some(line) = line
-            && println_flush(&line).is_err()
-        {
+        if !print_event(&event, args.json)? {
             break;
         }
     }
     session.close().await.context("the watch session failed")
+}
+
+/// A closed stdout means the reader is gone: stop quietly.
+fn print_event(event: &ClientEvent, json: bool) -> Result<bool> {
+    let line = if json {
+        Some(serde_json::to_string(event).context("encoding an event")?)
+    } else {
+        text_line(event)
+    };
+    Ok(line.is_none_or(|line| println_flush(&line).is_ok()))
 }
 
 /// Text mode's first line. The handle comes from the identity file, and

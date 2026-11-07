@@ -10,10 +10,12 @@ use std::path::Path;
 use std::str::FromStr;
 use std::time::Duration;
 
+use agmen_client::ClientEvent;
 use agmen_local::frame::{read_async, write_async};
 use agmen_local::{API, ErrorCode, HelloAnswer, Outcome, Request, Response};
 use agmen_proto::IdentityId;
 use serde_json::{Value, json};
+use tokio::io::{AsyncBufReadExt as _, BufReader};
 use tokio::net::UnixStream;
 
 /// How long `connect` may spend reaching the socket and finishing `hello`.
@@ -21,6 +23,10 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// How long one `call` or `call_as` waits for agmend's answer.
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
+/// A quiet watch waits for as long as agmend keeps the socket open, since agmend
+/// sends no keepalive. A frame that has begun must finish within this, or the
+/// watch drops its socket and the caller reconnects.
+const WATCH_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// One connection to agmend. Request ids start at 1 for `hello` and then
 /// increase by one. A local token is never stored here.
@@ -147,6 +153,34 @@ impl Agmend {
         exchange(&mut self.stream, request, self.call_timeout).await
     }
 
+    /// Opens an identity watch. The first response authenticates the stream;
+    /// subsequent frames keep the same request id.
+    pub(crate) async fn watch_as(
+        mut self,
+        identity: &IdentityId,
+        token: &LocalToken,
+        params: Value,
+    ) -> Result<Watch, AgmendError> {
+        let id = self.next_id;
+        let first = self.call_as(identity, token, "watch", params).await?;
+        let event: ClientEvent = serde_json::from_value(first)
+            .map_err(|_| AgmendError::Protocol("agmend's watch answer is invalid".into()))?;
+        if !matches!(event, ClientEvent::Me(me) if me.identity_id == *identity) {
+            return Err(AgmendError::Protocol(
+                "agmend's watch answered as another identity".into(),
+            ));
+        }
+        let stream = self
+            .stream
+            .take()
+            .ok_or_else(|| AgmendError::Protocol("agmend's watch socket is closed".into()))?;
+        Ok(Watch {
+            reader: BufReader::new(stream),
+            id,
+            frame_timeout: WATCH_FRAME_TIMEOUT,
+        })
+    }
+
     /// The next request id. Fails instead of wrapping, so two calls never share an id.
     fn alloc_id(&mut self) -> Result<u64, AgmendError> {
         let id = self.next_id;
@@ -154,6 +188,45 @@ impl Agmend {
             AgmendError::Protocol("agmend request ids are exhausted. Connect again".into())
         })?;
         Ok(id)
+    }
+}
+
+/// A streaming reader owns its socket so a cancelled read cannot be reused.
+#[derive(Debug)]
+pub(crate) struct Watch {
+    reader: BufReader<UnixStream>,
+    id: u64,
+    frame_timeout: Duration,
+}
+
+impl Watch {
+    /// The next event. Waits for as long as the watch stays quiet; once a frame
+    /// begins it has `WATCH_FRAME_TIMEOUT` to finish.
+    pub(crate) async fn recv(&mut self) -> Result<ClientEvent, AgmendError> {
+        // Waiting for data is cancel safe and `read_async` is not, so only a
+        // frame that has begun runs under the timeout. At EOF this returns with
+        // no data and `read_async` reports it.
+        self.reader.fill_buf().await.map_err(AgmendError::Io)?;
+        let response: Response =
+            tokio::time::timeout(self.frame_timeout, read_async(&mut self.reader))
+                .await
+                .map_err(|_| AgmendError::Timeout {
+                    method: "watch".into(),
+                })?
+                .map_err(AgmendError::Frame)?;
+        if response.id != self.id {
+            return Err(AgmendError::Protocol(
+                "agmend's watch response id is invalid".into(),
+            ));
+        }
+        match response.outcome {
+            Outcome::Ok { result } => serde_json::from_value(result)
+                .map_err(|_| AgmendError::Protocol("agmend's watch event is invalid".into())),
+            Outcome::Err { error } => Err(AgmendError::Refused {
+                code: error.code,
+                message: error.message,
+            }),
+        }
     }
 }
 
@@ -411,3 +484,55 @@ fn parse_hello(result: Value) -> Result<HelloAnswer, AgmendError> {
 #[cfg(test)]
 #[path = "agmend_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod watch_tests {
+    use std::time::Duration;
+
+    use agmen_client::ClientEvent;
+    use agmen_local::Response;
+    use agmen_local::frame::write_async;
+    use tokio::io::{AsyncWriteExt as _, BufReader};
+    use tokio::net::UnixStream;
+
+    use super::{AgmendError, Watch};
+
+    /// agmend sends a watch no keepalive, so a quiet watch is a healthy one: it
+    /// waits for its next event instead of ending, however long nothing comes.
+    #[tokio::test]
+    async fn an_idle_watch_keeps_waiting_for_its_next_event() {
+        let (client, mut daemon) = UnixStream::pair().unwrap();
+        let mut watch = Watch {
+            reader: BufReader::new(client),
+            id: 7,
+            frame_timeout: Duration::from_millis(200),
+        };
+        let idle = tokio::time::timeout(Duration::from_millis(800), watch.recv()).await;
+        assert!(idle.is_err(), "an idle watch ended on its own: {idle:?}");
+        let event = ClientEvent::Connection { connected: true };
+        let frame = Response::ok(7, serde_json::to_value(&event).unwrap());
+        write_async(&mut daemon, &frame).await.unwrap();
+        assert_eq!(watch.recv().await.unwrap(), event);
+    }
+
+    /// A frame that began and never finished is not an idle watch: it ends
+    /// within the frame timeout, so the caller drops the socket and reconnects.
+    #[tokio::test]
+    async fn a_frame_that_stalls_ends_the_watch() {
+        let (client, mut daemon) = UnixStream::pair().unwrap();
+        let mut watch = Watch {
+            reader: BufReader::new(client),
+            id: 7,
+            frame_timeout: Duration::from_millis(200),
+        };
+        // The length prefix of a 100 byte frame, and nothing after it.
+        daemon.write_all(&100_u32.to_be_bytes()).await.unwrap();
+        let stalled = tokio::time::timeout(Duration::from_secs(5), watch.recv())
+            .await
+            .expect("recv ended within the test's own bound");
+        assert!(
+            matches!(stalled, Err(AgmendError::Timeout { .. })),
+            "{stalled:?}"
+        );
+    }
+}

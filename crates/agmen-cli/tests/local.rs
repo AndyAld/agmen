@@ -6,10 +6,25 @@
 mod local_support;
 mod support;
 
+use agmen_cli::McpOptions;
 use agmen_client::{TokenKey, TokenStore, read_local_credential};
+use agmen_proto::{ClientEnvelope, Payload, StampedEnvelope, Stream, Timestamp};
 use local_support::Local;
 use serde_json::{Value, json};
+use std::process::Stdio;
+use std::time::Duration;
+use support::mcp::Mcp;
 use support::{Home, Worktree, assert_exit, stderr, stdout};
+use tokio::io::{AsyncBufReadExt as _, BufReader};
+
+const MCP_WAIT: Duration = Duration::from_secs(15);
+const LOCAL_POLL: Duration = Duration::from_millis(20);
+const LOCAL_POLLS: usize = 200;
+const WATCH_EVENTS: usize = 32;
+/// The shortest beat `McpOptions::with_heartbeat` takes.
+const HEARTBEAT_EVERY: Duration = Duration::from_secs(1);
+/// Polls for the first beat: 10 s at `LOCAL_POLL`, inside `MCP_WAIT`.
+const HEARTBEAT_POLLS: usize = 500;
 
 #[tokio::test]
 async fn init_without_flags_starts_locally() {
@@ -500,24 +515,403 @@ async fn local_token_never_reaches_output() {
     local.stop().await;
 }
 
-/// Task 12 gives `agmen watch` a local source and removes this test.
 #[tokio::test]
-async fn watch_refuses_on_local_until_supported() {
+async fn agmen_watch_prints_local_messages() {
     let local = Local::new().await;
     let worker = local.member("worker").await;
+    let sender = local.member("sender").await;
+    let token = read_local_credential(&local.home.tokens(), &worker.identity().identity_id)
+        .unwrap()
+        .unwrap()
+        .local_token;
     for args in [&["watch"][..], &["watch", "--json"][..]] {
-        let out = local.run(&worker, args).await;
-        assert_exit(&out, 2);
-        assert!(
-            stderr(&out).contains(
-                "agmen watch does not support local projects yet; this worktree is on this machine's local origin"
-            ),
-            "{}",
-            stderr(&out)
-        );
-        assert_eq!(stdout(&out), "", "watch prints nothing before it refuses");
+        let mut command = tokio::process::Command::from(local.home.agmen(&worker.path(), args));
+        let mut child = command
+            .env("AGMEN_LOG", "trace")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+        tokio::time::timeout(MCP_WAIT, async {
+            let first = lines.next_line().await.unwrap().expect("watch banner");
+            assert!(!first.contains(&token));
+            if args.len() == 2 {
+                let me: Value = serde_json::from_str(&first).unwrap();
+                assert_eq!(me["kind"], "self");
+                assert_eq!(me["identity_id"], json!(worker.identity().identity_id));
+            } else {
+                assert!(first.starts_with("watching as "), "{first}");
+            }
+            wait_local_status(&local, &worker, "online").await;
+            assert_exit(
+                &local
+                    .run(&sender, &["post", "FYI", "local watch feed"])
+                    .await,
+                0,
+            );
+            let mut feed = false;
+            let mut inbox = false;
+            person_message(&local, &worker, "local watch inbox").await;
+            for _ in 0..WATCH_EVENTS {
+                let line = lines.next_line().await.unwrap().expect("watch event");
+                assert!(!line.contains(&token));
+                if args.len() == 2 {
+                    let event: Value = serde_json::from_str(&line).unwrap();
+                    assert_ne!(event["kind"], "self", "one self line per process");
+                    if event["kind"] == "message" {
+                        feed |= event["message"]["body"] == "local watch feed";
+                        inbox |= event["message"]["body"] == "local watch inbox";
+                    }
+                } else {
+                    feed |= line.contains("local watch feed");
+                    inbox |= line.contains("local watch inbox");
+                }
+                if feed && inbox {
+                    return;
+                }
+            }
+            panic!("watch did not print both messages");
+        })
+        .await
+        .unwrap();
+        child.start_kill().unwrap();
+        let output = tokio::time::timeout(MCP_WAIT, child.wait_with_output())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!stderr(&output).contains(&token));
+        wait_local_status(&local, &worker, "offline").await;
     }
     local.stop().await;
+}
+
+fn local_mcp_options(local: &Local, worktree: &Worktree) -> McpOptions {
+    McpOptions::new(
+        worktree.path(),
+        local.home.tokens(),
+        local.home.state_base(),
+    )
+}
+
+async fn person_message(local: &Local, worker: &Worktree, body: &str) {
+    let now = Timestamp::now();
+    let mut random = [0_u8; 8];
+    getrandom::fill(&mut random).unwrap();
+    let envelope = ClientEnvelope {
+        v: 1,
+        id: format!("{:026X}", u64::from_be_bytes(random))
+            .parse()
+            .unwrap(),
+        reply_to: None,
+        to: vec![worker.identity().identity_id],
+        mentions: Vec::new(),
+        items: Vec::new(),
+        lane: None,
+        body: body.try_into().unwrap(),
+        valid_until: None,
+        sent_at: now,
+        payload: Payload::Dm {},
+    };
+    local
+        .call(
+            "post",
+            json!({"project": local.project, "envelope": envelope}),
+        )
+        .await;
+}
+
+async fn wait_local_status(local: &Local, worker: &Worktree, status: &str) {
+    for _ in 0..LOCAL_POLLS {
+        let roster = local
+            .call("state", json!({"project": local.project, "key": "roster"}))
+            .await;
+        if roster["value"].as_array().unwrap().iter().any(|row| {
+            row["identity_id"] == json!(worker.identity().identity_id) && row["status"] == status
+        }) {
+            return;
+        }
+        tokio::time::sleep(LOCAL_POLL).await;
+    }
+    panic!("local identity did not become {status}");
+}
+
+#[tokio::test]
+async fn mcp_tools_work_on_a_local_identity() {
+    tokio::time::timeout(MCP_WAIT, async {
+        let local = Local::new().await;
+        let worker = local.member("worker").await;
+        let mcp = Mcp::start(local_mcp_options(&local, &worker)).await;
+        let chat = mcp
+            .text("chat", json!({"text": "hello from local MCP"}))
+            .await;
+        assert!(chat.starts_with("recorded #1 (feed)"), "{chat}");
+        assert!(!chat.contains("queued"));
+        let history = mcp.text("read_chat", json!({})).await;
+        assert!(history.contains("hello from local MCP"), "{history}");
+        assert!(
+            mcp.text("found", json!({"title": "local MCP work"}))
+                .await
+                .contains("B-1")
+        );
+        let claim = mcp.text("claim", json!({"item": "B-1"})).await;
+        assert!(claim.contains("granted B-1 until"), "{claim}");
+        assert!(
+            mcp.text("state", json!({"key": "roster"}))
+                .await
+                .contains(&worker.identity().handle)
+        );
+        assert!(
+            mcp.text("state", json!({"key": "head"}))
+                .await
+                .starts_with("state/head:")
+        );
+        assert!(mcp.text("lanes", json!({})).await.contains("no lanes"));
+        assert!(
+            mcp.text("check_path", json!({"paths": ["src/a.rs"]}))
+                .await
+                .contains("unowned")
+        );
+        wait_local_status(&local, &worker, "online").await;
+        person_message(&local, &worker, "person DM for pending block").await;
+        let pending = mcp.text("lanes", json!({})).await;
+        assert!(
+            pending.contains("for you, from other participants"),
+            "{pending}"
+        );
+        assert!(pending.contains("person DM for pending block"), "{pending}");
+        assert!(
+            !mcp.text("lanes", json!({}))
+                .await
+                .contains("person DM for pending block")
+        );
+        let token = read_local_credential(&local.home.tokens(), &worker.identity().identity_id)
+            .unwrap()
+            .unwrap()
+            .local_token;
+        for text in [&chat, &history, &claim, &pending] {
+            assert!(!text.contains(&token));
+        }
+        mcp.stop().await;
+        wait_local_status(&local, &worker, "offline").await;
+        local.stop().await;
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn mcp_heartbeat_posts_locally() {
+    tokio::time::timeout(MCP_WAIT, async {
+        let local = Local::new().await;
+        let worker = local.member("worker").await;
+        assert_exit(
+            &local.run(&worker, &["found", "hold for heartbeat"]).await,
+            0,
+        );
+        assert_exit(&local.run(&worker, &["claim", "B-1"]).await, 0);
+        let mcp =
+            Mcp::start(local_mcp_options(&local, &worker).with_heartbeat(HEARTBEAT_EVERY)).await;
+        // agmen-core routes a HEARTBEAT to the sender's own inbox only; what it
+        // does there is renew the claim's lease (crates/agmend/tests/local_origin.rs).
+        let inbox = Stream::Inbox(worker.identity().identity_id);
+        let mut beat = None;
+        for _ in 0..HEARTBEAT_POLLS {
+            beat = identity_page(&local, &worker, &inbox)
+                .await
+                .into_iter()
+                .find(|message| {
+                    matches!(&message.client.payload, Payload::Heartbeat { items }
+                        if items.iter().any(|item| item.as_str() == "B-1"))
+                });
+            if beat.is_some() {
+                break;
+            }
+            tokio::time::sleep(LOCAL_POLL).await;
+        }
+        let beat = beat.expect("MCP did not record a local HEARTBEAT without a tool call");
+        assert_eq!(beat.from, worker.identity().identity_id);
+        assert_eq!(beat.stream, inbox);
+        mcp.stop().await;
+        local.stop().await;
+    })
+    .await
+    .unwrap();
+}
+
+/// A page of `stream` read as `worker`: agmend's `page` with the worker's own
+/// local token, the call `agmen inbox` makes.
+async fn identity_page(local: &Local, worker: &Worktree, stream: &Stream) -> Vec<StampedEnvelope> {
+    use agmen_local::{API, Outcome, Request, Response, frame};
+
+    let id = worker.identity().identity_id;
+    let token = read_local_credential(&local.home.tokens(), &id)
+        .unwrap()
+        .unwrap()
+        .local_token;
+    let socket = local.home.state_base().join("agmend.sock");
+    let mut socket = tokio::net::UnixStream::connect(socket).await.unwrap();
+    frame::write_async(&mut socket, &Request::new(1, "hello", json!({"api": API})))
+        .await
+        .unwrap();
+    let hello: Response = frame::read_async(&mut socket).await.unwrap();
+    assert!(matches!(hello.outcome, Outcome::Ok { .. }));
+    let mut request = Request::new(2, "page", json!({"stream": stream, "local_token": token}));
+    request.as_ = Some(id);
+    frame::write_async(&mut socket, &request).await.unwrap();
+    let response: Response = frame::read_async(&mut socket).await.unwrap();
+    match response.outcome {
+        Outcome::Ok { result } => serde_json::from_value(result["messages"].clone()).unwrap(),
+        Outcome::Err { error } => panic!("page: {error:?}"),
+    }
+}
+
+/// A refusal reads as it does from a hub (`rejected: <reason>`, a text
+/// answer, never `queued`), and records nothing.
+#[tokio::test]
+async fn local_mcp_rejection_reads_like_a_hub() {
+    tokio::time::timeout(MCP_WAIT, async {
+        let local = Local::new().await;
+        let worker = local.member("worker").await;
+        let mcp = Mcp::start(local_mcp_options(&local, &worker)).await;
+        // Built in two parts so no credential-shaped literal is in the source.
+        let secret = format!("{}{}", "ghp_", "a".repeat(36));
+        let answer = mcp.text("chat", json!({"text": secret})).await;
+        assert_eq!(answer, "rejected: secret_detected");
+        let feed = identity_page(&local, &worker, &Stream::Feed).await;
+        assert!(feed.is_empty(), "{feed:?}");
+        mcp.stop().await;
+        local.stop().await;
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn local_watch_and_mcp_keep_tokens_out_of_output() {
+    use rmcp::ServiceExt as _;
+    use rmcp::model::CallToolRequestParams;
+    use support::mcp::text_of;
+
+    let local = Local::new().await;
+    let worker = local.member("worker").await;
+    let id = worker.identity().identity_id;
+    let token = read_local_credential(&local.home.tokens(), &id)
+        .unwrap()
+        .unwrap()
+        .local_token;
+    let wrong = "0".repeat(64);
+    let env = [
+        ("AGMEN_LOG", "trace"),
+        ("AGMEN_IDENTITY", id.as_str()),
+        ("AGMEN_LOCAL_TOKEN", wrong.as_str()),
+    ];
+    let out = local.run_env(&worker, &["watch", "--json"], &env).await;
+    assert!(!out.status.success());
+    for text in [stdout(&out), stderr(&out)] {
+        assert!(!text.contains(&token));
+        assert!(!text.contains(&wrong));
+    }
+    for supplied in [&token, &wrong] {
+        let mut command = tokio::process::Command::from(local.home.agmen(&worker.path(), &["mcp"]));
+        let mut child = command
+            .env("AGMEN_LOG", "trace")
+            .env("AGMEN_IDENTITY", id.as_str())
+            .env("AGMEN_LOCAL_TOKEN", supplied)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let client = tokio::time::timeout(
+            MCP_WAIT,
+            ().serve((child.stdout.take().unwrap(), child.stdin.take().unwrap())),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let result = tokio::time::timeout(
+            MCP_WAIT,
+            client.call_tool(
+                CallToolRequestParams::new("chat")
+                    .with_arguments(json!({"text": "binary MCP"}).as_object().unwrap().clone()),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(result.is_error, Some(supplied == &wrong));
+        let text = text_of(&result);
+        assert!(!text.contains(&token));
+        assert!(!text.contains(&wrong));
+        tokio::time::timeout(MCP_WAIT, client.cancel())
+            .await
+            .unwrap()
+            .unwrap();
+        let out = tokio::time::timeout(MCP_WAIT, child.wait_with_output())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_exit(&out, 0);
+        for text in [stdout(&out), stderr(&out)] {
+            assert!(!text.contains(&token));
+            assert!(!text.contains(&wrong));
+        }
+    }
+    local.stop().await;
+}
+
+#[tokio::test]
+async fn local_mcp_surfaces_busy_and_stopped_without_hub_fallback() {
+    use agmen_local::{API, ErrorCode, Request, Response, frame};
+    use std::os::unix::fs::PermissionsExt as _;
+
+    tokio::time::timeout(MCP_WAIT, async {
+        let local = Local::new().await;
+        let worker = local.member("worker").await;
+        let mcp = Mcp::start(local_mcp_options(&local, &worker)).await;
+        mcp.text("chat", json!({"text": "before busy"})).await;
+        // Keep the established watch, and supply exact daemon refusals for new calls.
+        let socket = local.home.state_base().join("agmend.sock");
+        std::fs::rename(&socket, socket.with_extension("saved")).unwrap();
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
+        const ERRORS: [&str; 2] = [
+            "local.db is busy; try again",
+            "the local origin has stopped",
+        ];
+        let daemon = tokio::spawn(async move {
+            for message in ERRORS {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let hello: Request = frame::read_async(&mut stream).await.unwrap();
+                frame::write_async(&mut stream, &Response::ok(hello.id, json!({"api": API})))
+                    .await
+                    .unwrap();
+                let call: Request = frame::read_async(&mut stream).await.unwrap();
+                assert_eq!(call.method, "post");
+                frame::write_async(
+                    &mut stream,
+                    &Response::err(call.id, ErrorCode::Hub, message),
+                )
+                .await
+                .unwrap();
+            }
+        });
+        for message in ERRORS {
+            let answer = mcp.call("chat", json!({"text": "while unavailable"})).await;
+            assert_eq!(answer.is_error, Some(true));
+            let text = support::mcp::text_of(&answer);
+            assert!(text.contains(message), "{text}");
+            assert!(!text.contains("queued"));
+        }
+        daemon.await.unwrap();
+        mcp.stop().await;
+        local.stop().await;
+    })
+    .await
+    .unwrap();
 }
 
 /// A file the trust test refuses is not a local worktree, so a hub command
