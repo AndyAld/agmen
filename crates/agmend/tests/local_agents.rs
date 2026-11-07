@@ -305,7 +305,7 @@ async fn owner_dm_reaches_a_local_worker_batch() {
 }
 
 #[tokio::test]
-async fn stop_revokes_a_local_worker() {
+async fn stop_keeps_a_local_worker_resumable() {
     let mut f = Fixture::new().await;
     let worker = f.launch("worker", None).await;
     let credential = f.credential(&worker).await;
@@ -320,20 +320,37 @@ async fn stop_revokes_a_local_worker() {
             .await,
     );
     assert!(
-        !snapshot["roster"]
+        snapshot["roster"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|row| row["identity_id"] == worker["identity"])
+            .any(|row| row["identity_id"] == worker["identity"] && row["status"] != "online")
     );
-    assert_eq!(
-        error(
-            f.call_as(&worker, "state", json!({"key":"head"}), &credential)
-                .await
+    let listed = result(
+        f.client
+            .call("agent_list", json!({"project":f.project}))
+            .await,
+    );
+    assert_eq!(listed["agents"][0]["identity"], worker["identity"]);
+    assert_eq!(listed["agents"][0]["state"], "offline");
+    result(
+        f.call_as(
+            &worker,
+            "state",
+            json!({"project":f.project,"key":"head"}),
+            &credential,
         )
-        .code,
-        ErrorCode::Unauthorized
+        .await,
     );
+    let started = result(
+        f.client
+            .call("agent_start", json!({"identity":worker["identity"]}))
+            .await,
+    );
+    assert_eq!(started["identity"], worker["identity"]);
+    assert!(f.credential(&worker).await.local_token == credential.local_token);
+    f.dm(&worker, "after stop").await;
+    assert!(prompt(&worker).await.contains("after stop"));
     f.stop().await;
 }
 
@@ -443,6 +460,18 @@ async fn remove_revokes_a_local_worker() {
             .call("agent_remove", json!({"identity":worker["identity"]}))
             .await,
     );
+    let snapshot = result(
+        f.client
+            .call("console_snapshot", json!({"project":f.project}))
+            .await,
+    );
+    assert!(
+        !snapshot["roster"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["identity_id"] == worker["identity"])
+    );
     assert!(
         !Path::new(worker["worktree"].as_str().unwrap())
             .join(".agmen/identity.json")
@@ -462,6 +491,40 @@ async fn remove_revokes_a_local_worker() {
             .await,
     );
     assert!(listed["agents"].as_array().unwrap().is_empty());
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn stopped_local_agent_still_counts_toward_the_cap() {
+    let mut f = Fixture::new().await;
+    let worker = f.launch("worker", None).await;
+    result(
+        f.client
+            .call("agent_stop", json!({"identity":worker["identity"]}))
+            .await,
+    );
+    let listed = result(
+        f.client
+            .call("agent_list", json!({"project":f.project}))
+            .await,
+    );
+    assert_eq!(listed["agents"].as_array().unwrap().len(), 1);
+    assert_eq!(listed["agents"][0]["identity"], worker["identity"]);
+    let path = f.home.dir.path().join("agmend.db");
+    let id = worker["identity"].as_str().unwrap().to_owned();
+    let count: i64 = tokio::task::spawn_blocking(move || {
+        rusqlite::Connection::open(path)
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM identities WHERE identity=?1",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert_eq!(count, 1);
     f.stop().await;
 }
 

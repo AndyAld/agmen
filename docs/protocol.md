@@ -434,7 +434,8 @@ signed-in hub login for a hub project.
   is `running`, `idle`, `offline` or `attached`; `source` is `launched` or
   `joined`.
 - `agent_stop {identity}` cancels a running batch, posts BYE and sets
-  `offline`.
+  `offline`. The identity is kept on every origin; `agent_start` brings it
+  back and `agent_remove` revokes it.
 - `agent_start {identity, project?, root?}` brings an offline agent back.
   After agmend restarts, every saved record loads as `offline` and nothing runs
   until Start. A record restores its spend (`status.json`) and both session

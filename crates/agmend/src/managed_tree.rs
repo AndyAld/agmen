@@ -182,19 +182,7 @@ impl Managed {
                         .cloned()
                         .ok_or_else(|| error("stop target disappeared"))?;
                     let manager = self.clone();
-                    tasks.spawn(async move {
-                        let identity = worker.lock().await.record.identity.clone();
-                        manager.stop_worker(worker).await?;
-                        if agmen_client::is_local(&identity.hub_url) {
-                            manager.revoke_identity(&identity).await?;
-                            manager
-                                .identities()
-                                .ok_or_else(|| error("identity service stopped"))?
-                                .forget(&identity)
-                                .await?;
-                        }
-                        Ok::<_, ApiError>(())
-                    });
+                    tasks.spawn(async move { manager.stop_worker(worker).await });
                 }
                 for _ in 0..level.len() {
                     if let Some(result) = tasks.join_next().await {
