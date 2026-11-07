@@ -354,6 +354,22 @@ pub(crate) async fn mint(
             ));
         }
     }
+    if request.kind == MintKind::Listener {
+        let listener_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM identities WHERE owner_human_id=$1
+             AND project_id=$2 AND kind='listener' AND revoked_at IS NULL)",
+        )
+        .bind(human.as_str())
+        .bind(request.project.as_str())
+        .fetch_one(&mut *tx)
+        .await?;
+        if listener_exists {
+            return Err(ApiError::conflict(
+                "listener_exists",
+                "this owner already has a live listener in this project",
+            ));
+        }
+    }
     let inserted = sqlx::query(
         "INSERT INTO identities (id, tenant_id, project_id, kind, handle, owner_human_id,
           role, verbs, edits, role_sha256, agent, delegated_by)
