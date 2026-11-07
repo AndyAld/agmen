@@ -39,10 +39,12 @@ use std::time::Duration;
 use agmen_local::ApiError;
 use agmen_local::console::{ConsoleEvent, RosterEntry};
 use agmen_proto::{ProjectId, StampedEnvelope, Stream};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 use tokio::time::MissedTickBehavior;
 
 use crate::hub::{Hub, HubError};
+use crate::local_origin::LocalOrigin;
+use crate::origin::{Origin, Origins};
 use crate::sse::{SseError, SseEvent, SseParser};
 
 /// Events buffered per project for the slowest console.
@@ -53,10 +55,13 @@ const MAX_POSITIONS: usize = 256;
 /// The first reconnect delay and the cap (Global Constraints).
 const BACKOFF_START: Duration = Duration::from_secs(1);
 const BACKOFF_CAP: Duration = Duration::from_secs(30);
+/// Each wake drains at most this many pages of at most 500 messages.
+const LOCAL_PAGES: usize = 100;
 
 /// Every watched project's feed.
 #[derive(Debug)]
 pub(crate) struct Feeds {
+    origins: Arc<Origins>,
     hub: Arc<Hub>,
     roster_every: Duration,
     feeds: Mutex<HashMap<ProjectId, Arc<Feed>>>,
@@ -123,9 +128,10 @@ pub(crate) struct Watch {
 }
 
 impl Feeds {
-    pub(crate) fn new(hub: Arc<Hub>, roster_every: Duration) -> Arc<Self> {
+    pub(crate) fn new(origins: Arc<Origins>, roster_every: Duration) -> Arc<Self> {
         Arc::new(Self {
-            hub,
+            hub: origins.hub().clone(),
+            origins,
             roster_every,
             feeds: Mutex::new(HashMap::new()),
         })
@@ -134,14 +140,30 @@ impl Feeds {
     /// Joins `project`'s feed, starting it if no console watches it. The
     /// console joins before the task starts, so the task never sees an
     /// empty channel and ends before its first console.
-    pub(crate) fn watch(self: &Arc<Self>, project: &ProjectId) -> Watch {
+    pub(crate) async fn watch(
+        self: &Arc<Self>,
+        project: &ProjectId,
+        origin: Origin,
+    ) -> Result<Watch, ApiError> {
+        // Subscribe before reading the head, so a commit after it cannot be lost.
+        // Complete both reads before a local console receives connected: true.
+        let local = match origin {
+            Origin::Local => Some(LocalFeed {
+                stored: self.origins.local().watch_stored(project).await?,
+                position: self.origins.local().head(project).await?,
+            }),
+            Origin::Hub => None,
+        };
         let mut feeds = self.feeds.lock().unwrap_or_else(PoisonError::into_inner);
         let (feed, started) = match feeds.get(project) {
             Some(feed) => (feed.clone(), false),
             None => {
                 let feed = Arc::new(Feed {
                     tx: broadcast::channel(CHANNEL).0,
-                    status: Mutex::new(HubStatus::default()),
+                    status: Mutex::new(HubStatus {
+                        connected: local.is_some(),
+                        error: None,
+                    }),
                 });
                 feeds.insert(project.clone(), feed.clone());
                 (feed, true)
@@ -153,9 +175,9 @@ impl Feeds {
         drop(status);
         drop(feeds);
         if started {
-            tokio::spawn(run(self.clone(), project.clone(), feed));
+            tokio::spawn(run(self.clone(), project.clone(), feed, local));
         }
-        Watch { first, rx }
+        Ok(Watch { first, rx })
     }
 
     /// Whether `feed` has no console left; if so it leaves the map, under
@@ -182,7 +204,11 @@ enum End {
 }
 
 /// The feed task: connect, read, reconnect, until no console is left.
-async fn run(feeds: Arc<Feeds>, project: ProjectId, feed: Arc<Feed>) {
+async fn run(feeds: Arc<Feeds>, project: ProjectId, feed: Arc<Feed>, local: Option<LocalFeed>) {
+    if let Some(local) = local {
+        run_local(feeds, project, feed, local).await;
+        return;
+    }
     let mut state = State::default();
     let mut backoff = BACKOFF_START;
     let mut roster = RosterPoll::new(feeds.roster_every);
@@ -217,6 +243,79 @@ async fn run(feeds: Arc<Feeds>, project: ProjectId, feed: Arc<Feed>) {
             }
         }
     }
+}
+
+/// The local feed starts at its head; snapshots supply older messages.
+struct LocalFeed {
+    position: u64,
+    stored: watch::Receiver<()>,
+}
+
+/// A commit wakes readers without a broker. Roster ticks bound idle waits
+/// and also resume a backlog that exceeded LOCAL_PAGES on the previous wake.
+async fn run_local(feeds: Arc<Feeds>, project: ProjectId, feed: Arc<Feed>, mut state: LocalFeed) {
+    let local = feeds.origins.local();
+    let mut roster = RosterPoll::new(feeds.roster_every);
+    loop {
+        if feeds.retire_if_idle(&project, &feed) {
+            return;
+        }
+        let roster_due = tokio::select! {
+            changed = state.stored.changed() => {
+                if changed.is_err() {
+                    // The local origin has stopped. Removing the sender closes
+                    // the console receivers after the buffered events drain.
+                    feeds.feeds.lock().unwrap_or_else(PoisonError::into_inner).remove(&project);
+                    return;
+                }
+                false
+            }
+            () = roster.tick() => true,
+        };
+        if feeds.retire_if_idle(&project, &feed) {
+            return;
+        }
+        match page_local(local, &project, &feed, &mut state.position).await {
+            Ok(()) => feed.set_connected(true),
+            Err(error) => feed.set_status(HubStatus {
+                connected: false,
+                error: Some(error),
+            }),
+        }
+        if roster_due {
+            match local.roster(&project).await {
+                Ok(rows) => {
+                    if let Some(rows) = roster.update(rows) {
+                        feed.send(ConsoleEvent::Roster(rows));
+                    }
+                }
+                Err(error) => {
+                    tracing::info!(%project, message = %error.message, "reading the local roster failed")
+                }
+            }
+        }
+    }
+}
+
+async fn page_local(
+    local: &LocalOrigin,
+    project: &ProjectId,
+    feed: &Feed,
+    position: &mut u64,
+) -> Result<(), ApiError> {
+    for _ in 0..LOCAL_PAGES {
+        let page = local
+            .page(project, &Stream::Feed, *position, agmen_client::PAGE_LIMIT)
+            .await?;
+        for message in page.messages {
+            *position = message.seq.0;
+            feed.send(ConsoleEvent::Message(message));
+        }
+        if page.next_after.is_none() {
+            break;
+        }
+    }
+    Ok(())
 }
 
 /// Where the task is on each stream.
@@ -366,6 +465,10 @@ impl RosterPoll {
                 return None;
             }
         };
+        self.update(rows)
+    }
+
+    fn update(&mut self, rows: Vec<RosterEntry>) -> Option<Vec<RosterEntry>> {
         let changed = self.last.as_ref().is_some_and(|last| *last != rows);
         let first = self.last.is_none();
         self.last = Some(rows.clone());

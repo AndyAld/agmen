@@ -326,3 +326,114 @@ async fn roster_and_watch_reflect_mint_revoke_and_presence() {
     );
     local.shutdown().await;
 }
+
+// A busy or stopped origin says nothing about its record, so routing must not
+// ask a hub, even one that would list the person for any project id.
+
+const HUMAN: &str = "hmn7k2q9";
+const ANSWER_WAIT: Duration = Duration::from_secs(5);
+
+/// A hub that lists the person for every project id and logs each request.
+struct CountingHub {
+    url: String,
+    seen: Arc<std::sync::Mutex<Vec<String>>>,
+    task: JoinHandle<()>,
+}
+
+impl Drop for CountingHub {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+async fn counting_hub() -> CountingHub {
+    let seen: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+    let log = seen.clone();
+    let app = axum::Router::new().fallback(move |request: axum::extract::Request| {
+        let log = log.clone();
+        async move {
+            log.lock()
+                .unwrap()
+                .push(format!("{} {}", request.method(), request.uri()));
+            axum::Json(json!({"value": [
+                {"identity_id": HUMAN, "handle": "andy", "kind": "human", "status": "online"}
+            ]}))
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/", listener.local_addr().unwrap());
+    let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    CountingHub { url, seen, task }
+}
+
+/// An agmend signed in to `hub`, with a local project in its record.
+async fn signed_in(hub: &CountingHub) -> (tempfile::TempDir, crate::Agmend, ProjectId) {
+    let dir = tempfile::tempdir().unwrap();
+    let login = Login {
+        hub_url: hub.url.parse().unwrap(),
+        human_id: HUMAN.parse().unwrap(),
+        handle: "andy".into(),
+    };
+    let login_file = dir.path().join("login.json");
+    std::fs::write(&login_file, serde_json::to_vec(&login).unwrap()).unwrap();
+    let tokens = agmen_client::TokenStore::Dir(dir.path().join("tokens"));
+    let human = agmen_client::HumanTokens::new("access-1".into(), "refresh-1".into(), 3600);
+    agmen_client::store_tokens(&tokens, &login, &human)
+        .await
+        .unwrap();
+    let daemon = crate::Agmend::bind(crate::Config::new(
+        dir.path().join("agmend.sock"),
+        login_file,
+        tokens,
+    ))
+    .unwrap();
+    let topics = daemon
+        .core
+        .origins
+        .local()
+        .create_project("solo", "andy")
+        .await
+        .unwrap();
+    let project = topics.project().clone();
+    (dir, daemon, project)
+}
+
+fn assert_not_unreadable(error: &ApiError, reason: &str) {
+    assert_eq!(error.code, ErrorCode::Hub, "{error:?}");
+    assert!(error.message.contains(reason), "{error:?}");
+    for wrong in ["version", "cannot be read"] {
+        assert!(!error.message.contains(wrong), "{error:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_busy_record_is_not_placed_on_the_hub() {
+    let hub = counting_hub().await;
+    let (_dir, daemon, project) = signed_in(&hub).await;
+    let origins = daemon.core.origins.clone();
+    // Another call keeps the record's open lock past the open wait.
+    let held = origins.local().running.lock().await;
+    let error = tokio::time::timeout(OPEN_WAIT + ANSWER_WAIT, origins.of(&project))
+        .await
+        .unwrap()
+        .unwrap_err();
+    drop(held);
+    assert_not_unreadable(&error, "busy");
+    let seen = hub.seen.lock().unwrap().clone();
+    assert!(seen.is_empty(), "the hub was asked: {seen:?}");
+}
+
+#[tokio::test]
+async fn a_stopped_origin_is_not_placed_on_the_hub() {
+    let hub = counting_hub().await;
+    let (_dir, daemon, project) = signed_in(&hub).await;
+    let origins = daemon.core.origins.clone();
+    origins.local().shutdown().await;
+    let error = tokio::time::timeout(ANSWER_WAIT, origins.of(&project))
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_not_unreadable(&error, "stopped");
+    let seen = hub.seen.lock().unwrap().clone();
+    assert!(seen.is_empty(), "the hub was asked: {seen:?}");
+}
