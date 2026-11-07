@@ -60,6 +60,7 @@ fn base(project: &str) -> Result<Snapshot, BackendError> {
         roster,
         managed_agents: BTreeMap::new(),
         managed_work: BTreeMap::new(),
+        recents: Vec::new(),
         agent_error: None,
         agent_notice: None,
         listener: Some(listener),
@@ -327,6 +328,7 @@ impl Backend for FixtureBackend {
             Action::LaunchAgent { .. }
             | Action::StopAgent(_)
             | Action::StartAgent { .. }
+            | Action::ResumeTree(_)
             | Action::AttachAgent { .. }
             | Action::DetachAgent(_)
             | Action::RemoveAgent { .. } => {

@@ -22,6 +22,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
+use super::recents::{self, Stopped};
 use super::{
     Attached, MAX_MANAGED, Managed, Record, ReviewedBase, Source, Worker, envelope, error,
     mcp_config, metadata_for, private_json, root_depth,
@@ -182,9 +183,9 @@ fn zero_usd() -> String {
     "0".into()
 }
 
-/// One record read from disk: the record, its saved spend, and whether it
-/// must be saved again in the current format.
-type Loaded = (Record, Option<SavedStatus>, bool);
+/// One record read from disk: the record, its saved spend, its stop time,
+/// and whether it must be saved again in the current format.
+type Loaded = (Record, Option<SavedStatus>, Option<Stopped>, bool);
 
 impl Managed {
     async fn target_login(&self, target: &Target) -> Result<Login, ApiError> {
@@ -232,7 +233,7 @@ impl Managed {
                 return;
             }
         };
-        for (record, spent, migrated) in found {
+        for (record, spent, stopped, migrated) in found {
             let id = record.identity.identity_id.clone();
             if migrated && let Err(error) = self.save_record(&record).await {
                 tracing::warn!(code = ?error.code, "saving a migrated agent record failed");
@@ -263,7 +264,8 @@ impl Managed {
             }
             // Start and Attach check the sessions before either tier resumes.
             let parent = record.parent.clone();
-            let worker = Worker::offline(record, budget);
+            let mut worker = Worker::offline(record, budget);
+            worker.stopped_at = stopped.map(|stopped| stopped.stopped_at);
             let mut tree = self.tree.lock().await;
             let mut workers = self.workers.lock().await;
             if workers.len() < MAX_MANAGED && !workers.contains_key(&id) {
@@ -681,6 +683,7 @@ impl Managed {
         held.last_run = None;
         let record = held.record.clone();
         drop(held);
+        self.clear_stopped(&record.identity.identity_id).await;
         let hello = hello(record.model.clone(), record.branch.clone())?;
         if let Err(error) = identities.post(&record.identity, hello).await {
             tracing::warn!(code = ?error.code, "managed agent HELLO is pending connection");
@@ -1356,7 +1359,7 @@ async fn remove_quietly(path: &Path) {
 
 /// Writes `value` beside `path` and renames it over, so a reader sees the
 /// old file or the new one.
-fn replace_private_json(path: &Path, value: &Value) -> anyhow::Result<()> {
+pub(super) fn replace_private_json(path: &Path, value: &Value) -> anyhow::Result<()> {
     let fresh = path.with_extension("json.new");
     match std::fs::remove_file(&fresh) {
         Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
@@ -1367,7 +1370,7 @@ fn replace_private_json(path: &Path, value: &Value) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn read_bounded(path: &Path) -> std::io::Result<Vec<u8>> {
+pub(super) fn read_bounded(path: &Path) -> std::io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
     std::fs::File::open(path)?
         .take(MAX_RECORD_BYTES + 1)
@@ -1416,7 +1419,8 @@ fn read_record(dir: &Path) -> anyhow::Result<Option<Loaded>> {
     let spent = read_bounded(&dir.join("status.json"))
         .ok()
         .and_then(|bytes| serde_json::from_slice::<SavedStatus>(&bytes).ok());
-    Ok(Some((record, spent, migrated)))
+    let stopped = recents::read_stopped(dir).map(|stopped_at| Stopped { stopped_at });
+    Ok(Some((record, spent, stopped, migrated)))
 }
 
 #[cfg(test)]

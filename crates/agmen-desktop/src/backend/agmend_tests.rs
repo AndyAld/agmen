@@ -240,6 +240,122 @@ fn desktop_waits_for_ready() {
 }
 
 #[test]
+fn offline_agents_become_recents() {
+    let fake = FakeAgmend::start(console(vec![]));
+    fake.edit(|state| {
+        state.agent_list_answer = Some(json!({"agents": [
+            {
+                "identity": "idactive", "project": PROJECT,
+                "handle": "andy/active", "state": "idle"
+            },
+            {
+                "identity": "idstopped", "project": PROJECT,
+                "handle": "andy/stopped", "state": "offline",
+                "role": "reviewer", "branch": "agent/stopped",
+                "parent": "idactive", "depth": 1,
+                "stopped_at": "2026-11-07T12:00:00Z", "resumable": true
+            },
+            {
+                "identity": "idforeign", "project": "another-project",
+                "handle": "andy/foreign", "state": "offline"
+            },
+            {
+                "identity": "idrunning", "project": PROJECT,
+                "handle": "andy/running", "state": "running"
+            },
+            {
+                "identity": "idattached", "project": PROJECT,
+                "handle": "andy/attached", "state": "attached"
+            }
+        ]}));
+    });
+    let (backend, mut updates) = live_backend(&fake);
+    wait_for(&mut updates, |update| {
+        matches!(update, Update::Snapshot(snapshot)
+        if snapshot.managed_agents.contains_key(&ident("idstopped")))
+    });
+    assert_eq!(
+        backend.snapshot().recents,
+        vec![crate::backend::RecentAgent {
+            id: ident("idstopped"),
+            handle: "andy/stopped".into(),
+            role: Some("reviewer".into()),
+            branch: Some("agent/stopped".into()),
+            parent: Some(ident("idactive")),
+            stopped_at: Some(serde_json::from_value(json!("2026-11-07T12:00:00Z")).unwrap()),
+            resumable: true,
+        }]
+    );
+}
+
+#[test]
+fn offline_agents_without_stopped_at_are_recents() {
+    let fake = FakeAgmend::start(console(vec![]));
+    fake.edit(|state| {
+        state.agent_list_answer = Some(json!({"agents": [{
+            "identity": "idstopped", "project": PROJECT,
+            "handle": "andy/stopped", "state": "offline"
+        }]}));
+    });
+    let (backend, mut updates) = live_backend(&fake);
+    wait_for(&mut updates, |update| {
+        matches!(update, Update::Snapshot(snapshot)
+        if snapshot.managed_agents.contains_key(&ident("idstopped")))
+    });
+    assert_eq!(
+        backend.snapshot().recents,
+        vec![crate::backend::RecentAgent {
+            id: ident("idstopped"),
+            handle: "andy/stopped".into(),
+            role: None,
+            branch: None,
+            parent: None,
+            stopped_at: None,
+            resumable: true,
+        }]
+    );
+}
+
+#[test]
+fn offline_unresumable_agents_remain_in_recents() {
+    let fake = FakeAgmend::start(console(vec![]));
+    fake.edit(|state| {
+        state.agent_list_answer = Some(json!({"agents": [{
+            "identity": "idrevoked", "project": PROJECT,
+            "handle": "andy/revoked", "state": "offline", "resumable": false
+        }]}));
+    });
+    let (backend, mut updates) = live_backend(&fake);
+    wait_for(&mut updates, |update| {
+        matches!(update, Update::Snapshot(snapshot)
+        if snapshot.managed_agents.contains_key(&ident("idrevoked")))
+    });
+    let snapshot = backend.snapshot();
+    assert_eq!(snapshot.recents.len(), 1);
+    assert_eq!(snapshot.recents[0].id, ident("idrevoked"));
+    assert_eq!(snapshot.recents[0].handle, "andy/revoked");
+    assert!(!snapshot.recents[0].resumable);
+}
+
+#[test]
+fn resume_tree_sends_agent_start_with_subtree() {
+    let fake = FakeAgmend::start(console(vec![]));
+    let (backend, mut updates) = live_backend(&fake);
+    backend.act(Action::ResumeTree(ident("idmanaged"))).unwrap();
+    wait_for(&mut updates, |update| {
+        matches!(update, Update::Snapshot(snapshot)
+        if snapshot.managed_agents.get(&ident("idmanaged")).is_some_and(|s| s == "idle"))
+    });
+    let state = fake.state.lock().unwrap();
+    let request = state.agent_requests.last().unwrap();
+    assert_eq!(request.method, "agent_start");
+    assert_eq!(
+        request.params,
+        json!({"identity": "idmanaged", "project": PROJECT, "subtree": true})
+    );
+}
+
+#[test]
 fn snapshot_maps_roster_into_person_groups() {
     let fake = FakeAgmend::start(console(vec![message(1), message(2)]));
     fake.edit(|state| {
