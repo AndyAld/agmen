@@ -22,7 +22,13 @@ use tokio::net::UnixStream;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// How long one `call` or `call_as` waits for agmend's answer.
-const CALL_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const CALL_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a launch or a listener start waits for agmend's answer. agmend's hub
+/// mint waits up to 11 s and, when its answer is lost, a rollback reads the roster
+/// (up to 10 s) and revokes (up to 10 s), so a start that stalls at every step
+/// answers after about 31 s. A shorter wait would show this timeout in place of
+/// agmend's own answer.
+pub(crate) const LAUNCH_CALL_TIMEOUT: Duration = Duration::from_secs(45);
 /// How long a started watch frame may take to finish.
 const WATCH_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
 /// A quiet local watch reconnects after two missed keepalive intervals.
@@ -122,8 +128,23 @@ impl Agmend {
     /// when the frames are not a matching answer. A timeout, a frame error, or
     /// a mismatched id closes the socket. A refusal leaves it open.
     pub(crate) async fn call(&mut self, method: &str, params: Value) -> Result<Value, AgmendError> {
+        self.call_within(self.call_timeout, method, params).await
+    }
+
+    /// [`call`](Self::call) with `wait` in place of the connection's call budget.
+    /// A launch or a listener start passes [`LAUNCH_CALL_TIMEOUT`].
+    ///
+    /// # Errors
+    ///
+    /// As [`call`](Self::call).
+    pub(crate) async fn call_within(
+        &mut self,
+        wait: Duration,
+        method: &str,
+        params: Value,
+    ) -> Result<Value, AgmendError> {
         let request = Request::new(self.alloc_id()?, method, params);
-        exchange(&mut self.stream, request, self.call_timeout).await
+        exchange(&mut self.stream, request, wait).await
     }
 
     /// Sends one identity-scoped call: `as` is `identity`, and `local_token`
@@ -143,6 +164,24 @@ impl Agmend {
         method: &str,
         params: Value,
     ) -> Result<Value, AgmendError> {
+        self.call_as_within(self.call_timeout, identity, token, method, params)
+            .await
+    }
+
+    /// [`call_as`](Self::call_as) with `wait` in place of the connection's call
+    /// budget. A launch passes [`LAUNCH_CALL_TIMEOUT`].
+    ///
+    /// # Errors
+    ///
+    /// As [`call_as`](Self::call_as).
+    pub(crate) async fn call_as_within(
+        &mut self,
+        wait: Duration,
+        identity: &IdentityId,
+        token: &LocalToken,
+        method: &str,
+        params: Value,
+    ) -> Result<Value, AgmendError> {
         let Value::Object(mut params) = params else {
             return Err(AgmendError::BadParams);
         };
@@ -150,7 +189,7 @@ impl Agmend {
         params.insert("local_token".to_owned(), Value::String(token.0.clone()));
         let mut request = Request::new(self.alloc_id()?, method, Value::Object(params));
         request.as_ = Some(identity.clone());
-        exchange(&mut self.stream, request, self.call_timeout).await
+        exchange(&mut self.stream, request, wait).await
     }
 
     /// Opens an identity watch. The first response authenticates the stream;
@@ -516,7 +555,7 @@ fn parse_hello(result: Value) -> Result<HelloAnswer, AgmendError> {
 
 #[cfg(test)]
 #[path = "agmend_tests.rs"]
-mod tests;
+pub(crate) mod tests;
 
 #[cfg(test)]
 mod watch_tests {

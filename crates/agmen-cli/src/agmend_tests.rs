@@ -12,7 +12,7 @@ use serde_json::json;
 use tokio::io::AsyncWriteExt as _;
 use tokio::net::UnixListener;
 
-use super::{Agmend, AgmendError, LocalToken};
+use super::{Agmend, AgmendError, LAUNCH_CALL_TIMEOUT, LocalToken};
 
 const NOT_RUNNING: &str = "agmend is not running: open the agmen app or run agmend service install";
 
@@ -28,8 +28,12 @@ fn hello_response(id: u64) -> Response {
     )
 }
 
+/// How long agmend's slowest launch takes: an 11 s hub mint, then a rollback that
+/// reads the roster and revokes, 10 s each.
+pub(crate) const SLOW: Duration = Duration::from_secs(31);
+
 /// `None` from the reply leaves the fake holding the connection and not answering.
-struct Fake {
+pub(crate) struct Fake {
     _dir: tempfile::TempDir,
     path: PathBuf,
     requests: Arc<Mutex<Vec<Request>>>,
@@ -38,6 +42,25 @@ struct Fake {
 
 impl Fake {
     async fn start<F>(reply: F) -> Self
+    where
+        F: Fn(usize, &Request) -> Option<Response> + Send + 'static,
+    {
+        Self::spawn(Duration::ZERO, reply).await
+    }
+
+    /// Answers hello at once and every later request with `answer`, [`SLOW`] after it arrives.
+    pub(crate) async fn slow(answer: serde_json::Value) -> Self {
+        Self::spawn(SLOW, move |n, request| {
+            Some(if n == 0 {
+                hello_response(request.id)
+            } else {
+                Response::ok(request.id, answer.clone())
+            })
+        })
+        .await
+    }
+
+    async fn spawn<F>(slow: Duration, reply: F) -> Self
     where
         F: Fn(usize, &Request) -> Option<Response> + Send + 'static,
     {
@@ -59,6 +82,9 @@ impl Fake {
                 recorded.lock().unwrap().push(request.clone());
                 match reply(n, &request) {
                     Some(response) => {
+                        if n > 0 && !slow.is_zero() {
+                            tokio::time::sleep(slow).await;
+                        }
                         if write_async(&mut stream, &response).await.is_err() {
                             return;
                         }
@@ -75,11 +101,11 @@ impl Fake {
         }
     }
 
-    fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &Path {
         &self.path
     }
 
-    fn requests(&self) -> Vec<Request> {
+    pub(crate) fn requests(&self) -> Vec<Request> {
         self.requests.lock().unwrap().clone()
     }
 }
@@ -299,6 +325,74 @@ async fn slow_answer_times_out() {
     );
     assert!(elapsed >= Duration::from_millis(150), "{elapsed:?}");
     assert!(elapsed < Duration::from_secs(2), "{elapsed:?}");
+}
+
+/// A client of a fake agmend whose every answer after hello takes [`SLOW`].
+async fn slow_client() -> (Fake, Agmend) {
+    let fake = Fake::slow(json!("late")).await;
+    let client = Agmend::connect(fake.path()).await.unwrap();
+    (fake, client)
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_launch_call_gets_an_answer_that_takes_thirty_one_seconds() {
+    let id: IdentityId = "idparent".parse().unwrap();
+    let token: LocalToken = "0123456789abcdef".repeat(4).parse().unwrap();
+    let (_fake, mut client) = slow_client().await;
+    let answer = client
+        .call_within(LAUNCH_CALL_TIMEOUT, "agent_launch", json!({}))
+        .await;
+    assert_eq!(answer.unwrap(), json!("late"));
+    let answer = client
+        .call_as_within(LAUNCH_CALL_TIMEOUT, &id, &token, "child_launch", json!({}))
+        .await;
+    assert_eq!(answer.unwrap(), json!("late"));
+}
+
+/// Only a launch waits longer: `call` and `call_as` keep their 30 s.
+#[tokio::test(start_paused = true)]
+async fn a_plain_call_still_gives_up_at_thirty_seconds() {
+    let id: IdentityId = "idparent".parse().unwrap();
+    let token: LocalToken = "0123456789abcdef".repeat(4).parse().unwrap();
+    for as_identity in [false, true] {
+        let (_fake, mut client) = slow_client().await;
+        let started = tokio::time::Instant::now();
+        let err = if as_identity {
+            client.call_as(&id, &token, "child_stop", json!({})).await
+        } else {
+            client.call("agent_stop", json!({})).await
+        };
+        let elapsed = started.elapsed();
+        assert!(
+            matches!(err, Err(AgmendError::Timeout { .. })),
+            "{as_identity}: {err:?}"
+        );
+        assert!(
+            (Duration::from_secs(30)..SLOW).contains(&elapsed),
+            "{as_identity}: {elapsed:?}"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_launch_call_gives_up_at_forty_five_seconds() {
+    let silent = Fake::start(|n, request| (n == 0).then(|| hello_response(request.id))).await;
+    let mut client = Agmend::connect(silent.path()).await.unwrap();
+    let started = tokio::time::Instant::now();
+    let err = client
+        .call_within(LAUNCH_CALL_TIMEOUT, "listener_start", json!({}))
+        .await
+        .unwrap_err();
+    let elapsed = started.elapsed();
+    assert!(
+        matches!(err, AgmendError::Timeout { ref method } if method == "listener_start"),
+        "{err:?}"
+    );
+    let limit = Duration::from_secs(45);
+    assert!(
+        (limit..limit + Duration::from_secs(1)).contains(&elapsed),
+        "{elapsed:?}"
+    );
 }
 
 #[tokio::test]
