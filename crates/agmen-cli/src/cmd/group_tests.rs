@@ -1,10 +1,18 @@
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
 use anyhow::anyhow;
+use axum::http::StatusCode;
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use serde_json::{Value, json};
 
 use super::{
     Billed, BillingStep, PlanChoice, SeatDelta, absent_state_failure, billing_error, billing_step,
-    no_billing_to_show, repay_choice, seat_change_outcome, seat_target, seats_lines,
+    no_billing_to_show, portal_then_plan, repay_choice, seat_change_outcome, seat_target,
+    seats_lines,
 };
-use crate::client::Refusal;
+use crate::client::{Api, Group, Human, Login, Refusal};
 use crate::output::explain;
 
 fn refused(status: u16, code: &str, description: &str) -> anyhow::Error {
@@ -273,6 +281,106 @@ fn group_repay_choice_null_starts_team() {
 #[test]
 fn group_repay_choice_unknown_starts_team() {
     assert_eq!(repay_choice(Some("unknown"), 25), ("team", None));
+}
+
+/// Runs the read-only re-pay against a stub hub whose portal answers 409
+/// `no_subscription`, whose `GET /seats` answers `seats` and whose `POST /plan`
+/// answers `plan`. Returns the outcome and every body `/plan` received.
+async fn repay_against_stub(
+    seats: (u16, Value),
+    plan: (u16, Value),
+) -> (anyhow::Result<()>, Vec<Value>) {
+    let sent = Arc::new(Mutex::new(Vec::new()));
+    let recorded = sent.clone();
+    let reply = |(status, body): (u16, Value)| (StatusCode::from_u16(status).unwrap(), Json(body));
+    let app = Router::new()
+        .route(
+            "/v1/tenants/tenant01/portal",
+            post(move || async move { reply((409, json!({"error": "no_subscription"}))) }),
+        )
+        .route(
+            "/v1/tenants/tenant01/seats",
+            get(move || async move { reply(seats) }),
+        )
+        .route(
+            "/v1/tenants/tenant01/plan",
+            post(move |Json(body): Json<Value>| async move {
+                recorded.lock().unwrap().push(body);
+                reply(plan)
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let login = Login {
+        hub_url: format!("http://{}", listener.local_addr().unwrap())
+            .parse()
+            .unwrap(),
+        human_id: "hmn7k2q9".parse().unwrap(),
+        handle: "andy".to_owned(),
+    };
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let api = Api::new(login.hub_url.clone(), "token").unwrap();
+    let human = Human { login, api };
+    let group: Group = serde_json::from_value(
+        json!({"tenant": "tenant01", "name": "andy/owed", "role": "owner", "state": "read_only"}),
+    )
+    .unwrap();
+    let outcome =
+        tokio::time::timeout(Duration::from_secs(5), portal_then_plan(&human, &group)).await;
+    server.abort();
+    let outcome = outcome.expect("the re-pay finishes within 5 seconds");
+    (outcome, sent.lock().unwrap().clone())
+}
+
+/// `GET /seats` for a read-only group. `used` differs from every `paid` here,
+/// so a body built from the wrong field shows.
+fn seats_answer(plan: Option<&str>, paid: u32) -> (u16, Value) {
+    let body = json!({
+        "used": 2, "paid": paid, "plan": plan, "state": "read_only", "quota": 0, "used_today": 0
+    });
+    (200, body)
+}
+
+#[tokio::test]
+async fn group_repay_wiring_posts_previous_plan_and_paid_seats() {
+    let checkout = || (200, json!({"checkout_url": "https://pay.example/c"}));
+    let plan_body = |plan: &str, seats: u32| json!({"plan": plan, "seats": seats});
+    for (stored, paid, want) in [
+        (Some("team"), 6, plan_body("team", 6)),
+        (Some("business-10"), 10, plan_body("business", 10)),
+        (Some("business-25"), 25, plan_body("business", 25)),
+        (Some("business-50"), 50, plan_body("business", 50)),
+        // No known plan: today's body, with no `seats` key.
+        (None, 0, json!({"plan": "team"})),
+        (Some("mystery"), 7, json!({"plan": "team"})),
+    ] {
+        let (outcome, sent) = repay_against_stub(seats_answer(stored, paid), checkout()).await;
+        outcome.unwrap();
+        assert_eq!(sent, [want], "plan {stored:?} paid {paid}");
+    }
+}
+
+#[tokio::test]
+async fn group_repay_wiring_refusals_use_billing_errors() {
+    let checkout = || (200, json!({"checkout_url": "https://pay.example/c"}));
+    // A failed seats read sends no /plan.
+    for (status, code, want) in [
+        (500, "server_error", "reading seats failed"),
+        (404, "not_found", "has no seats or billing"),
+        (429, "rate_limited", "limited"),
+    ] {
+        let seats = (status, json!({"error": code}));
+        let (outcome, sent) = repay_against_stub(seats, checkout()).await;
+        let text = explain(&outcome.expect_err(&format!("{status} {code} must fail"))).0;
+        assert!(text.contains(want), "{status} {code}: {text}");
+        assert!(sent.is_empty(), "{status} {code}: {sent:?}");
+    }
+    // A refused /plan reaches the user through the billing mapping.
+    let plan_refusal = (409, json!({"error": "seats_in_use"}));
+    let seats = seats_answer(Some("business-10"), 10);
+    let (outcome, sent) = repay_against_stub(seats, plan_refusal).await;
+    let text = explain(&outcome.unwrap_err()).0;
+    assert!(text.contains("remove members first"), "{text}");
+    assert_eq!(sent.len(), 1);
 }
 
 #[test]
