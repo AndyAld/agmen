@@ -543,7 +543,15 @@ impl Home {
     /// Runs `agmen <args>` in `cwd` off the async runtime and returns its
     /// output.
     pub async fn run(&self, cwd: &Path, args: &[&str]) -> Output {
+        self.run_env(cwd, args, &[]).await
+    }
+
+    /// Runs with only the explicitly supplied agent credential variables.
+    pub async fn run_env(&self, cwd: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
         let mut cmd = self.agmen(cwd, args);
+        cmd.env_remove("AGMEN_IDENTITY")
+            .env_remove("AGMEN_LOCAL_TOKEN")
+            .envs(env.iter().copied());
         tokio::task::spawn_blocking(move || cmd.output().unwrap())
             .await
             .unwrap()

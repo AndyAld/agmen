@@ -150,6 +150,42 @@ async fn timed_out_brief_rolls_back_fully() {
     assert_discarded(&fixture, "kid00001", &before).await;
 }
 
+/// The parent's launch reaches agmend with its own valid token. The new
+/// child's stored credential is cut short, so the launch's read of it refuses
+/// after the hub minted the identity, and everything made so far is taken back.
+#[tokio::test]
+async fn child_launch_with_an_invalid_stored_credential_is_refused_and_leaves_nothing() {
+    let (fixture, _) = tree_fixture().await;
+    root(&fixture).await;
+    let parent_token = fixture
+        .daemon
+        .core
+        .identities
+        .local_token(&"agent001".parse().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    // register keeps a stored credential that parses, so this one reaches the launch.
+    let cut_short = "a".repeat(63);
+    let key = agmen_client::TokenKey::new(
+        &"https://agmend.invalid".parse().unwrap(),
+        &"kid00001".parse().unwrap(),
+    )
+    .unwrap();
+    let stored = json!({
+        "origin": fixture.hub_url.origin().ascii_serialization(),
+        "owner_id": "owner001",
+        "local_token": cut_short,
+    });
+    fixture.tokens.set(&key, &stored.to_string()).unwrap();
+    let before = git_state(&fixture);
+    let error = child(&fixture, "agent001", "k1").await.unwrap_err();
+    assert_eq!(error, crate::identities::unauthorized());
+    assert!(!error.message.contains(parent_token.expose()));
+    assert!(!error.message.contains(&cut_short));
+    assert_discarded(&fixture, "kid00001", &before).await;
+}
+
 fn commit_roles(fixture: &Fixture) {
     let repo = fixture.dir.path().join("repo");
     git(&repo, &["add", "-f", ".agmen/roles"]);
