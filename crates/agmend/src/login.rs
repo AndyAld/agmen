@@ -21,8 +21,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agmen_client::{
-    DeviceStart, HumanTokens, Login, LoginError, TokenKey, TokenStore, device_start, device_wait,
-    human_tokens, save_login, signed_in_as,
+    DeviceStart, HumanTokens, Login, LoginError, TokenKey, TokenStore, check_login_lock,
+    device_start, device_wait, human_tokens, save_login, signed_in_as,
 };
 use agmen_local::{ApiError, ErrorCode};
 use agmen_proto::{IdentityId, Timestamp};
@@ -207,7 +207,7 @@ impl Credentials {
     ///
     /// `bad_request` when no hub is named and nobody is signed in, or the
     /// hub URL is not one to send credentials to; `hub` when the hub's
-    /// device start fails.
+    /// device start fails, or the local login.lock is busy or unusable.
     pub(crate) async fn login_start(&self, raw: Value) -> Result<Value, ApiError> {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
@@ -226,16 +226,14 @@ impl Credentials {
                 .map(|login| login.hub_url)
                 .map_err(|_| bad_request("name the hub to sign in at"))?,
         };
-        let start = device_start(&self.http, &hub)
+        // Same order as the CLI: an unsafe hub is refused before the lock.
+        agmen_client::check_hub_url(&hub).map_err(|error| bad_request(error.to_string()))?;
+        // Before the hub is asked, so a lock that is busy or unusable fails
+        // before the person is sent to GitHub. Nothing is held afterwards.
+        check_login_lock(&self.login_file)
             .await
-            .map_err(|error| match error {
-                LoginError::HubUrl(error) => bad_request(error.to_string()),
-                // Display only: the chain behind it is the transport's.
-                error => ApiError {
-                    code: ErrorCode::Hub,
-                    message: format!("starting the sign-in failed: {error}"),
-                },
-            })?;
+            .map_err(start_error)?;
+        let start = device_start(&self.http, &hub).await.map_err(start_error)?;
         let answer = json!({
             "user_code": start.user_code,
             "verification_uri": start.verification_uri,
@@ -300,6 +298,18 @@ impl Credentials {
             Status::Expired => json!({"state": "expired"}),
             Status::Failed(message) => json!({"state": "failed", "message": message}),
         })
+    }
+}
+
+/// `error` as the answer to a `login_start` that could not begin.
+fn start_error(error: LoginError) -> ApiError {
+    match error {
+        LoginError::HubUrl(error) => bad_request(error.to_string()),
+        // Display only: the chain behind it is the transport's.
+        error => ApiError {
+            code: ErrorCode::Hub,
+            message: format!("starting the sign-in failed: {error}"),
+        },
     }
 }
 
