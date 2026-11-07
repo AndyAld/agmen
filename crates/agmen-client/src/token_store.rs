@@ -218,7 +218,8 @@ impl TokenStore {
     }
 
     /// Removes the token under `key`, and in a directory store the temporary
-    /// files a crashed write of that key left; removing one that is not there
+    /// files a crashed or older write of that key left (best effort: a failed
+    /// sweep is logged, not returned); removing one that is not there
     /// succeeds.
     ///
     /// # Errors
@@ -237,8 +238,10 @@ impl TokenStore {
                     Err(err) if err.kind() == io::ErrorKind::NotFound => {}
                     Err(source) => return Err(TokenStoreError::File { path, source }),
                 }
-                remove_leftovers(dir, &key.file_name())
-                    .map_err(|source| TokenStoreError::File { path, source })
+                if let Err((failed, error)) = remove_leftovers(dir, &key.file_name()) {
+                    tracing::warn!(path = %failed.display(), %error, "cannot remove the leftover temporary files of a deleted token");
+                }
+                Ok(())
             }
         }
     }
@@ -384,33 +387,59 @@ fn create_temp(
     Err(io::Error::from(io::ErrorKind::AlreadyExists))
 }
 
-/// Removes the crash leftovers of the token file `name` in `dir`: exactly
-/// `<name>.<16 lowercase hex digits>.tmp`, so another key's file never
-/// matches, even when its name starts with this one's.
-fn remove_leftovers(dir: &Path, name: &str) -> io::Result<()> {
+/// Removes the leftovers of the token file `name` in `dir`: the crash
+/// leftovers `<name>.<16 lowercase hex digits>.tmp` and the fixed name
+/// `<name>.tmp` earlier builds wrote, so another key's file never matches,
+/// even when its name starts with this one's (key file names have no `.`).
+/// Links are unlinked, never followed, and directories are skipped.
+///
+/// Best effort: it keeps going past a failure and returns the first one with
+/// the path that failed.
+fn remove_leftovers(dir: &Path, name: &str) -> Result<(), (PathBuf, io::Error)> {
     let is_leftover = |file: &std::ffi::OsStr| {
         file.to_str()
-            .and_then(|file| file.strip_prefix(name)?.strip_prefix('.'))
-            .and_then(|rest| rest.strip_suffix(".tmp"))
-            .is_some_and(|hex| {
-                hex.len() == 16 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+            .and_then(|file| file.strip_suffix(".tmp"))
+            .is_some_and(|stem| {
+                stem == name
+                    || stem
+                        .strip_prefix(name)
+                        .and_then(|rest| rest.strip_prefix('.'))
+                        .is_some_and(|hex| {
+                            hex.len() == 16
+                                && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+                        })
             })
     };
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error),
+        Err(error) => return Err((dir.to_owned(), error)),
     };
+    let mut first = None;
     for entry in entries {
-        let entry = entry?;
-        if is_leftover(&entry.file_name()) && !entry.file_type()?.is_dir() {
-            match fs::remove_file(entry.path()) {
-                Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
-                _ => {}
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                first.get_or_insert((dir.to_owned(), error));
+                continue;
             }
+        };
+        if !is_leftover(&entry.file_name()) {
+            continue;
+        }
+        let removed = match entry.file_type() {
+            Ok(kind) if kind.is_dir() => Ok(()),
+            Ok(_) => fs::remove_file(entry.path()),
+            Err(error) => Err(error),
+        };
+        match removed {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => {
+                first.get_or_insert((entry.path(), error));
+            }
+            _ => {}
         }
     }
-    Ok(())
+    first.map_or(Ok(()), Err)
 }
 
 /// Token files whose next write fails once the temporary file is written.
@@ -729,6 +758,63 @@ mod tests {
         assert!(others.iter().all(|path| path.exists()));
         // Deleting what is not there is still fine.
         store.delete(&short).unwrap();
+    }
+
+    #[test]
+    fn delete_removes_the_legacy_fixed_temp_name_of_that_key_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let tokens = dir.path().join("tokens");
+        let store = TokenStore::Dir(tokens.clone());
+        let short = TokenKey("https://hub.example.com idn7k2q".to_owned());
+        let long = key("https://hub.example.com");
+        assert!(store.set_if(&short, "secret", || true).unwrap());
+        let legacy = |key: &TokenKey| tokens.join(format!("{}.tmp", key.file_name()));
+        let (mine, others) = (legacy(&short), [legacy(&long), tokens.join("other.tmp")]);
+        for path in others.iter().chain([&mine]) {
+            fs::write(path, "old").unwrap();
+        }
+        store.delete(&short).unwrap();
+        assert!(!mine.exists());
+        assert!(others.iter().all(|path| path.exists()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delete_unlinks_a_leftover_symlink_and_keeps_a_leftover_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let tokens = dir.path().join("tokens");
+        let store = TokenStore::Dir(tokens.clone());
+        let ours = key("https://hub.example.com");
+        assert!(store.set_if(&ours, "secret", || true).unwrap());
+        let target = dir.path().join("target");
+        fs::write(&target, "keep").unwrap();
+        let link = tokens.join(format!("{}.tmp", ours.file_name()));
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let folder = tokens.join(format!("{}.0123456789abcdef.tmp", ours.file_name()));
+        fs::create_dir(&folder).unwrap();
+        store.delete(&ours).unwrap();
+        assert!(fs::symlink_metadata(&link).is_err());
+        assert_eq!(fs::read_to_string(&target).unwrap(), "keep");
+        assert!(folder.is_dir());
+    }
+
+    // The crate has no log-capture helper, so this asserts only that the
+    // delete succeeds; the one warn naming the directory is not asserted.
+    #[cfg(unix)]
+    #[test]
+    fn delete_succeeds_when_the_leftover_sweep_cannot_run() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let tokens = dir.path().join("tokens");
+        let store = TokenStore::Dir(tokens.clone());
+        let ours = key("https://hub.example.com");
+        assert!(store.set_if(&ours, "secret", || true).unwrap());
+        // Write and search but no read: the token can go, the listing cannot.
+        fs::set_permissions(&tokens, fs::Permissions::from_mode(0o300)).unwrap();
+        let result = store.delete(&ours);
+        fs::set_permissions(&tokens, fs::Permissions::from_mode(0o700)).unwrap();
+        result.unwrap();
+        assert_eq!(store.get(&ours).unwrap(), None);
     }
 
     #[test]
