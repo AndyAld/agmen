@@ -826,3 +826,59 @@ async fn stopped_local_agent_keeps_its_stop_time_across_reopen() {
     assert_eq!(listed["agents"][0]["stopped_at"], json!(stopped));
     f.stop().await;
 }
+
+#[tokio::test]
+async fn quit_then_resume_the_tree() {
+    let mut f = Fixture::new().await;
+    let parent = f.launch("parent", Some("engineer")).await;
+    let credential = f.credential(&parent).await;
+    f.dm(&parent, "launch a reviewer").await;
+    prompt(&parent).await;
+    let child = result(
+        f.call_as(
+            &parent,
+            "child_launch",
+            json!({"name":"child","role":"reviewer"}),
+            &credential,
+        )
+        .await,
+    );
+    assert_eq!(child["parent"], parent["identity"]);
+    let project = f.project.clone();
+    let home = f.stop().await;
+    let mut f = Fixture::start(home).await;
+    f.project = project;
+    let listed = result(f.client.call("agent_list", json!({})).await);
+    let agents = listed["agents"].as_array().unwrap();
+    assert_eq!(agents.len(), 2);
+    let mut stopped = Vec::new();
+    for worker in [&parent, &child] {
+        let entry = agents
+            .iter()
+            .find(|entry| entry["identity"] == worker["identity"])
+            .unwrap();
+        assert_eq!(entry["state"], "offline");
+        stopped.push(serde_json::from_value::<Timestamp>(entry["stopped_at"].clone()).unwrap());
+    }
+    assert!(stopped[1] <= stopped[0]);
+    let started = result(
+        f.client
+            .call(
+                "agent_start",
+                json!({"identity":parent["identity"],"subtree":true}),
+            )
+            .await,
+    );
+    assert_eq!(
+        started["started"],
+        json!([parent["identity"], child["identity"]])
+    );
+    assert_eq!(started["skipped"], json!([]));
+    f.dm(&child, "child instruction after quit").await;
+    assert!(
+        prompt(&child)
+            .await
+            .contains("child instruction after quit")
+    );
+    f.stop().await;
+}

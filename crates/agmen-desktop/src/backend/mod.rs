@@ -177,10 +177,6 @@ pub(crate) enum Action {
         root: Option<std::path::PathBuf>,
     },
     /// Brings an offline agent and its stopped descendants back.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the Recents view will send this action in Task 8")
-    )]
     ResumeTree(IdentityId),
     /// Opens Claude Code on the agent's owner session in Terminal.
     AttachAgent {

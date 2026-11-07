@@ -280,9 +280,11 @@ impl CommandPalette {
                 range.map(|ix| this.row(ix, cx)).collect::<Vec<_>>()
             }),
         )
-        // Infer: as tall as its rows, up to the max height, then it scrolls.
+        // As tall as its rows, up to the max height, then it scrolls. The
+        // height is set outright: `max_h` on a measured list does not clamp
+        // it, and the list grew to the window's height.
         .with_sizing_behavior(ListSizingBehavior::Infer)
-        .max_h(PALETTE_MAX_HEIGHT)
+        .h((PALETTE_ROW_HEIGHT * self.matches.len() as f32).min(PALETTE_MAX_HEIGHT))
         .track_scroll(&self.scroll)
         .into_any_element()
     }
@@ -342,7 +344,14 @@ impl Render for CommandPalette {
                     .gap_0()
                     .overflow_hidden()
                     .child(query)
-                    .child(div().flex().flex_col().p(SPACE_4).child(self.list(cx))),
+                    .child(
+                        div()
+                            .debug_selector(|| "palette:list".into())
+                            .flex()
+                            .flex_col()
+                            .p(SPACE_4)
+                            .child(self.list(cx)),
+                    ),
             )
     }
 }

@@ -14,6 +14,7 @@ use super::code_view::CodeView;
 use super::diff_view::{DiffTab, DiffTabEvent};
 use super::pane::{Pane, TabItem};
 use super::project_panel::FileView;
+use super::recents_view::RecentsView;
 use super::roles_panel::RoleFileView;
 use super::settings_view::{SettingsEvent, SettingsSources, SettingsView};
 use super::syntax::Language;
@@ -129,6 +130,7 @@ impl TabViews {
         let mut events = None;
         let snapshot = &self.sources.snapshot;
         let view: AnyView = match item {
+            TabItem::Recents => cx.new(|cx| RecentsView::new(snapshot, window, cx)).into(),
             // An agent with no session on this machine keeps the placeholder.
             TabItem::Agent(id) => {
                 let session = snapshot.sessions.get(id)?.clone();

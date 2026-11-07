@@ -79,6 +79,7 @@ impl PaneNames {
                 |name| name.to_string_lossy().into_owned(),
             ),
             TabItem::Search => "Search".into(),
+            TabItem::Recents => "Recents".into(),
         }
     }
 
@@ -92,7 +93,11 @@ impl PaneNames {
             TabItem::Settings(page) => vec!["settings".into(), page.label().into()],
             TabItem::SettingsFile(_) => vec!["settings".into(), self.tab_label(item)],
             TabItem::Spec(path) => vec![self.project.clone(), path.clone()],
-            TabItem::Chat | TabItem::Agent(_) | TabItem::Plan | TabItem::Search => {
+            TabItem::Chat
+            | TabItem::Agent(_)
+            | TabItem::Plan
+            | TabItem::Search
+            | TabItem::Recents => {
                 vec![self.project.clone(), self.tab_label(item)]
             }
         }
@@ -116,6 +121,7 @@ impl PaneNames {
             TabItem::Settings(_) => (UiIcon::Settings, Color::Placeholder),
             TabItem::SettingsFile(_) => (UiIcon::File, Color::Muted),
             TabItem::Search => (UiIcon::Search, Color::Placeholder),
+            TabItem::Recents => (UiIcon::Agents, Color::Placeholder),
         }
     }
 }
@@ -124,6 +130,6 @@ impl PaneNames {
 pub(super) const fn label_is_code(item: &TabItem) -> bool {
     !matches!(
         item,
-        TabItem::Chat | TabItem::Plan | TabItem::Settings(_) | TabItem::Search
+        TabItem::Chat | TabItem::Plan | TabItem::Settings(_) | TabItem::Search | TabItem::Recents
     )
 }

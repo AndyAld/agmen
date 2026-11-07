@@ -502,6 +502,164 @@ async fn resume_tree_quit_cancels_a_stuck_start_within_the_managed_deadline() {
     assert!(managed.launching.try_lock().is_ok());
 }
 
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "keeps the cancellation gate and retry assertions together"
+)]
+async fn resume_tree_cancelled_member_retry_keeps_its_parent_reservation() {
+    use crate::budget::Money;
+    use crate::launch::{AttachSpec, RunError, RunResult, RunSpec, Runner};
+    use std::future::Future;
+    use std::path::PathBuf;
+    use std::pin::Pin;
+
+    #[derive(Debug)]
+    struct PausedResume {
+        runner: Arc<FakeRunner>,
+        armed: Arc<std::sync::atomic::AtomicBool>,
+        calls: AtomicUsize,
+        reached: Arc<tokio::sync::Notify>,
+    }
+
+    impl Runner for PausedResume {
+        fn run(
+            &self,
+            spec: RunSpec,
+            stop: tokio::sync::oneshot::Receiver<()>,
+        ) -> Pin<Box<dyn Future<Output = Result<RunResult, RunError>> + Send>> {
+            self.runner.run(spec, stop)
+        }
+
+        fn attach(
+            &self,
+            spec: AttachSpec,
+        ) -> Pin<Box<dyn Future<Output = Result<(), RunError>> + Send + '_>> {
+            self.runner.attach(spec)
+        }
+
+        fn contains_peer(&self, pid: i32) -> bool {
+            self.runner.contains_peer(pid)
+        }
+
+        fn mcp_command(
+            &self,
+        ) -> Pin<Box<dyn Future<Output = Result<PathBuf, RunError>> + Send + '_>> {
+            Box::pin(async move {
+                if self.armed.load(Ordering::Acquire)
+                    && self.calls.fetch_add(1, Ordering::SeqCst) == 1
+                {
+                    self.reached.notify_one();
+                    std::future::pending::<()>().await;
+                }
+                self.runner.mcp_command().await
+            })
+        }
+    }
+
+    let (mut fixture, _) = tree_fixture().await;
+    let reached = Arc::new(tokio::sync::Notify::new());
+    let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    Arc::get_mut(&mut Arc::get_mut(&mut fixture.daemon.core).unwrap().managed)
+        .unwrap()
+        .runner = Arc::new(PausedResume {
+        runner: fixture.runner.clone(),
+        armed: armed.clone(),
+        calls: AtomicUsize::new(0),
+        reached: reached.clone(),
+    });
+    root(&fixture).await;
+    child_call(
+        &fixture,
+        "agent001",
+        "child_launch",
+        json!({"name":"k1","role":"chain","budget_usd":1}),
+    )
+    .await
+    .unwrap();
+    tier(&fixture, "kid00001", Some(Tier::Owner)).await;
+    child_call(
+        &fixture,
+        "kid00001",
+        "child_launch",
+        json!({"name":"k2","role":"chain","budget_usd":0.25}),
+    )
+    .await
+    .unwrap();
+    child_call(
+        &fixture,
+        "agent001",
+        "child_stop",
+        json!({"identity":"kid00001","subtree":false}),
+    )
+    .await
+    .unwrap();
+    let parent = worker_of(&fixture.daemon.core.managed, "agent001").await;
+    fixture
+        .daemon
+        .core
+        .managed
+        .stop_worker(parent.clone())
+        .await
+        .unwrap();
+    let quarter = Money::from_usd("0.25").unwrap();
+    assert_eq!(parent.lock().await.budget.reserved(), quarter);
+
+    armed.store(true, Ordering::Release);
+    let managed = &fixture.daemon.core.managed;
+    let (answer, ()) = tokio::time::timeout(RESUME_TEST_WAIT, async {
+        tokio::join!(
+            worker_call(
+                &fixture,
+                "agent_start",
+                json!({"identity":"agent001","subtree":true})
+            ),
+            async {
+                reached.notified().await;
+                // Drive quit's abandon signal without stopping the live descendant.
+                managed.abandon_launch.send_replace(true);
+            }
+        )
+    })
+    .await
+    .unwrap();
+    let answer = answer.unwrap();
+    assert_eq!(answer["started"], json!(["agent001"]));
+    assert_eq!(
+        answer["skipped"],
+        json!([
+            {"identity":"kid00001","reason":"daemon is shutting down"},
+            {"identity":"kid00002","reason":"daemon is shutting down"}
+        ])
+    );
+    assert_states(
+        &fixture,
+        &[
+            ("agent001", "idle"),
+            ("kid00001", "offline"),
+            ("kid00002", "idle"),
+        ],
+    )
+    .await;
+    assert_eq!(parent.lock().await.budget.reserved(), quarter);
+    let member = worker_of(managed, "kid00001").await;
+    assert_eq!(member.lock().await.reserved_from_parent, quarter);
+    managed.abandon_launch.send_replace(false);
+    let retried = tokio::time::timeout(
+        RESUME_TEST_WAIT,
+        worker_call(&fixture, "agent_start", json!({"identity":"kid00001"})),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(retried["state"], "idle");
+    assert_states(&fixture, &[("kid00001", "idle"), ("kid00002", "idle")]).await;
+    // Only the missing 0.75 USD is reserved, retaining the descendant's 0.25 USD once.
+    let cap = Money::from_usd("1.0").unwrap();
+    assert_eq!(parent.lock().await.budget.reserved(), cap);
+    assert_eq!(member.lock().await.reserved_from_parent, cap);
+}
+
 async fn listed(fixture: &Fixture) -> Value {
     worker_call(fixture, "agent_list", json!({})).await.unwrap()["agents"][0].clone()
 }
