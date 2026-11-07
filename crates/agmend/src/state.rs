@@ -575,6 +575,34 @@ impl Store {
         Ok(result)
     }
 
+    /// The saved position of `stream` if `owner` may deliver it and one exists.
+    pub(crate) fn saved_position(
+        &self,
+        origin: &str,
+        owner: &IdentityId,
+        project: &ProjectId,
+        stream: &Stream,
+    ) -> Result<Option<u64>, StoreError> {
+        if !self.can_deliver(origin, owner, project, stream)? {
+            return Ok(None);
+        }
+        let saved: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT seq FROM positions WHERE origin=?1 AND project=?2 AND stream=?3",
+                params![
+                    position_namespace(origin, Some(owner)),
+                    project.as_str(),
+                    stream.to_string()
+                ],
+                |row| row.get(0),
+            )
+            .optional()?;
+        saved
+            .map(|seq| u64::try_from(seq).map_err(|_| StoreError::Invalid("negative sequence")))
+            .transpose()
+    }
+
     pub(crate) fn positions_for_owner(
         &self,
         origin: &str,

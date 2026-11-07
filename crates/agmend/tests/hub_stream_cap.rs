@@ -510,14 +510,39 @@ async fn hub_drops_revoked_positions_and_delivers_all_live_inboxes() {
 async fn refusing_second_chunk(
     refusals: usize,
 ) -> (Daemon, std::sync::Arc<Proxy>, tokio::task::JoinHandle<()>) {
-    chunk_connections(refusals, None).await
+    chunk_connections(refusals, None, false).await
 }
+
+/// The same refusals with the collector's reconnect delays shortened, when the
+/// build has the hook; the retries are the same, only the waits between them.
+async fn quickly_retrying_second_chunk(
+    refusals: usize,
+) -> (Daemon, std::sync::Arc<Proxy>, tokio::task::JoinHandle<()>) {
+    chunk_connections(refusals, None, true).await
+}
+
+#[cfg(feature = "test-hooks")]
+fn shorten_hub_backoff(hub_url: &str) {
+    const RETRY_INITIAL: Duration = Duration::from_millis(10);
+    const RETRY_MAX: Duration = Duration::from_millis(80);
+    const RETRY_HEALTHY: Duration = Duration::from_secs(60);
+    agmend::test_hub_timing(
+        &hub_url.parse().unwrap(),
+        RETRY_INITIAL,
+        RETRY_MAX,
+        RETRY_HEALTHY,
+    );
+}
+
+#[cfg(not(feature = "test-hooks"))]
+fn shorten_hub_backoff(_hub_url: &str) {}
 
 type HeldHeaders = std::sync::Arc<(tokio::sync::Notify, tokio::sync::Notify)>;
 
 async fn chunk_connections(
     refusals: usize,
     held: Option<HeldHeaders>,
+    quick_retries: bool,
 ) -> (Daemon, std::sync::Arc<Proxy>, tokio::task::JoinHandle<()>) {
     let mut daemon = Daemon::seeded().await;
     daemon.pause().await;
@@ -572,6 +597,9 @@ async fn chunk_connections(
     .unwrap();
     daemon.hub.state.inject(inbox_message(1, 1));
     daemon.hub.state.inject(inbox_message(LIVE_IDENTITIES, 1));
+    if quick_retries {
+        shorten_hub_backoff(&proxy_url);
+    }
     daemon.resume();
     (daemon, state, server)
 }
@@ -601,7 +629,7 @@ async fn hub_first_chunk_delivers_during_second_chunk_refusal() {
 #[tokio::test]
 async fn hub_first_chunk_delivers_before_second_response_headers() {
     let held = HeldHeaders::default();
-    let (daemon, _, server) = chunk_connections(0, Some(held.clone())).await;
+    let (daemon, _, server) = chunk_connections(0, Some(held.clone()), false).await;
     tokio::time::timeout(CALL_WAIT, held.0.notified())
         .await
         .unwrap();
@@ -680,7 +708,7 @@ async fn person_only_collector_posts_a_project_stream_alert() {
 
 #[tokio::test]
 async fn hub_refusal_outlives_previous_retry_budget() {
-    let (daemon, state, server) = refusing_second_chunk(OLD_RETRY_BUDGET + 1).await;
+    let (daemon, state, server) = quickly_retrying_second_chunk(OLD_RETRY_BUDGET + 1).await;
     tokio::time::timeout(LONG_REFUSAL_WAIT, async {
         for _ in 0..LONG_REFUSAL_WAIT.as_secs() {
             if state
@@ -705,6 +733,60 @@ async fn hub_refusal_outlives_previous_retry_budget() {
     daemon.stop().await;
     server.abort();
     assert!(server.await.unwrap_err().is_cancelled());
+}
+
+#[cfg(feature = "test-hooks")]
+const BACKOFF_STEPS: u32 = 5;
+#[cfg(feature = "test-hooks")]
+const STREAM_WAIT: Duration = Duration::from_secs(10);
+
+#[cfg(feature = "test-hooks")]
+async fn wait_event_streams(daemon: &Daemon, expected: usize) {
+    tokio::time::timeout(STREAM_WAIT, async {
+        while daemon
+            .hub
+            .state
+            .event_streams
+            .load(std::sync::atomic::Ordering::SeqCst)
+            < expected
+        {
+            tokio::time::sleep(POSITION_POLL / 10).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("the collector never opened events connection {expected}"));
+}
+
+#[cfg(feature = "test-hooks")]
+#[tokio::test]
+async fn hub_backoff_starts_over_after_a_healthy_connection() {
+    const INITIAL: Duration = Duration::from_millis(50);
+    const MAX: Duration = Duration::from_millis(1600);
+    const HEALTHY: Duration = Duration::from_millis(400);
+    // Longer than HEALTHY, shorter than MAX, and well past INITIAL.
+    const UP_FOR: Duration = Duration::from_millis(600);
+    const RECONNECT_BY: Duration = Duration::from_millis(800);
+    let mut daemon = Daemon::seeded().await;
+    daemon.pause().await;
+    agmend::test_hub_timing(&daemon.hub.url.parse().unwrap(), INITIAL, MAX, HEALTHY);
+    daemon.resume();
+    // Each drop comes before HEALTHY, so the delay doubles up to MAX.
+    for n in 1..=BACKOFF_STEPS as usize {
+        wait_event_streams(&daemon, n).await;
+        daemon.hub.state.drop_streams();
+    }
+    let n = BACKOFF_STEPS as usize + 1;
+    wait_event_streams(&daemon, n).await;
+    tokio::time::sleep(UP_FOR).await;
+    daemon.hub.state.drop_streams();
+    let dropped = std::time::Instant::now();
+    wait_event_streams(&daemon, n + 1).await;
+    assert!(
+        dropped.elapsed() < RECONNECT_BY,
+        "reconnected after {:?}, not at the initial {INITIAL:?}",
+        dropped.elapsed()
+    );
+    daemon.stop().await;
 }
 
 const OTHER_OWNER_STREAMS: usize = agmen_local::safeguards::MAX_MANAGED;

@@ -263,6 +263,14 @@ impl Config {
     }
 }
 
+/// Shortens the hub reconnect delays of collectors started later for `hub_url`:
+/// the first delay, its cap, and how long a connection must stay up before the
+/// next drop starts over at the first delay.
+#[cfg(feature = "test-hooks")]
+pub fn test_hub_timing(hub_url: &url::Url, initial: Duration, max: Duration, healthy: Duration) {
+    identities::set_hub_timing(hub_url, initial, max, healthy);
+}
+
 /// A bound agmend, ready to serve.
 #[derive(Debug)]
 pub struct Agmend {

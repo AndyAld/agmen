@@ -51,12 +51,70 @@ const QUEUE_ALERT_MAX_BACKOFF: Duration = Duration::from_secs(30);
 const MAX_HUB_AFTER: usize = 256;
 const MAX_HUB_CONNECTIONS: usize = MAX_STREAM_POSITIONS.div_ceil(MAX_HUB_AFTER);
 const HUB_BACKOFF_SHIFT: u32 = 5;
+const HUB_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 const HUB_MAX_BACKOFF: Duration = Duration::from_secs(30);
+/// A hub connection that stayed up this long starts the next reconnect over at
+/// the initial delay.
+const HUB_HEALTHY: Duration = Duration::from_secs(60);
 const HUB_READ_WAIT: Duration = Duration::from_secs(45);
 /// How often a collector with skipped streams checks whether a position freed.
 const SKIPPED_RECHECK: Duration = Duration::from_secs(1);
 const HUB_EVENT_QUEUE: usize = 64;
 const HUB_PARSE_BYTES: usize = 16 * 1024;
+
+/// How a collector paces hub reconnects. Tests shorten it per hub origin.
+#[derive(Clone, Copy)]
+struct HubTiming {
+    initial: Duration,
+    max: Duration,
+    healthy: Duration,
+}
+
+impl HubTiming {
+    const DEFAULT: Self = Self {
+        initial: HUB_INITIAL_BACKOFF,
+        max: HUB_MAX_BACKOFF,
+        healthy: HUB_HEALTHY,
+    };
+
+    #[cfg(feature = "test-hooks")]
+    fn for_origin(origin: &str) -> Self {
+        HUB_TIMING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(origin)
+            .copied()
+            .unwrap_or(Self::DEFAULT)
+    }
+
+    #[cfg(not(feature = "test-hooks"))]
+    fn for_origin(_origin: &str) -> Self {
+        Self::DEFAULT
+    }
+
+    fn backoff(self, shift: u32) -> Duration {
+        self.initial.saturating_mul(1_u32 << shift).min(self.max)
+    }
+}
+
+#[cfg(feature = "test-hooks")]
+static HUB_TIMING: Mutex<BTreeMap<String, HubTiming>> = Mutex::new(BTreeMap::new());
+
+/// Shortens the reconnect delays of collectors started later for `hub_url`.
+#[cfg(feature = "test-hooks")]
+pub(crate) fn set_hub_timing(hub_url: &Url, initial: Duration, max: Duration, healthy: Duration) {
+    HUB_TIMING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(
+            agmen_client::origin_key(hub_url),
+            HubTiming {
+                initial,
+                max,
+                healthy,
+            },
+        );
+}
 
 type RuntimeKey = (String, IdentityId);
 type RuntimeSlot = Arc<AsyncMutex<Option<Runtime>>>;
@@ -851,6 +909,7 @@ impl Identities {
             owner: key.1.clone(),
             project: project.clone(),
             tx: tx.clone(),
+            timing: HubTiming::for_origin(&key.0),
         };
         if origin == crate::origin::Origin::Local {
             // Complete the first catch-up before a pending call can drain.
@@ -1616,6 +1675,21 @@ pub(crate) async fn store_work<T: Send + 'static>(
         .map_err(|_| hub_error("daemon state worker failed"))?
 }
 
+/// The positions split into the `after` sets of one SSE request each.
+fn hub_chunks(positions: &BTreeMap<Stream, u64>) -> Vec<BTreeMap<Stream, u64>> {
+    let mut chunks = vec![BTreeMap::new()];
+    for (n, (stream, seq)) in positions.iter().take(MAX_STREAM_POSITIONS).enumerate() {
+        let index = n / MAX_HUB_AFTER;
+        if index == chunks.len() {
+            chunks.push(BTreeMap::new());
+        }
+        if let Some(chunk) = chunks.get_mut(index) {
+            chunk.insert(stream.clone(), *seq);
+        }
+    }
+    chunks
+}
+
 struct Collection {
     hub: Arc<Hub>,
     origins: Arc<crate::origin::Origins>,
@@ -1624,6 +1698,7 @@ struct Collection {
     owner: IdentityId,
     project: ProjectId,
     tx: broadcast::Sender<WatchEvent>,
+    timing: HubTiming,
 }
 
 impl Collection {
@@ -1642,6 +1717,19 @@ impl Collection {
         let owner = self.owner.clone();
         store_work(self.store.clone(), move |s| {
             s.collection_positions(&origin, &owner, &project)
+        })
+        .await
+    }
+
+    /// The saved position of a stream this collector may deliver, without the
+    /// cleanup `collection_state` runs.
+    async fn saved_position(&self, stream: &Stream) -> Result<Option<u64>, ApiError> {
+        let origin = self.origin.clone();
+        let project = self.project.clone();
+        let owner = self.owner.clone();
+        let stream = stream.clone();
+        store_work(self.store.clone(), move |s| {
+            s.saved_position(&origin, &owner, &project, &stream)
         })
         .await
     }
@@ -1693,23 +1781,37 @@ impl Collection {
         &self,
         message: StampedEnvelope,
         skipped: &mut BTreeSet<Stream>,
+        cleaned: &mut tokio::time::Instant,
     ) -> Result<(), ApiError> {
         let stream = message.stream.clone();
-        let CollectionState {
-            positions,
-            streams: active,
-            room,
-        } = self.collection_state().await?;
-        // A freed position lets every skipped stream try again.
-        if room {
-            skipped.clear();
+        // The cleanup and room check take a write transaction. A deliverable
+        // stream with a saved position needs neither until a stream is skipped
+        // or SKIPPED_RECHECK has passed since the last one.
+        let saved = if skipped.is_empty() && cleaned.elapsed() < SKIPPED_RECHECK {
+            self.saved_position(&stream).await?
         } else {
-            skipped.retain(|stream| active.contains(stream));
-        }
-        if !active.contains(&stream) || skipped.contains(&stream) {
-            return Ok(());
-        }
-        let mut last = positions.get(&stream).copied().unwrap_or(0);
+            None
+        };
+        let mut last = if let Some(saved) = saved {
+            saved
+        } else {
+            let CollectionState {
+                positions,
+                streams: active,
+                room,
+            } = self.collection_state().await?;
+            *cleaned = tokio::time::Instant::now();
+            // A freed position lets every skipped stream try again.
+            if room {
+                skipped.clear();
+            } else {
+                skipped.retain(|stream| active.contains(stream));
+            }
+            if !active.contains(&stream) || skipped.contains(&stream) {
+                return Ok(());
+            }
+            positions.get(&stream).copied().unwrap_or(0)
+        };
         if message.seq.0 <= last {
             return Ok(());
         }
@@ -1766,16 +1868,23 @@ impl Collection {
                     return;
                 }
             };
-            let backoff = Duration::from_secs(1_u64 << backoff_shift).min(HUB_MAX_BACKOFF);
-            if let Err(error) = self
+            let backoff = self.timing.backoff(backoff_shift);
+            let healthy = match self
                 .hub_pass(positions, &mut warned_limit, &mut skipped, backoff)
                 .await
             {
-                self.send(Err(error));
-                return;
-            }
+                Ok(healthy) => healthy,
+                Err(error) => {
+                    self.send(Err(error));
+                    return;
+                }
+            };
             self.send(Ok(ClientEvent::Connection { connected: false }));
-            backoff_shift = (backoff_shift + 1).min(HUB_BACKOFF_SHIFT);
+            backoff_shift = if healthy {
+                0
+            } else {
+                (backoff_shift + 1).min(HUB_BACKOFF_SHIFT)
+            };
         }
     }
 
@@ -1785,17 +1894,8 @@ impl Collection {
         warned_limit: &mut bool,
         skipped: &mut BTreeSet<Stream>,
         backoff: Duration,
-    ) -> Result<(), ApiError> {
-        let mut chunks = vec![BTreeMap::new()];
-        for (n, (stream, seq)) in positions.iter().take(MAX_STREAM_POSITIONS).enumerate() {
-            let index = n / MAX_HUB_AFTER;
-            if index == chunks.len() {
-                chunks.push(BTreeMap::new());
-            }
-            if let Some(chunk) = chunks.get_mut(index) {
-                chunk.insert(stream.clone(), *seq);
-            }
-        }
+    ) -> Result<bool, ApiError> {
+        let chunks = hub_chunks(&positions);
         let (tx, mut rx) = mpsc::channel(HUB_EVENT_QUEUE);
         let mut readers = tokio::task::JoinSet::new();
         let secondary: BTreeSet<_> = chunks
@@ -1805,6 +1905,9 @@ impl Collection {
             .collect();
         let mut retry_at = None;
         let mut opened = 0;
+        let mut up_since = None;
+        let mut healthy = false;
+        let mut cleaned = tokio::time::Instant::now();
         'opening: for (index, chunk) in chunks.iter().enumerate().take(MAX_HUB_CONNECTIONS) {
             // The hub replays from seq 0 any stream `after` omits. Name other
             // streams too, up to its limit, so a short chunk does not make the
@@ -1828,6 +1931,7 @@ impl Collection {
                                 readers.spawn(read_hub_events(response, tx.clone(), assigned, index == 0));
                                 opened += 1;
                                 if opened == 1 {
+                                    up_since = Some(tokio::time::Instant::now());
                                     self.send(Ok(ClientEvent::Connection { connected: true }));
                                 }
                                 break;
@@ -1845,7 +1949,7 @@ impl Collection {
                         retry_at = Some(tokio::time::Instant::now() + backoff);
                         break 'opening;
                     },
-                    Some(message) = rx.recv() => self.accept(message, skipped).await?,
+                    Some(message) = rx.recv() => self.accept(message, skipped, &mut cleaned).await?,
                     ended = readers.join_next(), if !readers.is_empty() => {
                         reader_result(ended)?;
                         retry_at = Some(tokio::time::Instant::now() + backoff);
@@ -1869,7 +1973,7 @@ impl Collection {
         loop {
             tokio::select! {
                 event = rx.recv(), if receiving => match event {
-                    Some(message) => self.accept(message, skipped).await?,
+                    Some(message) => self.accept(message, skipped, &mut cleaned).await?,
                     None => { receiving = false; },
                 },
                 // The hub sends a skipped stream's backlog again only on a new
@@ -1877,19 +1981,24 @@ impl Collection {
                 _ = recheck.tick(), if !skipped.is_empty() => {
                     if self.collection_state().await?.room {
                         skipped.clear();
-                        return Ok(());
+                        return Ok(false);
                     }
                 },
                 ended = readers.join_next(), if !readers.is_empty() => {
                     reader_result(ended)?;
-                    retry_at.get_or_insert_with(|| tokio::time::Instant::now() + backoff);
+                    retry_at.get_or_insert_with(|| {
+                        // A connection that stayed up starts over at the initial delay.
+                        healthy = up_since.is_some_and(|since| since.elapsed() >= self.timing.healthy);
+                        let delay = if healthy { self.timing.initial } else { backoff };
+                        tokio::time::Instant::now() + delay
+                    });
                 },
                 () = async {
                     match retry_at {
                         Some(deadline) => tokio::time::sleep_until(deadline).await,
                         None => std::future::pending().await,
                     }
-                } => return Ok(()),
+                } => return Ok(healthy),
             }
         }
     }
@@ -2221,6 +2330,7 @@ mod local_collection_tests {
                 owner: person.id,
                 project: topics.project().clone(),
                 tx: broadcast::channel(WATCH_CAPACITY).0,
+                timing: HubTiming::DEFAULT,
             };
             Self {
                 _dir: dir,
@@ -2514,6 +2624,58 @@ mod local_collection_tests {
         })
         .await
         .unwrap();
+    }
+
+    fn feed_event(seq: u64) -> StampedEnvelope {
+        serde_json::from_value(json!({
+            "v":1,"id":"01JBX6Q4T7W3C2M8Y9K5N0P1RS","verb":"FYI","data":{},
+            "body":"already saved","sent_at":"2026-10-27T12:00:00Z",
+            "stream":"feed","seq":seq,"from":"sender01","from_handle":"sender",
+            "from_kind":"human","hub_at":"2026-10-27T12:00:00Z"
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn saved_stream_event_leaves_stale_positions_until_the_recheck() {
+        let f = Fixture::new().await;
+        let namespace = format!(
+            "{}#owner={}",
+            agmen_client::LOCAL_ORIGIN,
+            f.collection.owner
+        );
+        let project = f.collection.project.clone();
+        f.execute_state(format!(
+            "INSERT INTO positions VALUES ('{namespace}','{project}','feed',9);
+             INSERT INTO positions VALUES ('{namespace}','{project}','inbox:revoked001',1);"
+        ))
+        .await;
+        let stale = Stream::Inbox("revoked001".parse().unwrap());
+        let mut skipped = BTreeSet::new();
+        let mut cleaned = tokio::time::Instant::now();
+        f.collection
+            .accept(feed_event(3), &mut skipped, &mut cleaned)
+            .await
+            .unwrap();
+        // Not `positions()`, which is itself the cleanup.
+        let (owner, saved_project) = (f.collection.owner.clone(), project.clone());
+        let saved = store_work(f.collection.store.clone(), move |store| {
+            store.positions_for_owner(agmen_client::LOCAL_ORIGIN, &owner, &saved_project)
+        })
+        .await
+        .unwrap();
+        assert!(
+            saved.contains_key(&stale),
+            "a saved stream's event must not run the cleanup transaction"
+        );
+        // Once SKIPPED_RECHECK has passed, the next event cleans up.
+        cleaned = cleaned.checked_sub(SKIPPED_RECHECK).unwrap();
+        f.collection
+            .accept(feed_event(3), &mut skipped, &mut cleaned)
+            .await
+            .unwrap();
+        assert!(!f.collection.positions().await.unwrap().contains_key(&stale));
+        f.stop().await;
     }
 
     // The next three run no supervise task and no collector: a recorded row reaches
