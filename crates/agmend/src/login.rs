@@ -153,10 +153,15 @@ impl Credentials {
     /// stored and cached, and the next caller finds them. A caller that gives
     /// up while only waiting for the lock leaves without starting a renewal.
     ///
+    /// A renewal whose person signed out, or in as someone else, while the
+    /// hub renewed it is dropped: its tokens are neither stored nor cached,
+    /// and the call fails with `NotSignedIn`.
+    ///
     /// # Errors
     ///
-    /// [`LoginError::NotSignedIn`] when nobody is signed in or the hub no
-    /// longer takes the refresh token, else the store's or the hub's error.
+    /// [`LoginError::NotSignedIn`] when nobody is signed in, the hub no
+    /// longer takes the refresh token, or the person changed during the
+    /// renewal, else the store's or the hub's error.
     pub(crate) async fn access(&self) -> Result<(Login, String), LoginError> {
         let login = self.login().await?;
         let mut cache = self.cache.clone().lock_owned().await;
@@ -167,8 +172,9 @@ impl Credentials {
             return Ok((login, tokens.access_token().to_owned()));
         }
         let (http, store) = (self.http.clone(), self.store.clone());
+        let login_file = self.login_file.clone();
         tokio::spawn(async move {
-            let tokens = human_tokens(&http, &store, &login).await?;
+            let tokens = human_tokens(&http, &store, &login_file, &login).await?;
             let token = tokens.access_token().to_owned();
             *cache = Some((login.clone(), tokens));
             Ok((login, token))

@@ -246,11 +246,13 @@ pub(crate) async fn forget_login() -> Result<Option<Login>> {
 ///
 /// # Errors
 ///
-/// [`Fail::not_signed_in`] when nobody is signed in or the hub no longer
-/// takes the refresh token.
+/// [`Fail::not_signed_in`] when nobody is signed in, the hub no longer takes
+/// the refresh token, or the sign-in changed (a logout, or a login as someone
+/// else, in another process) while it was renewed.
 pub(crate) async fn human() -> Result<Human> {
     let login = read_login().await?.ok_or_else(Fail::not_signed_in)?;
-    let tokens = agmen_client::human_tokens(&http()?, &TokenStore::from_env(), &login)
+    let file = paths::login_file()?;
+    let tokens = agmen_client::human_tokens(&http()?, &TokenStore::from_env(), &file, &login)
         .await
         .map_err(|err| match err {
             // The renewal's own call to the hub failed: the CLI has always

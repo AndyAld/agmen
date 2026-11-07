@@ -56,12 +56,23 @@ async fn hub_url_policy_token_grant() {
 
 /// A token endpoint that answers `status` with `body` and counts calls.
 async fn token_endpoint(status: StatusCode, body: &'static str) -> (Url, Arc<AtomicUsize>) {
+    token_endpoint_during(status, body, || {}).await
+}
+
+/// Like `token_endpoint`, and runs `during` as each call arrives: what
+/// another process can do while the hub renews.
+async fn token_endpoint_during(
+    status: StatusCode,
+    body: &'static str,
+    during: impl Fn() + Clone + Send + Sync + 'static,
+) -> (Url, Arc<AtomicUsize>) {
     let calls = Arc::new(AtomicUsize::new(0));
     let counter = calls.clone();
     let app = Router::new().route(
         "/v1/auth/token",
         post(move |form: String| {
             counter.fetch_add(1, Ordering::SeqCst);
+            during();
             assert!(form.contains("grant_type=refresh_token"), "{form}");
             assert!(form.contains("refresh_token=old-refresh"), "{form}");
             async move { (status, [("content-type", "application/json")], body) }
@@ -86,14 +97,20 @@ async fn stored(store: &TokenStore, login: &Login, expires_in: i64) {
     store_tokens(store, login, &tokens).await.unwrap();
 }
 
+/// Writes the login file as `agmen login` leaves it.
+fn signed_in(file: &Path, login: &Login) {
+    std::fs::write(file, serde_json::to_vec(login).unwrap()).unwrap();
+}
+
 #[tokio::test]
 async fn fresh_tokens_are_used_as_stored() {
     let (hub, calls) = token_endpoint(StatusCode::OK, "{}").await;
     let dir = tempfile::tempdir().unwrap();
     let store = TokenStore::Dir(dir.path().into());
+    let file = dir.path().join("login.json");
     let login = login(hub);
     stored(&store, &login, 3600).await;
-    let tokens = human_tokens(&reqwest::Client::new(), &store, &login)
+    let tokens = human_tokens(&reqwest::Client::new(), &store, &file, &login)
         .await
         .unwrap();
     assert_eq!(tokens.access_token(), "old-access");
@@ -109,14 +126,16 @@ async fn expiring_tokens_are_renewed_and_stored() {
     .await;
     let dir = tempfile::tempdir().unwrap();
     let store = TokenStore::Dir(dir.path().into());
+    let file = dir.path().join("login.json");
     let login = login(hub);
+    signed_in(&file, &login);
     stored(&store, &login, 30).await;
     let http = reqwest::Client::new();
-    let tokens = human_tokens(&http, &store, &login).await.unwrap();
+    let tokens = human_tokens(&http, &store, &file, &login).await.unwrap();
     assert_eq!(tokens.access_token(), "new-access");
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     // The renewed pair was stored, so the next read does not renew again.
-    let again = human_tokens(&http, &store, &login).await.unwrap();
+    let again = human_tokens(&http, &store, &file, &login).await.unwrap();
     assert_eq!(again.access_token(), "new-access");
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
@@ -126,9 +145,10 @@ async fn a_refused_refresh_is_not_signed_in() {
     let (hub, _) = token_endpoint(StatusCode::BAD_REQUEST, r#"{"error":"invalid_grant"}"#).await;
     let dir = tempfile::tempdir().unwrap();
     let store = TokenStore::Dir(dir.path().into());
+    let file = dir.path().join("login.json");
     let login = login(hub);
     stored(&store, &login, 30).await;
-    let err = human_tokens(&reqwest::Client::new(), &store, &login)
+    let err = human_tokens(&reqwest::Client::new(), &store, &file, &login)
         .await
         .unwrap_err();
     assert!(matches!(err, LoginError::NotSignedIn), "{err:?}");
@@ -138,11 +158,74 @@ async fn a_refused_refresh_is_not_signed_in() {
 async fn no_stored_tokens_is_not_signed_in() {
     let dir = tempfile::tempdir().unwrap();
     let store = TokenStore::Dir(dir.path().into());
+    let file = dir.path().join("login.json");
     let login = login("http://127.0.0.1:9".parse().unwrap());
-    let err = human_tokens(&reqwest::Client::new(), &store, &login)
+    let err = human_tokens(&reqwest::Client::new(), &store, &file, &login)
         .await
         .unwrap_err();
     assert!(matches!(err, LoginError::NotSignedIn), "{err:?}");
+}
+
+#[tokio::test]
+async fn a_renewal_after_a_logout_is_dropped() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = TokenStore::Dir(dir.path().join("tokens"));
+    let file = dir.path().join("login.json");
+    // `agmen logout` in another process while the hub renews: the tokens go,
+    // then the login file.
+    let (hub, calls) = token_endpoint_during(StatusCode::OK, GRANTED, {
+        let (store, file) = (store.clone(), file.clone());
+        move || {
+            let login = Login::read(&file).unwrap().unwrap();
+            store.delete(&login.key().unwrap()).unwrap();
+            std::fs::remove_file(&file).unwrap();
+        }
+    })
+    .await;
+    let login = login(hub);
+    signed_in(&file, &login);
+    stored(&store, &login, 30).await;
+    let err = human_tokens(&reqwest::Client::new(), &store, &file, &login)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, LoginError::NotSignedIn), "{err:?}");
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "the hub spent the grant");
+    assert_eq!(store.get(&login.key().unwrap()).unwrap(), None);
+    assert!(!file.exists());
+}
+
+#[tokio::test]
+async fn a_renewal_is_dropped_when_the_login_file_names_someone_else() {
+    // The tokens stay in the store; only the login file moves on, to another
+    // person or to another path on the same hub (which shares the key).
+    let changes: [fn(&mut Login); 2] = [
+        |login| login.human_id = "hmn0new1".parse().unwrap(),
+        |login| login.hub_url = login.hub_url.join("other/").unwrap(),
+    ];
+    for change in changes {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TokenStore::Dir(dir.path().join("tokens"));
+        let file = dir.path().join("login.json");
+        let (hub, calls) = token_endpoint_during(StatusCode::OK, GRANTED, {
+            let file = file.clone();
+            move || {
+                let mut login = Login::read(&file).unwrap().unwrap();
+                change(&mut login);
+                signed_in(&file, &login);
+            }
+        })
+        .await;
+        let login = login(hub);
+        signed_in(&file, &login);
+        stored(&store, &login, 30).await;
+        let before = store.get(&login.key().unwrap()).unwrap();
+        let err = human_tokens(&reqwest::Client::new(), &store, &file, &login)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, LoginError::NotSignedIn), "{err:?}");
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "the hub spent the grant");
+        assert_eq!(store.get(&login.key().unwrap()).unwrap(), before);
+    }
 }
 
 #[test]

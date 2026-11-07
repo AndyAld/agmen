@@ -7,7 +7,9 @@
 //! the hub's origin and the person's id (rulings R17 and R42), and are sent
 //! only to that hub. The access token lasts 1 hour; a reader renews it with
 //! the refresh grant shortly before it runs out. The hub replaces the
-//! refresh token on every use, so the renewed pair is stored at once.
+//! refresh token on every use, so the renewed pair is stored at once, unless
+//! the person signed out, or in as someone else, while the hub renewed it
+//! (then the pair is dropped).
 
 use std::path::{Path, PathBuf};
 
@@ -367,12 +369,24 @@ pub async fn save_login(
 /// `login`'s tokens from `store`, renewed through the hub first when the
 /// access token is about to run out (the renewed pair is stored).
 ///
+/// The hub spends the refresh token before the renewed pair is stored, and
+/// `agmen logout`, or `agmen login` as someone else, can run in another
+/// process meanwhile. So the pair is stored only if `login_file` still names
+/// `login`'s person at `login`'s hub and their tokens are still in `store`.
+/// The check runs inside the store's write, as late as the store allows (a
+/// directory store runs it after the new file is written and synced, just
+/// before it replaces the old one). Nothing locks the login file and the
+/// store against another process, so a logout or login that lands in that
+/// last gap is not seen.
+///
 /// ```no_run
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// use agmen_client::{Login, TokenStore, human_tokens, login_file};
 ///
-/// let login = Login::read(&login_file()?)?.ok_or("not signed in")?;
-/// let tokens = human_tokens(&reqwest::Client::new(), &TokenStore::from_env(), &login).await?;
+/// let file = login_file()?;
+/// let login = Login::read(&file)?.ok_or("not signed in")?;
+/// let store = TokenStore::from_env();
+/// let tokens = human_tokens(&reqwest::Client::new(), &store, &file, &login).await?;
 /// println!("token good until {}", tokens.expires_at());
 /// # Ok(()) }
 /// ```
@@ -380,11 +394,14 @@ pub async fn save_login(
 /// # Errors
 ///
 /// [`LoginError::NotSignedIn`] when the store has no readable tokens for
-/// `login` or the hub refuses the refresh token (400), else the error of
-/// the store or the hub.
+/// `login`, the hub refuses the refresh token (400), or the person signed out
+/// or in as someone else while the hub renewed them (the renewed pair is
+/// dropped and logged at info), else the error of the store, the login file or
+/// the hub.
 pub async fn human_tokens(
     http: &reqwest::Client,
     store: &TokenStore,
+    login_file: &Path,
     login: &Login,
 ) -> Result<HumanTokens, LoginError> {
     crate::check_hub_url(&login.hub_url)?;
@@ -408,8 +425,57 @@ pub async fn human_tokens(
         Err(LoginError::Refused { status: 400, .. }) => return Err(LoginError::NotSignedIn),
         Err(err) => return Err(err),
     };
-    store_tokens(store, login, &renewed).await?;
+    if !store_renewed(store, login_file, login, &renewed).await? {
+        // The log holds no token, or part of one.
+        tracing::info!(
+            "discarded a renewed token pair: the sign-in changed while the hub renewed it"
+        );
+        return Err(LoginError::NotSignedIn);
+    }
     Ok(renewed)
+}
+
+/// Stores `renewed` as `login`'s tokens if `login` is still the signed-in
+/// person, and says whether it did. The check runs inside the store's write
+/// with no await between it and the write ([`TokenStore::set_if`]).
+async fn store_renewed(
+    store: &TokenStore,
+    login_file: &Path,
+    login: &Login,
+    renewed: &HumanTokens,
+) -> Result<bool, LoginError> {
+    let key = login.key().map_err(LoginError::Key)?;
+    let json = serde_json::to_string(renewed).map_err(LoginError::Encode)?;
+    let (store, login_file, login) = (store.clone(), login_file.to_owned(), login.clone());
+    tokio::task::spawn_blocking(move || {
+        let mut unconfirmed = None;
+        let stored = store
+            .set_if(&key, &json, || {
+                still_signed_in(&store, &key, &login_file, &login).unwrap_or_else(|error| {
+                    unconfirmed = Some(error);
+                    false
+                })
+            })
+            .map_err(LoginError::StoreWrite)?;
+        unconfirmed.map_or(Ok(stored), Err)
+    })
+    .await
+    .map_err(LoginError::Join)?
+}
+
+/// Whether `login` is still the signed-in person: the login file names the
+/// same person at the same hub, and their tokens are still in `store`. The
+/// CLI's logout deletes the tokens before it removes the login file, so tokens
+/// already gone mean a logout is under way.
+fn still_signed_in(
+    store: &TokenStore,
+    key: &TokenKey,
+    login_file: &Path,
+    login: &Login,
+) -> Result<bool, LoginError> {
+    let same = Login::read(login_file)?
+        .is_some_and(|now| now.human_id == login.human_id && now.hub_url == login.hub_url);
+    Ok(same && store.get(key).map_err(LoginError::StoreRead)?.is_some())
 }
 
 #[cfg(test)]

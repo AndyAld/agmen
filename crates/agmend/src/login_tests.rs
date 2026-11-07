@@ -198,6 +198,26 @@ impl RefreshFixture {
         self.home.dir.path()
     }
 
+    /// What the store holds for `login`, as written.
+    fn stored(&self, login: &Login) -> Option<String> {
+        self.home.store().get(&login.key().unwrap()).unwrap()
+    }
+
+    /// The first step of `agmen logout`, which runs in the CLI's process.
+    fn delete_tokens(&self) {
+        self.home
+            .store()
+            .delete(&self.login.key().unwrap())
+            .unwrap();
+    }
+
+    /// How many files the token store's folder holds, staged ones included.
+    fn store_files(&self) -> usize {
+        std::fs::read_dir(self.dir().join("tokens"))
+            .unwrap()
+            .count()
+    }
+
     pub(crate) async fn finish_refresh(&self) {
         assert_eq!(self.refresh.calls.load(Ordering::SeqCst), 1);
         self.refresh.release.notify_one();
@@ -680,4 +700,198 @@ async fn shutdown_does_not_wait_past_its_bound_for_a_hung_hub() {
         waited >= Duration::from_secs(10),
         "agmend left after {waited:?} with the renewal still in flight"
     );
+}
+
+/// Starts a renewal and waits until the hub holds its refresh grant.
+async fn renewal_in_flight(
+    fixture: &RefreshFixture,
+) -> JoinHandle<Result<(Login, String), LoginError>> {
+    let hub = fixture.daemon.core.origins.hub().clone();
+    let renewal = tokio::spawn(async move { hub.credentials().access().await });
+    tokio::time::timeout(Duration::from_secs(2), fixture.refresh.started.notified())
+        .await
+        .expect("the hub must see the refresh");
+    renewal
+}
+
+async fn cache_is_empty(fixture: &RefreshFixture) -> bool {
+    let hub = fixture.daemon.core.origins.hub();
+    hub.credentials().cache.lock().await.is_none()
+}
+
+/// What the tracing subscriber wrote, to read back.
+#[derive(Clone, Default)]
+struct LogBytes(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogBytes {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBytes {
+    type Writer = Self;
+    fn make_writer(&'a self) -> Self {
+        self.clone()
+    }
+}
+
+impl LogBytes {
+    /// Captures this thread's events up to INFO until the guard drops.
+    fn capture() -> (Self, tracing::subscriber::DefaultGuard) {
+        let logs = Self::default();
+        let guard = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .without_time()
+                .with_ansi(false)
+                .with_max_level(tracing::Level::INFO)
+                .with_writer(logs.clone())
+                .finish(),
+        );
+        (logs, guard)
+    }
+
+    fn text(&self) -> String {
+        String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+    }
+}
+
+#[tokio::test]
+async fn a_logout_during_a_renewal_leaves_no_token_pair() {
+    let (logs, _capture) = LogBytes::capture();
+    let fixture = RefreshFixture::new().await;
+    let renewal = renewal_in_flight(&fixture).await;
+    // `agmen logout`: the tokens go, then the login file.
+    fixture.delete_tokens();
+    std::fs::remove_file(fixture.home.login_file()).unwrap();
+    fixture.refresh.release.notify_one();
+    let outcome = renewal.await.unwrap();
+    assert!(
+        matches!(outcome, Err(LoginError::NotSignedIn)),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        fixture.stored(&fixture.login),
+        None,
+        "the store holds a pair after the logout"
+    );
+    assert_eq!(fixture.store_files(), 0, "the store folder is not empty");
+    assert!(
+        cache_is_empty(&fixture).await,
+        "the cache holds a pair after the logout"
+    );
+    assert!(!fixture.home.login_file().exists());
+    let text = logs.text();
+    assert!(
+        text.contains("INFO") && text.contains("discarded"),
+        "{text}"
+    );
+    for secret in ["old-access", "old-refresh", "new-access", "new-refresh"] {
+        assert!(!text.contains(secret), "{text}");
+    }
+}
+
+#[tokio::test]
+async fn a_logout_under_way_during_a_renewal_discards_it() {
+    // `agmen logout` deletes the tokens before the login file, so a renewal
+    // that checks in between finds the file still there.
+    let fixture = RefreshFixture::new().await;
+    let renewal = renewal_in_flight(&fixture).await;
+    fixture.delete_tokens();
+    fixture.refresh.release.notify_one();
+    let outcome = renewal.await.unwrap();
+    assert!(
+        matches!(outcome, Err(LoginError::NotSignedIn)),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        fixture.stored(&fixture.login),
+        None,
+        "the pair was written back after the logout began"
+    );
+    assert!(cache_is_empty(&fixture).await);
+}
+
+#[tokio::test]
+async fn a_login_as_another_account_during_a_renewal_keeps_the_new_pair() {
+    let fixture = RefreshFixture::new().await;
+    let renewal = renewal_in_flight(&fixture).await;
+    // `agmen login` as someone else: the old tokens go, then the new pair
+    // and the login file are written.
+    let other = Login {
+        hub_url: fixture.login.hub_url.clone(),
+        human_id: "hmn0new1".parse().unwrap(),
+        handle: "other".into(),
+    };
+    let pair = HumanTokens::new("other-access".into(), "other-refresh".into(), 3600);
+    save_login(
+        &fixture.home.store(),
+        &fixture.home.login_file(),
+        &other,
+        &pair,
+    )
+    .await
+    .unwrap();
+    let saved = fixture.stored(&other);
+    assert!(saved.is_some());
+    fixture.refresh.release.notify_one();
+    let outcome = renewal.await.unwrap();
+    assert!(
+        matches!(outcome, Err(LoginError::NotSignedIn)),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        fixture.stored(&fixture.login),
+        None,
+        "the old account's pair came back"
+    );
+    assert_eq!(
+        fixture.stored(&other),
+        saved,
+        "the new account's pair changed"
+    );
+    assert_eq!(
+        fixture.store_files(),
+        1,
+        "the store holds more than the new pair"
+    );
+    assert_eq!(
+        Login::read(&fixture.home.login_file()).unwrap(),
+        Some(other.clone())
+    );
+    assert!(cache_is_empty(&fixture).await);
+    // agmend serves the new account from its untouched pair, with no second
+    // refresh.
+    let hub = fixture.daemon.core.origins.hub();
+    let (login, access) = hub.credentials().access().await.unwrap();
+    assert_eq!((login, access.as_str()), (other, "other-access"));
+    assert_eq!(fixture.refresh.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn a_renewal_for_an_unchanged_login_is_stored_and_cached() {
+    let (logs, _capture) = LogBytes::capture();
+    let fixture = RefreshFixture::new().await;
+    let renewal = renewal_in_flight(&fixture).await;
+    fixture.refresh.release.notify_one();
+    let (login, access) = renewal.await.unwrap().unwrap();
+    assert_eq!(login, fixture.login);
+    assert_eq!(access, "new-access");
+    let stored = fixture.stored(&fixture.login).unwrap();
+    let stored: Value = serde_json::from_str(&stored).unwrap();
+    assert_eq!(stored["access_token"], "new-access");
+    assert_eq!(stored["refresh_token"], "new-refresh");
+    let hub = fixture.daemon.core.origins.hub();
+    let cache = hub.credentials().cache.lock().await;
+    assert!(
+        cache.as_ref().is_some_and(|(cached, tokens)| {
+            *cached == fixture.login && tokens.access_token() == "new-access"
+        }),
+        "the renewed pair is not cached"
+    );
+    assert!(!logs.text().contains("discarded"), "{}", logs.text());
 }
