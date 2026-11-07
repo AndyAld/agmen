@@ -43,4 +43,4 @@ axum = { version = "0.8.9", default-features = false, features = ["tokio", "http
 rmcp = { version = "3.7.0", features = ["client"] }
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "postgres"] }
 tempfile = "3.27.0"
-tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "process", "io-util"] }
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "process", "io-util", "test-util"] }

@@ -16,3 +16,7 @@ pub use message::{API, ApiError, ErrorCode, HelloAnswer, Outcome, ReadyAnswer, R
 
 /// The largest frame body either side accepts or sends, in bytes.
 pub const MAX_FRAME: u32 = 16 * 1024 * 1024;
+
+/// The idle interval between identity watch keepalive frames. agmend sends one
+/// after this long without a frame; the CLI reconnects after twice this long.
+pub const WATCH_KEEPALIVE: std::time::Duration = std::time::Duration::from_secs(30);

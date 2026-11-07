@@ -1,10 +1,15 @@
 //! An identity's authenticated calls to the local origin through agmend.
 
-use std::path::PathBuf;
+use std::collections::BTreeMap;
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use agmen_client::{ClientEvent, IdentityFile, Page, TokenStore, read_local_credential};
+use agmen_client::{
+    ClientEvent, Cursors, IdentityFile, Page, STATE_DB, TokenStore, read_local_credential,
+};
 use agmen_local::ErrorCode;
 use agmen_proto::{ClientEnvelope, IdentityId, ProjectId, Stream};
 use anyhow::{Context as _, Result};
@@ -25,6 +30,97 @@ const WATCH_RECONNECT_ATTEMPTS: usize = 5;
 const WATCH_RECONNECT_WAIT: Duration = Duration::from_secs(1);
 const WATCH_SEND_WAIT: Duration = Duration::from_secs(5);
 
+/// What an agmend from before watch resume answers a `watch` that carries
+/// `after`: its watch params are `{project}` with `deny_unknown_fields`, and
+/// the console wraps serde's complaint as `bad_request` text
+/// `bad params: {error}`. No other refusal means that agmend is older.
+const OLDER_AGMEND_REFUSAL: &str = "bad params: unknown field `after`, expected `project`";
+const OLDER_AGMEND_NOTICE: &str =
+    "agmend is older and cannot resume a watch; resume is off until agmend restarts";
+
+/// Whether this process has said that agmend is older, whichever link met it.
+static OLDER_AGMEND_SAID: AtomicBool = AtomicBool::new(false);
+
+#[derive(Debug)]
+struct WatchResume {
+    cursors: Option<Cursors>,
+    positions: BTreeMap<Stream, u64>,
+    /// Whether the open connection was asked to resume from `positions`. An
+    /// agmend from before resume starts at the heads and replays nothing, so
+    /// on its connection a message may skip ahead of `positions`.
+    resumed: bool,
+    said: &'static AtomicBool,
+}
+
+/// Where a local watch keeps its place across reconnects. agmend keeps none:
+/// each watch starts after the seqs this side sends. Only `agmen watch` owns
+/// the identity's durable delivery cursors (`agmen.db` in its state folder).
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum WatchState<'a> {
+    /// `agmen watch`: starts after the saved cursors in this state folder and
+    /// saves each seq once the message is queued for output.
+    Delivery(&'a Path),
+    /// `agmen mcp`: wakes tools. Starts at the current heads and keeps its
+    /// place in memory, so it never moves the delivery cursors.
+    Notifications,
+}
+
+impl WatchResume {
+    /// Records how a connection opened. The first connection in this process
+    /// to an agmend that cannot resume gets one line: `agmen watch`, the only
+    /// reader with delivery cursors, prints it to stderr and leaves its stdout
+    /// lines alone; `agmen mcp` logs it and never answers a tool with it.
+    /// Every reconnect asks to resume again, so resume returns once agmend
+    /// restarts on a version that takes `after`.
+    fn opened(&mut self, resumed: bool) {
+        self.resumed = resumed;
+        if resumed || self.said.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        if self.cursors.is_some() {
+            // eprintln! panics on a broken pipe, and a notice must not end the watch.
+            let _printed = writeln!(std::io::stderr(), "agmen: {OLDER_AGMEND_NOTICE}");
+        } else {
+            tracing::warn!("{OLDER_AGMEND_NOTICE}");
+        }
+    }
+
+    async fn deliver(&mut self, tx: &mpsc::Sender<ClientEvent>, event: ClientEvent) -> bool {
+        let position = if let ClientEvent::Message { message } = &event {
+            let Some(last) = self.positions.get(&message.stream) else {
+                tracing::warn!("local watch received another identity's stream");
+                return false;
+            };
+            if message.seq.0 <= *last {
+                return true;
+            }
+            if self.resumed && message.seq.0 != last.saturating_add(1) {
+                tracing::warn!("local watch received a sequence gap");
+                return false;
+            }
+            Some((message.stream.clone(), message.seq.0))
+        } else {
+            None
+        };
+        if !watch_send(tx, event).await {
+            return false;
+        }
+        // Save after sending: a crash between the two repeats a message, never loses one.
+        if let Some((stream, seq)) = position {
+            if let Some(cursors) = self.cursors.clone() {
+                let saved_stream = stream.clone();
+                if let Err(error) = blocking(move || Ok(cursors.skip_to(&saved_stream, seq)?)).await
+                {
+                    tracing::warn!(%error, "saving local watch cursor failed");
+                    return false;
+                }
+            }
+            self.positions.insert(stream, seq);
+        }
+        true
+    }
+}
+
 /// Credentials stay here and are never sent to a hub or broker.
 #[derive(Debug)]
 pub(crate) struct LocalLink {
@@ -33,6 +129,7 @@ pub(crate) struct LocalLink {
     project: ProjectId,
     token: LocalToken,
     watch_task: Mutex<Option<JoinHandle<()>>>,
+    said: &'static AtomicBool,
 }
 
 impl LocalLink {
@@ -69,15 +166,57 @@ impl LocalLink {
             project: identity.project.clone(),
             token,
             watch_task: Mutex::new(None),
+            said: &OLDER_AGMEND_SAID,
         })
     }
 
     /// Reads authenticated local events without opening a broker connection.
     /// Dropping the receiver or this link closes the watch and its presence.
-    pub(crate) async fn watch(&self) -> Result<mpsc::Receiver<ClientEvent>> {
-        let watch = open_watch(&self.socket, &self.identity, &self.project, &self.token)
-            .await
-            .map_err(|error| local_error(redact_error(error, &self.token)))?;
+    /// An agmend from before resume gets a watch without it, and one notice.
+    pub(crate) async fn watch(&self, state: WatchState<'_>) -> Result<mpsc::Receiver<ClientEvent>> {
+        let streams = [Stream::Feed, Stream::Inbox(self.identity.clone())];
+        let mut resume = match state {
+            WatchState::Delivery(dir) => {
+                let (dir, said) = (dir.to_owned(), self.said);
+                blocking(move || {
+                    std::fs::create_dir_all(&dir).context("creating local watch state folder")?;
+                    let cursors = Cursors::open(dir.join(STATE_DB))?;
+                    let mut positions = BTreeMap::new();
+                    for stream in streams {
+                        positions.insert(stream.clone(), cursors.last(&stream)?);
+                    }
+                    Ok(WatchResume {
+                        cursors: Some(cursors),
+                        positions,
+                        resumed: true,
+                        said,
+                    })
+                })
+                .await?
+            }
+            WatchState::Notifications => {
+                let mut positions = BTreeMap::new();
+                for stream in streams {
+                    positions.insert(stream.clone(), self.page(&stream, 0, 1).await?.head);
+                }
+                WatchResume {
+                    cursors: None,
+                    positions,
+                    resumed: true,
+                    said: self.said,
+                }
+            }
+        };
+        let (watch, resumed) = open_watch(
+            &self.socket,
+            &self.identity,
+            &self.project,
+            &self.token,
+            &resume.positions,
+        )
+        .await
+        .map_err(|error| local_error(redact_error(error, &self.token)))?;
+        resume.opened(resumed);
         let (tx, rx) = mpsc::channel(WATCH_CAPACITY);
         let (socket, identity, project, token) = (
             self.socket.clone(),
@@ -93,7 +232,7 @@ impl LocalLink {
             previous.abort();
         }
         *held = Some(tokio::spawn(async move {
-            follow_watch(watch, tx, socket, identity, project, token).await;
+            follow_watch(watch, tx, socket, identity, project, token, resume).await;
         }));
         Ok(rx)
     }
@@ -178,6 +317,8 @@ impl LocalLink {
             project: identity.project.clone(),
             token,
             watch_task: Mutex::new(None),
+            // Its own flag, so one test's notice does not silence another's.
+            said: Box::leak(Box::new(AtomicBool::new(false))),
         }
     }
 }
@@ -194,16 +335,37 @@ impl Drop for LocalLink {
     }
 }
 
+/// Opens a watch that resumes after `after`, and says whether it does. An
+/// agmend from before resume refuses `after`, and only that, with
+/// [`OLDER_AGMEND_REFUSAL`]. The watch then opens again as it did before
+/// resume: at the heads, and with no limit on silence, since that agmend
+/// sends no keepalive.
 async fn open_watch(
     socket: &std::path::Path,
     identity: &IdentityId,
     project: &ProjectId,
     token: &LocalToken,
-) -> Result<Watch, AgmendError> {
-    Agmend::connect_checked(socket)
+    after: &BTreeMap<Stream, u64>,
+) -> Result<(Watch, bool), AgmendError> {
+    let resuming = json!({"project": project, "after": after});
+    match Agmend::connect_checked(socket)
         .await?
-        .watch_as(identity, token, json!({"project": project}))
+        .watch_as(identity, token, resuming)
         .await
+    {
+        Ok(watch) => Ok((watch, true)),
+        Err(AgmendError::Refused {
+            code: ErrorCode::BadRequest,
+            message,
+        }) if message == OLDER_AGMEND_REFUSAL => {
+            let watch = Agmend::connect_checked(socket)
+                .await?
+                .watch_as(identity, token, json!({"project": project}))
+                .await?;
+            Ok((watch.without_keepalive(), false))
+        }
+        Err(error) => Err(error),
+    }
 }
 
 async fn watch_send(tx: &mpsc::Sender<ClientEvent>, event: ClientEvent) -> bool {
@@ -220,6 +382,7 @@ async fn follow_watch(
     identity: IdentityId,
     project: ProjectId,
     token: LocalToken,
+    mut resume: WatchResume,
 ) {
     let mut watch = Some(watch);
     if !watch_send(&tx, ClientEvent::Connection { connected: true }).await {
@@ -235,7 +398,7 @@ async fn follow_watch(
         };
         match result {
             Ok(event) => {
-                if !watch_send(&tx, event).await {
+                if !resume.deliver(&tx, event).await {
                     return;
                 }
                 continue;
@@ -258,11 +421,12 @@ async fn follow_watch(
                 () = tx.closed() => return,
                 result = async {
                     tokio::time::sleep(WATCH_RECONNECT_WAIT).await;
-                    open_watch(&socket, &identity, &project, &token).await
+                    open_watch(&socket, &identity, &project, &token, &resume.positions).await
                 } => result,
             };
             match result {
-                Ok(next) => {
+                Ok((next, resumed)) => {
+                    resume.opened(resumed);
                     watch = Some(next);
                     break;
                 }
@@ -308,3 +472,11 @@ fn local_error(error: AgmendError) -> anyhow::Error {
         other => other.into(),
     }
 }
+
+#[cfg(test)]
+#[path = "local_link_tests.rs"]
+mod tests;
+
+#[cfg(test)]
+#[path = "local_link_older_tests.rs"]
+mod older_tests;
