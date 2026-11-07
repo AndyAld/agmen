@@ -1,6 +1,8 @@
 //! This machine's lazy coordination record and its owned lease sweeper.
 
 use std::collections::BTreeMap;
+use std::fs::{self, File, OpenOptions};
+use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -96,12 +98,33 @@ impl LocalOrigin {
         let path = self.path.clone();
         let create = handle_hint.is_some();
         let store = tokio::task::spawn_blocking(move || {
+            let marker = path.with_file_name("local-origin-created");
+            let found = fs::metadata(&path);
             if !create {
-                match std::fs::metadata(&path) {
+                match &found {
                     Ok(_) => {}
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        // Only a missing marker proves this machine never had a local
+                        // origin. Unreadable entries and dangling links fail closed.
+                        return match fs::symlink_metadata(&marker) {
+                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                            _ => Err(failed(
+                                "local origin was created here but local.db is missing",
+                            )),
+                        };
+                    }
                     Err(error) => return Err(failed(error)),
                 }
+            }
+            if let Err(error) = mark_created(&marker) {
+                // A new local.db waits for its marker. One that already works opens without it.
+                if found.is_err() {
+                    return Err(failed(error));
+                }
+                tracing::warn!(
+                    %error,
+                    "the local origin marker could not be written; opening local.db without it"
+                );
             }
             // Inspect committed WAL frames before SQLite can recover or checkpoint them.
             if let Some(version) =
@@ -485,6 +508,40 @@ impl LocalOrigin {
             tracing::warn!("stopping the local origin reached its deadline");
         }
     }
+}
+
+/// Keep origin history in the daemon's state folder, independent of database
+/// restores and SQLite sidecars. A marker an earlier run synced is left alone.
+/// A link or folder in its place is refused, never followed.
+fn mark_created(marker: &Path) -> std::io::Result<()> {
+    match fs::symlink_metadata(marker) {
+        Ok(found) if found.is_file() => return Ok(()),
+        Ok(_) => {
+            return Err(std::io::Error::other(
+                "local-origin-created is not a regular file",
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let parent = marker
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| std::io::Error::other("local origin marker has no state folder"))?;
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(parent)?;
+    // create_new fails on anything already at the path, so a link planted since
+    // the check above is not followed either.
+    let file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(marker)?;
+    file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    file.sync_all()?;
+    File::open(parent)?.sync_all()
 }
 
 async fn supervise_sweeper<F, Fut, E>(mut sweep: F, retry: Duration)

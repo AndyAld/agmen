@@ -537,7 +537,13 @@ signed-in hub login for a hub project.
 The origin key `local` names this machine's record in `local.db`, beside
 `agmend.db`. The first successful `local_project_create` creates the record.
 Starting agmend or reading an absent local origin does not create the file.
-Once it exists, `ready` includes `"local.db":1` in `schemas`, and rollback
+Before it creates `local.db`, agmend writes an empty marker, `local-origin-created`,
+beside `agmend.db`, with mode 0600, and syncs the file and the folder. The marker
+lives outside the database and its SQLite sidecars, so deleting or restoring only
+`local.db` keeps it. If agmend cannot write the marker, it does not create
+`local.db`. An existing `local.db` without a marker gets one when agmend next
+opens it, and still opens if that write fails.
+Once `local.db` exists, `ready` includes `"local.db":1` in `schemas`, and rollback
 snapshots include its path and schema version. Both report the file's actual
 version, so a newer file shows as `"local.db":2` and `ready` still succeeds.
 Calls that need the local record give `version` with a message naming
@@ -576,10 +582,14 @@ record and every other project to the hub. The result keeps the console's
 shape. A project absent from this machine, with no hub login, gives `not_found`
 whose message names both `this machine` and `not signed in to a hub` and ends
 with ``(run `agmen login`)``. `chat_history`, `post` and `console_watch` route
-and answer the same way. When `local.db` exists but cannot be read, a project
-with a local identity never goes to the hub: `agmend.db` holds a row for it under
-the origin key `local`, and the call gives `version` naming `local.db` before any
-hub read. A read of `agmend.db` that fails or takes longer than 3 s counts as a row. A
+and answer the same way. When `local.db` does not hold a project, a project with
+a local identity never goes to the hub: `agmend.db` holds a row for it under the
+origin key `local`, and the call gives `version` naming `local.db` before any hub
+read. A read of `agmend.db` that fails or takes longer than 3 s counts as a row.
+A project with no such row goes to the hub when `local.db` is readable but lacks
+it, and when neither `local.db` nor `local-origin-created` exists, because the
+machine never had a local origin. A marker that cannot be read counts as present.
+When `local.db` cannot be read, or is missing while the marker is present, a
 person-only local project, one with no such row, goes to the hub only if the
 signed-in hub's roster lists the person, a read that carries no message body and
 is limited to 3 s; agmend trusts its own hub for that placement. With no login, a
