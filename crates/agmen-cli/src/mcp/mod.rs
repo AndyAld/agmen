@@ -796,7 +796,9 @@ impl Shared {
         let stopped = Arc::new(AtomicBool::new(false));
         let (session, pump) = if let Some(local) = &mut agent.local {
             local.socket = options.state_base.join(agmen_client::AGMEND_SOCKET);
-            let events = local.watch().await?;
+            let events = local
+                .watch(crate::local_link::WatchState::Notifications)
+                .await?;
             (
                 None,
                 Task::spawn(pump_local(events, answered.clone(), stopped.clone())),

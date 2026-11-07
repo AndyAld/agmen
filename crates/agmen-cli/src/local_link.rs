@@ -1,10 +1,13 @@
 //! An identity's authenticated calls to the local origin through agmend.
 
-use std::path::PathBuf;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
-use agmen_client::{ClientEvent, IdentityFile, Page, TokenStore, read_local_credential};
+use agmen_client::{
+    ClientEvent, Cursors, IdentityFile, Page, STATE_DB, TokenStore, read_local_credential,
+};
 use agmen_local::ErrorCode;
 use agmen_proto::{ClientEnvelope, IdentityId, ProjectId, Stream};
 use anyhow::{Context as _, Result};
@@ -24,6 +27,62 @@ const WATCH_MAX_EVENTS: usize = 1_000_000;
 const WATCH_RECONNECT_ATTEMPTS: usize = 5;
 const WATCH_RECONNECT_WAIT: Duration = Duration::from_secs(1);
 const WATCH_SEND_WAIT: Duration = Duration::from_secs(5);
+
+#[derive(Debug)]
+struct WatchResume {
+    cursors: Option<Cursors>,
+    positions: BTreeMap<Stream, u64>,
+}
+
+/// Where a local watch keeps its place across reconnects. agmend keeps none:
+/// each watch starts after the seqs this side sends. Only `agmen watch` owns
+/// the identity's durable delivery cursors (`agmen.db` in its state folder).
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum WatchState<'a> {
+    /// `agmen watch`: starts after the saved cursors in this state folder and
+    /// saves each seq once the message is queued for output.
+    Delivery(&'a Path),
+    /// `agmen mcp`: wakes tools. Starts at the current heads and keeps its
+    /// place in memory, so it never moves the delivery cursors.
+    Notifications,
+}
+
+impl WatchResume {
+    async fn deliver(&mut self, tx: &mpsc::Sender<ClientEvent>, event: ClientEvent) -> bool {
+        let position = if let ClientEvent::Message { message } = &event {
+            let Some(last) = self.positions.get(&message.stream) else {
+                tracing::warn!("local watch received another identity's stream");
+                return false;
+            };
+            if message.seq.0 <= *last {
+                return true;
+            }
+            if message.seq.0 != last.saturating_add(1) {
+                tracing::warn!("local watch received a sequence gap");
+                return false;
+            }
+            Some((message.stream.clone(), message.seq.0))
+        } else {
+            None
+        };
+        if !watch_send(tx, event).await {
+            return false;
+        }
+        // Save after sending: a crash between the two repeats a message, never loses one.
+        if let Some((stream, seq)) = position {
+            if let Some(cursors) = self.cursors.clone() {
+                let saved_stream = stream.clone();
+                if let Err(error) = blocking(move || Ok(cursors.skip_to(&saved_stream, seq)?)).await
+                {
+                    tracing::warn!(%error, "saving local watch cursor failed");
+                    return false;
+                }
+            }
+            self.positions.insert(stream, seq);
+        }
+        true
+    }
+}
 
 /// Credentials stay here and are never sent to a hub or broker.
 #[derive(Debug)]
@@ -74,10 +133,45 @@ impl LocalLink {
 
     /// Reads authenticated local events without opening a broker connection.
     /// Dropping the receiver or this link closes the watch and its presence.
-    pub(crate) async fn watch(&self) -> Result<mpsc::Receiver<ClientEvent>> {
-        let watch = open_watch(&self.socket, &self.identity, &self.project, &self.token)
-            .await
-            .map_err(|error| local_error(redact_error(error, &self.token)))?;
+    pub(crate) async fn watch(&self, state: WatchState<'_>) -> Result<mpsc::Receiver<ClientEvent>> {
+        let streams = [Stream::Feed, Stream::Inbox(self.identity.clone())];
+        let resume = match state {
+            WatchState::Delivery(dir) => {
+                let dir = dir.to_owned();
+                blocking(move || {
+                    std::fs::create_dir_all(&dir).context("creating local watch state folder")?;
+                    let cursors = Cursors::open(dir.join(STATE_DB))?;
+                    let mut positions = BTreeMap::new();
+                    for stream in streams {
+                        positions.insert(stream.clone(), cursors.last(&stream)?);
+                    }
+                    Ok(WatchResume {
+                        cursors: Some(cursors),
+                        positions,
+                    })
+                })
+                .await?
+            }
+            WatchState::Notifications => {
+                let mut positions = BTreeMap::new();
+                for stream in streams {
+                    positions.insert(stream.clone(), self.page(&stream, 0, 1).await?.head);
+                }
+                WatchResume {
+                    cursors: None,
+                    positions,
+                }
+            }
+        };
+        let watch = open_watch(
+            &self.socket,
+            &self.identity,
+            &self.project,
+            &self.token,
+            &resume.positions,
+        )
+        .await
+        .map_err(|error| local_error(redact_error(error, &self.token)))?;
         let (tx, rx) = mpsc::channel(WATCH_CAPACITY);
         let (socket, identity, project, token) = (
             self.socket.clone(),
@@ -93,7 +187,7 @@ impl LocalLink {
             previous.abort();
         }
         *held = Some(tokio::spawn(async move {
-            follow_watch(watch, tx, socket, identity, project, token).await;
+            follow_watch(watch, tx, socket, identity, project, token, resume).await;
         }));
         Ok(rx)
     }
@@ -199,10 +293,11 @@ async fn open_watch(
     identity: &IdentityId,
     project: &ProjectId,
     token: &LocalToken,
+    after: &BTreeMap<Stream, u64>,
 ) -> Result<Watch, AgmendError> {
     Agmend::connect_checked(socket)
         .await?
-        .watch_as(identity, token, json!({"project": project}))
+        .watch_as(identity, token, json!({"project": project, "after": after}))
         .await
 }
 
@@ -220,6 +315,7 @@ async fn follow_watch(
     identity: IdentityId,
     project: ProjectId,
     token: LocalToken,
+    mut resume: WatchResume,
 ) {
     let mut watch = Some(watch);
     if !watch_send(&tx, ClientEvent::Connection { connected: true }).await {
@@ -235,7 +331,7 @@ async fn follow_watch(
         };
         match result {
             Ok(event) => {
-                if !watch_send(&tx, event).await {
+                if !resume.deliver(&tx, event).await {
                     return;
                 }
                 continue;
@@ -258,7 +354,7 @@ async fn follow_watch(
                 () = tx.closed() => return,
                 result = async {
                     tokio::time::sleep(WATCH_RECONNECT_WAIT).await;
-                    open_watch(&socket, &identity, &project, &token).await
+                    open_watch(&socket, &identity, &project, &token, &resume.positions).await
                 } => result,
             };
             match result {
@@ -308,3 +404,7 @@ fn local_error(error: AgmendError) -> anyhow::Error {
         other => other.into(),
     }
 }
+
+#[cfg(test)]
+#[path = "local_link_tests.rs"]
+mod tests;

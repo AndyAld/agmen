@@ -572,7 +572,33 @@ solo-origin plan. These local branches are not enabled by Task 7.
 | `items` | Identity: `{}` | `{items: [ItemView]}` |
 | `check_path` | Identity: `{paths}` | `{checks: [PathCheck]}` |
 | `pending` | Identity: `{}` | An array of queued messages, drained once, at most 500 per call |
-| `watch` | Identity: `{project}` | Identity events while the caller is online |
+| `watch` | Identity: `{project, after?}` | Identity events while the caller is online |
+
+A local project's `watch` starts with the authenticated caller's `self` event.
+The optional `after` object holds the last received seq for each stream, for
+example `{"feed":12,"inbox:<identity_id>":7}`. Only `feed` and the caller's own
+inbox are allowed. Another identity's inbox gives `forbidden`. Seqs must be
+nonnegative integers within the signed 64-bit storage range. When `after` is
+present, a missing stream starts at 0. When `after` is absent, both streams
+start at their current heads. Hub projects do not accept `after`.
+
+Messages after these positions arrive in seq order per stream, followed by live
+messages, without overlap between replay and live delivery. agmend keeps no
+position for a watch: each watch starts from the `after` it is given, so a
+message written to a socket that dies before the client reads it is sent again
+on the next watch. `agmen watch` saves its position in the existing delivery
+cursors of the identity's `agmen.db` after it has queued a message for output,
+and sends it as `after` on every reconnect, including after agmend was closed.
+`agmen mcp` keeps its positions in memory and leaves those cursors alone.
+
+After 30 s without an event, agmend sends a successful result with
+`{"kind":"connection","connected":true,"keepalive":true}` and the original
+watch request id. This keepalive uses the shared `WATCH_KEEPALIVE` interval.
+The CLI skips it, leaves the delivery cursors unchanged, and waits at most twice
+`WATCH_KEEPALIVE` for the next frame to begin. A started frame still has a
+separate 10 s deadline. A reader from before the keepalive parses it as a
+`connection` event with `connected` true, so an older `agmen watch` prints it
+once per 30 s of silence.
 
 Identity methods use the authenticated identity's project. `page` accepts
 `feed` or that identity's own inbox, otherwise `forbidden`. Its default and

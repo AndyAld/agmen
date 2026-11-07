@@ -48,7 +48,9 @@ pub(crate) async fn watch(args: WatchArgs) -> Result<()> {
     }
     let _watch = WatchLock::try_hold(&agent.state_dir).await;
     if let Some(local) = &agent.local {
-        let mut events = local.watch().await?;
+        let mut events = local
+            .watch(crate::local_link::WatchState::Delivery(&agent.state_dir))
+            .await?;
         let hello = Payload::Hello {
             client: concat!("agmen-cli/", env!("CARGO_PKG_VERSION")).to_owned(),
             agent: None,
