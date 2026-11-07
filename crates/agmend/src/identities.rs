@@ -50,6 +50,9 @@ const QUEUE_ALERT_MAX_BACKOFF: Duration = Duration::from_secs(30);
 /// agmen-hub's events endpoint refuses more positions in one SSE request.
 const MAX_HUB_AFTER: usize = 256;
 const MAX_HUB_CONNECTIONS: usize = MAX_STREAM_POSITIONS.div_ceil(MAX_HUB_AFTER);
+/// Discarded cursors live only for this collector. Beyond this bound, replay
+/// remains preferable to retaining an unbounded set of remote stream names.
+const MAX_HUB_SEEN_HEADS: usize = MAX_HUB_AFTER * MAX_HUB_CONNECTIONS;
 const HUB_BACKOFF_SHIFT: u32 = 5;
 const HUB_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 const HUB_MAX_BACKOFF: Duration = Duration::from_secs(30);
@@ -1690,6 +1693,42 @@ fn hub_chunks(positions: &BTreeMap<Stream, u64>) -> Vec<BTreeMap<Stream, u64>> {
     chunks
 }
 
+/// Every connection receives every readable stream. Fill each request with
+/// deliverable cursors first, then as many discarded heads as it can name.
+fn hub_after(
+    chunk: &BTreeMap<Stream, u64>,
+    state: &CollectionState,
+    skipped: &BTreeSet<Stream>,
+    seen: &BTreeMap<Stream, u64>,
+) -> BTreeMap<Stream, u64> {
+    let mut after = chunk.clone();
+    for (stream, seq) in state.positions.iter().take(MAX_STREAM_POSITIONS) {
+        if after.len() >= MAX_HUB_AFTER {
+            break;
+        }
+        after.entry(stream.clone()).or_insert(*seq);
+    }
+    // Active streams without a saved position still take priority over heads
+    // of discarded messages, without opening connections just for zero cursors.
+    for stream in &state.streams {
+        if after.len() >= MAX_HUB_AFTER {
+            break;
+        }
+        if !skipped.contains(stream) {
+            after.entry(stream.clone()).or_insert(0);
+        }
+    }
+    // A new connection cannot suppress replay on another request that has no
+    // room for these heads. Leave that overflow replay rather than add sockets.
+    for (stream, seq) in seen {
+        if after.len() >= MAX_HUB_AFTER {
+            break;
+        }
+        after.entry(stream.clone()).or_insert(*seq);
+    }
+    after
+}
+
 struct Collection {
     hub: Arc<Hub>,
     origins: Arc<crate::origin::Origins>,
@@ -1707,6 +1746,7 @@ impl Collection {
         let _receivers = self.tx.send((None, event));
     }
 
+    #[cfg(test)]
     async fn positions(&self) -> Result<BTreeMap<Stream, u64>, ApiError> {
         self.collection_state().await.map(|state| state.positions)
     }
@@ -1782,7 +1822,7 @@ impl Collection {
         message: StampedEnvelope,
         skipped: &mut BTreeSet<Stream>,
         cleaned: &mut tokio::time::Instant,
-    ) -> Result<(), ApiError> {
+    ) -> Result<bool, ApiError> {
         let stream = message.stream.clone();
         // The cleanup and room check take a write transaction. A deliverable
         // stream with a saved position needs neither until a stream is skipped
@@ -1808,20 +1848,21 @@ impl Collection {
                 skipped.retain(|stream| active.contains(stream));
             }
             if !active.contains(&stream) || skipped.contains(&stream) {
-                return Ok(());
+                return Ok(false);
             }
             positions.get(&stream).copied().unwrap_or(0)
         };
         if message.seq.0 <= last {
-            return Ok(());
+            return Ok(true);
         }
         // At most 100 pages per catch-up, committing progress after each row.
         for _ in 0..100 {
             if message.seq.0 == last.saturating_add(1) {
                 if !self.commit(message).await? {
                     skipped.insert(stream);
+                    return Ok(false);
                 }
-                return Ok(());
+                return Ok(true);
             }
             let page = tokio::time::timeout(
                 DEADLINE,
@@ -1839,15 +1880,34 @@ impl Collection {
                 last = row.seq.0;
                 if !self.commit(row).await? {
                     skipped.insert(stream);
-                    return Ok(());
+                    return Ok(false);
                 }
                 if last >= message.seq.0 {
-                    return Ok(());
+                    return Ok(true);
                 }
             }
             tokio::task::yield_now().await;
         }
         Err(hub_error("gap replay incomplete after 100 pages"))
+    }
+
+    async fn accept_hub(
+        &self,
+        message: StampedEnvelope,
+        skipped: &mut BTreeSet<Stream>,
+        cleaned: &mut tokio::time::Instant,
+        seen: &mut BTreeMap<Stream, u64>,
+    ) -> Result<(), ApiError> {
+        let stream = message.stream.clone();
+        let seq = message.seq.0;
+        if self.accept(message, skipped, cleaned).await? {
+            seen.remove(&stream);
+        } else if let Some(head) = seen.get_mut(&stream) {
+            *head = (*head).max(seq);
+        } else if seen.len() < MAX_HUB_SEEN_HEADS {
+            seen.insert(stream, seq);
+        }
+        Ok(())
     }
 
     async fn run(self) {
@@ -1860,9 +1920,20 @@ impl Collection {
         let mut warned_limit = false;
         let mut backoff_shift = 0;
         let mut skipped = BTreeSet::new();
+        let mut seen = BTreeMap::new();
         loop {
-            let positions = match self.positions().await {
-                Ok(p) => p,
+            let state = match self.collection_state().await {
+                Ok(state) => {
+                    if state.room {
+                        skipped.clear();
+                    }
+                    // A re-picked stream resumes at its durable cursor (or
+                    // zero), never at a head of messages we only discarded.
+                    seen.retain(|stream, _| {
+                        !state.streams.contains(stream) || skipped.contains(stream)
+                    });
+                    state
+                }
                 Err(error) => {
                     self.send(Err(error));
                     return;
@@ -1870,7 +1941,7 @@ impl Collection {
             };
             let backoff = self.timing.backoff(backoff_shift);
             let healthy = match self
-                .hub_pass(positions, &mut warned_limit, &mut skipped, backoff)
+                .hub_pass(state, &mut warned_limit, &mut skipped, &mut seen, backoff)
                 .await
             {
                 Ok(healthy) => healthy,
@@ -1890,12 +1961,13 @@ impl Collection {
 
     async fn hub_pass(
         &self,
-        positions: BTreeMap<Stream, u64>,
+        state: CollectionState,
         warned_limit: &mut bool,
         skipped: &mut BTreeSet<Stream>,
+        seen: &mut BTreeMap<Stream, u64>,
         backoff: Duration,
     ) -> Result<bool, ApiError> {
-        let chunks = hub_chunks(&positions);
+        let chunks = hub_chunks(&state.positions);
         let (tx, mut rx) = mpsc::channel(HUB_EVENT_QUEUE);
         let mut readers = tokio::task::JoinSet::new();
         let secondary: BTreeSet<_> = chunks
@@ -1909,16 +1981,7 @@ impl Collection {
         let mut healthy = false;
         let mut cleaned = tokio::time::Instant::now();
         'opening: for (index, chunk) in chunks.iter().enumerate().take(MAX_HUB_CONNECTIONS) {
-            // The hub replays from seq 0 any stream `after` omits. Name other
-            // streams too, up to its limit, so a short chunk does not make the
-            // hub resend their whole history on every reconnect.
-            let mut after = chunk.clone();
-            for (stream, seq) in positions.iter().take(MAX_STREAM_POSITIONS) {
-                if after.len() >= MAX_HUB_AFTER {
-                    break;
-                }
-                after.entry(stream.clone()).or_insert(*seq);
-            }
+            let after = hub_after(chunk, &state, skipped, seen);
             let opening =
                 tokio::time::timeout(DEADLINE, self.hub.events(&self.project, &after, None));
             tokio::pin!(opening);
@@ -1949,7 +2012,7 @@ impl Collection {
                         retry_at = Some(tokio::time::Instant::now() + backoff);
                         break 'opening;
                     },
-                    Some(message) = rx.recv() => self.accept(message, skipped, &mut cleaned).await?,
+                    Some(message) = rx.recv() => self.accept_hub(message, skipped, &mut cleaned, seen).await?,
                     ended = readers.join_next(), if !readers.is_empty() => {
                         reader_result(ended)?;
                         retry_at = Some(tokio::time::Instant::now() + backoff);
@@ -1973,13 +2036,16 @@ impl Collection {
         loop {
             tokio::select! {
                 event = rx.recv(), if receiving => match event {
-                    Some(message) => self.accept(message, skipped, &mut cleaned).await?,
+                    Some(message) => self.accept_hub(message, skipped, &mut cleaned, seen).await?,
                     None => { receiving = false; },
                 },
                 // The hub sends a skipped stream's backlog again only on a new
                 // connection, so reconnect once a position has freed.
-                _ = recheck.tick(), if !skipped.is_empty() => {
-                    if self.collection_state().await?.room {
+                _ = recheck.tick(), if !skipped.is_empty() || !seen.is_empty() => {
+                    let state = self.collection_state().await?;
+                    if (state.room && !skipped.is_empty())
+                        || seen.keys().any(|stream| state.streams.contains(stream) && !skipped.contains(stream))
+                    {
                         skipped.clear();
                         return Ok(false);
                     }
