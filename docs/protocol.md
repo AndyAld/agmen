@@ -511,7 +511,8 @@ Once it exists, `ready` includes `"local.db":1` in `schemas`, and rollback
 snapshots include its path and schema version. Both report the file's actual
 version, so a newer file shows as `"local.db":2` and `ready` still succeeds.
 Calls that need the local record give `version` with a message naming
-`local.db`. Hub projects remain available.
+`local.db`. Hub projects remain available while the hub confirms them, as
+described for the console methods below.
 
 The local person has one fixed ID and handle. At creation, the handle comes
 from the hub login when present, otherwise the OS user name. ASCII letters
@@ -538,7 +539,13 @@ matching the hub's PUT body. Invalid lanes give `bad_request`.
 record and every other project to the hub. The result keeps the console's
 `{project, me, roster, messages, older, roles, worktrees, git, listener, changes}`
 shape. A project absent from this machine, with no hub login, gives `not_found`
-whose message names both `this machine` and `not signed in to a hub`.
+whose message names both `this machine` and `not signed in to a hub` and ends
+with ``(run `agmen login`)``. `chat_history`, `post` and `console_watch` route
+and answer the same way. When `local.db` exists but cannot be read, a project
+goes to the hub only if the signed-in hub's roster lists the person, a read that
+carries no message body and is limited to 3 s. With no login, a hub refusal or
+error, or a timeout, the call gives `version` naming `local.db` and sends no
+message to the hub.
 
 The remaining local method contract is implemented by Tasks 8 to 10 of the
 solo-origin plan. These local branches are not enabled by Task 7.

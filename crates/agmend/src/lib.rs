@@ -351,7 +351,7 @@ impl Agmend {
             LocalOrigin::new(&config.socket.with_file_name(""), config.local_claim_lease),
             hub.clone(),
         );
-        let feeds = Feeds::new(hub.clone(), config.roster_every);
+        let feeds = Feeds::new(origins.clone(), config.roster_every);
         let bound = socket::bind(&config.socket)?;
         let path = config.socket.with_file_name("agmend.db");
         let database = path.clone();
