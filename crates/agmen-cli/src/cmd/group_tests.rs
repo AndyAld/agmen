@@ -2,7 +2,7 @@ use anyhow::anyhow;
 
 use super::{
     Billed, BillingStep, PlanChoice, SeatDelta, absent_state_failure, billing_error, billing_step,
-    no_billing_to_show, seat_change_outcome, seat_target, seats_lines,
+    no_billing_to_show, repay_choice, seat_change_outcome, seat_target, seats_lines,
 };
 use crate::client::Refusal;
 use crate::output::explain;
@@ -242,6 +242,37 @@ fn group_billing_refusals_map_paddle() {
     ] {
         assert_billing_refusal(case.0, case.1, case.2, case.3, case.4);
     }
+}
+
+#[test]
+fn group_repay_choice_team_preserves_paid_seats() {
+    assert_eq!(repay_choice(Some("team"), 6), ("team", Some(6)));
+}
+
+#[test]
+fn group_repay_choice_business_25_preserves_paid_seats() {
+    assert_eq!(
+        repay_choice(Some("business-25"), 25),
+        ("business", Some(25))
+    );
+}
+
+#[test]
+fn group_repay_choice_business_50_preserves_paid_seats() {
+    assert_eq!(
+        repay_choice(Some("business-50"), 50),
+        ("business", Some(50))
+    );
+}
+
+#[test]
+fn group_repay_choice_null_starts_team() {
+    assert_eq!(repay_choice(None, 0), ("team", None));
+}
+
+#[test]
+fn group_repay_choice_unknown_starts_team() {
+    assert_eq!(repay_choice(Some("unknown"), 25), ("team", None));
 }
 
 #[test]
