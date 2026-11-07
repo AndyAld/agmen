@@ -176,7 +176,9 @@ async fn cancelling_daemon_serving_future_stops_its_fake_hub() {
     let pid_file = base.join("pid");
     std::fs::write(
         &script,
-        format!("#!/bin/sh\necho $$ > {:?}\nexec /bin/sleep 120\n", pid_file),
+        format!(
+            "#!/bin/sh\necho $$ >{pid_file:?}.tmp\nmv {pid_file:?}.tmp {pid_file:?}\nexec /bin/sleep 120\n"
+        ),
     )
     .unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
