@@ -624,17 +624,41 @@ impl Listeners {
             (self.mint(&request.project, login, &role).await?, true)
         };
         if let Err(error) = identities.register(identity.clone()).await {
-            // A committed local mint with no registered row would answer "already
-            // running" to every retry, so revoke it. The hub path is unchanged.
-            if minted
-                && agmen_client::is_local(&identity.hub_url)
-                && let Err(revoke) = self
-                    .origins
-                    .local()
-                    .revoke(&identity.project, &identity.identity_id)
-                    .await
-            {
-                tracing::warn!(code = ?revoke.code, "revoking an unregistered local listener failed");
+            // A live mint without a registered row makes every later start
+            // answer "already running". Only roll back this start's new mint.
+            if minted {
+                if agmen_client::is_local(&identity.hub_url) {
+                    if let Err(revoke) = self
+                        .origins
+                        .local()
+                        .revoke(&identity.project, &identity.identity_id)
+                        .await
+                    {
+                        tracing::warn!(code = ?revoke.code, "revoking an unregistered local listener failed");
+                    }
+                } else {
+                    // Hub error bodies can contain arbitrary text; log no token.
+                    if self
+                        .hub
+                        .revoke_identity(&identity.identity_id)
+                        .await
+                        .is_err()
+                    {
+                        tracing::warn!(identity = %identity.identity_id,
+                            "revoking an unregistered hub listener failed");
+                    }
+                    // The mint stored its credential; drop it with the revoked id.
+                    if self
+                        .hub
+                        .credentials()
+                        .delete_token(&identity.hub_url, &identity.identity_id)
+                        .await
+                        .is_err()
+                    {
+                        tracing::warn!(identity = %identity.identity_id,
+                            "deleting an unregistered hub listener's credential failed");
+                    }
+                }
             }
             return Err(error);
         }

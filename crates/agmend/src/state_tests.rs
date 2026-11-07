@@ -876,7 +876,7 @@ fn registration_and_stream_counts_are_bounded() {
     extra = who.clone();
     extra.owner_id = "other001".parse().unwrap();
     assert!(store.register(&extra).is_err());
-    for n in 0..256 {
+    for n in 0..258 {
         let mut event = message(1);
         event.stream = Stream::Inbox(format!("inbox{n:03}").parse().unwrap());
         store.ingest(ORIGIN, &who.project, &event).unwrap();
@@ -885,7 +885,7 @@ fn registration_and_stream_counts_are_bounded() {
         store.ingest(ORIGIN, &who.project, &message(1)),
         Err(StoreError::Full(_))
     ));
-    assert_eq!(store.positions(ORIGIN, &who.project).unwrap().len(), 256);
+    assert_eq!(store.positions(ORIGIN, &who.project).unwrap().len(), 258);
 }
 
 #[test]
@@ -1029,9 +1029,16 @@ fn owner_position_namespaces_preserve_project_quota() {
             .len(),
         128
     );
+    for seq in 256..258 {
+        let mut event = message(1);
+        event.stream = Stream::Inbox(format!("stream{seq:03}").parse().unwrap());
+        store
+            .ingest_for_owner(ORIGIN, &who.project, &event, Some(&other))
+            .unwrap();
+    }
     assert!(matches!(
         store.ingest_for_owner(ORIGIN, &who.project, &message(1), Some(&other)),
-        Err(StoreError::Full("256 stream positions"))
+        Err(StoreError::Full("258 stream positions"))
     ));
 }
 
@@ -1209,4 +1216,57 @@ fn identity_lookup_is_keyed_by_origin_and_project() {
             .has_identity("local", &"project3".parse().unwrap())
             .unwrap()
     );
+}
+
+#[test]
+fn inbox_ingest_skips_only_identities_the_addressing_rules_reject() {
+    // ingest_for_owner skips an identity before decoding it when an inbox cannot
+    // reach it. Every kind, recipient and sender must still match addressed_to.
+    let (_dir, mut store, who) = setup();
+    let identities = [
+        ("agent001", IdentityKind::Agent),
+        ("coord001", IdentityKind::Coordinator),
+        ("listen01", IdentityKind::Listener),
+    ];
+    for (id, kind) in identities {
+        let mut next = who.clone();
+        next.identity_id = id.parse().unwrap();
+        next.kind = kind;
+        store.register(&next).unwrap();
+    }
+    let mut sent = Vec::new();
+    for recipient in ["agent001", "coord001", "listen01", "owner001", "other001"] {
+        for (n, from) in ["sender01", "owner001", "agent001", "listen01"]
+            .into_iter()
+            .enumerate()
+        {
+            let mut event = message(n as u64 + 1);
+            event.client.id = format!("{:026}", sent.len() + 1).parse().unwrap();
+            event.stream = Stream::Inbox(recipient.parse().unwrap());
+            event.client.to = vec![recipient.parse().unwrap()];
+            event.from = from.parse().unwrap();
+            store.ingest(ORIGIN, &who.project, &event).unwrap();
+            sent.push(event);
+        }
+    }
+    for (id, kind) in identities {
+        let id: IdentityId = id.parse().unwrap();
+        let mut expected: Vec<_> = sent
+            .iter()
+            .filter(|m| m.from != id && addressed_to(m, &id, "owner001", kind, None).unwrap())
+            .map(|m| m.client.id.as_str().to_owned())
+            .collect();
+        let mut got: Vec<_> = store
+            .drain(ORIGIN, &id, 500, usize::MAX)
+            .unwrap()
+            .iter()
+            .map(|m| m.client.id.as_str().to_owned())
+            .collect();
+        expected.sort();
+        got.sort();
+        assert_eq!(got, expected, "{id}");
+        if kind == IdentityKind::Agent {
+            assert_eq!(expected.len(), 3, "the agent's own inbox reaches it");
+        }
+    }
 }
