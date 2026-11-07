@@ -12,11 +12,12 @@
 use std::borrow::Cow;
 use std::path::{Component, Path, PathBuf};
 
-use agmen_proto::{IdentityId, LaneName};
+use agmen_proto::LaneName;
 use anyhow::{Context as _, Result, bail};
 use clap::{Args, Subcommand};
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 
 use crate::client::{Api, blocking, human, read_login, send};
 use crate::joined::{Agent, agent};
@@ -53,7 +54,7 @@ struct LaneView {
 }
 
 #[derive(Debug, Deserialize)]
-struct LaneList {
+pub(crate) struct LaneList {
     v: i64,
     lanes: Vec<LaneView>,
 }
@@ -66,12 +67,23 @@ pub(crate) async fn lanes(args: LanesArgs) -> Result<()> {
         Some(LanesAction::Set { file }) => {
             let project = agent.identity.project.to_string();
             let (content_type, body) = read_lane_file(file).await?;
-            let request = setter(&agent)
-                .await?
-                .request(Method::PUT, &["projects", &project, "lanes"])
-                .header(reqwest::header::CONTENT_TYPE, content_type)
-                .body(body);
-            let list = send(request).await.context("replacing the lanes failed")?;
+            let list = if agent.local.is_some() {
+                let lanes = local_lane_file(content_type, &body)?;
+                let mut daemon = crate::agmend::Agmend::connect_default().await?;
+                serde_json::from_value(
+                    daemon
+                        .call("lanes_set", json!({"project": project, "lanes": lanes}))
+                        .await?,
+                )
+                .context("agmend's lanes_set answer is invalid")?
+            } else {
+                let request = setter(&agent)
+                    .await?
+                    .request(Method::PUT, &["projects", &project, "lanes"])
+                    .header(reqwest::header::CONTENT_TYPE, content_type)
+                    .body(body);
+                send(request).await.context("replacing the lanes failed")?
+            };
             lane_lines(&project, list)
         }
     };
@@ -82,8 +94,71 @@ pub(crate) async fn lanes(args: LanesArgs) -> Result<()> {
 /// line.
 pub(crate) async fn lanes_text(agent: &Agent) -> Result<String> {
     let project = agent.identity.project.to_string();
-    let list = agent.api()?.get(&["projects", &project, "lanes"]).await?;
+    let list = agent.lanes().await?;
     Ok(lane_lines(&project, list))
+}
+
+/// The existing TOML parser reads only the lane file's shallow schema here.
+/// agmend validates lane names, owners, globs and their limits.
+fn local_lane_file(content_type: &str, body: &str) -> Result<Value> {
+    const MAX_LANES: usize = 64;
+    const MAX_GLOBS: usize = 32;
+    if content_type == "application/json" {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct File {
+            lanes: Vec<Value>,
+        }
+        let file: File = serde_json::from_str(body)
+            .map_err(|error| Fail::usage(format!("invalid lane file: {error}")))?;
+        return Ok(Value::Array(file.lanes));
+    }
+    let doc = toml_edit::Document::parse(body)
+        .map_err(|error| Fail::usage(format!("invalid lane file: {error}")))?;
+    let bad = || Fail::usage("lane TOML needs [[lanes]] with name, globs and optional owner");
+    if doc.as_table().len() != 1 {
+        return Err(bad().into());
+    }
+    let item = doc.as_table().get("lanes").ok_or_else(bad)?;
+    // TOML also permits an empty replacement written as lanes = [].
+    if item.as_array().is_some_and(|array| array.is_empty()) {
+        return Ok(json!([]));
+    }
+    let tables = item.as_array_of_tables().ok_or_else(bad)?;
+    if tables.len() > MAX_LANES {
+        return Err(Fail::usage(format!("a project has at most {MAX_LANES} lanes")).into());
+    }
+    let mut lanes = Vec::with_capacity(tables.len());
+    for table in tables {
+        if table.len() > 3
+            || table
+                .iter()
+                .any(|(key, _)| !matches!(key, "name" | "globs" | "owner"))
+        {
+            return Err(bad().into());
+        }
+        let name = table
+            .get("name")
+            .and_then(toml_edit::Item::as_str)
+            .ok_or_else(bad)?;
+        let globs = table
+            .get("globs")
+            .and_then(toml_edit::Item::as_array)
+            .ok_or_else(bad)?;
+        if globs.len() > MAX_GLOBS {
+            return Err(Fail::usage(format!("a lane has at most {MAX_GLOBS} globs")).into());
+        }
+        let globs: Vec<&str> = globs
+            .iter()
+            .map(|glob| glob.as_str().ok_or_else(bad))
+            .collect::<Result<_, _>>()?;
+        let owner = table
+            .get("owner")
+            .map(|owner| owner.as_str().ok_or_else(bad))
+            .transpose()?;
+        lanes.push(json!({"name": name, "globs": globs, "owner": owner}));
+    }
+    Ok(Value::Array(lanes))
 }
 
 /// What `agmen lanes` prints for `list`, every hub-supplied string through
@@ -163,15 +238,14 @@ struct ItemView {
 }
 
 #[derive(Debug, Deserialize)]
-struct ItemList {
+pub(crate) struct ItemList {
     items: Vec<ItemView>,
 }
 
 /// `agmen items`.
 pub(crate) async fn items() -> Result<()> {
     let agent = agent().await?;
-    let project = agent.identity.project.to_string();
-    let list: ItemList = agent.api()?.get(&["projects", &project, "items"]).await?;
+    let list = agent.items().await?;
     let mut out = Vec::with_capacity(list.items.len().max(1));
     if list.items.is_empty() {
         out.push("no items".to_owned());
@@ -218,12 +292,6 @@ pub(crate) struct CheckPathArgs {
     paths: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
-struct CheckRequest<'a> {
-    identity: &'a IdentityId,
-    paths: Vec<String>,
-}
-
 /// One answer, as the hub gives it and as `--json` prints it.
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct PathCheck {
@@ -267,16 +335,7 @@ pub(crate) async fn check(agent: &Agent, cwd: &Path, paths: Vec<String>) -> Resu
             repo_path(&[&agent.root, &real_root], cwd, path).unwrap_or_else(|| path.clone())
         })
         .collect();
-    let project = agent.identity.project.to_string();
-    let request = CheckRequest {
-        identity: &agent.identity.identity_id,
-        paths: placed,
-    };
-    let mut answers: Vec<PathCheck> = agent
-        .api()?
-        .post(&["projects", &project, "check-path"], &request)
-        .await
-        .context("checking the paths failed")?;
+    let mut answers = agent.check_path(placed).await?;
     if answers.len() != paths.len() {
         bail!(
             "the hub answered {} entries for {} paths",

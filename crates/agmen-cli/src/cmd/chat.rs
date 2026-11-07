@@ -4,7 +4,7 @@ use std::io::{self, BufRead, Read as _};
 use std::time::Duration;
 
 use agmen_client::{Page, find_identity, read_hub_body, resolve_handle};
-use agmen_proto::{DeliveryReply, Mention, MessageId, Payload, ProjectId, StampedEnvelope};
+use agmen_proto::{DeliveryReply, Mention, MessageId, Payload, ProjectId, StampedEnvelope, Stream};
 use anyhow::{Context as _, Result, ensure};
 use clap::Args;
 use reqwest::{Method, RequestBuilder};
@@ -12,11 +12,16 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::client::{self, Api, Human, Refusal, blocking, human, refusal};
-use crate::joined::{envelope, mention_tokens};
+use crate::joined::{Agent, envelope, local_worktree, mention_tokens};
 use crate::output::{Fail, body_text, clean, explain, println_flush};
 
 const MAX_LINE: usize = 64 * 1024;
 const POLL: Duration = Duration::from_secs(2);
+const MAX_PAGES: usize = 5;
+const PAGE_LIMIT: u32 = 500;
+const CHAT_TAIL: u64 = 50;
+const STDIN_CAPACITY: usize = 1;
+const POST_WAIT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Args)]
 pub(crate) struct ChatArgs {
@@ -43,21 +48,95 @@ pub(crate) async fn chat(args: ChatArgs) -> Result<()> {
             Fail::usage("nothing to say: give some text, or no text to follow the chat").into(),
         );
     }
-    let human = human().await?;
-    let project = project(&human, args.project.clone()).await?;
+    let local = match local_worktree().await {
+        Some(joined) => Some(
+            Agent::load(
+                joined,
+                agmen_client::TokenStore::from_env(),
+                &crate::paths::state_base()?,
+            )
+            .await?,
+        ),
+        None => None,
+    };
+    let signed_in;
+    let project;
+    let origin = if let Some(agent) = &local {
+        if args
+            .project
+            .as_ref()
+            .is_some_and(|project| project != &agent.identity.project)
+        {
+            return Err(
+                Fail::usage("chat --project must name this worktree's local project").into(),
+            );
+        }
+        ChatOrigin::Local(agent)
+    } else {
+        signed_in = human().await?;
+        project = project_for_human(&signed_in, args.project.clone()).await?;
+        ChatOrigin::Hub {
+            api: &signed_in.api,
+            project: &project,
+        }
+    };
     if let Some(text) = &args.text {
-        let seq = post(&human.api, &project, text, &args).await?;
+        let seq = origin.post(text, &args).await?;
         return println_flush(&format!("recorded #{seq}")).context("writing to stdout");
     }
     // Dropping the follow future cancels its current bounded HTTP request.
     let followed = tokio::select! {
-        result = follow(&human.api, &project, &args) => result,
+        result = follow(&origin, &args) => result,
         signal = tokio::signal::ctrl_c() => signal.context("waiting for Ctrl-C"),
     };
     match followed {
         // A reader that went away ends the session without an error.
         Err(err) if err.is::<Closed>() => Ok(()),
         other => other,
+    }
+}
+
+enum ChatOrigin<'a> {
+    Hub {
+        api: &'a Api,
+        project: &'a ProjectId,
+    },
+    Local(&'a Agent),
+}
+
+impl ChatOrigin<'_> {
+    async fn post(&self, text: &str, args: &ChatArgs) -> Result<u64> {
+        match self {
+            Self::Hub { api, project } => post(api, project, text, args).await,
+            Self::Local(agent) => {
+                let mut env = envelope(Payload::Fyi {}, text.to_owned())?;
+                env.reply_to = args.reply_to.clone();
+                let mentions: Vec<String> = text
+                    .split_whitespace()
+                    .filter(|word| word.starts_with('@'))
+                    .map(str::to_owned)
+                    .collect();
+                env.mentions = agent.mentions(&mentions).await?;
+                if args.all && !env.mentions.contains(&Mention::All) {
+                    env.mentions.insert(0, Mention::All);
+                }
+                Ok(agent.publish(env, POST_WAIT).await?.seq)
+            }
+        }
+    }
+
+    async fn page(&self, after: u64, limit: u32) -> Result<Page> {
+        match self {
+            Self::Hub { api, project } => page(api, project, after, limit).await,
+            Self::Local(agent) => {
+                agent
+                    .local
+                    .as_ref()
+                    .context("local chat has no local link")?
+                    .page(&Stream::Feed, after, limit)
+                    .await
+            }
+        }
     }
 }
 
@@ -88,7 +167,7 @@ fn fatal(err: &anyhow::Error) -> bool {
     err.is::<Closed>() || refusal(err).is_some_and(|r| matches!(r.status, 401 | 403))
 }
 
-async fn project(human: &Human, explicit: Option<ProjectId>) -> Result<ProjectId> {
+async fn project_for_human(human: &Human, explicit: Option<ProjectId>) -> Result<ProjectId> {
     if let Some(project) = explicit {
         return Ok(project);
     }
@@ -218,12 +297,12 @@ fn line(message: &StampedEnvelope) -> String {
 
 /// Print at most five replay pages per poll, keeping the cursor at the last
 /// printed message so a busy feed resumes on the next poll.
-async fn show(api: &Api, project: &ProjectId, after: &mut u64, end: u64) -> Result<()> {
-    for _ in 0..5 {
+async fn show(origin: &ChatOrigin<'_>, after: &mut u64, end: u64) -> Result<()> {
+    for _ in 0..MAX_PAGES {
         if *after >= end {
             break;
         }
-        let page = page(api, project, *after, 500).await?;
+        let page = origin.page(*after, PAGE_LIMIT).await?;
         for message in page.messages.iter().filter(|m| m.seq.0 <= end) {
             print(&line(message))?;
             *after = (*after).max(message.seq.0);
@@ -261,11 +340,11 @@ fn read_line(input: &mut impl BufRead) -> Result<Option<String>> {
         .map_err(|_| Fail::usage("the chat line on stdin is not UTF-8").into())
 }
 
-async fn follow(api: &Api, project: &ProjectId, args: &ChatArgs) -> Result<()> {
-    let head = page(api, project, 0, 1).await?.head;
-    let mut after = head.saturating_sub(50);
-    show(api, project, &mut after, head).await?;
-    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+async fn follow(origin: &ChatOrigin<'_>, args: &ChatArgs) -> Result<()> {
+    let head = origin.page(0, 1).await?.head;
+    let mut after = head.saturating_sub(CHAT_TAIL);
+    show(origin, &mut after, head).await?;
+    let (tx, mut rx) = tokio::sync::mpsc::channel(STDIN_CAPACITY);
     // A dedicated thread keeps a pending terminal read out of Tokio's
     // blocking pool, whose shutdown would otherwise wait for stdin on Ctrl-C.
     std::thread::Builder::new()
@@ -296,15 +375,15 @@ async fn follow(api: &Api, project: &ProjectId, args: &ChatArgs) -> Result<()> {
                     continue;
                 }
                 // A rejected or unsent line is reported; the session goes on.
-                if let Err(err) = post(api, project, &text, args).await {
+                if let Err(err) = origin.post(&text, args).await {
                     report(err, false)?;
                 }
-                if let Err(err) = show(api, project, &mut after, u64::MAX).await {
+                if let Err(err) = show(origin, &mut after, u64::MAX).await {
                     report(err, down)?;
                     down = true;
                 }
             }
-            _ = poll.tick() => match show(api, project, &mut after, u64::MAX).await {
+            _ = poll.tick() => match show(origin, &mut after, u64::MAX).await {
                 Ok(()) => down = false,
                 // One notice per outage, not one every 2 s.
                 Err(err) => {

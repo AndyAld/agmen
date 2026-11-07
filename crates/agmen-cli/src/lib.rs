@@ -18,6 +18,7 @@ mod client;
 mod cmd;
 mod git;
 mod joined;
+mod local_link;
 mod mcp;
 mod open;
 mod output;
@@ -27,7 +28,7 @@ mod watch_lock;
 
 use std::process::ExitCode;
 
-use clap::Parser as _;
+use clap::{CommandFactory as _, FromArgMatches as _};
 
 pub use crate::mcp::{McpError, McpOptions, serve};
 
@@ -37,7 +38,8 @@ pub use crate::mcp::{McpError, McpOptions, serve};
 pub fn run() -> ExitCode {
     // clap prints help, version and usage errors itself, the last with
     // exit code 2.
-    let cli = cmd::Cli::parse();
+    let matches = cmd::Cli::command().get_matches();
+    let cli = cmd::Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(
@@ -65,7 +67,10 @@ pub fn run() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match runtime.block_on(cli.run()) {
+    match runtime.block_on(async {
+        refuse_local_hub_command(&matches).await?;
+        cli.run().await
+    }) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             let (text, code) = output::explain(&err);
@@ -73,4 +78,20 @@ pub fn run() -> ExitCode {
             ExitCode::from(code)
         }
     }
+}
+
+/// Reject hub administration before login or membership reads can reach a hub.
+async fn refuse_local_hub_command(matches: &clap::ArgMatches) -> anyhow::Result<()> {
+    let Some(command @ ("invite" | "group" | "project" | "whoami" | "leave")) =
+        matches.subcommand_name()
+    else {
+        return Ok(());
+    };
+    if joined::local_worktree().await.is_some() {
+        return Err(output::Fail::usage(format!(
+            "{command} needs a hub; this worktree is on this machine's local origin"
+        ))
+        .into());
+    }
+    Ok(())
 }

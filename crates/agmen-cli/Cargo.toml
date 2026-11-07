@@ -37,6 +37,7 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 url = "2.5.8"
 
 [dev-dependencies]
+agmend = { version = "0.1.0", path = "../agmend", features = ["test-hooks"] }
 agmen-hub = { version = "0.1.0", path = "../agmen-hub", features = ["test-hooks"] }
 axum = { version = "0.8.9", default-features = false, features = ["tokio", "http1", "json", "query"] }
 rmcp = { version = "3.7.0", features = ["client"] }

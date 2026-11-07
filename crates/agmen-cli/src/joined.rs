@@ -3,18 +3,21 @@
 //! what every command that speaks for it shares: retained state, handle
 //! lookup over HTTP (rulings R60 and R68), envelopes, and publishing that
 //! waits for the hub's answer, through a one-shot `<id>-cli` session (the
-//! CLI) or a session the caller holds open (`agmen mcp`).
+//! CLI) or a session the caller holds open (`agmen mcp`). An identity on this
+//! machine's local origin does all of that through agmend with its local token
+//! (`LocalLink`) and never opens a hub or broker connection.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use agmen_client::{
-    ClientEvent, ClientKind, HubClient, IdentityError, IdentityFile, Joined, OutboxState, Session,
-    SessionConfig, TokenKey, TokenStore, find_identity, read_state, resolve_handle,
+    ClientEvent, ClientKind, HubClient, IdentityError, IdentityFile, Joined, Outbox, OutboxState,
+    PAGE_LIMIT, Page, STATE_DB, Session, SessionConfig, TokenKey, TokenStore, find_identity,
+    read_state, resolve_handle,
 };
 use agmen_proto::{
-    Body, ClientEnvelope, IdentityId, Mention, MessageId, Payload, StampedEnvelope, Stream,
-    Timestamp, Topics,
+    Body, ClientEnvelope, DeliveryReply, IdentityId, Mention, MessageId, Payload, Seq,
+    StampedEnvelope, Stream, Timestamp, Topics,
 };
 use anyhow::{Context as _, Result};
 use serde_json::Value;
@@ -22,6 +25,8 @@ use tokio::sync::Notify;
 use tokio::time::Instant;
 
 use crate::client::{Api, blocking, get_token};
+use crate::cmd::lanes::{ItemList, LaneList, PathCheck};
+use crate::local_link::LocalLink;
 use crate::output::{Code, Fail, clean, println_flush};
 use crate::paths;
 
@@ -37,6 +42,7 @@ pub(crate) struct Agent {
     pub(crate) identity: IdentityFile,
     /// The identity's hub client (replay pages and broker tokens).
     pub(crate) hub: HubClient,
+    pub(crate) local: Option<LocalLink>,
     /// The identity's own hub token.
     token: String,
     /// Its state folder.
@@ -58,6 +64,21 @@ pub(crate) async fn joined() -> Result<Joined> {
     })
     .await?
     .ok_or_else(|| Fail::not_joined().into())
+}
+
+/// The worktree the process runs in, when it is joined to this machine's local
+/// origin.
+///
+/// A missing or untrusted identity file, or an unreadable working directory, is
+/// not one. The commands that ask report those as they always have, so none of
+/// them fails here (hence the `.ok()` calls).
+pub(crate) async fn local_worktree() -> Option<Joined> {
+    let cwd = std::env::current_dir().ok()?;
+    blocking(move || Ok(find_identity(&cwd).ok().flatten()))
+        .await
+        .ok()
+        .flatten()
+        .filter(|joined| joined.identity.is_local())
 }
 
 /// Loads the identity of the worktree the process runs in, with its token.
@@ -85,9 +106,20 @@ impl Agent {
         state_base: &Path,
     ) -> Result<Self> {
         let identity = joined.identity;
+        let local = if identity.is_local() {
+            Some(LocalLink::load(&identity, &tokens).await?)
+        } else {
+            None
+        };
         let key = TokenKey::new(&identity.hub_url, &identity.identity_id)
             .context("the identity file's hub URL")?;
-        let token = get_token(tokens, key).await?.ok_or_else(|| {
+        // A local identity has no hub token: agmend holds its credential.
+        let token = if local.is_some() {
+            Some(String::new())
+        } else {
+            get_token(tokens, key).await?
+        };
+        let token = token.ok_or_else(|| {
             Fail::new(
                 Code::NotLoggedIn,
                 format!(
@@ -110,6 +142,7 @@ impl Agent {
             root: joined.root,
             identity,
             hub,
+            local,
             token,
             state_dir,
         })
@@ -132,7 +165,66 @@ impl Agent {
 
     /// An API client for the identity's hub with its token.
     pub(crate) fn api(&self) -> Result<Api> {
+        if self.local.is_some() {
+            return Err(Fail::usage(
+                "this command needs a hub; this worktree is on this machine's local origin",
+            )
+            .into());
+        }
         Api::new(self.identity.hub_url.clone(), self.token.clone())
+    }
+
+    /// One replay page from this identity's origin, capped at 500 messages.
+    pub(crate) async fn page(&self, stream: &Stream, after: u64) -> Result<Page> {
+        if let Some(local) = &self.local {
+            return local.page(stream, after, PAGE_LIMIT).await;
+        }
+        self.hub
+            .page(stream, after)
+            .await
+            .map_err(|error| client_error(error, &format!("reading {stream} from the hub failed")))
+    }
+
+    /// The full roster, including handles used by outgoing messages.
+    pub(crate) async fn roster(&self) -> Result<Value> {
+        if let Some(local) = &self.local {
+            return local.state("roster").await;
+        }
+        self.hub
+            .roster()
+            .await
+            .map_err(|error| client_error(error, "reading the project's roster failed"))
+    }
+
+    pub(crate) async fn lanes(&self) -> Result<LaneList> {
+        if let Some(local) = &self.local {
+            return local.lanes().await;
+        }
+        self.api()?
+            .get(&["projects", self.identity.project.as_str(), "lanes"])
+            .await
+    }
+
+    pub(crate) async fn items(&self) -> Result<ItemList> {
+        if let Some(local) = &self.local {
+            return local.items().await;
+        }
+        self.api()?
+            .get(&["projects", self.identity.project.as_str(), "items"])
+            .await
+    }
+
+    pub(crate) async fn check_path(&self, paths: Vec<String>) -> Result<Vec<PathCheck>> {
+        if let Some(local) = &self.local {
+            return local.check_path(paths).await;
+        }
+        self.api()?
+            .post(
+                &["projects", self.identity.project.as_str(), "check-path"],
+                &serde_json::json!({"identity": self.identity.identity_id, "paths": paths}),
+            )
+            .await
+            .context("checking the paths failed")
     }
 
     /// The project's retained `state/{key}`, read the way `via` says: a
@@ -140,19 +232,23 @@ impl Agent {
     /// `agmen mcp` (ruling R68), which must not take `<id>-cli` from a
     /// concurrent command or hook of the same identity.
     ///
+    /// A local identity has no broker: agmend answers `state` for it (`head` or
+    /// `roster`, and its `roster` is the full array, as [`Agent::roster`]
+    /// reads it).
+    ///
     /// # Errors
     ///
-    /// The client's error for a bad key, a payload that is not JSON, or a
-    /// failed read.
-    pub(crate) async fn read_state(
-        &self,
-        via: Via<'_>,
-        key: &str,
-    ) -> Result<Option<Value>, agmen_client::ClientError> {
+    /// For a hub identity, the client's error for a bad key, a payload that is
+    /// not JSON, or a failed read. For a local one, agmend's refusal.
+    pub(crate) async fn read_state(&self, via: Via<'_>, key: &str) -> Result<Option<Value>> {
+        if let Some(local) = &self.local {
+            return local.state(key).await.map(Some);
+        }
         match via {
             Via::OneShot(_) => read_state(&self.identity, &self.hub, key).await,
             Via::Held { session, .. } => session.read_state(key).await,
         }
+        .map_err(|err| client_error(err, "reading the project's state failed"))
     }
 
     /// The ids of `names`, each a handle (`adam/coord`) or an id, looked up
@@ -167,11 +263,7 @@ impl Agent {
         if names.is_empty() {
             return Ok(Vec::new());
         }
-        let roster = self
-            .hub
-            .roster()
-            .await
-            .map_err(|err| client_error(err, "reading the project's roster failed"))?;
+        let roster = self.roster().await?;
         names
             .iter()
             .map(|name| {
@@ -211,6 +303,9 @@ impl Agent {
     /// [`Code::NotLoggedIn`] when the hub refuses the identity, and other
     /// errors when the session fails.
     pub(crate) async fn publish(&self, env: ClientEnvelope, wait: Duration) -> Result<Recorded> {
+        if let Some(local) = &self.local {
+            return self.post_local(local, env).await;
+        }
         let id = env.id.clone();
         let config = SessionConfig::new(
             ClientKind::Cli,
@@ -270,6 +365,9 @@ impl Agent {
     /// queued after the wait is a [`Code::Queued`] failure whose message is
     /// `queued id=<id> (not yet recorded)`, and nothing is printed.
     pub(crate) async fn send(&self, via: Via<'_>, env: ClientEnvelope) -> Result<Recorded> {
+        if let Some(local) = &self.local {
+            return self.post_local(local, env).await;
+        }
         match via {
             Via::OneShot(wait) => self.publish(env, wait).await,
             Via::Held {
@@ -278,6 +376,30 @@ impl Agent {
                 wait,
             } => publish_held(session, answered, env, wait).await,
         }
+    }
+
+    /// Remember recorded local messages so inbox recognizes answers after its
+    /// cursor has passed the original message. These rows never need delivery.
+    async fn post_local(&self, local: &LocalLink, env: ClientEnvelope) -> Result<Recorded> {
+        let recorded = local.post(&env).await?;
+        let reply = DeliveryReply::Ack {
+            id: recorded.id.clone(),
+            stream: recorded.stream.clone(),
+            seq: Seq(recorded.seq),
+        };
+        let dir = self.state_dir.clone();
+        blocking(move || {
+            std::fs::create_dir_all(&dir).context("creating the identity state folder")?;
+            let outbox = Outbox::open(dir.join(STATE_DB))?;
+            if outbox.state(&env.id)?.is_none() {
+                outbox.enqueue(&env)?;
+            }
+            outbox.apply(&reply)?;
+            Ok(())
+        })
+        .await
+        .context("the message was recorded, but remembering it for replies failed")?;
+        Ok(recorded)
     }
 
     /// Prints `recorded #<seq> (<stream>)` for `recorded`.
@@ -290,11 +412,7 @@ impl Agent {
     /// FOUND): the next message after it in its stream that replies to it.
     /// The hub posts it in the same transaction, so it is already there.
     pub(crate) async fn hub_answer(&self, recorded: &Recorded) -> Result<Option<StampedEnvelope>> {
-        let page = self
-            .hub
-            .page(&recorded.stream, recorded.seq)
-            .await
-            .map_err(|err| client_error(err, "reading the hub's answer failed"))?;
+        let page = self.page(&recorded.stream, recorded.seq).await?;
         Ok(page
             .messages
             .into_iter()
@@ -535,6 +653,69 @@ mod tests {
             first.as_str()[..10] < second.as_str()[..10],
             "{first} {second}"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_state_on_a_local_identity_asks_agmend() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        use agmen_local::frame::{read_async, write_async};
+        use agmen_local::{API, Request, Response};
+
+        const WAIT: Duration = Duration::from_secs(10);
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("agmend.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
+        // One connection: hello, then the state call. No hub or broker exists.
+        let daemon = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let hello: Request = read_async(&mut stream).await.unwrap();
+            let api = Response::ok(hello.id, serde_json::json!({"api": API}));
+            write_async(&mut stream, &api).await.unwrap();
+            let call: Request = read_async(&mut stream).await.unwrap();
+            let state =
+                serde_json::json!({"key": "head", "as_of_seq": 7, "value": {"feed_seq": 7}});
+            write_async(&mut stream, &Response::ok(call.id, state))
+                .await
+                .unwrap();
+            call
+        });
+        let identity: IdentityFile = serde_json::from_value(serde_json::json!({
+            "tenant": "tenant01", "project": "project1", "identity_id": "idn7k2q9",
+            "handle": "andy/sol", "owner_id": "andyandy",
+            "hub_url": agmen_client::LOCAL_HUB_URL,
+            "broker_url": agmen_client::LOCAL_BROKER_URL,
+        }))
+        .unwrap();
+        let token = "a".repeat(64);
+        let hub = HubClient::new(
+            identity.hub_url.clone(),
+            identity.project.clone(),
+            identity.identity_id.clone(),
+            "",
+        )
+        .unwrap();
+        let agent = Agent {
+            root: dir.path().to_owned(),
+            hub,
+            local: Some(LocalLink::at(socket, &identity, token.parse().unwrap())),
+            token: String::new(),
+            state_dir: dir.path().join("state"),
+            identity,
+        };
+        let read = agent.read_state(Via::OneShot(Duration::from_secs(1)), "head");
+        let state = tokio::time::timeout(WAIT, read).await.unwrap().unwrap();
+        assert_eq!(state, Some(serde_json::json!({"feed_seq": 7})));
+        let call = tokio::time::timeout(WAIT, daemon).await.unwrap().unwrap();
+        assert_eq!(call.method, "state");
+        assert_eq!(call.as_.as_ref(), Some(&agent.identity.identity_id));
+        assert_eq!(call.params["project"], "project1");
+        assert_eq!(call.params["key"], "head");
+        assert_eq!(call.params["local_token"], token);
+        // The link rides in the agent, and the agent's Debug output reaches logs.
+        assert!(!format!("{agent:?}").contains(&token));
     }
 
     #[test]

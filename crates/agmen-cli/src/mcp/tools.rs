@@ -649,10 +649,15 @@ impl Server {
             // The roster is the full array over HTTP; the retained topic is
             // only its head. Both keep the tool's one error text.
             let value = match key {
-                StateKey::Roster => live.agent.hub.roster().await.map(Some),
+                StateKey::Roster => live
+                    .agent
+                    .hub
+                    .roster()
+                    .await
+                    .map(Some)
+                    .map_err(|err| client_error(err, "reading the project's state failed")),
                 StateKey::Head => live.agent.read_state(live.via(), key.as_str()).await,
-            }
-            .map_err(|err| client_error(err, "reading the project's state failed"))?;
+            }?;
             let shown = value.map_or_else(|| "nothing retained".to_owned(), |v| v.to_string());
             Ok(format!("state/{}: {}", key.as_str(), clean(&shown)))
         })
