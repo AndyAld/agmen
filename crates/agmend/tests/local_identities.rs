@@ -10,7 +10,7 @@ use agmen_client::{
     IdentityFile, LOCAL_TOKEN_NAMESPACE, LocalCredential, TokenKey, read_local_credential,
 };
 use agmen_local::{ErrorCode, Request, Response};
-use agmen_proto::{ClientEnvelope, IdentityId, Payload, Timestamp};
+use agmen_proto::{ClientEnvelope, IdentityId, Payload, Stream, Timestamp};
 use agmend::Agmend;
 use serde_json::{Value, json};
 use support::{Client, Home, error, result};
@@ -20,6 +20,10 @@ const STOP_WAIT: Duration = Duration::from_secs(5);
 const INVALID_LIMITS: [u32; 2] = [0, 501];
 const IDENTITY_CAP: usize = agmen_local::safeguards::MAX_MANAGED;
 const ROLE_CASES: [(&str, &str); 2] = [("builtin", "reviewer"), ("personal", "personal")];
+const DELIVERY_POLLS: usize = 100;
+const DELIVERY_POLL: Duration = Duration::from_millis(20);
+const PRESENCE_WAIT: Duration = Duration::from_secs(2);
+const MAX_WATCH_EVENTS: usize = 32;
 const LOCAL_READS: [(&str, &str); 4] = [
     ("page", r#"{"stream":"feed"}"#),
     ("lanes", "{}"),
@@ -768,5 +772,379 @@ async fn the_person_reads_a_local_inbox_and_state() {
             .any(|entry| entry["identity_id"] == json!(who.identity_id)),
         "{roster}"
     );
+    f.stop().await;
+}
+
+async fn person_dm(f: &mut Fixture, who: &IdentityFile, body: &str) -> ClientEnvelope {
+    let mut dm = envelope(body);
+    dm.payload = Payload::Dm {};
+    dm.to.push(who.identity_id.clone());
+    result(
+        f.client
+            .call("post", json!({"project": who.project, "envelope": dm}))
+            .await,
+    );
+    dm
+}
+
+async fn delivered(f: &mut Fixture, who: &IdentityFile) -> Value {
+    for _ in 0..DELIVERY_POLLS {
+        let rows = result(f.call(who, "pending", json!({})).await);
+        if !rows.as_array().unwrap().is_empty() {
+            return rows;
+        }
+        tokio::time::sleep(DELIVERY_POLL).await;
+    }
+    panic!("no local pending message within the poll bound");
+}
+
+async fn identity_watch(f: &Fixture, who: &IdentityFile) -> Client {
+    let mut client = Client::connect(&f.home.socket()).await;
+    result(client.call("hello", json!({"api": 1})).await);
+    let mut request = Request::new(
+        2,
+        "watch",
+        json!({
+            "project": who.project, "local_token": f.credential(who).local_token
+        }),
+    );
+    request.as_ = Some(who.identity_id.clone());
+    client.send(&request).await;
+    let me = result(
+        tokio::time::timeout(CALL_WAIT, client.read())
+            .await
+            .unwrap(),
+    );
+    assert_eq!(me["kind"], "self");
+    assert_eq!(me["identity_id"], json!(who.identity_id));
+    client
+}
+
+async fn status(f: &mut Fixture, who: &IdentityFile) -> String {
+    let roster = result(
+        f.client
+            .call("state", json!({"project": who.project, "key": "roster"}))
+            .await,
+    );
+    roster["value"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["identity_id"] == json!(who.identity_id))
+        .unwrap()["status"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+async fn stop_with_home(f: Fixture) -> (Home, Value) {
+    let Fixture {
+        home,
+        created,
+        client,
+        stop,
+        task,
+    } = f;
+    drop(client);
+    stop.send(()).unwrap();
+    tokio::time::timeout(STOP_WAIT, task)
+        .await
+        .unwrap()
+        .unwrap();
+    (home, created)
+}
+
+async fn resume(home: Home, created: Value) -> Fixture {
+    let daemon = Agmend::bind(home.config()).unwrap();
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(daemon.serve_until(async {
+        stopped.await.unwrap();
+    }));
+    let mut client = Client::connect(&home.socket()).await;
+    result(client.call("hello", json!({"api": 1})).await);
+    Fixture {
+        home,
+        created,
+        client,
+        stop,
+        task,
+    }
+}
+
+#[tokio::test]
+async fn dm_to_a_local_agent_reaches_its_pending_queue() {
+    let mut f = Fixture::new().await;
+    let who = f.mint("worker").await;
+    let other = f.mint("other").await;
+    let dm = person_dm(&mut f, &who, "one delivery").await;
+    let rows = delivered(&mut f, &who).await;
+    assert_eq!(rows.as_array().unwrap().len(), 1);
+    assert_eq!(rows[0]["id"], json!(dm.id));
+    assert_eq!(rows[0]["from"], json!(who.owner_id));
+    assert_eq!(result(f.call(&who, "pending", json!({})).await), json!([]));
+    assert_eq!(
+        result(f.call(&other, "pending", json!({})).await),
+        json!([])
+    );
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn pending_is_exactly_once_after_agmend_stops() {
+    let mut f = Fixture::new().await;
+    let who = f.mint("worker").await;
+    let first = person_dm(&mut f, &who, "before stop").await;
+    let rows = delivered(&mut f, &who).await;
+    assert_eq!(rows[0]["id"], json!(first.id));
+    assert_eq!(
+        rows[0]["stream"],
+        Stream::Inbox(who.identity_id.clone()).to_string()
+    );
+    assert_eq!(inbox_position(&f, &who).await, 1);
+    let (home, created) = stop_with_home(f).await;
+    let mut f = resume(home, created).await;
+    let second = person_dm(&mut f, &who, "after stop").await;
+    let rows = delivered(&mut f, &who).await;
+    assert_eq!(rows.as_array().unwrap().len(), 1);
+    assert_eq!(rows[0]["id"], json!(second.id));
+    assert_eq!(inbox_position(&f, &who).await, 2);
+    assert_eq!(result(f.call(&who, "pending", json!({})).await), json!([]));
+    f.stop().await;
+}
+
+async fn inbox_position(f: &Fixture, who: &IdentityFile) -> i64 {
+    let path = f.home.database();
+    let owner = format!("local#owner={}", who.owner_id);
+    let project = who.project.to_string();
+    let stream = Stream::Inbox(who.identity_id.clone()).to_string();
+    tokio::task::spawn_blocking(move || {
+        rusqlite::Connection::open(path)
+            .unwrap()
+            .query_row(
+                "SELECT seq FROM positions WHERE origin=?1 AND project=?2 AND stream=?3",
+                rusqlite::params![owner, project, stream],
+                |row| row.get(0),
+            )
+            .unwrap()
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn agent_registered_after_collection_starts_receives_dm_on_watch_and_pending() {
+    let mut f = Fixture::new().await;
+    let first = f.mint("first").await;
+    assert_eq!(
+        result(f.call(&first, "pending", json!({})).await),
+        json!([])
+    );
+    let later = f.mint("later").await;
+    let mut watch = identity_watch(&f, &later).await;
+    let dm = person_dm(&mut f, &later, "new inbox").await;
+    tokio::time::timeout(CALL_WAIT, async {
+        for _ in 0..MAX_WATCH_EVENTS {
+            let event = result(watch.read().await);
+            if event["kind"] == "message"
+                && event["message"]["id"] == json!(dm.id)
+                && event["message"]["stream"]
+                    == Stream::Inbox(later.identity_id.clone()).to_string()
+            {
+                return;
+            }
+        }
+        panic!("watch did not receive the new identity's inbox copy");
+    })
+    .await
+    .unwrap();
+    let rows = delivered(&mut f, &later).await;
+    assert_eq!(rows.as_array().unwrap().len(), 1);
+    assert_eq!(rows[0]["id"], json!(dm.id));
+    assert_eq!(
+        result(f.call(&later, "pending", json!({})).await),
+        json!([])
+    );
+    assert_eq!(
+        result(f.call(&first, "pending", json!({})).await),
+        json!([])
+    );
+    drop(watch);
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn feed_mention_reaches_the_mentioned_agent() {
+    let mut f = Fixture::new().await;
+    let who = f.mint("worker").await;
+    let mut mention = envelope("mentioned on the feed");
+    mention
+        .mentions
+        .push(agmen_proto::Mention::Identity(who.identity_id.clone()));
+    result(
+        f.client
+            .call("post", json!({"project": who.project, "envelope": mention}))
+            .await,
+    );
+    let rows = delivered(&mut f, &who).await;
+    assert_eq!(rows.as_array().unwrap().len(), 1);
+    assert_eq!(rows[0]["id"], json!(mention.id));
+    assert_eq!(rows[0]["stream"], "feed");
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn identity_watch_sets_presence() {
+    let mut f = Fixture::new().await;
+    let who = f.mint("worker").await;
+    assert_eq!(status(&mut f, &who).await, "offline");
+    let watch = identity_watch(&f, &who).await;
+    assert_eq!(status(&mut f, &who).await, "online");
+    let second = identity_watch(&f, &who).await;
+    drop(watch);
+    tokio::time::sleep(DELIVERY_POLL).await;
+    assert_eq!(status(&mut f, &who).await, "online");
+    drop(second);
+    tokio::time::timeout(PRESENCE_WAIT, async {
+        for _ in 0..DELIVERY_POLLS {
+            if status(&mut f, &who).await == "offline" {
+                return;
+            }
+            tokio::time::sleep(DELIVERY_POLL).await;
+        }
+        panic!("identity remained online after the final watch closed");
+    })
+    .await
+    .unwrap();
+    f.stop().await;
+}
+
+struct CountingHub {
+    url: String,
+    requests: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    events: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl CountingHub {
+    async fn new() -> Self {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let requests = Arc::new(AtomicUsize::new(0));
+        let events = Arc::new(AtomicUsize::new(0));
+        let count = requests.clone();
+        let event_count = events.clone();
+        let app = axum::Router::new().fallback(move |uri: axum::http::Uri| {
+            let count = count.clone();
+            let event_count = event_count.clone();
+            async move {
+                count.fetch_add(1, Ordering::SeqCst);
+                if uri.path().ends_with("/events") {
+                    event_count.fetch_add(1, Ordering::SeqCst);
+                }
+                axum::Json(json!({"key":"roster", "as_of_seq":0, "value":[{
+                    "identity_id":support::HUMAN, "handle":"andy", "kind":"human", "status":"online"
+                }]}))
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        Self {
+            url,
+            requests,
+            events,
+            task,
+        }
+    }
+}
+
+impl Drop for CountingHub {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+#[tokio::test]
+async fn local_pending_and_watch_open_zero_hub_connections() {
+    use std::sync::atomic::Ordering;
+    let hub = CountingHub::new().await;
+    let mut f = Fixture::start(Home::signed_in(&hub.url).await).await;
+    let who = f.mint("worker").await;
+    assert_eq!(result(f.call(&who, "pending", json!({})).await), json!([]));
+    let watch = identity_watch(&f, &who).await;
+    tokio::time::sleep(PRESENCE_WAIT).await;
+    assert_eq!(status(&mut f, &who).await, "online");
+    assert_eq!(hub.events.load(Ordering::SeqCst), 0);
+    assert_eq!(hub.requests.load(Ordering::SeqCst), 0);
+    drop(watch);
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn local_watch_survives_hub_logout_and_delivers_feed() {
+    let hub = CountingHub::new().await;
+    let mut f = Fixture::start(Home::signed_in(&hub.url).await).await;
+    let who = f.mint("worker").await;
+    let mut watch = identity_watch(&f, &who).await;
+    let path = f.home.login_file();
+    tokio::task::spawn_blocking(move || std::fs::remove_file(path))
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::sleep(PRESENCE_WAIT).await;
+    let sent = envelope("feed after logout");
+    result(
+        f.client
+            .call("post", json!({"project":who.project, "envelope":sent}))
+            .await,
+    );
+    tokio::time::timeout(CALL_WAIT, async {
+        for _ in 0..MAX_WATCH_EVENTS {
+            let event = result(watch.read().await);
+            if event["kind"] == "message" && event["message"]["id"] == json!(sent.id) {
+                assert_eq!(event["message"]["stream"], "feed");
+                return;
+            }
+        }
+        panic!("local watch did not receive the committed feed message");
+    })
+    .await
+    .unwrap();
+    assert_eq!(hub.requests.load(std::sync::atomic::Ordering::SeqCst), 0);
+    drop(watch);
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn missing_local_record_refuses_post_and_human_inbox_without_hub_requests() {
+    use std::sync::atomic::Ordering;
+    let hub = CountingHub::new().await;
+    let mut f = Fixture::start(Home::signed_in(&hub.url).await).await;
+    let who = f.mint("worker").await;
+    let (home, created) = stop_with_home(f).await;
+    let path = home.dir.path().join("local.db");
+    tokio::task::spawn_blocking(move || std::fs::remove_file(path))
+        .await
+        .unwrap()
+        .unwrap();
+    let mut f = resume(home, created).await;
+    let post = f
+        .client
+        .call(
+            "post",
+            json!({"project":who.project, "envelope":envelope("must stay local")}),
+        )
+        .await;
+    let inbox = f.client.call("inbox", json!({"project":who.project})).await;
+    assert_eq!(hub.requests.load(Ordering::SeqCst), 0);
+    for response in [post, inbox] {
+        let err = error(response);
+        assert_eq!(err.code, ErrorCode::Version);
+        assert!(err.message.contains("local.db"), "{err:?}");
+    }
     f.stop().await;
 }

@@ -54,10 +54,20 @@ impl Origins {
         &self.hub
     }
 
+    pub(crate) async fn shutdown(&self) {
+        self.database.shutdown().await;
+    }
+
     pub(crate) async fn of(&self, project: &ProjectId) -> Result<Origin, ApiError> {
         match self.local.topics(project).await {
             Ok(_) => Ok(Origin::Local),
-            Err(error) if error.code == ErrorCode::NotFound => Ok(Origin::Hub),
+            Err(error) if error.code == ErrorCode::NotFound => {
+                if self.has_local_identity(project).await {
+                    Err(unreadable(&error))
+                } else {
+                    Ok(Origin::Hub)
+                }
+            }
             // A busy or stopped origin says nothing about its record, so no hub is asked.
             Err(error) if local_origin::is_unavailable(&error) => Err(error),
             Err(error) => {
@@ -139,10 +149,6 @@ impl Origins {
         }
     }
 
-    #[expect(
-        dead_code,
-        reason = "consumed by origin-aware identity authorization in Task 9"
-    )]
     pub(crate) async fn person_for(&self, hub_url: &Url) -> Result<Login, ApiError> {
         self.person(if is_local(hub_url) {
             Origin::Local
@@ -158,5 +164,54 @@ fn unreadable(error: &ApiError) -> ApiError {
     ApiError {
         code: ErrorCode::Version,
         message: format!("local.db cannot be read: {}", error.message),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const JOB_WAIT: Duration = Duration::from_secs(2);
+    const JOIN_PROBE: Duration = Duration::from_millis(20);
+
+    #[tokio::test]
+    async fn identity_shutdown_joins_origin_database_jobs() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = crate::Agmend::bind(crate::Config::new(
+            dir.path().join("agmend.sock"),
+            dir.path().join("login.json"),
+            agmen_client::TokenStore::Dir(dir.path().join("tokens")),
+        ))
+        .unwrap();
+        let database = daemon.core.origins.database.clone();
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let done = finished.clone();
+        let work = tokio::spawn(store_work(database, move |_| {
+            entered.send(()).unwrap();
+            wait.recv_timeout(JOB_WAIT).unwrap();
+            done.store(true, std::sync::atomic::Ordering::Release);
+            Ok(())
+        }));
+        tokio::time::timeout(JOB_WAIT, started)
+            .await
+            .unwrap()
+            .unwrap();
+        let shutdown = daemon.core.identities.shutdown();
+        tokio::pin!(shutdown);
+        let returned_early = tokio::time::timeout(JOIN_PROBE, &mut shutdown)
+            .await
+            .is_ok();
+        release.send(()).unwrap();
+        if !returned_early {
+            tokio::time::timeout(JOB_WAIT, shutdown).await.unwrap();
+        }
+        work.await.unwrap().unwrap();
+        assert!(
+            !returned_early,
+            "shutdown returned while an Origins database job was running"
+        );
+        assert!(finished.load(std::sync::atomic::Ordering::Acquire));
     }
 }
