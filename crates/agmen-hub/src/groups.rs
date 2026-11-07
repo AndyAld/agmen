@@ -55,7 +55,7 @@ const NO_SEAT_PLAN: &str = "this group has no seat plan";
 const SEATS_BELOW_JOINED: &str = "a member joined while seats were changing";
 const SEATS_BELOW_STORED: &str =
     "paid seats are below the members in the group, and Paddle could not be restored";
-const SEAT_REVERT_ALERT: &str = "Paddle lowered this group's paid seats below its members, and the previous seats could not be restored. Add seats so everyone still fits.";
+const SEAT_REVERT_ALERT: &str = "This group's paid seats in Paddle are below its members, and the previous seats could not be restored. Add seats so everyone still fits.";
 
 const SECS_PER_DAY: u64 = 86_400;
 
@@ -1512,5 +1512,14 @@ mod tests {
         assert!(notice.contains("deleted on 2026-11-15"), "{notice}");
         let active = active_record("team").unwrap();
         assert!(owner_notice("andy/acme", &active, start).is_none());
+    }
+
+    #[test]
+    fn seat_revert_alert_names_no_direction() {
+        // The alert also follows a seat raise that a join outran.
+        let alert = SEAT_REVERT_ALERT.to_lowercase();
+        assert!(!alert.contains("lowered"), "{alert}");
+        assert!(!alert.contains("raised"), "{alert}");
+        assert!(alert.contains("could not be restored"), "{alert}");
     }
 }
