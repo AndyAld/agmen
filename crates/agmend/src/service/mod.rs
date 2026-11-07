@@ -417,7 +417,8 @@ fn wait_ready(socket: &Path, version: &str, deadline: Instant) -> Result<()> {
             let mut last = String::from("daemon has not answered");
             // At most 300 attempts within the 30 s readiness budget.
             for _ in 0..300 {
-                match tokio::time::timeout(Duration::from_secs(2), ready_handshake(socket, version))
+                // 2 s for the handshake, 2 s more for agmend's ancestry walk before `ready`.
+                match tokio::time::timeout(Duration::from_secs(4), ready_handshake(socket, version))
                     .await
                 {
                     Ok(Ok(())) => return Ok(()),
@@ -1245,6 +1246,36 @@ ExecStart="/opt/a\sb/\xC3\xA9/\u0061/\141/%%/$$/agmend" --flag
             );
             server.join().unwrap();
         }
+    }
+
+    #[test]
+    fn readiness_waits_out_the_ancestry_walk_before_ready() {
+        // agmend walks a peer's ancestry, up to 2 s, before the first owner-only call.
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("s");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let hello: agmen_local::Request = agmen_local::frame::read(&mut stream).unwrap();
+            agmen_local::frame::write(
+                &mut stream,
+                &agmen_local::Response::ok(hello.id, serde_json::json!({"api":1,"version":"new"})),
+            )
+            .unwrap();
+            let ready: agmen_local::Request = agmen_local::frame::read(&mut stream).unwrap();
+            assert_eq!(ready.method, "ready");
+            std::thread::sleep(Duration::from_millis(2500));
+            agmen_local::frame::write(
+                &mut stream,
+                &agmen_local::Response::ok(
+                    ready.id,
+                    serde_json::json!({"ready":true,"schemas":{"agmend.db":2}}),
+                ),
+            )
+            .unwrap();
+        });
+        wait_ready(&socket, "new", Instant::now() + Duration::from_secs(10)).unwrap();
+        server.join().unwrap();
     }
 
     #[test]

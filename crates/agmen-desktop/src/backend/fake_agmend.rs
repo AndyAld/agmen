@@ -219,6 +219,9 @@ pub(crate) struct FakeState {
     /// How long each `console_snapshot` waits before it answers, as a
     /// slow hub makes agmend wait.
     pub(crate) snapshot_delay: Duration,
+    /// How long each `ready` waits before it answers, as agmend's ancestry
+    /// walk makes the first owner-only call on a connection wait.
+    pub(crate) ready_delay: Duration,
     pub(crate) posts: Vec<Request>,
     pub(crate) agent_requests: Vec<Request>,
     pub(crate) managed_state: Option<String>,
@@ -581,6 +584,8 @@ fn serve(mut stream: UnixStream, state: &Mutex<FakeState>) -> Option<()> {
             method @ ("host_status" | "host_restart") => host_response(id, method, state),
             "hello" => hello_response(id, &stream, state)?,
             "ready" => {
+                let delay = state.lock().unwrap().ready_delay;
+                std::thread::sleep(delay);
                 let mut state = state.lock().unwrap();
                 state.ready_calls += 1;
                 Response::ok(
