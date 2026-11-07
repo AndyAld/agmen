@@ -24,8 +24,8 @@ use tokio::sync::Mutex;
 
 use super::recents::{self, Stopped};
 use super::{
-    Attached, MAX_MANAGED, Managed, Record, ReviewedBase, Source, Worker, envelope, error,
-    mcp_config, metadata_for, private_json, root_depth,
+    Attached, MAX_MANAGED, Managed, PersonalSnapshot, Record, ReviewedBase, Source, Worker,
+    envelope, error, mcp_config, metadata_for, private_json, root_depth,
 };
 use crate::budget::{Budget, Money};
 use crate::console::{bad_request, params};
@@ -127,6 +127,8 @@ struct Stored {
     #[serde(default)]
     reviewed_base: Option<ReviewedBase>,
     #[serde(default)]
+    personal_snapshot: Option<PersonalSnapshot>,
+    #[serde(default)]
     verbs: Option<std::collections::BTreeSet<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     parent: Option<IdentityId>,
@@ -174,6 +176,7 @@ impl Stored {
                 role_layer: self.role_layer,
                 role_commit: self.role_commit,
                 reviewed_base: self.reviewed_base,
+                personal_snapshot: self.personal_snapshot,
                 verbs: self.verbs,
                 parent: self.parent,
                 depth: self.depth,
@@ -666,6 +669,7 @@ impl Managed {
             role_layer: None,
             role_commit: None,
             reviewed_base: None,
+            personal_snapshot: None,
             verbs: joined.identity.verbs.clone(),
             parent: None,
             depth: root_depth(),

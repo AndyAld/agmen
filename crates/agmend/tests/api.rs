@@ -802,27 +802,53 @@ async fn pending_frame_cap_keeps_undelivered_tail() {
 
 #[tokio::test]
 async fn pending_on_disk_failure_is_error() {
-    let daemon = Daemon::seeded().await;
+    let mut daemon = Daemon::seeded().await;
+    daemon.pause().await;
+    // The recovery below must not wait out the production backoff.
+    #[cfg(feature = "test-hooks")]
+    agmend::test_hub_timing(
+        &daemon.hub.url.parse().unwrap(),
+        std::time::Duration::from_millis(10),
+        std::time::Duration::from_millis(80),
+        std::time::Duration::from_secs(60),
+    );
     let connection = rusqlite::Connection::open(daemon.home.database()).unwrap();
     connection.execute_batch("CREATE TRIGGER fail_pending BEFORE INSERT ON pending BEGIN SELECT RAISE(FAIL,'injected disk failure'); END;").unwrap();
+    daemon.resume();
     let mut client = daemon.client().await;
     let mut watch = daemon.client().await;
     assert_eq!(
         result(agent(&mut watch, "watch", json!({"project":support::PROJECT})).await)["kind"],
         "self"
     );
+    // Nothing before the failure may report offline: a false that arrives
+    // early would come from a reconnect or a pass end, not from the failure.
+    while let Ok(response) =
+        tokio::time::timeout(std::time::Duration::from_millis(500), watch.read()).await
+    {
+        let agmen_local::Outcome::Ok { result } = &response.outcome else {
+            panic!("the watch must not see an error before the failure");
+        };
+        assert!(
+            !(result["kind"] == "connection" && result["connected"] == false),
+            "offline before the failure: {result}"
+        );
+    }
     daemon.hub.state.inject(dm(1, "agent001"));
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        for _ in 0..10 {
+        loop {
             let response = watch.read().await;
-            if matches!(response.outcome, agmen_local::Outcome::Err { .. }) {
+            // A store failure shows as offline; an error would close the watch.
+            let agmen_local::Outcome::Ok { result } = &response.outcome else {
+                panic!("the watch must not see an error");
+            };
+            if result["kind"] == "connection" && result["connected"] == false {
                 return;
             }
         }
-        panic!("expected collector error");
     })
     .await
-    .unwrap();
+    .expect("expected the collector to go offline");
     let count: i64 = connection
         .query_row(
             "SELECT count(*) FROM positions WHERE stream='inbox:agent001'",
@@ -835,6 +861,22 @@ async fn pending_on_disk_failure_is_error() {
         result(agent(&mut client, "pending", json!({})).await),
         json!([])
     );
+    connection
+        .execute_batch("DROP TRIGGER fail_pending")
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(45), async {
+        loop {
+            let response = watch.read().await;
+            let agmen_local::Outcome::Ok { result } = &response.outcome else {
+                panic!("the watch must not see an error");
+            };
+            if result["kind"] == "connection" && result["connected"] == true {
+                return;
+            }
+        }
+    })
+    .await
+    .expect("expected the collector to come back online after the repair");
     daemon.stop().await;
 }
 

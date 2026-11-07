@@ -1,6 +1,9 @@
 use super::stop::publisher;
 use super::*;
 
+#[path = "managed_personal_role_tests.rs"]
+mod personal;
+
 #[tokio::test]
 async fn brief_requires_dm_before_minting() {
     let (fixture, mints) = tree_fixture().await;

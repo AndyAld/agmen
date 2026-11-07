@@ -615,12 +615,13 @@ impl Store {
     }
 
     /// Only registered inboxes and the person's streams belong to a collector.
-    pub(crate) fn collection_positions(
-        &mut self,
+    /// Read without a write transaction.
+    pub(crate) fn active_streams(
+        &self,
         origin: &str,
         owner: &IdentityId,
         project: &ProjectId,
-    ) -> Result<CollectionState, StoreError> {
+    ) -> Result<BTreeSet<Stream>, StoreError> {
         let mut streams = BTreeSet::from([Stream::Feed, Stream::Inbox(owner.clone())]);
         let mut stmt = self.conn.prepare("SELECT identity FROM identities WHERE origin=?1 AND owner=?2 AND project=?3 ORDER BY identity LIMIT ?4")?;
         for row in stmt.query_map(
@@ -632,7 +633,16 @@ impl Store {
                     .map_err(|_| StoreError::Invalid("stored identity"))?,
             ));
         }
-        drop(stmt);
+        Ok(streams)
+    }
+
+    pub(crate) fn collection_positions(
+        &mut self,
+        origin: &str,
+        owner: &IdentityId,
+        project: &ProjectId,
+    ) -> Result<CollectionState, StoreError> {
+        let streams = self.active_streams(origin, owner, project)?;
         let namespace = position_namespace(origin, Some(owner));
         let tx = self
             .conn
@@ -749,10 +759,7 @@ impl Store {
         self.ingest_for_owner(origin, project, message, None)
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "routing, deduplication, quota and position commit in one transaction"
-    )]
+    #[cfg(test)]
     pub(crate) fn ingest_for_owner(
         &mut self,
         origin: &str,
@@ -760,6 +767,52 @@ impl Store {
         message: &StampedEnvelope,
         owner: Option<&IdentityId>,
     ) -> Result<(), StoreError> {
+        let (_, remember) = self.ingest_tx(origin, project, message, owner, None)?;
+        if let Some(id) = remember {
+            self.remember_own(origin, &id, &message.client.id)?;
+        }
+        Ok(())
+    }
+
+    /// Like `ingest_for_owner`, but an identity whose stored metadata does not
+    /// parse is skipped instead of failing the message, so the other
+    /// recipients still get it and the position advances. `broken` maps the
+    /// identities already known to be broken to a hash of their stored text; a
+    /// changed text is parsed again. A message with a skipped identity and no
+    /// other recipient that parses is refused, so nothing is lost silently.
+    /// Returns the identities found broken by this message, which exist only
+    /// once the transaction committed, and the error of the step after the
+    /// commit, if it failed: the caller must report the former either way.
+    pub(crate) fn ingest_skipping_broken(
+        &mut self,
+        origin: &str,
+        project: &ProjectId,
+        message: &StampedEnvelope,
+        owner: &IdentityId,
+        broken: &BTreeMap<IdentityId, u64>,
+    ) -> Result<(IdentityFindings, Option<StoreError>), StoreError> {
+        let (found, remember) =
+            self.ingest_tx(origin, project, message, Some(owner), Some(broken))?;
+        let after =
+            remember.and_then(|id| self.remember_own(origin, &id, &message.client.id).err());
+        Ok((found, after))
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "routing, deduplication, quota and position commit in one transaction"
+    )]
+    fn ingest_tx(
+        &mut self,
+        origin: &str,
+        project: &ProjectId,
+        message: &StampedEnvelope,
+        owner: Option<&IdentityId>,
+        tolerate: Option<&BTreeMap<IdentityId, u64>>,
+    ) -> Result<IngestOutcome, StoreError> {
+        let mut found = Vec::new();
+        let mut broken_recipient = false;
+        let mut delivered_to = 0_usize;
         let seq = i64::try_from(message.seq.0)
             .map_err(|_| StoreError::Invalid("sequence exceeds SQLite integer"))?;
         let raw = serde_json::to_string(message)?;
@@ -777,7 +830,7 @@ impl Store {
             .optional()?;
         let last = previous.unwrap_or(0);
         if seq <= last {
-            return Ok(());
+            return Ok((found, None));
         }
         if seq != last + 1 {
             return Err(StoreError::Gap {
@@ -819,10 +872,27 @@ impl Store {
             {
                 continue;
             }
-            let identity: ManagedIdentity = serde_json::from_str(&metadata)?;
             let id = id
                 .parse::<IdentityId>()
                 .map_err(|_| StoreError::Invalid("stored identity"))?;
+            let identity: ManagedIdentity = match tolerate {
+                None => serde_json::from_str(&metadata)?,
+                Some(known) => {
+                    let hash = metadata_hash(&metadata);
+                    if known.get(&id) == Some(&hash) {
+                        broken_recipient |= broken_is_recipient(message, &id, &owner);
+                        continue;
+                    }
+                    match serde_json::from_str(&metadata) {
+                        Ok(identity) => identity,
+                        Err(_) => {
+                            broken_recipient |= broken_is_recipient(message, &id, &owner);
+                            found.push((id, hash));
+                            continue;
+                        }
+                    }
+                }
+            };
             if message.from == id {
                 remember = Some(id);
                 continue;
@@ -836,6 +906,7 @@ impl Store {
             )? {
                 continue;
             }
+            delivered_to += 1;
             let needs_receipt = identity.kind != IdentityKind::Listener
                 && matches!(&message.client.payload, Payload::Assign { to, .. } if to == &id);
             let seen: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM pending WHERE origin=?1 AND project=?2 AND identity=?3 AND sender=?4 AND id=?5) OR (?6 AND EXISTS(SELECT 1 FROM receipts WHERE origin=?1 AND project=?2 AND identity=?3 AND sender=?4 AND id=?5))",
@@ -882,13 +953,18 @@ impl Store {
             }
         }
         drop(stmt);
+        // A message nobody can read is not skipped: the position stays, and a
+        // repair of any one recipient delivers it. A broken identity the
+        // message was not addressed to does not hold it.
+        if broken_recipient && delivered_to == 0 {
+            return Err(StoreError::Invalid(
+                "every recipient's stored state is unreadable",
+            ));
+        }
         tx.execute("INSERT INTO positions VALUES (?1,?2,?3,?4) ON CONFLICT(origin,project,stream) DO UPDATE SET seq=excluded.seq",
             params![position_origin, project.as_str(), stream, seq])?;
         tx.commit()?;
-        if let Some(id) = remember {
-            self.remember_own(origin, &id, &message.client.id)?;
-        }
-        Ok(())
+        Ok((found, remember))
     }
 
     /// Watches receive delivery IDs even when an outgoing ASK has no feed copy.
@@ -1097,6 +1173,35 @@ fn addressed_to(
     Ok(addressed
         || (kind == IdentityKind::Listener
             && crate::listener::includes(message, id, &me.owner_id, &[])))
+}
+
+/// Whether a message with an unreadable row was addressed to that identity,
+/// by the rules of `is_for_me` applied to the row's id.
+fn broken_is_recipient(message: &StampedEnvelope, id: &IdentityId, owner: &str) -> bool {
+    matches!(&message.stream, Stream::Inbox(recipient) if recipient == id)
+        || owner.parse().is_ok_and(|owner_id| {
+            agmen_client::Me {
+                identity_id: id.clone(),
+                handle: String::new(),
+                owner_id,
+            }
+            .is_for_me(message, |_| false)
+        })
+}
+
+/// What `ingest_tx` leaves for after the commit: the identities found broken,
+/// and the sender whose own message id is still to be remembered.
+type IngestOutcome = (IdentityFindings, Option<IdentityId>);
+
+/// Identities found broken, each with a hash of its stored text.
+pub(crate) type IdentityFindings = Vec<(IdentityId, u64)>;
+
+/// Identifies one stored metadata text, so a re-registered identity is parsed again.
+fn metadata_hash(metadata: &str) -> u64 {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    metadata.hash(&mut hasher);
+    hasher.finish()
 }
 
 #[cfg(test)]

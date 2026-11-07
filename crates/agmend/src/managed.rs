@@ -25,7 +25,7 @@ use crate::hub_mint::{identity_on_record, rollback_hub_mint, rollback_untrusted_
 use crate::identities::{Identities, LocalToken};
 use crate::launch::{RoleRun, RunError, RunSpec, Runner};
 use crate::state::ManagedIdentity;
-use roles::ReviewedBase;
+use roles::{PersonalSnapshot, ReviewedBase, RoleCacheKey};
 
 const MAX_ROLE_PROMPT_BYTES: usize = 64 * 1024;
 pub(crate) const QUIT_WAIT: Duration = Duration::from_secs(8);
@@ -57,6 +57,7 @@ struct Placement {
     shared_budget: bool,
     role_commit: Option<String>,
     reviewed_base: Option<ReviewedBase>,
+    personal_snapshot: Option<PersonalSnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,6 +88,9 @@ struct Record {
     /// person launched its root, inherited by every descendant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reviewed_base: Option<ReviewedBase>,
+    /// The personal sources recorded in daemon state when this tree's root launched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    personal_snapshot: Option<PersonalSnapshot>,
     /// Hub-granted verbs, pinned at mint rather than read from an agent's files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     verbs: Option<std::collections::BTreeSet<String>>,
@@ -208,8 +212,8 @@ pub(crate) struct Managed {
     /// Serializes reservations, refunds, cap raises and spend propagation.
     accounting: Mutex<()>,
     safeguards_cache: Mutex<budgets::SettingsCache>,
-    /// At most MAX_MANAGED successful resolutions, keyed by repo, name and commit.
-    role_cache: Mutex<BTreeMap<(PathBuf, String, String), agmen_roles::Resolved>>,
+    /// At most MAX_MANAGED resolutions, keyed by repo, name, commit and personal snapshot.
+    role_cache: Mutex<BTreeMap<RoleCacheKey, agmen_roles::Resolved>>,
     shutting_down: AtomicBool,
     /// Set when quit gives up on an admitted launch; it then discards what it made.
     abandon_launch: tokio::sync::watch::Sender<bool>,
@@ -393,6 +397,7 @@ impl Managed {
             shared_budget,
             role_commit,
             reviewed_base,
+            personal_snapshot,
         } = placement;
         write_identity(&worktree, identity).await?;
         let mut metadata = metadata_for(identity);
@@ -428,6 +433,7 @@ impl Managed {
             role_layer: role.as_ref().map(|role| role.layer.to_string()),
             role_commit,
             reviewed_base,
+            personal_snapshot,
             verbs: identity.verbs.clone(),
             parent: parent
                 .as_ref()
@@ -626,8 +632,11 @@ impl Managed {
         &self,
         repo: &Path,
         name: &str,
+        personal: Option<&Path>,
     ) -> Result<agmen_roles::Resolved, ApiError> {
-        let role = self.resolve_any_role(repo, name).await?;
+        let role = self
+            .resolve_role_sources(Some(repo), name, personal)
+            .await?;
         if role.kind == agmen_roles::Kind::Listener {
             return Err(bad_request(
                 "listeners are started by the listener runtime, not agent_launch",
@@ -655,9 +664,19 @@ impl Managed {
         repo: Option<&Path>,
         name: &str,
     ) -> Result<agmen_roles::Resolved, ApiError> {
+        self.resolve_role_sources(repo, name, self.personal_roles.as_deref())
+            .await
+    }
+
+    async fn resolve_role_sources(
+        &self,
+        repo: Option<&Path>,
+        name: &str,
+        personal: Option<&Path>,
+    ) -> Result<agmen_roles::Resolved, ApiError> {
         let layers = agmen_roles::Layers {
             project: repo.map(Path::to_owned),
-            personal: self.personal_roles.clone(),
+            personal: personal.map(Path::to_owned),
             ..agmen_roles::Layers::default()
         };
         let name = name.to_owned();
