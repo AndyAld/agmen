@@ -451,3 +451,177 @@ async fn mint_coordinator_lookup_matches_the_coordinator_kind() {
     assert_eq!(*fixture.revoked.lock().unwrap(), ["agent002"]);
     assert_no_credentials(&fixture).await;
 }
+
+/// An offline `owner/other` whose latest HELLO set `field` to `value`.
+fn said_hello(field: &str, value: &str) -> Value {
+    let mut said = offline_agent();
+    said[field] = json!(value);
+    said
+}
+
+#[tokio::test]
+async fn mint_lookup_skips_an_agent_that_said_hello_with_a_model() {
+    refuses_lookup(json!([said_hello("model", "sonnet")])).await;
+}
+
+#[tokio::test]
+async fn mint_lookup_skips_an_agent_that_said_hello_with_an_agent() {
+    refuses_lookup(json!([said_hello("agent", "claude-code")])).await;
+}
+
+/// A worker of mine, launched as `owner/<name>` (the fake hub gives it
+/// agent002) and then stopped: still live on the hub, so the roster lists it
+/// offline, and agmend holds its record, row and credential.
+async fn stopped_worker(fixture: &mut Fixture, name: &str) -> crate::state::ManagedIdentity {
+    mint_hub(fixture, Answer::Valid, false).await;
+    let managed = &fixture.daemon.core.managed;
+    managed
+        .launch(json!({"project":"project1","name":name,"root":fixture.dir.path().join("repo")}))
+        .await
+        .unwrap();
+    managed.stop(json!({"identity":"agent002"})).await.unwrap();
+    worker_of(managed, "agent002")
+        .await
+        .lock()
+        .await
+        .record
+        .identity
+        .clone()
+}
+
+async fn forget_row(fixture: &Fixture, identity: &crate::state::ManagedIdentity) {
+    fixture
+        .daemon
+        .core
+        .identities
+        .forget(identity)
+        .await
+        .unwrap();
+}
+
+fn forget_credential(fixture: &Fixture, id: &str) {
+    let key = agmen_client::TokenKey::new(&fixture.hub_url, &id.parse().unwrap()).unwrap();
+    fixture.tokens.delete(&key).unwrap();
+}
+
+/// A proxy now answers 2xx junk to a mint of `owner/other` that `launcher`
+/// takes: nothing may be revoked, and one warning says why.
+async fn junk_refused(fixture: &mut Fixture, launcher: &Arc<Managed>) {
+    mint_hub(fixture, Answer::WrongShape, false).await;
+    let (logs, _guard) = capture();
+    let failure = launcher
+        .launch(json!({"project":"project1","name":"other","root":fixture.dir.path().join("repo")}))
+        .await
+        .unwrap_err();
+    let logs = assert_private(&logs, &failure);
+    assert!(fixture.revoked.lock().unwrap().is_empty());
+    assert_eq!(
+        logs.lines()
+            .filter(|line| line.contains("cannot revoke an unregistered hub agent"))
+            .count(),
+        1,
+        "one warning must explain the skipped revoke: {logs}"
+    );
+    assert!(!logs.contains("agent002"), "{logs}");
+}
+
+#[tokio::test]
+async fn mint_lookup_skips_a_stopped_worker_on_record() {
+    let mut fixture = Fixture::new().await;
+    stopped_worker(&mut fixture, "other").await;
+    *fixture.roster.lock().unwrap() = json!([offline_agent()]);
+    let managed = fixture.daemon.core.managed.clone();
+    junk_refused(&mut fixture, &managed).await;
+}
+
+#[tokio::test]
+async fn mint_lookup_skips_a_record_read_back_after_a_restart() {
+    let mut fixture = Fixture::new().await;
+    let identity = stopped_worker(&mut fixture, "other").await;
+    // Only agent.json is left for the restarted agmend to read.
+    forget_row(&fixture, &identity).await;
+    forget_credential(&fixture, "agent002");
+    *fixture.roster.lock().unwrap() = json!([offline_agent()]);
+    let managed = restarted(&fixture).await;
+    junk_refused(&mut fixture, &managed).await;
+}
+
+#[tokio::test]
+async fn mint_lookup_skips_an_identity_row_alone() {
+    let mut fixture = Fixture::new().await;
+    stopped_worker(&mut fixture, "other").await;
+    let managed = fixture.daemon.core.managed.clone();
+    managed.workers.lock().await.clear();
+    forget_credential(&fixture, "agent002");
+    *fixture.roster.lock().unwrap() = json!([offline_agent()]);
+    junk_refused(&mut fixture, &managed).await;
+}
+
+#[tokio::test]
+async fn mint_lookup_skips_a_stored_credential_alone() {
+    let mut fixture = Fixture::new().await;
+    let identity = stopped_worker(&mut fixture, "other").await;
+    let managed = fixture.daemon.core.managed.clone();
+    managed.workers.lock().await.clear();
+    forget_row(&fixture, &identity).await;
+    *fixture.roster.lock().unwrap() = json!([offline_agent()]);
+    junk_refused(&mut fixture, &managed).await;
+}
+
+#[tokio::test]
+async fn mint_lookup_skips_a_credential_it_cannot_read() {
+    let mut fixture = Fixture::new().await;
+    let key = agmen_client::TokenKey::new(&fixture.hub_url, &"agent002".parse().unwrap()).unwrap();
+    let hex: String = key
+        .as_str()
+        .bytes()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    // A directory where the token file belongs makes the read fail.
+    std::fs::create_dir(fixture.dir.path().join("tokens").join(format!("tok-{hex}"))).unwrap();
+    *fixture.roster.lock().unwrap() = json!([offline_agent()]);
+    let managed = fixture.daemon.core.managed.clone();
+    junk_refused(&mut fixture, &managed).await;
+}
+
+#[tokio::test]
+async fn mint_lookup_still_finds_the_fresh_mint_among_known_and_said_hello_entries() {
+    let mut fixture = Fixture::new().await;
+    // A stopped worker of another handle, on record.
+    stopped_worker(&mut fixture, "worker").await;
+    // A worker joined by hand holds the handle asked for: only its credential is on record.
+    let joined =
+        agmen_client::TokenKey::new(&fixture.hub_url, &"agent003".parse().unwrap()).unwrap();
+    fixture.tokens.set(&joined, "joined-by-hand").unwrap();
+    let mut said = entry("hello001", "owner/other", "agent", "offline");
+    said["agent"] = json!("claude-code");
+    said["model"] = json!("sonnet");
+    *fixture.roster.lock().unwrap() = json!([
+        entry("agent002", "owner/worker", "agent", "offline"),
+        entry("agent003", "owner/other", "agent", "offline"),
+        said,
+        entry("fresh001", "owner/other", "agent", "offline")
+    ]);
+    mint_hub(&mut fixture, Answer::WrongShape, false).await;
+    let (logs, _guard) = capture();
+    let failure = other(&fixture, None).await.unwrap_err();
+    let logs = assert_private(&logs, &failure);
+    assert_eq!(*fixture.revoked.lock().unwrap(), ["fresh001"]);
+    assert!(logs.contains("fresh001"), "{logs}");
+}
+
+#[tokio::test]
+async fn mint_lookup_skips_an_agmend_db_it_cannot_read() {
+    let mut fixture = Fixture::new().await;
+    // A row agmend cannot parse makes its read of this person's rows fail.
+    rusqlite::Connection::open(fixture.dir.path().join("agmend.db"))
+        .unwrap()
+        .execute(
+            "INSERT INTO identities VALUES (?1, 'broken01', 'owner001', 'project1', 'not json')",
+            [agmen_client::origin_key(&fixture.hub_url)],
+        )
+        .unwrap();
+    *fixture.roster.lock().unwrap() = json!([offline_agent()]);
+    let managed = fixture.daemon.core.managed.clone();
+    junk_refused(&mut fixture, &managed).await;
+}
