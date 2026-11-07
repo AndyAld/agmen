@@ -758,6 +758,29 @@ async fn failed_run_is_idle_and_charges_reported_cost() {
 }
 
 #[tokio::test]
+async fn quit_set_during_tick_starts_no_batch() {
+    let fixture = Fixture::new().await;
+    fixture.launch().await;
+    enqueue(&fixture, 1, "agent001").await;
+    let managed = fixture.daemon.core.managed.clone();
+    let worker = worker_of(&managed, "agent001").await;
+    // Tick passes its entry check, then waits on this lock; quit lands meanwhile.
+    let held = worker.lock().await;
+    let ticking = tokio::spawn({
+        let managed = managed.clone();
+        async move { managed.tick().await }
+    });
+    for _ in 0..50 {
+        tokio::task::yield_now().await;
+    }
+    managed.shutting_down.store(true, Ordering::Release);
+    drop(held);
+    ticking.await.unwrap();
+    assert!(fixture.runner.runs.lock().unwrap().is_empty());
+    assert_eq!(worker.lock().await.state, "idle");
+}
+
+#[tokio::test]
 async fn stopping_active_agent_cancels_batch_and_shutdown_stops_every_agent() {
     let fixture = Fixture::new().await;
     fixture.runner.mode.store(2, Ordering::SeqCst);
