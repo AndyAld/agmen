@@ -92,6 +92,10 @@ const ROSTER_EVERY: Duration = Duration::from_secs(15);
 /// How often a watch with a checkout re-reads its roles, worktrees and git
 /// facts (Task 8 review fix 3).
 const LOCAL_EVERY: Duration = Duration::from_secs(15);
+/// The shared deadline for stopping daemon-owned sessions and collectors.
+const SHUTDOWN_WAIT: Duration = Duration::from_secs(10);
+/// Time reserved for storing a spent refresh grant after the ordered shutdown.
+const RENEWAL_SHUTDOWN_FLOOR: Duration = Duration::from_secs(3);
 
 /// Why agmend could not start.
 #[derive(Debug, thiserror::Error)]
@@ -458,10 +462,11 @@ impl Agmend {
     }
 
     /// Serves until `shutdown` resolves, then joins daemon-owned collectors
-    /// and sessions, waiting at most 5 s per task and 10 s in total.
+    /// and sessions within 10 s, then waits for an in-flight hub token renewal
+    /// until that deadline or for 3 s, whichever is longer. With the hosted
+    /// hub's separate 5 s stop, shutdown takes at most 18 s.
     /// Stops agents before the listener that may have delegated them, then
-    /// the local record, so their BYEs can still reach a live record. A hub
-    /// token renewal in flight gets the same 10 s to store its tokens.
+    /// the local record, so their BYEs can still reach a live record.
     pub async fn serve_until(self, shutdown: impl std::future::Future<Output = ()>) {
         self.core.origins.local().start().await;
         self.core.managed.attach(&self.core.identities).await;
@@ -525,18 +530,30 @@ impl Agmend {
         }
         tasks.abort_all();
         while tasks.join_next().await.is_some() {}
-        if tokio::time::timeout(Duration::from_secs(10), async {
+        let deadline = tokio::time::Instant::now() + SHUTDOWN_WAIT;
+        if tokio::time::timeout_at(deadline, async {
             self.core.managed.shutdown().await;
             self.core.listeners.shutdown().await;
             self.core.origins.local().shutdown().await;
             self.core.identities.shutdown().await;
-            // Last, so a hung hub cannot use up the time the steps above need.
-            self.core.origins.hub().credentials().shutdown().await;
         })
         .await
         .is_err()
         {
-            tracing::warn!("daemon shutdown reached its ten second deadline");
+            tracing::warn!("daemon session shutdown reached its ten second deadline");
+        }
+        // Keep the original deadline on a fast quit, but reserve a floor even
+        // when the ordered phase uses its whole budget. This only waits; it
+        // cannot initiate a renewal. The combined phases take at most 13 s.
+        let renewal_deadline = deadline.max(tokio::time::Instant::now() + RENEWAL_SHUTDOWN_FLOOR);
+        if tokio::time::timeout_at(
+            renewal_deadline,
+            self.core.origins.hub().credentials().shutdown(),
+        )
+        .await
+        .is_err()
+        {
+            tracing::warn!("hub token renewal reached its shutdown deadline");
         }
         self.core.host.stop();
         if !host_stopped {

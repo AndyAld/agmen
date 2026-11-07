@@ -134,6 +134,10 @@ pub(crate) struct DelayedRefresh {
 }
 
 impl DelayedRefresh {
+    pub(crate) fn release(&self) {
+        self.release.notify_one();
+    }
+
     async fn grant(&self, form: &str) -> (StatusCode, &'static str) {
         assert!(form.contains("refresh_token=old-refresh"));
         if self.calls.fetch_add(1, Ordering::SeqCst) != 0 {
@@ -700,6 +704,16 @@ async fn shutdown_does_not_wait_past_its_bound_for_a_hung_hub() {
         waited >= Duration::from_secs(10),
         "agmend left after {waited:?} with the renewal still in flight"
     );
+}
+
+#[tokio::test]
+async fn shutdown_does_not_start_a_renewal_for_expired_tokens() {
+    const EMPTY_SHUTDOWN_WAIT: Duration = Duration::from_secs(2);
+    let fixture = RefreshFixture::new().await;
+    tokio::time::timeout(EMPTY_SHUTDOWN_WAIT, fixture.daemon.serve_until(async {}))
+        .await
+        .expect("shutdown without an in-flight renewal must not wait for the floor");
+    assert_eq!(fixture.refresh.calls.load(Ordering::SeqCst), 0);
 }
 
 /// Starts a renewal and waits until the hub holds its refresh grant.

@@ -252,13 +252,30 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match runtime.block_on(run()) {
+    match serve_then_exit(runtime, run(), EXIT_WAIT) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("agmend: {err:#}");
             ExitCode::FAILURE
         }
     }
+}
+
+/// How long process exit waits for blocking threads (a credential read on a
+/// stalled filesystem) after the daemon stopped. Part of the stop budget that
+/// `service/launchd.rs` sizes `ExitTimeOut` against.
+const EXIT_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Runs `serving` to its end, then drops the runtime without waiting past
+/// `wait` for blocking threads, which a plain drop would wait for forever.
+fn serve_then_exit(
+    runtime: tokio::runtime::Runtime,
+    serving: impl std::future::Future<Output = Result<()>>,
+    wait: std::time::Duration,
+) -> Result<()> {
+    let result = runtime.block_on(serving);
+    runtime.shutdown_timeout(wait);
+    result
 }
 
 fn service_exit(action: ServiceAction, program: Option<std::path::PathBuf>) -> ExitCode {
@@ -305,6 +322,48 @@ mod tests {
     use super::*;
     use std::ffi::OsString;
     use std::os::unix::ffi::OsStringExt as _;
+
+    #[test]
+    fn exit_does_not_wait_past_its_bound_for_a_stuck_blocking_thread() {
+        const BOUND: std::time::Duration = std::time::Duration::from_millis(200);
+        const STUCK: std::time::Duration = std::time::Duration::from_secs(5);
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let began = std::time::Instant::now();
+        let result = serve_then_exit(
+            runtime,
+            async {
+                let (started, running) = tokio::sync::oneshot::channel();
+                tokio::task::spawn_blocking(move || {
+                    started.send(()).unwrap();
+                    std::thread::sleep(STUCK);
+                });
+                running.await.unwrap();
+                Ok(())
+            },
+            BOUND,
+        );
+        assert!(result.is_ok());
+        assert!(
+            began.elapsed() < STUCK / 2,
+            "exit waited for a stuck blocking thread"
+        );
+    }
+
+    #[test]
+    fn serve_then_exit_returns_the_serving_error() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let result = serve_then_exit(
+            runtime,
+            async { anyhow::bail!("serving failed") },
+            std::time::Duration::from_millis(10),
+        );
+        assert_eq!(result.unwrap_err().to_string(), "serving failed");
+    }
 
     #[test]
     fn token_store_option_parses_with_program() {

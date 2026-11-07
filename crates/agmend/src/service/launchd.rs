@@ -197,6 +197,12 @@ pub(super) fn render_with_token(
     )?;
     // shortcut: no automatic restart after a crash; revisit when Andy chooses a bounded restart policy.
     append(&mut contents, "  <key>KeepAlive</key><false/>\n")?;
+    // launchd's default is 20 s, which equals the worst-case stop (10 s sessions,
+    // 3 s renewal floor, 5 s hub stop, 2 s exit wait); 30 s leaves a 10 s margin.
+    append(
+        &mut contents,
+        "  <key>ExitTimeOut</key><integer>30</integer>\n",
+    )?;
     if let Some(token) = token {
         append(
             &mut contents,
@@ -315,6 +321,7 @@ mod tests {
                 "  <array><string>/opt/agmen/agmend</string></array>\n",
                 "  <key>RunAtLoad</key><true/>\n",
                 "  <key>KeepAlive</key><false/>\n",
+                "  <key>ExitTimeOut</key><integer>30</integer>\n",
                 "  <key>StandardOutPath</key><string>/test/home/Library/Logs/agmen/agmend.log</string>\n",
                 "  <key>StandardErrorPath</key><string>/test/home/Library/Logs/agmen/agmend.log</string>\n",
                 "</dict>\n</plist>\n",

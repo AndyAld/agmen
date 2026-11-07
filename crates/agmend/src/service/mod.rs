@@ -605,6 +605,20 @@ mod tests {
     }
 
     #[test]
+    fn launchd_waits_longer_than_the_worst_case_stop_before_killing() {
+        // Worst stop: 10 s sessions + 3 s renewal floor + 5 s hub stop + 2 s
+        // exit wait = 20 s, which is launchd's default ExitTimeOut.
+        let paths = ServicePaths {
+            home: PathBuf::from("/test/home"),
+            executable: PathBuf::from("/opt/agmen/agmend"),
+            uid: 501,
+        };
+        let plist = launchd::render(&paths).unwrap().contents;
+        assert!(plist.contains("<key>ExitTimeOut</key><integer>30</integer>"));
+        assert_eq!(plist.matches("ExitTimeOut").count(), 1);
+    }
+
+    #[test]
     fn launchd_token_store_dir_is_persisted() {
         let dir = tempfile::tempdir().unwrap();
         let token = dir.path().join("tokens &'\"<>%$");
