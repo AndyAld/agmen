@@ -350,6 +350,74 @@ async fn login_start_without_a_hub_or_login_is_refused() {
 }
 
 #[tokio::test]
+async fn login_start_with_an_unusable_lock_fails_before_the_hub_is_asked() {
+    let home = Home::new();
+    let lock = home.login_file().with_file_name("login.lock");
+    std::fs::create_dir_all(&lock).unwrap();
+    // Nothing listens here: asking the hub first would say it could not.
+    let error = home
+        .credentials
+        .login_start(json!({"hub": "http://127.0.0.1:9"}))
+        .await
+        .unwrap_err();
+    assert!(
+        error.message.contains(&lock.display().to_string()),
+        "{error:?}"
+    );
+    assert!(error.message.contains("os error"), "{error:?}");
+    assert!(error.message.contains("owner"), "{error:?}");
+    let status = home.credentials.login_status(json!({})).await.unwrap();
+    assert_eq!(status["state"], "idle");
+}
+
+#[tokio::test]
+async fn login_start_checks_the_hub_before_a_busy_lock() {
+    let home = Home::new();
+    let path = home.login_file().with_file_name("login.lock");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let lock = std::fs::File::create(path).unwrap();
+    lock.lock().unwrap();
+    let start = std::time::Instant::now();
+    let error = home
+        .credentials
+        .login_start(json!({"hub": "http://hub.example"}))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::BadRequest, "{error:?}");
+    assert!(
+        start.elapsed() < Duration::from_secs(2),
+        "waited on the lock"
+    );
+}
+
+#[tokio::test]
+async fn login_start_checks_the_hub_before_an_unusable_lock() {
+    let home = Home::new();
+    std::fs::create_dir_all(home.login_file().with_file_name("login.lock")).unwrap();
+    let error = home
+        .credentials
+        .login_start(json!({"hub": "http://hub.example"}))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::BadRequest, "{error:?}");
+}
+
+#[tokio::test]
+async fn login_start_lock_errors_name_login_lock() {
+    let home = Home::new();
+    let lock = home.login_file().with_file_name("login.lock");
+    std::fs::create_dir_all(&lock).unwrap();
+    let error = home
+        .credentials
+        .login_start(json!({"hub": "http://127.0.0.1:9"}))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::Hub);
+    assert!(error.message.contains("local login.lock"), "{error:?}");
+    assert!(!error.message.contains('\n'), "{error:?}");
+}
+
+#[tokio::test]
 async fn login_start_refuses_an_unsafe_hub() {
     let home = Home::new();
     for hub in ["http://hub.example", "not a url"] {

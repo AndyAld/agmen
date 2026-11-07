@@ -30,6 +30,7 @@ use crate::budget::{Budget, Money};
 use crate::console::{bad_request, params};
 use crate::git::Git;
 use crate::hub::{Hub, HubError};
+use crate::hub_mint::{identity_on_record, rollback_hub_mint, rollback_untrusted_hub_mint};
 use crate::identities::{Identities, LocalToken, forbidden};
 use crate::managed::Managed;
 use crate::origin::{Origin, Origins};
@@ -666,8 +667,13 @@ impl Listeners {
                         tracing::warn!(code = ?revoke.code, "revoking an unregistered local listener failed");
                     }
                 } else {
-                    self.rollback_hub_mint(&identity.hub_url, &identity.identity_id)
-                        .await;
+                    rollback_hub_mint(
+                        &self.hub,
+                        &identity.hub_url,
+                        &identity.identity_id,
+                        "listener",
+                    )
+                    .await;
                 }
             }
             return Err(error);
@@ -752,59 +758,50 @@ impl Listeners {
         Ok(json!({"identity_id":identity.identity_id,"handle":identity.handle}))
     }
 
-    /// Revokes a hub mint this start made but will not register, and drops its
-    /// credential. Both steps are best effort; hub and credential errors can
-    /// carry text that must not reach a log, so only the id is logged.
-    async fn rollback_hub_mint(&self, origin: &url::Url, id: &IdentityId) {
-        tracing::warn!(identity = %id, "rolling back an unregistered hub listener");
-        if self.hub.revoke_identity(id).await.is_err() {
-            tracing::warn!(identity = %id, "revoking an unregistered hub listener failed");
-        }
-        // Try both steps even if the revoke failed or the credential was never stored.
-        if self
-            .hub
-            .credentials()
-            .delete_token(origin, id)
-            .await
-            .is_err()
-        {
-            tracing::warn!(identity = %id,
-                "deleting an unregistered hub listener's credential failed");
-        }
-    }
-
-    /// Rolls back a hub mint that was accepted but whose answer cannot be
-    /// trusted to name it: not JSON, the wrong shape, or another handle or
-    /// project. Its id is not safe to revoke, because DELETE takes any identity
-    /// the person may administer, and a group admin may administer a teammate's.
-    /// The project roster is the hub's own list of live identities, and the hub
-    /// allows one live identity per handle in a project, so a listener with the
-    /// handle just asked for that has never connected is this start's mint.
-    async fn rollback_untrusted_hub_mint(
+    /// Whether agmend already holds `id`, so it cannot be the mint this start
+    /// just made: a listener record of any project, running or stopped (read
+    /// from the status index, because start holds the entries lock), this
+    /// project's durable intent (it survives without an identity row), an
+    /// identity row in agmend.db, or a stored credential. A lookup that fails
+    /// counts as held: a revoke cannot be undone.
+    async fn on_record(
         &self,
-        origin: &url::Url,
+        login: &agmen_client::Login,
         project: &ProjectId,
-        handle: &str,
-    ) {
-        // The error can carry hub text; none of it is logged.
-        let Ok(roster) = self.hub.roster(project).await else {
-            tracing::warn!(
-                "cannot revoke an unregistered hub listener: the project roster could not be read"
-            );
-            return;
+        id: &IdentityId,
+    ) -> bool {
+        let records: Vec<_> = {
+            let Ok(statuses) = self.statuses.lock() else {
+                return true;
+            };
+            statuses
+                .entries
+                .values()
+                .chain(statuses.starting.iter().map(|(_, live)| live))
+                .filter_map(Weak::upgrade)
+                .collect()
         };
-        let mut mine = roster.iter().filter(|entry| {
-            entry.kind == IdentityKind::Listener
-                && entry.handle == handle
-                && entry.status == agmen_local::console::Status::Offline
-        });
-        if let (Some(entry), None) = (mine.next(), mine.next()) {
-            self.rollback_hub_mint(origin, &entry.identity_id).await;
-        } else {
-            tracing::warn!(
-                "cannot revoke an unregistered hub listener: no unconnected one in the project roster"
-            );
+        for live in records {
+            if live.lock().await.identity.identity_id == *id {
+                return true;
+            }
         }
+        let path = self
+            .state_dir
+            .join("listener")
+            .join(project.as_str())
+            .join("intent.json");
+        let intent = tokio::task::spawn_blocking(move || read_intent(&path)).await;
+        let held = match intent {
+            Ok(Ok(intent)) => intent.project != *project || intent.identity_id == *id,
+            Ok(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => false,
+            _ => true,
+        };
+        if held {
+            return true;
+        }
+        // A stopped identity service is None, which counts as held.
+        identity_on_record(&self.hub, self.identities().ok(), login, id).await
     }
 
     async fn mint(
@@ -847,12 +844,22 @@ impl Listeners {
         }
         let broker = self.broker().await?;
         let body = json!({"project":project,"handle":handle,"kind":"listener","role":spec.role,"verbs":spec.verbs,"edits":spec.edits,"role_sha256":spec.role_sha256});
+        let rollback = || {
+            rollback_untrusted_hub_mint(
+                &self.hub,
+                login,
+                project,
+                &handle,
+                IdentityKind::Listener,
+                "listener",
+                |id| async move { self.on_record(login, project, &id).await },
+            )
+        };
         let minted = match self.hub.mint_identity(&body).await {
             Ok(minted) => minted,
             // A success status with a body that is not JSON: the hub made the mint.
             Err(HubError::BadAnswer(_)) => {
-                self.rollback_untrusted_hub_mint(&login.hub_url, project, &handle)
-                    .await;
+                rollback().await;
                 return Err(failure("invalid listener mint response"));
             }
             Err(error) => return Err(listener_mint_error(error)),
@@ -867,13 +874,11 @@ impl Listeners {
             token: String,
         }
         let Ok(minted) = serde_json::from_value::<Minted>(minted) else {
-            self.rollback_untrusted_hub_mint(&login.hub_url, project, &handle)
-                .await;
+            rollback().await;
             return Err(failure("invalid listener mint response"));
         };
         if minted.handle != handle || minted.project != *project {
-            self.rollback_untrusted_hub_mint(&login.hub_url, project, &handle)
-                .await;
+            rollback().await;
             return Err(failure("hub minted a different listener than requested"));
         }
         // The answer matches the request, so its id is this mint's.
@@ -883,7 +888,7 @@ impl Listeners {
             .set_token(&login.hub_url, &minted.id, minted.token)
             .await
         {
-            self.rollback_hub_mint(&login.hub_url, &minted.id).await;
+            rollback_hub_mint(&self.hub, &login.hub_url, &minted.id, "listener").await;
             return Err(error);
         }
         Ok(ManagedIdentity {

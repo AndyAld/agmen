@@ -636,7 +636,13 @@ fn report(ready: oneshot::Sender<Result<(), ClientError>>, outcome: Result<(), C
 }
 
 /// The reconnect delay after `failures` failed attempts in a row.
-fn retry_delay(failures: u32) -> Duration {
+/// Starts at 1 second and doubles to a cap of 30 seconds.
+///
+/// ```
+/// assert_eq!(agmen_client::retry_delay(3), std::time::Duration::from_secs(4));
+/// ```
+#[must_use]
+pub fn retry_delay(failures: u32) -> Duration {
     let doublings = failures.saturating_sub(1).min(16);
     FIRST_RETRY_DELAY
         .saturating_mul(1 << doublings)

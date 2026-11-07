@@ -10,8 +10,9 @@ use tokio::io::AsyncReadExt as _;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 
 use super::{
-    AUTHORITY_RECHECK, COLLECTION_PAGE_SIZE, Caller, DEADLINE, Identities, ProjectParams,
-    bad_request, forbidden, hub_error, still_managed, unauthorized, write_event, write_watch_frame,
+    AUTHORITY_RECHECK, COLLECTION_PAGE_SIZE, Caller, DEADLINE, Identities, ProjectParams, Site,
+    bad_request, check_managed, forbidden, hub_error, unauthorized, unconfirmed, write_event,
+    write_watch_frame,
 };
 use crate::origin::Origin;
 
@@ -90,17 +91,42 @@ impl Identities {
                     last_frame = tokio::time::Instant::now();
                 }
                 _ = authority.tick() => {
-                    let valid = tokio::time::timeout(DEADLINE, async {
-                        match caller {
-                            Caller::Identity(identity) => still_managed(&self.origins, self.store.clone(), identity).await,
-                            Caller::Human => self.origins.person(Origin::Local).await.is_ok_and(|login| login.human_id == me.identity_id),
-                        }
-                    }).await;
-                    if !matches!(valid, Ok(true)) {
+                    if !self.recheck(caller, me).await? {
                         return Err(unauthorized());
                     }
                 }
             }
         }
     }
+
+    /// Whether `caller` is still who it was: `false` when it is revoked or gone,
+    /// which ends the watch with `unauthorized`. A read that failed or ran out
+    /// of time says nothing against it, so the watch ends with the answer
+    /// `read_failed` gives instead.
+    async fn recheck(&self, caller: &Caller, me: &Me) -> Result<bool, ApiError> {
+        let checked = tokio::time::timeout(DEADLINE, async {
+            match caller {
+                Caller::Identity(identity) => {
+                    check_managed(&self.origins, self.store.clone(), identity).await
+                }
+                Caller::Human => match self.origins.person(Origin::Local).await {
+                    Ok(login) => Ok(login.human_id == me.identity_id),
+                    Err(error) => unconfirmed(error),
+                },
+            }
+        })
+        .await;
+        match checked {
+            Ok(Ok(valid)) => {
+                self.read_worked(Site::Recheck);
+                Ok(valid)
+            }
+            Ok(Err(error)) => Err(self.read_failed(Site::Recheck, &me.identity_id, error)),
+            Err(_) => Err(self.read_timed_out(Site::Recheck, &me.identity_id)),
+        }
+    }
 }
+
+#[cfg(test)]
+#[path = "identity_watch_tests.rs"]
+mod tests;

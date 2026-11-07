@@ -21,6 +21,7 @@ use tokio::sync::{Mutex, OnceCell, oneshot};
 use crate::budget::{Budget, Money, Step};
 use crate::console::{bad_request, params};
 use crate::hub::{Hub, HubError};
+use crate::hub_mint::{identity_on_record, rollback_hub_mint, rollback_untrusted_hub_mint};
 use crate::identities::{Identities, LocalToken};
 use crate::launch::{RoleRun, RunError, RunSpec, Runner};
 use crate::state::ManagedIdentity;
@@ -448,28 +449,6 @@ impl Managed {
         Ok(answer)
     }
 
-    /// Both cleanup steps are best effort. Their errors may contain hub text
-    /// or credentials, so warnings name only the validated identity id.
-    /// Returns whether the hub revoked the identity.
-    async fn rollback_hub_mint(&self, origin: &url::Url, id: &IdentityId) -> bool {
-        tracing::warn!(identity = %id, "rolling back an unregistered hub agent");
-        let revoked = self.hub.revoke_identity(id).await.is_ok();
-        if !revoked {
-            tracing::warn!(identity = %id, "revoking an unregistered hub agent failed");
-        }
-        if self
-            .hub
-            .credentials()
-            .delete_token(origin, id)
-            .await
-            .is_err()
-        {
-            tracing::warn!(identity = %id,
-                "deleting an unregistered hub agent's credential failed");
-        }
-        revoked
-    }
-
     /// Whether agmend already holds `id`, so it cannot be a mint made just
     /// now: a managed worker or child record (running, stopped, or read back
     /// after a restart), an identity row in agmend.db, or a stored credential
@@ -479,67 +458,7 @@ impl Managed {
         if self.workers.lock().await.contains_key(id) {
             return true;
         }
-        let Some(identities) = self.identities() else {
-            return true;
-        };
-        let origin = agmen_client::origin_key(&login.hub_url);
-        let rows = identities.managed(origin, login.human_id.clone()).await;
-        if rows.map_or(true, |rows| rows.iter().any(|row| row.identity_id == *id)) {
-            return true;
-        }
-        let token = self.hub.credentials().token(&login.hub_url, id).await;
-        token.map_or(true, |token| token.is_some())
-    }
-
-    /// A bad answer cannot authorize revoking its id. The hub enforces one
-    /// live handle per project for agents too (identities_live_handle), and
-    /// mint accepts only the owner's handle prefix. After a success status,
-    /// an offline identity of the requested kind and handle in this project's
-    /// roster is this mint only if it is fresh: a stopped worker of the
-    /// person's is just as live and offline under that handle. Fresh means
-    /// agmend does not hold it (`on_record`) and it has said no HELLO, which
-    /// would have set the roster's agent and model (docs/protocol.md,
-    /// state/roster). Both filters run before the count, so an entry they
-    /// drop is not ambiguity.
-    async fn rollback_untrusted_hub_mint(
-        &self,
-        login: &agmen_client::Login,
-        project: &ProjectId,
-        handle: &str,
-        kind: IdentityKind,
-    ) {
-        let Ok(roster) = self.hub.roster(project).await else {
-            tracing::warn!(
-                "cannot revoke an unregistered hub agent: the project roster could not be read"
-            );
-            return;
-        };
-        // shortcut: a HELLO that names neither agent nor model (`agmen watch`
-        // sends one) leaves both unset, so only the record check drops that
-        // worker; upgrade when the roster shows whether a HELLO was seen.
-        let mut fresh = Vec::new();
-        for entry in roster.iter().filter(|entry| {
-            entry.kind == kind
-                && entry.handle == handle
-                && entry.status == agmen_local::console::Status::Offline
-                && entry.agent.is_none()
-                && entry.model.is_none()
-        }) {
-            if !self.on_record(login, &entry.identity_id).await {
-                fresh.push(&entry.identity_id);
-                // Two are already ambiguous: read no more records.
-                if fresh.len() > 1 {
-                    break;
-                }
-            }
-        }
-        if let [id] = fresh.as_slice() {
-            self.rollback_hub_mint(&login.hub_url, id).await;
-        } else {
-            tracing::warn!(
-                "cannot revoke an unregistered hub agent: no single fresh offline match in the project roster"
-            );
-        }
+        identity_on_record(&self.hub, self.identities(), login, id).await
     }
 
     #[expect(
@@ -603,11 +522,21 @@ impl Managed {
                 verbs: minted.verbs,
             });
         }
+        let rollback = || {
+            rollback_untrusted_hub_mint(
+                &self.hub,
+                login,
+                &launch.project,
+                &handle,
+                kind,
+                "agent",
+                |id| async move { self.on_record(login, &id).await },
+            )
+        };
         let minted = match self.hub.mint_identity(&body).await {
             Ok(minted) => minted,
             Err(HubError::BadAnswer(_)) => {
-                self.rollback_untrusted_hub_mint(login, &launch.project, &handle, kind)
-                    .await;
+                rollback().await;
                 return Err(error("invalid agent mint response"));
             }
             // A refusal (409 handle_taken while a stopped worker of mine holds the
@@ -624,21 +553,18 @@ impl Managed {
             verbs: Option<std::collections::BTreeSet<String>>,
         }
         let Ok(minted) = serde_json::from_value::<Minted>(minted) else {
-            self.rollback_untrusted_hub_mint(login, &launch.project, &handle, kind)
-                .await;
+            rollback().await;
             return Err(error("invalid agent mint response"));
         };
         if minted.handle != handle
             || minted.project != launch.project
             || minted.tenant != joined.identity.tenant
         {
-            self.rollback_untrusted_hub_mint(login, &launch.project, &handle, kind)
-                .await;
+            rollback().await;
             return Err(error("hub minted a different identity than requested"));
         }
         if spec.is_some() && minted.verbs.is_none() {
-            self.rollback_untrusted_hub_mint(login, &launch.project, &handle, kind)
-                .await;
+            rollback().await;
             return Err(error("hub omitted the role's capped verbs"));
         }
         let identity = IdentityFile {
@@ -659,8 +585,7 @@ impl Managed {
             .set_token(&identity.hub_url, &identity.identity_id, minted.token)
             .await
         {
-            self.rollback_hub_mint(&identity.hub_url, &identity.identity_id)
-                .await;
+            rollback_hub_mint(&self.hub, &identity.hub_url, &identity.identity_id, "agent").await;
             return Err(failure);
         }
         Ok(identity)

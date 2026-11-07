@@ -16,7 +16,7 @@ use std::time::Duration;
 use support::mcp::Mcp;
 use support::{Home, Worktree, assert_exit, stderr, stdout};
 use tokio::io::{AsyncBufReadExt as _, BufReader};
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 
 const MCP_WAIT: Duration = Duration::from_secs(15);
 /// How long agmend gets to stop in the tests that run it without `Local`.
@@ -944,6 +944,137 @@ async fn agmen_watch_prints_local_messages() {
         assert!(!stderr(&output).contains(&token));
         wait_local_status(&local, &worker, "offline").await;
     }
+    local.stop().await;
+}
+
+/// Runs `sql` on agmend's own database from another connection.
+async fn agmend_db(local: &Local, sql: &'static str) {
+    let path = local.home.state_base().join("agmend.db");
+    tokio::task::spawn_blocking(move || {
+        rusqlite::Connection::open(path)
+            .unwrap()
+            .execute_batch(sql)
+            .unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+/// The lines `child` writes to stderr, taken as they come so the pipe never fills.
+fn stderr_lines(child: &mut tokio::process::Child) -> mpsc::UnboundedReceiver<String> {
+    let mut lines = BufReader::new(child.stderr.take().unwrap()).lines();
+    let (tx, rx) = mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Ok(Some(line)) = lines.next_line().await {
+            if tx.send(line).is_err() {
+                return;
+            }
+        }
+    });
+    rx
+}
+
+/// Reads stderr into `seen` until a line satisfies `wanted`.
+async fn stderr_until(
+    lines: &mut mpsc::UnboundedReceiver<String>,
+    seen: &mut Vec<String>,
+    what: &str,
+    wanted: impl Fn(&str) -> bool,
+) {
+    tokio::time::timeout(MCP_WAIT, async {
+        while !seen.iter().any(|line| wanted(line)) {
+            let Some(line) = lines.recv().await else {
+                panic!("agmen watch ended before {what}; stderr: {seen:#?}");
+            };
+            seen.push(line);
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("no {what} on stderr within {MCP_WAIT:?}: {seen:#?}"));
+}
+
+#[tokio::test]
+async fn agmen_watch_reconnects_while_agmend_cannot_read_its_registry() {
+    let local = Local::new().await;
+    let worker = local.member("worker").await;
+    let feed_seq = || async {
+        local
+            .call("state", json!({"project": local.project, "key": "head"}))
+            .await["value"]["feed_seq"]
+            .as_u64()
+            .unwrap()
+    };
+    let before_hello = feed_seq().await;
+    let mut command =
+        tokio::process::Command::from(local.home.agmen(&worker.path(), &["watch", "--json"]));
+    // Debug, so that each reconnect that fails shows on stderr.
+    let mut child = command
+        .env("AGMEN_LOG", "debug")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut out = BufReader::new(child.stdout.take().unwrap()).lines();
+    let mut err = stderr_lines(&mut child);
+    let mut seen = Vec::new();
+    tokio::time::timeout(MCP_WAIT, out.next_line())
+        .await
+        .unwrap()
+        .unwrap()
+        .expect("watch banner");
+    wait_local_status(&local, &worker, "online").await;
+    // The HELLO is recorded, so what follows is the watch alone.
+    for _ in 0..LOCAL_POLLS {
+        if feed_seq().await > before_hello {
+            break;
+        }
+        tokio::time::sleep(LOCAL_POLL).await;
+    }
+    assert!(
+        feed_seq().await > before_hello,
+        "the HELLO was not recorded"
+    );
+
+    // agmend cannot read its registry: the watch is cut within a second, and
+    // the watch's reconnects meet the same until it can.
+    agmend_db(&local, "ALTER TABLE identities RENAME TO identities_hidden").await;
+    stderr_until(
+        &mut err,
+        &mut seen,
+        "a reconnect that met a busy agmend",
+        |line| line.contains("reconnect failed") && line.contains("local.db is busy; try again"),
+    )
+    .await;
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "the watch ended: {seen:#?}"
+    );
+
+    agmend_db(&local, "ALTER TABLE identities_hidden RENAME TO identities").await;
+    stderr_until(&mut err, &mut seen, "the reconnect", |line| {
+        line.contains("reconnected to agmend")
+    })
+    .await;
+    person_message(&local, &worker, "after the hiccup").await;
+    tokio::time::timeout(MCP_WAIT, async {
+        for _ in 0..WATCH_EVENTS {
+            let line = out.next_line().await.unwrap().expect("watch event");
+            let event: Value = serde_json::from_str(&line).unwrap();
+            if event["kind"] == "message" && event["message"]["body"] == "after the hiccup" {
+                return;
+            }
+        }
+        panic!("watch did not print the message sent after the reconnect");
+    })
+    .await
+    .unwrap();
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "the watch ended: {seen:#?}"
+    );
+    child.start_kill().unwrap();
+    child.wait().await.unwrap();
     local.stop().await;
 }
 

@@ -4,7 +4,7 @@
 
 mod support;
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use agmen_local::Request;
 use serde_json::json;
@@ -14,6 +14,10 @@ const MANAGED_IDENTITIES: usize = agmen_local::safeguards::MAX_MANAGED - 1;
 const SEEDED_IDENTITIES: usize = 2;
 const POSITION_POLLS: usize = 100;
 const POSITION_POLL: Duration = Duration::from_millis(50);
+/// A collector that saves nothing new for this long has stopped, not slowed.
+const POSITION_STALL: Duration = Duration::from_secs(15);
+/// Hard bound on one wait, however steadily the collector progresses.
+const POSITION_TOTAL: Duration = Duration::from_secs(120);
 const CALL_WAIT: Duration = Duration::from_secs(10);
 
 async fn wait_position(daemon: &Daemon, stream: &str, seq: i64) {
@@ -21,7 +25,9 @@ async fn wait_position(daemon: &Daemon, stream: &str, seq: i64) {
     let stream = stream.to_owned();
     tokio::task::spawn_blocking(move || {
         let conn = rusqlite::Connection::open(path).unwrap();
-        for _ in 0..POSITION_POLLS {
+        let start = Instant::now();
+        let mut last_progress = (start, (0, 0));
+        loop {
             let saved: i64 = conn
                 .query_row(
                     "SELECT coalesce(max(seq),0) FROM positions WHERE project=?1 AND stream=?2",
@@ -32,16 +38,22 @@ async fn wait_position(daemon: &Daemon, stream: &str, seq: i64) {
             if saved >= seq {
                 return;
             }
+            let (count, total): (i64, i64) = conn
+                .query_row(
+                    "SELECT count(*), coalesce(sum(seq),0) FROM positions WHERE project=?1",
+                    [PROJECT],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            if last_progress.1 != (count, total) {
+                last_progress = (Instant::now(), (count, total));
+            }
+            assert!(
+                last_progress.0.elapsed() < POSITION_STALL && start.elapsed() < POSITION_TOTAL,
+                "collector stopped at {count} saved positions; {stream}:{seq} was never committed"
+            );
             std::thread::sleep(POSITION_POLL);
         }
-        let count: i64 = conn
-            .query_row(
-                "SELECT count(*) FROM positions WHERE project=?1",
-                [PROJECT],
-                |row| row.get(0),
-            )
-            .unwrap();
-        panic!("collector stopped at {count} saved positions; {stream}:{seq} was never committed");
     })
     .await
     .unwrap();

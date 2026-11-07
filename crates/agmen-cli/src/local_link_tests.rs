@@ -11,8 +11,10 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
+use super::older_tests::NEWER_LOCAL_DB_SAID;
 use super::{LocalLink, WatchState};
 use crate::agmend::Agmend;
+use crate::output::explain;
 
 const WAIT: Duration = Duration::from_secs(10);
 
@@ -607,5 +609,35 @@ async fn local_mcp_notifications_leave_delivery_cursors_for_cli_watch() {
     let mut messages = cli.watch(WatchState::Delivery(&state_dir)).await.unwrap();
     assert_eq!(received(&mut messages, 1).await, vec![expected]);
     drop((messages, notifications));
+    f.serving.take().unwrap().close().await;
+}
+
+#[tokio::test]
+async fn local_watch_stops_when_agmend_restarts_on_a_newer_local_db() {
+    let mut f = Fixture::new().await;
+    let mut rx = f
+        .link
+        .watch(WatchState::Delivery(&f.dir.path().join("watcher")))
+        .await
+        .unwrap();
+    f.serving.take().unwrap().close().await;
+    // This agmend, started on a local.db that a newer agmend wrote.
+    let path = f.dir.path().join("local.db");
+    tokio::task::spawn_blocking(move || {
+        rusqlite::Connection::open(path)
+            .unwrap()
+            .pragma_update(None, "user_version", 2)
+            .unwrap();
+    })
+    .await
+    .unwrap();
+    f.serving = Some(Serving::new(config(f.dir.path())));
+    // The watch the stop cut tries again, meets the refusal and ends, where
+    // answering busy had it wait for a local.db that never opens.
+    tokio::time::timeout(WAIT, async { while rx.recv().await.is_some() {} })
+        .await
+        .expect("a newer local.db must end the watch, not be waited out");
+    let error = f.link.check_watch().expect_err("the refusal is kept");
+    assert_eq!(explain(&error), (NEWER_LOCAL_DB_SAID.to_owned(), 1));
     f.serving.take().unwrap().close().await;
 }

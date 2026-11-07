@@ -186,9 +186,8 @@ impl TokenStore {
     /// `check` runs as late as the store allows. A directory store has the new
     /// file written and synced by then and renames it into place right after,
     /// or removes it; the keychain is written right after. A check that reads
-    /// other files or the store itself can still be overtaken by another
-    /// process in that gap, since neither the files nor the keychain offer a
-    /// compare and swap.
+    /// other files or the store itself needs external synchronization with
+    /// their writers: login, logout and renewal share the login lock.
     ///
     /// # Errors
     ///
@@ -244,10 +243,20 @@ impl TokenStore {
 
 /// The keychain entry for `key`.
 fn entry(key: &TokenKey) -> Result<Entry, TokenStoreError> {
+    #[cfg(test)]
+    if let Some(store) = fake_keychain::store(key) {
+        return store
+            .build(SERVICE, key.as_str(), None)
+            .map_err(TokenStoreError::Keychain);
+    }
     os_store()?
         .build(SERVICE, key.as_str(), None)
         .map_err(TokenStoreError::Keychain)
 }
+
+#[cfg(test)]
+#[path = "token_store_fake.rs"]
+pub(crate) mod fake_keychain;
 
 #[cfg(target_os = "macos")]
 fn os_store() -> Result<Arc<CredentialStore>, TokenStoreError> {
