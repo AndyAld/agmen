@@ -20,7 +20,7 @@ use tokio::sync::{Mutex, OnceCell, oneshot};
 
 use crate::budget::{Budget, Money, Step};
 use crate::console::{bad_request, params};
-use crate::hub::Hub;
+use crate::hub::{Hub, HubError};
 use crate::identities::{Identities, LocalToken};
 use crate::launch::{RoleRun, RunError, RunSpec, Runner};
 use crate::state::ManagedIdentity;
@@ -435,6 +435,65 @@ impl Managed {
         Ok(answer)
     }
 
+    /// Both cleanup steps are best effort. Their errors may contain hub text
+    /// or credentials, so warnings name only the validated identity id.
+    /// Returns whether the hub revoked the identity.
+    async fn rollback_hub_mint(&self, origin: &url::Url, id: &IdentityId) -> bool {
+        tracing::warn!(identity = %id, "rolling back an unregistered hub agent");
+        let revoked = self.hub.revoke_identity(id).await.is_ok();
+        if !revoked {
+            tracing::warn!(identity = %id, "revoking an unregistered hub agent failed");
+        }
+        if self
+            .hub
+            .credentials()
+            .delete_token(origin, id)
+            .await
+            .is_err()
+        {
+            tracing::warn!(identity = %id,
+                "deleting an unregistered hub agent's credential failed");
+        }
+        revoked
+    }
+
+    /// A bad answer cannot authorize revoking its id. The hub enforces one
+    /// live handle per project for agents too (identities_live_handle), and
+    /// mint accepts only the owner's handle prefix. After a success status,
+    /// an offline identity of the requested kind and handle in this project's
+    /// roster is this mint: a live one holding the handle would have made
+    /// the hub refuse it.
+    async fn rollback_untrusted_hub_mint(
+        &self,
+        origin: &url::Url,
+        project: &ProjectId,
+        handle: &str,
+        kind: IdentityKind,
+    ) {
+        let Ok(roster) = self.hub.roster(project).await else {
+            tracing::warn!(
+                "cannot revoke an unregistered hub agent: the project roster could not be read"
+            );
+            return;
+        };
+        let mut mine = roster.iter().filter(|entry| {
+            entry.kind == kind
+                && entry.handle == handle
+                && entry.status == agmen_local::console::Status::Offline
+        });
+        if let (Some(entry), None) = (mine.next(), mine.next()) {
+            self.rollback_hub_mint(origin, &entry.identity_id).await;
+        } else {
+            tracing::warn!(
+                "cannot revoke an unregistered hub agent: no single offline match in the project roster"
+            );
+        }
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "keep mint validation and rollback at the credential boundary together"
+    )]
     async fn mint(
         &self,
         launch: &Launch,
@@ -444,6 +503,7 @@ impl Managed {
         parent: Option<&Record>,
     ) -> Result<IdentityFile, ApiError> {
         let handle = format!("{}/{}", login.handle, launch.name);
+        let kind = role.map_or(IdentityKind::Agent, role_kind);
         let mut body = json!({"handle":handle,"project":launch.project,"kind":"agent"});
         if let Some(parent) = parent {
             body["delegated_by"] = json!(parent.identity.identity_id);
@@ -472,7 +532,7 @@ impl Managed {
                 .mint(crate::record::admin::LocalMint {
                     project: launch.project.clone(),
                     name: launch.name.clone(),
-                    kind: role.map_or(IdentityKind::Agent, role_kind),
+                    kind,
                     spec: spec.clone(),
                     agent: None,
                     delegated_by: parent.map(|parent| parent.identity.identity_id.clone()),
@@ -491,7 +551,17 @@ impl Managed {
                 verbs: minted.verbs,
             });
         }
-        let minted = self.hub.mint_identity(&body).await?;
+        let minted = match self.hub.mint_identity(&body).await {
+            Ok(minted) => minted,
+            Err(HubError::BadAnswer(_)) => {
+                self.rollback_untrusted_hub_mint(&login.hub_url, &launch.project, &handle, kind)
+                    .await;
+                return Err(error("invalid agent mint response"));
+            }
+            // A refusal (409 handle_taken while a stopped worker of mine holds the
+            // handle) made nothing, so nothing here may look up and revoke.
+            Err(failure) => return Err(failure.into()),
+        };
         #[derive(Deserialize)]
         struct Minted {
             id: IdentityId,
@@ -501,14 +571,22 @@ impl Managed {
             token: String,
             verbs: Option<std::collections::BTreeSet<String>>,
         }
-        let minted: Minted = serde_json::from_value(minted).map_err(error)?;
+        let Ok(minted) = serde_json::from_value::<Minted>(minted) else {
+            self.rollback_untrusted_hub_mint(&login.hub_url, &launch.project, &handle, kind)
+                .await;
+            return Err(error("invalid agent mint response"));
+        };
         if minted.handle != handle
             || minted.project != launch.project
             || minted.tenant != joined.identity.tenant
         {
+            self.rollback_untrusted_hub_mint(&login.hub_url, &launch.project, &handle, kind)
+                .await;
             return Err(error("hub minted a different identity than requested"));
         }
         if spec.is_some() && minted.verbs.is_none() {
+            self.rollback_untrusted_hub_mint(&login.hub_url, &launch.project, &handle, kind)
+                .await;
             return Err(error("hub omitted the role's capped verbs"));
         }
         let identity = IdentityFile {
@@ -523,10 +601,16 @@ impl Managed {
             role_sha256: spec.as_ref().map(|spec| spec.role_sha256.clone()),
             verbs: spec.and(minted.verbs),
         };
-        self.hub
+        if let Err(failure) = self
+            .hub
             .credentials()
             .set_token(&identity.hub_url, &identity.identity_id, minted.token)
-            .await?;
+            .await
+        {
+            self.rollback_hub_mint(&identity.hub_url, &identity.identity_id)
+                .await;
+            return Err(failure);
+        }
         Ok(identity)
     }
 
