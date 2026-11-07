@@ -116,6 +116,7 @@ impl Managed {
             return Err(bad_request(
                 Overdrawn {
                     remaining: remaining.usd(),
+                    protected: protected.usd(),
                 }
                 .to_string(),
             ));

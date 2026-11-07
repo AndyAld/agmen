@@ -128,10 +128,12 @@ pub(crate) const PARENT_FLOOR_USD: &str = "0.5";
 
 #[derive(Debug, thiserror::Error)]
 #[error(
-    "launching this child would leave the parent under 0.50 USD; the parent has {remaining} USD left"
+    "launching this child would leave the parent under {protected} USD; the parent has {remaining} USD left"
 )]
 pub(crate) struct Overdrawn {
     pub(crate) remaining: String,
+    /// What must stay unreserved: the larger of the floor and the running batch's cap.
+    pub(crate) protected: String,
 }
 
 impl Budget {
@@ -185,6 +187,7 @@ impl Budget {
         if amount > remaining || remaining.saturating_sub(amount) < floor {
             return Err(Overdrawn {
                 remaining: remaining.usd(),
+                protected: floor.usd(),
             });
         }
         self.reserved = self.reserved.saturating_add(amount);

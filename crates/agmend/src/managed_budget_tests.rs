@@ -72,7 +72,7 @@ async fn default_shared_amount_keeps_the_floor() {
     assert!(
         error
             .message
-            .contains("would leave the parent under 0.50 USD")
+            .contains("would leave the parent under 0.500000 USD")
     );
 }
 
@@ -85,7 +85,7 @@ async fn shared_child_that_breaks_the_floor_is_refused() {
         assert!(
             error
                 .message
-                .contains("would leave the parent under 0.50 USD")
+                .contains("would leave the parent under 0.500000 USD")
         );
     }
     assert_eq!(mints.lock().unwrap().len(), 1);
@@ -210,7 +210,7 @@ async fn starting_a_shared_child_reserves_again() {
     assert!(
         error
             .message
-            .contains("would leave the parent under 0.50 USD")
+            .contains("would leave the parent under 0.500000 USD")
     );
     assert_eq!(listed(&fixture, "kid00001").await["state"], "offline");
 }
@@ -402,7 +402,7 @@ async fn concurrent_child_launches_cannot_reserve_the_same_dollars() {
     assert!(
         error
             .message
-            .contains("would leave the parent under 0.50 USD")
+            .contains("would leave the parent under 0.500000 USD")
     );
     assert_eq!(mints.lock().unwrap().len(), 2);
     assert_eq!(
@@ -638,7 +638,7 @@ async fn starting_a_grandchild_reserves_through_its_offline_parent_and_rolls_bac
     assert!(
         error
             .message
-            .contains("would leave the parent under 0.50 USD")
+            .contains("would leave the parent under 0.500000 USD")
     );
     let list = restored.list(json!({})).await.unwrap();
     assert_eq!(list["agents"][0]["reserved_usd"], "0.000000");
@@ -751,7 +751,7 @@ async fn shared_child_larger_than_the_parent_has_is_refused() {
         assert!(
             error
                 .message
-                .contains("would leave the parent under 0.50 USD"),
+                .contains("would leave the parent under 0.500000 USD"),
             "{amount}: {error:?}"
         );
         assert!(error.message.contains("2.000000"), "{error:?}");

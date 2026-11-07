@@ -57,10 +57,49 @@ async fn shared_mid_batch_child_within_reserve_succeeds_and_above_it_reports_bud
     assert_eq!(failure.code, ErrorCode::BadRequest);
     assert_eq!(
         failure.message,
-        "launching this child would leave the parent under 0.50 USD; the parent has 4.000000 USD left"
+        "launching this child would leave the parent under 2.500000 USD; the parent has 4.000000 USD left"
     );
     assert_eq!(mints.lock().unwrap().len(), 2);
     assert_eq!(reserved(&fixture, "agent001").await, "1.000000");
+    fixture.daemon.core.managed.shutdown().await;
+}
+
+#[tokio::test]
+async fn shared_refusal_under_a_running_batch_names_the_amount_it_protects() {
+    // The larger of the batch cap (half of what is left) and the 0.50 USD floor.
+    for (cap, asked, left, protected) in [
+        (5.0, 4.5, "5.000000", "2.500000"),
+        (0.75, 0.5, "0.750000", "0.500000"),
+    ] {
+        let (fixture, _) = tree_fixture().await;
+        budget_root(&fixture, cap).await;
+        enqueue(&fixture, 1, "agent001").await;
+        running_batch(&fixture, "agent001", Tier::Owner).await;
+        let failure = budget_child(&fixture, "over", asked).await.unwrap_err();
+        assert_eq!(failure.code, ErrorCode::BadRequest);
+        assert_eq!(
+            failure.message,
+            format!(
+                "launching this child would leave the parent under {protected} USD; the parent has {left} USD left"
+            )
+        );
+        fixture.daemon.core.managed.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn shared_default_child_refusal_under_a_running_batch_names_the_amount_it_protects() {
+    let (fixture, _) = tree_fixture().await;
+    budget_root(&fixture, 5.0).await;
+    enqueue(&fixture, 1, "agent001").await;
+    running_batch(&fixture, "agent001", Tier::Owner).await;
+    child(&fixture, "agent001", "k1").await.unwrap();
+    let failure = child(&fixture, "agent001", "k2").await.unwrap_err();
+    assert_eq!(failure.code, ErrorCode::BadRequest);
+    assert_eq!(
+        failure.message,
+        "launching this child would leave the parent under 2.500000 USD; the parent has 2.500000 USD left"
+    );
     fixture.daemon.core.managed.shutdown().await;
 }
 
