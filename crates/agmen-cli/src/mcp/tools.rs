@@ -34,7 +34,7 @@ use serde_json::{Map, Value, json};
 use super::{Live, Server};
 use crate::cmd::post::{About, Outgoing, item_key, payload, send};
 use crate::cmd::{claim, inbox, lanes};
-use crate::joined::{Recorded, client_error};
+use crate::joined::Recorded;
 use crate::output::{CHAT_FENCE, Fail, clean, clean_lines, message_line_with_id, recorded};
 
 /// What the server tells the client about itself.
@@ -57,6 +57,7 @@ have no other agmen call to make, call inbox between steps.";
 
 pub(super) const LAUNCH_TOOLS: [&str; 2] = ["launch", "stop_agent"];
 const NO_AGENT_IDENTITY: &str = "no agent identity in this MCP server's environment";
+const CHAT_MAX_PAGES: usize = 4;
 
 fn no_agent_identity() -> CallToolResult {
     CallToolResult::error(vec![ContentBlock::text(NO_AGENT_IDENTITY)])
@@ -493,28 +494,16 @@ impl Server {
             let limit = params.limit()?;
             let end = match params.before {
                 Some(before) => before.saturating_sub(1),
-                None => {
-                    live.agent
-                        .hub
-                        .page(&Stream::Feed, 0)
-                        .await
-                        .map_err(|err| client_error(err, "reading the feed head failed"))?
-                        .head
-                }
+                None => live.agent.page(&Stream::Feed, 0).await?.head,
             };
             let mut after = end.saturating_sub(u64::from(limit));
             let mut messages = Vec::new();
             // One optional head request plus four replay pages, at most five.
-            for _ in 0..4 {
+            for _ in 0..CHAT_MAX_PAGES {
                 if after >= end {
                     break;
                 }
-                let page = live
-                    .agent
-                    .hub
-                    .page(&Stream::Feed, after)
-                    .await
-                    .map_err(|err| client_error(err, "reading the project chat failed"))?;
+                let page = live.agent.page(&Stream::Feed, after).await?;
                 messages.extend(
                     page.messages
                         .into_iter()
@@ -646,16 +635,10 @@ impl Server {
     async fn state(&self, Parameters(params): Parameters<StateParams>) -> CallToolResult {
         self.respond_with_pending(move |live: Arc<Live>| async move {
             let key = params.key.unwrap_or_default();
-            // The roster is the full array over HTTP; the retained topic is
-            // only its head. Both keep the tool's one error text.
+            // The roster is the full array over HTTP (agmend's `state` for a
+            // local identity); the retained topic is only its head.
             let value = match key {
-                StateKey::Roster => live
-                    .agent
-                    .hub
-                    .roster()
-                    .await
-                    .map(Some)
-                    .map_err(|err| client_error(err, "reading the project's state failed")),
+                StateKey::Roster => live.agent.roster().await.map(Some),
                 StateKey::Head => live.agent.read_state(live.via(), key.as_str()).await,
             }?;
             let shown = value.map_or_else(|| "nothing retained".to_owned(), |v| v.to_string());
