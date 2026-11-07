@@ -171,10 +171,20 @@ impl HubClient {
         &self.identity
     }
 
+    /// Refuses a local placeholder before a request or session can do I/O.
+    pub(crate) fn ensure_remote(&self) -> Result<(), ClientError> {
+        if crate::is_local(&self.base) {
+            Err(ClientError::LocalOrigin)
+        } else {
+            Ok(())
+        }
+    }
+
     /// Up to 500 messages of `stream` after seq `after`, in seq order.
     ///
     /// # Errors
     ///
+    /// [`ClientError::LocalOrigin`] for the local origin, which has no hub.
     /// [`ClientError::Http`] when the hub cannot be reached, and
     /// [`ClientError::Hub`] when it refuses (403 `forbidden_stream` for a
     /// stream this identity may not read).
@@ -182,6 +192,7 @@ impl HubClient {
     /// [`MAX_PAGE_RESPONSE_BYTES`], or
     /// [`ClientError::BadAnswer`] when a success body is not valid JSON.
     pub async fn page(&self, stream: &Stream, after: u64) -> Result<Page, ClientError> {
+        self.ensure_remote()?;
         let stream = stream.to_string();
         let mut url = self.url(&["projects", self.project.as_str(), "streams", &stream]);
         url.query_pairs_mut()
@@ -211,6 +222,7 @@ impl HubClient {
     ///
     /// # Errors
     ///
+    /// [`ClientError::LocalOrigin`] for the local origin, which has no hub.
     /// [`ClientError::Http`] when the hub cannot be reached, and
     /// [`ClientError::Hub`] when it refuses (403 `not_a_member` for a
     /// caller that is not a member of the project).
@@ -219,6 +231,7 @@ impl HubClient {
     /// [`ClientError::BadAnswer`] when a success body is not valid JSON
     /// or has no `value`.
     pub async fn roster(&self) -> Result<Value, ClientError> {
+        self.ensure_remote()?;
         let mut url = self.url(&["projects", self.project.as_str(), "state"]);
         url.query_pairs_mut().append_pair("key", "roster");
         let answer: StateAnswer = self.get(url, MAX_PAGE_RESPONSE_BYTES).await?;
@@ -229,12 +242,14 @@ impl HubClient {
     ///
     /// # Errors
     ///
+    /// [`ClientError::LocalOrigin`] for the local origin, which has no broker.
     /// [`ClientError::Http`] when the hub cannot be reached, and
     /// [`ClientError::Hub`] when it refuses (403 `identity_revoked` once the
     /// identity is revoked).
     /// [`ClientError::HubBodyTooLarge`] when its body exceeds 16 MiB, or
     /// [`ClientError::BadAnswer`] when a success body is not valid JSON.
     pub async fn broker_token(&self) -> Result<String, ClientError> {
+        self.ensure_remote()?;
         let url = self.url(&["identities", self.identity.as_str(), "broker-token"]);
         let answer: BrokerToken = self.get(url, MAX_HUB_RESPONSE_BYTES).await?;
         Ok(answer.token)

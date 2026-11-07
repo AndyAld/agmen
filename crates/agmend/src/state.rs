@@ -140,6 +140,15 @@ pub(crate) fn schemas(dir: &Path, deadline: Instant) -> Result<BTreeMap<String, 
     if let Some(version) = schema(&dir.join("agmend.db"), deadline, inspect)? {
         versions.insert("agmend.db".to_owned(), version);
     }
+    let record_path = dir.join(crate::record::schema::RECORD_DB);
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .ok_or(StoreError::Full("store inspection deadline"))?;
+    // A newer local.db is reported as found, not refused: local calls refuse it
+    // by name, and hub projects must keep working.
+    if let Some(version) = agmen_client::store_schema(&record_path, remaining)? {
+        versions.insert(crate::record::schema::RECORD_DB.to_owned(), version);
+    }
     for path in identity_stores(dir)? {
         if let Some(version) = identity_schema(&path, deadline, inspect)? {
             let relative = path
@@ -159,6 +168,7 @@ pub(crate) fn snapshot(dir: &Path) -> Result<Vec<(std::path::PathBuf, i64)>, Sto
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut paths = identity_stores(dir)?;
     paths.push(dir.join("agmend.db"));
+    include_record(dir, &mut paths)?;
     paths.sort();
     let mut result = Vec::with_capacity(paths.len());
     for path in &paths {
@@ -180,6 +190,7 @@ pub(crate) fn snapshot(dir: &Path) -> Result<Vec<(std::path::PathBuf, i64)>, Sto
     }
     let mut after = identity_stores(dir)?;
     after.push(dir.join("agmend.db"));
+    include_record(dir, &mut after)?;
     after.sort();
     if paths != after {
         return Err(StoreError::Invalid(
@@ -187,6 +198,16 @@ pub(crate) fn snapshot(dir: &Path) -> Result<Vec<(std::path::PathBuf, i64)>, Sto
         ));
     }
     Ok(result)
+}
+
+fn include_record(dir: &Path, paths: &mut Vec<std::path::PathBuf>) -> Result<(), StoreError> {
+    let path = dir.join(crate::record::schema::RECORD_DB);
+    match fs::symlink_metadata(&path) {
+        Ok(_) => paths.push(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
 }
 
 pub(crate) fn open_stores(path: &Path) -> Result<Store, StoreError> {

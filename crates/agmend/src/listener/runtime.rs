@@ -45,6 +45,8 @@ type Clock = Arc<dyn Fn() -> jiff::Zoned + Send + Sync>;
 type CreationHook = Arc<dyn Fn(&Path) + Send + Sync>;
 
 pub(crate) struct Listeners {
+    #[expect(dead_code, reason = "origin routing is wired in Task 15")]
+    origins: Arc<crate::origin::Origins>,
     hub: Arc<Hub>,
     identities: OnceCell<Weak<Identities>>,
     managed: OnceCell<Weak<Managed>>,
@@ -271,11 +273,16 @@ struct Apply {
 }
 
 impl Listeners {
-    pub(crate) fn new(hub: Arc<Hub>, state_dir: PathBuf, settings_file: PathBuf) -> Self {
+    pub(crate) fn new(
+        origins: Arc<crate::origin::Origins>,
+        state_dir: PathBuf,
+        settings_file: PathBuf,
+    ) -> Self {
         let changes = Changes::default();
         let cards = changes.published();
         Self {
-            hub,
+            hub: origins.hub().clone(),
+            origins,
             identities: OnceCell::new(),
             managed: OnceCell::new(),
             state_dir,

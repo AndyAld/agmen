@@ -316,14 +316,38 @@ async fn identity_call(
         }
         "git_log" | "git_show" | "git_diff" | "git_status" | "settings_get" | "settings_apply"
         | "roster" => core.listeners.identity_call(caller, method, raw).await,
-        "shutdown" | "hello" | "ready" | "whoami" | "console_watch" | "console_snapshot"
-        | "chat_history" | "file_text" | "identity_mint" | "identity_list" | "agent_launch"
-        | "host_status" | "host_restart" | "agent_stop" | "agent_list" | "agent_start"
-        | "agent_attach" | "agent_detach" | "agent_remove" | "agent_budget" | "prune"
-        | "login_start" | "login_status" | "listener_start" | "listener_stop"
-        | "listener_status" | "listener_set" | "settings_decide" | "settings_undo" => {
-            Err(forbidden())
-        }
+        "shutdown"
+        | "hello"
+        | "ready"
+        | "whoami"
+        | "console_watch"
+        | "console_snapshot"
+        | "chat_history"
+        | "file_text"
+        | "identity_mint"
+        | "identity_list"
+        | "agent_launch"
+        | "host_status"
+        | "host_restart"
+        | "agent_stop"
+        | "agent_list"
+        | "agent_start"
+        | "agent_attach"
+        | "agent_detach"
+        | "agent_remove"
+        | "agent_budget"
+        | "prune"
+        | "login_start"
+        | "login_status"
+        | "listener_start"
+        | "listener_stop"
+        | "listener_status"
+        | "listener_set"
+        | "settings_decide"
+        | "settings_undo"
+        | "local_project_create"
+        | "local_projects"
+        | "lanes_set" => Err(forbidden()),
         other => Err(ApiError {
             code: ErrorCode::NotFound,
             message: format!("agmend has no method {other:?}"),
@@ -358,6 +382,48 @@ async fn call(
 ) -> Result<Value, ApiError> {
     let console = &core.console;
     match method {
+        "local_project_create" => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Create {
+                name: String,
+            }
+            let Create { name } = params(raw)?;
+            let hint = match core.origins.hub().credentials().login().await {
+                Ok(login) => login.handle,
+                Err(agmen_client::LoginError::NotSignedIn) => {
+                    std::env::var("USER").unwrap_or_default()
+                }
+                Err(error) => return Err(crate::hub::HubError::from(error).into()),
+            };
+            let local = core.origins.local();
+            let topics = local.create_project(&name, &hint).await?;
+            let person = local
+                .person()
+                .await?
+                .ok_or_else(|| bad_request("local person is unavailable"))?;
+            Ok(
+                json!({"project": topics.project(), "tenant": topics.tenant(), "person": {"id": person.id, "handle": person.handle}}),
+            )
+        }
+        "local_projects" => {
+            params::<Shutdown>(raw)?;
+            let projects = core.origins.local().projects().await?;
+            Ok(
+                json!({"projects": projects.into_iter().map(|(project, name)| json!({"project": project, "name": name})).collect::<Vec<_>>()}),
+            )
+        }
+        "lanes_set" => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Set {
+                project: ProjectId,
+                lanes: Vec<agmen_core::LaneSpec>,
+            }
+            let Set { project, lanes } = params(raw)?;
+            serde_json::to_value(core.origins.local().replace_lanes(&project, lanes).await?)
+                .map_err(|error| bad_request(error.to_string()))
+        }
         "host_status" => params::<Shutdown>(raw).map(|_| core.host.status()),
         "host_restart" => params::<Shutdown>(raw).and_then(|_| {
             core.host

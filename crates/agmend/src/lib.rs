@@ -25,9 +25,10 @@ mod identities;
 mod launch;
 mod listener;
 mod local;
+mod local_origin;
 mod login;
 mod managed;
-#[cfg_attr(not(test), expect(dead_code, reason = "wired by Task 7"))]
+mod origin;
 mod record;
 mod safeguards;
 mod socket;
@@ -49,11 +50,14 @@ use crate::feed::Feeds;
 use crate::hub::Hub;
 use crate::identities::Identities;
 use crate::local::Local;
+use crate::local_origin::LocalOrigin;
 use crate::login::Credentials;
+use crate::origin::Origins;
 
 /// Shared context for all local API connections.
 #[derive(Debug)]
 pub(crate) struct Core {
+    origins: Arc<Origins>,
     host: Arc<host::Host>,
     console: Arc<Console>,
     identities: Arc<Identities>,
@@ -144,6 +148,7 @@ pub struct Config {
     runner: Arc<dyn launch::Runner>,
     claude_home: Option<PathBuf>,
     listener_settings: PathBuf,
+    local_claim_lease: Duration,
 }
 
 impl Config {
@@ -168,6 +173,7 @@ impl Config {
             settings_file: None,
             runner: Arc::new(launch::ClaudeRunner::default()),
             claude_home: transcripts::home_from_env(),
+            local_claim_lease: local_origin::DEFAULT_CLAIM_LEASE,
         }
     }
 
@@ -233,6 +239,13 @@ impl Config {
 
 #[cfg(feature = "test-hooks")]
 impl Config {
+    /// Uses a shorter local claim lease in tests.
+    #[must_use]
+    pub const fn local_claim_lease(mut self, lease: Duration) -> Self {
+        self.local_claim_lease = lease;
+        self
+    }
+
     /// Points launches at `claude` and `agmen` for tests only.
     ///
     /// The runner's program is `claude`. Its PATH is `path`, taken from a
@@ -258,7 +271,74 @@ pub struct Agmend {
     opening: tokio::task::JoinHandle<()>,
 }
 
+/// Direct access to the local origin for integration tests before identity routing is wired.
+#[cfg(feature = "test-hooks")]
+#[derive(Debug, Clone)]
+pub struct LocalOriginTest {
+    local: Arc<LocalOrigin>,
+}
+
+#[cfg(feature = "test-hooks")]
+impl LocalOriginTest {
+    /// Mints an unrestricted local agent through the origin's mint path.
+    ///
+    /// # Errors
+    /// Returns the local API mapping of a mint refusal or record failure.
+    pub async fn mint_agent(
+        &self,
+        project: &agmen_proto::ProjectId,
+        name: &str,
+    ) -> Result<agmen_proto::IdentityId, agmen_local::ApiError> {
+        self.local
+            .mint(record::admin::LocalMint {
+                project: project.clone(),
+                name: name.into(),
+                kind: agmen_proto::IdentityKind::Agent,
+                spec: None,
+                agent: None,
+                delegated_by: None,
+            })
+            .await
+            .map(|minted| minted.id)
+            .map_err(Into::into)
+    }
+
+    /// Records a message as the supplied local identity.
+    ///
+    /// # Errors
+    /// Returns a local record or project lookup error.
+    pub async fn ingest(
+        &self,
+        project: &agmen_proto::ProjectId,
+        from: &agmen_proto::IdentityId,
+        envelope: &agmen_proto::ClientEnvelope,
+    ) -> Result<agmen_proto::DeliveryReply, agmen_local::ApiError> {
+        self.local.ingest(project, from, envelope).await
+    }
+
+    /// Posts through the local person's authenticated path.
+    ///
+    /// # Errors
+    /// Returns a local record error or the hub-compatible NACK mapping.
+    pub async fn post_as_person(
+        &self,
+        project: &agmen_proto::ProjectId,
+        envelope: &agmen_proto::ClientEnvelope,
+    ) -> Result<(agmen_proto::Stream, agmen_proto::Seq), agmen_local::ApiError> {
+        self.local.post_as_person(project, envelope).await
+    }
+}
+
 impl Agmend {
+    /// A handle to this daemon's local origin for integration tests.
+    #[cfg(feature = "test-hooks")]
+    #[must_use]
+    pub fn test_local_origin(&self) -> LocalOriginTest {
+        LocalOriginTest {
+            local: self.core.origins.local().clone(),
+        }
+    }
+
     /// Takes the per-user lock and binds the socket (mode 0600). Must run
     /// inside a tokio runtime.
     ///
@@ -274,6 +354,10 @@ impl Agmend {
             http.clone(),
         ));
         let hub = Arc::new(Hub::new(http, credentials.clone()));
+        let origins = Origins::new(
+            LocalOrigin::new(&config.socket.with_file_name(""), config.local_claim_lease),
+            hub.clone(),
+        );
         let feeds = Feeds::new(hub.clone(), config.roster_every);
         let bound = socket::bind(&config.socket)?;
         let path = config.socket.with_file_name("agmend.db");
@@ -307,10 +391,10 @@ impl Agmend {
             credentials,
             store.clone(),
             config.socket.with_file_name(""),
-            hub.clone(),
+            origins.clone(),
         ));
         let managed = Arc::new(managed::Managed::new(
-            hub.clone(),
+            origins.clone(),
             config.runner,
             config.socket.with_file_name(""),
             config.claude_home,
@@ -319,7 +403,7 @@ impl Agmend {
         ));
         let settings_file = config.listener_settings.clone();
         let listeners = Arc::new(listener::Listeners::new(
-            hub.clone(),
+            origins.clone(),
             config.socket.with_file_name(""),
             config.listener_settings,
         ));
@@ -328,6 +412,7 @@ impl Agmend {
             bound,
             opening,
             core: Arc::new(Core {
+                origins: origins.clone(),
                 host: host::Host::new(&config.socket.with_file_name(""), config.host_log),
                 state_dir: config.socket.with_file_name(""),
                 schema_scan: Arc::new(Semaphore::new(1)),
@@ -336,6 +421,7 @@ impl Agmend {
                 managed,
                 listeners,
                 console: Arc::new(Console {
+                    origins,
                     hub,
                     feeds,
                     local: Local {
@@ -364,6 +450,7 @@ impl Agmend {
     /// Serves until `shutdown` resolves, then joins daemon-owned collectors
     /// and sessions, waiting at most 5 s per task and 10 s in total.
     pub async fn serve_until(self, shutdown: impl std::future::Future<Output = ()>) {
+        self.core.origins.local().start().await;
         self.core.managed.attach(&self.core.identities).await;
         self.core
             .listeners
@@ -426,6 +513,7 @@ impl Agmend {
         tasks.abort_all();
         while tasks.join_next().await.is_some() {}
         if tokio::time::timeout(Duration::from_secs(10), async {
+            self.core.origins.local().shutdown().await;
             self.core.listeners.shutdown().await;
             self.core.managed.shutdown().await;
             self.core.identities.shutdown().await;

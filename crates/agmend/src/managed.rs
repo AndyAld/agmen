@@ -163,6 +163,8 @@ struct Attached {
 /// One launch authority for the current signed-in human.
 #[derive(Debug)]
 pub(crate) struct Managed {
+    #[expect(dead_code, reason = "origin routing is wired in Task 14")]
+    origins: Arc<crate::origin::Origins>,
     hub: Arc<Hub>,
     identities: OnceCell<Weak<Identities>>,
     runner: Arc<dyn Runner>,
@@ -187,7 +189,7 @@ impl Managed {
         self.runner.contains_peer(pid)
     }
     pub(crate) fn new(
-        hub: Arc<Hub>,
+        origins: Arc<crate::origin::Origins>,
         runner: Arc<dyn Runner>,
         state_dir: PathBuf,
         claude_home: Option<PathBuf>,
@@ -195,7 +197,8 @@ impl Managed {
         settings_file: Option<PathBuf>,
     ) -> Self {
         Self {
-            hub,
+            hub: origins.hub().clone(),
+            origins,
             identities: OnceCell::new(),
             runner,
             state_dir,

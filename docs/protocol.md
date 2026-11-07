@@ -502,6 +502,78 @@ agent's owner and hub origin match the signed-in login.
   `managed/<identity>/`. It keeps the folder and branch and answers
   `{"identity":..., "removed":true, "kept":{"folder":..., "branch":...}}`.
 
+### Local origin
+
+The origin key `local` names this machine's record in `local.db`, beside
+`agmend.db`. The first successful `local_project_create` creates the record.
+Starting agmend or reading an absent local origin does not create the file.
+Once it exists, `ready` includes `"local.db":1` in `schemas`, and rollback
+snapshots include its path and schema version. Both report the file's actual
+version, so a newer file shows as `"local.db":2` and `ready` still succeeds.
+Calls that need the local record give `version` with a message naming
+`local.db`. Hub projects remain available.
+
+The local person has one fixed ID and handle. At creation, the handle comes
+from the hub login when present, otherwise the OS user name. ASCII letters
+become lowercase, characters outside `[a-z0-9-]` and leading hyphens are
+removed, and the result is cut to 39 characters. An empty result becomes `me`.
+Local identity files use `https://local.agmen.invalid/` and
+`mqtt://local.agmen.invalid:1883` as placeholders. Neither opens a connection.
+
+These owner-only methods are available without a hub login. Identity callers
+receive `forbidden`, and so do worker peers.
+
+| Method | Params | Result |
+|--------|--------|--------|
+| `local_project_create` | `{name}` | `{project, tenant, person: {id, handle}}` |
+| `local_projects` | `{}` | `{projects: [{project, name}]}` |
+| `lanes_set` | `{project, lanes: [LaneSpec]}` | `{v, lanes: [{name, globs, owner, owner_handle}]}` |
+
+Project names contain 1 to 64 characters, with no control characters or
+leading or trailing whitespace. Invalid or duplicate names give `bad_request`.
+`lanes_set` accepts only local projects. Each lane has `{name, globs, owner?}`,
+matching the hub's PUT body. Invalid lanes give `bad_request`.
+
+`console_snapshot {project, root?}` routes a stored local project to the local
+record and every other project to the hub. The result keeps the console's
+`{project, me, roster, messages, older, roles, worktrees, git, listener, changes}`
+shape. A project absent from this machine, with no hub login, gives `not_found`
+whose message names both `this machine` and `not signed in to a hub`.
+
+The remaining local method contract is implemented by Tasks 8 to 10 of the
+solo-origin plan. These local branches are not enabled by Task 7.
+
+| Method | Params | Local result |
+|--------|--------|--------------|
+| `whoami` | `{}` | `{id, handle}` from the hub login when present, else the local person |
+| `chat_history` | `{project, before?, limit?}` | `{messages, older}` before the cursor, at most 500 messages |
+| `post` | Human: `{project, envelope}`. Identity: `{project?, envelope}` | `{stream, seq}` after recording as the authenticated caller |
+| `console_watch` | `{project, root?}` | Console events, starting with `Hub {connected: true, error: null}` |
+| `local_mint` | `{project, name, kind?, role?}` | The current `IdentityFile` JSON, with local URLs and no token |
+| `inbox` | `{project, after?, limit?}` | The caller's inbox page |
+| `state` | `{project, key}` | `{key, as_of_seq, value}` for `head` or `roster` |
+| `page` | Identity: `{stream, after?, limit?}` | `{messages, next_after, head, pruned_through}` |
+| `lanes` | Identity: `{}` | `{v, lanes}` |
+| `items` | Identity: `{}` | `{items: [ItemView]}` |
+| `check_path` | Identity: `{paths}` | `{checks: [PathCheck]}` |
+| `pending` | Identity: `{}` | An array of queued messages, drained once, at most 500 per call |
+| `watch` | Identity: `{project}` | Identity events while the caller is online |
+
+Identity methods use the authenticated identity's project. `page` accepts
+`feed` or that identity's own inbox, otherwise `forbidden`. Its default and
+maximum limit are 500, and limits below 1 give `bad_request`. `pruned_through`
+is 0. `check_path` accepts at most 500 paths. Hub identities receive
+`bad_request` for the new identity-only reads, with the message
+`hub identities read this from their hub`.
+
+The `head` state contains `{feed_seq, rules_v: 0, lanes_v: 0, items_v: 0,
+hub_at}`. The roster reflects mint, revoke, and presence changes immediately.
+Each change wakes stored-record watchers. Console and identity watches hold
+online presence until they close. BYE sets the sender offline. ROLLCALL records
+the core's STATUS answer, and the owned lease sweeper releases expired claims.
+Mint refusals retain the hub's status and code, including 403 membership
+errors, 422 validation errors, 409 identity conflicts, and 500 `server_error`.
+
 ### Host mode
 
 `agmend host init --env-file <path> [--env-file <path> ...] [--hub-bin <path>] [--public-url <url>] [--tailscale-serve] [--force]` writes `<agmen state dir>/host.toml` with mode 0600. It refuses an existing configuration unless `--force` is present. Relative paths become absolute. Without `--hub-bin`, an agmend inside `Contents/MacOS` selects its adjacent `agmen-hub`; outside an app bundle the executable path is required. The URL comes from `--public-url` or `AGMEN_PUBLIC_URL` in the environment files.

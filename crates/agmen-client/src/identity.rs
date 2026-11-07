@@ -88,6 +88,12 @@ pub struct IdentityFile {
 }
 
 impl IdentityFile {
+    /// Whether this identity belongs to this machine's local origin.
+    #[must_use]
+    pub fn is_local(&self) -> bool {
+        crate::is_local(&self.hub_url)
+    }
+
     /// The project's topics.
     #[must_use]
     pub fn topics(&self) -> Topics {
