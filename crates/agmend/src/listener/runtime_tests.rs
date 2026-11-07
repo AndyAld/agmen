@@ -8,6 +8,9 @@ use std::sync::Mutex as StdMutex;
 #[path = "local_agents_tests.rs"]
 mod local_agents;
 
+#[path = "mint_rollback_tests.rs"]
+mod mint_rollback;
+
 const FAKE: &str = r#"
 printf '%s\n' "$@" >argv
 printf '%s\n' "$AGMEN_MANAGED" >managed-env
@@ -1118,6 +1121,9 @@ sleep 5
     f.wait_batches(2).await;
     let status = f.wait_state("capped").await;
     assert_eq!(status["today_usd"], "2.10");
+    // The cap shows before the process stops and the ALERT posts, so wait for
+    // the ALERT, then keep the old window in which a duplicate would show.
+    drop(wait_alerts(&f, 1).await);
     tokio::time::sleep(Duration::from_millis(50)).await;
     {
         let posts = f.posts.lock().unwrap();
