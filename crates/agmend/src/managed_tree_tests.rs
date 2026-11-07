@@ -50,10 +50,8 @@ async fn child_call_with_token_of(
     id: &str,
     token_of: &str,
     method: &str,
-    mut params: Value,
+    params: Value,
 ) -> Result<Value, ApiError> {
-    use agmen_local::{Outcome, Request, Response, frame};
-    let identity = id.parse().unwrap();
     let token = fixture
         .daemon
         .core
@@ -62,7 +60,21 @@ async fn child_call_with_token_of(
         .await
         .unwrap()
         .unwrap();
-    params["local_token"] = json!(token.expose());
+    framed_call(fixture, id, token.expose(), method, params).await
+}
+
+/// A framed request that names `id` and carries `token` as its local token,
+/// whatever the store holds.
+async fn framed_call(
+    fixture: &Fixture,
+    id: &str,
+    token: &str,
+    method: &str,
+    mut params: Value,
+) -> Result<Value, ApiError> {
+    use agmen_local::{Outcome, Request, Response, frame};
+    let identity = id.parse().unwrap();
+    params["local_token"] = json!(token);
     let (mut client, server) = tokio::net::UnixStream::pair().unwrap();
     let task = tokio::spawn(crate::api::serve_with_peer(
         server,

@@ -186,6 +186,74 @@ async fn child_launch_with_an_invalid_stored_credential_is_refused_and_leaves_no
     assert_discarded(&fixture, "kid00001", &before).await;
 }
 
+/// The front door checks the parent's own stored credential. Here the stored
+/// copy lost its last digit, so it agrees with the token the parent holds as
+/// far as it goes. A launch made as `agmen launch` makes it is refused before
+/// the hub is asked for anything.
+#[tokio::test]
+async fn child_launch_with_an_invalid_stored_parent_credential_is_refused_and_leaves_nothing() {
+    let (fixture, mints) = tree_fixture().await;
+    root(&fixture).await;
+    let parent: agmen_proto::IdentityId = "agent001".parse().unwrap();
+    let held = fixture
+        .daemon
+        .core
+        .identities
+        .local_token(&parent)
+        .await
+        .unwrap()
+        .unwrap()
+        .expose()
+        .to_owned();
+    let cut_short = &held[..63];
+    let key =
+        agmen_client::TokenKey::new(&"https://agmend.invalid".parse().unwrap(), &parent).unwrap();
+    let stored = json!({
+        "origin": fixture.hub_url.origin().ascii_serialization(),
+        "owner_id": "owner001",
+        "local_token": cut_short,
+    });
+    fixture.tokens.set(&key, &stored.to_string()).unwrap();
+    let before = git_state(&fixture);
+    let error = framed_call(
+        &fixture,
+        "agent001",
+        &held,
+        "child_launch",
+        json!({"name":"k1","role":"chain"}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error, crate::identities::unauthorized());
+    assert_eq!(error.message, "invalid local identity credential");
+    assert!(!error.message.contains(&held));
+    assert!(!error.message.contains(cut_short));
+    // The hub never heard of a child, and nothing was made for one.
+    let managed = &fixture.daemon.core.managed;
+    let child: agmen_proto::IdentityId = "kid00001".parse().unwrap();
+    assert_eq!(mints.lock().unwrap().len(), 1, "only the parent was minted");
+    assert!(fixture.revoked.lock().unwrap().is_empty());
+    let rows = fixture
+        .daemon
+        .core
+        .identities
+        .managed(
+            fixture.hub_url.origin().ascii_serialization(),
+            "owner001".parse().unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1, "store row");
+    assert!(!managed.agent_dir(&child).exists(), "record folder");
+    assert!(
+        !managed.state_dir.join("agents/kid00001").exists(),
+        "role prompt folder"
+    );
+    assert_eq!(managed.workers.lock().await.len(), 1, "child worker");
+    assert_eq!(managed.tree.lock().await.len(), 1, "tree link");
+    assert_eq!(git_state(&fixture), before, "worktree and branch");
+}
+
 fn commit_roles(fixture: &Fixture) {
     let repo = fixture.dir.path().join("repo");
     git(&repo, &["add", "-f", ".agmen/roles"]);

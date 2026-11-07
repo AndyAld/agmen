@@ -159,7 +159,15 @@ impl Agmend {
 
 /// A local token: 64 lowercase hex digits. `Debug` prints
 /// `LocalToken(<redacted>)` and there is no `Display`.
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct LocalToken(String);
+
+impl LocalToken {
+    /// Removes this credential from model-facing daemon answers and errors.
+    pub(crate) fn redact(&self, text: &str) -> String {
+        text.replace(&self.0, "<redacted>")
+    }
+}
 
 impl std::fmt::Debug for LocalToken {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -186,7 +194,7 @@ impl FromStr for LocalToken {
 }
 
 /// Identity credentials supplied by agmend to managed helpers.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LaunchCredential {
     pub(crate) identity: IdentityId,
     pub(crate) token: LocalToken,

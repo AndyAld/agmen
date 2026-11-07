@@ -6,17 +6,30 @@
 //! text instead of printing it. Input schemas come from schemars, with the
 //! agmen-proto types (item keys, lane names, message ids, severities)
 //! giving their own patterns.
+//!
+//! `launch` and `stop_agent` are different: they call agmend as the agent
+//! named in the server's environment, and are listed only when that
+//! environment holds a valid `AGMEN_IDENTITY` and `AGMEN_LOCAL_TOKEN`
+//! (agmend writes them into the agent's `mcp.json`). Their answers and
+//! errors never carry the token.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use agmen_proto::{Finding, ItemKey, LaneName, MessageId, Payload, Severity, Stream, Verdict};
+use agmen_proto::{
+    Finding, IdentityId, ItemKey, LaneName, MessageId, Payload, Severity, Stream, Verdict,
+};
+use anyhow::Context as _;
+use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, Implementation, ServerCapabilities, ServerConfig};
+use rmcp::model::{
+    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
+    ServerCapabilities, ServerConfig,
+};
 use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
 use serde::Deserialize;
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 
 use super::{Live, Server};
 use crate::cmd::post::{About, Outgoing, item_key, payload, send};
@@ -41,6 +54,13 @@ or rejected: <reason>. Never send a rejected message again unchanged. \
 Messages addressed to you are added at the end of tool results under \"for you\"; when you \
 have no other agmen call to make, call inbox between steps.";
 
+pub(super) const LAUNCH_TOOLS: [&str; 2] = ["launch", "stop_agent"];
+const NO_AGENT_IDENTITY: &str = "no agent identity in this MCP server's environment";
+
+fn no_agent_identity() -> CallToolResult {
+    CallToolResult::error(vec![ContentBlock::text(NO_AGENT_IDENTITY)])
+}
+
 /// Tool visibility at startup; absence of verbs preserves the legacy list.
 /// Chat and read_chat, like post, stay visible for every role. The hub
 /// enforces the sending role's verbs.
@@ -62,6 +82,108 @@ pub(crate) fn hidden_tools(verbs: Option<&BTreeSet<String>>) -> Vec<&'static str
             (!visible).then_some(tool)
         })
         .collect()
+}
+
+/// `launch` accepts roles; templates and caller-supplied parent links are refused.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LaunchParams {
+    /// The child's name.
+    name: String,
+    /// A role the launching agent is allowed to launch.
+    role: String,
+    /// Override the child's default model.
+    model: Option<String>,
+    /// The child's spending cap in USD.
+    budget_usd: Option<f64>,
+    /// Send this as the child's first message from its parent.
+    brief: Option<String>,
+}
+
+impl LaunchParams {
+    fn into_params(self) -> anyhow::Result<Value> {
+        let mut params = json!({"name": self.name, "role": self.role});
+        if let Some(model) = self.model {
+            params["model"] = Value::String(model);
+        }
+        if let Some(budget) = self.budget_usd {
+            let budget = serde_json::Number::from_f64(budget)
+                .ok_or_else(|| Fail::usage("budget_usd must be finite"))?;
+            params["budget_usd"] = Value::Number(budget);
+        }
+        if let Some(brief) = self.brief {
+            params["brief"] = Value::String(brief);
+        }
+        Ok(params)
+    }
+}
+
+/// `stop_agent`'s arguments.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct StopAgentParams {
+    /// An identity below the launching agent in its tree.
+    identity: IdentityId,
+    /// Stop descendants too, by default; false leaves children running.
+    subtree: Option<bool>,
+}
+
+impl Server {
+    async fn child_call(&self, method: &str, params: Value) -> anyhow::Result<Value> {
+        #[cfg(unix)]
+        {
+            let options = &self.shared.options;
+            let credential = options.launch.as_ref().context(NO_AGENT_IDENTITY)?;
+            let mut daemon = crate::agmend::Agmend::connect(
+                &options.state_base.join(agmen_client::AGMEND_SOCKET),
+            )
+            .await?;
+            daemon
+                .call_as(&credential.identity, &credential.token, method, params)
+                .await
+                .map_err(|error| match error {
+                    crate::agmend::AgmendError::Refused { message, .. } => {
+                        anyhow::Error::msg(message)
+                    }
+                    other => other.into(),
+                })
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (method, params);
+            anyhow::bail!(NO_AGENT_IDENTITY)
+        }
+    }
+}
+
+fn child_result(result: anyhow::Result<String>) -> CallToolResult {
+    match result {
+        Ok(answer) => super::text(answer),
+        Err(error) => super::failure(&error),
+    }
+}
+
+fn daemon_field<'a>(answer: &'a Value, key: &str) -> anyhow::Result<&'a str> {
+    answer
+        .get(key)
+        .and_then(Value::as_str)
+        .with_context(|| format!("agmend's answer has no string {key}"))
+}
+
+fn stopped_text(answer: &Value) -> anyhow::Result<String> {
+    let stopped = answer
+        .get("stopped")
+        .and_then(Value::as_array)
+        .filter(|ids| !ids.is_empty() && ids.len() <= agmen_local::safeguards::MAX_MANAGED)
+        .context("agmend's answer needs 1 to 256 stopped identities")?;
+    let ids = stopped
+        .iter()
+        .map(|id| {
+            id.as_str()
+                .context("agmend's answer has a non-string stopped identity")
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    Ok(format!("stopped {}", ids.join(", ")))
 }
 
 /// The most bytes one `read_chat` line may take, so a hundred 32 KiB bodies
@@ -287,6 +409,51 @@ fn recorded_line(at: &Recorded) -> String {
 
 #[tool_router(vis = "pub(super)")]
 impl Server {
+    #[tool(description = "Launch a child agent with an allowed role and an optional brief.")]
+    async fn launch(&self, Parameters(params): Parameters<LaunchParams>) -> CallToolResult {
+        if !self.shared.options.can_launch() {
+            return no_agent_identity();
+        }
+        let brief = params.brief.is_some();
+        child_result(
+            async {
+                let answer = self
+                    .child_call("child_launch", params.into_params()?)
+                    .await?;
+                let handle = daemon_field(&answer, "handle")?;
+                let identity = daemon_field(&answer, "identity")?;
+                let branch = daemon_field(&answer, "branch")?;
+                let depth = answer
+                    .get("depth")
+                    .and_then(Value::as_u64)
+                    .context("agmend's answer has no integer depth")?;
+                let suffix = if brief { "; brief sent" } else { "" };
+                Ok(format!(
+                    "launched @{handle} ({identity}) at depth {depth} on {branch}{suffix}"
+                ))
+            }
+            .await,
+        )
+    }
+
+    #[tool(description = "Stop an agent below you, including its subtree unless subtree is false.")]
+    async fn stop_agent(&self, Parameters(params): Parameters<StopAgentParams>) -> CallToolResult {
+        if !self.shared.options.can_launch() {
+            return no_agent_identity();
+        }
+        child_result(
+            async {
+                let mut args = json!({"identity": params.identity});
+                if let Some(subtree) = params.subtree {
+                    args["subtree"] = Value::Bool(subtree);
+                }
+                let answer = self.child_call("child_stop", args).await?;
+                stopped_text(&answer)
+            }
+            .await,
+        )
+    }
+
     #[tool(
         description = "Post an FYI to the project chat. @ tokens become mentions; groups require a human or coordinator."
     )]
@@ -612,6 +779,42 @@ impl Server {
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for Server {
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<CallToolResponse, rmcp::ErrorData> {
+        // Hidden tree tools still fail closed when called directly by name.
+        let tree_tool = LAUNCH_TOOLS.contains(&request.name.as_ref());
+        if tree_tool && !self.shared.options.can_launch() {
+            return Ok(no_agent_identity().into());
+        }
+        let mut response = self
+            .tool_router
+            .call(ToolCallContext::new(self, request, context))
+            .await;
+        // Parameter errors are generated by rmcp before the tool handler runs.
+        #[cfg(unix)]
+        if tree_tool && let Some(credential) = &self.shared.options.launch {
+            match &mut response {
+                Ok(CallToolResponse::Complete(result)) => {
+                    for block in &mut result.content {
+                        if let ContentBlock::Text(text) = block {
+                            text.text = credential.token.redact(&clean(&text.text));
+                        }
+                    }
+                }
+                Err(error) => {
+                    error.message = credential.token.redact(&clean(&error.message)).into();
+                    // The new tools return text only; no raw parameter data is exposed.
+                    error.data = None;
+                }
+                _ => {}
+            }
+        }
+        response
+    }
+
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("agmen", env!("CARGO_PKG_VERSION")))
@@ -626,6 +829,43 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn launch_tool_schema_requires_role() {
+        let tool = Server::tool_router()
+            .list_all()
+            .into_iter()
+            .find(|tool| tool.name == "launch")
+            .expect("launch tool");
+        let schema = serde_json::to_value(tool.input_schema).unwrap();
+        let required = schema["required"].as_array().unwrap();
+        for name in ["name", "role"] {
+            assert!(required.contains(&json!(name)));
+        }
+        for name in ["model", "budget_usd", "brief"] {
+            assert!(schema["properties"].get(name).is_some());
+            assert!(!required.contains(&json!(name)));
+        }
+        assert!(schema["properties"].get("template").is_none());
+        assert!(schema["properties"].get("parent").is_none());
+    }
+
+    #[test]
+    fn launch_tool_refuses_nonfinite_budget() {
+        for budget in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let params = LaunchParams {
+                name: "k1".into(),
+                role: "reviewer".into(),
+                model: None,
+                budget_usd: Some(budget),
+                brief: None,
+            };
+            assert_eq!(
+                params.into_params().unwrap_err().to_string(),
+                "budget_usd must be finite"
+            );
+        }
+    }
 
     #[test]
     fn review_params_require_reply_to() {

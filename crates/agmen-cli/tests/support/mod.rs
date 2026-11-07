@@ -537,7 +537,9 @@ impl Home {
             )
             .env_remove("CODEX_HOME")
             .env_remove("AGMEN_HUB")
-            .env_remove("AGMEN_LOG");
+            .env_remove("AGMEN_LOG")
+            .env_remove("AGMEN_IDENTITY")
+            .env_remove("AGMEN_LOCAL_TOKEN");
     }
 
     /// Runs `agmen <args>` in `cwd` off the async runtime and returns its

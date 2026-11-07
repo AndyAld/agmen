@@ -23,6 +23,538 @@ use support::{Home, Worktree, assert_exit, stderr};
 
 const ID: &str = "idn7k2q9";
 
+#[cfg(unix)]
+mod tree_tools {
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use agmen_local::{API, ErrorCode, Request, Response, frame};
+    use rmcp::model::CallToolResult;
+    use serde_json::{Value, json};
+
+    use super::*;
+
+    struct FakeAgmend {
+        requests: Arc<Mutex<Vec<Request>>>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl FakeAgmend {
+        fn start(home: &Home, reply: impl Fn(&Request) -> Response + Send + 'static) -> Self {
+            let path = home.state_base().join(agmen_client::AGMEND_SOCKET);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let listener = tokio::net::UnixListener::bind(path).unwrap();
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let recorded = requests.clone();
+            let task = tokio::spawn(async move {
+                tokio::time::timeout(Duration::from_secs(20), async move {
+                    // Each tool uses one hello and one identity-scoped call.
+                    for _ in 0..4 {
+                        let (mut socket, _) = listener.accept().await.unwrap();
+                        for _ in 0..2 {
+                            let request: Request = frame::read_async(&mut socket).await.unwrap();
+                            let answer = if request.method == "hello" {
+                                Response::ok(request.id, json!({"api": API}))
+                            } else {
+                                reply(&request)
+                            };
+                            recorded.lock().unwrap().push(request);
+                            frame::write_async(&mut socket, &answer).await.unwrap();
+                        }
+                    }
+                })
+                .await
+                .unwrap();
+            });
+            Self { requests, task }
+        }
+
+        fn request(&self, method: &str, token: &str) -> Request {
+            let requests = self.requests.lock().unwrap();
+            assert_eq!(requests.len(), 2);
+            assert_eq!(requests[0].method, "hello");
+            let mut request = requests[1].clone();
+            assert_eq!(request.method, method);
+            assert_eq!(request.as_.as_ref().unwrap().as_str(), "parent01");
+            let credential = request
+                .params
+                .as_object_mut()
+                .unwrap()
+                .remove("local_token");
+            // A failed comparison must not print the credential.
+            assert!(credential.is_some_and(|value| value == token));
+            request
+        }
+    }
+
+    impl Drop for FakeAgmend {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    struct AgentMcp {
+        client: rmcp::service::RunningService<rmcp::RoleClient, ()>,
+        child: tokio::process::Child,
+    }
+
+    impl AgentMcp {
+        async fn start(home: &Home, env: &[(&str, &str)]) -> Self {
+            let mut cmd = home.agmen(home.path(), &["mcp"]);
+            // Model Task 7's explicit mcp.json env, with no inherited credential.
+            cmd.env_remove("AGMEN_IDENTITY")
+                .env_remove("AGMEN_LOCAL_TOKEN")
+                .envs(env.iter().copied());
+            let mut cmd = tokio::process::Command::from(cmd);
+            cmd.stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true);
+            let mut child = cmd.spawn().unwrap();
+            let io = (child.stdout.take().unwrap(), child.stdin.take().unwrap());
+            let client = tokio::time::timeout(Duration::from_secs(10), ().serve(io))
+                .await
+                .unwrap()
+                .expect("the MCP handshake");
+            Self { client, child }
+        }
+
+        async fn call(&self, tool: &'static str, args: Value, token: &str) -> CallToolResult {
+            let result = tokio::time::timeout(
+                Duration::from_secs(10),
+                self.client.call_tool(
+                    CallToolRequestParams::new(tool)
+                        .with_arguments(args.as_object().unwrap().clone()),
+                ),
+            )
+            .await
+            .unwrap()
+            .expect("a tool result");
+            assert!(!serde_json::to_string(&result).unwrap().contains(token));
+            result
+        }
+
+        async fn assert_launch_tools(&self, visible: bool) {
+            let tools = self.client.list_all_tools().await.unwrap();
+            for name in ["launch", "stop_agent"] {
+                assert_eq!(
+                    tools.iter().any(|tool| tool.name == name),
+                    visible,
+                    "{name}"
+                );
+            }
+        }
+
+        async fn stop(self, token: &str) -> String {
+            self.client.cancel().await.unwrap();
+            let output =
+                tokio::time::timeout(Duration::from_secs(20), self.child.wait_with_output())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert!(!String::from_utf8_lossy(&output.stderr).contains(token));
+            assert!(output.status.success());
+            String::from_utf8(output.stderr).unwrap()
+        }
+    }
+
+    fn launched() -> Value {
+        json!({
+            "identity": "child001", "identity_id": "child001", "handle": "andy/k1",
+            "worktree": "/fake/k1", "branch": "agent/k1", "state": "idle",
+            "parent": "parent01", "depth": 2
+        })
+    }
+
+    #[tokio::test]
+    async fn launch_tools_hidden_without_a_credential() {
+        let home = Home::new_in(Path::new("/tmp"));
+        let mcp = AgentMcp::start(&home, &[]).await;
+        mcp.assert_launch_tools(false).await;
+        mcp.stop(&"a".repeat(64)).await;
+    }
+
+    #[tokio::test]
+    async fn launch_tool_calls_child_launch_as_the_agent() {
+        let home = Home::new_in(Path::new("/tmp"));
+        let fake = FakeAgmend::start(&home, |request| Response::ok(request.id, launched()));
+        let token = "a".repeat(64);
+        let mcp = AgentMcp::start(
+            &home,
+            &[
+                ("AGMEN_IDENTITY", "parent01"),
+                ("AGMEN_LOCAL_TOKEN", &token),
+            ],
+        )
+        .await;
+        mcp.assert_launch_tools(true).await;
+        let params = json!({
+            "name": "k1", "role": "reviewer", "model": "sonnet",
+            "budget_usd": 2.5, "brief": "look at a.rs"
+        });
+        let result = mcp.call("launch", params.clone(), &token).await;
+        assert_eq!(result.is_error, Some(false));
+        assert_eq!(
+            text_of(&result),
+            "launched @andy/k1 (child001) at depth 2 on agent/k1; brief sent"
+        );
+        assert_eq!(fake.request("child_launch", &token).params, params);
+        assert!(mcp.stop(&token).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn launch_tool_omits_unsupplied_options() {
+        let home = Home::new_in(Path::new("/tmp"));
+        let fake = FakeAgmend::start(&home, |request| Response::ok(request.id, launched()));
+        let token = "a".repeat(64);
+        let mcp = AgentMcp::start(
+            &home,
+            &[
+                ("AGMEN_IDENTITY", "parent01"),
+                ("AGMEN_LOCAL_TOKEN", &token),
+            ],
+        )
+        .await;
+        let params = json!({"name": "k1", "role": "reviewer"});
+        let result = mcp.call("launch", params.clone(), &token).await;
+        assert_eq!(result.is_error, Some(false));
+        assert_eq!(
+            text_of(&result),
+            "launched @andy/k1 (child001) at depth 2 on agent/k1"
+        );
+        assert_eq!(fake.request("child_launch", &token).params, params);
+        mcp.stop(&token).await;
+    }
+
+    #[tokio::test]
+    async fn stop_agent_tool_calls_child_stop() {
+        for subtree in [None, Some(false), Some(true)] {
+            let home = Home::new_in(Path::new("/tmp"));
+            let fake = FakeAgmend::start(&home, |request| {
+                Response::ok(
+                    request.id,
+                    json!({
+                        "identity": "child001", "state": "offline", "stopped": ["grand001", "child001"]
+                    }),
+                )
+            });
+            let token = "a".repeat(64);
+            let mcp = AgentMcp::start(
+                &home,
+                &[
+                    ("AGMEN_IDENTITY", "parent01"),
+                    ("AGMEN_LOCAL_TOKEN", &token),
+                ],
+            )
+            .await;
+            let mut params = json!({"identity": "child001"});
+            if let Some(subtree) = subtree {
+                params["subtree"] = json!(subtree);
+            }
+            let result = mcp.call("stop_agent", params.clone(), &token).await;
+            assert_eq!(result.is_error, Some(false));
+            assert_eq!(text_of(&result), "stopped grand001, child001");
+            assert_eq!(fake.request("child_stop", &token).params, params);
+            mcp.stop(&token).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn refusal_text_reaches_the_agent() {
+        for (tool, params) in [
+            ("launch", json!({"name": "k1", "role": "reviewer"})),
+            ("stop_agent", json!({"identity": "child001"})),
+        ] {
+            let home = Home::new_in(Path::new("/tmp"));
+            let _fake = FakeAgmend::start(&home, |request| {
+                Response::err(
+                    request.id,
+                    ErrorCode::Forbidden,
+                    "tree methods are refused from an others-tier batch",
+                )
+            });
+            let token = "a".repeat(64);
+            let mcp = AgentMcp::start(
+                &home,
+                &[
+                    ("AGMEN_IDENTITY", "parent01"),
+                    ("AGMEN_LOCAL_TOKEN", &token),
+                ],
+            )
+            .await;
+            let result = mcp.call(tool, params, &token).await;
+            assert_eq!(result.is_error, Some(true));
+            assert!(
+                text_of(&result).contains("tree methods are refused from an others-tier batch")
+            );
+            mcp.stop(&token).await;
+        }
+    }
+
+    const IDENTITY_REASON: &str = "AGMEN_IDENTITY must be a valid identity id";
+    const TOKEN_REASON: &str = "AGMEN_LOCAL_TOKEN must be 64 lowercase hex digits";
+    const PAIR_REASON: &str = "AGMEN_IDENTITY and AGMEN_LOCAL_TOKEN must be set together";
+
+    /// `logged` is what the server says on stderr about the pair: nothing when
+    /// neither variable is set, else the reason, which never names a value.
+    async fn assert_no_credential(tool: &'static str, env: &[(&str, &str)], logged: &str) {
+        let home = Home::new_in(Path::new("/tmp"));
+        let fake = FakeAgmend::start(&home, |request| Response::ok(request.id, launched()));
+        let token = "a".repeat(64);
+        let mcp = AgentMcp::start(&home, env).await;
+        mcp.assert_launch_tools(false).await;
+        let params = if tool == "launch" {
+            json!({"name": "k1", "role": "reviewer"})
+        } else {
+            json!({"identity": "child001"})
+        };
+        let result = mcp.call(tool, params, &token).await;
+        assert_eq!(result.is_error, Some(true));
+        assert_eq!(
+            text_of(&result),
+            "no agent identity in this MCP server's environment"
+        );
+        let stderr = mcp.stop(&token).await;
+        assert!(fake.requests.lock().unwrap().is_empty());
+        assert_eq!(stderr.is_empty(), logged.is_empty(), "{stderr}");
+        assert!(stderr.contains(logged), "{stderr}");
+        assert!(!stderr.contains("INVALID!"), "{stderr}");
+    }
+
+    #[tokio::test]
+    async fn launch_tool_without_credential_sends_no_request() {
+        assert_no_credential("launch", &[], "").await;
+    }
+
+    #[tokio::test]
+    async fn stop_agent_tool_without_credential_sends_no_request() {
+        assert_no_credential("stop_agent", &[], "").await;
+    }
+
+    #[tokio::test]
+    async fn launch_tool_with_empty_token_sends_no_request() {
+        assert_no_credential(
+            "launch",
+            &[("AGMEN_IDENTITY", "parent01"), ("AGMEN_LOCAL_TOKEN", "")],
+            TOKEN_REASON,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn stop_agent_tool_with_empty_token_sends_no_request() {
+        assert_no_credential(
+            "stop_agent",
+            &[("AGMEN_IDENTITY", "parent01"), ("AGMEN_LOCAL_TOKEN", "")],
+            TOKEN_REASON,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn launch_tools_with_empty_identity_send_no_request() {
+        let token = "a".repeat(64);
+        for tool in ["launch", "stop_agent"] {
+            assert_no_credential(
+                tool,
+                &[("AGMEN_IDENTITY", ""), ("AGMEN_LOCAL_TOKEN", &token)],
+                IDENTITY_REASON,
+            )
+            .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn launch_tools_with_invalid_credentials_send_no_request() {
+        let token = "a".repeat(64);
+        for (env, logged) in [
+            (vec![("AGMEN_IDENTITY", "parent01")], PAIR_REASON),
+            (vec![("AGMEN_LOCAL_TOKEN", token.as_str())], PAIR_REASON),
+            (
+                vec![
+                    ("AGMEN_IDENTITY", "INVALID!"),
+                    ("AGMEN_LOCAL_TOKEN", token.as_str()),
+                ],
+                IDENTITY_REASON,
+            ),
+            (
+                vec![
+                    ("AGMEN_IDENTITY", "parent01"),
+                    ("AGMEN_LOCAL_TOKEN", "INVALID!"),
+                ],
+                TOKEN_REASON,
+            ),
+        ] {
+            for tool in ["launch", "stop_agent"] {
+                assert_no_credential(tool, &env, logged).await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn launch_tools_redact_tokens_in_answers_and_refusals() {
+        let token = "a".repeat(64);
+        for tool in ["launch", "stop_agent"] {
+            for refused in [false, true] {
+                let home = Home::new_in(Path::new("/tmp"));
+                let echoed = token.clone();
+                let fake = FakeAgmend::start(&home, move |request| {
+                    if refused {
+                        Response::err(
+                            request.id,
+                            ErrorCode::Forbidden,
+                            format!("refused {echoed}\u{1b}\n\u{202e}"),
+                        )
+                    } else if request.method == "child_launch" {
+                        let mut answer = launched();
+                        answer["handle"] = json!(format!("andy/{echoed}\u{1b}\n\u{202e}"));
+                        Response::ok(request.id, answer)
+                    } else {
+                        Response::ok(
+                            request.id,
+                            json!({"stopped": [format!("{echoed}\u{1b}\n\u{202e}")]}),
+                        )
+                    }
+                });
+                let mcp = AgentMcp::start(
+                    &home,
+                    &[
+                        ("AGMEN_IDENTITY", "parent01"),
+                        ("AGMEN_LOCAL_TOKEN", &token),
+                    ],
+                )
+                .await;
+                let params = if tool == "launch" {
+                    json!({"name": "k1", "role": "reviewer"})
+                } else {
+                    json!({"identity": "child001"})
+                };
+                let result = mcp.call(tool, params, &token).await;
+                assert_eq!(result.is_error, Some(refused));
+                assert!(!text_of(&result).contains(['\u{1b}', '\n', '\u{202e}']));
+                assert!(text_of(&result).contains("<redacted>"));
+                assert_eq!(fake.requests.lock().unwrap().len(), 2);
+                mcp.stop(&token).await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn launch_tools_reject_malformed_daemon_answers() {
+        for (tool, answer) in [
+            ("launch", json!({})),
+            (
+                "launch",
+                json!({"identity": "child001", "handle": "andy/k1", "branch": "agent/k1", "depth": "two"}),
+            ),
+            ("stop_agent", json!({})),
+            ("stop_agent", json!({"stopped": []})),
+            ("stop_agent", json!({"stopped": [2]})),
+            (
+                "stop_agent",
+                json!({"stopped": vec!["child001"; agmen_local::safeguards::MAX_MANAGED + 1]}),
+            ),
+        ] {
+            let home = Home::new_in(Path::new("/tmp"));
+            let fake = FakeAgmend::start(&home, move |request| {
+                Response::ok(request.id, answer.clone())
+            });
+            let token = "a".repeat(64);
+            let mcp = AgentMcp::start(
+                &home,
+                &[
+                    ("AGMEN_IDENTITY", "parent01"),
+                    ("AGMEN_LOCAL_TOKEN", &token),
+                ],
+            )
+            .await;
+            let params = if tool == "launch" {
+                json!({"name": "k1", "role": "reviewer"})
+            } else {
+                json!({"identity": "child001"})
+            };
+            let result = mcp.call(tool, params, &token).await;
+            assert_eq!(result.is_error, Some(true));
+            assert!(text_of(&result).contains("agmend's answer"));
+            assert_eq!(fake.requests.lock().unwrap().len(), 2);
+            mcp.stop(&token).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn launch_tool_requires_role_before_contacting_agmend() {
+        let home = Home::new_in(Path::new("/tmp"));
+        let fake = FakeAgmend::start(&home, |request| Response::ok(request.id, launched()));
+        let token = "a".repeat(64);
+        let mcp = AgentMcp::start(
+            &home,
+            &[
+                ("AGMEN_IDENTITY", "parent01"),
+                ("AGMEN_LOCAL_TOKEN", &token),
+            ],
+        )
+        .await;
+        let result = mcp.call("launch", json!({"name": "k1"}), &token).await;
+        assert_eq!(result.is_error, Some(true));
+        assert!(text_of(&result).contains("role"));
+        mcp.stop(&token).await;
+        assert!(fake.requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn launch_tools_redact_tokens_in_argument_errors() {
+        let token = "a".repeat(64);
+        for tool in ["launch", "stop_agent"] {
+            let home = Home::new_in(Path::new("/tmp"));
+            let fake = FakeAgmend::start(&home, |request| Response::ok(request.id, launched()));
+            let mcp = AgentMcp::start(
+                &home,
+                &[
+                    ("AGMEN_IDENTITY", "parent01"),
+                    ("AGMEN_LOCAL_TOKEN", &token),
+                ],
+            )
+            .await;
+            let mut params = if tool == "launch" {
+                json!({"name": "k1", "role": "reviewer"})
+            } else {
+                json!({"identity": "child001"})
+            };
+            params[&token] = json!(true);
+            let result = mcp.call(tool, params, &token).await;
+            assert_eq!(result.is_error, Some(true));
+            assert!(text_of(&result).contains("<redacted>"));
+            mcp.stop(&token).await;
+            assert!(fake.requests.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn launch_tools_report_missing_daemon() {
+        let token = "a".repeat(64);
+        for tool in ["launch", "stop_agent"] {
+            let home = Home::new_in(Path::new("/tmp"));
+            let mcp = AgentMcp::start(
+                &home,
+                &[
+                    ("AGMEN_IDENTITY", "parent01"),
+                    ("AGMEN_LOCAL_TOKEN", &token),
+                ],
+            )
+            .await;
+            let params = if tool == "launch" {
+                json!({"name": "k1", "role": "reviewer"})
+            } else {
+                json!({"identity": "child001"})
+            };
+            let result = mcp.call(tool, params, &token).await;
+            assert_eq!(result.is_error, Some(true));
+            assert!(text_of(&result).contains("agmend is not running"));
+            assert!(mcp.stop(&token).await.is_empty());
+        }
+    }
+}
+
 /// Options for a server in `cwd` with `home`'s token store and state.
 fn options(home: &Home, cwd: &Path) -> McpOptions {
     McpOptions::new(cwd, home.tokens(), home.state_base())
