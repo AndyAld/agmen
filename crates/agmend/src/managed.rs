@@ -979,9 +979,10 @@ impl Managed {
     /// once `quit_launch_wait` passes: the launch then discards what it made
     /// and frees admission. A launch stuck elsewhere (worktree, role load,
     /// the hub mint) is waited for no later than `STOP_WORKERS_FLOOR` before
-    /// the returned deadline, which is what `stop_workers` keeps for itself. The launch runs on its caller's connection, so
-    /// this must finish before that connection is closed. Returns the quit
-    /// deadline and the admission guard, which `stop_workers` holds on to.
+    /// the returned deadline, which is what `stop_workers` keeps for itself.
+    /// The launch runs on its caller's connection, so this must finish before
+    /// that connection is closed. Returns the quit deadline and the admission
+    /// guard, which `stop_workers` holds on to.
     pub(crate) async fn close_launches(
         &self,
     ) -> (
@@ -1155,19 +1156,32 @@ impl Managed {
                 cap_budget,
             );
             spec.local_token = batch_local_token(&identities, &spec.identity).await;
-            held.last_run = Some(tokio::time::Instant::now());
-            held.state = "running";
-            held.batch_tier = Some(if owner_only {
-                Tier::Owner
-            } else {
-                Tier::Others
-            });
-            let (stop, stopped) = oneshot::channel();
-            held.stop = Some(stop);
-            let worker = worker.clone();
-            let managed = self.clone();
-            held.task = Some(tokio::spawn(run_worker(managed, worker, spec, stopped)));
+            // Quit may have begun during the awaits above; start no paid batch then.
+            if self.shutting_down.load(Ordering::Acquire) {
+                return;
+            }
+            self.start_batch(&worker, &mut held, spec, owner_only);
         }
+    }
+
+    fn start_batch(
+        self: &Arc<Self>,
+        worker: &Arc<Mutex<Worker>>,
+        held: &mut Worker,
+        spec: RunSpec,
+        owner_only: bool,
+    ) {
+        held.last_run = Some(tokio::time::Instant::now());
+        held.state = "running";
+        held.batch_tier = Some(if owner_only {
+            Tier::Owner
+        } else {
+            Tier::Others
+        });
+        let (stop, stopped) = oneshot::channel();
+        held.stop = Some(stop);
+        let (managed, worker) = (self.clone(), worker.clone());
+        held.task = Some(tokio::spawn(run_worker(managed, worker, spec, stopped)));
     }
 }
 

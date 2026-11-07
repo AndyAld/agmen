@@ -3559,7 +3559,7 @@ async fn slow_quit_stores_a_renewal_during_its_reserved_share() {
     let launching = managed.launching.lock().await;
     let began = tokio::time::Instant::now();
     stop.send(()).unwrap();
-    // An answer 2.5 s after the full managed deadline must still be stored.
+    // An answer 2.5 s after the ordered phase ends (QUIT_WAIT minus STOP_WORKERS_FLOOR) must still be stored.
     assert!(
         tokio::time::timeout(
             (super::QUIT_WAIT - super::STOP_WORKERS_FLOOR) + LATE_RENEWAL,
