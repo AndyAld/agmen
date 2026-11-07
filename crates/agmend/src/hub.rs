@@ -85,12 +85,24 @@ impl HubError {
     /// stopped worker of mine holds the handle). A transport error does unless
     /// reqwest proves the request never left: its connect errors (DNS, TCP
     /// connect, TLS handshake, the client's connect timeout) and builder errors.
-    /// Reqwest has no request-written flag, and the request's own timeout is no
-    /// connect error in any phase, so a stalled connect gets the lookup too;
-    /// its guards find no mint to revoke.
+    ///
+    /// Reqwest cannot say whether a request was written, and marks no timeout as
+    /// coming after the connection was made. The request's own timeout, as long
+    /// as the connect timeout but started first, ends any phase as a plain
+    /// timeout (reqwest 0.13.5, async_impl/client.rs, `PendingRequest::poll`), so
+    /// a stalled connect gets the lookup although the hub never saw the request.
+    /// Looking up only after a response would strand the late answer this exists
+    /// for. The lookup stays bounded: one roster read (a hub that stalled often
+    /// cannot answer it, which ends the lookup), then a revoke only if exactly one
+    /// offline identity of this kind and handle, with no HELLO, is unknown to this
+    /// daemon. When nothing was minted that is this daemon's own earlier stranded
+    /// mint, which is the one to remove, or an identity of the same person made
+    /// elsewhere that never named an agent or model: the residual of
+    /// `rollback_untrusted_hub_mint`, as for any lost answer.
     pub(crate) fn mint_may_have_committed(&self) -> bool {
         match self {
             Self::BadAnswer(_) | Self::Body(_) => true,
+            // A plain timeout may be a stalled connect; the lookup's guards bound it (see above).
             Self::Http(error) => !error.is_connect() && !error.is_builder(),
             _ => false,
         }

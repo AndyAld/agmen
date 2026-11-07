@@ -103,6 +103,26 @@ async fn agent_ambiguous_lookup_preserves_on_record_and_hello_entries() {
     }
 }
 
+// A mint that timed out may never have reached the hub: with no fresh match in
+// the roster the lookup reads it once and revokes nothing.
+#[tokio::test]
+async fn agent_timeout_without_a_fresh_match_revokes_nothing() {
+    for roster in [
+        json!([]),
+        json!([entry("agent002", "owner/other", "agent", "online")]),
+        json!([entry("agent002", "owner/someone", "agent", "offline")]),
+        json!([entry("agent002", "owner/other", "listener", "offline")]),
+    ] {
+        let mut f = Fixture::new().await;
+        let failure = Failure::LateHeaders;
+        let calls = ambiguous_hub(&mut f, failure, roster.clone()).await;
+        let error = other(&f, None).await.unwrap_err();
+        failure.assert_error(&error);
+        assert_eq!(calls.roster.load(Ordering::SeqCst), 1, "{roster}");
+        assert!(calls.revoked.lock().unwrap().is_empty(), "{roster}");
+    }
+}
+
 #[tokio::test]
 async fn agent_refusal_with_an_oversized_body_skips_lookup_and_revoke() {
     let mut f = Fixture::new().await;
