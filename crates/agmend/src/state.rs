@@ -1205,7 +1205,8 @@ fn broken_is_recipient(
     let client = &message.client;
     matches!(&message.stream, Stream::Inbox(recipient) if recipient == id)
         || client.to.contains(id)
-        || message.mentioned.contains(id)
+        // The hub stamps every ALERT with the coordinators, so a mention there is not addressing.
+        || (!matches!(client.payload, Payload::Alert { .. }) && message.mentioned.contains(id))
         || (matches!(client.payload, Payload::Answer {})
             && client
                 .reply_to

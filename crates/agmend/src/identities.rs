@@ -3999,6 +3999,34 @@ mod local_collection_tests {
     }
 
     #[tokio::test]
+    async fn owner_alert_mentioning_a_broken_coordinator_does_not_hold_the_feed() {
+        let f = Fixture::new().await;
+        f.execute_state("UPDATE identities SET metadata='{}'".into())
+            .await;
+        let coordinator = f.agents[0].clone();
+        let mut alert = owner_alert(1, &f.collection.owner);
+        alert.mentioned = vec![f.collection.owner.clone(), coordinator];
+        assert!(f.collection.commit(alert).await.unwrap());
+        assert_eq!(f.collection.positions().await.unwrap()[&Stream::Feed], 1);
+        f.stop().await;
+    }
+
+    #[tokio::test]
+    async fn non_alert_mentioning_a_broken_coordinator_is_still_held() {
+        let f = Fixture::new().await;
+        f.execute_state("UPDATE identities SET metadata='{}'".into())
+            .await;
+        let coordinator = f.agents[0].clone();
+        let error = f
+            .collection
+            .commit(feed_message(1, "FYI", &[], &[&coordinator]))
+            .await
+            .unwrap_err();
+        assert_eq!(error.store, Some(StoreKind::Permanent));
+        f.stop().await;
+    }
+
+    #[tokio::test]
     async fn owner_alert_still_reaches_a_healthy_agent_beside_a_broken_one() {
         let f = Fixture::new().await;
         let poison = f.agents[0].clone();
