@@ -767,16 +767,22 @@ impl Store {
         message: &StampedEnvelope,
         owner: Option<&IdentityId>,
     ) -> Result<(), StoreError> {
-        self.ingest_core(origin, project, message, owner, None)
-            .map(|_| ())
+        let (_, remember) = self.ingest_tx(origin, project, message, owner, None)?;
+        if let Some(id) = remember {
+            self.remember_own(origin, &id, &message.client.id)?;
+        }
+        Ok(())
     }
 
     /// Like `ingest_for_owner`, but an identity whose stored metadata does not
     /// parse is skipped instead of failing the message, so the other
     /// recipients still get it and the position advances. `broken` maps the
     /// identities already known to be broken to a hash of their stored text; a
-    /// changed text is parsed again. Returns the identities found broken by this
-    /// message, which the caller records only once the transaction committed.
+    /// changed text is parsed again. A message with a skipped identity and no
+    /// other recipient that parses is refused, so nothing is lost silently.
+    /// Returns the identities found broken by this message, which exist only
+    /// once the transaction committed, and the error of the step after the
+    /// commit, if it failed: the caller must report the former either way.
     pub(crate) fn ingest_skipping_broken(
         &mut self,
         origin: &str,
@@ -784,23 +790,29 @@ impl Store {
         message: &StampedEnvelope,
         owner: &IdentityId,
         broken: &BTreeMap<IdentityId, u64>,
-    ) -> Result<Vec<(IdentityId, u64)>, StoreError> {
-        self.ingest_core(origin, project, message, Some(owner), Some(broken))
+    ) -> Result<(IdentityFindings, Option<StoreError>), StoreError> {
+        let (found, remember) =
+            self.ingest_tx(origin, project, message, Some(owner), Some(broken))?;
+        let after =
+            remember.and_then(|id| self.remember_own(origin, &id, &message.client.id).err());
+        Ok((found, after))
     }
 
     #[expect(
         clippy::too_many_lines,
         reason = "routing, deduplication, quota and position commit in one transaction"
     )]
-    fn ingest_core(
+    fn ingest_tx(
         &mut self,
         origin: &str,
         project: &ProjectId,
         message: &StampedEnvelope,
         owner: Option<&IdentityId>,
         tolerate: Option<&BTreeMap<IdentityId, u64>>,
-    ) -> Result<Vec<(IdentityId, u64)>, StoreError> {
+    ) -> Result<IngestOutcome, StoreError> {
         let mut found = Vec::new();
+        let mut skipped_known = false;
+        let mut delivered_to = 0_usize;
         let seq = i64::try_from(message.seq.0)
             .map_err(|_| StoreError::Invalid("sequence exceeds SQLite integer"))?;
         let raw = serde_json::to_string(message)?;
@@ -818,7 +830,7 @@ impl Store {
             .optional()?;
         let last = previous.unwrap_or(0);
         if seq <= last {
-            return Ok(found);
+            return Ok((found, None));
         }
         if seq != last + 1 {
             return Err(StoreError::Gap {
@@ -868,6 +880,7 @@ impl Store {
                 Some(known) => {
                     let hash = metadata_hash(&metadata);
                     if known.get(&id) == Some(&hash) {
+                        skipped_known = true;
                         continue;
                     }
                     match serde_json::from_str(&metadata) {
@@ -892,6 +905,7 @@ impl Store {
             )? {
                 continue;
             }
+            delivered_to += 1;
             let needs_receipt = identity.kind != IdentityKind::Listener
                 && matches!(&message.client.payload, Payload::Assign { to, .. } if to == &id);
             let seen: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM pending WHERE origin=?1 AND project=?2 AND identity=?3 AND sender=?4 AND id=?5) OR (?6 AND EXISTS(SELECT 1 FROM receipts WHERE origin=?1 AND project=?2 AND identity=?3 AND sender=?4 AND id=?5))",
@@ -938,13 +952,17 @@ impl Store {
             }
         }
         drop(stmt);
+        // A message nobody can read is not skipped: the position stays, and a
+        // repair of any one recipient delivers it.
+        if (skipped_known || !found.is_empty()) && delivered_to == 0 {
+            return Err(StoreError::Invalid(
+                "every recipient's stored state is unreadable",
+            ));
+        }
         tx.execute("INSERT INTO positions VALUES (?1,?2,?3,?4) ON CONFLICT(origin,project,stream) DO UPDATE SET seq=excluded.seq",
             params![position_origin, project.as_str(), stream, seq])?;
         tx.commit()?;
-        if let Some(id) = remember {
-            self.remember_own(origin, &id, &message.client.id)?;
-        }
-        Ok(found)
+        Ok((found, remember))
     }
 
     /// Watches receive delivery IDs even when an outgoing ASK has no feed copy.
@@ -1154,6 +1172,13 @@ fn addressed_to(
         || (kind == IdentityKind::Listener
             && crate::listener::includes(message, id, &me.owner_id, &[])))
 }
+
+/// What `ingest_tx` leaves for after the commit: the identities found broken,
+/// and the sender whose own message id is still to be remembered.
+type IngestOutcome = (IdentityFindings, Option<IdentityId>);
+
+/// Identities found broken, each with a hash of its stored text.
+pub(crate) type IdentityFindings = Vec<(IdentityId, u64)>;
 
 /// Identifies one stored metadata text, so a re-registered identity is parsed again.
 fn metadata_hash(metadata: &str) -> u64 {

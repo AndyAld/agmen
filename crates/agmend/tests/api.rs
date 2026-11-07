@@ -815,11 +815,15 @@ async fn pending_on_disk_failure_is_error() {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         for _ in 0..10 {
             let response = watch.read().await;
-            if matches!(response.outcome, agmen_local::Outcome::Err { .. }) {
+            // A store failure shows as offline; an error would close the watch.
+            if let agmen_local::Outcome::Ok { result } = &response.outcome
+                && result["kind"] == "connection"
+                && result["connected"] == false
+            {
                 return;
             }
         }
-        panic!("expected collector error");
+        panic!("expected the collector to go offline");
     })
     .await
     .unwrap();

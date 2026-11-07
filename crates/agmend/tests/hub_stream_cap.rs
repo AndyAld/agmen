@@ -1508,3 +1508,39 @@ async fn hub_stream_skipped_at_the_position_cap_resumes_when_an_identity_is_remo
     assert_eq!(count(&daemon, REARMED).await, 1, "the ALERT re-arms");
     daemon.stop().await;
 }
+
+#[tokio::test]
+async fn hub_permanent_store_failure_keeps_a_watch_open_and_offline_until_repaired() {
+    const FAILING_FOR: Duration = Duration::from_secs(1);
+    let mut daemon = Daemon::seeded().await;
+    daemon.pause().await;
+    shorten_hub_backoff(&daemon.hub.url);
+    let conn = rusqlite::Connection::open(daemon.home.database()).unwrap();
+    conn.execute_batch("CREATE TRIGGER fail_pending BEFORE INSERT ON pending BEGIN SELECT RAISE(FAIL,'injected schema failure'); END;").unwrap();
+    daemon.resume();
+    let mut watch = daemon.client().await;
+    watch
+        .send(&Request::new(9, "watch", json!({"project":PROJECT})))
+        .await;
+    assert_eq!(result(watch.read().await)["kind"], "self");
+    daemon.hub.state.inject(inbox_message(1, 1));
+    // Only a failed ingest can report offline here.
+    next_connection(&mut watch, false).await;
+    // Many retries pass; the watch stays open and never hears the collector
+    // come back, because nothing has been ingested.
+    let _quiet = tokio::time::timeout(FAILING_FOR, async {
+        loop {
+            let event = result(watch.read().await);
+            assert!(
+                !(event["kind"] == "connection" && event["connected"] == true),
+                "connected flapped during the failure: {event}"
+            );
+        }
+    })
+    .await;
+    conn.execute_batch("DROP TRIGGER fail_pending").unwrap();
+    wait_position(&daemon, "inbox:agent001", 1).await;
+    next_connection(&mut watch, true).await;
+    drop(watch);
+    daemon.stop().await;
+}
