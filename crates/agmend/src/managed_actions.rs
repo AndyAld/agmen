@@ -79,12 +79,24 @@ const JOINED_BUDGET_USD: &str = "5";
 /// picked when agmend could not find it.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Target {
+pub(super) struct Target {
+    pub(super) identity: IdentityId,
+    #[serde(default)]
+    pub(super) project: Option<ProjectId>,
+    #[serde(default)]
+    pub(super) root: Option<PathBuf>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Start {
     identity: IdentityId,
     #[serde(default)]
     project: Option<ProjectId>,
     #[serde(default)]
     root: Option<PathBuf>,
+    #[serde(default)]
+    subtree: bool,
 }
 
 /// `agent.json`, in this format or the older one with a single `session_id`.
@@ -275,11 +287,33 @@ impl Managed {
         }
     }
 
-    /// `agent_start {identity, project?, root?}`: brings an offline agent
+    /// `agent_start {identity, project?, root?, subtree?}`: brings an offline agent
     /// back with its previous context.
     pub(crate) async fn start(self: &Arc<Self>, raw: Value) -> Result<Value, ApiError> {
-        let target: Target = params(raw)?;
+        let Start {
+            identity,
+            project,
+            root,
+            subtree,
+        } = params(raw)?;
+        let target = Target {
+            identity,
+            project,
+            root,
+        };
         let _launching = self.launching.lock().await;
+        if subtree {
+            self.start_tree_locked(target).await
+        } else {
+            self.start_one_locked(target).await
+        }
+    }
+
+    /// Caller holds `launching`, including when resuming a whole tree.
+    pub(super) async fn start_one_locked(
+        self: &Arc<Self>,
+        target: Target,
+    ) -> Result<Value, ApiError> {
         self.refuse_if_still_attached(&target.identity).await?;
         let (worker, context) = self.adopt(target).await?;
         let mut started = self.bring_online(&worker, "idle").await?;
