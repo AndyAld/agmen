@@ -195,11 +195,6 @@ pub(crate) fn login_error(err: LoginError) -> anyhow::Error {
     }
 }
 
-/// The token-store key of `login`'s tokens.
-fn key(login: &Login) -> Result<TokenKey> {
-    login.key().context("the login's hub URL")
-}
-
 /// The signed-in person and an API client with their access token.
 #[derive(Debug)]
 pub(crate) struct Human {
@@ -228,18 +223,9 @@ pub(crate) async fn save_login(login: &Login, tokens: &HumanTokens) -> Result<()
 /// Forgets the signed-in person: their tokens and the login file. Returns
 /// who it was, or `None` when nobody was signed in.
 pub(crate) async fn forget_login() -> Result<Option<Login>> {
-    let Some(login) = read_login().await? else {
-        return Ok(None);
-    };
-    delete_token(key(&login)?).await?;
-    let path = paths::login_file()?;
-    blocking(move || match std::fs::remove_file(&path) {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(err).with_context(|| format!("removing {}", path.display())),
-    })
-    .await?;
-    Ok(Some(login))
+    Login::forget(&TokenStore::from_env(), &paths::login_file()?)
+        .await
+        .map_err(login_error)
 }
 
 /// The signed-in person, with a fresh access token.

@@ -21,6 +21,10 @@ use url::Url;
 use crate::body::{BodyReadError, read_hub_body};
 use crate::token_store::{TokenKey, TokenStore, TokenStoreError};
 
+#[path = "login_lock.rs"]
+mod lock;
+use lock::LoginLock;
+
 /// Renew the access token when it has less than this left.
 const RENEW_LEAD: SignedDuration = SignedDuration::from_secs(120);
 /// The largest login file read.
@@ -30,6 +34,25 @@ const MAX_LOGIN_BYTES: u64 = 64 * 1024;
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum LoginError {
+    /// Another process held the login lock past the bounded wait.
+    #[error("timed out waiting for {} after {timeout:?}; try again", path.display())]
+    LockTimeout {
+        /// The shared lock file.
+        path: PathBuf,
+        /// How long acquisition was allowed to wait.
+        timeout: std::time::Duration,
+    },
+    /// The login lock file could not be opened or locked, for a reason other
+    /// than another process holding it. A login or logout needs the lock, so
+    /// it changed nothing.
+    #[error("cannot use the login lock {}; nothing was changed", path.display())]
+    LockUnusable {
+        /// The shared lock file.
+        path: PathBuf,
+        /// What failed.
+        #[source]
+        source: std::io::Error,
+    },
     /// The hub URL would expose credentials over an unsafe transport.
     #[error(transparent)]
     HubUrl(#[from] crate::HubUrlError),
@@ -104,6 +127,15 @@ pub enum LoginError {
         #[source]
         source: std::io::Error,
     },
+    /// The login file could not be removed during logout.
+    #[error("removing {}", path.display())]
+    Remove {
+        /// The login file.
+        path: PathBuf,
+        /// What failed.
+        #[source]
+        source: std::io::Error,
+    },
     /// The person declined the sign-in at GitHub: the token endpoint
     /// answered 400 `access_denied` to the device code.
     #[error("the sign-in was declined")]
@@ -136,6 +168,44 @@ pub struct Login {
 }
 
 impl Login {
+    /// Forgets the signed-in person and their tokens, returning the old
+    /// login, or `None` if nobody is signed in. The same lock as login and
+    /// renewal covers reading the login, deleting its tokens and its file.
+    /// File and keychain work runs off the async workers.
+    ///
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// use agmen_client::{Login, TokenStore, login_file};
+    /// let _previous = Login::forget(&TokenStore::from_env(), &login_file()?).await?;
+    /// # Ok(()) }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`LoginError::LockTimeout`] when another process holds the lock too
+    /// long and [`LoginError::LockUnusable`] when it cannot be taken at all;
+    /// both leave the login and its tokens as they were. Else the error of
+    /// reading the login or deleting its tokens or file.
+    pub async fn forget(store: &TokenStore, login_file: &Path) -> Result<Option<Self>, LoginError> {
+        let (store, path) = (store.clone(), login_file.to_owned());
+        tokio::task::spawn_blocking(move || {
+            let _lock = LoginLock::hold(&path)?;
+            let Some(login) = Self::read(&path)? else {
+                return Ok(None);
+            };
+            let key = login.key().map_err(LoginError::Key)?;
+            store.delete(&key).map_err(LoginError::StoreWrite)?;
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(source) => return Err(LoginError::Remove { path, source }),
+            }
+            Ok(Some(login))
+        })
+        .await
+        .map_err(LoginError::Join)?
+    }
+
     /// The token-store key of this person's tokens.
     ///
     /// # Errors
@@ -328,7 +398,9 @@ pub async fn store_tokens(
 ///
 /// The error of reading the old login file, deleting the old tokens
 /// ([`LoginError::StoreWrite`]), storing the new ones, or writing the file
-/// ([`LoginError::Write`]).
+/// ([`LoginError::Write`]). [`LoginError::LockTimeout`] if another process
+/// holds the shared login lock too long and [`LoginError::LockUnusable`] if it
+/// cannot be taken at all; both change nothing.
 pub async fn save_login(
     store: &TokenStore,
     login_file: &Path,
@@ -336,24 +408,20 @@ pub async fn save_login(
     tokens: &HumanTokens,
 ) -> Result<(), LoginError> {
     let key = login.key().map_err(LoginError::Key)?;
-    let reader = login_file.to_owned();
-    let old = tokio::task::spawn_blocking(move || Login::read(&reader))
-        .await
-        .map_err(LoginError::Join)??;
-    if let Some(old) = old {
-        let old_key = old.key().map_err(LoginError::Key)?;
-        if old_key != key {
-            let old_store = store.clone();
-            tokio::task::spawn_blocking(move || old_store.delete(&old_key))
-                .await
-                .map_err(LoginError::Join)?
-                .map_err(LoginError::StoreWrite)?;
-        }
-    }
-    store_tokens(store, login, tokens).await?;
+    let token_json = serde_json::to_string(tokens).map_err(LoginError::Encode)?;
     let json = serde_json::to_vec_pretty(login).map_err(LoginError::Encode)?;
-    let path = login_file.to_owned();
+    let (store, path) = (store.clone(), login_file.to_owned());
     tokio::task::spawn_blocking(move || {
+        let _lock = LoginLock::hold(&path)?;
+        if let Some(old) = Login::read(&path)? {
+            let old_key = old.key().map_err(LoginError::Key)?;
+            if old_key != key {
+                store.delete(&old_key).map_err(LoginError::StoreWrite)?;
+            }
+        }
+        store
+            .set(&key, &token_json)
+            .map_err(LoginError::StoreWrite)?;
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(|source| LoginError::Write {
                 path: dir.to_owned(),
@@ -375,9 +443,13 @@ pub async fn save_login(
 /// `login`'s person at `login`'s hub and their tokens are still in `store`.
 /// The check runs inside the store's write, as late as the store allows (a
 /// directory store runs it after the new file is written and synced, just
-/// before it replaces the old one). Nothing locks the login file and the
-/// store against another process, so a logout or login that lands in that
-/// last gap is not seen.
+/// before it replaces the old one). A shared advisory lock beside the login
+/// file covers the check and write, and login and logout's file and token
+/// changes. A lock held past the bounded wait drops the pair as a changed
+/// login would. A lock file that cannot be used at all (not a held lock) logs
+/// a warning and leaves the check on the login file as the only guard, since
+/// dropping the pair would waste a refresh the hub already spent. The lock is
+/// never held during the hub request.
 ///
 /// ```no_run
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
@@ -436,8 +508,8 @@ pub async fn human_tokens(
 }
 
 /// Stores `renewed` as `login`'s tokens if `login` is still the signed-in
-/// person, and says whether it did. The check runs inside the store's write
-/// with no await between it and the write ([`TokenStore::set_if`]).
+/// person, and says whether it did. The login lock covers the check and the
+/// write ([`TokenStore::set_if`]), including the keychain path.
 async fn store_renewed(
     store: &TokenStore,
     login_file: &Path,
@@ -448,6 +520,22 @@ async fn store_renewed(
     let json = serde_json::to_string(renewed).map_err(LoginError::Encode)?;
     let (store, login_file, login) = (store.clone(), login_file.to_owned(), login.clone());
     tokio::task::spawn_blocking(move || {
+        // A lock held too long drops the pair. A lock file that cannot be used
+        // at all must not cost a refresh the hub already spent, so then the
+        // renewal falls back to the login file check alone.
+        let _lock = match LoginLock::hold(&login_file) {
+            Ok(lock) => Some(lock),
+            Err(LoginError::LockTimeout { .. }) => return Ok(false),
+            Err(LoginError::LockUnusable { path, source }) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %source,
+                    "login.lock is unusable; the renewal checks the login file without it"
+                );
+                None
+            }
+            Err(error) => return Err(error),
+        };
         let mut unconfirmed = None;
         let stored = store
             .set_if(&key, &json, || {
@@ -481,3 +569,7 @@ fn still_signed_in(
 #[cfg(test)]
 #[path = "login_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "login_lock_tests.rs"]
+mod lock_tests;
