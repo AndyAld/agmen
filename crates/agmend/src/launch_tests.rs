@@ -2,6 +2,9 @@
 
 use super::*;
 
+#[path = "launch_peer_tests.rs"]
+mod peer_ancestry;
+
 #[test]
 fn launch_renders_role_and_tools() {
     use std::io::Read as _;

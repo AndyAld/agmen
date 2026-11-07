@@ -30,6 +30,7 @@ mod local_origin;
 mod login;
 mod managed;
 mod origin;
+mod peer;
 mod record;
 mod safeguards;
 mod socket;
@@ -37,6 +38,9 @@ mod sse;
 mod state;
 mod transcripts;
 mod worktree;
+
+#[cfg(test)]
+mod peer_tests;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -64,6 +68,7 @@ pub(crate) struct Core {
     identities: Arc<Identities>,
     managed: Arc<managed::Managed>,
     listeners: Arc<listener::Listeners>,
+    peers: peer::Guard,
     state_dir: PathBuf,
     schema_scan: Arc<Semaphore>,
     shutdown: tokio::sync::Notify,
@@ -443,6 +448,7 @@ impl Agmend {
             bound,
             opening,
             core: Arc::new(Core {
+                peers: peer::Guard::default(),
                 origins: origins.clone(),
                 host: host::Host::new(&config.socket.with_file_name(""), config.host_log),
                 state_dir: config.socket.with_file_name(""),

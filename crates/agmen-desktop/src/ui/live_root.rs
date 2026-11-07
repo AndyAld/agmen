@@ -402,10 +402,11 @@ impl LiveRoot {
             if now >= deadline {
                 break;
             }
+            // 2 s for the calls and 2 s for agmend's ancestry walk, which `ready` waits for.
             match AgmendBackend::host_status_before(
                 socket,
                 false,
-                deadline.min(now + Duration::from_secs(2)),
+                deadline.min(now + Duration::from_secs(4)),
             ) {
                 Ok(status) if status.configured && status.state == HostState::Failed => {
                     return Err(BackendError::Agmend(

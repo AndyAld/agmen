@@ -196,6 +196,9 @@ pub(crate) trait Runner: std::fmt::Debug + Send + Sync {
     fn contains_peer(&self, _pid: i32) -> bool {
         false
     }
+    fn peer_groups(&self) -> BTreeSet<i32> {
+        BTreeSet::new()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -522,18 +525,11 @@ impl Runner for ClaudeRunner {
     }
 
     fn contains_peer(&self, pid: i32) -> bool {
-        let groups = self
-            .groups
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if groups.is_empty() {
-            return false;
-        }
-        // While a worker runs, a peer whose group cannot be read (it exited
-        // and a child kept the socket, say) is refused: fail closed.
-        Pid::from_raw(pid)
-            .and_then(|pid| rustix::process::getpgid(Some(pid)).ok())
-            .is_none_or(|group| groups.contains(&group.as_raw_nonzero().get()))
+        crate::peer::contains_pid(&self.peer_groups(), pid).unwrap_or(true)
+    }
+
+    fn peer_groups(&self) -> BTreeSet<i32> {
+        crate::peer::groups(&self.groups)
     }
 
     fn run(&self, spec: RunSpec, mut stop: oneshot::Receiver<()>) -> RunFuture {

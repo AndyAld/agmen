@@ -200,6 +200,9 @@ impl Managed {
     pub(crate) fn contains_peer(&self, pid: i32) -> bool {
         self.runner.contains_peer(pid)
     }
+    pub(crate) fn peer_groups(&self) -> std::collections::BTreeSet<i32> {
+        self.runner.peer_groups()
+    }
     pub(crate) fn new(
         origins: Arc<crate::origin::Origins>,
         runner: Arc<dyn Runner>,
@@ -1397,7 +1400,7 @@ async fn write_agent_files(
 }
 
 fn mcp_config(agmen: &Path, identity: &IdentityId, local_token: Option<&LocalToken>) -> Value {
-    let mut env = json!({"AGMEN_IDENTITY": identity});
+    let mut env = json!({"AGMEN_IDENTITY": identity, "AGMEN_MANAGED": "1"});
     if let Some(token) = local_token {
         env["AGMEN_LOCAL_TOKEN"] = json!(token.expose());
     }

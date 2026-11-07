@@ -44,6 +44,30 @@ fn host_status_and_restart_use_the_local_api() {
     assert_eq!(fake.state.lock().unwrap().host_restarts, 1);
 }
 
+/// agmend walks a peer's ancestry, up to 2 s, before it answers the first owner-only call
+/// on a connection, which is `ready` here.
+const WALK: Duration = Duration::from_millis(2500);
+
+#[test]
+fn probe_waits_out_the_ancestry_walk_before_ready() {
+    let fake = FakeAgmend::start(console(vec![]));
+    fake.edit(|state| state.ready_delay = WALK);
+    assert!(AgmendBackend::probe(&fake.path()).unwrap().1.is_some());
+}
+
+#[test]
+fn host_status_waits_out_the_ancestry_walk_before_ready() {
+    let fake = FakeAgmend::start(console(vec![]));
+    fake.edit(|state| {
+        state.ready_delay = WALK;
+        state.host_status = Some(json!({
+            "configured": true, "state": "running", "last_error": null, "public_url": null
+        }))
+    });
+    let status = AgmendBackend::host_status(&fake.path(), false).unwrap();
+    assert_eq!(status.state, HostState::Running);
+}
+
 #[test]
 fn hosted_startup_requires_a_hub_snapshot() {
     let fake = FakeAgmend::start(console(vec![]));

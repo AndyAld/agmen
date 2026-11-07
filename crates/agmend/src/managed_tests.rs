@@ -12,6 +12,21 @@ use crate::managed::Managed;
 #[path = "managed_mint_tests.rs"]
 mod mint;
 
+#[tokio::test]
+async fn written_mcp_config_marks_the_server_managed() {
+    let fixture = Fixture::new().await;
+    fixture.launch().await;
+    let path = fixture
+        .daemon
+        .core
+        .managed
+        .agent_dir(&"agent001".parse().unwrap())
+        .join("mcp.json");
+    let config: Value = serde_json::from_str(&role_file(path).unwrap()).unwrap();
+    assert_eq!(config["mcpServers"]["agmen"]["env"]["AGMEN_MANAGED"], "1");
+    fixture.daemon.core.managed.shutdown().await;
+}
+
 fn role_file(path: impl AsRef<std::path::Path>) -> std::io::Result<String> {
     use std::io::Read as _;
     let mut text = String::new();
