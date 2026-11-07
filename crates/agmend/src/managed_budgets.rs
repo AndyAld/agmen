@@ -72,11 +72,6 @@ impl Worker {
 
 impl Managed {
     /// Caller holds launching and accounting until launch completes or refunds this amount.
-    // shortcut: the parent's running batch keeps the `--max-budget-usd` it
-    // started with, so that batch and the children it just reserved for can
-    // spend the same dollars, by at most that batch's cap once per launching
-    // level. The next batch sees the reservation. Revisit when a running
-    // batch's cap can be lowered.
     pub(super) async fn reserve_child_budget(
         &self,
         launch: &mut Launch,
@@ -96,7 +91,9 @@ impl Managed {
             .cloned()
             .ok_or_else(|| bad_request("the parent is no longer managed"))?;
         let held = parent.lock().await;
-        let remaining = Money::from_usd(&held.budget.remaining_usd()).map_err(error)?;
+        let remaining = held.budget.remaining();
+        // The batch cap and the idle floor protect the same dollars.
+        let protected = floor.max(held.in_flight_cap);
         // An agent may pick a smaller cap, never one above what the person allows
         // (ruling 7). This holds with budgets off too: the cap is recorded now
         // and enforced when budgets come back on.
@@ -108,7 +105,7 @@ impl Managed {
                 .min(allowed),
             None if shared => Money::from_usd("5")
                 .map_err(error)?
-                .min(remaining.saturating_sub(floor)),
+                .min(remaining.saturating_sub(protected)),
             None => allowed,
         };
         launch.budget_usd = Some(amount.usd().parse().map_err(error)?);
@@ -119,6 +116,7 @@ impl Managed {
             return Err(bad_request(
                 Overdrawn {
                     remaining: remaining.usd(),
+                    protected: protected.usd(),
                 }
                 .to_string(),
             ));
@@ -144,7 +142,8 @@ impl Managed {
             let failure = if !seen.insert(held.record.identity.identity_id.clone()) {
                 Some(bad_request("shared budget parent links contain a cycle"))
             } else {
-                held.budget.reserve(amount, floor).err().map(|failure| {
+                let protected = floor.max(held.in_flight_cap);
+                held.budget.reserve(amount, protected).err().map(|failure| {
                     bad_request(if floor == Money::ZERO {
                         format!(
                             "the parent has {} USD left; add to the parent first",

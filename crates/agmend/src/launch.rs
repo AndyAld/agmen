@@ -38,6 +38,8 @@ pub(crate) struct RunSpec {
     pub(crate) resume: bool,
     pub(crate) model: Option<String>,
     pub(crate) budget_remaining: String,
+    /// An explicit batch cap; absent means the full remaining budget.
+    pub(crate) budget_cap: Option<Money>,
     pub(crate) cap_budget: bool,
     pub(crate) mcp_config: PathBuf,
     pub(crate) identity: agmen_proto::IdentityId,
@@ -83,7 +85,11 @@ impl RunSpec {
         ]);
         args.extend(["--output-format".into(), "json".into()]);
         if self.cap_budget {
-            args.extend(["--max-budget-usd".into(), self.budget_remaining.clone()]);
+            args.extend([
+                "--max-budget-usd".into(),
+                self.budget_cap
+                    .map_or_else(|| self.budget_remaining.clone(), Money::usd),
+            ]);
         }
         args.extend([
             "--strict-mcp-config".into(),
