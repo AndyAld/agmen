@@ -1026,15 +1026,14 @@ impl Identities {
             tx: tx.clone(),
             timing: HubTiming::for_origin(&key.0),
         };
+        let mut streams = VecDeque::new();
         if origin == crate::origin::Origin::Local {
             // Complete the first catch-up before a pending call can drain.
-            context
-                .local_wake(&mut VecDeque::new(), MAX_COLLECTION_PAGES)
-                .await?;
+            streams = context.catch_up(MAX_COLLECTION_PAGES).await?;
         }
         let (stop, stopped) = oneshot::channel();
         let task = tokio::spawn(async move {
-            tokio::select! { () = context.run() => {}, _ = stopped => {} }
+            tokio::select! { () = context.run(streams) => {}, _ = stopped => {} }
         });
         collectors.insert(
             key,
@@ -1965,9 +1964,9 @@ impl Collection {
         Err(hub_error("gap replay incomplete after 100 pages"))
     }
 
-    async fn run(self) {
+    async fn run(self, streams: VecDeque<Stream>) {
         if self.origin == agmen_client::LOCAL_ORIGIN {
-            if let Err(error) = self.run_local().await {
+            if let Err(error) = self.run_local(streams, MAX_COLLECTION_PAGES).await {
                 self.send(Err(error));
             }
             return;
@@ -2118,16 +2117,26 @@ impl Collection {
         }
     }
 
-    async fn run_local(&self) -> Result<(), ApiError> {
+    /// One wake on a fresh queue; the streams it did not reach go to `run_local`.
+    async fn catch_up(&self, max_pages: usize) -> Result<VecDeque<Stream>, ApiError> {
+        let mut streams = VecDeque::new();
+        self.local_wake(&mut streams, max_pages).await?;
+        Ok(streams)
+    }
+
+    async fn run_local(
+        &self,
+        mut streams: VecDeque<Stream>,
+        max_pages: usize,
+    ) -> Result<(), ApiError> {
         let local = self.origins.local();
         let mut stored = local.watch_stored(&self.project).await?;
-        let mut streams = VecDeque::new();
         let mut skipped = BTreeSet::new();
         self.send(Ok(ClientEvent::Connection { connected: true }));
         loop {
             // Subscribe before paging so commits during replay remain visible.
             stored.borrow_and_update();
-            self.local_wake_skipping(&mut streams, MAX_COLLECTION_PAGES, &mut skipped)
+            self.local_wake_skipping(&mut streams, max_pages, &mut skipped)
                 .await?;
             if let Ok(Err(_)) = tokio::time::timeout(LOCAL_RECHECK, stored.changed()).await {
                 return Err(hub_error("local record notification channel closed"));
@@ -2851,6 +2860,36 @@ mod local_collection_tests {
                 .await
                 .unwrap();
             assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].client.id, dm.id);
+            f.stop().await;
+        })
+        .await
+        .unwrap();
+    }
+
+    // The catch-up's leftover queue must start run_local, so a late inbox is probed
+    // on its first wake rather than after the LOCAL_RECHECK wait.
+    #[tokio::test]
+    async fn local_collector_first_wake_continues_the_catch_up_queue() {
+        tokio::time::timeout(TEST_WAIT, async {
+            let f = Fixture::new().await;
+            let dm = f.post(Some(&f.agents[1])).await;
+            // Feed and the person's inbox use the whole budget; both agents are left.
+            let streams = f.collection.catch_up(TEST_COLLECTION_PAGES).await.unwrap();
+            assert!(f.drain(&f.agents[1]).await.is_empty());
+            let poll = tokio::time::timeout(COLLECT_WAIT, async {
+                loop {
+                    let rows = f.drain(&f.agents[1]).await;
+                    if !rows.is_empty() {
+                        return rows;
+                    }
+                    tokio::time::sleep(COLLECT_POLL).await;
+                }
+            });
+            let rows = tokio::select! {
+                rows = poll => rows.unwrap(),
+                done = f.collection.run_local(streams, TEST_COLLECTION_PAGES) => panic!("run_local ended: {done:?}"),
+            };
             assert_eq!(rows[0].client.id, dm.id);
             f.stop().await;
         })
