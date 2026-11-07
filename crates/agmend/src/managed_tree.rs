@@ -502,16 +502,14 @@ impl Managed {
         }
     }
 
-    /// Both callers hold `launching`; keep tree and registry insertion atomic.
+    /// Both callers hold `launching` and check shutdown before admission.
+    /// An admitted launch finishes insertion while shutdown waits for that lock.
     pub(super) async fn insert_worker(
         &self,
         worker: super::Worker,
     ) -> Result<Arc<tokio::sync::Mutex<super::Worker>>, ApiError> {
         let mut tree = self.tree.lock().await;
         let mut workers = self.workers.lock().await;
-        if self.shutting_down.load(Ordering::Acquire) {
-            return Err(error("daemon is shutting down"));
-        }
         if workers.len() >= MAX_MANAGED {
             return Err(registry_full());
         }

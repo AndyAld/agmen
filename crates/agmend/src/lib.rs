@@ -450,7 +450,9 @@ impl Agmend {
     }
 
     /// Serves until `shutdown` resolves, then joins daemon-owned collectors
-    /// and sessions, waiting at most 5 s per task and 10 s in total. A hub
+    /// and sessions, waiting at most 5 s per task and 10 s in total.
+    /// Stops agents before the listener that may have delegated them, then
+    /// the local record, so their BYEs can still reach a live record. A hub
     /// token renewal in flight gets the same 10 s to store its tokens.
     pub async fn serve_until(self, shutdown: impl std::future::Future<Output = ()>) {
         self.core.origins.local().start().await;
@@ -516,9 +518,9 @@ impl Agmend {
         tasks.abort_all();
         while tasks.join_next().await.is_some() {}
         if tokio::time::timeout(Duration::from_secs(10), async {
-            self.core.origins.local().shutdown().await;
-            self.core.listeners.shutdown().await;
             self.core.managed.shutdown().await;
+            self.core.listeners.shutdown().await;
+            self.core.origins.local().shutdown().await;
             self.core.identities.shutdown().await;
             // Last, so a hung hub cannot use up the time the steps above need.
             self.core.origins.hub().credentials().shutdown().await;

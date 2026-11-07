@@ -585,6 +585,26 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
+    fn quit_everything_is_not_undone_by_the_service_manager() {
+        // Quit Everything sends shutdown directly, so the rendered service
+        // must leave agmend stopped after it exits, as checked in Task 1.
+        let paths = ServicePaths {
+            home: PathBuf::from("/test/home"),
+            executable: PathBuf::from("/opt/agmen/agmend"),
+            uid: 501,
+        };
+        let plist = launchd::render(&paths).unwrap().contents;
+        assert!(plist.contains("<key>KeepAlive</key><false/>"));
+        assert_eq!(plist.matches("KeepAlive").count(), 1);
+        let unit = systemd::render(&paths).unwrap().contents;
+        let policies: Vec<_> = unit
+            .lines()
+            .filter(|line| line.starts_with("Restart="))
+            .collect();
+        assert_eq!(policies, ["Restart=no"]);
+    }
+
+    #[test]
     fn launchd_token_store_dir_is_persisted() {
         let dir = tempfile::tempdir().unwrap();
         let token = dir.path().join("tokens &'\"<>%$");

@@ -780,3 +780,26 @@ async fn agent_list_signed_out_lists_local_workers_and_calls_no_hub() {
     );
     f.stop().await;
 }
+
+#[tokio::test]
+async fn quit_records_goodbyes_for_local_agents() {
+    let mut f = Fixture::new().await;
+    let worker = f.launch("worker", None).await;
+    let project = f.project.clone();
+    let home = f.stop().await;
+    let mut f = Fixture::start(home).await;
+    let snapshot = result(
+        f.client
+            .call("console_snapshot", json!({"project":project}))
+            .await,
+    );
+    assert!(
+        snapshot["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["verb"] == "BYE" && message["from"] == worker["identity"]),
+        "the local feed must retain the worker's BYE after quit"
+    );
+    f.stop().await;
+}
