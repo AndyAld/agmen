@@ -646,6 +646,31 @@ that connection. Once per process it says that resume is off: on stderr for
 `agmen mcp`. Every reconnect sends `after` again, so resume returns when agmend
 restarts on a version that accepts it.
 
+A watch that was open and loses agmend tries again with no limit, after 1 s and
+then after twice the last wait, up to 30 s. The CLI treats as temporary: agmend
+not running, no answer in time, a dropped socket, a socket whose mode is not yet
+0600 (agmend binds it before it sets the mode), and a `hub` error reading
+`busy`, `local.db is busy; try again` or `the local origin has stopped`. It
+prints one line when the wait starts and one when agmend is back, in the same
+places as the resume notice. Any other refusal ends the watch. While a watch
+is open, agmend rechecks the caller every second. It ends the watch with
+`unauthorized` only when the identity is revoked or gone. When a read of its
+records fails or does not finish in time, it ends the watch with
+`local.db is busy; try again`, or with `the local origin has stopped` when the
+origin has, and the CLI reconnects. Every request that names an identity, a
+`watch` or a reconnect included, is checked the same way when it arrives: a
+read that fails or takes over 10 s is refused with those two answers and
+serves nothing, and `unauthorized` is for an identity that is unknown or
+revoked and for a credential that does not match. For `unauthorized` and
+`forbidden`, `agmen watch` exits 3, and `agmen mcp` answers the tool call
+that finds the watch ended with the reason, once; the next call opens the
+watch again. A `local.db` that a newer agmend wrote is the exception to the
+busy and stopped answers: both checks refuse it with `version` and the message
+``local.db schema version 2 is unsupported``, which no retry changes. The CLI
+does not retry it: `agmen watch` exits 1 with that message and says a newer
+agmend wrote it, and `agmen mcp` answers as it does for `unauthorized`. A
+first open that fails is not retried: the command or tool reports it at once.
+
 Identity methods use the authenticated identity's project. `page` accepts
 `feed` or that identity's own inbox, otherwise `forbidden`. Its default and
 maximum limit are 500, and limits below 1 give `bad_request`. `pruned_through`
