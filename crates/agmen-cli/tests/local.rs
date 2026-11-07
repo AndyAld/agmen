@@ -29,6 +29,133 @@ const HEARTBEAT_EVERY: Duration = Duration::from_secs(1);
 /// Polls for the first beat: 10 s at `LOCAL_POLL`, inside `MCP_WAIT`.
 const HEARTBEAT_POLLS: usize = 500;
 
+async fn run_bounded(home: &Home, cwd: &std::path::Path, args: &[&str]) -> std::process::Output {
+    tokio::time::timeout(
+        MCP_WAIT,
+        tokio::process::Command::from(home.agmen(cwd, args))
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+}
+
+#[tokio::test]
+async fn whoami_in_a_local_worktree_names_a_stopped_agmend() {
+    let home = Home::new_in(std::path::Path::new("/tmp"));
+    let (stop, daemon) = start_agmend(&home);
+    let worktree = Worktree::new(&home);
+    assert_exit(&run_bounded(&home, &worktree.path(), &["init"]).await, 0);
+    stop_agmend(stop, daemon).await;
+    assert!(!home.login_file().exists());
+    for args in [&["whoami"][..], &["whoami", "--json"][..]] {
+        let out = run_bounded(&home, &worktree.path(), args).await;
+        assert_exit(&out, 1);
+        assert_eq!(
+            stderr(&out).trim(),
+            "agmen: agmend is not running: open the agmen app or run agmend service install"
+        );
+        assert!(!stderr(&out).contains("agmen login"));
+        assert_eq!(stdout(&out), "");
+    }
+}
+
+#[tokio::test]
+async fn whoami_outside_a_local_worktree_keeps_the_hub_login_hint() {
+    let home = Home::new_in(std::path::Path::new("/tmp"));
+    let (stop, daemon) = start_agmend(&home);
+    for args in [&["whoami"][..], &["whoami", "--json"][..]] {
+        let out = run_bounded(&home, home.path(), args).await;
+        assert_exit(&out, 3);
+        assert_eq!(
+            stderr(&out).trim(),
+            "not signed in: run agmen login --hub <url>"
+        );
+    }
+    assert!(!home.state_base().join("local.db").exists());
+    stop_agmend(stop, daemon).await;
+    for args in [&["whoami"][..], &["whoami", "--json"][..]] {
+        let out = run_bounded(&home, home.path(), args).await;
+        assert_exit(&out, 3);
+        assert_eq!(
+            stderr(&out).trim(),
+            "not signed in: run agmen login --hub <url>"
+        );
+    }
+}
+
+#[tokio::test]
+async fn whoami_reads_the_person_with_one_local_projects_call() {
+    use agmen_local::{API, ErrorCode, Request, Response, frame};
+    use std::os::unix::fs::PermissionsExt as _;
+
+    const REQUEST_LIMIT: usize = 4;
+    let projects = json!([{"project": "project1", "name": "lightweight"}]);
+    let person = json!({"id": "hmn7k2q9", "handle": "local-person"});
+    for args in [&["whoami"][..], &["whoami", "--json"][..]] {
+        let home = Home::new_in(std::path::Path::new("/tmp"));
+        std::fs::create_dir_all(home.state_base()).unwrap();
+        let socket = home.state_base().join("agmend.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let answer = json!({"projects": projects, "person": person, "future_field": true});
+        let daemon = tokio::spawn(async move {
+            tokio::time::timeout(MCP_WAIT, async {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut methods = Vec::new();
+                for _ in 0..REQUEST_LIMIT {
+                    let Ok(request) = frame::read_async::<Request>(&mut socket).await else {
+                        break;
+                    };
+                    let response = match request.method.as_str() {
+                        "hello" => Response::ok(request.id, json!({"api": API})),
+                        "local_projects" => Response::ok(request.id, answer.clone()),
+                        _ => Response::err(request.id, ErrorCode::BadRequest, "unexpected method"),
+                    };
+                    methods.push(request.method);
+                    frame::write_async(&mut socket, &response).await.unwrap();
+                }
+                methods
+            })
+            .await
+            .unwrap()
+        });
+        let out = run_bounded(&home, home.path(), args).await;
+        let methods = tokio::time::timeout(STOP_WAIT, daemon)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(methods, ["hello", "local_projects"]);
+        assert_exit(&out, 0);
+        assert_eq!(stderr(&out), "");
+        if args.contains(&"--json") {
+            assert_eq!(
+                serde_json::from_str::<Value>(&stdout(&out)).unwrap(),
+                json!({"local": {"id": person["id"], "handle": person["handle"], "projects": projects}})
+            );
+        } else {
+            assert!(stdout(&out).contains("local-person (hmn7k2q9) on this machine"));
+            assert!(stdout(&out).contains("project project1 (lightweight)"));
+        }
+    }
+}
+
+#[test]
+fn socket_read_error_chain_names_the_io_error_once() {
+    let err = anyhow::Error::new(agmen_client::AgmendSocketError::Read {
+        path: std::path::PathBuf::from("/unreadable/agmend.sock"),
+        source: std::io::Error::other("socket metadata unavailable"),
+    });
+    let printed = format!("{err:#}");
+    assert_eq!(
+        printed.matches("socket metadata unavailable").count(),
+        1,
+        "{printed}"
+    );
+    assert!(printed.contains("cannot read /unreadable/agmend.sock"));
+}
+
 #[tokio::test]
 async fn whoami_lists_this_machine_without_a_hub() {
     let local = Local::new().await;
@@ -817,6 +944,164 @@ async fn agmen_watch_prints_local_messages() {
         assert!(!stderr(&output).contains(&token));
         wait_local_status(&local, &worker, "offline").await;
     }
+    local.stop().await;
+}
+
+/// An agmend from before watch resume, standing in for the real one.
+mod older_agmend {
+    use std::path::Path;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use agmen_local::{ErrorCode, Request, Response, frame};
+    use serde_json::{Value, json};
+    use tokio::net::UnixListener;
+    use tokio::task::{JoinHandle, JoinSet};
+
+    /// What the agmend of 5d8f266 answers a `watch` that carries `after`: its
+    /// params are `{project}` with `deny_unknown_fields`, which the console
+    /// wraps as `bad params: {error}`.
+    const REFUSAL: &str = "bad params: unknown field `after`, expected `project`";
+
+    fn message(seq: u64) -> Value {
+        json!({
+            "kind": "message",
+            "message": {
+                "v": 1, "id": format!("01JBX6Q4T7W3C2M8Y9K5N0P{seq:03}"), "verb": "FYI",
+                "data": {}, "body": format!("message {seq}"),
+                "sent_at": "2026-10-25T16:04:11Z", "stream": "feed", "seq": seq,
+                "from": "idother1", "from_handle": "x/y", "from_kind": "agent",
+                "hub_at": "2026-10-25T16:04:11Z",
+            },
+        })
+    }
+
+    /// Serves `hello`, `post` and `watch` at `socket`. A `watch` with `after`
+    /// is refused. The others deliver one new message each, seqs 10, 11, 12
+    /// and so on; every even one then cuts the connection.
+    pub fn start(socket: &Path, me: Value) -> JoinHandle<()> {
+        let listener = UnixListener::bind(socket).unwrap();
+        std::fs::set_permissions(socket, std::os::unix::fs::PermissionsExt::from_mode(0o600))
+            .unwrap();
+        let opened = Arc::new(AtomicU64::new(0));
+        tokio::spawn(async move {
+            let mut connections = JoinSet::new();
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let (me, opened) = (me.clone(), opened.clone());
+                connections.spawn(async move {
+                    while let Ok(request) = frame::read_async::<Request>(&mut socket).await {
+                        let id = request.id;
+                        let result = match request.method.as_str() {
+                            "hello" => json!({"api": 1}),
+                            "post" => json!({"stream": "feed", "seq": 1}),
+                            "watch" if request.params.get("after").is_some() => {
+                                let refusal = Response::err(id, ErrorCode::BadRequest, REFUSAL);
+                                let _sent = frame::write_async(&mut socket, &refusal).await;
+                                return;
+                            }
+                            "watch" => {
+                                let n = opened.fetch_add(1, Ordering::SeqCst);
+                                for result in [me.clone(), message(10 + n)] {
+                                    let ok = Response::ok(id, result);
+                                    if frame::write_async(&mut socket, &ok).await.is_err() {
+                                        return;
+                                    }
+                                }
+                                if n % 2 == 1 {
+                                    // Held open until the CLI closes its end.
+                                    let _end = frame::read_async::<Request>(&mut socket).await;
+                                }
+                                return;
+                            }
+                            _ => return,
+                        };
+                        if frame::write_async(&mut socket, &Response::ok(id, result))
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                });
+            }
+        })
+    }
+}
+
+#[tokio::test]
+async fn agmen_watch_on_an_older_agmend_says_so_once_on_stderr() {
+    let local = Local::new().await;
+    let worker = local.member("worker").await;
+    let identity = worker.identity();
+    let me = json!({
+        "kind": "self", "identity_id": identity.identity_id,
+        "handle": identity.handle, "owner_id": identity.owner_id,
+    });
+    // The real daemon keeps running, out of reach of the CLI.
+    let socket = local.home.state_base().join("agmend.sock");
+    std::fs::remove_file(&socket).unwrap();
+    let older = older_agmend::start(&socket, me);
+    // Each run reads two messages, the second after a reconnect, and the
+    // seqs only grow: 10 and 11, then 12 and 13.
+    let runs = [(&["watch"][..], 10), (&["watch", "--json"][..], 12)];
+    for (args, first) in runs {
+        let mut command = tokio::process::Command::from(local.home.agmen(&worker.path(), args));
+        // Off, so a line on stderr is not a log line the filter let through.
+        let mut child = command
+            .env("AGMEN_LOG", "off")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+        let wanted = [format!("message {first}"), format!("message {}", first + 1)];
+        let mut printed = Vec::new();
+        let read = tokio::time::timeout(MCP_WAIT, async {
+            while !wanted
+                .iter()
+                .all(|want| printed.iter().any(|line: &String| line.contains(want)))
+            {
+                // A watch that ends early is reported below with its stderr.
+                let Some(line) = lines.next_line().await.unwrap() else {
+                    break;
+                };
+                printed.push(line);
+            }
+        })
+        .await;
+        child.start_kill().unwrap();
+        let output = tokio::time::timeout(MCP_WAIT, child.wait_with_output())
+            .await
+            .unwrap()
+            .unwrap();
+        let err = stderr(&output);
+        let all_printed = wanted
+            .iter()
+            .all(|want| printed.iter().any(|line| line.contains(want)));
+        assert!(
+            read.is_ok() && all_printed,
+            "{args:?} did not print {wanted:?}\nstdout: {printed:?}\nstderr: {err}"
+        );
+        if args.len() == 2 {
+            for line in &printed {
+                assert!(
+                    serde_json::from_str::<Value>(line).is_ok(),
+                    "stdout is not JSON lines: {line}"
+                );
+            }
+        }
+        assert!(
+            !printed.iter().any(|line| line.contains("older")),
+            "stdout carries the notice: {printed:?}"
+        );
+        let notices = err
+            .lines()
+            .filter(|l| l.contains("agmend is older"))
+            .count();
+        assert_eq!(notices, 1, "{args:?}: {err}");
+    }
+    older.abort();
     local.stop().await;
 }
 

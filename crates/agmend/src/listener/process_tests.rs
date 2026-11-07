@@ -195,7 +195,8 @@ async fn assert_dead(pids: &[u32]) {
 const WITH_CHILD: &str = r#"
 sleep 30 &
 child=$!
-printf '%s\n%s\n' "$$" "$child" >pids
+printf '%s\n%s\n' "$$" "$child" >pids.tmp
+mv pids.tmp pids
 wait "$child"
 "#;
 

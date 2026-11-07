@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use agmen_client::ClientEvent;
 use agmen_local::frame::{read_async, write_async};
-use agmen_local::{API, ErrorCode, HelloAnswer, Outcome, Request, Response};
+use agmen_local::{API, ErrorCode, HelloAnswer, Outcome, Request, Response, WATCH_KEEPALIVE};
 use agmen_proto::IdentityId;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt as _, BufReader};
@@ -23,10 +23,10 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// How long one `call` or `call_as` waits for agmend's answer.
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
-/// A quiet watch waits for as long as agmend keeps the socket open, since agmend
-/// sends no keepalive. A frame that has begun must finish within this, or the
-/// watch drops its socket and the caller reconnects.
+/// How long a started watch frame may take to finish.
 const WATCH_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
+/// A quiet local watch reconnects after two missed keepalive intervals.
+const WATCH_IDLE_TIMEOUT: Duration = WATCH_KEEPALIVE.saturating_mul(2);
 
 /// One connection to agmend. Request ids start at 1 for `hello` and then
 /// increase by one. A local token is never stored here.
@@ -178,6 +178,7 @@ impl Agmend {
             reader: BufReader::new(stream),
             id,
             frame_timeout: WATCH_FRAME_TIMEOUT,
+            keepalive: true,
         })
     }
 
@@ -197,35 +198,67 @@ pub(crate) struct Watch {
     reader: BufReader<UnixStream>,
     id: u64,
     frame_timeout: Duration,
+    /// Whether agmend sends keepalives. One from before them stays silent
+    /// while the watch is quiet, so silence does not mean a dead socket.
+    keepalive: bool,
 }
 
 impl Watch {
-    /// The next event. Waits for as long as the watch stays quiet; once a frame
-    /// begins it has `WATCH_FRAME_TIMEOUT` to finish.
+    /// This watch's agmend predates keepalives: a quiet watch waits for as
+    /// long as the socket stays open.
+    pub(crate) fn without_keepalive(mut self) -> Self {
+        self.keepalive = false;
+        self
+    }
+
+    /// The next event, skipping keepalives. Idle waits have `WATCH_IDLE_TIMEOUT`
+    /// unless agmend sends no keepalive; a frame that begins has
+    /// `WATCH_FRAME_TIMEOUT` to finish.
     pub(crate) async fn recv(&mut self) -> Result<ClientEvent, AgmendError> {
-        // Waiting for data is cancel safe and `read_async` is not, so only a
-        // frame that has begun runs under the timeout. At EOF this returns with
-        // no data and `read_async` reports it.
-        self.reader.fill_buf().await.map_err(AgmendError::Io)?;
-        let response: Response =
-            tokio::time::timeout(self.frame_timeout, read_async(&mut self.reader))
-                .await
-                .map_err(|_| AgmendError::Timeout {
-                    method: "watch".into(),
-                })?
-                .map_err(AgmendError::Frame)?;
-        if response.id != self.id {
-            return Err(AgmendError::Protocol(
-                "agmend's watch response id is invalid".into(),
-            ));
-        }
-        match response.outcome {
-            Outcome::Ok { result } => serde_json::from_value(result)
-                .map_err(|_| AgmendError::Protocol("agmend's watch event is invalid".into())),
-            Outcome::Err { error } => Err(AgmendError::Refused {
-                code: error.code,
-                message: error.message,
-            }),
+        loop {
+            // fill_buf is cancel safe; a timeout during read_async requires
+            // dropping the watch because that read may have consumed a prefix.
+            let idle = self.reader.fill_buf();
+            let ready = if self.keepalive {
+                tokio::time::timeout(WATCH_IDLE_TIMEOUT, idle)
+                    .await
+                    .map_err(|_| AgmendError::Timeout {
+                        method: "watch".into(),
+                    })?
+            } else {
+                idle.await
+            };
+            ready.map_err(AgmendError::Io)?;
+            let response: Response =
+                tokio::time::timeout(self.frame_timeout, read_async(&mut self.reader))
+                    .await
+                    .map_err(|_| AgmendError::Timeout {
+                        method: "watch".into(),
+                    })?
+                    .map_err(AgmendError::Frame)?;
+            if response.id != self.id {
+                return Err(AgmendError::Protocol(
+                    "agmend's watch response id is invalid".into(),
+                ));
+            }
+            match response.outcome {
+                Outcome::Ok { result } => {
+                    let keepalive = result.get("keepalive") == Some(&Value::Bool(true));
+                    let event = serde_json::from_value(result).map_err(|_| {
+                        AgmendError::Protocol("agmend's watch event is invalid".into())
+                    })?;
+                    if keepalive && matches!(event, ClientEvent::Connection { connected: true }) {
+                        continue;
+                    }
+                    return Ok(event);
+                }
+                Outcome::Err { error } => {
+                    return Err(AgmendError::Refused {
+                        code: error.code,
+                        message: error.message,
+                    });
+                }
+            }
         }
     }
 }
@@ -497,8 +530,60 @@ mod watch_tests {
 
     use super::{AgmendError, Watch};
 
-    /// agmend sends a watch no keepalive, so a quiet watch is a healthy one: it
-    /// waits for its next event instead of ending, however long nothing comes.
+    #[tokio::test(start_paused = true)]
+    async fn idle_watch_with_keepalives_stays_connected_past_sixty_seconds() {
+        let (client, mut daemon) = UnixStream::pair().unwrap();
+        let mut watch = Watch {
+            reader: BufReader::new(client),
+            id: 7,
+            frame_timeout: Duration::from_millis(200),
+            keepalive: true,
+        };
+        let sender = tokio::spawn(async move {
+            for _ in 0..3 {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                write_async(
+                    &mut daemon,
+                    &Response::ok(
+                        7,
+                        serde_json::json!({
+                            "kind":"connection", "connected":true, "keepalive":true
+                        }),
+                    ),
+                )
+                .await
+                .unwrap();
+            }
+            let event = ClientEvent::Connection { connected: false };
+            write_async(
+                &mut daemon,
+                &Response::ok(7, serde_json::to_value(event).unwrap()),
+            )
+            .await
+            .unwrap();
+        });
+        let start = tokio::time::Instant::now();
+        let event = watch.recv().await.unwrap();
+        assert_eq!(event, ClientEvent::Connection { connected: false });
+        assert!(start.elapsed() > Duration::from_secs(60));
+        sender.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_watch_without_keepalives_times_out() {
+        let (client, _daemon) = UnixStream::pair().unwrap();
+        let mut watch = Watch {
+            reader: BufReader::new(client),
+            id: 7,
+            frame_timeout: Duration::from_millis(200),
+            keepalive: true,
+        };
+        let result = tokio::time::timeout(Duration::from_secs(61), watch.recv()).await;
+        assert!(matches!(result, Ok(Err(AgmendError::Timeout { .. }))));
+    }
+
+    /// A quiet watch waits within its keepalive budget, independently of the
+    /// shorter deadline for finishing a frame that has begun.
     #[tokio::test]
     async fn an_idle_watch_keeps_waiting_for_its_next_event() {
         let (client, mut daemon) = UnixStream::pair().unwrap();
@@ -506,6 +591,7 @@ mod watch_tests {
             reader: BufReader::new(client),
             id: 7,
             frame_timeout: Duration::from_millis(200),
+            keepalive: true,
         };
         let idle = tokio::time::timeout(Duration::from_millis(800), watch.recv()).await;
         assert!(idle.is_err(), "an idle watch ended on its own: {idle:?}");
@@ -524,6 +610,7 @@ mod watch_tests {
             reader: BufReader::new(client),
             id: 7,
             frame_timeout: Duration::from_millis(200),
+            keepalive: true,
         };
         // The length prefix of a 100 byte frame, and nothing after it.
         daemon.write_all(&100_u32.to_be_bytes()).await.unwrap();

@@ -10,7 +10,8 @@
 //!   Service store pulls in crates `cargo deny` rejects.
 //!
 //! A directory store keeps its directory at mode 0700 and each token file
-//! at 0600, written to a temporary file and renamed into place.
+//! at 0600, written to a temporary file and renamed into place. A conditional
+//! write ([`TokenStore::set_if`]) runs its check between the two.
 //!
 //! Every token is keyed by the hub's origin and the id it acts as (ruling
 //! R42), so an identity file that names another hub finds no token to
@@ -177,13 +178,41 @@ impl TokenStore {
     ///
     /// [`TokenStoreError`] when the store cannot be written.
     pub fn set(&self, key: &TokenKey, token: &str) -> Result<(), TokenStoreError> {
+        self.set_if(key, token, || true).map(|_stored| ())
+    }
+
+    /// Stores `token` under `key` like [`set`](Self::set), unless `check`
+    /// returns `false`: then nothing is stored and the answer is `Ok(false)`.
+    /// `check` runs as late as the store allows. A directory store has the new
+    /// file written and synced by then and renames it into place right after,
+    /// or removes it; the keychain is written right after. A check that reads
+    /// other files or the store itself can still be overtaken by another
+    /// process in that gap, since neither the files nor the keychain offer a
+    /// compare and swap.
+    ///
+    /// # Errors
+    ///
+    /// [`TokenStoreError`] when the store cannot be written.
+    pub(crate) fn set_if(
+        &self,
+        key: &TokenKey,
+        token: &str,
+        check: impl FnOnce() -> bool,
+    ) -> Result<bool, TokenStoreError> {
         match self {
-            Self::Keychain => entry(key)?
-                .set_password(token)
-                .map_err(TokenStoreError::Keychain),
+            Self::Keychain => {
+                let entry = entry(key)?;
+                if !check() {
+                    return Ok(false);
+                }
+                entry
+                    .set_password(token)
+                    .map_err(TokenStoreError::Keychain)?;
+                Ok(true)
+            }
             Self::Dir(dir) => {
                 let path = dir.join(key.file_name());
-                write_private(dir, &path, token.as_bytes())
+                write_private(dir, &path, token.as_bytes(), check)
                     .map_err(|source| TokenStoreError::File { path, source })
             }
         }
@@ -253,8 +282,15 @@ fn xdg_state_dir(xdg_state_home: Option<OsString>, home: Option<OsString>) -> Op
 /// Writes `bytes` to `path` in `dir`, making `dir` so only the owner can
 /// enter it, through a temporary file only the owner can read, then renames
 /// it into place, so a reader sees the old token or the new one, never part
-/// of one.
-fn write_private(dir: &Path, path: &Path, bytes: &[u8]) -> io::Result<()> {
+/// of one. `commit` runs after the file is written and synced and before the
+/// rename; when it returns `false` the temporary file is removed instead and
+/// the answer is `Ok(false)`.
+fn write_private(
+    dir: &Path,
+    path: &Path,
+    bytes: &[u8],
+    commit: impl FnOnce() -> bool,
+) -> io::Result<bool> {
     let mut folder = fs::DirBuilder::new();
     folder.recursive(true);
     #[cfg(unix)]
@@ -280,7 +316,12 @@ fn write_private(dir: &Path, path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut file = options.open(&tmp)?;
     file.write_all(bytes)?;
     file.sync_all()?;
-    fs::rename(&tmp, path)
+    if !commit() {
+        fs::remove_file(&tmp)?;
+        return Ok(false);
+    }
+    fs::rename(&tmp, path)?;
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -359,6 +400,46 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let tokens = dir.path().join("tokens");
         round_trip(&TokenStore::Dir(tokens.clone()), &tokens);
+    }
+
+    #[test]
+    fn set_if_stores_only_when_the_check_agrees() {
+        let dir = tempfile::tempdir().unwrap();
+        let tokens = dir.path().join("tokens");
+        let store = TokenStore::Dir(tokens.clone());
+        let ours = key("https://hub.example.com");
+        let files = || {
+            let mut names: Vec<_> = fs::read_dir(&tokens)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            names.sort();
+            names
+        };
+        assert!(store.set_if(&ours, "first", || true).unwrap());
+        assert_eq!(store.get(&ours).unwrap().as_deref(), Some("first"));
+        // A refusal keeps the old token and leaves no staged file behind...
+        assert!(!store.set_if(&ours, "second", || false).unwrap());
+        assert_eq!(store.get(&ours).unwrap().as_deref(), Some("first"));
+        // ...and stores nothing for a key that had no token.
+        let theirs = key("https://evil.example");
+        assert!(!store.set_if(&theirs, "refused", || false).unwrap());
+        assert_eq!(store.get(&theirs).unwrap(), None);
+        assert_eq!(files(), [OsString::from(ours.file_name())]);
+        // The check runs once the new file is staged and before it replaces
+        // the old token, which is the latest a store can run it.
+        let staged = tokens.join(format!("{}.tmp", ours.file_name()));
+        assert!(
+            store
+                .set_if(&ours, "third", || {
+                    assert_eq!(fs::read_to_string(&staged).unwrap(), "third");
+                    assert_eq!(store.get(&ours).unwrap().as_deref(), Some("first"));
+                    true
+                })
+                .unwrap()
+        );
+        assert_eq!(store.get(&ours).unwrap().as_deref(), Some("third"));
+        assert_eq!(files(), [OsString::from(ours.file_name())]);
     }
 
     #[test]

@@ -88,8 +88,14 @@ fn presence_lines_hide_until_show_ledger() {
     let all: Vec<usize> = (0..messages.len()).collect();
     let mut without_heartbeat = all.clone();
     without_heartbeat.pop();
-    assert_eq!(visible_rows(&messages, false), without_heartbeat);
-    assert_eq!(visible_rows(&messages, true), all);
+    assert_eq!(
+        visible_rows(&messages, false, ChatFilter::Everyone, &BTreeSet::new()),
+        without_heartbeat
+    );
+    assert_eq!(
+        visible_rows(&messages, true, ChatFilter::Everyone, &BTreeSet::new()),
+        all
+    );
     assert!(is_ledger(&messages[5]), "the GRANT is a ledger line");
     assert!(!is_presence(&messages[5]), "and it shows by default");
 }
@@ -581,6 +587,163 @@ fn snoozed_alert_stays_snoozed_across_snapshots(cx: &mut TestAppContext) {
         chat.read_with(cx, |chat, _| chat.alerts.needing_me().to_vec()),
         [fresh.client.id]
     );
+}
+
+#[gpui::test]
+fn filter_keeps_the_reading_position(cx: &mut TestAppContext) {
+    let mut snapshot = chat_snapshot();
+    let human = snapshot
+        .messages
+        .iter()
+        .find(|env| env.from_kind == agmen_proto::IdentityKind::Human)
+        .unwrap()
+        .clone();
+    let agent = snapshot
+        .messages
+        .iter()
+        .find(|env| env.from_kind == agmen_proto::IdentityKind::Agent)
+        .unwrap()
+        .clone();
+    const FILLER_MESSAGES: u64 = 120;
+    for i in 0..FILLER_MESSAGES {
+        let mut env = if i % 2 == 0 { &human } else { &agent }.clone();
+        env.client.id = format!("01JF{i:022}").parse().unwrap();
+        env.seq = Seq(i + 100);
+        snapshot.messages.push(env);
+    }
+    let anchor = snapshot
+        .messages
+        .iter()
+        .enumerate()
+        .find(|(i, env)| *i >= 20 && env.from_kind == agmen_proto::IdentityKind::Human)
+        .map(|(i, _)| i)
+        .unwrap();
+    let (chat, cx) = open_with(cx, snapshot);
+    assert_eq!(
+        chat.read_with(cx, |chat, _| chat.chat_filter()),
+        ChatFilter::Everyone
+    );
+    chat.read_with(cx, |chat, cx| {
+        let stream = chat.stream.read(cx);
+        stream.list.scroll_to(ListOffset {
+            item_ix: stream.rows.iter().position(|row| *row == anchor).unwrap(),
+            offset_in_item: px(0.),
+        });
+    });
+    redraw(cx);
+    let top_message = |chat: &ChatView, cx: &gpui::App| {
+        let stream = chat.stream.read(cx);
+        stream.rows[stream.list.logical_scroll_top().item_ix]
+    };
+    let before = chat.read_with(cx, top_message);
+    assert_eq!(before, anchor);
+
+    chat.update(cx, |chat, cx| {
+        chat.set_chat_filter(ChatFilter::JustHumans, cx)
+    });
+    redraw(cx);
+    assert_eq!(chat.read_with(cx, top_message), before);
+    chat.update(cx, |chat, cx| {
+        chat.set_chat_filter(ChatFilter::JustHumans, cx)
+    });
+    redraw(cx);
+    assert_eq!(chat.read_with(cx, top_message), before);
+    chat.update(cx, |chat, cx| {
+        chat.set_chat_filter(ChatFilter::Everyone, cx)
+    });
+    redraw(cx);
+    assert_eq!(chat.read_with(cx, top_message), before);
+}
+
+#[derive(Default)]
+struct FilterAlarm(std::cell::Cell<usize>);
+
+impl crate::ui::needs_you::Alarm for FilterAlarm {
+    fn chime(&self) -> bool {
+        self.0.set(self.0.get() + 1);
+        true
+    }
+
+    fn notify(&self, _notice: &crate::ui::needs_you::Notice, _cx: &gpui::App) {}
+}
+
+#[gpui::test]
+fn my_agents_filter_still_raises_alerts_from_others(cx: &mut TestAppContext) {
+    let alarm = Rc::new(FilterAlarm::default());
+    cx.update(|cx| cx.set_global(crate::ui::needs_you::AlarmHandle(alarm.clone())));
+    let mut snapshot = chat_snapshot();
+    snapshot.messages.clear();
+    let me = snapshot.me_id.clone();
+    let (chat, cx) = open_with(cx, snapshot);
+    chat.update(cx, |chat, cx| {
+        chat.set_chat_filter(ChatFilter::MyAgents, cx)
+    });
+    let alert: StampedEnvelope = serde_json::from_value(serde_json::json!({
+        "v": 1,
+        "id": "01JF0000000000000000000001",
+        "body": "Please decide",
+        "sent_at": "2026-11-07T22:00:00Z",
+        "verb": "ALERT",
+        "data": {"need": "decide", "urgency": "urgent", "needs": "anyone", "actions": []},
+        "stream": "feed",
+        "seq": 1,
+        "from": "seana100",
+        "from_handle": "sean/a1",
+        "from_kind": "agent",
+        "mentioned": [me],
+        "hub_at": "2026-11-07T22:00:00Z",
+    }))
+    .unwrap();
+    chat.update(cx, |chat, cx| {
+        chat.apply(Update::Message(Box::new(alert.clone())), cx)
+    });
+    redraw(cx);
+    assert!(cx.debug_bounds(sel(&alert, "row")).is_none());
+    assert_eq!(chat.read_with(cx, |chat, _| chat.badge()), 1);
+    assert_eq!(alarm.0.get(), 1);
+    assert!(cx.debug_bounds("banner").is_some());
+    assert!(chat.read_with(cx, |chat, _| chat.toast().is_some()));
+}
+
+#[gpui::test]
+fn empty_filter_says_so(cx: &mut TestAppContext) {
+    let mut snapshot = chat_snapshot();
+    snapshot.roster.clear();
+    let later = snapshot.clone();
+    let (chat, cx) = open_with(cx, snapshot);
+    assert!(cx.debug_bounds("chat:filter-empty").is_none());
+    chat.update(cx, |chat, cx| {
+        chat.set_chat_filter(ChatFilter::MyAgents, cx)
+    });
+    redraw(cx);
+    assert!(cx.debug_bounds("chat:filter-empty").is_some());
+
+    let mut with_agents = later.clone();
+    with_agents.roster = chat_snapshot().roster;
+    chat.update(cx, |chat, cx| {
+        chat.apply(Update::Snapshot(Box::new(with_agents)), cx)
+    });
+    redraw(cx);
+    assert!(cx.debug_bounds("chat:filter-empty").is_none());
+    chat.update(cx, |chat, cx| {
+        chat.apply(Update::Snapshot(Box::new(later.clone())), cx)
+    });
+    redraw(cx);
+    assert!(cx.debug_bounds("chat:filter-empty").is_some());
+
+    chat.update(cx, |chat, cx| {
+        chat.set_chat_filter(ChatFilter::Everyone, cx)
+    });
+    redraw(cx);
+    assert!(cx.debug_bounds("chat:filter-empty").is_none());
+    let mut empty = later;
+    empty.messages.clear();
+    chat.update(cx, |chat, cx| {
+        chat.apply(Update::Snapshot(Box::new(empty)), cx);
+        chat.set_chat_filter(ChatFilter::MyAgents, cx);
+    });
+    redraw(cx);
+    assert!(cx.debug_bounds("chat:filter-empty").is_none());
 }
 
 #[gpui::test]

@@ -449,9 +449,16 @@ async fn call(
         }
         "local_projects" => {
             params::<Shutdown>(raw)?;
-            let projects = core.origins.local().projects().await?;
+            let local = core.origins.local();
+            let person = local.person().await?;
+            let projects = if person.is_some() {
+                local.projects().await?
+            } else {
+                Vec::new()
+            };
+            let person = person.map(|person| json!({"id": person.id, "handle": person.handle}));
             Ok(
-                json!({"projects": projects.into_iter().map(|(project, name)| json!({"project": project, "name": name})).collect::<Vec<_>>()}),
+                json!({"projects": projects.into_iter().map(|(project, name)| json!({"project": project, "name": name})).collect::<Vec<_>>(), "person": person}),
             )
         }
         "lanes_set" => {
@@ -522,5 +529,39 @@ async fn answer(writer: &mut OwnedWriteHalf, id: u64, outcome: Result<Value, Api
             tracing::debug!(error = %err, "writing an answer failed");
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn finite_identity_read_timeout_preserves_spent_refresh() {
+        let fixture = crate::login::tests::RefreshFixture::new().await;
+        let core = fixture.daemon.core.clone();
+        let read = tokio::spawn(async move {
+            finite(
+                // Expire before the identity read's own 10 s timeout.
+                tokio::time::Instant::now() + Duration::from_secs(1),
+                core.identities.state(
+                    &Caller::Human,
+                    json!({"project": "project1", "key": "head"}),
+                ),
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), fixture.refresh.started.notified())
+            .await
+            .expect("the hub must spend the refresh token before the timeout");
+        let error = tokio::time::timeout(Duration::from_secs(3), read)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Hub);
+        assert_eq!(error.message, "local operation timed out");
+        fixture.finish_refresh().await;
     }
 }

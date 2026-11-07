@@ -53,7 +53,7 @@ fn config_for(dir: &Path) -> HostConfig {
     let script = dir.join("hub");
     fs::write(
         &script,
-        "#!/bin/sh\necho $$ > \"$AGMEN_TEST_PID_FILE\"\nexec /bin/sleep 120\n",
+        "#!/bin/sh\necho $$ >\"$AGMEN_TEST_PID_FILE.tmp\"\nmv \"$AGMEN_TEST_PID_FILE.tmp\" \"$AGMEN_TEST_PID_FILE\"\nexec /bin/sleep 120\n",
     )
     .unwrap();
     fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
@@ -153,7 +153,7 @@ async fn shutdown_cancels_env_loading_and_reaps_reader() {
     write_private(
         &config.env_file,
         &format!(
-            "echo $$ > {:?}\nexec /bin/sleep 120\n",
+            "echo $$ >{0:?}.tmp\nmv {0:?}.tmp {0:?}\nexec /bin/sleep 120\n",
             dir.path().join("reader-pid")
         ),
     );

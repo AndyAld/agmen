@@ -320,8 +320,9 @@ and other identity callers receive `forbidden`; an invalid credential receives
 `unauthorized`. Extra parameters are refused. A successful `{}` reply is written
 before shutdown is signaled, with a 10 s write deadline. The daemon then leaves
 `serve_until` through the same cleanup path as SIGTERM: stop accepting, abort
-local connections, and join daemon-owned collectors and sessions within their
-existing 10 s total bound. Clients waiting for exit should use a 15 s bound.
+local connections, and join daemon-owned collectors and sessions, and let a hub
+token renewal in flight store its tokens, within their existing 10 s total
+bound. Clients waiting for exit should use a 15 s bound.
 The desktop only sends this method to its own bundled executable and never
 stops another installation's daemon.
 
@@ -433,7 +434,8 @@ signed-in hub login for a hub project.
   is `running`, `idle`, `offline` or `attached`; `source` is `launched` or
   `joined`.
 - `agent_stop {identity}` cancels a running batch, posts BYE and sets
-  `offline`.
+  `offline`. The identity is kept on every origin; `agent_start` brings it
+  back and `agent_remove` revokes it.
 - `agent_start {identity, project?, root?}` brings an offline agent back.
   After agmend restarts, every saved record loads as `offline` and nothing runs
   until Start. A record restores its spend (`status.json`) and both session
@@ -532,8 +534,13 @@ receive `forbidden`, and so do worker peers.
 | Method | Params | Result |
 |--------|--------|--------|
 | `local_project_create` | `{name}` | `{project, tenant, person: {id, handle}}` |
-| `local_projects` | `{}` | `{projects: [{project, name}]}` |
+| `local_projects` | `{}` | `{projects: [{project, name}], person: {id, handle} \| null}` |
 | `lanes_set` | `{project, lanes: [LaneSpec]}` | `{v, lanes: [{name, globs, owner, owner_handle}]}` |
+
+`local_projects` returns `person: null` and an empty `projects` list before
+the first local project, without creating `local.db`. Once the local origin
+exists, `person` names its fixed local person. The field is additive; clients
+must accept unknown result fields.
 
 Project names contain 1 to 64 characters, with no control characters or
 leading or trailing whitespace. Invalid or duplicate names give `bad_request`.
@@ -577,7 +584,44 @@ solo-origin plan. These local branches are not enabled by Task 7.
 | `items` | Identity: `{}` | `{items: [ItemView]}` |
 | `check_path` | Identity: `{paths}` | `{checks: [PathCheck]}` |
 | `pending` | Identity: `{}` | An array of queued messages, drained once, at most 500 per call |
-| `watch` | Identity: `{project}` | Identity events while the caller is online |
+| `watch` | Identity: `{project, after?}` | Identity events while the caller is online |
+
+A local project's `watch` starts with the authenticated caller's `self` event.
+The optional `after` object holds the last received seq for each stream, for
+example `{"feed":12,"inbox:<identity_id>":7}`. Only `feed` and the caller's own
+inbox are allowed. Another identity's inbox gives `forbidden`. Seqs must be
+nonnegative integers within the signed 64-bit storage range. When `after` is
+present, a missing stream starts at 0. When `after` is absent, both streams
+start at their current heads. Hub projects do not accept `after`.
+
+Messages after these positions arrive in seq order per stream, followed by live
+messages, without overlap between replay and live delivery. agmend keeps no
+position for a watch: each watch starts from the `after` it is given, so a
+message written to a socket that dies before the client reads it is sent again
+on the next watch. `agmen watch` saves its position in the existing delivery
+cursors of the identity's `agmen.db` after it has queued a message for output,
+and sends it as `after` on every reconnect, including after agmend was closed.
+`agmen mcp` keeps its positions in memory and leaves those cursors alone.
+
+After 30 s without an event, agmend sends a successful result with
+`{"kind":"connection","connected":true,"keepalive":true}` and the original
+watch request id. This keepalive uses the shared `WATCH_KEEPALIVE` interval.
+The CLI skips it, leaves the delivery cursors unchanged, and waits at most twice
+`WATCH_KEEPALIVE` for the next frame to begin. A started frame still has a
+separate 10 s deadline. A reader from before the keepalive parses it as a
+`connection` event with `connected` true, so an older `agmen watch` prints it
+once per 30 s of silence.
+
+An agmend from before `after` refuses a `watch` that carries it with
+`bad_request` and the message ``bad params: unknown field `after`, expected
+`project` ``. The CLI treats that refusal, and no other, as an older agmend. It
+opens the watch again on a new connection without `after`, so that watch starts
+at the current heads and replays nothing, and the delivery cursors follow what
+was printed. Such an agmend sends no keepalive, so the CLI sets no idle limit on
+that connection. Once per process it says that resume is off: on stderr for
+`agmen watch`, where `--json` keeps stdout to JSON lines, and in the log for
+`agmen mcp`. Every reconnect sends `after` again, so resume returns when agmend
+restarts on a version that accepts it.
 
 Identity methods use the authenticated identity's project. `page` accepts
 `feed` or that identity's own inbox, otherwise `forbidden`. Its default and

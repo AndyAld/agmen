@@ -26,6 +26,9 @@ use crate::hub::Hub;
 use crate::login::Credentials;
 use crate::state::{MAX_STREAM_POSITIONS, ManagedIdentity, Store};
 
+#[path = "identity_watch.rs"]
+mod watch;
+
 const DEADLINE: Duration = Duration::from_secs(10);
 const POST_WAIT: Duration = Duration::from_secs(5);
 const MAX_DATABASE_JOBS: usize = 64;
@@ -100,6 +103,7 @@ impl Drop for Collector {
 #[serde(deny_unknown_fields)]
 struct ProjectParams {
     project: ProjectId,
+    after: Option<BTreeMap<Stream, u64>>,
 }
 
 #[derive(Deserialize)]
@@ -952,7 +956,8 @@ impl Identities {
         writer: &mut OwnedWriteHalf,
     ) -> Result<(), ApiError> {
         Self::project(caller, &raw)?;
-        let ProjectParams { project } = params(raw)?;
+        let watch_params: ProjectParams = params(raw)?;
+        let project = watch_params.project.clone();
         let origin = self.origins.of(&project).await?;
         let login = self.origins.person(origin).await?;
         let _presence = match (origin, caller) {
@@ -976,6 +981,16 @@ impl Identities {
                 owner_id: who.owner_id.clone(),
             },
         };
+        if origin == crate::origin::Origin::Local {
+            return self
+                .watch_local(caller, id, watch_params, &me, reader, writer)
+                .await;
+        }
+        if watch_params.after.is_some() {
+            return Err(bad_request(
+                "watch after is only supported for local projects",
+            ));
+        }
         let tx = self.project_channel(&project).await?;
         let mut events = tx.subscribe();
         write_event(writer, id, &ClientEvent::Me(me.clone())).await?;
@@ -1292,7 +1307,14 @@ async fn write_event(
         id,
         serde_json::to_value(event).map_err(|_| hub_error("encoding watch event failed"))?,
     );
-    tokio::time::timeout(DEADLINE, agmen_local::frame::write_async(writer, &response))
+    write_watch_frame(writer, &response).await
+}
+
+async fn write_watch_frame(
+    writer: &mut OwnedWriteHalf,
+    response: &agmen_local::Response,
+) -> Result<(), ApiError> {
+    tokio::time::timeout(DEADLINE, agmen_local::frame::write_async(writer, response))
         .await
         .map_err(|_| hub_error("watch write timed out"))?
         .map_err(|_| hub_error("watch write failed"))

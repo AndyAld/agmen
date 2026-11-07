@@ -7,6 +7,7 @@ mod support;
 
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -17,12 +18,14 @@ use agmen_proto::{ClientEnvelope, Payload, Timestamp};
 use agmend::Agmend;
 use serde_json::{Value, json};
 use support::{Client, Home, error, result};
+use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
 
 const WAIT: Duration = Duration::from_secs(10);
 const POLL: Duration = Duration::from_millis(20);
 const POLLS: usize = 500;
 const FAKE_CLAUDE: &str = r#"#!/bin/sh
-printf '%s' "$2" >prompt-seen
+printf '%s' "$2" >prompt-seen.tmp
+mv prompt-seen.tmp prompt-seen
 i=0
 while [ ! -f release ] && [ "$i" -lt 500 ]; do
 	/bin/sleep 0.02
@@ -240,6 +243,71 @@ async fn prompt(worker: &Value) -> String {
 }
 
 #[tokio::test]
+async fn fake_claude_publishes_complete_prompt() {
+    let dir = tempfile::tempdir().unwrap();
+    tokio::fs::write(dir.path().join("release"), "")
+        .await
+        .unwrap();
+    // The shell opens the redirection before calling this function. Hold the
+    // first printf there so the reader observes the create-before-write gap.
+    let pause = r#"printf() {
+	unset -f printf
+	echo ready >&2
+	IFS= read -r _
+	command printf "$@"
+}
+"#;
+    let expected = "complete worker prompt\nwith a second line";
+    let mut child = tokio::process::Command::new("/bin/sh")
+        .args([
+            "-c",
+            &format!("{pause}{FAKE_CLAUDE}"),
+            "fake-claude",
+            "-p",
+            expected,
+        ])
+        .current_dir(dir.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut ready = String::new();
+    tokio::time::timeout(
+        WAIT,
+        tokio::io::BufReader::new(child.stderr.take().unwrap()).read_line(&mut ready),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(ready, "ready\n");
+    let before = tokio::fs::read_to_string(dir.path().join("prompt-seen")).await;
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"write\n")
+        .await
+        .unwrap();
+    let output = tokio::time::timeout(WAIT, child.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(
+        matches!(&before, Err(error) if error.kind() == std::io::ErrorKind::NotFound),
+        "prompt became visible before printf wrote its contents: {before:?}"
+    );
+    assert_eq!(
+        tokio::fs::read_to_string(dir.path().join("prompt-seen"))
+            .await
+            .unwrap(),
+        expected
+    );
+}
+
+#[tokio::test]
 async fn launch_in_a_local_project_mints_locally() {
     let mut f = Fixture::new().await;
     let worker = f.launch("worker", Some("reviewer")).await;
@@ -305,7 +373,7 @@ async fn owner_dm_reaches_a_local_worker_batch() {
 }
 
 #[tokio::test]
-async fn stop_revokes_a_local_worker() {
+async fn stop_keeps_a_local_worker_resumable() {
     let mut f = Fixture::new().await;
     let worker = f.launch("worker", None).await;
     let credential = f.credential(&worker).await;
@@ -320,20 +388,37 @@ async fn stop_revokes_a_local_worker() {
             .await,
     );
     assert!(
-        !snapshot["roster"]
+        snapshot["roster"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|row| row["identity_id"] == worker["identity"])
+            .any(|row| row["identity_id"] == worker["identity"] && row["status"] != "online")
     );
-    assert_eq!(
-        error(
-            f.call_as(&worker, "state", json!({"key":"head"}), &credential)
-                .await
+    let listed = result(
+        f.client
+            .call("agent_list", json!({"project":f.project}))
+            .await,
+    );
+    assert_eq!(listed["agents"][0]["identity"], worker["identity"]);
+    assert_eq!(listed["agents"][0]["state"], "offline");
+    result(
+        f.call_as(
+            &worker,
+            "state",
+            json!({"project":f.project,"key":"head"}),
+            &credential,
         )
-        .code,
-        ErrorCode::Unauthorized
+        .await,
     );
+    let started = result(
+        f.client
+            .call("agent_start", json!({"identity":worker["identity"]}))
+            .await,
+    );
+    assert_eq!(started["identity"], worker["identity"]);
+    assert!(f.credential(&worker).await.local_token == credential.local_token);
+    f.dm(&worker, "after stop").await;
+    assert!(prompt(&worker).await.contains("after stop"));
     f.stop().await;
 }
 
@@ -443,6 +528,18 @@ async fn remove_revokes_a_local_worker() {
             .call("agent_remove", json!({"identity":worker["identity"]}))
             .await,
     );
+    let snapshot = result(
+        f.client
+            .call("console_snapshot", json!({"project":f.project}))
+            .await,
+    );
+    assert!(
+        !snapshot["roster"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["identity_id"] == worker["identity"])
+    );
     assert!(
         !Path::new(worker["worktree"].as_str().unwrap())
             .join(".agmen/identity.json")
@@ -462,6 +559,40 @@ async fn remove_revokes_a_local_worker() {
             .await,
     );
     assert!(listed["agents"].as_array().unwrap().is_empty());
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn stopped_local_agent_still_counts_toward_the_cap() {
+    let mut f = Fixture::new().await;
+    let worker = f.launch("worker", None).await;
+    result(
+        f.client
+            .call("agent_stop", json!({"identity":worker["identity"]}))
+            .await,
+    );
+    let listed = result(
+        f.client
+            .call("agent_list", json!({"project":f.project}))
+            .await,
+    );
+    assert_eq!(listed["agents"].as_array().unwrap().len(), 1);
+    assert_eq!(listed["agents"][0]["identity"], worker["identity"]);
+    let path = f.home.dir.path().join("agmend.db");
+    let id = worker["identity"].as_str().unwrap().to_owned();
+    let count: i64 = tokio::task::spawn_blocking(move || {
+        rusqlite::Connection::open(path)
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM identities WHERE identity=?1",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert_eq!(count, 1);
     f.stop().await;
 }
 

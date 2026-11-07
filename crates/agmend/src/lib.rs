@@ -450,7 +450,8 @@ impl Agmend {
     }
 
     /// Serves until `shutdown` resolves, then joins daemon-owned collectors
-    /// and sessions, waiting at most 5 s per task and 10 s in total.
+    /// and sessions, waiting at most 5 s per task and 10 s in total. A hub
+    /// token renewal in flight gets the same 10 s to store its tokens.
     pub async fn serve_until(self, shutdown: impl std::future::Future<Output = ()>) {
         self.core.origins.local().start().await;
         self.core.managed.attach(&self.core.identities).await;
@@ -519,6 +520,8 @@ impl Agmend {
             self.core.listeners.shutdown().await;
             self.core.managed.shutdown().await;
             self.core.identities.shutdown().await;
+            // Last, so a hung hub cannot use up the time the steps above need.
+            self.core.origins.hub().credentials().shutdown().await;
         })
         .await
         .is_err()
