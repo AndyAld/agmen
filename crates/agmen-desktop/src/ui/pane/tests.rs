@@ -14,8 +14,9 @@ use crate::backend::chat_snapshot;
 use crate::icons::FileIcon;
 use crate::icons::test_theme::material_icons;
 use crate::ui::chat::ChatView;
-use crate::ui::test_support::{click, init, redraw};
-use crate::ui::tokens::{MOCKUP_REM, TAB_CLOSE_SLOT};
+use crate::ui::chat_filter::ChatFilter;
+use crate::ui::test_support::{click, fills_at, init, redraw};
+use crate::ui::tokens::{MOCKUP_REM, TAB_CLOSE_SLOT, TINT_SEGMENT, tint};
 
 /// The window's root in these tests: the center at the mockup's rem size.
 struct Host(Entity<PaneGroup>);
@@ -288,6 +289,53 @@ fn show_ledger_toggles_the_chats_flag(cx: &mut TestAppContext) {
     assert!(chat.read_with(cx, |chat, _| chat.show_ledger()));
     click(cx, "pane-0:show-ledger");
     assert!(!chat.read_with(cx, |chat, _| chat.show_ledger()));
+}
+
+#[gpui::test]
+fn chat_filter_starts_on_everyone(cx: &mut TestAppContext) {
+    let (_group, chat, cx) = open_center_with_chat(cx, Vec::new());
+    assert_eq!(
+        chat.read_with(cx, |chat, _| chat.chat_filter()),
+        ChatFilter::Everyone
+    );
+    let fill = cx.update(|_, cx| {
+        let theme = &cx.global::<crate::appearance::Appearance>().theme;
+        tint(theme.text_accent, TINT_SEGMENT)
+    });
+    assert!(fills_at(cx, "pane-0:chat-filter:1").contains(&fill));
+    assert!(!fills_at(cx, "pane-0:chat-filter:0").contains(&fill));
+    assert!(!fills_at(cx, "pane-0:chat-filter:2").contains(&fill));
+}
+
+#[gpui::test]
+fn chat_filter_control_sets_the_chats_filter(cx: &mut TestAppContext) {
+    let (_group, chat, cx) = open_center_with_chat(cx, Vec::new());
+    click(cx, "pane-0:chat-filter:2");
+    assert_eq!(
+        chat.read_with(cx, |chat, _| chat.chat_filter()),
+        ChatFilter::JustHumans
+    );
+    click(cx, "pane-0:chat-filter:0");
+    assert_eq!(
+        chat.read_with(cx, |chat, _| chat.chat_filter()),
+        ChatFilter::MyAgents
+    );
+}
+
+#[gpui::test]
+fn show_ledger_still_toggles_beside_the_filter(cx: &mut TestAppContext) {
+    let (_group, chat, cx) = open_center_with_chat(cx, Vec::new());
+    click(cx, "pane-0:chat-filter:2");
+    click(cx, "pane-0:show-ledger");
+    chat.read_with(cx, |chat, _| {
+        assert_eq!(chat.chat_filter(), ChatFilter::JustHumans);
+        assert!(chat.show_ledger());
+    });
+    click(cx, "pane-0:show-ledger");
+    chat.read_with(cx, |chat, _| {
+        assert_eq!(chat.chat_filter(), ChatFilter::JustHumans);
+        assert!(!chat.show_ledger());
+    });
 }
 
 #[gpui::test]

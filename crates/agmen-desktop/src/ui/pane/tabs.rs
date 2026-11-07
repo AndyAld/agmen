@@ -15,9 +15,10 @@ use super::item::TabItem;
 use super::names::{PaneNames, label_is_code};
 use crate::icons::{FileIcon, FileIcons};
 use crate::ui::chat::ChatView;
-use crate::ui::components::{Breadcrumb, Button, ButtonStyle, Color, Label, Tab};
+use crate::ui::chat_filter::ChatFilter;
+use crate::ui::components::{Breadcrumb, Button, ButtonStyle, Color, Label, Segmented, Tab};
 use crate::ui::tab_views::TabViews;
-use crate::ui::tokens::{BORDER_WIDTH, TAB_BAR_HEIGHT};
+use crate::ui::tokens::{BORDER_WIDTH, SPACE_6, TAB_BAR_HEIGHT};
 
 /// The most tabs one pane holds; opening another closes the leftmost
 /// inactive tab other than the chat's.
@@ -216,17 +217,41 @@ impl Pane {
         match (item, &self.chat) {
             (TabItem::Chat, Some(chat)) => {
                 let on = chat.read(cx).show_ledger();
+                let filter = chat.read(cx).chat_filter();
+                let selected = ChatFilter::ALL
+                    .iter()
+                    .position(|choice| *choice == filter)
+                    .unwrap_or_default();
+                let filter_chat = chat.clone();
                 let chat = chat.clone();
                 bar.end(
-                    Button::new(
-                        SharedString::from(format!("pane-{}:show-ledger", self.number)),
-                        "Show ledger",
-                    )
-                    .style(ButtonStyle::Plain)
-                    .selected(on)
-                    .on_click(move |_, _, cx| {
-                        chat.update(cx, |chat, cx| chat.set_show_ledger(!on, cx));
-                    }),
+                    div()
+                        .flex()
+                        .gap(SPACE_6)
+                        .child(
+                            Segmented::new(
+                                format!("pane-{}:chat-filter", self.number),
+                                ChatFilter::ALL.map(ChatFilter::label),
+                                selected,
+                            )
+                            .on_change(move |index, _, cx| {
+                                if let Some(&filter) = ChatFilter::ALL.get(index) {
+                                    filter_chat
+                                        .update(cx, |chat, cx| chat.set_chat_filter(filter, cx));
+                                }
+                            }),
+                        )
+                        .child(
+                            Button::new(
+                                SharedString::from(format!("pane-{}:show-ledger", self.number)),
+                                "Show ledger",
+                            )
+                            .style(ButtonStyle::Plain)
+                            .selected(on)
+                            .on_click(move |_, _, cx| {
+                                chat.update(cx, |chat, cx| chat.set_show_ledger(!on, cx));
+                            }),
+                        ),
                 )
             }
             _ => bar,

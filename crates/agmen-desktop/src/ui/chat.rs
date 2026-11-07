@@ -366,8 +366,13 @@ impl ChatView {
             self.at_top = at_top;
             cx.notify();
         }
-        if at_top
-            && matches!(self.snapshot.older, Older::More | Older::Failed(_))
+        if at_top {
+            self.load_older(cx);
+        }
+    }
+
+    fn load_older(&self, cx: &mut Context<Self>) {
+        if matches!(self.snapshot.older, Older::More | Older::Failed(_))
             && let Some(backend) = cx.try_global::<BackendHandle>()
         {
             backend.0.load_older();
@@ -445,10 +450,6 @@ impl ChatView {
     }
 
     /// Changes the visible rows while keeping the person's reading position.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the breadcrumb control is added in Task 4")
-    )]
     pub(crate) fn set_chat_filter(&mut self, filter: ChatFilter, cx: &mut Context<Self>) {
         if self.filter == filter {
             return;
@@ -827,6 +828,15 @@ impl Render for ChatView {
                         ))
                         .size(LabelSize::Small)
                         .color(Color::Placeholder),
+                    )
+                    .when(
+                        matches!(self.snapshot.older, Older::More | Older::Failed(_)),
+                        |this| {
+                            this.child(
+                                Button::new("chat:load-older", "Load older messages")
+                                    .on_click(cx.listener(|chat, _, _, cx| chat.load_older(cx))),
+                            )
+                        },
                     )
                     .into_any_element()
             } else {
