@@ -1205,6 +1205,9 @@ async fn worker_peer_cannot_call_owner_methods_even_without_identity_credentials
         "login",
         "console_watch",
         "file_text",
+        "inbox",
+        "state",
+        "watch",
     ] {
         let error = crate::api::owner_peer_check(
             &fixture.daemon.core.managed,
@@ -1234,7 +1237,7 @@ async fn worker_peer_cannot_call_owner_methods_even_without_identity_credentials
     )
     .unwrap_err();
     assert_eq!(error.message, "agents cannot call owner-only methods");
-    for method in ["hello", "watch", "inbox", "state", "pending"] {
+    for method in ["hello", "pending"] {
         assert!(
             crate::api::owner_peer_check(
                 &fixture.daemon.core.managed,
@@ -1491,6 +1494,135 @@ async fn framed_local_inbox_and_state_requests_from_worker_are_forbidden() {
         match method {
             "inbox" => assert_eq!(result["messages"][0]["body"], "for the person only"),
             _ => assert_eq!(result["key"], key),
+        }
+    }
+    drop(client);
+    tokio::time::timeout(FRAME_WAIT, task)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+/// One request and its one answer.
+async fn ask(
+    client: &mut tokio::net::UnixStream,
+    request: agmen_local::Request,
+) -> agmen_local::Outcome {
+    agmen_local::frame::write_async(client, &request)
+        .await
+        .unwrap();
+    framed_reply(client).await.outcome
+}
+
+/// Swaps the fixture's hub for one that answers the person's inbox and state, as the real one
+/// does. The fixture's own routes (the mint) are gone after it.
+async fn hub_answers_the_person(fixture: &mut Fixture) {
+    fixture.hub.abort();
+    let _stopped = tokio::time::timeout(FRAME_WAIT, &mut fixture.hub)
+        .await
+        .unwrap();
+    let app = axum::Router::new()
+        .route(
+            "/v1/projects/{project}/streams/{stream}",
+            axum::routing::get(
+                |axum::extract::Path((_, stream)): axum::extract::Path<(String, String)>| async move {
+                    axum::Json(json!({"messages": [{
+                        "v": 1, "id": "01JBX6Q4T7W3C2M8Y9K5P00001", "verb": "FYI", "data": {},
+                        "body": "for the person only", "sent_at": "2026-10-25T16:04:11Z",
+                        "stream": stream, "seq": 1, "from": "sender01", "from_handle": "owner",
+                        "from_kind": "human", "mentioned": [], "hub_at": "2026-10-25T16:04:12Z"
+                    }], "next_after": null, "head": 1}))
+                },
+            ),
+        )
+        .route(
+            "/v1/projects/{project}/state",
+            axum::routing::get(|| async { axum::Json(json!({"value": "for the person only"})) }),
+        );
+    let listener = tokio::net::TcpListener::bind(fixture.hub_url.socket_addrs(|| None).unwrap()[0])
+        .await
+        .unwrap();
+    fixture.hub = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+}
+
+/// A hub project: the person's hub reads are as closed to a worker's peer as the local ones.
+#[tokio::test]
+async fn framed_hub_inbox_state_and_watch_requests_from_worker_are_forbidden() {
+    use agmen_local::{ErrorCode, Outcome, Request};
+    let mut fixture = Fixture::new().await;
+    fixture.launch().await;
+    hub_answers_the_person(&mut fixture).await;
+    let core = &fixture.daemon.core;
+    let token = core
+        .identities
+        .local_token(&"agent001".parse().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    // project1 is not in the local record, so these are the person's hub reads. A watch
+    // keeps its connection, so it goes last.
+    let requests = [
+        ("inbox", json!({"project": "project1"})),
+        ("state", json!({"project": "project1", "key": "roster"})),
+        ("state", json!({"project": "project1", "key": "head"})),
+        ("watch", json!({"project": "project1"})),
+    ];
+    // A peer in a worker's process group is refused every one of them.
+    let (mut client, task) = hello_over(4242, core.clone()).await;
+    let mut reached = Vec::new();
+    for (method, params) in requests.clone() {
+        match ask(&mut client, Request::new(2, method, params)).await {
+            Outcome::Err { error } => {
+                assert_eq!(error.code, ErrorCode::Forbidden, "{method}");
+                assert_eq!(error.message, "agents cannot call owner-only methods");
+            }
+            Outcome::Ok { .. } => reached.push(method),
+        }
+    }
+    assert!(
+        reached.is_empty(),
+        "these reached the person's hub record: {reached:?}"
+    );
+    // The worker's own identity keeps all three: the refusal is for the human caller.
+    for (method, mut params) in requests.clone() {
+        params["local_token"] = json!(token.expose());
+        let mut request = Request::new(3, method, params);
+        request.as_ = Some("agent001".parse().unwrap());
+        let outcome = ask(&mut client, request).await;
+        assert!(
+            matches!(outcome, Outcome::Ok { .. }),
+            "{method} was refused to the worker's identity: {outcome:?}"
+        );
+    }
+    drop(client);
+    tokio::time::timeout(FRAME_WAIT, task)
+        .await
+        .unwrap()
+        .unwrap();
+    // A peer agmend cannot read is refused the same three.
+    for method in ["inbox", "state", "watch"] {
+        let error = crate::api::owner_peer_check(
+            &core.managed,
+            &crate::identities::Caller::Human,
+            method,
+            || Err(std::io::Error::other("no peer")),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Forbidden, "{method}");
+    }
+    // The same reads from the person's own process still answer.
+    let (mut client, task) = hello_over(4243, core.clone()).await;
+    for (method, params) in requests {
+        let outcome = ask(&mut client, Request::new(2, method, params)).await;
+        let Outcome::Ok { result } = outcome else {
+            panic!("{method} was refused to the person: {outcome:?}");
+        };
+        match method {
+            "inbox" => assert_eq!(result["messages"][0]["body"], "for the person only"),
+            "state" => assert_eq!(result["value"], "for the person only"),
+            _ => assert_eq!(result["kind"], "self"),
         }
     }
     drop(client);

@@ -177,8 +177,13 @@ pub(crate) fn owner_peer_check(
                     | "lanes"
                     | "items"
                     | "check_path"
+                    | "inbox"
+                    | "state"
+                    | "watch"
             ))
-        || matches!(method, "hello" | "watch" | "inbox" | "state" | "pending")
+        // Without an identity, inbox, state and watch answer the person, on any origin, so
+        // they fall through to the owner-peer test below like the other owner methods.
+        || matches!(method, "hello" | "pending")
     {
         return Ok(());
     }
@@ -205,6 +210,10 @@ fn owner_only() -> ApiError {
 }
 
 /// Whether the request names a project this machine's record holds.
+#[expect(
+    dead_code,
+    reason = "no caller now that inbox, state and watch are refused on every origin; agmen-4f drops it"
+)]
 async fn names_local_project(core: &Core, raw: &Value) -> bool {
     let Some(project) = raw
         .get("project")
@@ -326,17 +335,6 @@ async fn authorize(
         }
     };
     owner_peer_check(&core.managed, &caller, &request.method, lookup)?;
-    // owner_peer_check lets these reads through for any caller, and a worker arrives
-    // as the human, so on a local project it would read the person's own record.
-    // shortcut: a hub project stays open to workers as before; to close it, drop
-    // names_local_project and change worker_peer_cannot_call_owner_methods_even_without_identity_credentials.
-    if matches!(caller, Caller::Human)
-        && matches!(request.method.as_str(), "inbox" | "state" | "watch")
-        && !is_owner_peer(&core.managed, lookup)
-        && names_local_project(core, &request.params).await
-    {
-        return Err(owner_only());
-    }
     Ok(caller)
 }
 
