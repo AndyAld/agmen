@@ -173,3 +173,6 @@ async fn a_revoked_identity_still_ends_the_watch_with_unauthorized() {
     assert_eq!(ended(watch).await, unauthorized());
     f.stop().await;
 }
+
+#[path = "identity_authorize_tests.rs"]
+mod authorize;

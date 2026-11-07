@@ -633,10 +633,15 @@ is open, agmend rechecks the caller every second. It ends the watch with
 `unauthorized` only when the identity is revoked or gone. When a read of its
 records fails or does not finish in time, it ends the watch with
 `local.db is busy; try again`, or with `the local origin has stopped` when the
-origin has, and the CLI reconnects. For `unauthorized` and `forbidden`,
-`agmen watch` exits 3, and `agmen mcp` answers the tool call that finds the
-watch ended with the reason, once; the next call opens the watch again. A first
-open that fails is not retried: the command or tool reports it at once.
+origin has, and the CLI reconnects. Every request that names an identity, a
+`watch` or a reconnect included, is checked the same way when it arrives: a
+read that fails or takes over 10 s is refused with those two answers and
+serves nothing, and `unauthorized` is for an identity that is unknown or
+revoked and for a credential that does not match. For `unauthorized` and
+`forbidden`, `agmen watch` exits 3, and `agmen mcp` answers the tool call
+that finds the watch ended with the reason, once; the next call opens the
+watch again. A first open that fails is not retried: the command or tool
+reports it at once.
 
 Identity methods use the authenticated identity's project. `page` accepts
 `feed` or that identity's own inbox, otherwise `forbidden`. Its default and

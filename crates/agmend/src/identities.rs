@@ -378,14 +378,23 @@ impl Identities {
         if !valid_token(supplied) {
             return Err(unauthorized());
         }
+        // A read that fails or runs out of time says nothing against the caller:
+        // it is refused with the answer a client retries (see `retryable`) and
+        // never lets the call through. `unauthorized` stays for an identity that
+        // is unknown or revoked, and for a credential that reads and does not match.
         tokio::time::timeout(DEADLINE, async {
-            let caller = self.owned_identity(id).await?.ok_or_else(unauthorized)?;
+            let caller = self
+                .owned_identity(id)
+                .await
+                .map_err(retryable)?
+                .ok_or_else(unauthorized)?;
             let origin = agmen_client::origin_key(&caller.hub_url);
             let namespace = Url::parse("https://agmend.invalid").map_err(|_| unauthorized())?;
             let raw = self
                 .credentials
                 .token(&namespace, id)
-                .await?
+                .await
+                .map_err(retryable)?
                 .ok_or_else(unauthorized)?;
             let credential: LocalCredential =
                 serde_json::from_str(&raw).map_err(|_| unauthorized())?;
@@ -398,7 +407,7 @@ impl Identities {
             Ok(Caller::Identity(caller))
         })
         .await
-        .map_err(|_| unauthorized())?
+        .map_err(|_| crate::local_origin::busy())?
     }
 
     pub(crate) async fn managed(
@@ -1636,13 +1645,21 @@ async fn check_managed(
 }
 
 /// What a failed read of the person means for a recheck. A person who is not on
-/// this machine is gone. Anything else is a read that failed: a stopped origin
-/// is answered as it is, and the rest as busy, which the CLI retries.
+/// this machine is gone. Anything else is a read that failed (see `retryable`).
 fn unconfirmed(error: ApiError) -> Result<bool, ApiError> {
     match error.code {
         ErrorCode::NotFound => Ok(false),
-        _ if crate::local_origin::is_unavailable(&error) => Err(error),
-        _ => Err(crate::local_origin::busy()),
+        _ => Err(retryable(error)),
+    }
+}
+
+/// A read that failed, as the answer a local client retries: a stopped origin
+/// is answered as it is, and anything else as busy.
+fn retryable(error: ApiError) -> ApiError {
+    if crate::local_origin::is_unavailable(&error) {
+        error
+    } else {
+        crate::local_origin::busy()
     }
 }
 
