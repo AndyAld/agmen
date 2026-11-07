@@ -23,7 +23,7 @@ use crate::token_store::{TokenKey, TokenStore, TokenStoreError};
 
 #[path = "login_lock.rs"]
 mod lock;
-use lock::{LOGIN_LOCK_TIMEOUT, LoginLock, SIGN_IN_LOCK_TIMEOUT};
+use lock::{LoginLock, RENEWAL_LOCK_TIMEOUT, SIGN_IN_LOCK_TIMEOUT};
 
 /// Renew the access token when it has less than this left.
 const RENEW_LEAD: SignedDuration = SignedDuration::from_secs(120);
@@ -35,7 +35,7 @@ const MAX_LOGIN_BYTES: u64 = 64 * 1024;
 #[non_exhaustive]
 pub enum LoginError {
     /// Another process held the login lock past the bounded wait.
-    #[error("timed out waiting for {} after {timeout:?}; try again", path.display())]
+    #[error("timed out waiting for {} after {timeout:?}; this is the local login.lock, not the hub; try again", path.display())]
     LockTimeout {
         /// The shared lock file.
         path: PathBuf,
@@ -46,7 +46,7 @@ pub enum LoginError {
     /// than another process holding it. A login or logout needs the lock, so
     /// it changed nothing.
     #[error(
-        "cannot use the login lock {}: {error}; nothing was changed. Check its owner and permissions, and that the filesystem supports file locks",
+        "cannot use the login lock {}: {error}; nothing was changed. Check its owner and permissions, and that the filesystem supports file locks. This is the local login.lock, not the hub",
         path.display()
     )]
     LockUnusable {
@@ -474,9 +474,10 @@ pub async fn check_login_lock(login_file: &Path) -> Result<(), LoginError> {
 /// before it replaces the old one). A shared advisory lock beside the login
 /// file covers the check and write, and login and logout's file and token
 /// changes. A lock held past the bounded wait drops the pair as a changed
-/// login would. A lock file that cannot be used at all (not a held lock) logs
-/// a warning and leaves the check on the login file as the only guard, since
-/// dropping the pair would waste a refresh the hub already spent. The lock is
+/// login would, and logs a warning. A lock file that cannot be used at all
+/// (not a held lock) warns once, then logs repeats at debug, and leaves the
+/// check on the login file as the only guard, since dropping the pair would
+/// waste a refresh the hub already spent. The lock is
 /// never held during the hub request.
 ///
 /// ```no_run
@@ -536,7 +537,7 @@ pub async fn human_tokens(
             return Err(LoginError::NotSignedIn);
         }
         Renewal::LockBusy(timeout) => {
-            tracing::info!(
+            tracing::warn!(
                 path = %login_file.display(),
                 "discarded a renewed token pair: login.lock stayed busy for {timeout:?}"
             );
@@ -584,7 +585,7 @@ async fn renew_outcome(
         // A lock held too long drops the pair. A lock file that cannot be used
         // at all must not cost a refresh the hub already spent, so then the
         // renewal falls back to the login file check alone.
-        let _lock = match LoginLock::hold(&login_file, LOGIN_LOCK_TIMEOUT) {
+        let _lock = match LoginLock::hold(&login_file, RENEWAL_LOCK_TIMEOUT) {
             Ok(lock) => Some(lock),
             Err(LoginError::LockTimeout { timeout, .. }) => {
                 return Ok(Renewal::LockBusy(timeout));

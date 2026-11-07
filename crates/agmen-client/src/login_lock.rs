@@ -10,8 +10,9 @@ use std::time::{Duration, Instant};
 use super::LoginError;
 
 /// How long a token renewal waits for another login transaction. It has a
-/// request waiting on it, and giving up only drops one renewed pair.
-pub(super) const LOGIN_LOCK_TIMEOUT: Duration = Duration::from_secs(1);
+/// request waiting on it. Giving up drops one renewed pair, which can leave a
+/// spent refresh token, so the person may need `agmen login` again.
+pub(super) const RENEWAL_LOCK_TIMEOUT: Duration = Duration::from_secs(1);
 /// How long a login or logout waits. A person runs it, and a failure costs a
 /// browser step or a retry, so it can wait out a slow keychain write.
 pub(super) const SIGN_IN_LOCK_TIMEOUT: Duration = Duration::from_secs(5);

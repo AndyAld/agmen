@@ -496,7 +496,7 @@ async fn a_renewal_dropped_for_a_busy_lock_says_the_lock_was_busy() {
         .await
         .unwrap_err();
     assert!(matches!(error, LoginError::NotSignedIn), "{error:?}");
-    let notes = logged_at(tracing::Level::INFO, dir.path());
+    let notes = logged_at(tracing::Level::WARN, dir.path());
     assert_eq!(notes.len(), 1, "{notes:?}");
     assert!(notes[0].contains("busy"), "{notes:?}");
     assert!(!notes[0].contains("sign-in changed"), "{notes:?}");
@@ -590,4 +590,48 @@ async fn an_unusable_lock_error_names_the_path_the_os_error_and_what_to_check() 
         // The OS error is in the message once, so `{:#}` does not repeat it.
         assert!(std::error::Error::source(&error).is_none(), "{text}");
     }
+}
+
+#[test]
+fn fell_back_caps_its_memory_and_clears_on_overflow() {
+    let dir = tempfile::tempdir().unwrap();
+    let error = std::io::Error::other("cap-test");
+    let paths: Vec<_> = (0..9).map(|n| dir.path().join(format!("cap{n}"))).collect();
+    for path in &paths[..8] {
+        assert!(lock::fell_back(path, &error));
+    }
+    for path in &paths[..8] {
+        assert!(
+            !lock::fell_back(path, &error),
+            "a repeat inside the cap warns"
+        );
+    }
+    // A ninth path overflows the cap and clears the rest.
+    assert!(lock::fell_back(&paths[8], &error));
+    assert!(
+        lock::fell_back(&paths[0], &error),
+        "cleared entries warn again"
+    );
+}
+
+#[test]
+fn a_busy_lock_error_names_login_lock_as_local() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("login.json");
+    let _guard = hold(&file);
+    let error = lock::LoginLock::hold(&file, Duration::from_millis(20)).unwrap_err();
+    let text = error.to_string();
+    assert!(text.contains("local login.lock"), "{text}");
+    assert!(!text.contains('\n'), "{text}");
+}
+
+#[tokio::test]
+async fn an_unusable_lock_error_names_login_lock_as_local() {
+    let (_dir, store, file) = signed_in_with_unusable_lock().await;
+    let error = save_login(&store, &file, &login(), &tokens())
+        .await
+        .unwrap_err();
+    let text = error.to_string();
+    assert!(text.contains("local login.lock"), "{text}");
+    assert!(!text.contains('\n'), "{text}");
 }

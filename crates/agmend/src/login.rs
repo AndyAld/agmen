@@ -207,7 +207,7 @@ impl Credentials {
     ///
     /// `bad_request` when no hub is named and nobody is signed in, or the
     /// hub URL is not one to send credentials to; `hub` when the hub's
-    /// device start fails.
+    /// device start fails, or the local login.lock is busy or unusable.
     pub(crate) async fn login_start(&self, raw: Value) -> Result<Value, ApiError> {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
@@ -226,6 +226,8 @@ impl Credentials {
                 .map(|login| login.hub_url)
                 .map_err(|_| bad_request("name the hub to sign in at"))?,
         };
+        // Same order as the CLI: an unsafe hub is refused before the lock.
+        agmen_client::check_hub_url(&hub).map_err(|error| bad_request(error.to_string()))?;
         // Before the hub is asked, so a lock that is busy or unusable fails
         // before the person is sent to GitHub. Nothing is held afterwards.
         check_login_lock(&self.login_file)
