@@ -112,6 +112,631 @@ async fn owner_with_255_hub_identities_keeps_every_stream() {
     daemon.stop().await;
 }
 
+struct ReplayPass {
+    after: std::collections::BTreeMap<String, u64>,
+    sent: Vec<(String, u64)>,
+}
+
+struct ReplayHub {
+    forward: std::sync::Arc<Proxy>,
+    hub: std::sync::Arc<support::HubState>,
+    passes: std::sync::Mutex<Vec<ReplayPass>>,
+    disconnect: tokio::sync::Notify,
+    /// While false, a new connection waits before it replays anything.
+    gate: tokio::sync::watch::Sender<bool>,
+}
+
+async fn counted_replay(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<ReplayHub>>,
+    uri: axum::http::Uri,
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    if !uri.path().ends_with("/events") {
+        return proxy(axum::extract::State(state.forward.clone()), uri).await;
+    }
+    let query = url::Url::parse(&format!("http://proxy{uri}")).unwrap();
+    let after: std::collections::BTreeMap<String, u64> = query
+        .query_pairs()
+        .find(|(name, _)| name == "after")
+        .map(|(_, value)| {
+            value
+                .split(',')
+                .filter(|entry| !entry.is_empty())
+                .map(|entry| {
+                    let (stream, seq) = entry.rsplit_once(':').unwrap();
+                    (stream.to_owned(), seq.parse().unwrap())
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(after.len() <= MAX_AFTER);
+    // Feed comes last, so its saved position proves every discarded row before
+    // it has been consumed, rather than merely queued by this fake hub.
+    let replay: Vec<_> = state
+        .hub
+        .inboxes
+        .lock()
+        .unwrap()
+        .values()
+        .flatten()
+        .chain(state.hub.feed.lock().unwrap().iter())
+        .filter(|message| {
+            message["seq"].as_u64().unwrap()
+                > after
+                    .get(message["stream"].as_str().unwrap())
+                    .copied()
+                    .unwrap_or(0)
+        })
+        .cloned()
+        .collect();
+    let pass = {
+        let mut passes = state.passes.lock().unwrap();
+        assert!(passes.len() < MAX_PROXY_REQUESTS);
+        passes.push(ReplayPass {
+            after,
+            sent: Vec::new(),
+        });
+        passes.len() - 1
+    };
+    let (tx, rx) = tokio::sync::mpsc::channel(PROXY_QUEUE);
+    let sending = state.clone();
+    let task = tokio::spawn(async move {
+        let disconnected = sending.disconnect.notified();
+        tokio::pin!(disconnected);
+        disconnected.as_mut().enable();
+        sending
+            .gate
+            .subscribe()
+            .wait_for(|open| *open)
+            .await
+            .unwrap();
+        for message in replay {
+            let stream = message["stream"].as_str().unwrap().to_owned();
+            let seq = message["seq"].as_u64().unwrap();
+            let event = axum::response::sse::Event::default()
+                .id(format!("{stream}:{seq}"))
+                .data(message.to_string());
+            if tx
+                .send(Ok::<_, std::convert::Infallible>(event))
+                .await
+                .is_err()
+            {
+                return;
+            }
+            sending.passes.lock().unwrap()[pass]
+                .sent
+                .push((stream, seq));
+        }
+        disconnected.await;
+        drop(tx);
+    });
+    state.forward.tasks.lock().unwrap().push(task);
+    axum::response::sse::Sse::new(tokio_stream::wrappers::ReceiverStream::new(rx)).into_response()
+}
+
+async fn replay_fixture(
+    full: bool,
+) -> (
+    Daemon,
+    std::sync::Arc<ReplayHub>,
+    tokio::task::JoinHandle<()>,
+) {
+    let mut daemon = Daemon::seeded().await;
+    daemon.pause().await;
+    let state = std::sync::Arc::new(ReplayHub {
+        forward: std::sync::Arc::new(Proxy {
+            upstream: daemon.hub.url.clone(),
+            afters: Default::default(),
+            refusals: Default::default(),
+            tasks: Default::default(),
+        }),
+        hub: daemon.hub.state.clone(),
+        passes: Default::default(),
+        disconnect: Default::default(),
+        gate: tokio::sync::watch::Sender::new(true),
+    });
+    let socket = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_url = format!("http://{}/", socket.local_addr().unwrap());
+    let app = axum::Router::new()
+        .fallback(counted_replay)
+        .with_state(state.clone());
+    let server = tokio::spawn(async move { axum::serve(socket, app).await.unwrap() });
+    let origin = agmen_client::origin_key(&proxy_url.parse().unwrap());
+    let seed_url = proxy_url.clone();
+    let daemon = tokio::task::spawn_blocking(move || {
+        let conn = rusqlite::Connection::open(daemon.home.database()).unwrap();
+        conn.execute("DELETE FROM identities", []).unwrap();
+        for n in 1..=SEEDED_IDENTITIES {
+            daemon
+                .home
+                .seed_identity(&seed_url, &format!("agent{n:03}"), &"c".repeat(64));
+        }
+        let namespace = format!("{origin}#owner={HUMAN}");
+        conn.execute(
+            "INSERT INTO positions VALUES (?1,?2,'feed',0)",
+            rusqlite::params![namespace, PROJECT],
+        )
+        .unwrap();
+        if full {
+            conn.execute(
+                "INSERT INTO positions VALUES (?1,?2,'inbox:agent001',0)",
+                rusqlite::params![namespace, PROJECT],
+            )
+            .unwrap();
+            for n in 1..=OTHER_OWNER_STREAMS {
+                conn.execute(
+                    "INSERT INTO positions VALUES (?1,?2,?3,0)",
+                    rusqlite::params![
+                        format!("{origin}#owner=other001"),
+                        PROJECT,
+                        format!("inbox:other{n:03}")
+                    ],
+                )
+                .unwrap();
+            }
+        }
+        daemon
+    })
+    .await
+    .unwrap();
+    let login = agmen_client::Login {
+        hub_url: proxy_url.parse().unwrap(),
+        human_id: HUMAN.parse().unwrap(),
+        handle: support::HANDLE.into(),
+    };
+    tokio::fs::write(
+        daemon.home.login_file(),
+        serde_json::to_vec(&login).unwrap(),
+    )
+    .await
+    .unwrap();
+    agmen_client::store_tokens(
+        &daemon.home.tokens(),
+        &login,
+        &agmen_client::HumanTokens::new(support::ACCESS.into(), "refresh-1".into(), 3600),
+    )
+    .await
+    .unwrap();
+    shorten_hub_backoff(&proxy_url);
+    (daemon, state, server)
+}
+
+fn discarded_message(stream: &str, seq: u64) -> serde_json::Value {
+    let mut message = inbox_message(2, seq);
+    message["stream"] = json!(stream);
+    message["to"] = json!([stream.strip_prefix("inbox:").unwrap()]);
+    message
+}
+
+fn sent_for(pass: &ReplayPass, stream: &str) -> Vec<u64> {
+    pass.sent
+        .iter()
+        .filter(|(name, _)| name == stream)
+        .map(|(_, seq)| *seq)
+        .collect()
+}
+
+async fn discarded_history(full: bool, repick: bool) {
+    let (mut daemon, state, server) = replay_fixture(full).await;
+    let stream = if full {
+        "inbox:agent002"
+    } else {
+        "inbox:revoked000"
+    };
+    for seq in 1..=3 {
+        daemon.hub.state.inject(discarded_message(stream, seq));
+    }
+    daemon
+        .hub
+        .state
+        .inject(support::stamped(1, "first pass consumed"));
+    daemon.resume();
+    wait_position(&daemon, "feed", 1).await;
+    assert_eq!(
+        sent_for(&state.passes.lock().unwrap()[0], stream),
+        [1, 2, 3]
+    );
+    daemon.hub.state.inject(discarded_message(stream, 4));
+    daemon
+        .hub
+        .state
+        .inject(support::stamped(2, "second pass consumed"));
+    state.disconnect.notify_waiters();
+    wait_position(&daemon, "feed", 2).await;
+    {
+        let passes = state.passes.lock().unwrap();
+        assert_eq!(passes.len(), 2);
+        assert_eq!(
+            sent_for(&passes[1], stream),
+            [4],
+            "only new events may be sent after reconnect"
+        );
+        assert_eq!(passes[1].after.get(stream), Some(&3));
+    }
+    assert_eq!(count(&daemon, "SELECT count(*) FROM positions WHERE project=?1 AND stream IN ('inbox:agent002','inbox:revoked000')").await, 0, "discarded heads must never be stored");
+    if repick {
+        let path = daemon.home.database();
+        tokio::task::spawn_blocking(move || {
+            rusqlite::Connection::open(path)
+                .unwrap()
+                .execute("DELETE FROM identities WHERE identity='agent001'", [])
+                .unwrap();
+        })
+        .await
+        .unwrap();
+        wait_position(&daemon, stream, 4).await;
+        let mut client = daemon.client().await;
+        let mut request = Request::new(99, "pending", json!({"local_token":"c".repeat(64)}));
+        request.as_ = Some("agent002".parse().unwrap());
+        client.send(&request).await;
+        let rows = result(
+            tokio::time::timeout(CALL_WAIT, client.read())
+                .await
+                .unwrap(),
+        );
+        let seqs: Vec<_> = rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row["stream"] == stream)
+            .map(|row| row["seq"].as_u64().unwrap())
+            .collect();
+        assert_eq!(seqs, [1, 2, 3, 4]);
+        client.send(&request).await;
+        assert!(
+            result(
+                tokio::time::timeout(CALL_WAIT, client.read())
+                    .await
+                    .unwrap()
+            )
+            .as_array()
+            .unwrap()
+            .is_empty()
+        );
+        let passes = state.passes.lock().unwrap();
+        assert_eq!(passes.len(), 3);
+        assert_eq!(
+            passes[2].after.get(stream).copied().unwrap_or(0),
+            0,
+            "re-pick must ignore the discarded head"
+        );
+    }
+    stop_replay_fixture(daemon, state, server).await;
+}
+
+async fn stop_replay_fixture(
+    daemon: Daemon,
+    state: std::sync::Arc<ReplayHub>,
+    server: tokio::task::JoinHandle<()>,
+) {
+    daemon.stop().await;
+    server.abort();
+    assert!(server.await.unwrap_err().is_cancelled());
+    let tasks = std::mem::take(&mut *state.forward.tasks.lock().unwrap());
+    for task in tasks {
+        task.abort();
+        assert!(task.await.map_or_else(|e| e.is_cancelled(), |()| true));
+    }
+}
+
+#[tokio::test]
+async fn hub_skipped_history_is_not_sent_again_on_reconnect() {
+    discarded_history(true, false).await;
+}
+
+#[tokio::test]
+async fn hub_undeliverable_history_is_not_sent_again_on_reconnect() {
+    discarded_history(false, false).await;
+}
+
+#[tokio::test]
+async fn hub_skipped_seen_head_is_discarded_when_a_position_frees() {
+    discarded_history(true, true).await;
+}
+
+/// SQLite refuses a second writer for longer than its 5 s busy timeout.
+const WRITE_LOCK_HELD: Duration = Duration::from_secs(7);
+/// A failed ingest waits the 5 s busy timeout before it reports.
+const STORE_FAILURE_WAIT: Duration = Duration::from_secs(30);
+/// No watch event for this long means the collector has delivered everything.
+const QUIET: Duration = Duration::from_millis(500);
+
+#[tokio::test]
+async fn hub_undeliverable_heads_are_rechecked_without_a_write_transaction() {
+    let (mut daemon, state, server) = replay_fixture(false).await;
+    for seq in 1..=2 {
+        daemon
+            .hub
+            .state
+            .inject(discarded_message("inbox:revoked000", seq));
+    }
+    daemon
+        .hub
+        .state
+        .inject(support::stamped(1, "first pass consumed"));
+    daemon.resume();
+    wait_position(&daemon, "feed", 1).await;
+    // A held write lock fails any write transaction after the busy timeout. The
+    // recheck of an undeliverable head must neither take one nor end on one.
+    let path = daemon.home.database();
+    tokio::task::spawn_blocking(move || {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        std::thread::sleep(WRITE_LOCK_HELD);
+        conn.execute_batch("COMMIT").unwrap();
+    })
+    .await
+    .unwrap();
+    daemon
+        .hub
+        .state
+        .inject(support::stamped(2, "collector survived"));
+    state.disconnect.notify_waiters();
+    wait_position(&daemon, "feed", 2).await;
+    assert_eq!(state.passes.lock().unwrap()[1].after["inbox:revoked000"], 2);
+    stop_replay_fixture(daemon, state, server).await;
+}
+
+#[tokio::test]
+async fn hub_store_errors_during_ingest_do_not_end_the_collector() {
+    let (mut daemon, state, server) = replay_fixture(false).await;
+    daemon
+        .hub
+        .state
+        .inject(support::stamped(1, "first pass consumed"));
+    daemon.resume();
+    wait_position(&daemon, "feed", 1).await;
+    // Hold the new connection until the write lock is taken, so the lock is
+    // held while the message is ingested, not while the pass starts.
+    state.gate.send_replace(false);
+    daemon
+        .hub
+        .state
+        .inject(support::stamped(2, "held by a store error"));
+    state.disconnect.notify_waiters();
+    while state.passes.lock().unwrap().len() < 2 {
+        tokio::time::sleep(POSITION_POLL).await;
+    }
+    let path = daemon.home.database();
+    let (locked, held) = std::sync::mpsc::channel();
+    let holder = tokio::task::spawn_blocking(move || {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        locked.send(()).unwrap();
+        std::thread::sleep(WRITE_LOCK_HELD);
+        conn.execute_batch("COMMIT").unwrap();
+    });
+    held.recv().unwrap();
+    state.gate.send_replace(true);
+    holder.await.unwrap();
+    // The collector must still be running: it delivers the held message and a later one.
+    wait_position(&daemon, "feed", 2).await;
+    daemon.hub.state.inject(support::stamped(3, "later"));
+    state.disconnect.notify_waiters();
+    wait_position(&daemon, "feed", 3).await;
+    stop_replay_fixture(daemon, state, server).await;
+}
+
+/// Reads watch events until the collector reports `connected`.
+async fn next_connection(watch: &mut support::Client, connected: bool) {
+    tokio::time::timeout(STORE_FAILURE_WAIT, async {
+        loop {
+            let event = result(watch.read().await);
+            if event["kind"] == "connection" && event["connected"] == connected {
+                return;
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("no connection event with connected={connected}"));
+}
+
+fn pending_copies(path: std::path::PathBuf, identity: &'static str, id: String) -> i64 {
+    rusqlite::Connection::open(path)
+        .unwrap()
+        .query_row(
+            "SELECT count(*) FROM pending WHERE identity=?1 AND id=?2",
+            rusqlite::params![identity, id],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+#[tokio::test]
+async fn hub_transient_store_failure_goes_offline_and_resumes_once() {
+    let (mut daemon, state, server) = replay_fixture(false).await;
+    let first = inbox_message(1, 1);
+    let held = [inbox_message(1, 2), inbox_message(2, 1)];
+    daemon.hub.state.inject(first.clone());
+    daemon
+        .hub
+        .state
+        .inject(support::stamped(1, "first pass consumed"));
+    daemon.resume();
+    wait_position(&daemon, "feed", 1).await;
+    wait_position(&daemon, "inbox:agent001", 1).await;
+    // The second pass waits at the gate, so the lock is certainly held when
+    // its first message is ingested.
+    state.gate.send_replace(false);
+    for message in &held {
+        daemon.hub.state.inject(message.clone());
+    }
+    daemon
+        .hub
+        .state
+        .inject(support::stamped(2, "held by a store error"));
+    state.disconnect.notify_waiters();
+    while state.passes.lock().unwrap().len() < 2 {
+        tokio::time::sleep(POSITION_POLL).await;
+    }
+    let mut watch = daemon.client().await;
+    watch
+        .send(&Request::new(9, "watch", json!({"project":PROJECT})))
+        .await;
+    assert_eq!(result(watch.read().await)["kind"], "self");
+    let path = daemon.home.database();
+    let (locked, taken) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let holder = tokio::task::spawn_blocking(move || {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        locked.send(()).unwrap();
+        // Held until the test has seen the failure, however long that takes.
+        released.recv().unwrap();
+        conn.execute_batch("COMMIT").unwrap();
+    });
+    taken.recv().unwrap();
+    state.gate.send_replace(true);
+    // Nothing disconnects the second pass, so an offline status can only come
+    // from the failed ingest.
+    next_connection(&mut watch, false).await;
+    release.send(()).unwrap();
+    holder.await.unwrap();
+    wait_position(&daemon, "feed", 2).await;
+    next_connection(&mut watch, true).await;
+    {
+        let passes = state.passes.lock().unwrap();
+        assert!(passes.len() >= 3, "the failure must end the second pass");
+        // The failed pass saved nothing, so the reconnect resumes from it.
+        assert_eq!(passes[2].after["feed"], 1);
+        assert_eq!(passes[2].after["inbox:agent001"], 1);
+    }
+    let path = daemon.home.database();
+    let copies = tokio::task::spawn_blocking(move || {
+        [
+            (&first, "agent001"),
+            (&held[0], "agent001"),
+            (&held[1], "agent002"),
+        ]
+        .map(|(message, identity)| {
+            let id = message["id"].as_str().unwrap().to_owned();
+            pending_copies(path.clone(), identity, id)
+        })
+    })
+    .await
+    .unwrap();
+    assert_eq!(copies, [1, 1, 1]);
+    // The feed message reaches the watcher once.
+    let mut delivered = 0;
+    while let Ok(event) = tokio::time::timeout(QUIET, watch.read()).await {
+        let event = result(event);
+        if event["kind"] == "message"
+            && event["message"]["seq"] == 2
+            && event["message"]["stream"] == "feed"
+        {
+            delivered += 1;
+        }
+    }
+    assert_eq!(delivered, 1);
+    drop(watch);
+    stop_replay_fixture(daemon, state, server).await;
+}
+
+#[tokio::test]
+async fn hub_repick_without_room_keeps_heads_of_streams_still_skipped() {
+    let (mut daemon, state, server) = replay_fixture(true).await;
+    let path = daemon.home.database();
+    let copy = |name: &'static str| {
+        let path = path.clone();
+        tokio::task::spawn_blocking(move || {
+            rusqlite::Connection::open(path)
+                .unwrap()
+                .execute(
+                    "INSERT INTO identities SELECT origin,?1,owner,project,metadata FROM identities WHERE identity='agent001'",
+                    [name],
+                )
+                .unwrap();
+        })
+    };
+    copy("agent003").await.unwrap();
+    for stream in ["inbox:agent002", "inbox:agent003", "inbox:agent004"] {
+        for seq in 1..=3 {
+            daemon.hub.state.inject(discarded_message(stream, seq));
+        }
+    }
+    daemon
+        .hub
+        .state
+        .inject(support::stamped(1, "first pass consumed"));
+    daemon.resume();
+    wait_position(&daemon, "feed", 1).await;
+    daemon
+        .hub
+        .state
+        .inject(support::stamped(2, "second pass consumed"));
+    // agent004 becomes deliverable while the project is still full.
+    copy("agent004").await.unwrap();
+    wait_position(&daemon, "feed", 2).await;
+    {
+        let passes = state.passes.lock().unwrap();
+        for stream in ["inbox:agent002", "inbox:agent003"] {
+            assert!(
+                sent_for(&passes[1], stream).is_empty(),
+                "{stream} is still skipped and must not replay"
+            );
+            assert_eq!(passes[1].after[stream], 3);
+        }
+    }
+    stop_replay_fixture(daemon, state, server).await;
+}
+
+#[tokio::test]
+async fn hub_discarded_head_overflow_keeps_deliverable_cursors_first() {
+    const REMOTE_STREAMS: usize = 600;
+    // Only the feed has a saved position; deliverable streams without one are unnamed.
+    const NAMED_CURSORS: usize = 1;
+    let (mut daemon, state, server) = replay_fixture(false).await;
+    for n in 0..REMOTE_STREAMS {
+        daemon
+            .hub
+            .state
+            .inject(discarded_message(&format!("inbox:remote{n:03}"), 1));
+    }
+    daemon
+        .hub
+        .state
+        .inject(support::stamped(1, "first pass consumed"));
+    daemon.resume();
+    wait_position(&daemon, "feed", 1).await;
+    assert_eq!(
+        state.passes.lock().unwrap()[0].sent.len(),
+        REMOTE_STREAMS + 1
+    );
+    // An unnamed deliverable stream still gets every message from the hub.
+    daemon.hub.state.inject(inbox_message(1, 1));
+    daemon
+        .hub
+        .state
+        .inject(support::stamped(2, "second pass consumed"));
+    state.disconnect.notify_waiters();
+    wait_position(&daemon, "feed", 2).await;
+    {
+        let passes = state.passes.lock().unwrap();
+        assert_eq!(
+            passes.len(),
+            2,
+            "discarded heads must not add SSE connections"
+        );
+        assert_eq!(passes[1].after.len(), MAX_AFTER);
+        assert!(!passes[1].after.contains_key("inbox:agent001"));
+        assert_eq!(passes[1].after["feed"], 1);
+        assert_eq!(
+            passes[1].sent.len(),
+            REMOTE_STREAMS - (MAX_AFTER - NAMED_CURSORS) + 2
+        );
+    }
+    assert_eq!(
+        count(
+            &daemon,
+            "SELECT count(*) FROM positions WHERE project=?1 AND stream LIKE 'inbox:remote%'"
+        )
+        .await,
+        0
+    );
+    wait_position(&daemon, "inbox:agent001", 1).await;
+    stop_replay_fixture(daemon, state, server).await;
+}
+
 const MAX_AFTER: usize = 256;
 const REFUSED_ATTEMPTS: usize = 2;
 const PROXY_QUEUE: usize = 16;
@@ -881,5 +1506,94 @@ async fn hub_stream_skipped_at_the_position_cap_resumes_when_an_identity_is_remo
         "the skipped message arrives"
     );
     assert_eq!(count(&daemon, REARMED).await, 1, "the ALERT re-arms");
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn hub_permanent_store_failure_keeps_a_watch_open_and_offline_until_repaired() {
+    const FAILING_FOR: Duration = Duration::from_secs(1);
+    let mut daemon = Daemon::seeded().await;
+    daemon.pause().await;
+    shorten_hub_backoff(&daemon.hub.url);
+    let conn = rusqlite::Connection::open(daemon.home.database()).unwrap();
+    conn.execute_batch("CREATE TRIGGER fail_pending BEFORE INSERT ON pending BEGIN SELECT RAISE(FAIL,'injected schema failure'); END;").unwrap();
+    daemon.resume();
+    let mut watch = daemon.client().await;
+    watch
+        .send(&Request::new(9, "watch", json!({"project":PROJECT})))
+        .await;
+    assert_eq!(result(watch.read().await)["kind"], "self");
+    daemon.hub.state.inject(inbox_message(1, 1));
+    // Only a failed ingest can report offline here.
+    next_connection(&mut watch, false).await;
+    // Many retries pass; the watch stays open and never hears the collector
+    // come back, because nothing has been ingested.
+    let _quiet = tokio::time::timeout(FAILING_FOR, async {
+        loop {
+            let event = result(watch.read().await);
+            assert!(
+                !(event["kind"] == "connection" && event["connected"] == true),
+                "connected flapped during the failure: {event}"
+            );
+        }
+    })
+    .await;
+    conn.execute_batch("DROP TRIGGER fail_pending").unwrap();
+    wait_position(&daemon, "inbox:agent001", 1).await;
+    next_connection(&mut watch, true).await;
+    drop(watch);
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn hub_failure_after_the_commit_goes_back_online_on_a_quiet_hub() {
+    let mut daemon = Daemon::seeded().await;
+    daemon.pause().await;
+    shorten_hub_backoff(&daemon.hub.url);
+    let mut daemon = tokio::task::spawn_blocking(move || {
+        for n in SEEDED_IDENTITIES + 1..=agmen_local::safeguards::MAX_MANAGED {
+            daemon
+                .home
+                .seed_identity(&daemon.hub.url, &format!("agent{n:03}"), &"c".repeat(64));
+        }
+        daemon
+    })
+    .await
+    .unwrap();
+    daemon.resume();
+    // Each managed sender takes one own-message tracker, so all are used.
+    for n in 1..=agmen_local::safeguards::MAX_MANAGED {
+        let mut message = support::stamped(n as u64, "own message");
+        message["from"] = json!(format!("agent{n:03}"));
+        daemon.hub.state.inject(message);
+    }
+    wait_position(&daemon, "feed", agmen_local::safeguards::MAX_MANAGED as i64).await;
+    // A new managed sender finds no free tracker, which fails after its commit.
+    let path = daemon.home.database();
+    tokio::task::spawn_blocking(move || {
+        rusqlite::Connection::open(path)
+            .unwrap()
+            .execute(
+                "UPDATE identities SET identity='agent900' WHERE identity='agent256'",
+                [],
+            )
+            .unwrap();
+    })
+    .await
+    .unwrap();
+    let mut watch = daemon.client().await;
+    watch
+        .send(&Request::new(9, "watch", json!({"project":PROJECT})))
+        .await;
+    assert_eq!(result(watch.read().await)["kind"], "self");
+    let last = agmen_local::safeguards::MAX_MANAGED as u64 + 1;
+    let mut message = support::stamped(last, "from the new identity");
+    message["from"] = json!("agent900");
+    daemon.hub.state.inject(message);
+    next_connection(&mut watch, false).await;
+    wait_position(&daemon, "feed", last as i64).await;
+    // The hub stays quiet: only the next good state read can end the outage.
+    next_connection(&mut watch, true).await;
+    drop(watch);
     daemon.stop().await;
 }
