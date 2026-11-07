@@ -1922,7 +1922,14 @@ impl Conn {
 pub(super) fn check_socket(socket: &Path, uid: u32) -> Result<(), BackendError> {
     agmen_client::check_agmend_socket_for(socket, uid).map_err(|error| match error {
         agmen_client::AgmendSocketError::Missing => BackendError::NotConnected,
-        other => BackendError::Agmend(other.to_string()),
+        other => {
+            // `Read` keeps its io error as `source`, not in its message.
+            let mut why = other.to_string();
+            if let Some(cause) = std::error::Error::source(&other) {
+                why = format!("{why}: {cause}");
+            }
+            BackendError::Agmend(why)
+        }
     })
 }
 
