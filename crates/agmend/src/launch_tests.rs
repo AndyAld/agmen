@@ -2,6 +2,9 @@
 
 use super::*;
 
+#[path = "launch_peer_tests.rs"]
+mod peer_ancestry;
+
 #[test]
 fn launch_renders_role_and_tools() {
     use std::io::Read as _;
@@ -112,6 +115,7 @@ fn spec(dir: &std::path::Path) -> RunSpec {
         resume: false,
         model: Some("sonnet".into()),
         budget_remaining: "5.000000".into(),
+        budget_cap: None,
         cap_budget: true,
         mcp_config: dir.join("mcp.json"),
         identity: "agent001".parse().unwrap(),

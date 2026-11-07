@@ -1158,6 +1158,34 @@ fn host_without_project_waits_for_hub_health() {
 }
 
 #[test]
+fn host_startup_waits_out_the_ancestry_walk_before_ready() {
+    let fake = FakeAgmend::start(console(vec![]));
+    fake.edit(|state| {
+        // agmend's walk, up to 2 s, comes before its first owner-only call, `ready`.
+        state.ready_delay = Duration::from_millis(2500);
+        state.host_status = Some(serde_json::json!({
+            "configured": true, "state": "running", "last_error": null, "public_url": null
+        }))
+    });
+    let result = LiveRoot::connect_host(
+        &fake.path(),
+        &ProjectChoice::None { why: None },
+        None,
+        Observation {
+            check: Check::NoBundle,
+            running: true,
+        },
+        Instant::now() + Duration::from_secs(6),
+    );
+    // The status answer got as far as the missing public URL; a timed out attempt
+    // would have gone on retrying until the deadline.
+    let Err(BackendError::Agmend(why)) = result else {
+        panic!("the host status was not read");
+    };
+    assert!(why.contains("no valid public URL"), "{why}");
+}
+
+#[test]
 fn host_without_project_checks_the_hubs_health_endpoint() {
     use std::io::{Read as _, Write as _};
     for code in [200, 503] {

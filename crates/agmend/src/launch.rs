@@ -38,6 +38,8 @@ pub(crate) struct RunSpec {
     pub(crate) resume: bool,
     pub(crate) model: Option<String>,
     pub(crate) budget_remaining: String,
+    /// An explicit batch cap; absent means the full remaining budget.
+    pub(crate) budget_cap: Option<Money>,
     pub(crate) cap_budget: bool,
     pub(crate) mcp_config: PathBuf,
     pub(crate) identity: agmen_proto::IdentityId,
@@ -83,7 +85,11 @@ impl RunSpec {
         ]);
         args.extend(["--output-format".into(), "json".into()]);
         if self.cap_budget {
-            args.extend(["--max-budget-usd".into(), self.budget_remaining.clone()]);
+            args.extend([
+                "--max-budget-usd".into(),
+                self.budget_cap
+                    .map_or_else(|| self.budget_remaining.clone(), Money::usd),
+            ]);
         }
         args.extend([
             "--strict-mcp-config".into(),
@@ -195,6 +201,9 @@ pub(crate) trait Runner: std::fmt::Debug + Send + Sync {
     }
     fn contains_peer(&self, _pid: i32) -> bool {
         false
+    }
+    fn peer_groups(&self) -> BTreeSet<i32> {
+        BTreeSet::new()
     }
 }
 
@@ -522,18 +531,11 @@ impl Runner for ClaudeRunner {
     }
 
     fn contains_peer(&self, pid: i32) -> bool {
-        let groups = self
-            .groups
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if groups.is_empty() {
-            return false;
-        }
-        // While a worker runs, a peer whose group cannot be read (it exited
-        // and a child kept the socket, say) is refused: fail closed.
-        Pid::from_raw(pid)
-            .and_then(|pid| rustix::process::getpgid(Some(pid)).ok())
-            .is_none_or(|group| groups.contains(&group.as_raw_nonzero().get()))
+        crate::peer::contains_pid(&self.peer_groups(), pid).unwrap_or(true)
+    }
+
+    fn peer_groups(&self) -> BTreeSet<i32> {
+        crate::peer::groups(&self.groups)
     }
 
     fn run(&self, spec: RunSpec, mut stop: oneshot::Receiver<()>) -> RunFuture {

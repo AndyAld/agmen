@@ -688,6 +688,10 @@ impl AgmendBackend {
         let hello = parse::<HelloAnswer>(conn.call("hello", json!({"api": API}))?)?;
         let ready =
             if hello.version.as_deref() == Some(env!("CARGO_PKG_VERSION")) && hello.api == API {
+                // `ready` is the first owner-only call: agmend's 2 s ancestry walk comes first.
+                conn.stream
+                    .set_read_timeout(Some(Duration::from_secs(4)))
+                    .map_err(io_failed)?;
                 Some(parse::<ReadyAnswer>(conn.call("ready", json!({}))?)?)
             } else {
                 None
@@ -697,10 +701,11 @@ impl AgmendBackend {
 
     /// Reads host status, or requests a restart, without contacting the hub.
     pub(crate) fn host_status(socket: &Path, restart: bool) -> Result<HostStatus, BackendError> {
+        // 2 s for the calls and 2 s for agmend's ancestry walk, which `ready` waits for.
         Self::host_status_before(
             socket,
             restart,
-            std::time::Instant::now() + Duration::from_secs(2),
+            std::time::Instant::now() + Duration::from_secs(4),
         )
     }
 

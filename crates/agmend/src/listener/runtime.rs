@@ -357,17 +357,8 @@ impl Listeners {
             .ok_or_else(|| failure("identity service stopped"))
     }
 
-    pub(crate) fn contains_peer(&self, pid: i32) -> bool {
-        let groups = self
-            .groups
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if groups.is_empty() {
-            return false;
-        }
-        rustix::process::Pid::from_raw(pid)
-            .and_then(|pid| rustix::process::getpgid(Some(pid)).ok())
-            .is_none_or(|group| groups.contains(&group.as_raw_nonzero().get()))
+    pub(crate) fn peer_groups(&self) -> BTreeSet<i32> {
+        crate::peer::groups(&self.groups)
     }
     fn managed(&self) -> Result<Arc<Managed>, ApiError> {
         self.managed
