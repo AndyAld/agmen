@@ -107,6 +107,9 @@ pub(crate) enum StoreError {
     Version(i64),
     #[error("daemon database invariant failed: {0}")]
     Invalid(&'static str),
+    /// Every recipient's stored state is unreadable; the message stays unsaved.
+    #[error("every recipient's stored state is unreadable")]
+    Held(Vec<IdentityId>),
     #[error("identity store failed: {0}")]
     Client(#[from] agmen_client::ClientError),
     #[error("identity store {} failed: {source}", path.display())]
@@ -811,7 +814,7 @@ impl Store {
         tolerate: Option<&BTreeMap<IdentityId, u64>>,
     ) -> Result<IngestOutcome, StoreError> {
         let mut found = Vec::new();
-        let mut broken_recipient = false;
+        let mut broken_recipients: Vec<IdentityId> = Vec::new();
         let mut delivered_to = 0_usize;
         let seq = i64::try_from(message.seq.0)
             .map_err(|_| StoreError::Invalid("sequence exceeds SQLite integer"))?;
@@ -880,13 +883,27 @@ impl Store {
                 Some(known) => {
                     let hash = metadata_hash(&metadata);
                     if known.get(&id) == Some(&hash) {
-                        broken_recipient |= broken_is_recipient(message, &id, &owner);
+                        if broken_is_recipient(
+                            message,
+                            &id,
+                            &owner,
+                            self.own_ids.get(&(origin.to_owned(), id.clone())),
+                        ) {
+                            broken_recipients.push(id);
+                        }
                         continue;
                     }
                     match serde_json::from_str(&metadata) {
                         Ok(identity) => identity,
                         Err(_) => {
-                            broken_recipient |= broken_is_recipient(message, &id, &owner);
+                            if broken_is_recipient(
+                                message,
+                                &id,
+                                &owner,
+                                self.own_ids.get(&(origin.to_owned(), id.clone())),
+                            ) {
+                                broken_recipients.push(id.clone());
+                            }
                             found.push((id, hash));
                             continue;
                         }
@@ -956,10 +973,8 @@ impl Store {
         // A message nobody can read is not skipped: the position stays, and a
         // repair of any one recipient delivers it. A broken identity the
         // message was not addressed to does not hold it.
-        if broken_recipient && delivered_to == 0 {
-            return Err(StoreError::Invalid(
-                "every recipient's stored state is unreadable",
-            ));
+        if !broken_recipients.is_empty() && delivered_to == 0 {
+            return Err(StoreError::Held(broken_recipients));
         }
         tx.execute("INSERT INTO positions VALUES (?1,?2,?3,?4) ON CONFLICT(origin,project,stream) DO UPDATE SET seq=excluded.seq",
             params![position_origin, project.as_str(), stream, seq])?;
@@ -1175,17 +1190,26 @@ fn addressed_to(
             && crate::listener::includes(message, id, &me.owner_id, &[])))
 }
 
-/// Whether a message with an unreadable row was addressed to that identity,
-/// by the rules of `is_for_me` applied to the row's id.
-fn broken_is_recipient(message: &StampedEnvelope, id: &IdentityId, owner: &str) -> bool {
+/// Whether a message with an unreadable row was addressed to that identity.
+/// The row's kind is unreadable, so only the rules that hold for every kind
+/// apply: the identity's own Inbox, or `is_for_me`. A listener-only copy is not
+/// guessed at, since holding for it would stall a Feed with no healthy listener.
+fn broken_is_recipient(
+    message: &StampedEnvelope,
+    id: &IdentityId,
+    owner: &str,
+    own_ids: Option<&VecDeque<MessageId>>,
+) -> bool {
     matches!(&message.stream, Stream::Inbox(recipient) if recipient == id)
-        || owner.parse().is_ok_and(|owner_id| {
+        || owner.parse().is_ok_and(|owner_id: IdentityId| {
             agmen_client::Me {
                 identity_id: id.clone(),
                 handle: String::new(),
                 owner_id,
             }
-            .is_for_me(message, |_| false)
+            .is_for_me(message, |reply| {
+                own_ids.is_some_and(|own| own.contains(reply))
+            })
         })
 }
 

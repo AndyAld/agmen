@@ -38,6 +38,8 @@ const POST_WAIT: Duration = Duration::from_secs(5);
 const MAX_DATABASE_JOBS: usize = 64;
 /// Identities remembered as broken; more than a daemon can manage never exist.
 const MAX_BROKEN_IDENTITIES: usize = MAX_MANAGED;
+/// Held messages remembered so one is alerted once; the oldest is forgotten first.
+const MAX_HELD_ALERTS: usize = 256;
 /// A permanent store fault is warned about at most this often per collector.
 const STORE_WARN_EVERY: Duration = Duration::from_secs(60);
 const MAX_COLLECTORS: usize = 64;
@@ -168,6 +170,18 @@ pub(crate) struct Database {
     /// job fills it, so a caller that timed out or got a later error still
     /// reports them (see `Collection::report_broken`).
     found: Mutex<Vec<FoundBroken>>,
+    /// Held messages not yet alerted, and the keys already alerted.
+    held: Mutex<HeldAlerts>,
+    /// Whether the last position probe after a store failure failed.
+    probe_failing: AtomicBool,
+}
+
+type HeldKey = (String, IdentityId, ProjectId, Stream, u64);
+
+#[derive(Debug, Default)]
+struct HeldAlerts {
+    seen: VecDeque<HeldKey>,
+    pending: Vec<(HeldKey, Vec<IdentityId>)>,
 }
 
 /// An identity found broken by an ingest that committed.
@@ -189,7 +203,22 @@ impl Database {
             jobs: AsyncMutex::new(tokio::task::JoinSet::new()),
             broken: Mutex::new(BTreeMap::new()),
             found: Mutex::new(Vec::new()),
+            held: Mutex::new(HeldAlerts::default()),
+            probe_failing: AtomicBool::new(false),
         }
+    }
+
+    /// Queues one alert for a held message unless this key was alerted before.
+    fn note_held(&self, key: HeldKey, broken: Vec<IdentityId>) {
+        let mut held = self.held.lock().unwrap_or_else(|e| e.into_inner());
+        if held.seen.contains(&key) {
+            return;
+        }
+        if held.seen.len() >= MAX_HELD_ALERTS {
+            held.seen.pop_front();
+        }
+        held.seen.push_back(key.clone());
+        held.pending.push((key, broken));
     }
 
     fn broken_in(&self, origin: &str) -> BTreeMap<IdentityId, u64> {
@@ -1892,6 +1921,27 @@ pub(crate) async fn store_work<T: Send + 'static>(
     store_job(database, work).await.map_err(ApiError::from)
 }
 
+/// Whether a message whose ingest job failed had already committed, from the
+/// result of re-reading its stream's saved position.
+/// A failed probe warns once, then logs at debug until a probe succeeds.
+fn committed_after(saved: Result<Option<u64>, Failed>, seq: u64, failing: &AtomicBool) -> bool {
+    match saved {
+        Ok(saved) => {
+            failing.store(false, Ordering::Relaxed);
+            saved.is_some_and(|saved| saved >= seq)
+        }
+        // Unknown, so assume committed: the next good read ends the offline state.
+        Err(error) => {
+            if failing.swap(true, Ordering::Relaxed) {
+                tracing::debug!(code = ?error.error.code, "position check failed again after a store failure; treating the message as committed");
+            } else {
+                tracing::warn!(code = ?error.error.code, "position check failed after a store failure; treating the message as committed");
+            }
+            true
+        }
+    }
+}
+
 async fn store_job<T: Send + 'static>(
     database: Arc<Database>,
     work: impl FnOnce(&mut Store) -> Result<T, crate::state::StoreError> + Send + 'static,
@@ -2108,22 +2158,35 @@ impl Collection {
                     s.mark_streams_full(&origin, &owner, &project)?;
                     Ok(false)
                 }
+                Err(crate::state::StoreError::Held(broken)) => {
+                    database.note_held(
+                        (
+                            origin.clone(),
+                            owner.clone(),
+                            project.clone(),
+                            stream.clone(),
+                            seq,
+                        ),
+                        broken.clone(),
+                    );
+                    Err(crate::state::StoreError::Held(broken))
+                }
                 Err(error) => Err(error),
             }
         })
         .await;
+        self.report_held();
         // The message committed without these identities. Later messages skip
         // them unprompted; the owner hears once.
         self.report_broken();
         let delivered = match delivered {
             Err(mut failed) if failed.store.is_some() => {
                 // A failure after the commit leaves nothing to replay.
-                failed.committed = self
-                    .saved_position(&probe)
-                    .await
-                    .ok()
-                    .flatten()
-                    .is_some_and(|saved| saved >= seq);
+                failed.committed = committed_after(
+                    self.saved_position(&probe).await,
+                    seq,
+                    &self.store.probe_failing,
+                );
                 return Err(failed);
             }
             other => other?,
@@ -2161,17 +2224,47 @@ impl Collection {
         }
     }
 
+    /// Tell the owner once about each message held for this collector.
+    fn report_held(&self) {
+        let mine: Vec<_> = {
+            let mut held = self.store.held.lock().unwrap_or_else(|e| e.into_inner());
+            let (mine, rest) = std::mem::take(&mut held.pending).into_iter().partition(
+                |((origin, owner, project, ..), _)| {
+                    *origin == self.origin && *owner == self.owner && *project == self.project
+                },
+            );
+            held.pending = rest;
+            mine
+        };
+        for ((.., stream, seq), broken) in mine {
+            let names: Vec<_> = broken.iter().map(ToString::to_string).collect();
+            tracing::warn!(
+                project = %self.project, stream = %stream, seq, identities = %names.join(", "),
+                "message held; every addressed identity's stored state is broken"
+            );
+            self.post_owner_alert(format!(
+                "{stream} #{seq} in {} is held and the stream is paused: every identity it is addressed to has unreadable stored state ({}). Register one of them again or repair it, and the stream resumes.",
+                self.project,
+                names.join(", ")
+            ));
+        }
+    }
+
     /// Warn and tell the owner that `identity` gets nothing until it is
     /// registered again or the daemon restarts. Names no message body.
     fn alert_broken(&self, identity: &IdentityId, stream: &Stream, seq: u64) {
         tracing::warn!(
             project = %self.project, identity = %identity, stream = %stream, seq,
-            "identity stored state is broken; skipping it"
+            "identity stored state is broken; dropping its messages until it is restarted, removed or repaired"
         );
-        let body = format!(
-            "{identity}'s stored state in {} cannot be read, so it is skipped from {stream} #{seq} on. Register it again or restart agmend.",
+        self.post_owner_alert(format!(
+            "{identity}'s stored state in {} cannot be read. Messages to {identity} are being dropped, from {stream} #{seq} on, until it is restarted, removed or repaired.",
             self.project
-        );
+        ));
+    }
+
+    /// Posts an owner ALERT off the ingest path. Never carries a message body.
+    fn post_owner_alert(&self, body: String) {
         let now = agmen_proto::Timestamp::now();
         let alert = agmen_core::new_message_id(now)
             .ok()
@@ -3778,6 +3871,227 @@ mod local_collection_tests {
         assert_eq!(error.store, Some(StoreKind::Permanent));
         assert!(f.collection.positions().await.unwrap().is_empty());
         f.stop().await;
+    }
+
+    /// Breaks agent 0 (no listener is registered) and asserts the message built
+    /// from the owner id advances: the position is saved and a later Feed message
+    /// reaches the healthy agent.
+    async fn assert_advances_past_broken_row(build: impl FnOnce(&IdentityId) -> StampedEnvelope) {
+        let f = Fixture::new().await;
+        let poison = f.agents[0].clone();
+        f.execute_state(format!(
+            "UPDATE identities SET metadata='{{}}' WHERE identity='{poison}'"
+        ))
+        .await;
+        assert!(
+            f.collection
+                .commit(build(&f.collection.owner))
+                .await
+                .unwrap()
+        );
+        assert_eq!(f.collection.positions().await.unwrap()[&Stream::Feed], 1);
+        assert!(f.collection.commit(dm_to(2, &f.agents[1..])).await.unwrap());
+        assert_eq!(f.collection.positions().await.unwrap()[&Stream::Feed], 2);
+        assert_eq!(f.drain(&f.agents[1]).await.len(), 1);
+        f.stop().await;
+    }
+
+    // Was owners_plain_fyi_is_held_for_a_broken_row, which asserted a hold.
+    #[tokio::test]
+    async fn owners_plain_fyi_advances_past_a_broken_row() {
+        assert_advances_past_broken_row(|owner| {
+            let mut message = feed_message(1, "FYI", &[], &[]);
+            message.from = owner.clone();
+            message
+        })
+        .await;
+    }
+
+    // Was dm_to_the_owner_is_held_for_a_broken_row, which asserted a hold.
+    #[tokio::test]
+    async fn dm_to_the_owner_advances_past_a_broken_row() {
+        assert_advances_past_broken_row(|owner| feed_message(1, "DM", &[owner.as_str()], &[]))
+            .await;
+    }
+
+    // Was owner_inbox_copy_is_held_for_a_broken_row, which asserted a hold.
+    #[tokio::test]
+    async fn owner_inbox_copy_advances_past_a_broken_row() {
+        let f = Fixture::new().await;
+        let poison = f.agents[0].clone();
+        f.execute_state(format!(
+            "UPDATE identities SET metadata='{{}}' WHERE identity='{poison}'"
+        ))
+        .await;
+        let owner = f.collection.owner.clone();
+        let mut message = feed_message(1, "DM", &[owner.as_str()], &[]);
+        message.stream = Stream::Inbox(owner);
+        let stream = message.stream.clone();
+        assert!(f.collection.commit(message).await.unwrap());
+        assert_eq!(f.collection.positions().await.unwrap()[&stream], 1);
+        f.stop().await;
+    }
+
+    #[tokio::test]
+    async fn owner_mention_on_feed_advances_past_a_broken_row() {
+        let f = Fixture::new().await;
+        let poison = f.agents[0].clone();
+        f.execute_state(format!(
+            "UPDATE identities SET metadata='{{}}' WHERE identity='{poison}'"
+        ))
+        .await;
+        let owner = f.collection.owner.clone();
+        assert!(
+            f.collection
+                .commit(feed_message(1, "FYI", &[], &[&owner]))
+                .await
+                .unwrap()
+        );
+        assert_eq!(f.collection.positions().await.unwrap()[&Stream::Feed], 1);
+        assert!(f.collection.commit(dm_to(2, &f.agents[1..])).await.unwrap());
+        assert_eq!(f.drain(&f.agents[1]).await.len(), 1);
+        f.stop().await;
+    }
+
+    async fn feed_alert_texts(f: &Fixture) -> Vec<String> {
+        f.collection
+            .origins
+            .local()
+            .page(
+                &f.collection.project,
+                &Stream::Feed,
+                0,
+                COLLECTION_PAGE_SIZE,
+            )
+            .await
+            .unwrap()
+            .messages
+            .iter()
+            .filter_map(|row| match &row.client.payload {
+                Payload::Alert { need, .. } => Some(need.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn held_message_alerts_the_owner_once_across_retries() {
+        let f = Fixture::new().await;
+        f.execute_state("UPDATE identities SET metadata='{}'".into())
+            .await;
+        for _ in 0..3 {
+            let error = f.collection.commit(dm_to(1, &f.agents)).await.unwrap_err();
+            assert_eq!(error.store, Some(StoreKind::Permanent));
+        }
+        tokio::time::timeout(COLLECT_WAIT, async {
+            while feed_alerts(&f).await == 0 {
+                tokio::time::sleep(COLLECT_POLL).await;
+            }
+        })
+        .await
+        .expect("no owner ALERT for the held message");
+        tokio::time::sleep(SUPERVISE_PROBE).await;
+        let texts = feed_alert_texts(&f).await;
+        assert_eq!(texts.len(), 1, "{texts:?}");
+        let text = &texts[0];
+        assert!(text.contains("#1") && text.contains("paused"), "{text}");
+        for agent in &f.agents {
+            assert!(text.contains(agent.as_str()), "{text}");
+        }
+        assert!(!text.contains("poison test"), "no message body: {text}");
+        f.stop().await;
+    }
+
+    #[tokio::test]
+    async fn broken_row_alert_says_messages_are_dropped_until_restarted_removed_or_repaired() {
+        let f = Fixture::new().await;
+        let poison = f.agents[0].clone();
+        f.execute_state(format!(
+            "UPDATE identities SET metadata='{{}}' WHERE identity='{poison}'"
+        ))
+        .await;
+        assert!(f.collection.commit(dm_to(1, &f.agents)).await.unwrap());
+        tokio::time::timeout(COLLECT_WAIT, async {
+            while feed_alerts(&f).await == 0 {
+                tokio::time::sleep(COLLECT_POLL).await;
+            }
+        })
+        .await
+        .expect("no owner ALERT named the broken identity");
+        let texts = feed_alert_texts(&f).await;
+        let text = &texts[0];
+        assert!(
+            text.contains(poison.as_str()) && text.contains("#1"),
+            "{text}"
+        );
+        assert!(
+            text.contains("being dropped")
+                && text.contains("until it is restarted, removed or repaired"),
+            "{text}"
+        );
+        assert!(!text.contains("poison test"), "no message body: {text}");
+        f.stop().await;
+    }
+
+    #[tokio::test]
+    async fn answer_to_a_broken_senders_message_is_held() {
+        let f = Fixture::new().await;
+        let poison = f.agents[0].clone();
+        let sent = agmen_core::new_message_id(Timestamp::now()).unwrap();
+        let remembered = sent.clone();
+        let remembered_for = poison.clone();
+        store_work(f.collection.store.clone(), move |s| {
+            s.remember_own(agmen_client::LOCAL_ORIGIN, &remembered_for, &remembered)
+        })
+        .await
+        .unwrap();
+        f.execute_state(format!(
+            "UPDATE identities SET metadata='{{}}' WHERE identity='{poison}'"
+        ))
+        .await;
+        let mut message = feed_message(1, "ANSWER", &[], &[]);
+        message.client.reply_to = Some(sent);
+        let error = f.collection.commit(message).await.unwrap_err();
+        assert_eq!(error.store, Some(StoreKind::Permanent));
+        assert!(f.collection.positions().await.unwrap().is_empty());
+        f.stop().await;
+    }
+
+    #[test]
+    fn failed_position_probe_counts_as_committed_and_warns_but_a_held_message_does_not() {
+        let (logs, _capture) = LogBytes::capture();
+        let failed = || store_failed(StoreKind::Transient, "probe fault");
+        let failing = AtomicBool::new(false);
+        assert!(committed_after(Err(failed()), 5, &failing));
+        let text = logs.text();
+        assert!(
+            text.lines()
+                .any(|l| l.contains("WARN") && l.contains("position check failed")),
+            "{text}"
+        );
+        assert!(committed_after(Ok(Some(5)), 5, &failing));
+        assert!(!committed_after(Ok(Some(4)), 5, &failing));
+        assert!(!committed_after(Ok(None), 5, &failing));
+    }
+
+    #[test]
+    fn failed_position_probe_warns_once_then_debug_and_warns_again_after_a_success() {
+        let (logs, _capture) = LogBytes::capture();
+        let failed = || store_failed(StoreKind::Transient, "probe fault");
+        let failing = AtomicBool::new(false);
+        let warns = || {
+            logs.text()
+                .lines()
+                .filter(|l| l.contains("WARN") && l.contains("position check failed"))
+                .count()
+        };
+        for _ in 0..3 {
+            assert!(committed_after(Err(failed()), 5, &failing));
+        }
+        assert_eq!(warns(), 1, "{}", logs.text());
+        assert!(!committed_after(Ok(None), 5, &failing));
+        assert!(committed_after(Err(failed()), 5, &failing));
+        assert_eq!(warns(), 2, "{}", logs.text());
     }
 
     #[tokio::test]
