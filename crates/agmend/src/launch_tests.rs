@@ -529,7 +529,7 @@ async fn claude_child_receives_login_path_and_group_is_removed_after_stop() {
     let dir = tempfile::tempdir().unwrap();
     let program = fake(
         dir.path(),
-        "#!/bin/sh\nprintf '%s' \"$PATH\" > child-path\nprintf '%s' \"$$\" > child-pid\n/bin/sleep 30\n",
+        "#!/bin/sh\nprintf '%s' \"$PATH\" >child-path\nprintf '%s' \"$$\" >child-pid.tmp\nmv child-pid.tmp child-pid\n/bin/sleep 30\n",
     );
     let path = format!("{}:/bin", dir.path().display());
     let runner = ClaudeRunner {

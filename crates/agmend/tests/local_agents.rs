@@ -7,6 +7,7 @@ mod support;
 
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -17,12 +18,14 @@ use agmen_proto::{ClientEnvelope, Payload, Timestamp};
 use agmend::Agmend;
 use serde_json::{Value, json};
 use support::{Client, Home, error, result};
+use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
 
 const WAIT: Duration = Duration::from_secs(10);
 const POLL: Duration = Duration::from_millis(20);
 const POLLS: usize = 500;
 const FAKE_CLAUDE: &str = r#"#!/bin/sh
-printf '%s' "$2" >prompt-seen
+printf '%s' "$2" >prompt-seen.tmp
+mv prompt-seen.tmp prompt-seen
 i=0
 while [ ! -f release ] && [ "$i" -lt 500 ]; do
 	/bin/sleep 0.02
@@ -237,6 +240,71 @@ async fn prompt(worker: &Value) -> String {
         tokio::time::sleep(POLL).await;
     }
     panic!("local worker received no batch");
+}
+
+#[tokio::test]
+async fn fake_claude_publishes_complete_prompt() {
+    let dir = tempfile::tempdir().unwrap();
+    tokio::fs::write(dir.path().join("release"), "")
+        .await
+        .unwrap();
+    // The shell opens the redirection before calling this function. Hold the
+    // first printf there so the reader observes the create-before-write gap.
+    let pause = r#"printf() {
+	unset -f printf
+	echo ready >&2
+	IFS= read -r _
+	command printf "$@"
+}
+"#;
+    let expected = "complete worker prompt\nwith a second line";
+    let mut child = tokio::process::Command::new("/bin/sh")
+        .args([
+            "-c",
+            &format!("{pause}{FAKE_CLAUDE}"),
+            "fake-claude",
+            "-p",
+            expected,
+        ])
+        .current_dir(dir.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut ready = String::new();
+    tokio::time::timeout(
+        WAIT,
+        tokio::io::BufReader::new(child.stderr.take().unwrap()).read_line(&mut ready),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(ready, "ready\n");
+    let before = tokio::fs::read_to_string(dir.path().join("prompt-seen")).await;
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"write\n")
+        .await
+        .unwrap();
+    let output = tokio::time::timeout(WAIT, child.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(
+        matches!(&before, Err(error) if error.kind() == std::io::ErrorKind::NotFound),
+        "prompt became visible before printf wrote its contents: {before:?}"
+    );
+    assert_eq!(
+        tokio::fs::read_to_string(dir.path().join("prompt-seen"))
+            .await
+            .unwrap(),
+        expected
+    );
 }
 
 #[tokio::test]
