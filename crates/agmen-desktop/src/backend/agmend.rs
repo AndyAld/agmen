@@ -52,8 +52,8 @@ use super::agmend_local;
 use super::{
     Action, AgentInfo, AgentRow, AgentStatus, Backend, BackendError, ChangeCard, ChangeId,
     ChangeRow, ChangeState, Draft, FileText, FileTextReply, GitFacts, Link, ListenerDetails,
-    ListenerField, ListenerInfo, ManagedWork, Older, PersonGroup, Snapshot, StatusSummary, Update,
-    WorktreeInfo,
+    ListenerField, ListenerInfo, ManagedWork, Older, PersonGroup, RecentAgent, Snapshot,
+    StatusSummary, Update, WorktreeInfo,
 };
 
 /// The most messages held per project; the oldest go first (the plan's
@@ -65,7 +65,7 @@ const MAX_QUEUED: usize = 32;
 /// How long one request waits on agmend before the connection is dropped.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// The deepest delegation chain the roster nests.
-const MAX_DEPTH: u8 = 8;
+pub(crate) const MAX_DEPTH: u8 = 8;
 
 /// The reconnect backoff: `first`, doubling up to `cap`.
 #[derive(Debug, Clone, Copy)]
@@ -249,6 +249,17 @@ impl Live {
         for agent in &self.managed {
             if agent.project != self.project {
                 continue;
+            }
+            if agent.state == ManagedState::Offline {
+                snapshot.recents.push(RecentAgent {
+                    id: agent.identity.clone(),
+                    handle: agent.handle.clone(),
+                    role: agent.role.clone(),
+                    branch: agent.branch.clone(),
+                    parent: agent.parent.clone(),
+                    stopped_at: agent.stopped_at,
+                    resumable: agent.resumable,
+                });
             }
             snapshot
                 .managed_agents
@@ -533,9 +544,22 @@ struct ManagedAgent {
     worktree: Option<String>,
     #[serde(default)]
     branch: Option<String>,
+    #[serde(default)]
+    parent: Option<IdentityId>,
+    #[serde(default)]
+    depth: Option<u32>,
+    #[serde(default)]
+    stopped_at: Option<Timestamp>,
+    /// Older daemons predate the revoked local identity check.
+    #[serde(default = "default_resumable")]
+    resumable: bool,
     /// `launched` or `joined`; older daemons leave it out.
     #[serde(default)]
     source: Option<String>,
+}
+
+const fn default_resumable() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
@@ -909,6 +933,11 @@ impl Backend for AgmendBackend {
             }
             Action::StartAgent { identity, root } => {
                 self.queue_agent("agent_start", self.agent_target(&identity, root))
+            }
+            Action::ResumeTree(identity) => {
+                let mut params = self.agent_target(&identity, None);
+                params["subtree"] = json!(true);
+                self.queue_agent("agent_start", params)
             }
             Action::AttachAgent { identity, root } => {
                 self.queue_agent("agent_attach", self.agent_target(&identity, root))
@@ -1990,6 +2019,7 @@ pub(super) fn snapshot_from(console: ConsoleSnapshot) -> Snapshot {
         roster: groups,
         managed_agents: BTreeMap::new(),
         managed_work: BTreeMap::new(),
+        recents: Vec::new(),
         agent_error: None,
         agent_notice: None,
         me: me.handle,
@@ -2101,7 +2131,7 @@ fn agent_row(entry: &RosterEntry, roster: &[RosterEntry]) -> AgentRow {
 fn depth(entry: &RosterEntry, roster: &[RosterEntry]) -> u8 {
     let mut depth = 0;
     let mut parent = entry.delegated_by.as_ref();
-    while depth < MAX_DEPTH {
+    while depth < super::MAX_DEPTH {
         let Some(up) = parent.and_then(|id| roster.iter().find(|e| &e.identity_id == id)) else {
             break;
         };
