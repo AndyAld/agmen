@@ -114,6 +114,8 @@ fn spec(dir: &std::path::Path) -> RunSpec {
         budget_remaining: "5.000000".into(),
         cap_budget: true,
         mcp_config: dir.join("mcp.json"),
+        identity: "agent001".parse().unwrap(),
+        local_token: None,
         owner_handle: "andy".into(),
         owner_id: "owner001".parse().unwrap(),
         owner_only: true,
@@ -182,6 +184,97 @@ fn fake(dir: &std::path::Path, source: &str) -> std::path::PathBuf {
     std::fs::write(&path, source).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
     path
+}
+
+async fn batch_token(dir: &Path) -> crate::identities::LocalToken {
+    let state = dir.join("state");
+    std::fs::create_dir(&state).unwrap();
+    let login_file = state.join("login.json");
+    std::fs::write(
+        &login_file,
+        r#"{"hub_url":"https://hub.example","human_id":"owner001","handle":"owner"}"#,
+    )
+    .unwrap();
+    let daemon = crate::Agmend::bind(crate::Config::new(
+        state.join("agmend.sock"),
+        login_file,
+        agmen_client::TokenStore::Dir(state.join("tokens")),
+    ))
+    .unwrap();
+    let identity: crate::state::ManagedIdentity = serde_json::from_value(serde_json::json!({
+        "hub_url":"https://hub.example", "broker_url":"mqtt://127.0.0.1:9",
+        "tenant":"tenant01", "project":"project1", "identity_id":"agent001",
+        "owner_id":"owner001", "handle":"owner/worker", "kind":"agent"
+    }))
+    .unwrap();
+    daemon
+        .core
+        .identities
+        .register(identity.clone())
+        .await
+        .unwrap();
+    daemon
+        .core
+        .identities
+        .local_token(&identity.identity_id)
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn batch_environment_names_identity_and_token() {
+    let dir = tempfile::tempdir().unwrap();
+    let token = batch_token(dir.path()).await;
+    let secret = token.expose().to_owned();
+    let program = fake(
+        dir.path(),
+        "#!/bin/sh\nprintf '%s' \"$AGMEN_IDENTITY\" >identity-seen\nprintf '%s' \"${#AGMEN_LOCAL_TOKEN}\" >token-length\nprintf '%s' \"$AGMEN_LOCAL_TOKEN\" >token-seen\nprintf '%s\\n' '{\"type\":\"result\",\"total_cost_usd\":0.25,\"is_error\":false}'\n",
+    );
+    let runner = ClaudeRunner {
+        program,
+        shell: Arc::new(TestShell {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            output: format!("{LOGIN_PATH_MARKER}\n/usr/bin:/bin\n"),
+        }),
+        ..ClaudeRunner::default()
+    };
+    for (local_token, length, seen) in [(Some(token), "64", secret.as_str()), (None, "0", "")] {
+        let mut request = spec(dir.path());
+        request.local_token = local_token;
+        let (_send, stop) = tokio::sync::oneshot::channel();
+        runner.run(request, stop).await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("identity-seen")).unwrap(),
+            "agent001"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("token-length")).unwrap(),
+            length
+        );
+        // The batch gets this identity's token, not just any 64 characters.
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("token-seen")).unwrap(),
+            seen
+        );
+    }
+}
+
+#[tokio::test]
+async fn run_spec_debug_redacts_the_token() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut request = spec(dir.path());
+    request.local_token = Some(batch_token(dir.path()).await);
+    let debug = format!("{request:?}");
+    assert!(debug.contains("LocalToken(<redacted>)"));
+    let token = request.local_token.as_ref().unwrap();
+    assert!(!debug.contains(token.expose()));
+    assert!(
+        !request
+            .args()
+            .iter()
+            .any(|arg| arg.contains(token.expose()))
+    );
 }
 
 #[tokio::test]
@@ -708,6 +801,33 @@ async fn attach_refuses_a_session_id_that_is_not_a_uuid() {
     };
     assert!(runner.attach(spec.clone()).await.is_err());
     assert!(!spec.script.exists());
+}
+
+#[tokio::test]
+async fn attach_script_carries_no_credential() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let claude = bin.join("claude");
+    std::fs::write(&claude, "#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let runner = ClaudeRunner {
+        program: "claude".into(),
+        // Stands in for `open -a Terminal <script>`: succeeds without running it.
+        opener: fake(dir.path(), "#!/bin/sh\nexit 0\n"),
+        shell: Arc::new(TestShell {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            output: format!("{LOGIN_PATH_MARKER}\n{}:/bin:/usr/bin\n", bin.display()),
+        }),
+        ..ClaudeRunner::default()
+    };
+    let spec = attach_spec(dir.path(), dir.path(), true);
+    runner.attach(spec.clone()).await.unwrap();
+    let script = std::fs::read_to_string(&spec.script).unwrap();
+    // Only a batch's own environment carries the identity and its token.
+    assert!(script.contains("AGMEN_MANAGED=1"));
+    assert!(!script.contains("AGMEN_IDENTITY"));
+    assert!(!script.contains("AGMEN_LOCAL_TOKEN"));
 }
 
 /// The fixed shell result is the PATH the child sees, so this never runs

@@ -21,7 +21,7 @@ use tokio::sync::{Mutex, OnceCell, oneshot};
 use crate::budget::{Budget, Money, Step};
 use crate::console::{bad_request, params};
 use crate::hub::Hub;
-use crate::identities::Identities;
+use crate::identities::{Identities, LocalToken};
 use crate::launch::{RoleRun, RunError, RunSpec, Runner};
 use crate::state::ManagedIdentity;
 use roles::ReviewedBase;
@@ -391,7 +391,14 @@ impl Managed {
             shared_budget,
         };
         let record_layer = record.role_layer.clone();
-        write_agent_files(self.agent_dir(&identity.identity_id), record.clone(), agmen).await?;
+        let local_token = identities.local_token(&identity.identity_id).await?;
+        let config = mcp_config(&agmen, &identity.identity_id, local_token.as_ref());
+        write_agent_files(
+            self.agent_dir(&identity.identity_id),
+            record.clone(),
+            config,
+        )
+        .await?;
         let budget = Budget::new(Money::from_usd(&record.budget_usd).map_err(error)?);
         let model = record.model.clone();
         let mut worker = Worker::offline(record, budget);
@@ -599,6 +606,8 @@ impl Managed {
             model: held.record.model.clone(),
             budget_remaining: held.budget.remaining_usd(),
             cap_budget,
+            identity: held.record.identity.identity_id.clone(),
+            local_token: None,
             mcp_config: self
                 .agent_dir(&held.record.identity.identity_id)
                 .join("mcp.json"),
@@ -902,15 +911,13 @@ impl Managed {
             };
             held.role_error = None;
             let rows = match identities.launch_pending(&held.record.identity).await {
+                Ok(rows) if rows.is_empty() => continue,
                 Ok(rows) => rows,
                 Err(error) => {
                     tracing::warn!(code=?error.code,"managed pending read failed");
                     continue;
                 }
             };
-            if rows.is_empty() {
-                continue;
-            }
             let prompt = match serde_json::to_string(&rows) {
                 Ok(prompt) => prompt,
                 Err(error) => {
@@ -929,7 +936,7 @@ impl Managed {
                     continue;
                 }
             };
-            let spec = self.run_spec(
+            let mut spec = self.run_spec(
                 &held,
                 prompt,
                 (session_id, resume),
@@ -937,6 +944,7 @@ impl Managed {
                 role,
                 cap_budget,
             );
+            spec.local_token = batch_local_token(&identities, &spec.identity).await;
             held.last_run = Some(tokio::time::Instant::now());
             held.state = "running";
             held.batch_tier = Some(if owner_only {
@@ -949,6 +957,20 @@ impl Managed {
             let worker = worker.clone();
             let managed = self.clone();
             held.task = Some(tokio::spawn(run_worker(managed, worker, spec, stopped)));
+        }
+    }
+}
+
+async fn batch_local_token(identities: &Identities, identity: &IdentityId) -> Option<LocalToken> {
+    match identities.local_token(identity).await {
+        Ok(Some(token)) => Some(token),
+        Ok(None) => {
+            tracing::warn!(%identity, "managed batch has no local token; agent cannot launch");
+            None
+        }
+        Err(failure) => {
+            tracing::warn!(%identity, code = ?failure.code, "reading managed batch local token failed; agent cannot launch");
+            None
         }
     }
 }
@@ -1132,7 +1154,7 @@ fn error(error: impl std::fmt::Display) -> ApiError {
 async fn write_agent_files(
     config_dir: PathBuf,
     record: Record,
-    agmen: PathBuf,
+    config: Value,
 ) -> Result<(), ApiError> {
     tokio::task::spawn_blocking(move || {
         std::fs::DirBuilder::new()
@@ -1143,14 +1165,19 @@ async fn write_agent_files(
             &config_dir.join("agent.json"),
             &serde_json::to_value(&record)?,
         )?;
-        private_json(
-            &config_dir.join("mcp.json"),
-            &json!({"mcpServers":{"agmen":{"command":agmen,"args":["mcp"]}}}),
-        )
+        private_json(&config_dir.join("mcp.json"), &config)
     })
     .await
     .map_err(error)?
     .map_err(error)
+}
+
+fn mcp_config(agmen: &Path, identity: &IdentityId, local_token: Option<&LocalToken>) -> Value {
+    let mut env = json!({"AGMEN_IDENTITY": identity});
+    if let Some(token) = local_token {
+        env["AGMEN_LOCAL_TOKEN"] = json!(token.expose());
+    }
+    json!({"mcpServers":{"agmen":{"command":agmen,"args":["mcp"],"env":env}}})
 }
 
 fn private_json(path: &Path, value: &Value) -> anyhow::Result<()> {

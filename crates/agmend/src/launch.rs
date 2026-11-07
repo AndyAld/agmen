@@ -40,6 +40,8 @@ pub(crate) struct RunSpec {
     pub(crate) budget_remaining: String,
     pub(crate) cap_budget: bool,
     pub(crate) mcp_config: PathBuf,
+    pub(crate) identity: agmen_proto::IdentityId,
+    pub(crate) local_token: Option<crate::identities::LocalToken>,
     pub(crate) owner_handle: String,
     pub(crate) owner_id: agmen_proto::IdentityId,
     pub(crate) owner_only: bool,
@@ -539,12 +541,20 @@ impl Runner for ClaudeRunner {
         Box::pin(async move {
             let environment = runner.environment().await?;
             // No shell interpolation: the batch and prompt each remain one argument.
-            let mut child = tokio::process::Command::new(&environment.claude)
+            let mut command = tokio::process::Command::new(&environment.claude);
+            command
                 .args(spec.args())
                 .current_dir(&spec.cwd)
                 .env("AGMEN_MANAGED", "1")
+                .env("AGMEN_IDENTITY", spec.identity.as_str())
                 .env("PATH", &environment.path)
-                .env_remove("CLAUDECODE")
+                .env_remove("CLAUDECODE");
+            if let Some(token) = &spec.local_token {
+                command.env("AGMEN_LOCAL_TOKEN", token.expose());
+            } else {
+                command.env_remove("AGMEN_LOCAL_TOKEN");
+            }
+            let mut child = command
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())

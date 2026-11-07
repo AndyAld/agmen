@@ -104,6 +104,7 @@ struct LocalCredential {
     local_token: String,
 }
 
+#[derive(Clone)]
 pub(crate) struct LocalToken(String);
 
 impl std::fmt::Debug for LocalToken {

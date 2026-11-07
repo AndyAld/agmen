@@ -24,7 +24,7 @@ use tokio::sync::Mutex;
 
 use super::{
     Attached, MAX_MANAGED, Managed, Record, ReviewedBase, Source, Worker, envelope, error,
-    metadata_for, private_json, root_depth,
+    mcp_config, metadata_for, private_json, root_depth,
 };
 use crate::budget::{Budget, Money};
 use crate::console::{bad_request, params};
@@ -284,7 +284,10 @@ impl Managed {
         let identity = target.identity.clone();
         let adopted = online.is_none();
         let (worker, mut context) = match online {
-            Some(worker) => (worker, "resumed"),
+            Some(worker) => {
+                self.refresh_mcp_config(&identity).await?;
+                (worker, "resumed")
+            }
             None => {
                 let (worker, context) = self.adopt(target).await?;
                 self.bring_online(&worker, "attached").await?;
@@ -575,7 +578,6 @@ impl Managed {
         let joined = verify_folder(&folder, &target.identity, &project, &login).await?;
         let identity = metadata_for(&joined.identity);
         self.refuse_if_connected(&identity).await?;
-        let agmen = self.runner.mcp_command().await.map_err(error)?;
         let (worker_root, _) = crate::worktree::worktree_root(&joined.root)
             .await
             .map_err(error)?;
@@ -608,12 +610,6 @@ impl Managed {
             shared_budget: false,
         };
         self.save_record(&record).await?;
-        let mcp = self.agent_dir(&target.identity).join("mcp.json");
-        let config = json!({"mcpServers":{"agmen":{"command":agmen,"args":["mcp"]}}});
-        tokio::task::spawn_blocking(move || replace_private_json(&mcp, &config))
-            .await
-            .map_err(error)?
-            .map_err(error)?;
         let cap = Money::from_usd(JOINED_BUDGET_USD).map_err(|_| error("invalid budget"))?;
         let mut worker = Worker::offline(record, Budget::new(cap));
         // The newest transcript is the session this folder last used.
@@ -652,6 +648,8 @@ impl Managed {
         // Register before reserving: a failed register must not hold parent funds.
         let record = worker.lock().await.record.clone();
         identities.register(record.identity.clone()).await?;
+        self.refresh_mcp_config(&record.identity.identity_id)
+            .await?;
         self.reserve_on_start(worker).await?;
         let mut held = worker.lock().await;
         held.state = state;
@@ -669,6 +667,20 @@ impl Managed {
             "branch": record.branch,
             "state": state,
         }))
+    }
+
+    async fn refresh_mcp_config(&self, identity: &IdentityId) -> Result<(), ApiError> {
+        let agmen = self.runner.mcp_command().await.map_err(error)?;
+        let identities = self
+            .identities()
+            .ok_or_else(|| error("identity service stopped"))?;
+        let local_token = identities.local_token(identity).await?;
+        let config = mcp_config(&agmen, identity, local_token.as_ref());
+        let path = self.agent_dir(identity).join("mcp.json");
+        tokio::task::spawn_blocking(move || replace_private_json(&path, &config))
+            .await
+            .map_err(error)?
+            .map_err(error)
     }
 
     /// Refuses when the hub shows the identity connected: an interactive

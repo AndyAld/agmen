@@ -833,6 +833,252 @@ async fn launch_creates_worktree_identity_and_managed_record() {
 }
 
 #[tokio::test]
+async fn batch_carries_a_token_that_authorizes_as_the_agent() {
+    let fixture = Fixture::new().await;
+    fixture.launch().await;
+    let managed = &fixture.daemon.core.managed;
+    for (seq, sender) in [(1, "owner001"), (2, "sender01")] {
+        enqueue_from(&fixture, seq, sender, "agent001").await;
+        batch(managed, "agent001").await;
+        let (identity, token) = {
+            let runs = fixture.runner.runs.lock().unwrap();
+            let spec = runs.last().unwrap();
+            (spec.identity.clone(), spec.local_token.clone().unwrap())
+        };
+        assert_eq!(identity.as_str(), "agent001");
+        let caller = fixture
+            .daemon
+            .core
+            .identities
+            .authorize(Some(&identity), Some(token.expose()))
+            .await
+            .unwrap();
+        assert!(
+            matches!(caller, crate::identities::Caller::Identity(who) if who.identity_id == identity)
+        );
+    }
+    managed.shutdown().await;
+}
+
+async fn assert_private_mcp_credential(fixture: &Fixture) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let identity = "agent001".parse().unwrap();
+    let managed = &fixture.daemon.core.managed;
+    let path = managed.agent_dir(&identity).join("mcp.json");
+    assert!(path.starts_with(&managed.state_dir));
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    let config: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let server = &config["mcpServers"]["agmen"];
+    assert_eq!(server["command"], "agmen");
+    assert_eq!(server["args"], json!(["mcp"]));
+    assert_eq!(server["env"]["AGMEN_IDENTITY"], "agent001");
+    let token = server["env"]["AGMEN_LOCAL_TOKEN"].as_str().unwrap();
+    let caller = fixture
+        .daemon
+        .core
+        .identities
+        .authorize(Some(&identity), Some(token))
+        .await
+        .unwrap();
+    assert!(
+        matches!(caller, crate::identities::Caller::Identity(who) if who.identity_id == identity)
+    );
+}
+
+#[tokio::test]
+async fn mcp_config_carries_the_credential_privately() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let fixture = Fixture::new().await;
+    fixture.launch().await;
+    let managed = &fixture.daemon.core.managed;
+    let path = managed
+        .agent_dir(&"agent001".parse().unwrap())
+        .join("mcp.json");
+    assert_private_mcp_credential(&fixture).await;
+    // Old configs must be replaced when an existing agent starts or attaches.
+    let legacy = json!({"mcpServers":{"agmen":{"command":"old-agmen","args":["mcp"]}}});
+    managed.stop(json!({"identity":"agent001"})).await.unwrap();
+    std::fs::write(&path, legacy.to_string()).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    managed.start(json!({"identity":"agent001"})).await.unwrap();
+    assert_private_mcp_credential(&fixture).await;
+    std::fs::write(&path, legacy.to_string()).unwrap();
+    managed
+        .attach_claude(json!({"identity":"agent001"}))
+        .await
+        .unwrap();
+    assert_private_mcp_credential(&fixture).await;
+    managed.shutdown().await;
+
+    let fixture = Fixture::new().await;
+    fixture.launch().await;
+    let managed = &fixture.daemon.core.managed;
+    managed.stop(json!({"identity":"agent001"})).await.unwrap();
+    let path = managed
+        .agent_dir(&"agent001".parse().unwrap())
+        .join("mcp.json");
+    std::fs::remove_file(path).unwrap();
+    managed
+        .attach_claude(json!({"identity":"agent001"}))
+        .await
+        .unwrap();
+    assert_private_mcp_credential(&fixture).await;
+    managed.shutdown().await;
+}
+
+#[tokio::test]
+async fn token_stays_out_of_worktrees_and_answers() {
+    let fixture = Fixture::new().await;
+    let launched = fixture.launch().await;
+    let managed = &fixture.daemon.core.managed;
+    let token = fixture
+        .daemon
+        .core
+        .identities
+        .local_token(&"agent001".parse().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    managed.stop(json!({"identity":"agent001"})).await.unwrap();
+    let started = managed.start(json!({"identity":"agent001"})).await.unwrap();
+    enqueue_from(&fixture, 1, "owner001", "agent001").await;
+    batch(managed, "agent001").await;
+    let listed = managed.list(json!({})).await.unwrap();
+    let failure = managed
+        .start(json!({"identity":"agent001"}))
+        .await
+        .unwrap_err();
+    for answer in [
+        launched.to_string(),
+        started.to_string(),
+        listed.to_string(),
+        serde_json::to_string(&failure).unwrap(),
+    ] {
+        assert!(!answer.contains(token.expose()));
+    }
+    for post in fixture.posts.lock().unwrap().iter() {
+        assert!(
+            !serde_json::to_string(post)
+                .unwrap()
+                .contains(token.expose())
+        );
+    }
+    let mut pending = vec![std::path::PathBuf::from(
+        launched["worktree"].as_str().unwrap(),
+    )];
+    for _ in 0..1024 {
+        let Some(path) = pending.pop() else { break };
+        for entry in std::fs::read_dir(path).unwrap() {
+            let entry = entry.unwrap();
+            let kind = entry.file_type().unwrap();
+            if kind.is_dir() {
+                pending.push(entry.path());
+            } else if kind.is_file() {
+                let bytes = std::fs::read(entry.path()).unwrap();
+                assert!(
+                    !bytes
+                        .windows(token.expose().len())
+                        .any(|window| window == token.expose().as_bytes())
+                );
+            }
+        }
+    }
+    assert!(
+        pending.is_empty(),
+        "worktree scan exceeded its directory bound"
+    );
+    assert_private_mcp_credential(&fixture).await;
+    managed.shutdown().await;
+}
+
+#[tokio::test]
+async fn batch_without_local_token_still_runs() {
+    let fixture = Fixture::new().await;
+    fixture.launch().await;
+    let managed = &fixture.daemon.core.managed;
+    let identity = "agent001".parse().unwrap();
+    let key =
+        agmen_client::TokenKey::new(&"https://agmend.invalid".parse().unwrap(), &identity).unwrap();
+    for (seq, invalid) in [(1, false), (2, true)] {
+        if invalid {
+            fixture.tokens.set(&key, "{}").unwrap();
+        } else {
+            fixture.tokens.delete(&key).unwrap();
+        }
+        enqueue_from(&fixture, seq, "owner001", "agent001").await;
+        batch(managed, "agent001").await;
+        let runs = fixture.runner.runs.lock().unwrap();
+        assert_eq!(runs.len(), seq as usize);
+        let spec = runs.last().unwrap();
+        assert_eq!(spec.identity, identity);
+        assert!(spec.local_token.is_none());
+    }
+    managed.shutdown().await;
+}
+
+#[derive(Clone, Default)]
+struct LogBytes(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogBytes {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBytes {
+    type Writer = Self;
+    fn make_writer(&'a self) -> Self {
+        self.clone()
+    }
+}
+
+#[tokio::test]
+async fn batch_token_is_never_logged() {
+    let logs = LogBytes::default();
+    let _capture = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(logs.clone())
+            .finish(),
+    );
+    let fixture = Fixture::new().await;
+    fixture.launch().await;
+    let managed = &fixture.daemon.core.managed;
+    let identity = "agent001".parse().unwrap();
+    let token = fixture
+        .daemon
+        .core
+        .identities
+        .local_token(&identity)
+        .await
+        .unwrap()
+        .unwrap();
+    managed.stop(json!({"identity":"agent001"})).await.unwrap();
+    managed.start(json!({"identity":"agent001"})).await.unwrap();
+    enqueue_from(&fixture, 1, "owner001", "agent001").await;
+    batch(managed, "agent001").await;
+    // A batch that finds no credential warns, and says nothing of its value.
+    let key =
+        agmen_client::TokenKey::new(&"https://agmend.invalid".parse().unwrap(), &identity).unwrap();
+    fixture.tokens.delete(&key).unwrap();
+    enqueue_from(&fixture, 2, "owner001", "agent001").await;
+    batch(managed, "agent001").await;
+    managed.shutdown().await;
+    let logs = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+    assert!(logs.contains("no local token"));
+    assert!(!logs.contains(token.expose()));
+}
+
+#[tokio::test]
 async fn launch_preserves_tracked_project_role_directory() {
     let fixture = Fixture::new().await;
     let repo = fixture.dir.path().join("repo");
