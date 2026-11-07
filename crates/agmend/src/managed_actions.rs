@@ -187,6 +187,35 @@ fn zero_usd() -> String {
 type Loaded = (Record, Option<SavedStatus>, bool);
 
 impl Managed {
+    async fn target_login(&self, target: &Target) -> Result<Login, ApiError> {
+        let existing = self.workers.lock().await.get(&target.identity).cloned();
+        if let Some(worker) = existing {
+            let hub_url = worker.lock().await.record.identity.hub_url.clone();
+            return self.origins.person_for(&hub_url).await;
+        }
+        let project = target.project.as_ref().ok_or_else(|| {
+            bad_request("project is required for an agent agmend has not started")
+        })?;
+        self.origins.person(self.origins.of(project).await?).await
+    }
+
+    pub(super) async fn revoke_identity(
+        &self,
+        identity: &ManagedIdentity,
+    ) -> Result<bool, ApiError> {
+        if agmen_client::is_local(&identity.hub_url) {
+            self.origins
+                .local()
+                .revoke(&identity.project, &identity.identity_id)
+                .await
+        } else {
+            self.hub
+                .revoke_identity(&identity.identity_id)
+                .await
+                .map_err(Into::into)
+        }
+    }
+
     pub(super) fn agent_dir(&self, id: &IdentityId) -> PathBuf {
         self.state_dir.join("managed").join(id.as_str())
     }
@@ -261,7 +290,7 @@ impl Managed {
     pub(crate) async fn attach_claude(self: &Arc<Self>, raw: Value) -> Result<Value, ApiError> {
         let target: Target = params(raw)?;
         let _launching = self.launching.lock().await;
-        let login = self.hub.credentials().login().await.map_err(error)?;
+        let login = self.target_login(&target).await?;
         let existing = self.workers.lock().await.get(&target.identity).cloned();
         let online = match &existing {
             Some(worker) => {
@@ -375,7 +404,8 @@ impl Managed {
             .get(&identity)
             .cloned()
             .ok_or_else(|| bad_request("agent is not managed by this daemon"))?;
-        let login = self.hub.credentials().login().await.map_err(error)?;
+        let hub_url = worker.lock().await.record.identity.hub_url.clone();
+        let login = self.origins.person_for(&hub_url).await?;
         let attached = {
             let held = worker.lock().await;
             owned(&held.record.identity, &login)?;
@@ -407,7 +437,7 @@ impl Managed {
     pub(crate) async fn remove(self: &Arc<Self>, raw: Value) -> Result<Value, ApiError> {
         let target: Target = params(raw)?;
         let _launching = self.launching.lock().await;
-        let login = self.hub.credentials().login().await.map_err(error)?;
+        let login = self.target_login(&target).await?;
         let existing = self.workers.lock().await.get(&target.identity).cloned();
         let (identity, folder, branch) = match &existing {
             Some(worker) => {
@@ -467,13 +497,8 @@ impl Managed {
         if let Some(worker) = existing {
             self.stop_worker(worker).await?;
         }
-        if !self
-            .hub
-            .revoke_identity(&identity.identity_id)
-            .await
-            .map_err(ApiError::from)?
-        {
-            tracing::info!("the hub had no such identity; removing it here");
+        if !self.revoke_identity(&identity).await? {
+            tracing::info!("the origin had no such identity; removing it here");
         }
         if let Some(joined) = joined {
             delete_identity_file(&joined.root).await?;
@@ -529,7 +554,7 @@ impl Managed {
         if self.shutting_down.load(Ordering::Acquire) {
             return Err(error("daemon is shutting down"));
         }
-        let login = self.hub.credentials().login().await.map_err(error)?;
+        let login = self.target_login(&target).await?;
         let existing = self.workers.lock().await.get(&target.identity).cloned();
         if let Some(worker) = existing {
             let identity = {
@@ -686,20 +711,28 @@ impl Managed {
     /// Refuses when the hub shows the identity connected: an interactive
     /// Claude Code with the agmen plugin would answer the same messages.
     async fn refuse_if_connected(&self, identity: &ManagedIdentity) -> Result<(), ApiError> {
-        let roster = self
-            .hub
-            .roster(&identity.project)
-            .await
-            .map_err(|failure| {
-                let failure = ApiError::from(failure);
-                ApiError {
-                    code: failure.code,
-                    message: format!(
-                        "could not check whether {} is connected elsewhere: {}",
-                        identity.handle, failure.message
-                    ),
-                }
-            })?;
+        let roster = match self.origins.of(&identity.project).await? {
+            crate::origin::Origin::Local => self.origins.local().roster(&identity.project).await,
+            crate::origin::Origin::Hub => {
+                self.hub.roster(&identity.project).await.map_err(Into::into)
+            }
+        }
+        .map_err(|failure| ApiError {
+            code: failure.code,
+            message: format!(
+                "could not check whether {} is connected elsewhere: {}",
+                identity.handle, failure.message
+            ),
+        })?;
+        if agmen_client::is_local(&identity.hub_url)
+            && !roster
+                .iter()
+                .any(|entry| entry.identity_id == identity.identity_id)
+        {
+            return Err(bad_request(
+                "local identity has been revoked; launch a new agent",
+            ));
+        }
         if roster.iter().any(|entry| {
             entry.identity_id == identity.identity_id
                 && matches!(entry.status, Status::Online | Status::Away)
@@ -920,7 +953,6 @@ impl Managed {
             .parent()
             .ok_or_else(|| error("worker root has no main checkout"))?
             .to_owned();
-        let login = self.hub.credentials().login().await.map_err(error)?;
         let project = request.project;
         let checked = repo.clone();
         let joined = tokio::task::spawn_blocking(move || find_identity(&checked))
@@ -928,9 +960,11 @@ impl Managed {
             .map_err(error)?
             .map_err(error)?
             .ok_or_else(|| bad_request("checkout has no trusted agmen identity"))?;
+        let login = self.origins.person_for(&joined.identity.hub_url).await?;
         if joined.identity.project != project
             || joined.identity.owner_id != login.human_id
-            || joined.identity.hub_url.origin() != login.hub_url.origin()
+            || agmen_client::origin_key(&joined.identity.hub_url)
+                != agmen_client::origin_key(&login.hub_url)
         {
             return Err(bad_request(
                 "checkout is not joined to this project and owner",
@@ -1109,8 +1143,10 @@ const fn fresh_context(found: transcripts::Contents) -> &'static str {
     }
 }
 
-fn owned(identity: &ManagedIdentity, login: &Login) -> Result<(), ApiError> {
-    if identity.owner_id == login.human_id && identity.hub_url.origin() == login.hub_url.origin() {
+pub(super) fn owned(identity: &ManagedIdentity, login: &Login) -> Result<(), ApiError> {
+    if identity.owner_id == login.human_id
+        && agmen_client::origin_key(&identity.hub_url) == agmen_client::origin_key(&login.hub_url)
+    {
         Ok(())
     } else {
         Err(crate::identities::forbidden())

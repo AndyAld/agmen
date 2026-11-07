@@ -432,7 +432,7 @@ impl Listeners {
                         let registered = self
                             .identities()?
                             .managed(
-                                login.hub_url.origin().ascii_serialization(),
+                                agmen_client::origin_key(&login.hub_url),
                                 login.human_id.clone(),
                             )
                             .await?;
@@ -599,7 +599,7 @@ impl Listeners {
             settings.model.clone_from(model);
         }
         let launch = self.resolve().await?;
-        let origin = login.hub_url.origin().ascii_serialization();
+        let origin = agmen_client::origin_key(&login.hub_url);
         let registered = self
             .identities()?
             .managed(origin, login.human_id.clone())
@@ -1004,7 +1004,7 @@ impl Listeners {
         };
         let Ok(registered) = identities
             .managed(
-                login.hub_url.origin().ascii_serialization(),
+                agmen_client::origin_key(&login.hub_url),
                 login.human_id.clone(),
             )
             .await
@@ -1804,7 +1804,8 @@ fn zero() -> Money {
     Money::from_usd("0").unwrap_or_else(|_| std::process::abort())
 }
 fn owns(identity: &ManagedIdentity, login: &agmen_client::Login) -> bool {
-    identity.owner_id == login.human_id && identity.hub_url.origin() == login.hub_url.origin()
+    identity.owner_id == login.human_id
+        && agmen_client::origin_key(&identity.hub_url) == agmen_client::origin_key(&login.hub_url)
 }
 fn failure(error: impl std::fmt::Display) -> ApiError {
     bad_request(error.to_string())
