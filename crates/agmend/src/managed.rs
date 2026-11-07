@@ -197,6 +197,9 @@ impl Managed {
     pub(crate) fn contains_peer(&self, pid: i32) -> bool {
         self.runner.contains_peer(pid)
     }
+    pub(crate) fn peer_groups(&self) -> std::collections::BTreeSet<i32> {
+        self.runner.peer_groups()
+    }
     pub(crate) fn new(
         origins: Arc<crate::origin::Origins>,
         runner: Arc<dyn Runner>,

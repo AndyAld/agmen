@@ -11,6 +11,9 @@ mod local_agents;
 #[path = "mint_rollback_tests.rs"]
 mod mint_rollback;
 
+#[path = "peer_tests.rs"]
+mod peer_ancestry;
+
 const FAKE: &str = r#"
 printf '%s\n' "$@" >argv
 printf '%s\n' "$AGMEN_MANAGED" >managed-env

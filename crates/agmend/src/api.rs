@@ -58,7 +58,16 @@ pub(crate) async fn serve_with_peer(
     core: Arc<Core>,
     peer: impl FnOnce(&UnixStream) -> std::io::Result<i32>,
 ) {
-    let peer = peer(&stream).map_err(|error| error.to_string());
+    let peer = peer(&stream);
+    let mut groups = core.managed.peer_groups();
+    groups.extend(core.listeners.peer_groups());
+    // The ancestry answer belongs to this connection, including its watch.
+    let known = peer.is_ok();
+    let managed = peer
+        .as_ref()
+        .is_ok_and(|pid| core.managed.contains_peer(*pid));
+    let contained = core.peers.contains_peer(peer, &groups).await;
+    let owner_peer = known && !managed && !contained;
     core.managed.attach(&core.identities).await;
     core.listeners.attach(&core.identities, &core.managed).await;
     // shortcut: Unix-only local API; revisit when S6 Windows IPC is approved.
@@ -86,7 +95,7 @@ pub(crate) async fn serve_with_peer(
         let outcome = if let Some(refusal) = refuse(&request, greeted) {
             Err(refusal)
         } else {
-            let caller = authorize(&core, &mut request, &peer).await;
+            let caller = authorize(&core, &mut request, owner_peer).await;
             match caller {
                 Err(error) => Err(error),
                 Ok(caller) if request.method == "watch" => {
@@ -154,11 +163,22 @@ pub(crate) async fn serve_with_peer(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn owner_peer_check(
     managed: &crate::managed::Managed,
     caller: &Caller,
     method: &str,
     lookup: impl FnOnce() -> std::io::Result<i32>,
+) -> Result<(), ApiError> {
+    owner_request_check(caller, method, || {
+        lookup().is_ok_and(|pid| !managed.contains_peer(pid))
+    })
+}
+
+fn owner_request_check(
+    caller: &Caller,
+    method: &str,
+    owner_peer: impl FnOnce() -> bool,
 ) -> Result<(), ApiError> {
     // Identity-scoped chat uses its authenticated identity, never the human post.
     if (matches!(method, "post" | "child_launch" | "child_stop")
@@ -187,19 +207,11 @@ pub(crate) fn owner_peer_check(
     {
         return Ok(());
     }
-    if is_owner_peer(managed, lookup) {
+    if owner_peer() {
         Ok(())
     } else {
         Err(owner_only())
     }
-}
-
-/// Whether `lookup` names a peer outside every worker and listener process group.
-fn is_owner_peer(
-    managed: &crate::managed::Managed,
-    lookup: impl FnOnce() -> std::io::Result<i32>,
-) -> bool {
-    lookup().is_ok_and(|pid| !managed.contains_peer(pid))
 }
 
 fn owner_only() -> ApiError {
@@ -292,7 +304,7 @@ fn refuse(request: &Request, greeted: bool) -> Option<ApiError> {
 async fn authorize(
     core: &Core,
     request: &mut Request,
-    peer: &Result<i32, String>,
+    owner_peer: bool,
 ) -> Result<Caller, ApiError> {
     let token = match request
         .params
@@ -307,18 +319,7 @@ async fn authorize(
         .identities
         .authorize(request.as_.as_ref(), token.as_deref())
         .await?;
-    let lookup = || {
-        let pid = peer
-            .as_ref()
-            .copied()
-            .map_err(|error| std::io::Error::other(error.clone()))?;
-        if core.listeners.contains_peer(pid) {
-            Err(std::io::Error::other("listener peer"))
-        } else {
-            Ok(pid)
-        }
-    };
-    owner_peer_check(&core.managed, &caller, &request.method, lookup)?;
+    owner_request_check(&caller, &request.method, || owner_peer)?;
     Ok(caller)
 }
 

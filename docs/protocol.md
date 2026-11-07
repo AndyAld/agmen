@@ -279,15 +279,23 @@ Listener settings (agent, model, effort, caps, `accept_from`, which always inclu
 ## 10. Local daemon identity, readiness and service ownership
 
 For owner-only local methods, agmend checks the socket peer PID and refuses
-processes in a running managed worker's process group with `forbidden` and
+processes descended from running managed workers or listeners with `forbidden` and
 `agents cannot call owner-only methods`. This covers agent launch, stop,
 list, start, attach, detach and remove, human posts, the person's inbox, state
 and watch, host methods, shutdown and login. Identity-authenticated
 posts and identity read/watch methods remain available. If the peer PID cannot
-be read, owner-only calls are refused; while a worker runs, so are calls from a
-peer whose process group cannot be read. This is a guard against accidental
-misuse, not isolation: workers share the user's uid and can escape a process
-group or access the user's files and credentials.
+be read, owner-only calls are refused. While workers or listeners run, agmend
+checks the peer and up to 32 ancestors against their process IDs and process
+groups, stopping at pid 1 or agmend's own pid. The walk has a 2 second deadline
+and uses one process snapshot on macOS or reads `/proc/<pid>/stat` on Linux.
+An unreadable ancestry or process group, a chain deeper than 32 hops, or a
+timeout refuses owner-only calls and logs the reason, warning on the first
+failure or a changed cause and using debug on repeats. The result is cached
+for the connection; with no running worker or listener, no ancestry walk runs.
+A process that deliberately daemonizes by double forking to pid 1, or whose
+parent exits first, still escapes. Same-user containment is not a security
+boundary: workers share the user's uid and can access the user's files and
+credentials.
 
 Managed workers drain owner messages first in separate batches. Only messages
 with the hub-stamped owner ID and `from_kind: human` get
@@ -679,9 +687,10 @@ is 0. `check_path` accepts at most 500 paths. Hub identities receive
 `hub identities read this from their hub`.
 
 Without an identity, `inbox`, `state` and `watch` answer the person, on a local
-project or a hub one. A peer in a running worker's or listener's process group,
-or one agmend cannot read, therefore gets `forbidden` (`agents cannot call
-owner-only methods`) from them; its own identity's calls are unaffected.
+project or a hub one. A peer descended from a running worker or listener (see
+section 10), or one agmend cannot read, therefore gets `forbidden` (`agents
+cannot call owner-only methods`) from them; its own identity's calls are
+unaffected.
 
 The `head` state contains `{feed_seq, rules_v: 0, lanes_v: 0, items_v: 0,
 hub_at}`. The roster reflects mint, revoke, and presence changes immediately.
