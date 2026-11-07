@@ -764,6 +764,80 @@ fn a_snapshot_reaches_the_composers_model_chip(cx: &mut TestAppContext) {
     assert_eq!(chip.as_deref(), Some("claude · default"));
 }
 
+#[gpui::test]
+async fn empty_filter_loads_older_messages(cx: &mut TestAppContext) {
+    use crate::backend::AgmendBackend;
+    use crate::backend::fake_agmend::{FakeAgmend, PROJECT};
+
+    let fake = FakeAgmend::with_history(45);
+    fake.edit(|state| {
+        state.history_page_size = Some(20);
+        let oldest = state.history.first_mut().unwrap();
+        oldest.from = "idfx1abc".parse().unwrap();
+        oldest.from_handle = "andy/fx1".into();
+        oldest.from_kind = agmen_proto::IdentityKind::Agent;
+        let snapshot = state.snapshot.as_mut().unwrap();
+        snapshot.messages.drain(..25);
+        snapshot.older = true;
+    });
+    cx.executor().allow_parking();
+    let backend: Rc<dyn Backend> =
+        Rc::new(AgmendBackend::connect(&fake.path(), PROJECT, None).unwrap());
+    cx.update(|cx| cx.set_global(BackendHandle(backend.clone())));
+    let (chat, cx) = open_with(cx, backend.snapshot());
+    chat.update(cx, |chat, cx| {
+        chat.set_chat_filter(ChatFilter::MyAgents, cx)
+    });
+    redraw(cx);
+    assert!(cx.debug_bounds("chat:filter-empty").is_some());
+
+    click(cx, "chat:load-older");
+    cx.condition(&chat, |chat, _| chat.message_count() == 40)
+        .await;
+    redraw(cx);
+    assert!(cx.debug_bounds("chat:filter-empty").is_some());
+    click(cx, "chat:load-older");
+    cx.condition(&chat, |chat, _| chat.message_count() == 45)
+        .await;
+    redraw(cx);
+    let row = chat.read_with(cx, |chat, cx| {
+        assert_eq!(chat.chat_filter(), ChatFilter::MyAgents);
+        assert_eq!(chat.snapshot.older, Older::Start);
+        assert_eq!(chat.stream.read(cx).rows, vec![0]);
+        sel(&chat.snapshot.messages[0], "row")
+    });
+    assert!(cx.debug_bounds(row).is_some());
+    assert!(cx.debug_bounds("chat:filter-empty").is_none());
+    assert!(cx.debug_bounds("chat:load-older").is_none());
+    assert_eq!(fake.state.lock().unwrap().history_params.len(), 2);
+}
+
+#[gpui::test]
+fn empty_filter_offers_older_messages_only_when_available(cx: &mut TestAppContext) {
+    let mut snapshot = chat_snapshot();
+    snapshot.roster.clear();
+    let (chat, cx) = open_with(cx, snapshot.clone());
+    chat.update(cx, |chat, cx| {
+        chat.set_chat_filter(ChatFilter::MyAgents, cx)
+    });
+    const PAGING_STATES: usize = 4;
+    let cases: [(Older, bool); PAGING_STATES] = [
+        (Older::More, true),
+        (Older::Loading, false),
+        (Older::Failed("page unavailable".into()), true),
+        (Older::Start, false),
+    ];
+    for (older, available) in cases {
+        snapshot.older = older;
+        chat.update(cx, |chat, cx| {
+            chat.apply(Update::Snapshot(Box::new(snapshot.clone())), cx)
+        });
+        redraw(cx);
+        assert!(cx.debug_bounds("chat:filter-empty").is_some());
+        assert_eq!(cx.debug_bounds("chat:load-older").is_some(), available);
+    }
+}
+
 // Final review fix 1: older messages page in on scroll-back.
 
 /// Scrolls the chat's message list up until its first row shows. The list

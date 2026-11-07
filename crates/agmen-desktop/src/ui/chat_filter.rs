@@ -18,10 +18,6 @@ pub(crate) enum ChatFilter {
 
 impl ChatFilter {
     /// The breadcrumb control's choices, in display order.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the breadcrumb control is added in Task 4")
-    )]
     pub(crate) const ALL: [Self; 3] = [Self::MyAgents, Self::Everyone, Self::JustHumans];
 
     /// The label shown for this choice.
