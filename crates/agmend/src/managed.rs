@@ -566,8 +566,13 @@ impl Managed {
                 return Err(error("invalid agent mint response"));
             }
             // A refusal (409 handle_taken while a stopped worker of mine holds the
-            // handle) made nothing, so nothing here may look up and revoke.
-            Err(failure) => return Err(failure.into()),
+            // handle) made nothing, so only an error that may have committed looks up.
+            Err(failure) => {
+                if failure.mint_may_have_committed() {
+                    rollback().await;
+                }
+                return Err(failure.into());
+            }
         };
         #[derive(Deserialize)]
         struct Minted {

@@ -860,7 +860,12 @@ impl Listeners {
                 rollback().await;
                 return Err(failure("invalid listener mint response"));
             }
-            Err(error) => return Err(listener_mint_error(error)),
+            Err(error) => {
+                if error.mint_may_have_committed() {
+                    rollback().await;
+                }
+                return Err(listener_mint_error(error));
+            }
         };
         // This boundary never derives Debug or includes the response in an error.
         #[derive(Deserialize)]

@@ -1,5 +1,181 @@
 use super::*;
+use crate::hub_mint::tests::{Calls, Failure, connect_failure_hub, mint_router};
 use std::sync::atomic::{AtomicBool, Ordering};
+
+const AMBIGUOUS_FAILURES: [Failure; 5] = [
+    Failure::LateHeaders,
+    Failure::LateBody,
+    Failure::ResetBody,
+    Failure::OversizedBody,
+    Failure::OversizedStream,
+];
+
+async fn ambiguous_hub(f: &mut Fixture, failure: Failure, roster: Value) -> Arc<Calls> {
+    failure.configure(&f.listeners().hub);
+    let (app, calls) = mint_router(failure, MINTED, roster);
+    let login = f.listeners().hub.credentials().login().await.unwrap();
+    f.hub_task.abort();
+    assert!((&mut f.hub_task).await.unwrap_err().is_cancelled());
+    let socket = tokio::net::TcpListener::bind(login.hub_url.socket_addrs(|| None).unwrap()[0])
+        .await
+        .unwrap();
+    f.hub_task = tokio::spawn(async move { axum::serve(socket, app).await.unwrap() });
+    calls
+}
+
+async fn ambiguous_listener_rollback(failure: Failure) {
+    let (bytes, subscriber) = warnings();
+    async {
+        let mut f = Fixture::new(FAKE).await;
+        let calls = ambiguous_hub(&mut f, failure, json!([offline_listener(MINTED)])).await;
+        let error = start_error(&f).await;
+        failure.assert_error(&error);
+        assert_eq!(calls.mints.load(Ordering::SeqCst), 1);
+        assert_eq!(calls.roster.load(Ordering::SeqCst), 1);
+        assert_eq!(*calls.revoked.lock().unwrap(), [MINTED]);
+        let listeners = f.listeners();
+        let login = listeners.hub.credentials().login().await.unwrap();
+        assert!(listeners.entries.lock().await.is_empty());
+        assert!(!f.dir.path().join("listener/project1/intent.json").exists());
+        assert!(
+            !listeners
+                .on_record(
+                    &login,
+                    &"project1".parse().unwrap(),
+                    &MINTED.parse().unwrap()
+                )
+                .await
+        );
+        let logs = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
+        assert!(logs.contains(MINTED), "{logs}");
+        for hidden in ["fake-private-mint-token", DECOY] {
+            assert!(!logs.contains(hidden), "{logs}");
+            assert!(!error.message.contains(hidden), "{error:?}");
+        }
+        assert_eq!(f.start().await["identity_id"], MINTED);
+        assert_eq!(calls.mints.load(Ordering::SeqCst), 2);
+        assert_eq!(*calls.revoked.lock().unwrap(), [MINTED]);
+        f.stop().await;
+    }
+    .with_subscriber(subscriber)
+    .await;
+}
+
+#[tokio::test]
+async fn listener_ambiguous_late_headers_revokes_and_allows_retry() {
+    ambiguous_listener_rollback(Failure::LateHeaders).await;
+}
+
+#[tokio::test]
+async fn listener_ambiguous_late_body_revokes_and_allows_retry() {
+    ambiguous_listener_rollback(Failure::LateBody).await;
+}
+
+#[tokio::test]
+async fn listener_ambiguous_reset_body_revokes_and_allows_retry() {
+    ambiguous_listener_rollback(Failure::ResetBody).await;
+}
+
+#[tokio::test]
+async fn listener_ambiguous_oversized_body_revokes_and_allows_retry() {
+    ambiguous_listener_rollback(Failure::OversizedBody).await;
+}
+
+#[tokio::test]
+async fn listener_ambiguous_oversized_stream_revokes_and_allows_retry() {
+    ambiguous_listener_rollback(Failure::OversizedStream).await;
+}
+
+#[tokio::test]
+async fn listener_ambiguous_lookup_preserves_on_record_and_hello_entries() {
+    for failure in AMBIGUOUS_FAILURES {
+        for held in [true, false] {
+            let mut f = Fixture::new(FAKE).await;
+            let mut roster = offline_listener(MINTED);
+            let listeners = f.listeners().clone();
+            let credentials = listeners.hub.credentials();
+            let login = credentials.login().await.unwrap();
+            if held {
+                credentials
+                    .set_token(
+                        &login.hub_url,
+                        &MINTED.parse().unwrap(),
+                        "held-listener".into(),
+                    )
+                    .await
+                    .unwrap();
+            } else {
+                roster["agent"] = json!("claude-code");
+            }
+            let calls = ambiguous_hub(&mut f, failure, json!([roster])).await;
+            failure.assert_error(&start_error(&f).await);
+            assert_eq!(calls.roster.load(Ordering::SeqCst), 1, "{failure:?}");
+            assert!(calls.revoked.lock().unwrap().is_empty(), "{failure:?}");
+            if held {
+                assert_eq!(
+                    credentials
+                        .token(&login.hub_url, &MINTED.parse().unwrap())
+                        .await
+                        .unwrap()
+                        .as_deref(),
+                    Some("held-listener")
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn listener_refusal_with_an_oversized_body_skips_lookup_and_revoke() {
+    let mut f = Fixture::new(FAKE).await;
+    let failure = Failure::OversizedRefusal;
+    let calls = ambiguous_hub(&mut f, failure, json!([offline_listener(MINTED)])).await;
+    let error = start_error(&f).await;
+    assert_eq!(calls.mints.load(Ordering::SeqCst), 1);
+    assert_eq!(calls.roster.load(Ordering::SeqCst), 0);
+    assert!(calls.revoked.lock().unwrap().is_empty());
+    failure.assert_error(&error);
+}
+
+#[tokio::test]
+async fn listener_mint_connect_failure_skips_lookup_and_revoke() {
+    let mut f = Fixture::new(FAKE).await;
+    let calls = ambiguous_hub(
+        &mut f,
+        Failure::ResetBody,
+        json!([offline_listener(MINTED)]),
+    )
+    .await;
+    let mut listeners = Listeners::new(
+        f.daemon.core.origins.clone(),
+        f.dir.path().to_owned(),
+        f.dir.path().join("settings.toml"),
+    );
+    listeners.hub = connect_failure_hub(&listeners.hub).await;
+    listeners
+        .attach(&f.daemon.core.identities, &f.daemon.core.managed)
+        .await;
+    let login = listeners.hub.credentials().login().await.unwrap();
+    let role = f
+        .daemon
+        .core
+        .managed
+        .resolve_any_role(&f.repo(), "listener")
+        .await
+        .unwrap();
+    let (bytes, subscriber) = warnings();
+    let error = listeners
+        .mint(&"project1".parse().unwrap(), &login, &role)
+        .with_subscriber(subscriber)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::Hub);
+    assert!(error.message.contains("connect"), "{error:?}");
+    assert_eq!(calls.mints.load(Ordering::SeqCst), 0);
+    assert_eq!(calls.roster.load(Ordering::SeqCst), 0);
+    assert!(calls.revoked.lock().unwrap().is_empty());
+    assert!(bytes.lock().unwrap().is_empty(), "no rollback attempted");
+}
 
 // The id of this start's mint, and the id of someone else's live listener that a
 // confused or hostile hub names in its answer instead.

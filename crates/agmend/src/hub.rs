@@ -80,6 +80,22 @@ pub(crate) enum HubError {
 }
 
 impl HubError {
+    /// Whether a failed mint may have committed, so the guarded roster lookup
+    /// runs. A refusal never does: it made nothing (a 409 handle_taken while a
+    /// stopped worker of mine holds the handle). A transport error does unless
+    /// reqwest proves the request never left: its connect errors (DNS, TCP
+    /// connect, TLS handshake, the client's connect timeout) and builder errors.
+    /// Reqwest has no request-written flag, and the request's own timeout is no
+    /// connect error in any phase, so a stalled connect gets the lookup too;
+    /// its guards find no mint to revoke.
+    pub(crate) fn mint_may_have_committed(&self) -> bool {
+        match self {
+            Self::BadAnswer(_) | Self::Body(_) => true,
+            Self::Http(error) => !error.is_connect() && !error.is_builder(),
+            _ => false,
+        }
+    }
+
     /// Whether retrying soon will not help: nobody is signed in, the hub
     /// refused the sign-in, or it refused this person the project (401,
     /// 403, 404). Everything else (unreachable, 5xx, a broken answer) is
@@ -181,6 +197,9 @@ struct Head {
 pub(crate) struct Hub {
     http: reqwest::Client,
     credentials: std::sync::Arc<Credentials>,
+    /// Test seam: the timeout of the next mint only, so a retry runs at full length.
+    #[cfg(test)]
+    pub(crate) mint_timeout: std::sync::Mutex<Option<Duration>>,
 }
 
 impl Hub {
@@ -189,6 +208,14 @@ impl Hub {
         &self,
         body: &serde_json::Value,
     ) -> Result<serde_json::Value, HubError> {
+        let timeout = REQUEST_TIMEOUT;
+        #[cfg(test)]
+        let timeout = self
+            .mint_timeout
+            .lock()
+            .ok()
+            .and_then(|mut next| next.take())
+            .unwrap_or(timeout);
         let (login, token) = self.credentials.access().await?;
         agmen_client::check_hub_url(&login.hub_url).map_err(LoginError::from)?;
         let mut url = login.hub_url.clone();
@@ -201,11 +228,21 @@ impl Hub {
             .post(url)
             .bearer_auth(token)
             .json(body)
-            .timeout(REQUEST_TIMEOUT)
+            .timeout(timeout)
             .send()
             .await
             .map_err(HubError::Http)?;
-        json_with_limit(response, MAX_HUB_RESPONSE_BYTES).await
+        let status = response.status();
+        match json_with_limit(response, MAX_HUB_RESPONSE_BYTES).await {
+            // A refusal made nothing, so one whose body is over the cap is no
+            // ambiguity: keep it a refusal, which gets no roster lookup.
+            Err(HubError::Body(_)) if !status.is_success() => Err(HubError::Refused {
+                status: status.as_u16(),
+                code: String::new(),
+                description: String::new(),
+            }),
+            answer => answer,
+        }
     }
     /// Revokes one of the person's identities, as `agmen leave` does
     /// (`DELETE /v1/identities/{id}` with the owner's token). `Ok(false)`
@@ -239,7 +276,12 @@ impl Hub {
         http: reqwest::Client,
         credentials: std::sync::Arc<Credentials>,
     ) -> Self {
-        Self { http, credentials }
+        Self {
+            http,
+            credentials,
+            #[cfg(test)]
+            mint_timeout: std::sync::Mutex::new(None),
+        }
     }
 
     /// An HTTP client for the hub: no redirects, bounded connect and read.
@@ -258,6 +300,11 @@ impl Hub {
 
     pub(crate) fn credentials(&self) -> &Credentials {
         &self.credentials
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_http(&self, http: reqwest::Client) -> Self {
+        Self::new(http, self.credentials.clone())
     }
 
     /// Sends `method` to `/v1/projects/{project}/<segments>?<query>` with
@@ -868,5 +915,56 @@ mod tests {
                 assert!(error.to_string().contains("16777216 byte limit"), "{error}");
             }
         }
+    }
+
+    /// Resolves nothing, so a request never leaves its connect phase.
+    struct Stalled;
+
+    impl reqwest::dns::Resolve for Stalled {
+        fn resolve(&self, _name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    /// The error of a POST to `url` that fails, or times out after `wait`.
+    async fn send_error(
+        client: reqwest::ClientBuilder,
+        url: &str,
+        wait: Duration,
+    ) -> reqwest::Error {
+        let client = client.no_proxy().build().unwrap();
+        client.post(url).timeout(wait).send().await.unwrap_err()
+    }
+
+    // Only a failure that proves the request never left skips the mint lookup.
+    #[tokio::test]
+    async fn mint_lookup_skips_only_errors_before_the_request_is_written() {
+        let client = reqwest::Client::builder;
+        let (long, short) = (Duration::from_secs(30), Duration::from_millis(50));
+        let lookup = |error| HubError::Http(error).mint_may_have_committed();
+        // Nothing listens: the connection is refused.
+        let socket = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let closed = format!("http://{}/", socket.local_addr().unwrap());
+        drop(socket);
+        assert!(!lookup(send_error(client(), &closed, long).await));
+        // A request reqwest cannot build is never sent.
+        let unbuildable = send_error(client(), "ftp://hub.invalid/", long).await;
+        assert!(unbuildable.is_builder() && !lookup(unbuildable));
+        // The client's connect timeout is a connect error as well as a timeout.
+        let stalled = || client().dns_resolver(Stalled);
+        let url = "http://hub.invalid/";
+        let error = send_error(stalled().connect_timeout(short), url, long).await;
+        assert!(error.is_connect() && error.is_timeout(), "{error:?}");
+        assert!(!lookup(error));
+        // The request's own timeout is not a connect error, whichever phase it
+        // ends. With both at 10 s it expires first, so a stalled connect gets the
+        // lookup too; its guards find no mint to revoke.
+        let error = send_error(stalled().connect_timeout(long), url, short).await;
+        assert!(error.is_timeout() && !error.is_connect(), "{error:?}");
+        assert!(lookup(error));
+        // A connected socket nobody answers: the request was written.
+        let silent = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", silent.local_addr().unwrap());
+        assert!(lookup(send_error(client(), &url, short).await));
     }
 }
