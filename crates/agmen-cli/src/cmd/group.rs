@@ -464,7 +464,8 @@ const NO_PAID_PLAN: &str = "this group has no paid plan, so it has no seats or b
 /// Reads of `GET /seats` when `/v1/me` omitted `state`. One call, no retry.
 const ABSENT_STATE_READS: usize = 1;
 
-/// Plan checkouts after a read-only portal refusal. One step, no retry.
+/// Plan checkouts after a read-only portal refusal reuse the previous plan and
+/// seats, or default to Team. One step, no retry.
 const READ_ONLY_FALLBACKS: usize = 1;
 
 /// `team` or `business` for `agmen group billing --plan`.
@@ -564,6 +565,15 @@ fn billing_step(state: Option<&str>, plan: Option<PlanChoice>, seats: Option<u32
         },
         "read_only" => BillingStep::PortalThenPlan,
         _ => BillingStep::Unsupported,
+    }
+}
+
+/// The previous paid plan and seats, or Team when no known plan is stored.
+fn repay_choice(plan: Option<&str>, paid: u32) -> (&'static str, Option<u32>) {
+    match plan {
+        Some("team") => ("team", Some(paid)),
+        Some(name) if name.starts_with("business-") => ("business", Some(paid)),
+        _ => ("team", None),
     }
 }
 
@@ -839,7 +849,9 @@ async fn portal_then_plan(human: &Human, group: &client::Group) -> Result<()> {
             Ok(())
         }
         Err(err) if is_no_subscription(&err) && READ_ONLY_FALLBACKS == 1 => {
-            print_plan(human, group, "team", None).await
+            let view = fetch_seats(human, group).await?;
+            let (plan, seats) = repay_choice(view.plan.as_deref(), view.paid);
+            print_plan(human, group, plan, seats).await
         }
         Err(err) => Err(billing_error(
             err,
