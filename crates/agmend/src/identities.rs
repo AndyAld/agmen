@@ -709,6 +709,13 @@ impl Identities {
         limit: u32,
         byte_budget: usize,
     ) -> Result<Vec<StampedEnvelope>, ApiError> {
+        // The pump marks a listener failed on any error here, so a failed catch-up
+        // is logged and retried on the next drain instead of returned.
+        if agmen_client::is_local(&caller.hub_url)
+            && let Err(error) = self.project_channel(&caller.project).await
+        {
+            tracing::warn!(code = ?error.code, "listener collector catch-up failed");
+        }
         let origin = agmen_client::origin_key(&caller.hub_url);
         let identity = caller.identity_id.clone();
         store_work(self.store.clone(), move |store| {
@@ -1934,7 +1941,7 @@ mod local_collection_tests {
         .unwrap();
     }
 
-    // The next two run no supervise task and no collector: a recorded row reaches
+    // The next three run no supervise task and no collector: a recorded row reaches
     // the caller only if the call itself finishes the catch-up before it drains.
     #[tokio::test]
     async fn pending_of_a_local_identity_collects_recorded_rows_before_it_drains() {
@@ -1962,6 +1969,55 @@ mod local_collection_tests {
                 .core
                 .identities
                 .launch_pending(&caller)
+                .await
+                .unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].client.id, dm.id);
+            f.stop().await;
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn listener_pending_of_a_local_identity_collects_recorded_rows_before_it_drains() {
+        tokio::time::timeout(TEST_WAIT, async {
+            let f = Fixture::new().await;
+            let dm = f.post(Some(&f.agents[0])).await;
+            let caller = f.caller(&f.agents[0]).await;
+            let rows = f
+                .daemon
+                .core
+                .identities
+                .listener_pending(&caller, 1, agmen_local::MAX_FRAME as usize - 4096)
+                .await
+                .unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].client.id, dm.id);
+            f.stop().await;
+        })
+        .await
+        .unwrap();
+    }
+
+    // The pump marks a listener failed when listener_pending errors, so a catch-up
+    // that fails (here the local origin has stopped) must not block the drain.
+    #[tokio::test]
+    async fn listener_pending_drains_rows_already_pending_when_the_catch_up_fails() {
+        tokio::time::timeout(TEST_WAIT, async {
+            let f = Fixture::new().await;
+            let dm = f.post(Some(&f.agents[0])).await;
+            f.collection
+                .local_wake(&mut VecDeque::new(), MAX_COLLECTION_PAGES)
+                .await
+                .unwrap();
+            f.daemon.core.origins.local().shutdown().await;
+            let caller = f.caller(&f.agents[0]).await;
+            let rows = f
+                .daemon
+                .core
+                .identities
+                .listener_pending(&caller, 1, agmen_local::MAX_FRAME as usize - 4096)
                 .await
                 .unwrap();
             assert_eq!(rows.len(), 1);

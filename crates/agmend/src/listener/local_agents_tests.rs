@@ -13,7 +13,7 @@ use std::time::Duration;
 use crate::Agmend;
 use agmen_client::{IdentityFile, read_local_credential};
 use agmen_local::{Request, Response};
-use agmen_proto::{ClientEnvelope, IdentityId, Payload, Timestamp};
+use agmen_proto::{ClientEnvelope, IdentityId, Payload, ProjectId, Timestamp};
 use serde_json::{Value, json};
 
 const WAIT: Duration = Duration::from_secs(5);
@@ -177,6 +177,11 @@ impl Fixture {
         tokio::sync::oneshot::Sender<()>,
         tokio::task::JoinHandle<()>,
     ) {
+        Self::serve_daemon(home, Self::daemon(home)).await
+    }
+
+    /// A bound daemon whose listeners run the fake program. It is not serving yet.
+    fn daemon(home: &Home) -> Agmend {
         let program = home.dir.path().join("fake-listener");
         std::fs::write(&program, format!("#!/bin/sh\nset -eu\n{FAKE}")).unwrap();
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -195,6 +200,17 @@ impl Fixture {
         ]);
         listeners.tick = POLL;
         core.listeners = Arc::new(listeners);
+        daemon
+    }
+
+    async fn serve_daemon(
+        home: &Home,
+        daemon: Agmend,
+    ) -> (
+        Client,
+        tokio::sync::oneshot::Sender<()>,
+        tokio::task::JoinHandle<()>,
+    ) {
         let (stop, stopped) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(daemon.serve_until(async {
             stopped.await.unwrap();
@@ -410,6 +426,34 @@ async fn listener_readopts_a_local_listener_after_agmend_stops() {
         f.wait_batches().await[0]
             .to_string()
             .contains("after adoption")
+    );
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn local_listener_pending_after_agmend_reopens_returns_recorded_rows() {
+    let mut f = Fixture::new().await;
+    f.start().await;
+    f.stop.send(()).unwrap();
+    tokio::time::timeout(WAIT, f.task).await.unwrap().unwrap();
+    // Recorded while agmend is closed, so no later commit wakes a collector for it.
+    let daemon = Fixture::daemon(&f.home);
+    let project: ProjectId = serde_json::from_value(f.project["project"].clone()).unwrap();
+    daemon
+        .core
+        .origins
+        .local()
+        .post_as_person(&project, &envelope("recorded while closed"))
+        .await
+        .unwrap();
+    let (client, stop, task) = Fixture::serve_daemon(&f.home, daemon).await;
+    f.client = client;
+    f.stop = stop;
+    f.task = task;
+    assert!(
+        f.wait_batches().await[0]
+            .to_string()
+            .contains("recorded while closed")
     );
     f.stop().await;
 }
