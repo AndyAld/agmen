@@ -179,20 +179,60 @@ async fn resume_tree_skips_running_members() {
     )
     .await
     .unwrap();
-    assert_eq!(answer["started"], json!(["agent001"]));
+    assert_eq!(answer["started"], json!(["agent001", "kid00002"]));
     assert_eq!(
         answer["skipped"],
-        json!([
-            {"identity":"kid00001", "reason":"already running"},
-            {"identity":"kid00002", "reason":"parent not started"}
-        ])
+        json!([{"identity":"kid00001", "reason":"already running"}])
     );
     assert_states(
         &fixture,
         &[
             ("agent001", "idle"),
             ("kid00001", "idle"),
-            ("kid00002", "offline"),
+            ("kid00002", "idle"),
+        ],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn resume_tree_starts_descendants_below_a_running_member() {
+    let (fixture, _) = tree_fixture().await;
+    settings(&fixture, "budgets = false");
+    root(&fixture).await;
+    child(&fixture, "agent001", "k1").await.unwrap();
+    tier(&fixture, "kid00001", Some(Tier::Owner)).await;
+    child(&fixture, "kid00001", "k2").await.unwrap();
+    tier(&fixture, "kid00002", Some(Tier::Owner)).await;
+    child(&fixture, "kid00002", "k3").await.unwrap();
+    worker_call(&fixture, "agent_stop", json!({"identity":"agent001"}))
+        .await
+        .unwrap();
+    worker_call(&fixture, "agent_start", json!({"identity":"kid00001"}))
+        .await
+        .unwrap();
+    let answer = worker_call(
+        &fixture,
+        "agent_start",
+        json!({"identity":"agent001","subtree":true}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        answer["started"],
+        json!(["agent001", "kid00002", "kid00003"])
+    );
+    assert_eq!(
+        answer["skipped"],
+        json!([{"identity":"kid00001", "reason":"already running"}])
+    );
+    assert_states(
+        &fixture,
+        &[
+            ("agent001", "idle"),
+            ("kid00001", "idle"),
+            ("kid00002", "idle"),
+            ("kid00003", "idle"),
         ],
     )
     .await;

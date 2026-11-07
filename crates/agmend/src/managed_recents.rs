@@ -86,10 +86,23 @@ impl Managed {
                         if held.state != "offline" {
                             return Err(bad_request("already running"));
                         }
-                        if !held.record.parent.as_ref().is_some_and(|parent| started.contains(parent)) {
+                        let parent = held.record.parent.clone();
+                        // One worker lock at a time: release the child before the parent's.
+                        drop(held);
+                        let parent_up = match parent {
+                            Some(parent) if started.contains(&parent) => true,
+                            Some(parent) => {
+                                let worker = self.workers.lock().await.get(&parent).cloned();
+                                match worker {
+                                    Some(worker) => worker.lock().await.state != "offline",
+                                    None => false,
+                                }
+                            }
+                            None => false,
+                        };
+                        if !parent_up {
                             return Err(bad_request("parent not started"));
                         }
-                        drop(held);
                         self.start_one_locked(Target {
                             identity: id.clone(),
                             project: None,

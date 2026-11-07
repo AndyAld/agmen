@@ -453,8 +453,8 @@ signed-in hub login for a hub project.
   children. A root failure fails the call without starting descendants.
   The root's answer gains `started`, an array of identity ids with the root
   first, and `skipped`, an array of `{identity, reason}`. Running descendants
-  are skipped as `already running`; descendants whose parent did not start
-  in this call are skipped as `parent not started`. Other start failures,
+  are skipped as `already running`; descendants whose parent is neither running nor
+  started in this call are skipped as `parent not started`. Other start failures,
   including a revoked local identity, use the original error message and
   do not stop siblings from starting. The tree has a 30 second deadline;
   unfinished and unreached members are skipped as `deadline`. Quit cancels
