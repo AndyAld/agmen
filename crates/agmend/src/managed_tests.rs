@@ -1120,6 +1120,140 @@ async fn framed_local_origin_request_from_worker_is_forbidden() {
     task.await.unwrap();
 }
 
+const FRAME_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The next frame, or a failed test: a regression here must not hang the suite.
+async fn framed_reply(client: &mut tokio::net::UnixStream) -> agmen_local::Response {
+    tokio::time::timeout(FRAME_WAIT, agmen_local::frame::read_async(client))
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+async fn hello_over(
+    peer: i32,
+    core: std::sync::Arc<crate::Core>,
+) -> (tokio::net::UnixStream, tokio::task::JoinHandle<()>) {
+    use agmen_local::{Outcome, Request, frame};
+    let (mut client, server) = tokio::net::UnixStream::pair().unwrap();
+    let task = tokio::spawn(crate::api::serve_with_peer(server, core, move |_| Ok(peer)));
+    frame::write_async(&mut client, &Request::new(1, "hello", json!({"api":1})))
+        .await
+        .unwrap();
+    assert!(matches!(
+        framed_reply(&mut client).await.outcome,
+        Outcome::Ok { .. }
+    ));
+    (client, task)
+}
+
+#[tokio::test]
+async fn framed_local_inbox_and_state_requests_from_worker_are_forbidden() {
+    use agmen_local::{Outcome, Request, frame};
+    let fixture = Fixture::new().await;
+    let core = &fixture.daemon.core;
+    let local = core.origins.local();
+    let project = local
+        .create_project("private", "owner")
+        .await
+        .unwrap()
+        .project()
+        .clone();
+    let person = local.person().await.unwrap().unwrap();
+    let worker: agmen_client::IdentityFile = serde_json::from_value(
+        core.identities
+            .local_mint(&core.managed, json!({"project": project, "name": "sender"}))
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let token = core
+        .identities
+        .local_token(&worker.identity_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let now = agmen_proto::Timestamp::now();
+    let dm = agmen_proto::ClientEnvelope {
+        v: 1,
+        id: agmen_core::new_message_id(now).unwrap(),
+        reply_to: None,
+        to: vec![person.id],
+        mentions: Vec::new(),
+        items: Vec::new(),
+        lane: None,
+        body: "for the person only".try_into().unwrap(),
+        valid_until: None,
+        sent_at: now,
+        payload: agmen_proto::Payload::Dm {},
+    };
+    assert!(matches!(
+        local
+            .ingest(&project, &worker.identity_id, &dm)
+            .await
+            .unwrap(),
+        agmen_proto::DeliveryReply::Ack { .. }
+    ));
+    let requests = [
+        ("inbox", json!({"project": project})),
+        ("state", json!({"project": project, "key": "roster"})),
+        ("state", json!({"project": project, "key": "head"})),
+        ("watch", json!({"project": project})),
+    ];
+    // A peer in a worker's process group is refused every one of them.
+    let (mut client, task) = hello_over(4242, core.clone()).await;
+    for (method, params) in requests.clone() {
+        frame::write_async(&mut client, &Request::new(2, method, params))
+            .await
+            .unwrap();
+        match framed_reply(&mut client).await.outcome {
+            Outcome::Err { error } => {
+                assert_eq!(error.code, agmen_local::ErrorCode::Forbidden, "{method}");
+                assert_eq!(error.message, "agents cannot call owner-only methods");
+            }
+            other => panic!("{method} reached the person's local record: {other:?}"),
+        }
+    }
+    // The worker's own identity keeps its reads: the refusal is for the human caller.
+    for (method, mut params) in requests.clone().into_iter().take(2) {
+        params["local_token"] = json!(token.expose());
+        let mut request = Request::new(3, method, params);
+        request.as_ = Some(worker.identity_id.clone());
+        frame::write_async(&mut client, &request).await.unwrap();
+        let response = framed_reply(&mut client).await;
+        assert!(
+            matches!(response.outcome, Outcome::Ok { .. }),
+            "{method} was refused to the worker's identity: {response:?}"
+        );
+    }
+    drop(client);
+    tokio::time::timeout(FRAME_WAIT, task)
+        .await
+        .unwrap()
+        .unwrap();
+    // The same reads from the person's own process still answer.
+    let (mut client, task) = hello_over(4243, core.clone()).await;
+    for (method, params) in requests.into_iter().take(3) {
+        let key = params["key"].clone();
+        frame::write_async(&mut client, &Request::new(2, method, params))
+            .await
+            .unwrap();
+        let response = framed_reply(&mut client).await;
+        let Outcome::Ok { result } = response.outcome else {
+            panic!("{method} was refused to the person: {response:?}");
+        };
+        match method {
+            "inbox" => assert_eq!(result["messages"][0]["body"], "for the person only"),
+            _ => assert_eq!(result["key"], key),
+        }
+    }
+    drop(client);
+    tokio::time::timeout(FRAME_WAIT, task)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
 #[tokio::test]
 async fn mixed_queue_runs_owner_batch_before_default_batch() {
     let fixture = Fixture::new().await;

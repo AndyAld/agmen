@@ -181,14 +181,38 @@ pub(crate) fn owner_peer_check(
     {
         return Ok(());
     }
-    if lookup().is_ok_and(|pid| !managed.contains_peer(pid)) {
+    if is_owner_peer(managed, lookup) {
         Ok(())
     } else {
-        Err(ApiError {
-            code: ErrorCode::Forbidden,
-            message: "agents cannot call owner-only methods".into(),
-        })
+        Err(owner_only())
     }
+}
+
+/// Whether `lookup` names a peer outside every worker and listener process group.
+fn is_owner_peer(
+    managed: &crate::managed::Managed,
+    lookup: impl FnOnce() -> std::io::Result<i32>,
+) -> bool {
+    lookup().is_ok_and(|pid| !managed.contains_peer(pid))
+}
+
+fn owner_only() -> ApiError {
+    ApiError {
+        code: ErrorCode::Forbidden,
+        message: "agents cannot call owner-only methods".into(),
+    }
+}
+
+/// Whether the request names a project this machine's record holds.
+async fn names_local_project(core: &Core, raw: &Value) -> bool {
+    let Some(project) = raw
+        .get("project")
+        .and_then(Value::as_str)
+        .and_then(|project| project.parse::<ProjectId>().ok())
+    else {
+        return false;
+    };
+    core.origins.of(&project).await == crate::origin::Origin::Local
 }
 
 async fn pending(core: &Core, caller: Caller, raw: Value) -> Result<Value, ApiError> {
@@ -289,7 +313,7 @@ async fn authorize(
         .identities
         .authorize(request.as_.as_ref(), token.as_deref())
         .await?;
-    owner_peer_check(&core.managed, &caller, &request.method, || {
+    let lookup = || {
         let pid = peer
             .as_ref()
             .copied()
@@ -299,7 +323,19 @@ async fn authorize(
         } else {
             Ok(pid)
         }
-    })?;
+    };
+    owner_peer_check(&core.managed, &caller, &request.method, lookup)?;
+    // owner_peer_check lets these reads through for any caller, and a worker arrives
+    // as the human, so on a local project it would read the person's own record.
+    // shortcut: a hub project stays open to workers as before; to close it, drop
+    // names_local_project and change worker_peer_cannot_call_owner_methods_even_without_identity_credentials.
+    if matches!(caller, Caller::Human)
+        && matches!(request.method.as_str(), "inbox" | "state" | "watch")
+        && !is_owner_peer(&core.managed, lookup)
+        && names_local_project(core, &request.params).await
+    {
+        return Err(owner_only());
+    }
     Ok(caller)
 }
 
