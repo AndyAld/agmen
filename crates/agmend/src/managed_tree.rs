@@ -18,6 +18,7 @@ use super::{
     root_depth,
 };
 use crate::console::{bad_request, params};
+use crate::hub_mint::rollback_hub_mint;
 use crate::state::ManagedIdentity;
 
 #[derive(Debug, Deserialize)]
@@ -474,7 +475,7 @@ impl Managed {
             {
                 tracing::warn!(identity = %id, "the discarded identity's credential was not deleted: {}", cause.message);
             }
-        } else if !self.rollback_hub_mint(&identity.hub_url, id).await {
+        } else if !rollback_hub_mint(&self.hub, &identity.hub_url, id, "agent").await {
             // The id alone: the hub's error text can carry anything.
             left.push(format!("revoking {id}: the hub did not revoke it"));
         }
