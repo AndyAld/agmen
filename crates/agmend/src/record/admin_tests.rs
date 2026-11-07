@@ -12,7 +12,7 @@ use crate::record::{Clock, SqliteStore, backend, micros, schema, test_clock, tes
 
 const NOW: &str = "2026-11-02T12:00:00Z";
 const BAD_DELEGATOR: &str =
-    "delegated_by must name a live listener of this owner and project for an agent worker";
+    "delegated_by must name a live identity of this owner and project for an agent child";
 const PROJECT_FIXTURES: usize = MAX_LOCAL_PROJECTS + 1;
 
 async fn store() -> (TempDir, SqliteStore) {
@@ -341,7 +341,10 @@ async fn delegated_by_must_be_a_live_listener_of_the_same_person() {
         .await
         .unwrap();
     let mut req = request(&topics, "worker", IdentityKind::Agent);
-    for id in [agent.id, elsewhere.id, foreign, "unknown1".parse().unwrap()] {
+    let mut agent_child = request(&topics, "agent-child", IdentityKind::Agent);
+    agent_child.delegated_by = Some(agent.id);
+    assert!(store.mint(agent_child).await.is_ok());
+    for id in [elsewhere.id, foreign, "unknown1".parse().unwrap()] {
         req.delegated_by = Some(id);
         error(
             store.mint(req.clone()).await.unwrap_err(),
@@ -379,6 +382,73 @@ async fn delegated_by_must_be_a_live_listener_of_the_same_person() {
     req.name = "after-revocation".into();
     error(
         store.mint(req).await.unwrap_err(),
+        "bad_role",
+        BAD_DELEGATOR,
+    );
+}
+
+#[tokio::test]
+async fn delegated_by_accepts_any_live_parent_of_owner() {
+    let (_dir, store, topics) = project().await;
+    for (name, kind) in [
+        ("agent", IdentityKind::Agent),
+        ("coordinator", IdentityKind::Coordinator),
+        ("listener", IdentityKind::Listener),
+    ] {
+        let parent = store.mint(request(&topics, name, kind)).await.unwrap();
+        let mut child = request(&topics, &format!("child-{name}"), IdentityKind::Agent);
+        child.delegated_by = Some(parent.id);
+        assert!(store.mint(child).await.is_ok());
+    }
+}
+
+#[tokio::test]
+async fn delegated_by_refuses_a_revoked_parent() {
+    let (_dir, store, topics) = project().await;
+    let parent = store
+        .mint(request(&topics, "parent", IdentityKind::Agent))
+        .await
+        .unwrap();
+    store.revoke(topics.project(), &parent.id).await.unwrap();
+    let mut child = request(&topics, "child", IdentityKind::Agent);
+    child.delegated_by = Some(parent.id);
+    error(
+        store.mint(child).await.unwrap_err(),
+        "bad_role",
+        BAD_DELEGATOR,
+    );
+}
+
+#[tokio::test]
+async fn delegated_by_refuses_another_owners_parent() {
+    let (_dir, store, topics) = project().await;
+    let other = store.add_member(&topics, MemberRole::Member).await.unwrap();
+    let t = topics.clone();
+    let parent = store
+        .write(move |conn, _| Ok(test_rows::identity(conn, &t, "agent", &other)))
+        .await
+        .unwrap();
+    let mut child = request(&topics, "child", IdentityKind::Agent);
+    child.delegated_by = Some(parent);
+    error(
+        store.mint(child).await.unwrap_err(),
+        "bad_role",
+        BAD_DELEGATOR,
+    );
+}
+
+#[tokio::test]
+async fn delegated_by_refuses_a_parent_in_another_project() {
+    let (_dir, store, topics) = project().await;
+    let other = store.create_project("other").await.unwrap();
+    let parent = store
+        .mint(request(&other, "parent", IdentityKind::Agent))
+        .await
+        .unwrap();
+    let mut child = request(&topics, "child", IdentityKind::Agent);
+    child.delegated_by = Some(parent.id);
+    error(
+        store.mint(child).await.unwrap_err(),
         "bad_role",
         BAD_DELEGATOR,
     );

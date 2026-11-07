@@ -163,7 +163,6 @@ struct Attached {
 /// One launch authority for the current signed-in human.
 #[derive(Debug)]
 pub(crate) struct Managed {
-    #[expect(dead_code, reason = "origin routing is wired in Task 14")]
     origins: Arc<crate::origin::Origins>,
     hub: Arc<Hub>,
     identities: OnceCell<Weak<Identities>>,
@@ -466,6 +465,32 @@ impl Managed {
             body["edits"] = json!(spec.edits);
             body["role_sha256"] = json!(spec.role_sha256);
         }
+        if self.origins.of(&launch.project).await? == crate::origin::Origin::Local {
+            let minted = self
+                .origins
+                .local()
+                .mint(crate::record::admin::LocalMint {
+                    project: launch.project.clone(),
+                    name: launch.name.clone(),
+                    kind: role.map_or(IdentityKind::Agent, role_kind),
+                    spec: spec.clone(),
+                    agent: None,
+                    delegated_by: parent.map(|parent| parent.identity.identity_id.clone()),
+                })
+                .await?;
+            return Ok(IdentityFile {
+                tenant: minted.topics.tenant().clone(),
+                project: minted.topics.project().clone(),
+                identity_id: minted.id,
+                handle: minted.handle,
+                owner_id: login.human_id.clone(),
+                hub_url: agmen_client::local_hub_url(),
+                broker_url: agmen_client::local_broker(),
+                role: spec.as_ref().map(|spec| spec.role.clone()),
+                role_sha256: spec.map(|spec| spec.role_sha256),
+                verbs: minted.verbs,
+            });
+        }
         let minted = self.hub.mint_identity(&body).await?;
         #[derive(Deserialize)]
         struct Minted {
@@ -670,7 +695,6 @@ impl Managed {
             project: Option<ProjectId>,
         }
         let list: List = params(raw)?;
-        let login = self.hub.credentials().login().await.map_err(error)?;
         let _settings = self.safeguards().await;
         let settings_error = self.safeguards_cache.lock().await.message();
         let _accounting = self.accounting.lock().await;
@@ -679,8 +703,16 @@ impl Managed {
         for worker in self.workers.lock().await.values() {
             let worker = worker.lock().await;
             let record = &worker.record;
+            let login = match self.origins.person_for(&record.identity.hub_url).await {
+                Ok(login) => login,
+                Err(failure) if agmen_client::is_local(&record.identity.hub_url) => {
+                    return Err(failure);
+                }
+                Err(_) => continue,
+            };
             if record.identity.owner_id != login.human_id
-                || record.identity.hub_url.origin() != login.hub_url.origin()
+                || agmen_client::origin_key(&record.identity.hub_url)
+                    != agmen_client::origin_key(&login.hub_url)
                 || list
                     .project
                     .as_ref()
@@ -755,10 +787,14 @@ impl Managed {
             .get(&identity)
             .cloned()
             .ok_or_else(|| bad_request("agent is not managed by this daemon"))?;
-        let login = self.hub.credentials().login().await.map_err(error)?;
         let held = worker.lock().await;
+        let login = self
+            .origins
+            .person_for(&held.record.identity.hub_url)
+            .await?;
         if held.record.identity.owner_id != login.human_id
-            || held.record.identity.hub_url.origin() != login.hub_url.origin()
+            || agmen_client::origin_key(&held.record.identity.hub_url)
+                != agmen_client::origin_key(&login.hub_url)
         {
             return Err(crate::identities::forbidden());
         }
@@ -887,22 +923,23 @@ impl Managed {
         if workers.is_empty() {
             return;
         }
-        let login = self.hub.credentials().login().await;
         let cap_budget = match self.safeguards().await {
             Ok(settings) => settings.budgets,
             Err(_) => self.safeguards_cache.lock().await.last_good.budgets,
         };
         for worker in workers {
             let mut held = worker.lock().await;
-            if !login.as_ref().is_ok_and(|login| {
-                login.human_id == held.record.identity.owner_id
-                    && login.hub_url.origin() == held.record.identity.hub_url.origin()
-            }) {
-                drop(held);
-                if let Err(error) = self.stop_worker(worker).await {
-                    tracing::warn!(code=?error.code,"stopping agent after login changed failed");
+            match self.origins.person_for(&held.record.identity.hub_url).await {
+                Ok(login) if actions::owned(&held.record.identity, &login).is_ok() => {}
+                // A busy or stopped local record is retryable, not a logout.
+                Err(error) if crate::local_origin::is_unavailable(&error) => continue,
+                _ => {
+                    drop(held);
+                    if let Err(error) = self.stop_worker(worker).await {
+                        tracing::warn!(code=?error.code,"stopping agent after login changed failed");
+                    }
+                    continue;
                 }
-                continue;
             }
             if held.state == "attached" {
                 self.watch_attached(&mut held).await;
@@ -1154,7 +1191,7 @@ fn check_project(
 ) -> Result<(), ApiError> {
     if identity.project != *project
         || identity.owner_id != login.human_id
-        || identity.hub_url.origin() != login.hub_url.origin()
+        || agmen_client::origin_key(&identity.hub_url) != agmen_client::origin_key(&login.hub_url)
     {
         return Err(bad_request(
             "checkout is not joined to this project and owner",

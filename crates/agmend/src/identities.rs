@@ -679,6 +679,9 @@ impl Identities {
     }
 
     pub(crate) async fn pending(&self, caller: &ManagedIdentity) -> Result<Value, ApiError> {
+        if agmen_client::is_local(&caller.hub_url) {
+            self.project_channel(&caller.project).await?;
+        }
         let origin = agmen_client::origin_key(&caller.hub_url);
         let identity = caller.identity_id.clone();
         let rows = store_work(self.store.clone(), move |store| {
@@ -719,6 +722,9 @@ impl Identities {
         &self,
         caller: &ManagedIdentity,
     ) -> Result<Vec<StampedEnvelope>, ApiError> {
+        if agmen_client::is_local(&caller.hub_url) {
+            self.project_channel(&caller.project).await?;
+        }
         let origin = agmen_client::origin_key(&caller.hub_url);
         let identity = caller.clone();
         let rows = store_work(self.store.clone(), move |store| {
@@ -767,6 +773,12 @@ impl Identities {
             project: project.clone(),
             tx: tx.clone(),
         };
+        if origin == crate::origin::Origin::Local {
+            // Complete the first catch-up before a pending call can drain.
+            context
+                .local_wake(&mut VecDeque::new(), MAX_COLLECTION_PAGES)
+                .await?;
+        }
         let (stop, stopped) = oneshot::channel();
         let task = tokio::spawn(async move {
             tokio::select! { () = context.run() => {}, _ = stopped => {} }
@@ -785,6 +797,18 @@ impl Identities {
     /// Runs independently of local subscriptions. Removing a login or identity
     /// ends its runtime; durable rows remain for their original owner.
     pub(crate) async fn supervise(&self) {
+        match self.origins.local().projects().await {
+            Ok(projects) => {
+                for (project, _) in projects.into_iter().take(MAX_COLLECTORS) {
+                    if let Err(error) = self.project_channel(&project).await {
+                        tracing::warn!(code = ?error.code, "starting local collector failed");
+                    }
+                }
+            }
+            // A person who only uses a hub has no local.db, as LocalOrigin::start allows.
+            Err(error) if error.code == ErrorCode::NotFound => {}
+            Err(error) => tracing::warn!(code = ?error.code, "reading local projects failed"),
+        }
         let mut tick = tokio::time::interval(Duration::from_millis(100));
         loop {
             tick.tick().await;
@@ -1598,7 +1622,30 @@ mod local_collection_tests {
     const TEST_DM_COUNT: usize = COLLECTION_PAGE_SIZE as usize + 1;
     const TEST_DRAIN_WAKES: usize = 4;
     const TEST_WAIT: Duration = Duration::from_secs(30);
+    const COLLECT_WAIT: Duration = Duration::from_secs(5);
+    const COLLECT_POLL: Duration = Duration::from_millis(20);
+    const SUPERVISE_PROBE: Duration = Duration::from_millis(300);
     const AGENTS: [&str; 2] = ["first", "second"];
+
+    #[derive(Clone, Default)]
+    struct LogBytes(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogBytes {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBytes {
+        type Writer = Self;
+        fn make_writer(&'a self) -> Self {
+            self.clone()
+        }
+    }
 
     struct Fixture {
         _dir: tempfile::TempDir,
@@ -1700,6 +1747,22 @@ mod local_collection_tests {
             })
             .await
             .unwrap()
+        }
+
+        /// The registered row a pending call authorizes as.
+        async fn caller(&self, id: &IdentityId) -> ManagedIdentity {
+            self.daemon
+                .core
+                .identities
+                .managed(
+                    agmen_client::LOCAL_ORIGIN.into(),
+                    self.collection.owner.clone(),
+                )
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|row| row.identity_id == *id)
+                .unwrap()
         }
 
         async fn execute_state(&self, sql: String) {
@@ -1869,6 +1932,97 @@ mod local_collection_tests {
         })
         .await
         .unwrap();
+    }
+
+    // The next two run no supervise task and no collector: a recorded row reaches
+    // the caller only if the call itself finishes the catch-up before it drains.
+    #[tokio::test]
+    async fn pending_of_a_local_identity_collects_recorded_rows_before_it_drains() {
+        tokio::time::timeout(TEST_WAIT, async {
+            let f = Fixture::new().await;
+            let dm = f.post(Some(&f.agents[0])).await;
+            let caller = f.caller(&f.agents[0]).await;
+            let rows = f.daemon.core.identities.pending(&caller).await.unwrap();
+            assert_eq!(rows.as_array().unwrap().len(), 1);
+            assert_eq!(rows[0]["id"], json!(dm.id));
+            f.stop().await;
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn launch_pending_of_a_local_identity_collects_recorded_rows_before_it_drains() {
+        tokio::time::timeout(TEST_WAIT, async {
+            let f = Fixture::new().await;
+            let dm = f.post(Some(&f.agents[0])).await;
+            let caller = f.caller(&f.agents[0]).await;
+            let rows = f
+                .daemon
+                .core
+                .identities
+                .launch_pending(&caller)
+                .await
+                .unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].client.id, dm.id);
+            f.stop().await;
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn supervise_collects_recorded_local_rows_without_a_pending_call() {
+        tokio::time::timeout(TEST_WAIT, async {
+            let f = Fixture::new().await;
+            f.post(Some(&f.agents[0])).await;
+            let identities = f.daemon.core.identities.clone();
+            let task = tokio::spawn(async move { identities.supervise().await });
+            let inbox = Stream::Inbox(f.agents[0].clone());
+            let collected = tokio::time::timeout(COLLECT_WAIT, async {
+                while !f.collection.positions().await.unwrap().contains_key(&inbox) {
+                    tokio::time::sleep(COLLECT_POLL).await;
+                }
+            })
+            .await;
+            task.abort();
+            let _aborted = task.await;
+            assert!(
+                collected.is_ok(),
+                "supervise did not collect the recorded row"
+            );
+            assert_eq!(f.drain(&f.agents[0]).await.len(), 1);
+            f.stop().await;
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn supervise_without_a_local_record_logs_no_warning_and_creates_none() {
+        let logs = LogBytes::default();
+        let _capture = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .without_time()
+                .with_ansi(false)
+                .with_writer(logs.clone())
+                .finish(),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = crate::Agmend::bind(crate::Config::new(
+            dir.path().join("agmend.sock"),
+            dir.path().join("login.json"),
+            agmen_client::TokenStore::Dir(dir.path().join("tokens")),
+        ))
+        .unwrap();
+        // supervise never returns; its first pass runs well inside the probe.
+        let ran = tokio::time::timeout(SUPERVISE_PROBE, daemon.core.identities.supervise()).await;
+        assert!(ran.is_err());
+        assert!(!dir.path().join("local.db").exists());
+        let logs = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+        assert!(!logs.contains("reading local projects failed"), "{logs}");
+        daemon.core.identities.shutdown().await;
     }
 }
 
