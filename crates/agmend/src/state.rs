@@ -1,6 +1,6 @@
 //! Durable daemon metadata, pending notifications and receive positions.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::{self, OpenOptions};
 use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::Path;
@@ -45,6 +45,42 @@ pub(crate) const MAX_PENDING: i64 = 10_000;
 const MAX_RECEIPTS: i64 = 20_000;
 // Notifications use a scalar count, bounded by SQLite's sequence range.
 const MAX_QUEUE_ALERTS: i64 = i64::MAX;
+
+/// The cap that caused a durable owner notification.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum QueueLimit {
+    Pending,
+    Receipts,
+}
+
+impl QueueLimit {
+    fn counter(self) -> &'static str {
+        match self {
+            Self::Pending => "$.queue_full.pending",
+            Self::Receipts => "$.queue_full.receipts",
+        }
+    }
+
+    pub(crate) fn text(self, identity: &ManagedIdentity) -> String {
+        let cap = match self {
+            Self::Receipts => format!("{MAX_RECEIPTS} receipts"),
+            _ => format!("{MAX_PENDING} waiting"),
+        };
+        format!(
+            "{}'s queue is full ({cap}); new messages to it are recorded in the project but not queued for it until it is started or removed.",
+            identity.handle
+        )
+    }
+}
+
+/// What one collector may deliver for a project.
+pub(crate) struct CollectionState {
+    pub(crate) positions: BTreeMap<Stream, u64>,
+    /// The streams it delivers: the feed, the person's inbox and live identities'.
+    pub(crate) streams: BTreeSet<Stream>,
+    /// The project has room for one more position.
+    pub(crate) room: bool,
+}
 
 /// Metadata only. Credentials stay in TokenStore.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -327,6 +363,13 @@ impl Store {
             2 => {}
             other => return Err(StoreError::Version(other)),
         }
+        // Additive to v2: old readers still use the same tables and columns.
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS stream_alerts (
+            origin TEXT NOT NULL, owner TEXT NOT NULL, project TEXT NOT NULL,
+            full INTEGER NOT NULL, alerts INTEGER NOT NULL, envelope TEXT,
+            PRIMARY KEY(origin,owner,project)) STRICT;",
+        )?;
         tx.commit()?;
         if convert {
             // Keep the exclusive migration lock until journal conversion completes.
@@ -443,17 +486,39 @@ impl Store {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let current: Option<Option<String>> = tx.query_row(
-            "SELECT json_extract(metadata,'$.queue_full.envelope') FROM identities WHERE origin=?1 AND identity=?2 AND json_extract(metadata,'$.queue_full.alerts')>0",
+        let current: Option<String> = tx.query_row(
+            "SELECT metadata FROM identities WHERE origin=?1 AND identity=?2 AND json_extract(metadata,'$.queue_full.alerts')>0",
             params![origin, identity.as_str()], |row| row.get(0),
         ).optional()?;
-        let envelope = match current {
-            None => return Ok(None),
-            Some(Some(raw)) => serde_json::from_str(&raw)?,
-            Some(None) => {
-                tx.execute("UPDATE identities SET metadata=json_set(metadata,'$.queue_full.envelope',json(?3)) WHERE origin=?1 AND identity=?2", params![origin, identity.as_str(), serde_json::to_string(proposed)?])?;
-                proposed.clone()
-            }
+        let Some(raw) = current else { return Ok(None) };
+        let metadata: serde_json::Value = serde_json::from_str(&raw)?;
+        let envelope = if let Some(saved) = metadata.pointer("/queue_full/envelope") {
+            serde_json::from_value(saved.clone())?
+        } else {
+            // Old markers contain only the total and mean the pending cap.
+            let limit = if metadata
+                .pointer("/queue_full/receipts")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0)
+                > 0
+            {
+                QueueLimit::Receipts
+            } else {
+                QueueLimit::Pending
+            };
+            let who: ManagedIdentity = serde_json::from_str(&raw)?;
+            let text = limit.text(&who);
+            let mut envelope = proposed.clone();
+            envelope.body = text
+                .clone()
+                .try_into()
+                .map_err(|_| StoreError::Invalid("full queue ALERT body"))?;
+            let Payload::Alert { need, .. } = &mut envelope.payload else {
+                return Err(StoreError::Invalid("full queue ALERT payload"));
+            };
+            *need = text;
+            tx.execute("UPDATE identities SET metadata=json_set(metadata,'$.queue_full.envelope',json(?3),'$.queue_full.counter',?4) WHERE origin=?1 AND identity=?2", params![origin, identity.as_str(), serde_json::to_string(&envelope)?, limit.counter()])?;
+            envelope
         };
         tx.commit()?;
         Ok(Some(envelope))
@@ -466,7 +531,9 @@ impl Store {
         message: &MessageId,
     ) -> Result<(), StoreError> {
         self.conn.execute(
-            "UPDATE identities SET metadata=json_remove(json_set(metadata,'$.queue_full.alerts',json_extract(metadata,'$.queue_full.alerts')-1),'$.queue_full.envelope')
+            "UPDATE identities SET metadata=json_remove(json_set(metadata,'$.queue_full.alerts',json_extract(metadata,'$.queue_full.alerts')-1,
+             coalesce(json_extract(metadata,'$.queue_full.counter'),'$.queue_full.pending'),max(0,coalesce(json_extract(metadata,coalesce(json_extract(metadata,'$.queue_full.counter'),'$.queue_full.pending')),1)-1)),
+             '$.queue_full.envelope','$.queue_full.counter')
              WHERE origin=?1 AND identity=?2 AND json_extract(metadata,'$.queue_full.envelope.id')=?3 AND json_extract(metadata,'$.queue_full.alerts')>0",
             params![origin, identity.as_str(), message.as_str()],
         )?;
@@ -517,6 +584,131 @@ impl Store {
         // B T5 is the first production ingester. Unattributed test-era positions
         // must not be inherited by a different login; catch up from zero instead.
         self.positions(&position_namespace(origin, Some(owner)), project)
+    }
+
+    /// Only registered inboxes and the person's streams belong to a collector.
+    pub(crate) fn collection_positions(
+        &mut self,
+        origin: &str,
+        owner: &IdentityId,
+        project: &ProjectId,
+    ) -> Result<CollectionState, StoreError> {
+        let mut streams = BTreeSet::from([Stream::Feed, Stream::Inbox(owner.clone())]);
+        let mut stmt = self.conn.prepare("SELECT identity FROM identities WHERE origin=?1 AND owner=?2 AND project=?3 ORDER BY identity LIMIT ?4")?;
+        for row in stmt.query_map(
+            params![origin, owner.as_str(), project.as_str(), MAX_MANAGED as i64],
+            |row| row.get::<_, String>(0),
+        )? {
+            streams.insert(Stream::Inbox(
+                row?.parse()
+                    .map_err(|_| StoreError::Invalid("stored identity"))?,
+            ));
+        }
+        drop(stmt);
+        let namespace = position_namespace(origin, Some(owner));
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
+            "DELETE FROM positions WHERE (origin=?1 OR origin=?2) AND project=?3 AND stream!='feed' AND stream!=?4
+             AND NOT EXISTS(SELECT 1 FROM identities WHERE origin=?2 AND owner=?5 AND project=?3 AND identity=substr(positions.stream,7))",
+            params![namespace, origin, project.as_str(), format!("inbox:{owner}"), owner.as_str()],
+        )?;
+        let room = rearm_stream_alert(&tx, origin, project)?;
+        tx.commit()?;
+        Ok(CollectionState {
+            positions: self.positions_for_owner(origin, owner, project)?,
+            streams,
+            room,
+        })
+    }
+
+    pub(crate) fn can_deliver(
+        &self,
+        origin: &str,
+        owner: &IdentityId,
+        project: &ProjectId,
+        stream: &Stream,
+    ) -> Result<bool, StoreError> {
+        match stream {
+            Stream::Feed => Ok(true),
+            Stream::Inbox(id) if id == owner => Ok(true),
+            Stream::Inbox(id) => Ok(self.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM identities WHERE origin=?1 AND owner=?2 AND project=?3 AND identity=?4)",
+                params![origin, owner.as_str(), project.as_str(), id.as_str()], |row| row.get(0),
+            )?),
+        }
+    }
+
+    pub(crate) fn mark_streams_full(
+        &mut self,
+        origin: &str,
+        owner: &IdentityId,
+        project: &ProjectId,
+    ) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO stream_alerts VALUES (?1,?2,?3,1,1,NULL)
+             ON CONFLICT(origin,owner,project) DO UPDATE SET full=1,alerts=min(alerts,?4-1)+1 WHERE full=0",
+            params![origin, owner.as_str(), project.as_str(), MAX_QUEUE_ALERTS],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn pending_stream_alerts(
+        &self,
+        origin: &str,
+        owner: &IdentityId,
+    ) -> Result<Vec<ProjectId>, StoreError> {
+        const MAX_PROJECT_ALERTS: usize = 64;
+        let mut stmt = self.conn.prepare("SELECT project FROM stream_alerts WHERE origin=?1 AND owner=?2 AND alerts>0 ORDER BY project LIMIT ?3")?;
+        let mut projects = Vec::new();
+        for row in stmt.query_map(
+            params![origin, owner.as_str(), MAX_PROJECT_ALERTS as i64],
+            |row| row.get::<_, String>(0),
+        )? {
+            projects.push(
+                row?.parse()
+                    .map_err(|_| StoreError::Invalid("stored project"))?,
+            );
+        }
+        Ok(projects)
+    }
+
+    pub(crate) fn prepare_stream_alert(
+        &mut self,
+        origin: &str,
+        owner: &IdentityId,
+        project: &ProjectId,
+        proposed: &ClientEnvelope,
+    ) -> Result<Option<ClientEnvelope>, StoreError> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current: Option<Option<String>> = tx.query_row(
+            "SELECT envelope FROM stream_alerts WHERE origin=?1 AND owner=?2 AND project=?3 AND alerts>0",
+            params![origin, owner.as_str(), project.as_str()], |row| row.get(0),
+        ).optional()?;
+        let envelope = match current {
+            None => return Ok(None),
+            Some(Some(raw)) => serde_json::from_str(&raw)?,
+            Some(None) => {
+                tx.execute("UPDATE stream_alerts SET envelope=?4 WHERE origin=?1 AND owner=?2 AND project=?3", params![origin, owner.as_str(), project.as_str(), serde_json::to_string(proposed)?])?;
+                proposed.clone()
+            }
+        };
+        tx.commit()?;
+        Ok(Some(envelope))
+    }
+
+    pub(crate) fn acknowledge_stream_alert(
+        &self,
+        origin: &str,
+        owner: &IdentityId,
+        project: &ProjectId,
+        message: &MessageId,
+    ) -> Result<(), StoreError> {
+        self.conn.execute("UPDATE stream_alerts SET alerts=alerts-1,envelope=NULL WHERE origin=?1 AND owner=?2 AND project=?3 AND json_extract(envelope,'$.id')=?4 AND alerts>0", params![origin, owner.as_str(), project.as_str(), message.as_str()])?;
+        Ok(())
     }
 
     #[cfg(test)]
@@ -628,7 +820,15 @@ impl Store {
                     "SELECT (SELECT count(*) FROM pending WHERE origin=?1 AND identity=?2), (SELECT count(*) FROM receipts WHERE origin=?1 AND identity=?2 AND sender!='')",
                     params![origin, id.as_str()], |r| Ok((r.get(0)?, r.get(1)?)))?;
                 if pending >= MAX_PENDING || (needs_receipt && receipts >= MAX_RECEIPTS) {
-                    tx.execute("UPDATE identities SET metadata=json_set(metadata,'$.queue_full.full',1,'$.queue_full.alerts',min(coalesce(json_extract(metadata,'$.queue_full.alerts'),0),?3-1)+1) WHERE origin=?1 AND identity=?2 AND json_extract(metadata,'$.queue_full.full') IS NULL", params![origin, id.as_str(), MAX_QUEUE_ALERTS])?;
+                    let changed = tx.execute("UPDATE identities SET metadata=json_set(metadata,'$.queue_full.full',1) WHERE origin=?1 AND identity=?2 AND json_extract(metadata,'$.queue_full.full') IS NULL", params![origin, id.as_str()])?;
+                    if changed > 0 {
+                        let limit = if pending >= MAX_PENDING {
+                            QueueLimit::Pending
+                        } else {
+                            QueueLimit::Receipts
+                        };
+                        record_full_alert(&tx, origin, id.as_str(), limit)?;
+                    }
                     // An ASSIGN also comes as a second stream copy. Record this copy's
                     // receipt when it fits, so the other copy is skipped too and the
                     // ASSIGN is not delivered late once the queue drains.
@@ -769,6 +969,43 @@ impl Store {
         tx.commit()?;
         Ok(result)
     }
+}
+
+fn record_full_alert(
+    tx: &rusqlite::Transaction<'_>,
+    origin: &str,
+    identity: &str,
+    limit: QueueLimit,
+) -> Result<(), StoreError> {
+    tx.execute(
+        "UPDATE identities SET metadata=json_set(metadata,
+         '$.queue_full.alerts',min(coalesce(json_extract(metadata,'$.queue_full.alerts'),0),?4-1)+1,
+         ?3,min(coalesce(json_extract(metadata,?3),0),?4-1)+1) WHERE origin=?1 AND identity=?2",
+        params![origin, identity, limit.counter(), MAX_QUEUE_ALERTS],
+    )?;
+    Ok(())
+}
+
+/// Whether the project has room for one more position, which also re-arms its
+/// stream list ALERT.
+fn rearm_stream_alert(
+    tx: &rusqlite::Transaction<'_>,
+    origin: &str,
+    project: &ProjectId,
+) -> Result<bool, StoreError> {
+    let count: i64 = tx.query_row(
+        "SELECT count(*) FROM positions WHERE project=?2 AND (origin=?1 OR substr(origin,1,length(?3))=?3)",
+        params![origin, project.as_str(), format!("{origin}#owner=")],
+        |row| row.get(0),
+    )?;
+    let room = count < MAX_STREAM_POSITIONS as i64;
+    if room {
+        tx.execute(
+            "UPDATE stream_alerts SET full=0 WHERE origin=?1 AND project=?2 AND full=1",
+            params![origin, project.as_str()],
+        )?;
+    }
+    Ok(room)
 }
 
 fn rearm_queue_alert(

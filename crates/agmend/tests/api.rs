@@ -906,7 +906,37 @@ async fn collector_ignores_inactive_owners() {
     let connection = rusqlite::Connection::open(daemon.home.database()).unwrap();
     connection.execute("UPDATE identities SET owner='other001',metadata=json_set(metadata,'$.owner_id','other001') WHERE identity='agent002'",[]).unwrap();
     daemon.hub.state.inject(dm(1, "agent002"));
-    wait_position(&daemon, "inbox:agent002", 1).await;
+    // agent002 is another owner's now, so its inbox is not deliverable here and
+    // gets no position. The owner's own inbox follows it in the hub's replay and
+    // live order, so that position shows the collector got past agent002's message.
+    let mut own = dm(1, support::HUMAN);
+    own["id"] = json!("01JBX6Q4T7W3C2M8Y9K5P00099");
+    daemon.hub.state.inject(own);
+    wait_position(&daemon, &format!("inbox:{}", support::HUMAN), 1).await;
+    // The collector keeps running: a later feed post is delivered and its position saved.
+    let mut later = support::stamped(1, "later");
+    later["mentioned"] = json!(["agent001"]);
+    daemon.hub.state.inject(later);
+    wait_position(&daemon, "feed", 1).await;
+    let saved: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM positions WHERE stream='inbox:agent002'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        saved, 0,
+        "an inbox this login does not own gets no position"
+    );
+    let delivered: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM pending WHERE identity='agent001'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(delivered, 1, "the later feed post must reach agent001");
     let count: i64 = connection
         .query_row(
             "SELECT count(*) FROM pending WHERE identity='agent002'",
