@@ -5,6 +5,9 @@ use agmen_client::{HumanTokens, Login, OutboxState, TokenStore, store_tokens};
 use axum::response::IntoResponse as _;
 use std::sync::Mutex as StdMutex;
 
+#[path = "local_agents_tests.rs"]
+mod local_agents;
+
 const FAKE: &str = r#"
 printf '%s\n' "$@" >argv
 printf '%s\n' "$AGMEN_MANAGED" >managed-env
@@ -352,6 +355,67 @@ impl Fixture {
 
 fn event(seq: u64, from: &str) -> StampedEnvelope {
     serde_json::from_value(json!({"v":1,"id":format!("{seq:026}"),"verb":"FYI","data":{},"body":format!("message {seq}"),"sent_at":"2026-10-29T16:00:00Z","stream":"feed","seq":seq,"from":from,"from_handle":if from=="owner001" {"owner"} else {"stranger"},"from_kind":"human","hub_at":"2026-10-29T16:00:00Z"})).unwrap()
+}
+
+#[tokio::test]
+async fn local_listener_mint_conflict_is_already_running() {
+    let f = Fixture::new(FAKE).await;
+    let local = f.daemon.core.origins.local();
+    let topics = local
+        .create_project("mint conflict", "local-owner")
+        .await
+        .unwrap();
+    let login = local.login().await.unwrap().unwrap();
+    let role = f
+        .daemon
+        .core
+        .managed
+        .resolve_any_role(&f.repo(), "listener")
+        .await
+        .unwrap();
+    local
+        .mint(crate::record::admin::LocalMint {
+            project: topics.project().clone(),
+            name: "listener".into(),
+            kind: IdentityKind::Listener,
+            spec: None,
+            agent: None,
+            delegated_by: None,
+        })
+        .await
+        .unwrap();
+    let err = f
+        .listeners()
+        .mint(topics.project(), &login, &role)
+        .await
+        .unwrap_err();
+    assert_eq!(err.message, "a listener already runs in this project");
+    assert!(f.mints.lock().unwrap().is_empty());
+    local.shutdown().await;
+}
+
+#[tokio::test]
+async fn stopped_local_origin_is_retryable_and_never_the_hub() {
+    let f = Fixture::new(FAKE).await;
+    let local = f.daemon.core.origins.local();
+    let project = local
+        .create_project("stopped origin", "local-owner")
+        .await
+        .unwrap()
+        .project()
+        .clone();
+    local.shutdown().await;
+    for (method, raw) in [
+        ("listener_start", json!({"project":project,"root":f.repo()})),
+        ("listener_stop", json!({"project":project})),
+        ("listener_status", json!({"project":project})),
+        ("listener_set", json!({"project":project,"model":"haiku"})),
+    ] {
+        let err = f.human(method, raw).await.unwrap_err();
+        assert_eq!(err.code, ErrorCode::Hub, "{method}");
+        assert_eq!(err.message, "the local origin has stopped", "{method}");
+    }
+    assert!(f.mints.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
