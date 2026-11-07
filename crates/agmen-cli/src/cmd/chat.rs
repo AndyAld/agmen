@@ -1,4 +1,4 @@
-//! Human chat through the hub's authenticated post and feed routes.
+//! Human chat through the hub or this machine's local origin.
 
 use std::io::{self, BufRead, Read as _};
 use std::time::Duration;
@@ -11,6 +11,7 @@ use reqwest::{Method, RequestBuilder};
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::agmend::Agmend;
 use crate::client::{self, Api, Human, Refusal, blocking, human, refusal};
 use crate::joined::{Agent, envelope, local_worktree, mention_tokens};
 use crate::output::{Fail, body_text, clean, explain, println_flush};
@@ -21,7 +22,6 @@ const MAX_PAGES: usize = 5;
 const PAGE_LIMIT: u32 = 500;
 const CHAT_TAIL: u64 = 50;
 const STDIN_CAPACITY: usize = 1;
-const POST_WAIT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Args)]
 pub(crate) struct ChatArgs {
@@ -120,7 +120,21 @@ impl ChatOrigin<'_> {
                 if args.all && !env.mentions.contains(&Mention::All) {
                     env.mentions.insert(0, Mention::All);
                 }
-                Ok(agent.publish(env, POST_WAIT).await?.seq)
+                #[derive(Deserialize)]
+                struct Posted {
+                    seq: u64,
+                }
+                let posted: Posted = serde_json::from_value(
+                    Agmend::connect_default()
+                        .await?
+                        .call(
+                            "post",
+                            serde_json::json!({"project": agent.identity.project, "envelope": env}),
+                        )
+                        .await?,
+                )
+                .context("agmend's post answer is invalid")?;
+                Ok(posted.seq)
             }
         }
     }

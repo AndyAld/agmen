@@ -491,7 +491,7 @@ const IDENTITY: &str = r#"{"tenant":"tenant01","project":"project1","identity_id
 "broker_url":"mqtt://127.0.0.1:9"}"#;
 
 #[test]
-fn init_without_choice_off_tty_exits_2() {
+fn init_without_flags_off_tty_requires_agmend() {
     let home = Home::new();
     let wt = Worktree::new(&home);
     let out = home
@@ -499,12 +499,15 @@ fn init_without_choice_off_tty_exits_2() {
         .stdin(Stdio::null())
         .output()
         .unwrap();
-    assert_exit(&out, 2);
+    assert_exit(&out, 1);
+    let text = stderr(&out);
+    assert!(!text.contains("--self-host"), "{text}");
+    assert!(!text.contains("--hosted"), "{text}");
     assert!(
-        stderr(&out).contains("--self-host or --hosted"),
-        "{}",
-        stderr(&out)
+        text.contains("agmend is not running") && text.contains("run agmend service install"),
+        "{text}"
     );
+    assert!(!wt.path().join(".agmen/identity.json").exists());
 }
 
 #[test]

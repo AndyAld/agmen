@@ -6,10 +6,265 @@
 mod local_support;
 mod support;
 
-use agmen_client::{TokenStore, read_local_credential};
+use agmen_client::{TokenKey, TokenStore, read_local_credential};
 use local_support::Local;
 use serde_json::{Value, json};
 use support::{Home, Worktree, assert_exit, stderr, stdout};
+
+#[tokio::test]
+async fn init_without_flags_starts_locally() {
+    let local = Local::new().await;
+    let worktree = Worktree::new(&local.home);
+    let root = worktree.path();
+    let name = root.file_name().unwrap().to_str().unwrap();
+    assert!(!local.home.login_file().exists());
+    let out = local.run(&worktree, &["init"]).await;
+    assert_exit(&out, 0);
+    assert!(stdout(&out).contains(&format!(
+        "started {name} on this machine; add a hub later with agmen host up or agmen join <invite>"
+    )));
+    let identity = worktree.identity();
+    assert!(identity.is_local());
+    let handle_name = name.to_ascii_lowercase().trim_start_matches('.').to_owned();
+    assert!(identity.handle.ends_with(&format!("/{handle_name}")));
+    let projects = local.call("local_projects", json!({})).await;
+    assert!(
+        projects["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|project| {
+                project["project"] == json!(identity.project) && project["name"] == name
+            })
+    );
+    let exclude = worktree.git(&local.home, &["rev-parse", "--git-path", "info/exclude"]);
+    assert!(
+        std::fs::read_to_string(root.join(exclude.trim()))
+            .unwrap()
+            .lines()
+            .any(|line| line == ".agmen/")
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(root.join(".agmen/identity.json"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+    let out = local
+        .run(&worktree, &["post", "FYI", "first message after init"])
+        .await;
+    assert_exit(&out, 0);
+    assert!(stdout(&out).contains("recorded #1 (feed)"));
+    assert!(!local.home.login_file().exists());
+    local.stop().await;
+}
+
+#[tokio::test]
+async fn init_local_while_signed_in_stays_local() {
+    let local = Local::new().await;
+    let hub = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    hub.set_nonblocking(true).unwrap();
+    let url = format!("http://{}/", hub.local_addr().unwrap());
+    let login = json!({"hub_url": url, "human_id": "hmn7k2q9", "handle": "andy"});
+    std::fs::create_dir_all(local.home.login_file().parent().unwrap()).unwrap();
+    let login = serde_json::to_vec(&login).unwrap();
+    std::fs::write(local.home.login_file(), &login).unwrap();
+    let key = TokenKey::new(&url.parse().unwrap(), &"hmn7k2q9".parse().unwrap()).unwrap();
+    local
+        .home
+        .tokens()
+        .set(
+            &key,
+            &json!({
+                "access_token": "fake-access", "refresh_token": "fake-refresh",
+                "expires_at": "2099-01-01T00:00:00Z"
+            })
+            .to_string(),
+        )
+        .unwrap();
+    const CHOICES: [&[&str]; 2] = [&["init"], &["init", "--local"]];
+    for args in CHOICES {
+        let worktree = Worktree::new(&local.home);
+        let out = local.run(&worktree, args).await;
+        assert_exit(&out, 0);
+        assert!(worktree.identity().is_local());
+        assert_eq!(std::fs::read(local.home.login_file()).unwrap(), login);
+        assert_eq!(
+            hub.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+    local.stop().await;
+}
+
+#[tokio::test]
+async fn join_in_a_local_worktree_refuses() {
+    let local = Local::new().await;
+    let worktree = local.member("worker").await;
+    let identity_path = worktree.path().join(".agmen/identity.json");
+    let identity = std::fs::read(&identity_path).unwrap();
+    let exclude = worktree.git(&local.home, &["rev-parse", "--git-path", "info/exclude"]);
+    let exclude_path = worktree.path().join(exclude.trim());
+    let exclude = std::fs::read(&exclude_path).unwrap();
+    let projects = local.call("local_projects", json!({})).await;
+    let credential = read_local_credential(&local.home.tokens(), &worktree.identity().identity_id)
+        .unwrap()
+        .unwrap();
+    let hub = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    hub.set_nonblocking(true).unwrap();
+    let link = format!("http://{}/i#{}", hub.local_addr().unwrap(), "ab".repeat(32));
+    let code = "ab".repeat(32);
+    let choices: [&[&str]; 4] = [
+        &["join"],
+        &["join", &link],
+        &["join", &code],
+        &["join", "--project", "project1"],
+    ];
+    for args in choices {
+        let out = local.run(&worktree, args).await;
+        assert_exit(&out, 2);
+        assert_eq!(
+            stderr(&out).trim(),
+            "this worktree is on this machine's local origin; a project cannot move to a hub"
+        );
+        assert_eq!(stdout(&out), "");
+        assert_eq!(std::fs::read(&identity_path).unwrap(), identity);
+        assert_eq!(std::fs::read(&exclude_path).unwrap(), exclude);
+        assert_eq!(local.call("local_projects", json!({})).await, projects);
+        let after = read_local_credential(&local.home.tokens(), &worktree.identity().identity_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.local_token, credential.local_token);
+        assert!(!local.home.login_file().exists());
+        assert_eq!(
+            hub.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+    local.stop().await;
+}
+
+#[tokio::test]
+async fn local_chat_posts_as_the_person() {
+    let local = Local::new().await;
+    let worktree = local.member("worker").await;
+    let out = local
+        .run(&worktree, &["chat", "hello as a person @all"])
+        .await;
+    assert_exit(&out, 0);
+    let history = local
+        .call("chat_history", json!({"project": local.project}))
+        .await;
+    assert_eq!(
+        history["messages"][0]["from"],
+        json!(worktree.identity().owner_id)
+    );
+    assert_ne!(
+        history["messages"][0]["from"],
+        json!(worktree.identity().identity_id)
+    );
+    assert_eq!(history["messages"][0]["body"], "hello as a person @all");
+    assert_eq!(history["messages"][0]["mentions"], json!(["all"]));
+    local.stop().await;
+}
+
+#[tokio::test]
+async fn local_chat_all_succeeds() {
+    let local = Local::new().await;
+    let worktree = Worktree::new(&local.home);
+    let out = local.run(&worktree, &["init", "--local"]).await;
+    assert_exit(&out, 0);
+    let out = local
+        .run(&worktree, &["chat", "hello everyone", "--all"])
+        .await;
+    assert_exit(&out, 0);
+    let history = local
+        .call(
+            "chat_history",
+            json!({"project": worktree.identity().project}),
+        )
+        .await;
+    assert_eq!(
+        history["messages"][0]["from"],
+        json!(worktree.identity().owner_id)
+    );
+    assert_eq!(history["messages"][0]["mentions"], json!(["all"]));
+    local.stop().await;
+}
+
+#[tokio::test]
+async fn init_local_project_names_have_bounded_suffixes() {
+    let local = Local::new().await;
+    local
+        .call("local_project_create", json!({"name": "widgets"}))
+        .await;
+    const LAST_OCCUPIED_SUFFIX: u8 = 8;
+    for suffix in 2..=LAST_OCCUPIED_SUFFIX {
+        local
+            .call(
+                "local_project_create",
+                json!({"name": format!("widgets-{suffix}")}),
+            )
+            .await;
+    }
+    let worktree = Worktree::new(&local.home);
+    let out = local
+        .run(
+            &worktree,
+            &["init", "--local", "--name", "widgets", "--handle", "sol"],
+        )
+        .await;
+    assert_exit(&out, 0);
+    assert!(stdout(&out).contains("started widgets-9 on this machine"));
+    assert!(worktree.identity().handle.ends_with("/sol"));
+    let projects = local.call("local_projects", json!({})).await;
+    let other = Worktree::new(&local.home);
+    let exclude = other.git(&local.home, &["rev-parse", "--git-path", "info/exclude"]);
+    let exclude_path = other.path().join(exclude.trim());
+    let before = std::fs::read(&exclude_path).unwrap();
+    let out = local
+        .run(&other, &["init", "--local", "--name", "widgets"])
+        .await;
+    assert_exit(&out, 1);
+    assert!(!other.path().join(".agmen").exists());
+    assert_eq!(std::fs::read(&exclude_path).unwrap(), before);
+    assert_eq!(local.call("local_projects", json!({})).await, projects);
+    let out = local.run(&worktree, &["init"]).await;
+    assert_exit(&out, 2);
+    assert_eq!(local.call("local_projects", json!({})).await, projects);
+    local.stop().await;
+}
+
+#[tokio::test]
+async fn init_local_invalid_names_do_not_write_an_identity() {
+    let local = Local::new().await;
+    let worktree = Worktree::new(&local.home);
+    let before = local.call("local_projects", json!({})).await;
+    let out = local
+        .run(&worktree, &["init", "--local", "--name", ""])
+        .await;
+    assert_exit(&out, 1);
+    assert!(stderr(&out).contains("name must be 1 to 64 characters"));
+    assert!(!worktree.path().join(".agmen").exists());
+    assert_eq!(local.call("local_projects", json!({})).await, before);
+    local.stop().await;
+}
+
+#[tokio::test]
+async fn init_local_conflicts_with_hub_choices() {
+    let home = Home::new();
+    let worktree = Worktree::new(&home);
+    const CHOICES: [&str; 2] = ["--self-host", "--hosted"];
+    for flag in CHOICES {
+        let out = home.run(&worktree.path(), &["init", "--local", flag]).await;
+        assert_exit(&out, 2);
+        assert!(stderr(&out).contains("cannot be used with"));
+        assert!(!worktree.path().join(".agmen").exists());
+    }
+}
 
 #[tokio::test]
 async fn post_and_inbox_in_a_local_worktree() {
