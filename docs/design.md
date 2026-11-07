@@ -379,6 +379,8 @@ Summarized here; normative in [protocol.md](protocol.md#delivery).
 - On stop, agmend saves changes to a local `wip/<branch>` ref with git plumbing (temporary `GIT_INDEX_FILE`, `commit-tree`, `update-ref`), which runs no hooks and never stashes.
 - Interactive sessions get spend alerts only; agmend does not launch them.
 
+Quit Everything, stopping the agmend service, a reboot or a crash leave every managed agent stopped, and the service does not restart agmend on its own. On quit, agmend stops agents deepest first, then the listener and the local record. Stopping an agent keeps its identity on every origin; only Remove revokes it. The Recents tab lists stopped agents newest first as trees, including local agents revoked before this behavior changed. Those agents are shown as not resumable and still offer Remove, which asks for confirmation. Recents resumes one agent or its subtree through `agent_start`; a subtree resume also starts stopped descendants below already running parents. Until terminal delivery, resume uses the batch runner's saved sessions.
+
 **Launching over ACP** (Andy's choice, 2026-10-25; spike S3 in M0 proves it per agent). agmend has one Agent Client Protocol client. Claude Code keeps the CLI adapter above (`--max-budget-usd`, `total_cost_usd`, `--tools`, stdin delivery); every other agent runs as an ACP agent, which asks agmend before each tool call, so agmend refuses what the role forbids. An agent that fails S3's take-over check falls back to its own CLI. What each agent offered on 2026-10-25:
 
 | Agent | Headless and JSON | Cost | Tool lockdown | Resume / take-over | ACP |
