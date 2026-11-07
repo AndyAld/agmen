@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
-use agmen_proto::{MessageId, Seq, StampedEnvelope, Stream};
+use agmen_proto::{IdentityId, MessageId, Seq, StampedEnvelope, Stream};
 use futures::StreamExt as _;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -18,6 +18,7 @@ use gpui::{
 use jiff::tz::TimeZone;
 
 use super::chat_context::ChatContext;
+use super::chat_filter::{ChatFilter, my_agents};
 use super::components::{Button, Color, Label, LabelSize};
 use super::composer::{Composer, Target};
 use super::message::{MessageRow, is_presence};
@@ -46,11 +47,16 @@ const MAX_DECISION_ERRORS: usize = 2000;
 
 /// The indices of the messages the chat draws, oldest first.
 #[must_use]
-fn visible_rows(messages: &[StampedEnvelope], show_ledger: bool) -> Vec<usize> {
+pub(super) fn visible_rows(
+    messages: &[StampedEnvelope],
+    show_ledger: bool,
+    filter: ChatFilter,
+    mine: &BTreeSet<IdentityId>,
+) -> Vec<usize> {
     messages
         .iter()
         .enumerate()
-        .filter(|(_, env)| show_ledger || !is_presence(env))
+        .filter(|(_, env)| (show_ledger || !is_presence(env)) && filter.shows(env, mine))
         .map(|(i, _)| i)
         .collect()
 }
@@ -223,6 +229,8 @@ pub(crate) struct ChatView {
     snapshot: Rc<Snapshot>,
     stream: Entity<ChatStream>,
     show_ledger: bool,
+    filter: ChatFilter,
+    mine: BTreeSet<IdentityId>,
     alerts: AlertState,
     /// Task 13: the banner, toast and snooze state beside `alerts`.
     alert_ui: alert_wiring::ChatAlerts,
@@ -251,6 +259,7 @@ impl std::fmt::Debug for ChatView {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ChatView")
             .field("show_ledger", &self.show_ledger)
+            .field("filter", &self.filter)
             .field("error", &self.error)
             .finish_non_exhaustive()
     }
@@ -296,7 +305,9 @@ impl ChatView {
                 }
             })
         });
-        let rows = visible_rows(&snapshot.messages, false);
+        let filter = ChatFilter::default();
+        let mine = my_agents(&snapshot);
+        let rows = visible_rows(&snapshot.messages, false, filter, &mine);
         let (alerts, alert_ui) = alert_wiring::replay(&snapshot);
         let looks = Rc::new(super::needs_you::alert_looks(&alerts, &snapshot.messages));
         let context = Rc::new(ChatContext::new(snapshot.clone()).with_zone(zone.clone()));
@@ -330,6 +341,8 @@ impl ChatView {
             snapshot,
             stream,
             show_ledger: false,
+            filter,
+            mine,
             alerts,
             alert_ui,
             composer,
@@ -353,8 +366,13 @@ impl ChatView {
             self.at_top = at_top;
             cx.notify();
         }
-        if at_top
-            && matches!(self.snapshot.older, Older::More | Older::Failed(_))
+        if at_top {
+            self.load_older(cx);
+        }
+    }
+
+    fn load_older(&self, cx: &mut Context<Self>) {
+        if matches!(self.snapshot.older, Older::More | Older::Failed(_))
             && let Some(backend) = cx.try_global::<BackendHandle>()
         {
             backend.0.load_older();
@@ -419,7 +437,30 @@ impl ChatView {
             return;
         }
         self.show_ledger = on;
-        let rows = visible_rows(&self.snapshot.messages, on);
+        let rows = visible_rows(&self.snapshot.messages, on, self.filter, &self.mine);
+        self.stream
+            .update(cx, |stream, cx| stream.set_rows_keeping_top(rows, 0, cx));
+        cx.notify();
+    }
+
+    /// The filter chosen for this chat view.
+    #[must_use]
+    pub(crate) const fn chat_filter(&self) -> ChatFilter {
+        self.filter
+    }
+
+    /// Changes the visible rows while keeping the person's reading position.
+    pub(crate) fn set_chat_filter(&mut self, filter: ChatFilter, cx: &mut Context<Self>) {
+        if self.filter == filter {
+            return;
+        }
+        self.filter = filter;
+        let rows = visible_rows(
+            &self.snapshot.messages,
+            self.show_ledger,
+            filter,
+            &self.mine,
+        );
         self.stream
             .update(cx, |stream, cx| stream.set_rows_keeping_top(rows, 0, cx));
         cx.notify();
@@ -648,8 +689,14 @@ impl ChatView {
             }
         };
         self.snapshot = Rc::new(snapshot);
+        self.mine = my_agents(&self.snapshot);
         let context = Rc::new(ChatContext::new(self.snapshot.clone()).with_zone(self.zone.clone()));
-        let rows = visible_rows(&self.snapshot.messages, self.show_ledger);
+        let rows = visible_rows(
+            &self.snapshot.messages,
+            self.show_ledger,
+            self.filter,
+            &self.mine,
+        );
         self.stream.update(cx, |stream, cx| {
             if shift > 0 {
                 // An older page: the person stays where they were reading,
@@ -741,6 +788,9 @@ impl Focusable for ChatView {
 
 impl Render for ChatView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let filter_empty = self.chat_filter() != ChatFilter::Everyone
+            && self.stream.read(cx).rows.is_empty()
+            && !self.snapshot.messages.is_empty();
         div()
             .debug_selector(|| "chat".into())
             .flex_1()
@@ -764,11 +814,37 @@ impl Render for ChatView {
                         ),
                 )
             })
-            .child(
+            .child(if filter_empty {
+                div()
+                    .debug_selector(|| "chat:filter-empty".into())
+                    .flex_1()
+                    .min_h_0()
+                    .px(SPACE_14)
+                    .pt(SPACE_10)
+                    .child(
+                        Label::new(format!(
+                            "No messages for {} yet.",
+                            self.chat_filter().label()
+                        ))
+                        .size(LabelSize::Small)
+                        .color(Color::Placeholder),
+                    )
+                    .when(
+                        matches!(self.snapshot.older, Older::More | Older::Failed(_)),
+                        |this| {
+                            this.child(
+                                Button::new("chat:load-older", "Load older messages")
+                                    .on_click(cx.listener(|chat, _, _, cx| chat.load_older(cx))),
+                            )
+                        },
+                    )
+                    .into_any_element()
+            } else {
                 self.stream
                     .clone()
-                    .cached(StyleRefinement::default().flex_1().min_h_0()),
-            )
+                    .cached(StyleRefinement::default().flex_1().min_h_0())
+                    .into_any_element()
+            })
             // Final review fix 1: reading back past the cap let the newest
             // messages go; this brings them back.
             .when(self.snapshot.newer, |this| {

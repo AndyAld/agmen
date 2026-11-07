@@ -182,19 +182,7 @@ impl Managed {
                         .cloned()
                         .ok_or_else(|| error("stop target disappeared"))?;
                     let manager = self.clone();
-                    tasks.spawn(async move {
-                        let identity = worker.lock().await.record.identity.clone();
-                        manager.stop_worker(worker).await?;
-                        if agmen_client::is_local(&identity.hub_url) {
-                            manager.revoke_identity(&identity).await?;
-                            manager
-                                .identities()
-                                .ok_or_else(|| error("identity service stopped"))?
-                                .forget(&identity)
-                                .await?;
-                        }
-                        Ok::<_, ApiError>(())
-                    });
+                    tasks.spawn(async move { manager.stop_worker(worker).await });
                 }
                 for _ in 0..level.len() {
                     if let Some(result) = tasks.join_next().await {
@@ -514,16 +502,14 @@ impl Managed {
         }
     }
 
-    /// Both callers hold `launching`; keep tree and registry insertion atomic.
+    /// Both callers hold `launching` and check shutdown before admission.
+    /// An admitted launch finishes insertion while shutdown waits for that lock.
     pub(super) async fn insert_worker(
         &self,
         worker: super::Worker,
     ) -> Result<Arc<tokio::sync::Mutex<super::Worker>>, ApiError> {
         let mut tree = self.tree.lock().await;
         let mut workers = self.workers.lock().await;
-        if self.shutting_down.load(Ordering::Acquire) {
-            return Err(error("daemon is shutting down"));
-        }
         if workers.len() >= MAX_MANAGED {
             return Err(registry_full());
         }

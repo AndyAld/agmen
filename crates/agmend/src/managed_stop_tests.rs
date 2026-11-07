@@ -2,6 +2,200 @@ use super::*;
 use crate::budget::{Budget, Money};
 use crate::managed::Worker;
 
+const QUIT_TEST_WAIT: std::time::Duration = std::time::Duration::from_secs(9);
+
+#[tokio::test]
+async fn quit_says_goodbye_deepest_first() {
+    let (mut fixture, _) = tree_fixture().await;
+    let senders = Arc::new(Mutex::new(Vec::new()));
+    let captured = senders.clone();
+    publisher(
+        &mut fixture,
+        Arc::new(move |sender, envelope| {
+            if matches!(envelope.payload, agmen_proto::Payload::Bye {}) {
+                captured
+                    .lock()
+                    .unwrap()
+                    .push(sender.identity_id.to_string());
+            }
+            Box::pin(async { Ok(OutboxState::Pending { attempts: 0 }) })
+        }),
+    )
+    .await;
+    three_levels(&fixture).await;
+    fixture.daemon.core.managed.shutdown().await;
+    assert_eq!(
+        *senders.lock().unwrap(),
+        ["kid00002", "kid00001", "agent001"]
+    );
+}
+
+#[tokio::test]
+async fn quit_waits_for_an_inflight_launch_then_stops_it() {
+    let (mut fixture, _) = tree_fixture().await;
+    let reached = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let senders = Arc::new(Mutex::new(Vec::new()));
+    let (held_reached, held_release, captured) =
+        (reached.clone(), release.clone(), senders.clone());
+    publisher(
+        &mut fixture,
+        Arc::new(move |sender, envelope| {
+            let (reached, release, captured) =
+                (held_reached.clone(), held_release.clone(), captured.clone());
+            Box::pin(async move {
+                if matches!(envelope.payload, agmen_proto::Payload::Hello { .. })
+                    && sender.identity_id.as_str() == "kid00001"
+                {
+                    // HELLO precedes registry insertion while launching is held.
+                    reached.notify_one();
+                    tokio::time::timeout(QUIT_TEST_WAIT, release.notified())
+                        .await
+                        .unwrap();
+                }
+                if matches!(envelope.payload, agmen_proto::Payload::Bye {}) {
+                    captured
+                        .lock()
+                        .unwrap()
+                        .push(sender.identity_id.to_string());
+                }
+                Ok(OutboxState::Pending { attempts: 0 })
+            })
+        }),
+    )
+    .await;
+    settings(&fixture, "budgets = false");
+    root(&fixture).await;
+    tier(&fixture, "agent001", Some(Tier::Owner)).await;
+    let shutdown = async {
+        tokio::time::timeout(QUIT_TEST_WAIT, reached.notified())
+            .await
+            .unwrap();
+        tokio::join!(fixture.daemon.core.managed.shutdown(), async {
+            release.notify_one();
+        });
+    };
+    let (launched, ()) = tokio::time::timeout(QUIT_TEST_WAIT, async {
+        tokio::join!(child(&fixture, "agent001", "late"), shutdown)
+    })
+    .await
+    .unwrap();
+    let launched = launched.unwrap();
+    for worker in fixture.daemon.core.managed.workers.lock().await.values() {
+        assert_eq!(worker.lock().await.state, "offline");
+    }
+    assert!(
+        senders
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|id| Some(id.as_str()) == launched["identity"].as_str())
+    );
+}
+
+#[tokio::test]
+async fn quit_discards_a_launch_that_never_finishes() {
+    let (mut fixture, _) = tree_fixture().await;
+    publisher(
+        &mut fixture,
+        Arc::new(|sender, envelope| {
+            Box::pin(async move {
+                if matches!(envelope.payload, agmen_proto::Payload::Hello { .. })
+                    && sender.identity_id.as_str() == "kid00001"
+                {
+                    std::future::pending::<()>().await;
+                }
+                Ok(OutboxState::Pending { attempts: 0 })
+            })
+        }),
+    )
+    .await;
+    Arc::get_mut(&mut Arc::get_mut(&mut fixture.daemon.core).unwrap().managed)
+        .unwrap()
+        .quit_launch_wait = std::time::Duration::from_millis(300);
+    settings(&fixture, "budgets = false");
+    root(&fixture).await;
+    tier(&fixture, "agent001", Some(Tier::Owner)).await;
+    let before = git_state(&fixture);
+    let (launched, ()) = tokio::time::timeout(QUIT_TEST_WAIT, async {
+        tokio::join!(child(&fixture, "agent001", "late"), async {
+            // Let the launch pass admission and reach its HELLO.
+            while fixture.revoked.lock().unwrap().is_empty()
+                && fixture.daemon.core.managed.launching.try_lock().is_ok()
+            {
+                tokio::task::yield_now().await;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            fixture.daemon.core.managed.shutdown().await;
+        })
+    })
+    .await
+    .unwrap();
+    assert!(launched.unwrap_err().message.contains("shutting down"));
+    assert_discarded(&fixture, "kid00001", &before).await;
+}
+
+#[tokio::test]
+async fn quit_refuses_a_launch_started_after_shutdown_begins() {
+    let (fixture, mints) = tree_fixture().await;
+    root(&fixture).await;
+    let managed = &fixture.daemon.core.managed;
+    let launching = managed.launching.lock().await;
+    let ((), launched) = tokio::time::timeout(QUIT_TEST_WAIT, async {
+        tokio::join!(managed.shutdown(), async {
+            assert!(managed.shutting_down.load(Ordering::Acquire));
+            drop(launching);
+            managed
+                .launch(json!({"project":"project1","name":"late","root":fixture.dir.path().join("repo")}))
+                .await
+        })
+    })
+    .await
+    .unwrap();
+    assert!(
+        launched
+            .unwrap_err()
+            .message
+            .contains("daemon is shutting down")
+    );
+    assert_eq!(mints.lock().unwrap().len(), 1);
+    assert_eq!(managed.workers.lock().await.len(), 1);
+}
+
+#[tokio::test]
+async fn quit_with_a_stuck_child_still_stops_the_parent() {
+    let (mut fixture, _) = tree_fixture().await;
+    let reached = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let held = hold_goodbye("kid00002", reached.clone(), release);
+    let senders = Arc::new(Mutex::new(Vec::new()));
+    let captured = senders.clone();
+    publisher(
+        &mut fixture,
+        Arc::new(move |sender, envelope| {
+            if matches!(envelope.payload, agmen_proto::Payload::Bye {}) {
+                captured
+                    .lock()
+                    .unwrap()
+                    .push(sender.identity_id.to_string());
+            }
+            held(sender, envelope)
+        }),
+    )
+    .await;
+    three_levels(&fixture).await;
+    tokio::time::timeout(QUIT_TEST_WAIT, fixture.daemon.core.managed.shutdown())
+        .await
+        .unwrap();
+    tokio::time::timeout(QUIT_TEST_WAIT, reached.notified())
+        .await
+        .unwrap();
+    assert!(senders.lock().unwrap().iter().any(|id| id == "agent001"));
+    for worker in fixture.daemon.core.managed.workers.lock().await.values() {
+        assert_eq!(worker.lock().await.state, "offline");
+    }
+}
+
 async fn three_levels(fixture: &Fixture) {
     settings(fixture, "budgets = false");
     root(fixture).await;

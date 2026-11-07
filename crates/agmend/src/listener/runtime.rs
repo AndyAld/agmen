@@ -274,6 +274,23 @@ struct Apply {
 }
 
 impl Listeners {
+    pub(crate) fn queue_full_alert(identity: &ManagedIdentity) -> Result<ClientEnvelope, ApiError> {
+        let body = format!(
+            "{}'s queue is full ({} waiting); new messages to it are recorded in the project but not queued for it until it is started or removed.",
+            identity.handle,
+            crate::state::MAX_PENDING,
+        );
+        envelope(
+            Payload::Alert {
+                need: body.clone(),
+                urgency: agmen_proto::Urgency::Normal,
+                needs: agmen_proto::Needs::Owner,
+                actions: Vec::new(),
+            },
+            &body,
+        )
+    }
+
     pub(crate) fn new(
         origins: Arc<crate::origin::Origins>,
         state_dir: PathBuf,
@@ -624,17 +641,22 @@ impl Listeners {
             (self.mint(&request.project, login, &role).await?, true)
         };
         if let Err(error) = identities.register(identity.clone()).await {
-            // A committed local mint with no registered row would answer "already
-            // running" to every retry, so revoke it. The hub path is unchanged.
-            if minted
-                && agmen_client::is_local(&identity.hub_url)
-                && let Err(revoke) = self
-                    .origins
-                    .local()
-                    .revoke(&identity.project, &identity.identity_id)
-                    .await
-            {
-                tracing::warn!(code = ?revoke.code, "revoking an unregistered local listener failed");
+            // A live mint without a registered row makes every later start
+            // answer "already running". Only roll back this start's new mint.
+            if minted {
+                if agmen_client::is_local(&identity.hub_url) {
+                    if let Err(revoke) = self
+                        .origins
+                        .local()
+                        .revoke(&identity.project, &identity.identity_id)
+                        .await
+                    {
+                        tracing::warn!(code = ?revoke.code, "revoking an unregistered local listener failed");
+                    }
+                } else {
+                    self.rollback_hub_mint(&identity.hub_url, &identity.identity_id)
+                        .await;
+                }
             }
             return Err(error);
         }
@@ -718,6 +740,61 @@ impl Listeners {
         Ok(json!({"identity_id":identity.identity_id,"handle":identity.handle}))
     }
 
+    /// Revokes a hub mint this start made but will not register, and drops its
+    /// credential. Both steps are best effort; hub and credential errors can
+    /// carry text that must not reach a log, so only the id is logged.
+    async fn rollback_hub_mint(&self, origin: &url::Url, id: &IdentityId) {
+        tracing::warn!(identity = %id, "rolling back an unregistered hub listener");
+        if self.hub.revoke_identity(id).await.is_err() {
+            tracing::warn!(identity = %id, "revoking an unregistered hub listener failed");
+        }
+        // Try both steps even if the revoke failed or the credential was never stored.
+        if self
+            .hub
+            .credentials()
+            .delete_token(origin, id)
+            .await
+            .is_err()
+        {
+            tracing::warn!(identity = %id,
+                "deleting an unregistered hub listener's credential failed");
+        }
+    }
+
+    /// Rolls back a hub mint that was accepted but whose answer cannot be
+    /// trusted to name it: not JSON, the wrong shape, or another handle or
+    /// project. Its id is not safe to revoke, because DELETE takes any identity
+    /// the person may administer, and a group admin may administer a teammate's.
+    /// The project roster is the hub's own list of live identities, and the hub
+    /// allows one live identity per handle in a project, so a listener with the
+    /// handle just asked for that has never connected is this start's mint.
+    async fn rollback_untrusted_hub_mint(
+        &self,
+        origin: &url::Url,
+        project: &ProjectId,
+        handle: &str,
+    ) {
+        // The error can carry hub text; none of it is logged.
+        let Ok(roster) = self.hub.roster(project).await else {
+            tracing::warn!(
+                "cannot revoke an unregistered hub listener: the project roster could not be read"
+            );
+            return;
+        };
+        let mut mine = roster.iter().filter(|entry| {
+            entry.kind == IdentityKind::Listener
+                && entry.handle == handle
+                && entry.status == agmen_local::console::Status::Offline
+        });
+        if let (Some(entry), None) = (mine.next(), mine.next()) {
+            self.rollback_hub_mint(origin, &entry.identity_id).await;
+        } else {
+            tracing::warn!(
+                "cannot revoke an unregistered hub listener: no unconnected one in the project roster"
+            );
+        }
+    }
+
     async fn mint(
         &self,
         project: &ProjectId,
@@ -758,11 +835,16 @@ impl Listeners {
         }
         let broker = self.broker().await?;
         let body = json!({"project":project,"handle":handle,"kind":"listener","role":spec.role,"verbs":spec.verbs,"edits":spec.edits,"role_sha256":spec.role_sha256});
-        let minted = self
-            .hub
-            .mint_identity(&body)
-            .await
-            .map_err(listener_mint_error)?;
+        let minted = match self.hub.mint_identity(&body).await {
+            Ok(minted) => minted,
+            // A success status with a body that is not JSON: the hub made the mint.
+            Err(HubError::BadAnswer(_)) => {
+                self.rollback_untrusted_hub_mint(&login.hub_url, project, &handle)
+                    .await;
+                return Err(failure("invalid listener mint response"));
+            }
+            Err(error) => return Err(listener_mint_error(error)),
+        };
         // This boundary never derives Debug or includes the response in an error.
         #[derive(Deserialize)]
         struct Minted {
@@ -772,15 +854,26 @@ impl Listeners {
             tenant: agmen_proto::TenantId,
             token: String,
         }
-        let minted: Minted = serde_json::from_value(minted)
-            .map_err(|_| failure("invalid listener mint response"))?;
+        let Ok(minted) = serde_json::from_value::<Minted>(minted) else {
+            self.rollback_untrusted_hub_mint(&login.hub_url, project, &handle)
+                .await;
+            return Err(failure("invalid listener mint response"));
+        };
         if minted.handle != handle || minted.project != *project {
+            self.rollback_untrusted_hub_mint(&login.hub_url, project, &handle)
+                .await;
             return Err(failure("hub minted a different listener than requested"));
         }
-        self.hub
+        // The answer matches the request, so its id is this mint's.
+        if let Err(error) = self
+            .hub
             .credentials()
             .set_token(&login.hub_url, &minted.id, minted.token)
-            .await?;
+            .await
+        {
+            self.rollback_hub_mint(&login.hub_url, &minted.id).await;
+            return Err(error);
+        }
         Ok(ManagedIdentity {
             hub_url: login.hub_url.clone(),
             broker_url: broker,

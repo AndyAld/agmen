@@ -336,24 +336,47 @@ fn pending_store_deduplicates_cross_stream_message() {
 #[test]
 fn pending_store_transaction_rolls_back_on_full() {
     let (_dir, mut store, who) = setup();
-    for seq in 1..=10_000 {
-        store.ingest(ORIGIN, &who.project, &message(seq)).unwrap();
-    }
-    assert!(
-        store
-            .ingest(ORIGIN, &who.project, &message(10_001))
-            .is_err()
-    );
+    seed_full_pending(&store, ORIGIN, &who);
+    let mut other = who.clone();
+    other.identity_id = "agent002".parse().unwrap();
+    store.register(&other).unwrap();
+    store
+        .conn
+        .execute(
+            "INSERT INTO positions VALUES (?1,?2,'feed',10000)",
+            params![ORIGIN, who.project.as_str()],
+        )
+        .unwrap();
+    let mut skipped = message(10_001);
+    skipped.client.to.push(other.identity_id.clone());
+    store.ingest(ORIGIN, &who.project, &skipped).unwrap();
     assert_eq!(
         store.positions(ORIGIN, &who.project).unwrap()[&Stream::Feed],
-        10_000
+        10_001
+    );
+    assert_eq!(pending_count(&store, ORIGIN, &who.identity_id), 10_000);
+    assert_eq!(
+        store
+            .drain(ORIGIN, &other.identity_id, 500, usize::MAX)
+            .unwrap(),
+        vec![skipped.clone()]
     );
     store
         .drain(ORIGIN, &who.identity_id, 1, usize::MAX)
         .unwrap();
-    store
-        .ingest(ORIGIN, &who.project, &message(10_001))
-        .unwrap();
+    store.ingest(ORIGIN, &who.project, &skipped).unwrap();
+    assert_eq!(pending_count(&store, ORIGIN, &who.identity_id), 9_999);
+    assert_eq!(
+        store
+            .conn
+            .query_row(
+                "SELECT count(*) FROM pending WHERE id=?1",
+                [skipped.client.id.as_str()],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0
+    );
     let batch = store
         .drain(ORIGIN, &who.identity_id, u32::MAX, usize::MAX)
         .unwrap();
@@ -848,17 +871,327 @@ fn receipt_cap_refuses_without_cursor_advance() {
             params![ORIGIN, who.project.as_str(), who.identity_id.as_str()],
         )
         .unwrap();
-    assert!(matches!(
-        store.ingest(ORIGIN, &who.project, &event),
-        Err(StoreError::Full(_))
-    ));
-    assert!(store.positions(ORIGIN, &who.project).unwrap().is_empty());
+    store.ingest(ORIGIN, &who.project, &event).unwrap();
+    assert_eq!(
+        store.positions(ORIGIN, &who.project).unwrap()[&Stream::Feed],
+        1
+    );
     assert!(
         store
             .drain(ORIGIN, &who.identity_id, 500, usize::MAX)
             .unwrap()
             .is_empty()
     );
+    assert_eq!(
+        store
+            .conn
+            .query_row(
+                "SELECT count(*) FROM receipts WHERE id=?1",
+                [event.client.id.as_str()],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0
+    );
+    store.conn.execute("DELETE FROM receipts", []).unwrap();
+    store.ingest(ORIGIN, &who.project, &event).unwrap();
+    assert!(
+        store
+            .drain(ORIGIN, &who.identity_id, 500, usize::MAX)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+fn seed_full_pending(store: &Store, origin: &str, who: &ManagedIdentity) {
+    store.conn.execute(
+        "WITH RECURSIVE rows(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM rows WHERE n<10000)
+         INSERT INTO pending(origin,project,identity,sender,id,message)
+         SELECT ?1,?2,?3,'sender01',printf('%026d',n),json_set(?4,'$.seq',n,'$.id',printf('%026d',n)) FROM rows",
+        params![origin, who.project.as_str(), who.identity_id.as_str(), serde_json::to_string(&message(1)).unwrap()],
+    ).unwrap();
+}
+
+fn pending_count(store: &Store, origin: &str, identity: &IdentityId) -> i64 {
+    store
+        .conn
+        .query_row(
+            "SELECT count(*) FROM pending WHERE origin=?1 AND identity=?2",
+            params![origin, identity.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+#[test]
+fn queue_full_alert_survives_drain_and_store_reopen() {
+    let (dir, mut store, who) = setup();
+    seed_full_pending(&store, ORIGIN, &who);
+    let mut event = message(10_001);
+    event.seq = agmen_proto::Seq(1);
+    store.ingest(ORIGIN, &who.project, &event).unwrap();
+    store
+        .drain(ORIGIN, &who.identity_id, 1, usize::MAX)
+        .unwrap();
+    drop(store);
+    let store = Store::open(&dir.path().join("agmend.db")).unwrap();
+    assert_eq!(
+        store
+            .pending_queue_full_alerts(ORIGIN, &who.owner_id)
+            .unwrap(),
+        vec![who]
+    );
+}
+
+#[test]
+fn queue_full_alert_is_retained_until_enqueued() {
+    let (_dir, mut store, who) = setup();
+    seed_full_pending(&store, ORIGIN, &who);
+    let mut event = message(10_001);
+    event.seq = agmen_proto::Seq(1);
+    store.ingest(ORIGIN, &who.project, &event).unwrap();
+    assert_eq!(
+        store
+            .pending_queue_full_alerts(ORIGIN, &who.owner_id)
+            .unwrap(),
+        vec![who.clone()]
+    );
+    assert_eq!(
+        store
+            .pending_queue_full_alerts(ORIGIN, &who.owner_id)
+            .unwrap(),
+        vec![who]
+    );
+}
+
+#[test]
+fn ingest_for_owner_skips_full_identity_and_commits_for_both_origins() {
+    for origin in [ORIGIN, agmen_client::LOCAL_ORIGIN] {
+        let (_dir, mut store, mut full) = setup();
+        store.unregister(ORIGIN, &full.identity_id).unwrap();
+        full.hub_url = if origin == agmen_client::LOCAL_ORIGIN {
+            agmen_client::local_hub_url()
+        } else {
+            origin.parse().unwrap()
+        };
+        store.register(&full).unwrap();
+        seed_full_pending(&store, origin, &full);
+        let mut other = full.clone();
+        other.identity_id = "agent002".parse().unwrap();
+        store.register(&other).unwrap();
+        for seq in 1..=2 {
+            let mut event = message(seq);
+            event.client.id = message(10_000 + seq).client.id;
+            event.client.to.push(other.identity_id.clone());
+            store
+                .ingest_for_owner(origin, &full.project, &event, Some(&full.owner_id))
+                .unwrap();
+            assert_eq!(
+                store
+                    .positions_for_owner(origin, &full.owner_id, &full.project)
+                    .unwrap()[&Stream::Feed],
+                seq
+            );
+            assert_eq!(pending_count(&store, origin, &full.identity_id), 10_000);
+            assert_eq!(
+                store
+                    .drain(origin, &other.identity_id, 500, usize::MAX)
+                    .unwrap(),
+                vec![event.clone()]
+            );
+            store
+                .ingest_for_owner(origin, &full.project, &event, Some(&full.owner_id))
+                .unwrap();
+            assert!(
+                store
+                    .drain(origin, &other.identity_id, 500, usize::MAX)
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
+}
+
+#[test]
+fn ingest_for_owner_skips_full_receipts_and_commits_for_both_origins() {
+    const RECEIPT_LIMIT: i64 = 20_000;
+    for origin in [ORIGIN, agmen_client::LOCAL_ORIGIN] {
+        let (_dir, mut store, mut full) = setup();
+        store.unregister(ORIGIN, &full.identity_id).unwrap();
+        full.hub_url = if origin == agmen_client::LOCAL_ORIGIN {
+            agmen_client::local_hub_url()
+        } else {
+            origin.parse().unwrap()
+        };
+        store.register(&full).unwrap();
+        let mut other = full.clone();
+        other.identity_id = "agent002".parse().unwrap();
+        store.register(&other).unwrap();
+        store
+            .conn
+            .execute(
+                "WITH RECURSIVE rows(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM rows WHERE n<?4)
+             INSERT INTO receipts SELECT ?1,?2,?3,'sender01',printf('old-%d',n),n,NULL FROM rows",
+                params![
+                    origin,
+                    full.project.as_str(),
+                    full.identity_id.as_str(),
+                    RECEIPT_LIMIT
+                ],
+            )
+            .unwrap();
+        let mut event = message(1);
+        event.client.payload = Payload::Assign {
+            item: "B-4".parse().unwrap(),
+            to: full.identity_id.clone(),
+        };
+        event.mentioned.push(other.identity_id.clone());
+        store
+            .ingest_for_owner(origin, &full.project, &event, Some(&full.owner_id))
+            .unwrap();
+        assert_eq!(
+            store
+                .positions_for_owner(origin, &full.owner_id, &full.project)
+                .unwrap()[&Stream::Feed],
+            1
+        );
+        assert_eq!(pending_count(&store, origin, &full.identity_id), 0);
+        assert_eq!(
+            store
+                .drain(origin, &other.identity_id, 500, usize::MAX)
+                .unwrap(),
+            vec![event]
+        );
+    }
+}
+
+#[test]
+fn skipped_assign_is_not_delivered_by_its_other_stream_copy() {
+    // An ASSIGN has a feed copy and an assignee inbox copy. A copy skipped for a
+    // full queue must not come back through the other copy once the agent drains.
+    for inbox_first in [false, true] {
+        let (_dir, mut store, who) = setup();
+        seed_full_pending(&store, ORIGIN, &who);
+        let mut feed = message(1);
+        feed.client.id = message(20_000).client.id;
+        feed.client.to.clear();
+        feed.client.payload = Payload::Assign {
+            item: "B-4".parse().unwrap(),
+            to: who.identity_id.clone(),
+        };
+        let mut inbox = feed.clone();
+        inbox.stream = Stream::Inbox(who.identity_id.clone());
+        let (first, second) = if inbox_first {
+            (inbox, feed)
+        } else {
+            (feed, inbox)
+        };
+        store.ingest(ORIGIN, &who.project, &first).unwrap();
+        store
+            .drain(ORIGIN, &who.identity_id, 1, usize::MAX)
+            .unwrap();
+        assert_eq!(pending_count(&store, ORIGIN, &who.identity_id), 9_999);
+        store.ingest(ORIGIN, &who.project, &second).unwrap();
+        assert_eq!(pending_count(&store, ORIGIN, &who.identity_id), 9_999);
+        let receipts: i64 = store
+            .conn
+            .query_row("SELECT count(*) FROM receipts", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(receipts, 0, "both copies passed, so no receipt remains");
+    }
+}
+
+fn queue_full_alerts(store: &Store, who: &ManagedIdentity) -> Vec<ManagedIdentity> {
+    store
+        .pending_queue_full_alerts(ORIGIN, &who.owner_id)
+        .unwrap()
+}
+
+/// What the supervisor does with one pending notification before it publishes.
+fn prepared_alert(store: &mut Store, who: &ManagedIdentity) -> agmen_proto::ClientEnvelope {
+    let proposed = crate::listener::Listeners::queue_full_alert(who).unwrap();
+    store
+        .prepare_queue_full_alert(ORIGIN, &who.identity_id, &proposed)
+        .unwrap()
+        .unwrap()
+}
+
+fn acknowledge_alert(store: &mut Store, who: &ManagedIdentity) {
+    let alert = prepared_alert(store, who);
+    store
+        .acknowledge_queue_full_alert(ORIGIN, &who.identity_id, &alert.id)
+        .unwrap();
+}
+
+#[test]
+fn queue_full_alert_counts_once_per_fill_and_rearms_after_a_drain() {
+    let (_dir, mut store, who) = setup();
+    seed_full_pending(&store, ORIGIN, &who);
+    let mut seq = 0;
+    let mut send = |store: &mut Store| {
+        seq += 1;
+        let mut event = message(10_000 + seq);
+        event.seq = agmen_proto::Seq(seq);
+        store.ingest(ORIGIN, &who.project, &event).unwrap();
+    };
+    for _ in 0..3 {
+        send(&mut store);
+    }
+    acknowledge_alert(&mut store, &who);
+    assert!(
+        queue_full_alerts(&store, &who).is_empty(),
+        "three skipped messages are one fill, so one notification"
+    );
+    send(&mut store);
+    assert!(queue_full_alerts(&store, &who).is_empty());
+    store
+        .drain(ORIGIN, &who.identity_id, 1, usize::MAX)
+        .unwrap();
+    // One slot is free: the message fills it, which alone is no notification.
+    send(&mut store);
+    assert!(queue_full_alerts(&store, &who).is_empty());
+    for _ in 0..2 {
+        send(&mut store);
+    }
+    acknowledge_alert(&mut store, &who);
+    assert!(
+        queue_full_alerts(&store, &who).is_empty(),
+        "the second fill is exactly one more notification"
+    );
+}
+
+#[test]
+fn queue_full_state_survives_register_and_unregister_clears_it() {
+    let (_dir, mut store, mut who) = setup();
+    seed_full_pending(&store, ORIGIN, &who);
+    let skip = |store: &mut Store, seq: u64| {
+        let mut event = message(10_000 + seq);
+        event.seq = agmen_proto::Seq(seq);
+        store.ingest(ORIGIN, &who.project, &event).unwrap();
+    };
+    skip(&mut store, 1);
+    let published = prepared_alert(&mut store, &who);
+    // Starting the agent registers it again, here with new metadata. Its
+    // notification, the envelope kept for retries and its full marker all stay.
+    who.handle = "owner/renamed".into();
+    store.register(&who).unwrap();
+    assert_eq!(queue_full_alerts(&store, &who), vec![who.clone()]);
+    assert_eq!(
+        prepared_alert(&mut store, &who),
+        published,
+        "a retry publishes the same envelope"
+    );
+    skip(&mut store, 2);
+    store
+        .acknowledge_queue_full_alert(ORIGIN, &who.identity_id, &published.id)
+        .unwrap();
+    assert!(
+        queue_full_alerts(&store, &who).is_empty(),
+        "the second skip was the same fill, so one acknowledgement clears it"
+    );
+    store.unregister(ORIGIN, &who.identity_id).unwrap();
+    store.register(&who).unwrap();
+    assert!(queue_full_alerts(&store, &who).is_empty());
 }
 
 #[test]
@@ -876,7 +1209,7 @@ fn registration_and_stream_counts_are_bounded() {
     extra = who.clone();
     extra.owner_id = "other001".parse().unwrap();
     assert!(store.register(&extra).is_err());
-    for n in 0..256 {
+    for n in 0..258 {
         let mut event = message(1);
         event.stream = Stream::Inbox(format!("inbox{n:03}").parse().unwrap());
         store.ingest(ORIGIN, &who.project, &event).unwrap();
@@ -885,7 +1218,7 @@ fn registration_and_stream_counts_are_bounded() {
         store.ingest(ORIGIN, &who.project, &message(1)),
         Err(StoreError::Full(_))
     ));
-    assert_eq!(store.positions(ORIGIN, &who.project).unwrap().len(), 256);
+    assert_eq!(store.positions(ORIGIN, &who.project).unwrap().len(), 258);
 }
 
 #[test]
@@ -1029,9 +1362,16 @@ fn owner_position_namespaces_preserve_project_quota() {
             .len(),
         128
     );
+    for seq in 256..258 {
+        let mut event = message(1);
+        event.stream = Stream::Inbox(format!("stream{seq:03}").parse().unwrap());
+        store
+            .ingest_for_owner(ORIGIN, &who.project, &event, Some(&other))
+            .unwrap();
+    }
     assert!(matches!(
         store.ingest_for_owner(ORIGIN, &who.project, &message(1), Some(&other)),
-        Err(StoreError::Full("256 stream positions"))
+        Err(StoreError::Full("258 stream positions"))
     ));
 }
 
@@ -1209,4 +1549,57 @@ fn identity_lookup_is_keyed_by_origin_and_project() {
             .has_identity("local", &"project3".parse().unwrap())
             .unwrap()
     );
+}
+
+#[test]
+fn inbox_ingest_skips_only_identities_the_addressing_rules_reject() {
+    // ingest_for_owner skips an identity before decoding it when an inbox cannot
+    // reach it. Every kind, recipient and sender must still match addressed_to.
+    let (_dir, mut store, who) = setup();
+    let identities = [
+        ("agent001", IdentityKind::Agent),
+        ("coord001", IdentityKind::Coordinator),
+        ("listen01", IdentityKind::Listener),
+    ];
+    for (id, kind) in identities {
+        let mut next = who.clone();
+        next.identity_id = id.parse().unwrap();
+        next.kind = kind;
+        store.register(&next).unwrap();
+    }
+    let mut sent = Vec::new();
+    for recipient in ["agent001", "coord001", "listen01", "owner001", "other001"] {
+        for (n, from) in ["sender01", "owner001", "agent001", "listen01"]
+            .into_iter()
+            .enumerate()
+        {
+            let mut event = message(n as u64 + 1);
+            event.client.id = format!("{:026}", sent.len() + 1).parse().unwrap();
+            event.stream = Stream::Inbox(recipient.parse().unwrap());
+            event.client.to = vec![recipient.parse().unwrap()];
+            event.from = from.parse().unwrap();
+            store.ingest(ORIGIN, &who.project, &event).unwrap();
+            sent.push(event);
+        }
+    }
+    for (id, kind) in identities {
+        let id: IdentityId = id.parse().unwrap();
+        let mut expected: Vec<_> = sent
+            .iter()
+            .filter(|m| m.from != id && addressed_to(m, &id, "owner001", kind, None).unwrap())
+            .map(|m| m.client.id.as_str().to_owned())
+            .collect();
+        let mut got: Vec<_> = store
+            .drain(ORIGIN, &id, 500, usize::MAX)
+            .unwrap()
+            .iter()
+            .map(|m| m.client.id.as_str().to_owned())
+            .collect();
+        expected.sort();
+        got.sort();
+        assert_eq!(got, expected, "{id}");
+        if kind == IdentityKind::Agent {
+            assert_eq!(expected.len(), 3, "the agent's own inbox reaches it");
+        }
+    }
 }

@@ -9,7 +9,8 @@ use std::time::{Duration, Instant};
 use agmen_client::Broker;
 use agmen_local::safeguards::MAX_MANAGED;
 use agmen_proto::{
-    IdentityId, IdentityKind, MessageId, Payload, ProjectId, StampedEnvelope, Stream, TenantId,
+    ClientEnvelope, IdentityId, IdentityKind, MessageId, Payload, ProjectId, StampedEnvelope,
+    Stream, TenantId,
 };
 use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
@@ -37,12 +38,13 @@ CREATE TABLE receipts (
 CREATE INDEX receipts_identity ON receipts(origin, identity);
 ";
 
-/// Stream positions one hub project keeps per origin. The hub refuses an `after`
-/// list over 256 streams (agmen-hub `events.rs` `MAX_AFTER`), so this stays 256.
-const MAX_HUB_STREAMS: usize = 256;
-/// Stream positions one local project keeps: Feed, the person's inbox and one
-/// inbox per managed identity, which the local collector pages separately.
-pub(crate) const MAX_LOCAL_STREAMS: usize = MAX_MANAGED + 2;
+/// Stream positions per project and origin: Feed, the person's inbox and one
+/// inbox per managed identity. Hub reconnects split these into bounded requests.
+pub(crate) const MAX_STREAM_POSITIONS: usize = MAX_MANAGED + 2;
+pub(crate) const MAX_PENDING: i64 = 10_000;
+const MAX_RECEIPTS: i64 = 20_000;
+// Notifications use a scalar count, bounded by SQLite's sequence range.
+const MAX_QUEUE_ALERTS: i64 = i64::MAX;
 
 /// Metadata only. Credentials stay in TokenStore.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -375,7 +377,7 @@ impl Store {
                 return Err(StoreError::Full("64 managed projects"));
             }
         }
-        tx.execute("INSERT INTO identities VALUES (?1,?2,?3,?4,?5) ON CONFLICT(origin,identity) DO UPDATE SET metadata=excluded.metadata",
+        tx.execute("INSERT INTO identities VALUES (?1,?2,?3,?4,?5) ON CONFLICT(origin,identity) DO UPDATE SET metadata=json_patch(excluded.metadata,json_object('queue_full',json_extract(identities.metadata,'$.queue_full')))",
             params![origin, identity.identity_id.as_str(), identity.owner_id.as_str(), identity.project.as_str(), serde_json::to_string(identity)?])?;
         tx.commit()?;
         Ok(())
@@ -415,6 +417,62 @@ impl Store {
         Ok(result)
     }
 
+    /// Pending notifications survive drains independently of the full marker.
+    pub(crate) fn pending_queue_full_alerts(
+        &self,
+        origin: &str,
+        owner: &IdentityId,
+    ) -> Result<Vec<ManagedIdentity>, StoreError> {
+        let mut stmt = self.conn.prepare("SELECT metadata FROM identities WHERE origin=?1 AND owner=?2 AND json_extract(metadata,'$.queue_full.alerts')>0 ORDER BY identity LIMIT ?3")?;
+        let mut identities = Vec::new();
+        for row in stmt.query_map(params![origin, owner.as_str(), MAX_MANAGED as i64], |row| {
+            row.get::<_, String>(0)
+        })? {
+            identities.push(serde_json::from_str(&row?)?);
+        }
+        Ok(identities)
+    }
+
+    /// Persist the envelope before publishing so every retry uses the same id.
+    pub(crate) fn prepare_queue_full_alert(
+        &mut self,
+        origin: &str,
+        identity: &IdentityId,
+        proposed: &ClientEnvelope,
+    ) -> Result<Option<ClientEnvelope>, StoreError> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current: Option<Option<String>> = tx.query_row(
+            "SELECT json_extract(metadata,'$.queue_full.envelope') FROM identities WHERE origin=?1 AND identity=?2 AND json_extract(metadata,'$.queue_full.alerts')>0",
+            params![origin, identity.as_str()], |row| row.get(0),
+        ).optional()?;
+        let envelope = match current {
+            None => return Ok(None),
+            Some(Some(raw)) => serde_json::from_str(&raw)?,
+            Some(None) => {
+                tx.execute("UPDATE identities SET metadata=json_set(metadata,'$.queue_full.envelope',json(?3)) WHERE origin=?1 AND identity=?2", params![origin, identity.as_str(), serde_json::to_string(proposed)?])?;
+                proposed.clone()
+            }
+        };
+        tx.commit()?;
+        Ok(Some(envelope))
+    }
+
+    pub(crate) fn acknowledge_queue_full_alert(
+        &self,
+        origin: &str,
+        identity: &IdentityId,
+        message: &MessageId,
+    ) -> Result<(), StoreError> {
+        self.conn.execute(
+            "UPDATE identities SET metadata=json_remove(json_set(metadata,'$.queue_full.alerts',json_extract(metadata,'$.queue_full.alerts')-1),'$.queue_full.envelope')
+             WHERE origin=?1 AND identity=?2 AND json_extract(metadata,'$.queue_full.envelope.id')=?3 AND json_extract(metadata,'$.queue_full.alerts')>0",
+            params![origin, identity.as_str(), message.as_str()],
+        )?;
+        Ok(())
+    }
+
     /// Whether any identity registered under `origin` belongs to `project`.
     pub(crate) fn has_identity(
         &self,
@@ -435,9 +493,8 @@ impl Store {
     ) -> Result<BTreeMap<Stream, u64>, StoreError> {
         let mut stmt = self.conn.prepare("SELECT stream, seq FROM positions WHERE origin=?1 AND project=?2 ORDER BY stream LIMIT ?3")?;
         let mut result = BTreeMap::new();
-        // The larger bound never cuts a hub project short: insertion caps it at 256.
         for row in stmt.query_map(
-            params![origin, project.as_str(), MAX_LOCAL_STREAMS as i64],
+            params![origin, project.as_str(), MAX_STREAM_POSITIONS as i64],
             |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
         )? {
             let (stream, seq) = row?;
@@ -514,13 +571,8 @@ impl Store {
                 params![origin, project.as_str(),format!("{origin}#owner=")],
                 |r| r.get(0),
             )?;
-            let (cap, full) = if origin == agmen_client::LOCAL_ORIGIN {
-                (MAX_LOCAL_STREAMS, "local stream positions")
-            } else {
-                (MAX_HUB_STREAMS, "256 stream positions")
-            };
-            if count >= cap as i64 {
-                return Err(StoreError::Full(full));
+            if count >= MAX_STREAM_POSITIONS as i64 {
+                return Err(StoreError::Full("258 stream positions"));
             }
         }
         let mut remember = None;
@@ -538,6 +590,15 @@ impl Store {
         )?;
         for row in identities {
             let (id, owner, metadata) = row?;
+            // An inbox can route only to its identity or an owning listener.
+            // Keep the sender too, since its outgoing ids must be remembered.
+            if let Stream::Inbox(recipient) = &message.stream
+                && recipient.as_str() != id
+                && recipient.as_str() != owner
+                && message.from.as_str() != id
+            {
+                continue;
+            }
             let identity: ManagedIdentity = serde_json::from_str(&metadata)?;
             let id = id
                 .parse::<IdentityId>()
@@ -566,16 +627,18 @@ impl Store {
                 let (pending, receipts): (i64, i64) = tx.query_row(
                     "SELECT (SELECT count(*) FROM pending WHERE origin=?1 AND identity=?2), (SELECT count(*) FROM receipts WHERE origin=?1 AND identity=?2 AND sender!='')",
                     params![origin, id.as_str()], |r| Ok((r.get(0)?, r.get(1)?)))?;
-                if pending >= 10_000 {
-                    return Err(StoreError::Full("10000 pending rows"));
+                if pending >= MAX_PENDING || (needs_receipt && receipts >= MAX_RECEIPTS) {
+                    tx.execute("UPDATE identities SET metadata=json_set(metadata,'$.queue_full.full',1,'$.queue_full.alerts',min(coalesce(json_extract(metadata,'$.queue_full.alerts'),0),?3-1)+1) WHERE origin=?1 AND identity=?2 AND json_extract(metadata,'$.queue_full.full') IS NULL", params![origin, id.as_str(), MAX_QUEUE_ALERTS])?;
+                    // An ASSIGN also comes as a second stream copy. Record this copy's
+                    // receipt when it fits, so the other copy is skipped too and the
+                    // ASSIGN is not delivered late once the queue drains.
+                    if !needs_receipt || receipts >= MAX_RECEIPTS {
+                        continue;
+                    }
+                } else {
+                    tx.execute("INSERT INTO pending(origin, project, identity, sender, id, message) VALUES (?1,?2,?3,?4,?5,?6) ON CONFLICT DO NOTHING",
+                        params![origin, project.as_str(), id.as_str(), message.from.as_str(), message.client.id.as_str(), raw])?;
                 }
-                if needs_receipt && receipts >= 20_000 {
-                    return Err(StoreError::Full(
-                        "20000 receipts; awaiting other stream copies",
-                    ));
-                }
-                tx.execute("INSERT INTO pending(origin, project, identity, sender, id, message) VALUES (?1,?2,?3,?4,?5,?6) ON CONFLICT DO NOTHING",
-                    params![origin, project.as_str(), id.as_str(), message.from.as_str(), message.client.id.as_str(), raw])?;
             }
             if needs_receipt {
                 let (feed, inbox) = match message.stream {
@@ -587,6 +650,7 @@ impl Store {
                 // Both copies commit contiguously; positions reject subsequent replays.
                 tx.execute("DELETE FROM receipts WHERE origin=?1 AND project=?2 AND identity=?3 AND sender=?4 AND id=?5 AND feed IS NOT NULL AND inbox IS NOT NULL",
                     params![origin, project.as_str(), id.as_str(), message.from.as_str(), message.client.id.as_str()])?;
+                rearm_queue_alert(&tx, origin, &id)?;
             }
         }
         drop(stmt);
@@ -701,9 +765,25 @@ impl Store {
         for n in selected {
             tx.execute("DELETE FROM pending WHERE n=?1", [n])?;
         }
+        rearm_queue_alert(&tx, origin, identity)?;
         tx.commit()?;
         Ok(result)
     }
+}
+
+fn rearm_queue_alert(
+    tx: &rusqlite::Transaction<'_>,
+    origin: &str,
+    identity: &IdentityId,
+) -> Result<(), StoreError> {
+    tx.execute(
+        "UPDATE identities SET metadata=json_remove(metadata,'$.queue_full.full')
+         WHERE origin=?1 AND identity=?2 AND json_extract(metadata,'$.queue_full.full') IS NOT NULL
+         AND (SELECT count(*) FROM pending WHERE origin=?1 AND identity=?2) < ?3
+         AND (SELECT count(*) FROM receipts WHERE origin=?1 AND identity=?2 AND sender!='') < ?4",
+        params![origin, identity.as_str(), MAX_PENDING, MAX_RECEIPTS],
+    )?;
+    Ok(())
 }
 
 /// Reuse the client's R31 routing rules, also implemented by the plugin.
@@ -714,6 +794,10 @@ fn addressed_to(
     kind: IdentityKind,
     own_ids: Option<&VecDeque<MessageId>>,
 ) -> Result<bool, StoreError> {
+    // ingest_for_owner skips an identity before decoding it when an inbox is
+    // neither its own nor its owner's. Keep that skip in step with the inbox
+    // rules below; inbox_ingest_skips_only_identities_the_addressing_rules_reject
+    // checks they agree.
     if kind == IdentityKind::Listener {
         // Private fanout includes the owner; public messages have a feed copy.
         // Choose one durable copy even if another arrives after a drain/restart.

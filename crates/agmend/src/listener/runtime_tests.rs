@@ -8,6 +8,9 @@ use std::sync::Mutex as StdMutex;
 #[path = "local_agents_tests.rs"]
 mod local_agents;
 
+#[path = "mint_rollback_tests.rs"]
+mod mint_rollback;
+
 const FAKE: &str = r#"
 printf '%s\n' "$@" >argv
 printf '%s\n' "$AGMEN_MANAGED" >managed-env
@@ -355,6 +358,102 @@ impl Fixture {
 
 fn event(seq: u64, from: &str) -> StampedEnvelope {
     serde_json::from_value(json!({"v":1,"id":format!("{seq:026}"),"verb":"FYI","data":{},"body":format!("message {seq}"),"sent_at":"2026-10-29T16:00:00Z","stream":"feed","seq":seq,"from":from,"from_handle":if from=="owner001" {"owner"} else {"stranger"},"from_kind":"human","hub_at":"2026-10-29T16:00:00Z"})).unwrap()
+}
+
+#[tokio::test]
+async fn failed_hub_listener_registration_revokes_the_mint_and_allows_retry() {
+    const IDENTITY_CAP: usize = agmen_local::safeguards::MAX_MANAGED;
+    let mut f = Fixture::new(FAKE).await;
+    let live = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let revokes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let minted = live.clone();
+    let revoked = live.clone();
+    let calls = revokes.clone();
+    let app = axum::Router::new()
+        .route("/v1/me", axum::routing::get(|| async {
+            axum::Json(json!({"broker_url":"mqtt://127.0.0.1:9"}))
+        }))
+        .route("/v1/identities", axum::routing::post(move |axum::Json(body): axum::Json<Value>| {
+            let exists = minted.swap(true, std::sync::atomic::Ordering::SeqCst);
+            async move {
+                if exists {
+                    return (axum::http::StatusCode::CONFLICT, axum::Json(json!({"error":"listener_exists"}))).into_response();
+                }
+                axum::Json(json!({"id":"listen01","handle":body["handle"],"project":"project1","tenant":"tenant01","token":"fake-hub-credential"})).into_response()
+            }
+        }))
+        .route("/v1/identities/{id}", axum::routing::delete(move |axum::extract::Path(id): axum::extract::Path<String>| {
+            assert_eq!(id, "listen01");
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            revoked.store(false, std::sync::atomic::Ordering::SeqCst);
+            async { axum::http::StatusCode::NO_CONTENT }
+        }));
+    let login: Login = serde_json::from_slice(
+        &tokio::fs::read(f.dir.path().join("login.json"))
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let hub_url = login.hub_url.clone();
+    f.hub_task.abort();
+    assert!((&mut f.hub_task).await.unwrap_err().is_cancelled());
+    let socket = tokio::net::TcpListener::bind(("127.0.0.1", hub_url.port().unwrap()))
+        .await
+        .unwrap();
+    f.hub_task = tokio::spawn(async move { axum::serve(socket, app).await.unwrap() });
+    let path = f.dir.path().join("test.db");
+    let origin = agmen_client::origin_key(&hub_url);
+    let seed_path = path.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut store = crate::state::Store::open(&seed_path).unwrap();
+        for n in 0..IDENTITY_CAP {
+            store
+                .register(&ManagedIdentity {
+                    hub_url: hub_url.clone(),
+                    broker_url: "mqtt://127.0.0.1:9".parse().unwrap(),
+                    tenant: "tenant01".parse().unwrap(),
+                    project: "project1".parse().unwrap(),
+                    identity_id: format!("seed{n:04}").parse().unwrap(),
+                    owner_id: "owner001".parse().unwrap(),
+                    handle: format!("owner/seed{n:04}"),
+                    kind: IdentityKind::Agent,
+                })
+                .unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    let request = || Start {
+        project: "project1".parse().unwrap(),
+        root: f.repo(),
+        model: None,
+        coordinator: false,
+    };
+    let error = f.listeners().start(request(), &login).await.unwrap_err();
+    assert_eq!(error.code, ErrorCode::Hub);
+    assert_eq!(revokes.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(!live.load(std::sync::atomic::Ordering::SeqCst));
+    // The rollback also drops the credential the mint stored for the revoked id.
+    let key = agmen_client::TokenKey::new(&login.hub_url, &"listen01".parse().unwrap()).unwrap();
+    assert_eq!(
+        TokenStore::Dir(f.dir.path().join("tokens"))
+            .get(&key)
+            .unwrap(),
+        None
+    );
+    tokio::task::spawn_blocking(move || {
+        let mut store = crate::state::Store::open(&path).unwrap();
+        store
+            .unregister(&origin, &"seed0000".parse().unwrap())
+            .unwrap();
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        f.listeners().start(request(), &login).await.unwrap()["identity_id"],
+        "listen01"
+    );
+    f.stop().await;
 }
 
 #[tokio::test]
@@ -1022,6 +1121,9 @@ sleep 5
     f.wait_batches(2).await;
     let status = f.wait_state("capped").await;
     assert_eq!(status["today_usd"], "2.10");
+    // The cap shows before the process stops and the ALERT posts, so wait for
+    // the ALERT, then keep the old window in which a duplicate would show.
+    drop(wait_alerts(&f, 1).await);
     tokio::time::sleep(Duration::from_millis(50)).await;
     {
         let posts = f.posts.lock().unwrap();

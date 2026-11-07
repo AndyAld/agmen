@@ -27,6 +27,10 @@ use crate::state::ManagedIdentity;
 use roles::ReviewedBase;
 
 const MAX_ROLE_PROMPT_BYTES: usize = 64 * 1024;
+pub(crate) const QUIT_WAIT: Duration = Duration::from_secs(8);
+/// How long quit lets an admitted launch finish before abandoning it.
+const QUIT_LAUNCH_WAIT: Duration = Duration::from_secs(4);
+const QUIT_LEVEL_WAIT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -181,6 +185,9 @@ pub(crate) struct Managed {
     /// At most MAX_MANAGED successful resolutions, keyed by repo, name and commit.
     role_cache: Mutex<BTreeMap<(PathBuf, String, String), agmen_roles::Resolved>>,
     shutting_down: AtomicBool,
+    /// Set when quit gives up on an admitted launch; it then discards what it made.
+    abandon_launch: tokio::sync::watch::Sender<bool>,
+    quit_launch_wait: Duration,
 }
 
 impl Managed {
@@ -212,6 +219,8 @@ impl Managed {
             safeguards_cache: Mutex::new(budgets::SettingsCache::default()),
             role_cache: Mutex::new(BTreeMap::new()),
             shutting_down: AtomicBool::new(false),
+            abandon_launch: tokio::sync::watch::channel(false).0,
+            quit_launch_wait: QUIT_LAUNCH_WAIT,
         }
     }
 
@@ -325,10 +334,12 @@ impl Managed {
             .await?;
         // The hub now holds a live identity and agmend a credential for it, so
         // any failure from here on takes both back.
-        match self
-            .register_launch(launch, &identity, placement, agmen, role, repo)
-            .await
-        {
+        let mut abandoned = self.abandon_launch.subscribe();
+        let registered = tokio::select! {
+            registered = self.register_launch(launch, &identity, placement, agmen, role, repo) => registered,
+            _ = abandoned.wait_for(|abandoned| *abandoned) => Err(error("daemon is shutting down")),
+        };
+        match registered {
             Ok(answer) => Ok(answer),
             Err(failure) => Err(self.discard_identity(&identity, failure).await),
         }
@@ -884,27 +895,62 @@ impl Managed {
 
     pub(crate) async fn shutdown(self: &Arc<Self>) {
         self.shutting_down.store(true, Ordering::Release);
-        let workers: Vec<_> = self.workers.lock().await.values().cloned().collect();
-        let mut tasks = tokio::task::JoinSet::new();
+        let deadline = tokio::time::Instant::now() + QUIT_WAIT;
+        let launch_deadline = deadline.min(tokio::time::Instant::now() + self.quit_launch_wait);
+        let _launching = match tokio::time::timeout_at(launch_deadline, self.launching.lock()).await
+        {
+            Ok(guard) => Some(guard),
+            Err(_) => {
+                tracing::warn!("managed shutdown is abandoning an in-flight launch");
+                // The launch discards its identity, then frees the lock.
+                self.abandon_launch.send_replace(true);
+                tokio::time::timeout_at(deadline, self.launching.lock())
+                    .await
+                    .ok()
+            }
+        };
+        let workers: Vec<_> = self
+            .workers
+            .lock()
+            .await
+            .values()
+            .take(MAX_MANAGED)
+            .cloned()
+            .collect();
+        let mut levels = BTreeMap::<u32, Vec<_>>::new();
         for worker in workers {
-            let manager = self.clone();
-            tasks.spawn(async move {
-                if let Err(error) = manager.stop_worker(worker).await {
-                    tracing::warn!(code=?error.code,"managed agent goodbye failed");
-                }
-            });
+            let depth = worker.lock().await.record.depth;
+            levels.entry(depth).or_default().push(worker);
         }
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
-        while !tasks.is_empty() {
-            if tokio::time::timeout_at(deadline, tasks.join_next())
-                .await
-                .is_err()
-            {
-                tasks.abort_all();
+        // The registry bounds the number of levels and their workers by MAX_MANAGED.
+        for (_, level) in levels.into_iter().rev() {
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
                 break;
             }
+            let level_deadline = deadline.min(now + QUIT_LEVEL_WAIT);
+            let mut tasks = tokio::task::JoinSet::new();
+            for worker in level {
+                let manager = self.clone();
+                tasks.spawn(async move {
+                    if let Err(error) = manager.stop_worker(worker).await {
+                        tracing::warn!(code=?error.code,"managed agent goodbye failed");
+                    }
+                });
+            }
+            for _ in 0..MAX_MANAGED {
+                match tokio::time::timeout_at(level_deadline, tasks.join_next()).await {
+                    Ok(Some(_)) => {}
+                    Ok(None) => break,
+                    Err(_) => {
+                        tasks.abort_all();
+                        break;
+                    }
+                }
+            }
+            // Drain at most MAX_MANAGED cancelled stops before advancing to parents.
+            tasks.shutdown().await;
         }
-        while tasks.join_next().await.is_some() {}
     }
 
     pub(crate) async fn supervise(self: Arc<Self>) {
