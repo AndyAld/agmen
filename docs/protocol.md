@@ -316,8 +316,9 @@ and other identity callers receive `forbidden`; an invalid credential receives
 `unauthorized`. Extra parameters are refused. A successful `{}` reply is written
 before shutdown is signaled, with a 10 s write deadline. The daemon then leaves
 `serve_until` through the same cleanup path as SIGTERM: stop accepting, abort
-local connections, and join daemon-owned collectors and sessions within their
-existing 10 s total bound. Clients waiting for exit should use a 15 s bound.
+local connections, and join daemon-owned collectors and sessions, and let a hub
+token renewal in flight store its tokens, within their existing 10 s total
+bound. Clients waiting for exit should use a 15 s bound.
 The desktop only sends this method to its own bundled executable and never
 stops another installation's daemon.
 

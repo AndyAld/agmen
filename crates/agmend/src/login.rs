@@ -6,9 +6,10 @@
 //! is about to run out or the hub refused it. The hub replaces the refresh
 //! token on every use, so renewals in this process go one at a time (the
 //! cache lock is held across one, and a renewal runs to its end even when the
-//! caller that started it gives up); a renewal by the CLI at the same moment
-//! can still spend the refresh token first, and then agmend reports
-//! `unauthorized` until `agmen login` runs again.
+//! caller that started it gives up, and shutdown waits for one within its
+//! bound); a renewal by the CLI at the same moment can still spend the refresh
+//! token first, and then agmend reports `unauthorized` until `agmen login`
+//! runs again.
 //!
 //! agmend can also sign a person in itself (`login_start`, `login_status`):
 //! the hub's device flow from agmen-client, run by one background task, so
@@ -166,9 +167,6 @@ impl Credentials {
             return Ok((login, tokens.access_token().to_owned()));
         }
         let (http, store) = (self.http.clone(), self.store.clone());
-        // shortcut: nothing joins this task at shutdown, so a renewal still in
-        // flight when agmend exits can lose the spent grant; await the cache
-        // lock in Agmend::serve_until if that ever matters.
         tokio::spawn(async move {
             let tokens = human_tokens(&http, &store, &login).await?;
             let token = tokens.access_token().to_owned();
@@ -183,6 +181,14 @@ impl Credentials {
     /// renewal by the CLI), so the next call reads the store again.
     pub(crate) async fn forget(&self) {
         forget_cached(&self.cache).await;
+    }
+
+    /// Waits for a renewal in flight to store its tokens. The renewal task
+    /// holds the cache lock until it has, whether or not the caller that
+    /// started it is still there. `Agmend::serve_until` calls this inside its
+    /// shutdown bound, so agmend does not exit with a spent grant unstored.
+    pub(crate) async fn shutdown(&self) {
+        drop(self.cache.lock().await);
     }
 
     /// `login_start {hub?}`: starts the hub's device sign-in and answers

@@ -610,3 +610,74 @@ async fn a_second_caller_waits_for_a_refresh_whose_caller_left() {
     assert_eq!(login, fixture.login);
     assert_eq!(access, "new-access");
 }
+
+/// Serves `daemon` until the returned sender fires, after a caller has
+/// started a renewal that the hub holds and then given up on it.
+async fn serve_with_a_renewal_in_flight(
+    daemon: crate::Agmend,
+    refresh: &DelayedRefresh,
+) -> (tokio::sync::oneshot::Sender<()>, JoinHandle<()>) {
+    let core = daemon.core.clone();
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let serving = tokio::spawn(daemon.serve_until(async move {
+        let _stopped = stopped.await;
+    }));
+    let caller = tokio::spawn(async move { core.origins.hub().credentials().access().await });
+    tokio::time::timeout(Duration::from_secs(2), refresh.started.notified())
+        .await
+        .expect("the hub must see the refresh");
+    caller.abort();
+    (stop, serving)
+}
+
+#[tokio::test]
+async fn shutdown_waits_for_a_renewal_in_flight_to_store_its_tokens() {
+    let RefreshFixture {
+        daemon,
+        refresh,
+        home,
+        login,
+    } = RefreshFixture::new().await;
+    let (stop, mut serving) = serve_with_a_renewal_in_flight(daemon, &refresh).await;
+    stop.send(()).unwrap();
+    // The hub answers only after shutdown began: agmend must still be there
+    // to store the answer.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), &mut serving)
+            .await
+            .is_err(),
+        "agmend exited with a renewal in flight"
+    );
+    refresh.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), serving)
+        .await
+        .expect("agmend must exit once the renewal ends")
+        .unwrap();
+    let stored = home.store().get(&login.key().unwrap()).unwrap().unwrap();
+    let stored: Value = serde_json::from_str(&stored).unwrap();
+    assert_eq!(stored["access_token"], "new-access");
+    assert_eq!(stored["refresh_token"], "new-refresh");
+}
+
+#[tokio::test]
+async fn shutdown_does_not_wait_past_its_bound_for_a_hung_hub() {
+    let RefreshFixture {
+        daemon,
+        refresh,
+        home: _home,
+        login: _login,
+    } = RefreshFixture::new().await;
+    let (stop, serving) = serve_with_a_renewal_in_flight(daemon, &refresh).await;
+    // The hub never answers.
+    let began = std::time::Instant::now();
+    stop.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(13), serving)
+        .await
+        .expect("a hung hub held agmend past its shutdown bound")
+        .unwrap();
+    let waited = began.elapsed();
+    assert!(
+        waited >= Duration::from_secs(10),
+        "agmend left after {waited:?} with the renewal still in flight"
+    );
+}
