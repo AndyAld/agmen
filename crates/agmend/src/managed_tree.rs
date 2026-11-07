@@ -312,14 +312,16 @@ impl Managed {
         let (joined, repo) =
             checked_checkout(root, &launch.project, &login, parent.as_ref()).await?;
         let base = self.launch_base(&repo, parent.as_ref()).await?;
+        let (personal_snapshot, pending_snapshot) =
+            self.launch_personal_roles(parent.as_ref()).await?;
+        let personal = self.personal_snapshot_dir(&personal_snapshot).await?;
         let role = self
-            .launch_role(&repo, &launch, parent.as_ref(), base.as_ref())
+            .launch_role(&repo, &launch, parent.as_ref(), base.as_ref(), &personal)
             .await?;
-        // A child's project role is read at its tree's commit. A root's is
-        // read from the checkout, where the person launched it.
+        // Every child pins project ancestry, even if its own role is personal
+        // or built-in. Roots keep reading their checkout's project layer.
         let role_commit = parent.as_ref().and_then(|_| {
             role.as_ref()
-                .filter(|role| role.layer == agmen_roles::Layer::Project)
                 .and(base.as_ref())
                 .map(|base| base.commit.clone())
         });
@@ -358,6 +360,7 @@ impl Managed {
                         shared_budget: reservation.is_some(),
                         role_commit,
                         reviewed_base: base,
+                        personal_snapshot: Some(personal_snapshot),
                     },
                     agmen,
                     role,
@@ -377,6 +380,11 @@ impl Managed {
             }
         }
         .await;
+        if result.is_ok()
+            && let Some(snapshot) = pending_snapshot
+        {
+            let _persisted = snapshot.keep();
+        }
         if result.is_err()
             && let Some(reservation) = reservation
         {
@@ -391,6 +399,7 @@ impl Managed {
         launch: &Launch,
         parent: Option<&Record>,
         base: Option<&ReviewedBase>,
+        personal: &std::path::Path,
     ) -> Result<Option<agmen_roles::Resolved>, ApiError> {
         Ok(match parent {
             Some(parent) => {
@@ -429,7 +438,7 @@ impl Managed {
                 }
                 let base = base.ok_or_else(|| error("child role commit is missing"))?;
                 let role = self
-                    .load_role_at(repo, name, &base.commit)
+                    .load_role_at(repo, name, &base.commit, Some(personal))
                     .await
                     .map_err(|failure| ApiError {
                         code: failure.code,
@@ -444,7 +453,7 @@ impl Managed {
                 Some(role)
             }
             None => match &launch.role {
-                Some(name) => Some(self.resolve_role(repo, name).await?),
+                Some(name) => Some(self.resolve_role(repo, name, Some(personal)).await?),
                 None => None,
             },
         })

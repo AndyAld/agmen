@@ -1,6 +1,8 @@
-//! Child project roles are resolved from reviewed Git objects, never agent files.
+//! Tree roles use reviewed Git objects and personal sources recorded at root launch.
 
-use std::path::Path;
+use std::io::Write as _;
+use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use agmen_local::ApiError;
@@ -22,7 +24,87 @@ pub(super) struct ReviewedBase {
     pub(super) commit: String,
 }
 
+/// An immutable directory of personal sources in agmend's private state.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(try_from = "String")]
+pub(super) struct PersonalSnapshot(String);
+
+impl TryFrom<String> for PersonalSnapshot {
+    type Error = &'static str;
+
+    fn try_from(id: String) -> Result<Self, Self::Error> {
+        if crate::transcripts::is_session_id(&id) {
+            Ok(Self(id))
+        } else {
+            Err("stored personal role snapshot ID is invalid")
+        }
+    }
+}
+
+pub(super) type RoleCacheKey = (PathBuf, String, String, Option<PersonalSnapshot>);
+
 impl Managed {
+    /// The guard removes a failed launch's snapshot; a successful root keeps it.
+    pub(super) async fn launch_personal_roles(
+        &self,
+        parent: Option<&Record>,
+    ) -> Result<(PersonalSnapshot, Option<tempfile::TempDir>), ApiError> {
+        if let Some(parent) = parent {
+            let snapshot = parent.personal_snapshot.clone().ok_or_else(|| {
+                bad_request("this agent's tree has no personal role snapshot on record: its root was launched before agmend recorded one; relaunch the root agent")
+            })?;
+            return Ok((snapshot, None));
+        }
+        let personal = self.personal_roles.clone();
+        let snapshots = self.state_dir.join("role-snapshots");
+        tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+            let sources = personal
+                .as_deref()
+                .map(agmen_roles::read_personal_roles)
+                .transpose()?
+                .unwrap_or_default();
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(&snapshots)?;
+            let id = PersonalSnapshot(crate::launch::new_session_id()?);
+            let dir = tempfile::Builder::new()
+                .prefix(&id.0)
+                .rand_bytes(0)
+                .permissions(std::fs::Permissions::from_mode(0o700))
+                .tempdir_in(snapshots)?;
+            for (index, source) in sources.iter().enumerate() {
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(dir.path().join(format!("{index:04}.xml")))?;
+                file.write_all(source.as_bytes())?;
+                file.sync_all()?;
+            }
+            Ok((id, Some(dir)))
+        })
+        .await
+        .map_err(error)?
+        .map_err(error)
+    }
+
+    pub(super) async fn personal_snapshot_dir(
+        &self,
+        snapshot: &PersonalSnapshot,
+    ) -> Result<PathBuf, ApiError> {
+        let dir = self.state_dir.join("role-snapshots").join(&snapshot.0);
+        if !tokio::fs::symlink_metadata(&dir)
+            .await
+            .is_ok_and(|metadata| metadata.is_dir())
+        {
+            return Err(bad_request(
+                "this agent's tree has a missing or unreadable personal role snapshot; relaunch the root agent",
+            ));
+        }
+        Ok(dir)
+    }
+
     /// What a launch records as its tree's reviewed base, and the commit a
     /// child's project role is read at. A child takes its parent's, as recorded
     /// when the person launched the root. A root records `origin/<branch>` as of
@@ -110,15 +192,32 @@ impl Managed {
         record: &Record,
         name: &str,
     ) -> Result<agmen_roles::Resolved, ApiError> {
-        let Some(commit) = &record.role_commit else {
-            return self.resolve_role(&record.repo, name).await;
-        };
-        let key = (record.repo.clone(), name.to_owned(), commit.clone());
-        if let Some(role) = self.role_cache.lock().await.get(&key) {
+        let key = record.role_commit.as_ref().map(|commit| {
+            (
+                record.repo.clone(),
+                name.to_owned(),
+                commit.clone(),
+                record.personal_snapshot.clone(),
+            )
+        });
+        if let Some(key) = &key
+            && let Some(role) = self.role_cache.lock().await.get(key)
+        {
             return Ok(role.clone());
         }
+        let personal = match &record.personal_snapshot {
+            Some(snapshot) => Some(self.personal_snapshot_dir(snapshot).await?),
+            None => self.personal_roles.clone(),
+        };
+        let Some(key) = key else {
+            return self
+                .resolve_role(&record.repo, name, personal.as_deref())
+                .await;
+        };
         // The lock is not held across git, so one cold load never stalls other workers.
-        let role = self.load_role_at(&record.repo, name, commit).await?;
+        let role = self
+            .load_role_at(&record.repo, name, &key.2, personal.as_deref())
+            .await?;
         let mut cache = self.role_cache.lock().await;
         if cache.len() >= agmen_local::safeguards::MAX_MANAGED && !cache.contains_key(&key) {
             // Evict the smallest key so eviction is deterministic without another index.
@@ -135,6 +234,7 @@ impl Managed {
         repo: &Path,
         name: &str,
         commit: &str,
+        personal: Option<&Path>,
     ) -> Result<agmen_roles::Resolved, ApiError> {
         if !matches!(commit.len(), 40 | 64) || !commit.bytes().all(|byte| byte.is_ascii_hexdigit())
         {
@@ -209,6 +309,7 @@ impl Managed {
                 .await
                 .map_err(error)?;
         }
-        self.resolve_any_role(snapshot.path(), name).await
+        self.resolve_role_sources(Some(snapshot.path()), name, personal)
+            .await
     }
 }

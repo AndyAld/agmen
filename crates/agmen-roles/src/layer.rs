@@ -150,7 +150,7 @@ impl Layers {
         if let Some(dir) = &self.personal {
             insert_layer(
                 &mut sources,
-                read_dir(dir, true)?,
+                read_personal_roles(dir)?,
                 &mut layers,
                 Layer::Personal,
             )?;
@@ -193,6 +193,17 @@ fn io(path: &Path, source: std::io::Error) -> RoleError {
         path: path.to_owned(),
         source,
     }
+}
+
+/// Read personal role sources in filename order, following personal file links.
+///
+/// Missing directories are empty. Reads at most 64 XML files of 64 KiB each,
+/// skipping unreadable, oversized and invalid UTF-8 files.
+///
+/// # Errors
+/// Returns directory I/O errors or a directory listing over 4096 entries.
+pub fn read_personal_roles(dir: &Path) -> Result<Vec<String>, RoleError> {
+    read_dir(dir, true)
 }
 
 fn read_dir(dir: &Path, follow: bool) -> Result<Vec<String>, RoleError> {
