@@ -86,19 +86,20 @@ impl HubError {
     /// reqwest proves the request never left: its connect errors (DNS, TCP
     /// connect, TLS handshake, the client's connect timeout) and builder errors.
     ///
-    /// Reqwest cannot say whether a request was written, and marks no timeout as
-    /// coming after the connection was made. The request's own timeout, as long
-    /// as the connect timeout but started first, ends any phase as a plain
-    /// timeout (reqwest 0.13.5, async_impl/client.rs, `PendingRequest::poll`), so
-    /// a stalled connect gets the lookup although the hub never saw the request.
-    /// Looking up only after a response would strand the late answer this exists
-    /// for. The lookup stays bounded: one roster read (a hub that stalled often
-    /// cannot answer it, which ends the lookup), then a revoke only if exactly one
-    /// offline identity of this kind and handle, with no HELLO, is unknown to this
-    /// daemon. When nothing was minted that is this daemon's own earlier stranded
-    /// mint, which is the one to remove, or an identity of the same person made
-    /// elsewhere that never named an agent or model: the residual of
-    /// `rollback_untrusted_hub_mint`, as for any lost answer.
+    /// Reqwest cannot say whether a request was written, and marks no timeout
+    /// before the response as coming after the connection was made. The
+    /// request's own timeout, as long as the connect timeout but started first,
+    /// ends any phase as a plain timeout (reqwest 0.13.5, async_impl/client.rs,
+    /// `PendingRequest::poll`), so a stalled connect gets the lookup although the
+    /// hub never saw the request. Looking up only after a response would strand
+    /// the late answer this exists for. The lookup stays bounded: one roster read
+    /// (a hub that stalled often cannot answer it, which ends the lookup), then a
+    /// revoke only if exactly one offline identity of this kind and handle, with
+    /// no HELLO, is unknown to this daemon. When nothing was minted that is this
+    /// daemon's own earlier stranded mint, which is the one to remove, or an
+    /// identity of the same person made elsewhere that never named an agent or
+    /// model: the residual of `rollback_untrusted_hub_mint`, as for any lost
+    /// answer.
     pub(crate) fn mint_may_have_committed(&self) -> bool {
         match self {
             Self::BadAnswer(_) | Self::Body(_) => true,
