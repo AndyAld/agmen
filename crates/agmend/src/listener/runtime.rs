@@ -294,6 +294,16 @@ impl Listeners {
         )
     }
 
+    /// The project's listener per its intent file; `None` on any read error.
+    /// Blocking file IO: call it off the async runtime.
+    pub(crate) fn intent_identity(state_dir: &Path, project: &ProjectId) -> Option<IdentityId> {
+        let path = state_dir
+            .join("listener")
+            .join(project.as_str())
+            .join("intent.json");
+        read_intent(&path).ok().map(|intent| intent.identity_id)
+    }
+
     pub(crate) fn queue_full_alert(identity: &ManagedIdentity) -> Result<ClientEnvelope, ApiError> {
         let body = crate::state::QueueLimit::Pending.text(identity);
         envelope(
