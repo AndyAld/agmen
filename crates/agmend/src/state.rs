@@ -448,6 +448,27 @@ impl Store {
         Ok(())
     }
 
+    /// Authority reads must distinguish an unreadable caller from a missing one,
+    /// without decoding any unrelated identity's metadata.
+    pub(crate) fn identity(
+        &self,
+        origin: &str,
+        owner: &IdentityId,
+        id: &IdentityId,
+    ) -> Result<Option<ManagedIdentity>, StoreError> {
+        let metadata: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT metadata FROM identities WHERE origin=?1 AND owner=?2 AND identity=?3",
+                params![origin, owner.as_str(), id.as_str()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        metadata
+            .map(|raw| serde_json::from_str(&raw).map_err(StoreError::from))
+            .transpose()
+    }
+
     pub(crate) fn identities(
         &self,
         origin: &str,
@@ -463,18 +484,44 @@ impl Store {
         Ok(result)
     }
 
+    /// Like `identities`, but a row whose stored text does not parse is left
+    /// out, so one broken identity cannot stop a caller that needs any healthy
+    /// one (the sender of an ALERT). An identity missing from this list may
+    /// still be registered: never decide from it that an identity is gone,
+    /// revoked or not the owner's. `identities` and `identity` answer that.
+    pub(crate) fn readable_identities(
+        &self,
+        origin: &str,
+        owner: &IdentityId,
+    ) -> Result<Vec<ManagedIdentity>, StoreError> {
+        let mut stmt = self.conn.prepare("SELECT metadata FROM identities WHERE origin=?1 AND owner=?2 ORDER BY identity LIMIT ?3")?;
+        let mut result = Vec::new();
+        for row in stmt.query_map(params![origin, owner.as_str(), MAX_MANAGED as i64], |r| {
+            r.get::<_, String>(0)
+        })? {
+            // Left out, not an error: ingest is what reports an unreadable row.
+            if let Ok(identity) = serde_json::from_str(&row?) {
+                result.push(identity);
+            }
+        }
+        Ok(result)
+    }
+
     /// Pending notifications survive drains independently of the full marker.
     pub(crate) fn pending_queue_full_alerts(
         &self,
         origin: &str,
         owner: &IdentityId,
     ) -> Result<Vec<ManagedIdentity>, StoreError> {
-        let mut stmt = self.conn.prepare("SELECT metadata FROM identities WHERE origin=?1 AND owner=?2 AND json_extract(metadata,'$.queue_full.alerts')>0 ORDER BY identity LIMIT ?3")?;
+        let mut stmt = self.conn.prepare("SELECT metadata FROM identities WHERE origin=?1 AND owner=?2 AND CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.queue_full.alerts')>0 ELSE 0 END ORDER BY identity LIMIT ?3")?;
         let mut identities = Vec::new();
         for row in stmt.query_map(params![origin, owner.as_str(), MAX_MANAGED as i64], |row| {
             row.get::<_, String>(0)
         })? {
-            identities.push(serde_json::from_str(&row?)?);
+            // Left out, not an error: ingest is what reports an unreadable row.
+            if let Ok(identity) = serde_json::from_str(&row?) {
+                identities.push(identity);
+            }
         }
         Ok(identities)
     }
