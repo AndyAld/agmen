@@ -707,3 +707,30 @@ fn a_read_that_outlasts_the_deadline_is_logged_as_a_timeout() {
         f.stop().await;
     });
 }
+
+/// A second registry row whose stored text does not parse.
+const ADD_UNREADABLE_ROW: &str =
+    "INSERT INTO identities SELECT origin,'unreadable1',owner,project,'{' FROM identities";
+/// Makes the caller's own row unreadable, and only that one.
+const BREAK_CALLERS_ROW: &str = "UPDATE identities SET metadata='{' WHERE identity!='unreadable1'";
+
+#[tokio::test]
+async fn an_unreadable_row_of_another_identity_does_not_refuse_the_caller_but_its_own_is_busy() {
+    let f = Fixture::new().await;
+    let token = token(&f).await;
+    let head_before = head(&f).await;
+    f.state(ADD_UNREADABLE_ROW).await;
+    // The caller's own row reads, so a row it does not depend on cannot refuse it.
+    assert_admitted(&f, &token).await;
+
+    // Its own row does not read: a failed read, which is neither a way in nor
+    // a finding that the caller is gone.
+    f.state(BREAK_CALLERS_ROW).await;
+    assert_eq!(
+        authorize(&f, &f.who.identity_id, &token).await.unwrap_err(),
+        retried(BUSY)
+    );
+    refused_everywhere(&f, &f.who.identity_id, &token, &retried(BUSY)).await;
+    assert_untouched(&f, head_before).await;
+    f.stop().await;
+}

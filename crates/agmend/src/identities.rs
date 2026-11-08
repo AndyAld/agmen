@@ -269,6 +269,8 @@ struct Collector {
     tx: broadcast::Sender<WatchEvent>,
     task: tokio::task::JoinHandle<()>,
     stop: Option<oneshot::Sender<()>>,
+    /// Explicit local callers must finish their initial catch-up before draining.
+    caught_up: bool,
 }
 
 impl Drop for Collector {
@@ -710,6 +712,18 @@ impl Identities {
         store_work(store, move |s| s.identities(&origin, &owner)).await
     }
 
+    /// `managed` without the rows that do not parse. Only for picking a healthy
+    /// identity to act as: what is missing here may be registered, so never
+    /// decide from this list that an identity is gone, revoked or not owned.
+    async fn readable(
+        &self,
+        origin: String,
+        owner: IdentityId,
+    ) -> Result<Vec<ManagedIdentity>, ApiError> {
+        let store = self.store.clone();
+        store_work(store, move |s| s.readable_identities(&origin, &owner)).await
+    }
+
     async fn owned_identity(&self, id: &IdentityId) -> Result<Option<ManagedIdentity>, ApiError> {
         // A missing or unreadable hub login must not remove local authority.
         if let Ok(login) = self.credentials.login().await
@@ -729,15 +743,18 @@ impl Identities {
         id: &IdentityId,
     ) -> Result<Option<ManagedIdentity>, ApiError> {
         let origin = agmen_client::origin_key(&login.hub_url);
-        Ok(self
-            .managed(origin.clone(), login.human_id.clone())
-            .await?
-            .into_iter()
-            .find(|row| {
-                row.identity_id == *id
-                    && row.owner_id == login.human_id
-                    && agmen_client::origin_key(&row.hub_url) == origin
-            }))
+        let lookup_origin = origin.clone();
+        let owner = login.human_id.clone();
+        let lookup_id = id.clone();
+        let row = store_work(self.store.clone(), move |store| {
+            store.identity(&lookup_origin, &owner, &lookup_id)
+        })
+        .await?;
+        Ok(row.filter(|row| {
+            row.identity_id == *id
+                && row.owner_id == login.human_id
+                && agmen_client::origin_key(&row.hub_url) == origin
+        }))
     }
 
     /// Uses the project's known checkout for roles, or only built-in and personal
@@ -1086,6 +1103,7 @@ impl Identities {
         let mut collectors = self.collectors.lock().await;
         if let Some(collector) = collectors.get(&key)
             && !collector.task.is_finished()
+            && collector.caught_up
         {
             return Ok(collector.tx.clone());
         }
@@ -1097,6 +1115,11 @@ impl Identities {
             |collector| collector.tx.clone(),
         );
         if let Some(collector) = collectors.get_mut(&key) {
+            // An explicit call retries a failed initial catch-up immediately.
+            // Join the background retry first so the two passes cannot race.
+            if let Some(stop) = collector.stop.take() {
+                let _sent = stop.send(());
+            }
             finish_task(&mut collector.task, tokio::time::Instant::now() + DEADLINE).await;
         }
         let context = Collection {
@@ -1111,9 +1134,18 @@ impl Identities {
             timing: HubTiming::for_origin(&key.0),
         };
         let mut streams = VecDeque::new();
+        let mut catch_up_error = None;
         if origin == crate::origin::Origin::Local {
             // Complete the first catch-up before a pending call can drain.
-            streams = context.catch_up(MAX_COLLECTION_PAGES).await?;
+            match context.catch_up(MAX_COLLECTION_PAGES).await {
+                Ok(left) => streams = left,
+                Err(failed) if failed.store.is_some() => {
+                    // The caller still sees the failed read, but the collector
+                    // must exist so recovery does not depend on another call.
+                    catch_up_error = Some(failed.error);
+                }
+                Err(failed) => return Err(failed.into()),
+            }
         }
         let (stop, stopped) = oneshot::channel();
         let task = tokio::spawn(async move {
@@ -1125,9 +1157,10 @@ impl Identities {
                 tx: tx.clone(),
                 task,
                 stop: Some(stop),
+                caught_up: catch_up_error.is_none(),
             },
         );
-        Ok(tx)
+        catch_up_error.map_or(Ok(tx), Err)
     }
 
     /// Runs independently of local subscriptions. Removing a login or identity
@@ -1283,7 +1316,7 @@ impl Identities {
                 // it between an ambiguous post and its retry can post a second
                 // ALERT; store the sender with the envelope if that ever matters.
                 let sender = self
-                    .managed(origin.clone(), owner.clone())
+                    .readable(origin.clone(), owner.clone())
                     .await?
                     .into_iter()
                     .find(|identity| identity.project == project);
@@ -1863,6 +1896,8 @@ struct Failed {
     store: Option<StoreKind>,
     /// The failing step came after the position advanced, so no replay follows.
     committed: bool,
+    /// Local replay may leave this stream held and still service other streams.
+    held: bool,
 }
 
 impl From<ApiError> for Failed {
@@ -1871,6 +1906,7 @@ impl From<ApiError> for Failed {
             error,
             store: None,
             committed: false,
+            held: false,
         }
     }
 }
@@ -1892,6 +1928,7 @@ fn store_failed(kind: StoreKind, message: &str) -> Failed {
         error: hub_error(message),
         store: Some(kind),
         committed: false,
+        held: false,
     }
 }
 
@@ -1981,7 +2018,10 @@ async fn store_job<T: Send + 'static>(
                             ));
                         }
                         return work(&mut guard).map_err(|error| {
-                            store_failed(kind_of(&error), "daemon state operation failed")
+                            let mut failed =
+                                store_failed(kind_of(&error), "daemon state operation failed");
+                            failed.held = matches!(error, crate::state::StoreError::Held(_));
+                            failed
                         });
                     }
                     Err(std::sync::TryLockError::Poisoned(_)) => {
@@ -2528,6 +2568,7 @@ impl Collection {
                     error,
                     store: Some(kind),
                     committed,
+                    ..
                 }) => {
                     offline = true;
                     // Nothing replays after a commit; the next good read ends it.
@@ -2729,9 +2770,10 @@ impl Collection {
     }
 
     /// One wake on a fresh queue; the streams it did not reach go to `run_local`.
-    async fn catch_up(&self, max_pages: usize) -> Result<VecDeque<Stream>, ApiError> {
+    async fn catch_up(&self, max_pages: usize) -> Result<VecDeque<Stream>, Failed> {
         let mut streams = VecDeque::new();
-        self.local_wake(&mut streams, max_pages).await?;
+        self.local_wake_skipping(&mut streams, max_pages, &mut BTreeSet::new())
+            .await?;
         Ok(streams)
     }
 
@@ -2743,18 +2785,49 @@ impl Collection {
         let local = self.origins.local();
         let mut stored = local.watch_stored(&self.project).await?;
         let mut skipped = BTreeSet::new();
-        self.send(Ok(ClientEvent::Connection { connected: true }));
+        let mut online = false;
+        let mut warned_store = None;
+        let mut backoff_shift = 0;
         loop {
             // Subscribe before paging so commits during replay remain visible.
             stored.borrow_and_update();
-            self.local_wake_skipping(&mut streams, max_pages, &mut skipped)
-                .await?;
+            match self
+                .local_wake_skipping(&mut streams, max_pages, &mut skipped)
+                .await
+            {
+                Ok(()) => {
+                    if !online {
+                        self.send(Ok(ClientEvent::Connection { connected: true }));
+                        online = true;
+                    }
+                    backoff_shift = 0;
+                }
+                Err(Failed {
+                    error,
+                    store: Some(kind),
+                    ..
+                }) => {
+                    online = false;
+                    self.store_retry(
+                        kind,
+                        &error,
+                        "local ingest failed; retrying",
+                        self.timing.backoff(backoff_shift),
+                        &mut warned_store,
+                    )
+                    .await;
+                    backoff_shift = (backoff_shift + 1).min(HUB_BACKOFF_SHIFT);
+                    continue;
+                }
+                Err(failed) => return Err(failed.into()),
+            }
             if let Ok(Err(_)) = tokio::time::timeout(LOCAL_RECHECK, stored.changed()).await {
                 return Err(hub_error("local record notification channel closed"));
             }
         }
     }
 
+    #[cfg(test)]
     async fn local_wake(
         &self,
         streams: &mut VecDeque<Stream>,
@@ -2762,6 +2835,7 @@ impl Collection {
     ) -> Result<(), ApiError> {
         self.local_wake_skipping(streams, max_pages, &mut BTreeSet::new())
             .await
+            .map_err(ApiError::from)
     }
 
     async fn local_wake_skipping(
@@ -2769,31 +2843,23 @@ impl Collection {
         streams: &mut VecDeque<Stream>,
         max_pages: usize,
         skipped: &mut BTreeSet<Stream>,
-    ) -> Result<(), ApiError> {
+    ) -> Result<(), Failed> {
         let CollectionState {
             mut positions,
             room,
-            ..
+            streams: registered,
         } = self.collection_state().await?;
         // A freed position lets every skipped stream try again.
         if room {
             skipped.clear();
         }
-        let origin = self.origin.clone();
-        let owner = self.owner.clone();
-        let identities = store_work(self.store.clone(), move |store| {
-            store.identities(&origin, &owner)
-        })
-        .await?;
         let mut active = Vec::with_capacity(MAX_STREAM_POSITIONS);
         active.extend([Stream::Feed, Stream::Inbox(self.owner.clone())]);
-        active.extend(
-            identities
-                .into_iter()
-                .take(MAX_MANAGED)
-                .filter(|identity| identity.project == self.project)
-                .map(|identity| Stream::Inbox(identity.identity_id)),
-        );
+        // Page registered inboxes even if their metadata is unreadable. Ingest
+        // already skips and reports broken rows, and holds addressed messages.
+        active.extend(registered.into_iter().filter(|stream| {
+            !matches!(stream, Stream::Feed) && *stream != Stream::Inbox(self.owner.clone())
+        }));
         // Keep unfinished streams first across wakes, even when there are more
         // inboxes than the page budget. Refresh registration on every wake.
         skipped.retain(|stream| active.contains(stream));
@@ -2813,6 +2879,7 @@ impl Collection {
                 .local()
                 .page(&self.project, &stream, after, COLLECTION_PAGE_SIZE)
                 .await?;
+            let mut held = false;
             for row in page
                 .messages
                 .into_iter()
@@ -2824,16 +2891,28 @@ impl Collection {
                     .unwrap_or(0)
                     .saturating_add(1);
                 if row.seq.0 != expected || row.stream != stream {
-                    return Err(hub_error("noncontiguous local replay"));
+                    return Err(hub_error("noncontiguous local replay").into());
                 }
                 let seq = row.seq.0;
-                if !self.commit(row).await? {
-                    skipped.insert(stream.clone());
-                    break;
+                match self.commit(row).await {
+                    Ok(true) => {
+                        positions.insert(stream.clone(), seq);
+                    }
+                    Ok(false) => {
+                        skipped.insert(stream.clone());
+                        break;
+                    }
+                    // The owner has been told once, and this stream waits at the
+                    // message for a repair. Failing the wake would put every other
+                    // stream, and every caller waiting on a catch-up, behind it.
+                    Err(failed) if failed.held => {
+                        held = true;
+                        break;
+                    }
+                    Err(failed) => return Err(failed),
                 }
-                positions.insert(stream.clone(), seq);
             }
-            if page.next_after.is_some() && !skipped.contains(&stream) {
+            if page.next_after.is_some() && !held && !skipped.contains(&stream) {
                 streams.push_back(stream);
             }
         }
@@ -2909,8 +2988,8 @@ async fn check_managed(
     }
     let expected = identity.clone();
     store_work(store, move |s| {
-        s.identities(&origin, &expected.owner_id)
-            .map(|rows| rows.contains(&expected))
+        s.identity(&origin, &expected.owner_id, &expected.identity_id)
+            .map(|row| row.as_ref() == Some(&expected))
     })
     .await
 }
@@ -2978,6 +3057,10 @@ mod local_collection_tests {
     const COLLECT_POLL: Duration = Duration::from_millis(20);
     const SUPERVISE_PROBE: Duration = Duration::from_millis(300);
     const AGENTS: [&str; 2] = ["first", "second"];
+
+    mod local_poison_tests {
+        include!("local_poison_tests.rs");
+    }
 
     #[derive(Clone, Default)]
     pub(super) struct LogBytes(Arc<Mutex<Vec<u8>>>);
@@ -4818,6 +4901,7 @@ mod tests {
                 tx: tx.clone(),
                 task,
                 stop: None,
+                caught_up: true,
             },
         );
         let channel = identities
@@ -4873,6 +4957,7 @@ mod tests {
                     tx,
                     task,
                     stop: Some(stop),
+                    caught_up: true,
                 },
             );
         }
