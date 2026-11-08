@@ -39,15 +39,29 @@ impl Identities {
         // Subscribe before reading heads or pages so commits during setup and
         // replay remain visible even if no later message wakes the watch.
         let mut stored = local.watch_stored(&params.project).await?;
+        let mut skipped = false;
         for stream in &streams {
             let after = if resume {
-                positions.get(stream).copied().unwrap_or(0)
+                let after = positions.get(stream).copied().unwrap_or(0);
+                match params.backlog {
+                    // A never-run stream starts `backlog` back from its head.
+                    Some(backlog) if after == 0 => {
+                        let head = local.page(&params.project, stream, 0, 1).await?.head;
+                        let start = head.saturating_sub(backlog);
+                        skipped |= start > 0;
+                        start
+                    }
+                    _ => after,
+                }
             } else {
                 local.page(&params.project, stream, 0, 1).await?.head
             };
             positions.insert(stream.clone(), after);
         }
         write_event(writer, id, &ClientEvent::Me(me.clone())).await?;
+        if skipped {
+            write_event(writer, id, &ClientEvent::first_watch_notice()).await?;
+        }
         let mut pending = VecDeque::from(streams.clone());
         let mut authority = tokio::time::interval(AUTHORITY_RECHECK);
         let mut last_frame = tokio::time::Instant::now();

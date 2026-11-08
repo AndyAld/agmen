@@ -11,6 +11,10 @@ use rusqlite::{OptionalExtension as _, TransactionBehavior, params};
 use crate::db::{Db, from_sql_int, to_sql_seq};
 use crate::error::ClientError;
 
+/// How many messages back from a stream's head a never-run watch starts.
+/// `agmen mcp` shows the same many pending messages.
+pub const FIRST_WATCH_BACKLOG: u64 = 20;
+
 /// What [`Cursors::advance`] made of a seq.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Advance {
@@ -122,6 +126,22 @@ impl Cursors {
             params![stream.to_string(), to_sql_seq(seq)?],
         )?;
         Ok(())
+    }
+
+    /// Starts a never-run `stream` [`FIRST_WATCH_BACKLOG`] messages back from
+    /// its `head`, and says whether it moved. A stream with a delivery cursor
+    /// is left alone.
+    ///
+    /// # Errors
+    ///
+    /// [`ClientError`] when the read or the write fails.
+    pub fn start_first_watch(&self, stream: &Stream, head: u64) -> Result<bool, ClientError> {
+        let start = head.saturating_sub(FIRST_WATCH_BACKLOG);
+        if start == 0 || self.last(stream)? != 0 {
+            return Ok(false);
+        }
+        self.skip_to(stream, start)?;
+        Ok(true)
     }
 
     /// The last seq of `stream` the inbox listed; 0 before the first.

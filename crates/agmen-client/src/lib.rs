@@ -30,11 +30,11 @@ pub use body::{
     BodyReadError, MAX_HUB_RESPONSE_BYTES, MAX_PAGE_RESPONSE_BYTES, read_hub_body,
     read_hub_body_with_limit,
 };
-pub use cursor::{Advance, Cursors};
+pub use cursor::{Advance, Cursors, FIRST_WATCH_BACKLOG};
 pub use db::{preflight_schema, store_schema};
 pub use device::{DeviceStart, device_start, device_wait, signed_in_as};
 pub use error::ClientError;
-pub use event::{ClientEvent, Me};
+pub use event::{ClientEvent, FIRST_WATCH_NOTICE, Me};
 pub use hub::{HubClient, HubUrlError, PAGE_LIMIT, Page, check_hub_url};
 pub use identity::{
     IDENTITY_DIR, IDENTITY_FILE, IdentityError, IdentityFile, Joined, find_identity,

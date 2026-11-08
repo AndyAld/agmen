@@ -641,3 +641,75 @@ async fn local_watch_stops_when_agmend_restarts_on_a_newer_local_db() {
     assert_eq!(explain(&error), (NEWER_LOCAL_DB_SAID.to_owned(), 1));
     f.serving.take().unwrap().close().await;
 }
+
+/// Posts `count` messages to `stream` and returns their seqs.
+async fn post_many(f: &Fixture, stream: &Stream, count: usize) -> Vec<u64> {
+    let mut seqs = Vec::new();
+    for n in 0..count {
+        seqs.push(f.post(stream.clone(), &format!("m{n}")).await.1);
+        // The daemon rate-limits posts.
+        tokio::time::sleep(Duration::from_millis(75)).await;
+    }
+    seqs
+}
+
+/// The notices and message seqs per stream the watch sends in its first moments.
+async fn first_events(rx: &mut mpsc::Receiver<ClientEvent>) -> (usize, Vec<(Stream, u64)>) {
+    let (mut notices, mut rows) = (0, Vec::new());
+    while let Ok(Some(event)) = tokio::time::timeout(Duration::from_millis(500), rx.recv()).await {
+        match event {
+            ClientEvent::Notice { text } => {
+                assert_eq!(text, agmen_client::FIRST_WATCH_NOTICE);
+                notices += 1;
+            }
+            ClientEvent::Message { message } => rows.push((message.stream.clone(), message.seq.0)),
+            _ => {}
+        }
+    }
+    (notices, rows)
+}
+
+#[tokio::test]
+async fn local_first_watch_starts_twenty_back_with_one_notice() {
+    let mut f = Fixture::new().await;
+    let inbox = Stream::Inbox(f.identity.identity_id.clone());
+    let feed_seqs = post_many(&f, &Stream::Feed, 24).await;
+    let inbox_seqs = post_many(&f, &inbox, 22).await;
+    let dir = f.dir.path().join("watcher");
+    let mut rx = f.link.watch(WatchState::Delivery(&dir)).await.unwrap();
+    let (notices, mut rows) = first_events(&mut rx).await;
+    rows.sort();
+    let mut expected: Vec<_> = feed_seqs[4..].iter().map(|s| (Stream::Feed, *s)).collect();
+    expected.extend(inbox_seqs[2..].iter().map(|s| (inbox.clone(), *s)));
+    expected.sort();
+    assert_eq!(rows, expected);
+    assert_eq!(notices, 1, "one notice for two skipped streams");
+    drop(rx);
+    f.serving.take().unwrap().close().await;
+}
+
+#[tokio::test]
+async fn local_resumed_watch_delivers_everything_after_its_cursor_without_a_notice() {
+    let mut f = Fixture::new().await;
+    let seqs = post_many(&f, &Stream::Feed, 24).await;
+    let dir = f.dir.path().join("watcher");
+    let path = dir.clone();
+    tokio::task::spawn_blocking(move || {
+        std::fs::create_dir_all(&path).unwrap();
+        let cursors = agmen_client::Cursors::open(path.join(agmen_client::STATE_DB)).unwrap();
+        cursors.skip_to(&Stream::Feed, 2).unwrap();
+    })
+    .await
+    .unwrap();
+    let mut rx = f.link.watch(WatchState::Delivery(&dir)).await.unwrap();
+    let (notices, rows) = first_events(&mut rx).await;
+    let expected: Vec<_> = seqs
+        .iter()
+        .filter(|s| **s > 2)
+        .map(|s| (Stream::Feed, *s))
+        .collect();
+    assert_eq!(rows, expected);
+    assert_eq!(notices, 0);
+    drop(rx);
+    f.serving.take().unwrap().close().await;
+}

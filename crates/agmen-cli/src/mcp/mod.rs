@@ -84,6 +84,8 @@ const ANSWER_WAIT: Duration = Duration::from_secs(5);
 const PRESENCE_RECHECK: Duration = Duration::from_secs(60);
 /// The most pending messages appended to one tool result.
 pub(crate) const PENDING_MAX: usize = 20;
+// A first watch starts this many back, so the two show the same backlog.
+const _: () = assert!(PENDING_MAX as u64 == agmen_client::FIRST_WATCH_BACKLOG);
 /// The most body bytes shown for one pending message.
 const PENDING_BODY_MAX: usize = 1024;
 /// The most bytes one tool result gains from the pending block.

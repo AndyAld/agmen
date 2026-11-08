@@ -158,6 +158,7 @@ fn text_line(event: &ClientEvent) -> Option<String> {
         ClientEvent::Message { message } => Some(message_line(message)),
         ClientEvent::Connection { connected: true } => Some("connected".to_owned()),
         ClientEvent::Connection { connected: false } => Some("disconnected".to_owned()),
+        ClientEvent::Notice { text } => Some(clean(text).into_owned()),
         _ => None,
     }
 }
@@ -191,6 +192,12 @@ async fn stop_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_first_watch_notice_prints_as_one_line() {
+        let line = text_line(&ClientEvent::first_watch_notice());
+        assert_eq!(line.as_deref(), Some(agmen_client::FIRST_WATCH_NOTICE));
+    }
 
     #[test]
     fn banner_drops_escape_sequences() {

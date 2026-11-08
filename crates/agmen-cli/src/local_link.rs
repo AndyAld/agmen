@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use agmen_client::{
-    ClientEvent, Cursors, IdentityFile, Outbox, Page, STATE_DB, TokenStore, read_local_credential,
-    retry_delay,
+    ClientEvent, Cursors, FIRST_WATCH_BACKLOG, IdentityFile, Outbox, Page, STATE_DB, TokenStore,
+    read_local_credential, retry_delay,
 };
 use agmen_local::ErrorCode;
 use agmen_proto::{ClientEnvelope, DeliveryReply, IdentityId, ProjectId, Seq, Stream, Timestamp};
@@ -35,6 +35,9 @@ const OUTBOX_POLL: Duration = Duration::from_millis(250);
 /// the console wraps serde's complaint as `bad_request` text
 /// `bad params: {error}`. No other refusal means that agmend is older.
 const OLDER_AGMEND_REFUSAL: &str = "bad params: unknown field `after`, expected `project`";
+/// What an agmend that takes `after` but not `backlog` answers a watch that
+/// carries `backlog`; it then gets a full first replay, with no notice.
+const NO_BACKLOG_REFUSAL: &str = "bad params: unknown field `backlog`";
 const OLDER_AGMEND_NOTICE: &str =
     "agmend is older and cannot resume a watch; resume is off until agmend restarts";
 
@@ -54,6 +57,9 @@ struct WatchResume {
     /// agmend from before resume starts at the heads and replays nothing, so
     /// on its connection a message may skip ahead of `positions`.
     resumed: bool,
+    /// Whether the first-watch notice went out. agmend sends it again on each
+    /// reconnect while a skipped stream has delivered nothing.
+    noticed: bool,
     said: &'static AtomicBool,
 }
 
@@ -71,6 +77,12 @@ pub(crate) enum WatchState<'a> {
 }
 
 impl WatchResume {
+    /// Whether agmend should start a never-run stream a few messages back. Only
+    /// `agmen watch` asks: `agmen mcp` starts at the heads already.
+    fn wants_backlog(&self) -> bool {
+        self.cursors.is_some() && self.positions.values().any(|last| *last == 0)
+    }
+
     /// One line for the person: `agmen watch` writes it to stderr and keeps its
     /// stdout lines alone; `agmen mcp` logs it, as it does for an older agmend.
     fn notice(&self, message: &str) {
@@ -110,11 +122,18 @@ impl WatchResume {
             if message.seq.0 <= *last {
                 return true;
             }
-            if self.resumed && message.seq.0 != last.saturating_add(1) {
+            // After the notice, a never-run stream starts past 1 by agmend's choice.
+            let skipped = self.noticed && *last == 0;
+            if self.resumed && !skipped && message.seq.0 != last.saturating_add(1) {
                 tracing::warn!("local watch received a sequence gap");
                 return false;
             }
             Some((message.stream.clone(), message.seq.0))
+        } else if matches!(event, ClientEvent::Notice { .. }) {
+            if std::mem::replace(&mut self.noticed, true) {
+                return true;
+            }
+            None
         } else {
             None
         };
@@ -207,6 +226,7 @@ impl LocalLink {
                         cursors: Some(cursors),
                         positions,
                         resumed: true,
+                        noticed: false,
                         said,
                     })
                 })
@@ -221,6 +241,7 @@ impl LocalLink {
                     cursors: None,
                     positions,
                     resumed: true,
+                    noticed: false,
                     said: self.said,
                 }
             }
@@ -233,7 +254,7 @@ impl LocalLink {
             &self.identity,
             &self.project,
             &self.token,
-            &resume.positions,
+            &resume,
         )
         .await
         .map_err(|error| local_error(redact_error(error, &self.token)))?;
@@ -421,8 +442,10 @@ impl Drop for LocalLink {
     }
 }
 
-/// Opens a watch that resumes after `after`, and says whether it does. An
-/// agmend from before resume refuses `after`, and only that, with
+/// Opens a watch that resumes after `after`, and says whether it does. A watch
+/// with a never-run stream also asks for a `backlog`; an agmend that refuses
+/// `backlog` is asked again without it. An agmend from before resume refuses
+/// `after`, and only that, with
 /// [`OLDER_AGMEND_REFUSAL`]. The watch then opens again as it did before
 /// resume: at the heads, and with no limit on silence, since that agmend
 /// sends no keepalive.
@@ -431,14 +454,29 @@ async fn open_watch(
     identity: &IdentityId,
     project: &ProjectId,
     token: &LocalToken,
-    after: &BTreeMap<Stream, u64>,
+    resume: &WatchResume,
 ) -> Result<(Watch, bool), AgmendError> {
-    let resuming = json!({"project": project, "after": after});
-    match Agmend::connect_checked(socket)
-        .await?
-        .watch_as(identity, token, resuming)
-        .await
+    let resuming = json!({"project": project, "after": resume.positions});
+    let ask = |params: Value| async move {
+        Agmend::connect_checked(socket)
+            .await?
+            .watch_as(identity, token, params)
+            .await
+    };
+    let mut answer = if resume.wants_backlog() {
+        let mut params = resuming.clone();
+        params["backlog"] = json!(FIRST_WATCH_BACKLOG);
+        ask(params).await
+    } else {
+        ask(resuming.clone()).await
+    };
+    // An agmend that resumes but takes no `backlog` replays from the start.
+    if matches!(&answer, Err(AgmendError::Refused { code: ErrorCode::BadRequest, message })
+        if message.starts_with(NO_BACKLOG_REFUSAL))
     {
+        answer = ask(resuming).await;
+    }
+    match answer {
         Ok(watch) => Ok((watch, true)),
         Err(AgmendError::Refused {
             code: ErrorCode::BadRequest,
@@ -478,7 +516,7 @@ async fn reconnect_watch(
     let mut failures = 1_u32;
     loop {
         tokio::time::sleep(retry_delay(failures)).await;
-        match open_watch(socket, identity, project, token, &resume.positions).await {
+        match open_watch(socket, identity, project, token, resume).await {
             Ok((watch, resumed)) => {
                 resume.opened(resumed);
                 resume.notice("reconnected to agmend");

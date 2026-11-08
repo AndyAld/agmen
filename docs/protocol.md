@@ -173,6 +173,7 @@ Verbs are uppercase strings; adding a verb is a minor protocol change (`v` stays
 - Keep the last seen `seq` per stream.
 - On a gap (`seq > last + 1`), on reconnect, or when `state/head.feed_seq > last`, call `GET /v1/projects/{project_id}/streams/{stream}?after={last}&limit=500` and apply results in order.
 - A replay page may carry `pruned_through`: treat seqs up to it as gone and continue from the first message the page holds.
+- A watch whose delivery cursor for a stream is 0 (it never ran) does not replay from the start: it reads the stream's `head` and starts at `head - 20` (`FIRST_WATCH_BACKLOG`, floored at 0). When it skipped any stream this way it emits one notice per watch start, `{"kind":"notice","text":"Earlier messages from before this watch started are not shown; use the inbox tool to read them."}`; `agmen watch` prints the text as one line. A stream with a cursor resumes after it. The inbox read cursor is not touched.
 
 Retention follows the plan: Team keeps 90 days, Business 365 days; self-host keeps unlimited history unless the host sets a limit.
 
@@ -646,6 +647,14 @@ message written to a socket that dies before the client reads it is sent again
 on the next watch. `agmen watch` saves its position in the existing delivery
 cursors of the identity's `agmen.db` after it has queued a message for output,
 and sends it as `after` on every reconnect, including after agmend was closed.
+When a saved position is 0 (the watch never ran), `agmen watch` also sends
+`backlog: 20` (`FIRST_WATCH_BACKLOG`). With `backlog` set, agmend starts each
+stream whose `after` is 0 at its head minus `backlog`, floored at 0, and if any
+stream moved it sends one `{"kind":"notice","text":...}` event right after
+`self` (see 5.3). `backlog` is refused on hub projects. An agmend that takes
+`after` but not `backlog` refuses it with ``bad params: unknown field
+`backlog` ``; the CLI then asks again without it, which gives a full first
+replay and no notice.
 `agmen mcp` keeps its positions in memory and leaves those cursors alone.
 
 After 30 s without an event, agmend sends a successful result with

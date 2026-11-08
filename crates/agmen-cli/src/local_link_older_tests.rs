@@ -803,3 +803,87 @@ async fn a_newer_local_db_that_ends_an_open_watch_is_not_retried() {
     tokio::time::sleep(Duration::from_secs(300)).await;
     assert_eq!(daemon.asked().len(), 1, "the watch was opened again");
 }
+
+/// What an agmend that takes `after` but not `backlog` answers a `backlog`.
+const NO_BACKLOG_REFUSAL: &str =
+    "bad params: unknown field `backlog`, expected `project` or `after`";
+
+/// The next `count` messages of the watch and the notices before them.
+async fn delivered_and_notices(
+    rx: &mut mpsc::Receiver<ClientEvent>,
+    count: usize,
+) -> (Vec<u64>, usize) {
+    let (mut seqs, mut notices) = (Vec::new(), 0);
+    tokio::time::timeout(WAIT, async {
+        while seqs.len() < count {
+            match rx.recv().await.expect("the local watch stays open") {
+                ClientEvent::Message { message } => seqs.push(message.seq.0),
+                ClientEvent::Notice { .. } => notices += 1,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("the local watch delivers its messages");
+    (seqs, notices)
+}
+
+#[tokio::test]
+async fn an_agmend_that_refuses_backlog_gives_a_full_first_replay_and_no_notice() {
+    let dir = tempfile::Builder::new().prefix("lo").tempdir().unwrap();
+    let socket = dir.path().join("agmend.sock");
+    let identity = identity();
+    let replay = vec![feed_message(1), feed_message(2), feed_message(3)];
+    let mut older = FakeAgmend::start(&socket, me(&identity), 0, move |_, params| {
+        if params.get("backlog").is_some() {
+            Answer::Refuse(ErrorCode::BadRequest, NO_BACKLOG_REFUSAL)
+        } else {
+            Answer::Open {
+                events: replay.clone(),
+                drop_after: false,
+            }
+        }
+    });
+    let state = dir.path().join("watcher");
+    let link = link_at(&socket, &identity);
+    let mut rx = link.watch(WatchState::Delivery(&state)).await.unwrap();
+    let asked = older.asked();
+    assert_eq!(asked.len(), 2, "{asked:?}");
+    assert_eq!(
+        asked[0]["backlog"],
+        json!(agmen_client::FIRST_WATCH_BACKLOG)
+    );
+    assert!(asked[1].get("backlog").is_none(), "{:?}", asked[1]);
+    let inbox = Stream::Inbox(identity.identity_id.clone());
+    assert_eq!(asked[1]["after"], json!({"feed": 0, inbox.to_string(): 0}));
+    assert_eq!(delivered_and_notices(&mut rx, 3).await, (vec![1, 2, 3], 0));
+}
+
+#[tokio::test]
+async fn an_agmend_that_refuses_backlog_and_after_falls_back_to_the_heads() {
+    let dir = tempfile::Builder::new().prefix("lo").tempdir().unwrap();
+    let socket = dir.path().join("agmend.sock");
+    let identity = identity();
+    let live = vec![feed_message(2), feed_message(3)];
+    let mut older = FakeAgmend::start(&socket, me(&identity), 0, move |_, params| {
+        if params.get("backlog").is_some() {
+            Answer::Refuse(ErrorCode::BadRequest, NO_BACKLOG_REFUSAL)
+        } else if after_of(params).is_some() {
+            Answer::Refuse(ErrorCode::BadRequest, OLD_REFUSAL)
+        } else {
+            Answer::Open {
+                events: live.clone(),
+                drop_after: false,
+            }
+        }
+    });
+    let state = dir.path().join("watcher");
+    let link = link_at(&socket, &identity);
+    let mut rx = link.watch(WatchState::Delivery(&state)).await.unwrap();
+    let asked = older.asked();
+    assert_eq!(asked.len(), 3, "{asked:?}");
+    assert!(asked[0].get("backlog").is_some());
+    assert!(asked[1].get("backlog").is_none() && after_of(&asked[1]).is_some());
+    assert!(after_of(&asked[2]).is_none());
+    assert_eq!(delivered_and_notices(&mut rx, 2).await, (vec![2, 3], 0));
+}

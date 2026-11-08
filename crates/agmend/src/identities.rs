@@ -282,6 +282,8 @@ impl Drop for Collector {
 struct ProjectParams {
     project: ProjectId,
     after: Option<BTreeMap<Stream, u64>>,
+    /// A stream whose `after` is 0 starts this many back from its head.
+    backlog: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -1472,7 +1474,7 @@ impl Identities {
                 .watch_local(caller, id, watch_params, &me, reader, writer)
                 .await;
         }
-        if watch_params.after.is_some() {
+        if watch_params.after.is_some() || watch_params.backlog.is_some() {
             return Err(bad_request(
                 "watch after is only supported for local projects",
             ));
