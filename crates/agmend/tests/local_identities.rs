@@ -1148,3 +1148,86 @@ async fn missing_local_record_refuses_post_and_human_inbox_without_hub_requests(
     }
     f.stop().await;
 }
+
+/// Opens a watch with `extra` params and returns it after its `self` answer.
+async fn watch_with(f: &Fixture, who: &IdentityFile, extra: Value) -> Client {
+    let mut client = Client::connect(&f.home.socket()).await;
+    result(client.call("hello", json!({"api": 1})).await);
+    let mut params = json!({"project": who.project, "local_token": f.credential(who).local_token});
+    params
+        .as_object_mut()
+        .unwrap()
+        .extend(extra.as_object().unwrap().clone());
+    let mut request = Request::new(2, "watch", params);
+    request.as_ = Some(who.identity_id.clone());
+    client.send(&request).await;
+    let me = result(
+        tokio::time::timeout(CALL_WAIT, client.read())
+            .await
+            .unwrap(),
+    );
+    assert_eq!(me["kind"], "self");
+    client
+}
+
+/// The seqs of the feed messages a watch sends, and its notices, until `count`
+/// messages have come.
+async fn feed_seqs_and_notices(watch: &mut Client, count: usize) -> (Vec<u64>, usize) {
+    let (mut seqs, mut notices) = (Vec::new(), 0);
+    tokio::time::timeout(CALL_WAIT, async {
+        while seqs.len() < count {
+            let event = result(watch.read().await);
+            match event["kind"].as_str() {
+                Some("message") if event["message"]["stream"] == "feed" => {
+                    seqs.push(event["message"]["seq"].as_u64().unwrap());
+                }
+                Some("notice") => notices += 1,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+    (seqs, notices)
+}
+
+#[tokio::test]
+async fn watch_backlog_starts_a_never_run_stream_twenty_back_with_one_notice() {
+    let mut f = Fixture::new().await;
+    let who = f.mint("worker").await;
+    for n in 0..24 {
+        result(
+            f.client
+                .call(
+                    "post",
+                    json!({"project": who.project, "envelope": envelope(&format!("m{n}"))}),
+                )
+                .await,
+        );
+        // The daemon rate-limits posts.
+        tokio::time::sleep(Duration::from_millis(75)).await;
+    }
+    let inbox = Stream::Inbox(who.identity_id.clone()).to_string();
+    let mut watch = watch_with(
+        &f,
+        &who,
+        json!({"after": {"feed": 0, inbox.clone(): 0}, "backlog": 20}),
+    )
+    .await;
+    let (seqs, notices) = feed_seqs_and_notices(&mut watch, 20).await;
+    assert_eq!(seqs, (5..=24).collect::<Vec<_>>());
+    assert_eq!(notices, 1);
+    drop(watch);
+    // A stream with a position resumes after it, with no notice.
+    let mut resumed = watch_with(
+        &f,
+        &who,
+        json!({"after": {"feed": 10, inbox: 0}, "backlog": 20}),
+    )
+    .await;
+    let (seqs, notices) = feed_seqs_and_notices(&mut resumed, 14).await;
+    assert_eq!(seqs, (11..=24).collect::<Vec<_>>());
+    assert_eq!(notices, 0);
+    drop(resumed);
+    f.stop().await;
+}

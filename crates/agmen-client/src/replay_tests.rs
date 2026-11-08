@@ -303,3 +303,69 @@ fn replay_delays_double_to_the_cap() {
     assert_eq!(replay_delay(7), MAX_REPLAY_DELAY);
     assert_eq!(replay_delay(u32::MAX), MAX_REPLAY_DELAY);
 }
+
+impl Harness {
+    /// Every event so far, once the replay settles: message seqs and notices.
+    async fn drained(&mut self) -> (Vec<u64>, usize) {
+        // The events channel holds 64: read while the replay runs.
+        let (mut seqs, mut notices) = (Vec::new(), 0);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            while let Ok(event) = self.events.try_recv() {
+                match event {
+                    ClientEvent::Message { message } => seqs.push(message.seq.0),
+                    ClientEvent::Notice { text } => {
+                        assert_eq!(text, crate::FIRST_WATCH_NOTICE);
+                        notices += 1;
+                    }
+                    _ => {}
+                }
+            }
+            if self.streams.idle() {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "replay did not finish"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        (seqs, notices)
+    }
+}
+
+#[tokio::test]
+async fn a_never_run_watch_on_a_long_stream_starts_twenty_back_with_one_notice() {
+    let mut h = start().await;
+    h.hub_has(500);
+    // Both watched streams are never-run, and the fake serves both the head.
+    h.streams.on_connected();
+    let (seqs, notices) = h.drained().await;
+    assert_eq!(seqs, (481..=500).collect::<Vec<_>>());
+    assert_eq!(notices, 1, "one notice for two skipped streams");
+    assert_eq!(h.cursors.last(&Stream::Feed).unwrap(), 500);
+    let inbox = Stream::Inbox(ME.parse().unwrap());
+    assert_eq!(h.cursors.last(&inbox).unwrap(), 480);
+    assert_eq!(h.cursors.read_cursor(&Stream::Feed).unwrap(), 0);
+}
+
+#[tokio::test]
+async fn a_never_run_watch_on_a_short_stream_replays_all_without_a_notice() {
+    let mut h = start().await;
+    h.hub_has(20);
+    h.streams.on_head(br#"{"feed_seq":20}"#).await.unwrap();
+    let (seqs, notices) = h.drained().await;
+    assert_eq!(seqs, (1..=20).collect::<Vec<_>>());
+    assert_eq!(notices, 0);
+}
+
+#[tokio::test]
+async fn a_resumed_watch_delivers_everything_after_its_cursor_without_a_notice() {
+    let mut h = start().await;
+    h.cursors.skip_to(&Stream::Feed, 5).unwrap();
+    h.hub_has(500);
+    h.streams.on_head(br#"{"feed_seq":500}"#).await.unwrap();
+    let (seqs, notices) = h.drained().await;
+    assert_eq!(seqs, (6..=500).collect::<Vec<_>>());
+    assert_eq!(notices, 0);
+}

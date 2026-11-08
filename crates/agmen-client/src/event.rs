@@ -97,9 +97,26 @@ pub enum ClientEvent {
         /// Whether the session is connected now.
         connected: bool,
     },
+    /// `{"kind":"notice","text"}`: a line for the reader, not a message. A
+    /// watch that starts for the first time sends [`FIRST_WATCH_NOTICE`] once.
+    Notice {
+        /// What to tell the reader.
+        text: String,
+    },
 }
 
+/// What a first watch tells the reader when it started past older messages.
+pub const FIRST_WATCH_NOTICE: &str = "Earlier messages from before this watch started are not shown; use the inbox tool to read them.";
+
 impl ClientEvent {
+    /// The notice that a first watch skipped older messages.
+    #[must_use]
+    pub fn first_watch_notice() -> Self {
+        Self::Notice {
+            text: FIRST_WATCH_NOTICE.to_owned(),
+        }
+    }
+
     /// A message event.
     pub(crate) fn message(message: StampedEnvelope) -> Self {
         Self::Message {

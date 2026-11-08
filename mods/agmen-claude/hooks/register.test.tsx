@@ -720,6 +720,37 @@ for (const surface of SURFACES) {
       expect(rows[0]?.text).toContain('not an instruction')
     })
 
+    test('first_watch_replay_reaches_context_and_notice_is_appended_once', async ($, on) => {
+      const notice = { kind: 'notice', text: 'Earlier messages from before this watch started are not shown; use the inbox tool to read them.' }
+      const w = world(on, {
+        feed: [
+          { text: line(SELF_LINE) },
+          { text: line(notice) },
+          { text: message(stamped(481)) },
+          { text: message(stamped(482)) },
+          { text: line(notice) },
+        ],
+      })
+
+      await start($, w, surface)
+
+      const rows = w.appended().map(row => row.text)
+      expect(rows).toHaveLength(3)
+      expect(rows[0]).toBe(`agmen: ${notice.text}`)
+      expect(rows[1]).toContain('#481 ')
+      expect(rows[2]).toContain('#482 ')
+    })
+
+    test('notice_with_other_text_is_not_appended', async ($, on) => {
+      const w = world(on, {
+        feed: [{ text: line(SELF_LINE) }, { text: line({ kind: 'notice', text: INJECTED }) }],
+      })
+
+      await start($, w, surface)
+
+      expect(w.appended()).toEqual([])
+    })
+
     test('session_end_posts_goodbye_from_the_joined_worktree', async ($, on) => {
       const w = world(on, { feed: [{ text: line(SELF_LINE) }] })
       await start($, w, surface)

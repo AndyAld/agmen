@@ -177,11 +177,15 @@ type Incoming = Readonly<
   readonly denyReason: DenyReason | undefined
 }
 
+/** What `agmen watch --json` says, once, when the watch started past older messages (agmen-client's FIRST_WATCH_NOTICE). */
+const FIRST_WATCH_NOTICE = 'Earlier messages from before this watch started are not shown; use the inbox tool to read them.'
+
 /** One line of `agmen watch --json`, parsed. */
 type WatchLine =
   | { readonly kind: 'self'; readonly self: Self }
   | { readonly kind: 'message'; readonly message: Incoming }
   | { readonly kind: 'delivery'; readonly id: string }
+  | { readonly kind: 'notice' }
   | { readonly kind: 'other' }
   | { readonly kind: 'invalid'; readonly why: string }
 
@@ -254,6 +258,8 @@ type State = {
   self: Self | undefined
   readonly ownIds: Set<string>
   readonly seen: Set<string>
+  /** The first-watch notice is in a row already. */
+  isNoticed: boolean
   readonly warned: Set<string>
   /** Messages the next wake-up names, oldest first, and how many past WAITING_MAX it only counts. */
   waiting: readonly Incoming[]
@@ -374,6 +380,9 @@ function parseWatchLine(text: string): WatchLine {
     }
     case 'delivery':
       return matches(value['id'], MESSAGE_ID) ? { kind: 'delivery', id: value['id'] } : { kind: 'invalid', why: 'bad delivery id' }
+    case 'notice':
+      // Only the CLI's own first-watch line; its text is fixed here, never taken from the line (R44a).
+      return value['text'] === FIRST_WATCH_NOTICE ? { kind: 'notice' } : { kind: 'other' }
     default:
       // `connection` and kinds a later CLI adds: nothing for the session.
       return { kind: 'other' }
@@ -534,6 +543,15 @@ async function receive($: EngineInterface, state: State, text: string): Promise<
     case 'delivery':
       remember(state.ownIds, parsed.id, OWN_IDS_MAX)
       return
+    case 'notice': {
+      if (state.isNoticed) return
+      state.isNoticed = true
+      const row = await $.session.append({
+        message: { type: 'user', content: [{ type: 'text', text: `agmen: ${FIRST_WATCH_NOTICE}` }] },
+      })
+      if (row.deny !== undefined) debug($, `first-watch notice refused: ${row.deny}`)
+      return
+    }
     case 'message': {
       const { message } = parsed
       if (state.self === undefined) {
@@ -1362,6 +1380,7 @@ export const register: Register = on => {
     self: undefined,
     ownIds: new Set(),
     seen: new Set(),
+    isNoticed: false,
     warned: new Set(),
     waiting: [],
     uncounted: 0,

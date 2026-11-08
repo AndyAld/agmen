@@ -79,6 +79,8 @@ pub(crate) struct Replayer {
     wake: mpsc::Receiver<()>,
     /// Failed replays in a row.
     failures: u32,
+    /// Whether the first-watch notice went out.
+    noticed: bool,
 }
 
 /// The two sides of delivery for one session, sharing its cursors and
@@ -100,6 +102,7 @@ pub(crate) fn delivery(
         queue: queue.clone(),
         wake: wake_rx,
         failures: 0,
+        noticed: false,
     };
     let streams = Streams {
         watched,
@@ -320,11 +323,24 @@ impl Replayer {
 
     /// Delivers up to [`PAGES_PER_PASS`] pages of `stream` after its
     /// delivery cursor.
-    async fn replay(&self, stream: &Stream) -> Result<Pass, ClientError> {
+    async fn replay(&mut self, stream: &Stream) -> Result<Pass, ClientError> {
         for _ in 0..PAGES_PER_PASS {
             let (cursors, key) = (self.cursors.clone(), stream.clone());
-            let after = blocking(move || cursors.last(&key)).await?;
-            let page = self.hub.page(stream, after).await?;
+            let mut after = blocking(move || cursors.last(&key)).await?;
+            let mut page = self.hub.page(stream, after).await?;
+            if after == 0 {
+                // A never-run stream: the page's head says how far back to start.
+                let (cursors, key, head) = (self.cursors.clone(), stream.clone(), page.head);
+                if blocking(move || cursors.start_first_watch(&key, head)).await? {
+                    if !self.noticed {
+                        self.noticed = true;
+                        emit(&self.events, ClientEvent::first_watch_notice()).await;
+                    }
+                    let (cursors, key) = (self.cursors.clone(), stream.clone());
+                    after = blocking(move || cursors.last(&key)).await?;
+                    page = self.hub.page(stream, after).await?;
+                }
+            }
             // Never past the head or the page's first message: a hub that
             // claims more was pruned than it serves must not skip real ones.
             let pruned = page
