@@ -1103,6 +1103,7 @@ impl Identities {
             store: self.store.clone(),
             origin: key.0.clone(),
             owner: key.1.clone(),
+            state_dir: self.state_dir.clone(),
             project: project.clone(),
             tx: tx.clone(),
             timing: HubTiming::for_origin(&key.0),
@@ -2055,6 +2056,7 @@ struct Collection {
     store: Arc<Database>,
     origin: String,
     owner: IdentityId,
+    state_dir: PathBuf,
     project: ProjectId,
     tx: broadcast::Sender<WatchEvent>,
     timing: HubTiming,
@@ -2126,7 +2128,7 @@ impl Collection {
         let project = self.project.clone();
         let saved = message.clone();
         let owner = self.owner.clone();
-        self.report_broken();
+        self.report_broken().await;
         let known = self.store.broken_in(&self.origin);
         let database = self.store.clone();
         let (stream, seq) = (message.stream.clone(), message.seq.0);
@@ -2178,7 +2180,7 @@ impl Collection {
         self.report_held();
         // The message committed without these identities. Later messages skip
         // them unprompted; the owner hears once.
-        self.report_broken();
+        self.report_broken().await;
         let delivered = match delivered {
             Err(mut failed) if failed.store.is_some() => {
                 // A failure after the commit leaves nothing to replay.
@@ -2200,7 +2202,7 @@ impl Collection {
     }
 
     /// Remember and report what the store jobs found broken for this collector.
-    fn report_broken(&self) {
+    async fn report_broken(&self) {
         let mine: Vec<_> = {
             let mut found = self.store.found.lock().unwrap_or_else(|e| e.into_inner());
             let (mine, rest) =
@@ -2219,7 +2221,7 @@ impl Collection {
                 .store
                 .remember_broken(&f.origin, f.identity.clone(), f.hash)
             {
-                self.alert_broken(&f.identity, &f.stream, f.seq);
+                self.alert_broken(&f.identity, &f.stream, f.seq).await;
             }
         }
     }
@@ -2252,13 +2254,27 @@ impl Collection {
 
     /// Warn and tell the owner that `identity` gets nothing until it is
     /// registered again or the daemon restarts. Names no message body.
-    fn alert_broken(&self, identity: &IdentityId, stream: &Stream, seq: u64) {
+    async fn alert_broken(&self, identity: &IdentityId, stream: &Stream, seq: u64) {
+        // Read only now that an ALERT is due, never per message.
+        let (state_dir, project) = (self.state_dir.clone(), self.project.clone());
+        let listener = tokio::task::spawn_blocking(move || {
+            crate::listener::Listeners::intent_identity(&state_dir, &project)
+        })
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|id| id == *identity);
+        let note = if listener {
+            " It is this project's listener and will miss messages until it is repaired or restarted."
+        } else {
+            ""
+        };
         tracing::warn!(
-            project = %self.project, identity = %identity, stream = %stream, seq,
-            "identity stored state is broken; dropping its messages until it is restarted, removed or repaired"
+            project = %self.project, identity = %identity, stream = %stream, seq, listener,
+            "identity stored state is broken; dropping its messages until it is restarted, removed or repaired{note}"
         );
         self.post_owner_alert(format!(
-            "{identity}'s stored state in {} cannot be read. Messages to {identity} are being dropped, from {stream} #{seq} on, until it is restarted, removed or repaired.",
+            "{identity}'s stored state in {} cannot be read. Messages to {identity} are being dropped, from {stream} #{seq} on, until it is restarted, removed or repaired.{note}",
             self.project
         ));
     }
@@ -3072,6 +3088,7 @@ mod local_collection_tests {
                 store: daemon.core.identities.store.clone(),
                 origin: agmen_client::LOCAL_ORIGIN.into(),
                 owner: person.id,
+                state_dir: dir.path().to_path_buf(),
                 project: topics.project().clone(),
                 tx: broadcast::channel(WATCH_CAPACITY).0,
                 timing: HubTiming::DEFAULT,
@@ -4139,6 +4156,61 @@ mod local_collection_tests {
         );
         assert!(!text.contains("poison test"), "no message body: {text}");
         f.stop().await;
+    }
+
+    /// Breaks agent 0, writes the project's listener intent for `listener`
+    /// (none writes no file), and returns the ALERT text for the broken row.
+    async fn broken_alert_text(
+        listener: impl Fn(&Fixture) -> Option<IdentityId>,
+    ) -> (String, IdentityId) {
+        let f = Fixture::new().await;
+        let poison = f.agents[0].clone();
+        f.execute_state(format!(
+            "UPDATE identities SET metadata='{{}}' WHERE identity='{poison}'"
+        ))
+        .await;
+        if let Some(id) = listener(&f) {
+            let dir = f
+                .collection
+                .state_dir
+                .join("listener")
+                .join(f.collection.project.as_str());
+            std::fs::create_dir_all(&dir).unwrap();
+            let intent =
+                json!({"project": f.collection.project, "root": "/tmp", "identity_id": id});
+            std::fs::write(dir.join("intent.json"), intent.to_string()).unwrap();
+        }
+        assert!(f.collection.commit(dm_to(1, &f.agents)).await.unwrap());
+        tokio::time::timeout(COLLECT_WAIT, async {
+            while feed_alerts(&f).await == 0 {
+                tokio::time::sleep(COLLECT_POLL).await;
+            }
+        })
+        .await
+        .expect("no owner ALERT named the broken identity");
+        let text = feed_alert_texts(&f).await.remove(0);
+        f.stop().await;
+        (text, poison)
+    }
+
+    #[tokio::test]
+    async fn broken_row_alert_says_when_the_identity_is_the_projects_listener() {
+        let (text, _) = broken_alert_text(|f| Some(f.agents[0].clone())).await;
+        assert!(
+            text.contains("is this project's listener")
+                && text.contains("until it is repaired or restarted"),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn broken_row_alert_is_unchanged_without_a_matching_listener_intent() {
+        let (none, _) = broken_alert_text(|_| None).await;
+        let (other, _) = broken_alert_text(|f| Some(f.agents[1].clone())).await;
+        for text in [none, other] {
+            assert!(!text.contains("listener"), "{text}");
+            assert!(text.contains("being dropped"), "{text}");
+        }
     }
 
     #[tokio::test]
