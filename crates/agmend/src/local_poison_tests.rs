@@ -8,6 +8,7 @@ async fn collecting(f: &Fixture, scenario: impl std::future::Future<Output = ()>
         store: f.collection.store.clone(),
         origin: f.collection.origin.clone(),
         owner: f.collection.owner.clone(),
+        state_dir: f.collection.state_dir.clone(),
         project: f.collection.project.clone(),
         tx: f.collection.tx.clone(),
         timing: f.collection.timing,
