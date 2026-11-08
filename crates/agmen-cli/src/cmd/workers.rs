@@ -5,7 +5,7 @@ use anyhow::{Context as _, Result, bail};
 use clap::{Args, Subcommand};
 use serde_json::{Value, json};
 
-use crate::agmend::{Agmend, AgmendError, LaunchCredential};
+use crate::agmend::{Agmend, AgmendError, LAUNCH_CALL_TIMEOUT, LaunchCredential};
 use crate::output::{Code, Fail, clean};
 
 #[derive(Debug, Args)]
@@ -136,18 +136,7 @@ pub(crate) async fn launch(args: LaunchArgs) -> Result<()> {
     if let Some(brief) = args.brief {
         params["brief"] = json!(brief);
     }
-    let answer = match credential {
-        Some(credential) => daemon
-            .call_as(
-                &credential.identity,
-                &credential.token,
-                "child_launch",
-                params,
-            )
-            .await
-            .map_err(daemon_error)?,
-        None => call(&mut daemon, "agent_launch", params).await?,
-    };
+    let answer = send_launch(&mut daemon, credential, params).await?;
     println!(
         "{} {} {}",
         clean(field(&answer, "identity")?),
@@ -155,6 +144,34 @@ pub(crate) async fn launch(args: LaunchArgs) -> Result<()> {
         clean(field(&answer, "branch")?)
     );
     Ok(())
+}
+
+/// Sends the launch as the parent agent when `credential` is set, else as the
+/// person. agmend may mint and roll back inside it, so it waits [`LAUNCH_CALL_TIMEOUT`].
+async fn send_launch(
+    daemon: &mut Agmend,
+    credential: Option<LaunchCredential>,
+    params: Value,
+) -> Result<Value> {
+    match credential {
+        Some(credential) => {
+            daemon
+                .call_as_within(
+                    LAUNCH_CALL_TIMEOUT,
+                    &credential.identity,
+                    &credential.token,
+                    "child_launch",
+                    params,
+                )
+                .await
+        }
+        None => {
+            daemon
+                .call_within(LAUNCH_CALL_TIMEOUT, "agent_launch", params)
+                .await
+        }
+    }
+    .map_err(daemon_error)
 }
 
 pub(crate) async fn workers(args: WorkersArgs) -> Result<()> {
@@ -306,4 +323,33 @@ pub(crate) async fn budget(args: BudgetArgs) -> Result<()> {
         clean(field(&answer, "budget_usd")?)
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::agmend::tests::Fake;
+
+    /// A launch whose hub mint stalls and rolls back answers after about 31 s,
+    /// which is past the 30 s every other call waits.
+    #[tokio::test(start_paused = true)]
+    async fn a_launch_gets_agmends_answer_after_thirty_one_seconds() {
+        let answer =
+            json!({"identity":"agent001","worktree":"/fake/worker","branch":"agent/worker"});
+        let fake = Fake::slow(answer.clone()).await;
+        let mut daemon = Agmend::connect(fake.path()).await.unwrap();
+        let person = send_launch(&mut daemon, None, json!({"name":"worker"})).await;
+        assert_eq!(person.unwrap(), answer, "the person's launch");
+        let credential = LaunchCredential {
+            identity: "parent01".parse().unwrap(),
+            token: "a".repeat(64).parse().unwrap(),
+        };
+        let params = json!({"name":"k1","role":"reviewer"});
+        let agent = send_launch(&mut daemon, Some(credential), params).await;
+        assert_eq!(agent.unwrap(), answer, "the agent's launch");
+        let methods: Vec<_> = fake.requests().into_iter().map(|r| r.method).collect();
+        assert_eq!(methods, ["hello", "agent_launch", "child_launch"]);
+    }
 }

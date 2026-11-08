@@ -140,8 +140,20 @@ impl Server {
                 &options.state_base.join(agmen_client::AGMEND_SOCKET),
             )
             .await?;
+            // A launch can mint and roll back inside agmend, so it waits longer than a stop.
+            let wait = if method == "child_launch" {
+                crate::agmend::LAUNCH_CALL_TIMEOUT
+            } else {
+                crate::agmend::CALL_TIMEOUT
+            };
             daemon
-                .call_as(&credential.identity, &credential.token, method, params)
+                .call_as_within(
+                    wait,
+                    &credential.identity,
+                    &credential.token,
+                    method,
+                    params,
+                )
                 .await
                 .map_err(|error| match error {
                     crate::agmend::AgmendError::Refused { message, .. } => {
@@ -1092,5 +1104,60 @@ mod tests {
         for bad in ["a/b", "nothing", "Head", ""] {
             assert!(parse(json!({ "key": bad })).is_err(), "{bad:?}");
         }
+    }
+
+    /// The tools of an agent's server, over a fake agmend whose answers take 31 s.
+    async fn slow_agmend(answer: Value) -> (crate::agmend::tests::Fake, Server) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let fake = crate::agmend::tests::Fake::slow(answer).await;
+        std::fs::set_permissions(fake.path(), std::fs::Permissions::from_mode(0o600)).unwrap();
+        let state = fake.path().parent().unwrap();
+        let options = super::super::McpOptions::new(
+            state,
+            agmen_client::TokenStore::Dir(state.into()),
+            state,
+        )
+        .with_launch(Some(crate::agmend::LaunchCredential {
+            identity: "parent01".parse().unwrap(),
+            token: "a".repeat(64).parse().unwrap(),
+        }));
+        (fake, Server::new(options, Server::tool_router()))
+    }
+
+    /// A launch whose hub mint stalls and rolls back answers after about 31 s,
+    /// which is past the 30 s every other call waits.
+    #[tokio::test(start_paused = true)]
+    async fn launch_gets_agmends_answer_after_thirty_one_seconds() {
+        let answer =
+            json!({"handle":"andy/k1","identity":"child001","branch":"agent/k1","depth":2});
+        let (fake, server) = slow_agmend(answer).await;
+        let params = LaunchParams {
+            name: "k1".into(),
+            role: "reviewer".into(),
+            model: None,
+            budget_usd: None,
+            brief: None,
+        };
+        let result = server.launch(Parameters(params)).await;
+        let text = super::super::result_text(&result);
+        assert_eq!(result.is_error, Some(false), "{text}");
+        assert_eq!(text, "launched @andy/k1 (child001) at depth 2 on agent/k1");
+        assert_eq!(fake.requests()[1].method, "child_launch");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stop_agent_still_gives_up_after_thirty_seconds() {
+        let (_fake, server) = slow_agmend(json!({"stopped": ["child001"]})).await;
+        let params = StopAgentParams {
+            identity: "child001".parse().unwrap(),
+            subtree: None,
+        };
+        let result = server.stop_agent(Parameters(params)).await;
+        let text = super::super::result_text(&result);
+        assert_eq!(result.is_error, Some(true), "{text}");
+        assert!(
+            text.contains("did not answer `child_stop` in time"),
+            "{text}"
+        );
     }
 }

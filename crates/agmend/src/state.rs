@@ -933,7 +933,6 @@ impl Store {
                         if broken_is_recipient(
                             message,
                             &id,
-                            &owner,
                             self.own_ids.get(&(origin.to_owned(), id.clone())),
                         ) {
                             broken_recipients.push(id);
@@ -946,7 +945,6 @@ impl Store {
                             if broken_is_recipient(
                                 message,
                                 &id,
-                                &owner,
                                 self.own_ids.get(&(origin.to_owned(), id.clone())),
                             ) {
                                 broken_recipients.push(id.clone());
@@ -1238,26 +1236,29 @@ fn addressed_to(
 }
 
 /// Whether a message with an unreadable row was addressed to that identity.
-/// The row's kind is unreadable, so only the rules that hold for every kind
-/// apply: the identity's own Inbox, or `is_for_me`. A listener-only copy is not
-/// guessed at, since holding for it would stall a Feed with no healthy listener.
+/// The row's kind is unreadable, so only targeted addressing counts: the
+/// identity's own Inbox (not its own message), its id in `to`, a mention, or an
+/// Answer to one of its own messages. A broadcast, such as the owner's ALERT, never
+/// holds, since the daemon's own dropped-messages ALERT would pause the Feed. A
+/// listener-only copy is not guessed at either.
 fn broken_is_recipient(
     message: &StampedEnvelope,
     id: &IdentityId,
-    owner: &str,
     own_ids: Option<&VecDeque<MessageId>>,
 ) -> bool {
+    if message.from == *id {
+        return false;
+    }
+    let client = &message.client;
     matches!(&message.stream, Stream::Inbox(recipient) if recipient == id)
-        || owner.parse().is_ok_and(|owner_id: IdentityId| {
-            agmen_client::Me {
-                identity_id: id.clone(),
-                handle: String::new(),
-                owner_id,
-            }
-            .is_for_me(message, |reply| {
-                own_ids.is_some_and(|own| own.contains(reply))
-            })
-        })
+        || client.to.contains(id)
+        // The hub stamps every ALERT with the coordinators, so a mention there is not addressing.
+        || (!matches!(client.payload, Payload::Alert { .. }) && message.mentioned.contains(id))
+        || (matches!(client.payload, Payload::Answer {})
+            && client
+                .reply_to
+                .as_ref()
+                .is_some_and(|reply| own_ids.is_some_and(|own| own.contains(reply))))
 }
 
 /// What `ingest_tx` leaves for after the commit: the identities found broken,
