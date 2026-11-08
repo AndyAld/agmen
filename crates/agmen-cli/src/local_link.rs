@@ -60,6 +60,12 @@ struct WatchResume {
     /// Whether the first-watch notice went out. agmend sends it again on each
     /// reconnect while a skipped stream has delivered nothing.
     noticed: bool,
+    /// Whether the connection now open got the notice, so agmend skipped
+    /// streams on it. Cleared when a connection opens.
+    skipping: bool,
+    /// Whether the watch has opened once. Only that first open asks for a
+    /// `backlog`; a reconnect resumes after `positions` alone.
+    started: bool,
     said: &'static AtomicBool,
 }
 
@@ -80,7 +86,7 @@ impl WatchResume {
     /// Whether agmend should start a never-run stream a few messages back. Only
     /// `agmen watch` asks: `agmen mcp` starts at the heads already.
     fn wants_backlog(&self) -> bool {
-        self.cursors.is_some() && self.positions.values().any(|last| *last == 0)
+        !self.started && self.cursors.is_some() && self.positions.values().any(|last| *last == 0)
     }
 
     /// One line for the person: `agmen watch` writes it to stderr and keeps its
@@ -102,6 +108,7 @@ impl WatchResume {
     /// restarts on a version that takes `after`.
     fn opened(&mut self, resumed: bool) {
         self.resumed = resumed;
+        self.skipping = false;
         if resumed || self.said.swap(true, Ordering::Relaxed) {
             return;
         }
@@ -122,14 +129,16 @@ impl WatchResume {
             if message.seq.0 <= *last {
                 return true;
             }
-            // After the notice, a never-run stream starts past 1 by agmend's choice.
-            let skipped = self.noticed && *last == 0;
+            // After the notice on this connection, a stream with no delivery yet
+            // may start past 1 by agmend's choice; its first delivery ends that.
+            let skipped = self.skipping && *last == 0;
             if self.resumed && !skipped && message.seq.0 != last.saturating_add(1) {
                 tracing::warn!("local watch received a sequence gap");
                 return false;
             }
             Some((message.stream.clone(), message.seq.0))
         } else if matches!(event, ClientEvent::Notice { .. }) {
+            self.skipping = true;
             if std::mem::replace(&mut self.noticed, true) {
                 return true;
             }
@@ -227,6 +236,8 @@ impl LocalLink {
                         positions,
                         resumed: true,
                         noticed: false,
+                        skipping: false,
+                        started: false,
                         said,
                     })
                 })
@@ -242,6 +253,8 @@ impl LocalLink {
                     positions,
                     resumed: true,
                     noticed: false,
+                    skipping: false,
+                    started: false,
                     said: self.said,
                 }
             }
@@ -259,6 +272,7 @@ impl LocalLink {
         .await
         .map_err(|error| local_error(redact_error(error, &self.token)))?;
         resume.opened(resumed);
+        resume.started = true;
         let (tx, rx) = mpsc::channel(WATCH_CAPACITY);
         let (socket, identity, project, token) = (
             self.socket.clone(),

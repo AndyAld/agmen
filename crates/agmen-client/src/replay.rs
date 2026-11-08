@@ -81,6 +81,9 @@ pub(crate) struct Replayer {
     failures: u32,
     /// Whether the first-watch notice went out.
     noticed: bool,
+    /// Streams already checked for a first-watch skip since this watch
+    /// started; a later replay at cursor 0, as after a reconnect, never skips.
+    checked: BTreeSet<Stream>,
 }
 
 /// The two sides of delivery for one session, sharing its cursors and
@@ -103,6 +106,7 @@ pub(crate) fn delivery(
         wake: wake_rx,
         failures: 0,
         noticed: false,
+        checked: BTreeSet::new(),
     };
     let streams = Streams {
         watched,
@@ -328,7 +332,7 @@ impl Replayer {
             let (cursors, key) = (self.cursors.clone(), stream.clone());
             let mut after = blocking(move || cursors.last(&key)).await?;
             let mut page = self.hub.page(stream, after).await?;
-            if after == 0 {
+            if after == 0 && self.checked.insert(stream.clone()) {
                 // A never-run stream: the page's head says how far back to start.
                 let (cursors, key, head) = (self.cursors.clone(), stream.clone(), page.head);
                 if blocking(move || cursors.start_first_watch(&key, head)).await? {
