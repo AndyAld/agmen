@@ -713,3 +713,43 @@ async fn local_resumed_watch_delivers_everything_after_its_cursor_without_a_noti
     drop(rx);
     f.serving.take().unwrap().close().await;
 }
+
+#[tokio::test]
+async fn local_watch_empty_at_start_delivers_all_after_a_forced_reconnect_without_a_notice() {
+    let mut f = Fixture::new().await;
+    let path = f.dir.path().join("proxy.sock");
+    let (_proxy, cut, closing, resume) = proxy(&path, f.link.socket.clone());
+    f.link.socket = path;
+    let mut rx = f
+        .link
+        .watch(WatchState::Delivery(&f.dir.path().join("watcher")))
+        .await
+        .unwrap();
+    let inbox = Stream::Inbox(f.identity.identity_id.clone());
+    cut.send(()).unwrap();
+    tokio::time::timeout(WAIT, closing).await.unwrap().unwrap();
+    let mut expected: Vec<_> = post_many(&f, &inbox, 25)
+        .await
+        .into_iter()
+        .map(|seq| (inbox.clone(), seq))
+        .collect();
+    expected.sort();
+    resume.send(()).unwrap();
+    let (mut rows, mut notices) = (Vec::new(), 0);
+    tokio::time::timeout(WAIT, async {
+        while rows.len() < expected.len() {
+            match rx.recv().await.expect("local watch remains open") {
+                ClientEvent::Message { message } => rows.push((message.stream, message.seq.0)),
+                ClientEvent::Notice { .. } => notices += 1,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+    rows.sort();
+    assert_eq!(rows, expected);
+    assert_eq!(notices, 0, "a reconnect never skips");
+    drop(rx);
+    f.serving.take().unwrap().close().await;
+}

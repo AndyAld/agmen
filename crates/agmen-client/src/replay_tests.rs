@@ -369,3 +369,18 @@ async fn a_resumed_watch_delivers_everything_after_its_cursor_without_a_notice()
     assert_eq!(seqs, (6..=500).collect::<Vec<_>>());
     assert_eq!(notices, 0);
 }
+
+#[tokio::test]
+async fn a_reconnect_replay_at_cursor_zero_never_skips_after_the_watch_started() {
+    let mut h = start().await;
+    // Empty at watch start: the cursors stay 0.
+    h.hub_has(0);
+    h.streams.on_connected();
+    let (seqs, notices) = h.drained().await;
+    assert_eq!((seqs.len(), notices), (0, 0));
+    h.hub_has(25);
+    h.streams.on_connected();
+    let (seqs, notices) = h.drained().await;
+    assert_eq!(seqs, (1..=25).collect::<Vec<_>>());
+    assert_eq!(notices, 0);
+}
