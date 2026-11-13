@@ -459,7 +459,9 @@ signed-in hub login for a hub project.
   Without `model`, Claude Code runs `sonnet` and OpenCode its own default.
   An OpenCode batch runs `opencode run --standalone --format json` with a
   per-batch config (the agmen MCP server, permission rules for the role and
-  for batches from others, and the instruction files). The batch runs as
+  for batches from others, and the instruction files). A batch from others
+  gets read, glob and grep and the same four reply tools as on Claude Code
+  (`agmen_chat`, `agmen_answer`, `agmen_ask` and `agmen_dm`), nothing else. The batch runs as
   its own OpenCode agent `agmen`, so rules the person gave other agents do
   not apply, and the worktree's own `opencode.json` and `.opencode` are
   ignored. agmend sums each step's reported cost and stops the batch at its
