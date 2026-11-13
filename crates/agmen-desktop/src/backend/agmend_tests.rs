@@ -641,6 +641,63 @@ fn opencode_agent_is_labelled_and_its_role_limit_is_shown_as_not_enforced() {
 }
 
 #[test]
+fn start_listener_asks_agmend_for_this_project_and_folder() {
+    let fake = FakeAgmend::start(console(vec![]));
+    let backend =
+        AgmendBackend::connect_with(&fake.path(), PROJECT, Some(Path::new(ROOT)), FAST).unwrap();
+    let mut updates = backend.subscribe();
+    wait_for(&mut updates, is_live);
+    backend
+        .act(Action::StartListener {
+            model: Some("claude-haiku-5-5".into()),
+        })
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let asked = loop {
+        let found = fake
+            .state
+            .lock()
+            .unwrap()
+            .agent_requests
+            .iter()
+            .find(|request| request.method == "listener_start")
+            .map(|request| request.params.clone());
+        if let Some(found) = found {
+            break found;
+        }
+        assert!(Instant::now() < deadline, "listener_start was never sent");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(
+        asked,
+        json!({"project": PROJECT, "root": ROOT, "model": "claude-haiku-5-5"})
+    );
+    // A window with no project folder has nowhere to start one.
+    let (plain, _updates) = live_backend(&fake);
+    assert!(plain.act(Action::StartListener { model: None }).is_err());
+}
+
+#[test]
+fn the_online_count_comes_with_who_it_counts() {
+    let fake = FakeAgmend::start(console(vec![]));
+    let (backend, _updates) = live_backend(&fake);
+    let status = backend.snapshot().status;
+    assert_eq!(status.online as usize, status.online_who.len());
+    assert!(status.online > 0, "the fake roster has someone online");
+    for who in &status.online_who {
+        // Only the person running the app is "you".
+        assert_eq!(who.kind == "you", who.handle == "andy", "{who:?}");
+    }
+    // andy's own listener is away and sean is offline, so neither is counted.
+    let handles: Vec<&str> = status
+        .online_who
+        .iter()
+        .map(|who| who.handle.as_str())
+        .collect();
+    assert_eq!(handles, ["andy", "andy/fx1", "sean/listen", "sean/plan"]);
+}
+
+#[test]
 fn older_agent_list_without_spend_still_parses() {
     let fake = FakeAgmend::start(console(vec![]));
     fake.edit(|state| {

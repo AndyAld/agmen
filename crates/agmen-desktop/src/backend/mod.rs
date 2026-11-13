@@ -240,6 +240,11 @@ pub(crate) enum Action {
     SpawnWorker {
         agent: String,
     },
+    /// Starts the person's listener in this project; `None` runs agmend's
+    /// default model.
+    StartListener {
+        model: Option<String>,
+    },
 }
 
 /// What a subscriber hears.
@@ -621,9 +626,21 @@ pub(crate) struct AgentInfo {
 
 /// The status bar's counts. Task 13: the needs-you and alert counts are
 /// not stored; the chat derives them from its messages (mockup fix 34).
+/// One identity the roster lists as online, as the status bar's list names it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OnlineIdentity {
+    /// The full handle, such as `andy` or `andy/fx1`.
+    pub(crate) handle: String,
+    /// What it is: `you`, `person`, `listener`, `coordinator` or `agent`.
+    pub(crate) kind: &'static str,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct StatusSummary {
     pub(crate) online: u32,
+    /// Who the count is, people and listeners included; empty when the
+    /// backend does not say.
+    pub(crate) online_who: Vec<OnlineIdentity>,
     pub(crate) worktrees: u32,
     pub(crate) spend_today_usd: f64,
 }

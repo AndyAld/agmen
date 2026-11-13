@@ -434,6 +434,11 @@ fn managed_response(request: Request, state: &Mutex<FakeState>) -> Response {
     if request.method == "agent_providers" {
         return Response::ok(id, json!({"providers": []}));
     }
+    // Recorded with the agent actions; it changes no managed agent.
+    if request.method == "listener_start" {
+        state.agent_requests.push(request);
+        return Response::ok(id, json!({}));
+    }
     if request.method == "agent_list" {
         if let Some(answer) = &state.agent_list_answer {
             return Response::ok(id, answer.clone());
@@ -625,7 +630,9 @@ fn serve(mut stream: UnixStream, state: &Mutex<FakeState>) -> Option<()> {
                     _ => Response::err(id, ErrorCode::Hub, "the hub cannot be reached"),
                 }
             }
-            method if method.starts_with("agent_") => managed_response(request, state),
+            method if method.starts_with("agent_") || method == "listener_start" => {
+                managed_response(request, state)
+            }
             "post" => {
                 let mut state = state.lock().unwrap();
                 state.posts.push(request.clone());
