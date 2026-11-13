@@ -607,6 +607,20 @@ impl AgmendBackend {
         params
     }
 
+    /// `listener_start` for this project, in the folder the window opened.
+    fn start_listener(&self, model: Option<String>) -> Result<(), BackendError> {
+        let Some(root) = &self.shared.root else {
+            return Err(BackendError::Unsupported(
+                "starting a listener without an open project folder",
+            ));
+        };
+        let mut params = json!({"project": self.shared.project, "root": root});
+        if let Some(model) = model {
+            params["model"] = json!(model);
+        }
+        self.queue_agent("listener_start", params)
+    }
+
     fn queue_agent(&self, method: &'static str, params: Value) -> Result<(), BackendError> {
         self.queue(Job::Agent { method, params }, "agent request queue is full")
     }
@@ -954,6 +968,7 @@ impl Backend for AgmendBackend {
                 }
                 self.queue_agent("agent_launch", params)
             }
+            Action::StartListener { model } => self.start_listener(model),
             Action::StopAgent(identity) => {
                 self.queue_agent("agent_stop", json!({"identity": identity}))
             }
@@ -2116,7 +2131,21 @@ pub(super) fn snapshot_from(console: ConsoleSnapshot) -> Snapshot {
         Some(entry) => listener_with_details(row, entry),
         None => listener_info(row),
     });
-    let online = roster.iter().filter(|e| e.status == Status::Online).count();
+    let online_who: Vec<super::OnlineIdentity> = roster
+        .iter()
+        .filter(|entry| entry.status == Status::Online)
+        .map(|entry| super::OnlineIdentity {
+            handle: entry.handle.clone(),
+            kind: match entry.kind {
+                IdentityKind::Human if entry.handle == me.handle => "you",
+                IdentityKind::Human => "person",
+                IdentityKind::Listener => "listener",
+                IdentityKind::Coordinator => "coordinator",
+                IdentityKind::Agent | IdentityKind::Hub => "agent",
+            },
+        })
+        .collect();
+    let online = online_who.len();
     let groups = person_groups(&roster, &me.handle);
     let roles = super::role_files::role_files(
         roles
@@ -2146,6 +2175,7 @@ pub(super) fn snapshot_from(console: ConsoleSnapshot) -> Snapshot {
         agents: BTreeMap::new(),
         status: StatusSummary {
             online: u32::try_from(online).unwrap_or(u32::MAX),
+            online_who,
             worktrees: u32::try_from(worktrees.len()).unwrap_or(u32::MAX),
             spend_today_usd: 0.0,
         },

@@ -547,3 +547,68 @@ fn managed_stop_button_calls_backend(cx: &mut TestAppContext) {
         vec![crate::backend::Action::StopAgent(identity)]
     );
 }
+
+#[gpui::test]
+fn online_count_lists_who_it_counts(cx: &mut TestAppContext) {
+    crate::ui::plan_test_support::plan_globals(cx, crate::backend::Screen::Plan, None);
+    let mut snapshot = chat_snapshot();
+    snapshot.status.online = 2;
+    snapshot.status.online_who = [("andy", "you"), ("andy/fx1", "agent")]
+        .map(|(handle, kind)| crate::backend::OnlineIdentity {
+            handle: handle.into(),
+            kind,
+        })
+        .into();
+    let (_, cx) = cx.add_window_view(|window, cx| Workspace::new(snapshot, window, cx));
+    redraw(cx);
+    assert!(cx.debug_bounds("online").is_none());
+    click(cx, "status-online");
+    assert!(cx.debug_bounds("online:andy").is_some());
+    assert!(cx.debug_bounds("online:andy/fx1").is_some());
+    click(cx, "online:close");
+    assert!(cx.debug_bounds("online").is_none());
+}
+
+#[gpui::test]
+fn listener_chip_offers_to_add_a_listener_when_there_is_none(cx: &mut TestAppContext) {
+    let (backend, _) =
+        crate::ui::plan_test_support::plan_globals(cx, crate::backend::Screen::Plan, None);
+    let mut snapshot = chat_snapshot();
+    snapshot.listener = None;
+    let (_, cx) = cx.add_window_view(|window, cx| Workspace::new(snapshot, window, cx));
+    redraw(cx);
+    click(cx, "title-listener");
+    assert!(cx.debug_bounds("listener-dialog").is_some());
+    assert!(cx.debug_bounds("listener-dialog:about").is_some());
+    click(cx, "listener-dialog:add");
+    assert_eq!(
+        *backend.acts.borrow(),
+        vec![crate::backend::Action::StartListener {
+            model: Some("claude-haiku-5-5".into())
+        }]
+    );
+    // The fixture cannot start one, so the dialog stays open and says why.
+    assert!(cx.debug_bounds("listener-dialog:error").is_some());
+    click(cx, "listener-dialog:cancel");
+    assert!(cx.debug_bounds("listener-dialog").is_none());
+}
+
+#[gpui::test]
+fn listener_chip_shows_the_listener_panel_when_one_is_running(cx: &mut TestAppContext) {
+    crate::ui::plan_test_support::plan_globals(cx, crate::backend::Screen::Plan, None);
+    let snapshot = chat_snapshot();
+    assert!(
+        snapshot.listener.is_some(),
+        "the chat fixture has a listener"
+    );
+    let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::new(snapshot, window, cx));
+    workspace.update(cx, |workspace, cx| {
+        if workspace.is_dock_open(DockSide::Right) {
+            workspace.toggle_dock(DockSide::Right, cx);
+        }
+    });
+    redraw(cx);
+    click(cx, "title-listener");
+    assert!(cx.debug_bounds("listener-dialog").is_none());
+    assert!(workspace.read_with(cx, |workspace, _| workspace.is_dock_open(DockSide::Right)));
+}

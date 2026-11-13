@@ -67,6 +67,7 @@ fn base(project: &str) -> Result<Snapshot, BackendError> {
         agents: BTreeMap::from([(fx1.id.clone(), fx1)]),
         status: StatusSummary {
             online: 9,
+            online_who: Vec::new(),
             // Mockup fix 29: five worktrees, as the Git panel lists.
             worktrees: 5,
             spend_today_usd: spend,
@@ -164,6 +165,7 @@ impl FixtureBackend {
                 // Mockup fix 35: the status bar counts this project, not pr-3331.
                 s.status = StatusSummary {
                     online: if running { 11 } else { 4 },
+                    online_who: Vec::new(),
                     worktrees: if running { 7 } else { 0 },
                     spend_today_usd: s.status.spend_today_usd,
                 };
@@ -334,6 +336,9 @@ impl Backend for FixtureBackend {
             | Action::DetachAgent(_)
             | Action::RemoveAgent { .. } => {
                 Err(BackendError::Unsupported("managed agents in fixture"))
+            }
+            Action::StartListener { .. } => {
+                Err(BackendError::Unsupported("starting a listener in fixture"))
             }
             Action::Apply(id) => self.set_change(&id, |_| ChangeState::Applied),
             Action::Cancel(id) => self.set_change(&id, |_| ChangeState::Cancelled),

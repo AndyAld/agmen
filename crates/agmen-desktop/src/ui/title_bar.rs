@@ -7,8 +7,8 @@ use gpui::{
 };
 
 use super::components::{
-    Avatar, Button, ButtonSize, ButtonStyle, Chip, Color, IconButton, IconButtonStyle, IconSize,
-    Label,
+    Avatar, Button, ButtonSize, ButtonStyle, Chip, ChipButton, Color, IconButton, IconButtonStyle,
+    IconSize, Label,
 };
 use super::format::listener_label;
 use super::tokens::{BORDER_WIDTH, SPACE_10, SPACE_12, TITLE_BAR_HEIGHT, TRAFFIC_LIGHTS_INSET};
@@ -18,6 +18,11 @@ use crate::icons::UiIcon;
 #[derive(Debug, Clone, PartialEq, Eq, gpui::Action)]
 #[action(namespace = project, no_json)]
 pub(crate) struct InvitePeople;
+
+/// The listener chip was clicked: add a listener, or show the one running.
+#[derive(Debug, Clone, PartialEq, Eq, gpui::Action)]
+#[action(namespace = project, no_json)]
+pub(crate) struct OpenListener;
 
 /// Which platform's window chrome the title bar leaves room for or draws.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +54,9 @@ impl PlatformStyle {
 pub(crate) struct TitleBar {
     project: SharedString,
     listener: SharedString,
+    /// Whether the person has a listener that is not offline: the chip's dot
+    /// is then the status bar's green, and grey otherwise.
+    listener_on: bool,
     me: SharedString,
     platform: PlatformStyle,
     invite_people: bool,
@@ -60,6 +68,10 @@ impl TitleBar {
         Self {
             project: snapshot.project.clone().into(),
             listener: listener_label(snapshot.listener.as_ref()).into(),
+            listener_on: snapshot
+                .listener
+                .as_ref()
+                .is_some_and(|listener| listener.state != "offline"),
             me: snapshot.me.clone().into(),
             platform: PlatformStyle::current(),
             invite_people: false,
@@ -132,7 +144,25 @@ impl RenderOnce for TitleBar {
             )
             .child(Label::new("›").color(Color::Muted))
             .child(Label::new(self.project))
-            .child(Chip::new(self.listener).dot(Color::Placeholder))
+            .child(
+                div()
+                    // A click on the chip is not a drag of the window.
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(
+                        ChipButton::new(
+                            "title-listener",
+                            Chip::new(self.listener).dot(if self.listener_on {
+                                Color::Success
+                            } else {
+                                Color::Placeholder
+                            }),
+                        )
+                        .caret(false)
+                        .on_toggle(|_, window, cx| {
+                            window.dispatch_action(Box::new(OpenListener), cx);
+                        }),
+                    ),
+            )
             .child(div().flex_1())
             .when(self.invite_people, |bar| {
                 bar.child(

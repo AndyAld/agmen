@@ -65,6 +65,10 @@ pub(crate) struct Workspace {
     new_agent_events: Option<Subscription>,
     remove_agent: Option<Entity<super::remove_agent_dialog::RemoveAgentDialog>>,
     remove_agent_events: Option<Subscription>,
+    /// Whether the list the status bar's online count opens is showing.
+    online_open: bool,
+    listener_dialog: Option<Entity<super::listener_dialog::ListenerDialog>>,
+    listener_dialog_events: Option<Subscription>,
     left_dock: Dock,
     right_dock: Dock,
     /// A dock handle's drag has moved a dock since the mouse went down, so
@@ -213,6 +217,9 @@ impl Workspace {
             new_agent_events: None,
             remove_agent: None,
             remove_agent_events: None,
+            online_open: false,
+            listener_dialog: None,
+            listener_dialog_events: None,
             pane_group,
             left_dock: Dock::new(left_width),
             right_dock: Dock::new(right_width),
@@ -517,6 +524,17 @@ impl Render for Workspace {
         .on_action(cx.listener(|this, _: &ToggleRightDock, _, cx| {
             this.toggle_dock(DockSide::Right, cx);
         }))
+        .on_action(
+            cx.listener(|this, _: &super::status_bar::ShowOnline, _, cx| {
+                this.online_open = true;
+                cx.notify();
+            }),
+        )
+        .on_action(
+            cx.listener(|this, _: &super::title_bar::OpenListener, _, cx| {
+                this.open_listener(cx);
+            }),
+        )
         .size_full()
         .flex()
         .flex_col()
@@ -539,6 +557,8 @@ impl Render for Workspace {
         .children(overlay)
         .children(self.new_agent.clone())
         .children(self.remove_agent.clone())
+        .children(self.online_list(cx))
+        .children(self.listener_dialog.clone())
     }
 }
 

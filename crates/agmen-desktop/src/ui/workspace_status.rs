@@ -8,12 +8,16 @@
 
 use std::path::Path;
 
-use gpui::{App, SharedString};
+use gpui::{
+    App, AppContext as _, Context, InteractiveElement as _, ParentElement as _, SharedString,
+    Styled as _, div,
+};
 
 use super::Workspace;
 use crate::backend::Snapshot;
-use crate::ui::components::Color;
+use crate::ui::components::{Button, Color, DialogFooter, Label, LabelSize, Modal};
 use crate::ui::dock::DockSide;
+use crate::ui::listener_dialog::{Closed, ListenerDialog};
 use crate::ui::pane::TabItem;
 use crate::ui::scope_chip::branch_label;
 use crate::ui::status_bar::link_label;
@@ -41,6 +45,68 @@ impl Workspace {
     pub(crate) fn status_link(&self, cx: &App) -> Option<(SharedString, Color)> {
         let chat = self.chat.read(cx);
         chat.link().map(|link| link_label(link, chat.was_live()))
+    }
+
+    /// The listener chip's click: the Listener panel when the person has a
+    /// listener, and otherwise the dialog that adds one.
+    pub(super) fn open_listener(&mut self, cx: &mut Context<Self>) {
+        if self.snapshot.listener.is_some() {
+            if !self.is_dock_open(DockSide::Right) {
+                self.toggle_dock(DockSide::Right, cx);
+            }
+            return;
+        }
+        let dialog = cx.new(|_| ListenerDialog::default());
+        self.listener_dialog_events = Some(cx.subscribe(&dialog, |this, _, _: &Closed, cx| {
+            this.listener_dialog = None;
+            this.listener_dialog_events = None;
+            cx.notify();
+        }));
+        self.listener_dialog = Some(dialog);
+        cx.notify();
+    }
+
+    /// Who the status bar's online count is, while its list is open. Tests
+    /// find each row as `online:<handle>`.
+    pub(super) fn online_list(&self, cx: &mut Context<Self>) -> Option<Modal> {
+        if !self.online_open {
+            return None;
+        }
+        let close = |this: &mut Self, cx: &mut Context<Self>| {
+            this.online_open = false;
+            cx.notify();
+        };
+        let status = &self.snapshot.status;
+        let rows = status.online_who.iter().map(|who| {
+            let selector = format!("online:{}", who.handle);
+            div()
+                .debug_selector(move || selector)
+                .flex()
+                .justify_between()
+                .child(Label::new(who.handle.clone()).code())
+                .child(
+                    Label::new(who.kind)
+                        .size(LabelSize::Small)
+                        .color(Color::Placeholder),
+                )
+        });
+        // The count without names: a backend that does not say who.
+        let note = match (status.online, status.online_who.is_empty()) {
+            (0, _) => Some("No one is online."),
+            (_, true) => Some("This project does not say who is online."),
+            _ => None,
+        };
+        Some(
+            Modal::small("online")
+                .on_dismiss(cx.listener(move |this, _, _, cx| close(this, cx)))
+                .title(Label::title("Online"))
+                .children(rows)
+                .children(note.map(|note| Label::new(note).color(Color::Placeholder)))
+                .footer(DialogFooter::close(
+                    Button::new("online:close", "Close")
+                        .on_click(cx.listener(move |this, _, _, cx| close(this, cx))),
+                )),
+        )
     }
 
     /// Whether the status bar offers the Listener toggle.

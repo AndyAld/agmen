@@ -15,6 +15,11 @@ use super::format::{counted, counted_capped, spend_today, status_listener_label}
 use super::left_dock::PanelButtons;
 use super::tokens::{BORDER_WIDTH, SPACE_10, SPACE_14, STATUS_BAR_HEIGHT};
 use super::workspace::{OpenAlerts, ToggleRightDock};
+
+/// The online count was clicked: list who it counts.
+#[derive(Debug, Clone, PartialEq, Eq, gpui::Action)]
+#[action(namespace = project, no_json)]
+pub(crate) struct ShowOnline;
 use crate::backend::{Link, Snapshot, StatusSummary};
 use crate::icons::UiIcon;
 use crate::keymap::{OpenSettings, ToggleCommandPalette, ToggleTerminal};
@@ -195,12 +200,15 @@ impl RenderOnce for StatusBar {
                         .truncate(),
                 )
             })
-            .child(StatusItem::new(
-                "status-online",
-                "●",
-                Color::Success,
-                counted(s.online, "online", "online"),
-            ))
+            .child(
+                StatusItem::new(
+                    "status-online",
+                    "●",
+                    Color::Success,
+                    counted(s.online, "online", "online"),
+                )
+                .on_click(|_, window, cx| window.dispatch_action(Box::new(ShowOnline), cx)),
+            )
             // Task 13: the count opens the chat at the alert (node 456).
             .child(
                 StatusItem::new(
@@ -326,13 +334,35 @@ mod tests {
                 )
                 .into_any_element()
         });
-        assert_control_feedback(cx, "status-alerts", "status-alerts", 4);
+        // One Tab more than before: the online count ahead of it is a control now.
+        assert_control_feedback(cx, "status-alerts", "status-alerts", 5);
         press(cx, "enter");
         assert_eq!(actions.get(), 1);
         press(cx, "space");
         assert_eq!(actions.get(), 2);
         click(cx, "status-alerts");
         assert_eq!(actions.get(), 3);
+    }
+
+    #[gpui::test]
+    fn online_count_hovers_takes_focus_and_asks_who(cx: &mut gpui::TestAppContext) {
+        use crate::ui::test_support::{assert_control_feedback, click, draw_with_tab, press};
+        use std::{cell::Cell, rc::Rc};
+        let actions = Rc::new(Cell::new(0));
+        let seen = actions.clone();
+        let cx = draw_with_tab(cx, move || {
+            let seen = seen.clone();
+            div()
+                .w(gpui::px(1600.))
+                .on_action(move |_: &ShowOnline, _, _| seen.set(seen.get() + 1))
+                .child(StatusBar::new(&crate::backend::chat_snapshot(), false))
+                .into_any_element()
+        });
+        assert_control_feedback(cx, "status-online", "status-online", 4);
+        press(cx, "enter");
+        assert_eq!(actions.get(), 1);
+        click(cx, "status-online");
+        assert_eq!(actions.get(), 2);
     }
 
     #[gpui::test]
