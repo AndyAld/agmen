@@ -16,7 +16,7 @@ use std::time::Duration;
 use agmen_client::{Joined, Login, find_identity};
 use agmen_local::console::Status;
 use agmen_local::{ApiError, ErrorCode};
-use agmen_proto::{ClientEnvelope, IdentityId, Payload, ProjectId};
+use agmen_proto::{ClientEnvelope, IdentityId, IdentityKind, Payload, ProjectId};
 use rustix::process::{Pid, Signal};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -504,11 +504,13 @@ impl Managed {
                     bad_request("project is required for an agent agmend has not started")
                 })?;
                 let folder = match target.root {
-                    Some(root) => root,
-                    None => self
-                        .find_folder(&project, &target.identity)
-                        .await
-                        .ok_or_else(|| no_folder(&target.identity))?,
+                    Some(root) => Some(root),
+                    None => self.find_folder(&project, &target.identity).await,
+                };
+                let Some(folder) = folder else {
+                    return self
+                        .remove_folderless(&project, &target.identity, &login)
+                        .await;
                 };
                 let joined = verify_folder(&folder, &target.identity, &project, &login).await?;
                 let branch = current_branch(&joined.root).await;
@@ -558,6 +560,54 @@ impl Managed {
             "identity": identity.identity_id,
             "removed": true,
             "kept": {"folder": folder, "branch": branch},
+        }))
+    }
+
+    /// Removes an agent of a local project whose folder is gone, from
+    /// agmend's own record: a local project has one person, the signed-in
+    /// one, so the record alone shows the identity is theirs. A hub identity
+    /// still needs its folder, whose identity file names its owner.
+    async fn remove_folderless(
+        &self,
+        project: &ProjectId,
+        id: &IdentityId,
+        login: &Login,
+    ) -> Result<Value, ApiError> {
+        if !agmen_client::is_local(&login.hub_url) {
+            return Err(no_folder(id));
+        }
+        let local = self.origins.local();
+        let entry = local
+            .roster(project)
+            .await?
+            .into_iter()
+            .find(|entry| entry.identity_id == *id)
+            .ok_or_else(|| no_folder(id))?;
+        if entry.kind == IdentityKind::Human {
+            return Err(bad_request(
+                "a person is not an agent; Remove takes agents only",
+            ));
+        }
+        let person = local.person().await?.ok_or_else(|| no_folder(id))?;
+        let identity = ManagedIdentity {
+            hub_url: login.hub_url.clone(),
+            broker_url: agmen_client::local_broker(),
+            tenant: person.tenant,
+            project: project.clone(),
+            identity_id: id.clone(),
+            owner_id: login.human_id.clone(),
+            handle: entry.handle,
+            kind: entry.kind,
+        };
+        self.refuse_live_descendants(id).await?;
+        if !self.revoke_identity(&identity).await? {
+            tracing::info!("the origin had no such identity; removing it here");
+        }
+        self.forget_removed_worker(&identity).await?;
+        Ok(json!({
+            "identity": id,
+            "removed": true,
+            "kept": {"folder": null, "branch": null},
         }))
     }
 

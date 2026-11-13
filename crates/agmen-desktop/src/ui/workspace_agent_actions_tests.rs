@@ -249,24 +249,26 @@ fn remove_of_a_hand_joined_agent_says_its_folder_is_not_deleted(cx: &mut TestApp
 }
 
 #[gpui::test]
-fn remove_without_a_known_folder_asks_for_one_first(cx: &mut TestAppContext) {
+fn remove_without_a_known_folder_removes_without_asking(cx: &mut TestAppContext) {
     let (backend, workspace, cx) = open(cx, |s| without_worktree(s, "andy/fx1"));
     click(cx, "agent:andy/fx1:more");
     click(cx, "agent:andy/fx1:menu:remove");
-    assert!(cx.did_prompt_for_paths());
-    assert!(cx.debug_bounds("remove-agent").is_none());
-    cx.simulate_path_prompt_response(|_| Some(vec![PathBuf::from("/picked/sol")]));
-    cx.run_until_parked();
+    // agmend finds the folder itself, or removes a local agent whose folder
+    // is gone from its own record; Remove never asks for a folder.
+    assert!(!cx.did_prompt_for_paths());
     let message = workspace
         .read_with(cx, |w, cx| w.remove_message(cx))
         .unwrap();
-    assert!(message.contains("/picked/sol"), "{message}");
+    assert!(
+        message.ends_with("Nothing on disk is deleted."),
+        "{message}"
+    );
     click(cx, "remove-agent:confirm");
     assert_eq!(
         *backend.acts.borrow(),
         vec![Action::RemoveAgent {
             identity: fixture_id("andy/fx1"),
-            root: Some(PathBuf::from("/picked/sol"))
+            root: None
         }]
     );
 }

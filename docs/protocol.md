@@ -582,6 +582,12 @@ signed-in hub login for a hub project.
   its identity file when that file names it, its hub token, its local queue and
   `managed/<identity>/`. It keeps the folder and branch and answers
   `{"identity":..., "removed":true, "kept":{"folder":..., "branch":...}}`.
+  For an identity it does not run and whose folder neither `root` nor the
+  project's worktrees give, a local project's agent is removed from agmend's
+  own record (a local project has one person, so the record shows the owner),
+  answering `"kept":{"folder":null,"branch":null}`; a person's own identity is
+  refused. A hub identity still needs its folder, whose identity file names
+  its owner.
 
 ### Local origin
 

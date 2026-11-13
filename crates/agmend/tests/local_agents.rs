@@ -563,6 +563,74 @@ async fn remove_revokes_a_local_worker() {
 }
 
 #[tokio::test]
+async fn remove_of_a_local_identity_whose_folder_is_gone() {
+    let mut f = Fixture::new().await;
+    let joined: IdentityFile = serde_json::from_slice(
+        &tokio::fs::read(f.repo.join(".agmen/identity.json"))
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    // The checkout was deleted; only agmend's record of the identity is left.
+    tokio::fs::remove_dir_all(f.repo.join(".agmen"))
+        .await
+        .unwrap();
+    let removed = result(
+        f.client
+            .call(
+                "agent_remove",
+                json!({"identity":joined.identity_id,"project":f.project}),
+            )
+            .await,
+    );
+    assert_eq!(removed["removed"], true);
+    assert!(removed["kept"]["folder"].is_null());
+    let snapshot = result(
+        f.client
+            .call("console_snapshot", json!({"project":f.project}))
+            .await,
+    );
+    let roster = snapshot["roster"].as_array().unwrap();
+    assert!(
+        !roster
+            .iter()
+            .any(|row| row["identity_id"] == joined.identity_id.as_str())
+    );
+    // The person is not an agent: the folderless path never removes them.
+    let person = roster
+        .iter()
+        .find(|row| row["kind"] == "human")
+        .expect("the local person is on the roster")["identity_id"]
+        .clone();
+    let refusal = error(
+        f.client
+            .call(
+                "agent_remove",
+                json!({"identity":person,"project":f.project}),
+            )
+            .await,
+    );
+    assert!(
+        refusal.message.contains("a person is not an agent"),
+        "{}",
+        refusal.message
+    );
+    let snapshot = result(
+        f.client
+            .call("console_snapshot", json!({"project":f.project}))
+            .await,
+    );
+    assert!(
+        snapshot["roster"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["identity_id"] == person)
+    );
+    f.stop().await;
+}
+
+#[tokio::test]
 async fn stopped_local_agent_still_counts_toward_the_cap() {
     let mut f = Fixture::new().await;
     let worker = f.launch("worker", None).await;
