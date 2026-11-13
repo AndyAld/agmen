@@ -86,7 +86,11 @@ fn rules_lock_a_batch_from_others_and_a_role_to_what_each_may_use() {
             rule("read", "allow"),
             rule("glob", "allow"),
             rule("grep", "allow"),
-            rule("agmen_*", "allow"),
+            // Only the tools that send a reply.
+            rule("agmen_chat", "allow"),
+            rule("agmen_answer", "allow"),
+            rule("agmen_ask", "allow"),
+            rule("agmen_dm", "allow"),
         ]
     );
     request.role = Some(role(&["read", "edit", "shell"], dir.path()));
@@ -95,7 +99,10 @@ fn rules_lock_a_batch_from_others_and_a_role_to_what_each_may_use() {
         [
             rule("*", "deny"),
             rule("read", "allow"),
-            rule("agmen_*", "allow")
+            rule("agmen_chat", "allow"),
+            rule("agmen_answer", "allow"),
+            rule("agmen_ask", "allow"),
+            rule("agmen_dm", "allow"),
         ]
     );
     request.owner_only = true;
@@ -206,7 +213,7 @@ async fn batch_from_others_is_told_so_and_a_failed_exit_keeps_the_cost() {
     let config: Value =
         serde_json::from_str(&std::fs::read_to_string(dir.path().join("config-seen")).unwrap())
             .unwrap();
-    assert_eq!(config["permissions"].as_array().unwrap().len(), 5);
+    assert_eq!(config["permissions"].as_array().unwrap().len(), 8);
 }
 
 #[tokio::test]

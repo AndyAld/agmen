@@ -57,6 +57,9 @@ pub(super) fn args(spec: &RunSpec) -> Vec<String> {
     args
 }
 
+/// The agmen tools a batch with messages from others may use.
+const REPLY_TOOLS: [&str; 4] = ["agmen_chat", "agmen_answer", "agmen_ask", "agmen_dm"];
+
 /// The rules for this batch. The last matching rule wins.
 pub(super) fn permissions(spec: &RunSpec) -> Vec<Value> {
     let rule =
@@ -82,7 +85,13 @@ pub(super) fn permissions(spec: &RunSpec) -> Vec<Value> {
         // refuses to load one (probed 2026-11-13).
         rules.push(rule("*", "deny"));
         rules.extend(allowed.into_iter().map(|action| rule(action, "allow")));
-        rules.push(rule("agmen_*", "allow"));
+        if spec.owner_only {
+            rules.push(rule("agmen_*", "allow"));
+        } else {
+            // Only the tools that send a reply, as a Claude Code batch from
+            // others gets (`--allowedTools` in `RunSpec::args`); inbox stays out.
+            rules.extend(REPLY_TOOLS.map(|tool| rule(tool, "allow")));
+        }
         // The deny also covers paths outside the worktree. A role limits tool
         // classes, not folders, so the owner's batch keeps those, as Claude
         // Code's does; a batch from others stays inside the worktree.
