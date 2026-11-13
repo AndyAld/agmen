@@ -73,6 +73,10 @@ impl RemoveAgentDialog {
                 folder: None,
                 branch: None,
             } => "Its folder and branch are kept.".to_owned(),
+            // agmend was not told a folder: it finds one, or the folder is gone.
+            Kept::Joined { folder } if folder.is_empty() => {
+                "Nothing on disk is deleted.".to_owned()
+            }
             Kept::Joined { folder } => {
                 format!("Only its identity file leaves {folder}; the folder itself is not deleted.")
             }
