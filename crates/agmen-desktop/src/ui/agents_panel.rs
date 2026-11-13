@@ -80,7 +80,10 @@ pub(crate) struct AgentsPanel {
     menu: Option<IdentityId>,
     /// A line about the last agent action that is not an error.
     notice: Option<String>,
-    recents: usize,
+    /// Stopped agents' handles, as the Recents tab lists them.
+    recents: Vec<String>,
+    /// Whether the Recents section at the bottom is expanded.
+    recents_open: bool,
 }
 
 impl EventEmitter<AgentsPanelEvent> for AgentsPanel {}
@@ -96,7 +99,8 @@ impl AgentsPanel {
             listener: None,
             menu: None,
             notice: None,
-            recents: 0,
+            recents: Vec::new(),
+            recents_open: true,
         }
     }
 
@@ -114,11 +118,53 @@ impl AgentsPanel {
         cx.notify();
     }
 
-    pub(crate) fn set_recents(&mut self, count: usize, cx: &mut Context<Self>) {
-        if self.recents != count {
-            self.recents = count;
+    pub(crate) fn set_recents(&mut self, handles: Vec<String>, cx: &mut Context<Self>) {
+        if self.recents != handles {
+            self.recents = handles;
             cx.notify();
         }
+    }
+
+    /// The bottom section: a folding Recents header, then the first few
+    /// stopped agents and the link to the Recents tab, where Resume and
+    /// Remove live.
+    fn recents_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        // The tab lists them all; the dock shows only the newest few.
+        const SHOWN: usize = 5;
+        div()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .child(
+                SectionHeader::new("agents:recents-header", "Recents")
+                    .open(self.recents_open)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.recents_open = !this.recents_open;
+                        cx.notify();
+                    })),
+            )
+            .when(self.recents_open, |section| {
+                section
+                    .children(self.recents.iter().take(SHOWN).map(|handle| {
+                        ListItem::new(format!("recent:{handle}"), Indent::Depth(0))
+                            .child(
+                                Label::new(handle.clone())
+                                    .code()
+                                    .color(Color::Muted)
+                                    .truncate(),
+                            )
+                            .on_click(
+                                cx.listener(|_, _, _, cx| cx.emit(AgentsPanelEvent::OpenRecents)),
+                            )
+                    }))
+                    .child(
+                        Button::new("agents:recents", "Open Recents")
+                            .style(ButtonStyle::Plain)
+                            .on_click(
+                                cx.listener(|_, _, _, cx| cx.emit(AgentsPanelEvent::OpenRecents)),
+                            ),
+                    )
+            })
     }
 
     fn open_menu(&mut self, id: &IdentityId, cx: &mut Context<Self>) {
@@ -414,11 +460,11 @@ impl Render for AgentsPanel {
                 }
             }
         }
-        div()
-            .w_full()
+        // No scroll container: it would clip the agent menus under each row.
+        let list = div()
+            .flex_none()
             .flex()
             .flex_col()
-            .py(SPACE_6)
             .child(
                 Button::new("agents:new", "New Agent…")
                     .style(ButtonStyle::Plain)
@@ -434,15 +480,19 @@ impl Render for AgentsPanel {
                     .clone()
                     .map(|error| Label::new(error).color(Color::Error).wrap()),
             )
-            .children(rows)
-            .when(self.recents > 0, |panel| {
-                panel.child(
-                    Button::new("agents:recents", "Recents")
-                        .style(ButtonStyle::Plain)
-                        .on_click(
-                            cx.listener(|_, _, _, cx| cx.emit(AgentsPanelEvent::OpenRecents)),
-                        ),
-                )
+            .children(rows);
+        div()
+            .debug_selector(|| "agents-panel".into())
+            .w_full()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .py(SPACE_6)
+            .child(list)
+            .child(div().flex_1())
+            .when(!self.recents.is_empty(), |panel| {
+                panel.child(self.recents_section(cx))
             })
     }
 }

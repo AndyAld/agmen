@@ -2,7 +2,7 @@ use super::*;
 use crate::backend::chat_snapshot;
 use crate::ui::test_support::{click, init, redraw};
 use crate::ui::tokens::{TREE_INDENT_BASE, TREE_INDENT_STEP};
-use gpui::{TestAppContext, px};
+use gpui::{AppContext as _, TestAppContext, px};
 
 #[gpui::test]
 fn agents_panel_groups_and_folds(cx: &mut TestAppContext) {
@@ -296,4 +296,62 @@ fn a_notice_shows_under_new_agent(cx: &mut TestAppContext) {
     });
     redraw(cx);
     assert!(cx.debug_bounds("agents:notice").is_some());
+}
+
+#[gpui::test]
+fn recents_sit_at_the_bottom_and_fold(cx: &mut TestAppContext) {
+    init(cx);
+    let (host, cx) = cx
+        .add_window_view(|_, cx| HostedPanel(cx.new(|_| AgentsPanel::new(chat_snapshot().roster))));
+    let agents = host.read_with(cx, |host, _| host.0.clone());
+    agents.update(cx, |p, cx| {
+        p.set_recents(vec!["andy/old".into(), "andy/older".into()], cx);
+    });
+    redraw(cx);
+    let whole = cx.debug_bounds("agents-panel").unwrap();
+    let last_agent = cx.debug_bounds("agent:sean/a1").unwrap();
+    let header = cx.debug_bounds("agents:recents-header").unwrap();
+    let open = cx.debug_bounds("agents:recents").unwrap();
+    assert!(cx.debug_bounds("recent:andy/old").is_some());
+    assert!(last_agent.bottom() <= header.top());
+    // Pinned to the column's bottom, not right under the roster.
+    assert!(whole.bottom() - open.bottom() < px(40.));
+    assert!(header.top() - last_agent.bottom() > px(100.));
+
+    click(cx, "agents:recents-header");
+    assert!(cx.debug_bounds("recent:andy/old").is_none());
+    assert!(cx.debug_bounds("agents:recents").is_none());
+    assert!(cx.debug_bounds("agents:recents-header").is_some());
+    click(cx, "agents:recents-header");
+    assert!(cx.debug_bounds("recent:andy/old").is_some());
+}
+
+#[gpui::test]
+fn recents_show_at_most_five(cx: &mut TestAppContext) {
+    init(cx);
+    let (panel, cx) = cx.add_window_view(|_, _| AgentsPanel::new(Vec::new()));
+    panel.update(cx, |p, cx| {
+        p.set_recents((0..7).map(|i| format!("andy/r{i}")).collect(), cx);
+    });
+    redraw(cx);
+    assert!(cx.debug_bounds("recent:andy/r4").is_some());
+    assert!(cx.debug_bounds("recent:andy/r5").is_none());
+    assert!(cx.debug_bounds("agents:recents").is_some());
+}
+
+/// The panel in a full-height column, as the left dock hosts it.
+struct HostedPanel(gpui::Entity<AgentsPanel>);
+
+impl gpui::Render for HostedPanel {
+    fn render(
+        &mut self,
+        _: &mut gpui::Window,
+        _: &mut gpui::Context<Self>,
+    ) -> impl gpui::IntoElement {
+        gpui::div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(self.0.clone())
+    }
 }

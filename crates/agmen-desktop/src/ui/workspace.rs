@@ -134,7 +134,10 @@ impl Workspace {
         agents_panel.update(cx, |panel, cx| {
             panel.set_listener(snapshot.listener_id().cloned(), cx);
             panel.set_notice(snapshot.agent_notice.clone(), cx);
-            panel.set_recents(snapshot.recents.len(), cx);
+            panel.set_recents(
+                snapshot.recents.iter().map(|r| r.handle.clone()).collect(),
+                cx,
+            );
             panel.set_managed(
                 snapshot.managed_agents.clone(),
                 snapshot.agent_error.clone(),
@@ -164,7 +167,14 @@ impl Workspace {
         let chat_changes = cx.observe(&chat, |this, _, cx| {
             this.follow_chat(cx);
             this.agents_panel.update(cx, |panel, cx| {
-                panel.set_recents(this.snapshot.recents.len(), cx);
+                panel.set_recents(
+                    this.snapshot
+                        .recents
+                        .iter()
+                        .map(|r| r.handle.clone())
+                        .collect(),
+                    cx,
+                );
             });
             cx.notify();
         });
