@@ -531,6 +531,7 @@ fn launch_sends_no_budget_role_and_color_when_chosen() {
             name: "worker".into(),
             provider: None,
             model: Some("opus".into()),
+            effort: None,
             budget_cents: None,
             role: Some("engineer".into()),
             color: Some(3),
@@ -576,14 +577,15 @@ fn no_budget_agent_has_no_cap_and_keeps_its_color() {
 }
 
 #[test]
-fn opencode_launch_names_its_provider_and_no_model_unless_one_is_picked() {
+fn opencode_launch_names_its_provider_model_and_effort() {
     let fake = FakeAgmend::start(console(vec![]));
     let (backend, mut updates) = live_backend(&fake);
     backend
         .act(Action::LaunchAgent {
             name: "worker".into(),
             provider: Some("opencode".into()),
-            model: None,
+            model: Some("anthropic/claude-haiku-5-5".into()),
+            effort: Some("high".into()),
             budget_cents: Some(500),
             role: None,
             color: None,
@@ -601,7 +603,8 @@ fn opencode_launch_names_its_provider_and_no_model_unless_one_is_picked() {
         .unwrap();
     assert_eq!(
         launch.params,
-        json!({"project": PROJECT, "name": "worker", "provider": "opencode", "budget_usd": 5.0})
+        json!({"project": PROJECT, "name": "worker", "provider": "opencode",
+               "model": "anthropic/claude-haiku-5-5", "effort": "high", "budget_usd": 5.0})
     );
 }
 
@@ -1713,6 +1716,7 @@ fn managed_agent_actions_use_local_launch_and_stop() {
             name: "worker".into(),
             provider: None,
             model: Some("sonnet".into()),
+            effort: None,
             budget_cents: Some(500),
             role: None,
             color: None,

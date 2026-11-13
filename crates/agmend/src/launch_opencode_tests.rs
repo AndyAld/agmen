@@ -62,6 +62,13 @@ fn args_name_the_session_model_and_prompt_and_only_owner_batches_auto_approve() 
             "message with spaces and $(literal)",
         ]
     );
+    // An effort rides on the model as its variant.
+    request.effort = Some("high".into());
+    assert!(
+        opencode::args(&request)
+            .windows(2)
+            .any(|args| args == ["--model", "anthropic/claude-haiku-5-5#high"])
+    );
     request.owner_only = false;
     request.model = None;
     let args = opencode::args(&request);
@@ -294,14 +301,32 @@ async fn providers_list_what_is_installed_and_opencodes_models() {
     assert_eq!(
         both.providers().await,
         [json!({"name": "opencode", "title": "OpenCode",
-                "models": ["anthropic/claude-haiku-5-5", "ollama/qwen3:32b"]})]
+                "models": ["anthropic/claude-haiku-5-5", "ollama/qwen3:32b"],
+                "efforts": ["low", "medium", "high", "xhigh", "max"]})]
     );
     let mut claude_only = runner(dir.path().join("missing-opencode"));
     claude_only.program = program;
-    assert_eq!(
-        claude_only.providers().await,
-        [json!({"name": "claude", "title": "Claude Code", "models": []})]
-    );
+    let listed = claude_only.providers().await;
+    assert_eq!(listed.len(), 1);
+    // Claude Code is listed by whose models it runs.
+    assert_eq!(listed[0]["name"], "claude");
+    assert_eq!(listed[0]["title"], "Anthropic");
+    let models: Vec<&str> = listed[0]["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|model| model.as_str().unwrap())
+        .collect();
+    assert_eq!(models.len(), 13);
+    for model in [
+        "claude-fable-5-2",
+        "claude-opus-5-5",
+        "claude-opus-4-6",
+        "claude-haiku-4-5",
+    ] {
+        assert!(models.contains(&model), "{model}");
+    }
+    assert!(models.iter().all(|model| model_name(model)));
 }
 
 #[tokio::test]

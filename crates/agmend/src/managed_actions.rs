@@ -140,6 +140,8 @@ struct Stored {
     color: Option<u8>,
     #[serde(default)]
     provider: Provider,
+    #[serde(default)]
+    effort: Option<String>,
 }
 
 impl Stored {
@@ -187,6 +189,7 @@ impl Stored {
                 shared_budget: self.shared_budget,
                 color: self.color,
                 provider: self.provider,
+                effort: self.effort,
             },
             migrated,
         ))
@@ -684,6 +687,7 @@ impl Managed {
             color: None,
             // A folder joined by hand holds a Claude Code session.
             provider: Provider::Claude,
+            effort: None,
         };
         self.save_record(&record).await?;
         let cap = Money::from_usd(JOINED_BUDGET_USD).map_err(|_| error("invalid budget"))?;

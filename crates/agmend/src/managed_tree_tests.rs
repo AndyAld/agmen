@@ -1236,3 +1236,43 @@ async fn a_launch_without_a_provider_is_claude_code_on_sonnet() {
     assert_eq!(list["agents"][0]["model"], "sonnet");
     fixture.daemon.core.managed.shutdown().await;
 }
+
+#[tokio::test]
+async fn effort_is_one_of_five_levels_and_reaches_the_batch() {
+    let (fixture, _) = tree_fixture().await;
+    let root = fixture.dir.path().join("repo");
+    for bad in [
+        json!({"project":"project1","name":"bad","root":root,"effort":"extreme"}),
+        // OpenCode takes the effort as a variant of a named model.
+        json!({"project":"project1","name":"bad","root":root,"provider":"opencode","effort":"high"}),
+    ] {
+        assert!(worker_call(&fixture, "agent_launch", bad).await.is_err());
+    }
+    worker_call(
+        &fixture,
+        "agent_launch",
+        json!({"project":"project1","name":"worker","root":root,"model":"claude-opus-5-5","effort":"xhigh"}),
+    )
+    .await
+    .unwrap();
+    let managed = &fixture.daemon.core.managed;
+    let list = managed.list(json!({})).await.unwrap();
+    assert_eq!(list["agents"][0]["effort"], "xhigh");
+    assert_eq!(list["agents"][0]["model"], "claude-opus-5-5");
+    enqueue(&fixture, 1, "agent001").await;
+    managed.tick().await;
+    for _ in 0..200 {
+        if !fixture.runner.runs.lock().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    }
+    assert_eq!(
+        fixture.runner.runs.lock().unwrap()[0].effort.as_deref(),
+        Some("xhigh")
+    );
+    managed.shutdown().await;
+    let restored = restarted(&fixture).await;
+    let list = restored.list(json!({})).await.unwrap();
+    assert_eq!(list["agents"][0]["effort"], "xhigh");
+}

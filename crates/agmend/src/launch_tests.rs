@@ -120,6 +120,7 @@ fn spec(dir: &std::path::Path) -> RunSpec {
         session_id: "a6cddf07-a8fd-46e1-9585-2571af65af24".into(),
         resume: false,
         model: Some("sonnet".into()),
+        effort: None,
         budget_remaining: "5.000000".into(),
         budget_cap: None,
         cap_budget: true,
@@ -131,6 +132,20 @@ fn spec(dir: &std::path::Path) -> RunSpec {
         owner_only: true,
         role: None,
     }
+}
+
+#[test]
+fn effort_is_passed_only_when_the_person_picked_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut request = spec(dir.path());
+    assert!(!request.args().iter().any(|arg| arg == "--effort"));
+    request.effort = Some("xhigh".into());
+    assert!(
+        request
+            .args()
+            .windows(2)
+            .any(|args| args == ["--effort", "xhigh"])
+    );
 }
 
 #[test]

@@ -181,6 +181,8 @@ pub(crate) enum Action {
         provider: Option<String>,
         /// `None` runs the provider's own default model.
         model: Option<String>,
+        /// `low`, `medium`, `high`, `xhigh` or `max`; `None` is the model's own.
+        effort: Option<String>,
         /// `None` launches with no budget.
         budget_cents: Option<u32>,
         /// `None` is a general-purpose agent: no role.
